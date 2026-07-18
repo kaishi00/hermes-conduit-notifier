@@ -6,7 +6,7 @@ import threading
 from typing import Any
 
 from .client import enqueue
-from .events import clarification_text, event_id, push_event
+from .events import clarification_text, event_id, is_silent_response, push_event
 
 
 _child_sessions: set[str] = set()
@@ -47,14 +47,15 @@ def _pre_tool_call(**kwargs: Any) -> None:
 
 def _post_llm_call(**kwargs: Any) -> None:
     session_id = _text(kwargs.get("session_id"))
-    if _is_child(session_id):
+    response = kwargs.get("assistant_response")
+    if _is_child(session_id) or is_silent_response(response):
         return
     enqueue(push_event(
         "response.ready",
         identifier=event_id("response", kwargs.get("turn_id"), session_id),
         session_id=session_id,
         profile=_profile,
-        body=_text(kwargs.get("assistant_response")),
+        body=_text(response),
     ))
 
 

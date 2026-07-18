@@ -58,6 +58,8 @@ The plugin currently emits notifications for:
 - failed turns
 - completed delegated tasks
 
+An exact `[Silent]` assistant response does not emit a completion notification.
+
 The iOS app controls which categories are enabled, whether notification previews are shown, and whether completion sounds play.
 
 ## Privacy and security

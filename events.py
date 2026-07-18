@@ -54,5 +54,10 @@ def clarification_text(args: Any) -> str:
     return "Hermes needs your response before it can continue."
 
 
+def is_silent_response(value: Any) -> bool:
+    """Return true only for Hermes' exact no-notification response sentinel."""
+    return isinstance(value, str) and " ".join(value.split()).casefold() == "[silent]"
+
+
 def _clean(value: str, maximum: int) -> str:
     return " ".join(str(value).split())[:maximum]
