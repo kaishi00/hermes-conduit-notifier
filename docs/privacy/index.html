@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Privacy policy for Hermes Conduit and its optional push notification service.">
+  <title>Privacy Policy · Hermes Conduit</title>
+  <link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <nav class="nav" aria-label="Primary navigation">
+      <a class="brand" href="../"><span class="mark" aria-hidden="true">⌁</span>Hermes Conduit</a>
+      <a class="nav-link" href="../support/">Support</a>
+      <a class="nav-link" aria-current="page" href="./">Privacy</a>
+      <a class="nav-link" href="https://github.com/kaishi00/hermes-conduit-notifier">Notification plugin</a>
+    </nav>
+  </header>
+  <main class="document">
+    <div class="eyebrow">Hermes Conduit</div>
+    <h1>Privacy Policy</h1>
+    <p class="meta">Effective July 18, 2026</p>
+    <p>This policy explains how Hermes Conduit handles information in the iOS app, the optional Hermes Conduit Notifier plugin, and the optional notification relay used to deliver Apple Push Notification service (APNs) alerts.</p>
+
+    <h2>Summary</h2>
+    <ul>
+      <li>Conduit has no advertising SDKs, third-party analytics SDKs, or cross-app tracking.</li>
+      <li>Your conversations, attachments, model settings, and gateway credentials are sent to the Hermes dashboard or gateway that you configure, not to a hosted Hermes service operated by Conduit.</li>
+      <li>The optional notification relay processes only the information needed to pair a gateway and deliver the notification categories you enable.</li>
+      <li>Personal information is not sold.</li>
+    </ul>
+
+    <h2>Information stored on your device</h2>
+    <p>Conduit stores the dashboard URL you provide, dashboard session information, app preferences, notification registration credentials, locally selected profile avatars, and cached attachment information on your device. Sensitive session and notification credentials are stored using iOS secure storage where supported.</p>
+
+    <h2>Your Hermes dashboard and gateway</h2>
+    <p>When you sign in, send a message, load a session, change a model or setting, run a command, or upload an attachment, Conduit communicates with the dashboard and gateway URL that you configured. The operator of that Hermes installation controls the storage, processing, retention, and security of that data. If you connect to a gateway operated by someone else, their privacy terms also apply.</p>
+
+    <h2>Optional push notifications</h2>
+    <p>If you enable notifications, Conduit sends the following information to the Conduit notification relay:</p>
+    <ul>
+      <li>Your APNs device token and a randomly generated installation identifier.</li>
+      <li>Notification preferences, such as enabled event categories, sound, and preview settings.</li>
+      <li>A gateway display name and randomly generated, revocable pairing credentials.</li>
+      <li>For notification delivery: event type, event identifier, session identifier, profile name, gateway identifier, and—only when notification previews are enabled—limited notification title and body text supplied by your gateway.</li>
+      <li>Basic request metadata used for security, rate limiting, diagnostics, and abuse prevention, which may include IP address, request path, response status, and time.</li>
+    </ul>
+    <p>The relay uses this information solely to authenticate paired installations, enforce notification preferences, prevent duplicate delivery, troubleshoot failures, and send notifications through APNs. Apple processes the device token and notification payload under Apple's applicable privacy terms.</p>
+
+    <h2>Retention and deletion</h2>
+    <p>On-device information remains until you remove it, sign out, disable the related feature, or uninstall the app. Notification registrations remain active until notifications are disabled, the registration is invalidated, or deletion is requested. Disabling notifications prevents further delivery and revokes the app's local notification credential. Short-lived pairing codes expire after ten minutes, and event identifiers used to prevent duplicate delivery expire after approximately 24 hours.</p>
+    <p>To request deletion of notification relay information, contact <a href="mailto:support@milim.dev?subject=Hermes%20Conduit%20deletion%20request">support@milim.dev</a>. We may ask for limited installation information to locate the registration. Information stored by your Hermes gateway must be deleted through that gateway's operator.</p>
+
+    <h2>Sharing</h2>
+    <p>Information is shared only with service providers necessary to provide the requested function, including Apple for APNs delivery and infrastructure providers used to operate the notification relay and this support site. Information may also be disclosed when required by law, to protect users or the service, or as part of a business transfer subject to appropriate safeguards.</p>
+
+    <h2>Security</h2>
+    <p>Conduit uses HTTPS and secure WebSocket connections when communicating with configured services. Notification credentials are randomly generated, scoped, revocable, and stored as cryptographic hashes on the relay where applicable. No method of transmission or storage can guarantee absolute security.</p>
+
+    <h2>Children</h2>
+    <p>Hermes Conduit is a developer and productivity tool and is not directed to children under 13. We do not knowingly collect personal information from children.</p>
+
+    <h2>International processing</h2>
+    <p>The notification relay and its service providers may process information in countries other than your own. By enabling notifications, you request this processing to provide the feature.</p>
+
+    <h2>Changes</h2>
+    <p>This policy may be updated as Conduit changes. The effective date above will be revised when material changes are published.</p>
+
+    <h2>Contact</h2>
+    <p>For privacy questions or requests, email <a href="mailto:support@milim.dev">support@milim.dev</a>. For general help, visit the <a href="../support/">support page</a>.</p>
+  </main>
+  <footer><div class="footer-inner"><span>© 2026 Milim</span><div class="footer-links"><a href="../">Home</a><a href="../support/">Support</a></div></div></footer>
+</body>
+</html>

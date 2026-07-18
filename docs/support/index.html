@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Support and troubleshooting for the Hermes Conduit iPhone app.">
+  <title>Support · Hermes Conduit</title>
+  <link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <nav class="nav" aria-label="Primary navigation">
+      <a class="brand" href="../"><span class="mark" aria-hidden="true">⌁</span>Hermes Conduit</a>
+      <a class="nav-link" aria-current="page" href="./">Support</a>
+      <a class="nav-link" href="../privacy/">Privacy</a>
+      <a class="nav-link" href="https://github.com/kaishi00/hermes-conduit-notifier">Notification plugin</a>
+    </nav>
+  </header>
+  <main class="document">
+    <div class="eyebrow">Help and contact</div>
+    <h1>Hermes Conduit support</h1>
+    <p class="lede">Get help connecting Conduit to your Hermes gateway, restoring a session, or configuring notifications.</p>
+
+    <div class="callout"><strong>Email support:</strong> <a href="mailto:support@milim.dev">support@milim.dev</a><br>For reproducible bugs and feature requests, you can also <a href="https://github.com/kaishi00/hermes-conduit-notifier/issues/new/choose">open a GitHub issue</a>.</div>
+
+    <h2>Before requesting support</h2>
+    <ol class="steps">
+      <li>Confirm that your Hermes dashboard is reachable from Safari on the same iPhone.</li>
+      <li>Open <strong>Settings → Gateway</strong>, refresh the connection, and use <strong>Sign in again</strong> if the dashboard session has expired.</li>
+      <li>Include your iOS version, Conduit version, Hermes version, and the exact error message. Do not include API keys, session tokens, notification credentials, or private conversation content.</li>
+    </ol>
+
+    <h2>Connection problems</h2>
+    <p>Conduit requires an HTTPS dashboard URL that the iPhone can reach. The dashboard completes authentication and grants the app a session token. If the connection cannot recover automatically, open the Gateway sheet from chat or visit <strong>Settings → Gateway</strong> to reconnect or sign in again.</p>
+
+    <h2>Notifications</h2>
+    <p>Notifications are optional. Enable them in <strong>Settings → Notifications</strong>, create a pairing code, and claim that code from the matching Hermes profile. Installation and pairing instructions are maintained in the <a href="https://github.com/kaishi00/hermes-conduit-notifier#install">notification plugin README</a>.</p>
+
+    <h2>Attachments</h2>
+    <p>Conduit supports user-selected images, PDFs, and text files. If an attachment is visible in your message but the agent cannot read it, confirm that the Hermes gateway has write access to its configured image and attachment directories.</p>
+
+    <h2>Privacy or deletion requests</h2>
+    <p>Read the <a href="../privacy/">privacy policy</a>. Questions and deletion requests can be sent to <a href="mailto:support@milim.dev?subject=Hermes%20Conduit%20privacy%20request">support@milim.dev</a>.</p>
+
+    <h2>Third-party status</h2>
+    <p>Hermes Conduit is an independent client and is not affiliated with or endorsed by Nous Research. Support for Conduit itself is provided through the contact methods above.</p>
+  </main>
+  <footer><div class="footer-inner"><span>© 2026 Milim</span><div class="footer-links"><a href="../">Home</a><a href="../privacy/">Privacy</a></div></div></footer>
+</body>
+</html>

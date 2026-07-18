@@ -71,6 +71,15 @@ The iOS app controls which categories are enabled, whether notification previews
 
 The public relay URL is part of the client protocol. Relay infrastructure, APNs signing material, and deployment configuration are intentionally not included in this repository.
 
+## Conduit support and privacy
+
+The repository also hosts the public Hermes Conduit support and privacy pages:
+
+- [Hermes Conduit support](https://kaishi00.github.io/hermes-conduit-notifier/support/)
+- [Hermes Conduit privacy policy](https://kaishi00.github.io/hermes-conduit-notifier/privacy/)
+
+The static site source lives in [`docs/`](docs/).
+
 ## Development
 
 The runtime uses only the Python standard library plus Hermes APIs. Run the pure event tests with:
