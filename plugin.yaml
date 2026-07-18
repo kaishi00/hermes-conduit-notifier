@@ -1,0 +1,17 @@
+name: conduit_push
+manifest_version: 1
+version: 0.1.0
+description: "Send Hermes lifecycle notifications to Conduit devices."
+author: Hermes Conduit
+kind: standalone
+platforms:
+  - linux
+  - macos
+  - windows
+hooks:
+  - pre_tool_call
+  - post_llm_call
+  - on_session_end
+  - pre_approval_request
+  - subagent_start
+  - subagent_stop
