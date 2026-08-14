@@ -179,10 +179,13 @@ function notificationFor(event, preferences) {
   const completion = event.type === 'response.ready' || event.type === 'background_task.finished';
   // `decision` carries structured approval card content so Conduit can render
   // an answerable card from the push payload alone — the one-shot gateway
-  // stream event is missed while the app is backgrounded. It is preview text
-  // exactly like `title`/`body`, so it is gated on show_previews; a user who
-  // disabled previews keeps approval descriptions off the payload entirely.
-  const decision = preferences.show_previews
+  // stream event is missed while the app is backgrounded. It has its own
+  // dedicated `decision_cards` preference (default on, independent of
+  // show_previews): previews only control banner text, while this controls
+  // functional answerability, and the audience running approval gates is
+  // exactly who the cards are for. `!== false` keeps legacy installations
+  // (whose stored preferences predate the key) on the default.
+  const decision = preferences.decision_cards !== false
     ? validateDecision(event.decision, event.type)
     : undefined;
   const routing = {

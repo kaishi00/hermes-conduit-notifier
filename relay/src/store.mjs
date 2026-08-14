@@ -11,6 +11,11 @@ const defaultPreferences = Object.freeze({
   background_task_finished: true,
   completion_sound: true,
   show_previews: false,
+  // Dedicated opt-out for structured decision content (answerable approval
+  // cards) in the push payload. Deliberately independent of show_previews:
+  // the feature's audience is exactly the approval-gate crowd, so cards
+  // default on and privacy-focused users can turn just this off.
+  decision_cards: true,
 });
 
 export class RelayStore {

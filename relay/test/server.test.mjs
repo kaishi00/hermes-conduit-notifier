@@ -4,7 +4,6 @@ import { test } from 'node:test';
 import { notificationFor, validateEvent, validateDecision } from '../src/server.mjs';
 
 const preferences = { show_previews: true, completion_sound: false };
-const privatePreferences = { show_previews: false, completion_sound: false };
 
 const approvalDecision = {
   kind: 'approval',
@@ -49,9 +48,7 @@ test('notificationFor drops a malformed decision so the notification degrades to
   assert.equal(payload.conduit.decision, undefined);
 });
 
-test('notificationFor omits decision when show_previews is disabled', () => {
-  // Decision content is preview text, exactly like title/body: a user who
-  // disabled previews must not have approval descriptions in the payload.
+test('notificationFor gates decision on the dedicated decision_cards preference', () => {
   const event = {
     eventId: 'approval:12345678',
     type: 'approval.needed',
@@ -59,11 +56,18 @@ test('notificationFor omits decision when show_previews is disabled', () => {
     profile: 'default',
     decision: approvalDecision,
   };
-  const { payload } = notificationFor(event, privatePreferences);
-  assert.equal(payload.conduit.decision, undefined);
-  assert.equal(payload.body.conduit.decision, undefined);
-  // Routing fields still flow so the tap still opens the right session.
-  assert.equal(payload.conduit.session_id, 'sess-1');
+  // Decision cards are independent of show_previews: previews-off users who
+  // left decision_cards on still get answerable cards...
+  const previewsOff = notificationFor(event, { show_previews: false, completion_sound: false });
+  assert.ok(previewsOff.payload.conduit.decision, 'previews-off must not disable decision cards');
+  assert.equal(previewsOff.payload.aps.alert.body.includes('Run a dangerous'), false, 'banner text stays generic');
+  // ...and turning just decision_cards off keeps the payload content-free.
+  const cardsOff = notificationFor(event, { show_previews: true, decision_cards: false, completion_sound: false });
+  assert.equal(cardsOff.payload.conduit.decision, undefined);
+  assert.equal(cardsOff.payload.body.conduit.decision, undefined);
+  // Legacy installations whose stored preferences predate the key default on.
+  const legacy = notificationFor(event, { show_previews: false, completion_sound: false });
+  assert.ok(legacy.payload.conduit.decision !== undefined);
 });
 
 test('notificationFor degrades to a routing stub when the payload would exceed the APNs cap', () => {
