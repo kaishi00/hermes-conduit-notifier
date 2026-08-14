@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import threading
 import uuid
 from typing import Any
@@ -30,7 +31,10 @@ def register(ctx: Any) -> None:
     # (plugin-minted id, answered through the relay). Older gateways without
     # middleware support simply keep the original clarify path.
     if hasattr(ctx, "register_middleware"):
-        ctx.register_middleware("tool_execution", clarify_loop.middleware)
+        ctx.register_middleware(
+            "tool_execution",
+            functools.partial(clarify_loop.middleware, is_child_session=_is_child),
+        )
         clarify_loop.set_profile(_profile)
         global _clarify_loop_active
         _clarify_loop_active = True

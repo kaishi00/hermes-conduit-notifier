@@ -215,3 +215,59 @@ def test_dict_shaped_choices_flatten_to_labels():
     finally:
         release.set()
     assert fake.enqueued[0]["decision"]["choices"] == ["Ship it", "Hold", "Ask user"]
+
+
+def test_child_sessions_keep_the_original_path():
+    fake = _FakeState([])
+    _install(fake)
+    kwargs = _kwargs(lambda a: "original", {"question": "Q?"}, session_id="child-1")
+    result = loop.middleware(is_child_session=lambda session_id: session_id == "child-1", **kwargs)
+    assert result == "original"
+    assert fake.enqueued == []
+    # The parent session still engages the loop.
+    parent_kwargs = _kwargs(lambda a: "original", {"question": "Q?"}, session_id="parent-1")
+    loop.middleware(is_child_session=lambda session_id: session_id == "child-1", **parent_kwargs)
+    assert len(fake.enqueued) == 1
+
+
+def test_polling_stops_when_relay_expires_the_decision():
+    # pending once, then unknown: the relay's 2h TTL expired the decision.
+    # The loop must stop polling (no third request) and wait for the
+    # original path instead of hammering a request that can never succeed.
+    fake = _FakeState([{"status": "pending"}, {"status": "unknown"}, {"status": "pending"}])
+    _install(fake)
+    original, release = _blocking_original("late original result")
+    try:
+        result = loop.middleware(**_kwargs(original, {"question": "Q?"}))
+    finally:
+        release.set()
+    assert result == "late original result"
+    assert len(fake.poll_ids) == 2, "polling must stop after unknown-following-pending"
+
+
+def test_unknown_before_first_pending_is_tolerated():
+    # The push event and the first poll race (enqueue is async), so an early
+    # unknown must NOT be treated as expiry; polling continues to the answer.
+    fake = _FakeState([
+        {"status": "unknown"},
+        {"status": "pending"},
+        {"status": "answered", "answer": "Blue"},
+    ])
+    _install(fake)
+    original, release = _blocking_original()
+    try:
+        result = loop.middleware(**_kwargs(original, {"question": "Q?"}))
+    finally:
+        release.set()
+    assert json.loads(result)["user_response"] == "Blue"
+    assert len(fake.poll_ids) == 3
+
+
+def test_poll_budget_coerces_string_timeout():
+    sys.modules["tools.clarify_gateway"] = types.SimpleNamespace(get_clarify_timeout=lambda: "3600")
+    try:
+        assert loop._clarify_poll_budget() == 3630.0
+        sys.modules["tools.clarify_gateway"] = types.SimpleNamespace(get_clarify_timeout=lambda: 0)
+        assert loop._clarify_poll_budget() == loop.MAX_POLL_SECONDS
+    finally:
+        sys.modules.pop("tools.clarify_gateway", None)

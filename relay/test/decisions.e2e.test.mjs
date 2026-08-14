@@ -168,6 +168,29 @@ test('clarify decision: push → device answer → gateway poll', async () => {
   });
   assert.equal(reanswer.status, 409);
 
+  // A duplicate delivery of the same event (same event_id) must not wipe the
+  // parked decision's answer: dedupe happens before the pending-decision save.
+  const duplicate = await api('/v1/events', {
+    method: 'POST',
+    credential: gatewayCredential,
+    body: {
+      type: 'input.needed',
+      event_id: 'input:abcdef123456',
+      session_id: 'sess-1',
+      profile: 'default',
+      decision: {
+        kind: 'clarify',
+        request_id: 'conduit-push-abc123',
+        question: 'Which color?',
+        choices: ['Red', 'Blue'],
+      },
+    },
+  });
+  assert.equal(duplicate.status, 200);
+  assert.equal(duplicate.json.duplicate, true);
+  const afterDuplicate = await api('/v1/decisions/conduit-push-abc123', { credential: gatewayCredential });
+  assert.deepEqual(afterDuplicate.json, { status: 'answered', answer: 'Red' });
+
   // Empty answers are rejected outright.
   const empty = await api('/v1/decisions/conduit-push-abc123', {
     method: 'POST',

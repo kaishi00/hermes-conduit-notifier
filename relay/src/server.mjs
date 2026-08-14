@@ -134,10 +134,12 @@ async function route(request, response) {
     enforceRateLimit(`event:${installation.id}`, 30, 60_000);
     const body = await readJson(request);
     const event = validateEvent(body);
+    if (!store.acceptEvent(installation.id, event.eventId)) return sendJson(response, 200, { accepted: true, duplicate: true });
     // A clarify decision carries a plugin-minted request id; park it so the
     // device can answer by id and the gateway can poll for the answer while
-    // its middleware blocks the tool call. Saved regardless of delivery
-    // preferences so poll semantics stay a simple answered|pending|unknown.
+    // its middleware blocks the tool call. Saved after the dedupe check so a
+    // re-delivered event can never overwrite (and wipe the answer of) the
+    // already-parked decision.
     if (event.decision?.kind === 'clarify' && event.decision.request_id) {
       store.savePendingDecision({
         id: event.decision.request_id,
@@ -147,7 +149,6 @@ async function route(request, response) {
         choices: event.decision.choices,
       });
     }
-    if (!store.acceptEvent(installation.id, event.eventId)) return sendJson(response, 200, { accepted: true, duplicate: true });
     if (!shouldDeliver(installation.preferences, event.type)) return sendJson(response, 202, { accepted: true, delivered: false });
     const notification = notificationFor(event, installation.preferences);
     const result = await apns.send(installation.deviceToken, notification);
@@ -160,15 +161,19 @@ async function route(request, response) {
   const decisionMatch = url.pathname.match(/^\/v1\/decisions\/([A-Za-z0-9_-]{4,128})$/);
   if (decisionMatch && request.method === 'POST') {
     // The device that received the push answers by the plugin-minted id.
+    // Authenticate and rate-limit before reading the body: this endpoint is
+    // publicly reachable, and unauthenticated request bodies must never be
+    // parsed (matches the pre-auth posture of /v1/pairings/claim).
     const id = decisionMatch[1];
-    const body = await readJson(request);
-    const answer = cleanText(body.answer, 2000);
-    if (!answer) return sendJson(response, 400, { error: 'invalid_answer' });
+    enforceRateLimit(`decision-respond-ip:${client}`, 60, 60_000);
     const credential = bearerCredential(request);
     if (!credential) return sendJson(response, 401, { error: 'unauthorized' });
     const installation = store.authenticate(credential.id, credential.secret, 'device');
     if (!installation) return sendJson(response, 401, { error: 'unauthorized' });
     enforceRateLimit(`decision-respond:${installation.id}`, 30, 60_000);
+    const body = await readJson(request);
+    const answer = cleanText(body.answer, 2000);
+    if (!answer) return sendJson(response, 400, { error: 'invalid_answer' });
     const outcome = store.respondPendingDecision(installation.id, id, answer);
     if (outcome === 'unknown') return sendJson(response, 404, { error: 'unknown_decision' });
     if (outcome === 'already_answered') return sendJson(response, 409, { error: 'already_answered' });

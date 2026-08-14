@@ -17,12 +17,13 @@ the agent cannot tell the paths apart.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import threading
 import time
 import uuid
-from typing import Any
+from typing import Any, Callable
 
 from . import client
 from .events import clarify_decision, event_id, flatten_choice_labels, push_event
@@ -32,7 +33,8 @@ logger = logging.getLogger("hermes.plugins.conduit_push")
 REQUEST_ID_PREFIX = "conduit-push-"
 POLL_INTERVAL_SECONDS = 2.0
 # Hard cap on polling even when the gateway configures an unlimited clarify
-# timeout; the relay expires pending decisions at 2h anyway.
+# timeout; the relay expires pending decisions at 2h, and polling stops on
+# the unknown-after-pending transition well before this in practice.
 MAX_POLL_SECONDS = 24 * 60 * 60.0
 
 # Set by register() so pushes carry the profile the rest of the plugin uses.
@@ -44,13 +46,20 @@ def set_profile(value: str) -> None:
     profile = value or "default"
 
 
-def middleware(**kwargs: Any) -> Any:
-    """``tool_execution`` middleware entry point."""
+def middleware(is_child_session: Callable[[str], bool] | None = None, **kwargs: Any) -> Any:
+    """``tool_execution`` middleware entry point.
+
+    ``is_child_session`` mirrors the hook path's subagent exclusion so a
+    delegated child session's clarify keeps the original path only.
+    """
     tool_name = str(kwargs.get("tool_name") or "")
     if tool_name != "clarify":
         return kwargs["next_call"](kwargs.get("args") or {})
     if not client.load_state():
         # Unpaired profile: no push is possible, keep the original path only.
+        return kwargs["next_call"](kwargs.get("args") or {})
+    session_id = _text(kwargs.get("session_id"))
+    if is_child_session and is_child_session(session_id):
         return kwargs["next_call"](kwargs.get("args") or {})
 
     args = dict(kwargs.get("args") or {})
@@ -65,7 +74,7 @@ def middleware(**kwargs: Any) -> Any:
     client.enqueue(push_event(
         "input.needed",
         identifier=event_id("input", kwargs.get("turn_id"), kwargs.get("tool_call_id"), request_id),
-        session_id=_text(kwargs.get("session_id")),
+        session_id=session_id,
         profile=profile,
         body=question,
         decision=clarify_decision(request_id=request_id, question=question, choices=labels or None),
@@ -99,12 +108,25 @@ def _first_answer_wins(
         except Exception as exc:  # pragma: no cover - mirrors tool error path
             outcome["original_error"] = exc
 
-    # Daemon thread: if the relay answer wins, this thread keeps blocking on
-    # the gateway's own prompt until it is answered or times out; its result
-    # is then discarded. It must never hold up interpreter shutdown.
-    threading.Thread(target=_run_original, name="conduit-push-clarify", daemon=True).start()
+    # Hermes invokes middleware synchronously inline (verified against
+    # hermes_cli.middleware._run_execution_chain: plain calls, no event loop),
+    # so exactly one of the two racing paths must move off-thread — this one.
+    # The gateway's own prompt blocks on a threading.Event, which is
+    # thread-safe, but contextvars do NOT propagate to new threads; run the
+    # body through a copy of the current context so anything the tool path
+    # reads (hook scoping, session context) behaves as if inline.
+    # Daemon: if the relay answer wins, this thread keeps blocking on the
+    # gateway's own prompt until it is answered or times out; its result is
+    # then discarded. It must never hold up interpreter shutdown.
+    threading.Thread(
+        target=contextvars.copy_context().run,
+        args=(_run_original,),
+        name="conduit-push-clarify",
+        daemon=True,
+    ).start()
 
     deadline = time.monotonic() + _clarify_poll_budget()
+    saw_pending = False
     while time.monotonic() < deadline:
         if "original" in outcome or "original_error" in outcome:
             if "original_error" in outcome:
@@ -114,13 +136,22 @@ def _first_answer_wins(
             status = client.poll_decision(request_id)
         except Exception:
             status = {"status": "pending"}  # transport hiccup: keep waiting
-        if status.get("status") == "answered":
+        state = str(status.get("status") or "")
+        if state == "answered":
             return _format_result(
                 question=question,
                 offered=offered,
                 answer=str(status.get("answer") or ""),
                 multi_select=multi_select,
             )
+        if state == "pending":
+            saw_pending = True
+        elif saw_pending:
+            # unknown-after-pending: the relay expired the decision (2h TTL,
+            # far under an unlimited clarify timeout). Stop polling and let
+            # the original path's own timeout conclude the race instead of
+            # hammering a request that can never succeed.
+            break
         time.sleep(POLL_INTERVAL_SECONDS)
 
     # Poll budget exhausted (unlimited clarify timeout): fall back to whatever
@@ -139,12 +170,12 @@ def _clarify_poll_budget() -> float:
     try:
         from tools.clarify_gateway import get_clarify_timeout
 
-        timeout = get_clarify_timeout()
+        timeout = float(get_clarify_timeout())
     except Exception:
-        timeout = 3600
-    if not isinstance(timeout, (int, float)) or timeout <= 0:
+        timeout = 3600.0
+    if timeout <= 0:
         return MAX_POLL_SECONDS
-    return min(float(timeout) + 30.0, MAX_POLL_SECONDS)
+    return min(timeout + 30.0, MAX_POLL_SECONDS)
 
 
 def _format_result(*, question: str, offered: list[str], answer: str, multi_select: bool) -> str:
