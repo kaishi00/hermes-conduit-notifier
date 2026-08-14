@@ -6,7 +6,7 @@ import threading
 from typing import Any
 
 from .client import enqueue
-from .events import clarification_text, event_id, is_silent_response, push_event
+from .events import approval_decision, clarification_text, event_id, is_silent_response, push_event
 
 
 _child_sessions: set[str] = set()
@@ -75,12 +75,19 @@ def _pre_approval_request(**kwargs: Any) -> None:
     if kwargs.get("surface") == "smart":
         return
     session_id = _text(kwargs.get("session_key"))
+    description = _text(kwargs.get("description"))
     enqueue(push_event(
         "approval.needed",
         identifier=event_id("approval", session_id, kwargs.get("pattern_key"), kwargs.get("command"), id(kwargs)),
         session_id=session_id,
         profile=_profile,
-        body=_text(kwargs.get("description")) or "Hermes is waiting for your approval.",
+        body=description or "Hermes is waiting for your approval.",
+        # Attach the structured card so Conduit can render an answerable
+        # approval from the push payload while backgrounded. Requires a
+        # session_key so the user's choice can be routed back via
+        # approval.respond {choice, session_id}. The raw command is omitted
+        # (see approval_decision) to avoid echoing secrets through APNs.
+        decision=approval_decision(session_key=session_id, description=description) if session_id else None,
     ))
 
 

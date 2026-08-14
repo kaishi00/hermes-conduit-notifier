@@ -1,30 +1,45 @@
 import { createServer } from 'node:http';
 import { isIP } from 'node:net';
+import { pathToFileURL } from 'node:url';
 import { ApnsClient } from './apns.mjs';
 import { RelayStore } from './store.mjs';
 
-const config = readConfig();
-const store = new RelayStore(config.dataPath);
-const apns = new ApnsClient(config);
-const limits = new Map();
+let config;
+let store;
+let apns;
+let limits;
 
-const server = createServer(async (request, response) => {
-  const startedAt = Date.now();
-  try {
-    await route(request, response);
-  } catch (error) {
-    const status = Number(error?.status ?? 500);
-    const code = status < 500 && error instanceof Error ? error.message : 'internal_error';
-    if (status >= 500) console.error(JSON.stringify({ level: 'error', message: 'request failed', error: error instanceof Error ? error.message : String(error) }));
-    sendJson(response, status, { error: code });
-  } finally {
-    console.log(JSON.stringify({ level: 'info', method: request.method, path: safePath(request.url), status: response.statusCode, duration_ms: Date.now() - startedAt }));
-  }
-});
+function main() {
+  config = readConfig();
+  store = new RelayStore(config.dataPath);
+  apns = new ApnsClient(config);
+  limits = new Map();
 
-server.listen(config.port, config.host, () => {
-  console.log(JSON.stringify({ level: 'info', message: 'Conduit push relay listening', host: config.host, port: config.port, public_url: config.publicUrl }));
-});
+  const server = createServer(async (request, response) => {
+    const startedAt = Date.now();
+    try {
+      await route(request, response);
+    } catch (error) {
+      const status = Number(error?.status ?? 500);
+      const code = status < 500 && error instanceof Error ? error.message : 'internal_error';
+      if (status >= 500) console.error(JSON.stringify({ level: 'error', message: 'request failed', error: error instanceof Error ? error.message : String(error) }));
+      sendJson(response, status, { error: code });
+    } finally {
+      console.log(JSON.stringify({ level: 'info', method: request.method, path: safePath(request.url), status: response.statusCode, duration_ms: Date.now() - startedAt }));
+    }
+  });
+
+  server.listen(config.port, config.host, () => {
+    console.log(JSON.stringify({ level: 'info', message: 'Conduit push relay listening', host: config.host, port: config.port, public_url: config.publicUrl }));
+  });
+
+  process.on('SIGTERM', () => server.close(() => process.exit(0)));
+  process.on('SIGINT', () => server.close(() => process.exit(0)));
+}
+
+// Start the server only when executed directly, so the pure notification
+// builders can be unit-tested by importing this module without binding a port.
+if (pathToFileURL(process.argv[1] ?? '').href === import.meta.url) main();
 
 async function route(request, response) {
   const url = new URL(request.url ?? '/', config.publicUrl);
@@ -135,6 +150,18 @@ function notificationFor(event, preferences) {
   // different profiles and sessions distinguishable in Notification Center.
   const body = preferences.show_previews && event.body ? event.body : notificationContext(generic.body, event);
   const completion = event.type === 'response.ready' || event.type === 'background_task.finished';
+  // `decision` carries structured card content (approval/clarify) so Conduit
+  // can render an answerable card from the push payload alone — the one-shot
+  // gateway stream event is missed while the app is backgrounded. The plugin
+  // already bounds/whitelists it; re-validate here as the trust boundary.
+  const decision = validateDecision(event.decision);
+  const conduit = {
+    type: event.type,
+    session_id: event.sessionId,
+    profile: event.profile,
+    gateway: event.gateway,
+    ...(decision ? { decision } : {}),
+  };
   return {
     collapseId: event.sessionId ? `${event.type}:${event.sessionId}` : event.eventId,
     payload: {
@@ -147,20 +174,8 @@ function notificationFor(event, preferences) {
       // `notification.request.content.data`. Keep the Conduit route there so
       // a notification tap can recover its session/profile after a cold start.
       // The top-level copy remains for clients that read the raw APNs payload.
-      body: {
-        conduit: {
-          type: event.type,
-          session_id: event.sessionId,
-          profile: event.profile,
-          gateway: event.gateway,
-        },
-      },
-      conduit: {
-        type: event.type,
-        session_id: event.sessionId,
-        profile: event.profile,
-        gateway: event.gateway,
-      },
+      body: { conduit },
+      conduit,
     },
   };
 }
@@ -202,7 +217,30 @@ function validateEvent(body) {
     sessionId: cleanIdentifier(body.session_id, 180),
     profile: cleanText(body.profile, 80),
     gateway: cleanIdentifier(body.gateway, 80),
+    decision: validateDecision(body.decision),
   };
+}
+
+// Mirror the plugin's decision sanitization at the relay trust boundary: bound
+// field sizes, whitelist the kind, and require both a display field and the
+// answerability key (approval: session_key; clarify: request_id). Anything
+// malformed degrades to undefined and the notification ships as a routing stub.
+function validateDecision(value) {
+  if (!value || typeof value !== 'object') return undefined;
+  const kind = cleanText(value.kind, 40);
+  if (kind !== 'approval' && kind !== 'clarify') return undefined;
+  const decision = { kind };
+  for (const key of ['session_key', 'request_id', 'question', 'description']) {
+    const text = cleanText(value[key], 500);
+    if (text) decision[key] = text;
+  }
+  if (Array.isArray(value.choices)) {
+    const choices = value.choices.map((c) => cleanText(c, 80)).filter((c) => c !== undefined);
+    if (choices.length) decision.choices = choices.slice(0, 8);
+  }
+  const hasDisplay = Boolean(decision.description || decision.question);
+  const answerable = kind === 'approval' ? decision.session_key : decision.request_id;
+  return hasDisplay && answerable ? decision : undefined;
 }
 
 function validateDeviceToken(value) {
@@ -285,5 +323,4 @@ function readConfig() {
   };
 }
 
-process.on('SIGTERM', () => server.close(() => process.exit(0)));
-process.on('SIGINT', () => server.close(() => process.exit(0)));
+export { notificationFor, validateEvent, validateDecision };
