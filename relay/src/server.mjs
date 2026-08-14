@@ -1,30 +1,72 @@
 import { createServer } from 'node:http';
+import { realpathSync } from 'node:fs';
 import { isIP } from 'node:net';
+import { pathToFileURL } from 'node:url';
 import { ApnsClient } from './apns.mjs';
 import { RelayStore } from './store.mjs';
 
-const config = readConfig();
-const store = new RelayStore(config.dataPath);
-const apns = new ApnsClient(config);
-const limits = new Map();
+let config;
+let store;
+let apns;
+let limits;
 
-const server = createServer(async (request, response) => {
-  const startedAt = Date.now();
+// APNs hard-caps a notification payload at 4096 bytes; stay under it with
+// headroom for JSON escaping and delivery headers, dropping decision content
+// (not the notification) when a payload would exceed the bound.
+const MAX_NOTIFICATION_BYTES = 3800;
+
+function main() {
+  config = readConfig();
+  store = new RelayStore(config.dataPath);
+  apns = new ApnsClient(config);
+  limits = new Map();
+
+  const server = createServer(async (request, response) => {
+    const startedAt = Date.now();
+    try {
+      await route(request, response);
+    } catch (error) {
+      const status = Number(error?.status ?? 500);
+      const code = status < 500 && error instanceof Error ? error.message : 'internal_error';
+      if (status >= 500) console.error(JSON.stringify({ level: 'error', message: 'request failed', error: error instanceof Error ? error.message : String(error) }));
+      sendJson(response, status, { error: code });
+    } finally {
+      console.log(JSON.stringify({ level: 'info', method: request.method, path: safePath(request.url), status: response.statusCode, duration_ms: Date.now() - startedAt }));
+    }
+  });
+
+  server.listen(config.port, config.host, () => {
+    console.log(JSON.stringify({ level: 'info', message: 'Conduit push relay listening', host: config.host, port: config.port, public_url: config.publicUrl }));
+  });
+
+  process.on('SIGTERM', () => server.close(() => process.exit(0)));
+  process.on('SIGINT', () => server.close(() => process.exit(0)));
+}
+
+// Start the server only when executed directly, so the pure notification
+// builders can be unit-tested by importing this module without binding a port.
+// Resolve argv[1] through realpath so a symlinked entrypoint still matches
+// import.meta.url (which Node resolves to the real file). If an entrypoint
+// exists but does not match, say so on stderr — a silent no-op start is the
+// worst possible deployment failure mode.
+function isEntryPoint() {
+  if (!process.argv[1]) return false;
   try {
-    await route(request, response);
-  } catch (error) {
-    const status = Number(error?.status ?? 500);
-    const code = status < 500 && error instanceof Error ? error.message : 'internal_error';
-    if (status >= 500) console.error(JSON.stringify({ level: 'error', message: 'request failed', error: error instanceof Error ? error.message : String(error) }));
-    sendJson(response, status, { error: code });
-  } finally {
-    console.log(JSON.stringify({ level: 'info', method: request.method, path: safePath(request.url), status: response.statusCode, duration_ms: Date.now() - startedAt }));
+    return pathToFileURL(realpathSync(process.argv[1])).href === import.meta.url;
+  } catch {
+    return false;
   }
-});
-
-server.listen(config.port, config.host, () => {
-  console.log(JSON.stringify({ level: 'info', message: 'Conduit push relay listening', host: config.host, port: config.port, public_url: config.publicUrl }));
-});
+}
+if (isEntryPoint()) {
+  main();
+} else if (process.argv[1] && !process.env.NODE_TEST_CONTEXT) {
+  console.error(JSON.stringify({
+    level: 'warn',
+    message: 'relay module imported without matching entrypoint; not starting server',
+    argv1: process.argv[1],
+    module: import.meta.url,
+  }));
+}
 
 async function route(request, response) {
   const url = new URL(request.url ?? '/', config.publicUrl);
@@ -135,33 +177,45 @@ function notificationFor(event, preferences) {
   // different profiles and sessions distinguishable in Notification Center.
   const body = preferences.show_previews && event.body ? event.body : notificationContext(generic.body, event);
   const completion = event.type === 'response.ready' || event.type === 'background_task.finished';
+  // `decision` carries structured approval card content so Conduit can render
+  // an answerable card from the push payload alone — the one-shot gateway
+  // stream event is missed while the app is backgrounded. It has its own
+  // dedicated `decision_cards` preference (default on, independent of
+  // show_previews): previews only control banner text, while this controls
+  // functional answerability, and the audience running approval gates is
+  // exactly who the cards are for. `!== false` keeps legacy installations
+  // (whose stored preferences predate the key) on the default.
+  const decision = preferences.decision_cards !== false
+    ? validateDecision(event.decision, event.type)
+    : undefined;
+  const routing = {
+    type: event.type,
+    session_id: event.sessionId,
+    profile: event.profile,
+    gateway: event.gateway,
+  };
+  const conduit = { ...routing, ...(decision ? { decision } : {}) };
+  const aps = {
+    alert: { title, body },
+    ...(preferences.completion_sound && completion ? { sound: 'default' } : {}),
+    'thread-id': event.sessionId ?? 'hermes',
+  };
+  // expo-notifications on iOS exposes the top-level APNs `body` value as
+  // `notification.request.content.data`. Keep the Conduit route there so
+  // a notification tap can recover its session/profile after a cold start.
+  // The top-level copy remains for clients that read the raw APNs payload.
+  let payload = { aps, body: { conduit }, conduit };
+  // APNs caps the notification payload at 4 KB and rejects anything larger.
+  // A maximal description (500 chars of multi-byte UTF-8, echoed in both
+  // conduit copies) plus the alert copy can approach that, so degrade to the
+  // routing stub instead of losing the whole notification. The headroom under
+  // the 4096 cap absorbs per-request APNs headers and JSON escaping.
+  if (decision && Buffer.byteLength(JSON.stringify(payload)) > MAX_NOTIFICATION_BYTES) {
+    payload = { aps, body: { conduit: routing }, conduit: routing };
+  }
   return {
     collapseId: event.sessionId ? `${event.type}:${event.sessionId}` : event.eventId,
-    payload: {
-      aps: {
-        alert: { title, body },
-        ...(preferences.completion_sound && completion ? { sound: 'default' } : {}),
-        'thread-id': event.sessionId ?? 'hermes',
-      },
-      // expo-notifications on iOS exposes the top-level APNs `body` value as
-      // `notification.request.content.data`. Keep the Conduit route there so
-      // a notification tap can recover its session/profile after a cold start.
-      // The top-level copy remains for clients that read the raw APNs payload.
-      body: {
-        conduit: {
-          type: event.type,
-          session_id: event.sessionId,
-          profile: event.profile,
-          gateway: event.gateway,
-        },
-      },
-      conduit: {
-        type: event.type,
-        session_id: event.sessionId,
-        profile: event.profile,
-        gateway: event.gateway,
-      },
-    },
+    payload,
   };
 }
 
@@ -202,7 +256,32 @@ function validateEvent(body) {
     sessionId: cleanIdentifier(body.session_id, 180),
     profile: cleanText(body.profile, 80),
     gateway: cleanIdentifier(body.gateway, 80),
+    decision: validateDecision(body.decision, body.type),
   };
+}
+
+// Mirror the plugin's decision sanitization at the relay trust boundary.
+// Only the approval contract is shipped: a clarify decision cannot be answered
+// from the payload (its request id is minted gateway-side), so it is rejected
+// until that phase exists, and the kind must agree with the event type.
+// Choices are whitelisted to the gateway's approval vocabulary so a
+// compromised gateway cannot inject arbitrary button text into the payload.
+// Anything malformed degrades to undefined and the notification ships as a
+// routing stub.
+function validateDecision(value, eventType) {
+  if (!value || typeof value !== 'object') return undefined;
+  if (cleanText(value.kind, 40) !== 'approval' || eventType !== 'approval.needed') return undefined;
+  const sessionKey = cleanIdentifier(value.session_key, 180);
+  const description = cleanText(value.description, 500);
+  if (!sessionKey || !description) return undefined;
+  const allowed = new Set(['once', 'session', 'always', 'deny']);
+  const choices = [...new Set(
+    (Array.isArray(value.choices) ? value.choices : [])
+      .map((choice) => cleanText(choice, 80))
+      .filter((choice) => allowed.has(choice)),
+  )];
+  if (!choices.length) return undefined;
+  return { kind: 'approval', session_key: sessionKey, description, choices };
 }
 
 function validateDeviceToken(value) {
@@ -285,5 +364,4 @@ function readConfig() {
   };
 }
 
-process.on('SIGTERM', () => server.close(() => process.exit(0)));
-process.on('SIGINT', () => server.close(() => process.exit(0)));
+export { notificationFor, validateEvent, validateDecision };

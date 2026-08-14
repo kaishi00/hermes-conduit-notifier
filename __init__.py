@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import threading
+import uuid
 from typing import Any
 
 from .client import enqueue
-from .events import clarification_text, event_id, is_silent_response, push_event
+from .events import approval_decision, clarification_text, event_id, is_silent_response, push_event
 
 
 _child_sessions: set[str] = set()
@@ -75,12 +76,34 @@ def _pre_approval_request(**kwargs: Any) -> None:
     if kwargs.get("surface") == "smart":
         return
     session_id = _text(kwargs.get("session_key"))
+    description = _text(kwargs.get("description"))
+    # The event id deliberately excludes `id(kwargs)`: CPython recycles ids, so
+    # a later, distinct approval with the same session/pattern/command could
+    # collide and be silently deduped by the relay for 24h. `turn_id` (forwarded
+    # by the approval hook) is stable across replays of one turn and distinct
+    # across turns. When the hook carries no turn id, fall back to a unique id
+    # per raise: two identical commands approved in sequence must both notify,
+    # and the plugin's delivery queue never retries, so a stable id has no
+    # at-least-once role to play there.
+    turn_id = kwargs.get("turn_id") or uuid.uuid4().hex
     enqueue(push_event(
         "approval.needed",
-        identifier=event_id("approval", session_id, kwargs.get("pattern_key"), kwargs.get("command"), id(kwargs)),
+        identifier=event_id("approval", session_id, turn_id, kwargs.get("pattern_key"), kwargs.get("command")),
         session_id=session_id,
         profile=_profile,
-        body=_text(kwargs.get("description")) or "Hermes is waiting for your approval.",
+        body=description or "Hermes is waiting for your approval.",
+        # Attach the structured card so Conduit can render an answerable
+        # approval from the push payload while backgrounded. Requires both a
+        # session_key (to route the choice back via approval.respond) and a
+        # description (the card's display text); without either, the
+        # sanitizer would reject it anyway, so skip the dead build.
+        # The raw command is omitted (see approval_decision) to avoid
+        # echoing secrets through APNs.
+        decision=(
+            approval_decision(session_key=session_id, description=description)
+            if session_id and description
+            else None
+        ),
     ))
 
 
