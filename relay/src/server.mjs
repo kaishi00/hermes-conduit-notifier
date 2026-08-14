@@ -134,6 +134,19 @@ async function route(request, response) {
     enforceRateLimit(`event:${installation.id}`, 30, 60_000);
     const body = await readJson(request);
     const event = validateEvent(body);
+    // A clarify decision carries a plugin-minted request id; park it so the
+    // device can answer by id and the gateway can poll for the answer while
+    // its middleware blocks the tool call. Saved regardless of delivery
+    // preferences so poll semantics stay a simple answered|pending|unknown.
+    if (event.decision?.kind === 'clarify' && event.decision.request_id) {
+      store.savePendingDecision({
+        id: event.decision.request_id,
+        installationId: installation.id,
+        gatewayId: credential.gatewayId,
+        question: event.decision.question,
+        choices: event.decision.choices,
+      });
+    }
     if (!store.acceptEvent(installation.id, event.eventId)) return sendJson(response, 200, { accepted: true, duplicate: true });
     if (!shouldDeliver(installation.preferences, event.type)) return sendJson(response, 202, { accepted: true, delivered: false });
     const notification = notificationFor(event, installation.preferences);
@@ -141,6 +154,33 @@ async function route(request, response) {
     if (result.status === 410 || result.reason === 'BadDeviceToken' || result.reason === 'Unregistered') store.deactivateInstallation(installation.id);
     if (!result.ok) return sendJson(response, 502, { error: 'apns_rejected', reason: result.reason, status: result.status });
     return sendJson(response, 202, { accepted: true, delivered: true });
+  }
+
+  // ── Clarify answer loop ──────────────────────────────────────────────
+  const decisionMatch = url.pathname.match(/^\/v1\/decisions\/([A-Za-z0-9_-]{4,128})$/);
+  if (decisionMatch && request.method === 'POST') {
+    // The device that received the push answers by the plugin-minted id.
+    const id = decisionMatch[1];
+    const body = await readJson(request);
+    const answer = cleanText(body.answer, 2000);
+    if (!answer) return sendJson(response, 400, { error: 'invalid_answer' });
+    const credential = bearerCredential(request);
+    if (!credential) return sendJson(response, 401, { error: 'unauthorized' });
+    const installation = store.authenticate(credential.id, credential.secret, 'device');
+    if (!installation) return sendJson(response, 401, { error: 'unauthorized' });
+    enforceRateLimit(`decision-respond:${installation.id}`, 30, 60_000);
+    const outcome = store.respondPendingDecision(installation.id, id, answer);
+    if (outcome === 'unknown') return sendJson(response, 404, { error: 'unknown_decision' });
+    if (outcome === 'already_answered') return sendJson(response, 409, { error: 'already_answered' });
+    return sendJson(response, 200, { status: 'answered' });
+  }
+  if (decisionMatch && request.method === 'GET') {
+    // The gateway polls for the answer while its clarify middleware blocks.
+    const credential = gatewayCredential(request);
+    if (!credential || !store.authenticateGateway(credential.installationId, credential.gatewayId, credential.secret)) return sendJson(response, 401, { error: 'unauthorized' });
+    enforceRateLimit(`decision-poll:${credential.gatewayId}`, 120, 60_000);
+    const status = store.pendingDecisionStatus(credential.installationId, credential.gatewayId, decisionMatch[1]);
+    return sendJson(response, 200, status);
   }
 
   if (request.method === 'DELETE' && url.pathname === '/v1/gateways/current') {
@@ -261,27 +301,42 @@ function validateEvent(body) {
 }
 
 // Mirror the plugin's decision sanitization at the relay trust boundary.
-// Only the approval contract is shipped: a clarify decision cannot be answered
-// from the payload (its request id is minted gateway-side), so it is rejected
-// until that phase exists, and the kind must agree with the event type.
-// Choices are whitelisted to the gateway's approval vocabulary so a
-// compromised gateway cannot inject arbitrary button text into the payload.
+// Two contracts, each bound to its event type:
+// - approval: session-keyed, answered via the gateway's approval.respond;
+//   choices whitelisted to the gateway's approval vocabulary.
+// - clarify: keyed by a plugin-minted request id (the gateway's own clarify
+//   id is unreachable to plugins), answered via this relay's /v1/decisions
+//   endpoints. Choices are model-generated labels, so they are bounded but
+//   deliberately not vocabulary-whitelisted.
 // Anything malformed degrades to undefined and the notification ships as a
 // routing stub.
 function validateDecision(value, eventType) {
   if (!value || typeof value !== 'object') return undefined;
-  if (cleanText(value.kind, 40) !== 'approval' || eventType !== 'approval.needed') return undefined;
-  const sessionKey = cleanIdentifier(value.session_key, 180);
-  const description = cleanText(value.description, 500);
-  if (!sessionKey || !description) return undefined;
-  const allowed = new Set(['once', 'session', 'always', 'deny']);
-  const choices = [...new Set(
-    (Array.isArray(value.choices) ? value.choices : [])
+  const kind = cleanText(value.kind, 40);
+  if (kind === 'approval' && eventType === 'approval.needed') {
+    const sessionKey = cleanIdentifier(value.session_key, 180);
+    const description = cleanText(value.description, 500);
+    if (!sessionKey || !description) return undefined;
+    const allowed = new Set(['once', 'session', 'always', 'deny']);
+    const choices = [...new Set(
+      (Array.isArray(value.choices) ? value.choices : [])
+        .map((choice) => cleanText(choice, 80))
+        .filter((choice) => allowed.has(choice)),
+    )];
+    if (!choices.length) return undefined;
+    return { kind: 'approval', session_key: sessionKey, description, choices };
+  }
+  if (kind === 'clarify' && eventType === 'input.needed') {
+    const requestId = cleanIdentifier(value.request_id, 128);
+    const question = cleanText(value.question, 500);
+    if (!requestId || !question) return undefined;
+    const choices = (Array.isArray(value.choices) ? value.choices : [])
       .map((choice) => cleanText(choice, 80))
-      .filter((choice) => allowed.has(choice)),
-  )];
-  if (!choices.length) return undefined;
-  return { kind: 'approval', session_key: sessionKey, description, choices };
+      .filter((choice) => choice !== undefined)
+      .slice(0, 8);
+    return { kind: 'clarify', request_id: requestId, question, ...(choices.length ? { choices } : {}) };
+  }
+  return undefined;
 }
 
 function validateDeviceToken(value) {

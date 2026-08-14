@@ -6,6 +6,7 @@ import threading
 import uuid
 from typing import Any
 
+from . import clarify_loop
 from .client import enqueue
 from .events import approval_decision, clarification_text, event_id, is_silent_response, push_event
 
@@ -13,6 +14,7 @@ from .events import approval_decision, clarification_text, event_id, is_silent_r
 _child_sessions: set[str] = set()
 _children_lock = threading.Lock()
 _profile = "default"
+_clarify_loop_active = False
 
 
 def register(ctx: Any) -> None:
@@ -24,6 +26,14 @@ def register(ctx: Any) -> None:
     ctx.register_hook("pre_approval_request", _pre_approval_request)
     ctx.register_hook("subagent_start", _subagent_start)
     ctx.register_hook("subagent_stop", _subagent_stop)
+    # Wrap clarify execution so a backgrounded device gets an answerable card
+    # (plugin-minted id, answered through the relay). Older gateways without
+    # middleware support simply keep the original clarify path.
+    if hasattr(ctx, "register_middleware"):
+        ctx.register_middleware("tool_execution", clarify_loop.middleware)
+        clarify_loop.set_profile(_profile)
+        global _clarify_loop_active
+        _clarify_loop_active = True
     from .cli import dispatch, register_cli
     ctx.register_cli_command(
         name="conduit-push",
@@ -36,6 +46,10 @@ def register(ctx: Any) -> None:
 
 def _pre_tool_call(**kwargs: Any) -> None:
     if kwargs.get("tool_name") != "clarify" or _is_child(kwargs.get("session_id")):
+        return
+    if _clarify_loop_active:
+        # The middleware wraps the execution and pushes a richer, answerable
+        # input.needed event itself; pushing here too would double-notify.
         return
     enqueue(push_event(
         "input.needed",

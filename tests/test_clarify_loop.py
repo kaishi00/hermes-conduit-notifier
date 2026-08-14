@@ -1,0 +1,217 @@
+import importlib.util
+import json
+import pathlib
+import sys
+import tempfile
+import threading
+import types
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+# client.py imports the Hermes runtime for the state path; tests only exercise
+# functions that never touch it, so provide a stub before loading the plugin.
+if "hermes_constants" not in sys.modules:
+    _hermes_constants = types.ModuleType("hermes_constants")
+    _hermes_constants.get_hermes_home = lambda: pathlib.Path(tempfile.gettempdir())
+    sys.modules["hermes_constants"] = _hermes_constants
+
+# _format_result imports the real strip_recommended from the Hermes runtime;
+# mirror its exact semantics so formatting assertions match production.
+if "tools" not in sys.modules:
+    _tools = types.ModuleType("tools")
+    _tools.__path__ = []
+    sys.modules["tools"] = _tools
+if "tools.clarify_tool" not in sys.modules:
+    _clarify_tool = types.ModuleType("tools.clarify_tool")
+
+    def _strip_recommended(text):
+        stripped = str(text).strip()
+        suffix = "(Recommended)"
+        if stripped.casefold().endswith(suffix.casefold()):
+            return stripped[: -len(suffix)].strip()
+        return stripped
+
+    _clarify_tool.strip_recommended = _strip_recommended
+    sys.modules["tools.clarify_tool"] = _clarify_tool
+
+# The repo directory name is hyphenated, so import the plugin modules under a
+# synthetic package (the same trick Hermes's plugin loader performs).
+if "conduit_push" not in sys.modules:
+    _pkg = types.ModuleType("conduit_push")
+    _pkg.__path__ = [str(ROOT)]
+    sys.modules["conduit_push"] = _pkg
+if "conduit_push.clarify_loop" not in sys.modules:
+    _spec = importlib.util.spec_from_file_location("conduit_push.clarify_loop", ROOT / "clarify_loop.py")
+    _module = importlib.util.module_from_spec(_spec)
+    sys.modules["conduit_push.clarify_loop"] = _module
+    _spec.loader.exec_module(_module)
+
+import conduit_push.clarify_loop as loop  # noqa: E402
+
+
+class _FakeState:
+    """Stand-in for client.load_state / poll_decision / enqueue."""
+
+    def __init__(self, poll_results):
+        self.paired = True
+        self.poll_results = list(poll_results)
+        self.enqueued = []
+        self.poll_ids = []
+
+    def load_state(self):
+        return {"credential": "x"} if self.paired else None
+
+    def poll_decision(self, request_id):
+        self.poll_ids.append(request_id)
+        if self.poll_results:
+            result = self.poll_results.pop(0)
+            if isinstance(result, Exception):
+                raise result
+            return result
+        return {"status": "pending"}
+
+    def enqueue(self, event):
+        self.enqueued.append(event)
+
+
+def _install(fake):
+    loop.client.load_state = fake.load_state
+    loop.client.poll_decision = fake.poll_decision
+    loop.client.enqueue = fake.enqueue
+    loop.POLL_INTERVAL_SECONDS = 0.01
+
+
+def _kwargs(next_call, args, **extra):
+    return {"tool_name": "clarify", "args": args, "next_call": next_call, "session_id": "sess-1", **extra}
+
+
+def test_non_clarify_tools_pass_through_untouched():
+    fake = _FakeState([])
+    _install(fake)
+    calls = []
+    result = loop.middleware(tool_name="read_file", args={"path": "x"}, next_call=lambda a: calls.append(a) or "original")
+    assert result == "original"
+    assert fake.enqueued == []
+    assert calls == [{"path": "x"}]
+
+
+def test_unpaired_profile_keeps_original_path_only():
+    fake = _FakeState([])
+    fake.paired = False
+    _install(fake)
+    result = loop.middleware(**_kwargs(lambda a: "original", {"question": "Q?"}))
+    assert result == "original"
+    assert fake.enqueued == []
+
+
+def test_relay_answer_wins_and_formats_like_the_builtin_tool():
+    fake = _FakeState([{"status": "answered", "answer": "Red"}])
+    _install(fake)
+    release = threading.Event()
+
+    def blocking_original(args):
+        release.wait(5)
+        return "never used"
+
+    result = loop.middleware(**_kwargs(blocking_original, {
+        "question": "Which color?",
+        "choices": ["Red", "Blue"],
+    }))
+    release.set()
+    parsed = json.loads(result)
+    assert parsed == {
+        "question": "Which color?",
+        "choices_offered": ["Red", "Blue"],
+        "user_response": "Red",
+    }
+    # The push carried the plugin-minted, answerable decision.
+    event = fake.enqueued[0]
+    assert event["type"] == "input.needed"
+    assert event["body"] == "Which color?"
+    decision = event["decision"]
+    assert decision["kind"] == "clarify"
+    assert decision["request_id"].startswith("conduit-push-")
+    assert decision["question"] == "Which color?"
+    assert decision["choices"] == ["Red", "Blue"]
+    assert fake.poll_ids == [decision["request_id"]]
+
+
+def test_original_answer_wins_when_gateway_responds_first():
+    fake = _FakeState([])
+    _install(fake)
+
+    def original(args):
+        return json.dumps({"question": "Q", "choices_offered": ["A"], "user_response": "A"})
+
+    result = loop.middleware(**_kwargs(original, {"question": "Q"}))
+    assert json.loads(result)["user_response"] == "A"
+
+
+def _blocking_original(unused_value="unused"):
+    release = threading.Event()
+    holder = {}
+
+    def original(args):
+        release.wait(5)
+        return unused_value
+
+    return original, release
+
+
+def test_poll_transport_errors_are_tolerated_until_answered():
+    fake = _FakeState([
+        RuntimeError("network down"),
+        {"status": "pending"},
+        {"status": "answered", "answer": "Blue"},
+    ])
+    _install(fake)
+    original, release = _blocking_original()
+    try:
+        result = loop.middleware(**_kwargs(original, {"question": "Q?"}))
+    finally:
+        release.set()
+    assert json.loads(result)["user_response"] == "Blue"
+
+
+def test_recommended_label_is_stripped_from_relay_answer():
+    fake = _FakeState([{"status": "answered", "answer": "Rebase onto main (Recommended)"}])
+    _install(fake)
+    original, release = _blocking_original()
+    try:
+        result = loop.middleware(**_kwargs(original, {
+            "question": "How?",
+            "choices": ["Rebase onto main", "Merge"],
+        }))
+    finally:
+        release.set()
+    assert json.loads(result)["user_response"] == "Rebase onto main"
+
+
+def test_multi_select_answer_parses_json_and_csv():
+    for raw in ('["Red", "Blue"]', "Red, Blue"):
+        fake = _FakeState([{"status": "answered", "answer": raw}])
+        _install(fake)
+        original, release = _blocking_original()
+        try:
+            result = loop.middleware(**_kwargs(original, {
+                "question": "Pick",
+                "choices": ["Red", "Blue"],
+                "multi_select": True,
+            }))
+        finally:
+            release.set()
+        assert json.loads(result)["user_response"] == ["Red", "Blue"]
+
+
+def test_dict_shaped_choices_flatten_to_labels():
+    fake = _FakeState([{"status": "answered", "answer": "Ship it"}])
+    _install(fake)
+    original, release = _blocking_original()
+    try:
+        loop.middleware(**_kwargs(original, {
+            "question": "What now?",
+            "choices": [{"label": "Ship it"}, {"description": "Hold"}, "Ask user"],
+        }))
+    finally:
+        release.set()
+    assert fake.enqueued[0]["decision"]["choices"] == ["Ship it", "Hold", "Ask user"]

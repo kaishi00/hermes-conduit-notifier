@@ -109,6 +109,23 @@ def send_now(event: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def poll_decision(request_id: str) -> dict[str, Any]:
+    """Poll the relay for a push-delivered clarify answer by plugin-minted id.
+
+    Returns {"status": "answered", "answer": str} once the device responded,
+    {"status": "pending"} otherwise. Raises on transport errors so the caller
+    can decide to keep waiting.
+    """
+    state = load_state()
+    if not state:
+        raise RuntimeError("This Hermes profile is not paired with Conduit.")
+    return request_json(
+        f"{state['relay_url'].rstrip('/')}/v1/decisions/{request_id}",
+        method="GET",
+        credential=state["credential"],
+    )
+
+
 def request_json(
     url: str,
     *,

@@ -38,12 +38,13 @@ def push_event(
     # `decision` carries the structured card content that lets Conduit render
     # an answerable card from the push payload alone, without the one-shot
     # gateway stream event (which is missed while the app is backgrounded).
-    # Only the approval contract is shipped: clarify is not answerable from a
-    # payload (its request id is minted gateway-side), and the relay rejects
-    # it, so it is not emitted or accepted here until that phase exists.
-    if decision and kind == "approval.needed":
+    # The decision kind must match the event type: approval.needed -> approval
+    # (answered via the gateway's approval.respond), input.needed -> clarify
+    # (answered via the relay's decision loop with a plugin-minted id).
+    if decision and kind in ("approval.needed", "input.needed"):
         sanitized = sanitize_decision(decision)
-        if sanitized:
+        expected_kind = "approval" if kind == "approval.needed" else "clarify"
+        if sanitized and sanitized.get("kind") == expected_kind:
             event["decision"] = sanitized
     return event
 
@@ -67,39 +68,90 @@ def approval_decision(*, session_key: str, description: str) -> dict[str, Any]:
     }
 
 
+def clarify_decision(*, request_id: str, question: str, choices: list[str] | None = None) -> dict[str, Any]:
+    """Build the structured payload for a clarify notification.
+
+    The gateway's own clarify request id is minted inside its blocking prompt
+    and unreachable to plugins, so the middleware mints this id and answers
+    return through the relay's /v1/decisions endpoints while the original
+    clarify callback keeps serving desktop/CLI clients.
+    """
+    decision: dict[str, Any] = {"kind": "clarify", "request_id": request_id, "question": question}
+    if choices:
+        decision["choices"] = choices
+    return decision
+
+
+def flatten_choice_labels(choices: Any) -> list[str]:
+    """Flatten clarify tool choices to display labels.
+
+    Mirrors tools.clarify_tool._flatten_choice: bare strings pass through and
+    LLM-emitted dict shapes unwrap via their canonical user-facing keys.
+    """
+    if not isinstance(choices, list):
+        return []
+    labels: list[str] = []
+    for choice in choices:
+        label = ""
+        if isinstance(choice, str):
+            label = choice.strip()
+        elif isinstance(choice, dict):
+            for key in ("label", "description", "text", "title"):
+                value = choice.get(key)
+                if isinstance(value, str) and value.strip():
+                    label = value.strip()
+                    break
+        if label:
+            labels.append(label)
+    return labels[:8]
+
+
 def sanitize_decision(decision: dict[str, Any]) -> dict[str, Any]:
     """Bound and whitelist a decision payload before it leaves the gateway.
 
     Defense in depth: the relay re-validates, but keep this side bounded too
     so a malformed hook payload can never push an oversized or unknown-shaped
-    object through to the relay/APNs. Mirrors the relay's contract: approval
-    only (clarify is rejected there until it is answerable from a payload),
-    requiring the session key that routes the answer and the description that
-    renders the card.
+    object through to the relay/APNs. Mirrors the relay's contract:
+    approval requires the session key that routes the answer, the description
+    that renders the card, and non-empty whitelisted choices; clarify
+    requires the plugin-minted request id and the question.
     """
     if not isinstance(decision, dict):
         return {}
-    if _clean(decision.get("kind", ""), 40) != "approval":
-        return {}
-    sanitized: dict[str, Any] = {"kind": "approval"}
-    for key in ("session_key", "description"):
-        value = _clean(decision.get(key, ""), 500)
-        if value:
-            sanitized[key] = value
-    choices = decision.get("choices")
-    if isinstance(choices, list):
-        # Clean first, then drop empties: filtering on the raw value would
-        # coerce None to the truthy "None" and forward it as a choice.
-        cleaned = [value for value in (_clean(choice, 80) for choice in choices) if value]
-        if cleaned:
-            sanitized["choices"] = cleaned[:8]
-    # Require both something to display, the key needed to answer it, and at
-    # least one usable choice — the same shape the relay enforces.
-    if not sanitized.get("description") or not sanitized.get("session_key"):
-        return {}
-    if not sanitized.get("choices"):
-        return {}
-    return sanitized
+    kind = _clean(decision.get("kind", ""), 40)
+    if kind == "approval":
+        sanitized: dict[str, Any] = {"kind": "approval"}
+        for key in ("session_key", "description"):
+            value = _clean(decision.get(key, ""), 500)
+            if value:
+                sanitized[key] = value
+        choices = decision.get("choices")
+        if isinstance(choices, list):
+            # Clean first, then drop empties: filtering on the raw value would
+            # coerce None to the truthy "None" and forward it as a choice.
+            cleaned = [value for value in (_clean(choice, 80) for choice in choices) if value]
+            if cleaned:
+                sanitized["choices"] = cleaned[:8]
+        if not sanitized.get("description") or not sanitized.get("session_key"):
+            return {}
+        if not sanitized.get("choices"):
+            return {}
+        return sanitized
+    if kind == "clarify":
+        sanitized = {"kind": "clarify"}
+        for key in ("request_id", "question"):
+            value = _clean(decision.get(key, ""), 500)
+            if value:
+                sanitized[key] = value
+        choices = decision.get("choices")
+        if isinstance(choices, list):
+            cleaned = [value for value in (_clean(choice, 80) for choice in choices) if value]
+            if cleaned:
+                sanitized["choices"] = cleaned[:8]
+        if not sanitized.get("request_id") or not sanitized.get("question"):
+            return {}
+        return sanitized
+    return {}
 
 
 def clarification_text(args: Any) -> str:
