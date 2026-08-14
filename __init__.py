@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import uuid
 from typing import Any
 
 from .client import enqueue
@@ -80,10 +81,14 @@ def _pre_approval_request(**kwargs: Any) -> None:
     # a later, distinct approval with the same session/pattern/command could
     # collide and be silently deduped by the relay for 24h. `turn_id` (forwarded
     # by the approval hook) is stable across replays of one turn and distinct
-    # across turns, which is exactly the dedupe semantics the relay wants.
+    # across turns. When the hook carries no turn id, fall back to a unique id
+    # per raise: two identical commands approved in sequence must both notify,
+    # and the plugin's delivery queue never retries, so a stable id has no
+    # at-least-once role to play there.
+    turn_id = kwargs.get("turn_id") or uuid.uuid4().hex
     enqueue(push_event(
         "approval.needed",
-        identifier=event_id("approval", session_id, kwargs.get("turn_id"), kwargs.get("pattern_key"), kwargs.get("command")),
+        identifier=event_id("approval", session_id, turn_id, kwargs.get("pattern_key"), kwargs.get("command")),
         session_id=session_id,
         profile=_profile,
         body=description or "Hermes is waiting for your approval.",
