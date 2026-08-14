@@ -6,7 +6,7 @@ import argparse
 import socket
 
 from .client import DEFAULT_RELAY_URL, claim_pairing, load_state, send_now, state_path, unpair
-from .events import event_id, push_event
+from .events import event_id, plugin_hello, push_event
 
 
 def register_cli(parser: argparse.ArgumentParser) -> None:
@@ -26,6 +26,12 @@ def dispatch(args: argparse.Namespace) -> int:
     if action == "pair":
         state = claim_pairing(args.code, args.relay_url, args.name)
         print(f"Paired {state['gateway_name']} with Conduit.")
+        try:
+            send_now(plugin_hello())
+        except Exception as error:
+            # Pairing succeeded; a failed announcement only means the app's
+            # compatibility view fills in on the first real event instead.
+            print(f"Warning: could not announce plugin version: {error}")
         return 0
     if action == "status":
         state = load_state()

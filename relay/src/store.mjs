@@ -124,6 +124,23 @@ export class RelayStore {
     return { gatewayId, installationId: installation.id, gatewaySecret };
   }
 
+  // ── Gateway plugin compatibility (Settings > Notifications) ─────────
+  // Every accepted event refreshes the gateway's last-seen plugin version
+  // and capabilities, surfaced via GET /v1/meta.
+
+  recordGatewayPlugin(installationId, gatewayId, { version, capabilities = [] }) {
+    const installation = this.data.installations[installationId];
+    const gateway = installation?.gateways?.[gatewayId];
+    if (!gateway) return;
+    gateway.pluginVersion = String(version || '').slice(0, 40) || undefined;
+    gateway.pluginCapabilities = Array.isArray(capabilities)
+      ? capabilities.map(String).map((capability) => capability.slice(0, 40)).filter(Boolean).slice(0, 16)
+      : [];
+    gateway.lastEventAt = new Date().toISOString();
+    installation.updatedAt = new Date().toISOString();
+    this.save();
+  }
+
   removeGateway(installationId, gatewayId) {
     const installation = this.data.installations[installationId];
     if (!installation?.gateways?.[gatewayId]) return false;

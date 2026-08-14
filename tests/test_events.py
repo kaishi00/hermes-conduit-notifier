@@ -167,6 +167,26 @@ def test_flatten_choice_labels_unwraps_llm_dict_shapes():
     assert flatten_choice_labels("not-a-list") == []
 
 
+def test_events_report_plugin_version_and_capabilities():
+    from events import PLUGIN_CAPABILITIES, PLUGIN_VERSION
+
+    event = push_event("response.ready", identifier="response:12345678", session_id="s")
+    assert event["plugin_version"] == PLUGIN_VERSION
+    assert event["plugin_capabilities"] == PLUGIN_CAPABILITIES
+    assert "approval-decisions" in event["plugin_capabilities"]
+    assert "clarify-loop" in event["plugin_capabilities"]
+
+
+def test_plugin_hello_is_a_non_notifying_version_announcement():
+    from events import PLUGIN_VERSION, plugin_hello
+
+    hello = plugin_hello()
+    assert hello["type"] == "plugin.hello"
+    assert hello["plugin_version"] == PLUGIN_VERSION
+    # Stable id per version: replays dedupe, a version bump re-announces.
+    assert plugin_hello() == hello
+
+
 def test_sanitize_decision_requires_choices_and_mirrors_relay_contract():
     # The relay enforces session_key + description + non-empty whitelisted
     # choices; mirror that here so plugin-side tests describe the real contract.
