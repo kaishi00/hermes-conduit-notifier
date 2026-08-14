@@ -384,11 +384,16 @@ function sendJson(response, status, body) {
   response.end(encoded);
 }
 
+let lastLimitsSweepAt = 0;
+
 function enforceRateLimit(key, maximum, windowMs) {
   const now = Date.now();
   // The map never evicts on its own and some keys (per-IP buckets) are
-  // attacker-rotatable, so sweep expired entries once it grows large.
-  if (limits.size > 10_000) {
+  // attacker-rotatable. Sweep expired entries once it grows large, but at
+  // most once per 30s so a sustained flood cannot turn every request into a
+  // full-map scan.
+  if (limits.size > 10_000 && now - lastLimitsSweepAt > 30_000) {
+    lastLimitsSweepAt = now;
     for (const [limitKey, limit] of limits) {
       if (limit.resetAt <= now) limits.delete(limitKey);
     }

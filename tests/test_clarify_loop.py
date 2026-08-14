@@ -303,3 +303,66 @@ def test_consecutive_unknown_polls_stop_after_grace_window():
         release.set()
     assert result == "original result"
     assert len(fake.poll_ids) == 3, "polling must stop at the grace boundary"
+
+
+def test_persistent_transport_errors_stop_after_grace_window():
+    # A persistently unreachable relay must not poll the full budget: errors
+    # count against the same grace as unknowns.
+    fake = _FakeState([RuntimeError("relay down")] * 5)
+    _install(fake)
+    original, release = _blocking_original("original result")
+    old_grace = loop.UNKNOWN_POLL_GRACE
+    loop.UNKNOWN_POLL_GRACE = 3
+    try:
+        result = loop.middleware(**_kwargs(original, {"question": "Q?"}))
+    finally:
+        loop.UNKNOWN_POLL_GRACE = old_grace
+        release.set()
+    assert result == "original result"
+    assert len(fake.poll_ids) == 3
+
+
+def test_transport_error_after_pending_does_not_stop_immediately():
+    # A transient blip after the decision was parked keeps polling to the
+    # answer (the grace counter resets on a successful pending/answered view).
+    fake = _FakeState([
+        {"status": "pending"},
+        RuntimeError("blip"),
+        {"status": "answered", "answer": "Blue"},
+    ])
+    _install(fake)
+    original, release = _blocking_original()
+    try:
+        result = loop.middleware(**_kwargs(original, {"question": "Q?"}))
+    finally:
+        release.set()
+    assert json.loads(result)["user_response"] == "Blue"
+
+
+def test_non_question_arg_shapes_still_produce_a_card():
+    # LLMs deviate from the clarify schema; the hook path handled prompt /
+    # message / questions[0] and the loop must too.
+    fake = _FakeState([{"status": "answered", "answer": "Ship it"}])
+    _install(fake)
+    original, release = _blocking_original()
+    try:
+        loop.middleware(**_kwargs(original, {"prompt": "Deploy now?", "choices": ["Ship it"]}))
+    finally:
+        release.set()
+    event = fake.enqueued[0]
+    assert event["body"] == "Deploy now?"
+    assert event["decision"]["question"] == "Deploy now?"
+
+
+def test_poll_delay_backs_off_and_caps():
+    old_base, old_cap = loop.POLL_INTERVAL_SECONDS, loop.MAX_POLL_BACKOFF_SECONDS
+    loop.POLL_INTERVAL_SECONDS = 2.0
+    loop.MAX_POLL_BACKOFF_SECONDS = 10.0
+    try:
+        assert loop._poll_delay(1) == 2.0
+        assert loop._poll_delay(2) == 4.0
+        assert loop._poll_delay(3) == 8.0
+        assert loop._poll_delay(4) == 10.0
+        assert loop._poll_delay(500) == 10.0
+    finally:
+        loop.POLL_INTERVAL_SECONDS, loop.MAX_POLL_BACKOFF_SECONDS = old_base, old_cap

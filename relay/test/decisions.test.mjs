@@ -13,6 +13,15 @@ function store() {
   return new RelayStore(join(dir, `store-${Math.random().toString(36).slice(2)}.json`));
 }
 
+test('a same-id write from another installation never clobbers a parked decision', () => {
+  const relay = store();
+  relay.savePendingDecision({ id: 'conduit-push-x', installationId: 'inst-1', gatewayId: 'gw-1', question: 'q' });
+  relay.savePendingDecision({ id: 'conduit-push-x', installationId: 'inst-2', gatewayId: 'gw-2', question: 'evil' });
+  assert.equal(relay.pendingDecisionStatus('inst-1', 'gw-1', 'conduit-push-x').status, 'pending');
+  // The original installation can still answer its own decision.
+  assert.equal(relay.respondPendingDecision('inst-1', 'conduit-push-x', 'Red'), 'answered');
+});
+
 test('pending decision lifecycle: save → pending → answered → already', () => {
   const relay = store();
   relay.savePendingDecision({

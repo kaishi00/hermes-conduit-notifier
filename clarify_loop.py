@@ -26,21 +26,26 @@ import uuid
 from typing import Any, Callable
 
 from . import client
-from .events import clarify_decision, event_id, flatten_choice_labels, push_event
+from .events import clarification_text, clarify_decision, event_id, flatten_choice_labels, push_event
 
 logger = logging.getLogger("hermes.plugins.conduit_push")
 
 REQUEST_ID_PREFIX = "conduit-push-"
 POLL_INTERVAL_SECONDS = 2.0
-# Consecutive unknown polls tolerated while the event POST and the first poll
-# race (enqueue is async, delivery can lag). Past this the decision was never
-# parked — the push was dropped at enqueue or delivery — and polling can never
-# succeed, so fall back to the original path instead of polling the full budget.
-UNKNOWN_POLL_GRACE = 30  # ~60s at the default interval
+# Consecutive unproductive polls (unknown status or transport errors) tolerated
+# while the event POST and the first poll race (enqueue is async, delivery can
+# lag, relays blip). Past this the decision was never parked or the relay is
+# unreachable -- polling can never succeed -- so fall back to the original path
+# instead of polling the full budget.
+UNKNOWN_POLL_GRACE = 30  # ~60s at the base interval
 # Hard cap on polling even when the gateway configures an unlimited clarify
 # timeout; the relay expires pending decisions at 2h, and polling stops on
 # the unknown-after-pending transition well before this in practice.
 MAX_POLL_SECONDS = 24 * 60 * 60.0
+# Unanswered polls back off exponentially (capped) so a parked-but-idle
+# decision costs ~a handful of requests per minute instead of 30+, and a
+# gateway's concurrent loops stay well under the relay's shared poll budget.
+MAX_POLL_BACKOFF_SECONDS = 10.0
 
 # Set by register() so pushes carry the profile the rest of the plugin uses.
 profile = "default"
@@ -68,7 +73,10 @@ def middleware(is_child_session: Callable[[str], bool] | None = None, **kwargs: 
         return kwargs["next_call"](kwargs.get("args") or {})
 
     args = dict(kwargs.get("args") or {})
-    question = str(args.get("question") or "").strip()
+    # clarification_text handles every question arg shape the hook path
+    # supported (question / prompt / message / questions[0]) -- LLMs do
+    # deviate from the clarify schema, and those shapes must still get a card.
+    question = clarification_text(args)
     if not question:
         return kwargs["next_call"](args)
 
@@ -132,7 +140,8 @@ def _first_answer_wins(
 
     deadline = time.monotonic() + _clarify_poll_budget()
     saw_pending = False
-    consecutive_unknown = 0
+    consecutive_unproductive = 0
+    unanswered_polls = 0
     while time.monotonic() < deadline:
         if "original" in outcome or "original_error" in outcome:
             if "original_error" in outcome:
@@ -141,7 +150,10 @@ def _first_answer_wins(
         try:
             status = client.poll_decision(request_id)
         except Exception:
-            status = {"status": "pending"}  # transport hiccup: keep waiting
+            # Transport failure (relay down, DNS, throttled). Counted against
+            # the same grace as unknowns: a persistently unreachable relay
+            # must not disable the never-parked stop and poll the full budget.
+            status = {"status": "__error__"}
         state = str(status.get("status") or "")
         if state == "answered":
             return _format_result(
@@ -151,24 +163,25 @@ def _first_answer_wins(
                 multi_select=multi_select,
             )
         if state == "pending":
+            consecutive_unproductive = 0
             saw_pending = True
-            consecutive_unknown = 0
             if status.get("deliverable") is False:
                 # Parked but no card was shown (device preferences disabled
                 # this notification): nobody can answer by id. Stop polling
                 # and let the original path's timeout conclude the race.
                 break
-        elif state == "unknown":
-            if saw_pending:
-                # unknown-after-pending: the relay expired the decision (2h
-                # TTL, far under an unlimited clarify timeout).
+        elif state == "unknown" and saw_pending:
+            # unknown-after-pending: the relay expired the decision (2h TTL,
+            # far under an unlimited clarify timeout).
+            break
+        else:
+            # Unknown before pending, or a transport failure: tolerated for
+            # the grace window, then treated as never-parked/unreachable.
+            consecutive_unproductive += 1
+            if consecutive_unproductive >= UNKNOWN_POLL_GRACE:
                 break
-            consecutive_unknown += 1
-            if consecutive_unknown >= UNKNOWN_POLL_GRACE:
-                # Never parked: the push was dropped at enqueue or delivery
-                # (queue full, relay down), so the poll can never succeed.
-                break
-        time.sleep(POLL_INTERVAL_SECONDS)
+        unanswered_polls += 1
+        time.sleep(_poll_delay(unanswered_polls))
 
     # Poll budget exhausted (unlimited clarify timeout): fall back to whatever
     # the original path produces, waiting for it if necessary.
@@ -179,6 +192,19 @@ def _first_answer_wins(
     if "original_error" in outcome:
         raise outcome["original_error"]
     return outcome["original"]
+
+
+def _poll_delay(unanswered_polls: int) -> float:
+    """Exponential backoff for unanswered polls, capped.
+
+    A parked-but-idle decision should cost a handful of requests per minute,
+    not 30+, and a gateway's concurrent loops must stay well under the relay's
+    shared per-gateway poll budget. Answers land within one capped interval.
+    """
+    base = POLL_INTERVAL_SECONDS
+    if unanswered_polls <= 1:
+        return base
+    return min(base * (2 ** min(unanswered_polls - 1, 8)), MAX_POLL_BACKOFF_SECONDS)
 
 
 def _clarify_poll_budget() -> float:

@@ -151,6 +151,10 @@ export class RelayStore {
 
   savePendingDecision({ id, installationId, gatewayId, question, choices, deliverable = true }) {
     this.prune();
+    // uuid4-minted ids make collisions vanishingly unlikely, but never let a
+    // same-id write from another installation clobber a parked decision.
+    const existing = this.data.pendingDecisions[id];
+    if (existing && existing.installationId !== installationId) return;
     this.data.pendingDecisions[id] = {
       installationId,
       gatewayId,
