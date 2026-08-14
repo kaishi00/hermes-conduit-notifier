@@ -105,17 +105,18 @@ def test_sanitize_decision_does_not_coerce_none_into_strings():
     assert decision["choices"] == ["once", "deny"]
 
 
-def test_push_event_only_attaches_approval_decisions_on_approval_events():
-    # Only the approval contract ships; clarify is not answerable from a
-    # payload and the relay rejects it, so it is never emitted or accepted.
-    clarify_decision = {"kind": "clarify", "request_id": "r1", "question": "Which?", "choices": ["a"]}
-    approval_decision = {"kind": "approval", "session_key": "s", "description": "d", "choices": ["once"]}
+def test_push_event_binds_decision_kind_to_event_type():
+    # Approval rides approval.needed; clarify (relay-loop, plugin-minted id)
+    # rides input.needed. Cross-pairings are dropped so the two contracts can
+    # never disagree.
+    clarify_payload = {"kind": "clarify", "request_id": "conduit-push-r1", "question": "Which?", "choices": ["a"]}
+    approval_payload = {"kind": "approval", "session_key": "s", "description": "d", "choices": ["once"]}
 
     event = push_event(
         "approval.needed",
         identifier="approval:12345678",
         session_id="s",
-        decision=clarify_decision,
+        decision=clarify_payload,
     )
     assert "decision" not in event
 
@@ -123,9 +124,47 @@ def test_push_event_only_attaches_approval_decisions_on_approval_events():
         "input.needed",
         identifier="input:12345678",
         session_id="s",
-        decision=approval_decision,
+        decision=approval_payload,
     )
     assert "decision" not in event
+
+
+def test_push_event_attaches_clarify_decision_on_input_events():
+    from events import clarify_decision as build_clarify_decision
+
+    decision = build_clarify_decision(request_id="conduit-push-abc", question="Which?", choices=["Red", "Blue"])
+    event = push_event(
+        "input.needed",
+        identifier="input:12345678",
+        session_id="s",
+        decision=decision,
+    )
+    assert event["decision"] == {
+        "kind": "clarify",
+        "request_id": "conduit-push-abc",
+        "question": "Which?",
+        "choices": ["Red", "Blue"],
+    }
+
+    # Open-ended clarifies (no choices) are valid too.
+    open_ended = build_clarify_decision(request_id="conduit-push-def", question="What next?")
+    event = push_event("input.needed", identifier="input:12345678", session_id="s", decision=open_ended)
+    assert event["decision"]["question"] == "What next?"
+    assert "choices" not in event["decision"]
+
+    # The sanitizer requires the answerable plugin id.
+    assert sanitize_decision({"kind": "clarify", "question": "Which?"}) == {}
+
+
+def test_flatten_choice_labels_unwraps_llm_dict_shapes():
+    from events import flatten_choice_labels
+
+    assert flatten_choice_labels(["Ship it", {"label": "Hold"}, {"description": "Ask"}, {"unknown": "x"}, ""]) == [
+        "Ship it",
+        "Hold",
+        "Ask",
+    ]
+    assert flatten_choice_labels("not-a-list") == []
 
 
 def test_sanitize_decision_requires_choices_and_mirrors_relay_contract():

@@ -5,6 +5,13 @@ import { notificationFor, validateEvent, validateDecision } from '../src/server.
 
 const preferences = { show_previews: true, completion_sound: false };
 
+const clarifyDecision = {
+  kind: 'clarify',
+  request_id: 'conduit-push-abc123',
+  question: 'Which color?',
+  choices: ['Red', 'Blue'],
+};
+
 const approvalDecision = {
   kind: 'approval',
   session_key: 'sess-1',
@@ -91,12 +98,28 @@ test('notificationFor degrades to a routing stub when the payload would exceed t
 
 test('validateDecision only accepts approval decisions on approval events', () => {
   assert.equal(validateDecision(approvalDecision, 'approval.needed').kind, 'approval');
-  // Not shipped yet: clarify cannot be answered from the payload.
-  assert.equal(validateDecision({ kind: 'clarify', request_id: 'r', question: 'q' }, 'input.needed'), undefined);
+  // Clarify is its own contract, bound to input.needed with a plugin-minted
+  // request id; it may not ride an approval event.
+  assert.equal(validateDecision(clarifyDecision, 'approval.needed'), undefined);
   // Kind and event type must agree.
   assert.equal(validateDecision(approvalDecision, 'input.needed'), undefined);
   assert.equal(validateDecision(approvalDecision, 'response.ready'), undefined);
   assert.equal(validateDecision({ kind: 'sudo', session_key: 's', description: 'd', choices: ['once'] }, 'approval.needed'), undefined);
+});
+
+test('validateDecision accepts the clarify contract on input events', () => {
+  assert.deepEqual(
+    validateDecision(clarifyDecision, 'input.needed'),
+    { kind: 'clarify', request_id: 'conduit-push-abc123', question: 'Which color?', choices: ['Red', 'Blue'] },
+  );
+  // Answerability (request id) and display text (question) are both required.
+  assert.equal(validateDecision({ kind: 'clarify', question: 'Which color?' }, 'input.needed'), undefined);
+  assert.equal(validateDecision({ kind: 'clarify', request_id: 'conduit-push-abc123' }, 'input.needed'), undefined);
+  // Open-ended clarifies (no choices) are valid.
+  assert.deepEqual(
+    validateDecision({ kind: 'clarify', request_id: 'conduit-push-abc123', question: 'What next?' }, 'input.needed'),
+    { kind: 'clarify', request_id: 'conduit-push-abc123', question: 'What next?' },
+  );
 });
 
 test('validateDecision whitelists choices to the approval vocabulary', () => {

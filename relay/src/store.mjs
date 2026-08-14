@@ -21,7 +21,7 @@ const defaultPreferences = Object.freeze({
 export class RelayStore {
   constructor(path) {
     this.path = path;
-    this.data = { version: 1, installations: {}, pairings: {}, eventIds: {} };
+    this.data = { version: 1, installations: {}, pairings: {}, eventIds: {}, pendingDecisions: {} };
     this.load();
   }
 
@@ -29,7 +29,7 @@ export class RelayStore {
     if (!existsSync(this.path)) return;
     const parsed = JSON.parse(readFileSync(this.path, 'utf8'));
     if (parsed?.version !== 1 || typeof parsed.installations !== 'object') throw new Error('Unsupported relay data format.');
-    this.data = { version: 1, installations: parsed.installations ?? {}, pairings: parsed.pairings ?? {}, eventIds: parsed.eventIds ?? {} };
+    this.data = { version: 1, installations: parsed.installations ?? {}, pairings: parsed.pairings ?? {}, eventIds: parsed.eventIds ?? {}, pendingDecisions: parsed.pendingDecisions ?? {} };
     this.prune();
   }
 
@@ -142,6 +142,63 @@ export class RelayStore {
     return true;
   }
 
+  // ── Pending decisions (clarify answer loop) ─────────────────────────
+  // A clarify decision the plugin pushes carries a plugin-minted request id
+  // because the gateway's own clarify id is unreachable to plugins. The
+  // device answers by that id; the plugin polls for the answer while its
+  // middleware blocks the tool call. Approval decisions answer via the
+  // gateway directly and never enter this store.
+
+  savePendingDecision({ id, installationId, gatewayId, question, choices, deliverable = true }) {
+    this.prune();
+    // uuid4-minted ids make collisions vanishingly unlikely, but never let a
+    // same-id write from another installation clobber a parked decision.
+    const existing = this.data.pendingDecisions[id];
+    if (existing && existing.installationId !== installationId) return;
+    this.data.pendingDecisions[id] = {
+      installationId,
+      gatewayId,
+      question: String(question ?? ''),
+      choices: Array.isArray(choices) ? choices.map(String) : [],
+      // False when device preferences mean no card was shown; the gateway's
+      // poller stops early instead of polling a decision nobody can answer.
+      deliverable: Boolean(deliverable),
+      createdAt: Date.now(),
+    };
+    const entries = Object.entries(this.data.pendingDecisions);
+    if (entries.length > 256) {
+      for (const [key] of entries.sort((a, b) => a[1].createdAt - b[1].createdAt).slice(0, entries.length - 256)) {
+        delete this.data.pendingDecisions[key];
+      }
+    }
+    this.save();
+  }
+
+  respondPendingDecision(installationId, id, answer) {
+    this.prune();
+    const decision = this.data.pendingDecisions[id];
+    if (!decision || decision.installationId !== installationId) return 'unknown';
+    if (decision.answer !== undefined) return 'already_answered';
+    decision.answer = String(answer ?? '').slice(0, 2000);
+    decision.answeredAt = Date.now();
+    this.save();
+    return 'answered';
+  }
+
+  pendingDecisionStatus(installationId, gatewayId, id) {
+    this.prune();
+    const decision = this.data.pendingDecisions[id];
+    if (!decision || decision.installationId !== installationId || decision.gatewayId !== gatewayId) {
+      return { status: 'unknown' };
+    }
+    if (decision.answer === undefined) {
+      // Legacy records predate the flag; treat missing as deliverable so the
+      // poller's behavior is unchanged for decisions parked by older relays.
+      return { status: 'pending', deliverable: decision.deliverable !== false };
+    }
+    return { status: 'answered', answer: decision.answer };
+  }
+
   prune() {
     const now = Date.now();
     for (const [key, pairing] of Object.entries(this.data.pairings)) {
@@ -149,6 +206,12 @@ export class RelayStore {
     }
     for (const [key, timestamp] of Object.entries(this.data.eventIds)) {
       if (Number(timestamp) < now - 24 * 60 * 60_000) delete this.data.eventIds[key];
+    }
+    // Clarify prompts live at most ~1h server-side (agent.clarify_timeout
+    // default 3600s); 2h covers drift and unlimited-config edge cases while
+    // still bounding the store.
+    for (const [key, decision] of Object.entries(this.data.pendingDecisions ?? {})) {
+      if (Number(decision.createdAt) < now - 2 * 60 * 60_000) delete this.data.pendingDecisions[key];
     }
   }
 }
