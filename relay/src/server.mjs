@@ -10,6 +10,11 @@ let store;
 let apns;
 let limits;
 
+// APNs hard-caps a notification payload at 4096 bytes; stay under it with
+// headroom for JSON escaping and delivery headers, dropping decision content
+// (not the notification) when a payload would exceed the bound.
+const MAX_NOTIFICATION_BYTES = 3800;
+
 function main() {
   config = readConfig();
   store = new RelayStore(config.dataPath);
@@ -41,7 +46,9 @@ function main() {
 // Start the server only when executed directly, so the pure notification
 // builders can be unit-tested by importing this module without binding a port.
 // Resolve argv[1] through realpath so a symlinked entrypoint still matches
-// import.meta.url (which Node resolves to the real file).
+// import.meta.url (which Node resolves to the real file). If an entrypoint
+// exists but does not match, say so on stderr — a silent no-op start is the
+// worst possible deployment failure mode.
 function isEntryPoint() {
   if (!process.argv[1]) return false;
   try {
@@ -50,7 +57,16 @@ function isEntryPoint() {
     return false;
   }
 }
-if (isEntryPoint()) main();
+if (isEntryPoint()) {
+  main();
+} else if (process.argv[1] && !process.env.NODE_TEST_CONTEXT) {
+  console.error(JSON.stringify({
+    level: 'warn',
+    message: 'relay module imported without matching entrypoint; not starting server',
+    argv1: process.argv[1],
+    module: import.meta.url,
+  }));
+}
 
 async function route(request, response) {
   const url = new URL(request.url ?? '/', config.publicUrl);
@@ -187,10 +203,11 @@ function notificationFor(event, preferences) {
   // The top-level copy remains for clients that read the raw APNs payload.
   let payload = { aps, body: { conduit }, conduit };
   // APNs caps the notification payload at 4 KB and rejects anything larger.
-  // A maximal description (500 chars of multi-byte UTF-8) plus the alert copy
-  // can approach that, so degrade to the routing stub instead of losing the
-  // whole notification.
-  if (decision && Buffer.byteLength(JSON.stringify(payload)) > 3800) {
+  // A maximal description (500 chars of multi-byte UTF-8, echoed in both
+  // conduit copies) plus the alert copy can approach that, so degrade to the
+  // routing stub instead of losing the whole notification. The headroom under
+  // the 4096 cap absorbs per-request APNs headers and JSON escaping.
+  if (decision && Buffer.byteLength(JSON.stringify(payload)) > MAX_NOTIFICATION_BYTES) {
     payload = { aps, body: { conduit: routing }, conduit: routing };
   }
   return {

@@ -38,13 +38,12 @@ def push_event(
     # `decision` carries the structured card content that lets Conduit render
     # an answerable card from the push payload alone, without the one-shot
     # gateway stream event (which is missed while the app is backgrounded).
-    # It is optional, only meaningful for decision notifications, and the
-    # decision kind must match the event type (approval.needed -> approval,
-    # input.needed -> clarify) so the two can never disagree.
-    if decision and kind in ("approval.needed", "input.needed"):
+    # Only the approval contract is shipped: clarify is not answerable from a
+    # payload (its request id is minted gateway-side), and the relay rejects
+    # it, so it is not emitted or accepted here until that phase exists.
+    if decision and kind == "approval.needed":
         sanitized = sanitize_decision(decision)
-        expected_kind = "approval" if kind == "approval.needed" else "clarify"
-        if sanitized and sanitized.get("kind") == expected_kind:
+        if sanitized:
             event["decision"] = sanitized
     return event
 
@@ -73,15 +72,17 @@ def sanitize_decision(decision: dict[str, Any]) -> dict[str, Any]:
 
     Defense in depth: the relay re-validates, but keep this side bounded too
     so a malformed hook payload can never push an oversized or unknown-shaped
-    object through to the relay/APNs.
+    object through to the relay/APNs. Mirrors the relay's contract: approval
+    only (clarify is rejected there until it is answerable from a payload),
+    requiring the session key that routes the answer and the description that
+    renders the card.
     """
     if not isinstance(decision, dict):
         return {}
-    kind = _clean(decision.get("kind", ""), 40)
-    if kind not in ("approval", "clarify"):
+    if _clean(decision.get("kind", ""), 40) != "approval":
         return {}
-    sanitized: dict[str, Any] = {"kind": kind}
-    for key in ("session_key", "request_id", "question", "description"):
+    sanitized: dict[str, Any] = {"kind": "approval"}
+    for key in ("session_key", "description"):
         value = _clean(decision.get(key, ""), 500)
         if value:
             sanitized[key] = value
@@ -92,13 +93,11 @@ def sanitize_decision(decision: dict[str, Any]) -> dict[str, Any]:
         cleaned = [value for value in (_clean(choice, 80) for choice in choices) if value]
         if cleaned:
             sanitized["choices"] = cleaned[:8]
-    # Require both something to display and the key needed to answer it,
-    # otherwise the card is useless and the notification should degrade to the
-    # plain routing stub. Approval responds by session_key; clarify by
-    # request_id. (Clarify content ships in a later phase.)
-    has_display = bool(sanitized.get("description") or sanitized.get("question"))
-    answerable = sanitized.get("session_key") if kind == "approval" else sanitized.get("request_id")
-    if not has_display or not answerable:
+    # Require both something to display, the key needed to answer it, and at
+    # least one usable choice — the same shape the relay enforces.
+    if not sanitized.get("description") or not sanitized.get("session_key"):
+        return {}
+    if not sanitized.get("choices"):
         return {}
     return sanitized
 

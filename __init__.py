@@ -76,9 +76,14 @@ def _pre_approval_request(**kwargs: Any) -> None:
         return
     session_id = _text(kwargs.get("session_key"))
     description = _text(kwargs.get("description"))
+    # The event id deliberately excludes `id(kwargs)`: CPython recycles ids, so
+    # a later, distinct approval with the same session/pattern/command could
+    # collide and be silently deduped by the relay for 24h. `turn_id` (forwarded
+    # by the approval hook) is stable across replays of one turn and distinct
+    # across turns, which is exactly the dedupe semantics the relay wants.
     enqueue(push_event(
         "approval.needed",
-        identifier=event_id("approval", session_id, kwargs.get("pattern_key"), kwargs.get("command"), id(kwargs)),
+        identifier=event_id("approval", session_id, kwargs.get("turn_id"), kwargs.get("pattern_key"), kwargs.get("command")),
         session_id=session_id,
         profile=_profile,
         body=description or "Hermes is waiting for your approval.",

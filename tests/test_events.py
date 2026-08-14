@@ -105,11 +105,12 @@ def test_sanitize_decision_does_not_coerce_none_into_strings():
     assert decision["choices"] == ["once", "deny"]
 
 
-def test_push_event_binds_decision_kind_to_event_type():
+def test_push_event_only_attaches_approval_decisions_on_approval_events():
+    # Only the approval contract ships; clarify is not answerable from a
+    # payload and the relay rejects it, so it is never emitted or accepted.
     clarify_decision = {"kind": "clarify", "request_id": "r1", "question": "Which?", "choices": ["a"]}
     approval_decision = {"kind": "approval", "session_key": "s", "description": "d", "choices": ["once"]}
 
-    # A clarify decision can never ride an approval event (or vice versa).
     event = push_event(
         "approval.needed",
         identifier="approval:12345678",
@@ -125,3 +126,10 @@ def test_push_event_binds_decision_kind_to_event_type():
         decision=approval_decision,
     )
     assert "decision" not in event
+
+
+def test_sanitize_decision_requires_choices_and_mirrors_relay_contract():
+    # The relay enforces session_key + description + non-empty whitelisted
+    # choices; mirror that here so plugin-side tests describe the real contract.
+    assert sanitize_decision({"kind": "approval", "session_key": "s", "description": "d"}) == {}
+    assert sanitize_decision({"kind": "approval", "session_key": "s", "description": "d", "choices": ["  "]}) == {}
