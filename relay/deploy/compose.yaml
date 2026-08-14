@@ -1,0 +1,40 @@
+name: hermes-conduit-push
+
+services:
+  conduit-push:
+    build:
+      context: ..
+    container_name: conduit-push
+    restart: unless-stopped
+    environment:
+      HOST: 0.0.0.0
+      PORT: 9120
+      PUBLIC_URL: ${PUBLIC_URL}
+      DATA_PATH: /var/lib/conduit-push/relay.json
+      APNS_KEY_PATH: /run/secrets/apns-production.p8
+      APNS_KEY_ID: ${APNS_KEY_ID}
+      APNS_TEAM_ID: ${APNS_TEAM_ID}
+      APNS_TOPIC: ${APNS_TOPIC}
+      TRUST_PROXY: 1
+    volumes:
+      - ./data:/var/lib/conduit-push
+      - ./secrets/apns-production.p8:/run/secrets/apns-production.p8:ro
+    networks:
+      - pangolin
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:9120/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+networks:
+  pangolin:
+    external: true

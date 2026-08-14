@@ -5,3 +5,12 @@ __pycache__/
 venv/
 .DS_Store
 conduit-push.json
+
+# Relay secrets — never commit
+*.p8
+*.key
+*.pem
+relay/deploy/.env
+relay/deploy/data/
+relay/deploy/secrets/
+node_modules/

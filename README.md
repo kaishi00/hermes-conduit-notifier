@@ -71,7 +71,57 @@ The iOS app controls which categories are enabled, whether notification previews
 - Event titles and bodies are length-limited before delivery.
 - Lock Screen previews are disabled by default in Hermes Conduit.
 
-The public relay URL is part of the client protocol. Relay infrastructure, APNs signing material, and deployment configuration are intentionally not included in this repository.
+The public relay URL is part of the client protocol. APNs signing material (the `.p8` key) is never committed — see the relay directory below for how to deploy your own.
+
+## Push relay
+
+The push relay is the server component that receives events from Hermes gateways and delivers them to iOS devices via APNs. The source lives in [`relay/`](relay/).
+
+**Architecture:** Hermes plugin → HTTPS → relay → APNs → Conduit app
+
+The relay handles device registration, pairing codes, per-installation preferences, rate limiting, and idempotent event delivery. It uses only the Node.js standard library (no npm dependencies).
+
+### Self-hosting
+
+```shell
+cd relay/deploy
+
+# 1. Copy and fill in environment
+cp .env.example .env
+# Edit .env with your PUBLIC_URL and Apple developer credentials
+
+# 2. Place your APNs signing key
+mkdir -p secrets
+cp /path/to/AuthKey_XXXXXX.p8 secrets/apns-production.p8
+
+# 3. Build and run
+docker compose up -d
+```
+
+The relay listens on port 9120. Put it behind an HTTPS reverse proxy (the relay validates that `PUBLIC_URL` uses HTTPS). If the proxy sends `X-Forwarded-For`, set `TRUST_PROXY=1`.
+
+**What stays secret:**
+
+| File | Contents | Gitignored |
+|------|----------|------------|
+| `.env` | APNs key ID, team ID, topic, public URL | Yes |
+| `secrets/*.p8` | Apple Push Notification signing key | Yes |
+| `data/relay.json` | Installation records, gateway credentials | Yes |
+
+See [`relay/deploy/.env.example`](relay/deploy/.env.example) for all required environment variables.
+
+### Relay API
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/healthz` | Health check |
+| POST | `/v1/installations` | Register a device |
+| PUT | `/v1/installations/:id` | Update device token / preferences |
+| DELETE | `/v1/installations/:id` | Deactivate a device |
+| POST | `/v1/installations/:id/pairings` | Create a pairing code |
+| POST | `/v1/pairings/claim` | Claim a pairing code (gateway side) |
+| POST | `/v1/events` | Deliver a notification event |
+| DELETE | `/v1/gateways/current` | Revoke a gateway credential |
 
 ## Conduit support and privacy
 
