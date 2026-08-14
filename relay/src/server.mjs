@@ -1,4 +1,5 @@
 import { createServer } from 'node:http';
+import { realpathSync } from 'node:fs';
 import { isIP } from 'node:net';
 import { pathToFileURL } from 'node:url';
 import { ApnsClient } from './apns.mjs';
@@ -39,7 +40,17 @@ function main() {
 
 // Start the server only when executed directly, so the pure notification
 // builders can be unit-tested by importing this module without binding a port.
-if (pathToFileURL(process.argv[1] ?? '').href === import.meta.url) main();
+// Resolve argv[1] through realpath so a symlinked entrypoint still matches
+// import.meta.url (which Node resolves to the real file).
+function isEntryPoint() {
+  if (!process.argv[1]) return false;
+  try {
+    return pathToFileURL(realpathSync(process.argv[1])).href === import.meta.url;
+  } catch {
+    return false;
+  }
+}
+if (isEntryPoint()) main();
 
 async function route(request, response) {
   const url = new URL(request.url ?? '/', config.publicUrl);
@@ -150,33 +161,41 @@ function notificationFor(event, preferences) {
   // different profiles and sessions distinguishable in Notification Center.
   const body = preferences.show_previews && event.body ? event.body : notificationContext(generic.body, event);
   const completion = event.type === 'response.ready' || event.type === 'background_task.finished';
-  // `decision` carries structured card content (approval/clarify) so Conduit
-  // can render an answerable card from the push payload alone — the one-shot
-  // gateway stream event is missed while the app is backgrounded. The plugin
-  // already bounds/whitelists it; re-validate here as the trust boundary.
-  const decision = validateDecision(event.decision);
-  const conduit = {
+  // `decision` carries structured approval card content so Conduit can render
+  // an answerable card from the push payload alone — the one-shot gateway
+  // stream event is missed while the app is backgrounded. It is preview text
+  // exactly like `title`/`body`, so it is gated on show_previews; a user who
+  // disabled previews keeps approval descriptions off the payload entirely.
+  const decision = preferences.show_previews
+    ? validateDecision(event.decision, event.type)
+    : undefined;
+  const routing = {
     type: event.type,
     session_id: event.sessionId,
     profile: event.profile,
     gateway: event.gateway,
-    ...(decision ? { decision } : {}),
   };
+  const conduit = { ...routing, ...(decision ? { decision } : {}) };
+  const aps = {
+    alert: { title, body },
+    ...(preferences.completion_sound && completion ? { sound: 'default' } : {}),
+    'thread-id': event.sessionId ?? 'hermes',
+  };
+  // expo-notifications on iOS exposes the top-level APNs `body` value as
+  // `notification.request.content.data`. Keep the Conduit route there so
+  // a notification tap can recover its session/profile after a cold start.
+  // The top-level copy remains for clients that read the raw APNs payload.
+  let payload = { aps, body: { conduit }, conduit };
+  // APNs caps the notification payload at 4 KB and rejects anything larger.
+  // A maximal description (500 chars of multi-byte UTF-8) plus the alert copy
+  // can approach that, so degrade to the routing stub instead of losing the
+  // whole notification.
+  if (decision && Buffer.byteLength(JSON.stringify(payload)) > 3800) {
+    payload = { aps, body: { conduit: routing }, conduit: routing };
+  }
   return {
     collapseId: event.sessionId ? `${event.type}:${event.sessionId}` : event.eventId,
-    payload: {
-      aps: {
-        alert: { title, body },
-        ...(preferences.completion_sound && completion ? { sound: 'default' } : {}),
-        'thread-id': event.sessionId ?? 'hermes',
-      },
-      // expo-notifications on iOS exposes the top-level APNs `body` value as
-      // `notification.request.content.data`. Keep the Conduit route there so
-      // a notification tap can recover its session/profile after a cold start.
-      // The top-level copy remains for clients that read the raw APNs payload.
-      body: { conduit },
-      conduit,
-    },
+    payload,
   };
 }
 
@@ -217,30 +236,32 @@ function validateEvent(body) {
     sessionId: cleanIdentifier(body.session_id, 180),
     profile: cleanText(body.profile, 80),
     gateway: cleanIdentifier(body.gateway, 80),
-    decision: validateDecision(body.decision),
+    decision: validateDecision(body.decision, body.type),
   };
 }
 
-// Mirror the plugin's decision sanitization at the relay trust boundary: bound
-// field sizes, whitelist the kind, and require both a display field and the
-// answerability key (approval: session_key; clarify: request_id). Anything
-// malformed degrades to undefined and the notification ships as a routing stub.
-function validateDecision(value) {
+// Mirror the plugin's decision sanitization at the relay trust boundary.
+// Only the approval contract is shipped: a clarify decision cannot be answered
+// from the payload (its request id is minted gateway-side), so it is rejected
+// until that phase exists, and the kind must agree with the event type.
+// Choices are whitelisted to the gateway's approval vocabulary so a
+// compromised gateway cannot inject arbitrary button text into the payload.
+// Anything malformed degrades to undefined and the notification ships as a
+// routing stub.
+function validateDecision(value, eventType) {
   if (!value || typeof value !== 'object') return undefined;
-  const kind = cleanText(value.kind, 40);
-  if (kind !== 'approval' && kind !== 'clarify') return undefined;
-  const decision = { kind };
-  for (const key of ['session_key', 'request_id', 'question', 'description']) {
-    const text = cleanText(value[key], 500);
-    if (text) decision[key] = text;
-  }
-  if (Array.isArray(value.choices)) {
-    const choices = value.choices.map((c) => cleanText(c, 80)).filter((c) => c !== undefined);
-    if (choices.length) decision.choices = choices.slice(0, 8);
-  }
-  const hasDisplay = Boolean(decision.description || decision.question);
-  const answerable = kind === 'approval' ? decision.session_key : decision.request_id;
-  return hasDisplay && answerable ? decision : undefined;
+  if (cleanText(value.kind, 40) !== 'approval' || eventType !== 'approval.needed') return undefined;
+  const sessionKey = cleanIdentifier(value.session_key, 180);
+  const description = cleanText(value.description, 500);
+  if (!sessionKey || !description) return undefined;
+  const allowed = new Set(['once', 'session', 'always', 'deny']);
+  const choices = [...new Set(
+    (Array.isArray(value.choices) ? value.choices : [])
+      .map((choice) => cleanText(choice, 80))
+      .filter((choice) => allowed.has(choice)),
+  )];
+  if (!choices.length) return undefined;
+  return { kind: 'approval', session_key: sessionKey, description, choices };
 }
 
 function validateDeviceToken(value) {

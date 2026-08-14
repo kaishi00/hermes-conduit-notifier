@@ -38,11 +38,13 @@ def push_event(
     # `decision` carries the structured card content that lets Conduit render
     # an answerable card from the push payload alone, without the one-shot
     # gateway stream event (which is missed while the app is backgrounded).
-    # It is optional and only meaningful for decision notifications, so it is
-    # ignored for any other event type even if a caller passes it.
+    # It is optional, only meaningful for decision notifications, and the
+    # decision kind must match the event type (approval.needed -> approval,
+    # input.needed -> clarify) so the two can never disagree.
     if decision and kind in ("approval.needed", "input.needed"):
         sanitized = sanitize_decision(decision)
-        if sanitized:
+        expected_kind = "approval" if kind == "approval.needed" else "clarify"
+        if sanitized and sanitized.get("kind") == expected_kind:
             event["decision"] = sanitized
     return event
 
@@ -85,7 +87,9 @@ def sanitize_decision(decision: dict[str, Any]) -> dict[str, Any]:
             sanitized[key] = value
     choices = decision.get("choices")
     if isinstance(choices, list):
-        cleaned = [_clean(str(choice), 80) for choice in choices if str(choice).strip()]
+        # Clean first, then drop empties: filtering on the raw value would
+        # coerce None to the truthy "None" and forward it as a choice.
+        cleaned = [value for value in (_clean(choice, 80) for choice in choices) if value]
         if cleaned:
             sanitized["choices"] = cleaned[:8]
     # Require both something to display and the key needed to answer it,
@@ -122,4 +126,10 @@ def is_silent_response(value: Any) -> bool:
 
 
 def _clean(value: str, maximum: int) -> str:
-    return " ".join(str(value).split())[:maximum]
+    # Non-strings (None, numbers, nested objects) must not be coerced —
+    # str(None) would produce a truthy "None" that slips past emptiness
+    # checks and gets forwarded to the relay. Drop them instead, matching
+    # the relay's cleanText semantics.
+    if not isinstance(value, str):
+        return ""
+    return " ".join(value.split())[:maximum]

@@ -90,3 +90,38 @@ def test_sanitize_decision_rejects_unknown_kind_and_oversized_fields():
     assert len(decision["choices"]) == 4  # empties dropped, all retained within cap
     assert all(len(c) <= 80 for c in decision["choices"])
     assert "command" not in decision  # unknown fields are not echoed
+
+
+def test_sanitize_decision_does_not_coerce_none_into_strings():
+    # A None session_key must be rejected (not become the truthy "None"), and
+    # a None choice entry must be dropped rather than stringified.
+    assert sanitize_decision({"kind": "approval", "session_key": None, "description": "x"}) == {}
+    decision = sanitize_decision({
+        "kind": "approval",
+        "session_key": "s",
+        "description": "x",
+        "choices": ["once", None, "deny"],
+    })
+    assert decision["choices"] == ["once", "deny"]
+
+
+def test_push_event_binds_decision_kind_to_event_type():
+    clarify_decision = {"kind": "clarify", "request_id": "r1", "question": "Which?", "choices": ["a"]}
+    approval_decision = {"kind": "approval", "session_key": "s", "description": "d", "choices": ["once"]}
+
+    # A clarify decision can never ride an approval event (or vice versa).
+    event = push_event(
+        "approval.needed",
+        identifier="approval:12345678",
+        session_id="s",
+        decision=clarify_decision,
+    )
+    assert "decision" not in event
+
+    event = push_event(
+        "input.needed",
+        identifier="input:12345678",
+        session_id="s",
+        decision=approval_decision,
+    )
+    assert "decision" not in event
