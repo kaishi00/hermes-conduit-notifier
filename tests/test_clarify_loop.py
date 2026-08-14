@@ -271,3 +271,35 @@ def test_poll_budget_coerces_string_timeout():
         assert loop._clarify_poll_budget() == loop.MAX_POLL_SECONDS
     finally:
         sys.modules.pop("tools.clarify_gateway", None)
+
+
+def test_polling_stops_when_no_card_was_delivered():
+    # deliverable:false means device preferences suppressed the card; nobody
+    # can answer by id, so the first poll result ends the polling.
+    fake = _FakeState([{"status": "pending", "deliverable": False}, {"status": "pending"}])
+    _install(fake)
+    original, release = _blocking_original("original result")
+    try:
+        result = loop.middleware(**_kwargs(original, {"question": "Q?"}))
+    finally:
+        release.set()
+    assert result == "original result"
+    assert len(fake.poll_ids) == 1
+
+
+def test_consecutive_unknown_polls_stop_after_grace_window():
+    # The push was never parked (dropped at enqueue or delivery): tolerate a
+    # short grace for the delivery race, then stop instead of polling the
+    # entire budget. The later "answered" must never be reached.
+    fake = _FakeState([{"status": "unknown"}] * 5 + [{"status": "answered", "answer": "late"}])
+    _install(fake)
+    original, release = _blocking_original("original result")
+    old_grace = loop.UNKNOWN_POLL_GRACE
+    loop.UNKNOWN_POLL_GRACE = 3
+    try:
+        result = loop.middleware(**_kwargs(original, {"question": "Q?"}))
+    finally:
+        loop.UNKNOWN_POLL_GRACE = old_grace
+        release.set()
+    assert result == "original result"
+    assert len(fake.poll_ids) == 3, "polling must stop at the grace boundary"

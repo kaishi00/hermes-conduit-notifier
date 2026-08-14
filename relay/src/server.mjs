@@ -139,7 +139,9 @@ async function route(request, response) {
     // device can answer by id and the gateway can poll for the answer while
     // its middleware blocks the tool call. Saved after the dedupe check so a
     // re-delivered event can never overwrite (and wipe the answer of) the
-    // already-parked decision.
+    // already-parked decision. `deliverable` records whether device
+    // preferences will actually show an answerable card, so the plugin can
+    // stop polling a decision nobody can answer.
     if (event.decision?.kind === 'clarify' && event.decision.request_id) {
       store.savePendingDecision({
         id: event.decision.request_id,
@@ -147,6 +149,8 @@ async function route(request, response) {
         gatewayId: credential.gatewayId,
         question: event.decision.question,
         choices: event.decision.choices,
+        deliverable: shouldDeliver(installation.preferences, event.type)
+          && installation.preferences.decision_cards !== false,
       });
     }
     if (!shouldDeliver(installation.preferences, event.type)) return sendJson(response, 202, { accepted: true, delivered: false });
@@ -382,6 +386,13 @@ function sendJson(response, status, body) {
 
 function enforceRateLimit(key, maximum, windowMs) {
   const now = Date.now();
+  // The map never evicts on its own and some keys (per-IP buckets) are
+  // attacker-rotatable, so sweep expired entries once it grows large.
+  if (limits.size > 10_000) {
+    for (const [limitKey, limit] of limits) {
+      if (limit.resetAt <= now) limits.delete(limitKey);
+    }
+  }
   const value = limits.get(key);
   if (!value || value.resetAt <= now) { limits.set(key, { count: 1, resetAt: now + windowMs }); return; }
   value.count += 1;

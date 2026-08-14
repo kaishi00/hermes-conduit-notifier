@@ -115,10 +115,12 @@ test('clarify decision: push → device answer → gateway poll', async () => {
   assert.equal(event.status, 202);
   assert.deepEqual(event.json, { accepted: true, delivered: false });
 
-  // Gateway polls: pending.
+  // Gateway polls: pending. This installation registered with enabled:false,
+  // so no card was delivered and the decision reports deliverable:false —
+  // the plugin's poll loop stops instead of waiting out the full budget.
   const poll = await api('/v1/decisions/conduit-push-abc123', { credential: gatewayCredential });
   assert.equal(poll.status, 200);
-  assert.equal(poll.json.status, 'pending');
+  assert.deepEqual(poll.json, { status: 'pending', deliverable: false });
 
   // Another installation's gateway must not see it.
   const stranger = await api('/v1/installations', {

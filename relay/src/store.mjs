@@ -149,13 +149,16 @@ export class RelayStore {
   // middleware blocks the tool call. Approval decisions answer via the
   // gateway directly and never enter this store.
 
-  savePendingDecision({ id, installationId, gatewayId, question, choices }) {
+  savePendingDecision({ id, installationId, gatewayId, question, choices, deliverable = true }) {
     this.prune();
     this.data.pendingDecisions[id] = {
       installationId,
       gatewayId,
       question: String(question ?? ''),
       choices: Array.isArray(choices) ? choices.map(String) : [],
+      // False when device preferences mean no card was shown; the gateway's
+      // poller stops early instead of polling a decision nobody can answer.
+      deliverable: Boolean(deliverable),
       createdAt: Date.now(),
     };
     const entries = Object.entries(this.data.pendingDecisions);
@@ -184,7 +187,11 @@ export class RelayStore {
     if (!decision || decision.installationId !== installationId || decision.gatewayId !== gatewayId) {
       return { status: 'unknown' };
     }
-    if (decision.answer === undefined) return { status: 'pending' };
+    if (decision.answer === undefined) {
+      // Legacy records predate the flag; treat missing as deliverable so the
+      // poller's behavior is unchanged for decisions parked by older relays.
+      return { status: 'pending', deliverable: decision.deliverable !== false };
+    }
     return { status: 'answered', answer: decision.answer };
   }
 

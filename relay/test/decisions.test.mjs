@@ -25,7 +25,27 @@ test('pending decision lifecycle: save → pending → answered → already', ()
 
   assert.deepEqual(
     relay.pendingDecisionStatus('inst-1', 'gw-1', 'conduit-push-abc123'),
-    { status: 'pending' },
+    { status: 'pending', deliverable: true },
+  );
+  // Deliverability is recorded at intake: a decision whose card device
+  // preferences suppressed reports deliverable:false so the plugin's poll
+  // can stop early.
+  relay.savePendingDecision({
+    id: 'conduit-push-hidden',
+    installationId: 'inst-1',
+    gatewayId: 'gw-1',
+    question: 'q',
+    deliverable: false,
+  });
+  assert.deepEqual(
+    relay.pendingDecisionStatus('inst-1', 'gw-1', 'conduit-push-hidden'),
+    { status: 'pending', deliverable: false },
+  );
+  // Legacy records without the flag default to deliverable.
+  relay.data.pendingDecisions['conduit-push-hidden'].deliverable = undefined;
+  assert.deepEqual(
+    relay.pendingDecisionStatus('inst-1', 'gw-1', 'conduit-push-hidden'),
+    { status: 'pending', deliverable: true },
   );
   // Cross-installation and cross-gateway reads never see it.
   assert.deepEqual(relay.pendingDecisionStatus('inst-2', 'gw-1', 'conduit-push-abc123'), { status: 'unknown' });

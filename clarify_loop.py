@@ -32,6 +32,11 @@ logger = logging.getLogger("hermes.plugins.conduit_push")
 
 REQUEST_ID_PREFIX = "conduit-push-"
 POLL_INTERVAL_SECONDS = 2.0
+# Consecutive unknown polls tolerated while the event POST and the first poll
+# race (enqueue is async, delivery can lag). Past this the decision was never
+# parked — the push was dropped at enqueue or delivery — and polling can never
+# succeed, so fall back to the original path instead of polling the full budget.
+UNKNOWN_POLL_GRACE = 30  # ~60s at the default interval
 # Hard cap on polling even when the gateway configures an unlimited clarify
 # timeout; the relay expires pending decisions at 2h, and polling stops on
 # the unknown-after-pending transition well before this in practice.
@@ -127,6 +132,7 @@ def _first_answer_wins(
 
     deadline = time.monotonic() + _clarify_poll_budget()
     saw_pending = False
+    consecutive_unknown = 0
     while time.monotonic() < deadline:
         if "original" in outcome or "original_error" in outcome:
             if "original_error" in outcome:
@@ -146,12 +152,22 @@ def _first_answer_wins(
             )
         if state == "pending":
             saw_pending = True
-        elif saw_pending:
-            # unknown-after-pending: the relay expired the decision (2h TTL,
-            # far under an unlimited clarify timeout). Stop polling and let
-            # the original path's own timeout conclude the race instead of
-            # hammering a request that can never succeed.
-            break
+            consecutive_unknown = 0
+            if status.get("deliverable") is False:
+                # Parked but no card was shown (device preferences disabled
+                # this notification): nobody can answer by id. Stop polling
+                # and let the original path's timeout conclude the race.
+                break
+        elif state == "unknown":
+            if saw_pending:
+                # unknown-after-pending: the relay expired the decision (2h
+                # TTL, far under an unlimited clarify timeout).
+                break
+            consecutive_unknown += 1
+            if consecutive_unknown >= UNKNOWN_POLL_GRACE:
+                # Never parked: the push was dropped at enqueue or delivery
+                # (queue full, relay down), so the poll can never succeed.
+                break
         time.sleep(POLL_INTERVAL_SECONDS)
 
     # Poll budget exhausted (unlimited clarify timeout): fall back to whatever
