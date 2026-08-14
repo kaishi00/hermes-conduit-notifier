@@ -145,15 +145,17 @@ async function route(request, response) {
     enforceRateLimit(`event:${installation.id}`, 30, 60_000);
     const body = await readJson(request);
     const event = validateEvent(body);
-    if (!store.acceptEvent(installation.id, event.eventId)) return sendJson(response, 200, { accepted: true, duplicate: true });
-    // Every accepted event refreshes the gateway's last-seen plugin version
-    // and capabilities (bounded, cleaned) for the /v1/meta compatibility view.
+    // Plugin version recording runs BEFORE the dedupe return: a second
+    // gateway on the same installation running the same plugin version sends
+    // the same deterministic plugin.hello id, and it must still be recorded.
+    // Re-recording identical state is idempotent, unlike pending decisions.
     if (event.pluginVersion) {
       store.recordGatewayPlugin(installation.id, credential.gatewayId, {
         version: event.pluginVersion,
         capabilities: event.pluginCapabilities,
       });
     }
+    if (!store.acceptEvent(installation.id, event.eventId)) return sendJson(response, 200, { accepted: true, duplicate: true });
     // Control event: version announcement only, never a notification.
     if (event.type === 'plugin.hello') return sendJson(response, 202, { accepted: true, delivered: false });
     // A clarify decision carries a plugin-minted request id; park it so the
@@ -226,6 +228,7 @@ async function route(request, response) {
   // Devices authenticate with their installation credential; older relays
   // without this endpoint simply 404 and the app renders an unknown state.
   if (request.method === 'GET' && url.pathname === '/v1/meta') {
+    enforceRateLimit(`meta-ip:${client}`, 60, 60_000);
     const credential = bearerCredential(request);
     if (!credential) return sendJson(response, 401, { error: 'unauthorized' });
     const installation = store.authenticate(credential.id, credential.secret, 'device');
@@ -350,7 +353,7 @@ function validateEvent(body) {
     sessionId: cleanIdentifier(body.session_id, 180),
     profile: cleanText(body.profile, 80),
     gateway: cleanIdentifier(body.gateway, 80),
-    pluginVersion: cleanText(body.plugin_version, 40),
+    pluginVersion: cleanIdentifier(body.plugin_version, 40),
     pluginCapabilities: Array.isArray(body.plugin_capabilities)
       ? body.plugin_capabilities.map((capability) => cleanIdentifier(capability, 40)).filter((capability) => capability !== undefined).slice(0, 16)
       : [],

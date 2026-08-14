@@ -97,7 +97,7 @@ def enqueue(event: dict[str, Any]) -> None:
         logger.warning("Conduit notification queue is full; dropping %s", event.get("type", "event"))
 
 
-def send_now(event: dict[str, Any]) -> dict[str, Any]:
+def send_now(event: dict[str, Any], timeout: float = 15.0) -> dict[str, Any]:
     state = load_state()
     if not state:
         raise RuntimeError("This Hermes profile is not paired with Conduit.")
@@ -106,6 +106,7 @@ def send_now(event: dict[str, Any]) -> dict[str, Any]:
         method="POST",
         credential=state["credential"],
         payload=event,
+        timeout=timeout,
     )
 
 
@@ -132,6 +133,7 @@ def request_json(
     method: str,
     payload: dict[str, Any] | None = None,
     credential: str = "",
+    timeout: float = 15.0,
 ) -> dict[str, Any]:
     data = None if payload is None else json.dumps(payload, separators=(",", ":")).encode("utf-8")
     headers = {
@@ -144,7 +146,7 @@ def request_json(
         headers["Authorization"] = f"Bearer {credential}"
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(request, timeout=15) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             raw = response.read()
             return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as error:

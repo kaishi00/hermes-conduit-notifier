@@ -187,6 +187,20 @@ def test_plugin_hello_is_a_non_notifying_version_announcement():
     assert plugin_hello() == hello
 
 
+def test_plugin_version_constant_matches_manifest():
+    # PLUGIN_VERSION misreporting compatibility is the failure this feature
+    # exists to prevent; keep the constant and the manifest in lockstep.
+    import pathlib
+    import re
+
+    from events import PLUGIN_VERSION
+
+    manifest = (pathlib.Path(__file__).resolve().parents[1] / "plugin.yaml").read_text()
+    match = re.search(r"^version:\s*(\S+)", manifest, re.MULTILINE)
+    assert match, "plugin.yaml must declare a version"
+    assert match.group(1) == PLUGIN_VERSION
+
+
 def test_sanitize_decision_requires_choices_and_mirrors_relay_contract():
     # The relay enforces session_key + description + non-empty whitelisted
     # choices; mirror that here so plugin-side tests describe the real contract.

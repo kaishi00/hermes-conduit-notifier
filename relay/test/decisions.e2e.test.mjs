@@ -257,6 +257,32 @@ test('clarify decision: push → device answer → gateway poll', async () => {
   const refreshed = metaAfter.json.gateways.find((gateway) => gateway.name === 'test gateway');
   assert.equal(refreshed.plugin_version, '0.2.1');
 
+  // A second gateway on the same installation running the same plugin version
+  // sends the same deterministic hello id; it must still be recorded even
+  // though the event itself dedupes.
+  const secondPairing = await api(`/v1/installations/${installationId}/pairings`, {
+    method: 'POST',
+    credential: deviceCredential,
+  });
+  const secondClaim = await api('/v1/pairings/claim', {
+    method: 'POST',
+    body: { pairing_code: secondPairing.json.pairing_code, gateway_name: 'second gateway' },
+  });
+  await api('/v1/events', {
+    method: 'POST',
+    credential: secondClaim.json.credential,
+    body: {
+      type: 'plugin.hello',
+      event_id: 'hello:020abcdef12',
+      plugin_version: '0.2.0',
+      plugin_capabilities: ['approval-decisions', 'clarify-loop', 'version-reporting'],
+    },
+  });
+  const metaTwo = await api('/v1/meta', { credential: deviceCredential });
+  const second = metaTwo.json.gateways.find((gateway) => gateway.name === 'second gateway');
+  assert.ok(second, 'second gateway listed');
+  assert.equal(second.plugin_version, '0.2.0', 'duplicate hello id must still record the new gateway');
+
   // Meta requires the device credential, and never leaks cross-installation.
   const metaUnauth = await api('/v1/meta');
   assert.equal(metaUnauth.status, 401);

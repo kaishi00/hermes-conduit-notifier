@@ -27,7 +27,7 @@ def dispatch(args: argparse.Namespace) -> int:
         state = claim_pairing(args.code, args.relay_url, args.name)
         print(f"Paired {state['gateway_name']} with Conduit.")
         try:
-            send_now(plugin_hello())
+            send_now(plugin_hello(), timeout=4.0)
         except Exception as error:
             # Pairing succeeded; a failed announcement only means the app's
             # compatibility view fills in on the first real event instead.
