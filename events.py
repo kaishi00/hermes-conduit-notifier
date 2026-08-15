@@ -7,6 +7,15 @@ import json
 import uuid
 from typing import Any
 
+# Keep in sync with plugin.yaml. Reported on every event so the relay can
+# expose per-gateway compatibility state to the app (Settings > Notifications).
+PLUGIN_VERSION = "0.2.0"
+PLUGIN_CAPABILITIES = [
+    "approval-decisions",
+    "clarify-loop",
+    "version-reporting",
+]
+
 
 def event_id(prefix: str, *parts: Any) -> str:
     values = [str(part).strip() for part in parts if str(part or "").strip()]
@@ -26,7 +35,12 @@ def push_event(
     body: str = "",
     decision: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    event: dict[str, Any] = {"event_id": identifier, "type": kind}
+    event: dict[str, Any] = {
+        "event_id": identifier,
+        "type": kind,
+        "plugin_version": PLUGIN_VERSION,
+        "plugin_capabilities": list(PLUGIN_CAPABILITIES),
+    }
     if session_id:
         event["session_id"] = session_id[:180]
     if profile:
@@ -152,6 +166,19 @@ def sanitize_decision(decision: dict[str, Any]) -> dict[str, Any]:
             return {}
         return sanitized
     return {}
+
+
+def plugin_hello() -> dict[str, Any]:
+    """A control event, sent right after pairing, that reports this plugin's
+    version and capabilities without producing a notification. The relay
+    records it so the app can show plugin compatibility immediately instead of
+    waiting for the first real event."""
+    return push_event(
+        "plugin.hello",
+        identifier=event_id("hello", PLUGIN_VERSION),
+        profile="default",
+        body="",
+    )
 
 
 def clarification_text(args: Any) -> str:

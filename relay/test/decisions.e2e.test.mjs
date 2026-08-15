@@ -212,4 +212,81 @@ test('clarify decision: push → device answer → gateway poll', async () => {
   // Credentials are enforced on both endpoints.
   const unauth = await api('/v1/decisions/conduit-push-abc123');
   assert.equal(unauth.status, 401);
+
+  // Plugin version announcement: a control event that never notifies but
+  // records the gateway's plugin state for the compatibility view.
+  const hello = await api('/v1/events', {
+    method: 'POST',
+    credential: gatewayCredential,
+    body: {
+      type: 'plugin.hello',
+      // The plugin's event_id hashes the version (hex, no dots); keep the
+      // fixture within the id charset the relay accepts.
+      event_id: 'hello:020abcdef12',
+      plugin_version: '0.2.0',
+      plugin_capabilities: ['approval-decisions', 'clarify-loop', 'version-reporting'],
+    },
+  });
+  assert.equal(hello.status, 202);
+  assert.deepEqual(hello.json, { accepted: true, delivered: false });
+
+  // The device reads relay + plugin compatibility state.
+  const meta = await api('/v1/meta', { credential: deviceCredential });
+  assert.equal(meta.status, 200);
+  assert.equal(meta.json.version, '0.2.0');
+  assert.ok(meta.json.capabilities.includes('decisions'));
+  const gatewayMeta = meta.json.gateways.find((gateway) => gateway.name === 'test gateway');
+  assert.ok(gatewayMeta, 'paired gateway appears in meta');
+  assert.equal(gatewayMeta.plugin_version, '0.2.0');
+  assert.ok(gatewayMeta.plugin_capabilities.includes('clarify-loop'));
+  assert.ok(gatewayMeta.last_event_at);
+
+  // A later real event refreshes the recorded plugin version.
+  await api('/v1/events', {
+    method: 'POST',
+    credential: gatewayCredential,
+    body: {
+      type: 'response.ready',
+      event_id: 'response:abcdef999999',
+      session_id: 'sess-1',
+      plugin_version: '0.2.1',
+      plugin_capabilities: ['approval-decisions', 'clarify-loop'],
+    },
+  });
+  const metaAfter = await api('/v1/meta', { credential: deviceCredential });
+  const refreshed = metaAfter.json.gateways.find((gateway) => gateway.name === 'test gateway');
+  assert.equal(refreshed.plugin_version, '0.2.1');
+
+  // A second gateway on the same installation running the same plugin version
+  // sends the same deterministic hello id; it must still be recorded even
+  // though the event itself dedupes.
+  const secondPairing = await api(`/v1/installations/${installationId}/pairings`, {
+    method: 'POST',
+    credential: deviceCredential,
+  });
+  const secondClaim = await api('/v1/pairings/claim', {
+    method: 'POST',
+    body: { pairing_code: secondPairing.json.pairing_code, gateway_name: 'second gateway' },
+  });
+  await api('/v1/events', {
+    method: 'POST',
+    credential: secondClaim.json.credential,
+    body: {
+      type: 'plugin.hello',
+      event_id: 'hello:020abcdef12',
+      plugin_version: '0.2.0',
+      plugin_capabilities: ['approval-decisions', 'clarify-loop', 'version-reporting'],
+    },
+  });
+  const metaTwo = await api('/v1/meta', { credential: deviceCredential });
+  const second = metaTwo.json.gateways.find((gateway) => gateway.name === 'second gateway');
+  assert.ok(second, 'second gateway listed');
+  assert.equal(second.plugin_version, '0.2.0', 'duplicate hello id must still record the new gateway');
+
+  // Meta requires the device credential, and never leaks cross-installation.
+  const metaUnauth = await api('/v1/meta');
+  assert.equal(metaUnauth.status, 401);
+  const strangerMeta = await api('/v1/meta', { credential: stranger.json.credential });
+  assert.equal(strangerMeta.status, 200);
+  assert.ok(strangerMeta.json.gateways.every((gateway) => gateway.name !== 'test gateway'), 'cross-installation gateways never leak');
 });

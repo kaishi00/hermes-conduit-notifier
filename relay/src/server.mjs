@@ -1,9 +1,20 @@
 import { createServer } from 'node:http';
-import { realpathSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { isIP } from 'node:net';
 import { pathToFileURL } from 'node:url';
 import { ApnsClient } from './apns.mjs';
 import { RelayStore } from './store.mjs';
+
+// Self-reported relay version/capabilities, surfaced via GET /v1/meta so the
+// app can show compatibility state (keep the version in sync with package.json).
+const RELAY_INFO = (() => {
+  try {
+    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+    return { version: String(pkg.version || 'unknown'), capabilities: ['decisions', 'decision-cards', 'meta'] };
+  } catch {
+    return { version: 'unknown', capabilities: ['decisions', 'decision-cards', 'meta'] };
+  }
+})();
 
 let config;
 let store;
@@ -134,7 +145,19 @@ async function route(request, response) {
     enforceRateLimit(`event:${installation.id}`, 30, 60_000);
     const body = await readJson(request);
     const event = validateEvent(body);
+    // Plugin version recording runs BEFORE the dedupe return: a second
+    // gateway on the same installation running the same plugin version sends
+    // the same deterministic plugin.hello id, and it must still be recorded.
+    // Re-recording identical state is idempotent, unlike pending decisions.
+    if (event.pluginVersion) {
+      store.recordGatewayPlugin(installation.id, credential.gatewayId, {
+        version: event.pluginVersion,
+        capabilities: event.pluginCapabilities,
+      });
+    }
     if (!store.acceptEvent(installation.id, event.eventId)) return sendJson(response, 200, { accepted: true, duplicate: true });
+    // Control event: version announcement only, never a notification.
+    if (event.type === 'plugin.hello') return sendJson(response, 202, { accepted: true, delivered: false });
     // A clarify decision carries a plugin-minted request id; park it so the
     // device can answer by id and the gateway can poll for the answer while
     // its middleware blocks the tool call. Saved after the dedupe check so a
@@ -198,6 +221,31 @@ async function route(request, response) {
     store.removeGateway(credential.installationId, credential.gatewayId);
     response.writeHead(204).end();
     return;
+  }
+
+  // Compatibility view for Settings > Notifications: the relay's own
+  // version/capabilities plus each paired gateway's last-seen plugin state.
+  // Devices authenticate with their installation credential; older relays
+  // without this endpoint simply 404 and the app renders an unknown state.
+  if (request.method === 'GET' && url.pathname === '/v1/meta') {
+    enforceRateLimit(`meta-ip:${client}`, 60, 60_000);
+    const credential = bearerCredential(request);
+    if (!credential) return sendJson(response, 401, { error: 'unauthorized' });
+    const installation = store.authenticate(credential.id, credential.secret, 'device');
+    if (!installation) return sendJson(response, 401, { error: 'unauthorized' });
+    enforceRateLimit(`meta:${installation.id}`, 30, 60_000);
+    const gateways = Object.values(installation.gateways ?? {}).map((gateway) => ({
+      id: gateway.id,
+      name: gateway.name,
+      plugin_version: gateway.pluginVersion,
+      plugin_capabilities: gateway.pluginCapabilities ?? [],
+      last_event_at: gateway.lastEventAt,
+    }));
+    return sendJson(response, 200, {
+      version: RELAY_INFO.version,
+      capabilities: RELAY_INFO.capabilities,
+      gateways,
+    });
   }
 
   sendJson(response, 404, { error: 'not_found' });
@@ -293,7 +341,7 @@ function shouldDeliver(preferences, type) {
 }
 
 function validateEvent(body) {
-  const types = new Set(['approval.needed', 'input.needed', 'response.ready', 'turn.failed', 'background_task.finished']);
+  const types = new Set(['approval.needed', 'input.needed', 'response.ready', 'turn.failed', 'background_task.finished', 'plugin.hello']);
   if (!types.has(body.type)) throw httpError(400, 'invalid_event_type');
   const eventId = String(body.event_id ?? '');
   if (!/^[A-Za-z0-9:_-]{8,128}$/.test(eventId)) throw httpError(400, 'invalid_event_id');
@@ -305,6 +353,10 @@ function validateEvent(body) {
     sessionId: cleanIdentifier(body.session_id, 180),
     profile: cleanText(body.profile, 80),
     gateway: cleanIdentifier(body.gateway, 80),
+    pluginVersion: cleanIdentifier(body.plugin_version, 40),
+    pluginCapabilities: Array.isArray(body.plugin_capabilities)
+      ? body.plugin_capabilities.map((capability) => cleanIdentifier(capability, 40)).filter((capability) => capability !== undefined).slice(0, 16)
+      : [],
     decision: validateDecision(body.decision, body.type),
   };
 }
