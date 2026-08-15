@@ -150,11 +150,19 @@ export class RelayStore {
     return true;
   }
 
-  acceptEvent(installationId, eventId) {
+  acceptEvent(installationId, eventId, gatewayId) {
     this.prune();
     const key = `${installationId}:${eventId}`;
     if (this.data.eventIds[key]) return false;
     this.data.eventIds[key] = Date.now();
+    // Last-seen is stamped on every accepted event, version-carrying or not,
+    // so /v1/meta can distinguish "gateway never reported a plugin version
+    // but has sent events" (a pre-0.2 notifier that needs updating) from
+    // "paired, nothing sent yet".
+    if (gatewayId) {
+      const gateway = this.data.installations[installationId]?.gateways?.[gatewayId];
+      if (gateway) gateway.lastEventAt = new Date().toISOString();
+    }
     this.save();
     return true;
   }

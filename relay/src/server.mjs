@@ -155,7 +155,7 @@ async function route(request, response) {
         capabilities: event.pluginCapabilities,
       });
     }
-    if (!store.acceptEvent(installation.id, event.eventId)) return sendJson(response, 200, { accepted: true, duplicate: true });
+    if (!store.acceptEvent(installation.id, event.eventId, credential.gatewayId)) return sendJson(response, 200, { accepted: true, duplicate: true });
     // Control event: version announcement only, never a notification.
     if (event.type === 'plugin.hello') return sendJson(response, 202, { accepted: true, delivered: false });
     // A clarify decision carries a plugin-minted request id; park it so the
