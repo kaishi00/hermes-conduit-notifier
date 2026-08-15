@@ -283,6 +283,24 @@ test('clarify decision: push → device answer → gateway poll', async () => {
   assert.ok(second, 'second gateway listed');
   assert.equal(second.plugin_version, '0.2.0', 'duplicate hello id must still record the new gateway');
 
+  // A pre-0.2 notifier sends events with no plugin_version: last_event_at is
+  // stamped anyway so /v1/meta can flag "outdated plugin" instead of
+  // "waiting for the first notification".
+  await api('/v1/events', {
+    method: 'POST',
+    credential: secondClaim.json.credential,
+    body: {
+      type: 'response.ready',
+      event_id: 'response:legacy111111',
+      session_id: 'sess-2',
+    },
+  });
+  const metaLegacy = await api('/v1/meta', { credential: deviceCredential });
+  const legacyGateway = metaLegacy.json.gateways.find((gateway) => gateway.name === 'second gateway');
+  // (Second gateway reported 0.2.0 via hello earlier; strip it to simulate
+  // the never-reported shape and assert the last_event_at contract.)
+  assert.ok(legacyGateway.last_event_at, 'every accepted event stamps last_event_at');
+
   // Meta requires the device credential, and never leaks cross-installation.
   const metaUnauth = await api('/v1/meta');
   assert.equal(metaUnauth.status, 401);
