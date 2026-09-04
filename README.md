@@ -123,6 +123,36 @@ See [`relay/deploy/.env.example`](relay/deploy/.env.example) for all required en
 | POST | `/v1/events` | Deliver a notification event |
 | DELETE | `/v1/gateways/current` | Revoke a gateway credential |
 
+## Batch clarify decisions (plugin 0.3+)
+
+Current Hermes lets one `clarify` call ask several questions
+(`questions: [{qid, question, choices, multi_select}]`). The plugin relays
+the FULL batch to Conduit instead of collapsing it to the first question:
+
+- The pushed decision carries `questions[]` with the gateway qids, choices,
+  and `multi_select` flags. The old collapsed `question`/`choices` summary
+  still rides along, so pre-0.3 Conduit builds keep rendering an answerable
+  first-question card.
+- The relay stores per-question answers with **first-answer-wins per qid**:
+  two devices answering the same qid resolve to one lock (the loser gets a
+  409), and the decision completes only when every qid is locked.
+- Devices answer per question with
+  `POST /v1/decisions/:id {"question_id": "q…", "answer": "…"}` and receive
+  the remaining open qids back. The legacy whole-decision body
+  (`{"answer": "…"}`) still works for single-question cards, and on a batch
+  it counts as the collapsed first question only.
+- The plugin returns the batch to Hermes exactly in the built-in tool's
+  result shape (`{"responses": [...]}`, multi-select answers parsed back to
+  lists).
+
+Known limitation: the relay cannot see answers made natively (Hermes
+Desktop/TUI answer through the gateway), and the gateway cannot see relay
+answers. Whichever surface completes the WHOLE batch first wins the tool
+call; the plugin then releases the parked decision (`DELETE
+/v1/decisions/:id`) so late device answers are rejected rather than
+reported as accepted. A batch answered partly natively and partly by relay
+stays open until the gateway's configured clarify timeout bounds it.
+
 ## Conduit support and privacy
 
 The repository also hosts the public Hermes Conduit support and privacy pages:

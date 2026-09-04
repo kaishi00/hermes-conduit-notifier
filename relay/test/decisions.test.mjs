@@ -19,7 +19,7 @@ test('a same-id write from another installation never clobbers a parked decision
   relay.savePendingDecision({ id: 'conduit-push-x', installationId: 'inst-2', gatewayId: 'gw-2', question: 'evil' });
   assert.equal(relay.pendingDecisionStatus('inst-1', 'gw-1', 'conduit-push-x').status, 'pending');
   // The original installation can still answer its own decision.
-  assert.equal(relay.respondPendingDecision('inst-1', 'conduit-push-x', 'Red'), 'answered');
+  assert.equal(relay.respondPendingDecision('inst-1', 'conduit-push-x', 'Red').outcome, 'answered');
 });
 
 test('pending decision lifecycle: save → pending → answered → already', () => {
@@ -61,15 +61,134 @@ test('pending decision lifecycle: save → pending → answered → already', ()
   assert.deepEqual(relay.pendingDecisionStatus('inst-1', 'gw-2', 'conduit-push-abc123'), { status: 'unknown' });
   assert.deepEqual(relay.pendingDecisionStatus('inst-1', 'gw-1', 'nope'), { status: 'unknown' });
 
-  assert.equal(relay.respondPendingDecision('inst-1', 'conduit-push-abc123', 'Red'), 'answered');
+  assert.equal(relay.respondPendingDecision('inst-1', 'conduit-push-abc123', 'Red').outcome, 'answered');
   assert.deepEqual(
     relay.pendingDecisionStatus('inst-1', 'gw-1', 'conduit-push-abc123'),
     { status: 'answered', answer: 'Red' },
   );
   // A device from another installation cannot answer or re-answer.
-  assert.equal(relay.respondPendingDecision('inst-2', 'conduit-push-abc123', 'Blue'), 'unknown');
-  assert.equal(relay.respondPendingDecision('inst-1', 'conduit-push-abc123', 'Blue'), 'already_answered');
+  assert.equal(relay.respondPendingDecision('inst-2', 'conduit-push-abc123', 'Blue').outcome, 'unknown');
+  assert.equal(relay.respondPendingDecision('inst-1', 'conduit-push-abc123', 'Blue').outcome, 'already_answered');
   assert.equal(relay.pendingDecisionStatus('inst-1', 'gw-1', 'conduit-push-abc123').answer, 'Red');
+});
+
+test('batch decisions accumulate per-question answers and complete on the last qid', () => {
+  const relay = store();
+  relay.savePendingDecision({
+    id: 'conduit-push-batch1',
+    installationId: 'inst-1',
+    gatewayId: 'gw-1',
+    question: 'Which environment?',
+    choices: ['staging', 'prod'],
+    questions: [
+      { qid: 'q0', question: 'Which environment?', choices: ['staging', 'prod'], multi_select: false },
+      { qid: 'q1', question: 'Which tests?', choices: ['unit', 'ui'], multi_select: true },
+    ],
+  });
+
+  // While open, the poll reports the authoritative open-qid list.
+  const pending = relay.pendingDecisionStatus('inst-1', 'gw-1', 'conduit-push-batch1');
+  assert.equal(pending.status, 'pending');
+  assert.deepEqual(pending.remaining, ['q0', 'q1']);
+
+  // First answer locks ONLY its qid; the sibling stays open.
+  const first = relay.respondPendingDecision('inst-1', 'conduit-push-batch1', 'staging', 'q0');
+  assert.equal(first.outcome, 'answered');
+  assert.deepEqual(first.remaining, ['q1']);
+  assert.equal(relay.pendingDecisionStatus('inst-1', 'gw-1', 'conduit-push-batch1').remaining.join(','), 'q1');
+
+  // A concurrent device locking the same qid loses (first-answer-wins per qid).
+  assert.equal(relay.respondPendingDecision('inst-1', 'conduit-push-batch1', 'prod', 'q0').outcome, 'already_answered');
+
+  // The final answer completes the batch with every locked answer.
+  const last = relay.respondPendingDecision('inst-1', 'conduit-push-batch1', '["unit"]', 'q1');
+  assert.equal(last.outcome, 'answered');
+  assert.deepEqual(last.remaining, []);
+  const done = relay.pendingDecisionStatus('inst-1', 'gw-1', 'conduit-push-batch1');
+  assert.equal(done.status, 'answered');
+  assert.deepEqual(done.answers, { q0: 'staging', q1: '["unit"]' });
+  assert.deepEqual(done.remaining, []);
+});
+
+test('an unknown qid and cross-installation answers never resolve a batch', () => {
+  const relay = store();
+  relay.savePendingDecision({
+    id: 'conduit-push-batch2',
+    installationId: 'inst-1',
+    gatewayId: 'gw-1',
+    question: 'One?',
+    questions: [{ qid: 'q0', question: 'One?', choices: ['a'], multi_select: false }],
+  });
+  assert.equal(relay.respondPendingDecision('inst-1', 'conduit-push-batch2', 'a', 'q9').outcome, 'unknown');
+  assert.equal(relay.respondPendingDecision('inst-2', 'conduit-push-batch2', 'a', 'q0').outcome, 'unknown');
+  assert.equal(relay.pendingDecisionStatus('inst-1', 'gw-1', 'conduit-push-batch2').status, 'pending');
+});
+
+test('a legacy whole-decision answer on a batch counts as the first question only', () => {
+  const relay = store();
+  relay.savePendingDecision({
+    id: 'conduit-push-batch3',
+    installationId: 'inst-1',
+    gatewayId: 'gw-1',
+    question: 'Which environment?',
+    questions: [
+      { qid: 'q0', question: 'Which environment?', choices: ['staging'], multi_select: false },
+      { qid: 'q1', question: 'Which tests?', choices: ['unit'], multi_select: false },
+    ],
+  });
+  const result = relay.respondPendingDecision('inst-1', 'conduit-push-batch3', 'staging');
+  assert.equal(result.outcome, 'answered');
+  assert.deepEqual(result.remaining, ['q1'], 'A pre-batch device answers the collapsed copy; the batch stays open');
+  assert.equal(relay.pendingDecisionStatus('inst-1', 'gw-1', 'conduit-push-batch3').status, 'pending');
+});
+
+test('releasing a decision rejects late device answers', () => {
+  const relay = store();
+  relay.savePendingDecision({
+    id: 'conduit-push-batch4',
+    installationId: 'inst-1',
+    gatewayId: 'gw-1',
+    question: 'One?',
+    questions: [{ qid: 'q0', question: 'One?', choices: ['a'], multi_select: false }],
+  });
+  assert.equal(relay.cancelPendingDecision('inst-1', 'gw-1', 'conduit-push-batch4'), 'cancelled');
+  // The poller sees unknown and falls back to the original clarify path.
+  assert.deepEqual(relay.pendingDecisionStatus('inst-1', 'gw-1', 'conduit-push-batch4'), { status: 'unknown' });
+  // A late device answer cannot claim acceptance.
+  assert.equal(relay.respondPendingDecision('inst-1', 'conduit-push-batch4', 'a', 'q0').outcome, 'already_answered');
+  // Cancelling an already-completed decision is reported, not an error.
+  relay.savePendingDecision({
+    id: 'conduit-push-batch5',
+    installationId: 'inst-1',
+    gatewayId: 'gw-1',
+    question: 'One?',
+    questions: [{ qid: 'q0', question: 'One?', choices: ['a'], multi_select: false }],
+  });
+  relay.respondPendingDecision('inst-1', 'conduit-push-batch5', 'a', 'q0');
+  assert.equal(relay.cancelPendingDecision('inst-1', 'gw-1', 'conduit-push-batch5'), 'answered');
+  assert.equal(relay.cancelPendingDecision('inst-1', 'gw-1', 'nope'), 'unknown');
+});
+
+test('batch question lists are sanitized and bounded at intake', () => {
+  const relay = store();
+  relay.savePendingDecision({
+    id: 'conduit-push-batch6',
+    installationId: 'inst-1',
+    gatewayId: 'gw-1',
+    question: 'summary',
+    questions: [
+      { qid: 'q0', question: 'Kept', choices: ['a'], multi_select: true },
+      { qid: '', question: 'No qid dropped' },
+      { question: 'No qid dropped either' },
+      'not-an-object',
+      { qid: 'q7', question: 'x'.repeat(600), choices: Array.from({ length: 20 }, (_, i) => `c${i}`) },
+    ],
+  });
+  const stored = relay.data.pendingDecisions['conduit-push-batch6'].questions;
+  assert.equal(stored.length, 2);
+  assert.equal(stored[0].multiSelect, true);
+  assert.equal(stored[1].question.length, 500);
+  assert.equal(stored[1].choices.length, 8);
 });
 
 test('pending decisions survive a reload and expire past the TTL', () => {

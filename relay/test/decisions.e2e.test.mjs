@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { after, before, test } from 'node:test';
 
 // Full clarify answer loop against a real relay process: register a device,
@@ -37,7 +38,9 @@ async function api(path, { method = 'GET', body, credential } = {}) {
 
 before(async () => {
   child = spawn(process.execPath, ['src/server.mjs'], {
-    cwd: new URL('.', import.meta.url).pathname.replace(/\/test\/$/, '/'),
+    // fileURLToPath: URL.pathname yields "/C:/…" on Windows, which spawn
+    // rejects; the file-path form works on every platform.
+    cwd: fileURLToPath(new URL('..', import.meta.url)),
     env: {
       ...process.env,
       HOST: '127.0.0.1',
@@ -223,7 +226,7 @@ test('clarify decision: push → device answer → gateway poll', async () => {
       // The plugin's event_id hashes the version (hex, no dots); keep the
       // fixture within the id charset the relay accepts.
       event_id: 'hello:020abcdef12',
-      plugin_version: '0.2.0',
+      plugin_version: '0.3.0',
       plugin_capabilities: ['approval-decisions', 'clarify-loop', 'version-reporting'],
     },
   });
@@ -233,11 +236,11 @@ test('clarify decision: push → device answer → gateway poll', async () => {
   // The device reads relay + plugin compatibility state.
   const meta = await api('/v1/meta', { credential: deviceCredential });
   assert.equal(meta.status, 200);
-  assert.equal(meta.json.version, '0.2.0');
+  assert.equal(meta.json.version, '0.3.0');
   assert.ok(meta.json.capabilities.includes('decisions'));
   const gatewayMeta = meta.json.gateways.find((gateway) => gateway.name === 'test gateway');
   assert.ok(gatewayMeta, 'paired gateway appears in meta');
-  assert.equal(gatewayMeta.plugin_version, '0.2.0');
+  assert.equal(gatewayMeta.plugin_version, '0.3.0');
   assert.ok(gatewayMeta.plugin_capabilities.includes('clarify-loop'));
   assert.ok(gatewayMeta.last_event_at);
 
@@ -274,14 +277,14 @@ test('clarify decision: push → device answer → gateway poll', async () => {
     body: {
       type: 'plugin.hello',
       event_id: 'hello:020abcdef12',
-      plugin_version: '0.2.0',
+      plugin_version: '0.3.0',
       plugin_capabilities: ['approval-decisions', 'clarify-loop', 'version-reporting'],
     },
   });
   const metaTwo = await api('/v1/meta', { credential: deviceCredential });
   const second = metaTwo.json.gateways.find((gateway) => gateway.name === 'second gateway');
   assert.ok(second, 'second gateway listed');
-  assert.equal(second.plugin_version, '0.2.0', 'duplicate hello id must still record the new gateway');
+  assert.equal(second.plugin_version, '0.3.0', 'duplicate hello id must still record the new gateway');
 
   // A pre-0.2 notifier sends events with no plugin_version: last_event_at is
   // stamped anyway so /v1/meta can flag "outdated plugin" instead of

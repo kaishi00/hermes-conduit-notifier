@@ -173,8 +173,13 @@ export class RelayStore {
   // device answers by that id; the plugin polls for the answer while its
   // middleware blocks the tool call. Approval decisions answer via the
   // gateway directly and never enter this store.
+  //
+  // Batch decisions (plugin 0.3+) additionally carry `questions` — the full
+  // gateway question set with qids. Answers accumulate PER QUESTION with
+  // first-answer-wins per qid, and the decision completes only when every
+  // qid is locked, so background batch clarifies preserve the whole batch.
 
-  savePendingDecision({ id, installationId, gatewayId, question, choices, deliverable = true }) {
+  savePendingDecision({ id, installationId, gatewayId, question, choices, questions, deliverable = true }) {
     this.prune();
     // uuid4-minted ids make collisions vanishingly unlikely, but never let a
     // same-id write from another installation clobber a parked decision.
@@ -185,6 +190,10 @@ export class RelayStore {
       gatewayId,
       question: String(question ?? ''),
       choices: Array.isArray(choices) ? choices.map(String) : [],
+      // Bounds mirror the plugin's sanitizer: a malformed push must never
+      // park an oversized or malformed batch.
+      questions: sanitizeBatchQuestions(questions),
+      answers: {},
       // False when device preferences mean no card was shown; the gateway's
       // poller stops early instead of polling a decision nobody can answer.
       deliverable: Boolean(deliverable),
@@ -199,15 +208,34 @@ export class RelayStore {
     this.save();
   }
 
-  respondPendingDecision(installationId, id, answer) {
+  respondPendingDecision(installationId, id, answer, questionId = '') {
     this.prune();
     const decision = this.data.pendingDecisions[id];
-    if (!decision || decision.installationId !== installationId) return 'unknown';
-    if (decision.answer !== undefined) return 'already_answered';
+    if (!decision || decision.installationId !== installationId) return { outcome: 'unknown' };
+    // A released decision (the original gateway path won and cancelled it)
+    // rejects late device answers instead of parking a result nobody reads.
+    if (decision.cancelledAt || decision.answer !== undefined) return { outcome: 'already_answered' };
+    const batchQuestions = Array.isArray(decision.questions) ? decision.questions : [];
+    if (batchQuestions.length) {
+      decision.answers ??= {};
+      // A question_id targets one qid of the batch; without one, the sender
+      // is a pre-batch device answering the collapsed first-question card.
+      const target = questionId || batchQuestions[0].qid;
+      if (!batchQuestions.some((question) => question.qid === target)) {
+        return { outcome: 'unknown' };
+      }
+      if (decision.answers[target] !== undefined) return { outcome: 'already_answered' };
+      decision.answers[target] = String(answer ?? '').slice(0, 2000);
+      decision.answeredAt = Date.now();
+      const remaining = batchQuestions.map((question) => question.qid)
+        .filter((qid) => decision.answers[qid] === undefined);
+      this.save();
+      return { outcome: 'answered', remaining };
+    }
     decision.answer = String(answer ?? '').slice(0, 2000);
     decision.answeredAt = Date.now();
     this.save();
-    return 'answered';
+    return { outcome: 'answered' };
   }
 
   pendingDecisionStatus(installationId, gatewayId, id) {
@@ -216,12 +244,51 @@ export class RelayStore {
     if (!decision || decision.installationId !== installationId || decision.gatewayId !== gatewayId) {
       return { status: 'unknown' };
     }
+    if (decision.cancelledAt) {
+      // Released by the gateway: the poller treats this like expiry and
+      // falls back to the original clarify path.
+      return { status: 'unknown' };
+    }
+    const batchQuestions = Array.isArray(decision.questions) ? decision.questions : [];
+    if (batchQuestions.length) {
+      const answers = decision.answers ?? {};
+      const remaining = batchQuestions.map((question) => question.qid)
+        .filter((qid) => answers[qid] === undefined);
+      if (remaining.length === 0) {
+        return { status: 'answered', answers, remaining: [] };
+      }
+      return {
+        status: 'pending',
+        // Legacy records predate the flag; treat missing as deliverable so
+        // the poller's behavior is unchanged for decisions parked by older
+        // relays.
+        deliverable: decision.deliverable !== false,
+        remaining,
+        answers,
+      };
+    }
     if (decision.answer === undefined) {
-      // Legacy records predate the flag; treat missing as deliverable so the
-      // poller's behavior is unchanged for decisions parked by older relays.
       return { status: 'pending', deliverable: decision.deliverable !== false };
     }
     return { status: 'answered', answer: decision.answer };
+  }
+
+  // Called by the plugin when the original clarify path won the race or the
+  // poll budget fell back to it: late device answers must be rejected (409)
+  // rather than parked as results nobody will read. Cancelling an
+  // already-completed decision reports it instead of double-marking.
+  cancelPendingDecision(installationId, gatewayId, id) {
+    this.prune();
+    const decision = this.data.pendingDecisions[id];
+    if (!decision || decision.installationId !== installationId || decision.gatewayId !== gatewayId) {
+      return 'unknown';
+    }
+    if (this.pendingDecisionStatus(installationId, gatewayId, id).status === 'answered') {
+      return 'answered';
+    }
+    decision.cancelledAt = Date.now();
+    this.save();
+    return 'cancelled';
   }
 
   prune() {
@@ -243,6 +310,32 @@ export class RelayStore {
 
 export function normalizePreferences(value = {}) {
   return Object.fromEntries(Object.entries(defaultPreferences).map(([key, fallback]) => [key, typeof value[key] === 'boolean' ? value[key] : fallback]));
+}
+
+// Batch decision bounds — mirror the plugin's sanitizer so a malformed push
+// can never park an oversized batch. One malformed entry is dropped rather
+// than failing the whole decision.
+const MAX_BATCH_QUESTIONS = 8;
+const MAX_BATCH_CHOICES = 8;
+
+function sanitizeBatchQuestions(value) {
+  if (!Array.isArray(value)) return [];
+  const questions = [];
+  for (const entry of value.slice(0, MAX_BATCH_QUESTIONS)) {
+    if (!entry || typeof entry !== 'object') continue;
+    const qid = String(entry.qid ?? '').trim().slice(0, 40);
+    const question = String(entry.question ?? '').trim().slice(0, 500);
+    if (!qid || !question) continue;
+    questions.push({
+      qid,
+      question,
+      choices: Array.isArray(entry.choices)
+        ? entry.choices.map((choice) => String(choice).trim().slice(0, 80)).filter(Boolean).slice(0, MAX_BATCH_CHOICES)
+        : [],
+      multiSelect: entry.multi_select === true,
+    });
+  }
+  return questions;
 }
 
 function publicInstallation(installation) {

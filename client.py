@@ -113,9 +113,11 @@ def send_now(event: dict[str, Any], timeout: float = 15.0) -> dict[str, Any]:
 def poll_decision(request_id: str) -> dict[str, Any]:
     """Poll the relay for a push-delivered clarify answer by plugin-minted id.
 
-    Returns {"status": "answered", "answer": str} once the device responded,
-    {"status": "pending"} otherwise. Raises on transport errors so the caller
-    can decide to keep waiting.
+    Returns {"status": "answered", "answer": str} once the device responded
+    to a single-question decision, {"status": "answered", "answers": {...},
+    "remaining": []} for a completed batch, and {"status": "pending",
+    "remaining": [...]} while questions are still open. Raises on transport
+    errors so the caller can decide to keep waiting.
     """
     state = load_state()
     if not state:
@@ -125,6 +127,31 @@ def poll_decision(request_id: str) -> dict[str, Any]:
         method="GET",
         credential=state["credential"],
     )
+
+
+def cancel_decision(request_id: str) -> bool:
+    """Release a parked decision the relay loop can no longer complete.
+
+    Called when the ORIGINAL clarify path won the race (desktop/CLI answered
+    through the gateway) or the poll budget fell back to it: without this, a
+    device answering the stale card would get a 200 "answered" from the relay
+    while the tool result is silently discarded — the card would claim an
+    answer Hermes never received. Best effort by contract: a relay without
+    the endpoint (or a transport blip) must never break the answering path.
+    """
+    try:
+        state = load_state()
+        if not state:
+            return False
+        request_json(
+            f"{state['relay_url'].rstrip('/')}/v1/decisions/{request_id}",
+            method="DELETE",
+            credential=state["credential"],
+        )
+        return True
+    except Exception as error:
+        logger.warning("Conduit decision cancel failed for %s: %s", request_id, error)
+        return False
 
 
 def request_json(

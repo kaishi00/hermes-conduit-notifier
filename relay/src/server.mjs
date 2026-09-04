@@ -172,6 +172,7 @@ async function route(request, response) {
         gatewayId: credential.gatewayId,
         question: event.decision.question,
         choices: event.decision.choices,
+        questions: event.decision.questions,
         deliverable: shouldDeliver(installation.preferences, event.type)
           && installation.preferences.decision_cards !== false,
       });
@@ -201,10 +202,16 @@ async function route(request, response) {
     const body = await readJson(request);
     const answer = cleanText(body.answer, 2000);
     if (!answer) return sendJson(response, 400, { error: 'invalid_answer' });
-    const outcome = store.respondPendingDecision(installation.id, id, answer);
-    if (outcome === 'unknown') return sendJson(response, 404, { error: 'unknown_decision' });
-    if (outcome === 'already_answered') return sendJson(response, 409, { error: 'already_answered' });
-    return sendJson(response, 200, { status: 'answered' });
+    // question_id scopes the answer to ONE question of a batch decision
+    // (first-answer-wins per qid, other qids stay open); its absence keeps
+    // the legacy whole-decision shape for single-question cards.
+    const questionId = cleanText(body.question_id, 40);
+    const result = store.respondPendingDecision(installation.id, id, answer, questionId);
+    if (result.outcome === 'unknown') return sendJson(response, 404, { error: 'unknown_decision' });
+    if (result.outcome === 'already_answered') return sendJson(response, 409, { error: 'already_answered' });
+    const payload = { status: 'answered' };
+    if (Array.isArray(result.remaining)) payload.remaining = result.remaining;
+    return sendJson(response, 200, payload);
   }
   if (decisionMatch && request.method === 'GET') {
     // The gateway polls for the answer while its clarify middleware blocks.
@@ -213,6 +220,17 @@ async function route(request, response) {
     enforceRateLimit(`decision-poll:${credential.gatewayId}`, 120, 60_000);
     const status = store.pendingDecisionStatus(credential.installationId, credential.gatewayId, decisionMatch[1]);
     return sendJson(response, 200, status);
+  }
+  if (decisionMatch && request.method === 'DELETE') {
+    // The plugin releases a parked decision when the original clarify path
+    // won the race or its poll budget fell back to it: a late device answer
+    // must then be rejected (409) instead of parking a result nobody reads.
+    const credential = gatewayCredential(request);
+    if (!credential || !store.authenticateGateway(credential.installationId, credential.gatewayId, credential.secret)) return sendJson(response, 401, { error: 'unauthorized' });
+    enforceRateLimit(`decision-poll:${credential.gatewayId}`, 120, 60_000);
+    const outcome = store.cancelPendingDecision(credential.installationId, credential.gatewayId, decisionMatch[1]);
+    if (outcome === 'unknown') return sendJson(response, 404, { error: 'unknown_decision' });
+    return sendJson(response, 200, { status: 'cancelled' });
   }
 
   if (request.method === 'DELETE' && url.pathname === '/v1/gateways/current') {
