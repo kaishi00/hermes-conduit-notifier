@@ -20,6 +20,7 @@ let config;
 let store;
 let apns;
 let limits;
+let apnsSend;
 
 // APNs hard-caps a notification payload at 4096 bytes; stay under it with
 // headroom for JSON escaping and delivery headers, dropping decision content
@@ -31,6 +32,17 @@ function main() {
   store = new RelayStore(config.dataPath);
   apns = new ApnsClient(config);
   limits = new Map();
+  // Test seam: APNS_MODE=accept makes every send succeed and APNS_MODE=reject
+  // makes every send fail with a 403 — both without touching the network —
+  // so the e2e suite can exercise delivery outcomes, decision parking, and
+  // APNs-failure cleanup deterministically. Unset = real APNs.
+  if (process.env.APNS_MODE === 'accept') {
+    apnsSend = async () => ({ ok: true, status: 200, reason: null });
+  } else if (process.env.APNS_MODE === 'reject') {
+    apnsSend = async () => ({ ok: false, status: 403, reason: 'InvalidProviderToken' });
+  } else {
+    apnsSend = (deviceToken, notification) => apns.send(deviceToken, notification);
+  }
 
   const server = createServer(async (request, response) => {
     const startedAt = Date.now();
@@ -164,39 +176,56 @@ async function route(request, response) {
     // re-delivered event can never overwrite (and wipe the answer of) the
     // already-parked decision.
     //
-    // `deliverable` must reflect whether the device will actually receive an
-    // ANSWERABLE card, so the final notification is built first and the flag
-    // is taken from what survived into the APNs payload: device preferences
-    // (input.needed / decision_cards) and the 4 KB size guard can each strip
-    // the structured decision. Marking a decision deliverable when its card
-    // was stripped would make the plugin poll — and a widget-less device
-    // answer — a decision no card can reach.
+    // Two independent concepts must not be conflated:
+    //
+    //   notification_delivery  — did the user get the (plain or card-bearing)
+    //                            input.needed banner? Governed by the
+    //                            ordinary input.needed preference.
+    //   relay_decision_deliverability (`deliverable`) — does the delivered
+    //                            payload contain an ANSWERABLE structured
+    //                            card? Governed by decision_cards preference
+    //                            and the APNs size guard.
+    //
+    // The final notification is built first and `deliverable` is taken from
+    // what survived into the APNs payload. A decision whose card was stripped
+    // (preference or size guard) still sends the plain banner and is parked
+    // undeliverable, so the plugin stops relay-polling and falls back to
+    // Hermes' native clarify path — it never suppresses the ordinary
+    // notification.
+    let parkedDecisionId = null;
     if (event.decision?.kind === 'clarify' && event.decision.request_id) {
+      parkedDecisionId = event.decision.request_id;
       const deliverableBase = shouldDeliver(installation.preferences, event.type);
       const notification = deliverableBase
         ? notificationFor(event, installation.preferences)
         : null;
       const decisionInPayload = notification?.payload?.conduit?.decision;
-      const deliverable = decisionInPayload != null
+      const decisionDeliverable = decisionInPayload != null
         && notification?.payload?.body?.conduit?.decision != null;
       store.savePendingDecision({
-        id: event.decision.request_id,
+        id: parkedDecisionId,
         installationId: installation.id,
         gatewayId: credential.gatewayId,
         question: event.decision.question,
         choices: event.decision.choices,
         questions: event.decision.questions,
-        deliverable,
+        deliverable: decisionDeliverable,
       });
-      if (!deliverable) return sendJson(response, 202, { accepted: true, delivered: false });
-      const result = await apns.send(installation.deviceToken, notification);
+      if (!notification) return sendJson(response, 202, { accepted: true, delivered: false });
+      const result = await apnsSend(installation.deviceToken, notification);
       if (result.status === 410 || result.reason === 'BadDeviceToken' || result.reason === 'Unregistered') store.deactivateInstallation(installation.id);
-      if (!result.ok) return sendJson(response, 502, { error: 'apns_rejected', reason: result.reason, status: result.status });
+      if (!result.ok) {
+        // The answerable card never reached the device: flip the parked
+        // decision to undeliverable so the plugin's next poll falls back to
+        // the native clarify path instead of waiting out the budget.
+        store.markPendingDecisionUndeliverable(installation.id, credential.gatewayId, parkedDecisionId);
+        return sendJson(response, 502, { error: 'apns_rejected', reason: result.reason, status: result.status });
+      }
       return sendJson(response, 202, { accepted: true, delivered: true });
     }
     if (!shouldDeliver(installation.preferences, event.type)) return sendJson(response, 202, { accepted: true, delivered: false });
     const notification = notificationFor(event, installation.preferences);
-    const result = await apns.send(installation.deviceToken, notification);
+    const result = await apnsSend(installation.deviceToken, notification);
     if (result.status === 410 || result.reason === 'BadDeviceToken' || result.reason === 'Unregistered') store.deactivateInstallation(installation.id);
     if (!result.ok) return sendJson(response, 502, { error: 'apns_rejected', reason: result.reason, status: result.status });
     return sendJson(response, 202, { accepted: true, delivered: true });
@@ -228,6 +257,9 @@ async function route(request, response) {
     const questionId = cleanText(body.question_id, 40);
     const result = store.respondPendingDecision(installation.id, id, answer, questionId);
     if (result.outcome === 'unknown') return sendJson(response, 404, { error: 'unknown_decision' });
+    // Distinct from 404: the decision is live but the sender addressed a qid
+    // it does not contain — the request is malformed, not the decision gone.
+    if (result.outcome === 'invalid_question') return sendJson(response, 400, { error: 'invalid_question_id' });
     // Distinct device-facing outcomes: a duplicate qid settles only that
     // question as answered elsewhere (409), while a RELEASED decision means
     // Hermes resolved through another surface and the whole pushed card must

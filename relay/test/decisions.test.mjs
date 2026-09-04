@@ -121,7 +121,8 @@ test('an unknown qid and cross-installation answers never resolve a batch', () =
     question: 'One?',
     questions: [{ qid: 'q0', question: 'One?', choices: ['a'], multi_select: false }],
   });
-  assert.equal(relay.respondPendingDecision('inst-1', 'conduit-push-batch2', 'a', 'q9').outcome, 'unknown');
+  assert.equal(relay.respondPendingDecision('inst-1', 'conduit-push-batch2', 'a', 'q9').outcome, 'invalid_question',
+    'an unknown qid on a live decision is a malformed request, not a missing decision');
   assert.equal(relay.respondPendingDecision('inst-2', 'conduit-push-batch2', 'a', 'q0').outcome, 'unknown');
   assert.equal(relay.pendingDecisionStatus('inst-1', 'gw-1', 'conduit-push-batch2').status, 'pending');
 });

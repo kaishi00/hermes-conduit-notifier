@@ -272,7 +272,7 @@ def test_sanitize_decision_bounds_batch_questions():
         "request_id": "conduit-push-x",
         "question": "summary",
         "questions": [
-            {"qid": "q0", "question": "x" * 900, "choices": ["y" * 200] * 20, "multi_select": True},
+            {"qid": "q0", "question": "x" * 900, "choices": [f"choice-{i}-" + "y" * 70 for i in range(20)], "multi_select": True},
             {"question": "no qid"},
             {"qid": "q1", "question": "kept", "multi_select": "truthy-coerced"},
         ],
@@ -281,8 +281,59 @@ def test_sanitize_decision_bounds_batch_questions():
     assert len(sanitized["questions"]) == 2
     first = sanitized["questions"][0]
     assert first["question"] == "x" * 500
-    assert first["choices"] == ["y" * 80] * 8
+    assert len(first["choices"]) == 8, "choice count is bounded like the relay"
+    assert len(set(first["choices"])) == 8
     assert first["multi_select"] is True
     assert sanitized["questions"][1]["qid"] == "q1"
     assert "multi_select" not in sanitized["questions"][1]
 
+
+def test_sanitize_decision_qid_contract_mirrors_the_relay():
+    # Same accepted charset, same reserved-name rejection, same
+    # first-qid-wins dedup as the relay's sanitizeBatchQuestions: a batch
+    # this plugin emits must never be silently shrunk by the relay.
+    sanitized = sanitize_decision({
+        "kind": "clarify",
+        "request_id": "conduit-push-sym",
+        "question": "summary",
+        "questions": [
+            {"qid": "q0", "question": "Kept", "choices": ["a", "a", "b"]},
+            {"qid": "q0", "question": "Duplicate qid dropped"},
+            {"qid": "__proto__", "question": "Reserved dropped"},
+            {"qid": "constructor", "question": "Reserved dropped too"},
+            {"qid": "bad charset!", "question": "Charset dropped"},
+            {"qid": "q1", "question": "Also kept", "choices": ["x", "x"]},
+        ],
+    })
+    assert [(question["qid"], question["question"]) for question in sanitized["questions"]] == [
+        ("q0", "Kept"),
+        ("q1", "Also kept"),
+    ]
+    assert sanitized["questions"][0]["choices"] == ["a", "b"], "duplicate choice values collapse"
+    assert sanitized["questions"][1]["choices"] == ["x"]
+
+
+def test_normalize_questions_locally_matches_upstream_raw_position_minting():
+    # The local mirror follows the upstream normalizer exactly: qids come
+    # from the RAW enumerate position and a malformed entry rejects the
+    # whole batch (upstream returns an error, it never skips).
+    batch = normalize_clarify_questions({
+        "questions": [
+            "Bare string question",
+            {"question": "Second", "choices": ["a"]},
+        ]
+    })
+    assert [entry["qid"] for entry in batch] == ["q0", "q1"]
+    assert batch[0]["question"] == "Bare string question"
+
+
+def test_normalize_questions_locally_rejects_whole_batch_on_malformed_entry():
+    # A leading malformed entry mirrors upstream's whole-batch error — the
+    # valid second question must NOT be renumbered onto the malformed slot.
+    batch = normalize_clarify_questions({
+        "questions": [
+            {"no_question": True},
+            {"question": "Valid second"},
+        ]
+    })
+    assert batch == [], "upstream rejects the batch; the mirror must not skip-and-renumber"

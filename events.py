@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import uuid
 from typing import Any
 
@@ -22,6 +23,11 @@ PLUGIN_CAPABILITIES = [
 # grow past what the relay, APNs, or a card should carry.
 MAX_BATCH_QUESTIONS = 8
 MAX_BATCH_CHOICES = 8
+
+# Same accepted-qid contract as the relay's sanitizeBatchQuestions: this
+# plugin must never emit a batch the relay would silently shrink.
+_QID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+_QID_RESERVED = {"__proto__", "constructor", "prototype"}
 
 
 def event_id(prefix: str, *parts: Any) -> str:
@@ -186,18 +192,21 @@ def scalar_question_text(args: Any) -> str:
 def _normalize_questions_locally(raw_questions: list[Any]) -> list[dict[str, Any]]:
     """Local mirror of the upstream batch normalizer (older Hermes installs).
 
-    Minting, flattening, and bounds match tools.clarify_tool._normalize_questions
-    so pushed qids are indistinguishable from gateway-minted ones.
+    Matches tools.clarify_tool._normalize_questions precisely: qids are
+    minted from the RAW position (`q{enumerate index}`), bare-string entries
+    are tolerated, a non-dict entry or an entry without question text
+    rejects the WHOLE batch (upstream returns an error, it never skips), and
+    multi_select is honored only when choices exist.
     """
     normalized: list[dict[str, Any]] = []
     for index, item in enumerate(raw_questions[:MAX_BATCH_QUESTIONS]):
         if isinstance(item, str):
             item = {"question": item}
         if not isinstance(item, dict):
-            continue
+            return []
         text = str(item.get("question") or "").strip()
         if not text:
-            continue
+            return []
         labels = flatten_choice_labels(item.get("choices"))
         normalized.append(
             {
@@ -285,24 +294,36 @@ def sanitize_decision(decision: dict[str, Any]) -> dict[str, Any]:
         raw_questions = decision.get("questions")
         if isinstance(raw_questions, list):
             questions: list[dict[str, Any]] = []
+            seen_qids: set[str] = set()
             for entry in raw_questions[:MAX_BATCH_QUESTIONS]:
                 if not isinstance(entry, dict):
                     continue
                 qid = _clean(entry.get("qid", ""), 40)
+                # Mirror of the relay's sanitizeBatchQuestions: same accepted
+                # charset, same reserved-name rejection, same first-qid-wins
+                # dedup and choice dedup — the relay must never silently
+                # shrink a batch this plugin emits.
+                if not _QID_PATTERN.fullmatch(qid) or qid in _QID_RESERVED or qid in seen_qids:
+                    continue
                 text = _clean(entry.get("question", ""), 500)
-                if not qid or not text:
+                if not text:
                     continue
                 question: dict[str, Any] = {"qid": qid, "question": text}
                 labels = entry.get("choices")
                 if isinstance(labels, list):
-                    cleaned_labels = [value for value in (_clean(label, 80) for label in labels) if value]
+                    cleaned_labels: list[str] = []
+                    for label in labels[:MAX_BATCH_CHOICES]:
+                        cleaned = _clean(label, 80)
+                        if cleaned and cleaned not in cleaned_labels:
+                            cleaned_labels.append(cleaned)
                     if cleaned_labels:
-                        question["choices"] = cleaned_labels[:MAX_BATCH_CHOICES]
+                        question["choices"] = cleaned_labels
                 if entry.get("multi_select") is True:
                     # Strict boolean: a truthy string must not coerce into a
                     # selected-state flag (mirrors the relay's === true check).
                     question["multi_select"] = True
                 questions.append(question)
+                seen_qids.add(qid)
             if questions:
                 sanitized["questions"] = questions
         if not sanitized.get("request_id") or not sanitized.get("question"):

@@ -146,7 +146,15 @@ the FULL batch to Conduit instead of collapsing it to the first question:
 - Duplicate qid answers and released decisions are distinct outcomes:
   `409 already_answered` settles only that qid as answered elsewhere,
   while `410 decision_released` (the native Desktop/TUI path resolved the
-  whole clarify) tells Conduit to retire the entire pushed card.
+  whole clarify) tells Conduit to retire the entire pushed card. An
+  unknown qid on a live decision is `400 invalid_question_id`, not a
+  missing decision.
+- The structured decision and the notification are independent: when the
+  card cannot be delivered (decision_cards disabled, or an oversized batch
+  stripped by the APNs size guard, or APNs rejecting the send), the
+  ordinary input.needed banner is still delivered and the parked decision
+  is marked `deliverable=false`, so the plugin immediately falls back to
+  Hermes' native clarify path.
 - The plugin returns the batch to Hermes exactly in the built-in tool's
   result shape (`{"responses": [...]}`, multi-select answers parsed back to
   lists). Protocol provenance comes from the original invocation: a

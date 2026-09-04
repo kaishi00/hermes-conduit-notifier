@@ -228,8 +228,11 @@ export class RelayStore {
       // A question_id targets one qid of the batch; without one, the sender
       // is a pre-batch device answering the collapsed first-question card.
       const target = questionId || batchQuestions[0].qid;
+      // An unknown qid on a live decision is the sender's mistake, not a
+      // missing decision — surfaced as its own outcome so the device gets
+      // 400 invalid_question_id instead of a misleading 404.
       if (!batchQuestions.some((question) => question.qid === target)) {
-        return { outcome: 'unknown' };
+        return { outcome: 'invalid_question' };
       }
       // hasOwn, not truthiness: a stored "" answer must still read as
       // locked, and sanitized qids can never collide with Object.prototype.
@@ -298,6 +301,23 @@ export class RelayStore {
     decision.cancelledAt = Date.now();
     this.save();
     return 'cancelled';
+  }
+
+  // Called by the relay intake when APNs rejected the send AFTER a
+  // deliverable decision was parked: no device received the answerable
+  // card, so the next plugin poll must see deliverable:false and fall back
+  // to the native clarify path instead of waiting out the poll budget.
+  // Already-answered and already-released decisions are left untouched.
+  markPendingDecisionUndeliverable(installationId, gatewayId, id) {
+    this.prune();
+    const decision = this.data.pendingDecisions[id];
+    if (!decision || decision.installationId !== installationId || decision.gatewayId !== gatewayId) {
+      return 'unknown';
+    }
+    if (decision.cancelledAt || decision.answer !== undefined) return 'skipped';
+    decision.deliverable = false;
+    this.save();
+    return 'marked';
   }
 
   prune() {
