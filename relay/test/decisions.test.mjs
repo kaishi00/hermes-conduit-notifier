@@ -106,7 +106,9 @@ test('batch decisions accumulate per-question answers and complete on the last q
   assert.deepEqual(last.remaining, []);
   const done = relay.pendingDecisionStatus('inst-1', 'gw-1', 'conduit-push-batch1');
   assert.equal(done.status, 'answered');
-  assert.deepEqual(done.answers, { q0: 'staging', q1: '["unit"]' });
+  // Spread: the store keeps answers on a null-prototype map (prototype-
+  // pollution safety), and strict deep-equal compares prototypes.
+  assert.deepEqual({ ...done.answers }, { q0: 'staging', q1: '["unit"]' });
   assert.deepEqual(done.remaining, []);
 });
 
@@ -154,8 +156,9 @@ test('releasing a decision rejects late device answers', () => {
   assert.equal(relay.cancelPendingDecision('inst-1', 'gw-1', 'conduit-push-batch4'), 'cancelled');
   // The poller sees unknown and falls back to the original clarify path.
   assert.deepEqual(relay.pendingDecisionStatus('inst-1', 'gw-1', 'conduit-push-batch4'), { status: 'unknown' });
-  // A late device answer cannot claim acceptance.
-  assert.equal(relay.respondPendingDecision('inst-1', 'conduit-push-batch4', 'a', 'q0').outcome, 'already_answered');
+  // A late device answer reports RELEASED, not merely qid-locked: Conduit
+  // tears the whole pushed card down instead of settling one question.
+  assert.equal(relay.respondPendingDecision('inst-1', 'conduit-push-batch4', 'a', 'q0').outcome, 'released');
   // Cancelling an already-completed decision is reported, not an error.
   relay.savePendingDecision({
     id: 'conduit-push-batch5',
@@ -186,7 +189,7 @@ test('batch question lists are sanitized and bounded at intake', () => {
   });
   const stored = relay.data.pendingDecisions['conduit-push-batch6'].questions;
   assert.equal(stored.length, 2);
-  assert.equal(stored[0].multiSelect, true);
+  assert.equal(stored[0].multi_select, true, 'wire shape keeps snake_case multi_select');
   assert.equal(stored[1].question.length, 500);
   assert.equal(stored[1].choices.length, 8);
 });

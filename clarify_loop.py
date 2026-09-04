@@ -83,6 +83,11 @@ def middleware(is_child_session: Callable[[str], bool] | None = None, **kwargs: 
     # Reducing the payload to its first question would silently drop
     # questions 2..N from the background path. `question` stays the
     # notification body / collapsed summary for pre-batch Conduit builds.
+    #
+    # Protocol provenance comes from the ORIGINAL invocation — a one-entry
+    # questions[] call is batch protocol and must produce the batch result
+    # shape; cardinality of the normalized list must never decide this.
+    batch_protocol = isinstance(args.get("questions"), list) and len(args["questions"]) > 0
     batch = normalize_clarify_questions(args)
     if not batch:
         return kwargs["next_call"](args)
@@ -112,6 +117,7 @@ def middleware(is_child_session: Callable[[str], bool] | None = None, **kwargs: 
         next_call=kwargs["next_call"],
         args=args,
         batch=batch,
+        batch_protocol=batch_protocol,
     )
 
 
@@ -121,16 +127,18 @@ def _first_answer_wins(
     next_call: Any,
     args: dict[str, Any],
     batch: list[dict[str, Any]],
+    batch_protocol: bool,
 ) -> Any:
     """Race the original clarify call against the relay answer poll.
 
     Single-question decisions resolve on one relay answer, exactly as before.
-    Batch decisions complete only when EVERY qid is locked through the relay;
-    a native (desktop/CLI) completion of the whole original call wins instead,
+    Batch-protocol decisions (a non-empty original ``questions`` array —
+    including exactly one question) complete only when EVERY qid is locked
+    through the relay and format the built-in batch result shape; a native
+    (desktop/CLI) completion of the whole original call wins instead,
     releases the parked decision, and the losing path is discarded.
     """
     outcome: dict[str, Any] = {}
-    batch_mode = len(batch) > 1
     relay_won = False
 
     def _run_original() -> None:
@@ -179,12 +187,12 @@ def _first_answer_wins(
             status = {"status": "__error__"}
         state = str(status.get("status") or "")
         if state == "answered":
-            if batch_mode and "answers" in status:
+            if batch_protocol and "answers" in status:
                 # Complete batch: the relay only reports answered once every
                 # qid is locked, so first-answer-wins held per question.
                 relay_won = True
                 return _format_batch_result(batch, status.get("answers") or {})
-            if not batch_mode:
+            if not batch_protocol:
                 relay_won = True
                 offered = list(batch[0]["choices"])
                 return _format_result(
@@ -193,8 +201,8 @@ def _first_answer_wins(
                     answer=str(status.get("answer") or ""),
                     multi_select=batch[0]["multi_select"],
                 )
-            # A batch decision answered through the legacy collapsed shape
-            # (old relay or pre-batch device): only the first question's
+            # Batch protocol, but the answer arrived in the legacy collapsed
+            # shape (old relay or pre-batch device): only the first question's
             # answer arrived. Format it as a batch result — the unanswered
             # rows surface as empty user_response, the upstream absence
             # semantics — instead of pretending the whole batch was answered.
@@ -238,13 +246,25 @@ def _first_answer_wins(
 
 
 def _release_decision(request_id: str, relay_won: bool) -> None:
-    """Cancel the parked decision when the relay path did not win."""
+    """Cancel the parked decision when the relay path did not win.
+
+    Strictly off the native answer's critical path: the DELETE can wait out
+    the relay's HTTP timeout on a slow or unreachable relay, and the user's
+    native answer must never queue behind it. The cancel is fired on a
+    daemon thread — ordering with tool completion does not matter, because
+    the relay rejects answers to a released decision regardless of whether
+    the release has landed yet.
+    """
     if relay_won:
         return
-    try:
-        client.cancel_decision(request_id)
-    except Exception as error:  # pragma: no cover - defensive
-        logger.warning("Conduit decision release failed for %s: %s", request_id, error)
+
+    def _cancel() -> None:
+        try:
+            client.cancel_decision(request_id)
+        except Exception as error:  # pragma: no cover - defensive
+            logger.warning("Conduit decision release failed for %s: %s", request_id, error)
+
+    threading.Thread(target=_cancel, name="conduit-push-release", daemon=True).start()
 
 
 def _poll_delay(unanswered_polls: int) -> float:

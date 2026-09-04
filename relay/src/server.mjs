@@ -3,7 +3,7 @@ import { readFileSync, realpathSync } from 'node:fs';
 import { isIP } from 'node:net';
 import { pathToFileURL } from 'node:url';
 import { ApnsClient } from './apns.mjs';
-import { RelayStore } from './store.mjs';
+import { RelayStore, sanitizeBatchQuestions } from './store.mjs';
 
 // Self-reported relay version/capabilities, surfaced via GET /v1/meta so the
 // app can show compatibility state (keep the version in sync with package.json).
@@ -162,10 +162,23 @@ async function route(request, response) {
     // device can answer by id and the gateway can poll for the answer while
     // its middleware blocks the tool call. Saved after the dedupe check so a
     // re-delivered event can never overwrite (and wipe the answer of) the
-    // already-parked decision. `deliverable` records whether device
-    // preferences will actually show an answerable card, so the plugin can
-    // stop polling a decision nobody can answer.
+    // already-parked decision.
+    //
+    // `deliverable` must reflect whether the device will actually receive an
+    // ANSWERABLE card, so the final notification is built first and the flag
+    // is taken from what survived into the APNs payload: device preferences
+    // (input.needed / decision_cards) and the 4 KB size guard can each strip
+    // the structured decision. Marking a decision deliverable when its card
+    // was stripped would make the plugin poll — and a widget-less device
+    // answer — a decision no card can reach.
     if (event.decision?.kind === 'clarify' && event.decision.request_id) {
+      const deliverableBase = shouldDeliver(installation.preferences, event.type);
+      const notification = deliverableBase
+        ? notificationFor(event, installation.preferences)
+        : null;
+      const decisionInPayload = notification?.payload?.conduit?.decision;
+      const deliverable = decisionInPayload != null
+        && notification?.payload?.body?.conduit?.decision != null;
       store.savePendingDecision({
         id: event.decision.request_id,
         installationId: installation.id,
@@ -173,9 +186,13 @@ async function route(request, response) {
         question: event.decision.question,
         choices: event.decision.choices,
         questions: event.decision.questions,
-        deliverable: shouldDeliver(installation.preferences, event.type)
-          && installation.preferences.decision_cards !== false,
+        deliverable,
       });
+      if (!deliverable) return sendJson(response, 202, { accepted: true, delivered: false });
+      const result = await apns.send(installation.deviceToken, notification);
+      if (result.status === 410 || result.reason === 'BadDeviceToken' || result.reason === 'Unregistered') store.deactivateInstallation(installation.id);
+      if (!result.ok) return sendJson(response, 502, { error: 'apns_rejected', reason: result.reason, status: result.status });
+      return sendJson(response, 202, { accepted: true, delivered: true });
     }
     if (!shouldDeliver(installation.preferences, event.type)) return sendJson(response, 202, { accepted: true, delivered: false });
     const notification = notificationFor(event, installation.preferences);
@@ -186,7 +203,10 @@ async function route(request, response) {
   }
 
   // ── Clarify answer loop ──────────────────────────────────────────────
-  const decisionMatch = url.pathname.match(/^\/v1\/decisions\/([A-Za-z0-9_-]{4,128})$/);
+  // The device answer route is /v1/decisions/{id}/respond (the iOS client's
+  // contract); the bare /v1/decisions/{id} POST path is kept as a
+  // backward-compatible alias. Both run the same handler.
+  const decisionMatch = url.pathname.match(/^\/v1\/decisions\/([A-Za-z0-9_-]{4,128})(\/respond)?$/);
   if (decisionMatch && request.method === 'POST') {
     // The device that received the push answers by the plugin-minted id.
     // Authenticate and rate-limit before reading the body: this endpoint is
@@ -208,12 +228,18 @@ async function route(request, response) {
     const questionId = cleanText(body.question_id, 40);
     const result = store.respondPendingDecision(installation.id, id, answer, questionId);
     if (result.outcome === 'unknown') return sendJson(response, 404, { error: 'unknown_decision' });
+    // Distinct device-facing outcomes: a duplicate qid settles only that
+    // question as answered elsewhere (409), while a RELEASED decision means
+    // Hermes resolved through another surface and the whole pushed card must
+    // be torn down (410). Collapsing them would either strand open qids or
+    // clear a card that still has answerable questions.
+    if (result.outcome === 'released') return sendJson(response, 410, { error: 'decision_released' });
     if (result.outcome === 'already_answered') return sendJson(response, 409, { error: 'already_answered' });
     const payload = { status: 'answered' };
     if (Array.isArray(result.remaining)) payload.remaining = result.remaining;
     return sendJson(response, 200, payload);
   }
-  if (decisionMatch && request.method === 'GET') {
+  if (decisionMatch && decisionMatch[2] === undefined && request.method === 'GET') {
     // The gateway polls for the answer while its clarify middleware blocks.
     const credential = gatewayCredential(request);
     if (!credential || !store.authenticateGateway(credential.installationId, credential.gatewayId, credential.secret)) return sendJson(response, 401, { error: 'unauthorized' });
@@ -221,10 +247,11 @@ async function route(request, response) {
     const status = store.pendingDecisionStatus(credential.installationId, credential.gatewayId, decisionMatch[1]);
     return sendJson(response, 200, status);
   }
-  if (decisionMatch && request.method === 'DELETE') {
+  if (decisionMatch && decisionMatch[2] === undefined && request.method === 'DELETE') {
     // The plugin releases a parked decision when the original clarify path
     // won the race or its poll budget fell back to it: a late device answer
-    // must then be rejected (409) instead of parking a result nobody reads.
+    // must then be rejected (410 decision_released) instead of parking a
+    // result nobody reads.
     const credential = gatewayCredential(request);
     if (!credential || !store.authenticateGateway(credential.installationId, credential.gatewayId, credential.secret)) return sendJson(response, 401, { error: 'unauthorized' });
     enforceRateLimit(`decision-poll:${credential.gatewayId}`, 120, 60_000);
@@ -413,7 +440,19 @@ function validateDecision(value, eventType) {
       .map((choice) => cleanText(choice, 80))
       .filter((choice) => choice !== undefined)
       .slice(0, 8);
-    return { kind: 'clarify', request_id: requestId, question, ...(choices.length ? { choices } : {}) };
+    // Batch decisions (plugin 0.3+) carry the FULL question set. It MUST
+    // survive this boundary through the same shared sanitizer the
+    // pending-decision store uses — dropping it here would silently reduce
+    // every pushed batch to its collapsed first question. Deduplication and
+    // bounds are inside the shared sanitizer.
+    const questions = sanitizeBatchQuestions(value.questions);
+    return {
+      kind: 'clarify',
+      request_id: requestId,
+      question,
+      ...(choices.length ? { choices } : {}),
+      ...(questions.length ? { questions } : {}),
+    };
   }
   return undefined;
 }

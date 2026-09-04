@@ -190,10 +190,12 @@ export class RelayStore {
       gatewayId,
       question: String(question ?? ''),
       choices: Array.isArray(choices) ? choices.map(String) : [],
-      // Bounds mirror the plugin's sanitizer: a malformed push must never
-      // park an oversized or malformed batch.
+      // Shared sanitizer (also applied at the relay trust boundary): a
+      // malformed push must never park an oversized or malformed batch.
       questions: sanitizeBatchQuestions(questions),
-      answers: {},
+      // Null prototype: answer maps are keyed by qid, and a qid like
+      // "__proto__" must never reach Object.prototype pollution paths.
+      answers: Object.create(null),
       // False when device preferences mean no card was shown; the gateway's
       // poller stops early instead of polling a decision nobody can answer.
       deliverable: Boolean(deliverable),
@@ -212,23 +214,30 @@ export class RelayStore {
     this.prune();
     const decision = this.data.pendingDecisions[id];
     if (!decision || decision.installationId !== installationId) return { outcome: 'unknown' };
-    // A released decision (the original gateway path won and cancelled it)
-    // rejects late device answers instead of parking a result nobody reads.
-    if (decision.cancelledAt || decision.answer !== undefined) return { outcome: 'already_answered' };
+    // Distinct device-facing outcomes: a CANCELLED decision (the original
+    // gateway path won) releases the whole pushed card (410
+    // decision_released), while an already-answered decision stays a 409
+    // (answered elsewhere). Collapsing them would clear cards that still
+    // have answerable questions.
+    if (decision.cancelledAt) return { outcome: 'released' };
+    if (decision.answer !== undefined) return { outcome: 'already_answered' };
     const batchQuestions = Array.isArray(decision.questions) ? decision.questions : [];
     if (batchQuestions.length) {
-      decision.answers ??= {};
+      decision.answers ??= Object.create(null);
+      const answers = decision.answers;
       // A question_id targets one qid of the batch; without one, the sender
       // is a pre-batch device answering the collapsed first-question card.
       const target = questionId || batchQuestions[0].qid;
       if (!batchQuestions.some((question) => question.qid === target)) {
         return { outcome: 'unknown' };
       }
-      if (decision.answers[target] !== undefined) return { outcome: 'already_answered' };
-      decision.answers[target] = String(answer ?? '').slice(0, 2000);
+      // hasOwn, not truthiness: a stored "" answer must still read as
+      // locked, and sanitized qids can never collide with Object.prototype.
+      if (Object.hasOwn(answers, target)) return { outcome: 'already_answered' };
+      answers[target] = String(answer ?? '').slice(0, 2000);
       decision.answeredAt = Date.now();
       const remaining = batchQuestions.map((question) => question.qid)
-        .filter((qid) => decision.answers[qid] === undefined);
+        .filter((qid) => !Object.hasOwn(answers, qid));
       this.save();
       return { outcome: 'answered', remaining };
     }
@@ -253,7 +262,7 @@ export class RelayStore {
     if (batchQuestions.length) {
       const answers = decision.answers ?? {};
       const remaining = batchQuestions.map((question) => question.qid)
-        .filter((qid) => answers[qid] === undefined);
+        .filter((qid) => !Object.hasOwn(answers, qid));
       if (remaining.length === 0) {
         return { status: 'answered', answers, remaining: [] };
       }
@@ -313,27 +322,49 @@ export function normalizePreferences(value = {}) {
 }
 
 // Batch decision bounds — mirror the plugin's sanitizer so a malformed push
-// can never park an oversized batch. One malformed entry is dropped rather
-// than failing the whole decision.
-const MAX_BATCH_QUESTIONS = 8;
-const MAX_BATCH_CHOICES = 8;
+// can never park an oversized batch.
+export const MAX_BATCH_QUESTIONS = 8;
+export const MAX_BATCH_CHOICES = 8;
 
-function sanitizeBatchQuestions(value) {
+// Single shared batch sanitizer for BOTH trust boundaries (the /v1/events
+// decision validation and the pending-decision store) so the notification
+// payload, the stored decision, and the poll answers can never disagree
+// about what a batch contains. Output is the WIRE shape (snake_case
+// multi_select — this array is embedded in APNs payloads verbatim). One
+// malformed entry is dropped rather than failing the whole decision; a
+// valid remainder survives. Deduplicates qids (first occurrence wins) and
+// repeated choice values.
+const UNSAFE_QIDS = new Set(['__proto__', 'constructor', 'prototype']);
+
+export function sanitizeBatchQuestions(value) {
   if (!Array.isArray(value)) return [];
   const questions = [];
+  const seenQids = new Set();
   for (const entry of value.slice(0, MAX_BATCH_QUESTIONS)) {
     if (!entry || typeof entry !== 'object') continue;
     const qid = String(entry.qid ?? '').trim().slice(0, 40);
+    // Gateway-minted qids are `q<index>`; this charset plus the reserved-name
+    // rejection keeps answer maps prototype-safe and per-question respond
+    // targets unambiguous.
+    if (!/^[A-Za-z0-9_-]+$/.test(qid) || UNSAFE_QIDS.has(qid) || seenQids.has(qid)) continue;
     const question = String(entry.question ?? '').trim().slice(0, 500);
-    if (!qid || !question) continue;
+    if (!question) continue;
+    const seenChoices = new Set();
+    const choices = (Array.isArray(entry.choices) ? entry.choices : [])
+      .map((choice) => String(choice ?? '').trim().slice(0, 80))
+      .filter((choice) => {
+        if (!choice || seenChoices.has(choice)) return false;
+        seenChoices.add(choice);
+        return true;
+      })
+      .slice(0, MAX_BATCH_CHOICES);
     questions.push({
       qid,
       question,
-      choices: Array.isArray(entry.choices)
-        ? entry.choices.map((choice) => String(choice).trim().slice(0, 80)).filter(Boolean).slice(0, MAX_BATCH_CHOICES)
-        : [],
-      multiSelect: entry.multi_select === true,
+      choices,
+      multi_select: entry.multi_select === true,
     });
+    seenQids.add(qid);
   }
   return questions;
 }

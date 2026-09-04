@@ -386,6 +386,80 @@ def test_poll_delay_backs_off_and_caps():
         loop.POLL_INTERVAL_SECONDS, loop.MAX_POLL_BACKOFF_SECONDS = old_base, old_cap
 
 
+def test_one_question_questions_array_is_batch_protocol_and_formats_batch_result():
+    # A ONE-entry questions[] call is still batch protocol: the relay's
+    # answers map must format into the upstream batch result shape, never
+    # the legacy scalar shape.
+    fake = _FakeState([
+        {"status": "answered", "answers": {"q0": "staging"}, "remaining": []},
+    ])
+    _install(fake)
+    original, release = _blocking_original("never used")
+    try:
+        result = loop.middleware(**_kwargs(original, {
+            "questions": [{"question": "Which environment?", "choices": ["staging", "prod"]}],
+        }))
+    finally:
+        release.set()
+    parsed = json.loads(result)
+    assert parsed == {
+        "responses": [
+            {"question": "Which environment?", "choices_offered": ["staging", "prod"], "user_response": "staging"},
+        ]
+    }
+
+
+def test_legacy_scalar_single_question_still_formats_scalar_result():
+    fake = _FakeState([{"status": "answered", "answer": "staging"}])
+    _install(fake)
+    original, release = _blocking_original()
+    try:
+        result = loop.middleware(**_kwargs(original, {
+            "question": "Which environment?",
+            "choices": ["staging", "prod"],
+        }))
+    finally:
+        release.set()
+    parsed = json.loads(result)
+    assert parsed["user_response"] == "staging"
+    assert "responses" not in parsed, "the legacy scalar shape must not gain batch wrapping"
+
+
+def test_native_result_returns_without_waiting_for_a_slow_release():
+    # The release DELETE rides a daemon thread: a relay that hangs the
+    # cancellation must never delay the user's native answer.
+    fake = _FakeState([])
+    _install(fake)
+    cancel_started = threading.Event()
+    release_cancel = threading.Event()
+
+    def slow_cancel(request_id):
+        cancel_started.set()
+        release_cancel.wait(5)
+        fake.cancelled_ids.append(request_id)
+        return True
+
+    loop.client.cancel_decision = slow_cancel
+
+    def original(args):
+        return "native result"
+
+    started = threading.Event()
+    result_holder = {}
+
+    def run_middleware():
+        started.set()
+        result_holder["result"] = loop.middleware(**_kwargs(original, {"question": "Q?"}))
+
+    worker = threading.Thread(target=run_middleware, daemon=True)
+    worker.start()
+    worker.join(timeout=5)
+    assert not worker.is_alive(), "middleware returned while cancellation was still hanging"
+    assert result_holder["result"] == "native result"
+    assert cancel_started.wait(5), "the release must still be fired, just off-thread"
+    release_cancel.set()
+
+
 def test_batch_push_preserves_every_question_and_relay_completion_wins():
     fake = _FakeState([
         {"status": "pending", "remaining": ["q0", "q1"], "answers": {}},

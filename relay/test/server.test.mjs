@@ -158,3 +158,72 @@ test('validateEvent passes a bounded decision through', () => {
   assert.equal(event.decision.description.length, 500);
   assert.deepEqual(event.decision.choices, ['once', 'deny'], 'unknown choice strings are filtered');
 });
+
+test('notificationFor embeds every batch question in both conduit payload paths', () => {
+  const event = {
+    type: 'input.needed',
+    sessionId: 'sess-1',
+    profile: 'default',
+    title: 'Input needed',
+    body: 'Which environment?',
+    decision: {
+      kind: 'clarify',
+      request_id: 'conduit-push-batch-e2e',
+      question: 'Which environment?',
+      choices: ['staging', 'prod'],
+      questions: [
+        { qid: 'q0', question: 'Which environment?', choices: ['staging', 'prod'], multi_select: false },
+        { qid: 'q1', question: 'Which tests?', choices: ['unit', 'ui'], multi_select: true },
+      ],
+    },
+  };
+  const preferences = { enabled: true, show_previews: true, decision_cards: true };
+  const { payload } = notificationFor(event, preferences);
+  // Both conduit copies (top-level and notification-center data) must carry
+  // the FULL batch — this is exactly what APNs delivers to the device.
+  for (const conduit of [payload.conduit, payload.body.conduit]) {
+    assert.equal(conduit.decision.questions.length, 2);
+    assert.deepEqual(conduit.decision.questions.map((question) => question.qid), ['q0', 'q1']);
+    assert.equal(conduit.decision.questions[1].multi_select, true);
+  }
+});
+
+test('notificationFor strips an oversized batch decision so the card cannot exceed APNs limits', () => {
+  const event = {
+    type: 'input.needed',
+    sessionId: 'sess-1',
+    profile: 'default',
+    decision: {
+      kind: 'clarify',
+      request_id: 'conduit-push-huge',
+      question: 'Huge?',
+      questions: Array.from({ length: 8 }, (_, i) => ({
+        qid: `q${i}`,
+        question: 'x'.repeat(500),
+        choices: Array.from({ length: 8 }, (_, j) => 'y'.repeat(80)),
+        multi_select: false,
+      })),
+    },
+  };
+  const preferences = { enabled: true, show_previews: true, decision_cards: true };
+  const { payload } = notificationFor(event, preferences);
+  assert.equal(payload.conduit.decision, undefined, 'the size guard must strip the decision');
+  assert.equal(Buffer.byteLength(JSON.stringify(payload)) <= 4096, true);
+});
+
+test('validateDecision preserves a sanitized batch and deduplicates identities', () => {
+  const decision = validateDecision({
+    kind: 'clarify',
+    request_id: 'conduit-push-dedupe',
+    question: 'summary',
+    questions: [
+      { qid: 'q0', question: 'First', choices: ['a', 'a', 'b'], multi_select: false },
+      { qid: 'q0', question: 'Duplicate qid dropped' },
+      { qid: '__proto__', question: 'Prototype qid dropped' },
+      { qid: 'q1', question: 'Second', choices: [], multi_select: 'yes' },
+    ],
+  }, 'input.needed');
+  assert.deepEqual(decision.questions.map((question) => question.qid), ['q0', 'q1']);
+  assert.deepEqual(decision.questions[0].choices, ['a', 'b'], 'duplicate choice values collapse');
+  assert.equal(decision.questions[1].multi_select, false, 'non-boolean multi_select never coerces to true');
+});

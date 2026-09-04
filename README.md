@@ -137,13 +137,24 @@ the FULL batch to Conduit instead of collapsing it to the first question:
   two devices answering the same qid resolve to one lock (the loser gets a
   409), and the decision completes only when every qid is locked.
 - Devices answer per question with
-  `POST /v1/decisions/:id {"question_id": "q…", "answer": "…"}` and receive
-  the remaining open qids back. The legacy whole-decision body
-  (`{"answer": "…"}`) still works for single-question cards, and on a batch
-  it counts as the collapsed first question only.
+  `POST /v1/decisions/:id/respond {"question_id": "q…", "answer": "…"}`
+  and receive the remaining open qids back (`POST /v1/decisions/:id` is
+  kept as a backward-compatible alias running the same handler). The
+  legacy whole-decision body (`{"answer": "…"}`) still works for
+  single-question cards, and on a batch it counts as the collapsed first
+  question only.
+- Duplicate qid answers and released decisions are distinct outcomes:
+  `409 already_answered` settles only that qid as answered elsewhere,
+  while `410 decision_released` (the native Desktop/TUI path resolved the
+  whole clarify) tells Conduit to retire the entire pushed card.
 - The plugin returns the batch to Hermes exactly in the built-in tool's
   result shape (`{"responses": [...]}`, multi-select answers parsed back to
-  lists).
+  lists). Protocol provenance comes from the original invocation: a
+  one-entry `questions[]` call is batch protocol even though it has a
+  single question, while legacy scalar calls keep the scalar result shape.
+- Releasing a decision (native path won) is fired off the answer's critical
+  path on a daemon thread, so a slow or unreachable relay can never delay
+  the user's native answer.
 
 Known limitation: the relay cannot see answers made natively (Hermes
 Desktop/TUI answer through the gateway), and the gateway cannot see relay

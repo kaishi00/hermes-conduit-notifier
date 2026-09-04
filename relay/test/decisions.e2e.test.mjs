@@ -70,6 +70,156 @@ after(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+test('batch clarify end to end: questions[] survive intake, per-qid answers, release, and both respond routes', async () => {
+  // Notifications ENABLED so intake builds the real APNs payload and
+  // deliverability is computed from what actually survived into it. The
+  // ephemeral key cannot pass Apple, so the send itself may 502 — the
+  // decision is parked (with accurate deliverability) before that point.
+  const registered = await api('/v1/installations', {
+    method: 'POST',
+    body: {
+      bundle_id: 'com.milim.relay',
+      device_token: 'c'.repeat(64),
+      environment: 'production',
+      preferences: { enabled: true, decision_cards: true },
+    },
+  });
+  assert.equal(registered.status, 201);
+  const deviceCredential = registered.json.credential;
+  const installationId = registered.json.installation.id;
+  const pairing = await api(`/v1/installations/${installationId}/pairings`, { method: 'POST', credential: deviceCredential });
+  const claimed = await api('/v1/pairings/claim', {
+    method: 'POST',
+    body: { pairing_code: pairing.json.pairing_code, gateway_name: 'batch gateway' },
+  });
+  const gatewayCredential = claimed.json.credential;
+
+  // Push a two-question batch through the real event endpoint.
+  const event = await api('/v1/events', {
+    method: 'POST',
+    credential: gatewayCredential,
+    body: {
+      type: 'input.needed',
+      event_id: 'input:batch0000001',
+      session_id: 'sess-batch',
+      profile: 'default',
+      decision: {
+        kind: 'clarify',
+        request_id: 'conduit-push-batche2e1',
+        question: 'Which environment?',
+        choices: ['staging', 'prod'],
+        questions: [
+          { qid: 'q0', question: 'Which environment?', choices: ['staging', 'prod'], multi_select: false },
+          { qid: 'q1', question: 'Which tests?', choices: ['unit', 'ui'], multi_select: true },
+        ],
+      },
+    },
+  });
+  // A decision card that survives the size guard attempts APNs; in tests the
+  // ephemeral key is rejected (502). The decision is parked either way.
+  assert.ok([202, 502].includes(event.status), `event status ${event.status}`);
+
+  // The stored decision kept the FULL batch, deliverable, and the open qids.
+  const poll = await api('/v1/decisions/conduit-push-batche2e1', { credential: gatewayCredential });
+  assert.equal(poll.status, 200);
+  assert.equal(poll.json.status, 'pending');
+  assert.equal(poll.json.deliverable, true, 'the card survived into the APNs payload');
+  assert.deepEqual(poll.json.remaining, ['q0', 'q1']);
+
+  // Device answers q0 through the iOS /respond route.
+  const q0 = await api('/v1/decisions/conduit-push-batche2e1/respond', {
+    method: 'POST',
+    credential: deviceCredential,
+    body: { question_id: 'q0', answer: 'staging' },
+  });
+  assert.equal(q0.status, 200);
+  assert.deepEqual(q0.json, { status: 'answered', remaining: ['q1'] });
+
+  // A duplicate q0 is question-locked (409), NOT released: q1 stays open.
+  const duplicate = await api('/v1/decisions/conduit-push-batche2e1/respond', {
+    method: 'POST',
+    credential: deviceCredential,
+    body: { question_id: 'q0', answer: 'prod' },
+  });
+  assert.equal(duplicate.status, 409);
+  assert.equal(duplicate.json.error, 'already_answered');
+
+  // The bare path stays a working alias for the same handler: q1 completes.
+  const q1 = await api('/v1/decisions/conduit-push-batche2e1', {
+    method: 'POST',
+    credential: deviceCredential,
+    body: { question_id: 'q1', answer: '["unit"]' },
+  });
+  assert.equal(q1.status, 200);
+  assert.deepEqual(q1.json, { status: 'answered', remaining: [] });
+
+  const done = await api('/v1/decisions/conduit-push-batche2e1', { credential: gatewayCredential });
+  assert.equal(done.status, 200);
+  assert.equal(done.json.status, 'answered');
+  assert.deepEqual(done.json.remaining, []);
+  assert.deepEqual({ ...done.json.answers }, { q0: 'staging', q1: '["unit"]' });
+
+  // ── Release semantics: the native path won, the plugin deletes. ──
+  await api('/v1/events', {
+    method: 'POST',
+    credential: gatewayCredential,
+    body: {
+      type: 'input.needed',
+      event_id: 'input:batch0000002',
+      session_id: 'sess-batch',
+      profile: 'default',
+      decision: {
+        kind: 'clarify',
+        request_id: 'conduit-push-batche2e2',
+        question: 'Second?',
+        questions: [{ qid: 'q0', question: 'Second?', choices: ['a'], multi_select: false }],
+      },
+    },
+  });
+  const released = await api('/v1/decisions/conduit-push-batche2e2', { method: 'DELETE', credential: gatewayCredential });
+  assert.equal(released.status, 200);
+  // A late device answer reports decision_released (410), NOT qid-locked.
+  const late = await api('/v1/decisions/conduit-push-batche2e2/respond', {
+    method: 'POST',
+    credential: deviceCredential,
+    body: { question_id: 'q0', answer: 'a' },
+  });
+  assert.equal(late.status, 410);
+  assert.equal(late.json.error, 'decision_released');
+  // The poller sees the release and falls back to the original path.
+  const pollReleased = await api('/v1/decisions/conduit-push-batche2e2', { credential: gatewayCredential });
+  assert.deepEqual(pollReleased.json, { status: 'unknown' });
+
+  // ── An oversized batch is parked undeliverable: the size guard stripped
+  // the card from the APNs payload, so the plugin must stop polling. ──
+  const oversized = await api('/v1/events', {
+    method: 'POST',
+    credential: gatewayCredential,
+    body: {
+      type: 'input.needed',
+      event_id: 'input:batch0000003',
+      session_id: 'sess-batch',
+      profile: 'default',
+      decision: {
+        kind: 'clarify',
+        request_id: 'conduit-push-batche2e3',
+        question: 'Huge?',
+        questions: Array.from({ length: 8 }, (_, i) => ({
+          qid: `q${i}`,
+          question: 'x'.repeat(500),
+          choices: Array.from({ length: 8 }, (_, j) => 'y'.repeat(80)),
+          multi_select: false,
+        })),
+      },
+    },
+  });
+  assert.equal(oversized.status, 202);
+  assert.deepEqual(oversized.json, { accepted: true, delivered: false });
+  const oversizedPoll = await api('/v1/decisions/conduit-push-batche2e3', { credential: gatewayCredential });
+  assert.equal(oversizedPoll.json.status, 'pending');
+  assert.equal(oversizedPoll.json.deliverable, false, 'a size-guard-stripped card must be undeliverable');
+});
+
 test('clarify decision: push → device answer → gateway poll', async () => {
   // Device registers with notifications disabled so event delivery skips APNs.
   const registered = await api('/v1/installations', {
