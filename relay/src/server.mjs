@@ -309,6 +309,11 @@ async function route(request, response) {
     enforceRateLimit(`decision-cancel:${credential.gatewayId}`, 30, 60_000);
     const outcome = store.cancelPendingDecision(credential.installationId, credential.gatewayId, decisionMatch[1]);
     if (outcome === 'unknown') return sendJson(response, 404, { error: 'unknown_decision' });
+    // Diagnostic distinction only (same 200, Conduit never parses this
+    // body): an already-completed decision was never released — it was
+    // answered or completed on its own — and gateway logs should be able to
+    // tell that apart from a live release.
+    if (outcome === 'answered') return sendJson(response, 200, { status: 'already_completed' });
     return sendJson(response, 200, { status: 'cancelled' });
   }
 
@@ -601,6 +606,11 @@ function readConfig() {
     keyId: process.env.APNS_KEY_ID,
     teamId: process.env.APNS_TEAM_ID,
     topic: process.env.APNS_TOPIC,
+    // Optional origin override (default: production APNs). Test seam for the
+    // REAL transport: pointing it at a closed port exercises the actual
+    // ClientHttp2Session failure path end to end, which the APNS_MODE seams
+    // (they bypass ApnsClient entirely) cannot.
+    origin: process.env.APNS_ORIGIN,
     trustProxy: process.env.TRUST_PROXY === '1',
   };
 }

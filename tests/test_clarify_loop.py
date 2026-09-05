@@ -543,6 +543,32 @@ def test_batch_legacy_collapsed_answer_formats_absences():
     assert parsed["responses"][1]["question"] == "Which tests should run?"
 
 
+def test_batch_progress_resets_the_poll_backoff():
+    # A shrinking remaining set means answers are landing: the loop must
+    # return to the short interval instead of compounding the capped backoff
+    # while the user is mid-batch (each subsequent answer would otherwise
+    # wait out the growing, capped delay).
+    fake = _FakeState([
+        {"status": "pending", "remaining": ["q0", "q1"]},
+        {"status": "pending", "remaining": ["q1"], "answers": {"q0": "staging"}},
+        {"status": "answered", "answers": {"q1": "ui"}, "remaining": []},
+    ])
+    _install(fake)
+    sleeps = []
+    real_sleep = loop.time.sleep
+    loop.time.sleep = lambda seconds: sleeps.append(seconds)
+    original, release = _blocking_original("never used")
+    try:
+        result = loop.middleware(**_kwargs(original, _batch_args()))
+    finally:
+        loop.time.sleep = real_sleep
+        release.set()
+    assert json.loads(result)["responses"][1]["user_response"] == ["ui"]
+    # Poll 1 sleeps the base interval; poll 2 saw remaining shrink (2 -> 1),
+    # so its sleep RESETS to base instead of backing off to 2x base.
+    assert sleeps == [loop.POLL_INTERVAL_SECONDS, loop.POLL_INTERVAL_SECONDS]
+
+
 def test_unparseable_clarify_args_keep_the_original_path_without_a_card():
     fake = _FakeState([])
     _install(fake)

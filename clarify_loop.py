@@ -182,6 +182,7 @@ def _first_answer_wins(
     saw_pending = False
     consecutive_unproductive = 0
     unanswered_polls = 0
+    previous_remaining: int | None = None
     while time.monotonic() < deadline:
         if "original" in outcome or "original_error" in outcome:
             # The native path resolved the whole call first (desktop/CLI
@@ -233,6 +234,15 @@ def _first_answer_wins(
                 # this notification): nobody can answer by id. Stop polling
                 # and let the original path's timeout conclude the race.
                 break
+            remaining = status.get("remaining")
+            if isinstance(remaining, list):
+                # Batch progress (a shrinking remaining set means another qid
+                # just locked) drops back to the short interval: the next
+                # answer is imminent, and the capped backoff would otherwise
+                # add seconds of dead latency between the remaining answers.
+                if previous_remaining is not None and len(remaining) < previous_remaining:
+                    unanswered_polls = 0
+                previous_remaining = len(remaining)
         elif state == "unknown" and saw_pending:
             # unknown-after-pending: the relay expired the decision (2h TTL,
             # far under an unlimited clarify timeout).

@@ -349,7 +349,9 @@ export function normalizePreferences(value = {}) {
 }
 
 // Batch decision bounds — mirror the plugin's sanitizer so a malformed push
-// can never park an oversized batch.
+// can never park an oversized batch. Protocol/store maximum only: an
+// answerable card is further bounded by the APNs 4 KB payload guard, and a
+// batch that exceeds it degrades to the plain banner (deliverable=false).
 export const MAX_BATCH_QUESTIONS = 8;
 export const MAX_BATCH_CHOICES = 8;
 

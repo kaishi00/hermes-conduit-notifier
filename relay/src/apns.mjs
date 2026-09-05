@@ -2,21 +2,52 @@ import { createPrivateKey, createSign } from 'node:crypto';
 import { connect } from 'node:http2';
 import { readFileSync } from 'node:fs';
 
+// Production origin; the constructor override exists so tests can point the
+// real transport at a failing endpoint (closed port, protocol-breaking peer)
+// without mocking the client away.
+const DEFAULT_APNS_ORIGIN = 'https://api.push.apple.com';
+
 export class ApnsClient {
-  constructor({ keyPath, keyId, teamId, topic }) {
+  constructor({ keyPath, keyId, teamId, topic, origin }) {
     this.keyId = keyId;
     this.teamId = teamId;
     this.topic = topic;
+    this.origin = origin || DEFAULT_APNS_ORIGIN;
     this.privateKey = createPrivateKey(readFileSync(keyPath));
     this.cachedToken = null;
     this.tokenCreatedAt = 0;
   }
 
   async send(deviceToken, notification) {
-    const client = connect('https://api.push.apple.com');
-    try {
-      return await new Promise((resolve, reject) => {
-        const request = client.request({
+    const client = connect(this.origin);
+    return await new Promise((resolve, reject) => {
+      // A failing APNs connection can surface through BOTH the request stream
+      // and the ClientHttp2Session, and a late session error can arrive after
+      // the response already completed. settle-once makes every path settle
+      // the SAME promise exactly once — critically, the session 'error'
+      // handler below is what keeps a connection-level failure (refused,
+      // TLS, GOAWAY, socket reset) from reaching Node as an unhandled
+      // 'error' event, which would terminate the whole relay process.
+      let settled = false;
+      const fail = (error) => {
+        if (settled) return;
+        settled = true;
+        // A failed session cannot shut down gracefully; destroy instead of
+        // close so cleanup itself cannot hang or throw (destroy is safe on
+        // an already-dead session).
+        client.destroy();
+        reject(error);
+      };
+      const succeed = (result) => {
+        if (settled) return;
+        settled = true;
+        client.close();
+        resolve(result);
+      };
+      client.on('error', fail);
+      let request;
+      try {
+        request = client.request({
           ':method': 'POST',
           ':path': `/3/device/${deviceToken}`,
           authorization: `bearer ${this.authorizationToken()}`,
@@ -25,22 +56,39 @@ export class ApnsClient {
           'apns-priority': '10',
           ...(notification.collapseId ? { 'apns-collapse-id': notification.collapseId.slice(0, 64) } : {}),
         });
-        let status = 0;
-        let body = '';
-        request.setEncoding('utf8');
-        request.on('response', (headers) => { status = Number(headers[':status'] ?? 0); });
-        request.on('data', (chunk) => { body += chunk; });
-        request.on('end', () => {
-          let detail = null;
-          try { detail = body ? JSON.parse(body) : null; } catch { detail = null; }
-          resolve({ ok: status === 200, status, reason: detail?.reason ?? null });
-        });
-        request.on('error', reject);
-        request.end(JSON.stringify(notification.payload));
+      } catch (error) {
+        fail(error);
+        return;
+      }
+      let status = 0;
+      let body = '';
+      request.setEncoding('utf8');
+      request.on('response', (headers) => { status = Number(headers[':status'] ?? 0); });
+      request.on('data', (chunk) => { body += chunk; });
+      request.on('end', () => {
+        // A legitimate APNs answer always carries :status; a stream that
+        // ended without one is a transport break (abrupt close, GOAWAY
+        // teardown) — fail it rather than "resolving" a status-0 non-answer
+        // the server would misread as an APNs rejection.
+        if (status === 0) {
+          fail(new Error('apns connection closed before a response arrived'));
+          return;
+        }
+        let detail = null;
+        try { detail = body ? JSON.parse(body) : null; } catch { detail = null; }
+        succeed({ ok: status === 200, status, reason: detail?.reason ?? null });
       });
-    } finally {
-      client.close();
-    }
+      request.on('error', fail);
+      // Final net so the promise settles even if the stream closes without
+      // 'end' or 'error' (settle-once turns later events into no-ops).
+      request.on('close', () => {
+        fail(new Error('apns stream closed before settling'));
+      });
+      request.end(JSON.stringify(notification.payload));
+    });
+    // Each send owns one short-lived session that is closed on success or
+    // destroyed on failure before the promise settles, so its listeners are
+    // released with the session — nothing is attached beyond this call.
   }
 
   authorizationToken() {

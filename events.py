@@ -18,9 +18,13 @@ PLUGIN_CAPABILITIES = [
     "version-reporting",
 ]
 
-# Bounds for batch clarify decisions, mirroring the single-question limits
-# (8 questions x 8 choices, same text caps) so a pushed batch can never
-# grow past what the relay, APNs, or a card should carry.
+# PROTOCOL/STORE bounds for batch clarify decisions (8 questions x 8
+# choices, same text caps), mirrored by the relay. This is the maximum a
+# decision may CONTAIN — it is NOT a promise that every valid batch fits an
+# answerable card: APNs caps the whole notification at 4 KB, so a wide or
+# long-text batch can still exceed the relay's payload guard. That case
+# degrades safely (plain banner delivered, decision parked deliverable=false,
+# native clarify path continues) instead of losing the notification.
 MAX_BATCH_QUESTIONS = 8
 MAX_BATCH_CHOICES = 8
 

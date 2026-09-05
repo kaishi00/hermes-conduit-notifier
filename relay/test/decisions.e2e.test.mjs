@@ -1,6 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { generateKeyPairSync } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer as createNetServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -9,22 +10,32 @@ import { after, before, test } from 'node:test';
 
 // Full clarify answer loop against real relay processes: register a device,
 // pair a gateway, push clarify decision events, answer from the device, and
-// poll from the gateway. Two relays are spawned so APNs outcomes are
+// poll from the gateway. Four relays are spawned so APNs outcomes are
 // deterministic: the accept relay "delivers" every notification (APNS_MODE
-// stub, no network) and the reject relay fails every send — covering
-// delivery success, plain-banner fallback, and APNs-failure cleanup. Nothing
-// about the HTTP API is mocked.
+// stub, no network), the reject relay fails every send with a returned
+// rejection, the throw relay makes every send RAISE, and the dead-origin
+// relay runs the REAL ApnsClient transport against a closed port — a real
+// ClientHttp2Session 'error', which the APNS_MODE stubs (they bypass
+// ApnsClient entirely) cannot produce — to prove a connection-level failure
+// parks the decision undeliverable AND leaves the relay process alive.
+// Nothing about the HTTP API is mocked.
 
 const dir = mkdtempSync(join(tmpdir(), 'conduit-relay-e2e-'));
 const port = 19000 + Math.floor(Math.random() * 1000);
 const rejectPort = port + 500;
 const throwPort = port + 1000;
+const deadPort = port + 1500;
 const baseUrl = `http://127.0.0.1:${port}`;
 const rejectBaseUrl = `http://127.0.0.1:${rejectPort}`;
 const throwBaseUrl = `http://127.0.0.1:${throwPort}`;
+const deadBaseUrl = `http://127.0.0.1:${deadPort}`;
 const dataPath = join(dir, 'relay-data.json');
 const rejectDataPath = join(dir, 'relay-data-reject.json');
 const throwDataPath = join(dir, 'relay-data-throw.json');
+const deadDataPath = join(dir, 'relay-data-dead.json');
+// Where the dead-origin relay's REAL APNs transport points; resolved in
+// before() by reserving and releasing a loopback port.
+let deadOriginPort;
 // The ApnsClient constructor parses the key eagerly, so the relay needs a
 // valid ES256 key to boot — an ephemeral one is fine; sends are stubbed by
 // APNS_MODE so nothing ever reaches Apple.
@@ -46,7 +57,20 @@ async function api(base, path, { method = 'GET', body, credential } = {}) {
   return { status: response.status, json: await response.json().catch(() => null) };
 }
 
-async function startRelay(aPort, apnsMode, dataFile) {
+// Reserve a loopback port and release it: connecting there must be refused,
+// which surfaces as a genuine session-level 'error' inside ApnsClient.
+function closedPort() {
+  return new Promise((resolve, reject) => {
+    const probe = createNetServer();
+    probe.listen(0, '127.0.0.1', () => {
+      const port = probe.address().port;
+      probe.close(() => resolve(port));
+    });
+    probe.on('error', reject);
+  });
+}
+
+async function startRelay(aPort, apnsMode, dataFile, extraEnv = {}) {
   const child = spawn(process.execPath, ['src/server.mjs'], {
     // fileURLToPath: URL.pathname yields "/C:/…" on Windows, which spawn
     // rejects; the file-path form works on every platform.
@@ -62,6 +86,7 @@ async function startRelay(aPort, apnsMode, dataFile) {
       APNS_TEAM_ID: 'BBBBBBBBBB',
       APNS_TOPIC: 'com.milim.relay',
       APNS_MODE: apnsMode,
+      ...extraEnv,
     },
     stdio: 'ignore',
   });
@@ -79,9 +104,13 @@ async function startRelay(aPort, apnsMode, dataFile) {
 }
 
 before(async () => {
+  deadOriginPort = await closedPort();
   children.push(await startRelay(port, 'accept', dataPath));
   children.push(await startRelay(rejectPort, 'reject', rejectDataPath));
   children.push(await startRelay(throwPort, 'throw', throwDataPath));
+  children.push(await startRelay(deadPort, undefined, deadDataPath, {
+    APNS_ORIGIN: `https://127.0.0.1:${deadOriginPort}`,
+  }));
 });
 
 after(() => {
@@ -198,6 +227,7 @@ test('batch clarify end to end: questions[] survive intake, per-qid answers, rel
   });
   const released = await api(baseUrl, '/v1/decisions/conduit-push-batche2e2', { method: 'DELETE', credential: gatewayCredential });
   assert.equal(released.status, 200);
+  assert.deepEqual(released.json, { status: 'cancelled' }, 'a LIVE decision release reports cancelled');
   // A late device answer reports decision_released (410), NOT qid-locked.
   const late = await api(baseUrl, '/v1/decisions/conduit-push-batche2e2/respond', {
     method: 'POST',
@@ -338,6 +368,12 @@ test('clarify decision: push → device answer → gateway poll', async () => {
   const answered = await api(baseUrl, '/v1/decisions/conduit-push-abc123', { credential: gatewayCredential });
   assert.equal(answered.status, 200);
   assert.deepEqual(answered.json, { status: 'answered', answer: 'Red' });
+
+  // Releasing an ALREADY-COMPLETED decision is a diagnostic, not an error:
+  // same 200, distinct status string so gateway logs can tell the two apart.
+  const completed = await api(baseUrl, '/v1/decisions/conduit-push-abc123', { method: 'DELETE', credential: gatewayCredential });
+  assert.equal(completed.status, 200);
+  assert.deepEqual(completed.json, { status: 'already_completed' });
 
   // Second answer attempts are rejected.
   const reanswer = await api(baseUrl, '/v1/decisions/conduit-push-abc123', {
@@ -791,4 +827,66 @@ test('release succeeds even after the poll quota is exhausted', async () => {
   });
   assert.equal(late.status, 410);
   assert.equal(late.json.error, 'decision_released');
+});
+
+test('a REAL APNs session failure parks the decision undeliverable and the relay survives', async () => {
+  // The dead-origin relay runs the real ApnsClient transport (no APNS_MODE
+  // stub) pointed at a closed loopback port, so the HTTP/2 CONNECT fails at
+  // the session level — the failure shape the APNS_MODE=throw stub cannot
+  // produce. Notifications are ENABLED (default preferences) so intake
+  // actually calls the transport instead of skipping it.
+  const registered = await api(deadBaseUrl, '/v1/installations', {
+    method: 'POST',
+    body: {
+      bundle_id: 'com.milim.relay',
+      device_token: 'e'.repeat(64),
+      environment: 'production',
+    },
+  });
+  assert.equal(registered.status, 201);
+  const deviceCredential = registered.json.credential;
+  const installationId = registered.json.installation.id;
+  const pairing = await api(deadBaseUrl, `/v1/installations/${installationId}/pairings`, { method: 'POST', credential: deviceCredential });
+  const claimed = await api(deadBaseUrl, '/v1/pairings/claim', {
+    method: 'POST',
+    body: { pairing_code: pairing.json.pairing_code, gateway_name: 'dead-origin gateway' },
+  });
+  const gatewayCredential = claimed.json.credential;
+
+  const event = await api(deadBaseUrl, '/v1/events', {
+    method: 'POST',
+    credential: gatewayCredential,
+    body: {
+      type: 'input.needed',
+      event_id: 'input:deadapns0001',
+      session_id: 'sess-dead',
+      profile: 'default',
+      decision: {
+        kind: 'clarify',
+        request_id: 'conduit-push-dead1',
+        question: 'Which environment?',
+        choices: ['staging', 'prod'],
+      },
+    },
+  });
+  // The thrown transport failure is converted to the same outcome as a
+  // returned rejection: reported upstream, decision flipped undeliverable.
+  assert.equal(event.status, 502);
+  assert.equal(event.json.error, 'apns_unreachable');
+
+  // The decision WAS parked before the send, and the plugin's poller must
+  // see deliverable:false so it stops waiting and falls back to the native
+  // clarify path.
+  const poll = await api(deadBaseUrl, '/v1/decisions/conduit-push-dead1', { credential: gatewayCredential });
+  assert.equal(poll.status, 200);
+  assert.deepEqual(poll.json, { status: 'pending', deliverable: false });
+
+  // THE regression assertion: the session 'error' event must have been
+  // converted into the rejected send promise — an unhandled 'error' would
+  // have killed this process, and both of these requests would fail.
+  const health = await api(deadBaseUrl, '/healthz');
+  assert.equal(health.status, 200);
+  assert.deepEqual(health.json, { ok: true });
+  const alivePoll = await api(deadBaseUrl, '/v1/decisions/conduit-push-dead1', { credential: gatewayCredential });
+  assert.equal(alivePoll.status, 200);
 });
