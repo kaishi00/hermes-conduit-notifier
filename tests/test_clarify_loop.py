@@ -73,6 +73,8 @@ class _FakeState:
 
     def enqueue(self, event):
         self.enqueued.append(event)
+        # Match the real boundary: True = accepted by the delivery queue.
+        return True
 
     def cancel_decision(self, request_id):
         # Stubbed so tests stay hermetic: the real client would attempt an
@@ -120,6 +122,48 @@ def test_unpaired_profile_keeps_original_path_only():
     result = loop.middleware(**_kwargs(lambda a: "original", {"question": "Q?"}))
     assert result == "original"
     assert fake.enqueued == []
+
+
+def test_queue_full_drop_uses_the_native_path_immediately_without_polling():
+    # enqueue returning False means the event was dropped BEFORE delivery
+    # (local queue full): the relay will never park the decision, so polling
+    # is phantom work that can only burn the unknown grace before the
+    # inevitable native fallback. The middleware must skip the race
+    # entirely — no thread, no poll_decision calls, native answer now.
+    fake = _FakeState([])
+    dropped = []
+    fake.enqueue = lambda event: dropped.append(event) or False
+    _install(fake)
+    result = loop.middleware(**_kwargs(lambda a: "native result", {
+        "question": "Which environment?",
+        "choices": ["staging", "prod"],
+    }))
+    assert result == "native result"
+    assert len(dropped) == 1, "the clarify event was attempted exactly once"
+    assert fake.enqueued == []
+    assert fake.poll_ids == [], "no phantom relay polling after a local drop"
+    assert fake.cancelled_ids == []
+
+
+def test_enqueue_reports_whether_the_event_was_queued():
+    # The boundary the clarify loop depends on: True while the delivery
+    # queue has capacity, False once it is full (event dropped).
+    import queue as queue_module
+
+    # Earlier tests in this file install fakes onto the shared client
+    # module; reload so the GENUINE enqueue boundary is under test.
+    importlib.reload(loop.client)
+    loop.client.load_state = lambda: {"credential": "x"}  # paired, without touching the filesystem
+    original_events = loop.client._events
+    original_worker_started = loop.client._worker_started
+    loop.client._events = queue_module.Queue(maxsize=1)
+    loop.client._worker_started = True  # keep the delivery worker unspawned
+    try:
+        assert loop.client.enqueue({"type": "response.ready"}) is True
+        assert loop.client.enqueue({"type": "response.ready"}) is False, "a full queue must drop and report False"
+    finally:
+        loop.client._events = original_events
+        loop.client._worker_started = original_worker_started
 
 
 def test_relay_answer_wins_and_formats_like_the_builtin_tool():

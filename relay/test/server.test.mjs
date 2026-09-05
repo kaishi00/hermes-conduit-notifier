@@ -196,6 +196,12 @@ test('notificationFor embeds every batch question in the rich body payload', () 
 });
 
 test('notificationFor strips an oversized batch decision so the card cannot exceed APNs limits', () => {
+  // A VALID protocol-max batch (8x8, maximal text): the answerable-card
+  // capacity is bounded by the APNs payload budget, not by the 8x8
+  // protocol ceiling. The degradation is ALL-OR-NOTHING — the serialized
+  // push must never carry a partial questions[] (Hermes is still waiting
+  // on every qid, so a truncated card would collect answers for a batch
+  // that can never complete) — and the plain banner still ships.
   const event = {
     type: 'input.needed',
     sessionId: 'sess-1',
@@ -214,7 +220,11 @@ test('notificationFor strips an oversized batch decision so the card cannot exce
   };
   const preferences = { enabled: true, show_previews: true, decision_cards: true };
   const { payload } = notificationFor(event, preferences);
+  // No decision in EITHER copy, and no partial questions anywhere.
   assert.equal(payload.conduit.decision, undefined, 'the size guard must strip the decision');
+  assert.equal(payload.body.conduit.decision, undefined, 'the body copy must not carry a partial card either');
+  assert.equal(JSON.stringify(payload).includes('"questions"'), false, 'no partial question list may survive anywhere in the payload');
+  assert.equal(JSON.stringify(payload).includes('conduit-push-huge'), false, 'no answerable card fragments may survive');
   assert.equal(Buffer.byteLength(JSON.stringify(payload)) <= 4096, true);
 });
 

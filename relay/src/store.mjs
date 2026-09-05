@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
@@ -65,14 +65,14 @@ export class RelayStore {
     const installation = this.data.installations[id];
     if (!installation?.active || !secret) return null;
     const expected = scope === 'gateway' ? installation.gatewaySecretHash : installation.deviceSecretHash;
-    return expected && hashSecret(secret) === expected ? installation : null;
+    return expected && secretMatches(secret, expected) ? installation : null;
   }
 
   authenticateGateway(installationId, gatewayId, secret) {
     const installation = this.data.installations[installationId];
     const gateway = installation?.gateways?.[gatewayId];
     if (!installation?.active || !gateway || !secret) return null;
-    return hashSecret(secret) === gateway.secretHash ? { installation, gateway } : null;
+    return secretMatches(secret, gateway.secretHash) ? { installation, gateway } : null;
   }
 
   updateInstallation(id, changes) {
@@ -410,6 +410,20 @@ function publicInstallation(installation) {
 
 function hashSecret(value) {
   return createHash('sha256').update(value).digest('hex');
+}
+
+// Authentication-boundary digest comparison. Same SHA-256 hex digest and
+// persisted format as before — only the comparison changed: fixed-length
+// buffers are compared in constant time so response timing cannot leak how
+// much of a credential prefix matched. The length guard MUST come first
+// (timingSafeEqual throws on unequal lengths); a length difference can only
+// come from corrupt or foreign stored data, and length is not secret (a
+// well-formed sha256 hex digest is always 64 chars), so returning false is
+// correct.
+function secretMatches(candidate, expectedHash) {
+  const actual = Buffer.from(hashSecret(candidate), 'hex');
+  const expected = Buffer.from(String(expectedHash ?? ''), 'hex');
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
 function normalizeCode(value) {

@@ -218,3 +218,41 @@ test('pending decision store is bounded', () => {
   assert.equal(relay.pendingDecisionStatus('inst-1', 'gw-1', 'conduit-push-0').status, 'unknown');
   assert.equal(relay.pendingDecisionStatus('inst-1', 'gw-1', 'conduit-push-299').status, 'pending');
 });
+
+test('credential checks accept exact secrets and reject wrong or corrupt digests', () => {
+  // Auth-boundary contract for the constant-time digest comparison: same
+  // accept/reject behavior as before, wrong and corrupt secrets never pass,
+  // and unequal-length stored digests reject without throwing.
+  const relay = store();
+  const { installation, deviceSecret } = relay.createInstallation({
+    bundleId: 'com.milim.relay',
+    deviceToken: 'a'.repeat(64),
+    environment: 'production',
+  });
+  assert.ok(relay.authenticate(installation.id, deviceSecret, 'device'), 'correct device credential accepted');
+  assert.equal(relay.authenticate(installation.id, `${deviceSecret}0`, 'device'), null, 'wrong device credential rejected');
+  assert.equal(relay.authenticate(installation.id, '', 'device'), null, 'empty secret rejected');
+  assert.equal(relay.authenticate('missing-installation', deviceSecret, 'device'), null);
+
+  const pairing = relay.createPairing(installation.id);
+  const claimed = relay.claimPairing(pairing.code, 'auth gateway');
+  assert.ok(
+    relay.authenticateGateway(installation.id, claimed.gatewayId, claimed.gatewaySecret),
+    'correct gateway credential accepted',
+  );
+  assert.equal(
+    relay.authenticateGateway(installation.id, claimed.gatewayId, `${claimed.gatewaySecret}0`),
+    null,
+    'wrong gateway credential rejected',
+  );
+  assert.equal(
+    relay.authenticateGateway('some-other-installation', claimed.gatewayId, claimed.gatewaySecret),
+    null,
+    'cross-installation gateway credential rejected',
+  );
+
+  // A corrupt/truncated stored digest must reject cleanly — this is the
+  // path that guards the timingSafeEqual unequal-length throw.
+  relay.data.installations[installation.id].deviceSecretHash = 'deadbeef';
+  assert.equal(relay.authenticate(installation.id, deviceSecret, 'device'), null, 'corrupt stored digest rejects without throwing');
+});

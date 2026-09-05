@@ -155,6 +155,17 @@ the FULL batch to Conduit instead of collapsing it to the first question:
   ordinary input.needed banner is still delivered and the parked decision
   is marked `deliverable=false`, so the plugin immediately falls back to
   Hermes' native clarify path.
+- Bounds: the plugin and relay accept at most 8 questions × 8 choices per
+  batch (validation mirrored on both sides). That is the protocol/store
+  ceiling, NOT a guarantee that every valid batch fits an answerable card:
+  answerable-card capacity is bounded by Apple's ~4 KB APNs payload limit,
+  and therefore by the actual byte size of the question and choice text. A
+  valid batch whose serialized decision exceeds the payload budget is
+  never truncated or split — Hermes is still waiting on every qid, so a
+  partial card would collect answers for a batch that can never complete —
+  instead the WHOLE structured decision is dropped from the push (plain
+  input.needed banner, decision parked `deliverable=false`) and the plugin
+  falls back to Hermes' native clarify path.
 - The plugin returns the batch to Hermes exactly in the built-in tool's
   result shape (`{"responses": [...]}`, multi-select answers parsed back to
   lists). Protocol provenance comes from the original invocation: a
