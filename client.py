@@ -15,8 +15,13 @@ from typing import Any
 
 from hermes_constants import get_hermes_home
 
+from .events import PLUGIN_VERSION
+
 
 DEFAULT_RELAY_URL = "https://push.milim.dev"
+# Derived from PLUGIN_VERSION so a version bump updates the UA automatically
+# (no second hand-synchronized constant).
+USER_AGENT = f"Hermes-Conduit-Notifier/{PLUGIN_VERSION}"
 logger = logging.getLogger("hermes.plugins.conduit_push")
 _events: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=128)
 _worker_started = False
@@ -113,9 +118,11 @@ def send_now(event: dict[str, Any], timeout: float = 15.0) -> dict[str, Any]:
 def poll_decision(request_id: str) -> dict[str, Any]:
     """Poll the relay for a push-delivered clarify answer by plugin-minted id.
 
-    Returns {"status": "answered", "answer": str} once the device responded,
-    {"status": "pending"} otherwise. Raises on transport errors so the caller
-    can decide to keep waiting.
+    Returns {"status": "answered", "answer": str} once the device responded
+    to a single-question decision, {"status": "answered", "answers": {...},
+    "remaining": []} for a completed batch, and {"status": "pending",
+    "remaining": [...]} while questions are still open. Raises on transport
+    errors so the caller can decide to keep waiting.
     """
     state = load_state()
     if not state:
@@ -127,6 +134,31 @@ def poll_decision(request_id: str) -> dict[str, Any]:
     )
 
 
+def cancel_decision(request_id: str) -> bool:
+    """Release a parked decision the relay loop can no longer complete.
+
+    Called when the ORIGINAL clarify path won the race (desktop/CLI answered
+    through the gateway) or the poll budget fell back to it: without this, a
+    device answering the stale card would get a 200 "answered" from the relay
+    while the tool result is silently discarded — the card would claim an
+    answer Hermes never received. Best effort by contract: a relay without
+    the endpoint (or a transport blip) must never break the answering path.
+    """
+    try:
+        state = load_state()
+        if not state:
+            return False
+        request_json(
+            f"{state['relay_url'].rstrip('/')}/v1/decisions/{request_id}",
+            method="DELETE",
+            credential=state["credential"],
+        )
+        return True
+    except Exception as error:
+        logger.warning("Conduit decision cancel failed for %s: %s", request_id, error)
+        return False
+
+
 def request_json(
     url: str,
     *,
@@ -135,10 +167,13 @@ def request_json(
     credential: str = "",
     timeout: float = 15.0,
 ) -> dict[str, Any]:
+    """One relay request. ``timeout`` bounds connect and read, but urllib
+    cannot bound a pathological DNS resolution — accepted technical debt;
+    bounding it would mean a resolver redesign for no realistic gain."""
     data = None if payload is None else json.dumps(payload, separators=(",", ":")).encode("utf-8")
     headers = {
         "Accept": "application/json",
-        "User-Agent": "Hermes-Conduit-Notifier/0.1",
+        "User-Agent": USER_AGENT,
     }
     if data is not None:
         headers["Content-Type"] = "application/json"

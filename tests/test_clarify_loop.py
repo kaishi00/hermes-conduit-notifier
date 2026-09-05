@@ -50,13 +50,14 @@ import conduit_push.clarify_loop as loop  # noqa: E402
 
 
 class _FakeState:
-    """Stand-in for client.load_state / poll_decision / enqueue."""
+    """Stand-in for client.load_state / poll_decision / enqueue / cancel_decision."""
 
     def __init__(self, poll_results):
         self.paired = True
         self.poll_results = list(poll_results)
         self.enqueued = []
         self.poll_ids = []
+        self.cancelled_ids = []
 
     def load_state(self):
         return {"credential": "x"} if self.paired else None
@@ -73,16 +74,33 @@ class _FakeState:
     def enqueue(self, event):
         self.enqueued.append(event)
 
+    def cancel_decision(self, request_id):
+        # Stubbed so tests stay hermetic: the real client would attempt an
+        # HTTPS call the moment the original clarify path wins the race.
+        self.cancelled_ids.append(request_id)
+        return True
+
 
 def _install(fake):
     loop.client.load_state = fake.load_state
     loop.client.poll_decision = fake.poll_decision
     loop.client.enqueue = fake.enqueue
+    loop.client.cancel_decision = fake.cancel_decision
     loop.POLL_INTERVAL_SECONDS = 0.01
 
 
 def _kwargs(next_call, args, **extra):
     return {"tool_name": "clarify", "args": args, "next_call": next_call, "session_id": "sess-1", **extra}
+
+
+def _batch_args():
+    """A two-question clarify invocation in the current wire shape."""
+    return {
+        "questions": [
+            {"question": "Which environment?", "choices": ["staging", "prod"]},
+            {"question": "Which tests should run?", "choices": ["unit", "ui"], "multi_select": True},
+        ]
+    }
 
 
 def test_non_clarify_tools_pass_through_untouched():
@@ -133,6 +151,9 @@ def test_relay_answer_wins_and_formats_like_the_builtin_tool():
     assert decision["request_id"].startswith("conduit-push-")
     assert decision["question"] == "Which color?"
     assert decision["choices"] == ["Red", "Blue"]
+    # A legacy scalar invocation pushes the SCALAR decision: no questions[],
+    # so the relay parks it on the scalar path and answers {"answer": ...}.
+    assert "questions" not in decision
     assert fake.poll_ids == [decision["request_id"]]
 
 
@@ -366,3 +387,209 @@ def test_poll_delay_backs_off_and_caps():
         assert loop._poll_delay(500) == 10.0
     finally:
         loop.POLL_INTERVAL_SECONDS, loop.MAX_POLL_BACKOFF_SECONDS = old_base, old_cap
+
+
+def test_one_question_questions_array_is_batch_protocol_and_formats_batch_result():
+    # A ONE-entry questions[] call is still batch protocol: the relay's
+    # answers map must format into the upstream batch result shape, never
+    # the legacy scalar shape.
+    fake = _FakeState([
+        {"status": "answered", "answers": {"q0": "staging"}, "remaining": []},
+    ])
+    _install(fake)
+    original, release = _blocking_original("never used")
+    try:
+        result = loop.middleware(**_kwargs(original, {
+            "questions": [{"question": "Which environment?", "choices": ["staging", "prod"]}],
+        }))
+    finally:
+        release.set()
+    parsed = json.loads(result)
+    assert parsed == {
+        "responses": [
+            {"question": "Which environment?", "choices_offered": ["staging", "prod"], "user_response": "staging"},
+        ]
+    }
+    # Guard against "fixing" scalar by collapsing every single-question case:
+    # a one-entry questions[] invocation pushes the BATCH wire shape.
+    decision = fake.enqueued[0]["decision"]
+    assert [q["qid"] for q in decision["questions"]] == ["q0"]
+    assert decision["questions"][0]["question"] == "Which environment?"
+
+
+def test_legacy_scalar_single_question_still_formats_scalar_result():
+    # Provenance, not cardinality: this invocation used `question`, so the
+    # push must be the scalar decision (no questions[]) — even though the
+    # normalized internal batch has one entry. The relay then answers in the
+    # scalar shape ({status, answer}); a batch-parked decision would return
+    # {status, answers: {q0: ...}} and this branch would format an empty
+    # answer, which is exactly the regression the wire shape prevents.
+    fake = _FakeState([{"status": "answered", "answer": "staging"}])
+    _install(fake)
+    original, release = _blocking_original()
+    try:
+        result = loop.middleware(**_kwargs(original, {
+            "question": "Which environment?",
+            "choices": ["staging", "prod"],
+        }))
+    finally:
+        release.set()
+    decision = fake.enqueued[0]["decision"]
+    assert decision["question"] == "Which environment?"
+    assert decision["choices"] == ["staging", "prod"]
+    assert "questions" not in decision, "a scalar invocation must push a scalar decision"
+    parsed = json.loads(result)
+    assert parsed["user_response"] == "staging"
+    assert "responses" not in parsed, "the legacy scalar shape must not gain batch wrapping"
+
+
+def test_native_result_returns_without_waiting_for_a_slow_release():
+    # The release DELETE rides a daemon thread: a relay that hangs the
+    # cancellation must never delay the user's native answer.
+    fake = _FakeState([])
+    _install(fake)
+    cancel_started = threading.Event()
+    release_cancel = threading.Event()
+
+    def slow_cancel(request_id):
+        cancel_started.set()
+        release_cancel.wait(5)
+        fake.cancelled_ids.append(request_id)
+        return True
+
+    loop.client.cancel_decision = slow_cancel
+
+    def original(args):
+        return "native result"
+
+    started = threading.Event()
+    result_holder = {}
+
+    def run_middleware():
+        started.set()
+        result_holder["result"] = loop.middleware(**_kwargs(original, {"question": "Q?"}))
+
+    worker = threading.Thread(target=run_middleware, daemon=True)
+    worker.start()
+    worker.join(timeout=5)
+    assert not worker.is_alive(), "middleware returned while cancellation was still hanging"
+    assert result_holder["result"] == "native result"
+    assert cancel_started.wait(5), "the release must still be fired, just off-thread"
+    release_cancel.set()
+
+
+def test_batch_push_preserves_every_question_and_relay_completion_wins():
+    fake = _FakeState([
+        {"status": "pending", "remaining": ["q0", "q1"], "answers": {}},
+        {"status": "answered", "answers": {"q0": "staging", "q1": '["unit"]'}, "remaining": []},
+    ])
+    _install(fake)
+    original, release = _blocking_original("never used")
+    try:
+        result = loop.middleware(**_kwargs(original, _batch_args()))
+    finally:
+        release.set()
+
+    # The pushed decision carried the FULL batch with gateway-style qids.
+    event = fake.enqueued[0]
+    decision = event["decision"]
+    assert decision["request_id"].startswith("conduit-push-")
+    assert [(q["qid"], q["question"]) for q in decision["questions"]] == [
+        ("q0", "Which environment?"),
+        ("q1", "Which tests should run?"),
+    ]
+    assert decision["questions"][1]["multi_select"] is True
+    assert event["body"] == "Which environment?", "the body stays the collapsed summary"
+    assert decision["question"] == "Which environment?"
+
+    # The relay completion formatted exactly like the built-in batch result.
+    parsed = json.loads(result)
+    assert parsed == {
+        "responses": [
+            {"question": "Which environment?", "choices_offered": ["staging", "prod"], "user_response": "staging"},
+            {"question": "Which tests should run?", "choices_offered": ["unit", "ui"], "user_response": ["unit"]},
+        ]
+    }
+    # The completed decision must not be cancelled after the relay won.
+    assert fake.cancelled_ids == []
+
+
+def test_native_answer_wins_and_releases_the_batch_decision():
+    fake = _FakeState([])
+    _install(fake)
+
+    def original(args):
+        return json.dumps({"responses": [{"question": "native", "user_response": "x"}]})
+
+    result = loop.middleware(**_kwargs(original, _batch_args()))
+    assert json.loads(result)["responses"][0]["question"] == "native"
+    assert len(fake.cancelled_ids) == 1, "the parked decision is released so late device answers are rejected"
+    assert fake.cancelled_ids[0].startswith("conduit-push-")
+
+
+def test_batch_legacy_collapsed_answer_formats_absences():
+    # An old relay/pre-batch device answers only the collapsed copy: the
+    # result keeps every row, with unanswered questions as empty responses
+    # (upstream absence semantics), never a fake full-batch success.
+    fake = _FakeState([{"status": "answered", "answer": "staging"}])
+    _install(fake)
+    original, release = _blocking_original()
+    try:
+        result = loop.middleware(**_kwargs(original, _batch_args()))
+    finally:
+        release.set()
+    parsed = json.loads(result)
+    assert [row["user_response"] for row in parsed["responses"]] == ["staging", ""]
+    assert parsed["responses"][1]["question"] == "Which tests should run?"
+
+
+def test_batch_progress_resets_the_poll_backoff():
+    # A shrinking remaining set means answers are landing: the loop must
+    # return to the short interval instead of compounding the capped backoff
+    # while the user is mid-batch (each subsequent answer would otherwise
+    # wait out the growing, capped delay).
+    fake = _FakeState([
+        {"status": "pending", "remaining": ["q0", "q1"]},
+        {"status": "pending", "remaining": ["q1"], "answers": {"q0": "staging"}},
+        {"status": "answered", "answers": {"q1": "ui"}, "remaining": []},
+    ])
+    _install(fake)
+    sleeps = []
+    real_sleep = loop.time.sleep
+    loop.time.sleep = lambda seconds: sleeps.append(seconds)
+    original, release = _blocking_original("never used")
+    try:
+        result = loop.middleware(**_kwargs(original, _batch_args()))
+    finally:
+        loop.time.sleep = real_sleep
+        release.set()
+    assert json.loads(result)["responses"][1]["user_response"] == ["ui"]
+    # Poll 1 sleeps the base interval; poll 2 saw remaining shrink (2 -> 1),
+    # so its sleep RESETS to base instead of backing off to 2x base.
+    assert sleeps == [loop.POLL_INTERVAL_SECONDS, loop.POLL_INTERVAL_SECONDS]
+
+
+def test_unparseable_clarify_args_keep_the_original_path_without_a_card():
+    fake = _FakeState([])
+    _install(fake)
+    result = loop.middleware(**_kwargs(lambda a: "original", {"questions": [{"no_question": True}]}))
+    assert result == "original"
+    assert fake.enqueued == []
+
+
+def test_single_question_decision_never_cancels_when_relay_wins():
+    fake = _FakeState([{"status": "answered", "answer": "Red"}])
+    _install(fake)
+    original, release = _blocking_original()
+    try:
+        result = loop.middleware(**_kwargs(original, {"question": "Which color?", "choices": ["Red", "Blue"]}))
+    finally:
+        release.set()
+    assert json.loads(result)["user_response"] == "Red"
+    assert fake.cancelled_ids == []
+
+def test_user_agent_derives_from_the_plugin_version():
+    # One source of truth: bumping PLUGIN_VERSION updates the relay UA
+    # automatically instead of leaving a stale hand-written constant.
+    assert loop.client.USER_AGENT == f"Hermes-Conduit-Notifier/{loop.client.PLUGIN_VERSION}"
+    assert loop.client.PLUGIN_VERSION == "0.3.0"

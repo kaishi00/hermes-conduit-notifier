@@ -3,7 +3,7 @@ import { readFileSync, realpathSync } from 'node:fs';
 import { isIP } from 'node:net';
 import { pathToFileURL } from 'node:url';
 import { ApnsClient } from './apns.mjs';
-import { RelayStore } from './store.mjs';
+import { RelayStore, sanitizeBatchQuestions } from './store.mjs';
 
 // Self-reported relay version/capabilities, surfaced via GET /v1/meta so the
 // app can show compatibility state (keep the version in sync with package.json).
@@ -20,6 +20,7 @@ let config;
 let store;
 let apns;
 let limits;
+let apnsSend;
 
 // APNs hard-caps a notification payload at 4096 bytes; stay under it with
 // headroom for JSON escaping and delivery headers, dropping decision content
@@ -31,6 +32,23 @@ function main() {
   store = new RelayStore(config.dataPath);
   apns = new ApnsClient(config);
   limits = new Map();
+  // Test seam: APNS_MODE=accept makes every send succeed, reject makes it
+  // return a 403 failure, and throw makes it RAISE (a dropped connection) —
+  // all without touching the network — so the e2e suite can exercise
+  // delivery outcomes, decision parking, and both APNs-failure shapes
+  // (returned rejection and thrown transport error) deterministically.
+  // Unset = real APNs.
+  if (process.env.APNS_MODE === 'accept') {
+    apnsSend = async () => ({ ok: true, status: 200, reason: null });
+  } else if (process.env.APNS_MODE === 'reject') {
+    apnsSend = async () => ({ ok: false, status: 403, reason: 'InvalidProviderToken' });
+  } else if (process.env.APNS_MODE === 'throw') {
+    apnsSend = async () => {
+      throw new Error('connection dropped');
+    };
+  } else {
+    apnsSend = (deviceToken, notification) => apns.send(deviceToken, notification);
+  }
 
   const server = createServer(async (request, response) => {
     const startedAt = Date.now();
@@ -162,30 +180,89 @@ async function route(request, response) {
     // device can answer by id and the gateway can poll for the answer while
     // its middleware blocks the tool call. Saved after the dedupe check so a
     // re-delivered event can never overwrite (and wipe the answer of) the
-    // already-parked decision. `deliverable` records whether device
-    // preferences will actually show an answerable card, so the plugin can
-    // stop polling a decision nobody can answer.
+    // already-parked decision.
+    //
+    // Two independent concepts must not be conflated:
+    //
+    //   notification_delivery  — did the user get the (plain or card-bearing)
+    //                            input.needed banner? Governed by the
+    //                            ordinary input.needed preference.
+    //   relay_decision_deliverability (`deliverable`) — does the delivered
+    //                            payload contain an ANSWERABLE structured
+    //                            card? Governed by decision_cards preference
+    //                            and the APNs size guard.
+    //
+    // The final notification is built first and `deliverable` is taken from
+    // what survived into the APNs payload. A decision whose card was stripped
+    // (preference or size guard) still sends the plain banner and is parked
+    // undeliverable, so the plugin stops relay-polling and falls back to
+    // Hermes' native clarify path — it never suppresses the ordinary
+    // notification.
+    let parkedDecisionId = null;
     if (event.decision?.kind === 'clarify' && event.decision.request_id) {
+      parkedDecisionId = event.decision.request_id;
+      const deliverableBase = shouldDeliver(installation.preferences, event.type);
+      const notification = deliverableBase
+        ? notificationFor(event, installation.preferences)
+        : null;
+      // The rich body copy is the canonical payload the iOS path reads, and
+      // (since the top-level copy became a routing stub) the only place the
+      // structured decision lives.
+      const decisionDeliverable = notification?.payload?.body?.conduit?.decision != null;
       store.savePendingDecision({
-        id: event.decision.request_id,
+        id: parkedDecisionId,
         installationId: installation.id,
         gatewayId: credential.gatewayId,
         question: event.decision.question,
         choices: event.decision.choices,
-        deliverable: shouldDeliver(installation.preferences, event.type)
-          && installation.preferences.decision_cards !== false,
+        questions: event.decision.questions,
+        deliverable: decisionDeliverable,
       });
+      if (!notification) return sendJson(response, 202, { accepted: true, delivered: false });
+      let result;
+      try {
+        result = await apnsSend(installation.deviceToken, notification);
+      } catch (error) {
+        // A THROWN transport failure (dropped connection, DNS, TLS) is the
+        // same outcome as a returned rejection: no device received the
+        // answerable card, so the parked decision must flip to undeliverable
+        // and the failure must still be reported upstream.
+        store.markPendingDecisionUndeliverable(installation.id, credential.gatewayId, parkedDecisionId);
+        console.error(JSON.stringify({ level: 'error', message: 'apns send threw', error: error instanceof Error ? error.message : String(error) }));
+        return sendJson(response, 502, { error: 'apns_unreachable' });
+      }
+      if (result.status === 410 || result.reason === 'BadDeviceToken' || result.reason === 'Unregistered') store.deactivateInstallation(installation.id);
+      if (!result.ok) {
+        // The answerable card never reached the device: flip the parked
+        // decision to undeliverable so the plugin's next poll falls back to
+        // the native clarify path instead of waiting out the budget.
+        store.markPendingDecisionUndeliverable(installation.id, credential.gatewayId, parkedDecisionId);
+        return sendJson(response, 502, { error: 'apns_rejected', reason: result.reason, status: result.status });
+      }
+      return sendJson(response, 202, { accepted: true, delivered: true });
     }
     if (!shouldDeliver(installation.preferences, event.type)) return sendJson(response, 202, { accepted: true, delivered: false });
     const notification = notificationFor(event, installation.preferences);
-    const result = await apns.send(installation.deviceToken, notification);
+    let result;
+    try {
+      result = await apnsSend(installation.deviceToken, notification);
+    } catch (error) {
+      // Same contract as the decision path: a THROWN transport failure is
+      // reported upstream, never left to surface as a 500. There is no
+      // parked decision on this path, so there is nothing to flip.
+      console.error(JSON.stringify({ level: 'error', message: 'apns send threw', error: error instanceof Error ? error.message : String(error) }));
+      return sendJson(response, 502, { error: 'apns_unreachable' });
+    }
     if (result.status === 410 || result.reason === 'BadDeviceToken' || result.reason === 'Unregistered') store.deactivateInstallation(installation.id);
     if (!result.ok) return sendJson(response, 502, { error: 'apns_rejected', reason: result.reason, status: result.status });
     return sendJson(response, 202, { accepted: true, delivered: true });
   }
 
   // ── Clarify answer loop ──────────────────────────────────────────────
-  const decisionMatch = url.pathname.match(/^\/v1\/decisions\/([A-Za-z0-9_-]{4,128})$/);
+  // The device answer route is /v1/decisions/{id}/respond (the iOS client's
+  // contract); the bare /v1/decisions/{id} POST path is kept as a
+  // backward-compatible alias. Both run the same handler.
+  const decisionMatch = url.pathname.match(/^\/v1\/decisions\/([A-Za-z0-9_-]{4,128})(\/respond)?$/);
   if (decisionMatch && request.method === 'POST') {
     // The device that received the push answers by the plugin-minted id.
     // Authenticate and rate-limit before reading the body: this endpoint is
@@ -201,18 +278,52 @@ async function route(request, response) {
     const body = await readJson(request);
     const answer = cleanText(body.answer, 2000);
     if (!answer) return sendJson(response, 400, { error: 'invalid_answer' });
-    const outcome = store.respondPendingDecision(installation.id, id, answer);
-    if (outcome === 'unknown') return sendJson(response, 404, { error: 'unknown_decision' });
-    if (outcome === 'already_answered') return sendJson(response, 409, { error: 'already_answered' });
-    return sendJson(response, 200, { status: 'answered' });
+    // question_id scopes the answer to ONE question of a batch decision
+    // (first-answer-wins per qid, other qids stay open); its absence keeps
+    // the legacy whole-decision shape for single-question cards.
+    const questionId = cleanText(body.question_id, 40);
+    const result = store.respondPendingDecision(installation.id, id, answer, questionId);
+    if (result.outcome === 'unknown') return sendJson(response, 404, { error: 'unknown_decision' });
+    // Distinct from 404: the decision is live but the sender addressed a qid
+    // it does not contain — the request is malformed, not the decision gone.
+    if (result.outcome === 'invalid_question') return sendJson(response, 400, { error: 'invalid_question_id' });
+    // Distinct device-facing outcomes: a duplicate qid settles only that
+    // question as answered elsewhere (409), while a RELEASED decision means
+    // Hermes resolved through another surface and the whole pushed card must
+    // be torn down (410). Collapsing them would either strand open qids or
+    // clear a card that still has answerable questions.
+    if (result.outcome === 'released') return sendJson(response, 410, { error: 'decision_released' });
+    if (result.outcome === 'already_answered') return sendJson(response, 409, { error: 'already_answered' });
+    const payload = { status: 'answered' };
+    if (Array.isArray(result.remaining)) payload.remaining = result.remaining;
+    return sendJson(response, 200, payload);
   }
-  if (decisionMatch && request.method === 'GET') {
+  if (decisionMatch && decisionMatch[2] === undefined && request.method === 'GET') {
     // The gateway polls for the answer while its clarify middleware blocks.
     const credential = gatewayCredential(request);
     if (!credential || !store.authenticateGateway(credential.installationId, credential.gatewayId, credential.secret)) return sendJson(response, 401, { error: 'unauthorized' });
     enforceRateLimit(`decision-poll:${credential.gatewayId}`, 120, 60_000);
     const status = store.pendingDecisionStatus(credential.installationId, credential.gatewayId, decisionMatch[1]);
     return sendJson(response, 200, status);
+  }
+  if (decisionMatch && decisionMatch[2] === undefined && request.method === 'DELETE') {
+    // The plugin releases a parked decision when the original clarify path
+    // won the race or its poll budget fell back to it: a late device answer
+    // must then be rejected (410 decision_released) instead of parking a
+    // result nobody reads.
+    const credential = gatewayCredential(request);
+    if (!credential || !store.authenticateGateway(credential.installationId, credential.gatewayId, credential.secret)) return sendJson(response, 401, { error: 'unauthorized' });
+    // Release has its OWN bucket: heavy clarify polling must never be able
+    // to starve the DELETE that cleans up when the native path wins.
+    enforceRateLimit(`decision-cancel:${credential.gatewayId}`, 30, 60_000);
+    const outcome = store.cancelPendingDecision(credential.installationId, credential.gatewayId, decisionMatch[1]);
+    if (outcome === 'unknown') return sendJson(response, 404, { error: 'unknown_decision' });
+    // Diagnostic distinction only (same 200, Conduit never parses this
+    // body): an already-completed decision was never released — it was
+    // answered or completed on its own — and gateway logs should be able to
+    // tell that apart from a live release.
+    if (outcome === 'answered') return sendJson(response, 200, { status: 'already_completed' });
+    return sendJson(response, 200, { status: 'cancelled' });
   }
 
   if (request.method === 'DELETE' && url.pathname === '/v1/gateways/current') {
@@ -291,22 +402,26 @@ function notificationFor(event, preferences) {
     profile: event.profile,
     gateway: event.gateway,
   };
-  const conduit = { ...routing, ...(decision ? { decision } : {}) };
+  // body.conduit is the canonical rich payload the iOS notification path
+  // reads (expo-notifications exposes the APNs `body` value as the
+  // notification's data, so a tap can recover session/profile after a cold
+  // start — and this is where the structured decision lives). The top-level
+  // `conduit` copy stays ROUTING-ONLY for raw-APNs consumers: duplicating
+  // the structured decision there once doubled the decision's byte cost and
+  // pushed ordinary multi-question batches over the size guard.
+  const bodyConduit = { ...routing, ...(decision ? { decision } : {}) };
   const aps = {
     alert: { title, body },
     ...(preferences.completion_sound && completion ? { sound: 'default' } : {}),
     'thread-id': event.sessionId ?? 'hermes',
   };
-  // expo-notifications on iOS exposes the top-level APNs `body` value as
-  // `notification.request.content.data`. Keep the Conduit route there so
-  // a notification tap can recover its session/profile after a cold start.
-  // The top-level copy remains for clients that read the raw APNs payload.
-  let payload = { aps, body: { conduit }, conduit };
+  let payload = { aps, body: { conduit: bodyConduit }, conduit: routing };
   // APNs caps the notification payload at 4 KB and rejects anything larger.
-  // A maximal description (500 chars of multi-byte UTF-8, echoed in both
-  // conduit copies) plus the alert copy can approach that, so degrade to the
-  // routing stub instead of losing the whole notification. The headroom under
-  // the 4096 cap absorbs per-request APNs headers and JSON escaping.
+  // With a single structured copy, the guard now measures the real cost of
+  // one decision plus routing and alert copy; a payload that still exceeds
+  // the budget degrades to the routing stub instead of losing the whole
+  // notification. The headroom under the 4096 cap absorbs per-request APNs
+  // headers and JSON escaping.
   if (decision && Buffer.byteLength(JSON.stringify(payload)) > MAX_NOTIFICATION_BYTES) {
     payload = { aps, body: { conduit: routing }, conduit: routing };
   }
@@ -395,7 +510,19 @@ function validateDecision(value, eventType) {
       .map((choice) => cleanText(choice, 80))
       .filter((choice) => choice !== undefined)
       .slice(0, 8);
-    return { kind: 'clarify', request_id: requestId, question, ...(choices.length ? { choices } : {}) };
+    // Batch decisions (plugin 0.3+) carry the FULL question set. It MUST
+    // survive this boundary through the same shared sanitizer the
+    // pending-decision store uses — dropping it here would silently reduce
+    // every pushed batch to its collapsed first question. Deduplication and
+    // bounds are inside the shared sanitizer.
+    const questions = sanitizeBatchQuestions(value.questions);
+    return {
+      kind: 'clarify',
+      request_id: requestId,
+      question,
+      ...(choices.length ? { choices } : {}),
+      ...(questions.length ? { questions } : {}),
+    };
   }
   return undefined;
 }
@@ -479,6 +606,13 @@ function readConfig() {
   for (const name of required) if (!process.env[name]) throw new Error(`${name} is required.`);
   const publicUrl = new URL(process.env.PUBLIC_URL);
   if (publicUrl.protocol !== 'https:') throw new Error('PUBLIC_URL must use HTTPS.');
+  let apnsOrigin;
+  if (process.env.APNS_ORIGIN !== undefined) {
+    // Fail at boot, not on the first real send: a mistyped origin would
+    // otherwise silently turn every push into a 502 until someone notices.
+    apnsOrigin = new URL(process.env.APNS_ORIGIN);
+    if (apnsOrigin.protocol !== 'https:') throw new Error('APNS_ORIGIN must use HTTPS.');
+  }
   return {
     host: process.env.HOST || '127.0.0.1',
     port: Number(process.env.PORT || 9120),
@@ -488,6 +622,11 @@ function readConfig() {
     keyId: process.env.APNS_KEY_ID,
     teamId: process.env.APNS_TEAM_ID,
     topic: process.env.APNS_TOPIC,
+    // Optional origin override (default: production APNs). Test seam for the
+    // REAL transport: pointing it at a closed port exercises the actual
+    // ClientHttp2Session failure path end to end, which the APNS_MODE seams
+    // (they bypass ApnsClient entirely) cannot.
+    origin: apnsOrigin,
     trustProxy: process.env.TRUST_PROXY === '1',
   };
 }

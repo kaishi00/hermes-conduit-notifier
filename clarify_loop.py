@@ -26,7 +26,12 @@ import uuid
 from typing import Any, Callable
 
 from . import client
-from .events import clarification_text, clarify_decision, event_id, flatten_choice_labels, push_event
+from .events import (
+    clarify_decision,
+    event_id,
+    normalize_clarify_questions,
+    push_event,
+)
 
 logger = logging.getLogger("hermes.plugins.conduit_push")
 
@@ -73,16 +78,39 @@ def middleware(is_child_session: Callable[[str], bool] | None = None, **kwargs: 
         return kwargs["next_call"](kwargs.get("args") or {})
 
     args = dict(kwargs.get("args") or {})
-    # clarification_text handles every question arg shape the hook path
-    # supported (question / prompt / message / questions[0]) -- LLMs do
-    # deviate from the clarify schema, and those shapes must still get a card.
-    question = clarification_text(args)
-    if not question:
+    # The FULL batch is normalized first: current Hermes calls carry
+    # questions[] and legacy scalar calls become a one-question batch.
+    # Reducing the payload to its first question would silently drop
+    # questions 2..N from the background path. `question` stays the
+    # notification body / collapsed summary for pre-batch Conduit builds.
+    #
+    # Protocol provenance comes from the ORIGINAL invocation — a one-entry
+    # questions[] call is batch protocol and must produce the batch result
+    # shape; cardinality of the normalized list must never decide this.
+    batch_protocol = isinstance(args.get("questions"), list) and len(args["questions"]) > 0
+    batch = normalize_clarify_questions(args)
+    if not batch:
         return kwargs["next_call"](args)
-
-    labels = flatten_choice_labels(args.get("choices"))
-    multi_select = bool(args.get("multi_select"))
+    question = batch[0]["question"]
+    labels = list(batch[0]["choices"])
     request_id = f"{REQUEST_ID_PREFIX}{uuid.uuid4().hex[:12]}"
+
+    # The pushed decision's wire shape mirrors the ORIGINAL invocation, not
+    # the normalized list: a legacy scalar call pushes the scalar decision
+    # (no questions[]) so the relay parks it on the scalar path and its
+    # answer returns as {"status": "answered", "answer": ...} — the shape
+    # this module's scalar branch reads. A questions[] call — even a
+    # one-entry one — pushes the batch and completes through per-qid
+    # answers. batch_protocol is the only authoritative discriminator; the
+    # cardinality of `batch` must never decide the wire shape.
+    questions_payload = (
+        [
+            {"qid": entry["qid"], "question": entry["question"], "choices": entry["choices"], "multi_select": entry["multi_select"]}
+            for entry in batch
+        ]
+        if batch_protocol
+        else None
+    )
 
     client.enqueue(push_event(
         "input.needed",
@@ -90,16 +118,20 @@ def middleware(is_child_session: Callable[[str], bool] | None = None, **kwargs: 
         session_id=session_id,
         profile=profile,
         body=question,
-        decision=clarify_decision(request_id=request_id, question=question, choices=labels or None),
+        decision=clarify_decision(
+            request_id=request_id,
+            question=question,
+            choices=labels or None,
+            questions=questions_payload,
+        ),
     ))
 
     return _first_answer_wins(
         request_id=request_id,
         next_call=kwargs["next_call"],
         args=args,
-        question=question,
-        offered=labels,
-        multi_select=multi_select,
+        batch=batch,
+        batch_protocol=batch_protocol,
     )
 
 
@@ -108,12 +140,20 @@ def _first_answer_wins(
     request_id: str,
     next_call: Any,
     args: dict[str, Any],
-    question: str,
-    offered: list[str],
-    multi_select: bool,
+    batch: list[dict[str, Any]],
+    batch_protocol: bool,
 ) -> Any:
-    """Race the original clarify call against the relay answer poll."""
+    """Race the original clarify call against the relay answer poll.
+
+    Single-question decisions resolve on one relay answer, exactly as before.
+    Batch-protocol decisions (a non-empty original ``questions`` array —
+    including exactly one question) complete only when EVERY qid is locked
+    through the relay and format the built-in batch result shape; a native
+    (desktop/CLI) completion of the whole original call wins instead,
+    releases the parked decision, and the losing path is discarded.
+    """
     outcome: dict[str, Any] = {}
+    relay_won = False
 
     def _run_original() -> None:
         try:
@@ -142,8 +182,14 @@ def _first_answer_wins(
     saw_pending = False
     consecutive_unproductive = 0
     unanswered_polls = 0
+    previous_remaining: int | None = None
     while time.monotonic() < deadline:
         if "original" in outcome or "original_error" in outcome:
+            # The native path resolved the whole call first (desktop/CLI
+            # answered through the gateway). Release the parked decision so
+            # a late device answer is rejected (409) instead of being
+            # reported as accepted while its result is discarded.
+            _release_decision(request_id, relay_won)
             if "original_error" in outcome:
                 raise outcome["original_error"]
             return outcome["original"]
@@ -156,11 +202,29 @@ def _first_answer_wins(
             status = {"status": "__error__"}
         state = str(status.get("status") or "")
         if state == "answered":
-            return _format_result(
-                question=question,
-                offered=offered,
-                answer=str(status.get("answer") or ""),
-                multi_select=multi_select,
+            if batch_protocol and "answers" in status:
+                # Complete batch: the relay only reports answered once every
+                # qid is locked, so first-answer-wins held per question.
+                relay_won = True
+                return _format_batch_result(batch, status.get("answers") or {})
+            if not batch_protocol:
+                relay_won = True
+                offered = list(batch[0]["choices"])
+                return _format_result(
+                    question=batch[0]["question"],
+                    offered=offered,
+                    answer=str(status.get("answer") or ""),
+                    multi_select=batch[0]["multi_select"],
+                )
+            # Batch protocol, but the answer arrived in the legacy collapsed
+            # shape (old relay or pre-batch device): only the first question's
+            # answer arrived. Format it as a batch result — the unanswered
+            # rows surface as empty user_response, the upstream absence
+            # semantics — instead of pretending the whole batch was answered.
+            relay_won = True
+            return _format_batch_result(
+                batch,
+                {batch[0]["qid"]: str(status.get("answer") or "")},
             )
         if state == "pending":
             consecutive_unproductive = 0
@@ -170,6 +234,15 @@ def _first_answer_wins(
                 # this notification): nobody can answer by id. Stop polling
                 # and let the original path's timeout conclude the race.
                 break
+            remaining = status.get("remaining")
+            if isinstance(remaining, list):
+                # Batch progress (a shrinking remaining set means another qid
+                # just locked) drops back to the short interval: the next
+                # answer is imminent, and the capped backoff would otherwise
+                # add seconds of dead latency between the remaining answers.
+                if previous_remaining is not None and len(remaining) < previous_remaining:
+                    unanswered_polls = 0
+                previous_remaining = len(remaining)
         elif state == "unknown" and saw_pending:
             # unknown-after-pending: the relay expired the decision (2h TTL,
             # far under an unlimited clarify timeout).
@@ -184,7 +257,9 @@ def _first_answer_wins(
         time.sleep(_poll_delay(unanswered_polls))
 
     # Poll budget exhausted (unlimited clarify timeout): fall back to whatever
-    # the original path produces, waiting for it if necessary.
+    # the original path produces, waiting for it if necessary. The parked
+    # decision is released first so late device answers are rejected.
+    _release_decision(request_id, relay_won)
     if "original_error" in outcome:
         raise outcome["original_error"]
     while "original" not in outcome and "original_error" not in outcome:
@@ -192,6 +267,28 @@ def _first_answer_wins(
     if "original_error" in outcome:
         raise outcome["original_error"]
     return outcome["original"]
+
+
+def _release_decision(request_id: str, relay_won: bool) -> None:
+    """Cancel the parked decision when the relay path did not win.
+
+    Strictly off the native answer's critical path: the DELETE can wait out
+    the relay's HTTP timeout on a slow or unreachable relay, and the user's
+    native answer must never queue behind it. The cancel is fired on a
+    daemon thread — ordering with tool completion does not matter, because
+    the relay rejects answers to a released decision regardless of whether
+    the release has landed yet.
+    """
+    if relay_won:
+        return
+
+    def _cancel() -> None:
+        try:
+            client.cancel_decision(request_id)
+        except Exception as error:  # pragma: no cover - defensive
+            logger.warning("Conduit decision release failed for %s: %s", request_id, error)
+
+    threading.Thread(target=_cancel, name="conduit-push-release", daemon=True).start()
 
 
 def _poll_delay(unanswered_polls: int) -> float:
@@ -236,6 +333,37 @@ def _format_result(*, question: str, offered: list[str], answer: str, multi_sele
         },
         ensure_ascii=False,
     )
+
+
+def _format_batch_result(batch: list[dict[str, Any]], answers: dict[str, Any]) -> str:
+    """Build the same JSON the built-in clarify_tool returns for a batch.
+
+    Mirrors tools.clarify_tool._batch_result: one row per question in the
+    original order, each carrying the model-supplied id when present, the
+    offered choices, and the cleaned user response (multi-select answers
+    parse back into a list). A qid the relay never locked — only possible
+    through the legacy collapsed-answer path — yields an empty
+    user_response, which upstream defines as an absence rather than a skip.
+    """
+    from tools.clarify_tool import strip_recommended
+
+    responses: list[dict[str, Any]] = []
+    for entry in batch:
+        row: dict[str, Any] = {}
+        if entry.get("id"):
+            row["id"] = entry["id"]
+        row["question"] = entry["question"]
+        row["choices_offered"] = list(entry["choices"])
+        raw = str(answers.get(entry["qid"]) or "")
+        if raw:
+            if entry["multi_select"] and entry["choices"]:
+                row["user_response"] = [strip_recommended(part) for part in _parse_multi_select(raw)]
+            else:
+                row["user_response"] = strip_recommended(raw)
+        else:
+            row["user_response"] = ""
+        responses.append(row)
+    return json.dumps({"responses": responses}, ensure_ascii=False)
 
 
 def _parse_multi_select(raw: str) -> list[str]:

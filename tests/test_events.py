@@ -3,7 +3,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from events import approval_decision, clarification_text, event_id, is_silent_response, push_event, sanitize_decision
+from events import approval_decision, clarify_decision, clarification_text, event_id, is_silent_response, normalize_clarify_questions, push_event, sanitize_decision
 
 
 def test_event_identifiers_are_stable_for_replayed_hooks():
@@ -206,3 +206,134 @@ def test_sanitize_decision_requires_choices_and_mirrors_relay_contract():
     # choices; mirror that here so plugin-side tests describe the real contract.
     assert sanitize_decision({"kind": "approval", "session_key": "s", "description": "d"}) == {}
     assert sanitize_decision({"kind": "approval", "session_key": "s", "description": "d", "choices": ["  "]}) == {}
+
+
+def test_normalize_clarify_questions_preserves_the_full_batch():
+    batch = normalize_clarify_questions({
+        "questions": [
+            {"question": "Which environment?", "choices": ["staging", "prod"]},
+            {"question": "Which tests?", "choices": [{"label": "unit"}, "ui"], "multi_select": True},
+            "Just one word?",
+        ]
+    })
+    assert [(entry["qid"], entry["question"]) for entry in batch] == [
+        ("q0", "Which environment?"),
+        ("q1", "Which tests?"),
+        ("q2", "Just one word?"),
+    ]
+    assert batch[0]["choices"] == ["staging", "prod"]
+    assert batch[1]["multi_select"] is True
+    assert batch[1]["choices"] == ["unit", "ui"], "dict-shaped choices flatten to labels"
+    assert batch[2]["multi_select"] is False
+
+
+def test_normalize_clarify_questions_scalar_becomes_one_question_batch():
+    batch = normalize_clarify_questions({
+        "question": "Deploy now?",
+        "choices": ["Ship it"],
+        "multi_select": True,
+    })
+    assert len(batch) == 1
+    assert batch[0] == {
+        "qid": "q0",
+        "id": None,
+        "question": "Deploy now?",
+        "choices": ["Ship it"],
+        "multi_select": True,
+    }
+    # multi_select without choices degrades like the gateway does.
+    assert normalize_clarify_questions({"question": "Notes?", "multi_select": True})[0]["multi_select"] is False
+
+
+def test_normalize_clarify_questions_unparseable_yields_no_question():
+    assert normalize_clarify_questions({}) == []
+    assert normalize_clarify_questions({"questions": [{"no_question": True}]}) == []
+    assert normalize_clarify_questions(None) == []
+
+
+def test_clarify_decision_carries_batch_and_collapsed_summary():
+    decision = clarify_decision(
+        request_id="conduit-push-x",
+        question="Which environment?",
+        choices=["staging", "prod"],
+        questions=[
+            {"qid": "q0", "question": "Which environment?", "choices": ["staging", "prod"], "multi_select": False},
+            {"qid": "q1", "question": "Notes?", "choices": [], "multi_select": False},
+        ],
+    )
+    assert decision["kind"] == "clarify"
+    assert decision["question"] == "Which environment?", "collapsed copy for pre-batch devices"
+    assert [q["qid"] for q in decision["questions"]] == ["q0", "q1"]
+
+
+def test_sanitize_decision_bounds_batch_questions():
+    sanitized = sanitize_decision({
+        "kind": "clarify",
+        "request_id": "conduit-push-x",
+        "question": "summary",
+        "questions": [
+            {"qid": "q0", "question": "x" * 900, "choices": [f"choice-{i}-" + "y" * 70 for i in range(20)], "multi_select": True},
+            {"question": "no qid"},
+            {"qid": "q1", "question": "kept", "multi_select": "truthy-coerced"},
+        ],
+    })
+    assert sanitized["request_id"] == "conduit-push-x"
+    assert len(sanitized["questions"]) == 2
+    first = sanitized["questions"][0]
+    assert first["question"] == "x" * 500
+    assert len(first["choices"]) == 8, "choice count is bounded like the relay"
+    assert len(set(first["choices"])) == 8
+    assert first["multi_select"] is True
+    assert sanitized["questions"][1]["qid"] == "q1"
+    assert "multi_select" not in sanitized["questions"][1]
+
+
+def test_sanitize_decision_qid_contract_mirrors_the_relay():
+    # Same accepted charset, same reserved-name rejection, same
+    # first-qid-wins dedup as the relay's sanitizeBatchQuestions: a batch
+    # this plugin emits must never be silently shrunk by the relay.
+    sanitized = sanitize_decision({
+        "kind": "clarify",
+        "request_id": "conduit-push-sym",
+        "question": "summary",
+        "questions": [
+            {"qid": "q0", "question": "Kept", "choices": ["a", "a", "b"]},
+            {"qid": "q0", "question": "Duplicate qid dropped"},
+            {"qid": "__proto__", "question": "Reserved dropped"},
+            {"qid": "constructor", "question": "Reserved dropped too"},
+            {"qid": "bad charset!", "question": "Charset dropped"},
+            {"qid": "q1", "question": "Also kept", "choices": ["x", "x"]},
+        ],
+    })
+    assert [(question["qid"], question["question"]) for question in sanitized["questions"]] == [
+        ("q0", "Kept"),
+        ("q1", "Also kept"),
+    ]
+    assert sanitized["questions"][0]["choices"] == ["a", "b"], "duplicate choice values collapse"
+    assert sanitized["questions"][1]["choices"] == ["x"]
+
+
+def test_normalize_questions_locally_matches_upstream_raw_position_minting():
+    # The local mirror follows the upstream normalizer exactly: qids come
+    # from the RAW enumerate position and a malformed entry rejects the
+    # whole batch (upstream returns an error, it never skips).
+    batch = normalize_clarify_questions({
+        "questions": [
+            "Bare string question",
+            {"question": "Second", "choices": ["a"]},
+        ]
+    })
+    assert [entry["qid"] for entry in batch] == ["q0", "q1"]
+    assert batch[0]["question"] == "Bare string question"
+
+
+def test_normalize_questions_locally_rejects_whole_batch_on_malformed_entry():
+    # A leading malformed entry mirrors upstream's whole-batch error — the
+    # valid second question must NOT be renumbered onto the malformed slot.
+    batch = normalize_clarify_questions({
+        "questions": [
+            {"no_question": True},
+            {"question": "Valid second"},
+        ]
+    })
+    assert batch == [], "upstream rejects the batch; the mirror must not skip-and-renumber"

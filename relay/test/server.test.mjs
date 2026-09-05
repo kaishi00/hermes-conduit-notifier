@@ -19,7 +19,7 @@ const approvalDecision = {
   choices: ['once', 'deny'],
 };
 
-test('notificationFor embeds a valid decision in both conduit payload paths', () => {
+test('notificationFor embeds the decision in body.conduit only; top-level stays routing-only', () => {
   const event = {
     eventId: 'approval:12345678',
     type: 'approval.needed',
@@ -28,12 +28,20 @@ test('notificationFor embeds a valid decision in both conduit payload paths', ()
     decision: approvalDecision,
   };
   const { payload } = notificationFor(event, preferences);
-  assert.equal(payload.conduit.decision.kind, 'approval');
-  assert.equal(payload.conduit.decision.session_key, 'sess-1');
-  assert.equal(payload.conduit.decision.description, 'Run a dangerous shell command');
-  assert.deepEqual(payload.conduit.decision.choices, ['once', 'deny']);
-  // The expo-notifications `body` mirror must carry the same decision.
-  assert.deepEqual(payload.body.conduit, payload.conduit);
+  // body.conduit is the canonical rich payload the iOS notification path reads.
+  assert.equal(payload.body.conduit.decision.kind, 'approval');
+  assert.equal(payload.body.conduit.decision.session_key, 'sess-1');
+  assert.equal(payload.body.conduit.decision.description, 'Run a dangerous shell command');
+  assert.deepEqual(payload.body.conduit.decision.choices, ['once', 'deny']);
+  // The top-level conduit copy is a ROUTING STUB: duplicating the structured
+  // decision there once doubled its byte cost against the APNs size guard.
+  assert.equal(payload.conduit.decision, undefined);
+  assert.deepEqual(payload.conduit, {
+    type: 'approval.needed',
+    session_id: 'sess-1',
+    profile: 'default',
+    gateway: undefined,
+  });
 });
 
 test('notificationFor omits decision when the event has none', () => {
@@ -66,7 +74,7 @@ test('notificationFor gates decision on the dedicated decision_cards preference'
   // Decision cards are independent of show_previews: previews-off users who
   // left decision_cards on still get answerable cards...
   const previewsOff = notificationFor(event, { show_previews: false, completion_sound: false });
-  assert.ok(previewsOff.payload.conduit.decision, 'previews-off must not disable decision cards');
+  assert.ok(previewsOff.payload.body.conduit.decision, 'previews-off must not disable decision cards');
   assert.equal(previewsOff.payload.aps.alert.body.includes('Run a dangerous'), false, 'banner text stays generic');
   // ...and turning just decision_cards off keeps the payload content-free.
   const cardsOff = notificationFor(event, { show_previews: true, decision_cards: false, completion_sound: false });
@@ -74,7 +82,7 @@ test('notificationFor gates decision on the dedicated decision_cards preference'
   assert.equal(cardsOff.payload.body.conduit.decision, undefined);
   // Legacy installations whose stored preferences predate the key default on.
   const legacy = notificationFor(event, { show_previews: false, completion_sound: false });
-  assert.ok(legacy.payload.conduit.decision !== undefined);
+  assert.ok(legacy.payload.body.conduit.decision !== undefined);
 });
 
 test('notificationFor degrades to a routing stub when the payload would exceed the APNs cap', () => {
@@ -157,4 +165,112 @@ test('validateEvent passes a bounded decision through', () => {
   assert.equal(event.decision.session_key, 'sess-1');
   assert.equal(event.decision.description.length, 500);
   assert.deepEqual(event.decision.choices, ['once', 'deny'], 'unknown choice strings are filtered');
+});
+
+test('notificationFor embeds every batch question in the rich body payload', () => {
+  const event = {
+    type: 'input.needed',
+    sessionId: 'sess-1',
+    profile: 'default',
+    title: 'Input needed',
+    body: 'Which environment?',
+    decision: {
+      kind: 'clarify',
+      request_id: 'conduit-push-batch-e2e',
+      question: 'Which environment?',
+      choices: ['staging', 'prod'],
+      questions: [
+        { qid: 'q0', question: 'Which environment?', choices: ['staging', 'prod'], multi_select: false },
+        { qid: 'q1', question: 'Which tests?', choices: ['unit', 'ui'], multi_select: true },
+      ],
+    },
+  };
+  const preferences = { enabled: true, show_previews: true, decision_cards: true };
+  const { payload } = notificationFor(event, preferences);
+  // The rich body payload — exactly what APNs delivers to the device —
+  // carries the FULL batch; the top-level copy stays a routing stub.
+  assert.equal(payload.body.conduit.decision.questions.length, 2);
+  assert.deepEqual(payload.body.conduit.decision.questions.map((question) => question.qid), ['q0', 'q1']);
+  assert.equal(payload.body.conduit.decision.questions[1].multi_select, true);
+  assert.equal(payload.conduit.decision, undefined);
+});
+
+test('notificationFor strips an oversized batch decision so the card cannot exceed APNs limits', () => {
+  const event = {
+    type: 'input.needed',
+    sessionId: 'sess-1',
+    profile: 'default',
+    decision: {
+      kind: 'clarify',
+      request_id: 'conduit-push-huge',
+      question: 'Huge?',
+      questions: Array.from({ length: 8 }, (_, i) => ({
+        qid: `q${i}`,
+        question: 'x'.repeat(500),
+        choices: Array.from({ length: 8 }, (_, j) => 'y'.repeat(80)),
+        multi_select: false,
+      })),
+    },
+  };
+  const preferences = { enabled: true, show_previews: true, decision_cards: true };
+  const { payload } = notificationFor(event, preferences);
+  assert.equal(payload.conduit.decision, undefined, 'the size guard must strip the decision');
+  assert.equal(Buffer.byteLength(JSON.stringify(payload)) <= 4096, true);
+});
+
+test('validateDecision preserves a sanitized batch and deduplicates identities', () => {
+  const decision = validateDecision({
+    kind: 'clarify',
+    request_id: 'conduit-push-dedupe',
+    question: 'summary',
+    questions: [
+      { qid: 'q0', question: 'First', choices: ['a', 'a', 'b'], multi_select: false },
+      { qid: 'q0', question: 'Duplicate qid dropped' },
+      { qid: '__proto__', question: 'Prototype qid dropped' },
+      { qid: 'q1', question: 'Second', choices: [], multi_select: 'yes' },
+    ],
+  }, 'input.needed');
+  assert.deepEqual(decision.questions.map((question) => question.qid), ['q0', 'q1']);
+  assert.deepEqual(decision.questions[0].choices, ['a', 'b'], 'duplicate choice values collapse');
+  assert.equal(decision.questions[1].multi_select, false, 'non-boolean multi_select never coerces to true');
+});
+
+test('a representative multi-question batch fits the budget with a single structured copy', () => {
+  // 3 questions x ~200-char text x 4 choices: comfortably deliverable now
+  // that the decision is serialized once, and it carries every qid.
+  const event = {
+    eventId: 'input:midsize0001',
+    type: 'input.needed',
+    sessionId: 'sess-midsize',
+    profile: 'default',
+    decision: {
+      kind: 'clarify',
+      request_id: 'conduit-push-midsize',
+      question: 'Implementation plan?',
+      questions: [0, 1, 2].map((index) => ({
+        qid: `q${index}`,
+        question: `Describe step ${index} of the rollout, including which services are affected, the expected downtime, and how a rollback would be performed if the step fails validation.` + ' Detail '.repeat(index + 1),
+        choices: [
+          `Proceed with step ${index} during the maintenance window`,
+          `Delay step ${index} until the follow-up release ships`,
+          `Ask the platform team to review step ${index} first`,
+          `Skip step ${index} entirely for this iteration`,
+        ],
+        multi_select: index === 2,
+      })),
+    },
+  };
+  const preferences = { enabled: true, show_previews: true, decision_cards: true };
+  const { payload } = notificationFor(event, preferences);
+  const size = Buffer.byteLength(JSON.stringify(payload));
+  assert.equal(
+    payload.body.conduit.decision.questions.length,
+    3,
+    'the full batch must reach the device payload',
+  );
+  assert.equal(payload.conduit.decision, undefined, 'top-level stays a routing stub');
+  assert.ok(
+    size <= 3800,
+    `a representative 3-question batch must fit the guard: ${size} bytes`,
+  );
 });

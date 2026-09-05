@@ -4,17 +4,34 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import uuid
 from typing import Any
 
 # Keep in sync with plugin.yaml. Reported on every event so the relay can
 # expose per-gateway compatibility state to the app (Settings > Notifications).
-PLUGIN_VERSION = "0.2.0"
+PLUGIN_VERSION = "0.3.0"
 PLUGIN_CAPABILITIES = [
     "approval-decisions",
     "clarify-loop",
+    "batch-clarify-decisions",
     "version-reporting",
 ]
+
+# PROTOCOL/STORE bounds for batch clarify decisions (8 questions x 8
+# choices, same text caps), mirrored by the relay. This is the maximum a
+# decision may CONTAIN — it is NOT a promise that every valid batch fits an
+# answerable card: APNs caps the whole notification at 4 KB, so a wide or
+# long-text batch can still exceed the relay's payload guard. That case
+# degrades safely (plain banner delivered, decision parked deliverable=false,
+# native clarify path continues) instead of losing the notification.
+MAX_BATCH_QUESTIONS = 8
+MAX_BATCH_CHOICES = 8
+
+# Same accepted-qid contract as the relay's sanitizeBatchQuestions: this
+# plugin must never emit a batch the relay would silently shrink.
+_QID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+_QID_RESERVED = {"__proto__", "constructor", "prototype"}
 
 
 def event_id(prefix: str, *parts: Any) -> str:
@@ -82,18 +99,135 @@ def approval_decision(*, session_key: str, description: str) -> dict[str, Any]:
     }
 
 
-def clarify_decision(*, request_id: str, question: str, choices: list[str] | None = None) -> dict[str, Any]:
+def clarify_decision(
+    *,
+    request_id: str,
+    question: str,
+    choices: list[str] | None = None,
+    questions: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Build the structured payload for a clarify notification.
 
     The gateway's own clarify request id is minted inside its blocking prompt
     and unreachable to plugins, so the middleware mints this id and answers
     return through the relay's /v1/decisions endpoints while the original
     clarify callback keeps serving desktop/CLI clients.
+
+    `questions` carries the FULL batch (current Hermes `questions[]`
+    protocol): each entry keeps the gateway qid as identity plus its
+    choices and multi_select flag, so background Conduit devices see and
+    answer every question instead of only the first. The collapsed
+    `question`/`choices` summary stays in the payload for older Conduit
+    builds, which render an answerable first-question card from it.
+
+    Legacy scalar invocations pass no `questions`, keeping the decision —
+    and therefore the relay's parked decision and answer shape — scalar
+    end to end. Protocol provenance lives in the original invocation shape,
+    never in the normalized question count.
     """
     decision: dict[str, Any] = {"kind": "clarify", "request_id": request_id, "question": question}
     if choices:
         decision["choices"] = choices
+    if questions:
+        decision["questions"] = questions
     return decision
+
+
+def normalize_clarify_questions(args: Any) -> list[dict[str, Any]]:
+    """Normalize every clarify arg shape into one batch-capable list.
+
+    Accepts the current `questions[]` protocol AND the legacy scalar
+    `question`/`prompt`/`message` shape (which becomes a one-question
+    batch). Nothing is discarded: each entry keeps a stable qid
+    (gateway-style `q<index>` — the same minting the gateway's own bridge
+    uses), the question text, its flattened choice labels, and the
+    multi_select flag. Entries are NEVER reduced to the first question.
+
+    Upstream's own normalizer is used when importable so qid minting and
+    choice flattening match the tool exactly; a local mirror keeps this
+    working against older Hermes installs.
+    """
+    if not isinstance(args, dict):
+        return []
+    raw_questions = args.get("questions")
+    if isinstance(raw_questions, list) and raw_questions:
+        try:
+            from tools.clarify_tool import _normalize_questions
+
+            normalized, error = _normalize_questions(raw_questions)
+            if error is None and normalized:
+                return [
+                    {
+                        "qid": entry["qid"],
+                        "id": entry.get("id"),
+                        "question": entry["question"],
+                        "choices": list(entry["choices_offered"] or []),
+                        "multi_select": bool(entry["multi_select"]),
+                    }
+                    for entry in normalized[:MAX_BATCH_QUESTIONS]
+                ]
+        except Exception:
+            pass
+        return _normalize_questions_locally(raw_questions)
+    text = scalar_question_text(args)
+    if not text:
+        return []
+    labels = flatten_choice_labels(args.get("choices"))
+    return [
+        {
+            "qid": "q0",
+            "id": None,
+            "question": text,
+            "choices": labels,
+            # multi_select without choices degrades exactly like the gateway.
+            "multi_select": bool(args.get("multi_select")) and bool(labels),
+        }
+    ]
+
+
+def scalar_question_text(args: Any) -> str:
+    """The legacy scalar question text, without clarification_text's canned
+    fallback — an unparseable shape must normalize to NO question, never to
+    a synthetic prompt the user would be asked to answer."""
+    if not isinstance(args, dict):
+        return ""
+    for key in ("question", "prompt", "message"):
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _normalize_questions_locally(raw_questions: list[Any]) -> list[dict[str, Any]]:
+    """Local mirror of the upstream batch normalizer (older Hermes installs).
+
+    Matches tools.clarify_tool._normalize_questions precisely: qids are
+    minted from the RAW position (`q{enumerate index}`), bare-string entries
+    are tolerated, a non-dict entry or an entry without question text
+    rejects the WHOLE batch (upstream returns an error, it never skips), and
+    multi_select is honored only when choices exist.
+    """
+    normalized: list[dict[str, Any]] = []
+    for index, item in enumerate(raw_questions[:MAX_BATCH_QUESTIONS]):
+        if isinstance(item, str):
+            item = {"question": item}
+        if not isinstance(item, dict):
+            return []
+        text = str(item.get("question") or "").strip()
+        if not text:
+            return []
+        labels = flatten_choice_labels(item.get("choices"))
+        normalized.append(
+            {
+                "qid": f"q{index}",
+                "id": str(item.get("id") or "").strip() or None,
+                "question": text,
+                "choices": labels,
+                # Upstream honors multi_select only when choices exist.
+                "multi_select": bool(item.get("multi_select")) and bool(labels),
+            }
+        )
+    return normalized
 
 
 def flatten_choice_labels(choices: Any) -> list[str]:
@@ -152,7 +286,7 @@ def sanitize_decision(decision: dict[str, Any]) -> dict[str, Any]:
             return {}
         return sanitized
     if kind == "clarify":
-        sanitized = {"kind": "clarify"}
+        sanitized: dict[str, Any] = {"kind": "clarify"}
         for key in ("request_id", "question"):
             value = _clean(decision.get(key, ""), 500)
             if value:
@@ -161,7 +295,46 @@ def sanitize_decision(decision: dict[str, Any]) -> dict[str, Any]:
         if isinstance(choices, list):
             cleaned = [value for value in (_clean(choice, 80) for choice in choices) if value]
             if cleaned:
-                sanitized["choices"] = cleaned[:8]
+                sanitized["choices"] = cleaned[:MAX_BATCH_CHOICES]
+        # Batch form: the full question set rides alongside the collapsed
+        # summary. Each entry keeps its qid (per-question answer identity),
+        # text, labels, and multi_select flag; one malformed entry is dropped
+        # rather than failing the whole decision.
+        raw_questions = decision.get("questions")
+        if isinstance(raw_questions, list):
+            questions: list[dict[str, Any]] = []
+            seen_qids: set[str] = set()
+            for entry in raw_questions[:MAX_BATCH_QUESTIONS]:
+                if not isinstance(entry, dict):
+                    continue
+                qid = _clean(entry.get("qid", ""), 40)
+                # Mirror of the relay's sanitizeBatchQuestions: same accepted
+                # charset, same reserved-name rejection, same first-qid-wins
+                # dedup and choice dedup — the relay must never silently
+                # shrink a batch this plugin emits.
+                if not _QID_PATTERN.fullmatch(qid) or qid in _QID_RESERVED or qid in seen_qids:
+                    continue
+                text = _clean(entry.get("question", ""), 500)
+                if not text:
+                    continue
+                question: dict[str, Any] = {"qid": qid, "question": text}
+                labels = entry.get("choices")
+                if isinstance(labels, list):
+                    cleaned_labels: list[str] = []
+                    for label in labels[:MAX_BATCH_CHOICES]:
+                        cleaned = _clean(label, 80)
+                        if cleaned and cleaned not in cleaned_labels:
+                            cleaned_labels.append(cleaned)
+                    if cleaned_labels:
+                        question["choices"] = cleaned_labels
+                if entry.get("multi_select") is True:
+                    # Strict boolean: a truthy string must not coerce into a
+                    # selected-state flag (mirrors the relay's === true check).
+                    question["multi_select"] = True
+                questions.append(question)
+                seen_qids.add(qid)
+            if questions:
+                sanitized["questions"] = questions
         if not sanitized.get("request_id") or not sanitized.get("question"):
             return {}
         return sanitized
