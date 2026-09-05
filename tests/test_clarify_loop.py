@@ -151,6 +151,9 @@ def test_relay_answer_wins_and_formats_like_the_builtin_tool():
     assert decision["request_id"].startswith("conduit-push-")
     assert decision["question"] == "Which color?"
     assert decision["choices"] == ["Red", "Blue"]
+    # A legacy scalar invocation pushes the SCALAR decision: no questions[],
+    # so the relay parks it on the scalar path and answers {"answer": ...}.
+    assert "questions" not in decision
     assert fake.poll_ids == [decision["request_id"]]
 
 
@@ -407,9 +410,20 @@ def test_one_question_questions_array_is_batch_protocol_and_formats_batch_result
             {"question": "Which environment?", "choices_offered": ["staging", "prod"], "user_response": "staging"},
         ]
     }
+    # Guard against "fixing" scalar by collapsing every single-question case:
+    # a one-entry questions[] invocation pushes the BATCH wire shape.
+    decision = fake.enqueued[0]["decision"]
+    assert [q["qid"] for q in decision["questions"]] == ["q0"]
+    assert decision["questions"][0]["question"] == "Which environment?"
 
 
 def test_legacy_scalar_single_question_still_formats_scalar_result():
+    # Provenance, not cardinality: this invocation used `question`, so the
+    # push must be the scalar decision (no questions[]) — even though the
+    # normalized internal batch has one entry. The relay then answers in the
+    # scalar shape ({status, answer}); a batch-parked decision would return
+    # {status, answers: {q0: ...}} and this branch would format an empty
+    # answer, which is exactly the regression the wire shape prevents.
     fake = _FakeState([{"status": "answered", "answer": "staging"}])
     _install(fake)
     original, release = _blocking_original()
@@ -420,6 +434,10 @@ def test_legacy_scalar_single_question_still_formats_scalar_result():
         }))
     finally:
         release.set()
+    decision = fake.enqueued[0]["decision"]
+    assert decision["question"] == "Which environment?"
+    assert decision["choices"] == ["staging", "prod"]
+    assert "questions" not in decision, "a scalar invocation must push a scalar decision"
     parsed = json.loads(result)
     assert parsed["user_response"] == "staging"
     assert "responses" not in parsed, "the legacy scalar shape must not gain batch wrapping"

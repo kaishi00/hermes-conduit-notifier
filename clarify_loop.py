@@ -95,6 +95,23 @@ def middleware(is_child_session: Callable[[str], bool] | None = None, **kwargs: 
     labels = list(batch[0]["choices"])
     request_id = f"{REQUEST_ID_PREFIX}{uuid.uuid4().hex[:12]}"
 
+    # The pushed decision's wire shape mirrors the ORIGINAL invocation, not
+    # the normalized list: a legacy scalar call pushes the scalar decision
+    # (no questions[]) so the relay parks it on the scalar path and its
+    # answer returns as {"status": "answered", "answer": ...} — the shape
+    # this module's scalar branch reads. A questions[] call — even a
+    # one-entry one — pushes the batch and completes through per-qid
+    # answers. batch_protocol is the only authoritative discriminator; the
+    # cardinality of `batch` must never decide the wire shape.
+    questions_payload = (
+        [
+            {"qid": entry["qid"], "question": entry["question"], "choices": entry["choices"], "multi_select": entry["multi_select"]}
+            for entry in batch
+        ]
+        if batch_protocol
+        else None
+    )
+
     client.enqueue(push_event(
         "input.needed",
         identifier=event_id("input", kwargs.get("turn_id"), kwargs.get("tool_call_id"), request_id),
@@ -105,10 +122,7 @@ def middleware(is_child_session: Callable[[str], bool] | None = None, **kwargs: 
             request_id=request_id,
             question=question,
             choices=labels or None,
-            questions=[
-                {"qid": entry["qid"], "question": entry["question"], "choices": entry["choices"], "multi_select": entry["multi_select"]}
-                for entry in batch
-            ],
+            questions=questions_payload,
         ),
     ))
 

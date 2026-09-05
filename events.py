@@ -115,6 +115,11 @@ def clarify_decision(
     answer every question instead of only the first. The collapsed
     `question`/`choices` summary stays in the payload for older Conduit
     builds, which render an answerable first-question card from it.
+
+    Legacy scalar invocations pass no `questions`, keeping the decision —
+    and therefore the relay's parked decision and answer shape — scalar
+    end to end. Protocol provenance lives in the original invocation shape,
+    never in the normalized question count.
     """
     decision: dict[str, Any] = {"kind": "clarify", "request_id": request_id, "question": question}
     if choices:

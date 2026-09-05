@@ -167,6 +167,9 @@ def request_json(
     credential: str = "",
     timeout: float = 15.0,
 ) -> dict[str, Any]:
+    """One relay request. ``timeout`` bounds connect and read, but urllib
+    cannot bound a pathological DNS resolution — accepted technical debt;
+    bounding it would mean a resolver redesign for no realistic gain."""
     data = None if payload is None else json.dumps(payload, separators=(",", ":")).encode("utf-8")
     headers = {
         "Accept": "application/json",
