@@ -184,6 +184,30 @@ def test_enqueue_exception_uses_the_native_path_without_polling():
     assert fake.cancelled_ids == []
 
 
+def test_native_path_exceptions_propagate_through_the_enqueue_guard():
+    # The guard exists only for the optional push sidecar: a failure raised
+    # by the NATIVE clarify path itself must reach the caller even when
+    # enqueue also failed — the fallback must never swallow it.
+    fake = _FakeState([])
+
+    def broken_enqueue(event):
+        raise RuntimeError("queue down")
+
+    fake.enqueue = broken_enqueue
+    _install(fake)
+
+    def broken_native(args):
+        raise RuntimeError("native clarify failed")
+
+    raised = None
+    try:
+        loop.middleware(**_kwargs(broken_native, {"question": "Q?"}))
+    except RuntimeError as error:
+        raised = error
+    assert raised is not None and "native clarify failed" in str(raised)
+    assert fake.poll_ids == []
+
+
 def test_enqueue_reports_whether_the_event_was_queued():
     # The boundary the clarify loop depends on: True while the delivery
     # queue has capacity, False once it is full (event dropped) or the
