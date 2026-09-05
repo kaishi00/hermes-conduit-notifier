@@ -243,7 +243,16 @@ async function route(request, response) {
     }
     if (!shouldDeliver(installation.preferences, event.type)) return sendJson(response, 202, { accepted: true, delivered: false });
     const notification = notificationFor(event, installation.preferences);
-    const result = await apnsSend(installation.deviceToken, notification);
+    let result;
+    try {
+      result = await apnsSend(installation.deviceToken, notification);
+    } catch (error) {
+      // Same contract as the decision path: a THROWN transport failure is
+      // reported upstream, never left to surface as a 500. There is no
+      // parked decision on this path, so there is nothing to flip.
+      console.error(JSON.stringify({ level: 'error', message: 'apns send threw', error: error instanceof Error ? error.message : String(error) }));
+      return sendJson(response, 502, { error: 'apns_unreachable' });
+    }
     if (result.status === 410 || result.reason === 'BadDeviceToken' || result.reason === 'Unregistered') store.deactivateInstallation(installation.id);
     if (!result.ok) return sendJson(response, 502, { error: 'apns_rejected', reason: result.reason, status: result.status });
     return sendJson(response, 202, { accepted: true, delivered: true });
@@ -597,6 +606,13 @@ function readConfig() {
   for (const name of required) if (!process.env[name]) throw new Error(`${name} is required.`);
   const publicUrl = new URL(process.env.PUBLIC_URL);
   if (publicUrl.protocol !== 'https:') throw new Error('PUBLIC_URL must use HTTPS.');
+  let apnsOrigin;
+  if (process.env.APNS_ORIGIN !== undefined) {
+    // Fail at boot, not on the first real send: a mistyped origin would
+    // otherwise silently turn every push into a 502 until someone notices.
+    apnsOrigin = new URL(process.env.APNS_ORIGIN);
+    if (apnsOrigin.protocol !== 'https:') throw new Error('APNS_ORIGIN must use HTTPS.');
+  }
   return {
     host: process.env.HOST || '127.0.0.1',
     port: Number(process.env.PORT || 9120),
@@ -610,7 +626,7 @@ function readConfig() {
     // REAL transport: pointing it at a closed port exercises the actual
     // ClientHttp2Session failure path end to end, which the APNS_MODE seams
     // (they bypass ApnsClient entirely) cannot.
-    origin: process.env.APNS_ORIGIN,
+    origin: apnsOrigin,
     trustProxy: process.env.TRUST_PROXY === '1',
   };
 }

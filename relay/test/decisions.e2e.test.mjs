@@ -881,12 +881,23 @@ test('a REAL APNs session failure parks the decision undeliverable and the relay
   assert.equal(poll.status, 200);
   assert.deepEqual(poll.json, { status: 'pending', deliverable: false });
 
-  // THE regression assertion: the session 'error' event must have been
-  // converted into the rejected send promise — an unhandled 'error' would
-  // have killed this process, and both of these requests would fail.
+  // Still alive: another poll works too, and a plain notification (no
+  // decision) takes the same thrown-transport path to 502.
   const health = await api(deadBaseUrl, '/healthz');
   assert.equal(health.status, 200);
   assert.deepEqual(health.json, { ok: true });
+  const plain = await api(deadBaseUrl, '/v1/events', {
+    method: 'POST',
+    credential: gatewayCredential,
+    body: {
+      type: 'response.ready',
+      event_id: 'response:deadapns01',
+      session_id: 'sess-dead',
+      profile: 'default',
+    },
+  });
+  assert.equal(plain.status, 502);
+  assert.equal(plain.json.error, 'apns_unreachable');
   const alivePoll = await api(deadBaseUrl, '/v1/decisions/conduit-push-dead1', { credential: gatewayCredential });
   assert.equal(alivePoll.status, 200);
 });

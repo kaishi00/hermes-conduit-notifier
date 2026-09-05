@@ -6,6 +6,11 @@ import { readFileSync } from 'node:fs';
 // real transport at a failing endpoint (closed port, protocol-breaking peer)
 // without mocking the client away.
 const DEFAULT_APNS_ORIGIN = 'https://api.push.apple.com';
+// Bound for one APNs send. APNs answers in well under a second in practice;
+// this exists for the one failure shape that emits NO event to settle on —
+// a peer that accepts the connection and then stalls — so the send promise
+// always settles and the intake request can never hang on it.
+const SEND_TIMEOUT_MS = 10_000;
 
 export class ApnsClient {
   constructor({ keyPath, keyId, teamId, topic, origin }) {
@@ -32,7 +37,8 @@ export class ApnsClient {
       const fail = (error) => {
         if (settled) return;
         settled = true;
-        // A failed session cannot shut down gracefully; destroy instead of
+        clearTimeout(stall);
+        // A failed session cannot be closed gracefully; destroy instead of
         // close so cleanup itself cannot hang or throw (destroy is safe on
         // an already-dead session).
         client.destroy();
@@ -41,9 +47,11 @@ export class ApnsClient {
       const succeed = (result) => {
         if (settled) return;
         settled = true;
+        clearTimeout(stall);
         client.close();
         resolve(result);
       };
+      const stall = setTimeout(() => fail(new Error('apns send timed out')), SEND_TIMEOUT_MS);
       client.on('error', fail);
       let request;
       try {
@@ -84,7 +92,11 @@ export class ApnsClient {
       request.on('close', () => {
         fail(new Error('apns stream closed before settling'));
       });
-      request.end(JSON.stringify(notification.payload));
+      try {
+        request.end(JSON.stringify(notification.payload));
+      } catch (error) {
+        fail(error);
+      }
     });
     // Each send owns one short-lived session that is closed on success or
     // destroyed on failure before the promise settles, so its listeners are
