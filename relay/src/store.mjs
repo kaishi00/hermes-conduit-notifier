@@ -419,10 +419,11 @@ function hashSecret(value) {
 // (timingSafeEqual throws on unequal lengths); a length difference can only
 // come from corrupt or foreign stored data, and length is not secret (a
 // well-formed sha256 hex digest is always 64 chars), so returning false is
-// correct.
+// correct. Lowercase-normalize the stored digest so decode behavior matches
+// the old case-sensitive string equality exactly.
 function secretMatches(candidate, expectedHash) {
   const actual = Buffer.from(hashSecret(candidate), 'hex');
-  const expected = Buffer.from(String(expectedHash ?? ''), 'hex');
+  const expected = Buffer.from(String(expectedHash ?? '').toLowerCase(), 'hex');
   return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 

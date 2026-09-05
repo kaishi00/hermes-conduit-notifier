@@ -134,11 +134,21 @@ def test_queue_full_drop_uses_the_native_path_immediately_without_polling():
     dropped = []
     fake.enqueue = lambda event: dropped.append(event) or False
     _install(fake)
-    result = loop.middleware(**_kwargs(lambda a: "native result", {
+    threads = []
+
+    def native(args):
+        threads.append(threading.current_thread().name)
+        return "native result"
+
+    result = loop.middleware(**_kwargs(native, {
         "question": "Which environment?",
         "choices": ["staging", "prod"],
     }))
     assert result == "native result"
+    # Deterministic regression proof: on the pre-fix code next_call ran on
+    # the spawned "conduit-push-clarify" daemon thread; with the fix it runs
+    # synchronously on the caller's thread.
+    assert threads == [threading.current_thread().name]
     assert len(dropped) == 1, "the clarify event was attempted exactly once"
     assert fake.enqueued == []
     assert fake.poll_ids == [], "no phantom relay polling after a local drop"
@@ -147,21 +157,26 @@ def test_queue_full_drop_uses_the_native_path_immediately_without_polling():
 
 def test_enqueue_reports_whether_the_event_was_queued():
     # The boundary the clarify loop depends on: True while the delivery
-    # queue has capacity, False once it is full (event dropped).
+    # queue has capacity, False once it is full (event dropped) or the
+    # profile lost its pairing.
     import queue as queue_module
 
     # Earlier tests in this file install fakes onto the shared client
     # module; reload so the GENUINE enqueue boundary is under test.
     importlib.reload(loop.client)
-    loop.client.load_state = lambda: {"credential": "x"}  # paired, without touching the filesystem
+    original_load_state = loop.client.load_state
     original_events = loop.client._events
     original_worker_started = loop.client._worker_started
     loop.client._events = queue_module.Queue(maxsize=1)
     loop.client._worker_started = True  # keep the delivery worker unspawned
     try:
+        loop.client.load_state = lambda: {"credential": "x"}  # paired, without touching the filesystem
         assert loop.client.enqueue({"type": "response.ready"}) is True
         assert loop.client.enqueue({"type": "response.ready"}) is False, "a full queue must drop and report False"
+        loop.client.load_state = lambda: None  # unpaired: nothing can be delivered
+        assert loop.client.enqueue({"type": "response.ready"}) is False, "an unpaired profile must report False"
     finally:
+        loop.client.load_state = original_load_state
         loop.client._events = original_events
         loop.client._worker_started = original_worker_started
 

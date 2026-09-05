@@ -42,10 +42,13 @@ POLL_INTERVAL_SECONDS = 2.0
 # lag, relays blip). Past this the decision was never parked or the relay is
 # unreachable -- polling can never succeed -- so fall back to the original path
 # instead of polling the full budget. The grace is ITERATION-based, so its
-# wall-clock span follows the backoff schedule: 30 consecutive unproductive
-# polls span 2+4+8 + 27*10 = ~284s (~4.75 min), NOT the ~60s a flat interval
-# would give. That is deliberate: it stays far under a default 3600s clarify
-# timeout while tolerating a long relay blip.
+# wall-clock span follows the backoff schedule: the break fires on the 30th
+# unproductive poll before its sleep, i.e. 29 sleeps of 2+4+8 + 26*10 =
+# ~274s (~4.6 min), NOT the ~60s a flat interval would give. That is
+# deliberate: it stays far under a default 3600s clarify timeout while
+# tolerating a long relay blip. (A locally DROPPED push never reaches this
+# loop at all -- enqueue reports the drop and the middleware falls back
+# immediately.)
 UNKNOWN_POLL_GRACE = 30
 # Hard cap on polling even when the gateway configures an unlimited clarify
 # timeout; the relay expires pending decisions at 2h, and polling stops on

@@ -225,7 +225,12 @@ test('notificationFor strips an oversized batch decision so the card cannot exce
   assert.equal(payload.body.conduit.decision, undefined, 'the body copy must not carry a partial card either');
   assert.equal(JSON.stringify(payload).includes('"questions"'), false, 'no partial question list may survive anywhere in the payload');
   assert.equal(JSON.stringify(payload).includes('conduit-push-huge'), false, 'no answerable card fragments may survive');
-  assert.equal(Buffer.byteLength(JSON.stringify(payload)) <= 4096, true);
+  // The plain input.needed banner still ships alongside the stripped card.
+  assert.equal(payload.aps.alert.title, 'Input needed');
+  assert.equal(typeof payload.aps.alert.body, 'string');
+  // The stripped payload must fit under the same 3800-byte guard that
+  // triggered the strip (with the guard headroom to 4096 for transport).
+  assert.ok(Buffer.byteLength(JSON.stringify(payload)) <= 3800, 'stripped payload must fit under the guard threshold');
 });
 
 test('validateDecision preserves a sanitized batch and deduplicates identities', () => {
