@@ -119,7 +119,7 @@ def middleware(is_child_session: Callable[[str], bool] | None = None, **kwargs: 
         else None
     )
 
-    if not client.enqueue(push_event(
+    push = push_event(
         "input.needed",
         identifier=event_id("input", kwargs.get("turn_id"), kwargs.get("tool_call_id"), request_id),
         session_id=session_id,
@@ -131,7 +131,21 @@ def middleware(is_child_session: Callable[[str], bool] | None = None, **kwargs: 
             choices=labels or None,
             questions=questions_payload,
         ),
-    )):
+    )
+    try:
+        queued = client.enqueue(push)
+    except Exception as error:
+        # The push sidecar failed LOCALLY (worker startup, queue/runtime
+        # error): the relay will never park this decision, exactly like a
+        # queue-full drop. An optional-notification failure must never abort
+        # the tool call — use the native path immediately. Only the enqueue
+        # boundary is guarded; next_call's own exceptions propagate.
+        logger.warning(
+            "Conduit clarify notification enqueue failed; using native clarify path: %s",
+            error,
+        )
+        return kwargs["next_call"](args)
+    if not queued:
         # The event was dropped BEFORE delivery (local queue full): the relay
         # will never park this decision, so every poll is a phantom — the
         # unknown grace can only burn minutes before the inevitable native

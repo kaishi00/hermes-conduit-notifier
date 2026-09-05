@@ -155,6 +155,35 @@ def test_queue_full_drop_uses_the_native_path_immediately_without_polling():
     assert fake.cancelled_ids == []
 
 
+def test_enqueue_exception_uses_the_native_path_without_polling():
+    # An UNEXPECTED enqueue failure (worker startup, queue/runtime error) is
+    # still just the optional push sidecar failing: the exception must not
+    # abort the tool call, and the relay never parked a decision — so the
+    # native path answers immediately, on the caller's thread, with no
+    # phantom polling and no release attempt.
+    fake = _FakeState([])
+
+    def broken_enqueue(event):
+        raise RuntimeError("worker startup failed")
+
+    fake.enqueue = broken_enqueue
+    _install(fake)
+    threads = []
+
+    def native(args):
+        threads.append(threading.current_thread().name)
+        return "native result"
+
+    result = loop.middleware(**_kwargs(native, {
+        "question": "Which environment?",
+        "choices": ["staging", "prod"],
+    }))
+    assert result == "native result"
+    assert threads == [threading.current_thread().name], "the native path must run on the caller's thread"
+    assert fake.poll_ids == [], "no phantom relay polling after an enqueue failure"
+    assert fake.cancelled_ids == []
+
+
 def test_enqueue_reports_whether_the_event_was_queued():
     # The boundary the clarify loop depends on: True while the delivery
     # queue has capacity, False once it is full (event dropped) or the

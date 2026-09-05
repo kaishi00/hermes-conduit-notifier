@@ -251,6 +251,15 @@ test('credential checks accept exact secrets and reject wrong or corrupt digests
     'cross-installation gateway credential rejected',
   );
 
+  // Canonical stored format: hashes are 64 LOWERCASE hex characters. An
+  // uppercase re-encoding of the otherwise-correct digest is noncanonical
+  // stored state and must reject rather than silently broaden what the
+  // store accepts.
+  const deviceSecretHash = relay.data.installations[installation.id].deviceSecretHash;
+  assert.ok(/^[0-9a-f]{64}$/.test(deviceSecretHash), 'hashSecret emits canonical lowercase sha256 hex');
+  relay.data.installations[installation.id].deviceSecretHash = deviceSecretHash.toUpperCase();
+  assert.equal(relay.authenticate(installation.id, deviceSecret, 'device'), null, 'uppercase noncanonical digest rejected');
+
   // A corrupt/truncated stored digest must reject cleanly — this is the
   // path that guards the timingSafeEqual unequal-length throw.
   relay.data.installations[installation.id].deviceSecretHash = 'deadbeef';

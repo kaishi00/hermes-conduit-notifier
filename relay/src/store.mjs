@@ -412,18 +412,23 @@ function hashSecret(value) {
   return createHash('sha256').update(value).digest('hex');
 }
 
-// Authentication-boundary digest comparison. Same SHA-256 hex digest and
-// persisted format as before — only the comparison changed: fixed-length
-// buffers are compared in constant time so response timing cannot leak how
-// much of a credential prefix matched. The length guard MUST come first
-// (timingSafeEqual throws on unequal lengths); a length difference can only
-// come from corrupt or foreign stored data, and length is not secret (a
-// well-formed sha256 hex digest is always 64 chars), so returning false is
-// correct. Lowercase-normalize the stored digest so decode behavior matches
-// the old case-sensitive string equality exactly.
+// Authentication-boundary digest comparison. Persisted hashes are CANONICAL:
+// exactly 64 lowercase hexadecimal characters — the output format of
+// hashSecret since the store was created. Anything else in the stored field
+// (corrupt, truncated, or manually edited state, including an uppercase
+// re-encoding) rejects before any comparison, keeping accepted state exactly
+// as narrow as the old case-sensitive string equality. For valid records the
+// two decoded 32-byte buffers are compared in constant time, so response
+// timing cannot leak how much of a credential prefix matched.
+const CANONICAL_SHA256_HEX = /^[0-9a-f]{64}$/;
+
 function secretMatches(candidate, expectedHash) {
+  const expectedText = String(expectedHash ?? '');
+  if (!CANONICAL_SHA256_HEX.test(expectedText)) return false;
   const actual = Buffer.from(hashSecret(candidate), 'hex');
-  const expected = Buffer.from(String(expectedHash ?? '').toLowerCase(), 'hex');
+  const expected = Buffer.from(expectedText, 'hex');
+  // Both sides are 32 bytes by construction; the guard stays defensive in
+  // case timingSafeEqual's throw-on-unequal-length contract ever changes.
   return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
