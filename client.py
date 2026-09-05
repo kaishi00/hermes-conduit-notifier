@@ -92,14 +92,25 @@ def unpair() -> bool:
     return True
 
 
-def enqueue(event: dict[str, Any]) -> None:
+def enqueue(event: dict[str, Any]) -> bool:
+    """Queue an event for asynchronous relay delivery.
+
+    Returns True when the event was accepted by the local delivery queue and
+    False when it was DROPPED (queue full, or the profile lost its pairing
+    between the caller's check and here). Fire-and-forget callers can ignore
+    the result; the clarify middleware MUST NOT — it parks a relay decision
+    on this event, so a drop has to fall back to the native clarify path
+    instead of polling an answer that can never arrive.
+    """
     if not load_state():
-        return
+        return False
     _start_worker()
     try:
         _events.put_nowait(event)
     except queue.Full:
         logger.warning("Conduit notification queue is full; dropping %s", event.get("type", "event"))
+        return False
+    return True
 
 
 def send_now(event: dict[str, Any], timeout: float = 15.0) -> dict[str, Any]:

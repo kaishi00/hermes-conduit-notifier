@@ -41,8 +41,15 @@ POLL_INTERVAL_SECONDS = 2.0
 # while the event POST and the first poll race (enqueue is async, delivery can
 # lag, relays blip). Past this the decision was never parked or the relay is
 # unreachable -- polling can never succeed -- so fall back to the original path
-# instead of polling the full budget.
-UNKNOWN_POLL_GRACE = 30  # ~60s at the base interval
+# instead of polling the full budget. The grace is ITERATION-based, so its
+# wall-clock span follows the backoff schedule: the break fires on the 30th
+# unproductive poll before its sleep, i.e. 29 sleeps of 2+4+8 + 26*10 =
+# ~274s (~4.6 min), NOT the ~60s a flat interval would give. That is
+# deliberate: it stays far under a default 3600s clarify timeout while
+# tolerating a long relay blip. (A locally DROPPED push never reaches this
+# loop at all -- enqueue reports the drop and the middleware falls back
+# immediately.)
+UNKNOWN_POLL_GRACE = 30
 # Hard cap on polling even when the gateway configures an unlimited clarify
 # timeout; the relay expires pending decisions at 2h, and polling stops on
 # the unknown-after-pending transition well before this in practice.
@@ -112,7 +119,7 @@ def middleware(is_child_session: Callable[[str], bool] | None = None, **kwargs: 
         else None
     )
 
-    client.enqueue(push_event(
+    push = push_event(
         "input.needed",
         identifier=event_id("input", kwargs.get("turn_id"), kwargs.get("tool_call_id"), request_id),
         session_id=session_id,
@@ -124,7 +131,26 @@ def middleware(is_child_session: Callable[[str], bool] | None = None, **kwargs: 
             choices=labels or None,
             questions=questions_payload,
         ),
-    ))
+    )
+    try:
+        queued = client.enqueue(push)
+    except Exception as error:
+        # The push sidecar failed LOCALLY (worker startup, queue/runtime
+        # error): the relay will never park this decision, exactly like a
+        # queue-full drop. An optional-notification failure must never abort
+        # the tool call — use the native path immediately. Only the enqueue
+        # boundary is guarded; next_call's own exceptions propagate.
+        logger.warning(
+            "Conduit clarify notification enqueue failed; using native clarify path: %s",
+            error,
+        )
+        return kwargs["next_call"](args)
+    if not queued:
+        # The event was dropped BEFORE delivery (local queue full): the relay
+        # will never park this decision, so every poll is a phantom — the
+        # unknown grace can only burn minutes before the inevitable native
+        # fallback. Use the native path immediately.
+        return kwargs["next_call"](args)
 
     return _first_answer_wins(
         request_id=request_id,

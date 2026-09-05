@@ -245,11 +245,14 @@ def _run_clarify(monkeypatch, args):
         # before replying to /v1/events, so a returned send_now guarantees
         # the decision is findable by the test's /respond request. Appending
         # in finally keeps the event visible for diagnosis if the send raises
-        # (the holder error then fails the test loudly).
+        # (the holder error then fails the test loudly). Returns True — this
+        # stands in for client.enqueue, whose boolean the middleware now
+        # reads to detect a local drop.
         try:
             real_send_now(event)
         finally:
             events.append(event)
+        return True
 
     monkeypatch.setattr(loop.client, "enqueue", capture_and_send)
     release = threading.Event()

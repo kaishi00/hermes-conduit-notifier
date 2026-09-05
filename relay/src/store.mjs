@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
@@ -65,14 +65,14 @@ export class RelayStore {
     const installation = this.data.installations[id];
     if (!installation?.active || !secret) return null;
     const expected = scope === 'gateway' ? installation.gatewaySecretHash : installation.deviceSecretHash;
-    return expected && hashSecret(secret) === expected ? installation : null;
+    return expected && secretMatches(secret, expected) ? installation : null;
   }
 
   authenticateGateway(installationId, gatewayId, secret) {
     const installation = this.data.installations[installationId];
     const gateway = installation?.gateways?.[gatewayId];
     if (!installation?.active || !gateway || !secret) return null;
-    return hashSecret(secret) === gateway.secretHash ? { installation, gateway } : null;
+    return secretMatches(secret, gateway.secretHash) ? { installation, gateway } : null;
   }
 
   updateInstallation(id, changes) {
@@ -410,6 +410,26 @@ function publicInstallation(installation) {
 
 function hashSecret(value) {
   return createHash('sha256').update(value).digest('hex');
+}
+
+// Authentication-boundary digest comparison. Persisted hashes are CANONICAL:
+// exactly 64 lowercase hexadecimal characters — the output format of
+// hashSecret since the store was created. Anything else in the stored field
+// (corrupt, truncated, or manually edited state, including an uppercase
+// re-encoding) rejects before any comparison, keeping accepted state exactly
+// as narrow as the old case-sensitive string equality. For valid records the
+// two decoded 32-byte buffers are compared in constant time, so response
+// timing cannot leak how much of a credential prefix matched.
+const CANONICAL_SHA256_HEX = /^[0-9a-f]{64}$/;
+
+function secretMatches(candidate, expectedHash) {
+  const expectedText = String(expectedHash ?? '');
+  if (!CANONICAL_SHA256_HEX.test(expectedText)) return false;
+  const actual = Buffer.from(hashSecret(candidate), 'hex');
+  const expected = Buffer.from(expectedText, 'hex');
+  // Both sides are 32 bytes by construction; the guard stays defensive in
+  // case timingSafeEqual's throw-on-unequal-length contract ever changes.
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
 function normalizeCode(value) {

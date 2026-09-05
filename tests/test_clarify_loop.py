@@ -73,6 +73,8 @@ class _FakeState:
 
     def enqueue(self, event):
         self.enqueued.append(event)
+        # Match the real boundary: True = accepted by the delivery queue.
+        return True
 
     def cancel_decision(self, request_id):
         # Stubbed so tests stay hermetic: the real client would attempt an
@@ -120,6 +122,116 @@ def test_unpaired_profile_keeps_original_path_only():
     result = loop.middleware(**_kwargs(lambda a: "original", {"question": "Q?"}))
     assert result == "original"
     assert fake.enqueued == []
+
+
+def test_queue_full_drop_uses_the_native_path_immediately_without_polling():
+    # enqueue returning False means the event was dropped BEFORE delivery
+    # (local queue full): the relay will never park the decision, so polling
+    # is phantom work that can only burn the unknown grace before the
+    # inevitable native fallback. The middleware must skip the race
+    # entirely — no thread, no poll_decision calls, native answer now.
+    fake = _FakeState([])
+    dropped = []
+    fake.enqueue = lambda event: dropped.append(event) or False
+    _install(fake)
+    threads = []
+
+    def native(args):
+        threads.append(threading.current_thread().name)
+        return "native result"
+
+    result = loop.middleware(**_kwargs(native, {
+        "question": "Which environment?",
+        "choices": ["staging", "prod"],
+    }))
+    assert result == "native result"
+    # Deterministic regression proof: on the pre-fix code next_call ran on
+    # the spawned "conduit-push-clarify" daemon thread; with the fix it runs
+    # synchronously on the caller's thread.
+    assert threads == [threading.current_thread().name]
+    assert len(dropped) == 1, "the clarify event was attempted exactly once"
+    assert fake.enqueued == []
+    assert fake.poll_ids == [], "no phantom relay polling after a local drop"
+    assert fake.cancelled_ids == []
+
+
+def test_enqueue_exception_uses_the_native_path_without_polling():
+    # An UNEXPECTED enqueue failure (worker startup, queue/runtime error) is
+    # still just the optional push sidecar failing: the exception must not
+    # abort the tool call, and the relay never parked a decision — so the
+    # native path answers immediately, on the caller's thread, with no
+    # phantom polling and no release attempt.
+    fake = _FakeState([])
+
+    def broken_enqueue(event):
+        raise RuntimeError("worker startup failed")
+
+    fake.enqueue = broken_enqueue
+    _install(fake)
+    threads = []
+
+    def native(args):
+        threads.append(threading.current_thread().name)
+        return "native result"
+
+    result = loop.middleware(**_kwargs(native, {
+        "question": "Which environment?",
+        "choices": ["staging", "prod"],
+    }))
+    assert result == "native result"
+    assert threads == [threading.current_thread().name], "the native path must run on the caller's thread"
+    assert fake.poll_ids == [], "no phantom relay polling after an enqueue failure"
+    assert fake.cancelled_ids == []
+
+
+def test_native_path_exceptions_propagate_through_the_enqueue_guard():
+    # The guard exists only for the optional push sidecar: a failure raised
+    # by the NATIVE clarify path itself must reach the caller even when
+    # enqueue also failed — the fallback must never swallow it.
+    fake = _FakeState([])
+
+    def broken_enqueue(event):
+        raise RuntimeError("queue down")
+
+    fake.enqueue = broken_enqueue
+    _install(fake)
+
+    def broken_native(args):
+        raise RuntimeError("native clarify failed")
+
+    raised = None
+    try:
+        loop.middleware(**_kwargs(broken_native, {"question": "Q?"}))
+    except RuntimeError as error:
+        raised = error
+    assert raised is not None and "native clarify failed" in str(raised)
+    assert fake.poll_ids == []
+
+
+def test_enqueue_reports_whether_the_event_was_queued():
+    # The boundary the clarify loop depends on: True while the delivery
+    # queue has capacity, False once it is full (event dropped) or the
+    # profile lost its pairing.
+    import queue as queue_module
+
+    # Earlier tests in this file install fakes onto the shared client
+    # module; reload so the GENUINE enqueue boundary is under test.
+    importlib.reload(loop.client)
+    original_load_state = loop.client.load_state
+    original_events = loop.client._events
+    original_worker_started = loop.client._worker_started
+    loop.client._events = queue_module.Queue(maxsize=1)
+    loop.client._worker_started = True  # keep the delivery worker unspawned
+    try:
+        loop.client.load_state = lambda: {"credential": "x"}  # paired, without touching the filesystem
+        assert loop.client.enqueue({"type": "response.ready"}) is True
+        assert loop.client.enqueue({"type": "response.ready"}) is False, "a full queue must drop and report False"
+        loop.client.load_state = lambda: None  # unpaired: nothing can be delivered
+        assert loop.client.enqueue({"type": "response.ready"}) is False, "an unpaired profile must report False"
+    finally:
+        loop.client.load_state = original_load_state
+        loop.client._events = original_events
+        loop.client._worker_started = original_worker_started
 
 
 def test_relay_answer_wins_and_formats_like_the_builtin_tool():
