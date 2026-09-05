@@ -307,14 +307,21 @@ export class RelayStore {
   // deliverable decision was parked: no device received the answerable
   // card, so the next plugin poll must see deliverable:false and fall back
   // to the native clarify path instead of waiting out the poll budget.
-  // Already-answered and already-released decisions are left untouched.
+  // Released and fully completed decisions (scalar or batch) are never
+  // mutated — their outcomes are already settled.
   markPendingDecisionUndeliverable(installationId, gatewayId, id) {
     this.prune();
     const decision = this.data.pendingDecisions[id];
     if (!decision || decision.installationId !== installationId || decision.gatewayId !== gatewayId) {
       return 'unknown';
     }
-    if (decision.cancelledAt || decision.answer !== undefined) return 'skipped';
+    // pendingDecisionStatus reports 'answered' for BOTH a completed scalar
+    // decision (decision.answer set) and a completed batch (every qid
+    // locked) — one guard covers both shapes.
+    if (this.pendingDecisionStatus(installationId, gatewayId, id).status === 'answered') {
+      return 'skipped';
+    }
+    if (decision.cancelledAt) return 'skipped';
     decision.deliverable = false;
     this.save();
     return 'marked';

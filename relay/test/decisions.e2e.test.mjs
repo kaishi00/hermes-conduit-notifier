@@ -18,10 +18,13 @@ import { after, before, test } from 'node:test';
 const dir = mkdtempSync(join(tmpdir(), 'conduit-relay-e2e-'));
 const port = 19000 + Math.floor(Math.random() * 1000);
 const rejectPort = port + 500;
+const throwPort = port + 1000;
 const baseUrl = `http://127.0.0.1:${port}`;
 const rejectBaseUrl = `http://127.0.0.1:${rejectPort}`;
+const throwBaseUrl = `http://127.0.0.1:${throwPort}`;
 const dataPath = join(dir, 'relay-data.json');
 const rejectDataPath = join(dir, 'relay-data-reject.json');
+const throwDataPath = join(dir, 'relay-data-throw.json');
 // The ApnsClient constructor parses the key eagerly, so the relay needs a
 // valid ES256 key to boot — an ephemeral one is fine; sends are stubbed by
 // APNS_MODE so nothing ever reaches Apple.
@@ -78,6 +81,7 @@ async function startRelay(aPort, apnsMode, dataFile) {
 before(async () => {
   children.push(await startRelay(port, 'accept', dataPath));
   children.push(await startRelay(rejectPort, 'reject', rejectDataPath));
+  children.push(await startRelay(throwPort, 'throw', throwDataPath));
 });
 
 after(() => {
@@ -628,4 +632,163 @@ test('unknown qid on a live batch decision is a bad request, not a missing decis
   // The established meanings are untouched: the live decision still polls.
   const poll = await api(baseUrl, '/v1/decisions/conduit-push-qidcheck', { credential: gatewayCredential });
   assert.equal(poll.json.status, 'pending');
+});
+
+test('an ordinary multi-question batch is delivered with the full qid set (single structured copy)', async () => {
+  // Representative 3-question batch (~200-char texts, 4 choices each) —
+  // large enough that the OLD duplicated payload flirted with the guard.
+  const registered = await api(baseUrl, '/v1/installations', {
+    method: 'POST',
+    body: {
+      bundle_id: 'com.milim.relay',
+      device_token: '1'.repeat(64),
+      environment: 'production',
+      preferences: { enabled: true, decision_cards: true },
+    },
+  });
+  assert.equal(registered.status, 201);
+  const deviceCredential = registered.json.credential;
+  const installationId = registered.json.installation.id;
+  const pairing = await api(baseUrl, `/v1/installations/${installationId}/pairings`, { method: 'POST', credential: deviceCredential });
+  const claimed = await api(baseUrl, '/v1/pairings/claim', {
+    method: 'POST',
+    body: { pairing_code: pairing.json.pairing_code, gateway_name: 'midsize gateway' },
+  });
+  const gatewayCredential = claimed.json.credential;
+
+  const longText = 'Describe this rollout step in detail: which services are affected, the expected downtime window, '
+    + 'the rollback procedure if validation fails, and who signs off on completion for the platform team to proceed. ';
+  const event = await api(baseUrl, '/v1/events', {
+    method: 'POST',
+    credential: gatewayCredential,
+    body: {
+      type: 'input.needed',
+      event_id: 'input:midsizee2e01',
+      session_id: 'sess-midsize-e2e',
+      profile: 'default',
+      decision: {
+        kind: 'clarify',
+        request_id: 'conduit-push-midsize1',
+        question: longText,
+        questions: [0, 1, 2].map((index) => ({
+          qid: `q${index}`,
+          question: longText + `Variant ${index}.`,
+          choices: [
+            `Proceed with option ${index} now`,
+            `Delay option ${index} to the next window`,
+            `Escalate option ${index} for review`,
+          ],
+          multi_select: index === 2,
+        })),
+      },
+    },
+  });
+  assert.equal(event.status, 202);
+  assert.deepEqual(event.json, { accepted: true, delivered: true });
+
+  const poll = await api(baseUrl, '/v1/decisions/conduit-push-midsize1', { credential: gatewayCredential });
+  assert.equal(poll.json.status, 'pending');
+  assert.equal(poll.json.deliverable, true, 'a representative batch must keep its answerable card');
+  assert.deepEqual(poll.json.remaining, ['q0', 'q1', 'q2'], 'all qids preserved');
+});
+
+test('APNs thrown transport error after parking flips the decision undeliverable', async () => {
+  const registered = await api(throwBaseUrl, '/v1/installations', {
+    method: 'POST',
+    body: {
+      bundle_id: 'com.milim.relay',
+      device_token: '9'.repeat(64),
+      environment: 'production',
+      preferences: { enabled: true, decision_cards: true },
+    },
+  });
+  assert.equal(registered.status, 201);
+  const deviceCredential = registered.json.credential;
+  const installationId = registered.json.installation.id;
+  const pairing = await api(throwBaseUrl, `/v1/installations/${installationId}/pairings`, { method: 'POST', credential: deviceCredential });
+  const claimed = await api(throwBaseUrl, '/v1/pairings/claim', {
+    method: 'POST',
+    body: { pairing_code: pairing.json.pairing_code, gateway_name: 'throw gateway' },
+  });
+  const gatewayCredential = claimed.json.credential;
+
+  const event = await api(throwBaseUrl, '/v1/events', {
+    method: 'POST',
+    credential: gatewayCredential,
+    body: {
+      type: 'input.needed',
+      event_id: 'input:throw000001',
+      session_id: 'sess-throw',
+      profile: 'default',
+      decision: {
+        kind: 'clarify',
+        request_id: 'conduit-push-throw1',
+        question: 'Which environment?',
+        questions: [{ qid: 'q0', question: 'Which environment?', choices: ['staging'], multi_select: false }],
+      },
+    },
+  });
+  // A thrown send is reported as a transport failure…
+  assert.equal(event.status, 502);
+  assert.equal(event.json.error, 'apns_unreachable');
+
+  // …and the parked decision is undeliverable, exactly like a returned
+  // rejection, so the plugin promptly falls back to the native path.
+  const poll = await api(throwBaseUrl, '/v1/decisions/conduit-push-throw1', { credential: gatewayCredential });
+  assert.equal(poll.json.status, 'pending');
+  assert.equal(poll.json.deliverable, false);
+});
+
+test('release succeeds even after the poll quota is exhausted', async () => {
+  const registered = await api(baseUrl, '/v1/installations', {
+    method: 'POST',
+    body: {
+      bundle_id: 'com.milim.relay',
+      device_token: '7'.repeat(64),
+      environment: 'production',
+      preferences: { enabled: false, decision_cards: true },
+    },
+  });
+  assert.equal(registered.status, 201);
+  const deviceCredential = registered.json.credential;
+  const installationId = registered.json.installation.id;
+  const pairing = await api(baseUrl, `/v1/installations/${installationId}/pairings`, { method: 'POST', credential: deviceCredential });
+  const claimed = await api(baseUrl, '/v1/pairings/claim', {
+    method: 'POST',
+    body: { pairing_code: pairing.json.pairing_code, gateway_name: 'quota gateway' },
+  });
+  const gatewayCredential = claimed.json.credential;
+  await api(baseUrl, '/v1/events', {
+    method: 'POST',
+    credential: gatewayCredential,
+    body: {
+      type: 'input.needed',
+      event_id: 'input:quota000001',
+      session_id: 'sess-quota',
+      profile: 'default',
+      decision: {
+        kind: 'clarify',
+        request_id: 'conduit-push-quota1',
+        question: 'One?',
+        questions: [{ qid: 'q0', question: 'One?', choices: ['a'], multi_select: false }],
+      },
+    },
+  });
+
+  // Burn the poll bucket (120/60s) plus margin — many polls will now 429.
+  for (let i = 0; i < 125; i += 1) {
+    await api(baseUrl, '/v1/decisions/conduit-push-quota1', { credential: gatewayCredential });
+  }
+
+  // Release must NOT be starved by the exhausted poll quota…
+  const released = await api(baseUrl, '/v1/decisions/conduit-push-quota1', { method: 'DELETE', credential: gatewayCredential });
+  assert.equal(released.status, 200);
+  // …and the late device answer still reports decision_released.
+  const late = await api(baseUrl, '/v1/decisions/conduit-push-quota1/respond', {
+    method: 'POST',
+    credential: deviceCredential,
+    body: { question_id: 'q0', answer: 'a' },
+  });
+  assert.equal(late.status, 410);
+  assert.equal(late.json.error, 'decision_released');
 });

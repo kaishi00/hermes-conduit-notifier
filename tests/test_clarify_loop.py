@@ -543,3 +543,9 @@ def test_single_question_decision_never_cancels_when_relay_wins():
         release.set()
     assert json.loads(result)["user_response"] == "Red"
     assert fake.cancelled_ids == []
+
+def test_user_agent_derives_from_the_plugin_version():
+    # One source of truth: bumping PLUGIN_VERSION updates the relay UA
+    # automatically instead of leaving a stale hand-written constant.
+    assert loop.client.USER_AGENT == f"Hermes-Conduit-Notifier/{loop.client.PLUGIN_VERSION}"
+    assert loop.client.PLUGIN_VERSION == "0.3.0"

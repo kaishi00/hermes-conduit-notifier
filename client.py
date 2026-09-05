@@ -15,8 +15,13 @@ from typing import Any
 
 from hermes_constants import get_hermes_home
 
+from .events import PLUGIN_VERSION
+
 
 DEFAULT_RELAY_URL = "https://push.milim.dev"
+# Derived from PLUGIN_VERSION so a version bump updates the UA automatically
+# (no second hand-synchronized constant).
+USER_AGENT = f"Hermes-Conduit-Notifier/{PLUGIN_VERSION}"
 logger = logging.getLogger("hermes.plugins.conduit_push")
 _events: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=128)
 _worker_started = False
@@ -165,7 +170,7 @@ def request_json(
     data = None if payload is None else json.dumps(payload, separators=(",", ":")).encode("utf-8")
     headers = {
         "Accept": "application/json",
-        "User-Agent": "Hermes-Conduit-Notifier/0.1",
+        "User-Agent": USER_AGENT,
     }
     if data is not None:
         headers["Content-Type"] = "application/json"

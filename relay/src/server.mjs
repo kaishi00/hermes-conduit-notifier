@@ -32,14 +32,20 @@ function main() {
   store = new RelayStore(config.dataPath);
   apns = new ApnsClient(config);
   limits = new Map();
-  // Test seam: APNS_MODE=accept makes every send succeed and APNS_MODE=reject
-  // makes every send fail with a 403 — both without touching the network —
-  // so the e2e suite can exercise delivery outcomes, decision parking, and
-  // APNs-failure cleanup deterministically. Unset = real APNs.
+  // Test seam: APNS_MODE=accept makes every send succeed, reject makes it
+  // return a 403 failure, and throw makes it RAISE (a dropped connection) —
+  // all without touching the network — so the e2e suite can exercise
+  // delivery outcomes, decision parking, and both APNs-failure shapes
+  // (returned rejection and thrown transport error) deterministically.
+  // Unset = real APNs.
   if (process.env.APNS_MODE === 'accept') {
     apnsSend = async () => ({ ok: true, status: 200, reason: null });
   } else if (process.env.APNS_MODE === 'reject') {
     apnsSend = async () => ({ ok: false, status: 403, reason: 'InvalidProviderToken' });
+  } else if (process.env.APNS_MODE === 'throw') {
+    apnsSend = async () => {
+      throw new Error('connection dropped');
+    };
   } else {
     apnsSend = (deviceToken, notification) => apns.send(deviceToken, notification);
   }
@@ -199,9 +205,10 @@ async function route(request, response) {
       const notification = deliverableBase
         ? notificationFor(event, installation.preferences)
         : null;
-      const decisionInPayload = notification?.payload?.conduit?.decision;
-      const decisionDeliverable = decisionInPayload != null
-        && notification?.payload?.body?.conduit?.decision != null;
+      // The rich body copy is the canonical payload the iOS path reads, and
+      // (since the top-level copy became a routing stub) the only place the
+      // structured decision lives.
+      const decisionDeliverable = notification?.payload?.body?.conduit?.decision != null;
       store.savePendingDecision({
         id: parkedDecisionId,
         installationId: installation.id,
@@ -212,7 +219,18 @@ async function route(request, response) {
         deliverable: decisionDeliverable,
       });
       if (!notification) return sendJson(response, 202, { accepted: true, delivered: false });
-      const result = await apnsSend(installation.deviceToken, notification);
+      let result;
+      try {
+        result = await apnsSend(installation.deviceToken, notification);
+      } catch (error) {
+        // A THROWN transport failure (dropped connection, DNS, TLS) is the
+        // same outcome as a returned rejection: no device received the
+        // answerable card, so the parked decision must flip to undeliverable
+        // and the failure must still be reported upstream.
+        store.markPendingDecisionUndeliverable(installation.id, credential.gatewayId, parkedDecisionId);
+        console.error(JSON.stringify({ level: 'error', message: 'apns send threw', error: error instanceof Error ? error.message : String(error) }));
+        return sendJson(response, 502, { error: 'apns_unreachable' });
+      }
       if (result.status === 410 || result.reason === 'BadDeviceToken' || result.reason === 'Unregistered') store.deactivateInstallation(installation.id);
       if (!result.ok) {
         // The answerable card never reached the device: flip the parked
@@ -286,7 +304,9 @@ async function route(request, response) {
     // result nobody reads.
     const credential = gatewayCredential(request);
     if (!credential || !store.authenticateGateway(credential.installationId, credential.gatewayId, credential.secret)) return sendJson(response, 401, { error: 'unauthorized' });
-    enforceRateLimit(`decision-poll:${credential.gatewayId}`, 120, 60_000);
+    // Release has its OWN bucket: heavy clarify polling must never be able
+    // to starve the DELETE that cleans up when the native path wins.
+    enforceRateLimit(`decision-cancel:${credential.gatewayId}`, 30, 60_000);
     const outcome = store.cancelPendingDecision(credential.installationId, credential.gatewayId, decisionMatch[1]);
     if (outcome === 'unknown') return sendJson(response, 404, { error: 'unknown_decision' });
     return sendJson(response, 200, { status: 'cancelled' });
@@ -368,22 +388,26 @@ function notificationFor(event, preferences) {
     profile: event.profile,
     gateway: event.gateway,
   };
-  const conduit = { ...routing, ...(decision ? { decision } : {}) };
+  // body.conduit is the canonical rich payload the iOS notification path
+  // reads (expo-notifications exposes the APNs `body` value as the
+  // notification's data, so a tap can recover session/profile after a cold
+  // start — and this is where the structured decision lives). The top-level
+  // `conduit` copy stays ROUTING-ONLY for raw-APNs consumers: duplicating
+  // the structured decision there once doubled the decision's byte cost and
+  // pushed ordinary multi-question batches over the size guard.
+  const bodyConduit = { ...routing, ...(decision ? { decision } : {}) };
   const aps = {
     alert: { title, body },
     ...(preferences.completion_sound && completion ? { sound: 'default' } : {}),
     'thread-id': event.sessionId ?? 'hermes',
   };
-  // expo-notifications on iOS exposes the top-level APNs `body` value as
-  // `notification.request.content.data`. Keep the Conduit route there so
-  // a notification tap can recover its session/profile after a cold start.
-  // The top-level copy remains for clients that read the raw APNs payload.
-  let payload = { aps, body: { conduit }, conduit };
+  let payload = { aps, body: { conduit: bodyConduit }, conduit: routing };
   // APNs caps the notification payload at 4 KB and rejects anything larger.
-  // A maximal description (500 chars of multi-byte UTF-8, echoed in both
-  // conduit copies) plus the alert copy can approach that, so degrade to the
-  // routing stub instead of losing the whole notification. The headroom under
-  // the 4096 cap absorbs per-request APNs headers and JSON escaping.
+  // With a single structured copy, the guard now measures the real cost of
+  // one decision plus routing and alert copy; a payload that still exceeds
+  // the budget degrades to the routing stub instead of losing the whole
+  // notification. The headroom under the 4096 cap absorbs per-request APNs
+  // headers and JSON escaping.
   if (decision && Buffer.byteLength(JSON.stringify(payload)) > MAX_NOTIFICATION_BYTES) {
     payload = { aps, body: { conduit: routing }, conduit: routing };
   }
