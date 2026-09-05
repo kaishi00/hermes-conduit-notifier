@@ -148,23 +148,36 @@ def relay():
     finally:
         process.terminate()
         try:
-            process.wait(timeout=5)
+            # Generous for slow hosts: a still-exiting Node holding DATA_PATH
+            # open would race the tmpdir cleanup below.
+            process.wait(timeout=15)
         except subprocess.TimeoutExpired:
             process.kill()
+            process.wait(timeout=5)
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+_REAL_CLIENT_FUNCTIONS = ("load_state", "poll_decision", "enqueue", "cancel_decision", "send_now", "save_state", "state_path", "claim_pairing")
 
 
 @pytest.fixture()
 def restore_real_client():
-    """Restore the real transport on the SHARED client module.
+    """Pin the real transport onto the SHARED client module for this test.
 
     Must run per-test, not at import time: pytest imports every test module
-    during collection but runs them later, so test_clarify_loop's tests
-    install their hermetic fakes (load_state/poll_decision/enqueue) onto this
-    same module object AFTER this file was imported. Reloading here puts the
-    genuine functions back immediately before these tests run.
+    during collection but runs them later, so test_clarify_loop's tests may
+    have installed their hermetic fakes (load_state/poll_decision/enqueue/
+    cancel_decision) onto this same module object before these tests run.
+    Deliberately NOT importlib.reload: that would also wipe the fakes for
+    tests that run AFTER this file, and pytest makes no cross-file ordering
+    guarantee. Saving and restoring only this file's functions keeps both
+    orderings hermetic.
     """
+    saved = {name: getattr(loop.client, name) for name in _REAL_CLIENT_FUNCTIONS}
     importlib.reload(loop.client)
+    yield
+    for name, function in saved.items():
+        setattr(loop.client, name, function)
 
 
 @pytest.fixture()
@@ -228,8 +241,15 @@ def _run_clarify(monkeypatch, args):
     real_send_now = loop.client.send_now
 
     def capture_and_send(event):
-        events.append(event)
-        real_send_now(event)
+        # Deliver FIRST, signal second: the relay parks the pending decision
+        # before replying to /v1/events, so a returned send_now guarantees
+        # the decision is findable by the test's /respond request. Appending
+        # in finally keeps the event visible for diagnosis if the send raises
+        # (the holder error then fails the test loudly).
+        try:
+            real_send_now(event)
+        finally:
+            events.append(event)
 
     monkeypatch.setattr(loop.client, "enqueue", capture_and_send)
     release = threading.Event()
@@ -253,7 +273,7 @@ def _run_clarify(monkeypatch, args):
     worker = threading.Thread(target=run_middleware, daemon=True)
     worker.start()
     deadline = time.time() + 5
-    while not events and time.time() < deadline:
+    while not events and "error" not in holder and time.time() < deadline:
         time.sleep(0.01)
     return worker, holder, events, release
 
