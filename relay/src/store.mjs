@@ -31,7 +31,37 @@ export class RelayStore {
     if (parsed?.version !== 1 || typeof parsed.installations !== 'object') throw new Error('Unsupported relay data format.');
     this.data = { version: 1, installations: parsed.installations ?? {}, pairings: parsed.pairings ?? {}, eventIds: parsed.eventIds ?? {}, pendingDecisions: parsed.pendingDecisions ?? {} };
     this.sanitizePersistedDashboardIds();
+    this.upgradeLegacyPendingDecisions();
     this.prune();
+  }
+
+  // Bounded upgrade window: relays that ran the pre-scoping layout parked
+  // decisions under the BARE request id with no `id` field on the record.
+  // Ownership is recoverable from the record's stored installationId and
+  // gatewayId, so re-key those decisions into the scoped layout at load —
+  // an otherwise-live pre-upgrade decision stays answerable across the
+  // deploy instead of going unreachable. If the scoped target already
+  // exists (a post-upgrade re-park of the same logical id), the newer
+  // scoped record is authoritative and the legacy duplicate retires, so a
+  // legacy record can never create cross-gateway ambiguity.
+  upgradeLegacyPendingDecisions() {
+    let changed = false;
+    for (const [key, decision] of Object.entries(this.data.pendingDecisions ?? {})) {
+      if (!decision || typeof decision !== 'object') continue;
+      // New-layout records carry `id`; legacy records are keyed by the bare
+      // request id and carry only the denormalized ownership fields.
+      if (decision.id !== undefined) continue;
+      if (typeof decision.installationId !== 'string' || typeof decision.gatewayId !== 'string') continue;
+      const scopedKey = RelayStore.decisionKey(decision.installationId, decision.gatewayId, key);
+      const existing = this.data.pendingDecisions[scopedKey];
+      if (!existing) {
+        decision.id = key;
+        this.data.pendingDecisions[scopedKey] = decision;
+      }
+      delete this.data.pendingDecisions[key];
+      changed = true;
+    }
+    if (changed) this.save();
   }
 
   // Rehydrated dashboard bindings are re-canonicalized: persisted state can
@@ -295,10 +325,11 @@ export class RelayStore {
 
   savePendingDecision({ id, installationId, gatewayId, question, choices, questions, deliverable = true }) {
     this.prune();
+    // installationId/gatewayId are denormalized onto the record for the
+    // legacy-decision upgrade scan and resolveLegacyRespond's holder scan;
+    // the scoped KEY remains the ownership authority.
     this.data.pendingDecisions[RelayStore.decisionKey(installationId, gatewayId, id)] = {
       id,
-      installationId,
-      gatewayId,
       installationId,
       gatewayId,
       question: String(question ?? ''),

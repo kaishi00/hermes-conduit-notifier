@@ -1,5 +1,5 @@
 import { strict as assert } from 'node:assert';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
@@ -445,4 +445,85 @@ test('load() drops malformed persisted bindings instead of emitting them', () =>
   const event = { eventId: 'response:12345678', type: 'response.ready', sessionId: 'sess-1', profile: 'default' };
   const { payload } = notificationFor(event, { show_previews: true, completion_sound: false }, secondGateway);
   assert.equal('dashboard_id' in payload.conduit, false, 'no arbitrary identity reaches the APNs payload after reload');
+});
+
+test('pre-upgrade pending decisions survive relay restart and stay answerable', () => {
+  // A data file written by a pre-scoping relay: bare request-id key, no
+  // `id` field, ownership only in the denormalized fields.
+  const path = join(dir, `store-legacy-${Math.random().toString(36).slice(2)}.json`);
+  const legacyData = {
+    version: 1,
+    installations: {
+      'inst-legacy': { id: 'inst-legacy', active: true, gateways: {}, deviceSecretHash: 'x', preferences: {}, createdAt: '', updatedAt: '' },
+    },
+    pairings: {},
+    eventIds: {},
+    pendingDecisions: {
+      'conduit-push-preupgrade': {
+        installationId: 'inst-legacy',
+        gatewayId: 'gw-old',
+        question: 'Pre-upgrade?',
+        choices: ['Red', 'Blue'],
+        answers: Object.create(null),
+        deliverable: true,
+        createdAt: Date.now(),
+      },
+    },
+  };
+  writeFileSync(path, `${JSON.stringify(legacyData)}\n`);
+
+  // Restart/deploy: the relay loads and re-keys the legacy decision into
+  // the scoped layout using its stored ownership.
+  const relay = new RelayStore(path);
+  const rekeyed = relay.data.pendingDecisions[RelayStore.decisionKey('inst-legacy', 'gw-old', 'conduit-push-preupgrade')];
+  assert.ok(rekeyed, 'legacy decision re-keyed into scoped layout');
+  assert.equal(rekeyed.id, 'conduit-push-preupgrade');
+  assert.equal('conduit-push-preupgrade' in relay.data.pendingDecisions, false, 'bare legacy key retired');
+  // The repair is durable (written back atomically).
+  const reloaded = new RelayStore(path);
+  assert.ok(reloaded.data.pendingDecisions[RelayStore.decisionKey('inst-legacy', 'gw-old', 'conduit-push-preupgrade')]);
+
+  // Still answerable where unambiguous: legacy resolution finds exactly
+  // the one live holder, and a device answer lands on it.
+  assert.deepEqual(
+    relay.resolveLegacyRespond('inst-legacy', 'conduit-push-preupgrade'),
+    { resolution: 'unique', gatewayId: 'gw-old' },
+  );
+  assert.equal(
+    relay.respondPendingDecision('inst-legacy', 'gw-old', 'conduit-push-preupgrade', 'Red').outcome,
+    'answered',
+  );
+  // The gateway poller sees the answered state (the answer loop survives).
+  assert.equal(
+    relay.pendingDecisionStatus('inst-legacy', 'gw-old', 'conduit-push-preupgrade').status,
+    'answered',
+  );
+});
+
+test('a legacy record colliding with a newer scoped decision retires, never turns ambiguous', () => {
+  const path = join(dir, `store-legacy-coll-${Math.random().toString(36).slice(2)}.json`);
+  const relay = new RelayStore(path);
+  // Post-upgrade re-park of the same logical id (authoritative, newer).
+  relay.savePendingDecision({ id: 'conduit-push-dual', installationId: 'inst-1', gatewayId: 'gw-1', question: 'New?' });
+  // Simulate the pre-upgrade record still on disk alongside it.
+  relay.data.pendingDecisions['conduit-push-dual'] = {
+    installationId: 'inst-1',
+    gatewayId: 'gw-1',
+    question: 'Old?',
+    choices: [],
+    answers: Object.create(null),
+    deliverable: true,
+    createdAt: Date.now() - 1000,
+  };
+  relay.save();
+
+  const reloaded = new RelayStore(path);
+  const scoped = reloaded.data.pendingDecisions[RelayStore.decisionKey('inst-1', 'gw-1', 'conduit-push-dual')];
+  assert.equal(scoped.question, 'New?', 'the newer scoped record is authoritative');
+  assert.equal('conduit-push-dual' in reloaded.data.pendingDecisions, false, 'the legacy duplicate retired');
+  // Unambiguous: exactly one live holder answers.
+  assert.deepEqual(
+    reloaded.resolveLegacyRespond('inst-1', 'conduit-push-dual'),
+    { resolution: 'unique', gatewayId: 'gw-1' },
+  );
 });

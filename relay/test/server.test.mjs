@@ -400,3 +400,36 @@ test('a plugin-supplied gateway_id in the event body is dropped and can never re
   );
   assert.equal(payload.conduit.gateway_id, gatewayA.id);
 });
+
+test('no-session collapse ids are gateway-scoped: identical event ids differ per gateway', () => {
+  const event = { eventId: 'cron:run-42', type: 'background_task.finished' };
+  const a = notificationFor(event, preferences, gatewayA);
+  const b = notificationFor(event, preferences, gatewayB);
+  // Same gateway + same event → deterministic (collapsible as before).
+  assert.equal(a.collapseId, notificationFor(event, preferences, gatewayA).collapseId);
+  // Cross-gateway same event_id → different collapse ids.
+  assert.notEqual(a.collapseId, b.collapseId);
+  // Bounded and token-shaped.
+  assert.ok(Buffer.byteLength(a.collapseId) <= 64);
+  assert.match(a.collapseId, /^background_task\.finished:[0-9a-f]{16}$/);
+  // Thread differs too.
+  assert.notEqual(a.payload.aps['thread-id'], b.payload.aps['thread-id']);
+});
+
+test('gateway-less direct callers keep the legacy collapse/thread shapes', () => {
+  const withSession = notificationFor(
+    { eventId: 'response:legacy01', type: 'response.ready', sessionId: 'sess-legacy', profile: 'default' },
+    preferences,
+  );
+  assert.equal(withSession.collapseId, 'response.ready:sess-legacy');
+  assert.equal(withSession.payload.aps['thread-id'], 'sess-legacy');
+  assert.equal(withSession.threadId, 'sess-legacy');
+
+  const noSession = notificationFor(
+    { eventId: 'cron:run-42', type: 'background_task.finished' },
+    preferences,
+  );
+  assert.equal(noSession.collapseId, 'cron:run-42');
+  assert.equal(noSession.payload.aps['thread-id'], 'hermes');
+  assert.equal(noSession.threadId, 'hermes');
+});

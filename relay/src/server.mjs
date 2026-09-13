@@ -500,8 +500,11 @@ function notificationFor(event, preferences, gateway = undefined) {
     alert: { title, body },
     ...(preferences.completion_sound && completion ? { sound: 'default' } : {}),
     // Thread grouping is gateway-scoped: two dashboards both using session
-    // "default" must never share a Notification Center thread.
-    'thread-id': event.sessionId ? scopeToken(event.sessionId) : scopeToken('hermes'),
+    // "default" must never share a Notification Center thread. Gateway-less
+    // callers (direct/test use) keep the legacy raw-session shape.
+    'thread-id': gatewayId
+      ? (event.sessionId ? scopeToken(event.sessionId) : scopeToken('hermes'))
+      : (event.sessionId ?? 'hermes'),
   };
   let payload = { aps, body: { conduit: bodyConduit }, conduit: routing };
   // APNs caps the notification payload at 4 KB and rejects anything larger.
@@ -517,10 +520,22 @@ function notificationFor(event, preferences, gateway = undefined) {
   // for one conversation replace each other) without ever colliding with
   // another gateway's identical session; ~41 bytes worst case, under the
   // 64-byte APNs cap. Events without a session collapse by event id.
-  const sessionScope = event.sessionId ? scopeToken(event.sessionId) : undefined;
+  // The no-session path is scoped too: two gateways with identical
+  // event_id values (the dedupe key now differs per gateway) must not
+  // produce the same APNs collapse id. Gateway-LESS callers (direct/test
+  // use of the pure builder) keep the exact pre-scoping shapes.
+  const collapseId = gatewayId
+    ? (event.sessionId
+        ? `${event.type}:${scopeToken(event.sessionId)}`
+        : `${event.type}:${scopeToken(event.eventId)}`)
+    : (event.sessionId ? `${event.type}:${event.sessionId}` : event.eventId);
+  const threadId = gatewayId
+    ? (event.sessionId ? scopeToken(event.sessionId) : scopeToken('hermes'))
+    : (event.sessionId ?? 'hermes');
   return {
-    collapseId: sessionScope ? `${event.type}:${sessionScope}` : event.eventId,
+    collapseId,
     payload,
+    threadId,
   };
 }
 
