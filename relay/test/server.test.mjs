@@ -289,3 +289,147 @@ test('a representative multi-question batch fits the budget with a single struct
     `a representative 3-question batch must fit the guard: ${size} bytes`,
   );
 });
+
+// ── Dashboard identity in outgoing payloads (#148) ───────────────────────
+// The outgoing dashboard_id comes from the AUTHENTICATED gateway record
+// (bound at pairing/claim time) — never from the event body, which plugins
+// must not be able to author.
+
+test('notificationFor stamps dashboard_id from the authenticated gateway into both routing copies', () => {
+  const event = { eventId: 'response:12345678', type: 'response.ready', sessionId: 'sess-1', profile: 'default' };
+  const gateway = { id: 'gw-1', name: 'Mac gateway', dashboardId: '0f5c8a34-1b2d-4e5f-8a9b-0c1d2e3f4a5b' };
+  const { payload } = notificationFor(event, preferences, gateway);
+  assert.equal(payload.conduit.dashboard_id, gateway.dashboardId);
+  assert.equal(payload.body.conduit.dashboard_id, gateway.dashboardId);
+});
+
+test('notificationFor omits dashboard_id for pre-dashboard gateways and absent gateway', () => {
+  const event = { eventId: 'response:12345678', type: 'response.ready', sessionId: 'sess-1', profile: 'default' };
+  const legacy = notificationFor(event, preferences, { id: 'gw-1', name: 'legacy' });
+  assert.equal(legacy.payload.conduit.dashboard_id, undefined);
+  assert.equal(legacy.payload.body.conduit.dashboard_id, undefined);
+  const noGateway = notificationFor(event, preferences);
+  assert.equal(noGateway.payload.conduit.dashboard_id, undefined);
+  // Wire shape is unchanged for legacy payloads: no key at all, not null.
+  assert.equal('dashboard_id' in noGateway.payload.conduit, false);
+});
+
+test('validateEvent drops a plugin-supplied dashboard_id: the event body is never a trust source', () => {
+  const validated = validateEvent({
+    type: 'response.ready',
+    event_id: 'response:12345678',
+    session_id: 'sess-1',
+    dashboard_id: '99999999-9999-4999-8999-999999999999',
+  });
+  assert.equal(validated.dashboard_id, undefined);
+  // The event object carries only the whitelisted fields.
+  assert.equal('dashboard_id' in validated, false);
+});
+
+// ── Push collapse / thread isolation across dashboards (#review round 2) ─
+// One installation, two gateways bound to two dashboards, both using
+// profile "default" and session "default": their notifications must never
+// coalesce or share a Notification Center thread, while repeated events
+// from the SAME gateway/session keep existing collapse semantics and stay
+// within APNs' 64-byte collapse-id cap.
+
+const gatewayA = { id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', name: 'A', dashboardId: '0f5c8a34-1b2d-4e5f-8a9b-0c1d2e3f4a5b' };
+const gatewayB = { id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', name: 'B', dashboardId: '11111111-2222-4333-8444-555555555555' };
+
+function sessionEvent(gateway, sessionId, suffix) {
+  return {
+    event: {
+      eventId: `response:${suffix}`,
+      type: 'response.ready',
+      sessionId,
+      profile: 'default',
+    },
+    gateway,
+  };
+}
+
+test('identical sessions on different dashboards never coalesce or share a thread', () => {
+  const a = notificationFor(sessionEvent(gatewayA, 'default', 'e1').event, preferences, sessionEvent(gatewayA, 'default', 'e1').gateway);
+  const b = notificationFor(sessionEvent(gatewayB, 'default', 'e2').event, preferences, sessionEvent(gatewayB, 'default', 'e2').gateway);
+  assert.notEqual(a.collapseId, b.collapseId, 'A/default and B/default must never coalesce');
+  assert.notEqual(a.payload.aps['thread-id'], b.payload.aps['thread-id'], 'A/default and B/default must never share a thread');
+  // Both routing copies carry the authenticated gateway's discriminator.
+  assert.equal(a.payload.conduit.gateway_id, gatewayA.id);
+  assert.equal(b.payload.conduit.gateway_id, gatewayB.id);
+});
+
+test('repeated events for the SAME gateway/session keep existing collapse semantics', () => {
+  const first = notificationFor(sessionEvent(gatewayA, 'default', 'e1').event, preferences, sessionEvent(gatewayA, 'default', 'e1').gateway);
+  const repeat = notificationFor(sessionEvent(gatewayA, 'default', 'e1').event, preferences, sessionEvent(gatewayA, 'default', 'e1').gateway);
+  const sameSessionOtherType = notificationFor(
+    { eventId: 'approval:1', type: 'approval.needed', sessionId: 'default', profile: 'default' },
+    preferences,
+    gatewayA,
+  );
+  assert.equal(first.collapseId, repeat.collapseId, 'identical scope collapses identically');
+  assert.equal(first.payload.aps['thread-id'], repeat.payload.aps['thread-id']);
+  // Cross-type same-session events share the thread but not the collapse key.
+  assert.equal(first.payload.aps['thread-id'], sameSessionOtherType.payload.aps['thread-id']);
+  assert.notEqual(first.collapseId, sameSessionOtherType.collapseId);
+});
+
+test('scoped collapse ids stay within the APNs 64-byte limit', () => {
+  const longSession = 'x'.repeat(200);
+  const { collapseId } = notificationFor(
+    { eventId: 'response:1', type: 'background_task.finished', sessionId: longSession, profile: 'default' },
+    preferences,
+    gatewayA,
+  );
+  assert.ok(Buffer.byteLength(collapseId) <= 64, `collapse id must fit APNs cap, got ${Buffer.byteLength(collapseId)} bytes`);
+  assert.match(collapseId, /^background_task\.finished:[0-9a-f]{16}$/);
+});
+
+test('a plugin-supplied gateway_id in the event body is dropped and can never rebind routing', () => {
+  const validated = validateEvent({
+    type: 'response.ready',
+    event_id: 'response:gwspoof001',
+    session_id: 'sess-1',
+    gateway_id: 'evil-identity',
+  });
+  assert.equal('gateway_id' in validated, false, 'the event body is never a trust source for gateway_id');
+  // The outgoing payload's discriminator comes from the AUTHENTICATED record.
+  const { payload } = notificationFor(
+    { eventId: 'response:gwspoof001', type: 'response.ready', sessionId: 'sess-1', profile: 'default' },
+    preferences,
+    gatewayA,
+  );
+  assert.equal(payload.conduit.gateway_id, gatewayA.id);
+});
+
+test('no-session collapse ids are gateway-scoped: identical event ids differ per gateway', () => {
+  const event = { eventId: 'cron:run-42', type: 'background_task.finished' };
+  const a = notificationFor(event, preferences, gatewayA);
+  const b = notificationFor(event, preferences, gatewayB);
+  // Same gateway + same event → deterministic (collapsible as before).
+  assert.equal(a.collapseId, notificationFor(event, preferences, gatewayA).collapseId);
+  // Cross-gateway same event_id → different collapse ids.
+  assert.notEqual(a.collapseId, b.collapseId);
+  // Bounded and token-shaped.
+  assert.ok(Buffer.byteLength(a.collapseId) <= 64);
+  assert.match(a.collapseId, /^background_task\.finished:[0-9a-f]{16}$/);
+  // Thread differs too.
+  assert.notEqual(a.payload.aps['thread-id'], b.payload.aps['thread-id']);
+});
+
+test('gateway-less direct callers keep the legacy collapse/thread shapes', () => {
+  const withSession = notificationFor(
+    { eventId: 'response:legacy01', type: 'response.ready', sessionId: 'sess-legacy', profile: 'default' },
+    preferences,
+  );
+  assert.equal(withSession.collapseId, 'response.ready:sess-legacy');
+  assert.equal(withSession.payload.aps['thread-id'], 'sess-legacy');
+  assert.equal(withSession.threadId, 'sess-legacy');
+
+  const noSession = notificationFor(
+    { eventId: 'cron:run-42', type: 'background_task.finished' },
+    preferences,
+  );
+  assert.equal(noSession.collapseId, 'cron:run-42');
+  assert.equal(noSession.payload.aps['thread-id'], 'hermes');
+  assert.equal(noSession.threadId, 'hermes');
+});

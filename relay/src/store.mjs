@@ -30,7 +30,83 @@ export class RelayStore {
     const parsed = JSON.parse(readFileSync(this.path, 'utf8'));
     if (parsed?.version !== 1 || typeof parsed.installations !== 'object') throw new Error('Unsupported relay data format.');
     this.data = { version: 1, installations: parsed.installations ?? {}, pairings: parsed.pairings ?? {}, eventIds: parsed.eventIds ?? {}, pendingDecisions: parsed.pendingDecisions ?? {} };
+    this.sanitizePersistedDashboardIds();
+    this.upgradeLegacyPendingDecisions();
     this.prune();
+  }
+
+  // Bounded upgrade window: relays that ran the pre-scoping layout parked
+  // decisions under the BARE request id with no `id` field on the record.
+  // Ownership is recoverable from the record's stored installationId and
+  // gatewayId, so re-key those decisions into the scoped layout at load —
+  // an otherwise-live pre-upgrade decision stays answerable across the
+  // deploy instead of going unreachable. If the scoped target already
+  // exists (a post-upgrade re-park of the same logical id), the newer
+  // scoped record is authoritative and the legacy duplicate retires, so a
+  // legacy record can never create cross-gateway ambiguity.
+  upgradeLegacyPendingDecisions() {
+    let changed = false;
+    for (const [key, decision] of Object.entries(this.data.pendingDecisions ?? {})) {
+      if (!decision || typeof decision !== 'object') continue;
+      // New-layout records carry `id`; legacy records are keyed by the bare
+      // request id and carry only the denormalized ownership fields.
+      if (decision.id !== undefined) continue;
+      if (typeof decision.installationId !== 'string' || typeof decision.gatewayId !== 'string') continue;
+      const scopedKey = RelayStore.decisionKey(decision.installationId, decision.gatewayId, key);
+      const existing = this.data.pendingDecisions[scopedKey];
+      if (!existing) {
+        decision.id = key;
+        this.data.pendingDecisions[scopedKey] = decision;
+      }
+      delete this.data.pendingDecisions[key];
+      changed = true;
+    }
+    if (changed) this.save();
+  }
+
+  // Rehydrated dashboard bindings are re-canonicalized: persisted state can
+  // predate validation or be hand-edited, and an arbitrary persisted string
+  // must never flow into an APNs `dashboard_id`. Policy is fail-closed by
+  // DROPPING the invalid binding (the record survives unbound — the legacy
+  // shape — rather than the load rejecting and the relay refusing to boot
+  // over one corrupted field); records with no binding pass through
+  // untouched.
+  sanitizePersistedDashboardIds() {
+    let changed = false;
+    for (const pairing of Object.values(this.data.pairings ?? {})) {
+      if (!pairing || typeof pairing !== 'object') continue;
+      if (pairing.dashboardId === undefined) continue;
+      try {
+        const canonical = normalizeDashboardId(pairing.dashboardId);
+        if (pairing.dashboardId !== canonical) changed = true;
+        pairing.dashboardId = canonical;
+      } catch {
+        delete pairing.dashboardId;
+        changed = true;
+      }
+    }
+    for (const installation of Object.values(this.data.installations ?? {})) {
+      // A malformed data file must not throw merely while iterating: a null
+      // or non-object installation/gateway record has no bindings to heal.
+      if (!installation || typeof installation !== 'object' || !installation.gateways || typeof installation.gateways !== 'object') {
+        continue;
+      }
+      for (const gateway of Object.values(installation.gateways)) {
+        if (!gateway || typeof gateway !== 'object') continue;
+        if (gateway.dashboardId === undefined) continue;
+        try {
+          const canonical = normalizeDashboardId(gateway.dashboardId);
+          if (gateway.dashboardId !== canonical) changed = true;
+          gateway.dashboardId = canonical;
+        } catch {
+          delete gateway.dashboardId;
+          changed = true;
+        }
+      }
+    }
+    // Persist the repaired form through the existing atomic save so the
+    // repair is durable rather than repeated on every load.
+    if (changed) this.save();
   }
 
   save() {
@@ -90,14 +166,25 @@ export class RelayStore {
     return this.updateInstallation(id, { active: false });
   }
 
-  createPairing(installationId) {
+  // Optional dashboard binding (#148): `dashboardId` is the opaque Conduit
+  // dashboard UUID the device attached to this pairing. It is bound at
+  // PAIRING CREATION, copied onto the gateway record at claim, and from then
+  // on derived from the authenticated gateway credential on every event —
+  // the plugin can never choose or change it per event.
+  createPairing(installationId, dashboardId = undefined) {
+    // Persistence-boundary validation: the HTTP handler pre-validates, but a
+    // future internal caller must not be able to persist an arbitrary
+    // dashboard identity either.
+    const canonicalDashboardId = normalizeDashboardId(dashboardId);
     this.prune();
     for (const [codeHash, pairing] of Object.entries(this.data.pairings)) {
       if (pairing.installationId === installationId) delete this.data.pairings[codeHash];
     }
     const code = readableCode();
     const expiresAt = new Date(Date.now() + 10 * 60_000).toISOString();
-    this.data.pairings[hashSecret(normalizeCode(code))] = { installationId, expiresAt };
+    const pairing = { installationId, expiresAt };
+    if (canonicalDashboardId) pairing.dashboardId = canonicalDashboardId;
+    this.data.pairings[hashSecret(normalizeCode(code))] = pairing;
     this.save();
     return { code, expiresAt };
   }
@@ -113,10 +200,25 @@ export class RelayStore {
     const gatewayId = randomUUID();
     const gatewaySecret = randomBytes(32).toString('base64url');
     installation.gateways ??= {};
+    // Revalidate the pairing's binding before it becomes gateway identity:
+    // the pairing record may have been rehydrated from disk (hand-edited or
+    // written by another build), and a malformed persisted identity must
+    // never become gateway identity. Invalid bindings are dropped — the
+    // gateway claims unbound (legacy shape) rather than inheriting garbage.
+    let claimedDashboardId;
+    try {
+      claimedDashboardId = normalizeDashboardId(pairing.dashboardId);
+    } catch {
+      claimedDashboardId = undefined;
+    }
     installation.gateways[gatewayId] = {
       id: gatewayId,
       name: String(gatewayName || 'Hermes gateway').slice(0, 80),
       secretHash: hashSecret(gatewaySecret),
+      // The pairing's validated dashboard binding (when one exists)
+      // becomes the gateway's persistent identity: every push this gateway
+      // triggers is stamped with it for the lifetime of the credential.
+      ...(claimedDashboardId ? { dashboardId: claimedDashboardId } : {}),
       createdAt: new Date().toISOString(),
     };
     installation.updatedAt = new Date().toISOString();
@@ -152,7 +254,12 @@ export class RelayStore {
 
   acceptEvent(installationId, eventId, gatewayId) {
     this.prune();
-    const key = `${installationId}:${eventId}`;
+    // Gateway-scoped ownership (#review round 2): two gateways on one
+    // installation legitimately emit identical event_id values (identical
+    // dashboards both use profile/session "default" and deterministic
+    // plugin event ids). Deduping installation-wide let one dashboard's
+    // event swallow another's.
+    const key = `${installationId}:${gatewayId}:${eventId}`;
     if (this.data.eventIds[key]) return false;
     this.data.eventIds[key] = Date.now();
     // Last-seen is stamped on every accepted event, version-carrying or not,
@@ -179,13 +286,50 @@ export class RelayStore {
   // first-answer-wins per qid, and the decision completes only when every
   // qid is locked, so background batch clarifies preserve the whole batch.
 
+  // Gateway-scoped pending-decision identity: every parked decision lives
+  // at `installationId:gatewayId:requestId`, so same-id decisions from two
+  // gateways (identical dashboards minting identical plugin request ids)
+  // coexist and can never mutate each other. Operations resolve EXACTLY
+  // this key — the legacy bare-requestId layout (pre-scoping relays) is not
+  // migrated: parked decisions live at most 2h, so a relay upgrade lets the
+  // old entries age out rather than carrying ambiguous ownership forward.
+  static decisionKey(installationId, gatewayId, id) {
+    return `${installationId}:${gatewayId}:${id}`;
+  }
+
+  /// Legacy resolution for a device answer that carries NO gateway
+  /// discriminator (pre-discriminator clients), given every holder of this
+  /// request id on the installation:
+  ///   - exactly one LIVE (answerable) decision → 'unique' (answer it);
+  ///   - more than one live → 'ambiguous' (fail closed, never guess);
+  ///   - zero decisions at all → 'unknown';
+  ///   - only settled ones → their settled outcome ('released' wins over
+  ///     'already_answered' because a release must clear the device's card).
+  resolveLegacyRespond(installationId, id) {
+    this.prune();
+    const holders = [];
+    for (const decision of Object.values(this.data.pendingDecisions)) {
+      if (decision.installationId === installationId && decision.id === id) {
+        holders.push(decision.gatewayId);
+      }
+    }
+    if (holders.length === 0) return { resolution: 'unknown' };
+    const live = holders.filter((gatewayId) =>
+      this.pendingDecisionStatus(installationId, gatewayId, id).status === 'pending');
+    if (live.length === 1) return { resolution: 'unique', gatewayId: live[0] };
+    if (live.length > 1) return { resolution: 'ambiguous' };
+    const anyReleased = holders.some((gatewayId) =>
+      Boolean(this.data.pendingDecisions[RelayStore.decisionKey(installationId, gatewayId, id)]?.cancelledAt));
+    return anyReleased ? { resolution: 'released' } : { resolution: 'already_answered' };
+  }
+
   savePendingDecision({ id, installationId, gatewayId, question, choices, questions, deliverable = true }) {
     this.prune();
-    // uuid4-minted ids make collisions vanishingly unlikely, but never let a
-    // same-id write from another installation clobber a parked decision.
-    const existing = this.data.pendingDecisions[id];
-    if (existing && existing.installationId !== installationId) return;
-    this.data.pendingDecisions[id] = {
+    // installationId/gatewayId are denormalized onto the record for the
+    // legacy-decision upgrade scan and resolveLegacyRespond's holder scan;
+    // the scoped KEY remains the ownership authority.
+    this.data.pendingDecisions[RelayStore.decisionKey(installationId, gatewayId, id)] = {
+      id,
       installationId,
       gatewayId,
       question: String(question ?? ''),
@@ -210,10 +354,10 @@ export class RelayStore {
     this.save();
   }
 
-  respondPendingDecision(installationId, id, answer, questionId = '') {
+  respondPendingDecision(installationId, gatewayId, id, answer, questionId = '') {
     this.prune();
-    const decision = this.data.pendingDecisions[id];
-    if (!decision || decision.installationId !== installationId) return { outcome: 'unknown' };
+    const decision = this.data.pendingDecisions[RelayStore.decisionKey(installationId, gatewayId, id)];
+    if (!decision) return { outcome: 'unknown' };
     // Distinct device-facing outcomes: a CANCELLED decision (the original
     // gateway path won) releases the whole pushed card (410
     // decision_released), while an already-answered decision stays a 409
@@ -252,8 +396,8 @@ export class RelayStore {
 
   pendingDecisionStatus(installationId, gatewayId, id) {
     this.prune();
-    const decision = this.data.pendingDecisions[id];
-    if (!decision || decision.installationId !== installationId || decision.gatewayId !== gatewayId) {
+    const decision = this.data.pendingDecisions[RelayStore.decisionKey(installationId, gatewayId, id)];
+    if (!decision) {
       return { status: 'unknown' };
     }
     if (decision.cancelledAt) {
@@ -291,8 +435,8 @@ export class RelayStore {
   // already-completed decision reports it instead of double-marking.
   cancelPendingDecision(installationId, gatewayId, id) {
     this.prune();
-    const decision = this.data.pendingDecisions[id];
-    if (!decision || decision.installationId !== installationId || decision.gatewayId !== gatewayId) {
+    const decision = this.data.pendingDecisions[RelayStore.decisionKey(installationId, gatewayId, id)];
+    if (!decision) {
       return 'unknown';
     }
     if (this.pendingDecisionStatus(installationId, gatewayId, id).status === 'answered') {
@@ -311,8 +455,8 @@ export class RelayStore {
   // mutated — their outcomes are already settled.
   markPendingDecisionUndeliverable(installationId, gatewayId, id) {
     this.prune();
-    const decision = this.data.pendingDecisions[id];
-    if (!decision || decision.installationId !== installationId || decision.gatewayId !== gatewayId) {
+    const decision = this.data.pendingDecisions[RelayStore.decisionKey(installationId, gatewayId, id)];
+    if (!decision) {
       return 'unknown';
     }
     // pendingDecisionStatus reports 'answered' for BOTH a completed scalar
@@ -396,6 +540,21 @@ export function sanitizeBatchQuestions(value) {
     seenQids.add(qid);
   }
   return questions;
+}
+
+// Canonical Conduit dashboard UUID form (lowercase). The nil UUID is
+// rejected: it would bind pushes to an identity no dashboard can hold.
+const DASHBOARD_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const NIL_DASHBOARD_ID = '00000000-0000-0000-0000-000000000000';
+
+export function normalizeDashboardId(value) {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string' || !DASHBOARD_ID_PATTERN.test(value)) {
+    throw new Error('invalid_dashboard_id');
+  }
+  const canonical = value.toLowerCase();
+  if (canonical === NIL_DASHBOARD_ID) throw new Error('invalid_dashboard_id');
+  return canonical;
 }
 
 function publicInstallation(installation) {

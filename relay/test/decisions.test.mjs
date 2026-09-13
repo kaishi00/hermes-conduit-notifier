@@ -1,9 +1,10 @@
 import { strict as assert } from 'node:assert';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
 
+import { notificationFor } from '../src/server.mjs';
 import { RelayStore } from '../src/store.mjs';
 
 const dir = mkdtempSync(join(tmpdir(), 'conduit-relay-decisions-'));
@@ -13,13 +14,66 @@ function store() {
   return new RelayStore(join(dir, `store-${Math.random().toString(36).slice(2)}.json`));
 }
 
-test('a same-id write from another installation never clobbers a parked decision', () => {
+test('same-id decisions from two gateways coexist and never mutate each other', () => {
+  // Gateway-scoped ownership: two gateways on one installation (identical
+  // dashboards minting identical plugin request ids) park, answer, cancel,
+  // and fail delivery INDEPENDENTLY.
   const relay = store();
-  relay.savePendingDecision({ id: 'conduit-push-x', installationId: 'inst-1', gatewayId: 'gw-1', question: 'q' });
-  relay.savePendingDecision({ id: 'conduit-push-x', installationId: 'inst-2', gatewayId: 'gw-2', question: 'evil' });
-  assert.equal(relay.pendingDecisionStatus('inst-1', 'gw-1', 'conduit-push-x').status, 'pending');
-  // The original installation can still answer its own decision.
-  assert.equal(relay.respondPendingDecision('inst-1', 'conduit-push-x', 'Red').outcome, 'answered');
+  const shared = 'conduit-push-x';
+  relay.savePendingDecision({ id: shared, installationId: 'inst-1', gatewayId: 'gw-A', question: 'A?' });
+  relay.savePendingDecision({ id: shared, installationId: 'inst-1', gatewayId: 'gw-B', question: 'B?' });
+  relay.savePendingDecision({ id: shared, installationId: 'inst-2', gatewayId: 'gw-C', question: 'C?' });
+
+  // All three coexist; B's save never overwrote A's question.
+  assert.equal(relay.pendingDecisionStatus('inst-1', 'gw-A', shared).status, 'pending');
+  assert.equal(relay.pendingDecisionStatus('inst-1', 'gw-B', shared).status, 'pending');
+  assert.equal(relay.pendingDecisionStatus('inst-2', 'gw-C', shared).status, 'pending');
+
+  // Answering A modifies only A.
+  assert.equal(relay.respondPendingDecision('inst-1', 'gw-A', shared, 'Red').outcome, 'answered');
+  assert.equal(relay.pendingDecisionStatus('inst-1', 'gw-A', shared).status, 'answered');
+  assert.equal(relay.pendingDecisionStatus('inst-1', 'gw-B', shared).status, 'pending', "B's same-id decision stays pending");
+  assert.equal(relay.pendingDecisionStatus('inst-2', 'gw-C', shared).status, 'pending', "another installation's same-id decision stays pending");
+  assert.equal(relay.respondPendingDecision('inst-1', 'gw-B', shared, 'Blue').outcome, 'answered', 'B answers its OWN decision independently');
+  assert.equal(relay.pendingDecisionStatus('inst-2', 'gw-C', shared).status, 'pending');
+
+  // Cancel A cannot mutate B; marking A undeliverable cannot either.
+  assert.equal(relay.cancelPendingDecision('inst-1', 'gw-B', shared), 'answered', 'cancelling an answered decision reports it');
+  assert.equal(relay.cancelPendingDecision('inst-1', 'gw-A', shared), 'answered');
+  assert.equal(relay.cancelPendingDecision('inst-1', 'gw-B', shared), 'answered');
+  assert.equal(relay.markPendingDecisionUndeliverable('inst-1', 'gw-A', shared), 'skipped', 'completed decisions are never re-marked');
+  assert.equal(relay.pendingDecisionStatus('inst-1', 'gw-B', shared).status, 'answered');
+
+  // Cross-gateway respond with a WRONG gateway id resolves nothing.
+  assert.equal(relay.respondPendingDecision('inst-1', 'gw-nope', shared, 'x').outcome, 'unknown');
+
+  // Legacy resolution: both holders settled (answered) → already_answered,
+  // never a guess between gateways.
+  assert.deepEqual(relay.resolveLegacyRespond('inst-1', shared), { resolution: 'already_answered' });
+  // Fresh same-id decisions on both gateways: two live → ambiguous.
+  relay.savePendingDecision({ id: shared, installationId: 'inst-1', gatewayId: 'gw-A', question: 'A2?' });
+  relay.savePendingDecision({ id: shared, installationId: 'inst-1', gatewayId: 'gw-B', question: 'B2?' });
+  assert.deepEqual(relay.resolveLegacyRespond('inst-1', shared), { resolution: 'ambiguous' });
+  // Cancelling one leaves exactly one live holder → unique, and one
+  // released holder means a settled legacy answer reports released.
+  assert.equal(relay.cancelPendingDecision('inst-1', 'gw-A', shared), 'cancelled');
+  assert.deepEqual(relay.resolveLegacyRespond('inst-1', shared), { resolution: 'unique', gatewayId: 'gw-B' });
+  assert.equal(relay.cancelPendingDecision('inst-1', 'gw-B', shared), 'cancelled');
+  assert.deepEqual(relay.resolveLegacyRespond('inst-1', shared), { resolution: 'released' });
+  // Unknown id → unknown.
+  assert.deepEqual(relay.resolveLegacyRespond('inst-1', 'conduit-push-never'), { resolution: 'unknown' });
+});
+
+test('event dedupe is gateway-scoped: same event id from different gateways both accepted', () => {
+  const relay = store();
+  assert.equal(relay.acceptEvent('inst-1', 'approval:42', 'gw-A'), true);
+  // Same gateway + same id → duplicate.
+  assert.equal(relay.acceptEvent('inst-1', 'approval:42', 'gw-A'), false);
+  // Different gateway, identical id → accepted: one dashboard's event must
+  // never swallow another's.
+  assert.equal(relay.acceptEvent('inst-1', 'approval:42', 'gw-B'), true);
+  // Third installation, same gateway-id and event id → accepted.
+  assert.equal(relay.acceptEvent('inst-2', 'approval:42', 'gw-A'), true);
 });
 
 test('pending decision lifecycle: save → pending → answered → already', () => {
@@ -51,7 +105,7 @@ test('pending decision lifecycle: save → pending → answered → already', ()
     { status: 'pending', deliverable: false },
   );
   // Legacy records without the flag default to deliverable.
-  relay.data.pendingDecisions['conduit-push-hidden'].deliverable = undefined;
+  relay.data.pendingDecisions[RelayStore.decisionKey('inst-1', 'gw-1', 'conduit-push-hidden')].deliverable = undefined;
   assert.deepEqual(
     relay.pendingDecisionStatus('inst-1', 'gw-1', 'conduit-push-hidden'),
     { status: 'pending', deliverable: true },
@@ -61,14 +115,14 @@ test('pending decision lifecycle: save → pending → answered → already', ()
   assert.deepEqual(relay.pendingDecisionStatus('inst-1', 'gw-2', 'conduit-push-abc123'), { status: 'unknown' });
   assert.deepEqual(relay.pendingDecisionStatus('inst-1', 'gw-1', 'nope'), { status: 'unknown' });
 
-  assert.equal(relay.respondPendingDecision('inst-1', 'conduit-push-abc123', 'Red').outcome, 'answered');
+  assert.equal(relay.respondPendingDecision('inst-1', 'gw-1', 'conduit-push-abc123', 'Red').outcome, 'answered');
   assert.deepEqual(
     relay.pendingDecisionStatus('inst-1', 'gw-1', 'conduit-push-abc123'),
     { status: 'answered', answer: 'Red' },
   );
   // A device from another installation cannot answer or re-answer.
-  assert.equal(relay.respondPendingDecision('inst-2', 'conduit-push-abc123', 'Blue').outcome, 'unknown');
-  assert.equal(relay.respondPendingDecision('inst-1', 'conduit-push-abc123', 'Blue').outcome, 'already_answered');
+  assert.equal(relay.respondPendingDecision('inst-2', 'gw-2', 'conduit-push-abc123', 'Blue').outcome, 'unknown');
+  assert.equal(relay.respondPendingDecision('inst-1', 'gw-1', 'conduit-push-abc123', 'Blue').outcome, 'already_answered');
   assert.equal(relay.pendingDecisionStatus('inst-1', 'gw-1', 'conduit-push-abc123').answer, 'Red');
 });
 
@@ -92,16 +146,16 @@ test('batch decisions accumulate per-question answers and complete on the last q
   assert.deepEqual(pending.remaining, ['q0', 'q1']);
 
   // First answer locks ONLY its qid; the sibling stays open.
-  const first = relay.respondPendingDecision('inst-1', 'conduit-push-batch1', 'staging', 'q0');
+  const first = relay.respondPendingDecision('inst-1', 'gw-1', 'conduit-push-batch1', 'staging', 'q0');
   assert.equal(first.outcome, 'answered');
   assert.deepEqual(first.remaining, ['q1']);
   assert.equal(relay.pendingDecisionStatus('inst-1', 'gw-1', 'conduit-push-batch1').remaining.join(','), 'q1');
 
   // A concurrent device locking the same qid loses (first-answer-wins per qid).
-  assert.equal(relay.respondPendingDecision('inst-1', 'conduit-push-batch1', 'prod', 'q0').outcome, 'already_answered');
+  assert.equal(relay.respondPendingDecision('inst-1', 'gw-1', 'conduit-push-batch1', 'prod', 'q0').outcome, 'already_answered');
 
   // The final answer completes the batch with every locked answer.
-  const last = relay.respondPendingDecision('inst-1', 'conduit-push-batch1', '["unit"]', 'q1');
+  const last = relay.respondPendingDecision('inst-1', 'gw-1', 'conduit-push-batch1', '["unit"]', 'q1');
   assert.equal(last.outcome, 'answered');
   assert.deepEqual(last.remaining, []);
   const done = relay.pendingDecisionStatus('inst-1', 'gw-1', 'conduit-push-batch1');
@@ -121,9 +175,9 @@ test('an unknown qid and cross-installation answers never resolve a batch', () =
     question: 'One?',
     questions: [{ qid: 'q0', question: 'One?', choices: ['a'], multi_select: false }],
   });
-  assert.equal(relay.respondPendingDecision('inst-1', 'conduit-push-batch2', 'a', 'q9').outcome, 'invalid_question',
+  assert.equal(relay.respondPendingDecision('inst-1', 'gw-1', 'conduit-push-batch2', 'a', 'q9').outcome, 'invalid_question',
     'an unknown qid on a live decision is a malformed request, not a missing decision');
-  assert.equal(relay.respondPendingDecision('inst-2', 'conduit-push-batch2', 'a', 'q0').outcome, 'unknown');
+  assert.equal(relay.respondPendingDecision('inst-2', 'gw-2', 'conduit-push-batch2', 'a', 'q0').outcome, 'unknown');
   assert.equal(relay.pendingDecisionStatus('inst-1', 'gw-1', 'conduit-push-batch2').status, 'pending');
 });
 
@@ -139,7 +193,7 @@ test('a legacy whole-decision answer on a batch counts as the first question onl
       { qid: 'q1', question: 'Which tests?', choices: ['unit'], multi_select: false },
     ],
   });
-  const result = relay.respondPendingDecision('inst-1', 'conduit-push-batch3', 'staging');
+  const result = relay.respondPendingDecision('inst-1', 'gw-1', 'conduit-push-batch3', 'staging');
   assert.equal(result.outcome, 'answered');
   assert.deepEqual(result.remaining, ['q1'], 'A pre-batch device answers the collapsed copy; the batch stays open');
   assert.equal(relay.pendingDecisionStatus('inst-1', 'gw-1', 'conduit-push-batch3').status, 'pending');
@@ -159,7 +213,7 @@ test('releasing a decision rejects late device answers', () => {
   assert.deepEqual(relay.pendingDecisionStatus('inst-1', 'gw-1', 'conduit-push-batch4'), { status: 'unknown' });
   // A late device answer reports RELEASED, not merely qid-locked: Conduit
   // tears the whole pushed card down instead of settling one question.
-  assert.equal(relay.respondPendingDecision('inst-1', 'conduit-push-batch4', 'a', 'q0').outcome, 'released');
+  assert.equal(relay.respondPendingDecision('inst-1', 'gw-1', 'conduit-push-batch4', 'a', 'q0').outcome, 'released');
   // Cancelling an already-completed decision is reported, not an error.
   relay.savePendingDecision({
     id: 'conduit-push-batch5',
@@ -168,7 +222,7 @@ test('releasing a decision rejects late device answers', () => {
     question: 'One?',
     questions: [{ qid: 'q0', question: 'One?', choices: ['a'], multi_select: false }],
   });
-  relay.respondPendingDecision('inst-1', 'conduit-push-batch5', 'a', 'q0');
+  relay.respondPendingDecision('inst-1', 'gw-1', 'conduit-push-batch5', 'a', 'q0');
   assert.equal(relay.cancelPendingDecision('inst-1', 'gw-1', 'conduit-push-batch5'), 'answered');
   assert.equal(relay.cancelPendingDecision('inst-1', 'gw-1', 'nope'), 'unknown');
 });
@@ -188,7 +242,7 @@ test('batch question lists are sanitized and bounded at intake', () => {
       { qid: 'q7', question: 'x'.repeat(600), choices: Array.from({ length: 20 }, (_, i) => `c${i}`) },
     ],
   });
-  const stored = relay.data.pendingDecisions['conduit-push-batch6'].questions;
+  const stored = relay.data.pendingDecisions[RelayStore.decisionKey('inst-1', 'gw-1', 'conduit-push-batch6')].questions;
   assert.equal(stored.length, 2);
   assert.equal(stored[0].multi_select, true, 'wire shape keeps snake_case multi_select');
   assert.equal(stored[1].question.length, 500);
@@ -204,7 +258,7 @@ test('pending decisions survive a reload and expire past the TTL', () => {
   assert.equal(reloaded.pendingDecisionStatus('inst-1', 'gw-1', 'conduit-push-old').status, 'pending');
 
   // Age the record past the 2h TTL directly, then let any access prune it.
-  reloaded.data.pendingDecisions['conduit-push-old'].createdAt = Date.now() - 3 * 60 * 60_000;
+  reloaded.data.pendingDecisions[RelayStore.decisionKey('inst-1', 'gw-1', 'conduit-push-old')].createdAt = Date.now() - 3 * 60 * 60_000;
   assert.deepEqual(reloaded.pendingDecisionStatus('inst-1', 'gw-1', 'conduit-push-old'), { status: 'unknown' });
 });
 
@@ -264,4 +318,212 @@ test('credential checks accept exact secrets and reject wrong or corrupt digests
   // path that guards the timingSafeEqual unequal-length throw.
   relay.data.installations[installation.id].deviceSecretHash = 'deadbeef';
   assert.equal(relay.authenticate(installation.id, deviceSecret, 'device'), null, 'corrupt stored digest rejects without throwing');
+});
+
+// ── Dashboard identity binding (#148) ────────────────────────────────────
+// A pairing may carry the opaque Conduit dashboard UUID the device intends
+// it for. The binding is captured at pairing creation, becomes the gateway
+// record's persistent identity at claim, and survives store reloads. The
+// plugin (and anything else) can never change it per event.
+
+test('pairing dashboard binding: created with dashboard_id, bound at claim, persisted', () => {
+  const relay = store();
+  const dashboardId = '0f5c8a34-1b2d-4e5f-8a9b-0c1d2e3f4a5b';
+  const { installation, deviceSecret } = relay.createInstallation({
+    bundleId: 'com.milim.relay',
+    deviceToken: 'a'.repeat(64),
+    environment: 'production',
+  });
+
+  const pairing = relay.createPairing(installation.id, dashboardId);
+  const claimed = relay.claimPairing(pairing.code, 'bound gateway');
+  assert.ok(claimed, 'claim succeeds');
+  const gateway = relay.data.installations[installation.id].gateways[claimed.gatewayId];
+  assert.equal(gateway.dashboardId, dashboardId, 'the pairing binding becomes the gateway identity');
+
+  // The binding survives a store reload: it is durable pairing state, not
+  // per-event metadata.
+  const reloaded = new RelayStore(relay.path);
+  const persisted = reloaded.data.installations[installation.id].gateways[claimed.gatewayId];
+  assert.equal(persisted.dashboardId, dashboardId);
+
+  // The device credential still works for re-pairing other dashboards.
+  const second = relay.createPairing(installation.id, '11111111-2222-4333-8444-555555555555');
+  const secondClaim = relay.claimPairing(second.code, 'other gateway');
+  const secondGateway = relay.data.installations[installation.id].gateways[secondClaim.gatewayId];
+  assert.equal(secondGateway.dashboardId, '11111111-2222-4333-8444-555555555555');
+  assert.ok(relay.authenticate(installation.id, deviceSecret, 'device'), 'device credential unaffected');
+
+  // One installation supports several paired gateways, each bound to its
+  // own dashboard.
+  assert.equal(Object.keys(relay.data.installations[installation.id].gateways).length, 2);
+});
+
+test('pairing without dashboard_id keeps the pre-dashboard gateway shape', () => {
+  const relay = store();
+  const { installation } = relay.createInstallation({
+    bundleId: 'com.milim.relay',
+    deviceToken: 'a'.repeat(64),
+    environment: 'production',
+  });
+  const pairing = relay.createPairing(installation.id);
+  const claimed = relay.claimPairing(pairing.code, 'legacy gateway');
+  const gateway = relay.data.installations[installation.id].gateways[claimed.gatewayId];
+  assert.equal(gateway.dashboardId, undefined, 'no binding, no dashboard identity');
+});
+
+test('createPairing validates dashboard_id at the persistence boundary', () => {
+  const relay = store();
+  const { installation } = relay.createInstallation({
+    bundleId: 'com.milim.relay',
+    deviceToken: 'a'.repeat(64),
+    environment: 'production',
+  });
+
+  const persistedPairings = () => Object.values(relay.data.pairings);
+
+  // Canonicalization: uppercase input persists the LOWERCASE canonical form.
+  relay.createPairing(installation.id, '0F5C8A34-1B2D-4E5F-8A9B-0C1D2E3F4A5B');
+  assert.equal(persistedPairings()[0].dashboardId, '0f5c8a34-1b2d-4e5f-8a9b-0c1d2e3f4a5b');
+
+  // A legacy (unbound) pairing truly has NO dashboardId on the persisted
+  // record — not undefined-by-convention, the key is absent.
+  relay.createPairing(installation.id);
+  const unbound = persistedPairings().find((pairing) => !pairing.dashboardId);
+  assert.ok(unbound, 'unbound pairing persisted');
+  assert.equal('dashboardId' in unbound, false, 'legacy pairing carries no dashboardId key at all');
+
+  // Malformed and nil UUIDs are rejected, never persisted.
+  const before = persistedPairings().length;
+  assert.throws(() => relay.createPairing(installation.id, 'not-a-uuid'), /invalid_dashboard_id/);
+  assert.throws(() => relay.createPairing(installation.id, '00000000-0000-0000-0000-000000000000'), /invalid_dashboard_id/);
+  assert.throws(() => relay.createPairing(installation.id, 12345), /invalid_dashboard_id/);
+  assert.equal(persistedPairings().length, before, 'rejected inputs persist nothing');
+});
+
+test('load() drops malformed persisted bindings instead of emitting them', () => {
+  const relay = store();
+  const { installation } = relay.createInstallation({
+    bundleId: 'com.milim.relay',
+    deviceToken: 'a'.repeat(64),
+    environment: 'production',
+  });
+
+  // Persist a validly-bound pairing and a validly-bound gateway, then
+  // corrupt BOTH bindings on disk the way a hand edit or foreign build
+  // might — bypassing createPairing/claimPairing entirely.
+  const pairing = relay.createPairing(installation.id, '0f5c8a34-1b2d-4e5f-8a9b-0c1d2e3f4a5b');
+  const claimed = relay.claimPairing(pairing.code, 'corrupted gateway');
+  const gateway = relay.data.installations[installation.id].gateways[claimed.gatewayId];
+  gateway.dashboardId = 'not-a-uuid';
+  for (const pairingRecord of Object.values(relay.data.pairings)) {
+    pairingRecord.dashboardId = 12345;
+  }
+  relay.save();
+
+  // Reload: the malformed bindings are DROPPED (fail closed), the records
+  // survive unbound in the legacy shape, and valid bindings canonicalize.
+  const reloaded = new RelayStore(relay.path);
+  const reloadedGateway = reloaded.data.installations[installation.id].gateways[claimed.gatewayId];
+  assert.equal('dashboardId' in reloadedGateway, false, 'malformed gateway binding dropped, not emitted');
+  for (const pairingRecord of Object.values(reloaded.data.pairings)) {
+    assert.equal('dashboardId' in pairingRecord, false, 'malformed pairing binding dropped, not emitted');
+  }
+
+  // A dropped binding can never reach a gateway: claiming the reloaded
+  // (now unbound) pairing yields an unbound gateway.
+  const unboundPairing = reloaded.createPairing(installation.id, '0F5C8A34-1B2D-4E5F-8A9B-0C1D2E3F4A5B');
+  // Corrupt the freshly-canonicalized value too, to prove claimPairing's
+  // own revalidation (defense in depth against load + claim racing a write).
+  for (const pairingRecord of Object.values(reloaded.data.pairings)) {
+    pairingRecord.dashboardId = 'EVIL-IDENTITY';
+  }
+  const secondClaim = reloaded.claimPairing(unboundPairing.code, 'post-reload gateway');
+  const secondGateway = reloaded.data.installations[installation.id].gateways[secondClaim.gatewayId];
+  assert.equal('dashboardId' in secondGateway, false, 'a malformed persisted pairing never becomes gateway identity');
+  // notificationFor from this gateway emits no dashboard_id on the wire.
+  const event = { eventId: 'response:12345678', type: 'response.ready', sessionId: 'sess-1', profile: 'default' };
+  const { payload } = notificationFor(event, { show_previews: true, completion_sound: false }, secondGateway);
+  assert.equal('dashboard_id' in payload.conduit, false, 'no arbitrary identity reaches the APNs payload after reload');
+});
+
+test('pre-upgrade pending decisions survive relay restart and stay answerable', () => {
+  // A data file written by a pre-scoping relay: bare request-id key, no
+  // `id` field, ownership only in the denormalized fields.
+  const path = join(dir, `store-legacy-${Math.random().toString(36).slice(2)}.json`);
+  const legacyData = {
+    version: 1,
+    installations: {
+      'inst-legacy': { id: 'inst-legacy', active: true, gateways: {}, deviceSecretHash: 'x', preferences: {}, createdAt: '', updatedAt: '' },
+    },
+    pairings: {},
+    eventIds: {},
+    pendingDecisions: {
+      'conduit-push-preupgrade': {
+        installationId: 'inst-legacy',
+        gatewayId: 'gw-old',
+        question: 'Pre-upgrade?',
+        choices: ['Red', 'Blue'],
+        answers: Object.create(null),
+        deliverable: true,
+        createdAt: Date.now(),
+      },
+    },
+  };
+  writeFileSync(path, `${JSON.stringify(legacyData)}\n`);
+
+  // Restart/deploy: the relay loads and re-keys the legacy decision into
+  // the scoped layout using its stored ownership.
+  const relay = new RelayStore(path);
+  const rekeyed = relay.data.pendingDecisions[RelayStore.decisionKey('inst-legacy', 'gw-old', 'conduit-push-preupgrade')];
+  assert.ok(rekeyed, 'legacy decision re-keyed into scoped layout');
+  assert.equal(rekeyed.id, 'conduit-push-preupgrade');
+  assert.equal('conduit-push-preupgrade' in relay.data.pendingDecisions, false, 'bare legacy key retired');
+  // The repair is durable (written back atomically).
+  const reloaded = new RelayStore(path);
+  assert.ok(reloaded.data.pendingDecisions[RelayStore.decisionKey('inst-legacy', 'gw-old', 'conduit-push-preupgrade')]);
+
+  // Still answerable where unambiguous: legacy resolution finds exactly
+  // the one live holder, and a device answer lands on it.
+  assert.deepEqual(
+    relay.resolveLegacyRespond('inst-legacy', 'conduit-push-preupgrade'),
+    { resolution: 'unique', gatewayId: 'gw-old' },
+  );
+  assert.equal(
+    relay.respondPendingDecision('inst-legacy', 'gw-old', 'conduit-push-preupgrade', 'Red').outcome,
+    'answered',
+  );
+  // The gateway poller sees the answered state (the answer loop survives).
+  assert.equal(
+    relay.pendingDecisionStatus('inst-legacy', 'gw-old', 'conduit-push-preupgrade').status,
+    'answered',
+  );
+});
+
+test('a legacy record colliding with a newer scoped decision retires, never turns ambiguous', () => {
+  const path = join(dir, `store-legacy-coll-${Math.random().toString(36).slice(2)}.json`);
+  const relay = new RelayStore(path);
+  // Post-upgrade re-park of the same logical id (authoritative, newer).
+  relay.savePendingDecision({ id: 'conduit-push-dual', installationId: 'inst-1', gatewayId: 'gw-1', question: 'New?' });
+  // Simulate the pre-upgrade record still on disk alongside it.
+  relay.data.pendingDecisions['conduit-push-dual'] = {
+    installationId: 'inst-1',
+    gatewayId: 'gw-1',
+    question: 'Old?',
+    choices: [],
+    answers: Object.create(null),
+    deliverable: true,
+    createdAt: Date.now() - 1000,
+  };
+  relay.save();
+
+  const reloaded = new RelayStore(path);
+  const scoped = reloaded.data.pendingDecisions[RelayStore.decisionKey('inst-1', 'gw-1', 'conduit-push-dual')];
+  assert.equal(scoped.question, 'New?', 'the newer scoped record is authoritative');
+  assert.equal('conduit-push-dual' in reloaded.data.pendingDecisions, false, 'the legacy duplicate retired');
+  // Unambiguous: exactly one live holder answers.
+  assert.deepEqual(
+    reloaded.resolveLegacyRespond('inst-1', 'conduit-push-dual'),
+    { resolution: 'unique', gatewayId: 'gw-1' },
+  );
 });
