@@ -48,8 +48,10 @@ function main() {
       // Test seam: when set, every "delivered" notification is recorded so
       // e2e tests can assert on the REAL outgoing APNs payload.
       if (capturePath) {
+        // 0o600: the capture contains the device token and full payload, so
+        // the test artifact must never be world-readable regardless of umask.
         appendFileSync(capturePath, `${JSON.stringify({ deviceToken, notification })}
-`);
+`, { mode: 0o600 });
       }
       return { ok: true, status: 200, reason: null };
     };
@@ -418,7 +420,10 @@ function gatewayCredential(request) {
 // dashboardId — bound at pairing/claim time — is the only source of the
 // outgoing dashboard identity; the event body is never consulted (#148).
 function notificationFor(event, preferences, gateway = undefined) {
-  const dashboardId = gateway?.dashboardId || undefined;
+  // load()/claimPairing guarantee a valid canonical binding or its
+  // absence; nullish coalescing keeps an empty-string persisted value from
+  // being silently conflated with "unbound" once validation guarantees hold.
+  const dashboardId = gateway?.dashboardId ?? undefined;
   const generic = genericCopy(event.type);
   const title = preferences.show_previews && event.title ? event.title : generic.title;
   // Keep previews private by default, while still making notifications from

@@ -30,7 +30,36 @@ export class RelayStore {
     const parsed = JSON.parse(readFileSync(this.path, 'utf8'));
     if (parsed?.version !== 1 || typeof parsed.installations !== 'object') throw new Error('Unsupported relay data format.');
     this.data = { version: 1, installations: parsed.installations ?? {}, pairings: parsed.pairings ?? {}, eventIds: parsed.eventIds ?? {}, pendingDecisions: parsed.pendingDecisions ?? {} };
+    this.sanitizePersistedDashboardIds();
     this.prune();
+  }
+
+  // Rehydrated dashboard bindings are re-canonicalized: persisted state can
+  // predate validation or be hand-edited, and an arbitrary persisted string
+  // must never flow into an APNs `dashboard_id`. Policy is fail-closed by
+  // DROPPING the invalid binding (the record survives unbound — the legacy
+  // shape — rather than the load rejecting and the relay refusing to boot
+  // over one corrupted field); records with no binding pass through
+  // untouched.
+  sanitizePersistedDashboardIds() {
+    for (const pairing of Object.values(this.data.pairings)) {
+      if (pairing.dashboardId === undefined) continue;
+      try {
+        pairing.dashboardId = normalizeDashboardId(pairing.dashboardId);
+      } catch {
+        delete pairing.dashboardId;
+      }
+    }
+    for (const installation of Object.values(this.data.installations)) {
+      for (const gateway of Object.values(installation.gateways ?? {})) {
+        if (gateway.dashboardId === undefined) continue;
+        try {
+          gateway.dashboardId = normalizeDashboardId(gateway.dashboardId);
+        } catch {
+          delete gateway.dashboardId;
+        }
+      }
+    }
   }
 
   save() {
@@ -124,14 +153,25 @@ export class RelayStore {
     const gatewayId = randomUUID();
     const gatewaySecret = randomBytes(32).toString('base64url');
     installation.gateways ??= {};
+    // Revalidate the pairing's binding before it becomes gateway identity:
+    // the pairing record may have been rehydrated from disk (hand-edited or
+    // written by another build), and a malformed persisted identity must
+    // never become gateway identity. Invalid bindings are dropped — the
+    // gateway claims unbound (legacy shape) rather than inheriting garbage.
+    let claimedDashboardId;
+    try {
+      claimedDashboardId = normalizeDashboardId(pairing.dashboardId);
+    } catch {
+      claimedDashboardId = undefined;
+    }
     installation.gateways[gatewayId] = {
       id: gatewayId,
       name: String(gatewayName || 'Hermes gateway').slice(0, 80),
       secretHash: hashSecret(gatewaySecret),
-      // The pairing's dashboard binding (when the device provided one)
+      // The pairing's validated dashboard binding (when one exists)
       // becomes the gateway's persistent identity: every push this gateway
       // triggers is stamped with it for the lifetime of the credential.
-      ...(pairing.dashboardId ? { dashboardId: pairing.dashboardId } : {}),
+      ...(claimedDashboardId ? { dashboardId: claimedDashboardId } : {}),
       createdAt: new Date().toISOString(),
     };
     installation.updatedAt = new Date().toISOString();

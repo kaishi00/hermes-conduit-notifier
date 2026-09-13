@@ -975,6 +975,44 @@ test('pairing dashboard binding end to end: bound at creation, visible in meta, 
   assert.equal(after.dashboard_id, dashboardId, 'event-body dashboard_id never rebinds the gateway');
 });
 
+test('a literal null or non-object JSON body never 500s the pairing route', async () => {
+  const registered = await api(baseUrl, '/v1/installations', {
+    method: 'POST',
+    body: {
+      bundle_id: 'com.milim.relay',
+      device_token: '7'.repeat(64),
+      environment: 'production',
+    },
+  });
+  assert.equal(registered.status, 201);
+  const installationId = registered.json.installation.id;
+  const deviceCredential = registered.json.credential;
+
+  // The regression: readJson normalized literal null (and arrays) to {},
+  // but before that hardening a null body crashed field access with a 500.
+  // A null pairing body carries no dashboard_id → unbound pairing → 201.
+  for (const rawBody of ['null', '[1,2]']) {
+    const response = await fetch(`${baseUrl}/v1/installations/${installationId}/pairings`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${deviceCredential}`,
+        'content-type': 'application/json',
+      },
+      body: rawBody,
+    });
+    assert.equal(response.status, 201, `body ${rawBody} must pair unbound, not 500`);
+  }
+
+  // Same hardening on the unauthenticated registration route: null body is
+  // a field validation failure (400), never a 500.
+  const nullRegistration = await fetch(`${baseUrl}/v1/installations`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: 'null',
+  });
+  assert.equal(nullRegistration.status, 400);
+});
+
 test('pairing rejects a nil dashboard UUID and treats explicit null as absent', async () => {
   const registered = await api(baseUrl, '/v1/installations', {
     method: 'POST',

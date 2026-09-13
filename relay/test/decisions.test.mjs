@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
 
+import { notificationFor } from '../src/server.mjs';
 import { RelayStore } from '../src/store.mjs';
 
 const dir = mkdtempSync(join(tmpdir(), 'conduit-relay-decisions-'));
@@ -326,13 +327,69 @@ test('createPairing validates dashboard_id at the persistence boundary', () => {
     environment: 'production',
   });
 
-  // Canonicalization: uppercase input persists lowercase canonical form.
-  const canonical = relay.createPairing(installation.id, '0F5C8A34-1B2D-4E5F-8A9B-0C1D2E3F4A5B');
-  assert.ok(canonical, 'canonicalizable UUID accepted');
-  // Absent and null stay legacy-unbound.
-  assert.equal(relay.createPairing(installation.id).dashboardId ?? undefined, undefined);
+  const persistedPairings = () => Object.values(relay.data.pairings);
+
+  // Canonicalization: uppercase input persists the LOWERCASE canonical form.
+  relay.createPairing(installation.id, '0F5C8A34-1B2D-4E5F-8A9B-0C1D2E3F4A5B');
+  assert.equal(persistedPairings()[0].dashboardId, '0f5c8a34-1b2d-4e5f-8a9b-0c1d2e3f4a5b');
+
+  // A legacy (unbound) pairing truly has NO dashboardId on the persisted
+  // record — not undefined-by-convention, the key is absent.
+  relay.createPairing(installation.id);
+  const unbound = persistedPairings().find((pairing) => !pairing.dashboardId);
+  assert.ok(unbound, 'unbound pairing persisted');
+  assert.equal('dashboardId' in unbound, false, 'legacy pairing carries no dashboardId key at all');
+
   // Malformed and nil UUIDs are rejected, never persisted.
+  const before = persistedPairings().length;
   assert.throws(() => relay.createPairing(installation.id, 'not-a-uuid'), /invalid_dashboard_id/);
   assert.throws(() => relay.createPairing(installation.id, '00000000-0000-0000-0000-000000000000'), /invalid_dashboard_id/);
   assert.throws(() => relay.createPairing(installation.id, 12345), /invalid_dashboard_id/);
+  assert.equal(persistedPairings().length, before, 'rejected inputs persist nothing');
+});
+
+test('load() drops malformed persisted bindings instead of emitting them', () => {
+  const relay = store();
+  const { installation } = relay.createInstallation({
+    bundleId: 'com.milim.relay',
+    deviceToken: 'a'.repeat(64),
+    environment: 'production',
+  });
+
+  // Persist a validly-bound pairing and a validly-bound gateway, then
+  // corrupt BOTH bindings on disk the way a hand edit or foreign build
+  // might — bypassing createPairing/claimPairing entirely.
+  const pairing = relay.createPairing(installation.id, '0f5c8a34-1b2d-4e5f-8a9b-0c1d2e3f4a5b');
+  const claimed = relay.claimPairing(pairing.code, 'corrupted gateway');
+  const gateway = relay.data.installations[installation.id].gateways[claimed.gatewayId];
+  gateway.dashboardId = 'not-a-uuid';
+  for (const pairingRecord of Object.values(relay.data.pairings)) {
+    pairingRecord.dashboardId = 12345;
+  }
+  relay.save();
+
+  // Reload: the malformed bindings are DROPPED (fail closed), the records
+  // survive unbound in the legacy shape, and valid bindings canonicalize.
+  const reloaded = new RelayStore(relay.path);
+  const reloadedGateway = reloaded.data.installations[installation.id].gateways[claimed.gatewayId];
+  assert.equal('dashboardId' in reloadedGateway, false, 'malformed gateway binding dropped, not emitted');
+  for (const pairingRecord of Object.values(reloaded.data.pairings)) {
+    assert.equal('dashboardId' in pairingRecord, false, 'malformed pairing binding dropped, not emitted');
+  }
+
+  // A dropped binding can never reach a gateway: claiming the reloaded
+  // (now unbound) pairing yields an unbound gateway.
+  const unboundPairing = reloaded.createPairing(installation.id, '0F5C8A34-1B2D-4E5F-8A9B-0C1D2E3F4A5B');
+  // Corrupt the freshly-canonicalized value too, to prove claimPairing's
+  // own revalidation (defense in depth against load + claim racing a write).
+  for (const pairingRecord of Object.values(reloaded.data.pairings)) {
+    pairingRecord.dashboardId = 'EVIL-IDENTITY';
+  }
+  const secondClaim = reloaded.claimPairing(unboundPairing.code, 'post-reload gateway');
+  const secondGateway = reloaded.data.installations[installation.id].gateways[secondClaim.gatewayId];
+  assert.equal('dashboardId' in secondGateway, false, 'a malformed persisted pairing never becomes gateway identity');
+  // notificationFor from this gateway emits no dashboard_id on the wire.
+  const event = { eventId: 'response:12345678', type: 'response.ready', sessionId: 'sess-1', profile: 'default' };
+  const { payload } = notificationFor(event, { show_previews: true, completion_sound: false }, secondGateway);
+  assert.equal('dashboard_id' in payload.conduit, false, 'no arbitrary identity reaches the APNs payload after reload');
 });
