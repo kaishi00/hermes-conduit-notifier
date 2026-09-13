@@ -988,10 +988,12 @@ test('a literal null or non-object JSON body never 500s the pairing route', asyn
   const installationId = registered.json.installation.id;
   const deviceCredential = registered.json.credential;
 
-  // The regression: readJson normalized literal null (and arrays) to {},
-  // but before that hardening a null body crashed field access with a 500.
-  // A null pairing body carries no dashboard_id → unbound pairing → 201.
-  for (const rawBody of ['null', '[1,2]']) {
+  // Deliberate contract: ONLY a JSON object is a valid body. A top-level
+  // null/array/scalar parses cleanly but is a client mistake — rejected as
+  // 400 invalid_json (the pre-hardening bug was a 500 TypeError). Never
+  // normalized to {} (which would turn a malformed request into a
+  // successful no-field operation).
+  for (const rawBody of ['null', '[1,2]', '"text"', '42']) {
     const response = await fetch(`${baseUrl}/v1/installations/${installationId}/pairings`, {
       method: 'POST',
       headers: {
@@ -1000,17 +1002,27 @@ test('a literal null or non-object JSON body never 500s the pairing route', asyn
       },
       body: rawBody,
     });
-    assert.equal(response.status, 201, `body ${rawBody} must pair unbound, not 500`);
+    assert.equal(response.status, 400, `body ${rawBody} must be invalid_json`);
+    assert.equal((await response.json()).error, 'invalid_json');
   }
 
-  // Same hardening on the unauthenticated registration route: null body is
-  // a field validation failure (400), never a 500.
+  // Same strictness on the unauthenticated registration route.
   const nullRegistration = await fetch(`${baseUrl}/v1/installations`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: 'null',
   });
   assert.equal(nullRegistration.status, 400);
+
+  // An EMPTY body stays legal where routes tolerate it (reads as {}).
+  const emptyBody = await fetch(`${baseUrl}/v1/installations/${installationId}/pairings`, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${deviceCredential}`,
+      'content-type': 'application/json',
+    },
+  });
+  assert.equal(emptyBody.status, 201, 'empty body pairs unbound');
 });
 
 test('pairing rejects a nil dashboard UUID and treats explicit null as absent', async () => {
@@ -1137,5 +1149,187 @@ test('plugin-supplied dashboard_id can never affect the REAL APNs payload; null 
     );
   } finally {
     captureRelay.kill();
+  }
+});
+
+test('full collision matrix: one installation, two gateways, identical dashboards', async () => {
+  // GA -> dashboard A, GB -> dashboard B. Both dashboards use
+  // profile=default, session=default, the SAME event_id and the SAME
+  // plugin-minted request_id. Nothing may swallow, answer, cancel, or
+  // rebind anything across the gateway boundary.
+  const capturePath = join(dir, `capture-matrix-${Date.now()}.jsonl`);
+  const matrixRelay = await startRelay(port + 3000, 'accept', join(dir, 'relay-data-matrix.json'), {
+    APNS_CAPTURE_PATH: capturePath,
+  });
+  const matrixBase = `http://127.0.0.1:${port + 3000}`;
+  try {
+    const registered = await api(matrixBase, '/v1/installations', {
+      method: 'POST',
+      body: { bundle_id: 'com.milim.relay', device_token: '9'.repeat(64), environment: 'production' },
+    });
+    assert.equal(registered.status, 201);
+    const installationId = registered.json.installation.id;
+    const deviceCredential = registered.json.credential;
+
+    const dashboardA = '0f5c8a34-1b2d-4e5f-8a9b-0c1d2e3f4a5b';
+    const dashboardB = '11111111-2222-4333-8444-555555555555';
+    const pairA = await api(matrixBase, `/v1/installations/${installationId}/pairings`, {
+      method: 'POST', credential: deviceCredential, body: { dashboard_id: dashboardA },
+    });
+    const claimA = await api(matrixBase, '/v1/pairings/claim', {
+      method: 'POST', body: { pairing_code: pairA.json.pairing_code, gateway_name: 'GA' },
+    });
+    const pairB = await api(matrixBase, `/v1/installations/${installationId}/pairings`, {
+      method: 'POST', credential: deviceCredential, body: { dashboard_id: dashboardB },
+    });
+    const claimB = await api(matrixBase, '/v1/pairings/claim', {
+      method: 'POST', body: { pairing_code: pairB.json.pairing_code, gateway_name: 'GB' },
+    });
+    const credA = claimA.json.credential;
+    const credB = claimB.json.credential;
+
+    // Identical plugin.hello ids: both gateways recorded (scoped dedupe).
+    const helloBody = {
+      type: 'plugin.hello', event_id: 'hello:collisio001', plugin_version: '0.3.0',
+      plugin_capabilities: ['approval-decisions', 'clarify-loop', 'version-reporting'],
+    };
+    assert.equal((await api(matrixBase, '/v1/events', { method: 'POST', credential: credA, body: helloBody })).status, 202);
+    assert.equal((await api(matrixBase, '/v1/events', { method: 'POST', credential: credB, body: helloBody })).status, 202);
+    const meta = await api(matrixBase, '/v1/meta', { credential: deviceCredential });
+    const gaId = meta.json.gateways.find((g) => g.name === 'GA').id;
+    const gbId = meta.json.gateways.find((g) => g.name === 'GB').id;
+    assert.equal(meta.json.gateways.find((g) => g.name === 'GA').dashboard_id, dashboardA);
+    assert.equal(meta.json.gateways.find((g) => g.name === 'GB').dashboard_id, dashboardB);
+
+    // Identical event_id values: BOTH accepted, neither dedupes the other.
+    const evt = { type: 'response.ready', event_id: 'response:sameevent1', session_id: 'default', profile: 'default' };
+    assert.deepEqual(
+      (await api(matrixBase, '/v1/events', { method: 'POST', credential: credA, body: evt })).json,
+      { accepted: true, delivered: true },
+    );
+    assert.deepEqual(
+      (await api(matrixBase, '/v1/events', { method: 'POST', credential: credB, body: evt })).json,
+      { accepted: true, delivered: true },
+      "GB's identical event_id must NOT dedupe against GA's",
+    );
+
+    // Identical plugin-minted request ids: BOTH clarify decisions park.
+    const clarifyBody = {
+      type: 'input.needed',
+      event_id: 'input:sameevent1',
+      session_id: 'default',
+      profile: 'default',
+      decision: { kind: 'clarify', request_id: 'conduit-push-same-request', question: 'Which?', choices: ['Red', 'Blue'] },
+    };
+    assert.equal((await api(matrixBase, '/v1/events', { method: 'POST', credential: credA, body: clarifyBody })).status, 202);
+    assert.equal((await api(matrixBase, '/v1/events', { method: 'POST', credential: credB, body: clarifyBody })).status, 202);
+
+    const respond = (gatewayId, body) => api(matrixBase, '/v1/decisions/conduit-push-same-request/respond', {
+      method: 'POST', credential: deviceCredential, body: { gateway_id: gatewayId, ...body },
+    });
+
+    // A answers with the discriminator: only A's decision locks.
+    const answerA = await respond(gaId, { answer: 'Red' });
+    assert.equal(answerA.status, 200);
+    assert.deepEqual(answerA.json, { status: 'answered' });
+
+    // B polls with its OWN credential: still pending — A's answer never leaked.
+    const pollB = await api(matrixBase, '/v1/decisions/conduit-push-same-request', { credential: credB });
+    assert.equal(pollB.json.status, 'pending', "A's answer must not resolve B's same-id decision");
+    // A's poller sees its own answered state.
+    const pollA = await api(matrixBase, '/v1/decisions/conduit-push-same-request', { credential: credA });
+    assert.equal(pollA.json.status, 'answered');
+
+    // B answers with the discriminator: only B locks.
+    assert.equal((await respond(gbId, { answer: 'Blue' })).status, 200);
+    assert.equal((await api(matrixBase, '/v1/decisions/conduit-push-same-request', { credential: credB })).json.status, 'answered');
+
+    // A plugin-supplied dashboard_id/gateway_id can never rebind routing:
+    // GA sends an event LYING about both. The payload discriminators must
+    // still be GA's authenticated identities (asserted on the capture below).
+    const lyingEvent = {
+      type: 'input.needed',
+      event_id: 'input:sameevent3',
+      session_id: 'default',
+      profile: 'default',
+      dashboard_id: dashboardB,
+      gateway_id: gbId,
+      decision: { kind: 'clarify', request_id: 'conduit-push-same-three', question: 'Lie?', choices: ['x'] },
+    };
+    assert.equal((await api(matrixBase, '/v1/events', { method: 'POST', credential: credA, body: lyingEvent })).status, 202);
+
+    // Legacy respond WITHOUT a discriminator:
+    // Ambiguous while two gateways hold the same live id → FAIL CLOSED.
+    const freshClarify = {
+      ...clarifyBody,
+      event_id: 'input:sameevent2',
+      decision: { ...clarifyBody.decision, request_id: 'conduit-push-same-two' },
+    };
+    await api(matrixBase, '/v1/events', { method: 'POST', credential: credA, body: freshClarify });
+    await api(matrixBase, '/v1/events', { method: 'POST', credential: credB, body: freshClarify });
+    const legacyAmbiguous = await api(matrixBase, '/v1/decisions/conduit-push-same-two/respond', {
+      method: 'POST', credential: deviceCredential, body: { answer: 'Guess' },
+    });
+    assert.equal(legacyAmbiguous.status, 400);
+    assert.equal(legacyAmbiguous.json.error, 'ambiguous_decision');
+
+    // Cancel A's fresh decision via GA's OWN credential; B's stays pending.
+    assert.equal((await api(matrixBase, '/v1/decisions/conduit-push-same-two', { method: 'DELETE', credential: credA })).status, 200);
+    assert.equal(
+      (await api(matrixBase, '/v1/decisions/conduit-push-same-two', { credential: credB })).json.status,
+      'pending',
+      'cancelling A cannot mutate B',
+    );
+
+    // Legacy respond now resolves UNAMBIGUOUSLY (exactly one live holder).
+    const legacyUnambiguous = await api(matrixBase, '/v1/decisions/conduit-push-same-two/respond', {
+      method: 'POST', credential: deviceCredential, body: { answer: 'Only-B-left' },
+    });
+    assert.equal(legacyUnambiguous.status, 200);
+    assert.equal(
+      (await api(matrixBase, '/v1/decisions/conduit-push-same-two', { credential: credB })).json.status,
+      'answered',
+    );
+
+    // Zero matches keeps the existing unknown behavior.
+    assert.equal(
+      (await api(matrixBase, '/v1/decisions/conduit-push-never-parked/respond', {
+        method: 'POST', credential: deviceCredential, body: { answer: 'x' },
+      })).status,
+      404,
+    );
+
+    // Captured APNs payloads: scope isolation + the trust boundary.
+    const lines = readFileSync(capturePath, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+    const decisionEntries = lines.filter((entry) => {
+      const decision = entry.notification.payload.body?.conduit?.decision;
+      return decision && decision.request_id === 'conduit-push-same-request';
+    });
+    assert.equal(decisionEntries.length, 2, 'both same-id decisions were delivered');
+    const [firstEntry, secondEntry] = decisionEntries;
+    assert.notEqual(firstEntry.notification.collapseId, secondEntry.notification.collapseId, 'A/default and B/default never coalesce');
+    assert.notEqual(
+      firstEntry.notification.payload.aps['thread-id'],
+      secondEntry.notification.payload.aps['thread-id'],
+      'threads never merge across dashboards',
+    );
+    assert.ok(Buffer.byteLength(firstEntry.notification.collapseId) <= 64, 'collapse id fits the APNs cap');
+    // The discriminators come from the AUTHENTICATED gateways — GA's lying
+    // event (dashboard_id=B, gateway_id=GB in the body) must NOT rebind.
+    // Each entry's discriminators pair with its OWN authenticated gateway:
+    // the entry carrying GA's gateway_id carries dashboard A, and GB's
+    // carries dashboard B (random UUIDs — never assume sort order).
+    const byGateway = Object.fromEntries(
+      decisionEntries.map((entry) => [entry.notification.payload.conduit.gateway_id, entry.notification.payload.conduit.dashboard_id]));
+    assert.deepEqual(byGateway, { [gaId]: dashboardA, [gbId]: dashboardB });
+    // GA's lying decision entry: routing carries GA's identity, never GB's.
+    const lyingEntry = lines.find((entry) => {
+      const decision = entry.notification.payload.body?.conduit?.decision;
+      return decision && decision.request_id === 'conduit-push-same-three';
+    });
+    assert.equal(lyingEntry.notification.payload.conduit.gateway_id, gaId, 'event-body gateway_id is dropped');
+    assert.equal(lyingEntry.notification.payload.conduit.dashboard_id, dashboardA, 'event-body dashboard_id is dropped');
+  } finally {
+    matrixRelay.kill();
   }
 });

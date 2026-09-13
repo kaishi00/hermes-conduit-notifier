@@ -1,5 +1,6 @@
+import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
-import { appendFileSync, readFileSync, realpathSync } from 'node:fs';
+import { appendFileSync, chmodSync, readFileSync, realpathSync } from 'node:fs';
 import { isIP } from 'node:net';
 import { pathToFileURL } from 'node:url';
 import { ApnsClient } from './apns.mjs';
@@ -52,6 +53,9 @@ function main() {
         // the test artifact must never be world-readable regardless of umask.
         appendFileSync(capturePath, `${JSON.stringify({ deviceToken, notification })}
 `, { mode: 0o600 });
+        // mode-on-create does not tighten an EXISTING file; chmod every
+        // append so the capture stays private regardless of umask.
+        chmodSync(capturePath, 0o600);
       }
       return { ok: true, status: 200, reason: null };
     };
@@ -319,7 +323,31 @@ async function route(request, response) {
     // (first-answer-wins per qid, other qids stay open); its absence keeps
     // the legacy whole-decision shape for single-question cards.
     const questionId = cleanText(body.question_id, 40);
-    const result = store.respondPendingDecision(installation.id, id, answer, questionId);
+    // gateway_id is the relay decision-routing discriminator: two gateways
+    // on one installation can park SAME-id decisions, so the device names
+    // the gateway it is answering (the id comes from the push's routing
+    // payload, which the relay stamped from the AUTHENTICATED gateway —
+    // never from the plugin event body). Omitting it takes the legacy
+    // resolution path for pre-discriminator clients.
+    let result;
+    const responseGatewayId = cleanIdentifier(body.gateway_id, 80);
+    if (responseGatewayId) {
+      result = store.respondPendingDecision(installation.id, responseGatewayId, id, answer, questionId);
+    } else {
+      // Legacy: resolve {installation, request id} without a discriminator.
+      const legacy = store.resolveLegacyRespond(installation.id, id);
+      if (legacy.resolution === 'unique') {
+        result = store.respondPendingDecision(installation.id, legacy.gatewayId, id, answer, questionId);
+      } else if (legacy.resolution === 'ambiguous') {
+        return sendJson(response, 400, { error: 'ambiguous_decision' });
+      } else if (legacy.resolution === 'released') {
+        return sendJson(response, 410, { error: 'decision_released' });
+      } else if (legacy.resolution === 'already_answered') {
+        return sendJson(response, 409, { error: 'already_answered' });
+      } else {
+        result = { outcome: 'unknown' };
+      }
+    }
     if (result.outcome === 'unknown') return sendJson(response, 404, { error: 'unknown_decision' });
     // Distinct from 404: the decision is live but the sender addressed a qid
     // it does not contain — the request is malformed, not the decision gone.
@@ -424,6 +452,17 @@ function notificationFor(event, preferences, gateway = undefined) {
   // absence; nullish coalescing keeps an empty-string persisted value from
   // being silently conflated with "unbound" once validation guarantees hold.
   const dashboardId = gateway?.dashboardId ?? undefined;
+  // The authenticated gateway's relay id — the discriminator a device
+  // echoes back when answering a parked decision. Derived from the
+  // authenticated gateway record, never from the plugin event body.
+  const gatewayId = gateway?.id || undefined;
+  // Notification-scope token: same gateway + seed → same token (existing
+  // collapse semantics retained); a DIFFERENT gateway with an identical
+  // session id → a different token, so identical dashboards never coalesce
+  // each other's notifications. Hashed and bounded — a raw concatenation of
+  // type + UUID + session could exceed APNs' 64-byte collapse-id cap.
+  const scopeToken = (seed) =>
+    gatewayId ? createHash('sha256').update(`${gatewayId}:${seed}`).digest('hex').slice(0, 16) : undefined;
   const generic = genericCopy(event.type);
   const title = preferences.show_previews && event.title ? event.title : generic.title;
   // Keep previews private by default, while still making notifications from
@@ -446,6 +485,7 @@ function notificationFor(event, preferences, gateway = undefined) {
     session_id: event.sessionId,
     profile: event.profile,
     gateway: event.gateway,
+    ...(gatewayId ? { gateway_id: gatewayId } : {}),
     ...(dashboardId ? { dashboard_id: dashboardId } : {}),
   };
   // body.conduit is the canonical rich payload the iOS notification path
@@ -459,7 +499,9 @@ function notificationFor(event, preferences, gateway = undefined) {
   const aps = {
     alert: { title, body },
     ...(preferences.completion_sound && completion ? { sound: 'default' } : {}),
-    'thread-id': event.sessionId ?? 'hermes',
+    // Thread grouping is gateway-scoped: two dashboards both using session
+    // "default" must never share a Notification Center thread.
+    'thread-id': event.sessionId ? scopeToken(event.sessionId) : scopeToken('hermes'),
   };
   let payload = { aps, body: { conduit: bodyConduit }, conduit: routing };
   // APNs caps the notification payload at 4 KB and rejects anything larger.
@@ -471,8 +513,13 @@ function notificationFor(event, preferences, gateway = undefined) {
   if (decision && Buffer.byteLength(JSON.stringify(payload)) > MAX_NOTIFICATION_BYTES) {
     payload = { aps, body: { conduit: routing }, conduit: routing };
   }
+  // Collapse key: same gateway + session + type collapses (repeat alerts
+  // for one conversation replace each other) without ever colliding with
+  // another gateway's identical session; ~41 bytes worst case, under the
+  // 64-byte APNs cap. Events without a session collapse by event id.
+  const sessionScope = event.sessionId ? scopeToken(event.sessionId) : undefined;
   return {
-    collapseId: event.sessionId ? `${event.type}:${event.sessionId}` : event.eventId,
+    collapseId: sessionScope ? `${event.type}:${sessionScope}` : event.eventId,
     payload,
   };
 }
@@ -596,13 +643,19 @@ function readJson(request) {
       if (data.length > 32_768) { reject(httpError(413, 'payload_too_large')); request.destroy(); }
     });
     request.on('end', () => {
-      try {
-        const parsed = data ? JSON.parse(data) : {};
-        // A literal `null` (or any non-object) body parses cleanly but has
-        // no fields; every route reads fields, so normalize to {} rather
-        // than 500 on a TypeError downstream.
-        resolve(parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {});
-      } catch { reject(httpError(400, 'invalid_json')); }
+      if (!data) { resolve({}); return; }
+      let parsed;
+      try { parsed = JSON.parse(data); } catch { reject(httpError(400, 'invalid_json')); return; }
+      // Deliberate contract: every route reads named fields, so ONLY a JSON
+      // object is a valid body. A top-level null/array/string/number is a
+      // client mistake — rejected as invalid_json rather than silently
+      // normalized to {} (which would turn a malformed request into a
+      // successful no-field operation).
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        reject(httpError(400, 'invalid_json'));
+        return;
+      }
+      resolve(parsed);
     });
     request.on('error', reject);
   });

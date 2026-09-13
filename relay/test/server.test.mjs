@@ -325,3 +325,78 @@ test('validateEvent drops a plugin-supplied dashboard_id: the event body is neve
   // The event object carries only the whitelisted fields.
   assert.equal('dashboard_id' in validated, false);
 });
+
+// ── Push collapse / thread isolation across dashboards (#review round 2) ─
+// One installation, two gateways bound to two dashboards, both using
+// profile "default" and session "default": their notifications must never
+// coalesce or share a Notification Center thread, while repeated events
+// from the SAME gateway/session keep existing collapse semantics and stay
+// within APNs' 64-byte collapse-id cap.
+
+const gatewayA = { id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', name: 'A', dashboardId: '0f5c8a34-1b2d-4e5f-8a9b-0c1d2e3f4a5b' };
+const gatewayB = { id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', name: 'B', dashboardId: '11111111-2222-4333-8444-555555555555' };
+
+function sessionEvent(gateway, sessionId, suffix) {
+  return {
+    event: {
+      eventId: `response:${suffix}`,
+      type: 'response.ready',
+      sessionId,
+      profile: 'default',
+    },
+    gateway,
+  };
+}
+
+test('identical sessions on different dashboards never coalesce or share a thread', () => {
+  const a = notificationFor(sessionEvent(gatewayA, 'default', 'e1').event, preferences, sessionEvent(gatewayA, 'default', 'e1').gateway);
+  const b = notificationFor(sessionEvent(gatewayB, 'default', 'e2').event, preferences, sessionEvent(gatewayB, 'default', 'e2').gateway);
+  assert.notEqual(a.collapseId, b.collapseId, 'A/default and B/default must never coalesce');
+  assert.notEqual(a.payload.aps['thread-id'], b.payload.aps['thread-id'], 'A/default and B/default must never share a thread');
+  // Both routing copies carry the authenticated gateway's discriminator.
+  assert.equal(a.payload.conduit.gateway_id, gatewayA.id);
+  assert.equal(b.payload.conduit.gateway_id, gatewayB.id);
+});
+
+test('repeated events for the SAME gateway/session keep existing collapse semantics', () => {
+  const first = notificationFor(sessionEvent(gatewayA, 'default', 'e1').event, preferences, sessionEvent(gatewayA, 'default', 'e1').gateway);
+  const repeat = notificationFor(sessionEvent(gatewayA, 'default', 'e1').event, preferences, sessionEvent(gatewayA, 'default', 'e1').gateway);
+  const sameSessionOtherType = notificationFor(
+    { eventId: 'approval:1', type: 'approval.needed', sessionId: 'default', profile: 'default' },
+    preferences,
+    gatewayA,
+  );
+  assert.equal(first.collapseId, repeat.collapseId, 'identical scope collapses identically');
+  assert.equal(first.payload.aps['thread-id'], repeat.payload.aps['thread-id']);
+  // Cross-type same-session events share the thread but not the collapse key.
+  assert.equal(first.payload.aps['thread-id'], sameSessionOtherType.payload.aps['thread-id']);
+  assert.notEqual(first.collapseId, sameSessionOtherType.collapseId);
+});
+
+test('scoped collapse ids stay within the APNs 64-byte limit', () => {
+  const longSession = 'x'.repeat(200);
+  const { collapseId } = notificationFor(
+    { eventId: 'response:1', type: 'background_task.finished', sessionId: longSession, profile: 'default' },
+    preferences,
+    gatewayA,
+  );
+  assert.ok(Buffer.byteLength(collapseId) <= 64, `collapse id must fit APNs cap, got ${Buffer.byteLength(collapseId)} bytes`);
+  assert.match(collapseId, /^background_task\.finished:[0-9a-f]{16}$/);
+});
+
+test('a plugin-supplied gateway_id in the event body is dropped and can never rebind routing', () => {
+  const validated = validateEvent({
+    type: 'response.ready',
+    event_id: 'response:gwspoof001',
+    session_id: 'sess-1',
+    gateway_id: 'evil-identity',
+  });
+  assert.equal('gateway_id' in validated, false, 'the event body is never a trust source for gateway_id');
+  // The outgoing payload's discriminator comes from the AUTHENTICATED record.
+  const { payload } = notificationFor(
+    { eventId: 'response:gwspoof001', type: 'response.ready', sessionId: 'sess-1', profile: 'default' },
+    preferences,
+    gatewayA,
+  );
+  assert.equal(payload.conduit.gateway_id, gatewayA.id);
+});
