@@ -974,3 +974,32 @@ test('pairing dashboard binding end to end: bound at creation, visible in meta, 
   const after = metaAfter.json.gateways.find((gateway) => gateway.name === 'bound gateway');
   assert.equal(after.dashboard_id, dashboardId, 'event-body dashboard_id never rebinds the gateway');
 });
+
+test('pairing rejects a nil dashboard UUID and treats explicit null as absent', async () => {
+  const registered = await api(baseUrl, '/v1/installations', {
+    method: 'POST',
+    body: {
+      bundle_id: 'com.milim.relay',
+      device_token: 'f'.repeat(64),
+      environment: 'production',
+    },
+  });
+  assert.equal(registered.status, 201);
+  const installationId = registered.json.installation.id;
+  const deviceCredential = registered.json.credential;
+
+  const nilUuid = await api(baseUrl, `/v1/installations/${installationId}/pairings`, {
+    method: 'POST',
+    credential: deviceCredential,
+    body: { dashboard_id: '00000000-0000-0000-0000-000000000000' },
+  });
+  assert.equal(nilUuid.status, 400);
+  assert.equal(nilUuid.json.error, 'invalid_dashboard_id');
+
+  const explicitNull = await api(baseUrl, `/v1/installations/${installationId}/pairings`, {
+    method: 'POST',
+    credential: deviceCredential,
+    body: { dashboard_id: null },
+  });
+  assert.equal(explicitNull.status, 201, 'explicit null means no binding, matching the absent shape');
+});

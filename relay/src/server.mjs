@@ -30,6 +30,7 @@ const MAX_NOTIFICATION_BYTES = 3800;
 // Conduit dashboard UUIDs (opaque app-generated identity, #148). Lowercase
 // canonical form after normalization.
 const DASHBOARD_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const NIL_DASHBOARD_ID = '00000000-0000-0000-0000-000000000000';
 
 function main() {
   config = readConfig();
@@ -149,11 +150,17 @@ async function route(request, response) {
     // pre-dashboard behavior; malformed values are rejected rather than
     // silently dropped so the device learns its binding did not land.
     let dashboardId;
-    if (body.dashboard_id !== undefined) {
-      if (typeof body.dashboard_id !== 'string' || !DASHBOARD_ID_PATTERN.test(body.dashboard_id)) {
+    if (body.dashboard_id !== undefined && body.dashboard_id !== null) {
+      const candidate = body.dashboard_id;
+      if (typeof candidate !== 'string' || !DASHBOARD_ID_PATTERN.test(candidate)) {
         return sendJson(response, 400, { error: 'invalid_dashboard_id' });
       }
-      dashboardId = body.dashboard_id.toLowerCase();
+      // A nil UUID would bind pushes to an identity no dashboard can hold,
+      // guaranteeing fail-closed routing; reject it where it is actionable.
+      if (candidate.toLowerCase() === NIL_DASHBOARD_ID) {
+        return sendJson(response, 400, { error: 'invalid_dashboard_id' });
+      }
+      dashboardId = candidate.toLowerCase();
     }
     const pairing = store.createPairing(installation.id, dashboardId);
     return sendJson(response, 201, { pairing_code: pairing.code, expires_at: pairing.expiresAt });
