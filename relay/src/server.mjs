@@ -1,9 +1,9 @@
 import { createServer } from 'node:http';
-import { readFileSync, realpathSync } from 'node:fs';
+import { appendFileSync, readFileSync, realpathSync } from 'node:fs';
 import { isIP } from 'node:net';
 import { pathToFileURL } from 'node:url';
 import { ApnsClient } from './apns.mjs';
-import { RelayStore, sanitizeBatchQuestions } from './store.mjs';
+import { normalizeDashboardId, RelayStore, sanitizeBatchQuestions } from './store.mjs';
 
 // Self-reported relay version/capabilities, surfaced via GET /v1/meta so the
 // app can show compatibility state (keep the version in sync with package.json).
@@ -27,10 +27,9 @@ let apnsSend;
 // (not the notification) when a payload would exceed the bound.
 const MAX_NOTIFICATION_BYTES = 3800;
 
-// Conduit dashboard UUIDs (opaque app-generated identity, #148). Lowercase
-// canonical form after normalization.
-const DASHBOARD_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const NIL_DASHBOARD_ID = '00000000-0000-0000-0000-000000000000';
+// Conduit dashboard UUIDs (opaque app-generated identity, #148) are
+// canonicalized and validated in the store (normalizeDashboardId); the route
+// below pre-validates so the device gets a 400 where it is actionable.
 
 function main() {
   config = readConfig();
@@ -44,7 +43,16 @@ function main() {
   // (returned rejection and thrown transport error) deterministically.
   // Unset = real APNs.
   if (process.env.APNS_MODE === 'accept') {
-    apnsSend = async () => ({ ok: true, status: 200, reason: null });
+    const capturePath = process.env.APNS_CAPTURE_PATH;
+    apnsSend = async (deviceToken, notification) => {
+      // Test seam: when set, every "delivered" notification is recorded so
+      // e2e tests can assert on the REAL outgoing APNs payload.
+      if (capturePath) {
+        appendFileSync(capturePath, `${JSON.stringify({ deviceToken, notification })}
+`);
+      }
+      return { ok: true, status: 200, reason: null };
+    };
   } else if (process.env.APNS_MODE === 'reject') {
     apnsSend = async () => ({ ok: false, status: 403, reason: 'InvalidProviderToken' });
   } else if (process.env.APNS_MODE === 'throw') {
@@ -151,16 +159,13 @@ async function route(request, response) {
     // silently dropped so the device learns its binding did not land.
     let dashboardId;
     if (body.dashboard_id !== undefined && body.dashboard_id !== null) {
-      const candidate = body.dashboard_id;
-      if (typeof candidate !== 'string' || !DASHBOARD_ID_PATTERN.test(candidate)) {
+      // Normalize/validate here so the device gets a 400 where it is
+      // actionable; the store re-validates at the persistence boundary.
+      try {
+        dashboardId = normalizeDashboardId(body.dashboard_id);
+      } catch {
         return sendJson(response, 400, { error: 'invalid_dashboard_id' });
       }
-      // A nil UUID would bind pushes to an identity no dashboard can hold,
-      // guaranteeing fail-closed routing; reject it where it is actionable.
-      if (candidate.toLowerCase() === NIL_DASHBOARD_ID) {
-        return sendJson(response, 400, { error: 'invalid_dashboard_id' });
-      }
-      dashboardId = candidate.toLowerCase();
     }
     const pairing = store.createPairing(installation.id, dashboardId);
     return sendJson(response, 201, { pairing_code: pairing.code, expires_at: pairing.expiresAt });
@@ -586,7 +591,13 @@ function readJson(request) {
       if (data.length > 32_768) { reject(httpError(413, 'payload_too_large')); request.destroy(); }
     });
     request.on('end', () => {
-      try { resolve(data ? JSON.parse(data) : {}); } catch { reject(httpError(400, 'invalid_json')); }
+      try {
+        const parsed = data ? JSON.parse(data) : {};
+        // A literal `null` (or any non-object) body parses cleanly but has
+        // no fields; every route reads fields, so normalize to {} rather
+        // than 500 on a TypeError downstream.
+        resolve(parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {});
+      } catch { reject(httpError(400, 'invalid_json')); }
     });
     request.on('error', reject);
   });

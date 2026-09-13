@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { generateKeyPairSync } from 'node:crypto';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer as createNetServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1002,4 +1002,102 @@ test('pairing rejects a nil dashboard UUID and treats explicit null as absent', 
     body: { dashboard_id: null },
   });
   assert.equal(explicitNull.status, 201, 'explicit null means no binding, matching the absent shape');
+});
+
+test('plugin-supplied dashboard_id can never affect the REAL APNs payload; null pairing stays unbound', async () => {
+  // Dedicated relay with payload capture so assertions run against the
+  // actual outgoing APNs notification, not /v1/meta or the event ack.
+  const capturePath = join(dir, `capture-${Date.now()}.jsonl`);
+  const captureRelay = await startRelay(port + 2000, 'accept', join(dir, 'relay-data-capture.json'), {
+    APNS_CAPTURE_PATH: capturePath,
+  });
+  const captureBase = `http://127.0.0.1:${port + 2000}`;
+  try {
+    const registered = await api(captureBase, '/v1/installations', {
+      method: 'POST',
+      body: {
+        bundle_id: 'com.milim.relay',
+        device_token: 'c'.repeat(64),
+        environment: 'production',
+      },
+    });
+    assert.equal(registered.status, 201);
+    const installationId = registered.json.installation.id;
+    const deviceCredential = registered.json.credential;
+
+    // Gateway 1: bound to dashboard A. Gateway 2: explicit null (unbound).
+    const dashboardId = '0f5c8a34-1b2d-4e5f-8a9b-0c1d2e3f4a5b';
+    // One active pairing per installation at a time: create AND claim the
+    // bound pairing before rotating to the unbound one.
+    const boundPairing = await api(captureBase, `/v1/installations/${installationId}/pairings`, {
+      method: 'POST',
+      credential: deviceCredential,
+      body: { dashboard_id: dashboardId },
+    });
+    assert.equal(boundPairing.status, 201);
+    const boundClaim = await api(captureBase, '/v1/pairings/claim', {
+      method: 'POST',
+      body: { pairing_code: boundPairing.json.pairing_code, gateway_name: 'bound' },
+    });
+    assert.equal(boundClaim.status, 200);
+    const unboundPairing = await api(captureBase, `/v1/installations/${installationId}/pairings`, {
+      method: 'POST',
+      credential: deviceCredential,
+      body: { dashboard_id: null },
+    });
+    assert.equal(unboundPairing.status, 201, 'explicit null pairs with no binding');
+    const unboundClaim = await api(captureBase, '/v1/pairings/claim', {
+      method: 'POST',
+      body: { pairing_code: unboundPairing.json.pairing_code, gateway_name: 'unbound' },
+    });
+    assert.equal(unboundClaim.status, 200);
+
+    // Gateway 1 sends an event whose body tries to REBIND itself to
+    // dashboard B (and gateway 2 sends an ordinary one).
+    const attackerEvent = await api(captureBase, '/v1/events', {
+      method: 'POST',
+      credential: boundClaim.json.credential,
+      body: {
+        type: 'response.ready',
+        event_id: 'response:attack000001',
+        session_id: 'sess-attack',
+        dashboard_id: '99999999-9999-4999-8999-999999999999',
+      },
+    });
+    assert.equal(attackerEvent.status, 202);
+    const plainEvent = await api(captureBase, '/v1/events', {
+      method: 'POST',
+      credential: unboundClaim.json.credential,
+      body: {
+        type: 'response.ready',
+        event_id: 'response:plain000001',
+        session_id: 'sess-plain',
+      },
+    });
+    assert.equal(plainEvent.status, 202);
+
+    // Assert on the captured APNs payloads.
+    const lines = readFileSync(capturePath, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+    const attacker = lines.find((entry) => entry.notification.payload.conduit.session_id === 'sess-attack');
+    const plain = lines.find((entry) => entry.notification.payload.conduit.session_id === 'sess-plain');
+    assert.ok(attacker, 'attacker notification captured');
+    assert.ok(plain, 'plain notification captured');
+    assert.equal(
+      attacker.notification.payload.conduit.dashboard_id,
+      dashboardId,
+      'the outgoing push carries the AUTHENTICATED gateway binding, not the event body'
+    );
+    assert.equal(attacker.notification.payload.body.conduit.dashboard_id, dashboardId);
+    assert.equal(
+      'dashboard_id' in plain.notification.payload.conduit,
+      false,
+      'an unbound gateway keeps the exact legacy wire shape'
+    );
+    assert.ok(
+      !JSON.stringify(attacker.notification.payload).includes('99999999'),
+      'the attacker-chosen identity never reaches the wire'
+    );
+  } finally {
+    captureRelay.kill();
+  }
 });

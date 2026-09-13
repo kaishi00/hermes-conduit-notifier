@@ -317,3 +317,22 @@ test('pairing without dashboard_id keeps the pre-dashboard gateway shape', () =>
   const gateway = relay.data.installations[installation.id].gateways[claimed.gatewayId];
   assert.equal(gateway.dashboardId, undefined, 'no binding, no dashboard identity');
 });
+
+test('createPairing validates dashboard_id at the persistence boundary', () => {
+  const relay = store();
+  const { installation } = relay.createInstallation({
+    bundleId: 'com.milim.relay',
+    deviceToken: 'a'.repeat(64),
+    environment: 'production',
+  });
+
+  // Canonicalization: uppercase input persists lowercase canonical form.
+  const canonical = relay.createPairing(installation.id, '0F5C8A34-1B2D-4E5F-8A9B-0C1D2E3F4A5B');
+  assert.ok(canonical, 'canonicalizable UUID accepted');
+  // Absent and null stay legacy-unbound.
+  assert.equal(relay.createPairing(installation.id).dashboardId ?? undefined, undefined);
+  // Malformed and nil UUIDs are rejected, never persisted.
+  assert.throws(() => relay.createPairing(installation.id, 'not-a-uuid'), /invalid_dashboard_id/);
+  assert.throws(() => relay.createPairing(installation.id, '00000000-0000-0000-0000-000000000000'), /invalid_dashboard_id/);
+  assert.throws(() => relay.createPairing(installation.id, 12345), /invalid_dashboard_id/);
+});

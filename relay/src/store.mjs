@@ -96,6 +96,10 @@ export class RelayStore {
   // on derived from the authenticated gateway credential on every event —
   // the plugin can never choose or change it per event.
   createPairing(installationId, dashboardId = undefined) {
+    // Persistence-boundary validation: the HTTP handler pre-validates, but a
+    // future internal caller must not be able to persist an arbitrary
+    // dashboard identity either.
+    const canonicalDashboardId = normalizeDashboardId(dashboardId);
     this.prune();
     for (const [codeHash, pairing] of Object.entries(this.data.pairings)) {
       if (pairing.installationId === installationId) delete this.data.pairings[codeHash];
@@ -103,7 +107,7 @@ export class RelayStore {
     const code = readableCode();
     const expiresAt = new Date(Date.now() + 10 * 60_000).toISOString();
     const pairing = { installationId, expiresAt };
-    if (dashboardId) pairing.dashboardId = dashboardId;
+    if (canonicalDashboardId) pairing.dashboardId = canonicalDashboardId;
     this.data.pairings[hashSecret(normalizeCode(code))] = pairing;
     this.save();
     return { code, expiresAt };
@@ -407,6 +411,21 @@ export function sanitizeBatchQuestions(value) {
     seenQids.add(qid);
   }
   return questions;
+}
+
+// Canonical Conduit dashboard UUID form (lowercase). The nil UUID is
+// rejected: it would bind pushes to an identity no dashboard can hold.
+const DASHBOARD_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const NIL_DASHBOARD_ID = '00000000-0000-0000-0000-000000000000';
+
+export function normalizeDashboardId(value) {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string' || !DASHBOARD_ID_PATTERN.test(value)) {
+    throw new Error('invalid_dashboard_id');
+  }
+  const canonical = value.toLowerCase();
+  if (canonical === NIL_DASHBOARD_ID) throw new Error('invalid_dashboard_id');
+  return canonical;
 }
 
 function publicInstallation(installation) {
