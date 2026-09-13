@@ -289,3 +289,39 @@ test('a representative multi-question batch fits the budget with a single struct
     `a representative 3-question batch must fit the guard: ${size} bytes`,
   );
 });
+
+// ── Dashboard identity in outgoing payloads (#148) ───────────────────────
+// The outgoing dashboard_id comes from the AUTHENTICATED gateway record
+// (bound at pairing/claim time) — never from the event body, which plugins
+// must not be able to author.
+
+test('notificationFor stamps dashboard_id from the authenticated gateway into both routing copies', () => {
+  const event = { eventId: 'response:12345678', type: 'response.ready', sessionId: 'sess-1', profile: 'default' };
+  const gateway = { id: 'gw-1', name: 'Mac gateway', dashboardId: '0f5c8a34-1b2d-4e5f-8a9b-0c1d2e3f4a5b' };
+  const { payload } = notificationFor(event, preferences, gateway);
+  assert.equal(payload.conduit.dashboard_id, gateway.dashboardId);
+  assert.equal(payload.body.conduit.dashboard_id, gateway.dashboardId);
+});
+
+test('notificationFor omits dashboard_id for pre-dashboard gateways and absent gateway', () => {
+  const event = { eventId: 'response:12345678', type: 'response.ready', sessionId: 'sess-1', profile: 'default' };
+  const legacy = notificationFor(event, preferences, { id: 'gw-1', name: 'legacy' });
+  assert.equal(legacy.payload.conduit.dashboard_id, undefined);
+  assert.equal(legacy.payload.body.conduit.dashboard_id, undefined);
+  const noGateway = notificationFor(event, preferences);
+  assert.equal(noGateway.payload.conduit.dashboard_id, undefined);
+  // Wire shape is unchanged for legacy payloads: no key at all, not null.
+  assert.equal('dashboard_id' in noGateway.payload.conduit, false);
+});
+
+test('validateEvent drops a plugin-supplied dashboard_id: the event body is never a trust source', () => {
+  const validated = validateEvent({
+    type: 'response.ready',
+    event_id: 'response:12345678',
+    session_id: 'sess-1',
+    dashboard_id: '99999999-9999-4999-8999-999999999999',
+  });
+  assert.equal(validated.dashboard_id, undefined);
+  // The event object carries only the whitelisted fields.
+  assert.equal('dashboard_id' in validated, false);
+});

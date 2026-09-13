@@ -265,3 +265,55 @@ test('credential checks accept exact secrets and reject wrong or corrupt digests
   relay.data.installations[installation.id].deviceSecretHash = 'deadbeef';
   assert.equal(relay.authenticate(installation.id, deviceSecret, 'device'), null, 'corrupt stored digest rejects without throwing');
 });
+
+// ── Dashboard identity binding (#148) ────────────────────────────────────
+// A pairing may carry the opaque Conduit dashboard UUID the device intends
+// it for. The binding is captured at pairing creation, becomes the gateway
+// record's persistent identity at claim, and survives store reloads. The
+// plugin (and anything else) can never change it per event.
+
+test('pairing dashboard binding: created with dashboard_id, bound at claim, persisted', () => {
+  const relay = store();
+  const dashboardId = '0f5c8a34-1b2d-4e5f-8a9b-0c1d2e3f4a5b';
+  const { installation, deviceSecret } = relay.createInstallation({
+    bundleId: 'com.milim.relay',
+    deviceToken: 'a'.repeat(64),
+    environment: 'production',
+  });
+
+  const pairing = relay.createPairing(installation.id, dashboardId);
+  const claimed = relay.claimPairing(pairing.code, 'bound gateway');
+  assert.ok(claimed, 'claim succeeds');
+  const gateway = relay.data.installations[installation.id].gateways[claimed.gatewayId];
+  assert.equal(gateway.dashboardId, dashboardId, 'the pairing binding becomes the gateway identity');
+
+  // The binding survives a store reload: it is durable pairing state, not
+  // per-event metadata.
+  const reloaded = new RelayStore(relay.path);
+  const persisted = reloaded.data.installations[installation.id].gateways[claimed.gatewayId];
+  assert.equal(persisted.dashboardId, dashboardId);
+
+  // The device credential still works for re-pairing other dashboards.
+  const second = relay.createPairing(installation.id, '11111111-2222-4333-8444-555555555555');
+  const secondClaim = relay.claimPairing(second.code, 'other gateway');
+  const secondGateway = relay.data.installations[installation.id].gateways[secondClaim.gatewayId];
+  assert.equal(secondGateway.dashboardId, '11111111-2222-4333-8444-555555555555');
+  assert.ok(relay.authenticate(installation.id, deviceSecret, 'device'), 'device credential unaffected');
+
+  // One installation supports several paired gateways, each bound to its
+  // own dashboard.
+  assert.equal(Object.keys(relay.data.installations[installation.id].gateways).length, 2);
+});
+
+test('pairing without dashboard_id keeps the pre-dashboard gateway shape', () => {
+  const relay = store();
+  const { installation } = relay.createInstallation({
+    bundleId: 'com.milim.relay',
+    deviceToken: 'a'.repeat(64),
+    environment: 'production',
+  });
+  const pairing = relay.createPairing(installation.id);
+  const claimed = relay.claimPairing(pairing.code, 'legacy gateway');
+  const gateway = relay.data.installations[installation.id].gateways[claimed.gatewayId];
+  assert.equal(gateway.dashboardId, undefined, 'no binding, no dashboard identity');
+});

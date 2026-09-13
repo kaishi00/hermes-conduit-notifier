@@ -27,6 +27,10 @@ let apnsSend;
 // (not the notification) when a payload would exceed the bound.
 const MAX_NOTIFICATION_BYTES = 3800;
 
+// Conduit dashboard UUIDs (opaque app-generated identity, #148). Lowercase
+// canonical form after normalization.
+const DASHBOARD_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 function main() {
   config = readConfig();
   store = new RelayStore(config.dataPath);
@@ -137,7 +141,21 @@ async function route(request, response) {
     const installation = authorize(request, pairingMatch[1], 'device');
     if (!installation) return sendJson(response, 401, { error: 'unauthorized' });
     enforceRateLimit(`pairing:${installation.id}`, 5, 60_000);
-    const pairing = store.createPairing(installation.id);
+    const body = await readJson(request);
+    // Optional dashboard binding (#148): the authenticated device names the
+    // saved Conduit dashboard this pairing is for. It is bound NOW, at
+    // pairing creation — never per event — so an event can never re-route
+    // itself to a different dashboard. Absent (older devices) keeps the
+    // pre-dashboard behavior; malformed values are rejected rather than
+    // silently dropped so the device learns its binding did not land.
+    let dashboardId;
+    if (body.dashboard_id !== undefined) {
+      if (typeof body.dashboard_id !== 'string' || !DASHBOARD_ID_PATTERN.test(body.dashboard_id)) {
+        return sendJson(response, 400, { error: 'invalid_dashboard_id' });
+      }
+      dashboardId = body.dashboard_id.toLowerCase();
+    }
+    const pairing = store.createPairing(installation.id, dashboardId);
     return sendJson(response, 201, { pairing_code: pairing.code, expires_at: pairing.expiresAt });
   }
 
@@ -163,6 +181,10 @@ async function route(request, response) {
     enforceRateLimit(`event:${installation.id}`, 30, 60_000);
     const body = await readJson(request);
     const event = validateEvent(body);
+    // The event body is NOT a source of dashboard identity: validateEvent
+    // whitelists fields, so any plugin-supplied dashboard_id is dropped
+    // here. Outgoing routing carries the dashboard binding of the
+    // AUTHENTICATED gateway credential (bound at pairing/claim time).
     // Plugin version recording runs BEFORE the dedupe return: a second
     // gateway on the same installation running the same plugin version sends
     // the same deterministic plugin.hello id, and it must still be recorded.
@@ -176,6 +198,7 @@ async function route(request, response) {
     if (!store.acceptEvent(installation.id, event.eventId, credential.gatewayId)) return sendJson(response, 200, { accepted: true, duplicate: true });
     // Control event: version announcement only, never a notification.
     if (event.type === 'plugin.hello') return sendJson(response, 202, { accepted: true, delivered: false });
+    const { gateway } = authenticated;
     // A clarify decision carries a plugin-minted request id; park it so the
     // device can answer by id and the gateway can poll for the answer while
     // its middleware blocks the tool call. Saved after the dedupe check so a
@@ -203,7 +226,7 @@ async function route(request, response) {
       parkedDecisionId = event.decision.request_id;
       const deliverableBase = shouldDeliver(installation.preferences, event.type);
       const notification = deliverableBase
-        ? notificationFor(event, installation.preferences)
+        ? notificationFor(event, installation.preferences, gateway)
         : null;
       // The rich body copy is the canonical payload the iOS path reads, and
       // (since the top-level copy became a routing stub) the only place the
@@ -242,7 +265,7 @@ async function route(request, response) {
       return sendJson(response, 202, { accepted: true, delivered: true });
     }
     if (!shouldDeliver(installation.preferences, event.type)) return sendJson(response, 202, { accepted: true, delivered: false });
-    const notification = notificationFor(event, installation.preferences);
+    const notification = notificationFor(event, installation.preferences, gateway);
     let result;
     try {
       result = await apnsSend(installation.deviceToken, notification);
@@ -351,6 +374,7 @@ async function route(request, response) {
       plugin_version: gateway.pluginVersion,
       plugin_capabilities: gateway.pluginCapabilities ?? [],
       last_event_at: gateway.lastEventAt,
+      dashboard_id: gateway.dashboardId,
     }));
     return sendJson(response, 200, {
       version: RELAY_INFO.version,
@@ -378,7 +402,11 @@ function gatewayCredential(request) {
   return match ? { installationId: match[1], gatewayId: match[2], secret: match[3] } : null;
 }
 
-function notificationFor(event, preferences) {
+// `gateway` is the AUTHENTICATED gateway record (relay/store.mjs). Its
+// dashboardId — bound at pairing/claim time — is the only source of the
+// outgoing dashboard identity; the event body is never consulted (#148).
+function notificationFor(event, preferences, gateway = undefined) {
+  const dashboardId = gateway?.dashboardId || undefined;
   const generic = genericCopy(event.type);
   const title = preferences.show_previews && event.title ? event.title : generic.title;
   // Keep previews private by default, while still making notifications from
@@ -401,6 +429,7 @@ function notificationFor(event, preferences) {
     session_id: event.sessionId,
     profile: event.profile,
     gateway: event.gateway,
+    ...(dashboardId ? { dashboard_id: dashboardId } : {}),
   };
   // body.conduit is the canonical rich payload the iOS notification path
   // reads (expo-notifications exposes the APNs `body` value as the

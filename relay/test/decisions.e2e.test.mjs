@@ -901,3 +901,76 @@ test('a REAL APNs session failure parks the decision undeliverable and the relay
   const alivePoll = await api(deadBaseUrl, '/v1/decisions/conduit-push-dead1', { credential: gatewayCredential });
   assert.equal(alivePoll.status, 200);
 });
+
+test('pairing dashboard binding end to end: bound at creation, visible in meta, event body never rebinds', async () => {
+  const registered = await api(baseUrl, '/v1/installations', {
+    method: 'POST',
+    body: {
+      bundle_id: 'com.milim.relay',
+      device_token: 'e'.repeat(64),
+      environment: 'production',
+    },
+  });
+  assert.equal(registered.status, 201);
+  const installationId = registered.json.installation.id;
+  const deviceCredential = registered.json.credential;
+
+  // A malformed dashboard_id is rejected at pairing creation: the device
+  // must learn its binding did not land, never silently pair unscoped.
+  const malformed = await api(baseUrl, `/v1/installations/${installationId}/pairings`, {
+    method: 'POST',
+    credential: deviceCredential,
+    body: { dashboard_id: 'not-a-uuid' },
+  });
+  assert.equal(malformed.status, 400);
+  assert.equal(malformed.json.error, 'invalid_dashboard_id');
+
+  const dashboardId = '0f5c8a34-1b2d-4e5f-8a9b-0c1d2e3f4a5b';
+  const pairing = await api(baseUrl, `/v1/installations/${installationId}/pairings`, {
+    method: 'POST',
+    credential: deviceCredential,
+    body: { dashboard_id: dashboardId },
+  });
+  assert.equal(pairing.status, 201);
+  const claim = await api(baseUrl, '/v1/pairings/claim', {
+    method: 'POST',
+    body: { pairing_code: pairing.json.pairing_code, gateway_name: 'bound gateway' },
+  });
+  assert.equal(claim.status, 200);
+  const gatewayCredential = claim.json.credential;
+
+  // A hello records the gateway; meta now reports its dashboard binding.
+  const hello = await api(baseUrl, '/v1/events', {
+    method: 'POST',
+    credential: gatewayCredential,
+    body: {
+      type: 'plugin.hello',
+      event_id: 'hello:020abcdef12',
+      plugin_version: '0.3.0',
+      plugin_capabilities: ['approval-decisions', 'clarify-loop', 'version-reporting'],
+    },
+  });
+  assert.equal(hello.status, 202);
+  const meta = await api(baseUrl, '/v1/meta', { credential: deviceCredential });
+  const bound = meta.json.gateways.find((gateway) => gateway.name === 'bound gateway');
+  assert.ok(bound, 'bound gateway listed in meta');
+  assert.equal(bound.dashboard_id, dashboardId);
+
+  // A plugin-supplied dashboard_id in the event body is dropped at the
+  // trust boundary and can never rebind the gateway: the stored pairing
+  // binding survives unchanged.
+  const rebinding = await api(baseUrl, '/v1/events', {
+    method: 'POST',
+    credential: gatewayCredential,
+    body: {
+      type: 'response.ready',
+      event_id: 'response:rebind000001',
+      session_id: 'sess-1',
+      dashboard_id: '99999999-9999-4999-8999-999999999999',
+    },
+  });
+  assert.equal(rebinding.status, 202);
+  const metaAfter = await api(baseUrl, '/v1/meta', { credential: deviceCredential });
+  const after = metaAfter.json.gateways.find((gateway) => gateway.name === 'bound gateway');
+  assert.equal(after.dashboard_id, dashboardId, 'event-body dashboard_id never rebinds the gateway');
+});

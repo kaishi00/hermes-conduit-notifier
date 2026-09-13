@@ -90,14 +90,21 @@ export class RelayStore {
     return this.updateInstallation(id, { active: false });
   }
 
-  createPairing(installationId) {
+  // Optional dashboard binding (#148): `dashboardId` is the opaque Conduit
+  // dashboard UUID the device attached to this pairing. It is bound at
+  // PAIRING CREATION, copied onto the gateway record at claim, and from then
+  // on derived from the authenticated gateway credential on every event —
+  // the plugin can never choose or change it per event.
+  createPairing(installationId, dashboardId = undefined) {
     this.prune();
     for (const [codeHash, pairing] of Object.entries(this.data.pairings)) {
       if (pairing.installationId === installationId) delete this.data.pairings[codeHash];
     }
     const code = readableCode();
     const expiresAt = new Date(Date.now() + 10 * 60_000).toISOString();
-    this.data.pairings[hashSecret(normalizeCode(code))] = { installationId, expiresAt };
+    const pairing = { installationId, expiresAt };
+    if (dashboardId) pairing.dashboardId = dashboardId;
+    this.data.pairings[hashSecret(normalizeCode(code))] = pairing;
     this.save();
     return { code, expiresAt };
   }
@@ -117,6 +124,10 @@ export class RelayStore {
       id: gatewayId,
       name: String(gatewayName || 'Hermes gateway').slice(0, 80),
       secretHash: hashSecret(gatewaySecret),
+      // The pairing's dashboard binding (when the device provided one)
+      // becomes the gateway's persistent identity: every push this gateway
+      // triggers is stamped with it for the lifetime of the credential.
+      ...(pairing.dashboardId ? { dashboardId: pairing.dashboardId } : {}),
       createdAt: new Date().toISOString(),
     };
     installation.updatedAt = new Date().toISOString();
