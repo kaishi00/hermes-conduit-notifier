@@ -123,17 +123,34 @@ def test_search_keeps_only_web_urls():
         {"title": "file", "url": "file:///etc/passwd"},
         {"title": "long", "url": "https://e.com/" + "a" * api.SEARCH_MAX_URL_CHARS},
         {"title": "ok", "url": "HTTPS://e.com/ok"},
+        {"title": "padded", "url": "  https://e.com/p "},
     ]))
-    assert [r["title"] for r in result["results"]] == ["ok"]
+    assert [r["title"] for r in result["results"]] == ["ok", "padded"]
+    assert result["results"][1]["url"] == "https://e.com/p"
 
 
-def test_search_errors_drop_urls_and_credentials():
-    error = "GET https://search.internal:8080/search?q=x&api_key=abc123 failed: token=deadbeef; FIRECRAWL_API_KEY is not set"
+@pytest.mark.parametrize("error", [
+    "GET https://search.internal:8080/search?q=x&api_key=abc123 failed",
+    'backend said {"api_key":"ABC"}',
+    "bearer ABCDEFGHIJKLMNOPQRSTUVWXYZ rejected",
+    "sk-proj-ABCDEFGHIJKLMNOPQRSTUVWX",
+    "FIRECRAWL_API_KEY is not set; tried https://fc.internal/?token=abc",
+    "x" * 5_000_000,
+])
+def test_backend_error_text_never_reaches_the_client(error):
     with pytest.raises(api.TokenError) as err:
         api.run_web_search("q", search=lambda q, n: hermes_reply(success=False, error=error))
-    message = str(err.value)
-    assert "search.internal" not in message and "abc123" not in message and "deadbeef" not in message
-    assert "FIRECRAWL_API_KEY is not set" in message
+    assert str(err.value) == "The web search backend failed; the Hermes log has the details"
+
+
+@pytest.mark.parametrize("error", [
+    "No web search provider configured. Run `hermes tools` to set one up.",
+    "FIRECRAWL_API_KEY is not set",
+])
+def test_hermes_configuration_messages_reach_the_client(error):
+    with pytest.raises(api.TokenError) as err:
+        api.run_web_search("q", search=lambda q, n: hermes_reply(success=False, error=error))
+    assert str(err.value) == error
 
 
 def test_search_rejects_a_huge_query_before_normalizing():
@@ -152,17 +169,6 @@ def test_route_times_out_a_slow_backend(client, monkeypatch):
     assert response.headers["cache-control"] == "no-store"
 
 
-def test_search_errors_redact_uppercase_secrets_too():
-    error = "api_key=ABC123DEF TOKEN:ABCDEF bad bearer ABCDEFGHIJKLMNOPQRSTUVWX12 while FIRECRAWL_API_KEY is not set"
-    with pytest.raises(api.TokenError) as err:
-        api.run_web_search("q", search=lambda q, n: hermes_reply(success=False, error=error))
-    message = str(err.value)
-    for secret in ("ABC123DEF", "ABCDEF ", "ABCDEFGHIJKLMNOPQRSTUVWX12"):
-        assert secret not in message
-    assert "api_key=[redacted]" in message
-    assert "FIRECRAWL_API_KEY is not set" in message
-
-
 def test_a_broken_import_inside_hermes_is_not_reported_as_missing():
     def broken(query, limit):
         raise ModuleNotFoundError("No module named 'ruamel'", name="ruamel")
@@ -179,3 +185,13 @@ def test_route_refuses_an_oversized_body(client):
 
 def test_status_route_is_not_cached(client):
     assert client.get("/api/plugins/conduit_push/web-search/status").headers["cache-control"] == "no-store"
+
+
+def test_route_refuses_an_oversized_chunked_body(client):
+    def chunks():
+        for _ in range(40):
+            yield b"x" * 1024
+
+    response = client.post("/api/plugins/conduit_push/web-search", content=chunks(),
+                           headers={"Content-Type": "application/json"})
+    assert response.status_code == 413

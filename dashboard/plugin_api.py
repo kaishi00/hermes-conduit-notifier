@@ -218,22 +218,20 @@ def _clip(value: Any, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
-_URL = re.compile(r"\b[a-z][a-z0-9+.-]*://\S+", re.IGNORECASE)
-# A value after a key/token/secret/password name, and any long opaque run
-# with a digit in it (env var names like FIRECRAWL_API_KEY have none).
-_NAMED_SECRET = re.compile(r"\b([A-Za-z0-9_-]*(?:key|token|secret|password)[A-Za-z0-9_-]*)(\s*[=:]\s*)\S+", re.IGNORECASE)
-_OPAQUE = re.compile(r"\b(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{24,}\b")
+# Hermes' own configuration messages, which tell the user what to fix and
+# carry no backend output. Anything else a backend says stays in the log:
+# its errors can quote request URLs, hosts or keys in any shape.
+_SHAREABLE_ERRORS = (
+    re.compile(r"^No web (?:search )?provider configured\b[^\n]{0,200}$"),
+    re.compile(r"^[A-Z][A-Z0-9_]{2,63} is not set\b[^\n]{0,200}$"),
+)
 
 
-def _scrub(error: Any) -> str:
-    """A backend's error for the user: no URLs (they can carry keys or
-    internal hosts) and nothing that looks like a credential. Hermes' own
-    configuration messages ("No web search provider configured…",
-    "FIRECRAWL_API_KEY is not set") come through readable."""
-    text = _URL.sub("[url]", str(error or ""))
-    text = _NAMED_SECRET.sub(lambda m: m.group(1) + m.group(2) + "[redacted]", text)
-    text = _OPAQUE.sub("[redacted]", text)
-    return _clip(text, 300)
+def _user_error(error: Any) -> str:
+    text = str(error or "").strip()[:400]
+    if any(pattern.match(text) for pattern in _SHAREABLE_ERRORS) and "://" not in text:
+        return _clip(text, 300)
+    return "The web search backend failed; the Hermes log has the details"
 
 
 def run_web_search(
@@ -271,12 +269,12 @@ def run_web_search(
     if not isinstance(payload, dict) or not payload.get("success", False):
         error = payload.get("error") if isinstance(payload, dict) else None
         logger.warning("Web search for Conduit failed on the backend: %s", error)
-        raise TokenError(502, _scrub(error) or "Web search failed")
+        raise TokenError(502, _user_error(error))
     data = payload.get("data") or {}
     items = data.get("web") if isinstance(data, dict) else None
     results = []
     for item in items if isinstance(items, list) else []:
-        url = str(item.get("url") or "") if isinstance(item, dict) else ""
+        url = str(item.get("url") or "").strip() if isinstance(item, dict) else ""
         if not url.lower().startswith(("http://", "https://")) or len(url) > SEARCH_MAX_URL_CHARS:
             continue
         results.append({
@@ -322,7 +320,7 @@ def mint_gemini_live_token(
 
 
 class _MintLimiter:
-    """Sliding-window cap on token mints, per profile."""
+    """Sliding-window cap per profile (token mints, web searches)."""
 
     def __init__(
         self,
@@ -444,7 +442,9 @@ async def create_gemini_live_token(response: Response, profile: Optional[str] = 
 async def get_web_search_status(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     try:
-        return {"ok": True, **(await _run_scoped(profile, web_search_status, _search_executor))}
+        # A quick local check (no network), so it stays off the search pool
+        # and answers even while searches are backed up.
+        return {"ok": True, **(await _run_scoped(profile, web_search_status))}
     except TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
     except HTTPException as exc:
@@ -458,19 +458,21 @@ async def get_web_search_status(response: Response, profile: Optional[str] = Non
 async def post_web_search(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     no_store = {"Cache-Control": "no-store"}
-    # A declared oversized body is refused before it is read. (A chunked body
-    # has no length to check; the dashboard's auth limits who can send one.)
+    # Read with a hard cap, chunked bodies included, so an oversized body is
+    # refused without buffering it.
     try:
         declared = int(request.headers.get("content-length") or 0)
     except ValueError:
         declared = 0
     if declared > SEARCH_MAX_BODY_BYTES:
         raise HTTPException(status_code=413, detail="Request body is too large", headers=no_store)
-    raw = await request.body()
-    if len(raw) > SEARCH_MAX_BODY_BYTES:
-        raise HTTPException(status_code=413, detail="Request body is too large", headers=no_store)
+    raw = bytearray()
+    async for chunk in request.stream():
+        raw.extend(chunk)
+        if len(raw) > SEARCH_MAX_BODY_BYTES:
+            raise HTTPException(status_code=413, detail="Request body is too large", headers=no_store)
     try:
-        body = json.loads(raw or b"{}")
+        body = json.loads(bytes(raw) or b"{}")
     except ValueError:
         raise HTTPException(status_code=400, detail="Request body is not JSON", headers=no_store)
     query = body.get("query") if isinstance(body, dict) else None

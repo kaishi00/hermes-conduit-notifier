@@ -228,7 +228,7 @@ needs configuring on the plugin side.
 | POST | `/api/plugins/conduit_push/web-search` with `{query, limit?}` | `{ok, query, results: [{title, url, snippet}]}` |
 
 Results are titles, URLs and snippets only (at most 5), and searches are capped
-at 30 per minute per profile. A search that takes more than 20 seconds returns 504, and backend errors are passed on with URLs and credential-like text removed. `?profile=<name>` searches with that profile's
+at 30 per minute per profile. A search that takes more than 20 seconds returns 504, and a backend's own error text stays in the Hermes log: Conduit only sees Hermes' configuration messages (such as "No web search provider configured") or a generic failure. `?profile=<name>` searches with that profile's
 backend and keys, as the Gemini Live routes do.
 
 ## Conduit support and privacy
