@@ -215,20 +215,34 @@ class _MintLimiter:
 _mint_limiter = _MintLimiter(MINT_LIMIT, MINT_WINDOW_S)
 
 
+def _limiter_key(profile: Optional[str]) -> str:
+    # Same notion of "the dashboard's own profile" as Hermes' scope, so
+    # ?profile=current / " " / "Current" can't each get a fresh window.
+    name = (profile or "").strip()
+    return "" if name.lower() in ("", "current") else name
+
+
 def _profile_scope(profile: Optional[str]):
     """Resolve .env/config for ``profile`` the way /api/audio/* does.
 
+    Always enters Hermes' scope, even with no profile: once the dashboard has
+    served any ``?profile=`` request it hosts several profiles, and an unscoped
+    secret read then raises instead of reading the dashboard's own .env.
     Fails closed: a requested profile that can't be scoped must never fall back
     to the default profile's key.
     """
-    if not profile:
-        return nullcontext()
     try:
         from hermes_cli.web_server_profiles import _config_profile_scope
-    except ImportError:
+    except ModuleNotFoundError as exc:
+        # Only a missing Hermes (tests, or a Hermes without profiles) falls back;
+        # a broken import inside Hermes must not silently read unscoped.
+        if exc.name not in ("hermes_cli", "hermes_cli.web_server_profiles"):
+            raise
+        if not profile:
+            return nullcontext()
         logger.warning("Cannot scope Gemini Live request to profile %r: profile scoping unavailable", profile)
         raise TokenError(503, "This Hermes version can't resolve per-profile keys")
-    return _config_profile_scope(profile)
+    return _config_profile_scope(profile or None)
 
 
 async def _run_scoped(profile: Optional[str], fn: Callable[[], Dict[str, Any]]) -> Dict[str, Any]:
@@ -239,12 +253,24 @@ async def _run_scoped(profile: Optional[str], fn: Callable[[], Dict[str, Any]]) 
     return await asyncio.get_running_loop().run_in_executor(None, scoped)
 
 
+def _unexpected(route: str, exc: Exception) -> HTTPException:
+    # Name the failure so Conduit shows something more useful than a bare 500;
+    # the message itself stays in the log since it can carry host details.
+    logger.exception("Gemini Live %s route failed", route)
+    return HTTPException(status_code=500, detail=f"Gemini Live {route} failed on the host ({type(exc).__name__})",
+                         headers={"Cache-Control": "no-store"})
+
+
 @router.get("/gemini-live/status")
 async def get_gemini_live_status(profile: Optional[str] = None) -> Dict[str, Any]:
     try:
         return {"ok": True, **(await _run_scoped(profile, gemini_live_status))}
     except TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc))
+    except HTTPException:
+        raise  # Hermes' own 400/404 for a bad or unknown profile
+    except Exception as exc:
+        raise _unexpected("status", exc)
 
 
 @router.post("/gemini-live/token")
@@ -253,8 +279,12 @@ async def create_gemini_live_token(response: Response, profile: Optional[str] = 
     response.headers["Cache-Control"] = "no-store"
     response.headers["Pragma"] = "no-cache"
     try:
-        result = await _run_scoped(profile, lambda: mint_gemini_live_token(limiter_key=profile or ""))
+        result = await _run_scoped(profile, lambda: mint_gemini_live_token(limiter_key=_limiter_key(profile)))
     except TokenError as exc:
         logger.warning("Gemini Live token request failed: %s", exc)
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _unexpected("token", exc)
     return {"ok": True, **result}

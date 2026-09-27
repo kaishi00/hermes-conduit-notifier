@@ -208,3 +208,64 @@ def test_network_errors_return_a_generic_message(monkeypatch):
         api._post_json(api.token_url("v1alpha"), "secret", {})
     assert raised.value.status == 502
     assert str(raised.value) == "Could not reach Google"
+
+
+def test_requests_without_a_profile_still_enter_hermes_scope(client, monkeypatch):
+    # Once the dashboard hosts several profiles, an unscoped secret read raises
+    # (UnscopedSecretError), so the no-profile path must enter the scope too.
+    import contextlib
+    import sys
+    import types
+
+    entered = []
+
+    @contextlib.contextmanager
+    def scope(profile):
+        entered.append(profile)
+        yield
+
+    fake = types.ModuleType("hermes_cli.web_server_profiles")
+    fake._config_profile_scope = scope
+    monkeypatch.setitem(sys.modules, "hermes_cli", types.ModuleType("hermes_cli"))
+    monkeypatch.setitem(sys.modules, "hermes_cli.web_server_profiles", fake)
+
+    assert client.get("/api/plugins/conduit_push/gemini-live/status").status_code == 200
+    assert client.post("/api/plugins/conduit_push/gemini-live/token").status_code == 200
+    assert client.get("/api/plugins/conduit_push/gemini-live/status?profile=coder").status_code == 200
+    assert entered == [None, None, "coder"]
+
+
+def test_unexpected_host_errors_name_the_failure(client, monkeypatch):
+    def boom(key):
+        raise RuntimeError("secret scope exploded at /home/eric")
+
+    monkeypatch.setattr(api, "_env_value", boom)
+    response = client.get("/api/plugins/conduit_push/gemini-live/status")
+    assert response.status_code == 500
+    assert response.json()["detail"] == "Gemini Live status failed on the host (RuntimeError)"
+
+
+def test_hermes_http_errors_for_bad_profiles_pass_through(client, monkeypatch):
+    import contextlib
+    import sys
+    import types
+    from fastapi import HTTPException
+
+    @contextlib.contextmanager
+    def scope(profile):
+        if profile:
+            raise HTTPException(status_code=404, detail="Profile not found")
+        yield
+
+    fake = types.ModuleType("hermes_cli.web_server_profiles")
+    fake._config_profile_scope = scope
+    monkeypatch.setitem(sys.modules, "hermes_cli", types.ModuleType("hermes_cli"))
+    monkeypatch.setitem(sys.modules, "hermes_cli.web_server_profiles", fake)
+
+    assert client.get("/api/plugins/conduit_push/gemini-live/status?profile=ghost").status_code == 404
+    assert client.post("/api/plugins/conduit_push/gemini-live/token?profile=ghost").status_code == 404
+
+
+def test_current_profile_aliases_share_one_mint_budget():
+    assert {api._limiter_key(p) for p in (None, "", " ", "current", "Current")} == {""}
+    assert api._limiter_key(" coder ") == "coder"
