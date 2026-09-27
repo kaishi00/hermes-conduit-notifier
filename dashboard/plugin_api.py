@@ -5,6 +5,10 @@ Gemini API key stays on this host. Conduit asks for a short-lived ephemeral
 token per Live connection; the token is locked to one model, one use, and
 must open its session within a minute.
 
+Web search: Gemini Live's quick lookups can run on this host's own web
+search backend (whatever `hermes tools` configured: SearXNG, Firecrawl,
+Tavily…) instead of Google Search, which is metered separately.
+
 Routes sit behind the dashboard's own auth, the same as /api/audio/*.
 The API key is never returned, logged, or written anywhere.
 """
@@ -45,6 +49,12 @@ REQUEST_TIMEOUT_S = 15.0
 # bursts, but stop a looping client from burning the host's Gemini quota.
 MINT_LIMIT = 20
 MINT_WINDOW_S = 60.0
+# A voice lookup is one query; cap a looping client well above that.
+SEARCH_LIMIT = 30
+SEARCH_WINDOW_S = 60.0
+SEARCH_MAX_RESULTS = 5
+SEARCH_MAX_QUERY_CHARS = 500
+SEARCH_MAX_SNIPPET_CHARS = 500
 
 
 class TokenError(Exception):
@@ -156,6 +166,93 @@ def gemini_live_status(get_env: Optional[Callable[[str], Optional[str]]] = None)
     return {"available": True, "model": model}
 
 
+def _hermes_web_search(query: str, limit: int) -> str:
+    from tools.web_tools import web_search_tool
+
+    return web_search_tool(query, limit)
+
+
+def _hermes_web_search_status() -> Dict[str, Any]:
+    try:
+        from tools.web_tools import check_web_api_key
+    except ImportError as exc:
+        if exc.name and not exc.name.startswith("tools"):
+            raise
+        return {"available": False, "reason": "unsupported"}
+    if not check_web_api_key():
+        return {"available": False, "reason": "not_configured"}
+    backend: Optional[str] = None
+    try:
+        from agent.web_search_registry import get_active_search_provider
+
+        provider = get_active_search_provider()
+        backend = getattr(provider, "name", None)
+    except Exception:  # noqa: BLE001 — the name is only a label
+        logger.debug("Could not name the active web search backend", exc_info=True)
+    return {"available": True, "backend": backend}
+
+
+def web_search_status(probe: Optional[Callable[[], Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """Whether this host can answer Conduit's quick lookups with its own backend."""
+    return (probe or _hermes_web_search_status)()
+
+
+def _clip(value: Any, limit: int) -> str:
+    text = " ".join(str(value or "").split())
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def run_web_search(
+    query: Any,
+    limit: Any = 3,
+    search: Optional[Callable[[str, int], str]] = None,
+    limiter_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Search with the host's configured backend; titles, URLs and snippets only."""
+    query = " ".join(str(query or "").split())
+    if not query:
+        raise TokenError(400, "query is required")
+    if len(query) > SEARCH_MAX_QUERY_CHARS:
+        raise TokenError(400, f"query is longer than {SEARCH_MAX_QUERY_CHARS} characters")
+    try:
+        limit = min(max(int(limit), 1), SEARCH_MAX_RESULTS)
+    except (TypeError, ValueError):
+        limit = 3
+    if limiter_key is not None:
+        _search_limiter.acquire(limiter_key)
+    try:
+        raw = (search or _hermes_web_search)(query, limit)
+    except ImportError as exc:
+        # Only a Hermes without the web tool module; a broken import deeper
+        # inside Hermes is a real failure.
+        if exc.name and not exc.name.startswith("tools"):
+            raise
+        raise TokenError(503, "This Hermes version has no web search tool")
+    try:
+        payload = json.loads(raw) if isinstance(raw, str) else raw
+    except ValueError:
+        raise TokenError(502, "The web search backend returned an unreadable response")
+    if not isinstance(payload, dict) or not payload.get("success", False):
+        error = payload.get("error") if isinstance(payload, dict) else None
+        # Hermes' own message ("No web search provider configured…", a
+        # backend's HTTP error) is what the user needs; it carries no secret.
+        raise TokenError(502, _clip(error or "Web search failed", 300))
+    data = payload.get("data") or {}
+    items = data.get("web") if isinstance(data, dict) else None
+    results = []
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict) or not item.get("url"):
+            continue
+        results.append({
+            "title": _clip(item.get("title"), 200),
+            "url": str(item.get("url")),
+            "snippet": _clip(item.get("description"), SEARCH_MAX_SNIPPET_CHARS),
+        })
+        if len(results) >= limit:
+            break
+    return {"query": query, "results": results}
+
+
 def mint_gemini_live_token(
     get_env: Optional[Callable[[str], Optional[str]]] = None,
     post: Optional[Callable[[str, str, Dict[str, Any]], Dict[str, Any]]] = None,
@@ -191,8 +288,15 @@ def mint_gemini_live_token(
 class _MintLimiter:
     """Sliding-window cap on token mints, per profile."""
 
-    def __init__(self, limit: int, window_s: float, clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(
+        self,
+        limit: int,
+        window_s: float,
+        clock: Callable[[], float] = time.monotonic,
+        message: str = "Too many Gemini Live token requests; try again shortly",
+    ) -> None:
         self.limit = limit
+        self.message = message
         self.window_s = window_s
         self.clock = clock
         self._mints: Dict[str, deque] = {}
@@ -208,11 +312,12 @@ class _MintLimiter:
             while mints and now - mints[0] >= self.window_s:
                 mints.popleft()
             if len(mints) >= self.limit:
-                raise TokenError(429, "Too many Gemini Live token requests; try again shortly")
+                raise TokenError(429, self.message)
             mints.append(now)
 
 
 _mint_limiter = _MintLimiter(MINT_LIMIT, MINT_WINDOW_S)
+_search_limiter = _MintLimiter(SEARCH_LIMIT, SEARCH_WINDOW_S, message="Too many web searches; try again shortly")
 
 
 def _limiter_key(profile: Optional[str]) -> str:
@@ -289,4 +394,34 @@ async def create_gemini_live_token(response: Response, profile: Optional[str] = 
         raise
     except Exception as exc:
         raise _unexpected("token", exc)
+    return {"ok": True, **result}
+
+
+@router.get("/web-search/status")
+async def get_web_search_status(profile: Optional[str] = None) -> Dict[str, Any]:
+    try:
+        return {"ok": True, **(await _run_scoped(profile, web_search_status))}
+    except TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _unexpected("web search status", exc)
+
+
+@router.post("/web-search")
+async def post_web_search(body: Dict[str, Any], response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    query = body.get("query") if isinstance(body, dict) else None
+    limit = body.get("limit", 3) if isinstance(body, dict) else 3
+    try:
+        result = await _run_scoped(profile, lambda: run_web_search(query, limit, limiter_key=_limiter_key(profile)))
+    except TokenError as exc:
+        logger.warning("Web search for Conduit failed: %s", exc)
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
+        raise
+    except Exception as exc:
+        raise _unexpected("web search", exc)
     return {"ok": True, **result}
