@@ -263,9 +263,22 @@ def test_hermes_http_errors_for_bad_profiles_pass_through(client, monkeypatch):
     monkeypatch.setitem(sys.modules, "hermes_cli.web_server_profiles", fake)
 
     assert client.get("/api/plugins/conduit_push/gemini-live/status?profile=ghost").status_code == 404
-    assert client.post("/api/plugins/conduit_push/gemini-live/token?profile=ghost").status_code == 404
+    ghost = client.post("/api/plugins/conduit_push/gemini-live/token?profile=ghost")
+    assert ghost.status_code == 404
+    assert ghost.headers["cache-control"] == "no-store"
 
 
 def test_current_profile_aliases_share_one_mint_budget():
     assert {api._limiter_key(p) for p in (None, "", " ", "current", "Current")} == {""}
     assert api._limiter_key(" coder ") == "coder"
+
+
+def test_hermes_without_the_scope_helper_fails_closed_for_named_profiles(client, monkeypatch):
+    import sys
+    import types
+
+    # The module exists but the private helper was renamed: plain ImportError.
+    monkeypatch.setitem(sys.modules, "hermes_cli", types.ModuleType("hermes_cli"))
+    monkeypatch.setitem(sys.modules, "hermes_cli.web_server_profiles", types.ModuleType("hermes_cli.web_server_profiles"))
+    response = client.get("/api/plugins/conduit_push/gemini-live/status?profile=coder")
+    assert response.status_code == 503
