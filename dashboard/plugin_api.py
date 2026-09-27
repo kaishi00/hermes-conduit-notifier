@@ -233,9 +233,10 @@ def _profile_scope(profile: Optional[str]):
     """
     try:
         from hermes_cli.web_server_profiles import _config_profile_scope
-    except ModuleNotFoundError as exc:
-        # Only a missing Hermes (tests, or a Hermes without profiles) falls back;
-        # a broken import inside Hermes must not silently read unscoped.
+    except ImportError as exc:
+        # Only a missing Hermes or profile module (tests, or a Hermes without
+        # profiles, including a renamed private scope helper) falls back; a broken
+        # import deeper inside Hermes must not silently read unscoped.
         if exc.name not in ("hermes_cli", "hermes_cli.web_server_profiles"):
             raise
         if not profile:
@@ -283,7 +284,8 @@ async def create_gemini_live_token(response: Response, profile: Optional[str] = 
     except TokenError as exc:
         logger.warning("Gemini Live token request failed: %s", exc)
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
-    except HTTPException:
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
         raise
     except Exception as exc:
         raise _unexpected("token", exc)
