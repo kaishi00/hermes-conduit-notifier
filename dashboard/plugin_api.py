@@ -19,6 +19,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import threading
 import time
 import urllib.error
@@ -55,6 +56,10 @@ SEARCH_WINDOW_S = 60.0
 SEARCH_MAX_RESULTS = 5
 SEARCH_MAX_QUERY_CHARS = 500
 SEARCH_MAX_SNIPPET_CHARS = 500
+SEARCH_MAX_URL_CHARS = 2000
+# Bounds the wait on a slow backend. Hermes' own provider timeouts end the
+# worker thread; this only stops Conduit from waiting on it.
+SEARCH_TIMEOUT_S = 20.0
 
 
 class TokenError(Exception):
@@ -202,6 +207,20 @@ def _clip(value: Any, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
+_URL = re.compile(r"\b[a-z][a-z0-9+.-]*://\S+", re.IGNORECASE)
+_SECRETISH = re.compile(r"\b(?:[A-Za-z0-9_-]*(?:key|token|secret|password)[A-Za-z0-9_-]*\s*[=:]\s*)\S+|\b[A-Za-z0-9_-]{24,}\b", re.IGNORECASE)
+
+
+def _scrub(error: Any) -> str:
+    """A backend's error for the user: no URLs (they can carry keys or
+    internal hosts) and nothing that looks like a credential. Hermes' own
+    configuration messages ("No web search provider configured…",
+    "FIRECRAWL_API_KEY is not set") come through readable."""
+    text = _URL.sub("[url]", str(error or ""))
+    text = _SECRETISH.sub(lambda m: "[redacted]" if not m.group(0).isupper() else m.group(0), text)
+    return _clip(text, 300)
+
+
 def run_web_search(
     query: Any,
     limit: Any = 3,
@@ -209,14 +228,18 @@ def run_web_search(
     limiter_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Search with the host's configured backend; titles, URLs and snippets only."""
-    query = " ".join(str(query or "").split())
+    raw_query = str(query or "")
+    # Bounded before normalizing, so a huge body isn't tokenized first.
+    if len(raw_query) > SEARCH_MAX_QUERY_CHARS * 4:
+        raise TokenError(400, f"query is longer than {SEARCH_MAX_QUERY_CHARS} characters")
+    query = " ".join(raw_query.split())
     if not query:
         raise TokenError(400, "query is required")
     if len(query) > SEARCH_MAX_QUERY_CHARS:
         raise TokenError(400, f"query is longer than {SEARCH_MAX_QUERY_CHARS} characters")
     try:
         limit = min(max(int(limit), 1), SEARCH_MAX_RESULTS)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         limit = 3
     if limiter_key is not None:
         _search_limiter.acquire(limiter_key)
@@ -234,18 +257,18 @@ def run_web_search(
         raise TokenError(502, "The web search backend returned an unreadable response")
     if not isinstance(payload, dict) or not payload.get("success", False):
         error = payload.get("error") if isinstance(payload, dict) else None
-        # Hermes' own message ("No web search provider configured…", a
-        # backend's HTTP error) is what the user needs; it carries no secret.
-        raise TokenError(502, _clip(error or "Web search failed", 300))
+        logger.warning("Web search for Conduit failed on the backend: %s", error)
+        raise TokenError(502, _scrub(error) or "Web search failed")
     data = payload.get("data") or {}
     items = data.get("web") if isinstance(data, dict) else None
     results = []
     for item in items if isinstance(items, list) else []:
-        if not isinstance(item, dict) or not item.get("url"):
+        url = str(item.get("url") or "") if isinstance(item, dict) else ""
+        if not url.lower().startswith(("http://", "https://")) or len(url) > SEARCH_MAX_URL_CHARS:
             continue
         results.append({
             "title": _clip(item.get("title"), 200),
-            "url": str(item.get("url")),
+            "url": url,
             "snippet": _clip(item.get("description"), SEARCH_MAX_SNIPPET_CHARS),
         })
         if len(results) >= limit:
@@ -323,8 +346,8 @@ _search_limiter = _MintLimiter(SEARCH_LIMIT, SEARCH_WINDOW_S, message="Too many 
 def _limiter_key(profile: Optional[str]) -> str:
     # Same notion of "the dashboard's own profile" as Hermes' scope, so
     # ?profile=current / " " / "Current" can't each get a fresh window.
-    name = (profile or "").strip()
-    return "" if name.lower() in ("", "current") else name
+    name = (profile or "").strip().lower()
+    return "" if name in ("", "current") else name
 
 
 def _profile_scope(profile: Optional[str]):
@@ -359,11 +382,11 @@ async def _run_scoped(profile: Optional[str], fn: Callable[[], Dict[str, Any]]) 
     return await asyncio.get_running_loop().run_in_executor(None, scoped)
 
 
-def _unexpected(route: str, exc: Exception) -> HTTPException:
+def _unexpected(route: str, exc: Exception, feature: str = "Gemini Live") -> HTTPException:
     # Name the failure so Conduit shows something more useful than a bare 500;
     # the message itself stays in the log since it can carry host details.
-    logger.exception("Gemini Live %s route failed", route)
-    return HTTPException(status_code=500, detail=f"Gemini Live {route} failed on the host ({type(exc).__name__})",
+    logger.exception("%s %s route failed", feature, route)
+    return HTTPException(status_code=500, detail=f"{feature} {route} failed on the host ({type(exc).__name__})",
                          headers={"Cache-Control": "no-store"})
 
 
@@ -406,7 +429,7 @@ async def get_web_search_status(profile: Optional[str] = None) -> Dict[str, Any]
     except HTTPException:
         raise
     except Exception as exc:
-        raise _unexpected("web search status", exc)
+        raise _unexpected("status", exc, feature="Web search")
 
 
 @router.post("/web-search")
@@ -415,7 +438,13 @@ async def post_web_search(body: Dict[str, Any], response: Response, profile: Opt
     query = body.get("query") if isinstance(body, dict) else None
     limit = body.get("limit", 3) if isinstance(body, dict) else 3
     try:
-        result = await _run_scoped(profile, lambda: run_web_search(query, limit, limiter_key=_limiter_key(profile)))
+        result = await asyncio.wait_for(
+            _run_scoped(profile, lambda: run_web_search(query, limit, limiter_key=_limiter_key(profile))),
+            timeout=SEARCH_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("Web search for Conduit timed out after %ss", SEARCH_TIMEOUT_S)
+        raise HTTPException(status_code=504, detail="Web search timed out", headers={"Cache-Control": "no-store"})
     except TokenError as exc:
         logger.warning("Web search for Conduit failed: %s", exc)
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
@@ -423,5 +452,5 @@ async def post_web_search(body: Dict[str, Any], response: Response, profile: Opt
         exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
         raise
     except Exception as exc:
-        raise _unexpected("web search", exc)
+        raise _unexpected("request", exc, feature="Web search")
     return {"ok": True, **result}

@@ -109,3 +109,44 @@ def test_route_reports_a_bad_query(client):
     response = client.post("/api/plugins/conduit_push/web-search", json={})
     assert response.status_code == 400
     assert response.json()["detail"] == "query is required"
+
+
+def test_search_survives_an_overflowing_limit():
+    seen = []
+    api.run_web_search("q", float("inf"), search=lambda q, n: seen.append(n) or hermes_reply())
+    assert seen == [3]
+
+
+def test_search_keeps_only_web_urls():
+    result = api.run_web_search("q", 5, search=lambda q, n: hermes_reply([
+        {"title": "js", "url": "javascript:alert(1)"},
+        {"title": "file", "url": "file:///etc/passwd"},
+        {"title": "long", "url": "https://e.com/" + "a" * api.SEARCH_MAX_URL_CHARS},
+        {"title": "ok", "url": "HTTPS://e.com/ok"},
+    ]))
+    assert [r["title"] for r in result["results"]] == ["ok"]
+
+
+def test_search_errors_drop_urls_and_credentials():
+    error = "GET https://search.internal:8080/search?q=x&api_key=abc123 failed: token=deadbeef; FIRECRAWL_API_KEY is not set"
+    with pytest.raises(api.TokenError) as err:
+        api.run_web_search("q", search=lambda q, n: hermes_reply(success=False, error=error))
+    message = str(err.value)
+    assert "search.internal" not in message and "abc123" not in message and "deadbeef" not in message
+    assert "FIRECRAWL_API_KEY is not set" in message
+
+
+def test_search_rejects_a_huge_query_before_normalizing():
+    with pytest.raises(api.TokenError) as err:
+        api.run_web_search(" " * (api.SEARCH_MAX_QUERY_CHARS * 4 + 1), search=lambda q, n: pytest.fail("must not search"))
+    assert err.value.status == 400
+
+
+def test_route_times_out_a_slow_backend(client, monkeypatch):
+    import time
+
+    monkeypatch.setattr(api, "SEARCH_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(api, "_hermes_web_search", lambda q, n: time.sleep(0.3) or hermes_reply())
+    response = client.post("/api/plugins/conduit_push/web-search", json={"query": "slow"})
+    assert response.status_code == 504
+    assert response.headers["cache-control"] == "no-store"
