@@ -243,3 +243,29 @@ def test_unexpected_host_errors_name_the_failure(client, monkeypatch):
     response = client.get("/api/plugins/conduit_push/gemini-live/status")
     assert response.status_code == 500
     assert response.json()["detail"] == "Gemini Live status failed on the host (RuntimeError)"
+
+
+def test_hermes_http_errors_for_bad_profiles_pass_through(client, monkeypatch):
+    import contextlib
+    import sys
+    import types
+    from fastapi import HTTPException
+
+    @contextlib.contextmanager
+    def scope(profile):
+        if profile:
+            raise HTTPException(status_code=404, detail="Profile not found")
+        yield
+
+    fake = types.ModuleType("hermes_cli.web_server_profiles")
+    fake._config_profile_scope = scope
+    monkeypatch.setitem(sys.modules, "hermes_cli", types.ModuleType("hermes_cli"))
+    monkeypatch.setitem(sys.modules, "hermes_cli.web_server_profiles", fake)
+
+    assert client.get("/api/plugins/conduit_push/gemini-live/status?profile=ghost").status_code == 404
+    assert client.post("/api/plugins/conduit_push/gemini-live/token?profile=ghost").status_code == 404
+
+
+def test_current_profile_aliases_share_one_mint_budget():
+    assert {api._limiter_key(p) for p in (None, "", " ", "current", "Current")} == {""}
+    assert api._limiter_key(" coder ") == "coder"

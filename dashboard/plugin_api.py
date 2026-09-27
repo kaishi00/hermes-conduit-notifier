@@ -215,6 +215,13 @@ class _MintLimiter:
 _mint_limiter = _MintLimiter(MINT_LIMIT, MINT_WINDOW_S)
 
 
+def _limiter_key(profile: Optional[str]) -> str:
+    # Same notion of "the dashboard's own profile" as Hermes' scope, so
+    # ?profile=current / " " / "Current" can't each get a fresh window.
+    name = (profile or "").strip()
+    return "" if name.lower() in ("", "current") else name
+
+
 def _profile_scope(profile: Optional[str]):
     """Resolve .env/config for ``profile`` the way /api/audio/* does.
 
@@ -226,7 +233,11 @@ def _profile_scope(profile: Optional[str]):
     """
     try:
         from hermes_cli.web_server_profiles import _config_profile_scope
-    except ImportError:
+    except ModuleNotFoundError as exc:
+        # Only a missing Hermes (tests, or a Hermes without profiles) falls back;
+        # a broken import inside Hermes must not silently read unscoped.
+        if exc.name not in ("hermes_cli", "hermes_cli.web_server_profiles"):
+            raise
         if not profile:
             return nullcontext()
         logger.warning("Cannot scope Gemini Live request to profile %r: profile scoping unavailable", profile)
@@ -256,6 +267,8 @@ async def get_gemini_live_status(profile: Optional[str] = None) -> Dict[str, Any
         return {"ok": True, **(await _run_scoped(profile, gemini_live_status))}
     except TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc))
+    except HTTPException:
+        raise  # Hermes' own 400/404 for a bad or unknown profile
     except Exception as exc:
         raise _unexpected("status", exc)
 
@@ -266,10 +279,12 @@ async def create_gemini_live_token(response: Response, profile: Optional[str] = 
     response.headers["Cache-Control"] = "no-store"
     response.headers["Pragma"] = "no-cache"
     try:
-        result = await _run_scoped(profile, lambda: mint_gemini_live_token(limiter_key=profile or ""))
+        result = await _run_scoped(profile, lambda: mint_gemini_live_token(limiter_key=_limiter_key(profile)))
     except TokenError as exc:
         logger.warning("Gemini Live token request failed: %s", exc)
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+    except HTTPException:
+        raise
     except Exception as exc:
         raise _unexpected("token", exc)
     return {"ok": True, **result}
