@@ -187,3 +187,24 @@ def test_api_version_override_moves_both_urls():
 
 def test_unknown_api_version_falls_back_to_v1alpha():
     assert api.resolve_api_version(env(CONDUIT_GEMINI_LIVE_API_VERSION="../evil")) == "v1alpha"
+
+
+def test_token_reports_the_window_google_granted():
+    granted = {"name": "auth_tokens/t", "expireTime": "2026-09-27T12:20:00Z",
+               "newSessionExpireTime": "2026-09-27T12:00:30Z"}
+    result = api.mint_gemini_live_token(env(GEMINI_API_KEY="secret"), lambda *_: granted, now=NOW)
+    assert result["expires_at"] == "2026-09-27T12:20:00Z"
+    assert result["new_session_expires_at"] == "2026-09-27T12:00:30Z"
+
+
+def test_network_errors_return_a_generic_message(monkeypatch):
+    import urllib.error
+
+    def fail(request, timeout):
+        raise urllib.error.URLError("proxy.internal:3128 refused")
+
+    monkeypatch.setattr(api._opener, "open", fail)
+    with pytest.raises(api.TokenError) as raised:
+        api._post_json(api.token_url("v1alpha"), "secret", {})
+    assert raised.value.status == 502
+    assert str(raised.value) == "Could not reach Google"
