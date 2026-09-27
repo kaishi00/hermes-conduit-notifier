@@ -2,7 +2,7 @@
 
 Hermes Conduit Notifier is the open-source Hermes plugin that delivers lifecycle notifications to the Hermes Conduit iOS app. It observes normal Hermes hooks and sends small HTTPS events to the Conduit push relay.
 
-The plugin does **not** contain an Apple Push Notification service key, dashboard credentials, or access to your Hermes gateway. (Its only dashboard routes hand Conduit short-lived Gemini Live tokens; see below.) Apple credentials remain on the central push relay, so self-hosted users never need to copy a shared signing key onto their gateway.
+The plugin does **not** contain an Apple Push Notification service key, dashboard credentials, or access to your Hermes gateway. (Its only dashboard routes hand Conduit short-lived Gemini Live tokens and run its voice web lookups; see below.) Apple credentials remain on the central push relay, so self-hosted users never need to copy a shared signing key onto their gateway.
 
 ## Install
 
@@ -213,6 +213,23 @@ profile. The API key itself is never returned or logged. `?profile=<name>` resol
 `/api/audio/*` routes do, and fails with 503 rather than falling back to the
 default profile if it can't. Restart the dashboard (`hermes gateway restart`)
 after updating the plugin so the routes mount.
+
+## Web search for voice lookups
+
+Gemini Live can answer quick questions (weather, news, facts) with a web
+search. Instead of Google Search, which Google meters separately, Conduit can
+run those lookups on this host's own web search backend: whatever
+`hermes tools` set up (SearXNG, Firecrawl, Tavily, and so on). Nothing extra
+needs configuring on the plugin side.
+
+| Method | Path | Returns |
+|--------|------|---------|
+| GET | `/api/plugins/conduit_push/web-search/status` | `{ok, available, reason?, backend?}` |
+| POST | `/api/plugins/conduit_push/web-search` with `{query, limit?}` | `{ok, query, results: [{title, url, snippet}]}` |
+
+Results are titles, URLs and snippets only (at most 5), and searches are capped
+at 30 per minute per profile. A search that takes more than 20 seconds returns 504, and a backend's own error text stays in the Hermes log: Conduit only sees Hermes' configuration messages (such as "No web search provider configured") or a generic failure. `?profile=<name>` searches with that profile's
+backend and keys, as the Gemini Live routes do.
 
 ## Conduit support and privacy
 
