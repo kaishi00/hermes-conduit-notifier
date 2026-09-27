@@ -41,7 +41,7 @@ MODEL_ENV_VAR = "CONDUIT_GEMINI_LIVE_MODEL"
 TOKEN_LIFETIME = timedelta(minutes=30)
 NEW_SESSION_WINDOW = timedelta(minutes=1)
 REQUEST_TIMEOUT_S = 15.0
-# Each Live connection (including every resume) needs its own token, so allow
+# Conduit mints a token per Live connection (resuming a session doesn't use one up), so allow
 # bursts, but stop a looping client from burning the host's Gemini quota.
 MINT_LIMIT = 20
 MINT_WINDOW_S = 60.0
@@ -64,7 +64,8 @@ def _env_value(key: str) -> Optional[str]:
     return get_env_value(key)
 
 
-def resolve_api_key(get_env: Callable[[str], Optional[str]] = _env_value) -> Optional[str]:
+def resolve_api_key(get_env: Optional[Callable[[str], Optional[str]]] = None) -> Optional[str]:
+    get_env = get_env or _env_value
     for name in API_KEY_ENV_VARS:
         value = str(get_env(name) or "").strip()
         if value:
@@ -72,12 +73,14 @@ def resolve_api_key(get_env: Callable[[str], Optional[str]] = _env_value) -> Opt
     return None
 
 
-def resolve_model(get_env: Callable[[str], Optional[str]] = _env_value) -> str:
+def resolve_model(get_env: Optional[Callable[[str], Optional[str]]] = None) -> str:
+    get_env = get_env or _env_value
     value = str(get_env(MODEL_ENV_VAR) or "").strip()
     return value.removeprefix("models/") or DEFAULT_MODEL
 
 
-def resolve_api_version(get_env: Callable[[str], Optional[str]] = _env_value) -> str:
+def resolve_api_version(get_env: Optional[Callable[[str], Optional[str]]] = None) -> str:
+    get_env = get_env or _env_value
     value = str(get_env(API_VERSION_ENV_VAR) or "").strip()
     return value if value in ("v1alpha", "v1beta", "v1") else DEFAULT_API_VERSION
 
@@ -138,7 +141,9 @@ def _post_json(url: str, api_key: str, body: Dict[str, Any]) -> Dict[str, Any]:
             pass
         raise TokenError(502, f"Google rejected the token request ({exc.code}){': ' + detail if detail else ''}")
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise TokenError(502, f"Could not reach Google: {getattr(exc, 'reason', exc)}")
+        # The reason can name proxies or hosts; keep it in the log, not the response.
+        logger.warning("Gemini Live token request could not reach Google: %s", getattr(exc, "reason", exc))
+        raise TokenError(502, "Could not reach Google")
     except ValueError:
         raise TokenError(502, "Google returned an unreadable token response")
 
@@ -175,8 +180,9 @@ def mint_gemini_live_token(
         raise TokenError(502, "Google's token response had no token")
     return {
         "token": token,
-        "expires_at": body["expireTime"],
-        "new_session_expires_at": body["newSessionExpireTime"],
+        # Google may clamp the requested window; report what it granted.
+        "expires_at": payload.get("expireTime") or body["expireTime"],
+        "new_session_expires_at": payload.get("newSessionExpireTime") or body["newSessionExpireTime"],
         "model": model,
         "websocket_url": websocket_url(api_version),
     }
