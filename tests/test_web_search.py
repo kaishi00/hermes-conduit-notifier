@@ -150,3 +150,32 @@ def test_route_times_out_a_slow_backend(client, monkeypatch):
     response = client.post("/api/plugins/conduit_push/web-search", json={"query": "slow"})
     assert response.status_code == 504
     assert response.headers["cache-control"] == "no-store"
+
+
+def test_search_errors_redact_uppercase_secrets_too():
+    error = "api_key=ABC123DEF TOKEN:ABCDEF bad bearer ABCDEFGHIJKLMNOPQRSTUVWX12 while FIRECRAWL_API_KEY is not set"
+    with pytest.raises(api.TokenError) as err:
+        api.run_web_search("q", search=lambda q, n: hermes_reply(success=False, error=error))
+    message = str(err.value)
+    for secret in ("ABC123DEF", "ABCDEF ", "ABCDEFGHIJKLMNOPQRSTUVWX12"):
+        assert secret not in message
+    assert "api_key=[redacted]" in message
+    assert "FIRECRAWL_API_KEY is not set" in message
+
+
+def test_a_broken_import_inside_hermes_is_not_reported_as_missing():
+    def broken(query, limit):
+        raise ModuleNotFoundError("No module named 'ruamel'", name="ruamel")
+
+    with pytest.raises(ModuleNotFoundError):
+        api.run_web_search("q", search=broken)
+
+
+def test_route_refuses_an_oversized_body(client):
+    response = client.post("/api/plugins/conduit_push/web-search", content=b'{"query":"' + b"x" * 20000 + b'"}',
+                           headers={"Content-Type": "application/json"})
+    assert response.status_code == 413
+
+
+def test_status_route_is_not_cached(client):
+    assert client.get("/api/plugins/conduit_push/web-search/status").headers["cache-control"] == "no-store"

@@ -25,11 +25,12 @@ import time
 import urllib.error
 import urllib.request
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, Optional
 
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, HTTPException, Request, Response
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,10 @@ SEARCH_MAX_URL_CHARS = 2000
 # Bounds the wait on a slow backend. Hermes' own provider timeouts end the
 # worker thread; this only stops Conduit from waiting on it.
 SEARCH_TIMEOUT_S = 20.0
+# Searches get their own small pool, so a slow backend can hold at most this
+# many threads and never starves the dashboard's shared executor.
+SEARCH_WORKERS = 4
+SEARCH_MAX_BODY_BYTES = 16 * 1024
 
 
 class TokenError(Exception):
@@ -177,11 +182,17 @@ def _hermes_web_search(query: str, limit: int) -> str:
     return web_search_tool(query, limit)
 
 
+def _is_missing_web_tools(exc: ModuleNotFoundError) -> bool:
+    # Only a Hermes without the web tool module; any other missing module
+    # (a broken import deeper inside Hermes) is a real failure.
+    return exc.name in ("tools", "tools.web_tools")
+
+
 def _hermes_web_search_status() -> Dict[str, Any]:
     try:
         from tools.web_tools import check_web_api_key
-    except ImportError as exc:
-        if exc.name and not exc.name.startswith("tools"):
+    except ModuleNotFoundError as exc:
+        if not _is_missing_web_tools(exc):
             raise
         return {"available": False, "reason": "unsupported"}
     if not check_web_api_key():
@@ -208,7 +219,10 @@ def _clip(value: Any, limit: int) -> str:
 
 
 _URL = re.compile(r"\b[a-z][a-z0-9+.-]*://\S+", re.IGNORECASE)
-_SECRETISH = re.compile(r"\b(?:[A-Za-z0-9_-]*(?:key|token|secret|password)[A-Za-z0-9_-]*\s*[=:]\s*)\S+|\b[A-Za-z0-9_-]{24,}\b", re.IGNORECASE)
+# A value after a key/token/secret/password name, and any long opaque run
+# with a digit in it (env var names like FIRECRAWL_API_KEY have none).
+_NAMED_SECRET = re.compile(r"\b([A-Za-z0-9_-]*(?:key|token|secret|password)[A-Za-z0-9_-]*)(\s*[=:]\s*)\S+", re.IGNORECASE)
+_OPAQUE = re.compile(r"\b(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{24,}\b")
 
 
 def _scrub(error: Any) -> str:
@@ -217,7 +231,8 @@ def _scrub(error: Any) -> str:
     configuration messages ("No web search provider configured…",
     "FIRECRAWL_API_KEY is not set") come through readable."""
     text = _URL.sub("[url]", str(error or ""))
-    text = _SECRETISH.sub(lambda m: "[redacted]" if not m.group(0).isupper() else m.group(0), text)
+    text = _NAMED_SECRET.sub(lambda m: m.group(1) + m.group(2) + "[redacted]", text)
+    text = _OPAQUE.sub("[redacted]", text)
     return _clip(text, 300)
 
 
@@ -245,10 +260,8 @@ def run_web_search(
         _search_limiter.acquire(limiter_key)
     try:
         raw = (search or _hermes_web_search)(query, limit)
-    except ImportError as exc:
-        # Only a Hermes without the web tool module; a broken import deeper
-        # inside Hermes is a real failure.
-        if exc.name and not exc.name.startswith("tools"):
+    except ModuleNotFoundError as exc:
+        if not _is_missing_web_tools(exc):
             raise
         raise TokenError(503, "This Hermes version has no web search tool")
     try:
@@ -374,12 +387,19 @@ def _profile_scope(profile: Optional[str]):
     return _config_profile_scope(profile or None)
 
 
-async def _run_scoped(profile: Optional[str], fn: Callable[[], Dict[str, Any]]) -> Dict[str, Any]:
+async def _run_scoped(
+    profile: Optional[str],
+    fn: Callable[[], Dict[str, Any]],
+    executor: Optional[ThreadPoolExecutor] = None,
+) -> Dict[str, Any]:
     def scoped() -> Dict[str, Any]:
         with _profile_scope(profile):
             return fn()
 
-    return await asyncio.get_running_loop().run_in_executor(None, scoped)
+    return await asyncio.get_running_loop().run_in_executor(executor, scoped)
+
+
+_search_executor = ThreadPoolExecutor(max_workers=SEARCH_WORKERS, thread_name_prefix="conduit-web-search")
 
 
 def _unexpected(route: str, exc: Exception, feature: str = "Gemini Live") -> HTTPException:
@@ -421,25 +441,43 @@ async def create_gemini_live_token(response: Response, profile: Optional[str] = 
 
 
 @router.get("/web-search/status")
-async def get_web_search_status(profile: Optional[str] = None) -> Dict[str, Any]:
+async def get_web_search_status(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
     try:
-        return {"ok": True, **(await _run_scoped(profile, web_search_status))}
+        return {"ok": True, **(await _run_scoped(profile, web_search_status, _search_executor))}
     except TokenError as exc:
-        raise HTTPException(status_code=exc.status, detail=str(exc))
-    except HTTPException:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
         raise
     except Exception as exc:
         raise _unexpected("status", exc, feature="Web search")
 
 
 @router.post("/web-search")
-async def post_web_search(body: Dict[str, Any], response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+async def post_web_search(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
+    no_store = {"Cache-Control": "no-store"}
+    # A declared oversized body is refused before it is read. (A chunked body
+    # has no length to check; the dashboard's auth limits who can send one.)
+    try:
+        declared = int(request.headers.get("content-length") or 0)
+    except ValueError:
+        declared = 0
+    if declared > SEARCH_MAX_BODY_BYTES:
+        raise HTTPException(status_code=413, detail="Request body is too large", headers=no_store)
+    raw = await request.body()
+    if len(raw) > SEARCH_MAX_BODY_BYTES:
+        raise HTTPException(status_code=413, detail="Request body is too large", headers=no_store)
+    try:
+        body = json.loads(raw or b"{}")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Request body is not JSON", headers=no_store)
     query = body.get("query") if isinstance(body, dict) else None
     limit = body.get("limit", 3) if isinstance(body, dict) else 3
     try:
         result = await asyncio.wait_for(
-            _run_scoped(profile, lambda: run_web_search(query, limit, limiter_key=_limiter_key(profile))),
+            _run_scoped(profile, lambda: run_web_search(query, limit, limiter_key=_limiter_key(profile)), _search_executor),
             timeout=SEARCH_TIMEOUT_S,
         )
     except asyncio.TimeoutError:
