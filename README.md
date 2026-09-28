@@ -2,7 +2,7 @@
 
 Hermes Conduit Notifier is the open-source Hermes plugin that delivers lifecycle notifications to the Hermes Conduit iOS app. It observes normal Hermes hooks and sends small HTTPS events to the Conduit push relay.
 
-The plugin does **not** contain an Apple Push Notification service key, dashboard credentials, or access to your Hermes gateway. (Its only dashboard routes hand Conduit short-lived Gemini Live tokens, run its voice web lookups and read memory for voice; see below.) Apple credentials remain on the central push relay, so self-hosted users never need to copy a shared signing key onto their gateway.
+The plugin does **not** contain an Apple Push Notification service key, dashboard credentials, or access to your Hermes gateway. (Its only dashboard routes hand Conduit short-lived Gemini Live tokens, start GPT-Live sessions on the host's ChatGPT subscription, run its voice web lookups and read memory and personality for voice; see below.) Apple credentials remain on the central push relay, so self-hosted users never need to copy a shared signing key onto their gateway.
 
 ## Install
 
@@ -288,6 +288,41 @@ hook sees Hermes' voice-live note on that turn and adds one line to the user
 message: keep the usual personality through word choice and tone, but write
 only words meant to be spoken, with no stage directions or narrated actions,
 no sound effects, no emoji, and no markdown. Other turns are left alone.
+
+## GPT-Live on a ChatGPT subscription
+
+This is the host half of [hermes-agent#108940](https://github.com/NousResearch/hermes-agent/pull/108940),
+shipped in the plugin so Conduit doesn't wait on the upstream merge. It lets a
+GPT-Live voice session bill your ChatGPT/Codex subscription instead of an OpenAI
+API key. First sign in on the Hermes host with `hermes auth` and choose OpenAI Codex.
+
+| Method | Path | Returns |
+|--------|------|---------|
+| GET | `/api/plugins/conduit_push/gpt-live/status` | `{ok, auth, available, reason, model, voice, source}` |
+| POST | `/api/plugins/conduit_push/gpt-live/session` | `{ok, auth, session: {id}, transport: {type, sdp}, source}` |
+
+The session route takes `{"sdp": "<WebRTC offer>", "history": [...]}` (history
+optional, last 40 items kept) and returns the SDP answer. The plugin posts the
+offer to the Codex voice service with the host's Codex OAuth token and ChatGPT
+account id; neither is ever returned to Conduit or logged (a failure in Hermes' own exchange logs only its exception type). Status only checks that a
+sign-in exists; the account's voice entitlement is checked when a call starts.
+A sign-in, quota or connection failure is an error: **it never falls back to
+API billing**. Sessions are capped at 10 per minute per profile.
+
+Optional settings in the profile's `config.yaml`, the same keys upstream uses:
+
+```yaml
+voice:
+  gpt_live:
+    subscription_model: gpt-live-1-codex
+    subscription_voice: cove
+    instructions: ""   # extra persona sentences
+```
+
+When the host's Hermes ships the same exchange, both routes hand the request to
+Hermes (`source: "hermes"`) and keep serving the same URLs, so Conduit needs no
+change. `voice.gpt_live.auth` is Hermes desktop's setting; these routes always
+use the subscription.
 
 ## Conduit support and privacy
 
