@@ -308,3 +308,11 @@ def test_oversized_answer_is_refused():
     finally:
         api._opener = original
     assert raised.value.status == 502
+
+
+@pytest.mark.parametrize("claims", [None, [], "x"])
+def test_a_decoder_returning_a_non_dict_is_a_503(client, hermes, openai, monkeypatch, claims):
+    import hermes_cli.auth_constants as constants
+    monkeypatch.setattr(constants, "_decode_jwt_claims", lambda token: claims)
+    assert client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER}).status_code == 503
+    assert openai.calls == []

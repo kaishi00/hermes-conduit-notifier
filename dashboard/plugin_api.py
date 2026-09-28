@@ -1033,8 +1033,10 @@ GPT_LIVE_WORKERS = 2
 GPT_LIVE_MAX_BODY_BYTES = 256 * 1024
 GPT_LIVE_MAX_HISTORY_ITEMS = 40
 GPT_LIVE_MAX_ANSWER_BYTES = 64 * 1024
-# Whole-request backstop, above the socket timeout, so a stuck Hermes call
-# (a token refresh, the upstream exchange) can't pin the two workers.
+# Bounds how long Conduit waits (a 504), above the socket timeout. It can't
+# interrupt a Hermes call already running on a worker (a token refresh, the
+# upstream exchange), so status has its own pool: a stuck session never
+# blocks the readiness check.
 GPT_LIVE_REQUEST_TIMEOUT_S = GPT_LIVE_TIMEOUT_S + 2
 GPT_LIVE_NO_FALLBACK = "No API fallback was used."
 _GPT_LIVE_CALL_ID = re.compile(r"rtc_[A-Za-z0-9_-]+|[0-9a-fA-F-]{36}")
@@ -1065,6 +1067,7 @@ GPT_LIVE_PERSONA = (
 )
 
 _gpt_live_executor = ThreadPoolExecutor(max_workers=GPT_LIVE_WORKERS, thread_name_prefix="conduit-gpt-live")
+_gpt_live_status_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="conduit-gpt-live-status")
 _gpt_live_limiter = _MintLimiter(GPT_LIVE_LIMIT, GPT_LIVE_WINDOW_S,
                                  message="Too many GPT-Live session requests; try again shortly")
 
@@ -1130,7 +1133,8 @@ def _codex_credentials(refresh_if_expiring: bool = True) -> tuple:
         raise TokenError(503, "GPT-Live needs a working Codex sign-in on the Hermes host. "
                               "Run `hermes auth` and choose OpenAI Codex. " + GPT_LIVE_NO_FALLBACK)
     token = str(credentials.get("api_key") or "").strip() if isinstance(credentials, dict) else ""
-    claims = _decode_jwt_claims(token).get("https://api.openai.com/auth", {})
+    claims = _decode_jwt_claims(token)
+    claims = claims.get("https://api.openai.com/auth") if isinstance(claims, dict) else None
     account = claims.get("chatgpt_account_id") if isinstance(claims, dict) else None
     if (not token or not isinstance(account, str) or not account.strip()
             or any(c in token + account for c in "\r\n")):
@@ -1247,7 +1251,7 @@ async def get_gpt_live_status(response: Response, profile: Optional[str] = None)
     response.headers["Cache-Control"] = "no-store"
     try:
         return {"ok": True, **(await asyncio.wait_for(
-            _run_scoped(profile, gpt_live_status, _gpt_live_executor), timeout=GPT_LIVE_REQUEST_TIMEOUT_S))}
+            _run_scoped(profile, gpt_live_status, _gpt_live_status_executor), timeout=GPT_LIVE_REQUEST_TIMEOUT_S))}
     except asyncio.TimeoutError:
         logger.warning("GPT-Live status for Conduit timed out after %ss", GPT_LIVE_REQUEST_TIMEOUT_S)
         raise HTTPException(status_code=504, detail="GPT-Live status timed out", headers={"Cache-Control": "no-store"})
