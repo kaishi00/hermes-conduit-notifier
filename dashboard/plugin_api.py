@@ -1035,7 +1035,8 @@ GPT_LIVE_MAX_HISTORY_ITEMS = 40
 GPT_LIVE_MAX_ANSWER_BYTES = 64 * 1024
 # Bounds how long Conduit waits (a 504), above the socket timeout. It can't
 # interrupt a Hermes call already running on a worker (a token refresh, the
-# upstream exchange), so status has its own pool: a stuck session never
+# upstream exchange), so a Hermes call that never returns holds its worker
+# until the process restarts. Status has its own pool: a stuck session never
 # blocks the readiness check.
 GPT_LIVE_REQUEST_TIMEOUT_S = GPT_LIVE_TIMEOUT_S + 2
 GPT_LIVE_NO_FALLBACK = "No API fallback was used."
@@ -1162,7 +1163,8 @@ def gpt_live_status() -> Dict[str, Any]:
     try:
         _codex_credentials(refresh_if_expiring=False)
     except TokenError as exc:
-        return {**status, "available": False, "reason": str(exc)}
+        # A readiness reason, not a call failure: without the "no fallback" sentence.
+        return {**status, "available": False, "reason": str(exc).replace(" " + GPT_LIVE_NO_FALLBACK, "")}
     return {**status, "available": True, "reason": None}
 
 
@@ -1198,6 +1200,10 @@ def _post_sdp(url: str, headers: Dict[str, str], body: Dict[str, Any]) -> tuple:
         return status, "", ""
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         logger.warning("GPT-Live session request could not reach OpenAI: %s", getattr(exc, "reason", exc))
+        raise TokenError(502, "GPT-Live connection failed. " + GPT_LIVE_NO_FALLBACK)
+    except ValueError as exc:
+        # A header value the request can't carry (a non-Latin-1 token, say): the type only, never the value.
+        logger.warning("GPT-Live could not build its session request: %s", type(exc).__name__)
         raise TokenError(502, "GPT-Live connection failed. " + GPT_LIVE_NO_FALLBACK)
 
 

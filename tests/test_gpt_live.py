@@ -384,3 +384,21 @@ def test_a_config_read_failure_uses_the_defaults(client, hermes, monkeypatch):
 
     monkeypatch.setattr(config, "load_config", boom)
     assert client.get(f"{BASE}/gpt-live/status").json()["model"] == "gpt-live-1-codex"
+
+
+def test_status_reason_omits_the_call_failure_sentence(client, hermes):
+    hermes.auth_error = True
+    reason = client.get(f"{BASE}/gpt-live/status").json()["reason"]
+    assert "hermes auth" in reason and "No API fallback" not in reason
+
+
+def test_an_unencodable_header_is_a_502_without_the_value(monkeypatch):
+    class Boom:
+        def open(self, request, timeout=None):
+            raise UnicodeEncodeError("latin-1", "SECRET-DETAIL", 0, 1, "nope")
+
+    monkeypatch.setattr(api, "_opener", Boom())
+    with pytest.raises(api.TokenError) as raised:
+        api._post_sdp(api.GPT_LIVE_URL, {}, {"sdp": OFFER})
+    assert raised.value.status == 502
+    assert "No API fallback" in str(raised.value) and "SECRET-DETAIL" not in str(raised.value)
