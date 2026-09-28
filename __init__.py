@@ -27,6 +27,7 @@ def register(ctx: Any) -> None:
     ctx.register_hook("pre_approval_request", _pre_approval_request)
     ctx.register_hook("subagent_start", _subagent_start)
     ctx.register_hook("subagent_stop", _subagent_stop)
+    ctx.register_hook("pre_llm_call", _pre_llm_call)
     # Wrap clarify execution so a backgrounded device gets an answerable card
     # (plugin-minted id, answered through the relay). Older gateways without
     # middleware support simply keep the original clarify path.
@@ -146,6 +147,64 @@ def _subagent_stop(**kwargs: Any) -> None:
         profile=_profile,
         body=_text(kwargs.get("child_summary")) or f"A delegated task {status}.",
     ))
+
+
+# Hermes' voice-live delegation note starts with this; used when the running
+# Hermes has no tools.voice_live to import it from.
+_VOICE_LIVE_NOTE_PREFIX = "[Note: this message is a delegation from a live spoken conversation"
+_voice_live_prefix: str | None = None
+
+PERSONA_VOICE_NOTE = (
+    "[Spoken reply: keep your usual personality through word choice and tone, but everything you "
+    "write will be read aloud, so write only words meant to be spoken. No stage directions or "
+    "narrated actions (for example *sets down the gavel*), no sound effects, no emoji, no markdown.]"
+)
+
+
+def _voice_note_prefix() -> str:
+    global _voice_live_prefix
+    if _voice_live_prefix is None:
+        try:
+            from tools.voice_live import VOICE_LIVE_TURN_NOTE
+
+            prefix = VOICE_LIVE_TURN_NOTE if isinstance(VOICE_LIVE_TURN_NOTE, str) and VOICE_LIVE_TURN_NOTE else ""
+        except Exception:  # noqa: BLE001 — an older Hermes, or none (tests)
+            prefix = ""
+        _voice_live_prefix = prefix or _VOICE_LIVE_NOTE_PREFIX
+    return _voice_live_prefix
+
+
+def _first_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str):
+                return part["text"]
+    return ""
+
+
+def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
+    """Keep a voice-live delegation's reply speakable without flattening the persona.
+
+    The TUI gateway prepends Hermes' voice-live note to the model input of a
+    turn delegated from a live spoken conversation; the ``user_message`` kwarg
+    is the clean text, so the note is read from the turn's own user row in
+    ``conversation_history``.
+    """
+    try:
+        history = kwargs.get("conversation_history")
+        if not isinstance(history, list):
+            return None
+        for message in reversed(history):
+            if isinstance(message, dict) and message.get("role") == "user":
+                text = _first_text(message.get("content")).lstrip()
+                if text.startswith(_voice_note_prefix()):
+                    return {"context": PERSONA_VOICE_NOTE}
+                return None
+    except Exception:  # noqa: BLE001 — a hook must never break the turn
+        return None
+    return None
 
 
 def _is_child(session_id: Any) -> bool:

@@ -267,6 +267,28 @@ profile's memory routes answer 503 at once until it returns, and other profiles
 are unaffected. `?profile=<name>`
 reads that profile's memory, as the other routes do.
 
+## Personality for voice
+
+Conduit's voice modes can keep the agent's personality without reading stage
+directions or emoji aloud.
+
+| Method | Path | Returns |
+|--------|------|---------|
+| GET | `/api/plugins/conduit_push/personality` | `{ok, available, text}` |
+
+`text` is the profile's `SOUL.md` as Hermes itself loads it (`load_soul_md`,
+with its injection scan and legacy-protocol stripping), capped at 8,000
+characters. `available` is false with empty `text` when there is no
+`SOUL.md`, it is empty, or the Hermes is too old to have `load_soul_md`.
+Reads are capped at 30 per minute per profile, unexpected errors are reported
+by type only, and `?profile=<name>` reads that profile's `SOUL.md`.
+
+When Conduit delegates a spoken turn to Hermes, the plugin's `pre_llm_call`
+hook sees Hermes' voice-live note on that turn and adds one line to the user
+message: keep the usual personality through word choice and tone, but write
+only words meant to be spoken, with no stage directions or narrated actions,
+no sound effects, no emoji, and no markdown. Other turns are left alone.
+
 ## Conduit support and privacy
 
 The repository also hosts the public Hermes Conduit support and privacy pages:

@@ -13,6 +13,9 @@ Memory: Gemini Live can see what this host's Hermes remembers without Conduit
 knowing the backend: the built-in MEMORY.md / USER.md snapshot plus whatever
 external provider `memory.provider` names (Honcho, Mem0, …). Read-only.
 
+Personality: the profile's SOUL.md as Hermes loads it, so voice keeps the
+agent's personality. Read-only.
+
 Routes sit behind the dashboard's own auth, the same as /api/audio/*.
 The API key is never returned, logged, or written anywhere.
 """
@@ -924,3 +927,60 @@ async def post_memory_recall(request: Request, response: Response, profile: Opti
     query = body.get("query") if isinstance(body, dict) else None
     job = _memory_job(profile, lambda key, limiter_key: run_memory_recall(query, key, limiter_key=limiter_key))
     return {"ok": True, **(await _run_memory(profile, job, "recall"))}
+
+
+# --- Personality ------------------------------------------------------------
+#
+# The profile's SOUL.md as Hermes itself loads it (injection scan, legacy
+# protocol stripped), so a voice model can keep the agent's personality.
+# Read-only; the voice-side rules against stage directions live in the
+# pre_llm_call hook and in Conduit's own voice prompt.
+PERSONALITY_MAX_CHARS = 8000
+PERSONALITY_LIMIT = 30
+PERSONALITY_WINDOW_S = 60.0
+
+_MISSING_PERSONALITY_MODULES = frozenset({"agent", "agent.prompt_builder", "hermes_constants"})
+
+_personality_limiter = _MintLimiter(PERSONALITY_LIMIT, PERSONALITY_WINDOW_S,
+                                    message="Too many personality requests; try again shortly")
+
+
+def _hermes_soul_md() -> Optional[str]:
+    """SOUL.md for the active profile (profile-scoped by _run_scoped), or None."""
+    from agent.prompt_builder import load_soul_md
+    from hermes_constants import get_hermes_home
+
+    # Pin the home explicitly: this runs on a worker thread, and Hermes'
+    # ambient lookup there could fall back to the launch profile.
+    return load_soul_md(home_override=get_hermes_home())
+
+
+def personality(limiter_key: Optional[str] = None) -> Dict[str, Any]:
+    """The agent's SOUL.md for Conduit voice; ``available`` is false when there is none."""
+    if limiter_key is not None:
+        _personality_limiter.acquire(limiter_key)
+    try:
+        soul = _hermes_soul_md()
+    except ImportError as exc:
+        # An older Hermes without load_soul_md (or without Hermes at all).
+        if exc.name not in _MISSING_PERSONALITY_MODULES:
+            raise
+        return {"available": False, "text": ""}
+    text = _clip_block(soul, PERSONALITY_MAX_CHARS) if soul else ""
+    return {"available": bool(text), "text": text}
+
+
+@router.get("/personality")
+async def get_personality(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        result = await _run_scoped(profile, lambda: personality(limiter_key=_limiter_key(profile)))
+    except TokenError as exc:
+        logger.warning("Personality for Conduit failed: %s", exc)
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
+        raise
+    except Exception as exc:
+        raise _unexpected("request", exc, feature="Personality")
+    return {"ok": True, **result}
