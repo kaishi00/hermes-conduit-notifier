@@ -80,6 +80,8 @@ def hermes(monkeypatch):
     monkeypatch.setattr(api, "_memory_provider_init_kwargs", lambda: {"platform": api.MEMORY_PLATFORM})
     monkeypatch.setattr(api, "_memory_providers", api._MemoryProviders())
     monkeypatch.setattr(api, "_memory_limiter", api._MintLimiter(api.MEMORY_RECALL_LIMIT, api.MEMORY_RECALL_WINDOW_S))
+    monkeypatch.setattr(api, "_memory_context_limiter",
+                        api._MintLimiter(api.MEMORY_CONTEXT_LIMIT, api.MEMORY_CONTEXT_WINDOW_S))
     return state
 
 
@@ -197,12 +199,127 @@ def test_concurrent_requests_start_one_provider(hermes):
         return FakeProvider()
 
     cache = api._MemoryProviders()
-    threads = [threading.Thread(target=cache.get, args=("", "honcho", slow_start)) for _ in range(5)]
+    threads = [threading.Thread(target=cache.get, args=("", "honcho"), kwargs={"start": slow_start}) for _ in range(5)]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
     assert started == ["honcho"]
+
+
+def test_concurrent_recalls_on_one_profile_never_overlap(hermes):
+    hermes.config = {"memory": {"provider": "honcho"}}
+    provider = hermes.providers["honcho"] = FakeProvider()
+    active, peak, lock = [0], [0], threading.Lock()
+
+    def prefetch(query, session_id=""):
+        with lock:
+            active[0] += 1
+            peak[0] = max(peak[0], active[0])
+        time.sleep(0.02)
+        with lock:
+            active[0] -= 1
+        return "r"
+
+    provider.prefetch = prefetch
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(api.run_memory_recall("tea", "p"))) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert results == [{"available": True, "results": "r"}] * 6
+    assert peak[0] == 1
+
+
+@pytest.mark.parametrize("hang_in", ["initialize", "prefetch"])
+def test_a_hung_provider_fails_fast_and_spares_other_profiles(hermes, monkeypatch, hang_in):
+    monkeypatch.setattr(api, "MEMORY_TIMEOUT_S", 0.2)
+    release = threading.Event()
+
+    class Hanging(FakeProvider):
+        def initialize(self, session_id, **kwargs):
+            if hang_in == "initialize":
+                release.wait(5)
+
+        def prefetch(self, query, *, session_id=""):
+            if hang_in == "prefetch":
+                release.wait(5)
+            return "r"
+
+    providers = {"hung": Hanging(), "ok": FakeProvider()}
+    monkeypatch.setattr(api, "_hermes_load_memory_provider", lambda name: providers.pop(key[0]))
+    hermes.config = {"memory": {"provider": "honcho"}}
+    key = ["hung"]
+    try:
+        with pytest.raises(api.TokenError) as err:
+            api.run_memory_recall("tea", "hung")
+        assert err.value.status == 504
+        # The same profile now fails at once instead of queueing behind the hung call.
+        began = time.monotonic()
+        with pytest.raises(api.TokenError) as err:
+            api.run_memory_recall("tea", "hung")
+        assert err.value.status == 503
+        assert time.monotonic() - began < 0.1
+        # Other profiles are unaffected.
+        key[0] = "ok"
+        assert api.run_memory_recall("tea", "ok") == {"available": True, "results": "## Recall\nlikes tea"}
+    finally:
+        release.set()
+    # Once the hung call returns, the profile recovers.
+    for _ in range(50):
+        if not api._memory_providers._entries["hung"].stuck:
+            break
+        time.sleep(0.01)
+    assert api.run_memory_recall("tea", "hung")["available"] is True
+
+
+def test_in_flight_requests_are_capped_per_profile(monkeypatch):
+    cache = api._MemoryProviders()
+    for _ in range(api.MEMORY_MAX_IN_FLIGHT):
+        cache.enter("a")
+    with pytest.raises(api.TokenError) as err:
+        cache.enter("a")
+    assert err.value.status == 503
+    cache.enter("b")
+    cache.leave("a")
+    cache.enter("a")
+
+
+def test_profiles_differing_in_case_get_their_own_provider(hermes, monkeypatch):
+    monkeypatch.setitem(sys.modules, "hermes_constants", None)  # key on the profile name itself
+    hermes.config = {"memory": {"provider": "honcho"}}
+    hermes.providers["honcho"] = FakeProvider()
+    api.memory_context("Work")
+    api.memory_context("work")
+    assert hermes.loads == ["honcho", "honcho"]
+    assert api._memory_cache_key("Work") == "Work" and api._memory_cache_key(" Current ") == ""
+
+
+def test_dropped_profiles_leave_no_entries(hermes):
+    hermes.config = {"memory": {"provider": "honcho"}}
+    hermes.providers["honcho"] = FakeProvider()
+    api.memory_context("a")
+    hermes.config = {"memory": {}}
+    api.memory_context("a")
+    assert api._memory_providers._entries == {}
+
+
+def test_context_is_rate_limited_per_profile(hermes, monkeypatch):
+    monkeypatch.setattr(api, "_memory_context_limiter", api._MintLimiter(1, 60.0, message="slow down"))
+    api.memory_context(limiter_key="a")
+    api.memory_context(limiter_key="b")
+    with pytest.raises(api.TokenError) as err:
+        api.memory_context(limiter_key="a")
+    assert err.value.status == 429
+
+
+def test_an_older_hermes_missing_a_name_is_unsupported(hermes, monkeypatch):
+    def old(config):
+        raise ImportError("cannot import name 'get_memory_dir'", name="tools.memory_tool")
+
+    monkeypatch.setattr(api, "_hermes_builtin_memory", old)
+    assert api.memory_context()["reason"] == "unsupported"
 
 
 def test_recall_uses_the_provider_prefetch(hermes):

@@ -234,8 +234,10 @@ backend and keys, as the Gemini Live routes do.
 ## Memory for voice
 
 Gemini Live can use what this host's Hermes remembers, whichever memory setup
-it runs, without Conduit knowing the backend. Both routes only read: they never
-record the voice conversation or write to memory.
+it runs, without Conduit knowing the backend. Both routes are read-only in the
+sense that the plugin issues no write calls: no `sync_turn`, no memory tool, so
+the voice conversation is never recorded to memory. A provider may still keep
+its own caches or bookkeeping while it recalls.
 
 | Method | Path | Returns |
 |--------|------|---------|
@@ -256,10 +258,13 @@ memory modules) or `"disabled"` (memory off, or nothing stored yet).
 all in `context`. Then `POST /memory/recall` returns the provider's recall for
 `query` (at most 500 characters) as `results`, capped at 4,000 characters.
 Without a provider it returns `available: false` and empty `results`, not an
-error. Recalls are capped at 30 per minute per profile, time out after 10
-seconds (504), and a provider's own error text stays in the Hermes log. The
-provider is started once per profile (as the `conduit_voice` platform, session
-`conduit-voice`) and restarted when `memory.provider` changes. `?profile=<name>`
+error. Recalls and context reads are each capped at 30 per minute per
+profile, time out after 10 seconds (504), and a provider's own error text stays
+in the Hermes log. The provider is started once per profile (as the
+`conduit_voice` platform, session `conduit-voice`) and restarted when
+`memory.provider` changes. Calls into it run one at a time. If one hangs, that
+profile's memory routes answer 503 at once until it returns, and other profiles
+are unaffected. `?profile=<name>`
 reads that profile's memory, as the other routes do.
 
 ## Conduit support and privacy

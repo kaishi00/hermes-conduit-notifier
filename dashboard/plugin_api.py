@@ -20,6 +20,8 @@ The API key is never returned, logged, or written anywhere.
 from __future__ import annotations
 
 import asyncio
+import atexit
+import contextvars
 import json
 import logging
 import os
@@ -517,10 +519,18 @@ MEMORY_MAX_QUERY_CHARS = 500
 # A voice turn recalls at most once; cap a looping client well above that.
 MEMORY_RECALL_LIMIT = 30
 MEMORY_RECALL_WINDOW_S = 60.0
-# Bounds the wait on a slow provider; the worker thread runs on until the
-# provider's own call returns.
+# The context route starts the provider and reads files: generous, but bounded.
+MEMORY_CONTEXT_LIMIT = 30
+MEMORY_CONTEXT_WINDOW_S = 60.0
+# Budget for one request, provider start included. Each provider call runs on
+# its own thread, so a hung call is abandoned rather than holding a worker.
 MEMORY_TIMEOUT_S = 10.0
-MEMORY_WORKERS = 4
+MEMORY_WORKERS = 8
+# Requests one profile may have running or queued at once, so a slow backend
+# can't fill the shared pool for every profile.
+MEMORY_MAX_IN_FLIGHT = 2
+# How long provider shutdown may take when the process exits.
+MEMORY_SHUTDOWN_TIMEOUT_S = 5.0
 MEMORY_MAX_BODY_BYTES = 16 * 1024
 # A stable session, so providers that key recall state per session reuse it.
 MEMORY_SESSION_ID = "conduit-voice"
@@ -540,9 +550,10 @@ _MISSING_MEMORY_MODULES = frozenset({
 })
 
 
-def _is_missing_memory_modules(exc: ModuleNotFoundError) -> bool:
-    # Only a Hermes without the memory modules; a broken import deeper inside
-    # Hermes is a real failure.
+def _is_missing_memory_modules(exc: ImportError) -> bool:
+    # A Hermes without the memory modules, or an older one whose modules lack
+    # a name this imports (ImportError.name is then that module). A broken
+    # import deeper inside Hermes is a real failure.
     return exc.name in _MISSING_MEMORY_MODULES
 
 
@@ -562,7 +573,7 @@ def _hermes_memory_config() -> Dict[str, Any]:
 
 def _int_or(value: Any, default: int) -> int:
     try:
-        return int(value)
+        return max(int(value), 0)
     except (TypeError, ValueError, OverflowError):
         return default
 
@@ -573,6 +584,7 @@ def _hermes_builtin_memory(config: Dict[str, Any]) -> str:
         MemoryStore, get_builtin_memory_config, get_builtin_memory_store_flags, get_memory_dir)
 
     section = get_builtin_memory_config(config)
+    section = section if isinstance(section, dict) else {}
     memory_on, user_on = get_builtin_memory_store_flags(config)
     # load_from_disk creates the memories dir; nothing stored means nothing to read.
     if not (memory_on or user_on) or not get_memory_dir().is_dir():
@@ -596,7 +608,7 @@ def _configured_memory_provider(config: Dict[str, Any]) -> Optional[str]:
         return None
     try:
         from agent.memory_provider import is_core_memory_provider
-    except ModuleNotFoundError as exc:
+    except ImportError as exc:
         if not _is_missing_memory_modules(exc):
             raise
         return None  # a Hermes without external providers
@@ -647,71 +659,186 @@ def _start_memory_provider(name: str) -> Any:
         return None
 
 
-def _stop_memory_provider(provider: Any) -> None:
-    if provider is None:
+def _memory_cache_key(profile: Optional[str]) -> str:
+    """The provider cache key: the profile's resolved Hermes home, exactly.
+
+    Runs inside _run_scoped. Unlike _limiter_key it doesn't fold case, so on a
+    case-sensitive host two profiles never share a provider.
+    """
+    try:
+        from hermes_constants import get_hermes_home
+
+        return str(get_hermes_home().resolve())
+    except ImportError as exc:
+        if not _is_missing_memory_modules(exc):
+            raise
+    name = (profile or "").strip()
+    return "" if name.lower() in ("", "current") else name
+
+
+_MEMORY_BUSY = "The memory provider is not responding; try again shortly"
+
+
+class _ProviderEntry:
+    """One profile's provider. Every call into it (initialize, prefetch,
+    shutdown) holds ``call_lock``, so they run one at a time, and runs on its
+    own thread with a deadline, so a hung call is abandoned, not waited on."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.provider: Any = None
+        self.started = False
+        self.started_at = 0.0
+        self.call_lock = threading.Lock()
+        self._state = threading.Lock()
+        self._running = False
+        self.stuck = False  # a call outlived its deadline and still holds call_lock
+
+    def call(self, fn: Callable[[], Any], deadline: float, what: str) -> Any:
+        if self.stuck:
+            raise TokenError(503, _MEMORY_BUSY)
+        if not self.call_lock.acquire(timeout=max(deadline - time.monotonic(), 0.0)):
+            raise TokenError(503 if self.stuck else 504, _MEMORY_BUSY if self.stuck else f"Memory {what} timed out")
+        box: Dict[str, Any] = {}
+        done = threading.Event()
+        # The profile scope lives in contextvars; the call thread must see it.
+        ctx = contextvars.copy_context()
+
+        def run() -> None:
+            try:
+                box["value"] = ctx.run(fn)
+            except BaseException as exc:  # noqa: BLE001 — re-raised on the caller's thread
+                box["error"] = exc
+            finally:
+                with self._state:
+                    self._running = False
+                    self.stuck = False
+                self.call_lock.release()
+                done.set()
+
+        with self._state:
+            self._running = True
+        try:
+            threading.Thread(target=run, name=f"conduit-memory-{what}", daemon=True).start()
+        except BaseException:
+            with self._state:
+                self._running = False
+            self.call_lock.release()
+            raise
+        if not done.wait(max(deadline - time.monotonic(), 0.0)):
+            with self._state:
+                if self._running:
+                    self.stuck = True
+            logger.warning("Memory provider %r %s for Conduit timed out; abandoning the call", self.name, what)
+            raise TokenError(504, f"Memory {what} timed out")
+        if "error" in box:
+            raise box["error"]
+        return box.get("value")
+
+
+def _stop_memory_provider(entry: _ProviderEntry, timeout: float = MEMORY_SHUTDOWN_TIMEOUT_S) -> None:
+    if entry.provider is None:
         return
     try:
-        provider.shutdown()
+        entry.call(entry.provider.shutdown, time.monotonic() + timeout, "shutdown")
     except Exception:  # noqa: BLE001
-        logger.warning("Memory provider shutdown failed", exc_info=True)
+        logger.warning("Memory provider %r shutdown failed", entry.name, exc_info=True)
 
 
 class _MemoryProviders:
-    """One initialized provider per profile, rebuilt when memory.provider changes."""
+    """One initialized provider per profile, rebuilt when memory.provider changes.
+
+    The registry lock only guards the dict; it is never held across provider
+    I/O. The first request for a profile starts its provider under that
+    entry's call lock, and concurrent requests wait on it with their deadline.
+    """
 
     def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
         self.clock = clock
-        self._entries: Dict[str, tuple] = {}  # key -> (name, provider or None, started_at)
-        self._key_locks: Dict[str, threading.Lock] = {}
+        self._entries: Dict[str, _ProviderEntry] = {}
+        self._in_flight: Dict[str, int] = {}
         self._lock = threading.Lock()
 
-    def get(self, key: str, name: Optional[str], start: Optional[Callable[[str], Any]] = None) -> Any:
+    def _drop(self, entry: _ProviderEntry) -> None:
+        # Shut down off the request path: it waits for the entry's calls.
+        threading.Thread(target=_stop_memory_provider, args=(entry,), name="conduit-memory-stop", daemon=True).start()
+
+    def get(self, key: str, name: Optional[str], deadline: Optional[float] = None,
+            start: Optional[Callable[[str], Any]] = None) -> Optional[_ProviderEntry]:
+        """The started entry for ``key``, or None when no provider is usable."""
+        deadline = time.monotonic() + MEMORY_TIMEOUT_S if deadline is None else deadline
         with self._lock:
-            key_lock = self._key_locks.setdefault(key, threading.Lock())
-        # Per profile, so one slow provider start doesn't hold up other profiles.
-        with key_lock:
             entry = self._entries.get(key)
-            if entry is not None:
-                cached_name, provider, started = entry
-                if cached_name == name and (provider is not None or self.clock() - started < MEMORY_PROVIDER_RETRY_S):
-                    return provider
+            if entry is not None and (entry.name != name or (
+                    entry.started and entry.provider is None
+                    and self.clock() - entry.started_at >= MEMORY_PROVIDER_RETRY_S)):
                 del self._entries[key]
-                _stop_memory_provider(provider)
+                self._drop(entry)
+                entry = None
             if name is None:
                 return None
-            provider = (start or _start_memory_provider)(name)
-            self._entries[key] = (name, provider, self.clock())
-            return provider
+            if entry is None:
+                entry = self._entries[key] = _ProviderEntry(name)
+        if not entry.started:
+            def begin() -> None:
+                if not entry.started:  # another request may have started it meanwhile
+                    entry.provider = (start or _start_memory_provider)(name)
+                    entry.started_at = self.clock()
+                    entry.started = True
+
+            entry.call(begin, deadline, "start")
+        return entry if entry.provider is not None else None
+
+    def enter(self, key: str) -> None:
+        with self._lock:
+            if self._in_flight.get(key, 0) >= MEMORY_MAX_IN_FLIGHT:
+                raise TokenError(503, _MEMORY_BUSY)
+            self._in_flight[key] = self._in_flight.get(key, 0) + 1
+
+    def leave(self, key: str) -> None:
+        with self._lock:
+            count = self._in_flight.get(key, 0) - 1
+            if count > 0:
+                self._in_flight[key] = count
+            else:
+                self._in_flight.pop(key, None)
 
     def clear(self) -> None:
         with self._lock:
-            entries, self._entries = self._entries, {}
-        for _, provider, _ in entries.values():
-            _stop_memory_provider(provider)
+            entries, self._entries = list(self._entries.values()), {}
+        for entry in entries:
+            _stop_memory_provider(entry)
 
 
 _memory_providers = _MemoryProviders()
 _memory_limiter = _MintLimiter(MEMORY_RECALL_LIMIT, MEMORY_RECALL_WINDOW_S,
                                message="Too many memory lookups; try again shortly")
+_memory_context_limiter = _MintLimiter(MEMORY_CONTEXT_LIMIT, MEMORY_CONTEXT_WINDOW_S,
+                                       message="Too many memory requests; try again shortly")
 _memory_executor = ThreadPoolExecutor(max_workers=MEMORY_WORKERS, thread_name_prefix="conduit-memory")
+# Let providers flush and close their clients when the dashboard exits.
+atexit.register(lambda: _memory_providers.clear())
 
 
-def memory_context(key: str = "") -> Dict[str, Any]:
+def memory_context(key: str = "", limiter_key: Optional[str] = None) -> Dict[str, Any]:
     """What Hermes injects into its own system prompt from memory, for Gemini Live."""
+    deadline = time.monotonic() + MEMORY_TIMEOUT_S
+    if limiter_key is not None:
+        _memory_context_limiter.acquire(limiter_key)
     try:
         config = _hermes_memory_config()
         builtin = _hermes_builtin_memory(config)
         name = _configured_memory_provider(config)
-    except ModuleNotFoundError as exc:
+    except ImportError as exc:
         if not _is_missing_memory_modules(exc):
             raise
         return {"available": False, "reason": "unsupported", "provider": None, "recall": False, "context": ""}
-    provider = _memory_providers.get(key, name)
+    entry = _memory_providers.get(key, name, deadline)
     # Not the provider's system_prompt_block(): that is mostly instructions
     # for its own tools, which the voice model can't call. Its memory is
     # reached through recall instead.
     context = _clip_block(builtin, MEMORY_CONTEXT_MAX_CHARS) if builtin else ""
-    recall = provider is not None
+    recall = entry is not None
     label = name if recall else ("builtin" if builtin else None)
     result: Dict[str, Any] = {"available": bool(context) or recall, "provider": label, "recall": recall, "context": context}
     if not result["available"]:
@@ -721,6 +848,7 @@ def memory_context(key: str = "") -> Dict[str, Any]:
 
 def run_memory_recall(query: Any, key: str = "", limiter_key: Optional[str] = None) -> Dict[str, Any]:
     """The external provider's recall for ``query``; built-in memory is already in the context."""
+    deadline = time.monotonic() + MEMORY_TIMEOUT_S
     raw_query = str(query or "")
     # Bounded before normalizing, so a huge body isn't tokenized first.
     if len(raw_query) > MEMORY_MAX_QUERY_CHARS * 4:
@@ -734,24 +862,41 @@ def run_memory_recall(query: Any, key: str = "", limiter_key: Optional[str] = No
         _memory_limiter.acquire(limiter_key)
     try:
         name = _configured_memory_provider(_hermes_memory_config())
-    except ModuleNotFoundError as exc:
+    except ImportError as exc:
         if not _is_missing_memory_modules(exc):
             raise
         name = None
-    provider = _memory_providers.get(key, name)
-    if provider is None:
+    entry = _memory_providers.get(key, name, deadline)
+    if entry is None:
         return {"available": False, "results": ""}
+    provider = entry.provider
     try:
-        text = provider.prefetch(query, session_id=MEMORY_SESSION_ID)
+        text = entry.call(lambda: provider.prefetch(query, session_id=MEMORY_SESSION_ID), deadline, "recall")
+    except TokenError:
+        raise
     except Exception:  # noqa: BLE001 — its text can carry hosts or keys
         logger.warning("Memory provider %r recall for Conduit failed", name, exc_info=True)
         raise TokenError(502, _MEMORY_FAILURE)
     return {"available": True, "results": _clip_block(text, MEMORY_RECALL_MAX_CHARS)}
 
 
+def _memory_job(profile: Optional[str], job: Callable[[str, str], Dict[str, Any]]) -> Callable[[], Dict[str, Any]]:
+    """Wrap ``job(cache_key, limiter_key)`` with the per-profile in-flight cap."""
+    def run() -> Dict[str, Any]:
+        key = _memory_cache_key(profile)
+        _memory_providers.enter(key)
+        try:
+            return job(key, _limiter_key(profile))
+        finally:
+            _memory_providers.leave(key)
+
+    return run
+
+
 async def _run_memory(profile: Optional[str], fn: Callable[[], Dict[str, Any]], what: str) -> Dict[str, Any]:
     try:
-        return await asyncio.wait_for(_run_scoped(profile, fn, _memory_executor), timeout=MEMORY_TIMEOUT_S)
+        # A backstop: the provider calls enforce MEMORY_TIMEOUT_S themselves.
+        return await asyncio.wait_for(_run_scoped(profile, fn, _memory_executor), timeout=MEMORY_TIMEOUT_S + 2.0)
     except asyncio.TimeoutError:
         logger.warning("Memory %s for Conduit timed out after %ss", what, MEMORY_TIMEOUT_S)
         raise HTTPException(status_code=504, detail=f"Memory {what} timed out", headers={"Cache-Control": "no-store"})
@@ -768,8 +913,8 @@ async def _run_memory(profile: Optional[str], fn: Callable[[], Dict[str, Any]], 
 @router.get("/memory/context")
 async def get_memory_context(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
-    key = _limiter_key(profile)
-    return {"ok": True, **(await _run_memory(profile, lambda: memory_context(key), "context"))}
+    job = _memory_job(profile, lambda key, limiter_key: memory_context(key, limiter_key=limiter_key))
+    return {"ok": True, **(await _run_memory(profile, job, "context"))}
 
 
 @router.post("/memory/recall")
@@ -777,5 +922,5 @@ async def post_memory_recall(request: Request, response: Response, profile: Opti
     response.headers["Cache-Control"] = "no-store"
     body = await _read_json_body(request, MEMORY_MAX_BODY_BYTES)
     query = body.get("query") if isinstance(body, dict) else None
-    key = _limiter_key(profile)
-    return {"ok": True, **(await _run_memory(profile, lambda: run_memory_recall(query, key, limiter_key=key), "recall"))}
+    job = _memory_job(profile, lambda key, limiter_key: run_memory_recall(query, key, limiter_key=limiter_key))
+    return {"ok": True, **(await _run_memory(profile, job, "recall"))}
