@@ -9,6 +9,10 @@ Web search: Gemini Live's quick lookups can run on this host's own web
 search backend (whatever `hermes tools` configured: SearXNG, Firecrawl,
 Tavily…) instead of Google Search, which is metered separately.
 
+Memory: Gemini Live can see what this host's Hermes remembers without Conduit
+knowing the backend: the built-in MEMORY.md / USER.md snapshot plus whatever
+external provider `memory.provider` names (Honcho, Mem0, …). Read-only.
+
 Routes sit behind the dashboard's own auth, the same as /api/audio/*.
 The API key is never returned, logged, or written anywhere.
 """
@@ -408,6 +412,27 @@ def _unexpected(route: str, exc: Exception, feature: str = "Gemini Live") -> HTT
                          headers={"Cache-Control": "no-store"})
 
 
+async def _read_json_body(request: Request, max_bytes: int = SEARCH_MAX_BODY_BYTES) -> Any:
+    no_store = {"Cache-Control": "no-store"}
+    # Read with a hard cap, chunked bodies included, so an oversized body is
+    # refused without buffering it.
+    try:
+        declared = int(request.headers.get("content-length") or 0)
+    except ValueError:
+        declared = 0
+    if declared > max_bytes:
+        raise HTTPException(status_code=413, detail="Request body is too large", headers=no_store)
+    raw = bytearray()
+    async for chunk in request.stream():
+        raw.extend(chunk)
+        if len(raw) > max_bytes:
+            raise HTTPException(status_code=413, detail="Request body is too large", headers=no_store)
+    try:
+        return json.loads(bytes(raw) or b"{}")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Request body is not JSON", headers=no_store)
+
+
 @router.get("/gemini-live/status")
 async def get_gemini_live_status(profile: Optional[str] = None) -> Dict[str, Any]:
     try:
@@ -457,24 +482,7 @@ async def get_web_search_status(response: Response, profile: Optional[str] = Non
 @router.post("/web-search")
 async def post_web_search(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
-    no_store = {"Cache-Control": "no-store"}
-    # Read with a hard cap, chunked bodies included, so an oversized body is
-    # refused without buffering it.
-    try:
-        declared = int(request.headers.get("content-length") or 0)
-    except ValueError:
-        declared = 0
-    if declared > SEARCH_MAX_BODY_BYTES:
-        raise HTTPException(status_code=413, detail="Request body is too large", headers=no_store)
-    raw = bytearray()
-    async for chunk in request.stream():
-        raw.extend(chunk)
-        if len(raw) > SEARCH_MAX_BODY_BYTES:
-            raise HTTPException(status_code=413, detail="Request body is too large", headers=no_store)
-    try:
-        body = json.loads(bytes(raw) or b"{}")
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Request body is not JSON", headers=no_store)
+    body = await _read_json_body(request)
     query = body.get("query") if isinstance(body, dict) else None
     limit = body.get("limit", 3) if isinstance(body, dict) else 3
     try:
@@ -494,3 +502,283 @@ async def post_web_search(request: Request, response: Response, profile: Optiona
     except Exception as exc:
         raise _unexpected("request", exc, feature="Web search")
     return {"ok": True, **result}
+
+
+# --- Memory -----------------------------------------------------------------
+#
+# Read-only view of the host's memory for Gemini Live: never sync_turn, never
+# a write. The built-in store is read fresh per request (it is a couple of
+# small files); an external provider is initialized once per profile and kept,
+# since initializing one can open network clients.
+
+MEMORY_CONTEXT_MAX_CHARS = 8000
+MEMORY_RECALL_MAX_CHARS = 4000
+MEMORY_MAX_QUERY_CHARS = 500
+# A voice turn recalls at most once; cap a looping client well above that.
+MEMORY_RECALL_LIMIT = 30
+MEMORY_RECALL_WINDOW_S = 60.0
+# Bounds the wait on a slow provider; the worker thread runs on until the
+# provider's own call returns.
+MEMORY_TIMEOUT_S = 10.0
+MEMORY_WORKERS = 4
+MEMORY_MAX_BODY_BYTES = 16 * 1024
+# A stable session, so providers that key recall state per session reuse it.
+MEMORY_SESSION_ID = "conduit-voice"
+MEMORY_PLATFORM = "conduit_voice"
+# An unavailable or failed provider is retried after this long, so fixing its
+# credentials doesn't need a dashboard restart.
+MEMORY_PROVIDER_RETRY_S = 60.0
+# Same defaults Hermes' agent_init uses for the built-in store.
+_BUILTIN_MEMORY_CHAR_LIMIT = 2200
+_BUILTIN_USER_CHAR_LIMIT = 1375
+_MEMORY_FAILURE = "The memory provider failed; the Hermes log has the details"
+
+_MISSING_MEMORY_MODULES = frozenset({
+    "hermes_cli", "hermes_cli.config", "hermes_constants",
+    "tools", "tools.memory_tool", "tools.memory_tool_store",
+    "agent", "agent.memory_provider", "plugins", "plugins.memory",
+})
+
+
+def _is_missing_memory_modules(exc: ModuleNotFoundError) -> bool:
+    # Only a Hermes without the memory modules; a broken import deeper inside
+    # Hermes is a real failure.
+    return exc.name in _MISSING_MEMORY_MODULES
+
+
+def _clip_block(value: Any, limit: int) -> str:
+    """Like _clip, but keeps line structure: memory blocks are formatted text."""
+    text = str(value or "").strip()
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def _hermes_memory_config() -> Dict[str, Any]:
+    """The active profile's Hermes config (profile-scoped by _run_scoped)."""
+    from hermes_cli.config import load_config
+
+    config = load_config()
+    return config if isinstance(config, dict) else {}
+
+
+def _int_or(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def _hermes_builtin_memory(config: Dict[str, Any]) -> str:
+    """MEMORY.md + USER.md exactly as Hermes renders them into its system prompt."""
+    from tools.memory_tool import (
+        MemoryStore, get_builtin_memory_config, get_builtin_memory_store_flags, get_memory_dir)
+
+    section = get_builtin_memory_config(config)
+    memory_on, user_on = get_builtin_memory_store_flags(config)
+    # load_from_disk creates the memories dir; nothing stored means nothing to read.
+    if not (memory_on or user_on) or not get_memory_dir().is_dir():
+        return ""
+    store = MemoryStore(
+        _int_or(section.get("memory_char_limit"), _BUILTIN_MEMORY_CHAR_LIMIT),
+        _int_or(section.get("user_char_limit"), _BUILTIN_USER_CHAR_LIMIT),
+        memory_enabled=memory_on,
+        user_profile_enabled=user_on,
+    )
+    store.load_from_disk()
+    blocks = [store.format_for_system_prompt(kind) for on, kind in ((memory_on, "memory"), (user_on, "user")) if on]
+    return "\n\n".join(b for b in blocks if b)
+
+
+def _configured_memory_provider(config: Dict[str, Any]) -> Optional[str]:
+    """The external provider ``memory.provider`` names, or None for the built-in store."""
+    section = config.get("memory") if isinstance(config, dict) else None
+    name = str((section or {}).get("provider") or "").strip() if isinstance(section, dict) else ""
+    if not name:
+        return None
+    try:
+        from agent.memory_provider import is_core_memory_provider
+    except ModuleNotFoundError as exc:
+        if not _is_missing_memory_modules(exc):
+            raise
+        return None  # a Hermes without external providers
+    return None if is_core_memory_provider(name) else name
+
+
+def _hermes_load_memory_provider(name: str) -> Any:
+    from plugins.memory import load_memory_provider
+
+    return load_memory_provider(name)
+
+
+def _memory_provider_init_kwargs() -> Dict[str, Any]:
+    """What agent_init's _memory_provider_init_kwargs gives a provider, minus the agent."""
+    from hermes_constants import get_hermes_home
+
+    kwargs: Dict[str, Any] = {
+        "platform": MEMORY_PLATFORM,
+        "hermes_home": str(get_hermes_home()),
+        # Providers skip writes outside "primary" (MemoryProvider.initialize);
+        # this caller only reads, so it says so.
+        "agent_context": "subagent",
+    }
+    try:
+        from hermes_cli.profiles import get_active_profile_name
+
+        kwargs["agent_identity"] = get_active_profile_name()
+        kwargs["agent_workspace"] = "hermes"
+    except Exception:  # noqa: BLE001 — identity is optional scoping
+        logger.debug("Could not name the active profile for the memory provider", exc_info=True)
+    return kwargs
+
+
+def _start_memory_provider(name: str) -> Any:
+    """A loaded, available, initialized provider, or None. Never raises."""
+    try:
+        provider = _hermes_load_memory_provider(name)
+        if provider is None:
+            logger.info("Memory provider %r for Conduit voice is not installed", name)
+            return None
+        if not provider.is_available():
+            logger.info("Memory provider %r for Conduit voice is not available", name)
+            return None
+        provider.initialize(session_id=MEMORY_SESSION_ID, **_memory_provider_init_kwargs())
+        return provider
+    except Exception:  # noqa: BLE001 — a provider must never break the route
+        logger.warning("Memory provider %r failed to start for Conduit voice", name, exc_info=True)
+        return None
+
+
+def _stop_memory_provider(provider: Any) -> None:
+    if provider is None:
+        return
+    try:
+        provider.shutdown()
+    except Exception:  # noqa: BLE001
+        logger.warning("Memory provider shutdown failed", exc_info=True)
+
+
+class _MemoryProviders:
+    """One initialized provider per profile, rebuilt when memory.provider changes."""
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        self.clock = clock
+        self._entries: Dict[str, tuple] = {}  # key -> (name, provider or None, started_at)
+        self._key_locks: Dict[str, threading.Lock] = {}
+        self._lock = threading.Lock()
+
+    def get(self, key: str, name: Optional[str], start: Optional[Callable[[str], Any]] = None) -> Any:
+        with self._lock:
+            key_lock = self._key_locks.setdefault(key, threading.Lock())
+        # Per profile, so one slow provider start doesn't hold up other profiles.
+        with key_lock:
+            entry = self._entries.get(key)
+            if entry is not None:
+                cached_name, provider, started = entry
+                if cached_name == name and (provider is not None or self.clock() - started < MEMORY_PROVIDER_RETRY_S):
+                    return provider
+                del self._entries[key]
+                _stop_memory_provider(provider)
+            if name is None:
+                return None
+            provider = (start or _start_memory_provider)(name)
+            self._entries[key] = (name, provider, self.clock())
+            return provider
+
+    def clear(self) -> None:
+        with self._lock:
+            entries, self._entries = self._entries, {}
+        for _, provider, _ in entries.values():
+            _stop_memory_provider(provider)
+
+
+_memory_providers = _MemoryProviders()
+_memory_limiter = _MintLimiter(MEMORY_RECALL_LIMIT, MEMORY_RECALL_WINDOW_S,
+                               message="Too many memory lookups; try again shortly")
+_memory_executor = ThreadPoolExecutor(max_workers=MEMORY_WORKERS, thread_name_prefix="conduit-memory")
+
+
+def memory_context(key: str = "") -> Dict[str, Any]:
+    """What Hermes injects into its own system prompt from memory, for Gemini Live."""
+    try:
+        config = _hermes_memory_config()
+        builtin = _hermes_builtin_memory(config)
+        name = _configured_memory_provider(config)
+    except ModuleNotFoundError as exc:
+        if not _is_missing_memory_modules(exc):
+            raise
+        return {"available": False, "reason": "unsupported", "provider": None, "recall": False, "context": ""}
+    provider = _memory_providers.get(key, name)
+    block = ""
+    if provider is not None:
+        try:
+            block = str(provider.system_prompt_block() or "").strip()
+        except Exception:  # noqa: BLE001 — the built-in snapshot still stands
+            logger.warning("Memory provider %r system_prompt_block failed", name, exc_info=True)
+    context = _clip_block("\n\n".join(part for part in (builtin, block) if part), MEMORY_CONTEXT_MAX_CHARS)
+    recall = provider is not None
+    label = name if recall else ("builtin" if builtin else None)
+    result: Dict[str, Any] = {"available": bool(context) or recall, "provider": label, "recall": recall, "context": context}
+    if not result["available"]:
+        result["reason"] = "disabled"
+    return result
+
+
+def run_memory_recall(query: Any, key: str = "", limiter_key: Optional[str] = None) -> Dict[str, Any]:
+    """The external provider's recall for ``query``; built-in memory is already in the context."""
+    raw_query = str(query or "")
+    # Bounded before normalizing, so a huge body isn't tokenized first.
+    if len(raw_query) > MEMORY_MAX_QUERY_CHARS * 4:
+        raise TokenError(400, f"query is longer than {MEMORY_MAX_QUERY_CHARS} characters")
+    query = " ".join(raw_query.split())
+    if not query:
+        raise TokenError(400, "query is required")
+    if len(query) > MEMORY_MAX_QUERY_CHARS:
+        raise TokenError(400, f"query is longer than {MEMORY_MAX_QUERY_CHARS} characters")
+    if limiter_key is not None:
+        _memory_limiter.acquire(limiter_key)
+    try:
+        name = _configured_memory_provider(_hermes_memory_config())
+    except ModuleNotFoundError as exc:
+        if not _is_missing_memory_modules(exc):
+            raise
+        name = None
+    provider = _memory_providers.get(key, name)
+    if provider is None:
+        return {"available": False, "results": ""}
+    try:
+        text = provider.prefetch(query, session_id=MEMORY_SESSION_ID)
+    except Exception:  # noqa: BLE001 — its text can carry hosts or keys
+        logger.warning("Memory provider %r recall for Conduit failed", name, exc_info=True)
+        raise TokenError(502, _MEMORY_FAILURE)
+    return {"available": True, "results": _clip_block(text, MEMORY_RECALL_MAX_CHARS)}
+
+
+async def _run_memory(profile: Optional[str], fn: Callable[[], Dict[str, Any]], what: str) -> Dict[str, Any]:
+    try:
+        return await asyncio.wait_for(_run_scoped(profile, fn, _memory_executor), timeout=MEMORY_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        logger.warning("Memory %s for Conduit timed out after %ss", what, MEMORY_TIMEOUT_S)
+        raise HTTPException(status_code=504, detail=f"Memory {what} timed out", headers={"Cache-Control": "no-store"})
+    except TokenError as exc:
+        logger.warning("Memory %s for Conduit failed: %s", what, exc)
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
+        raise
+    except Exception as exc:
+        raise _unexpected(what, exc, feature="Memory")
+
+
+@router.get("/memory/context")
+async def get_memory_context(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    key = _limiter_key(profile)
+    return {"ok": True, **(await _run_memory(profile, lambda: memory_context(key), "context"))}
+
+
+@router.post("/memory/recall")
+async def post_memory_recall(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    body = await _read_json_body(request, MEMORY_MAX_BODY_BYTES)
+    query = body.get("query") if isinstance(body, dict) else None
+    key = _limiter_key(profile)
+    return {"ok": True, **(await _run_memory(profile, lambda: run_memory_recall(query, key, limiter_key=key), "recall"))}
