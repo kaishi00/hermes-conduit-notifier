@@ -1032,6 +1032,10 @@ GPT_LIVE_WORKERS = 2
 # An SDP offer is a few KB; the rest is room for the recent-history items.
 GPT_LIVE_MAX_BODY_BYTES = 256 * 1024
 GPT_LIVE_MAX_HISTORY_ITEMS = 40
+GPT_LIVE_MAX_ANSWER_BYTES = 64 * 1024
+# Whole-request backstop, above the socket timeout, so a stuck Hermes call
+# (a token refresh, the upstream exchange) can't pin the two workers.
+GPT_LIVE_REQUEST_TIMEOUT_S = GPT_LIVE_TIMEOUT_S + 2
 GPT_LIVE_NO_FALLBACK = "No API fallback was used."
 _GPT_LIVE_CALL_ID = re.compile(r"rtc_[A-Za-z0-9_-]+|[0-9a-fA-F-]{36}")
 
@@ -1076,10 +1080,13 @@ def _upstream_voice_live() -> Any:
     if not callable(exchange) or not callable(build):
         return None
     try:
-        # The shape #108940 ships; anything else means Hermes moved on and the plugin keeps serving.
-        if "live" not in inspect.signature(build).parameters or len(inspect.signature(exchange).parameters) != 2:
-            return None
+        build_params = inspect.signature(build).parameters
+        exchange_params = inspect.signature(exchange).parameters
     except (TypeError, ValueError):
+        return None
+    # The shape #108940 ships; anything else means Hermes moved on and the plugin keeps serving.
+    if "live" not in build_params or len(exchange_params) != 2:
+        logger.info("Hermes' GPT-Live subscription exchange has a different shape; using the plugin's own")
         return None
     return voice_live
 
@@ -1088,15 +1095,17 @@ def _gpt_live_settings() -> Dict[str, Any]:
     """The profile's ``voice.gpt_live`` block (profile-scoped by _run_scoped), or {}."""
     try:
         from hermes_cli.config import load_config
-        live = (load_config().get("voice") or {}).get("gpt_live")
+        config = load_config()
     except ImportError:
         return {}
+    voice = config.get("voice") if isinstance(config, dict) else None
+    live = voice.get("gpt_live") if isinstance(voice, dict) else None
     return live if isinstance(live, dict) else {}
 
 
 def _gpt_live_model_voice(live: Dict[str, Any]) -> tuple:
-    return (str(live.get("subscription_model") or GPT_LIVE_DEFAULT_MODEL).strip(),
-            str(live.get("subscription_voice") or GPT_LIVE_DEFAULT_VOICE).strip())
+    return (str(live.get("subscription_model") or "").strip() or GPT_LIVE_DEFAULT_MODEL,
+            str(live.get("subscription_voice") or "").strip() or GPT_LIVE_DEFAULT_VOICE)
 
 
 def _gpt_live_instructions(live: Dict[str, Any]) -> str:
@@ -1120,7 +1129,7 @@ def _codex_credentials(refresh_if_expiring: bool = True) -> tuple:
     except AuthError:
         raise TokenError(503, "GPT-Live needs a working Codex sign-in on the Hermes host. "
                               "Run `hermes auth` and choose OpenAI Codex. " + GPT_LIVE_NO_FALLBACK)
-    token = str((credentials or {}).get("api_key") or "").strip()
+    token = str(credentials.get("api_key") or "").strip() if isinstance(credentials, dict) else ""
     claims = _decode_jwt_claims(token).get("https://api.openai.com/auth", {})
     account = claims.get("chatgpt_account_id") if isinstance(claims, dict) else None
     if (not token or not isinstance(account, str) or not account.strip()
@@ -1162,10 +1171,16 @@ def _post_sdp(url: str, headers: Dict[str, str], body: Dict[str, Any]) -> tuple:
                                      headers={**headers, "Content-Type": "application/json"})
     try:
         with _opener.open(request, timeout=GPT_LIVE_TIMEOUT_S) as response:
-            return response.status, response.read().decode("utf-8", "replace"), response.headers.get("Location", "")
+            # An SDP answer is a few KB; one byte over the cap is refused, not buffered.
+            answer = response.read(GPT_LIVE_MAX_ANSWER_BYTES + 1)
+            if len(answer) > GPT_LIVE_MAX_ANSWER_BYTES:
+                raise TokenError(502, "GPT-Live returned an invalid WebRTC answer. " + GPT_LIVE_NO_FALLBACK)
+            return response.status, answer.decode("utf-8", "replace"), response.headers.get("Location", "")
     except urllib.error.HTTPError as exc:
         # The body can echo account details; only the status goes back to Conduit.
-        return exc.code, "", ""
+        status = exc.code
+        exc.close()
+        return status, "", ""
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         logger.warning("GPT-Live session request could not reach OpenAI: %s", getattr(exc, "reason", exc))
         raise TokenError(502, "GPT-Live connection failed. " + GPT_LIVE_NO_FALLBACK)
@@ -1213,10 +1228,15 @@ def create_gpt_live_session(
         try:
             config = upstream.build_session_config(history, live=live)
             result = upstream._create_subscription_session(sdp, config)
-        except ValueError as exc:  # sign-in problems, in Hermes' words
-            raise TokenError(503, str(exc))
-        except RuntimeError as exc:  # rejected or unreachable, in Hermes' words
-            raise TokenError(502, str(exc))
+        except ValueError as exc:  # sign-in problems
+            # Hermes' wording stays in the log: it isn't ours to vouch for as free of provider detail.
+            logger.warning("Hermes' GPT-Live subscription exchange refused the sign-in: %s", exc)
+            raise TokenError(503, "GPT-Live needs a working Codex sign-in on the Hermes host. "
+                                  "Run `hermes auth` and choose OpenAI Codex. " + GPT_LIVE_NO_FALLBACK)
+        except RuntimeError as exc:  # rejected or unreachable
+            logger.warning("Hermes' GPT-Live subscription exchange failed: %s", exc)
+            raise TokenError(502, "GPT-Live session could not be started; check the Codex sign-in "
+                                  "and the account's voice access. " + GPT_LIVE_NO_FALLBACK)
         return {**result, "source": "hermes"}
     config = gpt_live_session_config(history, live)
     return {**_plugin_gpt_live_session(sdp, config, post or _post_sdp), "source": "plugin"}
@@ -1226,7 +1246,11 @@ def create_gpt_live_session(
 async def get_gpt_live_status(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     try:
-        return {"ok": True, **(await _run_scoped(profile, gpt_live_status, _gpt_live_executor))}
+        return {"ok": True, **(await asyncio.wait_for(
+            _run_scoped(profile, gpt_live_status, _gpt_live_executor), timeout=GPT_LIVE_REQUEST_TIMEOUT_S))}
+    except asyncio.TimeoutError:
+        logger.warning("GPT-Live status for Conduit timed out after %ss", GPT_LIVE_REQUEST_TIMEOUT_S)
+        raise HTTPException(status_code=504, detail="GPT-Live status timed out", headers={"Cache-Control": "no-store"})
     except TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
     except HTTPException as exc:
@@ -1244,11 +1268,17 @@ async def post_gpt_live_session(request: Request, response: Response, profile: O
         raise HTTPException(status_code=400, detail="Request body must be a JSON object",
                             headers={"Cache-Control": "no-store"})
     try:
-        result = await _run_scoped(
-            profile,
-            lambda: create_gpt_live_session(body.get("sdp"), body.get("history"), limiter_key=_limiter_key(profile)),
-            _gpt_live_executor,
+        result = await asyncio.wait_for(
+            _run_scoped(
+                profile,
+                lambda: create_gpt_live_session(body.get("sdp"), body.get("history"), limiter_key=_limiter_key(profile)),
+                _gpt_live_executor,
+            ),
+            timeout=GPT_LIVE_REQUEST_TIMEOUT_S,
         )
+    except asyncio.TimeoutError:
+        logger.warning("GPT-Live session for Conduit timed out after %ss", GPT_LIVE_REQUEST_TIMEOUT_S)
+        raise HTTPException(status_code=504, detail="GPT-Live session timed out", headers={"Cache-Control": "no-store"})
     except TokenError as exc:
         logger.warning("GPT-Live session for Conduit failed: %s", exc)
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})

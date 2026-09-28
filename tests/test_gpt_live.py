@@ -235,12 +235,14 @@ def test_hands_off_to_hermes_when_it_ships_the_exchange(client, hermes, openai, 
     assert client.get(f"{BASE}/gpt-live/status").json()["source"] == "hermes"
 
 
-@pytest.mark.parametrize("error, status", [(ValueError("sign in"), 503), (RuntimeError("rejected"), 502)])
+@pytest.mark.parametrize("error, status", [(ValueError("SECRET-DETAIL sign in"), 503), (RuntimeError("SECRET-DETAIL rejected"), 502)])
 def test_hermes_failures_keep_their_words_and_never_fall_back(client, openai, monkeypatch, error, status):
     _upstream(monkeypatch, [], error=error)
     response = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER})
     assert response.status_code == status
-    assert response.json()["detail"] == str(error)
+    # Hermes' wording (which could quote a provider response) stays in the log.
+    assert "SECRET-DETAIL" not in response.text
+    assert "No API fallback" in response.json()["detail"]
     assert openai.calls == []
 
 
@@ -255,3 +257,54 @@ def test_persona_matches_hermes(monkeypatch):
     # Kept in step with tools/voice_live.py so the plugin path sounds like Hermes' own.
     assert api.GPT_LIVE_PERSONA.startswith("You are Hermes, a calm and friendly voice assistant.")
     assert "Delegation policy:" in api.GPT_LIVE_PERSONA
+
+
+def test_whitespace_config_falls_back_to_the_defaults(client, hermes, openai):
+    hermes.config = {"voice": {"gpt_live": {"subscription_model": "   ", "subscription_voice": " "}}}
+    client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER})
+    session = openai.calls[0][2]["session"]
+    assert session["model"] == "gpt-live-1-codex"
+    assert session["audio"] == {"output": {"voice": "cove"}}
+
+
+@pytest.mark.parametrize("config", [None, [], {"voice": None}, {"voice": {"gpt_live": "x"}}])
+def test_malformed_config_uses_the_defaults(client, hermes, config):
+    hermes.config = config
+    assert client.get(f"{BASE}/gpt-live/status").json()["model"] == "gpt-live-1-codex"
+
+
+def test_a_stuck_exchange_is_a_504(client, monkeypatch):
+    import time
+    monkeypatch.setattr(api, "GPT_LIVE_REQUEST_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(api, "_plugin_gpt_live_session", lambda *a, **k: time.sleep(0.5))
+    assert client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER}).status_code == 504
+    monkeypatch.setattr(api, "gpt_live_status", lambda: time.sleep(0.5))
+    assert client.get(f"{BASE}/gpt-live/status").status_code == 504
+
+
+def test_oversized_answer_is_refused():
+    class Big:
+        status = 201
+        headers = {"Location": "/v1/realtime/calls/rtc_abc"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self, size=-1):
+            return b"v=0" + b"x" * size
+
+    class Opener:
+        def open(self, request, timeout=None):
+            return Big()
+
+    original = api._opener
+    api._opener = Opener()
+    try:
+        with pytest.raises(api.TokenError) as raised:
+            api._post_sdp(api.GPT_LIVE_URL, {}, {"sdp": OFFER})
+    finally:
+        api._opener = original
+    assert raised.value.status == 502
