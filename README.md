@@ -2,7 +2,7 @@
 
 Hermes Conduit Notifier is the open-source Hermes plugin that delivers lifecycle notifications to the Hermes Conduit iOS app. It observes normal Hermes hooks and sends small HTTPS events to the Conduit push relay.
 
-The plugin does **not** contain an Apple Push Notification service key, dashboard credentials, or access to your Hermes gateway. (Its only dashboard routes hand Conduit short-lived Gemini Live tokens and run its voice web lookups; see below.) Apple credentials remain on the central push relay, so self-hosted users never need to copy a shared signing key onto their gateway.
+The plugin does **not** contain an Apple Push Notification service key, dashboard credentials, or access to your Hermes gateway. (Its only dashboard routes hand Conduit short-lived Gemini Live tokens, run its voice web lookups and read memory for voice; see below.) Apple credentials remain on the central push relay, so self-hosted users never need to copy a shared signing key onto their gateway.
 
 ## Install
 
@@ -230,6 +230,42 @@ needs configuring on the plugin side.
 Results are titles, URLs and snippets only (at most 5), and searches are capped
 at 30 per minute per profile. A search that takes more than 20 seconds returns 504, and a backend's own error text stays in the Hermes log: Conduit only sees Hermes' configuration messages (such as "No web search provider configured") or a generic failure. `?profile=<name>` searches with that profile's
 backend and keys, as the Gemini Live routes do.
+
+## Memory for voice
+
+Gemini Live can use what this host's Hermes remembers, whichever memory setup
+it runs, without Conduit knowing the backend. Both routes are read-only in the
+sense that the plugin issues no write calls: no `sync_turn`, no memory tool, so
+the voice conversation is never recorded to memory. A provider may still keep
+its own caches or bookkeeping while it recalls.
+
+| Method | Path | Returns |
+|--------|------|---------|
+| GET | `/api/plugins/conduit_push/memory/context` | `{ok, available, reason?, provider, recall, context}` |
+| POST | `/api/plugins/conduit_push/memory/recall` with `{query}` | `{ok, available, results}` |
+
+`context` is the built-in `MEMORY.md` / `USER.md` snapshot Hermes puts in its
+own system prompt (respecting `memory.memory_enabled` and
+`memory.user_profile_enabled`), capped at 8,000 characters. An external
+provider named by `memory.provider` (Honcho, Mem0, Holographic, and so on) is
+reached through recall instead: its own prompt block mostly describes tools the
+voice model can't call. `provider` is
+`"builtin"`, the external provider's name, or `null`. When there is nothing to
+use, `available` is false with `reason` `"unsupported"` (a Hermes without the
+memory modules) or `"disabled"` (memory off, or nothing stored yet).
+
+`recall` is true only with an external provider: the built-in store is already
+all in `context`. Then `POST /memory/recall` returns the provider's recall for
+`query` (at most 500 characters) as `results`, capped at 4,000 characters.
+Without a provider it returns `available: false` and empty `results`, not an
+error. Recalls and context reads are each capped at 30 per minute per
+profile, time out after 10 seconds (504), and a provider's own error text stays
+in the Hermes log. The provider is started once per profile (as the
+`conduit_voice` platform, session `conduit-voice`) and restarted when
+`memory.provider` changes. Calls into it run one at a time. If one hangs, that
+profile's memory routes answer 503 at once until it returns, and other profiles
+are unaffected. `?profile=<name>`
+reads that profile's memory, as the other routes do.
 
 ## Conduit support and privacy
 
