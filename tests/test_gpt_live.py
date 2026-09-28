@@ -235,7 +235,7 @@ def test_hands_off_to_hermes_when_it_ships_the_exchange(client, hermes, openai, 
     assert client.get(f"{BASE}/gpt-live/status").json()["source"] == "hermes"
 
 
-@pytest.mark.parametrize("error, status", [(ValueError("SECRET-DETAIL sign in"), 503), (RuntimeError("SECRET-DETAIL rejected"), 502),
+@pytest.mark.parametrize("error, status", [(ValueError("SECRET-DETAIL bad history"), 502), (RuntimeError("SECRET-DETAIL rejected"), 502),
                                           (KeyError("SECRET-DETAIL"), 502), (TimeoutError("SECRET-DETAIL"), 502)])
 def test_hermes_failures_keep_their_words_and_never_fall_back(client, openai, monkeypatch, error, status):
     _upstream(monkeypatch, [], error=error)
@@ -351,3 +351,36 @@ def test_a_header_injecting_token_is_refused(client, hermes, openai):
 def test_the_exchange_never_follows_redirects():
     request = api.urllib.request.Request("https://example.com")
     assert api._NoRedirect().redirect_request(request, None, 302, "Found", {}, "https://evil.example") is None
+
+
+@pytest.mark.parametrize("sdp, call_id", [("not-an-sdp", "rtc_up"), (ANSWER, "../../evil"), (ANSWER, "https://evil.example/x")])
+def test_hermes_result_gets_the_same_sdp_and_call_id_checks(client, monkeypatch, sdp, call_id):
+    voice_live = _upstream(monkeypatch, [])
+    result = {"session": {"id": call_id}, "transport": {"type": "webrtc", "sdp": sdp}}
+    voice_live._create_subscription_session = lambda offer, config: result
+    assert client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER}).status_code == 502
+
+
+def test_an_unexpected_credentials_failure_keeps_the_no_fallback_message(client, hermes, openai, monkeypatch):
+    import hermes_cli.auth_codex as auth_codex
+
+    def boom(**kwargs):
+        raise OSError("SECRET-DETAIL refresh failed")
+
+    monkeypatch.setattr(auth_codex, "resolve_codex_runtime_credentials", boom)
+    response = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER})
+    assert response.status_code == 503
+    assert "No API fallback" in response.json()["detail"] and "SECRET-DETAIL" not in response.text
+    status = client.get(f"{BASE}/gpt-live/status").json()
+    assert status["available"] is False and "SECRET-DETAIL" not in json.dumps(status)
+    assert openai.calls == []
+
+
+def test_a_config_read_failure_uses_the_defaults(client, hermes, monkeypatch):
+    import hermes_cli.config as config
+
+    def boom():
+        raise OSError("disk")
+
+    monkeypatch.setattr(config, "load_config", boom)
+    assert client.get(f"{BASE}/gpt-live/status").json()["model"] == "gpt-live-1-codex"

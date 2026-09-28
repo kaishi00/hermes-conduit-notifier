@@ -1101,6 +1101,9 @@ def _gpt_live_settings() -> Dict[str, Any]:
         config = load_config()
     except ImportError:
         return {}
+    except Exception as exc:
+        logger.warning("GPT-Live could not read the Hermes config: %s", type(exc).__name__)
+        return {}
     voice = config.get("voice") if isinstance(config, dict) else None
     live = voice.get("gpt_live") if isinstance(voice, dict) else None
     return live if isinstance(live, dict) else {}
@@ -1132,6 +1135,11 @@ def _codex_credentials(refresh_if_expiring: bool = True) -> tuple:
     except AuthError:
         raise TokenError(503, "GPT-Live needs a working Codex sign-in on the Hermes host. "
                               "Run `hermes auth` and choose OpenAI Codex. " + GPT_LIVE_NO_FALLBACK)
+    except Exception as exc:
+        # A refresh that failed on the network, say: the type only, since the text could carry detail.
+        logger.warning("GPT-Live could not read the Codex sign-in: %s", type(exc).__name__)
+        raise TokenError(503, "GPT-Live could not read the Codex sign-in on the Hermes host. "
+                              + GPT_LIVE_NO_FALLBACK)
     token = str(credentials.get("api_key") or "").strip() if isinstance(credentials, dict) else ""
     try:
         claims = _decode_jwt_claims(token)
@@ -1193,6 +1201,11 @@ def _post_sdp(url: str, headers: Dict[str, str], body: Dict[str, Any]) -> tuple:
         raise TokenError(502, "GPT-Live connection failed. " + GPT_LIVE_NO_FALLBACK)
 
 
+def _valid_answer(sdp: Any, call_id: Any) -> bool:
+    return (isinstance(sdp, str) and sdp.startswith("v=0")
+            and isinstance(call_id, str) and _GPT_LIVE_CALL_ID.fullmatch(call_id) is not None)
+
+
 def _plugin_gpt_live_session(sdp: str, config: Dict[str, Any], post: Callable[..., tuple]) -> Dict[str, Any]:
     token, account = _codex_credentials()
     status, answer, location = post(GPT_LIVE_URL, {
@@ -1205,7 +1218,7 @@ def _plugin_gpt_live_session(sdp: str, config: Dict[str, Any], post: Callable[..
         raise TokenError(502, f"GPT-Live session was rejected (HTTP {status}); check the Codex sign-in "
                               "and the account's voice access. " + GPT_LIVE_NO_FALLBACK)
     call_id = urllib.parse.urlparse(location).path.rstrip("/").rsplit("/", 1)[-1]
-    if not answer.startswith("v=0") or not _GPT_LIVE_CALL_ID.fullmatch(call_id):
+    if not _valid_answer(answer, call_id):
         raise TokenError(502, "GPT-Live returned an invalid WebRTC answer. " + GPT_LIVE_NO_FALLBACK)
     return {"auth": "subscription", "session": {"id": call_id}, "transport": {"type": "webrtc", "sdp": answer}}
 
@@ -1238,14 +1251,11 @@ def create_gpt_live_session(
         except Exception as exc:
             # Only the type is logged: Hermes' text could quote a provider response.
             logger.warning("Hermes' GPT-Live subscription exchange failed: %s", type(exc).__name__)
-            if isinstance(exc, ValueError):  # Hermes' own sign-in refusals
-                raise TokenError(503, "GPT-Live needs a working Codex sign-in on the Hermes host. "
-                                      "Run `hermes auth` and choose OpenAI Codex. " + GPT_LIVE_NO_FALLBACK)
             raise TokenError(502, "GPT-Live session could not be started; check the Codex sign-in "
                                   "and the account's voice access. " + GPT_LIVE_NO_FALLBACK)
         session, transport = (result.get("session"), result.get("transport")) if isinstance(result, dict) else (None, None)
-        if (not isinstance(session, dict) or not isinstance(session.get("id"), str)
-                or not isinstance(transport, dict) or not isinstance(transport.get("sdp"), str)):
+        if (not isinstance(session, dict) or not isinstance(transport, dict)
+                or not _valid_answer(transport.get("sdp"), session.get("id"))):
             raise TokenError(502, "GPT-Live returned an invalid WebRTC answer. " + GPT_LIVE_NO_FALLBACK)
         # Only the fields Conduit reads: nothing else Hermes returns leaves the host.
         return {"auth": "subscription", "session": {"id": session["id"]},
