@@ -242,11 +242,12 @@ record the voice conversation or write to memory.
 | GET | `/api/plugins/conduit_push/memory/context` | `{ok, available, reason?, provider, recall, context}` |
 | POST | `/api/plugins/conduit_push/memory/recall` with `{query}` | `{ok, available, results}` |
 
-`context` is what Hermes puts in its own system prompt: the built-in
-`MEMORY.md` / `USER.md` snapshot (respecting `memory.memory_enabled` and
-`memory.user_profile_enabled`), followed by the external provider's prompt
-block when `memory.provider` names one (Honcho, Mem0, Holographic, and so on)
-and it is available. It is capped at 8,000 characters. `provider` is
+`context` is the built-in `MEMORY.md` / `USER.md` snapshot Hermes puts in its
+own system prompt (respecting `memory.memory_enabled` and
+`memory.user_profile_enabled`), capped at 8,000 characters. An external
+provider named by `memory.provider` (Honcho, Mem0, Holographic, and so on) is
+reached through recall instead: its own prompt block mostly describes tools the
+voice model can't call. `provider` is
 `"builtin"`, the external provider's name, or `null`. When there is nothing to
 use, `available` is false with `reason` `"unsupported"` (a Hermes without the
 memory modules) or `"disabled"` (memory off, or nothing stored yet).

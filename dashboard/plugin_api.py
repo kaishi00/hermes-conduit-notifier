@@ -616,9 +616,9 @@ def _memory_provider_init_kwargs() -> Dict[str, Any]:
     kwargs: Dict[str, Any] = {
         "platform": MEMORY_PLATFORM,
         "hermes_home": str(get_hermes_home()),
-        # Providers skip writes outside "primary" (MemoryProvider.initialize);
-        # this caller only reads, so it says so.
-        "agent_context": "subagent",
+        # Some providers skip recall as well as writes outside "primary"; this
+        # caller never writes (no sync_turn, no memory tool), so it is safe.
+        "agent_context": "primary",
     }
     try:
         from hermes_cli.profiles import get_active_profile_name
@@ -707,13 +707,10 @@ def memory_context(key: str = "") -> Dict[str, Any]:
             raise
         return {"available": False, "reason": "unsupported", "provider": None, "recall": False, "context": ""}
     provider = _memory_providers.get(key, name)
-    block = ""
-    if provider is not None:
-        try:
-            block = str(provider.system_prompt_block() or "").strip()
-        except Exception:  # noqa: BLE001 — the built-in snapshot still stands
-            logger.warning("Memory provider %r system_prompt_block failed", name, exc_info=True)
-    context = _clip_block("\n\n".join(part for part in (builtin, block) if part), MEMORY_CONTEXT_MAX_CHARS)
+    # Not the provider's system_prompt_block(): that is mostly instructions
+    # for its own tools, which the voice model can't call. Its memory is
+    # reached through recall instead.
+    context = _clip_block(builtin, MEMORY_CONTEXT_MAX_CHARS) if builtin else ""
     recall = provider is not None
     label = name if recall else ("builtin" if builtin else None)
     result: Dict[str, Any] = {"available": bool(context) or recall, "provider": label, "recall": recall, "context": context}

@@ -96,12 +96,12 @@ def test_context_is_the_builtin_snapshot(hermes):
         "available": True, "provider": "builtin", "recall": False, "context": "MEMORY (your personal notes)\nprefers metric"}
 
 
-def test_context_adds_the_external_provider_block(hermes):
+def test_context_offers_recall_for_the_external_provider_without_its_tool_block(hermes):
     hermes.builtin = "notes"
     hermes.config = {"memory": {"provider": "honcho"}}
     provider = hermes.providers["honcho"] = FakeProvider()
     result = api.memory_context()
-    assert result == {"available": True, "provider": "honcho", "recall": True, "context": "notes\n\n## Honcho\nuser likes tea"}
+    assert result == {"available": True, "provider": "honcho", "recall": True, "context": "notes"}
     assert provider.initialized == [(api.MEMORY_SESSION_ID, {"platform": api.MEMORY_PLATFORM})]
     assert not provider.synced
 
@@ -158,9 +158,9 @@ def test_provider_init_failure_never_breaks_the_route(hermes):
     assert api.memory_context()["reason"] == "disabled"
 
 
-def test_a_failing_system_prompt_block_keeps_recall(hermes):
+def test_an_external_provider_alone_offers_recall_only(hermes):
     hermes.config = {"memory": {"provider": "honcho"}}
-    hermes.providers["honcho"] = FakeProvider(block=RuntimeError("boom"))
+    hermes.providers["honcho"] = FakeProvider(block=RuntimeError("never called"))
     assert api.memory_context() == {"available": True, "provider": "honcho", "recall": True, "context": ""}
 
 
@@ -273,7 +273,7 @@ def test_routes_report_context_and_recall(client, hermes):
     context = client.get(f"{BASE}/memory/context")
     assert context.headers["cache-control"] == "no-store"
     assert context.json() == {"ok": True, "available": True, "provider": "honcho", "recall": True,
-                              "context": "notes\n\n## Honcho\nuser likes tea"}
+                              "context": "notes"}
 
     recall = client.post(f"{BASE}/memory/recall", json={"query": "tea"})
     assert recall.status_code == 200
