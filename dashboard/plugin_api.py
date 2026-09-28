@@ -1133,7 +1133,10 @@ def _codex_credentials(refresh_if_expiring: bool = True) -> tuple:
         raise TokenError(503, "GPT-Live needs a working Codex sign-in on the Hermes host. "
                               "Run `hermes auth` and choose OpenAI Codex. " + GPT_LIVE_NO_FALLBACK)
     token = str(credentials.get("api_key") or "").strip() if isinstance(credentials, dict) else ""
-    claims = _decode_jwt_claims(token)
+    try:
+        claims = _decode_jwt_claims(token)
+    except Exception:
+        claims = None
     claims = claims.get("https://api.openai.com/auth") if isinstance(claims, dict) else None
     account = claims.get("chatgpt_account_id") if isinstance(claims, dict) else None
     if (not token or not isinstance(account, str) or not account.strip()
@@ -1232,16 +1235,21 @@ def create_gpt_live_session(
         try:
             config = upstream.build_session_config(history, live=live)
             result = upstream._create_subscription_session(sdp, config)
-        except ValueError as exc:  # sign-in problems
-            # Hermes' wording stays in the log: it isn't ours to vouch for as free of provider detail.
-            logger.warning("Hermes' GPT-Live subscription exchange refused the sign-in: %s", exc)
-            raise TokenError(503, "GPT-Live needs a working Codex sign-in on the Hermes host. "
-                                  "Run `hermes auth` and choose OpenAI Codex. " + GPT_LIVE_NO_FALLBACK)
-        except RuntimeError as exc:  # rejected or unreachable
-            logger.warning("Hermes' GPT-Live subscription exchange failed: %s", exc)
+        except Exception as exc:
+            # Only the type is logged: Hermes' text could quote a provider response.
+            logger.warning("Hermes' GPT-Live subscription exchange failed: %s", type(exc).__name__)
+            if isinstance(exc, ValueError):  # Hermes' own sign-in refusals
+                raise TokenError(503, "GPT-Live needs a working Codex sign-in on the Hermes host. "
+                                      "Run `hermes auth` and choose OpenAI Codex. " + GPT_LIVE_NO_FALLBACK)
             raise TokenError(502, "GPT-Live session could not be started; check the Codex sign-in "
                                   "and the account's voice access. " + GPT_LIVE_NO_FALLBACK)
-        return {**result, "source": "hermes"}
+        session, transport = (result.get("session"), result.get("transport")) if isinstance(result, dict) else (None, None)
+        if (not isinstance(session, dict) or not isinstance(session.get("id"), str)
+                or not isinstance(transport, dict) or not isinstance(transport.get("sdp"), str)):
+            raise TokenError(502, "GPT-Live returned an invalid WebRTC answer. " + GPT_LIVE_NO_FALLBACK)
+        # Only the fields Conduit reads: nothing else Hermes returns leaves the host.
+        return {"auth": "subscription", "session": {"id": session["id"]},
+                "transport": {"type": "webrtc", "sdp": transport["sdp"]}, "source": "hermes"}
     config = gpt_live_session_config(history, live)
     return {**_plugin_gpt_live_session(sdp, config, post or _post_sdp), "source": "plugin"}
 

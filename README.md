@@ -304,7 +304,7 @@ API key. First sign in on the Hermes host with `hermes auth` and choose OpenAI C
 The session route takes `{"sdp": "<WebRTC offer>", "history": [...]}` (history
 optional, last 40 items kept) and returns the SDP answer. The plugin posts the
 offer to the Codex voice service with the host's Codex OAuth token and ChatGPT
-account id; neither is ever returned to Conduit or logged by the plugin (failure detail from Hermes' own exchange goes to the Hermes log only). Status only checks that a
+account id; neither is ever returned to Conduit or logged (a failure in Hermes' own exchange logs only its exception type). Status only checks that a
 sign-in exists; the account's voice entitlement is checked when a call starts.
 A sign-in, quota or connection failure is an error: **it never falls back to
 API billing**. Sessions are capped at 10 per minute per profile.

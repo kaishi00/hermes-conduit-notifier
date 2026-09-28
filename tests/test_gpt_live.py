@@ -235,7 +235,8 @@ def test_hands_off_to_hermes_when_it_ships_the_exchange(client, hermes, openai, 
     assert client.get(f"{BASE}/gpt-live/status").json()["source"] == "hermes"
 
 
-@pytest.mark.parametrize("error, status", [(ValueError("SECRET-DETAIL sign in"), 503), (RuntimeError("SECRET-DETAIL rejected"), 502)])
+@pytest.mark.parametrize("error, status", [(ValueError("SECRET-DETAIL sign in"), 503), (RuntimeError("SECRET-DETAIL rejected"), 502),
+                                          (KeyError("SECRET-DETAIL"), 502), (TimeoutError("SECRET-DETAIL"), 502)])
 def test_hermes_failures_keep_their_words_and_never_fall_back(client, openai, monkeypatch, error, status):
     _upstream(monkeypatch, [], error=error)
     response = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER})
@@ -316,3 +317,37 @@ def test_a_decoder_returning_a_non_dict_is_a_503(client, hermes, openai, monkeyp
     monkeypatch.setattr(constants, "_decode_jwt_claims", lambda token: claims)
     assert client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER}).status_code == 503
     assert openai.calls == []
+
+
+def test_hermes_result_is_whitelisted_and_validated(client, hermes, openai, monkeypatch):
+    voice_live = _upstream(monkeypatch, [])
+    good = {"auth": "subscription", "session": {"id": "rtc_up", "token": "LEAK"},
+            "transport": {"type": "webrtc", "sdp": ANSWER, "bearer": "LEAK"}, "debug": "LEAK"}
+    voice_live._create_subscription_session = lambda sdp, config: good
+    response = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER})
+    assert "LEAK" not in response.text
+    assert response.json()["session"] == {"id": "rtc_up"}
+    for bad in (None, {}, {"session": {}, "transport": {"sdp": ANSWER}}, {"session": {"id": "x"}, "transport": {}}):
+        voice_live._create_subscription_session = (lambda value: lambda sdp, config: value)(bad)
+        assert client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER}).status_code == 502
+
+
+def test_a_raising_decoder_is_a_503(client, hermes, openai, monkeypatch):
+    import hermes_cli.auth_constants as constants
+
+    def boom(token):
+        raise ValueError("malformed")
+
+    monkeypatch.setattr(constants, "_decode_jwt_claims", boom)
+    assert client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER}).status_code == 503
+
+
+def test_a_header_injecting_token_is_refused(client, hermes, openai):
+    hermes.token = GOOD_TOKEN + "\r\nX-Evil: 1"
+    assert client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER}).status_code == 503
+    assert openai.calls == []
+
+
+def test_the_exchange_never_follows_redirects():
+    request = api.urllib.request.Request("https://example.com")
+    assert api._NoRedirect().redirect_request(request, None, 302, "Found", {}, "https://evil.example") is None
