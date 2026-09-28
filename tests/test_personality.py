@@ -256,3 +256,63 @@ def test_hook_never_raises():
     assert plugin._pre_llm_call(conversation_history=Exploding([{}])) is None
     assert plugin._pre_llm_call() is None
     assert plugin._pre_llm_call(conversation_history=[{"role": "user", "content": [None, 3, {"type": "text"}]}]) is None
+
+
+def test_manifest_declares_every_registered_hook():
+    hooks = []
+    ctx = types.SimpleNamespace(profile_name="default", register_hook=lambda name, fn: hooks.append(name),
+                                register_cli_command=lambda **kwargs: None)
+    plugin.register(ctx)
+    manifest = (ROOT / "plugin.yaml").read_text()
+    declared = {line.strip()[2:] for line in manifest.split("hooks:", 1)[1].splitlines() if line.strip().startswith("- ")}
+    assert set(hooks) <= declared
+
+
+def test_a_hermes_that_refuses_the_hook_keeps_the_other_hooks():
+    hooks = []
+
+    def register_hook(name, fn):
+        if name == "pre_llm_call":
+            raise ValueError("unknown hook")
+        hooks.append(name)
+
+    ctx = types.SimpleNamespace(profile_name="default", register_hook=register_hook,
+                                register_cli_command=lambda **kwargs: None)
+    plugin.register(ctx)
+    assert "post_llm_call" in hooks and "subagent_stop" in hooks
+
+
+def test_hook_finds_the_note_in_a_later_text_part():
+    content = [{"type": "text", "text": "[Note: something else first]"}, {"type": "text", "text": f"{VOICE_NOTE}\n\nhi"}]
+    assert plugin._pre_llm_call(conversation_history=_history(content)) == {"context": plugin.PERSONA_VOICE_NOTE}
+
+
+def test_older_load_soul_md_without_home_override_reads_the_scoped_home(client, hermes, monkeypatch):
+    hermes.souls["work"] = "Work persona."
+
+    def load_soul_md(context_length=None):
+        return hermes.souls.get(sys.modules["hermes_constants"].get_hermes_home().name)
+
+    monkeypatch.setattr(sys.modules["agent.prompt_builder"], "load_soul_md", load_soul_md)
+    response = client.get(f"{BASE}/personality", params={"profile": "work"})
+    assert response.status_code == 200
+    assert response.json()["text"] == "Work persona."
+
+
+def test_a_hung_read_times_out(client, hermes, monkeypatch):
+    import threading
+
+    release = threading.Event()
+
+    def hung():
+        release.wait(5)
+        return "late"
+
+    monkeypatch.setattr(api, "_hermes_soul_md", hung)
+    monkeypatch.setattr(api, "PERSONALITY_TIMEOUT_S", 0.2)
+    try:
+        response = client.get(f"{BASE}/personality")
+    finally:
+        release.set()
+    assert response.status_code == 504
+    assert response.headers["cache-control"] == "no-store"

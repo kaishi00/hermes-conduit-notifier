@@ -938,9 +938,14 @@ async def post_memory_recall(request: Request, response: Response, profile: Opti
 PERSONALITY_MAX_CHARS = 8000
 PERSONALITY_LIMIT = 30
 PERSONALITY_WINDOW_S = 60.0
+PERSONALITY_TIMEOUT_S = 10.0
+PERSONALITY_WORKERS = 2
 
 _MISSING_PERSONALITY_MODULES = frozenset({"agent", "agent.prompt_builder", "hermes_constants"})
 
+# Its own small pool: a hung filesystem read can't pin the default executor
+# or the memory and search pools.
+_personality_executor = ThreadPoolExecutor(max_workers=PERSONALITY_WORKERS, thread_name_prefix="conduit-personality")
 _personality_limiter = _MintLimiter(PERSONALITY_LIMIT, PERSONALITY_WINDOW_S,
                                     message="Too many personality requests; try again shortly")
 
@@ -952,7 +957,12 @@ def _hermes_soul_md() -> Optional[str]:
 
     # Pin the home explicitly: this runs on a worker thread, and Hermes'
     # ambient lookup there could fall back to the launch profile.
-    return load_soul_md(home_override=get_hermes_home())
+    try:
+        return load_soul_md(home_override=get_hermes_home())
+    except TypeError:
+        # A Hermes whose load_soul_md predates home_override: the profile
+        # scope _run_scoped entered is what its ambient lookup reads.
+        return load_soul_md()
 
 
 def personality(limiter_key: Optional[str] = None) -> Dict[str, Any]:
@@ -974,7 +984,13 @@ def personality(limiter_key: Optional[str] = None) -> Dict[str, Any]:
 async def get_personality(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     try:
-        result = await _run_scoped(profile, lambda: personality(limiter_key=_limiter_key(profile)))
+        result = await asyncio.wait_for(
+            _run_scoped(profile, lambda: personality(limiter_key=_limiter_key(profile)), _personality_executor),
+            timeout=PERSONALITY_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("Personality for Conduit timed out after %ss", PERSONALITY_TIMEOUT_S)
+        raise HTTPException(status_code=504, detail="Personality timed out", headers={"Cache-Control": "no-store"})
     except TokenError as exc:
         logger.warning("Personality for Conduit failed: %s", exc)
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})

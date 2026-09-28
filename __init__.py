@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import logging
 import threading
 import uuid
 from typing import Any
@@ -12,6 +13,7 @@ from .client import enqueue
 from .events import approval_decision, clarification_text, event_id, is_silent_response, push_event
 
 
+logger = logging.getLogger(__name__)
 _child_sessions: set[str] = set()
 _children_lock = threading.Lock()
 _profile = "default"
@@ -27,7 +29,12 @@ def register(ctx: Any) -> None:
     ctx.register_hook("pre_approval_request", _pre_approval_request)
     ctx.register_hook("subagent_start", _subagent_start)
     ctx.register_hook("subagent_stop", _subagent_stop)
-    ctx.register_hook("pre_llm_call", _pre_llm_call)
+    # The voice hint is an extra: a Hermes that refuses the hook must not
+    # take the notifications down with it.
+    try:
+        ctx.register_hook("pre_llm_call", _pre_llm_call)
+    except Exception:  # noqa: BLE001
+        logger.warning("conduit_push: pre_llm_call hook unavailable; voice replies get no persona hint", exc_info=True)
     # Wrap clarify execution so a backgrounded device gets an answerable card
     # (plugin-minted id, answered through the relay). Older gateways without
     # middleware support simply keep the original clarify path.
@@ -174,14 +181,13 @@ def _voice_note_prefix() -> str:
     return _voice_live_prefix
 
 
-def _first_text(content: Any) -> str:
+def _text_parts(content: Any) -> list[str]:
     if isinstance(content, str):
-        return content
+        return [content]
     if isinstance(content, list):
-        for part in content:
-            if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str):
-                return part["text"]
-    return ""
+        return [part["text"] for part in content
+                if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)]
+    return []
 
 
 def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
@@ -198,8 +204,8 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
             return None
         for message in reversed(history):
             if isinstance(message, dict) and message.get("role") == "user":
-                text = _first_text(message.get("content")).lstrip()
-                if text.startswith(_voice_note_prefix()):
+                prefix = _voice_note_prefix()
+                if any(text.lstrip().startswith(prefix) for text in _text_parts(message.get("content"))):
                     return {"context": PERSONA_VOICE_NOTE}
                 return None
     except Exception:  # noqa: BLE001 — a hook must never break the turn
