@@ -176,6 +176,10 @@ def test_provider_is_cached_per_profile_and_rebuilt_on_change(hermes):
     assert hermes.loads == ["honcho", "honcho"]
     hermes.config = {"memory": {"provider": "mem0"}}
     assert api.memory_context("a")["provider"] == "mem0"
+    # The old provider shuts down on its own thread, off the request path.
+    deadline = time.monotonic() + 2
+    while not honcho.shut_down and time.monotonic() < deadline:
+        time.sleep(0.01)
     assert honcho.shut_down
 
 

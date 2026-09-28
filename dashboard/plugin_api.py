@@ -16,6 +16,10 @@ external provider `memory.provider` names (Honcho, Mem0, …). Read-only.
 Personality: the profile's SOUL.md as Hermes loads it, so voice keeps the
 agent's personality. Read-only.
 
+GPT-Live: exchanges Conduit's WebRTC offer for a GPT-Live answer using this
+host's Codex sign-in, so live voice bills the ChatGPT subscription. The OAuth
+token and account id stay on the host (hermes-agent#108940, host half).
+
 Routes sit behind the dashboard's own auth, the same as /api/audio/*.
 The API key is never returned, logged, or written anywhere.
 """
@@ -25,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import contextvars
+import inspect
 import json
 import logging
 import os
@@ -32,6 +37,7 @@ import re
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -999,4 +1005,256 @@ async def get_personality(response: Response, profile: Optional[str] = None) -> 
         raise
     except Exception as exc:
         raise _unexpected("request", exc, feature="Personality")
+    return {"ok": True, **result}
+
+
+# --- GPT-Live on a ChatGPT/Codex subscription --------------------------------
+#
+# Backport of hermes-agent#108940's host half: exchange a WebRTC SDP offer for
+# a GPT-Live answer using this host's Codex OAuth sign-in (`hermes auth` ->
+# OpenAI Codex), so the voice layer bills the ChatGPT subscription instead of
+# an API key. The bearer and its account id never leave the host. There is no
+# fallback: a sign-in, entitlement or transport failure is an error, never an
+# API-billed session.
+#
+# Once Hermes ships the same exchange (tools.voice_live grows
+# _create_subscription_session), this route hands the request to Hermes and
+# keeps only its URL, so Conduit needs no change when upstream lands.
+
+GPT_LIVE_URL = "https://chatgpt.com/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas"
+GPT_LIVE_DEFAULT_MODEL = "gpt-live-1-codex"
+GPT_LIVE_DEFAULT_VOICE = "cove"
+GPT_LIVE_TIMEOUT_S = 30.0
+# A call starts once per conversation; cap a looping client well above that.
+GPT_LIVE_LIMIT = 10
+GPT_LIVE_WINDOW_S = 60.0
+GPT_LIVE_WORKERS = 2
+# An SDP offer is a few KB; the rest is room for the recent-history items.
+GPT_LIVE_MAX_BODY_BYTES = 256 * 1024
+GPT_LIVE_MAX_HISTORY_ITEMS = 40
+GPT_LIVE_NO_FALLBACK = "No API fallback was used."
+_GPT_LIVE_CALL_ID = re.compile(r"rtc_[A-Za-z0-9_-]+|[0-9a-fA-F-]{36}")
+
+# Hermes' own voice-layer persona (tools/voice_live.py), for a Hermes that
+# predates that module. Short on purpose: the live model delegates real work.
+GPT_LIVE_PERSONA = (
+    "You are Hermes, a calm and friendly voice assistant. Speak naturally at an unhurried pace. "
+    "Be clear and direct, not overly cheerful. If the user is frustrated, acknowledge it briefly "
+    "and focus on the next helpful step.\n\n"
+    "Backchannel policy: Use moderate backchannels. Acknowledge naturally without competing with "
+    "the main response.\n\n"
+    "Interruption policy: Stop speaking when the user interrupts. Listen to what they say.\n\n"
+    "Delegation policy:\n"
+    "Backend tools:\n"
+    "- Hermes agent: a full AI agent with tools — it can run commands, read and edit files, "
+    "browse the web, search, remember things across sessions, schedule tasks, and reason "
+    "carefully about anything. It is the one who actually does work and knows facts.\n\n"
+    "Delegate to the backend when:\n"
+    "- The user asks a question that needs facts, current information, or careful reasoning.\n"
+    "- The user asks you to do, check, find, make, fix, run or remember anything.\n"
+    "- A correction changes work already requested.\n\n"
+    "Do not delegate to the backend when:\n"
+    "- The user greets you, makes small talk, or asks you to repeat a result already provided.\n"
+    "- You need a brief clarification to understand the request.\n\n"
+    "Delegate before giving an answer that depends on backend work. Do not guess the result "
+    "while waiting; say briefly that you are checking, then wait for the result."
+)
+
+_gpt_live_executor = ThreadPoolExecutor(max_workers=GPT_LIVE_WORKERS, thread_name_prefix="conduit-gpt-live")
+_gpt_live_limiter = _MintLimiter(GPT_LIVE_LIMIT, GPT_LIVE_WINDOW_S,
+                                 message="Too many GPT-Live session requests; try again shortly")
+
+
+def _upstream_voice_live() -> Any:
+    """Hermes' tools.voice_live when it carries the subscription exchange, else None."""
+    try:
+        from tools import voice_live
+    except ImportError:
+        return None
+    exchange = getattr(voice_live, "_create_subscription_session", None)
+    build = getattr(voice_live, "build_session_config", None)
+    if not callable(exchange) or not callable(build):
+        return None
+    try:
+        # The shape #108940 ships; anything else means Hermes moved on and the plugin keeps serving.
+        if "live" not in inspect.signature(build).parameters or len(inspect.signature(exchange).parameters) != 2:
+            return None
+    except (TypeError, ValueError):
+        return None
+    return voice_live
+
+
+def _gpt_live_settings() -> Dict[str, Any]:
+    """The profile's ``voice.gpt_live`` block (profile-scoped by _run_scoped), or {}."""
+    try:
+        from hermes_cli.config import load_config
+        live = (load_config().get("voice") or {}).get("gpt_live")
+    except ImportError:
+        return {}
+    return live if isinstance(live, dict) else {}
+
+
+def _gpt_live_model_voice(live: Dict[str, Any]) -> tuple:
+    return (str(live.get("subscription_model") or GPT_LIVE_DEFAULT_MODEL).strip(),
+            str(live.get("subscription_voice") or GPT_LIVE_DEFAULT_VOICE).strip())
+
+
+def _gpt_live_instructions(live: Dict[str, Any]) -> str:
+    try:
+        from tools.voice_live import LIVE_PERSONA as persona
+    except ImportError:
+        persona = GPT_LIVE_PERSONA
+    extra = str(live.get("instructions") or "").strip()
+    return f"{persona}\n\n{extra}" if extra else persona
+
+
+def _codex_credentials(refresh_if_expiring: bool = True) -> tuple:
+    """(bearer, ChatGPT account id) from Hermes' Codex sign-in; TokenError(503) when unusable."""
+    try:
+        from hermes_cli.auth_codex import resolve_codex_runtime_credentials
+        from hermes_cli.auth_constants import AuthError, _decode_jwt_claims
+    except ImportError:
+        raise TokenError(503, "This Hermes version has no Codex sign-in. " + GPT_LIVE_NO_FALLBACK)
+    try:
+        credentials = resolve_codex_runtime_credentials(refresh_if_expiring=refresh_if_expiring)
+    except AuthError:
+        raise TokenError(503, "GPT-Live needs a working Codex sign-in on the Hermes host. "
+                              "Run `hermes auth` and choose OpenAI Codex. " + GPT_LIVE_NO_FALLBACK)
+    token = str((credentials or {}).get("api_key") or "").strip()
+    claims = _decode_jwt_claims(token).get("https://api.openai.com/auth", {})
+    account = claims.get("chatgpt_account_id") if isinstance(claims, dict) else None
+    if (not token or not isinstance(account, str) or not account.strip()
+            or any(c in token + account for c in "\r\n")):
+        raise TokenError(503, "GPT-Live needs a Codex sign-in with a ChatGPT account. " + GPT_LIVE_NO_FALLBACK)
+    return token, account.strip()
+
+
+def gpt_live_status() -> Dict[str, Any]:
+    """Credential readiness only; the voice entitlement is checked when a call starts."""
+    live = _gpt_live_settings()
+    model, voice = _gpt_live_model_voice(live)
+    status: Dict[str, Any] = {"auth": "subscription", "model": model, "voice": voice,
+                              "source": "hermes" if _upstream_voice_live() else "plugin"}
+    try:
+        _codex_credentials(refresh_if_expiring=False)
+    except TokenError as exc:
+        return {**status, "available": False, "reason": str(exc)}
+    return {**status, "available": True, "reason": None}
+
+
+def gpt_live_session_config(history: Optional[list], live: Dict[str, Any]) -> Dict[str, Any]:
+    model, voice = _gpt_live_model_voice(live)
+    config: Dict[str, Any] = {
+        "model": model,
+        "instructions": _gpt_live_instructions(live),
+        "audio": {"output": {"voice": voice}},
+        "delegation": {"type": "client"},
+    }
+    if history:
+        # The Codex frameless contract names seeded history initial_items.
+        config["initial_items"] = history
+    return config
+
+
+def _post_sdp(url: str, headers: Dict[str, str], body: Dict[str, Any]) -> tuple:
+    """POST the offer; returns (status, answer text, Location). No redirects: the bearer must not follow one."""
+    request = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), method="POST",
+                                     headers={**headers, "Content-Type": "application/json"})
+    try:
+        with _opener.open(request, timeout=GPT_LIVE_TIMEOUT_S) as response:
+            return response.status, response.read().decode("utf-8", "replace"), response.headers.get("Location", "")
+    except urllib.error.HTTPError as exc:
+        # The body can echo account details; only the status goes back to Conduit.
+        return exc.code, "", ""
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        logger.warning("GPT-Live session request could not reach OpenAI: %s", getattr(exc, "reason", exc))
+        raise TokenError(502, "GPT-Live connection failed. " + GPT_LIVE_NO_FALLBACK)
+
+
+def _plugin_gpt_live_session(sdp: str, config: Dict[str, Any], post: Callable[..., tuple]) -> Dict[str, Any]:
+    token, account = _codex_credentials()
+    status, answer, location = post(GPT_LIVE_URL, {
+        "Authorization": f"Bearer {token}",
+        "ChatGPT-Account-Id": account,
+        "OpenAI-Alpha": "quicksilver=v2",
+    }, {"sdp": sdp, "session": config})
+    if not 200 <= status < 300:
+        logger.warning("GPT-Live session was rejected: HTTP %s", status)
+        raise TokenError(502, f"GPT-Live session was rejected (HTTP {status}); check the Codex sign-in "
+                              "and the account's voice access. " + GPT_LIVE_NO_FALLBACK)
+    call_id = urllib.parse.urlparse(location).path.rstrip("/").rsplit("/", 1)[-1]
+    if not answer.startswith("v=0") or not _GPT_LIVE_CALL_ID.fullmatch(call_id):
+        raise TokenError(502, "GPT-Live returned an invalid WebRTC answer. " + GPT_LIVE_NO_FALLBACK)
+    return {"auth": "subscription", "session": {"id": call_id}, "transport": {"type": "webrtc", "sdp": answer}}
+
+
+def _clean_history(history: Any) -> Optional[list]:
+    if history is None:
+        return None
+    if not isinstance(history, list) or not all(isinstance(item, dict) for item in history):
+        raise TokenError(400, "history must be a list of conversation items")
+    return history[-GPT_LIVE_MAX_HISTORY_ITEMS:] or None
+
+
+def create_gpt_live_session(
+    sdp: Any,
+    history: Any = None,
+    limiter_key: Optional[str] = None,
+    post: Optional[Callable[..., tuple]] = None,
+) -> Dict[str, Any]:
+    if not isinstance(sdp, str) or not sdp.startswith("v=0"):
+        raise TokenError(400, "sdp must be a WebRTC SDP offer")
+    history = _clean_history(history)
+    if limiter_key is not None:
+        _gpt_live_limiter.acquire(limiter_key)
+    live = {**_gpt_live_settings(), "auth": "subscription"}
+    upstream = _upstream_voice_live()
+    if upstream is not None:
+        try:
+            config = upstream.build_session_config(history, live=live)
+            result = upstream._create_subscription_session(sdp, config)
+        except ValueError as exc:  # sign-in problems, in Hermes' words
+            raise TokenError(503, str(exc))
+        except RuntimeError as exc:  # rejected or unreachable, in Hermes' words
+            raise TokenError(502, str(exc))
+        return {**result, "source": "hermes"}
+    config = gpt_live_session_config(history, live)
+    return {**_plugin_gpt_live_session(sdp, config, post or _post_sdp), "source": "plugin"}
+
+
+@router.get("/gpt-live/status")
+async def get_gpt_live_status(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return {"ok": True, **(await _run_scoped(profile, gpt_live_status, _gpt_live_executor))}
+    except TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
+        raise
+    except Exception as exc:
+        raise _unexpected("status", exc, feature="GPT-Live")
+
+
+@router.post("/gpt-live/session")
+async def post_gpt_live_session(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    body = await _read_json_body(request, GPT_LIVE_MAX_BODY_BYTES)
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Request body must be a JSON object",
+                            headers={"Cache-Control": "no-store"})
+    try:
+        result = await _run_scoped(
+            profile,
+            lambda: create_gpt_live_session(body.get("sdp"), body.get("history"), limiter_key=_limiter_key(profile)),
+            _gpt_live_executor,
+        )
+    except TokenError as exc:
+        logger.warning("GPT-Live session for Conduit failed: %s", exc)
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
+        raise
+    except Exception as exc:
+        raise _unexpected("session", exc, feature="GPT-Live")
     return {"ok": True, **result}
