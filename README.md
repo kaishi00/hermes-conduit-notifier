@@ -299,10 +299,10 @@ API key. First sign in on the Hermes host with `hermes auth` and choose OpenAI C
 | Method | Path | Returns |
 |--------|------|---------|
 | GET | `/api/plugins/conduit_push/gpt-live/status` | `{ok, auth, available, reason, model, voice, source}` |
-| POST | `/api/plugins/conduit_push/gpt-live/session` | `{ok, auth, session: {id}, transport: {type, sdp}, source, voice}` |
+| POST | `/api/plugins/conduit_push/gpt-live/session` | `{ok, auth, session: {id}, transport: {type, sdp}, source, voice, briefing_applied}` |
 
-The session route takes `{"sdp": "<WebRTC offer>", "history": [...], "voice": "cove"}` (history
-optional, last 40 items kept; voice optional and, when given, used instead of `subscription_voice`) and returns the SDP answer plus the `voice` it used. The plugin posts the
+The session route takes `{"sdp": "<WebRTC offer>", "history": [...], "voice": "cove", "briefing": "..."}` (history
+optional, last 40 items kept; voice optional and, when given, used instead of `subscription_voice`; briefing optional, up to 32 KB, and added to the session instructions so the model has Conduit's rules before it speaks) and returns the SDP answer plus the `voice` it used. The plugin posts the
 offer to the Codex voice service with the host's Codex OAuth token and ChatGPT
 account id; neither is ever returned to Conduit or logged (a failure in Hermes' own exchange logs only its exception type). Status only checks that a
 sign-in exists; the account's voice entitlement is checked when a call starts.

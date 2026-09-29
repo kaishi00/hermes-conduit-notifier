@@ -106,7 +106,7 @@ def test_session_uses_the_codex_sign_in_and_keeps_it_on_the_host(client, openai)
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
     assert response.json() == {
-        "ok": True, "auth": "subscription", "source": "plugin", "voice": "cove",
+        "ok": True, "auth": "subscription", "source": "plugin", "voice": "cove", "briefing_applied": False,
         "session": {"id": "rtc_abc123"}, "transport": {"type": "webrtc", "sdp": ANSWER},
     }
     url, headers, body = openai.calls[0]
@@ -144,6 +144,19 @@ def test_session_voice_from_conduit_overrides_the_configured_voice(client, herme
     # No voice (or an empty one) keeps the profile's.
     client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "voice": "  "})
     assert openai.calls[1][2]["session"]["audio"] == {"output": {"voice": "ember"}}
+
+
+def test_session_briefing_joins_the_instructions_instead_of_context_appends(client, hermes, openai):
+    hermes.config = {"voice": {"gpt_live": {"instructions": "Speak French."}}}
+    body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "briefing": "  [Conduit rules] "}).json()
+    assert body["briefing_applied"] is True
+    assert openai.calls[0][2]["session"]["instructions"].endswith("Speak French.\n\n[Conduit rules]")
+
+
+@pytest.mark.parametrize("briefing", [5, "x" * (api.GPT_LIVE_MAX_BRIEFING_CHARS + 1)])
+def test_session_rejects_a_bad_briefing(client, openai, briefing):
+    assert client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "briefing": briefing}).status_code == 400
+    assert openai.calls == []
 
 
 @pytest.mark.parametrize("voice", ["../x", "a b", 5, "x" * 40])
@@ -243,7 +256,7 @@ def test_hands_off_to_hermes_when_it_ships_the_exchange(client, hermes, openai, 
     _upstream(monkeypatch, calls)
     hermes.config = {"voice": {"gpt_live": {"auth": "api", "subscription_voice": "ember"}}}
     body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "history": [{"type": "message"}]}).json()
-    assert body == {"ok": True, "auth": "subscription", "source": "hermes", "voice": "ember",
+    assert body == {"ok": True, "auth": "subscription", "source": "hermes", "voice": "ember", "briefing_applied": False,
                     "session": {"id": "rtc_up"}, "transport": {"type": "webrtc", "sdp": ANSWER}}
     # Subscription is forced even when the desktop's own setting says api.
     assert calls[0] == ("build", [{"type": "message"}], {"auth": "subscription", "subscription_voice": "ember"})
