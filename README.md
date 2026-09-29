@@ -299,7 +299,7 @@ API key. First sign in on the Hermes host with `hermes auth` and choose OpenAI C
 | Method | Path | Returns |
 |--------|------|---------|
 | GET | `/api/plugins/conduit_push/gpt-live/status` | `{ok, auth, available, reason, model, voice, source}` |
-| POST | `/api/plugins/conduit_push/gpt-live/session` | `{ok, auth, session: {id}, transport: {type, sdp}, source}` |
+| POST | `/api/plugins/conduit_push/gpt-live/session` | `{ok, auth, session: {id}, transport: {type, sdp}, source, voice}` |
 
 The session route takes `{"sdp": "<WebRTC offer>", "history": [...], "voice": "cove"}` (history
 optional, last 40 items kept; voice optional and, when given, used instead of `subscription_voice`) and returns the SDP answer plus the `voice` it used. The plugin posts the

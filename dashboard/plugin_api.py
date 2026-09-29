@@ -1276,6 +1276,10 @@ def create_gpt_live_session(
         try:
             config = upstream.build_session_config(history, live=live)
             result = upstream._create_subscription_session(sdp, config)
+            # Prefer the voice Hermes put in the session over the one we asked for.
+            built = ((config.get("audio") or {}).get("output") or {}).get("voice") if isinstance(config, dict) else None
+            if isinstance(built, str) and built.strip():
+                applied_voice = built.strip()
         except Exception as exc:
             # Only the type is logged: Hermes' text could quote a provider response.
             logger.warning("Hermes' GPT-Live subscription exchange failed: %s", type(exc).__name__)
