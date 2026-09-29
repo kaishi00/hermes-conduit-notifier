@@ -1240,19 +1240,25 @@ def _clean_history(history: Any) -> Optional[list]:
 
 def _clean_voice(voice: Any) -> Optional[str]:
     """The voice Conduit asked for, or None to keep the profile's configured one."""
-    if voice is None or voice == "":
+    if voice is None:
         return None
-    if not isinstance(voice, str) or _GPT_LIVE_VOICE.fullmatch(voice.strip().lower()) is None:
+    if not isinstance(voice, str):
         raise TokenError(400, "voice must be a voice name such as cove")
-    return voice.strip().lower()
+    voice = voice.strip().lower()
+    if not voice:
+        return None
+    if _GPT_LIVE_VOICE.fullmatch(voice) is None:
+        raise TokenError(400, "voice must be a voice name such as cove")
+    return voice
 
 
 def create_gpt_live_session(
     sdp: Any,
     history: Any = None,
-    voice: Any = None,
     limiter_key: Optional[str] = None,
     post: Optional[Callable[..., tuple]] = None,
+    *,
+    voice: Any = None,
 ) -> Dict[str, Any]:
     if not isinstance(sdp, str) or not sdp.startswith("v=0"):
         raise TokenError(400, "sdp must be a WebRTC SDP offer")
@@ -1313,7 +1319,7 @@ async def post_gpt_live_session(request: Request, response: Response, profile: O
         result = await asyncio.wait_for(
             _run_scoped(
                 profile,
-                lambda: create_gpt_live_session(body.get("sdp"), body.get("history"), body.get("voice"), limiter_key=_limiter_key(profile)),
+                lambda: create_gpt_live_session(body.get("sdp"), body.get("history"), limiter_key=_limiter_key(profile), voice=body.get("voice")),
                 _gpt_live_executor,
             ),
             timeout=GPT_LIVE_REQUEST_TIMEOUT_S,

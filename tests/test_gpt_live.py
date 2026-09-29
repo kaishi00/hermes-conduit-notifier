@@ -141,7 +141,7 @@ def test_session_voice_from_conduit_overrides_the_configured_voice(client, herme
     client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "voice": " Sol "})
     assert openai.calls[0][2]["session"]["audio"] == {"output": {"voice": "sol"}}
     # No voice (or an empty one) keeps the profile's.
-    client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "voice": ""})
+    client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "voice": "  "})
     assert openai.calls[1][2]["session"]["audio"] == {"output": {"voice": "ember"}}
 
 
