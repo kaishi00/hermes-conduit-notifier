@@ -1269,6 +1269,8 @@ def create_gpt_live_session(
     live = {**_gpt_live_settings(), "auth": "subscription"}
     if voice:
         live["subscription_voice"] = voice
+    # Echoed back so Conduit can tell a host that applied the chosen voice from one that ignored it.
+    applied_voice = _gpt_live_model_voice(live)[1]
     upstream = _upstream_voice_live()
     if upstream is not None:
         try:
@@ -1285,9 +1287,10 @@ def create_gpt_live_session(
             raise TokenError(502, "GPT-Live returned an invalid WebRTC answer. " + GPT_LIVE_NO_FALLBACK)
         # Only the fields Conduit reads: nothing else Hermes returns leaves the host.
         return {"auth": "subscription", "session": {"id": session["id"]},
-                "transport": {"type": "webrtc", "sdp": transport["sdp"]}, "source": "hermes"}
+                "transport": {"type": "webrtc", "sdp": transport["sdp"]}, "source": "hermes",
+                "voice": applied_voice}
     config = gpt_live_session_config(history, live)
-    return {**_plugin_gpt_live_session(sdp, config, post or _post_sdp), "source": "plugin"}
+    return {**_plugin_gpt_live_session(sdp, config, post or _post_sdp), "source": "plugin", "voice": applied_voice}
 
 
 @router.get("/gpt-live/status")
