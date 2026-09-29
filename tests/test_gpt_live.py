@@ -136,6 +136,22 @@ def test_session_reads_the_profile_config_and_seeds_history(client, hermes, open
     assert hermes.entered == ["coder"]
 
 
+def test_session_voice_from_conduit_overrides_the_configured_voice(client, hermes, openai):
+    hermes.config = {"voice": {"gpt_live": {"subscription_voice": "ember"}}}
+    client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "voice": " Sol "})
+    assert openai.calls[0][2]["session"]["audio"] == {"output": {"voice": "sol"}}
+    # No voice (or an empty one) keeps the profile's.
+    client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "voice": ""})
+    assert openai.calls[1][2]["session"]["audio"] == {"output": {"voice": "ember"}}
+
+
+@pytest.mark.parametrize("voice", ["../x", "a b", 5, "x" * 40])
+def test_session_rejects_a_malformed_voice(client, openai, voice):
+    response = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "voice": voice})
+    assert response.status_code == 400
+    assert openai.calls == []
+
+
 @pytest.mark.parametrize("body, status", [
     ({}, 400),
     ({"sdp": "not sdp"}, 400),
@@ -232,6 +248,9 @@ def test_hands_off_to_hermes_when_it_ships_the_exchange(client, hermes, openai, 
     assert calls[0] == ("build", [{"type": "message"}], {"auth": "subscription", "subscription_voice": "ember"})
     assert calls[1] == ("exchange", OFFER, {"model": "upstream-model"})
     assert openai.calls == []
+    calls.clear()
+    client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "voice": "sol"})
+    assert calls[0][2]["subscription_voice"] == "sol"
     assert client.get(f"{BASE}/gpt-live/status").json()["source"] == "hermes"
 
 

@@ -1040,6 +1040,7 @@ GPT_LIVE_MAX_ANSWER_BYTES = 64 * 1024
 # blocks the readiness check.
 GPT_LIVE_REQUEST_TIMEOUT_S = GPT_LIVE_TIMEOUT_S + 2
 GPT_LIVE_NO_FALLBACK = "No API fallback was used."
+_GPT_LIVE_VOICE = re.compile(r"[a-z][a-z0-9_-]{0,31}")
 _GPT_LIVE_CALL_ID = re.compile(r"rtc_[A-Za-z0-9_-]+|[0-9a-fA-F-]{36}")
 
 # Hermes' own voice-layer persona (tools/voice_live.py), for a Hermes that
@@ -1237,18 +1238,31 @@ def _clean_history(history: Any) -> Optional[list]:
     return history[-GPT_LIVE_MAX_HISTORY_ITEMS:] or None
 
 
+def _clean_voice(voice: Any) -> Optional[str]:
+    """The voice Conduit asked for, or None to keep the profile's configured one."""
+    if voice is None or voice == "":
+        return None
+    if not isinstance(voice, str) or _GPT_LIVE_VOICE.fullmatch(voice.strip().lower()) is None:
+        raise TokenError(400, "voice must be a voice name such as cove")
+    return voice.strip().lower()
+
+
 def create_gpt_live_session(
     sdp: Any,
     history: Any = None,
+    voice: Any = None,
     limiter_key: Optional[str] = None,
     post: Optional[Callable[..., tuple]] = None,
 ) -> Dict[str, Any]:
     if not isinstance(sdp, str) or not sdp.startswith("v=0"):
         raise TokenError(400, "sdp must be a WebRTC SDP offer")
     history = _clean_history(history)
+    voice = _clean_voice(voice)
     if limiter_key is not None:
         _gpt_live_limiter.acquire(limiter_key)
     live = {**_gpt_live_settings(), "auth": "subscription"}
+    if voice:
+        live["subscription_voice"] = voice
     upstream = _upstream_voice_live()
     if upstream is not None:
         try:
@@ -1299,7 +1313,7 @@ async def post_gpt_live_session(request: Request, response: Response, profile: O
         result = await asyncio.wait_for(
             _run_scoped(
                 profile,
-                lambda: create_gpt_live_session(body.get("sdp"), body.get("history"), limiter_key=_limiter_key(profile)),
+                lambda: create_gpt_live_session(body.get("sdp"), body.get("history"), body.get("voice"), limiter_key=_limiter_key(profile)),
                 _gpt_live_executor,
             ),
             timeout=GPT_LIVE_REQUEST_TIMEOUT_S,
