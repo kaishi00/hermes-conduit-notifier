@@ -106,7 +106,7 @@ def test_session_uses_the_codex_sign_in_and_keeps_it_on_the_host(client, openai)
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
     assert response.json() == {
-        "ok": True, "auth": "subscription", "source": "plugin",
+        "ok": True, "auth": "subscription", "source": "plugin", "voice": "cove",
         "session": {"id": "rtc_abc123"}, "transport": {"type": "webrtc", "sdp": ANSWER},
     }
     url, headers, body = openai.calls[0]
@@ -138,7 +138,8 @@ def test_session_reads_the_profile_config_and_seeds_history(client, hermes, open
 
 def test_session_voice_from_conduit_overrides_the_configured_voice(client, hermes, openai):
     hermes.config = {"voice": {"gpt_live": {"subscription_voice": "ember"}}}
-    client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "voice": " Sol "})
+    body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "voice": " Sol "}).json()
+    assert body["voice"] == "sol", "The applied voice is echoed for Conduit"
     assert openai.calls[0][2]["session"]["audio"] == {"output": {"voice": "sol"}}
     # No voice (or an empty one) keeps the profile's.
     client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "voice": "  "})
@@ -242,7 +243,7 @@ def test_hands_off_to_hermes_when_it_ships_the_exchange(client, hermes, openai, 
     _upstream(monkeypatch, calls)
     hermes.config = {"voice": {"gpt_live": {"auth": "api", "subscription_voice": "ember"}}}
     body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "history": [{"type": "message"}]}).json()
-    assert body == {"ok": True, "auth": "subscription", "source": "hermes",
+    assert body == {"ok": True, "auth": "subscription", "source": "hermes", "voice": "ember",
                     "session": {"id": "rtc_up"}, "transport": {"type": "webrtc", "sdp": ANSWER}}
     # Subscription is forced even when the desktop's own setting says api.
     assert calls[0] == ("build", [{"type": "message"}], {"auth": "subscription", "subscription_voice": "ember"})
