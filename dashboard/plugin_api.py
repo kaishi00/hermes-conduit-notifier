@@ -1683,7 +1683,7 @@ def save_voice_turns(body: Dict[str, Any]) -> Dict[str, Any]:
     with _voice_lock():
         db = _open_voice_db(_VOICE_SAVE, appends=True)
         try:
-            created = False
+            created = adopted = False
             if session_id:
                 row = db.get_session(session_id)
                 if not row:
@@ -1695,6 +1695,7 @@ def save_voice_turns(body: Dict[str, Any]) -> Dict[str, Any]:
                 earlier = _created_voice_rows(db).get(call_id)
                 if earlier and db.get_session(earlier):
                     session_id = earlier  # a retried create: continue that row
+                    adopted = True
                 elif earlier:
                     _drop_voice_meta(db, earlier)
             if not session_id:
@@ -1731,7 +1732,7 @@ def save_voice_turns(body: Dict[str, Any]) -> Dict[str, Any]:
                     _append_voice_messages(db, session_id, messages)
                 if fresh:
                     _record_voice_call(db, session_id, calls, call_id, last)
-                if hasattr(db, "end_session") and (created or fresh):
+                if hasattr(db, "end_session") and (created or adopted or fresh):
                     # A saved call is never a live chat; the first end wins, so
                     # later flushes are no-ops. Hermes refuses appends only to rows
                     # that compression closed, so this end doesn't block them.
@@ -1739,6 +1740,9 @@ def save_voice_turns(body: Dict[str, Any]) -> Dict[str, Any]:
                 if created:
                     if title and hasattr(db, "set_session_title"):
                         _set_voice_title(db, session_id, title)
+                    _set_voice_tag(db, session_id, {"kind": "call", "engine": engine})
+                elif adopted and _voice_tags(db).get(session_id, {}).get("kind") != "call":
+                    # The first attempt died before tagging its row: finish it.
                     _set_voice_tag(db, session_id, {"kind": "call", "engine": engine})
             except Exception:
                 if created:

@@ -253,6 +253,18 @@ def test_a_retried_create_continues_the_row_it_made(client, hermes):
     assert len(hermes.stores["default"].sessions) == 1
 
 
+def test_a_retried_create_finishes_a_row_the_first_attempt_left_untagged(client, hermes):
+    first = save(client, turns=turns(("user", "a"))).json()["session_id"]
+    store = hermes.stores["default"]
+    # As if the first attempt died after writing turns, before end and tag.
+    store.sessions[first]["end_reason"] = None
+    store.meta[api.VOICE_TAGS_KEY] = "{}"
+    again = save(client, turns=turns(("user", "a"))).json()
+    assert again["session_id"] == first
+    assert store.sessions[first]["end_reason"] == api.VOICE_END_REASON
+    assert client.get(f"{BASE}/voice/tags").json()["tags"][first]["kind"] == "call"
+
+
 def test_a_title_failure_never_costs_the_transcript(client, hermes, monkeypatch):
     def broken(self, session_id, title):
         raise RuntimeError("constraint")

@@ -362,7 +362,8 @@ start the agent or call a model. A resumed call appends to the same session.
   session is being compacted, and 422 when the session was deleted or compaction
   has closed it (Conduit then saves the call as a new session). Writes are
   capped at 120 a minute and reads at 600 for the whole dashboard (429 past
-  that). Each request gets 20 seconds; a store call that hangs past that keeps its worker
+  that). Writes assume one dashboard process, as Hermes runs it. Each
+  request gets 20 seconds; a store call that hangs past that keeps its worker
   busy until Hermes' own SQLite timeout releases it, and may still complete, so
   a 504 doesn't mean the write didn't land (a retried save skips what did). Writes are serialized per profile, so a slow
   store in one profile doesn't hold up another. A 404 only ever means
