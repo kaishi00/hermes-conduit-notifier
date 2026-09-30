@@ -343,7 +343,8 @@ start the agent or call a model. A resumed call appends to the same session.
   source as the agent platform and restores the stored model on resume, so
   typing into a saved call behaves exactly like any Conduit chat.
 - Each turn's `index` counts from 0 within its `call_id` (at most 100,000),
-  with no gaps; an empty turn still holds its index. A row is append-only, so
+  with no gaps, and a turn is sent only once it's final: it must have text,
+  and an index never changes content afterwards. A row is append-only, so
   the host keeps each call's highest written index (for a session's last 500
   calls): indices at or below it are replays of a retried save and are
   reported as `skipped`, and new turns must continue right after it. A gap
@@ -360,7 +361,8 @@ start the agent or call a model. A resumed call appends to the same session.
   has closed it (Conduit then saves the call as a new session). Writes are
   capped at 120 a minute per profile and reads at 600 (429 past that). Each
   request gets 20 seconds; a store call that hangs past that keeps its worker
-  busy until Hermes' own SQLite timeout releases it. A 404 only ever means
+  busy until Hermes' own SQLite timeout releases it, and may still complete, so
+  a 504 doesn't mean the write didn't land (a retried save skips what did). A 404 only ever means
   the plugin is too old to have the route.
 
 ## Conduit support and privacy

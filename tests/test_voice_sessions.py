@@ -205,7 +205,7 @@ def test_first_save_tags_the_session_as_a_call(client, hermes):
 
 
 def test_nothing_to_save_creates_no_session(client, hermes):
-    body = save(client, turns=turns(("user", "   "))).json()
+    body = save(client, turns=[]).json()
     assert body["session_id"] is None
     assert not hermes.stores.get("default", api) or not hermes.stores["default"].sessions
 
@@ -237,12 +237,36 @@ def test_a_gap_in_indices_is_refused_not_stored_or_lost(client, hermes):
     assert len(hermes.stores["default"].sessions) == 1
 
 
-def test_an_empty_turn_holds_its_index_without_being_stored(client, hermes):
-    first = save(client, turns=[{"index": 0, "role": "user", "text": "hi"},
-                                {"index": 1, "role": "assistant", "text": "  "}]).json()
-    assert first["written"] == 2 and first["appended"] == 1
-    later = save(client, session_id=first["session_id"], turns=turns(("user", "two"), start=2)).json()
-    assert later["appended"] == 1
+def test_a_turn_that_isnt_final_is_refused(client, hermes):
+    # An empty turn could still gain text; a sent index must never change.
+    assert save(client, turns=turns(("user", "hi"), ("assistant", "  "))).status_code == 400
+    assert not hermes.stores.get("default") or not hermes.stores["default"].sessions
+
+
+def test_bad_timestamps_are_dropped(client, hermes):
+    body = save(client, turns=[{"index": 0, "role": "user", "text": "a", "at": 1e300},
+                               {"index": 1, "role": "user", "text": "b", "at": -5}]).json()
+    stored = hermes.stores["default"].messages[body["session_id"]]
+    assert all("timestamp" not in message for message in stored)
+
+
+def test_a_saved_calls_tag_cant_be_replaced(client, hermes):
+    call = save(client, turns=turns(("user", "a"))).json()["session_id"]
+    assert client.post(f"{BASE}/voice/tags", json={"session_id": call, "kind": "classic"}).status_code == 422
+    assert client.get(f"{BASE}/voice/tags").json()["tags"][call]["kind"] == "call"
+
+
+def test_reads_are_rate_limited_before_anything_runs(client, hermes, monkeypatch):
+    monkeypatch.setattr(api, "_voice_read_limiter", api._MintLimiter(1, 60.0))
+    assert client.get(f"{BASE}/voice/tags").status_code == 200
+    assert client.get(f"{BASE}/voice/tags").status_code == 429
+
+
+def test_the_limiter_tracks_a_bounded_number_of_profiles(client, hermes):
+    limiter = api._MintLimiter(5, 60.0, max_keys=2)
+    for key in ("a", "b", "c"):
+        limiter.acquire(key)
+    assert len(limiter._mints) == 2 and "a" not in limiter._mints
 
 
 def test_summaries_need_a_voice_row_and_string_text(client, hermes):
@@ -378,7 +402,7 @@ def test_writes_are_rate_limited_per_profile(client, hermes, monkeypatch):
     assert save(client, turns=turns(("user", "a"))).status_code == 200
     assert save(client, call_id="call-2", turns=turns(("user", "b"))).status_code == 200
     assert save(client, call_id="call-3", turns=turns(("user", "c"))).status_code == 429
-    assert client.get(f"{BASE}/voice/tags").status_code == 200  # reads aren't limited
+    assert client.get(f"{BASE}/voice/tags").status_code == 200  # reads have their own limit
 
 
 def test_hermes_without_a_session_store_is_501(client, hermes, monkeypatch):

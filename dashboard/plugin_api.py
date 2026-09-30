@@ -32,6 +32,7 @@ import contextvars
 import inspect
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -343,8 +344,10 @@ class _MintLimiter:
         window_s: float,
         clock: Callable[[], float] = time.monotonic,
         message: str = "Too many Gemini Live token requests; try again shortly",
+        max_keys: Optional[int] = None,
     ) -> None:
         self.limit = limit
+        self.max_keys = max_keys
         self.message = message
         self.window_s = window_s
         self.clock = clock
@@ -357,6 +360,11 @@ class _MintLimiter:
             # Drop buckets whose newest mint has aged out, so idle keys don't pile up.
             for stale in [k for k, q in self._mints.items() if now - q[-1] >= self.window_s]:
                 del self._mints[stale]
+            if self.max_keys is not None and key not in self._mints:
+                # Keys are client-supplied profile names: bound how many are
+                # tracked, dropping the least recently used.
+                while len(self._mints) >= self.max_keys:
+                    del self._mints[min(self._mints, key=lambda k: self._mints[k][-1])]
             mints = self._mints.setdefault(key, deque())
             while mints and now - mints[0] >= self.window_s:
                 mints.popleft()
@@ -1424,6 +1432,8 @@ VOICE_TIMEOUT_S = 20.0
 VOICE_WRITE_LIMIT = 120
 VOICE_WRITE_WINDOW_S = 60.0
 VOICE_READ_LIMIT = 600
+VOICE_LIMITER_KEYS = 256
+VOICE_MAX_TIMESTAMP = 32_503_680_000  # year 3000
 VOICE_SESSION_SOURCE = "desktop"
 VOICE_END_REASON = "conduit_voice"
 VOICE_TAG_KINDS = frozenset({"call", "classic", "job"})
@@ -1441,9 +1451,9 @@ _voice_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="conduit-
 _voice_lock = threading.Lock()
 # Conduit writes about once a minute per call plus a tag or summary; this only
 # stops a runaway client from growing state.db without bound.
-_voice_write_limiter = _MintLimiter(VOICE_WRITE_LIMIT, VOICE_WRITE_WINDOW_S,
+_voice_write_limiter = _MintLimiter(VOICE_WRITE_LIMIT, VOICE_WRITE_WINDOW_S, max_keys=VOICE_LIMITER_KEYS,
                                     message="Too many voice history writes; try again shortly")
-_voice_read_limiter = _MintLimiter(VOICE_READ_LIMIT, VOICE_WRITE_WINDOW_S,
+_voice_read_limiter = _MintLimiter(VOICE_READ_LIMIT, VOICE_WRITE_WINDOW_S, max_keys=VOICE_LIMITER_KEYS,
                                    message="Too many voice history reads; try again shortly")
 _VOICE_READ = ("get_meta",)
 _VOICE_WRITE = ("get_meta", "set_meta", "get_session")
@@ -1519,15 +1529,18 @@ def _voice_turns(raw: Any) -> list:
                                   f"{VOICE_MAX_INDEX}")
         if text is not None and not isinstance(text, str):
             raise TokenError(400, "A turn's text must be a string")
-        # An empty turn still holds its index (so indices stay contiguous);
-        # it just isn't stored.
+        # A turn is final once sent: an empty one could only be a turn that
+        # isn't done yet, and its index must never change content later.
         text = (text or "").strip()
+        if not text:
+            raise TokenError(400, "Each turn needs text; send a turn only once it's final")
         at = item.get("at")
         turns.append({
             "index": index,
             "role": role,
             "content": text[:VOICE_MAX_TURN_CHARS],
-            "timestamp": at if isinstance(at, (int, float)) and not isinstance(at, bool) else None,
+            "timestamp": at if isinstance(at, (int, float)) and not isinstance(at, bool)
+            and math.isfinite(at) and 0 < at < VOICE_MAX_TIMESTAMP else None,
         })
     turns.sort(key=lambda turn: turn["index"])
     return turns
@@ -1639,7 +1652,7 @@ def save_voice_turns(body: Dict[str, Any]) -> Dict[str, Any]:
                 if not _is_voice_row(db, session_id, row):
                     raise TokenError(422, "That session isn't a saved voice call; start a new one")
             else:
-                if not any(turn["content"] for turn in turns):
+                if not turns:
                     return {"session_id": None, "written": 0, "appended": 0, "skipped": 0, "created": False}
                 if sorted({turn["index"] for turn in turns}) != list(range(len({turn["index"] for turn in turns}))):
                     raise TokenError(400, "Turns must continue from index 0 for this call")
@@ -1663,8 +1676,7 @@ def save_voice_turns(body: Dict[str, Any]) -> Dict[str, Any]:
                     fresh.append(turn)
                     last = turn["index"]
                 skipped = len(turns) - len(fresh)
-                messages = [{k: v for k, v in turn.items() if k != "index" and v is not None}
-                            for turn in fresh if turn["content"]]
+                messages = [{k: v for k, v in turn.items() if k != "index" and v is not None} for turn in fresh]
                 if messages:
                     _append_voice_messages(db, session_id, messages)
                 if fresh:
@@ -1704,6 +1716,8 @@ def set_voice_tag(body: Dict[str, Any]) -> Dict[str, Any]:
     with _voice_lock:
         db = _open_voice_db(_VOICE_WRITE)
         try:
+            if _voice_tags(db).get(session_id, {}).get("kind") == "call":
+                raise TokenError(422, "That session is a saved voice call; its tag can't change")
             _set_voice_tag(db, session_id, tag)
         finally:
             db.close()
@@ -1755,11 +1769,17 @@ def set_voice_summary(body: Dict[str, Any]) -> Dict[str, Any]:
     return {"session_id": session_id, "covers": covers}
 
 
-async def _run_voice(profile: Optional[str], fn: Callable[[], Dict[str, Any]], what: str,
-                     write: bool = False) -> Dict[str, Any]:
-    no_store = {"Cache-Control": "no-store"}
+def _voice_limit(profile: Optional[str], write: bool) -> None:
+    """Checked first, before a body is read or a worker is taken."""
     try:
         (_voice_write_limiter if write else _voice_read_limiter).acquire(_limiter_key(profile))
+    except TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+
+
+async def _run_voice(profile: Optional[str], fn: Callable[[], Dict[str, Any]], what: str) -> Dict[str, Any]:
+    no_store = {"Cache-Control": "no-store"}
+    try:
         return await asyncio.wait_for(_run_scoped(profile, fn, _voice_executor), timeout=VOICE_TIMEOUT_S)
     except asyncio.TimeoutError:
         logger.warning("Voice %s for Conduit timed out after %ss", what, VOICE_TIMEOUT_S)
@@ -1792,32 +1812,37 @@ async def _voice_body(request: Request) -> Dict[str, Any]:
 @router.post("/voice/sessions")
 async def post_voice_session(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
+    _voice_limit(profile, write=True)
     body = await _voice_body(request)
-    return {"ok": True, **(await _run_voice(profile, lambda: save_voice_turns(body), "save", write=True))}
+    return {"ok": True, **(await _run_voice(profile, lambda: save_voice_turns(body), "save"))}
 
 
 @router.get("/voice/tags")
 async def get_voice_tags(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
+    _voice_limit(profile, write=False)
     return {"ok": True, **(await _run_voice(profile, voice_tags, "tags"))}
 
 
 @router.post("/voice/tags")
 async def post_voice_tag(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
+    _voice_limit(profile, write=True)
     body = await _voice_body(request)
-    return {"ok": True, **(await _run_voice(profile, lambda: set_voice_tag(body), "tag", write=True))}
+    return {"ok": True, **(await _run_voice(profile, lambda: set_voice_tag(body), "tag"))}
 
 
 @router.get("/voice/summary")
 async def get_voice_summary(response: Response, session_id: Optional[str] = None,
                             profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
+    _voice_limit(profile, write=False)
     return {"ok": True, **(await _run_voice(profile, lambda: voice_summary(session_id), "summary"))}
 
 
 @router.post("/voice/summary")
 async def post_voice_summary(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
+    _voice_limit(profile, write=True)
     body = await _voice_body(request)
-    return {"ok": True, **(await _run_voice(profile, lambda: set_voice_summary(body), "summary", write=True))}
+    return {"ok": True, **(await _run_voice(profile, lambda: set_voice_summary(body), "summary"))}
