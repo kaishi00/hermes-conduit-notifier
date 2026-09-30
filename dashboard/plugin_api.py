@@ -344,10 +344,8 @@ class _MintLimiter:
         window_s: float,
         clock: Callable[[], float] = time.monotonic,
         message: str = "Too many Gemini Live token requests; try again shortly",
-        max_keys: Optional[int] = None,
     ) -> None:
         self.limit = limit
-        self.max_keys = max_keys
         self.message = message
         self.window_s = window_s
         self.clock = clock
@@ -360,11 +358,6 @@ class _MintLimiter:
             # Drop buckets whose newest mint has aged out, so idle keys don't pile up.
             for stale in [k for k, q in self._mints.items() if now - q[-1] >= self.window_s]:
                 del self._mints[stale]
-            if self.max_keys is not None and key not in self._mints and len(self._mints) >= self.max_keys:
-                # Keys are client-supplied profile names. Buckets that aged out
-                # were dropped above; a live one is never evicted (that would
-                # reset its window), so a new key waits for one to expire.
-                raise TokenError(429, self.message)
             mints = self._mints.setdefault(key, deque())
             while mints and now - mints[0] >= self.window_s:
                 mints.popleft()
@@ -1433,7 +1426,6 @@ VOICE_TIMEOUT_S = 20.0
 VOICE_WRITE_LIMIT = 120
 VOICE_WRITE_WINDOW_S = 60.0
 VOICE_READ_LIMIT = 600
-VOICE_LIMITER_KEYS = 256
 VOICE_MAX_TIMESTAMP = 32_503_680_000  # year 3000
 VOICE_SESSION_SOURCE = "desktop"
 VOICE_END_REASON = "conduit_voice"
@@ -1462,9 +1454,9 @@ def _voice_lock() -> threading.Lock:
         return _voice_locks.setdefault(str(get_hermes_home()), threading.Lock())
 # Conduit writes about once a minute per call plus a tag or summary; this only
 # stops a runaway client from growing state.db without bound.
-_voice_write_limiter = _MintLimiter(VOICE_WRITE_LIMIT, VOICE_WRITE_WINDOW_S, max_keys=VOICE_LIMITER_KEYS,
+_voice_write_limiter = _MintLimiter(VOICE_WRITE_LIMIT, VOICE_WRITE_WINDOW_S,
                                     message="Too many voice history writes; try again shortly")
-_voice_read_limiter = _MintLimiter(VOICE_READ_LIMIT, VOICE_WRITE_WINDOW_S, max_keys=VOICE_LIMITER_KEYS,
+_voice_read_limiter = _MintLimiter(VOICE_READ_LIMIT, VOICE_WRITE_WINDOW_S,
                                    message="Too many voice history reads; try again shortly")
 _VOICE_READ = ("get_meta",)
 _VOICE_WRITE = ("get_meta", "set_meta", "get_session")
@@ -1630,6 +1622,13 @@ def _created_voice_rows(db) -> Dict[str, str]:
     return {k: v for k, v in created.items() if isinstance(v, str)} if isinstance(created, dict) else {}
 
 
+def _forget_created_voice_row(db, session_id: str) -> None:
+    created = _created_voice_rows(db)
+    kept = {call: sid for call, sid in created.items() if sid != session_id}
+    if len(kept) != len(created):
+        db.set_meta(VOICE_CREATED_KEY, json.dumps(kept, separators=(",", ":")))
+
+
 def _remember_created_voice_row(db, call_id: str, session_id: str) -> None:
     # Which row each call created, so a create whose response was lost and is
     # retried lands in that row instead of a second one. Only recent calls
@@ -1650,11 +1649,12 @@ def _is_voice_row(db, session_id: str, row: Any) -> bool:
 
 
 def _drop_voice_meta(db, session_id: str) -> None:
-    """Clears a gone row's call record and summary (Hermes has no meta delete)."""
+    """Clears a gone row's call record, summary and create record (Hermes has no meta delete)."""
     for key in (VOICE_CALLS_KEY, VOICE_SUMMARY_KEY):
         key = key.format(session_id=session_id)
         if db.get_meta(key):
             db.set_meta(key, "")
+    _forget_created_voice_row(db, session_id)
 
 
 def _discard_new_voice_session(db, session_id: str) -> None:
@@ -1695,6 +1695,8 @@ def save_voice_turns(body: Dict[str, Any]) -> Dict[str, Any]:
                 earlier = _created_voice_rows(db).get(call_id)
                 if earlier and db.get_session(earlier):
                     session_id = earlier  # a retried create: continue that row
+                elif earlier:
+                    _drop_voice_meta(db, earlier)
             if not session_id:
                 if not turns:
                     return {"session_id": None, "written": 0, "appended": 0, "skipped": 0, "created": False}
@@ -1817,10 +1819,12 @@ def set_voice_summary(body: Dict[str, Any]) -> Dict[str, Any]:
     return {"session_id": session_id, "covers": covers}
 
 
-def _voice_limit(profile: Optional[str], write: bool) -> None:
-    """Checked first, before a body is read or a worker is taken."""
+def _voice_limit(write: bool) -> None:
+    """Checked first, before a body is read or a worker is taken. One budget
+    for the whole dashboard: the profile isn't resolved yet, and keying on the
+    raw query value would let made-up names mint fresh windows."""
     try:
-        (_voice_write_limiter if write else _voice_read_limiter).acquire(_limiter_key(profile))
+        (_voice_write_limiter if write else _voice_read_limiter).acquire("")
     except TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
 
@@ -1860,7 +1864,7 @@ async def _voice_body(request: Request) -> Dict[str, Any]:
 @router.post("/voice/sessions")
 async def post_voice_session(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
-    _voice_limit(profile, write=True)
+    _voice_limit(write=True)
     body = await _voice_body(request)
     return {"ok": True, **(await _run_voice(profile, lambda: save_voice_turns(body), "save"))}
 
@@ -1868,14 +1872,14 @@ async def post_voice_session(request: Request, response: Response, profile: Opti
 @router.get("/voice/tags")
 async def get_voice_tags(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
-    _voice_limit(profile, write=False)
+    _voice_limit(write=False)
     return {"ok": True, **(await _run_voice(profile, voice_tags, "tags"))}
 
 
 @router.post("/voice/tags")
 async def post_voice_tag(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
-    _voice_limit(profile, write=True)
+    _voice_limit(write=True)
     body = await _voice_body(request)
     return {"ok": True, **(await _run_voice(profile, lambda: set_voice_tag(body), "tag"))}
 
@@ -1884,13 +1888,13 @@ async def post_voice_tag(request: Request, response: Response, profile: Optional
 async def get_voice_summary(response: Response, session_id: Optional[str] = None,
                             profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
-    _voice_limit(profile, write=False)
+    _voice_limit(write=False)
     return {"ok": True, **(await _run_voice(profile, lambda: voice_summary(session_id), "summary"))}
 
 
 @router.post("/voice/summary")
 async def post_voice_summary(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
-    _voice_limit(profile, write=True)
+    _voice_limit(write=True)
     body = await _voice_body(request)
     return {"ok": True, **(await _run_voice(profile, lambda: set_voice_summary(body), "summary"))}

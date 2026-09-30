@@ -284,18 +284,20 @@ def test_reads_are_rate_limited_before_anything_runs(client, hermes, monkeypatch
     assert client.get(f"{BASE}/voice/tags").status_code == 429
 
 
-def test_the_limiter_tracks_a_bounded_number_of_profiles(client, hermes):
-    now = [0.0]
-    limiter = api._MintLimiter(5, 60.0, clock=lambda: now[0], max_keys=2)
-    limiter.acquire("a")
-    limiter.acquire("b")
-    # A live bucket is never evicted (that would reset its window).
-    with pytest.raises(api.TokenError):
-        limiter.acquire("c")
-    assert set(limiter._mints) == {"a", "b"}
-    now[0] = 61.0
-    limiter.acquire("c")
-    assert set(limiter._mints) == {"c"}
+def test_made_up_profile_names_share_one_voice_budget(client, hermes, monkeypatch):
+    monkeypatch.setattr(api, "_voice_read_limiter", api._MintLimiter(2, 60.0))
+    assert client.get(f"{BASE}/voice/tags?profile=x1").status_code != 429
+    assert client.get(f"{BASE}/voice/tags?profile=x2").status_code != 429
+    assert client.get(f"{BASE}/voice/tags?profile=x3").status_code == 429
+
+
+def test_a_discarded_create_forgets_its_call(client, hermes, monkeypatch):
+    def broken(*args, **kwargs):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(api, "_set_voice_tag", broken)
+    save(client, turns=turns(("user", "a")))
+    assert __import__("json").loads(hermes.stores["default"].meta.get(api.VOICE_CREATED_KEY) or "{}") == {}
 
 
 def test_summaries_need_a_voice_row_and_string_text(client, hermes):
