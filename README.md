@@ -342,15 +342,17 @@ start the agent or call a model. A resumed call appends to the same session.
 - Saved sessions keep source `desktop` and no model. Hermes uses a session's
   source as the agent platform and restores the stored model on resume, so
   typing into a saved call behaves exactly like any Conduit chat.
-- Each turn's `index` counts from 0 within its `call_id`. Turns the host
-  already has for that call are skipped, so a retried save never duplicates
-  them.
+- Each turn's `index` counts from 0 within its `call_id` (at most 100,000)
+  and only grows. A save carries every turn from the first unsent one on;
+  turns the host already has for that call are skipped, so a retried save
+  doesn't duplicate them.
 - Conduit's labels (voice call, classic voice chat, voice job) and the resume
   summaries live in Hermes' `state_meta` table, which the agent never reads.
 - The routes return 501 on a Hermes without a session store, 409 while the
   session is being compacted, and 422 when the session was deleted or compaction
-  has closed it (Conduit then saves the call as a new session). A 404 only ever
-  means the plugin is too old to have the route.
+  has closed it (Conduit then saves the call as a new session). Writes are
+  capped at 120 a minute per profile (429 past that). A 404 only ever means
+  the plugin is too old to have the route.
 
 ## Conduit support and privacy
 

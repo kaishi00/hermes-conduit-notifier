@@ -32,6 +32,11 @@ api = _load_plugin_api()
 _active_profile = contextvars.ContextVar("active_profile", default=None)
 
 
+# Mirrors hermes_state_errors.
+class CompressionSessionClosedError(RuntimeError):
+    pass
+
+
 class CompressionSessionBusyError(RuntimeError):
     pass
 
@@ -93,22 +98,27 @@ class FakeSessionDB:
         if row["ended"] is None:
             row["ended"] = end_reason
 
-    def _check(self):
+    def _check(self, session_id):
         if self.store.fail_append:
             raise self.store.fail_append
+        # Hermes' write guard: only a row that compression closed refuses appends.
+        if self.store.sessions[session_id]["ended"] == "compression":
+            raise CompressionSessionClosedError(session_id)
 
     def append_message(self, session_id, role, content=None, timestamp=None, **kwargs):
-        self._check()
+        self._check(session_id)
         self.store.messages[session_id].append({"role": role, "content": content, "timestamp": timestamp})
 
     def append_messages_batch(self, session_id, messages, **kwargs):
-        self._check()
+        self._check(session_id)
         self.store.messages[session_id].extend(dict(message) for message in messages)
         return len(messages)
 
 
 @pytest.fixture
 def hermes(monkeypatch, tmp_path):
+    monkeypatch.setattr(api, "_voice_write_limiter",
+                        api._MintLimiter(api.VOICE_WRITE_LIMIT, api.VOICE_WRITE_WINDOW_S))
     FakeSessionDB.stores = {}
     FakeSessionDB.batch = True
     entered = []
@@ -236,18 +246,40 @@ def test_unknown_session_is_422(client, hermes):
     {"engine": "gemini-live", "call_id": "c", "turns": [{"role": "system", "text": "x", "index": 0}]},
     {"engine": "gemini-live", "call_id": "c", "turns": [{"role": "user", "text": "x"}]},
     {"engine": "gemini-live", "call_id": "c", "session_id": "../etc", "turns": []},
+    {"engine": "gemini-live", "call_id": "c", "turns": [{"role": "user", "text": "x", "index": 100_001}]},
+    {"engine": "gemini-live", "call_id": "c", "turns": [{"role": "user", "text": {"a": 1}, "index": 0}]},
 ])
 def test_invalid_bodies_are_400(client, hermes, body):
     assert client.post(f"{BASE}/voice/sessions", json=body).status_code == 400
 
 
-def test_compression_in_flight_is_409_and_a_compacted_row_is_410(client, hermes):
+def test_compression_in_flight_is_409_and_a_compacted_row_is_422(client, hermes):
     session_id = save(client, turns=turns(("user", "a"))).json()["session_id"]
     store = hermes.stores["default"]
     store.fail_append = SessionCompressionInProgressError("busy")
     assert save(client, session_id=session_id, turns=turns(("user", "b"), start=1)).status_code == 409
-    store.fail_append = CompressionSessionBusyError("closed by compression")
+    store.fail_append = CompressionSessionBusyError("compression owns the row")
+    assert save(client, session_id=session_id, turns=turns(("user", "b"), start=1)).status_code == 409
+    store.fail_append = None
+    store.sessions[session_id]["ended"] = "compression"
     assert save(client, session_id=session_id, turns=turns(("user", "b"), start=1)).status_code == 422
+
+
+def test_saved_rows_are_ended_and_still_take_appends(client, hermes):
+    session_id = save(client, turns=turns(("user", "a"))).json()["session_id"]
+    store = hermes.stores["default"]
+    assert store.sessions[session_id]["ended"] == api.VOICE_END_REASON
+    later = save(client, session_id=session_id, turns=turns(("assistant", "b"), start=1))
+    assert later.status_code == 200 and later.json()["appended"] == 1
+    assert store.sessions[session_id]["ended"] == api.VOICE_END_REASON
+
+
+def test_writes_are_rate_limited_per_profile(client, hermes, monkeypatch):
+    monkeypatch.setattr(api, "_voice_write_limiter", api._MintLimiter(2, 60.0))
+    assert save(client, turns=turns(("user", "a"))).status_code == 200
+    assert save(client, call_id="call-2", turns=turns(("user", "b"))).status_code == 200
+    assert save(client, call_id="call-3", turns=turns(("user", "c"))).status_code == 429
+    assert client.get(f"{BASE}/voice/tags").status_code == 200  # reads aren't limited
 
 
 def test_hermes_without_a_session_store_is_501(client, hermes, monkeypatch):
@@ -288,6 +320,30 @@ def test_tags_prune_deleted_sessions_when_over_the_cap(client, hermes, monkeypat
     client.post(f"{BASE}/voice/tags", json={"session_id": "deleted_2", "kind": "job"})
     tags = client.get(f"{BASE}/voice/tags").json()["tags"]
     assert live in tags and len(tags) <= 2
+
+
+def test_the_tag_being_written_survives_the_cap(client, hermes, monkeypatch):
+    monkeypatch.setattr(api, "VOICE_MAX_TAGS", 1)
+    save(client, turns=turns(("user", "a")))
+    assert client.post(f"{BASE}/voice/tags", json={"session_id": "not_saved_yet", "kind": "classic"}).status_code == 200
+    assert client.get(f"{BASE}/voice/tags").json()["tags"] == {"not_saved_yet": {"kind": "classic"}}
+
+
+def test_reads_work_on_a_store_without_the_write_helpers(client, hermes, monkeypatch):
+    class ReadOnlyDB:
+        def __init__(self, db_path=None):
+            pass
+
+        def get_meta(self, key):
+            return None
+
+        def close(self):
+            pass
+
+    sys.modules["hermes_state"].SessionDB = ReadOnlyDB
+    assert client.get(f"{BASE}/voice/tags").status_code == 200
+    assert client.get(f"{BASE}/voice/summary", params={"session_id": "s_1"}).status_code == 200
+    assert save(client, turns=turns(("user", "a"))).status_code == 501
 
 
 def test_unreadable_tags_start_over(client, hermes):
