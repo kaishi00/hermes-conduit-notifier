@@ -131,7 +131,7 @@ def test_session_reads_the_profile_config_and_seeds_history(client, hermes, open
     session = openai.calls[0][2]["session"]
     assert session["model"] == "gpt-live-2-codex"
     assert session["audio"] == {"output": {"voice": "ember"}}
-    assert session["instructions"].endswith("\n\nSpeak French.")
+    assert session["instructions"].endswith("\n\nSpeak French.\n\n" + api.GPT_LIVE_WAIT_FOR_USER)
     assert session["initial_items"] == history[-api.GPT_LIVE_MAX_HISTORY_ITEMS:]
     assert hermes.entered == ["coder"]
 
@@ -150,7 +150,7 @@ def test_session_briefing_joins_the_instructions_instead_of_context_appends(clie
     hermes.config = {"voice": {"gpt_live": {"instructions": "Speak French."}}}
     body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "briefing": "  [Conduit rules] "}).json()
     assert body["briefing_applied"] is True
-    assert openai.calls[0][2]["session"]["instructions"].endswith("Speak French.\n\n[Conduit rules]")
+    assert openai.calls[0][2]["session"]["instructions"].endswith("Speak French.\n\n[Conduit rules]\n\n" + api.GPT_LIVE_WAIT_FOR_USER)
 
 
 @pytest.mark.parametrize("briefing", [5, "x" * (api.GPT_LIVE_MAX_BRIEFING_CHARS + 1)])
@@ -259,7 +259,8 @@ def test_hands_off_to_hermes_when_it_ships_the_exchange(client, hermes, openai, 
     assert body == {"ok": True, "auth": "subscription", "source": "hermes", "voice": "ember", "briefing_applied": False,
                     "session": {"id": "rtc_up"}, "transport": {"type": "webrtc", "sdp": ANSWER}}
     # Subscription is forced even when the desktop's own setting says api.
-    assert calls[0] == ("build", [{"type": "message"}], {"auth": "subscription", "subscription_voice": "ember"})
+    assert calls[0] == ("build", [{"type": "message"}], {"auth": "subscription", "subscription_voice": "ember",
+                                                             "instructions": api.GPT_LIVE_WAIT_FOR_USER})
     assert calls[1] == ("exchange", OFFER, {"model": "upstream-model"})
     assert openai.calls == []
     calls.clear()

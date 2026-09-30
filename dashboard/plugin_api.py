@@ -1253,6 +1253,11 @@ def _clean_voice(voice: Any) -> Optional[str]:
 
 
 GPT_LIVE_MAX_BRIEFING_CHARS = 32 * 1024
+# Last, so a chatty persona doesn't talk the model into an opening greeting.
+GPT_LIVE_WAIT_FOR_USER = (
+    "Opening policy: do not speak first. When the call starts, stay silent until the user "
+    "speaks, then answer what they said. This applies whatever the persona above says."
+)
 
 
 def _clean_briefing(briefing: Any) -> Optional[str]:
@@ -1291,6 +1296,8 @@ def create_gpt_live_session(
         # sent as context appends after the call starts, it answers each chunk out loud.
         extra = str(live.get("instructions") or "").strip()
         live["instructions"] = f"{extra}\n\n{briefing}" if extra else briefing
+    extra = str(live.get("instructions") or "").strip()
+    live["instructions"] = f"{extra}\n\n{GPT_LIVE_WAIT_FOR_USER}" if extra else GPT_LIVE_WAIT_FOR_USER
     # Echoed back so Conduit can tell a host that applied the chosen voice from one that ignored it.
     applied_voice = _gpt_live_model_voice(live)[1]
     upstream = _upstream_voice_live()
