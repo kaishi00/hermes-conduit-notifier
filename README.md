@@ -352,6 +352,8 @@ start the agent or call a model. A resumed call appends to the same session.
   past that highest index, where the next save starts. One caveat: the
   append and that record are two separate writes, so a failure between them
   can repeat a line on retry (it never loses one).
+- A create is idempotent per `call_id`: a retried first save whose response
+  was lost continues the row it made instead of starting a second one.
 - Appends and summaries go only to rows saved as voice calls; any other
   session id gets 422. A gone row's call record and summary are cleared.
 - Conduit's labels (voice call, classic voice chat, voice job) and the resume
@@ -362,7 +364,8 @@ start the agent or call a model. A resumed call appends to the same session.
   capped at 120 a minute per profile and reads at 600 (429 past that). Each
   request gets 20 seconds; a store call that hangs past that keeps its worker
   busy until Hermes' own SQLite timeout releases it, and may still complete, so
-  a 504 doesn't mean the write didn't land (a retried save skips what did). A 404 only ever means
+  a 504 doesn't mean the write didn't land (a retried save skips what did). Writes are serialized per profile, so a slow
+  store in one profile doesn't hold up another. A 404 only ever means
   the plugin is too old to have the route.
 
 ## Conduit support and privacy

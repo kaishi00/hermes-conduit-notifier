@@ -58,16 +58,11 @@ class FakeStore:
 
 class FakeSessionDB:
     stores = {}
-    batch = True
 
     def __init__(self, db_path=None):
         self.path = Path(db_path)
         self.store = FakeSessionDB.stores.setdefault(self.path.parent.name, FakeStore())
         self.closed = False
-        if not FakeSessionDB.batch:
-            # An older Hermes without the batch writer.
-            self.append_messages_batch = None
-            del self.append_messages_batch
 
     def close(self):
         self.closed = True
@@ -128,7 +123,6 @@ def hermes(monkeypatch, tmp_path):
     monkeypatch.setattr(api, "_voice_read_limiter",
                         api._MintLimiter(api.VOICE_READ_LIMIT, api.VOICE_WRITE_WINDOW_S))
     FakeSessionDB.stores = {}
-    FakeSessionDB.batch = True
     entered = []
 
     def home():
@@ -250,6 +244,34 @@ def test_bad_timestamps_are_dropped(client, hermes):
     assert all("timestamp" not in message for message in stored)
 
 
+def test_a_retried_create_continues_the_row_it_made(client, hermes):
+    # The first create landed but its response was lost: Conduit resends it.
+    first = save(client, turns=turns(("user", "a"))).json()
+    again = save(client, turns=turns(("user", "a"), ("assistant", "b"))).json()
+    assert again["session_id"] == first["session_id"] and not again["created"]
+    assert again["appended"] == 1 and again["skipped"] == 1
+    assert len(hermes.stores["default"].sessions) == 1
+
+
+def test_a_title_failure_never_costs_the_transcript(client, hermes, monkeypatch):
+    def broken(self, session_id, title):
+        raise RuntimeError("constraint")
+
+    monkeypatch.setattr(FakeSessionDB, "set_session_title", broken)
+    body = save(client, title="Voice call", turns=turns(("user", "a")))
+    assert body.status_code == 200
+    assert len(hermes.stores["default"].messages[body.json()["session_id"]]) == 1
+
+
+def test_pruning_a_deleted_rows_tag_clears_its_meta(client, hermes, monkeypatch):
+    monkeypatch.setattr(api, "VOICE_MAX_TAGS", 1)
+    call = save(client, turns=turns(("user", "a"))).json()["session_id"]
+    store = hermes.stores["default"]
+    del store.sessions[call]
+    client.post(f"{BASE}/voice/tags", json={"session_id": "s_new", "kind": "job"})
+    assert not store.meta.get(api.VOICE_CALLS_KEY.format(session_id=call))
+
+
 def test_a_saved_calls_tag_cant_be_replaced(client, hermes):
     call = save(client, turns=turns(("user", "a"))).json()["session_id"]
     assert client.post(f"{BASE}/voice/tags", json={"session_id": call, "kind": "classic"}).status_code == 422
@@ -343,9 +365,14 @@ def test_a_resumed_call_appends_to_the_same_row(client, hermes):
     assert len(hermes.stores["default"].messages[first["session_id"]]) == 2
 
 
-def test_older_hermes_without_the_batch_writer_appends_one_by_one(client, hermes):
-    FakeSessionDB.batch = False
+def test_older_hermes_without_the_batch_writer_appends_one_by_one(client, hermes, monkeypatch):
+    monkeypatch.delattr(FakeSessionDB, "append_messages_batch")
+    calls = []
+    original = FakeSessionDB.append_message
+    monkeypatch.setattr(FakeSessionDB, "append_message",
+                        lambda self, *args, **kwargs: calls.append(1) or original(self, *args, **kwargs))
     body = save(client, turns=turns(("user", "a"), ("assistant", "b"))).json()
+    assert len(calls) == 2
     assert [m["content"] for m in hermes.stores["default"].messages[body["session_id"]]] == ["a", "b"]
 
 

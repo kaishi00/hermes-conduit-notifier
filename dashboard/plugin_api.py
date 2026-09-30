@@ -1440,6 +1440,7 @@ VOICE_TAG_KINDS = frozenset({"call", "classic", "job"})
 VOICE_ENGINES = frozenset({"gemini-live", "gpt-live", "classic"})
 VOICE_TAGS_KEY = "conduit.voice.tags"
 VOICE_CALLS_KEY = "conduit.voice.calls:{session_id}"
+VOICE_CREATED_KEY = "conduit.voice.created"
 VOICE_MAX_CALLS = 500
 VOICE_SUMMARY_KEY = "conduit.voice.summary:{session_id}"
 _VOICE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
@@ -1448,7 +1449,16 @@ _VOICE_UNSUPPORTED = "This Hermes version can't store voice transcripts; update 
 _voice_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="conduit-voice")
 # One writer at a time: the tag map is a read-modify-write JSON value, and a
 # call's written-turn counter must not race a retried flush of the same call.
-_voice_lock = threading.Lock()
+_voice_locks: Dict[str, threading.Lock] = {}
+_voice_locks_guard = threading.Lock()
+
+
+def _voice_lock() -> threading.Lock:
+    """One writer at a time per profile, so a slow store in one profile never
+    holds up another's (called inside the profile scope)."""
+    from hermes_constants import get_hermes_home
+    with _voice_locks_guard:
+        return _voice_locks.setdefault(str(get_hermes_home()), threading.Lock())
 # Conduit writes about once a minute per call plus a tag or summary; this only
 # stops a runaway client from growing state.db without bound.
 _voice_write_limiter = _MintLimiter(VOICE_WRITE_LIMIT, VOICE_WRITE_WINDOW_S, max_keys=VOICE_LIMITER_KEYS,
@@ -1505,7 +1515,10 @@ def _set_voice_tag(db, session_id: str, tag: Dict[str, Any]) -> None:
     if len(tags) > VOICE_MAX_TAGS:
         # Drop tags whose sessions were deleted, then the oldest if still over;
         # the tag being written always stays.
-        tags = {sid: value for sid, value in tags.items() if sid == session_id or db.get_session(sid)}
+        gone = [sid for sid in tags if sid != session_id and not db.get_session(sid)]
+        for sid in gone:
+            del tags[sid]
+            _drop_voice_meta(db, sid)  # a row deleted elsewhere leaves no meta behind
         while len(tags) > VOICE_MAX_TAGS:
             tags.pop(next(iter(tags)))
     db.set_meta(VOICE_TAGS_KEY, json.dumps(tags, separators=(",", ":")))
@@ -1562,8 +1575,12 @@ def _set_voice_title(db, session_id: str, title: str) -> None:
         try:
             db.set_session_title(session_id, candidate)
             return
-        except ValueError:
+        except ValueError:  # the title is taken
             continue
+        except Exception:
+            # A title is never worth the transcript: keep the row untitled.
+            logger.warning("Couldn't title Conduit voice session %s", session_id, exc_info=True)
+            return
     logger.info("Conduit voice session %s kept no title", session_id)
 
 
@@ -1600,6 +1617,26 @@ def _record_voice_call(db, session_id: str, calls: Dict[str, int], call_id: str,
     while len(calls) > VOICE_MAX_CALLS:
         calls.pop(next(iter(calls)))
     db.set_meta(VOICE_CALLS_KEY.format(session_id=session_id), json.dumps(calls, separators=(",", ":")))
+
+
+def _created_voice_rows(db) -> Dict[str, str]:
+    try:
+        created = json.loads(db.get_meta(VOICE_CREATED_KEY) or "{}")
+    except ValueError:
+        return {}
+    return {k: v for k, v in created.items() if isinstance(v, str)} if isinstance(created, dict) else {}
+
+
+def _remember_created_voice_row(db, call_id: str, session_id: str) -> None:
+    # Which row each call created, so a create whose response was lost and is
+    # retried lands in that row instead of a second one. Only recent calls
+    # can be retried, so the map keeps the last VOICE_MAX_CALLS.
+    created = _created_voice_rows(db)
+    created.pop(call_id, None)
+    created[call_id] = session_id
+    while len(created) > VOICE_MAX_CALLS:
+        created.pop(next(iter(created)))
+    db.set_meta(VOICE_CREATED_KEY, json.dumps(created, separators=(",", ":")))
 
 
 def _is_voice_row(db, session_id: str, row: Any) -> bool:
@@ -1640,7 +1677,7 @@ def save_voice_turns(body: Dict[str, Any]) -> Dict[str, Any]:
     title = _voice_text(body.get("title"), VOICE_MAX_TITLE_CHARS)
     requested = body.get("session_id")
     session_id = _voice_id(requested, "session_id") if requested else None
-    with _voice_lock:
+    with _voice_lock():
         db = _open_voice_db(_VOICE_SAVE, appends=True)
         try:
             created = False
@@ -1652,6 +1689,10 @@ def save_voice_turns(body: Dict[str, Any]) -> Dict[str, Any]:
                 if not _is_voice_row(db, session_id, row):
                     raise TokenError(422, "That session isn't a saved voice call; start a new one")
             else:
+                earlier = _created_voice_rows(db).get(call_id)
+                if earlier and db.get_session(earlier):
+                    session_id = earlier  # a retried create: continue that row
+            if not session_id:
                 if not turns:
                     return {"session_id": None, "written": 0, "appended": 0, "skipped": 0, "created": False}
                 if sorted({turn["index"] for turn in turns}) != list(range(len({turn["index"] for turn in turns}))):
@@ -1659,6 +1700,7 @@ def save_voice_turns(body: Dict[str, Any]) -> Dict[str, Any]:
                 session_id = _new_voice_session_id()
                 db.ensure_session(session_id, source=VOICE_SESSION_SOURCE)
                 created = True
+                _remember_created_voice_row(db, call_id, session_id)
             try:
                 calls = _voice_calls(db, session_id)
                 last = calls.get(call_id, -1)
@@ -1681,7 +1723,7 @@ def save_voice_turns(body: Dict[str, Any]) -> Dict[str, Any]:
                     _append_voice_messages(db, session_id, messages)
                 if fresh:
                     _record_voice_call(db, session_id, calls, call_id, last)
-                if hasattr(db, "end_session"):
+                if hasattr(db, "end_session") and (created or fresh):
                     # A saved call is never a live chat; the first end wins, so
                     # later flushes are no-ops. Hermes refuses appends only to rows
                     # that compression closed, so this end doesn't block them.
@@ -1713,7 +1755,7 @@ def set_voice_tag(body: Dict[str, Any]) -> Dict[str, Any]:
     parent_title = _voice_text(body.get("parent_title"), VOICE_MAX_TITLE_CHARS)
     if parent_title:
         tag["parent_title"] = parent_title
-    with _voice_lock:
+    with _voice_lock():
         db = _open_voice_db(_VOICE_WRITE)
         try:
             if _voice_tags(db).get(session_id, {}).get("kind") == "call":
@@ -1754,7 +1796,7 @@ def set_voice_summary(body: Dict[str, Any]) -> Dict[str, Any]:
     covers = body.get("covers")
     if not text or not isinstance(covers, int) or isinstance(covers, bool) or covers < 0:
         raise TokenError(400, "A summary needs text and a non-negative covers count")
-    with _voice_lock:
+    with _voice_lock():
         db = _open_voice_db(_VOICE_WRITE)
         try:
             row = db.get_session(session_id)
