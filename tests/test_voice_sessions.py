@@ -93,6 +93,12 @@ class FakeSessionDB:
         self.store.titles[session_id] = title
         return True
 
+    def delete_session(self, session_id):
+        self.store.sessions.pop(session_id, None)
+        self.store.messages.pop(session_id, None)
+        self.store.titles.pop(session_id, None)
+        return True
+
     def end_session(self, session_id, end_reason):
         row = self.store.sessions[session_id]
         if row["ended"] is None:
@@ -119,6 +125,8 @@ class FakeSessionDB:
 def hermes(monkeypatch, tmp_path):
     monkeypatch.setattr(api, "_voice_write_limiter",
                         api._MintLimiter(api.VOICE_WRITE_LIMIT, api.VOICE_WRITE_WINDOW_S))
+    monkeypatch.setattr(api, "_voice_read_limiter",
+                        api._MintLimiter(api.VOICE_READ_LIMIT, api.VOICE_WRITE_WINDOW_S))
     FakeSessionDB.stores = {}
     FakeSessionDB.batch = True
     entered = []
@@ -210,6 +218,43 @@ def test_appends_skip_turns_already_written_for_the_call(client, hermes):
     assert again["appended"] == 1 and again["written"] == 3 and not again["created"]
     contents = [m["content"] for m in hermes.stores["default"].messages[first["session_id"]]]
     assert contents == ["one", "two", "three"]
+
+
+def test_a_late_or_out_of_order_turn_is_still_written_once(client, hermes):
+    first = save(client, turns=[{"index": 0, "role": "user", "text": "zero"},
+                                {"index": 2, "role": "user", "text": "two"}]).json()
+    late = save(client, session_id=first["session_id"],
+                turns=[{"index": 1, "role": "assistant", "text": "one"},
+                       {"index": 2, "role": "user", "text": "two"}]).json()
+    assert late["appended"] == 1 and late["written"] == 3
+    contents = [m["content"] for m in hermes.stores["default"].messages[first["session_id"]]]
+    assert contents == ["zero", "two", "one"]
+
+
+def test_only_the_most_recent_calls_are_remembered(client, hermes, monkeypatch):
+    monkeypatch.setattr(api, "VOICE_MAX_CALLS", 2)
+    session_id = save(client, turns=turns(("user", "a"))).json()["session_id"]
+    for call in ("call-2", "call-3"):
+        save(client, session_id=session_id, call_id=call, turns=turns(("user", call)))
+    calls = hermes.stores["default"].meta[api.VOICE_CALLS_KEY.format(session_id=session_id)]
+    assert list(__import__("json").loads(calls)) == ["call-2", "call-3"]
+
+
+def test_a_failed_create_leaves_no_row_behind(client, hermes, monkeypatch):
+    def broken(*args, **kwargs):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(api, "_set_voice_tag", broken)
+    assert save(client, title="Voice call", turns=turns(("user", "a"))).status_code == 500
+    store = hermes.stores["default"]
+    assert store.sessions == {} and store.messages == {} and store.titles == {}
+
+
+def test_titles_are_skipped_on_a_store_without_them_or_when_not_a_string(client, hermes, monkeypatch):
+    body = save(client, title={"a": 1}, turns=turns(("user", "a"))).json()
+    assert body["session_id"] not in hermes.stores["default"].titles
+    monkeypatch.delattr(FakeSessionDB, "set_session_title")
+    assert save(client, title="Voice call", call_id="call-2", turns=turns(("user", "b"))).status_code == 200
 
 
 def test_a_resumed_call_appends_to_the_same_row(client, hermes):
