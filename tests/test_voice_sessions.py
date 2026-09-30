@@ -224,8 +224,9 @@ def test_title_clash_gets_the_id_tail(client, hermes):
     assert titles[second] == f"Voice call ({second[-6:]})"
 
 
-def test_unknown_session_is_404(client, hermes):
-    assert save(client, session_id="gone_123", turns=turns(("user", "a"))).status_code == 404
+def test_unknown_session_is_422(client, hermes):
+    # Not 404: Conduit reads a 404 as "the plugin has no such route".
+    assert save(client, session_id="gone_123", turns=turns(("user", "a"))).status_code == 422
 
 
 @pytest.mark.parametrize("body", [
@@ -246,7 +247,7 @@ def test_compression_in_flight_is_409_and_a_compacted_row_is_410(client, hermes)
     store.fail_append = SessionCompressionInProgressError("busy")
     assert save(client, session_id=session_id, turns=turns(("user", "b"), start=1)).status_code == 409
     store.fail_append = CompressionSessionBusyError("closed by compression")
-    assert save(client, session_id=session_id, turns=turns(("user", "b"), start=1)).status_code == 410
+    assert save(client, session_id=session_id, turns=turns(("user", "b"), start=1)).status_code == 422
 
 
 def test_hermes_without_a_session_store_is_501(client, hermes, monkeypatch):
@@ -308,10 +309,10 @@ def test_summary_round_trip(client, hermes):
         "ok": True, "available": True, "text": "We talked.", "covers": 12}
 
 
-def test_summary_for_a_deleted_session_is_404(client, hermes):
+def test_summary_for_a_deleted_session_is_422(client, hermes):
     save(client, turns=turns(("user", "a")))
     response = client.post(f"{BASE}/voice/summary", json={"session_id": "gone_1", "text": "x", "covers": 1})
-    assert response.status_code == 404
+    assert response.status_code == 422
 
 
 @pytest.mark.parametrize("body", [{"text": "", "covers": 1}, {"text": "x", "covers": -1}, {"text": "x"}])

@@ -348,7 +348,9 @@ start the agent or call a model. A resumed call appends to the same session.
 - Conduit's labels (voice call, classic voice chat, voice job) and the resume
   summaries live in Hermes' `state_meta` table, which the agent never reads.
 - The routes return 501 on a Hermes without a session store, 409 while the
-  session is being compacted, and 410 once compaction has closed it.
+  session is being compacted, and 422 when the session was deleted or compaction
+  has closed it (Conduit then saves the call as a new session). A 404 only ever
+  means the plugin is too old to have the route.
 
 ## Conduit support and privacy
 

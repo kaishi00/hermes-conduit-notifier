@@ -1544,7 +1544,7 @@ def save_voice_turns(body: Dict[str, Any]) -> Dict[str, Any]:
             if requested:
                 session_id = _voice_id(requested, "session_id")
                 if not db.get_session(session_id):
-                    raise TokenError(404, "That voice session no longer exists")
+                    raise TokenError(422, "That voice session no longer exists; start a new one")
             else:
                 if not turns:
                     return {"session_id": None, "written": 0, "appended": 0, "created": False}
@@ -1634,7 +1634,7 @@ def set_voice_summary(body: Dict[str, Any]) -> Dict[str, Any]:
         db = _open_voice_db()
         try:
             if not db.get_session(session_id):
-                raise TokenError(404, "That voice session no longer exists")
+                raise TokenError(422, "That voice session no longer exists; start a new one")
             db.set_meta(VOICE_SUMMARY_KEY.format(session_id=session_id),
                         json.dumps({"text": text, "covers": covers}, separators=(",", ":")))
         finally:
@@ -1662,7 +1662,7 @@ async def _run_voice(profile: Optional[str], fn: Callable[[], Dict[str, Any]], w
         if "SessionCompressionInProgressError" in names:
             raise HTTPException(status_code=409, detail="The session is busy; try again shortly", headers=no_store)
         if "CompressionSessionBusyError" in names:
-            raise HTTPException(status_code=410, detail="That session was compacted; start a new one", headers=no_store)
+            raise HTTPException(status_code=422, detail="That session was compacted; start a new one", headers=no_store)
         raise _unexpected(what, exc, feature="Voice")
 
 
