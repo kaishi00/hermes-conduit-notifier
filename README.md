@@ -2,7 +2,7 @@
 
 Hermes Conduit Notifier is the open-source Hermes plugin that delivers lifecycle notifications to the Hermes Conduit iOS app. It observes normal Hermes hooks and sends small HTTPS events to the Conduit push relay.
 
-The plugin does **not** contain an Apple Push Notification service key, dashboard credentials, or access to your Hermes gateway. (Its only dashboard routes hand Conduit short-lived Gemini Live tokens, start GPT-Live sessions on the host's ChatGPT subscription, run its voice web lookups and read memory and personality for voice; see below.) Apple credentials remain on the central push relay, so self-hosted users never need to copy a shared signing key onto their gateway.
+The plugin does **not** contain an Apple Push Notification service key, dashboard credentials, or access to your Hermes gateway. (Its only dashboard routes hand Conduit short-lived Gemini Live tokens, start GPT-Live sessions on the host's ChatGPT subscription, run its voice web lookups, read memory and personality for voice, and save live voice transcripts to this host's session history; see below.) Apple credentials remain on the central push relay, so self-hosted users never need to copy a shared signing key onto their gateway.
 
 ## Install
 
@@ -323,6 +323,51 @@ When the host's Hermes ships the same exchange, both routes hand the request to
 Hermes (`source: "hermes"`) and keep serving the same URLs, so Conduit needs no
 change. `voice.gpt_live.auth` is Hermes desktop's setting; these routes always
 use the subscription.
+
+## Voice call transcripts
+
+Gemini Live and GPT-Live calls never run a Hermes turn, so nothing records
+them. These routes let Conduit save a call's transcript as an ordinary session
+in this profile's history, written straight into the session store. They never
+start the agent or call a model. A resumed call appends to the same session.
+
+| Method | Route | Returns |
+| --- | --- | --- |
+| POST | `/api/plugins/conduit_push/voice/sessions` with `{call_id, engine, session_id?, title?, turns: [{index, role, text, at?}]}` | `{ok, session_id, written, appended, created}` |
+| GET | `/api/plugins/conduit_push/voice/tags` | `{ok, tags: {session_id: {kind, engine?, parent_id?, parent_title?}}}` |
+| POST | `/api/plugins/conduit_push/voice/tags` with `{session_id, kind: classic or job, parent_id?, parent_title?}` | `{ok, session_id, kind, ...}` |
+| GET | `/api/plugins/conduit_push/voice/summary?session_id=` | `{ok, available, text, covers}` |
+| POST | `/api/plugins/conduit_push/voice/summary` with `{session_id, text, covers}` | `{ok, session_id, covers}` |
+
+- Saved sessions keep source `desktop` and no model. Hermes uses a session's
+  source as the agent platform and restores the stored model on resume, so
+  typing into a saved call behaves exactly like any Conduit chat.
+- Each turn's `index` counts from 0 within its `call_id` (at most 100,000),
+  with no gaps, and a turn is sent only once it's final: it must have text,
+  and an index never changes content afterwards. A row is append-only, so
+  the host keeps each call's highest written index (for a session's last 500
+  calls): indices at or below it are replays of a retried save and are
+  reported as `skipped`, and new turns must continue right after it. A gap
+  gets 400 instead of being stored out of order or lost. `written` is one
+  past that highest index, where the next save starts. One caveat: the
+  append and that record are two separate writes, so a failure between them
+  can repeat a line on retry (it never loses one).
+- A create is idempotent per `call_id`: a retried first save whose response
+  was lost continues the row it made instead of starting a second one.
+- Appends and summaries go only to rows saved as voice calls; any other
+  session id gets 422. A gone row's call record and summary are cleared.
+- Conduit's labels (voice call, classic voice chat, voice job) and the resume
+  summaries live in Hermes' `state_meta` table, which the agent never reads.
+- The routes return 501 on a Hermes without a session store, 409 while the
+  session is being compacted, and 422 when the session was deleted or compaction
+  has closed it (Conduit then saves the call as a new session). Writes are
+  capped at 120 a minute and reads at 600 for the whole dashboard (429 past
+  that). Writes assume one dashboard process, as Hermes runs it. Each
+  request gets 20 seconds; a store call that hangs past that keeps its worker
+  busy until Hermes' own SQLite timeout releases it, and may still complete, so
+  a 504 doesn't mean the write didn't land (a retried save skips what did). Writes are serialized per profile, so a slow
+  store in one profile doesn't hold up another. A 404 only ever means
+  the plugin is too old to have the route.
 
 ## Conduit support and privacy
 
