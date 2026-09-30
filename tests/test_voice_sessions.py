@@ -83,7 +83,7 @@ class FakeSessionDB:
 
     def ensure_session(self, session_id, source="unknown", model=None, **kwargs):
         self.store.sessions.setdefault(session_id, {"id": session_id, "source": source, "model": model,
-                                                    "ended": None, **kwargs})
+                                                    "end_reason": None, **kwargs})
         self.store.messages.setdefault(session_id, [])
         return session_id
 
@@ -101,14 +101,14 @@ class FakeSessionDB:
 
     def end_session(self, session_id, end_reason):
         row = self.store.sessions[session_id]
-        if row["ended"] is None:
-            row["ended"] = end_reason
+        if row["end_reason"] is None:
+            row["end_reason"] = end_reason
 
     def _check(self, session_id):
         if self.store.fail_append:
             raise self.store.fail_append
         # Hermes' write guard: only a row that compression closed refuses appends.
-        if self.store.sessions[session_id]["ended"] == "compression":
+        if self.store.sessions[session_id]["end_reason"] == "compression":
             raise CompressionSessionClosedError(session_id)
 
     def append_message(self, session_id, role, content=None, timestamp=None, **kwargs):
@@ -192,7 +192,7 @@ def test_first_save_creates_a_desktop_session_without_a_model(client, hermes):
     # The source is the agent's platform and the model is restored on resume:
     # a saved call must look exactly like a Conduit chat.
     assert row["source"] == "desktop" and row["model"] is None
-    assert row["ended"] == api.VOICE_END_REASON
+    assert row["end_reason"] == api.VOICE_END_REASON
     assert [m["content"] for m in store.messages[body["session_id"]]] == ["hi", "hello"]
     assert store.messages[body["session_id"]][0]["timestamp"] == 1_780_000_000
     assert store.titles[body["session_id"]] == "Voice call"
@@ -220,15 +220,23 @@ def test_appends_skip_turns_already_written_for_the_call(client, hermes):
     assert contents == ["one", "two", "three"]
 
 
-def test_a_late_or_out_of_order_turn_is_still_written_once(client, hermes):
+def test_turns_stay_in_index_order_and_replays_are_counted(client, hermes):
     first = save(client, turns=[{"index": 0, "role": "user", "text": "zero"},
                                 {"index": 2, "role": "user", "text": "two"}]).json()
+    # Index 1 is at or below what the call already wrote: a replay, skipped.
     late = save(client, session_id=first["session_id"],
                 turns=[{"index": 1, "role": "assistant", "text": "one"},
-                       {"index": 2, "role": "user", "text": "two"}]).json()
-    assert late["appended"] == 1 and late["written"] == 3
+                       {"index": 2, "role": "user", "text": "two"},
+                       {"index": 3, "role": "assistant", "text": "three"}]).json()
+    assert late["appended"] == 1 and late["skipped"] == 2 and late["written"] == 4
     contents = [m["content"] for m in hermes.stores["default"].messages[first["session_id"]]]
-    assert contents == ["zero", "two", "one"]
+    assert contents == ["zero", "two", "three"]
+
+
+def test_a_repeated_index_in_one_save_is_written_once(client, hermes):
+    body = save(client, turns=[{"index": 0, "role": "user", "text": "hi"},
+                               {"index": 0, "role": "user", "text": "hi"}]).json()
+    assert body["appended"] == 1 and body["skipped"] == 1
 
 
 def test_only_the_most_recent_calls_are_remembered(client, hermes, monkeypatch):
@@ -237,7 +245,23 @@ def test_only_the_most_recent_calls_are_remembered(client, hermes, monkeypatch):
     for call in ("call-2", "call-3"):
         save(client, session_id=session_id, call_id=call, turns=turns(("user", call)))
     calls = hermes.stores["default"].meta[api.VOICE_CALLS_KEY.format(session_id=session_id)]
-    assert list(__import__("json").loads(calls)) == ["call-2", "call-3"]
+    assert __import__("json").loads(calls) == {"call-2": 0, "call-3": 0}
+
+
+def test_an_ordinary_chat_never_takes_voice_turns(client, hermes):
+    store = FakeSessionDB.stores.setdefault("default", FakeStore())
+    store.sessions["chat_1"] = {"id": "chat_1", "source": "desktop", "end_reason": None}
+    store.messages["chat_1"] = []
+    assert save(client, session_id="chat_1", turns=turns(("user", "a"))).status_code == 422
+    assert store.messages["chat_1"] == [] and store.sessions["chat_1"]["end_reason"] is None
+    # A classic voice chat is a real agent chat too: it never takes them.
+    client.post(f"{BASE}/voice/tags", json={"session_id": "chat_1", "kind": "classic"})
+    assert save(client, session_id="chat_1", turns=turns(("user", "a"))).status_code == 422
+
+
+def test_a_store_with_only_the_batch_writer_can_save(client, hermes, monkeypatch):
+    monkeypatch.delattr(FakeSessionDB, "append_message")
+    assert save(client, turns=turns(("user", "a"))).status_code == 200
 
 
 def test_a_failed_create_leaves_no_row_behind(client, hermes, monkeypatch):
@@ -306,17 +330,17 @@ def test_compression_in_flight_is_409_and_a_compacted_row_is_422(client, hermes)
     store.fail_append = CompressionSessionBusyError("compression owns the row")
     assert save(client, session_id=session_id, turns=turns(("user", "b"), start=1)).status_code == 409
     store.fail_append = None
-    store.sessions[session_id]["ended"] = "compression"
+    store.sessions[session_id]["end_reason"] = "compression"
     assert save(client, session_id=session_id, turns=turns(("user", "b"), start=1)).status_code == 422
 
 
 def test_saved_rows_are_ended_and_still_take_appends(client, hermes):
     session_id = save(client, turns=turns(("user", "a"))).json()["session_id"]
     store = hermes.stores["default"]
-    assert store.sessions[session_id]["ended"] == api.VOICE_END_REASON
+    assert store.sessions[session_id]["end_reason"] == api.VOICE_END_REASON
     later = save(client, session_id=session_id, turns=turns(("assistant", "b"), start=1))
     assert later.status_code == 200 and later.json()["appended"] == 1
-    assert store.sessions[session_id]["ended"] == api.VOICE_END_REASON
+    assert store.sessions[session_id]["end_reason"] == api.VOICE_END_REASON
 
 
 def test_writes_are_rate_limited_per_profile(client, hermes, monkeypatch):

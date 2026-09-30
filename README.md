@@ -343,10 +343,15 @@ start the agent or call a model. A resumed call appends to the same session.
   source as the agent platform and restores the stored model on resume, so
   typing into a saved call behaves exactly like any Conduit chat.
 - Each turn's `index` counts from 0 within its `call_id` (at most 100,000).
-  The host remembers which indices it wrote for a session's 20 most recent
-  calls, so a retried save doesn't duplicate turns and a late turn still
-  lands. One caveat: the append and that record are two separate writes, so
-  a failure between them can repeat a line on retry (it never loses one).
+  A row is append-only, so the host keeps each call's turns in index order:
+  it takes only indices past the highest one it already has for that call
+  (remembered for a session's last 500 calls) and reports the rest as
+  `skipped`. Conduit sends its settled turns in order, so those are replays
+  of a retried save. `written` is one past that highest index. One caveat:
+  the append and that record are two separate writes, so a failure between
+  them can repeat a line on retry (it never loses one).
+- Appends go only to rows saved as voice calls; any other session id gets
+  422.
 - Conduit's labels (voice call, classic voice chat, voice job) and the resume
   summaries live in Hermes' `state_meta` table, which the agent never reads.
 - The routes return 501 on a Hermes without a session store, 409 while the

@@ -1430,7 +1430,7 @@ VOICE_TAG_KINDS = frozenset({"call", "classic", "job"})
 VOICE_ENGINES = frozenset({"gemini-live", "gpt-live", "classic"})
 VOICE_TAGS_KEY = "conduit.voice.tags"
 VOICE_CALLS_KEY = "conduit.voice.calls:{session_id}"
-VOICE_MAX_CALLS = 20
+VOICE_MAX_CALLS = 500
 VOICE_SUMMARY_KEY = "conduit.voice.summary:{session_id}"
 _VOICE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _VOICE_UNSUPPORTED = "This Hermes version can't store voice transcripts; update Hermes"
@@ -1447,7 +1447,7 @@ _voice_read_limiter = _MintLimiter(VOICE_READ_LIMIT, VOICE_WRITE_WINDOW_S,
                                    message="Too many voice history reads; try again shortly")
 _VOICE_READ = ("get_meta",)
 _VOICE_WRITE = ("get_meta", "set_meta", "get_session")
-_VOICE_SAVE = _VOICE_WRITE + ("ensure_session", "append_message")
+_VOICE_SAVE = _VOICE_WRITE + ("ensure_session",)
 
 
 def _voice_id(value: Any, what: str) -> str:
@@ -1469,7 +1469,8 @@ def _open_voice_db(needs=_VOICE_READ):
     # Pin the path: this runs on a worker thread, where Hermes' ambient home
     # lookup could fall back to the launch profile.
     db = SessionDB(db_path=get_hermes_home() / "state.db")
-    if not all(hasattr(db, name) for name in needs):
+    appends = needs is not _VOICE_SAVE or hasattr(db, "append_messages_batch") or hasattr(db, "append_message")
+    if not appends or not all(hasattr(db, name) for name in needs):
         db.close()
         raise TokenError(501, _VOICE_UNSUPPORTED)
     return db
@@ -1566,23 +1567,32 @@ def _append_voice_messages(db, session_id: str, messages: list) -> None:
                               timestamp=message.get("timestamp"))
 
 
-def _voice_calls(db, session_id: str) -> Dict[str, list]:
+def _voice_calls(db, session_id: str) -> Dict[str, int]:
+    """The highest turn index written per call_id for this session."""
     try:
         calls = json.loads(db.get_meta(VOICE_CALLS_KEY.format(session_id=session_id)) or "{}")
     except ValueError:
         return {}
-    return {k: v for k, v in calls.items() if isinstance(v, list)} if isinstance(calls, dict) else {}
+    if not isinstance(calls, dict):
+        return {}
+    return {k: v for k, v in calls.items() if isinstance(v, int) and not isinstance(v, bool)}
 
 
-def _record_voice_call(db, session_id: str, calls: Dict[str, list], call_id: str, seen: set) -> None:
-    # One row per session holding the indices written for its recent calls. A
-    # call older than the last VOICE_MAX_CALLS is never retried (Conduit's
-    # outbox gives up long before), so dropping it bounds the row.
+def _record_voice_call(db, session_id: str, calls: Dict[str, int], call_id: str, last: int) -> None:
+    # One small int per call, in one row per session. Past VOICE_MAX_CALLS
+    # calls the oldest are dropped; a call that old is never retried.
     calls.pop(call_id, None)
-    calls[call_id] = sorted(seen)
+    calls[call_id] = last
     while len(calls) > VOICE_MAX_CALLS:
         calls.pop(next(iter(calls)))
     db.set_meta(VOICE_CALLS_KEY.format(session_id=session_id), json.dumps(calls, separators=(",", ":")))
+
+
+def _is_voice_row(db, session_id: str, row: Any) -> bool:
+    """Appends go only to a row this plugin saved, never to an ordinary chat."""
+    if isinstance(row, dict) and row.get("end_reason") == VOICE_END_REASON:
+        return True
+    return _voice_tags(db).get(session_id, {}).get("kind") == "call"
 
 
 def _discard_new_voice_session(db, session_id: str) -> None:
@@ -1612,25 +1622,34 @@ def save_voice_turns(body: Dict[str, Any]) -> Dict[str, Any]:
         try:
             created = False
             if session_id:
-                if not db.get_session(session_id):
+                row = db.get_session(session_id)
+                if not row:
                     raise TokenError(422, "That voice session no longer exists; start a new one")
+                if not _is_voice_row(db, session_id, row):
+                    raise TokenError(422, "That session isn't a saved voice call; start a new one")
             else:
                 if not turns:
-                    return {"session_id": None, "written": 0, "appended": 0, "created": False}
+                    return {"session_id": None, "written": 0, "appended": 0, "skipped": 0, "created": False}
                 session_id = _new_voice_session_id()
                 db.ensure_session(session_id, source=VOICE_SESSION_SOURCE)
                 created = True
             try:
                 calls = _voice_calls(db, session_id)
-                seen = {i for i in calls.get(call_id, []) if isinstance(i, int)}
-                # Any index not yet written for this call is taken, so a turn
-                # that arrives late or out of order is never dropped.
-                fresh = [turn for turn in turns if turn["index"] not in seen]
+                last = calls.get(call_id, -1)
+                # A row is append-only, so a call's turns land in index order:
+                # only indices past the last one written are taken. Conduit
+                # sends its settled prefix, so anything at or below it is a
+                # replay; it's skipped and counted, never re-appended.
+                fresh = []
+                for turn in turns:  # sorted by index
+                    if turn["index"] > last:
+                        fresh.append(turn)
+                        last = turn["index"]
+                skipped = len(turns) - len(fresh)
                 messages = [{k: v for k, v in turn.items() if k != "index" and v is not None} for turn in fresh]
                 if messages:
                     _append_voice_messages(db, session_id, messages)
-                    seen.update(turn["index"] for turn in fresh)
-                    _record_voice_call(db, session_id, calls, call_id, seen)
+                    _record_voice_call(db, session_id, calls, call_id, last)
                 if hasattr(db, "end_session"):
                     # A saved call is never a live chat; the first end wins, so
                     # later flushes are no-ops. Hermes refuses appends only to rows
@@ -1640,12 +1659,14 @@ def save_voice_turns(body: Dict[str, Any]) -> Dict[str, Any]:
                     if title and hasattr(db, "set_session_title"):
                         _set_voice_title(db, session_id, title)
                     _set_voice_tag(db, session_id, {"kind": "call", "engine": engine})
-            except BaseException:
+            except Exception:
                 if created:
                     _discard_new_voice_session(db, session_id)
                 raise
-            written = max(seen) + 1 if seen else 0
-            return {"session_id": session_id, "written": written, "appended": len(messages), "created": created}
+            # `written` is one past the highest index the host has for this
+            # call: where the next save starts.
+            return {"session_id": session_id, "written": last + 1, "appended": len(messages),
+                    "skipped": skipped, "created": created}
         finally:
             db.close()
 
