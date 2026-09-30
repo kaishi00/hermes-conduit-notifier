@@ -230,13 +230,13 @@ def test_session_rate_limit(client, openai):
 # --- Stepping aside once Hermes ships hermes-agent#108940 ---------------------
 
 
-def _upstream(monkeypatch, calls, error=None):
+def _upstream(monkeypatch, calls, error=None, built=None):
     voice_live = types.ModuleType("tools.voice_live")
     voice_live.LIVE_PERSONA = "Hermes persona."
 
     def build_session_config(history=None, *, live=None):
         calls.append(("build", history, live))
-        return {"model": "upstream-model"}
+        return built(live) if built else {"model": "upstream-model"}
 
     def _create_subscription_session(sdp_offer, config):
         calls.append(("exchange", sdp_offer, config))
@@ -267,6 +267,25 @@ def test_hands_off_to_hermes_when_it_ships_the_exchange(client, hermes, openai, 
     client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "voice": "sol"})
     assert calls[0][2]["subscription_voice"] == "sol"
     assert client.get(f"{BASE}/gpt-live/status").json()["source"] == "hermes"
+
+
+def test_hermes_path_reports_the_briefing_only_when_its_config_carries_it(client, openai, monkeypatch):
+    _upstream(monkeypatch, [])
+    body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "briefing": "[Conduit rules]"}).json()
+    assert body["briefing_applied"] is False, "Hermes dropped it, so Conduit must still send it"
+    _upstream(monkeypatch, [], built=lambda live: {"session": {"instructions": live["instructions"],
+                                                               "audio": {"output": {"voice": "Marin"}}}})
+    body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "briefing": "[Conduit rules]"}).json()
+    assert body["briefing_applied"] is True
+    assert body["voice"] == "marin"
+
+
+@pytest.mark.parametrize("audio", ["loud", {"output": "x"}, {"output": {"voice": "bad voice!"}}])
+def test_an_oddly_shaped_hermes_voice_keeps_the_requested_one(client, openai, monkeypatch, audio):
+    _upstream(monkeypatch, [], built=lambda live: {"audio": audio})
+    response = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "voice": "sol"})
+    assert response.status_code == 200
+    assert response.json()["voice"] == "sol"
 
 
 @pytest.mark.parametrize("error, status", [(ValueError("SECRET-DETAIL bad history"), 502), (RuntimeError("SECRET-DETAIL rejected"), 502),
