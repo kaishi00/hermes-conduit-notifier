@@ -220,17 +220,47 @@ def test_appends_skip_turns_already_written_for_the_call(client, hermes):
     assert contents == ["one", "two", "three"]
 
 
-def test_turns_stay_in_index_order_and_replays_are_counted(client, hermes):
-    first = save(client, turns=[{"index": 0, "role": "user", "text": "zero"},
-                                {"index": 2, "role": "user", "text": "two"}]).json()
-    # Index 1 is at or below what the call already wrote: a replay, skipped.
-    late = save(client, session_id=first["session_id"],
-                turns=[{"index": 1, "role": "assistant", "text": "one"},
-                       {"index": 2, "role": "user", "text": "two"},
-                       {"index": 3, "role": "assistant", "text": "three"}]).json()
-    assert late["appended"] == 1 and late["skipped"] == 2 and late["written"] == 4
+def test_replays_are_skipped_and_new_turns_continue_in_order(client, hermes):
+    first = save(client, turns=turns(("user", "zero"), ("assistant", "one"))).json()
+    again = save(client, session_id=first["session_id"],
+                 turns=turns(("assistant", "one"), ("user", "two"), start=1)).json()
+    assert again["appended"] == 1 and again["skipped"] == 1 and again["written"] == 3
     contents = [m["content"] for m in hermes.stores["default"].messages[first["session_id"]]]
-    assert contents == ["zero", "two", "three"]
+    assert contents == ["zero", "one", "two"]
+
+
+def test_a_gap_in_indices_is_refused_not_stored_or_lost(client, hermes):
+    first = save(client, turns=turns(("user", "zero"))).json()
+    gap = save(client, session_id=first["session_id"], turns=turns(("user", "two"), start=2))
+    assert gap.status_code == 400 and "index 1" in gap.json()["detail"]
+    assert save(client, call_id="call-2", turns=turns(("user", "late"), start=1)).status_code == 400
+    assert len(hermes.stores["default"].sessions) == 1
+
+
+def test_an_empty_turn_holds_its_index_without_being_stored(client, hermes):
+    first = save(client, turns=[{"index": 0, "role": "user", "text": "hi"},
+                                {"index": 1, "role": "assistant", "text": "  "}]).json()
+    assert first["written"] == 2 and first["appended"] == 1
+    later = save(client, session_id=first["session_id"], turns=turns(("user", "two"), start=2)).json()
+    assert later["appended"] == 1
+
+
+def test_summaries_need_a_voice_row_and_string_text(client, hermes):
+    store = FakeSessionDB.stores.setdefault("default", FakeStore())
+    store.sessions["chat_1"] = {"id": "chat_1", "source": "desktop", "end_reason": None}
+    assert client.post(f"{BASE}/voice/summary", json={"session_id": "chat_1", "text": "x", "covers": 1}).status_code == 422
+    call = save(client, turns=turns(("user", "a"))).json()["session_id"]
+    assert client.post(f"{BASE}/voice/summary", json={"session_id": call, "text": {"a": 1}, "covers": 1}).status_code == 400
+
+
+def test_a_gone_row_leaves_no_voice_meta(client, hermes):
+    call = save(client, turns=turns(("user", "a"))).json()["session_id"]
+    client.post(f"{BASE}/voice/summary", json={"session_id": call, "text": "s", "covers": 1})
+    store = hermes.stores["default"]
+    del store.sessions[call]
+    assert save(client, session_id=call, turns=turns(("user", "b"), start=1)).status_code == 422
+    assert not store.meta.get(api.VOICE_CALLS_KEY.format(session_id=call))
+    assert not store.meta.get(api.VOICE_SUMMARY_KEY.format(session_id=call))
 
 
 def test_a_repeated_index_in_one_save_is_written_once(client, hermes):

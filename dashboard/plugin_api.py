@@ -1457,8 +1457,9 @@ def _voice_id(value: Any, what: str) -> str:
     return text
 
 
-def _open_voice_db(needs=_VOICE_READ):
-    """This profile's session store (profile-scoped by _run_scoped); 501 without the methods *needs*."""
+def _open_voice_db(needs=_VOICE_READ, appends: bool = False):
+    """This profile's session store (profile-scoped by _run_scoped); 501 without the methods *needs*,
+    or, with *appends*, without either message writer."""
     try:
         from hermes_constants import get_hermes_home
         from hermes_state import SessionDB
@@ -1469,8 +1470,8 @@ def _open_voice_db(needs=_VOICE_READ):
     # Pin the path: this runs on a worker thread, where Hermes' ambient home
     # lookup could fall back to the launch profile.
     db = SessionDB(db_path=get_hermes_home() / "state.db")
-    appends = needs is not _VOICE_SAVE or hasattr(db, "append_messages_batch") or hasattr(db, "append_message")
-    if not appends or not all(hasattr(db, name) for name in needs):
+    can_append = hasattr(db, "append_messages_batch") or hasattr(db, "append_message")
+    if (appends and not can_append) or not all(hasattr(db, name) for name in needs):
         db.close()
         raise TokenError(501, _VOICE_UNSUPPORTED)
     return db
@@ -1518,9 +1519,9 @@ def _voice_turns(raw: Any) -> list:
                                   f"{VOICE_MAX_INDEX}")
         if text is not None and not isinstance(text, str):
             raise TokenError(400, "A turn's text must be a string")
+        # An empty turn still holds its index (so indices stay contiguous);
+        # it just isn't stored.
         text = (text or "").strip()
-        if not text:
-            continue
         at = item.get("at")
         turns.append({
             "index": index,
@@ -1595,11 +1596,20 @@ def _is_voice_row(db, session_id: str, row: Any) -> bool:
     return _voice_tags(db).get(session_id, {}).get("kind") == "call"
 
 
+def _drop_voice_meta(db, session_id: str) -> None:
+    """Clears a gone row's call record and summary (Hermes has no meta delete)."""
+    for key in (VOICE_CALLS_KEY, VOICE_SUMMARY_KEY):
+        key = key.format(session_id=session_id)
+        if db.get_meta(key):
+            db.set_meta(key, "")
+
+
 def _discard_new_voice_session(db, session_id: str) -> None:
     """Best effort: don't leave an empty or half-written row behind a failed create."""
     try:
         if hasattr(db, "delete_session"):
             db.delete_session(session_id)
+        _drop_voice_meta(db, session_id)
         tags = _voice_tags(db)
         if tags.pop(session_id, None) is not None:
             db.set_meta(VOICE_TAGS_KEY, json.dumps(tags, separators=(",", ":")))
@@ -1618,37 +1628,46 @@ def save_voice_turns(body: Dict[str, Any]) -> Dict[str, Any]:
     requested = body.get("session_id")
     session_id = _voice_id(requested, "session_id") if requested else None
     with _voice_lock:
-        db = _open_voice_db(_VOICE_SAVE)
+        db = _open_voice_db(_VOICE_SAVE, appends=True)
         try:
             created = False
             if session_id:
                 row = db.get_session(session_id)
                 if not row:
+                    _drop_voice_meta(db, session_id)
                     raise TokenError(422, "That voice session no longer exists; start a new one")
                 if not _is_voice_row(db, session_id, row):
                     raise TokenError(422, "That session isn't a saved voice call; start a new one")
             else:
-                if not turns:
+                if not any(turn["content"] for turn in turns):
                     return {"session_id": None, "written": 0, "appended": 0, "skipped": 0, "created": False}
+                if sorted({turn["index"] for turn in turns}) != list(range(len({turn["index"] for turn in turns}))):
+                    raise TokenError(400, "Turns must continue from index 0 for this call")
                 session_id = _new_voice_session_id()
                 db.ensure_session(session_id, source=VOICE_SESSION_SOURCE)
                 created = True
             try:
                 calls = _voice_calls(db, session_id)
                 last = calls.get(call_id, -1)
-                # A row is append-only, so a call's turns land in index order:
-                # only indices past the last one written are taken. Conduit
-                # sends its settled prefix, so anything at or below it is a
-                # replay; it's skipped and counted, never re-appended.
+                # A call's indices are contiguous from 0 and a row is
+                # append-only, so every index up to `last` is already stored:
+                # those are replays of a retried save and are skipped. New
+                # turns must continue at last + 1; a gap is refused rather
+                # than stored out of order or silently lost.
                 fresh = []
                 for turn in turns:  # sorted by index
-                    if turn["index"] > last:
-                        fresh.append(turn)
-                        last = turn["index"]
+                    if turn["index"] <= last:
+                        continue
+                    if turn["index"] != last + 1:
+                        raise TokenError(400, f"Turns must continue from index {last + 1} for this call")
+                    fresh.append(turn)
+                    last = turn["index"]
                 skipped = len(turns) - len(fresh)
-                messages = [{k: v for k, v in turn.items() if k != "index" and v is not None} for turn in fresh]
+                messages = [{k: v for k, v in turn.items() if k != "index" and v is not None}
+                            for turn in fresh if turn["content"]]
                 if messages:
                     _append_voice_messages(db, session_id, messages)
+                if fresh:
                     _record_voice_call(db, session_id, calls, call_id, last)
                 if hasattr(db, "end_session"):
                     # A saved call is never a live chat; the first end wins, so
@@ -1717,15 +1736,18 @@ def voice_summary(session_id: Any) -> Dict[str, Any]:
 
 def set_voice_summary(body: Dict[str, Any]) -> Dict[str, Any]:
     session_id = _voice_id(body.get("session_id"), "session_id")
-    text = _clip_block(body.get("text"), VOICE_MAX_SUMMARY_CHARS)
+    text = _clip_block(body.get("text"), VOICE_MAX_SUMMARY_CHARS) if isinstance(body.get("text"), str) else ""
     covers = body.get("covers")
     if not text or not isinstance(covers, int) or isinstance(covers, bool) or covers < 0:
         raise TokenError(400, "A summary needs text and a non-negative covers count")
     with _voice_lock:
         db = _open_voice_db(_VOICE_WRITE)
         try:
-            if not db.get_session(session_id):
+            row = db.get_session(session_id)
+            if not row:
                 raise TokenError(422, "That voice session no longer exists; start a new one")
+            if not _is_voice_row(db, session_id, row):
+                raise TokenError(422, "That session isn't a saved voice call")
             db.set_meta(VOICE_SUMMARY_KEY.format(session_id=session_id),
                         json.dumps({"text": text, "covers": covers}, separators=(",", ":")))
         finally:

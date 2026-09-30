@@ -342,16 +342,17 @@ start the agent or call a model. A resumed call appends to the same session.
 - Saved sessions keep source `desktop` and no model. Hermes uses a session's
   source as the agent platform and restores the stored model on resume, so
   typing into a saved call behaves exactly like any Conduit chat.
-- Each turn's `index` counts from 0 within its `call_id` (at most 100,000).
-  A row is append-only, so the host keeps each call's turns in index order:
-  it takes only indices past the highest one it already has for that call
-  (remembered for a session's last 500 calls) and reports the rest as
-  `skipped`. Conduit sends its settled turns in order, so those are replays
-  of a retried save. `written` is one past that highest index. One caveat:
-  the append and that record are two separate writes, so a failure between
-  them can repeat a line on retry (it never loses one).
-- Appends go only to rows saved as voice calls; any other session id gets
-  422.
+- Each turn's `index` counts from 0 within its `call_id` (at most 100,000),
+  with no gaps; an empty turn still holds its index. A row is append-only, so
+  the host keeps each call's highest written index (for a session's last 500
+  calls): indices at or below it are replays of a retried save and are
+  reported as `skipped`, and new turns must continue right after it. A gap
+  gets 400 instead of being stored out of order or lost. `written` is one
+  past that highest index, where the next save starts. One caveat: the
+  append and that record are two separate writes, so a failure between them
+  can repeat a line on retry (it never loses one).
+- Appends and summaries go only to rows saved as voice calls; any other
+  session id gets 422. A gone row's call record and summary are cleared.
 - Conduit's labels (voice call, classic voice chat, voice job) and the resume
   summaries live in Hermes' `state_meta` table, which the agent never reads.
 - The routes return 501 on a Hermes without a session store, 409 while the
