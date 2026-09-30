@@ -1252,6 +1252,51 @@ def _clean_voice(voice: Any) -> Optional[str]:
     return voice
 
 
+GPT_LIVE_MAX_BRIEFING_CHARS = 32 * 1024
+# Last, so a chatty persona doesn't talk the model into an opening greeting.
+GPT_LIVE_WAIT_FOR_USER = (
+    "Opening policy: do not speak first. When the call starts, stay silent until the user "
+    "speaks, then answer what they said. This applies whatever the persona above says."
+)
+
+
+def _clean_briefing(briefing: Any) -> Optional[str]:
+    """Conduit's rules/persona/memory for this call, or None when it sent none."""
+    if briefing is None:
+        return None
+    if not isinstance(briefing, str):
+        raise TokenError(400, "briefing must be text")
+    briefing = briefing.strip()
+    if len(briefing) > GPT_LIVE_MAX_BRIEFING_CHARS:
+        raise TokenError(400, "briefing is too long")
+    return briefing or None
+
+
+def _built_session(config: Any) -> Dict[str, Any]:
+    """The session block of a Hermes-built config, which may or may not wrap it in "session"."""
+    if not isinstance(config, dict):
+        return {}
+    inner = config.get("session")
+    return inner if isinstance(inner, dict) else config
+
+
+def _built_voice(config: Any) -> Optional[str]:
+    audio = _built_session(config).get("audio")
+    output = audio.get("output") if isinstance(audio, dict) else None
+    voice = output.get("voice") if isinstance(output, dict) else None
+    if not isinstance(voice, str) or _GPT_LIVE_VOICE.fullmatch(voice.strip().lower()) is None:
+        return None
+    return voice.strip().lower()
+
+
+def _built_has_briefing(config: Any, briefing: Optional[str]) -> bool:
+    """True only when Hermes' config really carries the briefing, so Conduit never drops it unsent."""
+    if not briefing:
+        return False
+    instructions = _built_session(config).get("instructions")
+    return isinstance(instructions, str) and briefing in instructions
+
+
 def create_gpt_live_session(
     sdp: Any,
     history: Any = None,
@@ -1259,16 +1304,25 @@ def create_gpt_live_session(
     post: Optional[Callable[..., tuple]] = None,
     *,
     voice: Any = None,
+    briefing: Any = None,
 ) -> Dict[str, Any]:
     if not isinstance(sdp, str) or not sdp.startswith("v=0"):
         raise TokenError(400, "sdp must be a WebRTC SDP offer")
     history = _clean_history(history)
     voice = _clean_voice(voice)
+    briefing = _clean_briefing(briefing)
     if limiter_key is not None:
         _gpt_live_limiter.acquire(limiter_key)
     live = {**_gpt_live_settings(), "auth": "subscription"}
     if voice:
         live["subscription_voice"] = voice
+    if briefing:
+        # Part of the session's instructions, so the model has it before the first word:
+        # sent as context appends after the call starts, it answers each chunk out loud.
+        extra = str(live.get("instructions") or "").strip()
+        live["instructions"] = f"{extra}\n\n{briefing}" if extra else briefing
+    extra = str(live.get("instructions") or "").strip()
+    live["instructions"] = f"{extra}\n\n{GPT_LIVE_WAIT_FOR_USER}" if extra else GPT_LIVE_WAIT_FOR_USER
     # Echoed back so Conduit can tell a host that applied the chosen voice from one that ignored it.
     applied_voice = _gpt_live_model_voice(live)[1]
     upstream = _upstream_voice_live()
@@ -1285,12 +1339,17 @@ def create_gpt_live_session(
         if (not isinstance(session, dict) or not isinstance(transport, dict)
                 or not _valid_answer(transport.get("sdp"), session.get("id"))):
             raise TokenError(502, "GPT-Live returned an invalid WebRTC answer. " + GPT_LIVE_NO_FALLBACK)
+        # Prefer the voice Hermes put in the session over the one we asked for.
+        built = _built_voice(config)
+        if built:
+            applied_voice = built
         # Only the fields Conduit reads: nothing else Hermes returns leaves the host.
         return {"auth": "subscription", "session": {"id": session["id"]},
                 "transport": {"type": "webrtc", "sdp": transport["sdp"]}, "source": "hermes",
-                "voice": applied_voice}
+                "voice": applied_voice, "briefing_applied": _built_has_briefing(config, briefing)}
     config = gpt_live_session_config(history, live)
-    return {**_plugin_gpt_live_session(sdp, config, post or _post_sdp), "source": "plugin", "voice": applied_voice}
+    return {**_plugin_gpt_live_session(sdp, config, post or _post_sdp), "source": "plugin", "voice": applied_voice,
+            "briefing_applied": bool(briefing)}
 
 
 @router.get("/gpt-live/status")
@@ -1322,7 +1381,8 @@ async def post_gpt_live_session(request: Request, response: Response, profile: O
         result = await asyncio.wait_for(
             _run_scoped(
                 profile,
-                lambda: create_gpt_live_session(body.get("sdp"), body.get("history"), limiter_key=_limiter_key(profile), voice=body.get("voice")),
+                lambda: create_gpt_live_session(body.get("sdp"), body.get("history"), limiter_key=_limiter_key(profile), voice=body.get("voice"),
+                                                briefing=body.get("briefing")),
                 _gpt_live_executor,
             ),
             timeout=GPT_LIVE_REQUEST_TIMEOUT_S,

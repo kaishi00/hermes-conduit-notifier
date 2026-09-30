@@ -106,7 +106,7 @@ def test_session_uses_the_codex_sign_in_and_keeps_it_on_the_host(client, openai)
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
     assert response.json() == {
-        "ok": True, "auth": "subscription", "source": "plugin", "voice": "cove",
+        "ok": True, "auth": "subscription", "source": "plugin", "voice": "cove", "briefing_applied": False,
         "session": {"id": "rtc_abc123"}, "transport": {"type": "webrtc", "sdp": ANSWER},
     }
     url, headers, body = openai.calls[0]
@@ -131,7 +131,7 @@ def test_session_reads_the_profile_config_and_seeds_history(client, hermes, open
     session = openai.calls[0][2]["session"]
     assert session["model"] == "gpt-live-2-codex"
     assert session["audio"] == {"output": {"voice": "ember"}}
-    assert session["instructions"].endswith("\n\nSpeak French.")
+    assert session["instructions"].endswith("\n\nSpeak French.\n\n" + api.GPT_LIVE_WAIT_FOR_USER)
     assert session["initial_items"] == history[-api.GPT_LIVE_MAX_HISTORY_ITEMS:]
     assert hermes.entered == ["coder"]
 
@@ -144,6 +144,19 @@ def test_session_voice_from_conduit_overrides_the_configured_voice(client, herme
     # No voice (or an empty one) keeps the profile's.
     client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "voice": "  "})
     assert openai.calls[1][2]["session"]["audio"] == {"output": {"voice": "ember"}}
+
+
+def test_session_briefing_joins_the_instructions_instead_of_context_appends(client, hermes, openai):
+    hermes.config = {"voice": {"gpt_live": {"instructions": "Speak French."}}}
+    body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "briefing": "  [Conduit rules] "}).json()
+    assert body["briefing_applied"] is True
+    assert openai.calls[0][2]["session"]["instructions"].endswith("Speak French.\n\n[Conduit rules]\n\n" + api.GPT_LIVE_WAIT_FOR_USER)
+
+
+@pytest.mark.parametrize("briefing", [5, "x" * (api.GPT_LIVE_MAX_BRIEFING_CHARS + 1)])
+def test_session_rejects_a_bad_briefing(client, openai, briefing):
+    assert client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "briefing": briefing}).status_code == 400
+    assert openai.calls == []
 
 
 @pytest.mark.parametrize("voice", ["../x", "a b", 5, "x" * 40])
@@ -217,13 +230,13 @@ def test_session_rate_limit(client, openai):
 # --- Stepping aside once Hermes ships hermes-agent#108940 ---------------------
 
 
-def _upstream(monkeypatch, calls, error=None):
+def _upstream(monkeypatch, calls, error=None, built=None):
     voice_live = types.ModuleType("tools.voice_live")
     voice_live.LIVE_PERSONA = "Hermes persona."
 
     def build_session_config(history=None, *, live=None):
         calls.append(("build", history, live))
-        return {"model": "upstream-model"}
+        return built(live) if built else {"model": "upstream-model"}
 
     def _create_subscription_session(sdp_offer, config):
         calls.append(("exchange", sdp_offer, config))
@@ -243,16 +256,36 @@ def test_hands_off_to_hermes_when_it_ships_the_exchange(client, hermes, openai, 
     _upstream(monkeypatch, calls)
     hermes.config = {"voice": {"gpt_live": {"auth": "api", "subscription_voice": "ember"}}}
     body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "history": [{"type": "message"}]}).json()
-    assert body == {"ok": True, "auth": "subscription", "source": "hermes", "voice": "ember",
+    assert body == {"ok": True, "auth": "subscription", "source": "hermes", "voice": "ember", "briefing_applied": False,
                     "session": {"id": "rtc_up"}, "transport": {"type": "webrtc", "sdp": ANSWER}}
     # Subscription is forced even when the desktop's own setting says api.
-    assert calls[0] == ("build", [{"type": "message"}], {"auth": "subscription", "subscription_voice": "ember"})
+    assert calls[0] == ("build", [{"type": "message"}], {"auth": "subscription", "subscription_voice": "ember",
+                                                             "instructions": api.GPT_LIVE_WAIT_FOR_USER})
     assert calls[1] == ("exchange", OFFER, {"model": "upstream-model"})
     assert openai.calls == []
     calls.clear()
     client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "voice": "sol"})
     assert calls[0][2]["subscription_voice"] == "sol"
     assert client.get(f"{BASE}/gpt-live/status").json()["source"] == "hermes"
+
+
+def test_hermes_path_reports_the_briefing_only_when_its_config_carries_it(client, openai, monkeypatch):
+    _upstream(monkeypatch, [])
+    body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "briefing": "[Conduit rules]"}).json()
+    assert body["briefing_applied"] is False, "Hermes dropped it, so Conduit must still send it"
+    _upstream(monkeypatch, [], built=lambda live: {"session": {"instructions": live["instructions"],
+                                                               "audio": {"output": {"voice": "Marin"}}}})
+    body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "briefing": "[Conduit rules]"}).json()
+    assert body["briefing_applied"] is True
+    assert body["voice"] == "marin"
+
+
+@pytest.mark.parametrize("audio", ["loud", {"output": "x"}, {"output": {"voice": "bad voice!"}}])
+def test_an_oddly_shaped_hermes_voice_keeps_the_requested_one(client, openai, monkeypatch, audio):
+    _upstream(monkeypatch, [], built=lambda live: {"audio": audio})
+    response = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "voice": "sol"})
+    assert response.status_code == 200
+    assert response.json()["voice"] == "sol"
 
 
 @pytest.mark.parametrize("error, status", [(ValueError("SECRET-DETAIL bad history"), 502), (RuntimeError("SECRET-DETAIL rejected"), 502),
