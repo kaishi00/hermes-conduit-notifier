@@ -1399,3 +1399,310 @@ async def post_gpt_live_session(request: Request, response: Response, profile: O
     except Exception as exc:
         raise _unexpected("session", exc, feature="GPT-Live")
     return {"ok": True, **result}
+
+
+# --- Voice transcripts -------------------------------------------------------
+#
+# Conduit's live voice calls (Gemini Live, GPT-Live) never run a Hermes turn,
+# so nothing records them. These routes write a call's settled turns straight
+# into this profile's session store as an ordinary session row: no gateway,
+# no agent, no model call. A resumed call appends to the same row.
+#
+# Rows keep source "desktop" and no model on purpose: Hermes treats a
+# session's source as the agent platform (it picks the toolsets) and restores
+# the stored model on resume, so typing into a saved call must look exactly
+# like a Conduit chat. Conduit's own labels (voice call / classic voice chat /
+# voice job) live in state_meta, which the agent never reads.
+VOICE_MAX_BODY_BYTES = 1024 * 1024
+VOICE_MAX_TURNS = 500
+VOICE_MAX_TURN_CHARS = 16000
+VOICE_MAX_TITLE_CHARS = 120
+VOICE_MAX_SUMMARY_CHARS = 8000
+VOICE_MAX_TAGS = 2000
+VOICE_TIMEOUT_S = 20.0
+VOICE_SESSION_SOURCE = "desktop"
+VOICE_END_REASON = "conduit_voice"
+VOICE_TAG_KINDS = frozenset({"call", "classic", "job"})
+VOICE_ENGINES = frozenset({"gemini-live", "gpt-live", "classic"})
+VOICE_TAGS_KEY = "conduit.voice.tags"
+VOICE_CALL_KEY = "conduit.voice.call:{session_id}:{call_id}"
+VOICE_SUMMARY_KEY = "conduit.voice.summary:{session_id}"
+_VOICE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+_VOICE_UNSUPPORTED = "This Hermes version can't store voice transcripts; update Hermes"
+
+_voice_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="conduit-voice")
+# One writer at a time: the tag map is a read-modify-write JSON value, and a
+# call's written-turn counter must not race a retried flush of the same call.
+_voice_lock = threading.Lock()
+
+
+def _voice_id(value: Any, what: str) -> str:
+    text = str(value or "").strip()
+    if not _VOICE_ID_RE.match(text):
+        raise TokenError(400, f"{what} is missing or invalid")
+    return text
+
+
+def _open_voice_db():
+    """This profile's session store (profile-scoped by _run_scoped)."""
+    try:
+        from hermes_constants import get_hermes_home
+        from hermes_state import SessionDB
+    except ImportError as exc:
+        if exc.name not in ("hermes_state", "hermes_constants"):
+            raise
+        raise TokenError(501, _VOICE_UNSUPPORTED)
+    # Pin the path: this runs on a worker thread, where Hermes' ambient home
+    # lookup could fall back to the launch profile.
+    db = SessionDB(db_path=get_hermes_home() / "state.db")
+    if not all(hasattr(db, name) for name in ("get_meta", "set_meta", "ensure_session", "append_message", "get_session")):
+        db.close()
+        raise TokenError(501, _VOICE_UNSUPPORTED)
+    return db
+
+
+def _voice_tags(db) -> Dict[str, Dict[str, Any]]:
+    try:
+        tags = json.loads(db.get_meta(VOICE_TAGS_KEY) or "{}")
+    except ValueError:
+        logger.warning("Conduit voice tags were unreadable; starting over")
+        return {}
+    return {k: v for k, v in tags.items() if isinstance(v, dict)} if isinstance(tags, dict) else {}
+
+
+def _set_voice_tag(db, session_id: str, tag: Dict[str, Any]) -> None:
+    tags = _voice_tags(db)
+    tags[session_id] = tag
+    if len(tags) > VOICE_MAX_TAGS:
+        # Drop tags whose sessions were deleted, then the oldest if still over.
+        tags = {sid: value for sid, value in tags.items() if db.get_session(sid)}
+        while len(tags) > VOICE_MAX_TAGS:
+            tags.pop(next(iter(tags)))
+    db.set_meta(VOICE_TAGS_KEY, json.dumps(tags, separators=(",", ":")))
+
+
+def _voice_turns(raw: Any) -> list:
+    if not isinstance(raw, list):
+        raise TokenError(400, "turns must be a list")
+    if len(raw) > VOICE_MAX_TURNS:
+        raise TokenError(413, f"At most {VOICE_MAX_TURNS} turns per request")
+    turns = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise TokenError(400, "Each turn must be an object")
+        role = item.get("role")
+        text = str(item.get("text") or "").strip()
+        index = item.get("index")
+        if role not in ("user", "assistant") or not isinstance(index, int) or isinstance(index, bool) or index < 0:
+            raise TokenError(400, "Each turn needs a role (user or assistant) and a non-negative index")
+        if not text:
+            continue
+        at = item.get("at")
+        turns.append({
+            "index": index,
+            "role": role,
+            "content": text[:VOICE_MAX_TURN_CHARS],
+            "timestamp": at if isinstance(at, (int, float)) and not isinstance(at, bool) else None,
+        })
+    turns.sort(key=lambda turn: turn["index"])
+    return turns
+
+
+def _new_voice_session_id() -> str:
+    try:
+        from hermes_state_ids import new_session_id
+        return new_session_id()
+    except ImportError:
+        import uuid
+        return f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:12]}"
+
+
+def _set_voice_title(db, session_id: str, title: str) -> None:
+    # Titles are unique per profile; a clash gets the id's tail, and a second
+    # failure leaves the row untitled rather than failing the save.
+    for candidate in (title, f"{title} ({session_id[-6:]})"):
+        try:
+            db.set_session_title(session_id, candidate)
+            return
+        except ValueError:
+            continue
+    logger.info("Conduit voice session %s kept no title", session_id)
+
+
+def save_voice_turns(body: Dict[str, Any]) -> Dict[str, Any]:
+    """Create a voice-call session or append to one; replays of a call's turns are skipped."""
+    call_id = _voice_id(body.get("call_id"), "call_id")
+    engine = str(body.get("engine") or "").strip()
+    if engine not in VOICE_ENGINES:
+        raise TokenError(400, "engine is missing or invalid")
+    turns = _voice_turns(body.get("turns"))
+    requested = body.get("session_id")
+    with _voice_lock:
+        db = _open_voice_db()
+        try:
+            created = False
+            if requested:
+                session_id = _voice_id(requested, "session_id")
+                if not db.get_session(session_id):
+                    raise TokenError(404, "That voice session no longer exists")
+            else:
+                if not turns:
+                    return {"session_id": None, "written": 0, "appended": 0, "created": False}
+                session_id = _new_voice_session_id()
+                db.ensure_session(session_id, source=VOICE_SESSION_SOURCE)
+                title = _clip(body.get("title"), VOICE_MAX_TITLE_CHARS)
+                if title:
+                    _set_voice_title(db, session_id, title)
+                _set_voice_tag(db, session_id, {"kind": "call", "engine": engine})
+                created = True
+            call_key = VOICE_CALL_KEY.format(session_id=session_id, call_id=call_id)
+            try:
+                written = int(db.get_meta(call_key) or 0)
+            except ValueError:
+                written = 0
+            fresh = [turn for turn in turns if turn["index"] >= written]
+            messages = [{k: v for k, v in turn.items() if k != "index" and v is not None} for turn in fresh]
+            if messages:
+                if hasattr(db, "append_messages_batch"):
+                    db.append_messages_batch(session_id, messages)
+                else:  # older Hermes: one row at a time
+                    for message in messages:
+                        db.append_message(session_id, message["role"], content=message["content"],
+                                          timestamp=message.get("timestamp"))
+                written = fresh[-1]["index"] + 1
+                db.set_meta(call_key, str(written))
+            if hasattr(db, "end_session"):
+                # A saved call is never a live chat; the first end wins, so
+                # later flushes are no-ops.
+                db.end_session(session_id, VOICE_END_REASON)
+            return {"session_id": session_id, "written": written, "appended": len(messages), "created": created}
+        finally:
+            db.close()
+
+
+def set_voice_tag(body: Dict[str, Any]) -> Dict[str, Any]:
+    session_id = _voice_id(body.get("session_id"), "session_id")
+    kind = body.get("kind")
+    if kind not in VOICE_TAG_KINDS - {"call"}:
+        raise TokenError(400, "kind must be classic or job")
+    tag: Dict[str, Any] = {"kind": kind}
+    if body.get("parent_id"):
+        tag["parent_id"] = _voice_id(body.get("parent_id"), "parent_id")
+    parent_title = _clip(body.get("parent_title"), VOICE_MAX_TITLE_CHARS)
+    if parent_title:
+        tag["parent_title"] = parent_title
+    with _voice_lock:
+        db = _open_voice_db()
+        try:
+            _set_voice_tag(db, session_id, tag)
+        finally:
+            db.close()
+    return {"session_id": session_id, **tag}
+
+
+def voice_tags() -> Dict[str, Any]:
+    db = _open_voice_db()
+    try:
+        return {"tags": _voice_tags(db)}
+    finally:
+        db.close()
+
+
+def voice_summary(session_id: Any) -> Dict[str, Any]:
+    session_id = _voice_id(session_id, "session_id")
+    db = _open_voice_db()
+    try:
+        raw = db.get_meta(VOICE_SUMMARY_KEY.format(session_id=session_id))
+    finally:
+        db.close()
+    try:
+        stored = json.loads(raw) if raw else {}
+    except ValueError:
+        stored = {}
+    text = str(stored.get("text") or "") if isinstance(stored, dict) else ""
+    covers = stored.get("covers") if isinstance(stored, dict) else None
+    return {"available": bool(text), "text": text, "covers": covers if isinstance(covers, int) else 0}
+
+
+def set_voice_summary(body: Dict[str, Any]) -> Dict[str, Any]:
+    session_id = _voice_id(body.get("session_id"), "session_id")
+    text = _clip_block(body.get("text"), VOICE_MAX_SUMMARY_CHARS)
+    covers = body.get("covers")
+    if not text or not isinstance(covers, int) or isinstance(covers, bool) or covers < 0:
+        raise TokenError(400, "A summary needs text and a non-negative covers count")
+    with _voice_lock:
+        db = _open_voice_db()
+        try:
+            if not db.get_session(session_id):
+                raise TokenError(404, "That voice session no longer exists")
+            db.set_meta(VOICE_SUMMARY_KEY.format(session_id=session_id),
+                        json.dumps({"text": text, "covers": covers}, separators=(",", ":")))
+        finally:
+            db.close()
+    return {"session_id": session_id, "covers": covers}
+
+
+async def _run_voice(profile: Optional[str], fn: Callable[[], Dict[str, Any]], what: str) -> Dict[str, Any]:
+    no_store = {"Cache-Control": "no-store"}
+    try:
+        return await asyncio.wait_for(_run_scoped(profile, fn, _voice_executor), timeout=VOICE_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        logger.warning("Voice %s for Conduit timed out after %ss", what, VOICE_TIMEOUT_S)
+        raise HTTPException(status_code=504, detail=f"Voice {what} timed out", headers=no_store)
+    except TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers=no_store)
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), **no_store}
+        raise
+    except Exception as exc:
+        # Hermes' write guards: a compression in flight is transient (Conduit
+        # keeps the turns and retries); a row that compression already closed
+        # never takes appends again, so Conduit starts a new row instead.
+        names = {cls.__name__ for cls in type(exc).__mro__}
+        if "SessionCompressionInProgressError" in names:
+            raise HTTPException(status_code=409, detail="The session is busy; try again shortly", headers=no_store)
+        if "CompressionSessionBusyError" in names:
+            raise HTTPException(status_code=410, detail="That session was compacted; start a new one", headers=no_store)
+        raise _unexpected(what, exc, feature="Voice")
+
+
+async def _voice_body(request: Request) -> Dict[str, Any]:
+    body = await _read_json_body(request, VOICE_MAX_BODY_BYTES)
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Request body must be a JSON object",
+                            headers={"Cache-Control": "no-store"})
+    return body
+
+
+@router.post("/voice/sessions")
+async def post_voice_session(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    body = await _voice_body(request)
+    return {"ok": True, **(await _run_voice(profile, lambda: save_voice_turns(body), "save"))}
+
+
+@router.get("/voice/tags")
+async def get_voice_tags(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    return {"ok": True, **(await _run_voice(profile, voice_tags, "tags"))}
+
+
+@router.post("/voice/tags")
+async def post_voice_tag(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    body = await _voice_body(request)
+    return {"ok": True, **(await _run_voice(profile, lambda: set_voice_tag(body), "tag"))}
+
+
+@router.get("/voice/summary")
+async def get_voice_summary(response: Response, session_id: Optional[str] = None,
+                            profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    return {"ok": True, **(await _run_voice(profile, lambda: voice_summary(session_id), "summary"))}
+
+
+@router.post("/voice/summary")
+async def post_voice_summary(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    body = await _voice_body(request)
+    return {"ok": True, **(await _run_voice(profile, lambda: set_voice_summary(body), "summary"))}

@@ -2,7 +2,7 @@
 
 Hermes Conduit Notifier is the open-source Hermes plugin that delivers lifecycle notifications to the Hermes Conduit iOS app. It observes normal Hermes hooks and sends small HTTPS events to the Conduit push relay.
 
-The plugin does **not** contain an Apple Push Notification service key, dashboard credentials, or access to your Hermes gateway. (Its only dashboard routes hand Conduit short-lived Gemini Live tokens, start GPT-Live sessions on the host's ChatGPT subscription, run its voice web lookups and read memory and personality for voice; see below.) Apple credentials remain on the central push relay, so self-hosted users never need to copy a shared signing key onto their gateway.
+The plugin does **not** contain an Apple Push Notification service key, dashboard credentials, or access to your Hermes gateway. (Its only dashboard routes hand Conduit short-lived Gemini Live tokens, start GPT-Live sessions on the host's ChatGPT subscription, run its voice web lookups, read memory and personality for voice, and save live voice transcripts to this host's session history; see below.) Apple credentials remain on the central push relay, so self-hosted users never need to copy a shared signing key onto their gateway.
 
 ## Install
 
@@ -323,6 +323,32 @@ When the host's Hermes ships the same exchange, both routes hand the request to
 Hermes (`source: "hermes"`) and keep serving the same URLs, so Conduit needs no
 change. `voice.gpt_live.auth` is Hermes desktop's setting; these routes always
 use the subscription.
+
+## Voice call transcripts
+
+Gemini Live and GPT-Live calls never run a Hermes turn, so nothing records
+them. These routes let Conduit save a call's transcript as an ordinary session
+in this profile's history, written straight into the session store. They never
+start the agent or call a model. A resumed call appends to the same session.
+
+| Method | Route | Returns |
+| --- | --- | --- |
+| POST | `/api/plugins/conduit_push/voice/sessions` with `{call_id, engine, session_id?, title?, turns: [{index, role, text, at?}]}` | `{ok, session_id, written, appended, created}` |
+| GET | `/api/plugins/conduit_push/voice/tags` | `{ok, tags: {session_id: {kind, engine?, parent_id?, parent_title?}}}` |
+| POST | `/api/plugins/conduit_push/voice/tags` with `{session_id, kind: classic or job, parent_id?, parent_title?}` | `{ok, session_id, kind, ...}` |
+| GET | `/api/plugins/conduit_push/voice/summary?session_id=` | `{ok, available, text, covers}` |
+| POST | `/api/plugins/conduit_push/voice/summary` with `{session_id, text, covers}` | `{ok, session_id, covers}` |
+
+- Saved sessions keep source `desktop` and no model. Hermes uses a session's
+  source as the agent platform and restores the stored model on resume, so
+  typing into a saved call behaves exactly like any Conduit chat.
+- Each turn's `index` counts from 0 within its `call_id`. Turns the host
+  already has for that call are skipped, so a retried save never duplicates
+  them.
+- Conduit's labels (voice call, classic voice chat, voice job) and the resume
+  summaries live in Hermes' `state_meta` table, which the agent never reads.
+- The routes return 501 on a Hermes without a session store, 409 while the
+  session is being compacted, and 410 once compaction has closed it.
 
 ## Conduit support and privacy
 

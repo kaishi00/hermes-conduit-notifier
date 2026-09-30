@@ -1,7 +1,7 @@
 {
   "name": "conduit_push",
   "label": "Conduit",
-  "description": "Routes the Hermes Conduit iOS app calls on this host (Gemini Live tokens, GPT-Live subscription sessions, voice lookups, memory and personality).",
+  "description": "Routes the Hermes Conduit iOS app calls on this host (Gemini Live tokens, GPT-Live subscription sessions, voice lookups, memory and personality, voice call transcripts).",
   "icon": "Puzzle",
   "version": "0.3.0",
   "tab": { "path": "/conduit", "hidden": true },
