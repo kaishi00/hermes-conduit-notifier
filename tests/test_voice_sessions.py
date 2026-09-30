@@ -285,10 +285,17 @@ def test_reads_are_rate_limited_before_anything_runs(client, hermes, monkeypatch
 
 
 def test_the_limiter_tracks_a_bounded_number_of_profiles(client, hermes):
-    limiter = api._MintLimiter(5, 60.0, max_keys=2)
-    for key in ("a", "b", "c"):
-        limiter.acquire(key)
-    assert len(limiter._mints) == 2 and "a" not in limiter._mints
+    now = [0.0]
+    limiter = api._MintLimiter(5, 60.0, clock=lambda: now[0], max_keys=2)
+    limiter.acquire("a")
+    limiter.acquire("b")
+    # A live bucket is never evicted (that would reset its window).
+    with pytest.raises(api.TokenError):
+        limiter.acquire("c")
+    assert set(limiter._mints) == {"a", "b"}
+    now[0] = 61.0
+    limiter.acquire("c")
+    assert set(limiter._mints) == {"c"}
 
 
 def test_summaries_need_a_voice_row_and_string_text(client, hermes):

@@ -360,11 +360,11 @@ class _MintLimiter:
             # Drop buckets whose newest mint has aged out, so idle keys don't pile up.
             for stale in [k for k, q in self._mints.items() if now - q[-1] >= self.window_s]:
                 del self._mints[stale]
-            if self.max_keys is not None and key not in self._mints:
-                # Keys are client-supplied profile names: bound how many are
-                # tracked, dropping the least recently used.
-                while len(self._mints) >= self.max_keys:
-                    del self._mints[min(self._mints, key=lambda k: self._mints[k][-1])]
+            if self.max_keys is not None and key not in self._mints and len(self._mints) >= self.max_keys:
+                # Keys are client-supplied profile names. Buckets that aged out
+                # were dropped above; a live one is never evicted (that would
+                # reset its window), so a new key waits for one to expire.
+                raise TokenError(429, self.message)
             mints = self._mints.setdefault(key, deque())
             while mints and now - mints[0] >= self.window_s:
                 mints.popleft()
@@ -1428,6 +1428,7 @@ VOICE_MAX_TURN_CHARS = 16000
 VOICE_MAX_TITLE_CHARS = 120
 VOICE_MAX_SUMMARY_CHARS = 8000
 VOICE_MAX_TAGS = 2000
+VOICE_PRUNE_BATCH = 50
 VOICE_TIMEOUT_S = 20.0
 VOICE_WRITE_LIMIT = 120
 VOICE_WRITE_WINDOW_S = 60.0
@@ -1515,7 +1516,9 @@ def _set_voice_tag(db, session_id: str, tag: Dict[str, Any]) -> None:
     if len(tags) > VOICE_MAX_TAGS:
         # Drop tags whose sessions were deleted, then the oldest if still over;
         # the tag being written always stays.
-        gone = [sid for sid in tags if sid != session_id and not db.get_session(sid)]
+        # Checks only the oldest few, so a request's work stays bounded.
+        oldest = [sid for sid in tags if sid != session_id][:VOICE_PRUNE_BATCH]
+        gone = [sid for sid in oldest if not db.get_session(sid)]
         for sid in gone:
             del tags[sid]
             _drop_voice_meta(db, sid)  # a row deleted elsewhere leaves no meta behind
@@ -1700,8 +1703,9 @@ def save_voice_turns(body: Dict[str, Any]) -> Dict[str, Any]:
                 session_id = _new_voice_session_id()
                 db.ensure_session(session_id, source=VOICE_SESSION_SOURCE)
                 created = True
-                _remember_created_voice_row(db, call_id, session_id)
             try:
+                if created:
+                    _remember_created_voice_row(db, call_id, session_id)
                 calls = _voice_calls(db, session_id)
                 last = calls.get(call_id, -1)
                 # A call's indices are contiguous from 0 and a row is
@@ -1718,6 +1722,8 @@ def save_voice_turns(body: Dict[str, Any]) -> Dict[str, Any]:
                     fresh.append(turn)
                     last = turn["index"]
                 skipped = len(turns) - len(fresh)
+                if skipped:
+                    logger.debug("Conduit voice save for %s skipped %d already-written turn(s)", session_id, skipped)
                 messages = [{k: v for k, v in turn.items() if k != "index" and v is not None} for turn in fresh]
                 if messages:
                     _append_voice_messages(db, session_id, messages)
