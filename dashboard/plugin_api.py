@@ -1435,6 +1435,10 @@ GROK_LIVE_WINDOW_S = 60.0
 # the socket it replaces; the global cap bounds every profile together.
 GROK_LIVE_MAX_OPEN_PER_PROFILE = 3
 GROK_LIVE_MAX_OPEN = 8
+# Every profile together: each start or status check can refresh the
+# SuperGrok sign-in, so the host bounds them whatever ?profile= says.
+GROK_LIVE_HOST_LIMIT = 30
+GROK_LIVE_STATUS_LIMIT = 30
 # Conduit's frames are 100 ms audio chunks and a session.update carrying the
 # instructions (persona and memory included); xAI's carry model audio.
 GROK_LIVE_MAX_CLIENT_FRAME_BYTES = 256 * 1024
@@ -1459,6 +1463,10 @@ _grok_live_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="cond
 _grok_live_status_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="conduit-grok-live-status")
 _grok_live_limiter = _MintLimiter(GROK_LIVE_LIMIT, GROK_LIVE_WINDOW_S,
                                   message="Too many Grok Live connections; try again shortly")
+_grok_live_host_limiter = _MintLimiter(GROK_LIVE_HOST_LIMIT, GROK_LIVE_WINDOW_S,
+                                       message="Too many Grok Live connections on this host; try again shortly")
+_grok_live_status_limiter = _MintLimiter(GROK_LIVE_STATUS_LIMIT, GROK_LIVE_WINDOW_S,
+                                         message="Too many Grok Live status checks; try again shortly")
 # Open relays by limiter key. Only touched on the event loop, so no lock.
 _grok_live_open: Dict[str, int] = {}
 
@@ -1515,6 +1523,11 @@ def grok_live_credentials() -> Tuple[str, str]:
             # A failed refresh, say: the type only, since the text could carry detail.
             logger.warning("Grok Live could not read the xAI sign-in: %s", type(exc).__name__)
             raise TokenError(503, GROK_LIVE_SIGN_IN_FAILED)
+        if credentials is not None and not isinstance(credentials, dict):
+            # A resolver this plugin doesn't understand: refusing beats
+            # guessing past a SuperGrok sign-in to the billed key.
+            logger.warning("Grok Live does not recognize the xAI sign-in (%s)", type(credentials).__name__)
+            raise TokenError(503, GROK_LIVE_SIGN_IN_FAILED)
         if isinstance(credentials, dict):
             token = str(credentials.get("api_key") or "").strip()
             auth = "subscription" if credentials.get("provider") == "xai-oauth" else "api_key"
@@ -1526,7 +1539,12 @@ def grok_live_credentials() -> Tuple[str, str]:
 
 
 def grok_live_status() -> Dict[str, Any]:
-    """Credential readiness only; whether xAI accepts it is learnt when a call connects."""
+    """Credential readiness only; whether xAI accepts it is learnt when a call connects.
+
+    ``voice`` is the configured voice Conduit puts in its session.update;
+    the relay itself never sets one.
+    """
+    _grok_live_status_limiter.acquire("")
     model, voice = grok_live_model_voice()
     status: Dict[str, Any] = {"model": model, "voice": voice, "transport": "relay"}
     try:
@@ -1555,7 +1573,7 @@ async def get_grok_live_status(response: Response, profile: Optional[str] = None
 
 
 def _close_reason(text: str) -> str:
-    data = text.encode("utf-8")[:_CLOSE_REASON_MAX_BYTES]
+    data = text.encode("utf-8", "replace")[:_CLOSE_REASON_MAX_BYTES]
     return data.decode("utf-8", "ignore")
 
 
@@ -1620,7 +1638,7 @@ async def _connect_xai(url: str, headers: Dict[str, str]) -> Any:
         raise
 
 
-def _grok_refusal(status: int, auth: str) -> tuple:
+def _grok_refusal(status: int, auth: str) -> Tuple[int, str]:
     if status in (401, 403):
         who = "the SuperGrok sign-in" if auth == "subscription" else "XAI_API_KEY"
         return GROK_CLOSE_REFUSED, f"xAI refused {who} (HTTP {status})"
@@ -1651,6 +1669,7 @@ def _grok_live_socket_setup(profile: Optional[str]) -> Tuple[str, str, str]:
     The limiter runs here, after the scope has accepted the profile, as the
     other per-profile routes do: an unknown ?profile= gets no bucket.
     """
+    _grok_live_host_limiter.acquire("")
     _grok_live_limiter.acquire(_limiter_key(profile))
     token, auth = grok_live_credentials()
     return token, auth, grok_live_model_voice()[0]
@@ -1770,11 +1789,13 @@ async def _grok_live_relay(ws: WebSocket, refuse: Callable[[int, str], Any], tok
     # Both finished by now; read both so neither logs an unretrieved exception.
     outbound_failure = None if outbound.cancelled() else outbound.exception()
     inbound_failure = None if inbound.cancelled() else inbound.exception()
-    if outbound in done:
+    upstream_gone = isinstance(outbound_failure, ConnectionClosed)
+    if outbound in done and not upstream_gone:
         if isinstance(outbound_failure, ValueError):
             await refuse(1009, "Frame too large")
         # Otherwise Conduit hung up (or its socket broke): nothing to tell it.
         return
+    # xAI ended the call, seen by either side of the relay.
     failure = inbound_failure
     if failure is not None and not isinstance(failure, ConnectionClosed):
         logger.warning("Grok Live relay from xAI failed: %s", type(failure).__name__)

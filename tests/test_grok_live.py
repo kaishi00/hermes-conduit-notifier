@@ -58,6 +58,8 @@ def hermes(monkeypatch):
     monkeypatch.setitem(sys.modules, "tools", types.ModuleType("tools"))
     monkeypatch.setitem(sys.modules, "tools.xai_http", xai_http)
     monkeypatch.setattr(api, "_grok_live_limiter", api._MintLimiter(api.GROK_LIVE_LIMIT, api.GROK_LIVE_WINDOW_S))
+    monkeypatch.setattr(api, "_grok_live_host_limiter", api._MintLimiter(api.GROK_LIVE_HOST_LIMIT, api.GROK_LIVE_WINDOW_S))
+    monkeypatch.setattr(api, "_grok_live_status_limiter", api._MintLimiter(api.GROK_LIVE_STATUS_LIMIT, api.GROK_LIVE_WINDOW_S))
     return state
 
 
@@ -223,6 +225,44 @@ def test_socket_forwards_xai_close_reason(client, xai):
     xai.upstream.release.set()
     closed = _close_of(client)
     assert (closed.code, closed.reason) == (1008, "bad session")
+
+
+def test_socket_reports_xai_dropping_while_conduit_sends_as_retryable(client, xai):
+    from websockets.exceptions import ConnectionClosed
+
+    async def gone(frame):
+        raise ConnectionClosed(None, None)
+
+    xai.upstream.close_code = None
+    xai.upstream.send = gone
+    with client.websocket_connect(f"{BASE}/grok-live/socket") as ws:
+        ws.send_text("hello")
+        closed = _wait_close(ws)
+    assert closed.code == api.GROK_CLOSE_UNREACHABLE
+
+
+def test_unrecognized_resolver_result_is_refused_not_swapped_for_the_key(client, hermes, xai):
+    hermes.credentials = ("oauth-token", "xai-oauth")
+    hermes.env["XAI_API_KEY"] = "env-key"
+    assert _close_of(client).code == api.GROK_CLOSE_NO_CREDENTIAL
+    assert xai.connects == []
+
+
+def test_status_is_rate_limited_across_profiles(client, monkeypatch):
+    monkeypatch.setattr(api, "_grok_live_status_limiter", api._MintLimiter(1, 60))
+    assert client.get(f"{BASE}/grok-live/status?profile=a").status_code == 200
+    assert client.get(f"{BASE}/grok-live/status?profile=b").status_code == 429
+
+
+def test_socket_starts_are_capped_across_profiles(client, xai, monkeypatch):
+    monkeypatch.setattr(api, "_grok_live_host_limiter", api._MintLimiter(1, 60))
+    xai.upstream.release.set()
+    _close_of(client, f"{BASE}/grok-live/socket?profile=a")
+    assert _close_of(client, f"{BASE}/grok-live/socket?profile=b").code == api.GROK_CLOSE_RATE_LIMITED
+
+
+def test_close_reason_survives_unencodable_text():
+    assert api._close_reason("bad \udc80 reason").startswith("bad ")
 
 
 def test_socket_never_forwards_xai_codes_that_look_like_the_plugins(client, xai):
