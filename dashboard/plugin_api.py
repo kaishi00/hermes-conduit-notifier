@@ -1465,6 +1465,11 @@ _grok_live_limiter = _MintLimiter(GROK_LIVE_LIMIT, GROK_LIVE_WINDOW_S,
                                   message="Too many Grok Live connections; try again shortly")
 _grok_live_host_limiter = _MintLimiter(GROK_LIVE_HOST_LIMIT, GROK_LIVE_WINDOW_S,
                                        message="Too many Grok Live connections on this host; try again shortly")
+# Refused upgrades on the whole host: past this, they're turned away before
+# the handshake completes (a bare 403) instead of with a 4401 close.
+GROK_LIVE_AUTH_FAILURE_LIMIT = 30
+_grok_live_auth_failure_limiter = _MintLimiter(GROK_LIVE_AUTH_FAILURE_LIMIT, GROK_LIVE_WINDOW_S,
+                                               message="Too many refused Grok Live connections")
 _grok_live_status_limiter = _MintLimiter(GROK_LIVE_STATUS_LIMIT, GROK_LIVE_WINDOW_S,
                                          message="Too many Grok Live status checks; try again shortly")
 # Open relays by limiter key. Only touched on the event loop, so no lock.
@@ -1507,16 +1512,24 @@ def grok_live_credentials() -> Tuple[str, str]:
     """(bearer, "subscription" | "api_key") for the realtime socket; TokenError(503) when there is none.
 
     Hermes' resolver when it has one (SuperGrok first, then XAI_API_KEY,
-    refreshing an expiring sign-in), else XAI_API_KEY alone. A resolver that
-    fails is not bypassed: on a SuperGrok host that would quietly switch to
+    refreshing an expiring sign-in), else XAI_API_KEY alone. The resolver's
+    answer is final: it already checks XAI_API_KEY itself, and reading the
+    key past a resolver that failed would quietly switch a SuperGrok host to
     per-token billing.
     """
     token, auth = "", ""
     try:
         from tools.xai_http import resolve_xai_http_credentials
-    except ImportError:
+    except ImportError as exc:
+        # Only a Hermes without the module falls back; a broken import
+        # inside it is a failed sign-in, not an absent one.
+        if exc.name not in ("tools", "tools.xai_http"):
+            logger.warning("Grok Live could not load the xAI sign-in: %s", type(exc).__name__)
+            raise TokenError(503, GROK_LIVE_SIGN_IN_FAILED)
         resolve_xai_http_credentials = None
-    if resolve_xai_http_credentials is not None:
+    if resolve_xai_http_credentials is None:
+        token, auth = str(_env_value("XAI_API_KEY") or "").strip(), "api_key"
+    else:
         try:
             credentials = resolve_xai_http_credentials()
         except Exception as exc:
@@ -1531,8 +1544,6 @@ def grok_live_credentials() -> Tuple[str, str]:
         if isinstance(credentials, dict):
             token = str(credentials.get("api_key") or "").strip()
             auth = "subscription" if credentials.get("provider") == "xai-oauth" else "api_key"
-    if not token:
-        token, auth = str(_env_value("XAI_API_KEY") or "").strip(), "api_key"
     if not token or any(c in token for c in "\r\n"):
         raise TokenError(503, GROK_LIVE_NO_CREDENTIAL)
     return token, auth
@@ -1658,7 +1669,7 @@ def _forwardable_close(code: Optional[int], reason: str) -> Tuple[int, str]:
     """
     if code is not None and 3000 <= code <= 4999:
         return GROK_CLOSE_REFUSED, f"xAI closed the call ({code}): {reason}" if reason else f"xAI closed the call ({code})"
-    if code is None or code in (1005, 1006, 1015) or not 1000 <= code <= 1011:
+    if code is None or code in (1005, 1006, 1015) or not 1000 <= code <= 1014:
         return GROK_CLOSE_UNREACHABLE, "The connection to xAI was lost"
     return code, reason
 
@@ -1678,6 +1689,12 @@ def _grok_live_socket_setup(profile: Optional[str]) -> Tuple[str, str, str]:
 @router.websocket("/grok-live/socket")
 async def grok_live_socket(ws: WebSocket) -> None:
     authorized = await _ws_authorized(ws)
+    if not authorized:
+        try:
+            _grok_live_auth_failure_limiter.acquire("")
+        except TokenError:
+            await ws.close(code=GROK_CLOSE_UNAUTHORIZED)
+            return
     # Accepted before refusing: a close before the accept reaches Conduit as
     # a bare HTTP 403, and every refusal below should say why.
     await ws.accept()
@@ -1699,7 +1716,13 @@ async def grok_live_socket(ws: WebSocket) -> None:
         await refuse(GROK_CLOSE_UNREACHABLE, "The Hermes host timed out reading its xAI sign-in")
         return
     except TokenError as exc:
-        code = GROK_CLOSE_RATE_LIMITED if exc.status == 429 else GROK_CLOSE_NO_CREDENTIAL
+        if exc.status == 429:
+            code = GROK_CLOSE_RATE_LIMITED
+        elif str(exc) in (GROK_LIVE_NO_CREDENTIAL, GROK_LIVE_SIGN_IN_FAILED):
+            code = GROK_CLOSE_NO_CREDENTIAL
+        else:
+            # The host itself (profile scoping, say): not an xAI sign-in problem.
+            code = GROK_CLOSE_FAILED
         logger.warning("Grok Live socket for Conduit refused: %s", exc)
         await refuse(code, str(exc))
         return
@@ -1708,7 +1731,8 @@ async def grok_live_socket(ws: WebSocket) -> None:
         await refuse(GROK_CLOSE_REFUSED, str(exc.detail))
         return
     except Exception as exc:
-        logger.exception("Grok Live socket setup failed")
+        # The type only: the text could quote the credential being handled.
+        logger.warning("Grok Live socket setup failed: %s", type(exc).__name__)
         await refuse(GROK_CLOSE_FAILED, f"Grok Live failed on the host ({type(exc).__name__})")
         return
 

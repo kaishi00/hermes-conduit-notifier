@@ -344,12 +344,12 @@ plugin or xAI refuses a call, the socket closes with a reason Conduit shows:
 
 | Code | Meaning |
 |------|---------|
-| 4401 | Dashboard auth failed |
+| 4401 | Dashboard auth failed (past 30 refusals a minute on the host, refused upgrades get a bare HTTP 403 instead) |
 | 4503 | No xAI credential on the host, or its SuperGrok sign-in couldn't be read |
 | 4400 | xAI refused the credential or the call, or closed it with one of its own 3000-4999 codes (named in the reason) |
 | 4429 | Too many connections (10 per minute or 3 open per profile, 8 open on the host), or xAI rate limiting |
 | 4502 | xAI unreachable, the connection to xAI dropped, or the host timed out reading its xAI sign-in (retryable) |
-| 4500 | Grok Live failed on the host (see the dashboard log) |
+| 4500 | Grok Live failed on the host, e.g. it can't scope the profile (see the dashboard log) |
 
 Frames from Conduit over 256 KiB close the socket with 1009. The dashboard's
 server reads a whole frame before the plugin sees it, so its own WebSocket size
