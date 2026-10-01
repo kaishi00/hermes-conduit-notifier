@@ -2,7 +2,7 @@
 
 Hermes Conduit Notifier is the open-source Hermes plugin that delivers lifecycle notifications to the Hermes Conduit iOS app. It observes normal Hermes hooks and sends small HTTPS events to the Conduit push relay.
 
-The plugin does **not** contain an Apple Push Notification service key, dashboard credentials, or access to your Hermes gateway. (Its only dashboard routes hand Conduit short-lived Gemini Live tokens, start GPT-Live sessions on the host's ChatGPT subscription, run its voice web lookups, read memory and personality for voice, and save live voice transcripts to this host's session history; see below.) Apple credentials remain on the central push relay, so self-hosted users never need to copy a shared signing key onto their gateway.
+The plugin does **not** contain an Apple Push Notification service key, dashboard credentials, or access to your Hermes gateway. (Its only dashboard routes hand Conduit short-lived Gemini Live tokens, start GPT-Live sessions on the host's ChatGPT subscription, relay Grok Live calls with the host's SuperGrok sign-in, run its voice web lookups, read memory and personality for voice, and save live voice transcripts to this host's session history; see below.) Apple credentials remain on the central push relay, so self-hosted users never need to copy a shared signing key onto their gateway.
 
 ## Install
 
@@ -324,9 +324,45 @@ Hermes (`source: "hermes"`) and keep serving the same URLs, so Conduit needs no
 change. `voice.gpt_live.auth` is Hermes desktop's setting; these routes always
 use the subscription.
 
+## Grok Live on a SuperGrok subscription
+
+Grok Live is xAI's realtime voice model. Conduit reaches it through a socket on
+this plugin: the plugin opens `wss://api.x.ai/v1/realtime` with the host's xAI
+credential and relays frames both ways without reading or changing them. The
+credential is the host's SuperGrok sign-in (`hermes model`, then xAI Grok
+OAuth) or, without one, `XAI_API_KEY`. That's the same order Hermes uses for its
+other xAI endpoints, and neither credential is ever sent to Conduit or logged.
+
+| Method | Path | Returns |
+|--------|------|---------|
+| GET | `/api/plugins/conduit_push/grok-live/status` | `{ok, available, reason, auth, model, voice, transport}` |
+| WebSocket | `/api/plugins/conduit_push/grok-live/socket` | xAI realtime events, relayed |
+
+The socket takes the dashboard's own WebSocket credential (`?ticket=`, as
+`/api/audio/speak-stream` does) and an optional `?profile=`. `auth` in the status
+says which credential would be used: `subscription` or `api_key`. When the
+plugin or xAI refuses a call, the socket closes with a reason Conduit shows:
+
+| Code | Meaning |
+|------|---------|
+| 4401 | Dashboard auth failed |
+| 4503 | No xAI credential on the host |
+| 4400 | xAI refused the credential or the call |
+| 4429 | Too many connections (10 per minute per profile), or xAI rate limiting |
+| 4502 | xAI unreachable, or the connection to xAI dropped (retryable) |
+
+Optional settings in the profile's `config.yaml`:
+
+```yaml
+voice:
+  grok_live:
+    model: grok-voice-latest   # or CONDUIT_GROK_LIVE_MODEL in .env
+    voice: eve
+```
+
 ## Voice call transcripts
 
-Gemini Live and GPT-Live calls never run a Hermes turn, so nothing records
+Gemini Live, GPT-Live and Grok Live calls never run a Hermes turn, so nothing records
 them. These routes let Conduit save a call's transcript as an ordinary session
 in this profile's history, written straight into the session store. They never
 start the agent or call a model. A resumed call appends to the same session.
