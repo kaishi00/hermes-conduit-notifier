@@ -346,10 +346,15 @@ plugin or xAI refuses a call, the socket closes with a reason Conduit shows:
 |------|---------|
 | 4401 | Dashboard auth failed |
 | 4503 | No xAI credential on the host, or its SuperGrok sign-in couldn't be read |
-| 4400 | xAI refused the credential or the call |
-| 4429 | Too many connections (10 per minute per profile), or xAI rate limiting |
+| 4400 | xAI refused the credential or the call, or closed it with one of its own 3000-4999 codes (named in the reason) |
+| 4429 | Too many connections (10 per minute or 3 open per profile, 8 open on the host), or xAI rate limiting |
 | 4502 | xAI unreachable, the connection to xAI dropped, or the host timed out reading its xAI sign-in (retryable) |
 | 4500 | Grok Live failed on the host (see the dashboard log) |
+
+Frames from Conduit over 256 KiB close the socket with 1009. The dashboard's
+server reads a whole frame before the plugin sees it, so its own WebSocket size
+limit (uvicorn's `ws_max_size`, 16 MiB by default) is what bounds memory per
+frame; only a signed-in dashboard client can send one.
 
 Optional settings in the profile's `config.yaml`:
 

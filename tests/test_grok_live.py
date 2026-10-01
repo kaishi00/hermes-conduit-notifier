@@ -225,6 +225,38 @@ def test_socket_forwards_xai_close_reason(client, xai):
     assert (closed.code, closed.reason) == (1008, "bad session")
 
 
+def test_socket_never_forwards_xai_codes_that_look_like_the_plugins(client, xai):
+    xai.upstream = FakeUpstream(close_code=4503, close_reason="quota")
+    xai.upstream.release.set()
+    closed = _close_of(client)
+    assert (closed.code, closed.reason) == (api.GROK_CLOSE_REFUSED, "xAI closed the call (4503): quota")
+
+
+def test_socket_auth_awaits_async_checks(client, hermes, xai):
+    chat = sys.modules["hermes_cli.web_server_chat"]
+
+    async def denied(ws):
+        return False
+
+    chat._ws_auth_ok = denied
+    assert _close_of(client).code == api.GROK_CLOSE_UNAUTHORIZED, "a coroutine is not a yes"
+    assert xai.connects == []
+
+
+def test_socket_caps_open_relays_per_profile_and_frees_them(client, xai, monkeypatch):
+    monkeypatch.setattr(api, "GROK_LIVE_MAX_OPEN_PER_PROFILE", 1)
+    with client.websocket_connect(f"{BASE}/grok-live/socket") as first:
+        first.send_text("hello")
+        assert _close_of(client).code == api.GROK_CLOSE_RATE_LIMITED
+        assert len(xai.connects) == 1
+        first.send_text("finish")
+        _wait_close(first)
+    assert api._grok_live_open == {}
+    xai.upstream = FakeUpstream()
+    xai.upstream.release.set()
+    assert _close_of(client).code == 1000, "a closed relay frees its place"
+
+
 def test_socket_maps_a_dropped_xai_connection_to_retryable(client, xai):
     xai.upstream = FakeUpstream(close_code=1006)
     xai.upstream.release.set()

@@ -48,7 +48,7 @@ from concurrent.futures import ThreadPoolExecutor
 import contextlib
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, Optional, TypeVar
+from typing import Any, Callable, Dict, Optional, Tuple, TypeVar
 
 from fastapi import APIRouter, HTTPException, Request, Response, WebSocket
 
@@ -1431,6 +1431,10 @@ GROK_LIVE_CONNECT_TIMEOUT_S = 15.0
 # A call connects once per conversation (plus a few reconnects); cap a looping client.
 GROK_LIVE_LIMIT = 10
 GROK_LIVE_WINDOW_S = 60.0
+# Open relays at once. A call holds one, and a reconnect briefly overlaps
+# the socket it replaces; the global cap bounds every profile together.
+GROK_LIVE_MAX_OPEN_PER_PROFILE = 3
+GROK_LIVE_MAX_OPEN = 8
 # Conduit's frames are 100 ms audio chunks and a session.update carrying the
 # instructions (persona and memory included); xAI's carry model audio.
 GROK_LIVE_MAX_CLIENT_FRAME_BYTES = 256 * 1024
@@ -1455,6 +1459,8 @@ _grok_live_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="cond
 _grok_live_status_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="conduit-grok-live-status")
 _grok_live_limiter = _MintLimiter(GROK_LIVE_LIMIT, GROK_LIVE_WINDOW_S,
                                   message="Too many Grok Live connections; try again shortly")
+# Open relays by limiter key. Only touched on the event loop, so no lock.
+_grok_live_open: Dict[str, int] = {}
 
 
 def _grok_live_settings() -> Dict[str, Any]:
@@ -1477,7 +1483,7 @@ def _grok_live_name(value: Any, fallback: str) -> str:
     return text if _GROK_LIVE_NAME.fullmatch(text) else fallback
 
 
-def grok_live_model_voice(live: Optional[Dict[str, Any]] = None) -> tuple:
+def grok_live_model_voice(live: Optional[Dict[str, Any]] = None) -> Tuple[str, str]:
     live = _grok_live_settings() if live is None else live
     model = _grok_live_name(_env_value(GROK_LIVE_MODEL_ENV_VAR) or live.get("model"), GROK_LIVE_DEFAULT_MODEL)
     return model, _grok_live_name(live.get("voice"), GROK_LIVE_DEFAULT_VOICE)
@@ -1489,7 +1495,7 @@ GROK_LIVE_SIGN_IN_FAILED = ("The Hermes host couldn't read its xAI sign-in; try 
                             "again with `hermes auth add xai-oauth`.")
 
 
-def grok_live_credentials() -> tuple:
+def grok_live_credentials() -> Tuple[str, str]:
     """(bearer, "subscription" | "api_key") for the realtime socket; TokenError(503) when there is none.
 
     Hermes' resolver when it has one (SuperGrok first, then XAI_API_KEY,
@@ -1553,7 +1559,7 @@ def _close_reason(text: str) -> str:
     return data.decode("utf-8", "ignore")
 
 
-def _ws_authorized(ws: WebSocket) -> bool:
+async def _ws_authorized(ws: WebSocket) -> bool:
     """The dashboard's own WebSocket auth (the one /api/audio/speak-stream uses).
 
     Plugin routes inherit the dashboard's HTTP auth middleware, but WebSocket
@@ -1566,7 +1572,14 @@ def _ws_authorized(ws: WebSocket) -> bool:
         logger.warning("Grok Live socket refused: this Hermes has no dashboard WebSocket auth")
         return False
     try:
-        return bool(_ws_auth_ok(ws)) and bool(_ws_request_is_allowed(ws))
+        for check in (_ws_auth_ok, _ws_request_is_allowed):
+            result = check(ws)
+            # An async check would otherwise be a coroutine, which is truthy.
+            if inspect.isawaitable(result):
+                result = await result
+            if not result:
+                return False
+        return True
     except Exception as exc:
         logger.warning("Grok Live socket auth check failed: %s", type(exc).__name__)
         return False
@@ -1618,14 +1631,21 @@ def _grok_refusal(status: int, auth: str) -> tuple:
     return GROK_CLOSE_UNREACHABLE, f"xAI voice is unavailable (HTTP {status or 'error'})"
 
 
-def _forwardable_close(code: Optional[int], reason: str) -> tuple:
-    """xAI's close as one Conduit can be sent: 1005/1006/1015 can't go on the wire."""
-    if code is None or code in (1005, 1006, 1015) or not (1000 <= code <= 1011 or 3000 <= code <= 4999):
+def _forwardable_close(code: Optional[int], reason: str) -> Tuple[int, str]:
+    """xAI's close as one Conduit can be sent.
+
+    Standard codes pass through (bar 1005/1006/1015, which can't go on the
+    wire). xAI's own 3000-4999 codes become the plugin's refusal, so the
+    plugin's codes (4401, 4503, 4502…) always mean what the plugin says.
+    """
+    if code is not None and 3000 <= code <= 4999:
+        return GROK_CLOSE_REFUSED, f"xAI closed the call ({code}): {reason}" if reason else f"xAI closed the call ({code})"
+    if code is None or code in (1005, 1006, 1015) or not 1000 <= code <= 1011:
         return GROK_CLOSE_UNREACHABLE, "The connection to xAI was lost"
     return code, reason
 
 
-def _grok_live_socket_setup(profile: Optional[str]) -> tuple:
+def _grok_live_socket_setup(profile: Optional[str]) -> Tuple[str, str, str]:
     """(bearer, auth, model) for one relay connection, inside the profile's scope.
 
     The limiter runs here, after the scope has accepted the profile, as the
@@ -1638,7 +1658,7 @@ def _grok_live_socket_setup(profile: Optional[str]) -> tuple:
 
 @router.websocket("/grok-live/socket")
 async def grok_live_socket(ws: WebSocket) -> None:
-    authorized = _ws_authorized(ws)
+    authorized = await _ws_authorized(ws)
     # Accepted before refusing: a close before the accept reaches Conduit as
     # a bare HTTP 403, and every refusal below should say why.
     await ws.accept()
@@ -1673,6 +1693,28 @@ async def grok_live_socket(ws: WebSocket) -> None:
         await refuse(GROK_CLOSE_FAILED, f"Grok Live failed on the host ({type(exc).__name__})")
         return
 
+    key = _limiter_key(profile)
+    if _grok_live_open.get(key, 0) >= GROK_LIVE_MAX_OPEN_PER_PROFILE or \
+            sum(_grok_live_open.values()) >= GROK_LIVE_MAX_OPEN:
+        await refuse(GROK_CLOSE_RATE_LIMITED, "Too many Grok Live calls are open on this host")
+        return
+    _grok_live_open[key] = _grok_live_open.get(key, 0) + 1
+    try:
+        await _grok_live_relay(ws, refuse, token, auth, model)
+    finally:
+        remaining = _grok_live_open.get(key, 1) - 1
+        if remaining > 0:
+            _grok_live_open[key] = remaining
+        else:
+            _grok_live_open.pop(key, None)
+
+
+async def _grok_live_relay(ws: WebSocket, refuse: Callable[[int, str], Any], token: str, auth: str, model: str) -> None:
+    """One call's relay, from connecting to xAI to forwarding its close.
+
+    The bearer lives only in this call's upgrade headers; it is never
+    stored or logged.
+    """
     url = f"{GROK_LIVE_URL}?{urllib.parse.urlencode({'model': model})}"
     try:
         upstream = await _connect_xai(url, {"Authorization": f"Bearer {token}"})
@@ -1685,8 +1727,6 @@ async def grok_live_socket(ws: WebSocket) -> None:
         logger.warning("Grok Live could not reach xAI: %s", type(exc).__name__)
         await refuse(GROK_CLOSE_UNREACHABLE, "Could not reach xAI")
         return
-    finally:
-        token = ""
 
     async def client_to_xai() -> None:
         while True:
@@ -1720,14 +1760,13 @@ async def grok_live_socket(ws: WebSocket) -> None:
         done, _ = await asyncio.wait({outbound, inbound}, return_when=asyncio.FIRST_COMPLETED)
     finally:
         # Also on cancellation (shutdown): the tasks and the credentialed
-        # upstream socket never outlive the handler.
+        # upstream socket never outlive the handler. The handler's own
+        # cancellation still propagates: gather only collects the tasks'.
         for task in (outbound, inbound):
             task.cancel()
-        for task in (outbound, inbound):
-            with contextlib.suppress(BaseException):
-                await task
         with contextlib.suppress(Exception):
             await upstream.close()
+        await asyncio.gather(outbound, inbound, return_exceptions=True)
     # Both finished by now; read both so neither logs an unretrieved exception.
     outbound_failure = None if outbound.cancelled() else outbound.exception()
     inbound_failure = None if inbound.cancelled() else inbound.exception()
