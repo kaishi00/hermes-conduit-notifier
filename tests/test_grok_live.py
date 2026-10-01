@@ -3,13 +3,13 @@ import contextlib
 import importlib.util
 import json
 import sys
+import threading
 import types
 from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from starlette.websockets import WebSocketDisconnect
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = "/api/plugins/conduit_push"
@@ -153,11 +153,42 @@ def test_status_without_credentials(client, hermes):
     assert "SuperGrok" in body["reason"] and "XAI_API_KEY" in body["reason"]
 
 
-def test_status_falls_back_to_env_key_when_resolver_fails(client, hermes):
+def test_status_never_swaps_a_failed_sign_in_for_the_billed_key(client, hermes):
     hermes.resolver_error = RuntimeError("refresh failed")
     hermes.env["XAI_API_KEY"] = "env-key"
     body = client.get(f"{BASE}/grok-live/status").json()
-    assert (body["available"], body["auth"]) == (True, "api_key")
+    assert (body["available"], body["reason"]) == (False, api.GROK_LIVE_SIGN_IN_FAILED)
+    assert "refresh failed" not in json.dumps(body)
+
+
+def test_socket_refuses_when_the_sign_in_fails(client, hermes, xai):
+    hermes.resolver_error = RuntimeError("refresh failed")
+    hermes.env["XAI_API_KEY"] = "env-key"
+    closed = _close_of(client)
+    assert closed.code == api.GROK_CLOSE_NO_CREDENTIAL
+    assert xai.connects == []
+
+
+def test_socket_setup_that_hangs_closes_as_retryable(client, hermes, xai, monkeypatch):
+    released = threading.Event()
+
+    def stuck():
+        released.wait(5)
+        return hermes.credentials
+
+    sys.modules["tools.xai_http"].resolve_xai_http_credentials = stuck
+    monkeypatch.setattr(api, "GROK_LIVE_SETUP_TIMEOUT_S", 0.2)
+    try:
+        closed = _close_of(client)
+    finally:
+        released.set()
+    assert closed.code == api.GROK_CLOSE_UNREACHABLE
+    assert xai.connects == []
+
+
+def test_status_has_its_own_workers():
+    # A stuck socket setup holds the socket pool, never the readiness check.
+    assert api._grok_live_status_executor is not api._grok_live_executor
 
 
 def test_status_without_hermes_resolver_uses_env_key(client, hermes, monkeypatch):
@@ -202,26 +233,21 @@ def test_socket_maps_a_dropped_xai_connection_to_retryable(client, xai):
 
 def test_socket_refuses_without_dashboard_auth(client, hermes, xai):
     hermes.ws_auth = False
-    with pytest.raises(WebSocketDisconnect) as closed:
-        with client.websocket_connect(f"{BASE}/grok-live/socket"):
-            pass
-    assert closed.value.code == api.GROK_CLOSE_UNAUTHORIZED
+    # Accepted first, so Conduit reads 4401 rather than a bare HTTP 403.
+    assert _close_of(client).code == api.GROK_CLOSE_UNAUTHORIZED
     assert xai.connects == []
+    assert hermes.entered == [], "no host work before auth"
 
 
 def test_socket_refuses_a_disallowed_origin(client, hermes, xai):
     hermes.ws_allowed = False
-    with pytest.raises(WebSocketDisconnect):
-        with client.websocket_connect(f"{BASE}/grok-live/socket"):
-            pass
+    assert _close_of(client).code == api.GROK_CLOSE_UNAUTHORIZED
     assert xai.connects == []
 
 
 def test_socket_fails_closed_without_hermes_ws_auth(client, xai, monkeypatch):
     monkeypatch.setitem(sys.modules, "hermes_cli.web_server_chat", None)
-    with pytest.raises(WebSocketDisconnect):
-        with client.websocket_connect(f"{BASE}/grok-live/socket"):
-            pass
+    assert _close_of(client).code == api.GROK_CLOSE_UNAUTHORIZED
     assert xai.connects == []
 
 

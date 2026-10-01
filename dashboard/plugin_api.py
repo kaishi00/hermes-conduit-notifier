@@ -48,7 +48,7 @@ from concurrent.futures import ThreadPoolExecutor
 import contextlib
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, TypeVar
 
 from fastapi import APIRouter, HTTPException, Request, Response, WebSocket
 
@@ -405,12 +405,15 @@ def _profile_scope(profile: Optional[str]):
     return _config_profile_scope(profile or None)
 
 
+_Scoped = TypeVar("_Scoped")
+
+
 async def _run_scoped(
     profile: Optional[str],
-    fn: Callable[[], Dict[str, Any]],
+    fn: Callable[[], _Scoped],
     executor: Optional[ThreadPoolExecutor] = None,
-) -> Dict[str, Any]:
-    def scoped() -> Dict[str, Any]:
+) -> _Scoped:
+    def scoped() -> _Scoped:
         with _profile_scope(profile):
             return fn()
 
@@ -1443,8 +1446,13 @@ GROK_CLOSE_RATE_LIMITED = 4429
 GROK_CLOSE_REFUSED = 4400
 GROK_CLOSE_UNREACHABLE = 4502
 GROK_CLOSE_FAILED = 4500
+# Bounds the host work before a call connects (a SuperGrok refresh is a
+# network call). It can't interrupt a Hermes call already on a worker, so
+# status has its own pool: a stuck refresh never blocks the readiness check.
+GROK_LIVE_SETUP_TIMEOUT_S = GROK_LIVE_CONNECT_TIMEOUT_S + 10
 
 _grok_live_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="conduit-grok-live")
+_grok_live_status_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="conduit-grok-live-status")
 _grok_live_limiter = _MintLimiter(GROK_LIVE_LIMIT, GROK_LIVE_WINDOW_S,
                                   message="Too many Grok Live connections; try again shortly")
 
@@ -1477,13 +1485,17 @@ def grok_live_model_voice(live: Optional[Dict[str, Any]] = None) -> tuple:
 
 GROK_LIVE_NO_CREDENTIAL = ("Grok Live needs xAI on the Hermes host: sign in with SuperGrok "
                            "(`hermes auth add xai-oauth`) or set XAI_API_KEY.")
+GROK_LIVE_SIGN_IN_FAILED = ("The Hermes host couldn't read its xAI sign-in; try again, or sign in "
+                            "again with `hermes auth add xai-oauth`.")
 
 
 def grok_live_credentials() -> tuple:
     """(bearer, "subscription" | "api_key") for the realtime socket; TokenError(503) when there is none.
 
     Hermes' resolver when it has one (SuperGrok first, then XAI_API_KEY,
-    refreshing an expiring sign-in), else XAI_API_KEY alone.
+    refreshing an expiring sign-in), else XAI_API_KEY alone. A resolver that
+    fails is not bypassed: on a SuperGrok host that would quietly switch to
+    per-token billing.
     """
     token, auth = "", ""
     try:
@@ -1496,7 +1508,7 @@ def grok_live_credentials() -> tuple:
         except Exception as exc:
             # A failed refresh, say: the type only, since the text could carry detail.
             logger.warning("Grok Live could not read the xAI sign-in: %s", type(exc).__name__)
-            credentials = None
+            raise TokenError(503, GROK_LIVE_SIGN_IN_FAILED)
         if isinstance(credentials, dict):
             token = str(credentials.get("api_key") or "").strip()
             auth = "subscription" if credentials.get("provider") == "xai-oauth" else "api_key"
@@ -1523,7 +1535,7 @@ async def get_grok_live_status(response: Response, profile: Optional[str] = None
     response.headers["Cache-Control"] = "no-store"
     try:
         return {"ok": True, **(await asyncio.wait_for(
-            _run_scoped(profile, grok_live_status, _grok_live_executor), timeout=GROK_LIVE_CONNECT_TIMEOUT_S + 10))}
+            _run_scoped(profile, grok_live_status, _grok_live_status_executor), timeout=GROK_LIVE_SETUP_TIMEOUT_S))}
     except asyncio.TimeoutError:
         logger.warning("Grok Live status for Conduit timed out")
         raise HTTPException(status_code=504, detail="Grok Live status timed out", headers={"Cache-Control": "no-store"})
@@ -1613,12 +1625,22 @@ def _forwardable_close(code: Optional[int], reason: str) -> tuple:
     return code, reason
 
 
+def _grok_live_socket_setup(profile: Optional[str]) -> tuple:
+    """(bearer, auth, model) for one relay connection, inside the profile's scope.
+
+    The limiter runs here, after the scope has accepted the profile, as the
+    other per-profile routes do: an unknown ?profile= gets no bucket.
+    """
+    _grok_live_limiter.acquire(_limiter_key(profile))
+    token, auth = grok_live_credentials()
+    return token, auth, grok_live_model_voice()[0]
+
+
 @router.websocket("/grok-live/socket")
 async def grok_live_socket(ws: WebSocket) -> None:
-    if not _ws_authorized(ws):
-        await ws.close(code=GROK_CLOSE_UNAUTHORIZED)
-        return
-    # Accepted before the host work below, so a refusal can say why.
+    authorized = _ws_authorized(ws)
+    # Accepted before refusing: a close before the accept reaches Conduit as
+    # a bare HTTP 403, and every refusal below should say why.
     await ws.accept()
     profile = (ws.query_params.get("profile") or "").strip() or None
 
@@ -1626,10 +1648,17 @@ async def grok_live_socket(ws: WebSocket) -> None:
         with contextlib.suppress(Exception):
             await ws.close(code=code, reason=_close_reason(reason))
 
+    if not authorized:
+        await refuse(GROK_CLOSE_UNAUTHORIZED, "Dashboard sign-in required")
+        return
     try:
-        _grok_live_limiter.acquire(_limiter_key(profile))
-        token, auth, model = await _run_scoped(
-            profile, lambda: (*grok_live_credentials(), grok_live_model_voice()[0]), _grok_live_executor)
+        token, auth, model = await asyncio.wait_for(
+            _run_scoped(profile, lambda: _grok_live_socket_setup(profile), _grok_live_executor),
+            timeout=GROK_LIVE_SETUP_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        logger.warning("Grok Live socket setup for Conduit timed out")
+        await refuse(GROK_CLOSE_UNREACHABLE, "The Hermes host timed out reading its xAI sign-in")
+        return
     except TokenError as exc:
         code = GROK_CLOSE_RATE_LIMITED if exc.status == 429 else GROK_CLOSE_NO_CREDENTIAL
         logger.warning("Grok Live socket for Conduit refused: %s", exc)
@@ -1680,24 +1709,35 @@ async def grok_live_socket(ws: WebSocket) -> None:
             else:
                 await ws.send_bytes(bytes(frame))
 
+    try:
+        from websockets.exceptions import ConnectionClosed
+    except ImportError:
+        ConnectionClosed = ()  # type: ignore[assignment,misc]
+
     outbound = asyncio.create_task(client_to_xai())
     inbound = asyncio.create_task(xai_to_client())
-    done, pending = await asyncio.wait({outbound, inbound}, return_when=asyncio.FIRST_COMPLETED)
-    for task in pending:
-        task.cancel()
-    for task in pending:
-        with contextlib.suppress(BaseException):
-            await task
-    with contextlib.suppress(Exception):
-        await upstream.close()
+    try:
+        done, _ = await asyncio.wait({outbound, inbound}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        # Also on cancellation (shutdown): the tasks and the credentialed
+        # upstream socket never outlive the handler.
+        for task in (outbound, inbound):
+            task.cancel()
+        for task in (outbound, inbound):
+            with contextlib.suppress(BaseException):
+                await task
+        with contextlib.suppress(Exception):
+            await upstream.close()
+    # Both finished by now; read both so neither logs an unretrieved exception.
+    outbound_failure = None if outbound.cancelled() else outbound.exception()
+    inbound_failure = None if inbound.cancelled() else inbound.exception()
     if outbound in done:
-        failure = outbound.exception()
-        if isinstance(failure, ValueError):
+        if isinstance(outbound_failure, ValueError):
             await refuse(1009, "Frame too large")
         # Otherwise Conduit hung up (or its socket broke): nothing to tell it.
         return
-    failure = inbound.exception()
-    if failure is not None and not hasattr(failure, "rcvd"):
+    failure = inbound_failure
+    if failure is not None and not isinstance(failure, ConnectionClosed):
         logger.warning("Grok Live relay from xAI failed: %s", type(failure).__name__)
     close_code = getattr(upstream, "close_code", None)
     close_reason = str(getattr(upstream, "close_reason", "") or "")

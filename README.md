@@ -345,10 +345,11 @@ plugin or xAI refuses a call, the socket closes with a reason Conduit shows:
 | Code | Meaning |
 |------|---------|
 | 4401 | Dashboard auth failed |
-| 4503 | No xAI credential on the host |
+| 4503 | No xAI credential on the host, or its SuperGrok sign-in couldn't be read |
 | 4400 | xAI refused the credential or the call |
 | 4429 | Too many connections (10 per minute per profile), or xAI rate limiting |
-| 4502 | xAI unreachable, or the connection to xAI dropped (retryable) |
+| 4502 | xAI unreachable, the connection to xAI dropped, or the host timed out reading its xAI sign-in (retryable) |
+| 4500 | Grok Live failed on the host (see the dashboard log) |
 
 Optional settings in the profile's `config.yaml`:
 
