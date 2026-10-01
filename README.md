@@ -329,8 +329,7 @@ use the subscription.
 Grok Live is xAI's realtime voice model. Conduit reaches it through a socket on
 this plugin: the plugin opens `wss://api.x.ai/v1/realtime` with the host's xAI
 credential and relays frames both ways without reading or changing them. The
-credential is the host's SuperGrok sign-in (`hermes model`, then xAI Grok
-OAuth) or, without one, `XAI_API_KEY`. That's the same order Hermes uses for its
+credential is the host's SuperGrok sign-in (`hermes auth add xai-oauth`) or, without one, `XAI_API_KEY`. That's the same order Hermes uses for its
 other xAI endpoints, and neither credential is ever sent to Conduit or logged.
 
 | Method | Path | Returns |

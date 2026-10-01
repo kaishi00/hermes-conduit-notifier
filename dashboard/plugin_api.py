@@ -1411,7 +1411,7 @@ async def post_gpt_live_session(request: Request, response: Response, profile: O
 # Grok Live (xAI's realtime voice model) talks to Conduit through this host:
 # the socket below relays Conduit's realtime events to wss://api.x.ai and
 # back, adding only the Authorization header. The bearer is this host's
-# SuperGrok sign-in (Hermes' xai-oauth, `hermes model`) or, without one,
+# SuperGrok sign-in (Hermes' xai-oauth, `hermes auth add xai-oauth`) or, without one,
 # XAI_API_KEY: the same order Hermes' own xAI endpoints use. Neither ever
 # reaches Conduit. Conduit owns the conversation itself (session.update,
 # tools, audio); the relay never reads or rewrites it.
@@ -1476,7 +1476,7 @@ def grok_live_model_voice(live: Optional[Dict[str, Any]] = None) -> tuple:
 
 
 GROK_LIVE_NO_CREDENTIAL = ("Grok Live needs xAI on the Hermes host: sign in with SuperGrok "
-                           "(`hermes model`, xAI Grok OAuth) or set XAI_API_KEY.")
+                           "(`hermes auth add xai-oauth`) or set XAI_API_KEY.")
 
 
 def grok_live_credentials() -> tuple:
