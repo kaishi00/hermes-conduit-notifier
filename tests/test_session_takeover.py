@@ -150,6 +150,19 @@ def test_another_writers_marker_does_not_block(tmp_path):
     assert _take(tmp_path, ["chat"], marker=marker)["status"] == "taken_over"
 
 
+def test_a_marker_under_another_alias_still_blocks(tmp_path):
+    _seed(tmp_path, [_entry("stored-id")])
+    marker = FakeTurnMarker({"runtime-id": {"writer_pid": DESKTOP_PID}})
+    assert _take(tmp_path, ["runtime-id", "stored-id"], marker=marker)["status"] == "busy"
+
+
+def test_an_owner_without_a_pid_never_hides_a_marker(tmp_path):
+    entry = {**_entry("chat"), "pid": None}
+    _seed(tmp_path, [entry])
+    marker = FakeTurnMarker({"chat": {"writer_pid": DESKTOP_PID}})
+    assert _take(tmp_path, ["chat"], marker=marker)["status"] == "busy"
+
+
 def test_never_touches_this_dashboards_own_claim(tmp_path):
     _seed(tmp_path, [_entry("chat", pid=OWN_PID, surface="tui")])
     assert _take(tmp_path, ["chat"]) == {"status": "same_host", "surface": "tui"}
@@ -277,6 +290,8 @@ def test_probe_accepts_the_expected_shape(monkeypatch):
 @pytest.mark.parametrize("registry_attrs, marker_attrs", [
     ({**_REGISTRY, "_read_entries": lambda path: []}, _MARKER),
     ({**_REGISTRY, "_lease_paths": lambda registry_home=None, /: (None, None)}, _MARKER),
+    ({**_REGISTRY, "_write_entries": lambda path: None}, _MARKER),
+    (_REGISTRY, {**_MARKER, "read_turn_marker": lambda home, key, extra: None}),
     ({k: v for k, v in _REGISTRY.items() if k != "_pid_liveness"}, _MARKER),
     (_REGISTRY, {"read_turn_marker": _MARKER["read_turn_marker"]}),
 ])

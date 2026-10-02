@@ -2352,6 +2352,10 @@ async def post_voice_summary(request: Request, response: Response, profile: Opti
 # starts in the instant between the marker check and the write can still lose
 # its claim. That turn keeps running in the owner (nothing is interrupted);
 # it is the same exposure as the known limit that the owner isn't told.
+#
+# A 504 is inconclusive: the worker thread can't be cancelled, so the takeover
+# may still land after it. Asking again answers definitively (taken_over,
+# free, busy), and Conduit retries a 504.
 
 TAKEOVER_MAX_BODY_BYTES = 4096
 TAKEOVER_MAX_IDS = 4
@@ -2377,24 +2381,22 @@ def _takeover_modules() -> Tuple[Any, Any]:
         if exc.name not in ("hermes_cli", "hermes_cli.active_sessions", "tui_gateway", "tui_gateway.turn_marker"):
             raise
         raise unsupported
-    required = {
-        registry: {"_FileLock": (), "_lease_paths": ("registry_home",), "_read_entries": ("strict",),
-                   "_write_entries": (), "_pid_liveness": ()},
-        turn_marker: {"read_turn_marker": (), "marker_writer_state": ()},
+    # Each helper must accept exactly the call this route makes.
+    calls = {
+        registry: {"_FileLock": ((None,), {}), "_lease_paths": ((), {"registry_home": None}),
+                   "_read_entries": ((None,), {"strict": True}), "_write_entries": ((None, None), {}),
+                   "_pid_liveness": ((None, None), {})},
+        turn_marker: {"read_turn_marker": ((None, None), {}), "marker_writer_state": ((None,), {})},
     }
-    for module, helpers in required.items():
-        for name, params in helpers.items():
+    for module, helpers in calls.items():
+        for name, (args, kwargs) in helpers.items():
             helper = getattr(module, name, None)
             if not callable(helper):
                 raise unsupported
-            if params:
-                try:
-                    accepted = inspect.signature(helper).parameters
-                except (TypeError, ValueError):
-                    raise unsupported
-                keyword = (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
-                if not all(param in accepted and accepted[param].kind in keyword for param in params):
-                    raise unsupported
+            try:
+                inspect.signature(helper).bind(*args, **kwargs)
+            except (TypeError, ValueError):
+                raise unsupported
     return registry, turn_marker
 
 
@@ -2404,8 +2406,8 @@ def _takeover_ids(body: Any) -> list:
         raise TokenError(400, f"session_ids must list 1 to {TAKEOVER_MAX_IDS} chat ids")
     ids = []
     for value in raw:
-        if not isinstance(value, str) or not value.strip() or len(value) > TAKEOVER_MAX_ID_CHARS:
-            raise TokenError(400, "session_ids must be non-empty strings")
+        if not isinstance(value, str) or not value.strip() or len(value.strip()) > TAKEOVER_MAX_ID_CHARS:
+            raise TokenError(400, f"session_ids must be non-empty strings of at most {TAKEOVER_MAX_ID_CHARS} characters")
         if value.strip() not in ids:
             ids.append(value.strip())
     return ids
@@ -2421,28 +2423,35 @@ def _owner_pid(entry: Dict[str, Any]) -> int:
         return 0
 
 
-def _owner_turn_running(turn_marker: Any, home: Any, entry: Dict[str, Any]) -> bool:
-    """True while the owner's process has a turn in flight on this chat.
+def _owner_turn_running(turn_marker: Any, home: Any, entry: Dict[str, Any], aliases: list) -> bool:
+    """True while the owner's process may have a turn in flight on this chat.
 
     Every Desktop/TUI turn writes a durable marker at start and clears it when
-    the turn ends. A marker whose writer is still the owner and not provably
-    dead means a turn is running; a marker left by a dead process is crash
-    evidence, not a running turn.
+    the turn ends. The marker is looked up under the owner's id and every id
+    the caller passed. A marker counts unless its writer is provably another
+    process than a known owner pid, or provably dead (crash evidence, not a
+    running turn). A marker that can't be read counts as running.
     """
-    try:
-        marker = turn_marker.read_turn_marker(home, str(entry.get("session_id") or ""))
-    except Exception:  # noqa: BLE001 — can't tell, so never cut a turn off
-        return True
-    if not isinstance(marker, dict):
-        return False
-    writer = marker.get("writer_pid")
-    if isinstance(writer, int) and not isinstance(writer, bool) and writer != _owner_pid(entry):
-        return False
-    try:
-        state = turn_marker.marker_writer_state(marker)
-    except Exception:  # noqa: BLE001
-        state = "unknown"
-    return state != "dead"
+    owner_pid = _owner_pid(entry)
+    keys = [str(entry.get("session_id") or "")] + [alias for alias in aliases if alias != entry.get("session_id")]
+    for key in keys:
+        try:
+            marker = turn_marker.read_turn_marker(home, key)
+        except Exception:  # noqa: BLE001 — can't tell, so never cut a turn off
+            return True
+        if not isinstance(marker, dict):
+            continue
+        writer = marker.get("writer_pid")
+        if (owner_pid > 0 and isinstance(writer, int) and not isinstance(writer, bool)
+                and writer != owner_pid):
+            continue
+        try:
+            state = turn_marker.marker_writer_state(marker)
+        except Exception:  # noqa: BLE001
+            state = "unknown"
+        if state != "dead":
+            return True
+    return False
 
 
 def take_over_session(session_ids: list, *, registry: Any, turn_marker: Any, home: Any,
@@ -2466,22 +2475,22 @@ def take_over_session(session_ids: list, *, registry: Any, turn_marker: Any, hom
         owners = [entry for entry in entries if str(entry.get("session_id") or "") in wanted]
         if not owners:
             return {"status": "free"}
+        own = [entry for entry in owners if _owner_pid(entry) == own_pid]
         foreign = [entry for entry in owners if _owner_pid(entry) != own_pid]
         if not foreign:
-            return {"status": "same_host", "surface": str(owners[0].get("surface") or "")}
+            return {"status": "same_host", "surface": str(own[0].get("surface") or "")}
         # A dead owner is dropped like Hermes' own prune would; unknown liveness counts as live.
         live = [entry for entry in foreign
                 if registry._pid_liveness(entry.get("pid"), entry.get("process_start_time")) is not False]
         surface = str((live or foreign)[0].get("surface") or "")
-        if any(_owner_turn_running(turn_marker, home, entry) for entry in live):
+        if any(_owner_turn_running(turn_marker, home, entry, session_ids) for entry in live):
             return {"status": "busy", "surface": surface}
         dropped = {id(entry) for entry in foreign}  # by identity: never let a blank lease id match others
         registry._write_entries(state_path, [entry for entry in entries if id(entry) not in dropped])
-    logger.info("Chat takeover: Conduit took %s over from %s (pid %s)", foreign[0].get("session_id"),
-                surface or "another surface", foreign[0].get("pid"))
-    if len(foreign) < len(owners):
+    logger.info("Chat takeover: Conduit took a chat over from %s", surface or "another surface")
+    if own:
         # This dashboard still holds one of the ids, so a send can still be refused.
-        return {"status": "same_host", "surface": str(next(e for e in owners if e not in foreign).get("surface") or "")}
+        return {"status": "same_host", "surface": str(own[0].get("surface") or "")}
     return {"status": "taken_over", "surface": surface}
 
 

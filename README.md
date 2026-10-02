@@ -437,7 +437,7 @@ lock, and Conduit's next send claims the chat.
 - `session_ids` takes 1 to 4 ids (the chat's stored id and its live id).
   400 for a bad body, 501 on a Hermes without the ownership registry or turn markers, 503
   when the registry can't be read (ownership is never guessed), 429 past 60
-  requests a minute, 504 if the registry lock doesn't come free within 20 seconds.
+  requests a minute, 504 if the registry lock doesn't come free within 20 seconds (inconclusive: the takeover may still land, so ask again).
 
 ## Conduit support and privacy
 
