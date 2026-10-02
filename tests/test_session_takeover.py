@@ -404,3 +404,30 @@ def test_a_hermes_without_its_home_helper_is_unsupported(monkeypatch):
     with pytest.raises(api.TokenError) as raised:
         api._takeover_home()
     assert raised.value.status == 501
+
+
+def test_a_marker_whose_writer_state_fails_counts_as_running_even_for_a_dead_owner(tmp_path):
+    _seed(tmp_path, [_entry("chat")])
+    registry = FakeRegistry(tmp_path, dead_pids={DESKTOP_PID})
+
+    class BrokenState(FakeTurnMarker):
+        def marker_writer_state(self, entry):
+            raise OSError("permission denied")
+
+    marker = BrokenState({"chat": {"writer_pid": 4242}})
+    assert _take(tmp_path, ["chat"], registry=registry, marker=marker)["status"] == "busy"
+    assert _entries(tmp_path) == [_entry("chat")]
+
+
+def test_a_marker_of_an_unexpected_shape_counts_as_running(tmp_path):
+    _seed(tmp_path, [_entry("chat")])
+    assert _take(tmp_path, ["chat"], marker=FakeTurnMarker({"chat": "legacy"}))["status"] == "busy"
+
+
+def test_liveness_gets_the_normalized_pid(tmp_path):
+    _seed(tmp_path, [_entry("chat", pid=str(DESKTOP_PID))])
+    seen = []
+    registry = FakeRegistry(tmp_path)
+    registry._pid_liveness = lambda pid, start=None: seen.append(pid) or True
+    _take(tmp_path, ["chat"], registry=registry)
+    assert seen == [DESKTOP_PID]

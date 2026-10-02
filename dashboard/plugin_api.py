@@ -2465,12 +2465,14 @@ def _owner_turn_running(turn_marker: Any, home: Any, entry: Dict[str, Any], alia
             marker = turn_marker.read_turn_marker(home, key)
         except Exception:  # noqa: BLE001 — can't tell, so never cut a turn off
             return True
-        if not isinstance(marker, dict):
+        if marker is None:
             continue
+        if not isinstance(marker, dict):
+            return True  # an unexpected shape can't be read, so it counts as running
         try:
             state = turn_marker.marker_writer_state(marker)
-        except Exception:  # noqa: BLE001
-            state = "unknown"
+        except Exception:  # noqa: BLE001 — can't tell, so never cut a turn off
+            return True
         if state == "alive" or (state != "dead" and not owner_dead):
             return True
     return False
@@ -2479,7 +2481,7 @@ def _owner_turn_running(turn_marker: Any, home: Any, entry: Dict[str, Any], alia
 def _owner_alive(registry: Any, entry: Dict[str, Any]) -> Optional[bool]:
     """Hermes' pid + start-time liveness; an error is unknown, which counts as live."""
     try:
-        return registry._pid_liveness(entry.get("pid"), entry.get("process_start_time"))
+        return registry._pid_liveness(_owner_pid(entry), entry.get("process_start_time"))
     except Exception:  # noqa: BLE001
         return None
 
@@ -2487,7 +2489,9 @@ def _owner_alive(registry: Any, entry: Dict[str, Any]) -> Optional[bool]:
 def take_over_session(session_ids: list, *, registry: Any, turn_marker: Any, home: Any,
                       own_pid: Optional[int] = None,
                       abandoned: Optional[threading.Event] = None) -> Dict[str, Any]:
-    """Drop other processes' claims on the chat. Statuses:
+    """Drop other processes' claims on the chat. ``session_ids`` are the ids
+    of ONE chat (its stored id and live id); a running turn under any of
+    them makes the whole request busy. Statuses:
 
     ``free``: nobody else holds it (send again); ``taken_over``: the claims
     were dropped (send again); ``busy``: an owner is mid-turn (ask again
