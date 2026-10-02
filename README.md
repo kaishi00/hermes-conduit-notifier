@@ -425,7 +425,7 @@ lock, and Conduit's next send claims the chat.
 
 - `status` is `taken_over` (send again), `free` (nobody else holds it),
   `busy` (the other app is running a turn on it; ask again shortly, nothing
-  is interrupted; a marker that can't be read counts as running, and only a marker whose writer is provably dead is ignored) or
+  is interrupted; a marker that can't be read counts as running, and only a marker whose writer is provably dead, or a gone owner's marker that names no writer, is ignored) or
   `same_host` (this dashboard process still holds it, for example Conduit on
   another device; that claim is left alone).
 - The other app writes its turn marker without the registry lock, so a turn
