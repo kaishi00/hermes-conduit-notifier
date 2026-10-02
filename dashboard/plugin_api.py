@@ -2455,6 +2455,14 @@ def _owner_turn_running(turn_marker: Any, home: Any, entry: Dict[str, Any], alia
     return False
 
 
+def _owner_alive(registry: Any, entry: Dict[str, Any]) -> Optional[bool]:
+    """Hermes' pid + start-time liveness; an error is unknown, which counts as live."""
+    try:
+        return registry._pid_liveness(entry.get("pid"), entry.get("process_start_time"))
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def take_over_session(session_ids: list, *, registry: Any, turn_marker: Any, home: Any,
                       own_pid: Optional[int] = None) -> Dict[str, Any]:
     """Drop other processes' claims on the chat. Statuses:
@@ -2475,6 +2483,8 @@ def take_over_session(session_ids: list, *, registry: Any, turn_marker: Any, hom
         except Exception as exc:  # noqa: BLE001 — ActiveSessionRegistryError: never guess ownership
             logger.warning("Chat takeover: active-session registry unreadable: %s", exc)
             raise TokenError(503, "Hermes can't read who owns this chat right now")
+        # Registry entries are keyed by session_id alone; the caller passes
+        # every id the chat goes by so whichever one the owner used matches.
         owners = [entry for entry in entries if str(entry.get("session_id") or "") in wanted]
         if not owners:
             return {"status": "free"}
@@ -2483,8 +2493,7 @@ def take_over_session(session_ids: list, *, registry: Any, turn_marker: Any, hom
         if not foreign:
             return {"status": "same_host", "surface": str(own[0].get("surface") or "")}
         # A dead owner is dropped like Hermes' own prune would; unknown liveness counts as live.
-        live = [entry for entry in foreign
-                if registry._pid_liveness(entry.get("pid"), entry.get("process_start_time")) is not False]
+        live = [entry for entry in foreign if _owner_alive(registry, entry) is not False]
         surface = str((live or foreign)[0].get("surface") or "")
         if any(_owner_turn_running(turn_marker, home, entry, session_ids) for entry in live):
             return {"status": "busy", "surface": surface}
