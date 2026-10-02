@@ -2596,3 +2596,45 @@ async def post_session_takeover(request: Request, response: Response,
     except Exception as exc:
         raise _unexpected("takeover", exc, feature="Chat takeover")
     return {"ok": True, **result}
+
+
+# --- Capabilities ------------------------------------------------------------
+#
+# Conduit reads this once per connection to tell which of its features this
+# plugin serves, and nudges an update when one it uses is missing. A plugin
+# without this route predates it, which Conduit reads as "update". Names are
+# stable feature ids, one per route family; add one with every new route.
+
+ROUTE_CAPABILITIES = (
+    "gemini-live",
+    "web-search",
+    "memory",
+    "personality",
+    "gpt-live",
+    "grok-live",
+    "voice-sessions",
+    "voice-tags",
+    "voice-summary",
+    "session-takeover",
+)
+
+
+def _plugin_version() -> Optional[str]:
+    """The version in plugin.yaml beside this folder, or None if unreadable."""
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plugin.yaml")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
+                key, _, value = line.partition(":")
+                if key.strip() == "version":
+                    return value.strip().strip("\"'") or None
+    except (OSError, UnicodeDecodeError):
+        return None
+    return None
+
+
+@router.get("/capabilities")
+async def get_capabilities(response: Response) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    return {"ok": True, "version": _plugin_version(), "capabilities": list(ROUTE_CAPABILITIES)}
+
