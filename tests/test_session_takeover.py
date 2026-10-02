@@ -33,11 +33,13 @@ api = _load_plugin_api()
 
 
 class FakeRegistry:
+
     """hermes_cli.active_sessions' private helpers, over a real JSON file."""
 
-    def __init__(self, home: Path, dead_pids=(), unreadable=False):
+    def __init__(self, home: Path, dead_pids=(), unknown_pids=(), unreadable=False):
         self.home = home
         self.dead_pids = set(dead_pids)
+        self.unknown_pids = set(unknown_pids)
         self.unreadable = unreadable
         self.locked = False
 
@@ -68,6 +70,8 @@ class FakeRegistry:
         path.write_text(json.dumps({"entries": entries}))
 
     def _pid_liveness(self, pid, process_start_time=None, *, lenient=False):
+        if pid in self.unknown_pids:
+            return None
         return pid not in self.dead_pids
 
 
@@ -152,6 +156,20 @@ def test_never_touches_this_dashboards_own_claim(tmp_path):
     assert _entries(tmp_path) == [_entry("chat", pid=OWN_PID, surface="tui")]
 
 
+def test_takes_the_desktop_claim_even_beside_this_dashboards_own(tmp_path):
+    own = _entry("runtime-id", pid=OWN_PID, surface="tui", lease="lease-own")
+    _seed(tmp_path, [own, _entry("chat")])
+    assert _take(tmp_path, ["runtime-id", "chat"]) == {"status": "taken_over", "surface": "desktop"}
+    assert _entries(tmp_path) == [own]
+
+
+def test_an_owner_of_unknown_liveness_still_counts_as_live(tmp_path):
+    _seed(tmp_path, [_entry("chat")])
+    registry = FakeRegistry(tmp_path, unknown_pids={DESKTOP_PID})
+    marker = FakeTurnMarker({"chat": {"writer_pid": DESKTOP_PID}})
+    assert _take(tmp_path, ["chat"], registry=registry, marker=marker)["status"] == "busy"
+
+
 def test_a_dead_owner_is_dropped_without_waiting(tmp_path):
     _seed(tmp_path, [_entry("chat")])
     registry = FakeRegistry(tmp_path, dead_pids={DESKTOP_PID})
@@ -203,3 +221,50 @@ def test_route_reports_an_unsupported_hermes(monkeypatch, client):
 
     monkeypatch.setattr(api, "_takeover_modules", missing)
     assert client.post(f"{BASE}/sessions/takeover", json={"session_ids": ["chat"]}).status_code == 501
+
+
+# --- Capability probe -----------------------------------------------------------
+
+
+def _install(monkeypatch, registry_attrs, marker_attrs):
+    hermes_cli = types.ModuleType("hermes_cli")
+    registry = types.ModuleType("hermes_cli.active_sessions")
+    for name, value in registry_attrs.items():
+        setattr(registry, name, value)
+    hermes_cli.active_sessions = registry
+    tui_gateway = types.ModuleType("tui_gateway")
+    marker = types.ModuleType("tui_gateway.turn_marker")
+    for name, value in marker_attrs.items():
+        setattr(marker, name, value)
+    tui_gateway.turn_marker = marker
+    for name, module in (("hermes_cli", hermes_cli), ("hermes_cli.active_sessions", registry),
+                         ("tui_gateway", tui_gateway), ("tui_gateway.turn_marker", marker)):
+        monkeypatch.setitem(sys.modules, name, module)
+    return registry, marker
+
+
+_REGISTRY = {
+    "_FileLock": lambda path: None,
+    "_lease_paths": lambda lease=None, registry_home=None: (None, None),
+    "_read_entries": lambda path, *, strict=False: [],
+    "_write_entries": lambda path, entries: None,
+    "_pid_liveness": lambda pid, start=None: True,
+}
+_MARKER = {"read_turn_marker": lambda home, key: None, "marker_writer_state": lambda entry: "dead"}
+
+
+def test_probe_accepts_the_expected_shape(monkeypatch):
+    registry, marker = _install(monkeypatch, _REGISTRY, _MARKER)
+    assert api._takeover_modules() == (registry, marker)
+
+
+@pytest.mark.parametrize("registry_attrs, marker_attrs", [
+    ({**_REGISTRY, "_read_entries": lambda path: []}, _MARKER),
+    ({k: v for k, v in _REGISTRY.items() if k != "_pid_liveness"}, _MARKER),
+    (_REGISTRY, {"read_turn_marker": _MARKER["read_turn_marker"]}),
+])
+def test_probe_refuses_a_different_shape(monkeypatch, registry_attrs, marker_attrs):
+    _install(monkeypatch, registry_attrs, marker_attrs)
+    with pytest.raises(api.TokenError) as raised:
+        api._takeover_modules()
+    assert raised.value.status == 501
