@@ -2329,3 +2329,270 @@ async def post_voice_summary(request: Request, response: Response, profile: Opti
     _voice_limit(write=True)
     body = await _voice_body(request)
     return {"ok": True, **(await _run_voice(profile, lambda: set_voice_summary(body), "summary"))}
+
+
+# --- Chat takeover -----------------------------------------------------------
+#
+# Hermes lets one live surface own a chat at a time (hermes_cli.active_sessions,
+# the runtime/active_sessions.json registry). Hermes Desktop claims a chat on
+# its first turn and keeps the claim until the chat is closed there, so the
+# same chat refuses Conduit's next send with SESSION_NOT_OWNED. This route is
+# the "Take over" Conduit offers on that refusal (#304): it drops the other
+# surface's claim, under the registry's own lock, so the next send claims the
+# chat for Conduit. A turn the other surface is running is never cut off: its
+# turn marker (tui_gateway.turn_marker) answers "busy" and Conduit asks again.
+#
+# Only another process's claim is dropped. A claim held by this dashboard
+# process (Conduit on another device, or the web chat) is left alone: Hermes
+# already hands those over itself once their client is gone. "This process"
+# is its pid: Hermes serves the dashboard as one process (its chat runtimes
+# and turn leases live in that process's memory), as the voice routes assume.
+#
+# The owner writes its turn marker without the registry lock, so a turn it
+# starts in the instant between the marker check and the write can still lose
+# its claim. That turn keeps running in the owner (nothing is interrupted);
+# it is the same exposure as the known limit that the owner isn't told.
+#
+# A timed-out request is abandoned: the worker thread can't be cancelled, but
+# it checks the abandon flag once it holds the lock and again right before it
+# writes, so a 504 almost never drops a claim after the fact (only a write
+# already under way when the timeout fires still lands). Conduit retries a
+# 504, and asking again reports the real state.
+
+TAKEOVER_MAX_BODY_BYTES = 4096
+TAKEOVER_MAX_IDS = 4
+TAKEOVER_MAX_ID_CHARS = 200
+TAKEOVER_LIMIT = 60
+TAKEOVER_WINDOW_S = 60.0
+TAKEOVER_TIMEOUT_S = 20.0
+_takeover_limiter = _MintLimiter(TAKEOVER_LIMIT, TAKEOVER_WINDOW_S,
+                                 message="Too many takeover requests; try again shortly")
+_takeover_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="conduit-takeover")
+
+
+def _takeover_modules() -> Tuple[Any, Any]:
+    """Hermes' registry and turn-marker modules, or a clear 501. The route
+    leans on private helpers, so their shape is checked, not just their
+    presence; and without turn markers a running turn can't be seen, so the
+    route refuses rather than risk cutting one off."""
+    unsupported = TokenError(501, "This Hermes version can't hand a chat over")
+    try:
+        from hermes_cli import active_sessions as registry
+        from tui_gateway import turn_marker
+    except ImportError as exc:
+        if exc.name not in ("hermes_cli", "hermes_cli.active_sessions", "tui_gateway", "tui_gateway.turn_marker"):
+            raise
+        raise unsupported
+    # Each helper must accept exactly the call this route makes.
+    calls = {
+        registry: {"_FileLock": ((None,), {}), "_lease_paths": ((), {"registry_home": None}),
+                   "_read_entries": ((None,), {"strict": True}), "_write_entries": ((None, None), {}),
+                   "_pid_liveness": ((None, None), {})},
+        turn_marker: {"read_turn_marker": ((None, None), {}), "marker_writer_state": ((None,), {})},
+    }
+    for module, helpers in calls.items():
+        for name, (args, kwargs) in helpers.items():
+            helper = getattr(module, name, None)
+            if not callable(helper):
+                raise unsupported
+            try:
+                inspect.signature(helper).bind(*args, **kwargs)
+            except (TypeError, ValueError):
+                raise unsupported
+    return registry, turn_marker
+
+
+def _takeover_ids(body: Any) -> list:
+    raw = body.get("session_ids") if isinstance(body, dict) else None
+    if not isinstance(raw, list) or not raw or len(raw) > TAKEOVER_MAX_IDS:
+        raise TokenError(400, f"session_ids must list 1 to {TAKEOVER_MAX_IDS} chat ids")
+    ids = []
+    for value in raw:
+        if not isinstance(value, str) or not value.strip() or len(value.strip()) > TAKEOVER_MAX_ID_CHARS:
+            raise TokenError(400, f"session_ids must be non-empty strings of at most {TAKEOVER_MAX_ID_CHARS} characters")
+        if value.strip() not in ids:
+            ids.append(value.strip())
+    return ids
+
+
+def _takeover_home() -> Any:
+    """Hermes' home directory, or the same clear 501 as a missing registry."""
+    try:
+        from hermes_constants import get_hermes_home
+    except ImportError as exc:
+        if exc.name != "hermes_constants":
+            raise
+        raise TokenError(501, "This Hermes version can't hand a chat over")
+    if not callable(get_hermes_home):
+        raise TokenError(501, "This Hermes version can't hand a chat over")
+    return get_hermes_home()
+
+
+def _entry_session_id(entry: Dict[str, Any]) -> str:
+    value = entry.get("session_id")
+    return "" if value is None or isinstance(value, bool) else str(value)
+
+
+def _owner_pid(entry: Dict[str, Any]) -> int:
+    pid = entry.get("pid")
+    if isinstance(pid, bool):
+        return 0
+    try:
+        return int(pid)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _owner_turn_running(turn_marker: Any, home: Any, entry: Dict[str, Any], aliases: list,
+                        owner_dead: bool = False) -> bool:
+    """True while a turn may be in flight on this chat.
+
+    Every Desktop/TUI turn writes a durable marker at start and clears it when
+    the turn ends. The marker is looked up under the owner's id and every id
+    the caller passed. Any marker counts unless its writer is provably dead
+    (crash evidence, not a running turn): the writer need not be the owner's
+    pid, since an isolated turn runs in a compute-host child. A marker that
+    can't be read counts as running. For an owner that is gone, a marker counts
+    unless its writer is provably dead or it names no writer at all (its
+    isolated child may outlive it); those are crash leftovers.
+
+    The marker helpers never take the registry lock: liveness is a pid and
+    start-time probe (hermes_cli.active_sessions._pid_liveness).
+
+    Keys are looked up in Hermes' marker JSON, never used as a path.
+    """
+    own_key = _entry_session_id(entry)
+    keys = ([own_key] if own_key else []) + [alias for alias in aliases if alias != own_key]
+    for key in keys:
+        try:
+            marker = turn_marker.read_turn_marker(home, key)
+        except Exception:  # noqa: BLE001 — can't tell, so never cut a turn off
+            return True
+        if marker is None:
+            continue
+        if not isinstance(marker, dict):
+            return True  # an unexpected shape can't be read, so it counts as running
+        try:
+            state = turn_marker.marker_writer_state(marker)
+        except Exception:  # noqa: BLE001 — can't tell, so never cut a turn off
+            return True
+        # A gone owner's marker with no writer identity is a leftover from a
+        # build without isolated turns; one naming a writer of unknown
+        # liveness may be a child still running, so it counts.
+        identified = marker.get("writer_pid") is not None
+        if state == "alive" or (state != "dead" and (not owner_dead or identified)):
+            return True
+    return False
+
+
+def _owner_alive(registry: Any, entry: Dict[str, Any]) -> Optional[bool]:
+    """Hermes' pid + start-time liveness; an error is unknown, which counts as live."""
+    try:
+        return registry._pid_liveness(_owner_pid(entry), entry.get("process_start_time"))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def take_over_session(session_ids: list, *, registry: Any, turn_marker: Any, home: Any,
+                      own_pid: Optional[int] = None,
+                      abandoned: Optional[threading.Event] = None) -> Dict[str, Any]:
+    """Drop other processes' claims on the chat. ``session_ids`` are the ids
+    of ONE chat (its stored id and live id); a running turn under any of
+    them makes the whole request busy. Statuses:
+
+    ``free``: nobody else holds it (send again); ``taken_over``: the claims
+    were dropped (send again); ``busy``: an owner is mid-turn (ask again
+    shortly); ``same_host``: this dashboard process still holds one of the
+    ids, which this route never touches (other processes' claims may have
+    been dropped). Marker reads happen under the registry lock on purpose:
+    the decision and the write must be atomic against other claimers; the
+    reads are bounded by the caller's ids (at most TAKEOVER_MAX_IDS) per owner.
+
+    A claim whose pid is missing or invalid can't be attributed to another
+    process, so it is kept like this dashboard's own. ``abandoned`` is set
+    when the request timed out: nothing is written after that.
+    """
+    own_pid = os.getpid() if own_pid is None else own_pid
+    wanted = set(session_ids)
+    state_path, lock_path = registry._lease_paths(registry_home=home)
+    def check_abandoned() -> None:
+        if abandoned is not None and abandoned.is_set():
+            raise TokenError(504, "Chat takeover timed out")
+
+    lock = registry._FileLock(lock_path)
+    if not (hasattr(lock, "__enter__") and hasattr(lock, "__exit__")):
+        raise TokenError(501, "This Hermes version can't hand a chat over")
+    with lock:
+        check_abandoned()
+        try:
+            entries = registry._read_entries(state_path, strict=True)
+        except Exception as exc:  # noqa: BLE001 — ActiveSessionRegistryError: never guess ownership
+            logger.warning("Chat takeover: active-session registry unreadable: %s", exc)
+            raise TokenError(503, "Hermes can't read who owns this chat right now")
+        # Registry entries are keyed by session_id alone; the caller passes
+        # every id the chat goes by so whichever one the owner used matches.
+        owners = [entry for entry in entries
+                  if isinstance(entry, dict) and _entry_session_id(entry) in wanted]
+        if not owners:
+            return {"status": "free"}
+        # Kept: this dashboard's own claims, and any claim with no usable pid.
+        foreign, own = [], []
+        for entry in owners:
+            pid = _owner_pid(entry)
+            (foreign if pid > 0 and pid != own_pid else own).append(entry)
+        if not foreign:
+            return {"status": "same_host", "surface": str(own[0].get("surface") or "")}
+        # A dead owner is dropped like Hermes' own prune would, unless a
+        # live writer is still running its turn; unknown liveness counts as live.
+        dead = {id(entry) for entry in foreign if _owner_alive(registry, entry) is False}
+        live = [entry for entry in foreign if id(entry) not in dead]
+        surface = str((live or foreign)[0].get("surface") or "")
+        if any(_owner_turn_running(turn_marker, home, entry, session_ids, owner_dead=id(entry) in dead)
+               for entry in foreign):
+            return {"status": "busy", "surface": surface}
+        dropped = {id(entry) for entry in foreign}  # by identity: never let a blank lease id match others
+        check_abandoned()
+        registry._write_entries(state_path, [entry for entry in entries if id(entry) not in dropped])
+    logger.info("Chat takeover: Conduit took a chat over (%d claim(s) dropped)", len(foreign))
+    if own:
+        # This dashboard still holds one of the ids, so a send can still be refused.
+        return {"status": "same_host", "surface": str(own[0].get("surface") or "")}
+    return {"status": "taken_over", "surface": surface}
+
+
+def _take_over_scoped(session_ids: list, abandoned: Optional[threading.Event] = None) -> Dict[str, Any]:
+    registry, turn_marker = _takeover_modules()
+    return take_over_session(session_ids, registry=registry, turn_marker=turn_marker, home=_takeover_home(),
+                             abandoned=abandoned)
+
+
+@router.post("/sessions/takeover")
+async def post_session_takeover(request: Request, response: Response,
+                                profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    no_store = {"Cache-Control": "no-store"}
+    try:
+        body = await _read_json_body(request, TAKEOVER_MAX_BODY_BYTES)
+        ids = _takeover_ids(body)
+        # One budget for the whole dashboard, like the voice routes: the
+        # profile isn't resolved yet, so a made-up name can't mint a window.
+        _takeover_limiter.acquire("")
+        abandoned = threading.Event()
+        try:
+            result = await asyncio.wait_for(
+                _run_scoped(profile, lambda: _take_over_scoped(ids, abandoned), _takeover_executor),
+                timeout=TAKEOVER_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            abandoned.set()
+            raise
+    except asyncio.TimeoutError:
+        logger.warning("Chat takeover timed out after %ss", TAKEOVER_TIMEOUT_S)
+        raise HTTPException(status_code=504, detail="Chat takeover timed out", headers=no_store)
+    except TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers=no_store)
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), **no_store}
+        raise
+    except Exception as exc:
+        raise _unexpected("takeover", exc, feature="Chat takeover")
+    return {"ok": True, **result}

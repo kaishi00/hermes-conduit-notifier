@@ -410,6 +410,37 @@ start the agent or call a model. A resumed call appends to the same session.
   store in one profile doesn't hold up another. A 404 only ever means
   the plugin is too old to have the route.
 
+## Chat takeover
+
+Hermes lets one app own a chat at a time. Hermes Desktop claims a chat on its
+first turn and keeps the claim until the chat is closed there, so sending to
+the same chat from Conduit is refused with "This chat is open in another Hermes
+window/terminal". This route is what Conduit's **Take over** does: it drops the
+other app's claim in `runtime/active_sessions.json`, under Hermes' own registry
+lock, and Conduit's next send claims the chat.
+
+| Method | Route | Returns |
+| --- | --- | --- |
+| POST | `/api/plugins/conduit_push/sessions/takeover` with `{session_ids: [..]}` | `{ok, status, surface?}` |
+
+- `status` is `taken_over` (send again), `free` (nobody else holds it),
+  `busy` (the other app is running a turn on it; ask again shortly, nothing
+  is interrupted; a marker that can't be read counts as running, and only a marker whose writer is provably dead, or a gone owner's marker that names no writer, is ignored) or
+  `same_host` (this dashboard process still holds it, for example Conduit on
+  another device; that claim is left alone).
+- The other app writes its turn marker without the registry lock, so a turn
+  it starts in the instant between the check and the takeover still loses
+  its claim. That turn keeps running there; nothing is interrupted.
+- Only another process's claim is dropped; a claim without a valid pid is
+  kept, since it can't be attributed. The other app isn't told: if you
+  go back and send from Hermes Desktop, it still believes it owns the chat
+  and doesn't see what you sent from Conduit until you reopen the chat there.
+- `session_ids` takes 1 to 4 ids of one chat (its stored id and its live id),
+  never ids of different chats.
+  400 for a bad body, 501 on a Hermes without the ownership registry or turn markers, 503
+  when the registry can't be read (ownership is never guessed), 429 past 60
+  requests a minute, 504 if the takeover doesn't finish within 20 seconds (ask again: nothing is written after that, short of a write already under way).
+
 ## Conduit support and privacy
 
 The repository also hosts the public Hermes Conduit support and privacy pages:
