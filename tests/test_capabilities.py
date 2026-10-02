@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import re
 from pathlib import Path
 
@@ -33,6 +34,8 @@ def test_capabilities_report_the_manifest_version_and_route_features():
     manifest = re.search(r"^version:\s*(\S+)", (ROOT / "plugin.yaml").read_text(), re.M).group(1)
     assert body == {"ok": True, "version": manifest, "capabilities": list(api.ROUTE_CAPABILITIES)}
     assert "session-takeover" in body["capabilities"]
+    # The dashboard manifest must carry the same version the route reports.
+    assert json.loads((ROOT / "dashboard" / "manifest.json").read_text())["version"] == manifest
 
 
 def test_every_capability_names_a_served_route_family():

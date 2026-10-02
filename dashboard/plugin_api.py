@@ -2628,7 +2628,7 @@ def _plugin_version() -> Optional[str]:
                 key, _, value = line.partition(":")
                 if key.strip() == "version":
                     return value.strip().strip("\"'") or None
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return None
     return None
 
