@@ -410,6 +410,31 @@ start the agent or call a model. A resumed call appends to the same session.
   store in one profile doesn't hold up another. A 404 only ever means
   the plugin is too old to have the route.
 
+## Chat takeover
+
+Hermes lets one app own a chat at a time. Hermes Desktop claims a chat on its
+first turn and keeps the claim until the chat is closed there, so sending to
+the same chat from Conduit is refused with "This chat is open in another Hermes
+window/terminal". This route is what Conduit's **Take over** does: it drops the
+other app's claim in `runtime/active_sessions.json`, under Hermes' own registry
+lock, and Conduit's next send claims the chat.
+
+| Method | Route | Returns |
+| --- | --- | --- |
+| POST | `/api/plugins/conduit_push/sessions/takeover` with `{session_ids: [..]}` | `{ok, status, surface?}` |
+
+- `status` is `taken_over` (send again), `free` (nobody else holds it),
+  `busy` (the other app is running a turn on it; ask again shortly, nothing
+  is interrupted) or `same_host` (this dashboard process holds it, for example
+  Conduit on another device; it's left alone).
+- Only another process's claim is dropped. The other app isn't told: if you
+  go back and send from Hermes Desktop, it still believes it owns the chat
+  and doesn't see what you sent from Conduit until you reopen the chat there.
+- `session_ids` takes 1 to 4 ids (the chat's stored id and its live id).
+  400 for a bad body, 501 on a Hermes without the ownership registry, 503
+  when the registry can't be read (ownership is never guessed), 429 past 60
+  requests a minute.
+
 ## Conduit support and privacy
 
 The repository also hosts the public Hermes Conduit support and privacy pages:
