@@ -441,6 +441,20 @@ lock, and Conduit's next send claims the chat.
   when the registry can't be read (ownership is never guessed), 429 past 60
   requests a minute, 504 if the takeover doesn't finish within 20 seconds (ask again: nothing is written after that, short of a write already under way).
 
+## Capabilities (plugin 0.4+)
+
+`GET /api/plugins/conduit_push/capabilities` returns the plugin version and
+the Conduit features its routes serve:
+
+```json
+{"ok": true, "version": "0.4.0", "capabilities": ["gemini-live", "web-search", "memory", "personality", "gpt-live", "grok-live", "voice-sessions", "voice-tags", "voice-summary", "session-takeover"]}
+```
+
+Conduit reads it on connect. When a feature it uses is missing, or the route
+itself is (a plugin older than 0.4), Settings asks you to run
+`hermes plugins update conduit_push` and restart the gateway. Every new route
+family adds its name here.
+
 ## Conduit support and privacy
 
 The repository also hosts the public Hermes Conduit support and privacy pages:
