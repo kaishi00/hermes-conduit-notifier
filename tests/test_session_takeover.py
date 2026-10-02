@@ -36,8 +36,9 @@ class FakeRegistry:
 
     """hermes_cli.active_sessions' private helpers, over a real JSON file."""
 
-    def __init__(self, home: Path, dead_pids=(), unknown_pids=(), unreadable=False):
+    def __init__(self, home: Path, dead_pids=(), unknown_pids=(), unreadable=False, starts=None):
         self.home = home
+        self.starts = starts or {}  # pid -> the running process's start time (default START)
         self.dead_pids = set(dead_pids)
         self.unknown_pids = set(unknown_pids)
         self.unreadable = unreadable
@@ -72,6 +73,8 @@ class FakeRegistry:
     def _pid_liveness(self, pid, process_start_time=None, *, lenient=False):
         if pid in self.unknown_pids:
             return None
+        if process_start_time is not None and process_start_time != self.starts.get(pid, START):
+            return False  # the pid was recycled by another process
         return pid not in self.dead_pids
 
 
@@ -87,9 +90,12 @@ class FakeTurnMarker:
         return self.states.get(entry.get("writer_pid"), "alive")
 
 
-def _entry(session_id, pid=DESKTOP_PID, surface="desktop", lease="lease-1"):
+START = 100.0
+
+
+def _entry(session_id, pid=DESKTOP_PID, surface="desktop", lease="lease-1", start=START):
     return {"lease_id": lease, "session_id": session_id, "surface": surface, "pid": pid,
-            "started_at": 1.0, "updated_at": 1.0}
+            "process_start_time": start, "started_at": 1.0, "updated_at": 1.0}
 
 
 def _seed(home: Path, entries):
@@ -202,12 +208,46 @@ def test_an_owner_of_unknown_liveness_still_counts_as_live(tmp_path):
     assert _take(tmp_path, ["chat"], registry=registry, marker=marker)["status"] == "busy"
 
 
-def test_a_dead_owner_is_dropped_without_waiting(tmp_path):
+@pytest.mark.parametrize("writer_state", ["dead", "unknown"])
+def test_a_dead_owner_is_dropped_without_waiting(tmp_path, writer_state):
     _seed(tmp_path, [_entry("chat")])
     registry = FakeRegistry(tmp_path, dead_pids={DESKTOP_PID})
-    marker = FakeTurnMarker({"chat": {"writer_pid": DESKTOP_PID}})
+    marker = FakeTurnMarker({"chat": {"writer_pid": DESKTOP_PID}}, {DESKTOP_PID: writer_state})
     assert _take(tmp_path, ["chat"], registry=registry, marker=marker)["status"] == "taken_over"
     assert _entries(tmp_path) == []
+
+
+def test_a_dead_owner_whose_isolated_child_still_runs_a_turn_is_busy(tmp_path):
+    _seed(tmp_path, [_entry("chat")])
+    registry = FakeRegistry(tmp_path, dead_pids={DESKTOP_PID})
+    marker = FakeTurnMarker({"chat": {"writer_pid": 4242}}, {4242: "alive"})
+    assert _take(tmp_path, ["chat"], registry=registry, marker=marker)["status"] == "busy"
+    assert _entries(tmp_path) == [_entry("chat")]
+
+
+def test_a_recycled_pid_is_not_the_live_owner(tmp_path):
+    # Desktop's pid now belongs to another process started later.
+    _seed(tmp_path, [_entry("chat")])
+    registry = FakeRegistry(tmp_path, starts={DESKTOP_PID: START + 50})
+    marker = FakeTurnMarker({"chat": {"writer_pid": DESKTOP_PID}}, {DESKTOP_PID: "unknown"})
+    assert _take(tmp_path, ["chat"], registry=registry, marker=marker)["status"] == "taken_over"
+    assert _entries(tmp_path) == []
+
+
+def test_the_same_pid_and_start_time_is_the_live_owner(tmp_path):
+    _seed(tmp_path, [_entry("chat")])
+    marker = FakeTurnMarker({"chat": {"writer_pid": DESKTOP_PID}}, {DESKTOP_PID: "unknown"})
+    assert _take(tmp_path, ["chat"], marker=marker)["status"] == "busy"
+
+
+def test_a_lock_that_is_not_a_context_manager_is_unsupported(tmp_path):
+    _seed(tmp_path, [_entry("chat")])
+    registry = FakeRegistry(tmp_path)
+    registry._FileLock = lambda path: None
+    with pytest.raises(api.TokenError) as raised:
+        _take(tmp_path, ["chat"], registry=registry)
+    assert raised.value.status == 501
+    assert _entries(tmp_path) == [_entry("chat")]
 
 
 def test_an_unreadable_registry_is_never_guessed(tmp_path):

@@ -2355,7 +2355,9 @@ async def post_voice_summary(request: Request, response: Response, profile: Opti
 #
 # A timed-out request is abandoned: the worker thread can't be cancelled, but
 # it checks the abandon flag once it holds the lock and again right before it
-# writes, so a 504 never drops a claim after the fact. Conduit retries a 504.
+# writes, so a 504 almost never drops a claim after the fact (only a write
+# already under way when the timeout fires still lands). Conduit retries a
+# 504, and asking again reports the real state.
 
 TAKEOVER_MAX_BODY_BYTES = 4096
 TAKEOVER_MAX_IDS = 4
@@ -2441,7 +2443,8 @@ def _owner_pid(entry: Dict[str, Any]) -> int:
         return 0
 
 
-def _owner_turn_running(turn_marker: Any, home: Any, entry: Dict[str, Any], aliases: list) -> bool:
+def _owner_turn_running(turn_marker: Any, home: Any, entry: Dict[str, Any], aliases: list,
+                        owner_dead: bool = False) -> bool:
     """True while a turn may be in flight on this chat.
 
     Every Desktop/TUI turn writes a durable marker at start and clears it when
@@ -2449,7 +2452,11 @@ def _owner_turn_running(turn_marker: Any, home: Any, entry: Dict[str, Any], alia
     the caller passed. Any marker counts unless its writer is provably dead
     (crash evidence, not a running turn): the writer need not be the owner's
     pid, since an isolated turn runs in a compute-host child. A marker that
-    can't be read counts as running.
+    can't be read counts as running. For an owner that is gone, only a marker
+    whose writer is provably alive counts (its isolated child may outlive
+    it); anything else there is a crash leftover, as Hermes' prune treats it.
+
+    Keys are looked up in Hermes' marker JSON, never used as a path.
     """
     own_key = _entry_session_id(entry)
     keys = ([own_key] if own_key else []) + [alias for alias in aliases if alias != own_key]
@@ -2464,7 +2471,7 @@ def _owner_turn_running(turn_marker: Any, home: Any, entry: Dict[str, Any], alia
             state = turn_marker.marker_writer_state(marker)
         except Exception:  # noqa: BLE001
             state = "unknown"
-        if state != "dead":
+        if state == "alive" or (state != "dead" and not owner_dead):
             return True
     return False
 
@@ -2501,7 +2508,10 @@ def take_over_session(session_ids: list, *, registry: Any, turn_marker: Any, hom
         if abandoned is not None and abandoned.is_set():
             raise TokenError(504, "Chat takeover timed out")
 
-    with registry._FileLock(lock_path):
+    lock = registry._FileLock(lock_path)
+    if not (hasattr(lock, "__enter__") and hasattr(lock, "__exit__")):
+        raise TokenError(501, "This Hermes version can't hand a chat over")
+    with lock:
         check_abandoned()
         try:
             entries = registry._read_entries(state_path, strict=True)
@@ -2515,14 +2525,19 @@ def take_over_session(session_ids: list, *, registry: Any, turn_marker: Any, hom
         if not owners:
             return {"status": "free"}
         # Kept: this dashboard's own claims, and any claim with no usable pid.
-        foreign = [entry for entry in owners if _owner_pid(entry) > 0 and _owner_pid(entry) != own_pid]
-        own = [entry for entry in owners if entry not in foreign]
+        foreign, own = [], []
+        for entry in owners:
+            pid = _owner_pid(entry)
+            (foreign if pid > 0 and pid != own_pid else own).append(entry)
         if not foreign:
             return {"status": "same_host", "surface": str(own[0].get("surface") or "")}
-        # A dead owner is dropped like Hermes' own prune would; unknown liveness counts as live.
-        live = [entry for entry in foreign if _owner_alive(registry, entry) is not False]
+        # A dead owner is dropped like Hermes' own prune would, unless a
+        # live writer is still running its turn; unknown liveness counts as live.
+        dead = {id(entry) for entry in foreign if _owner_alive(registry, entry) is False}
+        live = [entry for entry in foreign if id(entry) not in dead]
         surface = str((live or foreign)[0].get("surface") or "")
-        if any(_owner_turn_running(turn_marker, home, entry, session_ids) for entry in live):
+        if any(_owner_turn_running(turn_marker, home, entry, session_ids, owner_dead=id(entry) in dead)
+               for entry in foreign):
             return {"status": "busy", "surface": surface}
         dropped = {id(entry) for entry in foreign}  # by identity: never let a blank lease id match others
         check_abandoned()
