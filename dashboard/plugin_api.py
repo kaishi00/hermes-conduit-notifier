@@ -2353,9 +2353,9 @@ async def post_voice_summary(request: Request, response: Response, profile: Opti
 # its claim. That turn keeps running in the owner (nothing is interrupted);
 # it is the same exposure as the known limit that the owner isn't told.
 #
-# A 504 is inconclusive: the worker thread can't be cancelled, so the takeover
-# may still land after it. Asking again answers definitively (taken_over,
-# free, busy), and Conduit retries a 504.
+# A timed-out request is abandoned: the worker thread can't be cancelled, but
+# it checks the abandon flag once it holds the lock and again right before it
+# writes, so a 504 never drops a claim after the fact. Conduit retries a 504.
 
 TAKEOVER_MAX_BODY_BYTES = 4096
 TAKEOVER_MAX_IDS = 4
@@ -2413,6 +2413,24 @@ def _takeover_ids(body: Any) -> list:
     return ids
 
 
+def _takeover_home() -> Any:
+    """Hermes' home directory, or the same clear 501 as a missing registry."""
+    try:
+        from hermes_constants import get_hermes_home
+    except ImportError as exc:
+        if exc.name != "hermes_constants":
+            raise
+        raise TokenError(501, "This Hermes version can't hand a chat over")
+    if not callable(get_hermes_home):
+        raise TokenError(501, "This Hermes version can't hand a chat over")
+    return get_hermes_home()
+
+
+def _entry_session_id(entry: Dict[str, Any]) -> str:
+    value = entry.get("session_id")
+    return "" if value is None or isinstance(value, bool) else str(value)
+
+
 def _owner_pid(entry: Dict[str, Any]) -> int:
     pid = entry.get("pid")
     if isinstance(pid, bool):
@@ -2433,7 +2451,7 @@ def _owner_turn_running(turn_marker: Any, home: Any, entry: Dict[str, Any], alia
     pid, since an isolated turn runs in a compute-host child. A marker that
     can't be read counts as running.
     """
-    own_key = str(entry.get("session_id") or "")
+    own_key = _entry_session_id(entry)
     keys = ([own_key] if own_key else []) + [alias for alias in aliases if alias != own_key]
     for key in keys:
         try:
@@ -2460,7 +2478,8 @@ def _owner_alive(registry: Any, entry: Dict[str, Any]) -> Optional[bool]:
 
 
 def take_over_session(session_ids: list, *, registry: Any, turn_marker: Any, home: Any,
-                      own_pid: Optional[int] = None) -> Dict[str, Any]:
+                      own_pid: Optional[int] = None,
+                      abandoned: Optional[threading.Event] = None) -> Dict[str, Any]:
     """Drop other processes' claims on the chat. Statuses:
 
     ``free``: nobody else holds it (send again); ``taken_over``: the claims
@@ -2468,12 +2487,22 @@ def take_over_session(session_ids: list, *, registry: Any, turn_marker: Any, hom
     shortly); ``same_host``: this dashboard process still holds one of the
     ids, which this route never touches (other processes' claims may have
     been dropped). Marker reads happen under the registry lock on purpose:
-    the decision and the write must be atomic against other claimers.
+    the decision and the write must be atomic against other claimers; the
+    reads are bounded by the caller's ids (at most TAKEOVER_MAX_IDS) per owner.
+
+    A claim whose pid is missing or invalid can't be attributed to another
+    process, so it is kept like this dashboard's own. ``abandoned`` is set
+    when the request timed out: nothing is written after that.
     """
     own_pid = os.getpid() if own_pid is None else own_pid
     wanted = set(session_ids)
     state_path, lock_path = registry._lease_paths(registry_home=home)
+    def check_abandoned() -> None:
+        if abandoned is not None and abandoned.is_set():
+            raise TokenError(504, "Chat takeover timed out")
+
     with registry._FileLock(lock_path):
+        check_abandoned()
         try:
             entries = registry._read_entries(state_path, strict=True)
         except Exception as exc:  # noqa: BLE001 — ActiveSessionRegistryError: never guess ownership
@@ -2482,11 +2511,12 @@ def take_over_session(session_ids: list, *, registry: Any, turn_marker: Any, hom
         # Registry entries are keyed by session_id alone; the caller passes
         # every id the chat goes by so whichever one the owner used matches.
         owners = [entry for entry in entries
-                  if isinstance(entry, dict) and str(entry.get("session_id") or "") in wanted]
+                  if isinstance(entry, dict) and _entry_session_id(entry) in wanted]
         if not owners:
             return {"status": "free"}
-        own = [entry for entry in owners if _owner_pid(entry) == own_pid]
-        foreign = [entry for entry in owners if _owner_pid(entry) != own_pid]
+        # Kept: this dashboard's own claims, and any claim with no usable pid.
+        foreign = [entry for entry in owners if _owner_pid(entry) > 0 and _owner_pid(entry) != own_pid]
+        own = [entry for entry in owners if entry not in foreign]
         if not foreign:
             return {"status": "same_host", "surface": str(own[0].get("surface") or "")}
         # A dead owner is dropped like Hermes' own prune would; unknown liveness counts as live.
@@ -2495,18 +2525,19 @@ def take_over_session(session_ids: list, *, registry: Any, turn_marker: Any, hom
         if any(_owner_turn_running(turn_marker, home, entry, session_ids) for entry in live):
             return {"status": "busy", "surface": surface}
         dropped = {id(entry) for entry in foreign}  # by identity: never let a blank lease id match others
+        check_abandoned()
         registry._write_entries(state_path, [entry for entry in entries if id(entry) not in dropped])
-    logger.info("Chat takeover: Conduit took a chat over from %s", surface or "another surface")
+    logger.info("Chat takeover: Conduit took a chat over (%d claim(s) dropped)", len(foreign))
     if own:
         # This dashboard still holds one of the ids, so a send can still be refused.
         return {"status": "same_host", "surface": str(own[0].get("surface") or "")}
     return {"status": "taken_over", "surface": surface}
 
 
-def _take_over_scoped(session_ids: list) -> Dict[str, Any]:
+def _take_over_scoped(session_ids: list, abandoned: Optional[threading.Event] = None) -> Dict[str, Any]:
     registry, turn_marker = _takeover_modules()
-    from hermes_constants import get_hermes_home
-    return take_over_session(session_ids, registry=registry, turn_marker=turn_marker, home=get_hermes_home())
+    return take_over_session(session_ids, registry=registry, turn_marker=turn_marker, home=_takeover_home(),
+                             abandoned=abandoned)
 
 
 @router.post("/sessions/takeover")
@@ -2520,8 +2551,14 @@ async def post_session_takeover(request: Request, response: Response,
         # One budget for the whole dashboard, like the voice routes: the
         # profile isn't resolved yet, so a made-up name can't mint a window.
         _takeover_limiter.acquire("")
-        result = await asyncio.wait_for(
-            _run_scoped(profile, lambda: _take_over_scoped(ids), _takeover_executor), timeout=TAKEOVER_TIMEOUT_S)
+        abandoned = threading.Event()
+        try:
+            result = await asyncio.wait_for(
+                _run_scoped(profile, lambda: _take_over_scoped(ids, abandoned), _takeover_executor),
+                timeout=TAKEOVER_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            abandoned.set()
+            raise
     except asyncio.TimeoutError:
         logger.warning("Chat takeover timed out after %ss", TAKEOVER_TIMEOUT_S)
         raise HTTPException(status_code=504, detail="Chat takeover timed out", headers=no_store)

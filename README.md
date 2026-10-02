@@ -431,13 +431,14 @@ lock, and Conduit's next send claims the chat.
 - The other app writes its turn marker without the registry lock, so a turn
   it starts in the instant between the check and the takeover still loses
   its claim. That turn keeps running there; nothing is interrupted.
-- Only another process's claim is dropped. The other app isn't told: if you
+- Only another process's claim is dropped; a claim without a valid pid is
+  kept, since it can't be attributed. The other app isn't told: if you
   go back and send from Hermes Desktop, it still believes it owns the chat
   and doesn't see what you sent from Conduit until you reopen the chat there.
 - `session_ids` takes 1 to 4 ids (the chat's stored id and its live id).
   400 for a bad body, 501 on a Hermes without the ownership registry or turn markers, 503
   when the registry can't be read (ownership is never guessed), 429 past 60
-  requests a minute, 504 if the takeover doesn't finish within 20 seconds (inconclusive: the takeover may still land, so ask again).
+  requests a minute, 504 if the takeover doesn't finish within 20 seconds (nothing is written after that, so ask again).
 
 ## Conduit support and privacy
 

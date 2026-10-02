@@ -158,11 +158,12 @@ def test_a_marker_under_another_alias_still_blocks(tmp_path):
     assert _take(tmp_path, ["runtime-id", "stored-id"], marker=marker)["status"] == "busy"
 
 
-def test_an_owner_without_a_pid_never_hides_a_marker(tmp_path):
+def test_an_owner_without_a_pid_is_never_dropped_even_with_a_marker(tmp_path):
     entry = {**_entry("chat"), "pid": None}
     _seed(tmp_path, [entry])
     marker = FakeTurnMarker({"chat": {"writer_pid": DESKTOP_PID}})
-    assert _take(tmp_path, ["chat"], marker=marker)["status"] == "busy"
+    assert _take(tmp_path, ["chat"], marker=marker)["status"] == "same_host"
+    assert _entries(tmp_path) == [entry]
 
 
 def test_never_touches_this_dashboards_own_claim(tmp_path):
@@ -301,4 +302,65 @@ def test_probe_refuses_a_different_shape(monkeypatch, registry_attrs, marker_att
     _install(monkeypatch, registry_attrs, marker_attrs)
     with pytest.raises(api.TokenError) as raised:
         api._takeover_modules()
+    assert raised.value.status == 501
+
+
+# --- Review hardening -------------------------------------------------------------
+
+
+@pytest.mark.parametrize("pid", [None, "", "abc", 0, -5, True])
+def test_a_claim_without_a_valid_pid_is_kept(tmp_path, pid):
+    entry = _entry("chat", pid=pid)
+    _seed(tmp_path, [entry])
+    assert _take(tmp_path, ["chat"])["status"] == "same_host"
+    assert _entries(tmp_path) == [entry]
+
+
+def test_a_pidless_claim_is_kept_while_another_process_claim_is_dropped(tmp_path):
+    kept = _entry("chat", pid=None, lease="kept")
+    _seed(tmp_path, [kept, _entry("chat-live", lease="desktop")])
+    assert _take(tmp_path, ["chat", "chat-live"])["status"] == "same_host"
+    assert _entries(tmp_path) == [kept]
+
+
+def test_a_numeric_session_id_still_matches(tmp_path):
+    _seed(tmp_path, [_entry(0)])
+    assert _take(tmp_path, ["0"])["status"] == "taken_over"
+    assert _entries(tmp_path) == []
+
+
+def test_an_abandoned_takeover_writes_nothing(tmp_path):
+    import threading
+
+    _seed(tmp_path, [_entry("chat")])
+    abandoned = threading.Event()
+    abandoned.set()
+    with pytest.raises(api.TokenError) as raised:
+        api.take_over_session(["chat"], registry=FakeRegistry(tmp_path), turn_marker=FakeTurnMarker(),
+                              home=tmp_path, own_pid=OWN_PID, abandoned=abandoned)
+    assert raised.value.status == 504
+    assert _entries(tmp_path) == [_entry("chat")]
+
+
+def test_a_takeover_abandoned_while_deciding_writes_nothing(tmp_path):
+    import threading
+
+    _seed(tmp_path, [_entry("chat")])
+    abandoned = threading.Event()
+
+    class AbandonDuringRead(FakeTurnMarker):
+        def read_turn_marker(self, home, session_key):
+            abandoned.set()
+            return None
+
+    with pytest.raises(api.TokenError):
+        api.take_over_session(["chat"], registry=FakeRegistry(tmp_path), turn_marker=AbandonDuringRead(),
+                              home=tmp_path, own_pid=OWN_PID, abandoned=abandoned)
+    assert _entries(tmp_path) == [_entry("chat")]
+
+
+def test_a_hermes_without_its_home_helper_is_unsupported(monkeypatch):
+    monkeypatch.setitem(sys.modules, "hermes_constants", types.ModuleType("hermes_constants"))
+    with pytest.raises(api.TokenError) as raised:
+        api._takeover_home()
     assert raised.value.status == 501
