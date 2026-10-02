@@ -425,8 +425,9 @@ lock, and Conduit's next send claims the chat.
 
 - `status` is `taken_over` (send again), `free` (nobody else holds it),
   `busy` (the other app is running a turn on it; ask again shortly, nothing
-  is interrupted) or `same_host` (only this dashboard process holds it, for
-  example Conduit on another device; it's left alone).
+  is interrupted; a marker that can't be read counts as running) or
+  `same_host` (this dashboard process still holds it, for example Conduit on
+  another device; that claim is left alone).
 - The other app writes its turn marker without the registry lock, so a turn
   it starts in the instant between the check and the takeover still loses
   its claim. That turn keeps running there; nothing is interrupted.
@@ -436,7 +437,7 @@ lock, and Conduit's next send claims the chat.
 - `session_ids` takes 1 to 4 ids (the chat's stored id and its live id).
   400 for a bad body, 501 on a Hermes without the ownership registry or turn markers, 503
   when the registry can't be read (ownership is never guessed), 429 past 60
-  requests a minute.
+  requests a minute, 504 if the registry lock doesn't come free within 20 seconds.
 
 ## Conduit support and privacy
 

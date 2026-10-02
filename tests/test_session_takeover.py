@@ -104,7 +104,7 @@ def _entries(home: Path):
 
 
 def _take(home, ids, registry=None, marker=None):
-    return api.take_over_session(ids, registry=registry or FakeRegistry(home), turn_marker=marker,
+    return api.take_over_session(ids, registry=registry or FakeRegistry(home), turn_marker=marker or FakeTurnMarker(),
                                  home=home, own_pid=OWN_PID)
 
 
@@ -156,11 +156,27 @@ def test_never_touches_this_dashboards_own_claim(tmp_path):
     assert _entries(tmp_path) == [_entry("chat", pid=OWN_PID, surface="tui")]
 
 
-def test_takes_the_desktop_claim_even_beside_this_dashboards_own(tmp_path):
+def test_drops_the_desktop_claim_but_reports_this_dashboards_own(tmp_path):
     own = _entry("runtime-id", pid=OWN_PID, surface="tui", lease="lease-own")
     _seed(tmp_path, [own, _entry("chat")])
-    assert _take(tmp_path, ["runtime-id", "chat"]) == {"status": "taken_over", "surface": "desktop"}
+    assert _take(tmp_path, ["runtime-id", "chat"]) == {"status": "same_host", "surface": "tui"}
     assert _entries(tmp_path) == [own]
+
+
+def test_a_blank_lease_id_never_matches_other_claims(tmp_path):
+    other = {**_entry("other", pid=OWN_PID), "lease_id": ""}
+    _seed(tmp_path, [{**_entry("chat"), "lease_id": ""}, other])
+    assert _take(tmp_path, ["chat"])["status"] == "taken_over"
+    assert _entries(tmp_path) == [other]
+
+
+def test_an_unreadable_marker_counts_as_running(tmp_path):
+    class BrokenMarker(FakeTurnMarker):
+        def read_turn_marker(self, home, session_key):
+            raise OSError("permission denied")
+
+    _seed(tmp_path, [_entry("chat")])
+    assert _take(tmp_path, ["chat"], marker=BrokenMarker())["status"] == "busy"
 
 
 def test_an_owner_of_unknown_liveness_still_counts_as_live(tmp_path):
@@ -260,6 +276,7 @@ def test_probe_accepts_the_expected_shape(monkeypatch):
 
 @pytest.mark.parametrize("registry_attrs, marker_attrs", [
     ({**_REGISTRY, "_read_entries": lambda path: []}, _MARKER),
+    ({**_REGISTRY, "_lease_paths": lambda registry_home=None, /: (None, None)}, _MARKER),
     ({k: v for k, v in _REGISTRY.items() if k != "_pid_liveness"}, _MARKER),
     (_REGISTRY, {"read_turn_marker": _MARKER["read_turn_marker"]}),
 ])

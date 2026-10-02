@@ -2358,6 +2358,7 @@ TAKEOVER_MAX_IDS = 4
 TAKEOVER_MAX_ID_CHARS = 200
 TAKEOVER_LIMIT = 60
 TAKEOVER_WINDOW_S = 60.0
+TAKEOVER_TIMEOUT_S = 20.0
 _takeover_limiter = _MintLimiter(TAKEOVER_LIMIT, TAKEOVER_WINDOW_S,
                                  message="Too many takeover requests; try again shortly")
 _takeover_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="conduit-takeover")
@@ -2391,7 +2392,8 @@ def _takeover_modules() -> Tuple[Any, Any]:
                     accepted = inspect.signature(helper).parameters
                 except (TypeError, ValueError):
                     raise unsupported
-                if not all(param in accepted for param in params):
+                keyword = (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+                if not all(param in accepted and accepted[param].kind in keyword for param in params):
                     raise unsupported
     return registry, turn_marker
 
@@ -2429,8 +2431,8 @@ def _owner_turn_running(turn_marker: Any, home: Any, entry: Dict[str, Any]) -> b
     """
     try:
         marker = turn_marker.read_turn_marker(home, str(entry.get("session_id") or ""))
-    except Exception:  # noqa: BLE001 — bookkeeping only; no marker reads as idle upstream too
-        return False
+    except Exception:  # noqa: BLE001 — can't tell, so never cut a turn off
+        return True
     if not isinstance(marker, dict):
         return False
     writer = marker.get("writer_pid")
@@ -2473,11 +2475,13 @@ def take_over_session(session_ids: list, *, registry: Any, turn_marker: Any, hom
         surface = str((live or foreign)[0].get("surface") or "")
         if any(_owner_turn_running(turn_marker, home, entry) for entry in live):
             return {"status": "busy", "surface": surface}
-        dropped = {str(entry.get("lease_id") or "") for entry in foreign}
-        registry._write_entries(state_path, [entry for entry in entries
-                                             if str(entry.get("lease_id") or "") not in dropped])
+        dropped = {id(entry) for entry in foreign}  # by identity: never let a blank lease id match others
+        registry._write_entries(state_path, [entry for entry in entries if id(entry) not in dropped])
     logger.info("Chat takeover: Conduit took %s over from %s (pid %s)", foreign[0].get("session_id"),
                 surface or "another surface", foreign[0].get("pid"))
+    if len(foreign) < len(owners):
+        # This dashboard still holds one of the ids, so a send can still be refused.
+        return {"status": "same_host", "surface": str(next(e for e in owners if e not in foreign).get("surface") or "")}
     return {"status": "taken_over", "surface": surface}
 
 
@@ -2498,7 +2502,11 @@ async def post_session_takeover(request: Request, response: Response,
         # One budget for the whole dashboard, like the voice routes: the
         # profile isn't resolved yet, so a made-up name can't mint a window.
         _takeover_limiter.acquire("")
-        result = await _run_scoped(profile, lambda: _take_over_scoped(ids), _takeover_executor)
+        result = await asyncio.wait_for(
+            _run_scoped(profile, lambda: _take_over_scoped(ids), _takeover_executor), timeout=TAKEOVER_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        logger.warning("Chat takeover timed out after %ss", TAKEOVER_TIMEOUT_S)
+        raise HTTPException(status_code=504, detail="Chat takeover timed out", headers=no_store)
     except TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers=no_store)
     except HTTPException as exc:
