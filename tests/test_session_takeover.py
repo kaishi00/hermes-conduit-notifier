@@ -144,10 +144,12 @@ def test_a_crashed_turn_marker_does_not_block(tmp_path):
     assert _entries(tmp_path) == []
 
 
-def test_another_writers_marker_does_not_block(tmp_path):
+def test_a_child_process_marker_still_blocks(tmp_path):
+    # An isolated turn runs in a compute-host child, so its marker's writer
+    # isn't the owner's pid.
     _seed(tmp_path, [_entry("chat")])
     marker = FakeTurnMarker({"chat": {"writer_pid": 4242}})
-    assert _take(tmp_path, ["chat"], marker=marker)["status"] == "taken_over"
+    assert _take(tmp_path, ["chat"], marker=marker)["status"] == "busy"
 
 
 def test_a_marker_under_another_alias_still_blocks(tmp_path):

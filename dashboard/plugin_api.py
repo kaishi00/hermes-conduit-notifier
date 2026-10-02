@@ -2424,15 +2424,15 @@ def _owner_pid(entry: Dict[str, Any]) -> int:
 
 
 def _owner_turn_running(turn_marker: Any, home: Any, entry: Dict[str, Any], aliases: list) -> bool:
-    """True while the owner's process may have a turn in flight on this chat.
+    """True while a turn may be in flight on this chat.
 
     Every Desktop/TUI turn writes a durable marker at start and clears it when
     the turn ends. The marker is looked up under the owner's id and every id
-    the caller passed. A marker counts unless its writer is provably another
-    process than a known owner pid, or provably dead (crash evidence, not a
-    running turn). A marker that can't be read counts as running.
+    the caller passed. Any marker counts unless its writer is provably dead
+    (crash evidence, not a running turn): the writer need not be the owner's
+    pid, since an isolated turn runs in a compute-host child. A marker that
+    can't be read counts as running.
     """
-    owner_pid = _owner_pid(entry)
     own_key = str(entry.get("session_id") or "")
     keys = ([own_key] if own_key else []) + [alias for alias in aliases if alias != own_key]
     for key in keys:
@@ -2441,10 +2441,6 @@ def _owner_turn_running(turn_marker: Any, home: Any, entry: Dict[str, Any], alia
         except Exception:  # noqa: BLE001 — can't tell, so never cut a turn off
             return True
         if not isinstance(marker, dict):
-            continue
-        writer = marker.get("writer_pid")
-        if (owner_pid > 0 and isinstance(writer, int) and not isinstance(writer, bool)
-                and writer != owner_pid):
             continue
         try:
             state = turn_marker.marker_writer_state(marker)
@@ -2485,7 +2481,8 @@ def take_over_session(session_ids: list, *, registry: Any, turn_marker: Any, hom
             raise TokenError(503, "Hermes can't read who owns this chat right now")
         # Registry entries are keyed by session_id alone; the caller passes
         # every id the chat goes by so whichever one the owner used matches.
-        owners = [entry for entry in entries if str(entry.get("session_id") or "") in wanted]
+        owners = [entry for entry in entries
+                  if isinstance(entry, dict) and str(entry.get("session_id") or "") in wanted]
         if not owners:
             return {"status": "free"}
         own = [entry for entry in owners if _owner_pid(entry) == own_pid]
