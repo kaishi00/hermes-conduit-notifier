@@ -2433,7 +2433,8 @@ def _owner_turn_running(turn_marker: Any, home: Any, entry: Dict[str, Any], alia
     running turn). A marker that can't be read counts as running.
     """
     owner_pid = _owner_pid(entry)
-    keys = [str(entry.get("session_id") or "")] + [alias for alias in aliases if alias != entry.get("session_id")]
+    own_key = str(entry.get("session_id") or "")
+    keys = ([own_key] if own_key else []) + [alias for alias in aliases if alias != own_key]
     for key in keys:
         try:
             marker = turn_marker.read_turn_marker(home, key)
@@ -2460,8 +2461,10 @@ def take_over_session(session_ids: list, *, registry: Any, turn_marker: Any, hom
 
     ``free``: nobody else holds it (send again); ``taken_over``: the claims
     were dropped (send again); ``busy``: an owner is mid-turn (ask again
-    shortly); ``same_host``: only this dashboard process holds it, which this
-    route never touches.
+    shortly); ``same_host``: this dashboard process still holds one of the
+    ids, which this route never touches (other processes' claims may have
+    been dropped). Marker reads happen under the registry lock on purpose:
+    the decision and the write must be atomic against other claimers.
     """
     own_pid = os.getpid() if own_pid is None else own_pid
     wanted = set(session_ids)
