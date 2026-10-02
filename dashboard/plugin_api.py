@@ -2439,7 +2439,7 @@ def _owner_pid(entry: Dict[str, Any]) -> int:
         return 0
     try:
         return int(pid)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0
 
 
@@ -2452,9 +2452,12 @@ def _owner_turn_running(turn_marker: Any, home: Any, entry: Dict[str, Any], alia
     the caller passed. Any marker counts unless its writer is provably dead
     (crash evidence, not a running turn): the writer need not be the owner's
     pid, since an isolated turn runs in a compute-host child. A marker that
-    can't be read counts as running. For an owner that is gone, only a marker
-    whose writer is provably alive counts (its isolated child may outlive
-    it); anything else there is a crash leftover, as Hermes' prune treats it.
+    can't be read counts as running. For an owner that is gone, a marker counts
+    unless its writer is provably dead or it names no writer at all (its
+    isolated child may outlive it); those are crash leftovers.
+
+    The marker helpers never take the registry lock: liveness is a pid and
+    start-time probe (hermes_cli.active_sessions._pid_liveness).
 
     Keys are looked up in Hermes' marker JSON, never used as a path.
     """
@@ -2473,7 +2476,11 @@ def _owner_turn_running(turn_marker: Any, home: Any, entry: Dict[str, Any], alia
             state = turn_marker.marker_writer_state(marker)
         except Exception:  # noqa: BLE001 — can't tell, so never cut a turn off
             return True
-        if state == "alive" or (state != "dead" and not owner_dead):
+        # A gone owner's marker with no writer identity is a leftover from a
+        # build without isolated turns; one naming a writer of unknown
+        # liveness may be a child still running, so it counts.
+        identified = marker.get("writer_pid") is not None
+        if state == "alive" or (state != "dead" and (not owner_dead or identified)):
             return True
     return False
 

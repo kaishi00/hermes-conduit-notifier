@@ -208,11 +208,12 @@ def test_an_owner_of_unknown_liveness_still_counts_as_live(tmp_path):
     assert _take(tmp_path, ["chat"], registry=registry, marker=marker)["status"] == "busy"
 
 
-@pytest.mark.parametrize("writer_state", ["dead", "unknown"])
-def test_a_dead_owner_is_dropped_without_waiting(tmp_path, writer_state):
+@pytest.mark.parametrize("marker_entry", [{"writer_pid": DESKTOP_PID}, {}])
+def test_a_dead_owner_is_dropped_without_waiting(tmp_path, marker_entry):
     _seed(tmp_path, [_entry("chat")])
     registry = FakeRegistry(tmp_path, dead_pids={DESKTOP_PID})
-    marker = FakeTurnMarker({"chat": {"writer_pid": DESKTOP_PID}}, {DESKTOP_PID: writer_state})
+    # A provably dead writer, or a legacy marker naming no writer.
+    marker = FakeTurnMarker({"chat": marker_entry}, {DESKTOP_PID: "dead", None: "unknown"})
     assert _take(tmp_path, ["chat"], registry=registry, marker=marker)["status"] == "taken_over"
     assert _entries(tmp_path) == []
 
@@ -229,7 +230,8 @@ def test_a_recycled_pid_is_not_the_live_owner(tmp_path):
     # Desktop's pid now belongs to another process started later.
     _seed(tmp_path, [_entry("chat")])
     registry = FakeRegistry(tmp_path, starts={DESKTOP_PID: START + 50})
-    marker = FakeTurnMarker({"chat": {"writer_pid": DESKTOP_PID}}, {DESKTOP_PID: "unknown"})
+    # Upstream's writer check uses the same pid + start-time probe, so it reads dead too.
+    marker = FakeTurnMarker({"chat": {"writer_pid": DESKTOP_PID}}, {DESKTOP_PID: "dead"})
     assert _take(tmp_path, ["chat"], registry=registry, marker=marker)["status"] == "taken_over"
     assert _entries(tmp_path) == []
 
@@ -431,3 +433,16 @@ def test_liveness_gets_the_normalized_pid(tmp_path):
     registry._pid_liveness = lambda pid, start=None: seen.append(pid) or True
     _take(tmp_path, ["chat"], registry=registry)
     assert seen == [DESKTOP_PID]
+
+
+def test_a_dead_owner_whose_child_has_unknown_liveness_is_busy(tmp_path):
+    _seed(tmp_path, [_entry("chat")])
+    registry = FakeRegistry(tmp_path, dead_pids={DESKTOP_PID})
+    marker = FakeTurnMarker({"chat": {"writer_pid": 4242}}, {4242: "unknown"})
+    assert _take(tmp_path, ["chat"], registry=registry, marker=marker)["status"] == "busy"
+
+
+def test_an_overflowing_pid_is_treated_as_unknown(tmp_path):
+    entry = _entry("chat", pid=float("inf"))
+    _seed(tmp_path, [entry])
+    assert _take(tmp_path, ["chat"])["status"] == "same_host"
