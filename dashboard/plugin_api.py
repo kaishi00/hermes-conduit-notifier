@@ -1266,6 +1266,34 @@ GPT_LIVE_WAIT_FOR_USER = (
     "Opening policy: do not speak first. When the call starts, stay silent until the user "
     "speaks, then answer what they said. This applies whatever the persona above says."
 )
+GPT_LIVE_MAX_GREETING_CHARS = 200
+
+
+def _greet_first(greeting: str) -> str:
+    """The opening policy for a user who asked to be greeted when a call connects."""
+    say = f' Say: "{greeting}"' if greeting else ""
+    return ("Opening policy: speak first. As soon as the call starts, greet the user in one short "
+            f"sentence so they know you're there and listening.{say} Then wait for them. "
+            "This applies whatever the persona above says.")
+
+
+def _clean_greeting(greeting: Any) -> Optional[str]:
+    """None keeps the call silent until the user speaks; text (or "" for a default
+    greeting) makes the model greet first. Kept to one printable line without
+    double quotes so it reads as the line to say. It is the user's own setting
+    for their own call, not untrusted input: nothing here stops it from reading
+    as an instruction."""
+    if greeting is None:
+        return None
+    if not isinstance(greeting, str):
+        raise TokenError(400, "greeting must be text")
+    if len(greeting) > GPT_LIVE_MAX_GREETING_CHARS * 4:
+        raise TokenError(400, "greeting is too long")
+    greeting = "".join(ch if ch.isprintable() else " " for ch in greeting.replace('"', "'"))
+    greeting = " ".join(greeting.split())
+    if len(greeting) > GPT_LIVE_MAX_GREETING_CHARS:
+        raise TokenError(400, "greeting is too long")
+    return greeting
 
 
 def _clean_briefing(briefing: Any) -> Optional[str]:
@@ -1297,12 +1325,13 @@ def _built_voice(config: Any) -> Optional[str]:
     return voice.strip().lower()
 
 
-def _built_has_briefing(config: Any, briefing: Optional[str]) -> bool:
-    """True only when Hermes' config really carries the briefing, so Conduit never drops it unsent."""
-    if not briefing:
+def _built_has_instructions(config: Any, text: Optional[str]) -> bool:
+    """True only when Hermes' config really carries the text (the briefing or the
+    opening policy), so Conduit never drops it unsent."""
+    if not text:
         return False
     instructions = _built_session(config).get("instructions")
-    return isinstance(instructions, str) and briefing in instructions
+    return isinstance(instructions, str) and text in instructions
 
 
 def create_gpt_live_session(
@@ -1313,12 +1342,14 @@ def create_gpt_live_session(
     *,
     voice: Any = None,
     briefing: Any = None,
+    greeting: Any = None,
 ) -> Dict[str, Any]:
     if not isinstance(sdp, str) or not sdp.startswith("v=0"):
         raise TokenError(400, "sdp must be a WebRTC SDP offer")
     history = _clean_history(history)
     voice = _clean_voice(voice)
     briefing = _clean_briefing(briefing)
+    greeting = _clean_greeting(greeting)
     if limiter_key is not None:
         _gpt_live_limiter.acquire(limiter_key)
     live = {**_gpt_live_settings(), "auth": "subscription"}
@@ -1329,8 +1360,9 @@ def create_gpt_live_session(
         # sent as context appends after the call starts, it answers each chunk out loud.
         extra = str(live.get("instructions") or "").strip()
         live["instructions"] = f"{extra}\n\n{briefing}" if extra else briefing
+    opening = GPT_LIVE_WAIT_FOR_USER if greeting is None else _greet_first(greeting)
     extra = str(live.get("instructions") or "").strip()
-    live["instructions"] = f"{extra}\n\n{GPT_LIVE_WAIT_FOR_USER}" if extra else GPT_LIVE_WAIT_FOR_USER
+    live["instructions"] = f"{extra}\n\n{opening}" if extra else opening
     # Echoed back so Conduit can tell a host that applied the chosen voice from one that ignored it.
     applied_voice = _gpt_live_model_voice(live)[1]
     upstream = _upstream_voice_live()
@@ -1354,10 +1386,11 @@ def create_gpt_live_session(
         # Only the fields Conduit reads: nothing else Hermes returns leaves the host.
         return {"auth": "subscription", "session": {"id": session["id"]},
                 "transport": {"type": "webrtc", "sdp": transport["sdp"]}, "source": "hermes",
-                "voice": applied_voice, "briefing_applied": _built_has_briefing(config, briefing)}
+                "voice": applied_voice, "briefing_applied": _built_has_instructions(config, briefing),
+                "greeting_applied": greeting is not None and _built_has_instructions(config, opening)}
     config = gpt_live_session_config(history, live)
     return {**_plugin_gpt_live_session(sdp, config, post or _post_sdp), "source": "plugin", "voice": applied_voice,
-            "briefing_applied": bool(briefing)}
+            "briefing_applied": bool(briefing), "greeting_applied": greeting is not None}
 
 
 @router.get("/gpt-live/status")
@@ -1390,7 +1423,7 @@ async def post_gpt_live_session(request: Request, response: Response, profile: O
             _run_scoped(
                 profile,
                 lambda: create_gpt_live_session(body.get("sdp"), body.get("history"), limiter_key=_limiter_key(profile), voice=body.get("voice"),
-                                                briefing=body.get("briefing")),
+                                                briefing=body.get("briefing"), greeting=body.get("greeting")),
                 _gpt_live_executor,
             ),
             timeout=GPT_LIVE_REQUEST_TIMEOUT_S,
