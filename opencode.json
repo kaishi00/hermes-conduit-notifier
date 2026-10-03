@@ -13,6 +13,19 @@
           "name": "DeepSeek V4.1 Flash"
         }
       }
+    },
+    "zai-custom": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Z.ai",
+      "options": {
+        "baseURL": "https://api.z.ai/api/coding/paas/v4",
+        "apiKey": "{env:ZAI_API_KEY}"
+      },
+      "models": {
+        "glm-5.3-flashx": {
+          "name": "GLM-5.3-FlashX"
+        }
+      }
     }
   }
 }
