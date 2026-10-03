@@ -1279,15 +1279,18 @@ def _greet_first(greeting: str) -> str:
 
 def _clean_greeting(greeting: Any) -> Optional[str]:
     """None keeps the call silent until the user speaks; text (or "" for a default
-    greeting) makes the model greet first. Kept to one line without quotes, so
-    the user's text can't end the sentence and pass as instructions."""
-    if greeting is None or greeting is False:
+    greeting) makes the model greet first. Kept to one printable line without
+    double quotes so it reads as the line to say. It is the user's own setting
+    for their own call, not untrusted input: nothing here stops it from reading
+    as an instruction."""
+    if greeting is None:
         return None
-    if greeting is True:
-        return ""
     if not isinstance(greeting, str):
         raise TokenError(400, "greeting must be text")
-    greeting = " ".join(greeting.replace('"', "'").split())
+    if len(greeting) > GPT_LIVE_MAX_GREETING_CHARS * 4:
+        raise TokenError(400, "greeting is too long")
+    greeting = "".join(ch if ch.isprintable() else " " for ch in greeting.replace('"', "'"))
+    greeting = " ".join(greeting.split())
     if len(greeting) > GPT_LIVE_MAX_GREETING_CHARS:
         raise TokenError(400, "greeting is too long")
     return greeting
@@ -1322,12 +1325,13 @@ def _built_voice(config: Any) -> Optional[str]:
     return voice.strip().lower()
 
 
-def _built_has_briefing(config: Any, briefing: Optional[str]) -> bool:
-    """True only when Hermes' config really carries the briefing, so Conduit never drops it unsent."""
-    if not briefing:
+def _built_has_instructions(config: Any, text: Optional[str]) -> bool:
+    """True only when Hermes' config really carries the text (the briefing or the
+    opening policy), so Conduit never drops it unsent."""
+    if not text:
         return False
     instructions = _built_session(config).get("instructions")
-    return isinstance(instructions, str) and briefing in instructions
+    return isinstance(instructions, str) and text in instructions
 
 
 def create_gpt_live_session(
@@ -1382,8 +1386,8 @@ def create_gpt_live_session(
         # Only the fields Conduit reads: nothing else Hermes returns leaves the host.
         return {"auth": "subscription", "session": {"id": session["id"]},
                 "transport": {"type": "webrtc", "sdp": transport["sdp"]}, "source": "hermes",
-                "voice": applied_voice, "briefing_applied": _built_has_briefing(config, briefing),
-                "greeting_applied": greeting is not None and _built_has_briefing(config, opening)}
+                "voice": applied_voice, "briefing_applied": _built_has_instructions(config, briefing),
+                "greeting_applied": greeting is not None and _built_has_instructions(config, opening)}
     config = gpt_live_session_config(history, live)
     return {**_plugin_gpt_live_session(sdp, config, post or _post_sdp), "source": "plugin", "voice": applied_voice,
             "briefing_applied": bool(briefing), "greeting_applied": greeting is not None}

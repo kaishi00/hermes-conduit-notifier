@@ -171,7 +171,11 @@ def test_session_greets_first_only_when_conduit_asks(client, hermes, openai):
     assert 'Say: "Hey Neal, I\'m \'here\'."' in instructions, "the user's text stays on one line, inside the quotes"
 
 
-@pytest.mark.parametrize("greeting", [5, "x" * (api.GPT_LIVE_MAX_GREETING_CHARS + 1)])
+def test_greeting_control_characters_become_spaces():
+    assert api._clean_greeting("Hi\x00there\u200b!") == "Hi there !"
+
+
+@pytest.mark.parametrize("greeting", [5, True, False, "x" * (api.GPT_LIVE_MAX_GREETING_CHARS + 1)])
 def test_session_rejects_a_bad_greeting(client, openai, greeting):
     assert client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "greeting": greeting}).status_code == 400
     assert openai.calls == []
@@ -302,6 +306,19 @@ def test_hermes_path_reports_the_briefing_only_when_its_config_carries_it(client
     body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "briefing": "[Conduit rules]"}).json()
     assert body["briefing_applied"] is True
     assert body["voice"] == "marin"
+
+
+def test_hermes_path_reports_the_greeting_only_when_its_config_carries_it(client, openai, monkeypatch):
+    _upstream(monkeypatch, [])
+    body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "greeting": ""}).json()
+    assert body["greeting_applied"] is False, "Hermes dropped it, so Conduit must still ask for it"
+    calls = []
+    _upstream(monkeypatch, calls, built=lambda live: {"session": {"instructions": live["instructions"]}})
+    body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "greeting": "Hi"}).json()
+    assert body["greeting_applied"] is True
+    assert calls[0][2]["instructions"].endswith(api._greet_first("Hi"))
+    body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER}).json()
+    assert body["greeting_applied"] is False
 
 
 @pytest.mark.parametrize("audio", ["loud", {"output": "x"}, {"output": {"voice": "bad voice!"}}])
