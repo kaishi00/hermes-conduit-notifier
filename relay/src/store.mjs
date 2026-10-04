@@ -466,7 +466,7 @@ export class RelayStore {
     // have answerable questions.
     if (decision.cancelledAt) return { outcome: 'released' };
     if (decision.answer !== undefined) return { outcome: 'already_answered' };
-    const batchQuestions = Array.isArray(decision.questions) ? decision.questions : [];
+    const batchQuestions = decisionQuestions(decision);
     if (batchQuestions.length) {
       decision.answers ??= Object.create(null);
       const answers = decision.answers;
@@ -506,7 +506,7 @@ export class RelayStore {
       // falls back to the original clarify path.
       return { status: 'unknown' };
     }
-    const batchQuestions = Array.isArray(decision.questions) ? decision.questions : [];
+    const batchQuestions = decisionQuestions(decision);
     if (batchQuestions.length) {
       const answers = decision.answers ?? {};
       const remaining = batchQuestions.map((question) => question.qid)
@@ -609,10 +609,16 @@ export const MAX_GLOBAL_EVENT_IDS = 8_192;
 function decisionIsActive(decision) {
   if (!decision || typeof decision !== 'object' || decision.cancelledAt) return false;
   if (decision.answer !== undefined) return false;
-  const questions = Array.isArray(decision.questions) ? decision.questions : [];
+  const questions = decisionQuestions(decision);
   if (!questions.length) return true;
   const answers = decision.answers ?? {};
   return questions.some((question) => !Object.hasOwn(answers, question.qid));
+}
+
+function decisionQuestions(decision) {
+  if (!Array.isArray(decision?.questions)) return [];
+  return decision.questions.filter((question) =>
+    question !== null && typeof question === 'object' && typeof question.qid === 'string');
 }
 
 export function normalizePreferences(value = {}) {

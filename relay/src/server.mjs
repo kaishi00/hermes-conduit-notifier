@@ -217,6 +217,9 @@ async function route(request, response) {
     // here. Outgoing routing carries the dashboard binding of the
     // AUTHENTICATED gateway credential (bound at pairing/claim time).
     const duplicateEvent = store.hasAcceptedEvent(installation.id, event.eventId, credential.gatewayId);
+    // Keep capacity preflight through savePendingDecision synchronous with no
+    // await: otherwise requests could interleave after this check and consume
+    // the same last slot. A catch after acceptEvent would still consume the ID.
     if (!duplicateEvent && event.decision?.kind === 'clarify' && event.decision.request_id) {
       try {
         store.assertPendingDecisionCapacity(

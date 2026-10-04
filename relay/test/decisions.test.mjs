@@ -475,6 +475,37 @@ test('pruning removes malformed timestamps and null records but preserves valid 
   assert.deepEqual(Object.keys(relay.data.pendingDecisions), ['valid']);
 });
 
+test('persisted malformed batch rows do not break capacity, polling, answering, or scalar fallback', () => {
+  const path = join(dir, `store-malformed-batch-${Math.random().toString(36).slice(2)}.json`);
+  const seed = new RelayStore(path);
+  seed.savePendingDecision({
+    id: 'conduit-push-corrupt-batch', installationId: 'inst-corrupt', gatewayId: 'gw-1',
+    question: 'First?', questions: [{ qid: 'q-valid', question: 'Valid question?', choices: ['Yes'] }],
+  });
+  seed.savePendingDecision({
+    id: 'conduit-push-empty-batch', installationId: 'inst-corrupt', gatewayId: 'gw-1',
+    question: 'Scalar fallback?', questions: [{ qid: 'q-valid-2', question: 'Second?', choices: ['Yes'] }],
+  });
+  const persisted = JSON.parse(readFileSync(path, 'utf8'));
+  persisted.pendingDecisions[RelayStore.decisionKey('inst-corrupt', 'gw-1', 'conduit-push-corrupt-batch')].questions = [
+    null, { qid: 'q-valid', question: 'Valid question?', choices: ['Yes'] },
+  ];
+  persisted.pendingDecisions[RelayStore.decisionKey('inst-corrupt', 'gw-1', 'conduit-push-empty-batch')].questions = [null, { qid: 42 }];
+  writeFileSync(path, JSON.stringify(persisted));
+
+  const relay = new RelayStore(path, { activeGlobal: 3, activePerInstallation: 3, retainedGlobal: 5, retainedPerInstallation: 5 });
+  assert.equal(relay.assertPendingDecisionCapacity('another-install'), true);
+  assert.deepEqual(relay.pendingDecisionStatus('inst-corrupt', 'gw-1', 'conduit-push-corrupt-batch').remaining, ['q-valid']);
+  assert.equal(relay.respondPendingDecision('inst-corrupt', 'gw-1', 'conduit-push-corrupt-batch', 'Yes', 'q-valid').outcome, 'answered');
+  assert.deepEqual(relay.pendingDecisionStatus('inst-corrupt', 'gw-1', 'conduit-push-corrupt-batch'), {
+    status: 'answered', answers: { 'q-valid': 'Yes' }, remaining: [],
+  });
+  assert.equal(relay.respondPendingDecision('inst-corrupt', 'gw-1', 'conduit-push-corrupt-batch', 'Again', 'q-valid').outcome, 'already_answered');
+  assert.deepEqual(relay.pendingDecisionStatus('inst-corrupt', 'gw-1', 'conduit-push-empty-batch'), { status: 'pending', deliverable: true });
+  assert.equal(relay.respondPendingDecision('inst-corrupt', 'gw-1', 'conduit-push-empty-batch', 'Scalar').outcome, 'answered');
+  assert.deepEqual(relay.pendingDecisionStatus('inst-corrupt', 'gw-1', 'conduit-push-empty-batch'), { status: 'answered', answer: 'Scalar' });
+});
+
 test('global active decision limit rejects new tenants without evicting a live decision', () => {
   const relay = store();
   for (let i = 0; i < 256; i += 1) {
