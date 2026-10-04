@@ -203,6 +203,20 @@ async function route(request, response) {
     // whitelists fields, so any plugin-supplied dashboard_id is dropped
     // here. Outgoing routing carries the dashboard binding of the
     // AUTHENTICATED gateway credential (bound at pairing/claim time).
+    const duplicateEvent = store.hasAcceptedEvent(installation.id, event.eventId, credential.gatewayId);
+    if (!duplicateEvent && event.decision?.kind === 'clarify' && event.decision.request_id) {
+      try {
+        store.assertPendingDecisionCapacity(
+          installation.id,
+          RelayStore.decisionKey(installation.id, credential.gatewayId, event.decision.request_id),
+        );
+      } catch (error) {
+        if (error?.code === 'decision_capacity_exceeded') {
+          return sendJson(response, 429, { error: 'decision_capacity_exceeded' });
+        }
+        throw error;
+      }
+    }
     // Plugin version recording runs BEFORE the dedupe return: a second
     // gateway on the same installation running the same plugin version sends
     // the same deterministic plugin.hello id, and it must still be recorded.
@@ -250,7 +264,7 @@ async function route(request, response) {
       // (since the top-level copy became a routing stub) the only place the
       // structured decision lives.
       const decisionDeliverable = notification?.payload?.body?.conduit?.decision != null;
-      store.savePendingDecision({
+      const saved = store.savePendingDecision({
         id: parkedDecisionId,
         installationId: installation.id,
         gatewayId: credential.gatewayId,
@@ -259,6 +273,7 @@ async function route(request, response) {
         questions: event.decision.questions,
         deliverable: decisionDeliverable,
       });
+      if (!saved) return sendJson(response, 200, { accepted: true, duplicate: true });
       if (!notification) return sendJson(response, 202, { accepted: true, delivered: false });
       let result;
       try {

@@ -187,6 +187,21 @@ call; the plugin then releases the parked decision (`DELETE
 reported as accepted. A batch answered partly natively and partly by relay
 stays open until the gateway's configured clarify timeout bounds it.
 
+### Decision retention limits
+
+The relay retains up to 32 unexpired decision records per installation and
+256 across the relay. Answered and cancelled records count toward these
+limits and remain available until the two-hour decision TTL expires. Retaining
+them preserves gateway answer retrieval and the first-answer/release locks;
+the relay does not reclaim settled records before expiry.
+
+When either limit is full, a new clarify event receives HTTP `429`
+`decision_capacity_exceeded`. The relay sends no push and does not consume the
+event ID, so the event can be retried after capacity becomes available.
+Existing decisions remain answerable, pollable, and cancellable while the
+relay is at capacity. The plugin can use Hermes' native clarify path as its
+existing fallback when relay delivery is rejected.
+
 ## Gemini Live tokens
 
 Conduit's Gemini Live voice mode talks to Google directly from the phone, but

@@ -22,6 +22,9 @@ const defaultPreferences = Object.freeze({
   decision_cards: true,
 });
 
+const MAX_PENDING_DECISIONS = 256;
+const MAX_PENDING_DECISIONS_PER_INSTALLATION = 32;
+
 export class RelayStore {
   constructor(path) {
     this.path = path;
@@ -278,6 +281,11 @@ export class RelayStore {
     return true;
   }
 
+  hasAcceptedEvent(installationId, eventId, gatewayId) {
+    this.prune();
+    return Boolean(this.data.eventIds[`${installationId}:${gatewayId}:${eventId}`]);
+  }
+
   // ── Pending decisions (clarify answer loop) ─────────────────────────
   // A clarify decision the plugin pushes carries a plugin-minted request id
   // because the gateway's own clarify id is unreachable to plugins. The
@@ -328,11 +336,13 @@ export class RelayStore {
   }
 
   savePendingDecision({ id, installationId, gatewayId, question, choices, questions, deliverable = true }) {
-    this.prune();
+    const key = RelayStore.decisionKey(installationId, gatewayId, id);
+    this.assertPendingDecisionCapacity(installationId, key);
+    if (this.data.pendingDecisions[key]) return false;
     // installationId/gatewayId are denormalized onto the record for the
     // legacy-decision upgrade scan and resolveLegacyRespond's holder scan;
     // the scoped KEY remains the ownership authority.
-    this.data.pendingDecisions[RelayStore.decisionKey(installationId, gatewayId, id)] = {
+    this.data.pendingDecisions[key] = {
       id,
       installationId,
       gatewayId,
@@ -349,13 +359,21 @@ export class RelayStore {
       deliverable: Boolean(deliverable),
       createdAt: Date.now(),
     };
-    const entries = Object.entries(this.data.pendingDecisions);
-    if (entries.length > 256) {
-      for (const [key] of entries.sort((a, b) => a[1].createdAt - b[1].createdAt).slice(0, entries.length - 256)) {
-        delete this.data.pendingDecisions[key];
-      }
-    }
     this.save();
+    return true;
+  }
+
+  assertPendingDecisionCapacity(installationId, key = undefined) {
+    this.prune();
+    const decisions = Object.entries(this.data.pendingDecisions);
+    if (key && this.data.pendingDecisions[key]) return true;
+    const installationCount = decisions.filter(([, decision]) => decision.installationId === installationId).length;
+    if (decisions.length >= MAX_PENDING_DECISIONS || installationCount >= MAX_PENDING_DECISIONS_PER_INSTALLATION) {
+      const error = new Error('decision_capacity_exceeded');
+      error.code = 'decision_capacity_exceeded';
+      throw error;
+    }
+    return true;
   }
 
   respondPendingDecision(installationId, gatewayId, id, answer, questionId = '') {
