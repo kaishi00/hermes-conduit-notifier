@@ -10,8 +10,8 @@ import { RelayStore } from '../src/store.mjs';
 const dir = mkdtempSync(join(tmpdir(), 'conduit-relay-decisions-'));
 after(() => rmSync(dir, { recursive: true, force: true }));
 
-function store() {
-  return new RelayStore(join(dir, `store-${Math.random().toString(36).slice(2)}.json`));
+function store(limits) {
+  return new RelayStore(join(dir, `store-${Math.random().toString(36).slice(2)}.json`), limits);
 }
 
 test('same-id decisions from two gateways coexist and never mutate each other', () => {
@@ -283,23 +283,68 @@ test('pending decisions reject overflow without evicting another installation or
   assert.equal(relay.data.pendingDecisions[RelayStore.decisionKey('inst-1', 'gw-1', 'conduit-push-0')].question, 'q');
 });
 
-test('answered and cancelled decisions count toward capacity until TTL expiry', () => {
-  const relay = store();
-  for (let i = 0; i < 32; i += 1) {
-    relay.savePendingDecision({ id: `conduit-push-settled-${i}`, installationId: 'inst-settled', gatewayId: 'gw-1', question: 'q' });
-  }
+test('answered and cancelled decisions release active capacity while remaining retained', () => {
+  const relay = store({ activePerInstallation: 1, activeGlobal: 1, retainedPerInstallation: 4, retainedGlobal: 4 });
+  relay.savePendingDecision({ id: 'conduit-push-settled-0', installationId: 'inst-settled', gatewayId: 'gw-1', question: 'q' });
   assert.equal(relay.respondPendingDecision('inst-settled', 'gw-1', 'conduit-push-settled-0', 'kept answer').outcome, 'answered');
-  assert.equal(relay.cancelPendingDecision('inst-settled', 'gw-1', 'conduit-push-settled-1'), 'cancelled');
-  assert.throws(
-    () => relay.savePendingDecision({ id: 'conduit-push-after-settled', installationId: 'inst-settled', gatewayId: 'gw-1', question: 'q' }),
-    { code: 'decision_capacity_exceeded' },
-  );
+  relay.savePendingDecision({ id: 'conduit-push-after-answer', installationId: 'inst-settled', gatewayId: 'gw-1', question: 'q' });
+  assert.equal(relay.cancelPendingDecision('inst-settled', 'gw-1', 'conduit-push-after-answer'), 'cancelled');
+  relay.savePendingDecision({ id: 'conduit-push-after-cancel', installationId: 'inst-settled', gatewayId: 'gw-1', question: 'q' });
+  assert.equal(Object.keys(relay.data.pendingDecisions).length, 3);
   assert.deepEqual(relay.pendingDecisionStatus('inst-settled', 'gw-1', 'conduit-push-settled-0'), { status: 'answered', answer: 'kept answer' });
-  assert.equal(relay.respondPendingDecision('inst-settled', 'gw-1', 'conduit-push-settled-1', 'late').outcome, 'released');
-  assert.deepEqual(relay.pendingDecisionStatus('inst-settled', 'gw-1', 'conduit-push-settled-31'), { status: 'pending', deliverable: true });
+  assert.equal(relay.respondPendingDecision('inst-settled', 'gw-1', 'conduit-push-after-answer', 'late').outcome, 'released');
 });
 
-test('global pending decision limit rejects new tenants without evicting a live decision', () => {
+test('a partial batch remains active until its final question is answered', () => {
+  const relay = store({ activePerInstallation: 1, activeGlobal: 1, retainedPerInstallation: 4, retainedGlobal: 4 });
+  relay.savePendingDecision({ id: 'conduit-push-partial', installationId: 'inst-batch', gatewayId: 'gw-1', questions: [
+    { qid: 'q0', question: 'First?', choices: ['a'] }, { qid: 'q1', question: 'Second?', choices: ['b'] },
+  ] });
+  relay.respondPendingDecision('inst-batch', 'gw-1', 'conduit-push-partial', 'a', 'q0');
+  assert.throws(() => relay.savePendingDecision({ id: 'conduit-push-blocked', installationId: 'inst-batch', gatewayId: 'gw-1', question: 'q' }), { code: 'decision_capacity_exceeded' });
+  assert.deepEqual(relay.pendingDecisionStatus('inst-batch', 'gw-1', 'conduit-push-partial').remaining, ['q1']);
+  relay.respondPendingDecision('inst-batch', 'gw-1', 'conduit-push-partial', 'b', 'q1');
+  assert.equal(relay.savePendingDecision({ id: 'conduit-push-after-batch', installationId: 'inst-batch', gatewayId: 'gw-1', question: 'q' }), true);
+});
+
+test('per-installation retained cap rejects without dropping locks or blocking another installation', () => {
+  const limits = { activePerInstallation: 3, activeGlobal: 3, retainedPerInstallation: 2, retainedGlobal: 4 };
+  const path = join(dir, `store-retained-${Math.random().toString(36).slice(2)}.json`);
+  const relay = new RelayStore(path, limits);
+  relay.savePendingDecision({ id: 'conduit-push-answer-lock', installationId: 'inst-retain', gatewayId: 'gw-1', question: 'q' });
+  relay.respondPendingDecision('inst-retain', 'gw-1', 'conduit-push-answer-lock', 'preserved');
+  relay.savePendingDecision({ id: 'conduit-push-cancel-lock', installationId: 'inst-retain', gatewayId: 'gw-1', question: 'q' });
+  relay.cancelPendingDecision('inst-retain', 'gw-1', 'conduit-push-cancel-lock');
+  assert.throws(() => relay.savePendingDecision({ id: 'conduit-push-retained-over', installationId: 'inst-retain', gatewayId: 'gw-1', question: 'q' }), { code: 'decision_capacity_exceeded', status: 429 });
+  const reloaded = new RelayStore(path, limits);
+  assert.deepEqual(reloaded.pendingDecisionStatus('inst-retain', 'gw-1', 'conduit-push-answer-lock'), { status: 'answered', answer: 'preserved' });
+  assert.equal(reloaded.respondPendingDecision('inst-retain', 'gw-1', 'conduit-push-cancel-lock', 'late').outcome, 'released');
+  assert.equal(reloaded.savePendingDecision({ id: 'conduit-push-other-install', installationId: 'inst-other', gatewayId: 'gw-1', question: 'q' }), true);
+});
+
+test('global retained cap counts settled records across installations', () => {
+  const relay = store({ activePerInstallation: 4, activeGlobal: 4, retainedPerInstallation: 4, retainedGlobal: 2 });
+  for (let i = 0; i < 2; i += 1) {
+    const installationId = `inst-retained-${i}`;
+    const id = `conduit-push-retained-${i}`;
+    relay.savePendingDecision({ id, installationId, gatewayId: 'gw-1', question: 'q' });
+    relay.respondPendingDecision(installationId, 'gw-1', id, `answer-${i}`);
+  }
+  assert.throws(() => relay.savePendingDecision({ id: 'conduit-push-global-retained-over', installationId: 'inst-retained-new', gatewayId: 'gw-1', question: 'q' }), { code: 'decision_capacity_exceeded', status: 429 });
+  assert.deepEqual(relay.pendingDecisionStatus('inst-retained-0', 'gw-1', 'conduit-push-retained-0'), { status: 'answered', answer: 'answer-0' });
+});
+
+test('pruning removes malformed timestamps and null records but preserves valid timestamps', () => {
+  const relay = store();
+  relay.data.pendingDecisions.bad = null;
+  relay.data.pendingDecisions.nan = { createdAt: 'not-a-time' };
+  relay.data.pendingDecisions.infinite = { createdAt: Infinity };
+  relay.data.pendingDecisions.valid = { createdAt: Date.now(), installationId: 'i' };
+  relay.prune();
+  assert.deepEqual(Object.keys(relay.data.pendingDecisions), ['valid']);
+});
+
+test('global active decision limit rejects new tenants without evicting a live decision', () => {
   const relay = store();
   for (let i = 0; i < 256; i += 1) {
     relay.savePendingDecision({ id: `conduit-push-${i}`, installationId: `inst-${i}`, gatewayId: 'gw-1', question: 'q' });

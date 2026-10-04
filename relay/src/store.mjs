@@ -24,10 +24,21 @@ const defaultPreferences = Object.freeze({
 
 const MAX_PENDING_DECISIONS = 256;
 const MAX_PENDING_DECISIONS_PER_INSTALLATION = 32;
+const MAX_RETAINED_DECISIONS = 1024;
+const MAX_RETAINED_DECISIONS_PER_INSTALLATION = 128;
 
 export class RelayStore {
-  constructor(path) {
+  constructor(path, limits = {}) {
     this.path = path;
+    this.decisionLimits = {
+      activeGlobal: limits.activeGlobal ?? MAX_PENDING_DECISIONS,
+      activePerInstallation: limits.activePerInstallation ?? MAX_PENDING_DECISIONS_PER_INSTALLATION,
+      retainedGlobal: limits.retainedGlobal ?? MAX_RETAINED_DECISIONS,
+      retainedPerInstallation: limits.retainedPerInstallation ?? MAX_RETAINED_DECISIONS_PER_INSTALLATION,
+    };
+    for (const limit of Object.values(this.decisionLimits)) {
+      if (!Number.isSafeInteger(limit) || limit <= 0) throw new TypeError('Decision limits must be positive integers.');
+    }
     this.data = { version: 1, installations: {}, pairings: {}, eventIds: {}, pendingDecisions: {} };
     this.load();
   }
@@ -365,12 +376,16 @@ export class RelayStore {
 
   assertPendingDecisionCapacity(installationId, key = undefined) {
     this.prune();
-    const decisions = Object.entries(this.data.pendingDecisions);
     if (key && this.data.pendingDecisions[key]) return true;
-    const installationCount = decisions.filter(([, decision]) => decision.installationId === installationId).length;
-    if (decisions.length >= MAX_PENDING_DECISIONS || installationCount >= MAX_PENDING_DECISIONS_PER_INSTALLATION) {
+    const decisions = Object.entries(this.data.pendingDecisions);
+    const installationDecisions = decisions.filter(([, decision]) => decision?.installationId === installationId);
+    const active = decisions.filter(([, decision]) => decisionIsActive(decision));
+    const installationActive = installationDecisions.filter(([, decision]) => decisionIsActive(decision));
+    if (active.length >= this.decisionLimits.activeGlobal || installationActive.length >= this.decisionLimits.activePerInstallation
+      || decisions.length >= this.decisionLimits.retainedGlobal || installationDecisions.length >= this.decisionLimits.retainedPerInstallation) {
       const error = new Error('decision_capacity_exceeded');
       error.code = 'decision_capacity_exceeded';
+      error.status = 429;
       throw error;
     }
     return true;
@@ -505,9 +520,19 @@ export class RelayStore {
     // default 3600s); 2h covers drift and unlimited-config edge cases while
     // still bounding the store.
     for (const [key, decision] of Object.entries(this.data.pendingDecisions ?? {})) {
-      if (Number(decision.createdAt) < now - 2 * 60 * 60_000) delete this.data.pendingDecisions[key];
+      const createdAt = decision && typeof decision === 'object' ? Number(decision.createdAt) : NaN;
+      if (!Number.isFinite(createdAt) || createdAt < now - 2 * 60 * 60_000) delete this.data.pendingDecisions[key];
     }
   }
+}
+
+function decisionIsActive(decision) {
+  if (!decision || typeof decision !== 'object' || decision.cancelledAt) return false;
+  if (decision.answer !== undefined) return false;
+  const questions = Array.isArray(decision.questions) ? decision.questions : [];
+  if (!questions.length) return true;
+  const answers = decision.answers ?? {};
+  return questions.some((question) => !Object.hasOwn(answers, question.qid));
 }
 
 export function normalizePreferences(value = {}) {

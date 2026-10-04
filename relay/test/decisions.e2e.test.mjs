@@ -36,6 +36,8 @@ const throwDataPath = join(dir, 'relay-data-throw.json');
 const deadDataPath = join(dir, 'relay-data-dead.json');
 const capacityPort = port + 2500;
 const capacityDataPath = join(dir, 'relay-data-capacity.json');
+const installationCapacityPort = port + 3500;
+const installationCapacityDataPath = join(dir, 'relay-data-installation-capacity.json');
 // Where the dead-origin relay's REAL APNs transport points; resolved in
 // before() by reserving and releasing a loopback port.
 let deadOriginPort;
@@ -600,6 +602,35 @@ test('full decision capacity rejects before event persistence and leaves another
   assert.deepEqual((await api(`http://127.0.0.1:${capacityPort}`, `/v1/decisions/${victimId}`, {
     credential: victim.gatewayCredential,
   })).json, { status: 'answered', answer: 'Yes' });
+});
+
+test('per-installation active capacity returns 429 and retry succeeds after an answer releases a slot', async () => {
+  const seed = new RelayStore(installationCapacityDataPath);
+  const registered = seed.createInstallation({ bundleId: 'com.milim.relay', deviceToken: 'e'.repeat(64), environment: 'production' });
+  const pairing = seed.createPairing(registered.installation.id);
+  const gateway = seed.claimPairing(pairing.code, 'capacity gateway');
+  for (let i = 0; i < 32; i += 1) {
+    seed.savePendingDecision({
+      id: `conduit-push-install-${i}`, installationId: registered.installation.id,
+      gatewayId: gateway.gatewayId, question: 'Seed?',
+    });
+  }
+  children.push(await startRelay(installationCapacityPort, 'accept', installationCapacityDataPath));
+  const base = `http://127.0.0.1:${installationCapacityPort}`;
+  const event = {
+    type: 'input.needed', event_id: 'input:install-capacity', session_id: 'sess-1', profile: 'default',
+    decision: { kind: 'clarify', request_id: 'conduit-push-install-over', question: 'Overflow?', choices: ['Yes'] },
+  };
+  const rejected = await api(base, '/v1/events', { method: 'POST', credential: `${registered.installation.id}.${gateway.gatewayId}.${gateway.gatewaySecret}`, body: event });
+  assert.equal(rejected.status, 429);
+  assert.deepEqual(rejected.json, { error: 'decision_capacity_exceeded' });
+  const answer = await api(base, '/v1/decisions/conduit-push-install-0', {
+    method: 'POST', credential: `${registered.installation.id}.${registered.deviceSecret}`, body: { answer: 'Done' },
+  });
+  assert.equal(answer.status, 200);
+  const retried = await api(base, '/v1/events', { method: 'POST', credential: `${registered.installation.id}.${gateway.gatewayId}.${gateway.gatewaySecret}`, body: event });
+  assert.equal(retried.status, 202);
+  assert.equal(retried.json.accepted, true);
 });
 
 test('decision_cards=false still delivers the plain banner and parks the decision undeliverable', async () => {

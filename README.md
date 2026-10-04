@@ -189,18 +189,25 @@ stays open until the gateway's configured clarify timeout bounds it.
 
 ### Decision retention limits
 
-The relay retains up to 32 unexpired decision records per installation and
-256 across the relay. Answered and cancelled records count toward these
-limits and remain available until the two-hour decision TTL expires. Retaining
-them preserves gateway answer retrieval and the first-answer/release locks;
-the relay does not reclaim settled records before expiry.
+The relay allows up to 32 active unresolved decisions per installation and
+256 across the relay. A scalar decision is active until answered or cancelled;
+a batch remains active until every question is answered or the decision is
+cancelled. Completed and cancelled decisions preserve their answers and locks
+for the two-hour decision TTL, within separate retained-record caps of 128 per
+installation and 1024 across the relay. Active decisions count toward both
+retained caps. Since settled records stay for two hours, those retained caps
+also impose a maximum admission throughput of 64 records per installation per
+hour and 512 records per hour across the relay, averaged over a full retention
+window.
 
-When either limit is full, a new clarify event receives HTTP `429`
+When any limit is full, a new clarify event receives HTTP `429`
 `decision_capacity_exceeded`. The relay sends no push and does not consume the
 event ID, so the event can be retried after capacity becomes available.
 Existing decisions remain answerable, pollable, and cancellable while the
-relay is at capacity. The plugin can use Hermes' native clarify path as its
-existing fallback when relay delivery is rejected.
+relay is at capacity. The shipped plugin logs the 429 rejection and keeps
+Hermes' native clarify path available; it does not automatically retry a
+rejected event. Before acceptance, the same event ID may be explicitly retried
+after capacity becomes available.
 
 ## Gemini Live tokens
 
