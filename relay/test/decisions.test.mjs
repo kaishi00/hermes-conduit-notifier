@@ -117,6 +117,34 @@ test('installation update preflight preserves explicit enablement for legacy pre
   assert.equal(relay.data.installations[created.installation.id].preferences.enabled, true);
 });
 
+test('response preflight matches scalar, batch-first, duplicate, invalid, released, and unknown outcomes', () => {
+  const relay = store();
+  relay.savePendingDecision({ id: 'conduit-push-scalar', installationId: 'inst-r', gatewayId: 'gw-r', question: 'Scalar?' });
+  relay.savePendingDecision({ id: 'conduit-push-answered', installationId: 'inst-r', gatewayId: 'gw-r', question: 'Done?' });
+  relay.respondPendingDecision('inst-r', 'gw-r', 'conduit-push-answered', 'yes');
+  relay.savePendingDecision({ id: 'conduit-push-batch-preflight', installationId: 'inst-r', gatewayId: 'gw-r', question: 'First?', questions: [
+    { qid: 'q0', question: 'First?', choices: ['a'] },
+    { qid: 'q1', question: 'Second?', choices: ['b'] },
+  ] });
+  relay.respondPendingDecision('inst-r', 'gw-r', 'conduit-push-batch-preflight', 'a', 'q0');
+  relay.savePendingDecision({ id: 'conduit-push-released', installationId: 'inst-r', gatewayId: 'gw-r', question: 'Released?' });
+  relay.cancelPendingDecision('inst-r', 'gw-r', 'conduit-push-released');
+  relay.savePendingDecision({ id: 'conduit-push-corrupt-time', installationId: 'inst-r', gatewayId: 'gw-r', question: 'Corrupt time?' });
+  relay.data.pendingDecisions[RelayStore.decisionKey('inst-r', 'gw-r', 'conduit-push-corrupt-time')].createdAt = Number.NaN;
+  const before = JSON.stringify(relay.data.pendingDecisions);
+
+  assert.equal(relay.wouldRespondPendingDecision('inst-r', 'gw-r', 'conduit-push-scalar', 'ignored-qid'), true, 'scalar responses ignore question ids');
+  assert.equal(relay.wouldRespondPendingDecision('inst-r', 'gw-r', 'conduit-push-answered'), false);
+  assert.equal(relay.wouldRespondPendingDecision('inst-r', 'gw-r', 'conduit-push-batch-preflight'), false, 'omitted qid targets the already-answered first batch question');
+  assert.equal(relay.wouldRespondPendingDecision('inst-r', 'gw-r', 'conduit-push-batch-preflight', 'q0'), false);
+  assert.equal(relay.wouldRespondPendingDecision('inst-r', 'gw-r', 'conduit-push-batch-preflight', 'q1'), true);
+  assert.equal(relay.wouldRespondPendingDecision('inst-r', 'gw-r', 'conduit-push-batch-preflight', 'q9'), false);
+  assert.equal(relay.wouldRespondPendingDecision('inst-r', 'gw-r', 'conduit-push-released'), false);
+  assert.equal(relay.wouldRespondPendingDecision('inst-r', 'gw-r', 'conduit-push-missing'), false);
+  assert.equal(relay.wouldRespondPendingDecision('inst-r', 'gw-r', 'conduit-push-corrupt-time'), false);
+  assert.equal(JSON.stringify(relay.data.pendingDecisions), before, 'preflight reads state without mutating it');
+});
+
 test('event dedupe is gateway-scoped: same event id from different gateways both accepted', () => {
   const relay = store();
   assert.equal(relay.acceptEvent('inst-1', 'approval:42', 'gw-A'), true);

@@ -455,6 +455,19 @@ export class RelayStore {
     return true;
   }
 
+  wouldRespondPendingDecision(installationId, gatewayId, id, questionId = '') {
+    const decision = this.data.pendingDecisions[RelayStore.decisionKey(installationId, gatewayId, id)];
+    const createdAt = Number(decision?.createdAt);
+    if (!decision || !Number.isFinite(createdAt) || createdAt < Date.now() - 2 * 60 * 60_000) return false;
+    if (decision.cancelledAt || decision.answer !== undefined) return false;
+    const batchQuestions = decisionQuestions(decision);
+    if (!batchQuestions.length) return true;
+    const target = questionId || batchQuestions[0].qid;
+    if (!batchQuestions.some((question) => question.qid === target)) return false;
+    const answers = decision.answers ?? {};
+    return !Object.hasOwn(answers, target);
+  }
+
   respondPendingDecision(installationId, gatewayId, id, answer, questionId = '') {
     this.prune();
     const decision = this.data.pendingDecisions[RelayStore.decisionKey(installationId, gatewayId, id)];

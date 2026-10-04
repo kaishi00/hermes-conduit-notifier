@@ -50,16 +50,32 @@ writeFileSync(keyPath, privateKey.export({ type: 'sec1', format: 'pem' }));
 
 const children = [];
 
-async function api(base, path, { method = 'GET', body, credential } = {}) {
+async function api(base, path, { method = 'GET', body, credential, headers: extraHeaders } = {}) {
   const response = await fetch(`${base}${path}`, {
     method,
     headers: {
       ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
       ...(credential ? { authorization: `Bearer ${credential}` } : {}),
+      ...extraHeaders,
     },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   return { status: response.status, json: await response.json().catch(() => null) };
+}
+
+async function stopRelay(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const waitForExit = (timeoutMs) => new Promise((resolve) => {
+    if (child.exitCode !== null || child.signalCode !== null) { resolve(true); return; }
+    const onExit = () => { clearTimeout(timer); resolve(true); };
+    const timer = setTimeout(() => { child.off('exit', onExit); resolve(false); }, timeoutMs);
+    timer.unref?.();
+    child.once('exit', onExit);
+  });
+  child.kill('SIGTERM');
+  if (await waitForExit(5_000)) return;
+  child.kill('SIGKILL');
+  if (!await waitForExit(2_000)) throw new Error('relay did not stop after SIGKILL');
 }
 
 // Reserve a loopback port and release it: connecting there must be refused,
@@ -141,12 +157,12 @@ test('authenticated installation updates are rate limited', async () => {
     assert.equal(last.status, 429);
     assert.equal(last.json.error, 'rate_limited');
   } finally {
-    child.kill('SIGTERM');
+    await stopRelay(child);
   }
 });
 
 test('registration flood stays bounded without consuming authenticated event capacity', async () => {
-  const aPort = 25000 + Math.floor(Math.random() * 1000);
+  const aPort = await closedPort();
   const isolatedPath = join(dir, 'relay-data-global-budget.json');
   const fixture = new RelayStore(isolatedPath);
   const created = fixture.createInstallation({ bundleId: 'com.milim.relay', deviceToken: 'c'.repeat(64), environment: 'production' });
@@ -185,12 +201,12 @@ test('registration flood stays bounded without consuming authenticated event cap
     });
     assert.equal(answered.status, 200, 'decision answers use their separate authenticated control budget');
   } finally {
-    child.kill('SIGTERM');
+    await stopRelay(child);
   }
 });
 
 test('invalid and per-client-limited registration or claim requests cannot starve authenticated intake', async () => {
-  const aPort = 28000 + Math.floor(Math.random() * 1000);
+  const aPort = await closedPort();
   const isolatedPath = join(dir, 'relay-data-invalid-ingress.json');
   const fixture = new RelayStore(isolatedPath);
   const created = fixture.createInstallation({ bundleId: 'com.milim.relay', deviceToken: 'e'.repeat(64), environment: 'production' });
@@ -219,12 +235,12 @@ test('invalid and per-client-limited registration or claim requests cannot starv
     });
     assert.equal(result.status, 202, 'invalid or rate-limited public requests must not spend the global ingress budget');
   } finally {
-    child.kill('SIGTERM');
+    await stopRelay(child);
   }
 });
 
 test('authenticated invalid or locally limited writes do not spend the shared ingress budget', async () => {
-  const aPort = 29000 + Math.floor(Math.random() * 1000);
+  const aPort = await closedPort();
   const isolatedPath = join(dir, 'relay-data-invalid-authenticated-ingress.json');
   const fixture = new RelayStore(isolatedPath);
   const first = fixture.createInstallation({ bundleId: 'com.milim.relay', deviceToken: 'f'.repeat(64), environment: 'production' });
@@ -257,12 +273,12 @@ test('authenticated invalid or locally limited writes do not spend the shared in
     });
     assert.equal(result.status, 202, 'validation and local quota failures must not spend the shared ingress budget');
   } finally {
-    child.kill('SIGTERM');
+    await stopRelay(child);
   }
 });
 
 test('revocation budget leaves decision answer and release actions available', async () => {
-  const aPort = 26000 + Math.floor(Math.random() * 1000);
+  const aPort = await closedPort();
   const isolatedPath = join(dir, 'relay-data-control-budget.json');
   const installations = {};
   const credentials = [];
@@ -312,12 +328,12 @@ test('revocation budget leaves decision answer and release actions available', a
     const released = await api(base, '/v1/decisions/conduit-push-control2', { method: 'DELETE', credential: credentials.find((credential) => credential.startsWith(`00000000-0000-4000-8000-000000000008.${secondGateway}.`)) });
     assert.equal(released.status, 200, 'revocation flood must leave decision release available');
   } finally {
-    child.kill('SIGTERM');
+    await stopRelay(child);
   }
 });
 
 test('no-op updates and metadata-free duplicates leave authenticated ingress capacity available', async () => {
-  const aPort = 25500 + Math.floor(Math.random() * 1000);
+  const aPort = await closedPort();
   const isolatedPath = join(dir, 'relay-data-noop-ingress.json');
   const fixture = new RelayStore(isolatedPath);
   const targets = [];
@@ -372,12 +388,97 @@ test('no-op updates and metadata-free duplicates leave authenticated ingress cap
     assert.equal(event97.status, 429);
     assert.equal(event97.json.error, 'rate_limited');
   } finally {
-    child.kill('SIGTERM');
+    await stopRelay(child);
+  }
+});
+
+test('non-mutating decision responses do not consume the shared decision budget', async () => {
+  const aPort = await closedPort();
+  const isolatedPath = join(dir, 'relay-data-noop-decision-budget.json');
+  const fixture = new RelayStore(isolatedPath);
+  const targets = [];
+  for (let index = 0; index < 7; index += 1) {
+    const created = fixture.createInstallation({ bundleId: 'com.milim.relay', deviceToken: String(index + 2).repeat(64), environment: 'production' });
+    const pairing = fixture.createPairing(created.installation.id);
+    const claim = fixture.claimPairing(pairing.code, `response quota ${index}`);
+    targets.push({ created, claim, deviceCredential: `${created.installation.id}.${created.deviceSecret}`, gatewayCredential: `${created.installation.id}.${claim.gatewayId}.${claim.gatewaySecret}` });
+  }
+  const answeredId = 'conduit-push-already-answered';
+  fixture.savePendingDecision({ id: answeredId, installationId: targets[1].created.installation.id, gatewayId: targets[1].claim.gatewayId, question: 'Done?' });
+  fixture.respondPendingDecision(targets[1].created.installation.id, targets[1].claim.gatewayId, answeredId, 'yes');
+  const batchId = 'conduit-push-duplicate-first';
+  fixture.savePendingDecision({ id: batchId, installationId: targets[2].created.installation.id, gatewayId: targets[2].claim.gatewayId, question: 'First?', questions: [
+    { qid: 'q0', question: 'First?', choices: ['a'] }, { qid: 'q1', question: 'Second?', choices: ['b'] },
+  ] });
+  fixture.respondPendingDecision(targets[2].created.installation.id, targets[2].claim.gatewayId, batchId, 'a', 'q0');
+  const invalidQidId = 'conduit-push-invalid-qid';
+  fixture.savePendingDecision({ id: invalidQidId, installationId: targets[3].created.installation.id, gatewayId: targets[3].claim.gatewayId, question: 'Batch?', questions: [
+    { qid: 'q0', question: 'First?', choices: ['a'] }, { qid: 'q1', question: 'Second?', choices: ['b'] },
+  ] });
+  const releasedId = 'conduit-push-released-response';
+  fixture.savePendingDecision({ id: releasedId, installationId: targets[4].created.installation.id, gatewayId: targets[4].claim.gatewayId, question: 'Released?' });
+  fixture.cancelPendingDecision(targets[4].created.installation.id, targets[4].claim.gatewayId, releasedId);
+  const answerId = 'conduit-push-valid-after-noops';
+  fixture.savePendingDecision({ id: answerId, installationId: targets[5].created.installation.id, gatewayId: targets[5].claim.gatewayId, question: 'Still answerable?' });
+  const releaseId = 'conduit-push-release-after-noops';
+  fixture.savePendingDecision({ id: releaseId, installationId: targets[6].created.installation.id, gatewayId: targets[6].claim.gatewayId, question: 'Still releasable?' });
+
+  const child = await startRelay(aPort, 'accept', isolatedPath, { TRUST_PROXY: '1' });
+  children.push(child);
+  const base = `http://127.0.0.1:${aPort}`;
+  try {
+    for (let index = 0; index < 100; index += 1) {
+      const targetIndex = index % 5;
+      const target = targets[targetIndex];
+      let id;
+      let body;
+      let expectedStatus;
+      if (targetIndex === 0) {
+        id = 'conduit-push-no-such-decision';
+        body = { answer: 'yes', ...(index % 2 === 0 ? { gateway_id: 'missing-gateway' } : {}) };
+        expectedStatus = 404;
+      } else if (targetIndex === 1) {
+        id = answeredId;
+        body = { answer: 'again', gateway_id: target.claim.gatewayId };
+        expectedStatus = 409;
+      } else if (targetIndex === 2) {
+        id = batchId;
+        body = { answer: 'again', gateway_id: target.claim.gatewayId, ...(index % 2 === 0 ? { question_id: 'q0' } : {}) };
+        expectedStatus = 409;
+      } else if (targetIndex === 3) {
+        id = invalidQidId;
+        body = { answer: 'bad-qid', gateway_id: target.claim.gatewayId, question_id: 'q9' };
+        expectedStatus = 400;
+      } else {
+        id = releasedId;
+        body = { answer: 'late', gateway_id: target.claim.gatewayId };
+        expectedStatus = 410;
+      }
+      const result = await api(base, `/v1/decisions/${id}/respond`, {
+        method: 'POST', credential: target.deviceCredential, body,
+        headers: { 'x-forwarded-for': `10.12.0.${targetIndex + 1}` },
+      });
+      assert.equal(result.status, expectedStatus);
+    }
+
+    const answered = await api(base, `/v1/decisions/${answerId}/respond`, {
+      method: 'POST', credential: targets[5].deviceCredential,
+      body: { answer: 'yes', gateway_id: targets[5].claim.gatewayId },
+      headers: { 'x-forwarded-for': '10.12.0.6' },
+    });
+    assert.equal(answered.status, 200, '100 non-mutating responses leave the budget for a real answer');
+    const released = await api(base, `/v1/decisions/${releaseId}`, {
+      method: 'DELETE', credential: targets[6].gatewayCredential,
+      headers: { 'x-forwarded-for': '10.12.0.7' },
+    });
+    assert.equal(released.status, 200, 'a valid release also remains available');
+  } finally {
+    await stopRelay(child);
   }
 });
 
 test('a full installation store rejects a valid registration before charging its public budget', async () => {
-  const aPort = 26500 + Math.floor(Math.random() * 1000);
+  const aPort = await closedPort();
   const isolatedPath = join(dir, 'relay-data-full-registration-capacity.json');
   const installations = {};
   for (let index = 0; index < 1024; index += 1) {
@@ -404,12 +505,12 @@ test('a full installation store rejects a valid registration before charging its
     }
     assert.equal(readFileSync(isolatedPath, 'utf8'), before, 'rejected registrations do not rewrite the full store');
   } finally {
-    child.kill('SIGTERM');
+    await stopRelay(child);
   }
 });
 
 test('global event capacity rejects before recording plugin metadata or a new event ID', async () => {
-  const aPort = 27000 + Math.floor(Math.random() * 1000);
+  const aPort = await closedPort();
   const isolatedPath = join(dir, 'relay-data-event-capacity.json');
   const relayStore = new RelayStore(isolatedPath);
   let target;
@@ -445,7 +546,7 @@ test('global event capacity rejects before recording plugin metadata or a new ev
     assert.equal(persisted.eventIds[`${target.installation.id}:${target.claim.gatewayId}:plugin:capacity-new`], undefined);
     assert.equal(persisted.installations[target.installation.id].gateways[target.claim.gatewayId].pluginVersion, undefined);
   } finally {
-    child.kill('SIGTERM');
+    await stopRelay(child);
   }
 });
 

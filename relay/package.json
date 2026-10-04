@@ -8,6 +8,7 @@
   },
   "scripts": {
     "start": "node src/server.mjs",
+    "storage:status": "node src/storage-status.mjs",
     "test": "node --test"
   }
 }

@@ -114,6 +114,26 @@ The relay listens on port 9120. Put it behind an HTTPS reverse proxy (the relay 
 
 See [`relay/deploy/.env.example`](relay/deploy/.env.example) for all required environment variables.
 
+Check retained installation capacity without changing the data file. From the
+repository root, pass the mounted JSON path directly:
+
+```shell
+node relay/src/storage-status.mjs relay/deploy/data/relay.json
+```
+
+Or, from `relay/deploy`, inspect the running Compose service:
+
+```shell
+docker compose exec conduit-push npm run --silent storage:status
+```
+
+The command prints only total, active, inactive, and maximum installation
+counts. Inactive installations remain in the store and still consume slots:
+automatic APNs deactivation and repeated uninstall/reinstall cycles can use up
+the 1,024 retained-record limit. Review counts before scheduling offline data
+maintenance; the relay never deletes installation records or their
+credentials automatically.
+
 ### Relay API
 
 | Method | Path | Purpose |
@@ -142,20 +162,24 @@ intake share a separate 96-request-per-minute budget. Together these reserve
 120 mutation admissions per minute without letting public registration drain
 event capacity. Existing per-installation and per-client limits still apply;
 validation and capacity rejection happen before shared budget charging.
+Authenticated update, pairing, or event churn can consume the shared ingress
+pool and temporarily block other events until its window resets.
 Unchanged device updates and already-accepted events without plugin metadata
 do not consume the ingress budget or rewrite the store. A duplicate carrying
 plugin metadata still records that gateway's plugin state and uses the budget.
 
-Decision answers and releases share a separate process-wide budget of 96
-actions per minute. Installation deactivation and gateway revocation share
-another 24-action-per-minute budget, so revocation traffic cannot exhaust the
-answer/release quota. These are admission limits, not literal file-write
-counts: one event can make up to five full-store saves while recording plugin
-state, parking a decision, and handling an APNs failure. Health checks and
-decision polling consume none of these four budgets. Device updates remain
-limited to 30 requests per minute per installation, including unchanged
-updates. Repeated decision cancellation does not rewrite the store or use
-the shared decision budget, though its per-gateway limit still applies.
+State-changing decision answers and releases share a separate process-wide
+budget of 96 actions per minute. Unknown, released, invalid-question, and
+already-answered responses do not consume it. Installation deactivation and
+gateway revocation share another 24-action-per-minute budget, so revocation
+traffic cannot exhaust the answer/release quota or block the native clarify
+path. These are admission limits, not literal file-write counts: one event can
+make up to five full-store saves while recording plugin state, parking a
+decision, and handling an APNs failure. Health checks and decision polling
+consume none of these four budgets. Device updates remain limited to 30
+requests per minute per installation, including unchanged updates. Repeated
+decision cancellation does not rewrite the store or use the shared decision
+budget, though its per-gateway limit still applies.
 
 Run exactly one relay process/replica per `DATA_PATH`. The relay caches its
 state and rewrites the whole JSON file; atomic replacement does not coordinate

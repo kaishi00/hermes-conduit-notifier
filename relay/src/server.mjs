@@ -352,7 +352,6 @@ async function route(request, response) {
     const body = await readJson(request);
     const answer = cleanText(body.answer, 2000);
     if (!answer) return sendJson(response, 400, { error: 'invalid_answer' });
-    enforceDecisionBudget();
     // question_id scopes the answer to ONE question of a batch decision
     // (first-answer-wins per qid, other qids stay open); its absence keeps
     // the legacy whole-decision shape for single-question cards.
@@ -366,11 +365,13 @@ async function route(request, response) {
     let result;
     const responseGatewayId = cleanIdentifier(body.gateway_id, 80);
     if (responseGatewayId) {
+      if (store.wouldRespondPendingDecision(installation.id, responseGatewayId, id, questionId)) enforceDecisionBudget();
       result = store.respondPendingDecision(installation.id, responseGatewayId, id, answer, questionId);
     } else {
       // Legacy: resolve {installation, request id} without a discriminator.
       const legacy = store.resolveLegacyRespond(installation.id, id);
       if (legacy.resolution === 'unique') {
+        if (store.wouldRespondPendingDecision(installation.id, legacy.gatewayId, id, questionId)) enforceDecisionBudget();
         result = store.respondPendingDecision(installation.id, legacy.gatewayId, id, answer, questionId);
       } else if (legacy.resolution === 'ambiguous') {
         return sendJson(response, 400, { error: 'ambiguous_decision' });
