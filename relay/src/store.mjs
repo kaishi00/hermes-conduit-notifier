@@ -26,8 +26,14 @@ const MAX_PENDING_DECISIONS = 256;
 const MAX_PENDING_DECISIONS_PER_INSTALLATION = 32;
 
 export class RelayStore {
-  constructor(path) {
+  constructor(path, limits = {}) {
     this.path = path;
+    this.limits = {
+      maxInstallations: limits.maxInstallations ?? MAX_INSTALLATIONS,
+      maxGatewaysPerInstallation: limits.maxGatewaysPerInstallation ?? MAX_GATEWAYS_PER_INSTALLATION,
+      maxEventIdsPerInstallation: limits.maxEventIdsPerInstallation ?? MAX_EVENT_IDS_PER_INSTALLATION,
+      maxGlobalEventIds: limits.maxGlobalEventIds ?? MAX_GLOBAL_EVENT_IDS,
+    };
     this.data = { version: 1, installations: {}, pairings: {}, eventIds: {}, pendingDecisions: {} };
     this.load();
   }
@@ -125,6 +131,7 @@ export class RelayStore {
   }
 
   createInstallation({ bundleId, deviceToken, environment, preferences }) {
+    if (Object.keys(this.data.installations).length >= this.limits.maxInstallations) throw capacityError('installation_limit_reached');
     const id = randomUUID();
     const deviceSecret = randomBytes(32).toString('base64url');
     const now = new Date().toISOString();
@@ -161,9 +168,18 @@ export class RelayStore {
   updateInstallation(id, changes) {
     const installation = this.data.installations[id];
     if (!installation) return null;
-    if (changes.deviceToken) installation.deviceToken = changes.deviceToken;
-    if (changes.preferences) installation.preferences = normalizePreferences({ ...installation.preferences, ...changes.preferences });
-    installation.active = changes.active ?? installation.active;
+    const deviceToken = changes.deviceToken || installation.deviceToken;
+    const preferences = changes.preferences
+      ? normalizePreferences({ ...installation.preferences, ...changes.preferences })
+      : installation.preferences;
+    const active = changes.active ?? installation.active;
+    const preferencesChanged = JSON.stringify(preferences) !== JSON.stringify(installation.preferences);
+    if (deviceToken === installation.deviceToken && !preferencesChanged && active === installation.active) {
+      return publicInstallation(installation);
+    }
+    installation.deviceToken = deviceToken;
+    installation.preferences = preferences;
+    installation.active = active;
     installation.updatedAt = new Date().toISOString();
     this.save();
     return publicInstallation(installation);
@@ -202,6 +218,9 @@ export class RelayStore {
     const pairing = this.data.pairings[key];
     if (!pairing) return null;
     const installation = this.data.installations[pairing.installationId];
+    if (installation?.active && Object.keys(installation.gateways ?? {}).length >= this.limits.maxGatewaysPerInstallation) {
+      throw capacityError('gateway_limit_reached');
+    }
     delete this.data.pairings[key];
     if (!installation?.active) { this.save(); return null; }
     const gatewayId = randomUUID();
@@ -231,6 +250,19 @@ export class RelayStore {
     installation.updatedAt = new Date().toISOString();
     this.save();
     return { gatewayId, installationId: installation.id, gatewaySecret };
+  }
+
+  canClaimPairing(code) {
+    const key = hashSecret(normalizeCode(code));
+    const pairing = this.data.pairings[key];
+    const expiresAt = Date.parse(pairing?.expiresAt);
+    if (!pairing || !Number.isFinite(expiresAt) || expiresAt <= Date.now()) return false;
+    const installation = this.data.installations[pairing.installationId];
+    if (!installation?.active) return false;
+    if (Object.keys(installation.gateways ?? {}).length >= this.limits.maxGatewaysPerInstallation) {
+      throw capacityError('gateway_limit_reached');
+    }
+    return true;
   }
 
   // ── Gateway plugin compatibility (Settings > Notifications) ─────────
@@ -268,6 +300,7 @@ export class RelayStore {
     // event swallow another's.
     const key = `${installationId}:${gatewayId}:${eventId}`;
     if (this.data.eventIds[key]) return false;
+    this.assertEventCapacity(installationId, eventId, gatewayId);
     this.data.eventIds[key] = Date.now();
     // Last-seen is stamped on every accepted event, version-carrying or not,
     // so /v1/meta can distinguish "gateway never reported a plugin version
@@ -284,6 +317,19 @@ export class RelayStore {
   hasAcceptedEvent(installationId, eventId, gatewayId) {
     this.prune();
     return Boolean(this.data.eventIds[`${installationId}:${gatewayId}:${eventId}`]);
+  }
+
+  assertEventCapacity(installationId, eventId, gatewayId) {
+    this.prune();
+    const eventKey = `${installationId}:${gatewayId}:${eventId}`;
+    if (this.data.eventIds[eventKey]) return false;
+    const prefix = `${installationId}:`;
+    let count = 0;
+    for (const key of Object.keys(this.data.eventIds)) if (key.startsWith(prefix)) count += 1;
+    if (count >= this.limits.maxEventIdsPerInstallation || Object.keys(this.data.eventIds).length >= this.limits.maxGlobalEventIds) {
+      throw capacityError('event_limit_reached');
+    }
+    return true;
   }
 
   // ── Pending decisions (clarify answer loop) ─────────────────────────
@@ -464,6 +510,7 @@ export class RelayStore {
     if (this.pendingDecisionStatus(installationId, gatewayId, id).status === 'answered') {
       return 'answered';
     }
+    if (decision.cancelledAt) return 'cancelled';
     decision.cancelledAt = Date.now();
     this.save();
     return 'cancelled';
@@ -509,6 +556,20 @@ export class RelayStore {
     }
   }
 }
+
+function capacityError(code) {
+  const error = new Error(code);
+  error.status = 429;
+  return error;
+}
+
+// Hard bounds on persistent records. Existing files are intentionally loaded
+// intact; operators must remove/revoke records explicitly before new admission
+// when a legacy store is already above a limit.
+export const MAX_INSTALLATIONS = 1_024;
+export const MAX_GATEWAYS_PER_INSTALLATION = 16;
+export const MAX_EVENT_IDS_PER_INSTALLATION = 512;
+export const MAX_GLOBAL_EVENT_IDS = 8_192;
 
 export function normalizePreferences(value = {}) {
   return Object.fromEntries(Object.entries(defaultPreferences).map(([key, fallback]) => [key, typeof value[key] === 'boolean' ? value[key] : fallback]));

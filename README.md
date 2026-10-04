@@ -127,6 +127,34 @@ See [`relay/deploy/.env.example`](relay/deploy/.env.example) for all required en
 | POST | `/v1/events` | Deliver a notification event |
 | DELETE | `/v1/gateways/current` | Revoke a gateway credential |
 
+The relay bounds persistent admission at 1,024 installations, 16 gateways per
+installation, 512 retained event IDs per installation, and 8,192 event IDs
+across the whole relay (event IDs expire after 24 hours). New records are
+rejected with HTTP 429 when a bound is full; the relay does not evict existing
+credentials or event owners. An installation already above a limit when
+upgraded keeps all its current records, but cannot add records of that kind
+until the operator performs reviewed data maintenance while the relay is
+stopped, preserving active credentials and unexpired event IDs.
+
+Registration, authenticated device updates, pairing creation/claim, and event
+intake share a process-wide limit of 120 requests per minute, in addition to
+their per-installation or per-client limits. This bounds aggregate write
+admission even when requests use many installations or source IPs. Invalid
+registrations and non-live pairing claims are rejected before they use this
+shared budget. Event handling can persist up to five times for one request
+when it records plugin state, parks a decision, and handles an APNs failure,
+so ingress can cause at most 600 full-store writes per minute in that
+exceptional case.
+
+Authenticated decision answers, cancellations, installation deactivation, and
+gateway revocation use a separate process-wide limit of 120 actions per
+minute. This keeps control actions available when ingress is full and bounds
+their own store writes; together, the two budgets cap the documented paths at
+720 full-store writes per minute. Health checks and decision polling do not
+consume either budget. Authenticated device updates are limited to 30 requests
+per minute per installation, and unchanged updates and repeated decision
+cancellation do not rewrite the store.
+
 ## Batch clarify decisions (plugin 0.3+)
 
 Current Hermes lets one `clarify` call ask several questions
