@@ -132,7 +132,40 @@ counts. Inactive installations remain in the store and still consume slots:
 automatic APNs deactivation and repeated uninstall/reinstall cycles can use up
 the 1,024 retained-record limit. Review counts before scheduling offline data
 maintenance; the relay never deletes installation records or their
-credentials automatically.
+credentials automatically. `DELETE /v1/installations/:id` deactivates an
+installation and does not free its slot.
+
+For offline reclamation, `storage:prune-inactive` previews the number of
+eligible records by default. It removes only installations that have been
+inactive and unchanged for at least 30 days, have no gateway credentials,
+and have no pairing or pending-decision references. Active, recent, legacy
+gateway-bound, and referenced records are preserved; other store sections
+are left unchanged. Malformed state causes a generic failure without writes.
+
+From `relay/deploy`, stop every relay writer before previewing or applying:
+
+```shell
+docker compose stop conduit-push
+docker compose run --rm --no-deps conduit-push npm run --silent storage:prune-inactive
+```
+
+Review the counts, then explicitly apply and restart:
+
+```shell
+docker compose run --rm --no-deps conduit-push npm run --silent storage:prune-inactive -- --apply --relay-stopped
+docker compose start conduit-push
+```
+
+The command creates an exclusive, exact-byte `relay.json.backup-*` beside
+the data file before atomically replacing it. Backups contain credentials
+and private messages: protect them like the original data file. The
+`--relay-stopped` flag acknowledges the offline requirement; it does not
+stop running writers. A byte comparison detects changes before replacement,
+but cannot make concurrent maintenance safe. Preview and zero-eligible runs
+create no backup and change no files. For a direct Node invocation, use
+`node relay/src/storage-prune-inactive.mjs PATH_TO_RELAY_JSON` and the same
+explicit flags when applying. Reclamation is operator-run, never automatic;
+gateway-bound inactive records still require separately reviewed maintenance.
 
 ### Relay API
 

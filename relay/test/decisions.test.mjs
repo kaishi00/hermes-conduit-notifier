@@ -1,5 +1,5 @@
 import { strict as assert } from 'node:assert';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
@@ -13,6 +13,63 @@ after(() => rmSync(dir, { recursive: true, force: true }));
 function store(limits) {
   return new RelayStore(join(dir, `store-${Math.random().toString(36).slice(2)}.json`), limits);
 }
+
+test('storage limits must be positive safe integers before store files are touched', () => {
+  const invalidValues = [0, -1, Number.NaN, 1.5, Number.MAX_SAFE_INTEGER + 1];
+  const limitNames = [
+    'maxInstallations',
+    'maxGatewaysPerInstallation',
+    'maxEventIdsPerInstallation',
+    'maxGlobalEventIds',
+  ];
+
+  for (const limitName of limitNames) {
+    for (const invalidValue of invalidValues) {
+      const path = join(dir, `invalid-${limitName}-${Math.random().toString(36).slice(2)}.json`);
+      assert.throws(
+        () => new RelayStore(path, { [limitName]: invalidValue }),
+        /Storage limits must be positive integers\./,
+        `${limitName}=${String(invalidValue)} must be rejected`,
+      );
+      assert.equal(existsSync(path), false, 'invalid limits must be rejected before loading or creating store state');
+    }
+  }
+});
+
+test('registration with null preferences uses the default preferences', () => {
+  const relay = store();
+  const created = relay.createInstallation({
+    bundleId: 'com.milim.relay', deviceToken: 'n'.repeat(64), environment: 'production', preferences: null,
+  });
+
+  assert.equal(created.installation.preferences.enabled, true);
+  assert.equal(created.installation.preferences.approval_needed, true);
+  assert.equal(created.installation.preferences.show_previews, false);
+  assert.equal(created.installation.preferences.decision_cards, true);
+});
+
+test('loading and pruning malformed pairings removes corrupt entries and preserves a valid future pairing', () => {
+  const path = join(dir, `malformed-pairings-${Math.random().toString(36).slice(2)}.json`);
+  const validKey = 'valid-future';
+  writeFileSync(path, JSON.stringify({
+    version: 1,
+    installations: {},
+    pairings: {
+      nullRecord: null,
+      stringRecord: 'corrupt',
+      invalidDate: { expiresAt: 'not-a-date' },
+      expired: { expiresAt: new Date(Date.now() - 60_000).toISOString() },
+      [validKey]: { installationId: 'inst-future', expiresAt: new Date(Date.now() + 60_000).toISOString() },
+    },
+    eventIds: {},
+    pendingDecisions: {},
+  }));
+
+  const relay = new RelayStore(path);
+
+  assert.deepEqual(Object.keys(relay.data.pairings), [validKey]);
+  assert.equal(relay.data.pairings[validKey].installationId, 'inst-future');
+});
 
 test('same-id decisions from two gateways coexist and never mutate each other', () => {
   // Gateway-scoped ownership: two gateways on one installation (identical

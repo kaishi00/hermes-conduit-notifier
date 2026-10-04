@@ -37,6 +37,9 @@ export class RelayStore {
       maxEventIdsPerInstallation: limits.maxEventIdsPerInstallation ?? MAX_EVENT_IDS_PER_INSTALLATION,
       maxGlobalEventIds: limits.maxGlobalEventIds ?? MAX_GLOBAL_EVENT_IDS,
     };
+    for (const limit of Object.values(this.limits)) {
+      if (!Number.isSafeInteger(limit) || limit <= 0) throw new TypeError('Storage limits must be positive integers.');
+    }
     this.decisionLimits = {
       activeGlobal: limits.activeGlobal ?? MAX_PENDING_DECISIONS,
       activePerInstallation: limits.activePerInstallation ?? MAX_PENDING_DECISIONS_PER_INSTALLATION,
@@ -589,7 +592,8 @@ export class RelayStore {
   prune() {
     const now = Date.now();
     for (const [key, pairing] of Object.entries(this.data.pairings)) {
-      if (Date.parse(pairing.expiresAt) <= now) delete this.data.pairings[key];
+      const expiresAt = pairing && typeof pairing === 'object' ? Date.parse(pairing.expiresAt) : NaN;
+      if (!Number.isFinite(expiresAt) || expiresAt <= now) delete this.data.pairings[key];
     }
     for (const [key, timestamp] of Object.entries(this.data.eventIds)) {
       const parsedTimestamp = Number(timestamp);
@@ -635,6 +639,7 @@ function decisionQuestions(decision) {
 }
 
 export function normalizePreferences(value = {}) {
+  value ??= {};
   return Object.fromEntries(Object.entries(defaultPreferences).map(([key, fallback]) => [key, typeof value[key] === 'boolean' ? value[key] : fallback]));
 }
 
