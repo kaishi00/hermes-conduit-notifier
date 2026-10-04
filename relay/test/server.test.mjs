@@ -131,6 +131,14 @@ test('validateDecision accepts the clarify contract on input events', () => {
   );
 });
 
+test('clarify request IDs match the poll/respond route grammar without truncation', () => {
+  const valid = { kind: 'clarify', request_id: 'Abc_123-x', question: 'What next?' };
+  assert.equal(validateDecision(valid, 'input.needed').request_id, valid.request_id);
+  for (const requestId of ['abc', 'abc/def', 'abc def', 'a'.repeat(129), 'é'.repeat(4)]) {
+    assert.equal(validateDecision({ ...valid, request_id: requestId }, 'input.needed'), undefined, requestId);
+  }
+});
+
 test('validateDecision whitelists choices to the approval vocabulary', () => {
   const injected = validateDecision(
     { ...approvalDecision, choices: ['once', 'deny', 'not-a-real-choice', 'free text'] },

@@ -652,7 +652,9 @@ function validateDecision(value, eventType) {
     return { kind: 'approval', session_key: sessionKey, description, choices };
   }
   if (kind === 'clarify' && eventType === 'input.needed') {
-    const requestId = cleanIdentifier(value.request_id, 128);
+    const requestId = typeof value.request_id === 'string' && /^[A-Za-z0-9_-]{4,128}$/.test(value.request_id)
+      ? value.request_id
+      : undefined;
     const question = cleanText(value.question, 500);
     if (!requestId || !question) return undefined;
     const choices = (Array.isArray(value.choices) ? value.choices : [])

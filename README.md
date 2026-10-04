@@ -136,24 +136,32 @@ upgraded keeps all its current records, but cannot add records of that kind
 until the operator performs reviewed data maintenance while the relay is
 stopped, preserving active credentials and unexpired event IDs.
 
-Registration, authenticated device updates, pairing creation/claim, and event
-intake share a process-wide limit of 120 requests per minute, in addition to
-their per-installation or per-client limits. This bounds aggregate write
-admission even when requests use many installations or source IPs. Invalid
-registrations and non-live pairing claims are rejected before they use this
-shared budget. Event handling can persist up to five times for one request
-when it records plugin state, parks a decision, and handles an APNs failure,
-so ingress can cause at most 600 full-store writes per minute in that
-exceptional case.
+Public registration has a process-wide admission limit of 24 requests per
+minute. Authenticated device updates, pairing creation/valid claims, and event
+intake share a separate 96-request-per-minute budget. Together these reserve
+120 mutation admissions per minute without letting public registration drain
+event capacity. Existing per-installation and per-client limits still apply;
+validation and capacity rejection happen before shared budget charging.
+Unchanged device updates and already-accepted events without plugin metadata
+do not consume the ingress budget or rewrite the store. A duplicate carrying
+plugin metadata still records that gateway's plugin state and uses the budget.
 
-Authenticated decision answers, cancellations, installation deactivation, and
-gateway revocation use a separate process-wide limit of 120 actions per
-minute. This keeps control actions available when ingress is full and bounds
-their own store writes; together, the two budgets cap the documented paths at
-720 full-store writes per minute. Health checks and decision polling do not
-consume either budget. Authenticated device updates are limited to 30 requests
-per minute per installation, and unchanged updates and repeated decision
-cancellation do not rewrite the store.
+Decision answers and releases share a separate process-wide budget of 96
+actions per minute. Installation deactivation and gateway revocation share
+another 24-action-per-minute budget, so revocation traffic cannot exhaust the
+answer/release quota. These are admission limits, not literal file-write
+counts: one event can make up to five full-store saves while recording plugin
+state, parking a decision, and handling an APNs failure. Health checks and
+decision polling consume none of these four budgets. Device updates remain
+limited to 30 requests per minute per installation, including unchanged
+updates. Repeated decision cancellation does not rewrite the store or use
+the shared decision budget, though its per-gateway limit still applies.
+
+Run exactly one relay process/replica per `DATA_PATH`. The relay caches its
+state and rewrites the whole JSON file; atomic replacement does not coordinate
+multiple writers, and sharing the file between processes can lose updates.
+The budgets are per process. Finite storage and request quotas remain
+saturable and do not guarantee fair admission under a hostile flood.
 
 ## Batch clarify decisions (plugin 0.3+)
 
@@ -217,18 +225,25 @@ stays open until the gateway's configured clarify timeout bounds it.
 
 ### Decision retention limits
 
-The relay retains up to 32 unexpired decision records per installation and
-256 across the relay. Answered and cancelled records count toward these
-limits and remain available until the two-hour decision TTL expires. Retaining
-them preserves gateway answer retrieval and the first-answer/release locks;
-the relay does not reclaim settled records before expiry.
+The relay allows up to 32 active unresolved decisions per installation and
+256 across the relay. A scalar decision is active until answered or cancelled;
+a batch remains active until every question is answered or the decision is
+cancelled. Completed and cancelled decisions preserve their answers and locks
+for the two-hour decision TTL, within separate retained-record caps of 128 per
+installation and 1024 across the relay. Active decisions count toward both
+retained caps. Since settled records stay for two hours, those retained caps
+also impose a maximum admission throughput of 64 records per installation per
+hour and 512 records per hour across the relay, averaged over a full retention
+window.
 
-When either limit is full, a new clarify event receives HTTP `429`
+When any limit is full, a new clarify event receives HTTP `429`
 `decision_capacity_exceeded`. The relay sends no push and does not consume the
 event ID, so the event can be retried after capacity becomes available.
 Existing decisions remain answerable, pollable, and cancellable while the
-relay is at capacity. The plugin can use Hermes' native clarify path as its
-existing fallback when relay delivery is rejected.
+relay is at capacity. The shipped plugin logs the 429 rejection and keeps
+Hermes' native clarify path available; it does not automatically retry a
+rejected event. Before acceptance, the same event ID may be explicitly retried
+after capacity becomes available.
 
 ## Gemini Live tokens
 
