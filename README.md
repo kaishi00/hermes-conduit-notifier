@@ -202,12 +202,20 @@ window.
 
 When any limit is full, a new clarify event receives HTTP `429`
 `decision_capacity_exceeded`. The relay sends no push and does not consume the
-event ID, so the event can be retried after capacity becomes available.
-Existing decisions remain answerable, pollable, and cancellable while the
-relay is at capacity. The shipped plugin logs the 429 rejection and keeps
-Hermes' native clarify path available; it does not automatically retry a
-rejected event. Before acceptance, the same event ID may be explicitly retried
-after capacity becomes available.
+event ID. Retrying is caller-chosen: the shipped plugin logs the rejection and
+does not retry automatically; a caller may explicitly retry the same event ID
+after capacity becomes available and before the event is accepted. Hermes'
+native clarify path remains available, and existing decisions remain
+answerable, pollable, and cancellable.
+
+The global limits apply across every installation. Because installation
+self-registration is open, one actor can create multiple installations,
+occupy the global active and retained pools, and keep refreshing them as
+records expire, denying new relay clarifies indefinitely. The relay cannot
+identify a shared actor or enforce fairness from installation IDs alone.
+Existing answers and Hermes' native clarify path remain available during
+saturation; the global caps are a bounded storage tradeoff, not a tenant
+fairness boundary.
 
 ## Gemini Live tokens
 
