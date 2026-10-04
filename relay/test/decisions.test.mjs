@@ -65,6 +65,58 @@ test('same-id decisions from two gateways coexist and never mutate each other', 
   assert.deepEqual(relay.resolveLegacyRespond('inst-1', 'conduit-push-never'), { resolution: 'unknown' });
 });
 
+test('event pruning removes corrupt or non-finite persisted timestamps', () => {
+  const relay = store();
+  relay.data.eventIds = {
+    'inst:gw:old-number': Date.now() - 25 * 60 * 60_000,
+    'inst:gw:nan': 'not-a-time',
+    'inst:gw:infinity': Infinity,
+    'inst:gw:valid': Date.now(),
+  };
+
+  relay.prune();
+
+  assert.deepEqual(Object.keys(relay.data.eventIds), ['inst:gw:valid']);
+});
+
+test('installation update preflight compares preference meaning, not key order', () => {
+  const relay = store();
+  const created = relay.createInstallation({
+    bundleId: 'com.milim.relay', deviceToken: 'a'.repeat(64), environment: 'production',
+    preferences: { enabled: false, show_previews: true },
+  });
+  const installation = relay.data.installations[created.installation.id];
+  installation.preferences = Object.fromEntries(Object.entries(installation.preferences).reverse());
+  relay.save();
+  const before = readFileSync(relay.path, 'utf8');
+
+  assert.equal(relay.wouldUpdateInstallation(created.installation.id, {
+    preferences: { show_previews: true, enabled: false },
+  }), false);
+  const updated = relay.updateInstallation(created.installation.id, {
+    preferences: { show_previews: true, enabled: false },
+  });
+
+  assert.deepEqual(updated.preferences, created.installation.preferences);
+  assert.equal(readFileSync(relay.path, 'utf8'), before, 'semantic no-op does not rewrite stored state');
+});
+
+test('installation update preflight preserves explicit enablement for legacy preferences', () => {
+  const relay = store();
+  const created = relay.createInstallation({
+    bundleId: 'com.milim.relay', deviceToken: 'b'.repeat(64), environment: 'production', preferences: {},
+  });
+  relay.data.installations[created.installation.id].preferences = {};
+  relay.save();
+
+  const changes = { preferences: { enabled: true } };
+  assert.equal(relay.wouldUpdateInstallation(created.installation.id, changes), true);
+  const updated = relay.updateInstallation(created.installation.id, changes);
+
+  assert.equal(updated.preferences.enabled, true);
+  assert.equal(relay.data.installations[created.installation.id].preferences.enabled, true);
+});
+
 test('event dedupe is gateway-scoped: same event id from different gateways both accepted', () => {
   const relay = store();
   assert.equal(relay.acceptEvent('inst-1', 'approval:42', 'gw-A'), true);

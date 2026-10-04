@@ -131,7 +131,7 @@ export class RelayStore {
   }
 
   createInstallation({ bundleId, deviceToken, environment, preferences }) {
-    if (Object.keys(this.data.installations).length >= this.limits.maxInstallations) throw capacityError('installation_limit_reached');
+    this.assertInstallationCapacity();
     const id = randomUUID();
     const deviceSecret = randomBytes(32).toString('base64url');
     const now = new Date().toISOString();
@@ -151,6 +151,11 @@ export class RelayStore {
     return { installation: publicInstallation(this.data.installations[id]), deviceSecret };
   }
 
+  assertInstallationCapacity() {
+    if (Object.keys(this.data.installations).length >= this.limits.maxInstallations) throw capacityError('installation_limit_reached');
+    return true;
+  }
+
   authenticate(id, secret, scope) {
     const installation = this.data.installations[id];
     if (!installation?.active || !secret) return null;
@@ -165,7 +170,7 @@ export class RelayStore {
     return secretMatches(secret, gateway.secretHash) ? { installation, gateway } : null;
   }
 
-  updateInstallation(id, changes) {
+  normalizedInstallationChanges(id, changes) {
     const installation = this.data.installations[id];
     if (!installation) return null;
     const deviceToken = changes.deviceToken || installation.deviceToken;
@@ -173,10 +178,22 @@ export class RelayStore {
       ? normalizePreferences({ ...installation.preferences, ...changes.preferences })
       : installation.preferences;
     const active = changes.active ?? installation.active;
-    const preferencesChanged = JSON.stringify(preferences) !== JSON.stringify(installation.preferences);
-    if (deviceToken === installation.deviceToken && !preferencesChanged && active === installation.active) {
-      return publicInstallation(installation);
-    }
+    return { installation, deviceToken, preferences, active };
+  }
+
+  wouldUpdateInstallation(id, changes) {
+    const normalized = this.normalizedInstallationChanges(id, changes);
+    if (!normalized) return false;
+    const { installation, deviceToken, preferences, active } = normalized;
+    const preferencesChanged = !preferencesEqual(preferences, installation.preferences);
+    return deviceToken !== installation.deviceToken || preferencesChanged || active !== installation.active;
+  }
+
+  updateInstallation(id, changes) {
+    const normalized = this.normalizedInstallationChanges(id, changes);
+    if (!normalized) return null;
+    const { installation, deviceToken, preferences, active } = normalized;
+    if (!this.wouldUpdateInstallation(id, changes)) return publicInstallation(installation);
     installation.deviceToken = deviceToken;
     installation.preferences = preferences;
     installation.active = active;
@@ -546,7 +563,8 @@ export class RelayStore {
       if (Date.parse(pairing.expiresAt) <= now) delete this.data.pairings[key];
     }
     for (const [key, timestamp] of Object.entries(this.data.eventIds)) {
-      if (Number(timestamp) < now - 24 * 60 * 60_000) delete this.data.eventIds[key];
+      const parsedTimestamp = Number(timestamp);
+      if (!Number.isFinite(parsedTimestamp) || parsedTimestamp < now - 24 * 60 * 60_000) delete this.data.eventIds[key];
     }
     // Clarify prompts live at most ~1h server-side (agent.clarify_timeout
     // default 3600s); 2h covers drift and unlimited-config edge cases while
@@ -573,6 +591,10 @@ export const MAX_GLOBAL_EVENT_IDS = 8_192;
 
 export function normalizePreferences(value = {}) {
   return Object.fromEntries(Object.entries(defaultPreferences).map(([key, fallback]) => [key, typeof value[key] === 'boolean' ? value[key] : fallback]));
+}
+
+function preferencesEqual(left, right) {
+  return Object.keys(defaultPreferences).every((key) => left?.[key] === right?.[key]);
 }
 
 // Batch decision bounds — mirror the plugin's sanitizer so a malformed push

@@ -127,7 +127,8 @@ async function route(request, response) {
     const deviceToken = validateDeviceToken(body.device_token);
     if (body.bundle_id !== config.topic) return sendJson(response, 400, { error: 'invalid_topic' });
     if (body.environment !== 'production') return sendJson(response, 400, { error: 'production_only' });
-    enforceMutationBudget();
+    store.assertInstallationCapacity();
+    enforceRegistrationBudget();
     const created = store.createInstallation({ bundleId: body.bundle_id, deviceToken, environment: body.environment, preferences: body.preferences });
     return sendJson(response, 201, {
       installation: created.installation,
@@ -143,13 +144,14 @@ async function route(request, response) {
     enforceRateLimit(`installation-update:${installation.id}`, 30, 60_000);
     const body = await readJson(request);
     const deviceToken = body.device_token === undefined ? undefined : validateDeviceToken(body.device_token);
-    enforceMutationBudget();
-    return sendJson(response, 200, { installation: store.updateInstallation(installation.id, { deviceToken, preferences: body.preferences }) });
+    const changes = { deviceToken, preferences: body.preferences };
+    if (store.wouldUpdateInstallation(installation.id, changes)) enforceIngressBudget();
+    return sendJson(response, 200, { installation: store.updateInstallation(installation.id, changes) });
   }
   if (installationMatch && request.method === 'DELETE') {
     const installation = authorize(request, installationMatch[1], 'device');
     if (!installation) return sendJson(response, 401, { error: 'unauthorized' });
-    enforceControlBudget();
+    enforceRevocationBudget();
     store.deactivateInstallation(installation.id);
     response.writeHead(204).end();
     return;
@@ -177,7 +179,7 @@ async function route(request, response) {
         return sendJson(response, 400, { error: 'invalid_dashboard_id' });
       }
     }
-    enforceMutationBudget();
+    enforceIngressBudget();
     const pairing = store.createPairing(installation.id, dashboardId);
     return sendJson(response, 201, { pairing_code: pairing.code, expires_at: pairing.expiresAt });
   }
@@ -186,7 +188,7 @@ async function route(request, response) {
     enforceRateLimit(`claim:${client}`, 20, 60_000);
     const body = await readJson(request);
     if (!store.canClaimPairing(body.pairing_code)) return sendJson(response, 404, { error: 'invalid_or_expired_pairing' });
-    enforceMutationBudget();
+    enforceIngressBudget();
     const claimed = store.claimPairing(body.pairing_code, body.gateway_name);
     if (!claimed) return sendJson(response, 404, { error: 'invalid_or_expired_pairing' });
     return sendJson(response, 200, {
@@ -228,7 +230,8 @@ async function route(request, response) {
         throw error;
       }
     }
-    enforceMutationBudget();
+    if (duplicateEvent && !event.pluginVersion) return sendJson(response, 200, { accepted: true, duplicate: true });
+    enforceIngressBudget();
     // Plugin version recording runs BEFORE the dedupe return: a second
     // gateway on the same installation running the same plugin version sends
     // the same deterministic plugin.hello id, and it must still be recorded.
@@ -346,7 +349,7 @@ async function route(request, response) {
     const body = await readJson(request);
     const answer = cleanText(body.answer, 2000);
     if (!answer) return sendJson(response, 400, { error: 'invalid_answer' });
-    enforceControlBudget();
+    enforceDecisionBudget();
     // question_id scopes the answer to ONE question of a batch decision
     // (first-answer-wins per qid, other qids stay open); its absence keeps
     // the legacy whole-decision shape for single-question cards.
@@ -410,7 +413,7 @@ async function route(request, response) {
     // to starve the DELETE that cleans up when the native path wins.
     enforceRateLimit(`decision-cancel:${credential.gatewayId}`, 30, 60_000);
     const beforeCancel = store.pendingDecisionStatus(credential.installationId, credential.gatewayId, decisionMatch[1]);
-    if (beforeCancel.status === 'pending') enforceControlBudget();
+    if (beforeCancel.status === 'pending') enforceDecisionBudget();
     const outcome = store.cancelPendingDecision(credential.installationId, credential.gatewayId, decisionMatch[1]);
     if (outcome === 'unknown') return sendJson(response, 404, { error: 'unknown_decision' });
     // Diagnostic distinction only (same 200, Conduit never parses this
@@ -424,7 +427,7 @@ async function route(request, response) {
   if (request.method === 'DELETE' && url.pathname === '/v1/gateways/current') {
     const credential = gatewayCredential(request);
     if (!credential || !store.authenticateGateway(credential.installationId, credential.gatewayId, credential.secret)) return sendJson(response, 401, { error: 'unauthorized' });
-    enforceControlBudget();
+    enforceRevocationBudget();
     store.removeGateway(credential.installationId, credential.gatewayId);
     response.writeHead(204).end();
     return;
@@ -741,17 +744,22 @@ function enforceRateLimit(key, maximum, windowMs) {
   if (value.count > maximum) throw httpError(429, 'rate_limited');
 }
 
-// Fixed process-wide write budget: rotating IPs or creating additional
-// installations cannot multiply the relay's synchronous full-store writes.
-function enforceMutationBudget() {
-  enforceRateLimit('mutation-global', 120, 60_000);
+// Process-wide admission budgets reserve capacity for each class of action.
+// They bound admitted requests; one event may perform multiple bounded saves.
+function enforceRegistrationBudget() {
+  enforceRateLimit('registration-global', 24, 60_000);
 }
 
-// Authenticated control actions have an independent budget, so an ingress
-// flood cannot block answers or cleanup, and many credentials cannot turn
-// revocation into unbounded synchronous full-store writes.
-function enforceControlBudget() {
-  enforceRateLimit('control-global', 120, 60_000);
+function enforceIngressBudget() {
+  enforceRateLimit('ingress-global', 96, 60_000);
+}
+
+function enforceDecisionBudget() {
+  enforceRateLimit('decision-global', 96, 60_000);
+}
+
+function enforceRevocationBudget() {
+  enforceRateLimit('revocation-global', 24, 60_000);
 }
 
 function clientAddress(request) {
