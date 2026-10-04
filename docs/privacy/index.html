@@ -19,7 +19,7 @@
   <main class="document">
     <div class="eyebrow">Hermes Conduit</div>
     <h1>Privacy Policy</h1>
-    <p class="meta">Effective July 18, 2026</p>
+    <p class="meta">Effective October 4, 2026</p>
     <p>This policy explains how Hermes Conduit handles information in the iOS app, the optional Hermes Conduit Notifier plugin, and the optional notification relay used to deliver Apple Push Notification service (APNs) alerts.</p>
 
     <h2>Summary</h2>
@@ -42,13 +42,16 @@
       <li>Your APNs device token and a randomly generated installation identifier.</li>
       <li>Notification preferences, such as enabled event categories, sound, and preview settings.</li>
       <li>A gateway display name and randomly generated, revocable pairing credentials.</li>
-      <li>For notification delivery: event type, event identifier, session identifier, profile name, gateway identifier, and—only when notification previews are enabled—limited notification title and body text supplied by your gateway.</li>
+      <li>For notification delivery: event type, event identifier, session identifier, profile name, gateway identifier, and limited notification title and body text supplied by your gateway. This text can reach the relay even when notification previews are disabled.</li>
+      <li>For approval and clarify cards: the decision identifier, approval description or clarify questions, available choice labels, and, for clarify responses, the answers you submit.</li>
       <li>Basic request metadata used for security, rate limiting, diagnostics, and abuse prevention, which may include IP address, request path, response status, and time.</li>
     </ul>
-    <p>The relay uses this information solely to authenticate paired installations, enforce notification preferences, prevent duplicate delivery, troubleshoot failures, and send notifications through APNs. Apple processes the device token and notification payload under Apple's applicable privacy terms.</p>
+    <p>Notification previews control the title and body shown in the APNs alert; they do not control what the plugin sends to the relay. Decision cards have a separate preference, enabled by default, that controls structured decision content in the APNs payload. Turning off previews or decision cards does not prevent that content from reaching the relay.</p>
+    <p>To limit content before it leaves your Hermes gateway, enable the plugin's profile-specific redaction setting with <code>hermes conduit-push redact on</code>. Redaction removes notification title and body text and replaces approval descriptions and clarify questions with generic text. Routing identifiers and clarify choice labels still reach the relay, and answers you submit are sent to the relay for the gateway to retrieve.</p>
+    <p>The relay uses this information solely to authenticate paired installations, enforce notification preferences, prevent duplicate delivery, relay clarify answers to your gateway, troubleshoot failures, and send notifications through APNs. Apple processes the device token and notification payload under Apple's applicable privacy terms.</p>
 
     <h2>Retention and deletion</h2>
-    <p>On-device information remains until you remove it, sign out, disable the related feature, or uninstall the app. Notification registrations remain active until notifications are disabled, the registration is invalidated, or deletion is requested. Disabling notifications prevents further delivery and revokes the app's local notification credential. Short-lived pairing codes expire after ten minutes, and event identifiers used to prevent duplicate delivery expire after approximately 24 hours.</p>
+    <p>On-device information remains until you remove it, sign out, disable the related feature, or uninstall the app. Notification registrations remain active until notifications are disabled, the registration is invalidated, or deletion is requested. Disabling notifications prevents further delivery and revokes the app's local notification credential. Short-lived pairing codes expire after ten minutes, and event identifiers used to prevent duplicate delivery expire after approximately 24 hours. Clarify decision records, including questions, choices, and submitted answers, expire after approximately two hours; expired records are removed when the relay next checks its stored state.</p>
     <p>To request deletion of notification relay information, contact <a href="mailto:support@milim.dev?subject=Hermes%20Conduit%20deletion%20request">support@milim.dev</a>. We may ask for limited installation information to locate the registration. Information stored by your Hermes gateway must be deleted through that gateway's operator.</p>
 
     <h2>Sharing</h2>
