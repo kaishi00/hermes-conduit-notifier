@@ -1,5 +1,5 @@
 import { strict as assert } from 'node:assert';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
@@ -10,8 +10,8 @@ import { RelayStore } from '../src/store.mjs';
 const dir = mkdtempSync(join(tmpdir(), 'conduit-relay-decisions-'));
 after(() => rmSync(dir, { recursive: true, force: true }));
 
-function store() {
-  return new RelayStore(join(dir, `store-${Math.random().toString(36).slice(2)}.json`));
+function store(limits) {
+  return new RelayStore(join(dir, `store-${Math.random().toString(36).slice(2)}.json`), limits);
 }
 
 test('same-id decisions from two gateways coexist and never mutate each other', () => {
@@ -51,15 +51,16 @@ test('same-id decisions from two gateways coexist and never mutate each other', 
   // never a guess between gateways.
   assert.deepEqual(relay.resolveLegacyRespond('inst-1', shared), { resolution: 'already_answered' });
   // Fresh same-id decisions on both gateways: two live → ambiguous.
-  relay.savePendingDecision({ id: shared, installationId: 'inst-1', gatewayId: 'gw-A', question: 'A2?' });
-  relay.savePendingDecision({ id: shared, installationId: 'inst-1', gatewayId: 'gw-B', question: 'B2?' });
-  assert.deepEqual(relay.resolveLegacyRespond('inst-1', shared), { resolution: 'ambiguous' });
+  const sharedAgain = `${shared}-again`;
+  relay.savePendingDecision({ id: sharedAgain, installationId: 'inst-1', gatewayId: 'gw-A', question: 'A2?' });
+  relay.savePendingDecision({ id: sharedAgain, installationId: 'inst-1', gatewayId: 'gw-B', question: 'B2?' });
+  assert.deepEqual(relay.resolveLegacyRespond('inst-1', sharedAgain), { resolution: 'ambiguous' });
   // Cancelling one leaves exactly one live holder → unique, and one
   // released holder means a settled legacy answer reports released.
-  assert.equal(relay.cancelPendingDecision('inst-1', 'gw-A', shared), 'cancelled');
-  assert.deepEqual(relay.resolveLegacyRespond('inst-1', shared), { resolution: 'unique', gatewayId: 'gw-B' });
-  assert.equal(relay.cancelPendingDecision('inst-1', 'gw-B', shared), 'cancelled');
-  assert.deepEqual(relay.resolveLegacyRespond('inst-1', shared), { resolution: 'released' });
+  assert.equal(relay.cancelPendingDecision('inst-1', 'gw-A', sharedAgain), 'cancelled');
+  assert.deepEqual(relay.resolveLegacyRespond('inst-1', sharedAgain), { resolution: 'unique', gatewayId: 'gw-B' });
+  assert.equal(relay.cancelPendingDecision('inst-1', 'gw-B', sharedAgain), 'cancelled');
+  assert.deepEqual(relay.resolveLegacyRespond('inst-1', sharedAgain), { resolution: 'released' });
   // Unknown id → unknown.
   assert.deepEqual(relay.resolveLegacyRespond('inst-1', 'conduit-push-never'), { resolution: 'unknown' });
 });
@@ -262,15 +263,145 @@ test('pending decisions survive a reload and expire past the TTL', () => {
   assert.deepEqual(reloaded.pendingDecisionStatus('inst-1', 'gw-1', 'conduit-push-old'), { status: 'unknown' });
 });
 
-test('pending decision store is bounded', () => {
+test('pending decisions reject overflow without evicting another installation or overwriting existing ids', () => {
   const relay = store();
-  for (let i = 0; i < 300; i += 1) {
+  for (let i = 0; i < 32; i += 1) {
     relay.savePendingDecision({ id: `conduit-push-${i}`, installationId: 'inst-1', gatewayId: 'gw-1', question: 'q' });
   }
-  assert.ok(Object.keys(relay.data.pendingDecisions).length <= 256);
-  // Oldest entries were evicted; the newest survives.
-  assert.equal(relay.pendingDecisionStatus('inst-1', 'gw-1', 'conduit-push-0').status, 'unknown');
-  assert.equal(relay.pendingDecisionStatus('inst-1', 'gw-1', 'conduit-push-299').status, 'pending');
+  assert.throws(
+    () => relay.savePendingDecision({ id: 'conduit-push-over', installationId: 'inst-1', gatewayId: 'gw-1', question: 'q' }),
+    { code: 'decision_capacity_exceeded' },
+  );
+  assert.equal(relay.pendingDecisionStatus('inst-1', 'gw-1', 'conduit-push-0').status, 'pending');
+  assert.equal(relay.pendingDecisionStatus('inst-1', 'gw-1', 'conduit-push-31').status, 'pending');
+  assert.equal(Object.keys(relay.data.pendingDecisions).length, 32);
+
+  // Reusing a logical ID preserves its first request, including after it is answered.
+  relay.respondPendingDecision('inst-1', 'gw-1', 'conduit-push-0', 'first answer');
+  relay.savePendingDecision({ id: 'conduit-push-0', installationId: 'inst-1', gatewayId: 'gw-1', question: 'replacement?' });
+  assert.equal(relay.pendingDecisionStatus('inst-1', 'gw-1', 'conduit-push-0').answer, 'first answer');
+  assert.equal(relay.data.pendingDecisions[RelayStore.decisionKey('inst-1', 'gw-1', 'conduit-push-0')].question, 'q');
+});
+
+test('answered and cancelled decisions release active capacity while remaining retained', () => {
+  const relay = store({ activePerInstallation: 1, activeGlobal: 1, retainedPerInstallation: 4, retainedGlobal: 4 });
+  relay.savePendingDecision({ id: 'conduit-push-settled-0', installationId: 'inst-settled', gatewayId: 'gw-1', question: 'q' });
+  assert.equal(relay.respondPendingDecision('inst-settled', 'gw-1', 'conduit-push-settled-0', 'kept answer').outcome, 'answered');
+  relay.savePendingDecision({ id: 'conduit-push-after-answer', installationId: 'inst-settled', gatewayId: 'gw-1', question: 'q' });
+  assert.equal(relay.cancelPendingDecision('inst-settled', 'gw-1', 'conduit-push-after-answer'), 'cancelled');
+  relay.savePendingDecision({ id: 'conduit-push-after-cancel', installationId: 'inst-settled', gatewayId: 'gw-1', question: 'q' });
+  assert.equal(Object.keys(relay.data.pendingDecisions).length, 3);
+  assert.deepEqual(relay.pendingDecisionStatus('inst-settled', 'gw-1', 'conduit-push-settled-0'), { status: 'answered', answer: 'kept answer' });
+  assert.equal(relay.respondPendingDecision('inst-settled', 'gw-1', 'conduit-push-after-answer', 'late').outcome, 'released');
+});
+
+test('a partial batch remains active until its final question is answered', () => {
+  const relay = store({ activePerInstallation: 1, activeGlobal: 1, retainedPerInstallation: 4, retainedGlobal: 4 });
+  relay.savePendingDecision({ id: 'conduit-push-partial', installationId: 'inst-batch', gatewayId: 'gw-1', questions: [
+    { qid: 'q0', question: 'First?', choices: ['a'] }, { qid: 'q1', question: 'Second?', choices: ['b'] },
+  ] });
+  relay.respondPendingDecision('inst-batch', 'gw-1', 'conduit-push-partial', 'a', 'q0');
+  assert.throws(() => relay.savePendingDecision({ id: 'conduit-push-blocked', installationId: 'inst-batch', gatewayId: 'gw-1', question: 'q' }), { code: 'decision_capacity_exceeded' });
+  assert.deepEqual(relay.pendingDecisionStatus('inst-batch', 'gw-1', 'conduit-push-partial').remaining, ['q1']);
+  relay.respondPendingDecision('inst-batch', 'gw-1', 'conduit-push-partial', 'b', 'q1');
+  assert.equal(relay.savePendingDecision({ id: 'conduit-push-after-batch', installationId: 'inst-batch', gatewayId: 'gw-1', question: 'q' }), true);
+});
+
+test('per-installation retained cap rejects without dropping locks or blocking another installation', () => {
+  const limits = { activePerInstallation: 3, activeGlobal: 3, retainedPerInstallation: 2, retainedGlobal: 4 };
+  const path = join(dir, `store-retained-${Math.random().toString(36).slice(2)}.json`);
+  const relay = new RelayStore(path, limits);
+  relay.savePendingDecision({ id: 'conduit-push-answer-lock', installationId: 'inst-retain', gatewayId: 'gw-1', question: 'q' });
+  relay.respondPendingDecision('inst-retain', 'gw-1', 'conduit-push-answer-lock', 'preserved');
+  relay.savePendingDecision({ id: 'conduit-push-cancel-lock', installationId: 'inst-retain', gatewayId: 'gw-1', question: 'q' });
+  relay.cancelPendingDecision('inst-retain', 'gw-1', 'conduit-push-cancel-lock');
+  assert.throws(() => relay.savePendingDecision({ id: 'conduit-push-retained-over', installationId: 'inst-retain', gatewayId: 'gw-1', question: 'q' }), { code: 'decision_capacity_exceeded', status: 429 });
+  const reloaded = new RelayStore(path, limits);
+  assert.deepEqual(reloaded.pendingDecisionStatus('inst-retain', 'gw-1', 'conduit-push-answer-lock'), { status: 'answered', answer: 'preserved' });
+  assert.equal(reloaded.respondPendingDecision('inst-retain', 'gw-1', 'conduit-push-cancel-lock', 'late').outcome, 'released');
+  assert.equal(reloaded.savePendingDecision({ id: 'conduit-push-other-install', installationId: 'inst-other', gatewayId: 'gw-1', question: 'q' }), true);
+});
+
+test('global retained cap counts settled records across installations', () => {
+  const relay = store({ activePerInstallation: 4, activeGlobal: 4, retainedPerInstallation: 4, retainedGlobal: 2 });
+  for (let i = 0; i < 2; i += 1) {
+    const installationId = `inst-retained-${i}`;
+    const id = `conduit-push-retained-${i}`;
+    relay.savePendingDecision({ id, installationId, gatewayId: 'gw-1', question: 'q' });
+    relay.respondPendingDecision(installationId, 'gw-1', id, `answer-${i}`);
+  }
+  assert.throws(() => relay.savePendingDecision({ id: 'conduit-push-global-retained-over', installationId: 'inst-retained-new', gatewayId: 'gw-1', question: 'q' }), { code: 'decision_capacity_exceeded', status: 429 });
+  assert.deepEqual(relay.pendingDecisionStatus('inst-retained-0', 'gw-1', 'conduit-push-retained-0'), { status: 'answered', answer: 'answer-0' });
+});
+
+test('pruning removes malformed timestamps and null records but preserves valid timestamps', () => {
+  const relay = store();
+  relay.data.pendingDecisions.bad = null;
+  relay.data.pendingDecisions.nan = { createdAt: 'not-a-time' };
+  relay.data.pendingDecisions.infinite = { createdAt: Infinity };
+  relay.data.pendingDecisions.valid = { createdAt: Date.now(), installationId: 'i' };
+  relay.prune();
+  assert.deepEqual(Object.keys(relay.data.pendingDecisions), ['valid']);
+});
+
+test('persisted malformed batch rows do not break capacity, polling, answering, or scalar fallback', () => {
+  const path = join(dir, `store-malformed-batch-${Math.random().toString(36).slice(2)}.json`);
+  const seed = new RelayStore(path);
+  seed.savePendingDecision({
+    id: 'conduit-push-corrupt-batch', installationId: 'inst-corrupt', gatewayId: 'gw-1',
+    question: 'First?', questions: [{ qid: 'q-valid', question: 'Valid question?', choices: ['Yes'] }],
+  });
+  seed.savePendingDecision({
+    id: 'conduit-push-empty-batch', installationId: 'inst-corrupt', gatewayId: 'gw-1',
+    question: 'Scalar fallback?', questions: [{ qid: 'q-valid-2', question: 'Second?', choices: ['Yes'] }],
+  });
+  const persisted = JSON.parse(readFileSync(path, 'utf8'));
+  persisted.pendingDecisions[RelayStore.decisionKey('inst-corrupt', 'gw-1', 'conduit-push-corrupt-batch')].questions = [
+    null, { qid: 'q-valid', question: 'Valid question?', choices: ['Yes'] },
+  ];
+  persisted.pendingDecisions[RelayStore.decisionKey('inst-corrupt', 'gw-1', 'conduit-push-empty-batch')].questions = [null, { qid: 42 }];
+  writeFileSync(path, JSON.stringify(persisted));
+
+  const relay = new RelayStore(path, { activeGlobal: 3, activePerInstallation: 3, retainedGlobal: 5, retainedPerInstallation: 5 });
+  assert.equal(relay.assertPendingDecisionCapacity('another-install'), true);
+  assert.deepEqual(relay.pendingDecisionStatus('inst-corrupt', 'gw-1', 'conduit-push-corrupt-batch').remaining, ['q-valid']);
+  assert.equal(relay.respondPendingDecision('inst-corrupt', 'gw-1', 'conduit-push-corrupt-batch', 'Yes', 'q-valid').outcome, 'answered');
+  assert.deepEqual(relay.pendingDecisionStatus('inst-corrupt', 'gw-1', 'conduit-push-corrupt-batch'), {
+    status: 'answered', answers: { 'q-valid': 'Yes' }, remaining: [],
+  });
+  assert.equal(relay.respondPendingDecision('inst-corrupt', 'gw-1', 'conduit-push-corrupt-batch', 'Again', 'q-valid').outcome, 'already_answered');
+  assert.deepEqual(relay.pendingDecisionStatus('inst-corrupt', 'gw-1', 'conduit-push-empty-batch'), { status: 'pending', deliverable: true });
+  assert.equal(relay.respondPendingDecision('inst-corrupt', 'gw-1', 'conduit-push-empty-batch', 'Scalar').outcome, 'answered');
+  assert.deepEqual(relay.pendingDecisionStatus('inst-corrupt', 'gw-1', 'conduit-push-empty-batch'), { status: 'answered', answer: 'Scalar' });
+});
+
+test('global active decision limit rejects new tenants without evicting a live decision', () => {
+  const relay = store();
+  for (let i = 0; i < 256; i += 1) {
+    relay.savePendingDecision({ id: `conduit-push-${i}`, installationId: `inst-${i}`, gatewayId: 'gw-1', question: 'q' });
+  }
+  assert.throws(
+    () => relay.savePendingDecision({ id: 'conduit-push-over', installationId: 'another-install', gatewayId: 'gw-1', question: 'q' }),
+    { code: 'decision_capacity_exceeded' },
+  );
+  assert.equal(relay.pendingDecisionStatus('inst-0', 'gw-1', 'conduit-push-0').status, 'pending');
+  assert.equal(relay.pendingDecisionStatus('inst-255', 'gw-1', 'conduit-push-255').status, 'pending');
+  assert.equal(Object.keys(relay.data.pendingDecisions).length, 256);
+});
+
+test('loading an over-limit decision file preserves every unexpired record', () => {
+  const path = join(dir, `store-over-limit-${Math.random().toString(36).slice(2)}.json`);
+  const pendingDecisions = Object.fromEntries(Array.from({ length: 260 }, (_, i) => {
+    const id = `conduit-push-${i}`;
+    return [RelayStore.decisionKey(`inst-${i}`, 'gw-1', id), {
+      id, installationId: `inst-${i}`, gatewayId: 'gw-1', question: 'q', choices: [],
+      answers: Object.create(null), deliverable: true, createdAt: Date.now(),
+    }];
+  }));
+  writeFileSync(path, `${JSON.stringify({ version: 1, installations: {}, pairings: {}, eventIds: {}, pendingDecisions })}\n`);
+  const relay = new RelayStore(path);
+  assert.equal(Object.keys(relay.data.pendingDecisions).length, 260);
+  assert.equal(relay.pendingDecisionStatus('inst-0', 'gw-1', 'conduit-push-0').status, 'pending');
 });
 
 test('credential checks accept exact secrets and reject wrong or corrupt digests', () => {

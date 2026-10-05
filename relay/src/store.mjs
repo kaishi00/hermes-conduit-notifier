@@ -22,9 +22,23 @@ const defaultPreferences = Object.freeze({
   decision_cards: true,
 });
 
+const MAX_PENDING_DECISIONS = 256;
+const MAX_PENDING_DECISIONS_PER_INSTALLATION = 32;
+const MAX_RETAINED_DECISIONS = 1024;
+const MAX_RETAINED_DECISIONS_PER_INSTALLATION = 128;
+
 export class RelayStore {
-  constructor(path) {
+  constructor(path, limits = {}) {
     this.path = path;
+    this.decisionLimits = {
+      activeGlobal: limits.activeGlobal ?? MAX_PENDING_DECISIONS,
+      activePerInstallation: limits.activePerInstallation ?? MAX_PENDING_DECISIONS_PER_INSTALLATION,
+      retainedGlobal: limits.retainedGlobal ?? MAX_RETAINED_DECISIONS,
+      retainedPerInstallation: limits.retainedPerInstallation ?? MAX_RETAINED_DECISIONS_PER_INSTALLATION,
+    };
+    for (const limit of Object.values(this.decisionLimits)) {
+      if (!Number.isSafeInteger(limit) || limit <= 0) throw new TypeError('Decision limits must be positive integers.');
+    }
     this.data = { version: 1, installations: {}, pairings: {}, eventIds: {}, pendingDecisions: {} };
     this.load();
   }
@@ -278,6 +292,11 @@ export class RelayStore {
     return true;
   }
 
+  hasAcceptedEvent(installationId, eventId, gatewayId) {
+    this.prune();
+    return Boolean(this.data.eventIds[`${installationId}:${gatewayId}:${eventId}`]);
+  }
+
   // ── Pending decisions (clarify answer loop) ─────────────────────────
   // A clarify decision the plugin pushes carries a plugin-minted request id
   // because the gateway's own clarify id is unreachable to plugins. The
@@ -328,11 +347,13 @@ export class RelayStore {
   }
 
   savePendingDecision({ id, installationId, gatewayId, question, choices, questions, deliverable = true }) {
-    this.prune();
+    const key = RelayStore.decisionKey(installationId, gatewayId, id);
+    this.assertPendingDecisionCapacity(installationId, key);
+    if (this.data.pendingDecisions[key]) return false;
     // installationId/gatewayId are denormalized onto the record for the
     // legacy-decision upgrade scan and resolveLegacyRespond's holder scan;
     // the scoped KEY remains the ownership authority.
-    this.data.pendingDecisions[RelayStore.decisionKey(installationId, gatewayId, id)] = {
+    this.data.pendingDecisions[key] = {
       id,
       installationId,
       gatewayId,
@@ -349,13 +370,25 @@ export class RelayStore {
       deliverable: Boolean(deliverable),
       createdAt: Date.now(),
     };
-    const entries = Object.entries(this.data.pendingDecisions);
-    if (entries.length > 256) {
-      for (const [key] of entries.sort((a, b) => a[1].createdAt - b[1].createdAt).slice(0, entries.length - 256)) {
-        delete this.data.pendingDecisions[key];
-      }
-    }
     this.save();
+    return true;
+  }
+
+  assertPendingDecisionCapacity(installationId, key = undefined) {
+    this.prune();
+    if (key && this.data.pendingDecisions[key]) return true;
+    const decisions = Object.entries(this.data.pendingDecisions);
+    const installationDecisions = decisions.filter(([, decision]) => decision?.installationId === installationId);
+    const active = decisions.filter(([, decision]) => decisionIsActive(decision));
+    const installationActive = installationDecisions.filter(([, decision]) => decisionIsActive(decision));
+    if (active.length >= this.decisionLimits.activeGlobal || installationActive.length >= this.decisionLimits.activePerInstallation
+      || decisions.length >= this.decisionLimits.retainedGlobal || installationDecisions.length >= this.decisionLimits.retainedPerInstallation) {
+      const error = new Error('decision_capacity_exceeded');
+      error.code = 'decision_capacity_exceeded';
+      error.status = 429;
+      throw error;
+    }
+    return true;
   }
 
   respondPendingDecision(installationId, gatewayId, id, answer, questionId = '') {
@@ -369,7 +402,7 @@ export class RelayStore {
     // have answerable questions.
     if (decision.cancelledAt) return { outcome: 'released' };
     if (decision.answer !== undefined) return { outcome: 'already_answered' };
-    const batchQuestions = Array.isArray(decision.questions) ? decision.questions : [];
+    const batchQuestions = decisionQuestions(decision);
     if (batchQuestions.length) {
       decision.answers ??= Object.create(null);
       const answers = decision.answers;
@@ -409,7 +442,7 @@ export class RelayStore {
       // falls back to the original clarify path.
       return { status: 'unknown' };
     }
-    const batchQuestions = Array.isArray(decision.questions) ? decision.questions : [];
+    const batchQuestions = decisionQuestions(decision);
     if (batchQuestions.length) {
       const answers = decision.answers ?? {};
       const remaining = batchQuestions.map((question) => question.qid)
@@ -487,9 +520,25 @@ export class RelayStore {
     // default 3600s); 2h covers drift and unlimited-config edge cases while
     // still bounding the store.
     for (const [key, decision] of Object.entries(this.data.pendingDecisions ?? {})) {
-      if (Number(decision.createdAt) < now - 2 * 60 * 60_000) delete this.data.pendingDecisions[key];
+      const createdAt = decision && typeof decision === 'object' ? Number(decision.createdAt) : NaN;
+      if (!Number.isFinite(createdAt) || createdAt < now - 2 * 60 * 60_000) delete this.data.pendingDecisions[key];
     }
   }
+}
+
+function decisionIsActive(decision) {
+  if (!decision || typeof decision !== 'object' || decision.cancelledAt) return false;
+  if (decision.answer !== undefined) return false;
+  const questions = decisionQuestions(decision);
+  if (!questions.length) return true;
+  const answers = decision.answers ?? {};
+  return questions.some((question) => !Object.hasOwn(answers, question.qid));
+}
+
+function decisionQuestions(decision) {
+  if (!Array.isArray(decision?.questions)) return [];
+  return decision.questions.filter((question) =>
+    question !== null && typeof question === 'object' && typeof question.qid === 'string');
 }
 
 export function normalizePreferences(value = {}) {

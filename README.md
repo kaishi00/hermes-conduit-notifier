@@ -187,6 +187,36 @@ call; the plugin then releases the parked decision (`DELETE
 reported as accepted. A batch answered partly natively and partly by relay
 stays open until the gateway's configured clarify timeout bounds it.
 
+### Decision retention limits
+
+The relay allows up to 32 active unresolved decisions per installation and
+256 across the relay. A scalar decision is active until answered or cancelled;
+a batch remains active until every question is answered or the decision is
+cancelled. Completed and cancelled decisions preserve their answers and locks
+for the two-hour decision TTL, within separate retained-record caps of 128 per
+installation and 1024 across the relay. Active decisions count toward both
+retained caps. Since settled records stay for two hours, those retained caps
+also impose a maximum admission throughput of 64 records per installation per
+hour and 512 records per hour across the relay, averaged over a full retention
+window.
+
+When any limit is full, a new clarify event receives HTTP `429`
+`decision_capacity_exceeded`. The relay sends no push and does not consume the
+event ID. Retrying is caller-chosen: the shipped plugin logs the rejection and
+does not retry automatically; a caller may explicitly retry the same event ID
+after capacity becomes available and before the event is accepted. Hermes'
+native clarify path remains available, and existing decisions remain
+answerable, pollable, and cancellable.
+
+The global limits apply across every installation. Because installation
+self-registration is open, one actor can create multiple installations,
+occupy the global active and retained pools, and keep refreshing them as
+records expire, denying new relay clarifies indefinitely. The relay cannot
+identify a shared actor or enforce fairness from installation IDs alone.
+Existing answers and Hermes' native clarify path remain available during
+saturation; the global caps are a bounded storage tradeoff, not a tenant
+fairness boundary.
+
 ## Gemini Live tokens
 
 Conduit's Gemini Live voice mode talks to Google directly from the phone, but
