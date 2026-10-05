@@ -21,6 +21,7 @@ import { RelayStore } from '../src/store.mjs';
 // parks the decision undeliverable AND leaves the relay process alive.
 // Nothing about the HTTP API is mocked.
 
+const relayVersion = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 const dir = mkdtempSync(join(tmpdir(), 'conduit-relay-e2e-'));
 const port = 19000 + Math.floor(Math.random() * 1000);
 const rejectPort = port + 500;
@@ -939,7 +940,7 @@ test('clarify decision: push → device answer → gateway poll', async () => {
   // The device reads relay + plugin compatibility state.
   const meta = await api(baseUrl, '/v1/meta', { credential: deviceCredential });
   assert.equal(meta.status, 200);
-  assert.equal(meta.json.version, '0.3.0');
+  assert.equal(meta.json.version, relayVersion, 'meta reports the version in package.json');
   assert.ok(meta.json.capabilities.includes('decisions'));
   const gatewayMeta = meta.json.gateways.find((gateway) => gateway.name === 'test gateway');
   assert.ok(gatewayMeta, 'paired gateway appears in meta');
