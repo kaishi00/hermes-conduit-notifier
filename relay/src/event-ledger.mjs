@@ -5,7 +5,7 @@
 // rewrite the whole data file. Both bounds forget old IDs rather than reject
 // new events, so a busy relay never drops a notification to make room.
 export const EVENT_ID_TTL_MS = 24 * 60 * 60_000;
-const SWEEP_INTERVAL_MS = 60_000;
+export const SWEEP_INTERVAL_MS = 60_000;
 
 export class EventLedger {
   constructor({ perInstallation, total }) {
@@ -62,8 +62,12 @@ export class EventLedger {
     if (!eventIds || typeof eventIds !== 'object' || Array.isArray(eventIds)) return;
     const entries = [];
     for (const [key, value] of Object.entries(eventIds)) {
-      const acceptedAt = Number(value);
-      if (!Number.isFinite(acceptedAt) || acceptedAt < now - EVENT_ID_TTL_MS) continue;
+      // A future time (hand edit, clock step) would outlive the TTL, so it
+      // counts from now instead.
+      const recordedAt = Number(value);
+      if (!Number.isFinite(recordedAt)) continue;
+      const acceptedAt = Math.min(recordedAt, now);
+      if (acceptedAt < now - EVENT_ID_TTL_MS) continue;
       const first = key.indexOf(':');
       const second = first < 0 ? -1 : key.indexOf(':', first + 1);
       if (first <= 0 || second <= first + 1 || second === key.length - 1) continue;
@@ -99,7 +103,9 @@ export class EventLedger {
   // Over the total bound the installation holding the most IDs gives up its
   // oldest ones: the heaviest sender pays for the space. It gives up 0.1% of
   // the bound beyond what is needed, so the scan for it runs once per batch
-  // of events rather than on every event while the ledger stays full.
+  // of events rather than on every event while the ledger stays full. The
+  // scan only visits installations that hold IDs, so it never costs more
+  // than the ledger's size even when the bound is too small to batch.
   trimLargest() {
     let largestId;
     let largest;

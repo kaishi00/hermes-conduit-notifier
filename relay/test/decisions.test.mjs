@@ -1,5 +1,5 @@
 import { strict as assert } from 'node:assert';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
@@ -170,6 +170,22 @@ test('a failed save keeps its changes pending and retries after the save delay',
   }
   assert.equal(relay.dirty, false);
   assert.equal(JSON.parse(readFileSync(path, 'utf8')).installations[created.installation.id].active, false, 'a later retry wrote the change');
+});
+
+test('a failed save removes its temporary file', () => {
+  const path = join(dir, `temporary-${Math.random().toString(36).slice(2)}.json`);
+  const relay = new RelayStore(path, {}, { saveDelayMs: 60_000 });
+  const created = relay.createInstallation({ bundleId: 'app', deviceToken: 'a'.repeat(64), environment: 'production' });
+  // Renaming a file over a directory fails after the temporary file is written.
+  const directoryTarget = join(dir, `directory-${Math.random().toString(36).slice(2)}`);
+  mkdirSync(directoryTarget);
+  relay.path = directoryTarget;
+  assert.throws(() => relay.deactivateInstallation(created.installation.id));
+  assert.equal(existsSync(`${directoryTarget}.${process.pid}.tmp`), false);
+  relay.path = path;
+  relay.flush();
+  assert.equal(relay.dirty, false);
+  assert.equal(JSON.parse(readFileSync(path, 'utf8')).installations[created.installation.id].active, false);
 });
 
 test('event metadata is written by a deferred save, and an immediate save includes it', async () => {

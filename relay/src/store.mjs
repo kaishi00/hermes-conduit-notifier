@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { EventLedger } from './event-ledger.mjs';
 import { DEFAULT_STORE_LIMITS } from './limits.mjs';
@@ -148,13 +148,15 @@ export class RelayStore {
 
   save() {
     this.dirty = true;
+    const temporary = `${this.path}.${process.pid}.tmp`;
     try {
       mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
-      const temporary = `${this.path}.${process.pid}.tmp`;
       writeFileSync(temporary, `${JSON.stringify(this.data)}\n`, { encoding: 'utf8', mode: 0o600 });
       chmodSync(temporary, 0o600);
       renameSync(temporary, this.path);
     } catch (error) {
+      // A partial file would hold space a full disk needs back.
+      try { unlinkSync(temporary); } catch { /* Preserve the original failure. */ }
       // Keep the change pending and try again after the save delay.
       this.saveSoon();
       throw error;

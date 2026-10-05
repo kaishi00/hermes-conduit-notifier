@@ -35,7 +35,7 @@ function main() {
     const data = JSON.parse(original.toString('utf8'));
     // Event IDs left the data file; older files may still carry them.
     if (data?.version !== 1 || ![data.installations, data.pairings, data.pendingDecisions].every(isRecord) ||
-        (data.eventIds !== undefined && !isRecord(data.eventIds))) throw new Error();
+        (data.eventIds != null && !isRecord(data.eventIds))) throw new Error();
     const referenced = new Set();
     for (const record of [...Object.values(data.pairings), ...Object.values(data.pendingDecisions)]) {
       if (!isRecord(record) || typeof record.installationId !== 'string' || !record.installationId) throw new Error();
