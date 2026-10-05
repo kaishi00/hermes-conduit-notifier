@@ -129,8 +129,9 @@ docker compose exec conduit-push npm run --silent storage:status
 
 The command prints only total, active, inactive, and maximum installation
 counts. Inactive installations remain in the store and still consume slots:
-automatic APNs deactivation and repeated uninstall/reinstall cycles can use up
-the 1,024 retained-record limit. Review counts before scheduling offline data
+automatic APNs deactivation and repeated uninstall/reinstall cycles count
+toward the installation limit (50,000 by default, `RELAY_MAX_INSTALLATIONS`),
+which the printed maximum reflects. Review counts before scheduling offline data
 maintenance; the relay never deletes installation records or their
 credentials automatically. `DELETE /v1/installations/:id` deactivates an
 installation and does not free its slot.
@@ -180,45 +181,64 @@ gateway-bound inactive records still require separately reviewed maintenance.
 | POST | `/v1/events` | Deliver a notification event |
 | DELETE | `/v1/gateways/current` | Revoke a gateway credential |
 
-The relay bounds persistent admission at 1,024 installations, 16 gateways per
-installation, 512 retained event IDs per installation, and 8,192 event IDs
-across the whole relay (event IDs expire after 24 hours). New records are
-rejected with HTTP 429 when a bound is full; the relay does not evict existing
-credentials or event owners. An installation already above a limit when
-upgraded keeps all its current records, but cannot add records of that kind
-until the operator performs reviewed data maintenance while the relay is
-stopped, preserving active credentials and unexpired event IDs.
+### Capacity and admission limits
 
-Public registration has a process-wide admission limit of 24 requests per
-minute. Authenticated device updates, pairing creation/valid claims, and event
-intake share a separate 96-request-per-minute budget. Together these reserve
-120 mutation admissions per minute without letting public registration drain
-event capacity. Existing per-installation and per-client limits still apply;
-validation and capacity rejection happen before shared budget charging.
-Authenticated update, pairing, or event churn can consume the shared ingress
-pool and temporarily block other events until its window resets.
-Unchanged device updates and already-accepted events without plugin metadata
-do not consume the ingress budget or rewrite the store. A duplicate carrying
-plugin metadata still records that gateway's plugin state and uses the budget.
+The defaults are sized for the shared public relay with thousands of
+installations. Each bound is a backstop against floods, not a quota ordinary
+traffic reaches. Every one can be changed with the environment variable next
+to it: unset or empty keeps the default, and anything other than a positive
+integer stops the relay at boot.
 
-State-changing decision answers and releases share a separate process-wide
-budget of 96 actions per minute. Unknown, released, invalid-question, and
-already-answered responses do not consume it. Installation deactivation and
-gateway revocation share another 24-action-per-minute budget, so revocation
-traffic cannot exhaust the answer/release quota or block the native clarify
-path. These are admission limits, not literal file-write counts: one event can
-make up to five full-store saves while recording plugin state, parking a
-decision, and handling an APNs failure. Health checks and decision polling
-consume none of these four budgets. Device updates remain limited to 30
-requests per minute per installation, including unchanged updates. Repeated
-decision cancellation does not rewrite the store or use the shared decision
-budget, though its per-gateway limit still applies.
+| Bound | Default | Variable |
+|-------|---------|----------|
+| Installations, inactive ones included | 50,000 | `RELAY_MAX_INSTALLATIONS` |
+| Gateways per installation | 64 | `RELAY_MAX_GATEWAYS_PER_INSTALLATION` |
+| Event IDs remembered per installation | 5,000 | `RELAY_MAX_EVENT_IDS_PER_INSTALLATION` |
+| Event IDs remembered across the relay | 250,000 | `RELAY_MAX_EVENT_IDS` |
+| Active clarify decisions across the relay | 1,024 | `RELAY_MAX_ACTIVE_DECISIONS` |
+| Retained clarify decisions across the relay | 4,096 | `RELAY_MAX_RETAINED_DECISIONS` |
+| Registrations per minute | 24 | `RELAY_REGISTRATIONS_PER_MINUTE` |
+| Events per minute | 6,000 | `RELAY_EVENTS_PER_MINUTE` |
+| Device updates that change state, pairing creations, and valid claims per minute | 240 | `RELAY_DEVICE_CHANGES_PER_MINUTE` |
+| Decision answers and releases that change state per minute | 600 | `RELAY_DECISION_ACTIONS_PER_MINUTE` |
+| Installation deactivations and gateway revocations per minute | 24 | `RELAY_REVOCATIONS_PER_MINUTE` |
+
+Event IDs only prevent a repeated delivery of the same event within 24 hours,
+so the relay keeps them in memory and never writes them to the data file. A
+restart forgets them, which costs at most one duplicate push; replaying an
+event after a restart needs that gateway's credential, which can send new
+events anyway. An installation
+at its event-ID bound forgets its own oldest ID, and at the relay-wide bound
+the installation holding the most IDs forgets its oldest, so neither bound
+rejects an event. A gateway's last-seen time and plugin version are written
+at most every five seconds, and on shutdown, instead of on every event. Each
+of those writes is still a full rewrite of the data file, so a busy relay
+spends one whole-file write per five seconds on them rather than two per
+event.
+
+Installations, gateways, and clarify decisions are persistent. A new record is
+rejected with HTTP 429 when its bound is full; the relay never evicts existing
+credentials. A store already above a limit when upgraded keeps every record,
+but cannot add records of that kind until the operator raises the limit or
+removes records while the relay is stopped. Re-pairing a profile adds a
+gateway without revoking the previous one, which is why the gateway bound is
+generous.
+
+The per-minute budgets are process-wide and separate for each class of
+action, so a flood of one kind cannot starve the others. Validation, capacity
+rejection, and per-client limits run before a budget is charged. Unchanged
+device updates, already-accepted events without plugin metadata, non-mutating
+decision responses, and repeated cancellations use no budget and do not
+rewrite the store; health checks and decision polling use none either. The
+per-installation limits of 30 events and 30 device updates per minute still
+apply.
 
 Run exactly one relay process/replica per `DATA_PATH`. The relay caches its
-state and rewrites the whole JSON file; atomic replacement does not coordinate
-multiple writers, and sharing the file between processes can lose updates.
-The budgets are per process. Finite storage and request quotas remain
-saturable and do not guarantee fair admission under a hostile flood.
+state and rewrites the whole JSON file on every persistent change; atomic
+replacement does not coordinate multiple writers, and sharing the file
+between processes can lose updates. The budgets are per process. A hostile
+flood can still saturate a budget or a bound, and installation IDs alone
+cannot establish fairness between actors.
 
 ## Batch clarify decisions (plugin 0.3+)
 
@@ -283,15 +303,17 @@ stays open until the gateway's configured clarify timeout bounds it.
 ### Decision retention limits
 
 The relay allows up to 32 active unresolved decisions per installation and
-256 across the relay. A scalar decision is active until answered or cancelled;
+1,024 across the relay (`RELAY_MAX_ACTIVE_DECISIONS`). A scalar decision is active until answered or cancelled;
 a batch remains active until every question is answered or the decision is
 cancelled. Completed and cancelled decisions preserve their answers and locks
 for the two-hour decision TTL, within separate retained-record caps of 128 per
-installation and 1024 across the relay. Active decisions count toward both
-retained caps. Since settled records stay for two hours, those retained caps
-also impose a maximum admission throughput of 64 records per installation per
-hour and 512 records per hour across the relay, averaged over a full retention
-window.
+installation and 4,096 across the relay (`RELAY_MAX_RETAINED_DECISIONS`).
+Active decisions count toward both retained caps. Since settled records stay
+for two hours, those retained caps also impose a maximum admission throughput
+of 64 records per installation per hour and 2,048 records per hour across the
+relay, averaged over a full retention window. Decisions are stored in the data
+file and a full batch record can reach about 13 KB, so the relay-wide caps
+also bound how large a flood can make that file.
 
 When any limit is full, a new clarify event receives HTTP `429`
 `decision_capacity_exceeded`. The relay sends no push and does not consume the

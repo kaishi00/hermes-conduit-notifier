@@ -1,6 +1,8 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { EventLedger } from './event-ledger.mjs';
+import { DEFAULT_STORE_LIMITS } from './limits.mjs';
 
 const defaultPreferences = Object.freeze({
   enabled: true,
@@ -22,34 +24,38 @@ const defaultPreferences = Object.freeze({
   decision_cards: true,
 });
 
-const MAX_PENDING_DECISIONS = 256;
-const MAX_PENDING_DECISIONS_PER_INSTALLATION = 32;
-const MAX_RETAINED_DECISIONS = 1024;
-const MAX_RETAINED_DECISIONS_PER_INSTALLATION = 128;
+// Metadata-only changes (a gateway's last-seen time and plugin version) are
+// written at most this often instead of on every event. Each write is still
+// the whole file, so on a busy relay this is one full rewrite per interval.
+const DEFAULT_SAVE_DELAY_MS = 5_000;
 
 export class RelayStore {
-  constructor(path, limits = {}) {
+  constructor(path, limits = {}, { saveDelayMs = DEFAULT_SAVE_DELAY_MS } = {}) {
     this.path = path;
     limits ??= {};
     this.limits = {
-      maxInstallations: limits.maxInstallations ?? MAX_INSTALLATIONS,
-      maxGatewaysPerInstallation: limits.maxGatewaysPerInstallation ?? MAX_GATEWAYS_PER_INSTALLATION,
-      maxEventIdsPerInstallation: limits.maxEventIdsPerInstallation ?? MAX_EVENT_IDS_PER_INSTALLATION,
-      maxGlobalEventIds: limits.maxGlobalEventIds ?? MAX_GLOBAL_EVENT_IDS,
+      maxInstallations: limits.maxInstallations ?? DEFAULT_STORE_LIMITS.maxInstallations,
+      maxGatewaysPerInstallation: limits.maxGatewaysPerInstallation ?? DEFAULT_STORE_LIMITS.maxGatewaysPerInstallation,
+      maxEventIdsPerInstallation: limits.maxEventIdsPerInstallation ?? DEFAULT_STORE_LIMITS.maxEventIdsPerInstallation,
+      maxGlobalEventIds: limits.maxGlobalEventIds ?? DEFAULT_STORE_LIMITS.maxGlobalEventIds,
     };
     for (const limit of Object.values(this.limits)) {
       if (!Number.isSafeInteger(limit) || limit <= 0) throw new TypeError('Storage limits must be positive integers.');
     }
     this.decisionLimits = {
-      activeGlobal: limits.activeGlobal ?? MAX_PENDING_DECISIONS,
-      activePerInstallation: limits.activePerInstallation ?? MAX_PENDING_DECISIONS_PER_INSTALLATION,
-      retainedGlobal: limits.retainedGlobal ?? MAX_RETAINED_DECISIONS,
-      retainedPerInstallation: limits.retainedPerInstallation ?? MAX_RETAINED_DECISIONS_PER_INSTALLATION,
+      activeGlobal: limits.activeGlobal ?? DEFAULT_STORE_LIMITS.activeGlobal,
+      activePerInstallation: limits.activePerInstallation ?? DEFAULT_STORE_LIMITS.activePerInstallation,
+      retainedGlobal: limits.retainedGlobal ?? DEFAULT_STORE_LIMITS.retainedGlobal,
+      retainedPerInstallation: limits.retainedPerInstallation ?? DEFAULT_STORE_LIMITS.retainedPerInstallation,
     };
     for (const limit of Object.values(this.decisionLimits)) {
       if (!Number.isSafeInteger(limit) || limit <= 0) throw new TypeError('Decision limits must be positive integers.');
     }
-    this.data = { version: 1, installations: {}, pairings: {}, eventIds: {}, pendingDecisions: {} };
+    this.saveDelayMs = saveDelayMs;
+    this.saveTimer = undefined;
+    this.dirty = false;
+    this.events = new EventLedger({ perInstallation: this.limits.maxEventIdsPerInstallation, total: this.limits.maxGlobalEventIds });
+    this.data = { version: 1, installations: {}, pairings: {}, pendingDecisions: {} };
     this.load();
   }
 
@@ -57,7 +63,10 @@ export class RelayStore {
     if (!existsSync(this.path)) return;
     const parsed = JSON.parse(readFileSync(this.path, 'utf8'));
     if (parsed?.version !== 1 || typeof parsed.installations !== 'object') throw new Error('Unsupported relay data format.');
-    this.data = { version: 1, installations: parsed.installations ?? {}, pairings: parsed.pairings ?? {}, eventIds: parsed.eventIds ?? {}, pendingDecisions: parsed.pendingDecisions ?? {} };
+    this.data = { version: 1, installations: parsed.installations ?? {}, pairings: parsed.pairings ?? {}, pendingDecisions: parsed.pendingDecisions ?? {} };
+    // Older files persisted event IDs; keep them for dedupe, and the next
+    // save leaves them out of the file.
+    this.events.importPersisted(parsed.eventIds);
     this.sanitizePersistedDashboardIds();
     this.upgradeLegacyPendingDecisions();
     this.prune();
@@ -138,11 +147,41 @@ export class RelayStore {
   }
 
   save() {
-    mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
-    const temporary = `${this.path}.${process.pid}.tmp`;
-    writeFileSync(temporary, `${JSON.stringify(this.data)}\n`, { encoding: 'utf8', mode: 0o600 });
-    chmodSync(temporary, 0o600);
-    renameSync(temporary, this.path);
+    this.dirty = true;
+    try {
+      mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
+      const temporary = `${this.path}.${process.pid}.tmp`;
+      writeFileSync(temporary, `${JSON.stringify(this.data)}\n`, { encoding: 'utf8', mode: 0o600 });
+      chmodSync(temporary, 0o600);
+      renameSync(temporary, this.path);
+    } catch (error) {
+      // Keep the change pending and try again after the save delay.
+      this.saveSoon();
+      throw error;
+    }
+    this.dirty = false;
+    clearTimeout(this.saveTimer);
+    this.saveTimer = undefined;
+  }
+
+  // Deferred save for metadata a crash may lose without harm. Any full save
+  // in the meantime writes it too.
+  saveSoon() {
+    this.dirty = true;
+    if (this.saveTimer) return;
+    this.saveTimer = setTimeout(() => {
+      this.saveTimer = undefined;
+      try {
+        this.flush();
+      } catch (error) {
+        console.error(JSON.stringify({ level: 'error', message: 'deferred relay save failed', error: error instanceof Error ? error.message : String(error) }));
+      }
+    }, this.saveDelayMs);
+    this.saveTimer.unref?.();
+  }
+
+  flush() {
+    if (this.dirty) this.save();
   }
 
   createInstallation({ bundleId, deviceToken, environment, preferences }) {
@@ -311,7 +350,7 @@ export class RelayStore {
       : [];
     gateway.lastEventAt = new Date().toISOString();
     installation.updatedAt = new Date().toISOString();
-    this.save();
+    this.saveSoon();
   }
 
   removeGateway(installationId, gatewayId) {
@@ -324,44 +363,28 @@ export class RelayStore {
   }
 
   acceptEvent(installationId, eventId, gatewayId) {
-    this.prune();
     // Gateway-scoped ownership (#review round 2): two gateways on one
     // installation legitimately emit identical event_id values (identical
     // dashboards both use profile/session "default" and deterministic
     // plugin event ids). Deduping installation-wide let one dashboard's
     // event swallow another's.
-    const key = `${installationId}:${gatewayId}:${eventId}`;
-    if (this.data.eventIds[key]) return false;
-    this.assertEventCapacity(installationId, eventId, gatewayId);
-    this.data.eventIds[key] = Date.now();
+    if (!this.events.add(installationId, gatewayId, eventId)) return false;
     // Last-seen is stamped on every accepted event, version-carrying or not,
     // so /v1/meta can distinguish "gateway never reported a plugin version
     // but has sent events" (a pre-0.2 notifier that needs updating) from
     // "paired, nothing sent yet".
     if (gatewayId) {
       const gateway = this.data.installations[installationId]?.gateways?.[gatewayId];
-      if (gateway) gateway.lastEventAt = new Date().toISOString();
+      if (gateway) {
+        gateway.lastEventAt = new Date().toISOString();
+        this.saveSoon();
+      }
     }
-    this.save();
     return true;
   }
 
   hasAcceptedEvent(installationId, eventId, gatewayId) {
-    this.prune();
-    return Boolean(this.data.eventIds[`${installationId}:${gatewayId}:${eventId}`]);
-  }
-
-  assertEventCapacity(installationId, eventId, gatewayId) {
-    this.prune();
-    const eventKey = `${installationId}:${gatewayId}:${eventId}`;
-    if (this.data.eventIds[eventKey]) return false;
-    const prefix = `${installationId}:`;
-    let count = 0;
-    for (const key of Object.keys(this.data.eventIds)) if (key.startsWith(prefix)) count += 1;
-    if (count >= this.limits.maxEventIdsPerInstallation || Object.keys(this.data.eventIds).length >= this.limits.maxGlobalEventIds) {
-      throw capacityError('event_limit_reached');
-    }
-    return true;
+    return this.events.has(installationId, gatewayId, eventId);
   }
 
   // ── Pending decisions (clarify answer loop) ─────────────────────────
@@ -595,10 +618,6 @@ export class RelayStore {
       const expiresAt = pairing && typeof pairing === 'object' ? Date.parse(pairing.expiresAt) : NaN;
       if (!Number.isFinite(expiresAt) || expiresAt <= now) delete this.data.pairings[key];
     }
-    for (const [key, timestamp] of Object.entries(this.data.eventIds)) {
-      const parsedTimestamp = Number(timestamp);
-      if (!Number.isFinite(parsedTimestamp) || parsedTimestamp < now - 24 * 60 * 60_000) delete this.data.eventIds[key];
-    }
     // Clarify prompts live at most ~1h server-side (agent.clarify_timeout
     // default 3600s); 2h covers drift and unlimited-config edge cases while
     // still bounding the store.
@@ -614,14 +633,6 @@ function capacityError(code) {
   error.status = 429;
   return error;
 }
-
-// Hard bounds on persistent records. Existing files are intentionally loaded
-// intact; operators must remove/revoke records explicitly before new admission
-// when a legacy store is already above a limit.
-export const MAX_INSTALLATIONS = 1_024;
-export const MAX_GATEWAYS_PER_INSTALLATION = 16;
-export const MAX_EVENT_IDS_PER_INSTALLATION = 512;
-export const MAX_GLOBAL_EVENT_IDS = 8_192;
 
 function decisionIsActive(decision) {
   if (!decision || typeof decision !== 'object' || decision.cancelledAt) return false;

@@ -4,6 +4,7 @@ import { appendFileSync, chmodSync, readFileSync, realpathSync } from 'node:fs';
 import { isIP } from 'node:net';
 import { pathToFileURL } from 'node:url';
 import { ApnsClient } from './apns.mjs';
+import { limitsFromEnv } from './limits.mjs';
 import { normalizeDashboardId, RelayStore, sanitizeBatchQuestions } from './store.mjs';
 
 // Self-reported relay version/capabilities, surfaced via GET /v1/meta so the
@@ -34,7 +35,7 @@ const MAX_NOTIFICATION_BYTES = 3800;
 
 function main() {
   config = readConfig();
-  store = new RelayStore(config.dataPath);
+  store = new RelayStore(config.dataPath, config.storeLimits);
   apns = new ApnsClient(config);
   limits = new Map();
   // Test seam: APNS_MODE=accept makes every send succeed, reject makes it
@@ -87,8 +88,23 @@ function main() {
     console.log(JSON.stringify({ level: 'info', message: 'Conduit push relay listening', host: config.host, port: config.port, public_url: config.publicUrl }));
   });
 
-  process.on('SIGTERM', () => server.close(() => process.exit(0)));
-  process.on('SIGINT', () => server.close(() => process.exit(0)));
+  // Write deferred metadata before exiting, even if open connections keep
+  // server.close waiting until the container is killed.
+  const shutdown = () => {
+    flushStore();
+    server.close(() => process.exit(0));
+  };
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
+  process.on('exit', flushStore);
+}
+
+function flushStore() {
+  try {
+    store.flush();
+  } catch (error) {
+    console.error(JSON.stringify({ level: 'error', message: 'relay save on shutdown failed', error: error instanceof Error ? error.message : String(error) }));
+  }
 }
 
 // Start the server only when executed directly, so the pure notification
@@ -145,7 +161,7 @@ async function route(request, response) {
     const body = await readJson(request);
     const deviceToken = body.device_token === undefined ? undefined : validateDeviceToken(body.device_token);
     const changes = { deviceToken, preferences: body.preferences };
-    if (store.wouldUpdateInstallation(installation.id, changes)) enforceIngressBudget();
+    if (store.wouldUpdateInstallation(installation.id, changes)) enforceDeviceChangeBudget();
     return sendJson(response, 200, { installation: store.updateInstallation(installation.id, changes) });
   }
   if (installationMatch && request.method === 'DELETE') {
@@ -179,7 +195,7 @@ async function route(request, response) {
         return sendJson(response, 400, { error: 'invalid_dashboard_id' });
       }
     }
-    enforceIngressBudget();
+    enforceDeviceChangeBudget();
     const pairing = store.createPairing(installation.id, dashboardId);
     return sendJson(response, 201, { pairing_code: pairing.code, expires_at: pairing.expiresAt });
   }
@@ -188,7 +204,7 @@ async function route(request, response) {
     enforceRateLimit(`claim:${client}`, 20, 60_000);
     const body = await readJson(request);
     if (!store.canClaimPairing(body.pairing_code)) return sendJson(response, 404, { error: 'invalid_or_expired_pairing' });
-    enforceIngressBudget();
+    enforceDeviceChangeBudget();
     const claimed = store.claimPairing(body.pairing_code, body.gateway_name);
     if (!claimed) return sendJson(response, 404, { error: 'invalid_or_expired_pairing' });
     return sendJson(response, 200, {
@@ -208,10 +224,6 @@ async function route(request, response) {
     enforceRateLimit(`event:${installation.id}`, 30, 60_000);
     const body = await readJson(request);
     const event = validateEvent(body);
-    // Capacity rejection must precede plugin metadata persistence: otherwise
-    // a caller could fill the dedupe table while still forcing a JSON rewrite
-    // (and an event retry would misleadingly appear accepted as duplicate).
-    store.assertEventCapacity(installation.id, event.eventId, credential.gatewayId);
     // The event body is NOT a source of dashboard identity: validateEvent
     // whitelists fields, so any plugin-supplied dashboard_id is dropped
     // here. Outgoing routing carries the dashboard binding of the
@@ -234,7 +246,7 @@ async function route(request, response) {
       }
     }
     if (duplicateEvent && !event.pluginVersion) return sendJson(response, 200, { accepted: true, duplicate: true });
-    enforceIngressBudget();
+    enforceEventBudget();
     // Plugin version recording runs BEFORE the dedupe return: a second
     // gateway on the same installation running the same plugin version sends
     // the same deterministic plugin.hello id, and it must still be recorded.
@@ -750,22 +762,26 @@ function enforceRateLimit(key, maximum, windowMs) {
   if (value.count > maximum) throw httpError(429, 'rate_limited');
 }
 
-// Process-wide admission budgets reserve capacity for each class of action.
-// They bound admitted requests; one event may perform multiple bounded saves.
+// Process-wide admission budgets reserve capacity for each class of action,
+// so a flood of one kind cannot starve the others. Sizes live in limits.mjs.
 function enforceRegistrationBudget() {
-  enforceRateLimit('registration-global', 24, 60_000);
+  enforceRateLimit('registration-global', config.budgets.registrationsPerMinute, 60_000);
 }
 
-function enforceIngressBudget() {
-  enforceRateLimit('ingress-global', 96, 60_000);
+function enforceEventBudget() {
+  enforceRateLimit('event-global', config.budgets.eventsPerMinute, 60_000);
+}
+
+function enforceDeviceChangeBudget() {
+  enforceRateLimit('device-change-global', config.budgets.deviceChangesPerMinute, 60_000);
 }
 
 function enforceDecisionBudget() {
-  enforceRateLimit('decision-global', 96, 60_000);
+  enforceRateLimit('decision-global', config.budgets.decisionActionsPerMinute, 60_000);
 }
 
 function enforceRevocationBudget() {
-  enforceRateLimit('revocation-global', 24, 60_000);
+  enforceRateLimit('revocation-global', config.budgets.revocationsPerMinute, 60_000);
 }
 
 function clientAddress(request) {
@@ -813,6 +829,7 @@ function readConfig() {
     // (they bypass ApnsClient entirely) cannot.
     origin: apnsOrigin,
     trustProxy: process.env.TRUST_PROXY === '1',
+    ...limitsFromEnv(process.env),
   };
 }
 
