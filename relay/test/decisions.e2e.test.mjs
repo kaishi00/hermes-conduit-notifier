@@ -1,5 +1,5 @@
 import { strict as assert } from 'node:assert';
-import { generateKeyPairSync } from 'node:crypto';
+import { createHash, generateKeyPairSync } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer as createNetServer } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -50,16 +50,32 @@ writeFileSync(keyPath, privateKey.export({ type: 'sec1', format: 'pem' }));
 
 const children = [];
 
-async function api(base, path, { method = 'GET', body, credential } = {}) {
+async function api(base, path, { method = 'GET', body, credential, headers: extraHeaders } = {}) {
   const response = await fetch(`${base}${path}`, {
     method,
     headers: {
       ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
       ...(credential ? { authorization: `Bearer ${credential}` } : {}),
+      ...extraHeaders,
     },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   return { status: response.status, json: await response.json().catch(() => null) };
+}
+
+async function stopRelay(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const waitForExit = (timeoutMs) => new Promise((resolve) => {
+    if (child.exitCode !== null || child.signalCode !== null) { resolve(true); return; }
+    const onExit = () => { clearTimeout(timer); resolve(true); };
+    const timer = setTimeout(() => { child.off('exit', onExit); resolve(false); }, timeoutMs);
+    timer.unref?.();
+    child.once('exit', onExit);
+  });
+  child.kill('SIGTERM');
+  if (await waitForExit(5_000)) return;
+  child.kill('SIGKILL');
+  if (!await waitForExit(2_000)) throw new Error('relay did not stop after SIGKILL');
 }
 
 // Reserve a loopback port and release it: connecting there must be refused,
@@ -116,6 +132,422 @@ before(async () => {
   children.push(await startRelay(deadPort, undefined, deadDataPath, {
     APNS_ORIGIN: `https://127.0.0.1:${deadOriginPort}`,
   }));
+});
+
+test('authenticated installation updates are rate limited', async () => {
+  const aPort = await closedPort();
+  const isolatedPath = join(dir, 'relay-data-installation-update-budget.json');
+  const child = await startRelay(aPort, 'accept', isolatedPath);
+  children.push(child);
+  const base = `http://127.0.0.1:${aPort}`;
+  try {
+    const registration = await api(base, '/v1/installations', {
+      method: 'POST',
+      body: { bundle_id: 'com.milim.relay', device_token: 'a'.repeat(64), environment: 'production' },
+    });
+    assert.equal(registration.status, 201);
+    const id = registration.json.installation.id;
+    const credential = registration.json.credential;
+    let last;
+    for (let index = 0; index < 31; index += 1) {
+      last = await api(base, `/v1/installations/${id}`, {
+        method: 'PUT', credential, body: { preferences: { enabled: true } },
+      });
+    }
+    assert.equal(last.status, 429);
+    assert.equal(last.json.error, 'rate_limited');
+  } finally {
+    await stopRelay(child);
+  }
+});
+
+test('registration flood stays bounded without consuming authenticated event capacity', async () => {
+  const aPort = await closedPort();
+  const isolatedPath = join(dir, 'relay-data-global-budget.json');
+  const fixture = new RelayStore(isolatedPath);
+  const created = fixture.createInstallation({ bundleId: 'com.milim.relay', deviceToken: 'c'.repeat(64), environment: 'production' });
+  const pairing = fixture.createPairing(created.installation.id);
+  const claim = fixture.claimPairing(pairing.code, 'control target');
+  fixture.savePendingDecision({ id: 'conduit-push-globalbudget', installationId: created.installation.id, gatewayId: claim.gatewayId, question: 'answer?' });
+  const child = await startRelay(aPort, 'accept', isolatedPath, { TRUST_PROXY: '1' });
+  children.push(child);
+  const base = `http://127.0.0.1:${aPort}`;
+  try {
+    let response;
+    for (let index = 0; index < 25; index += 1) {
+      response = await fetch(`${base}/v1/installations`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-forwarded-for': `10.${Math.floor(index / 250)}.${Math.floor(index / 250)}.${(index % 250) + 1}`,
+        },
+        body: JSON.stringify({ bundle_id: 'com.milim.relay', device_token: 'b'.repeat(64), environment: 'production' }),
+      });
+      if (index < 24) assert.equal(response.status, 201);
+    }
+    assert.equal(response.status, 429);
+    assert.equal((await response.json()).error, 'rate_limited');
+    const gatewayCredential = `${created.installation.id}.${claim.gatewayId}.${claim.gatewaySecret}`;
+    const event = await api(base, '/v1/events', {
+      method: 'POST', credential: gatewayCredential,
+      body: { event_id: 'plugin:after-registration-flood', type: 'plugin.hello' },
+    });
+    assert.equal(event.status, 202, 'registration writes must not spend the authenticated event budget');
+    assert.equal((await api(base, '/v1/decisions/conduit-push-globalbudget', { credential: gatewayCredential })).json.status, 'pending', 'polls remain usable after registration quota exhaustion');
+    const answered = await api(base, '/v1/decisions/conduit-push-globalbudget/respond', {
+      method: 'POST',
+      credential: `${created.installation.id}.${created.deviceSecret}`,
+      body: { answer: 'yes', gateway_id: claim.gatewayId },
+    });
+    assert.equal(answered.status, 200, 'decision answers use their separate authenticated control budget');
+  } finally {
+    await stopRelay(child);
+  }
+});
+
+test('invalid and per-client-limited registration or claim requests cannot starve authenticated intake', async () => {
+  const aPort = await closedPort();
+  const isolatedPath = join(dir, 'relay-data-invalid-ingress.json');
+  const fixture = new RelayStore(isolatedPath);
+  const created = fixture.createInstallation({ bundleId: 'com.milim.relay', deviceToken: 'e'.repeat(64), environment: 'production' });
+  const pairing = fixture.createPairing(created.installation.id);
+  const claim = fixture.claimPairing(pairing.code, 'valid event gateway');
+  const child = await startRelay(aPort, 'accept', isolatedPath, { TRUST_PROXY: '1' });
+  children.push(child);
+  const base = `http://127.0.0.1:${aPort}`;
+  try {
+    for (let index = 0; index < 60; index += 1) {
+      await fetch(`${base}/v1/installations`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-forwarded-for': '10.9.0.7' },
+        body: JSON.stringify({ bundle_id: 'com.milim.relay', device_token: 'invalid', environment: 'production' }),
+      });
+      await fetch(`${base}/v1/pairings/claim`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-forwarded-for': '10.9.0.7' },
+        body: JSON.stringify({ pairing_code: 'not-a-live-code' }),
+      });
+    }
+    const result = await api(base, '/v1/events', {
+      method: 'POST',
+      credential: `${created.installation.id}.${claim.gatewayId}.${claim.gatewaySecret}`,
+      body: { event_id: 'response:after-invalid-flood', type: 'plugin.hello' },
+    });
+    assert.equal(result.status, 202, 'invalid or rate-limited public requests must not spend the global ingress budget');
+  } finally {
+    await stopRelay(child);
+  }
+});
+
+test('authenticated invalid or locally limited writes do not spend the shared ingress budget', async () => {
+  const aPort = await closedPort();
+  const isolatedPath = join(dir, 'relay-data-invalid-authenticated-ingress.json');
+  const fixture = new RelayStore(isolatedPath);
+  const first = fixture.createInstallation({ bundleId: 'com.milim.relay', deviceToken: 'f'.repeat(64), environment: 'production' });
+  const second = fixture.createInstallation({ bundleId: 'com.milim.relay', deviceToken: '1'.repeat(64), environment: 'production' });
+  const firstPairing = fixture.createPairing(first.installation.id);
+  const firstClaim = fixture.claimPairing(firstPairing.code, 'invalid request source');
+  const secondPairing = fixture.createPairing(second.installation.id);
+  const secondClaim = fixture.claimPairing(secondPairing.code, 'valid request source');
+  const child = await startRelay(aPort, 'accept', isolatedPath);
+  children.push(child);
+  const base = `http://127.0.0.1:${aPort}`;
+  const deviceCredential = `${first.installation.id}.${first.deviceSecret}`;
+  const gatewayCredential = `${first.installation.id}.${firstClaim.gatewayId}.${firstClaim.gatewaySecret}`;
+  try {
+    for (let index = 0; index < 40; index += 1) {
+      await api(base, `/v1/installations/${first.installation.id}`, {
+        method: 'PUT', credential: deviceCredential, body: { device_token: 'invalid' },
+      });
+      await api(base, '/v1/events', {
+        method: 'POST', credential: gatewayCredential, body: { event_id: 'bad', type: 'plugin.hello' },
+      });
+      await api(base, `/v1/installations/${first.installation.id}/pairings`, {
+        method: 'POST', credential: deviceCredential, body: { dashboard_id: 'not-a-uuid' },
+      });
+    }
+    const result = await api(base, '/v1/events', {
+      method: 'POST',
+      credential: `${second.installation.id}.${secondClaim.gatewayId}.${secondClaim.gatewaySecret}`,
+      body: { event_id: 'plugin:after-invalid-authenticated-flood', type: 'plugin.hello' },
+    });
+    assert.equal(result.status, 202, 'validation and local quota failures must not spend the shared ingress budget');
+  } finally {
+    await stopRelay(child);
+  }
+});
+
+test('revocation budget leaves decision answer and release actions available', async () => {
+  const aPort = await closedPort();
+  const isolatedPath = join(dir, 'relay-data-control-budget.json');
+  const installations = {};
+  const credentials = [];
+  let gatewayCounter = 0;
+  const hash = (value) => createHash('sha256').update(value).digest('hex');
+  for (let installationIndex = 0; installationIndex < 8; installationIndex += 1) {
+    const installationId = `00000000-0000-4000-8000-${String(installationIndex + 1).padStart(12, '0')}`;
+    const deviceSecret = `device-${installationIndex}`;
+    const gateways = {};
+    for (let gatewayIndex = 0; gatewayIndex < 16; gatewayIndex += 1) {
+      const gatewayId = `10000000-0000-4000-8000-${String(gatewayCounter + 1).padStart(12, '0')}`;
+      const gatewaySecret = `gateway-${gatewayCounter++}`;
+      gateways[gatewayId] = { id: gatewayId, name: 'test', secretHash: hash(gatewaySecret), createdAt: new Date().toISOString() };
+      credentials.push(`${installationId}.${gatewayId}.${gatewaySecret}`);
+    }
+    installations[installationId] = {
+      id: installationId, bundleId: 'com.milim.relay', deviceToken: 'd'.repeat(64), environment: 'production',
+      deviceSecretHash: hash(deviceSecret), gateways, active: true, preferences: { enabled: true },
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    };
+  }
+  writeFileSync(isolatedPath, JSON.stringify({ version: 1, installations, pairings: {}, eventIds: {}, pendingDecisions: {} }));
+  const fixture = new RelayStore(isolatedPath);
+  const answerGateway = Object.keys(installations['00000000-0000-4000-8000-000000000008'].gateways)[0];
+  const releaseGateway = Object.keys(installations['00000000-0000-4000-8000-000000000008'].gateways)[1];
+  fixture.savePendingDecision({ id: 'conduit-push-control1', installationId: '00000000-0000-4000-8000-000000000008', gatewayId: answerGateway, question: 'answer?' });
+  fixture.savePendingDecision({ id: 'conduit-push-control2', installationId: '00000000-0000-4000-8000-000000000008', gatewayId: releaseGateway, question: 'release?' });
+  const child = await startRelay(aPort, 'accept', isolatedPath);
+  children.push(child);
+  try {
+    let last;
+    for (let index = 0; index < 25; index += 1) {
+      last = await api(`http://127.0.0.1:${aPort}`, '/v1/gateways/current', { method: 'DELETE', credential: credentials[index] });
+      if (index < 24) assert.equal(last.status, 204);
+    }
+    assert.equal(last.status, 429);
+    assert.equal(last.json.error, 'rate_limited');
+    const base = `http://127.0.0.1:${aPort}`;
+    const decisionInstallation = installations['00000000-0000-4000-8000-000000000008'];
+    const deviceCredential = `00000000-0000-4000-8000-000000000008.device-7`;
+    const decisionGateway = Object.keys(decisionInstallation.gateways)[0];
+    const answered = await api(base, '/v1/decisions/conduit-push-control1/respond', {
+      method: 'POST', credential: deviceCredential, body: { answer: 'yes', gateway_id: decisionGateway },
+    });
+    assert.equal(answered.status, 200, 'revocation flood must leave answers available');
+    const secondGateway = Object.keys(decisionInstallation.gateways)[1];
+    const released = await api(base, '/v1/decisions/conduit-push-control2', { method: 'DELETE', credential: credentials.find((credential) => credential.startsWith(`00000000-0000-4000-8000-000000000008.${secondGateway}.`)) });
+    assert.equal(released.status, 200, 'revocation flood must leave decision release available');
+  } finally {
+    await stopRelay(child);
+  }
+});
+
+test('no-op updates and metadata-free duplicates leave authenticated ingress capacity available', async () => {
+  const aPort = await closedPort();
+  const isolatedPath = join(dir, 'relay-data-noop-ingress.json');
+  const fixture = new RelayStore(isolatedPath);
+  const targets = [];
+  for (let index = 0; index < 4; index += 1) {
+    const created = fixture.createInstallation({ bundleId: 'com.milim.relay', deviceToken: String(index + 2).repeat(64), environment: 'production' });
+    const pairing = fixture.createPairing(created.installation.id);
+    const claim = fixture.claimPairing(pairing.code, `quota gateway ${index}`);
+    targets.push({ created, claim, deviceCredential: `${created.installation.id}.${created.deviceSecret}`, gatewayCredential: `${created.installation.id}.${claim.gatewayId}.${claim.gatewaySecret}` });
+  }
+  fixture.acceptEvent(targets[0].created.installation.id, 'plugin:duplicate-no-meta', targets[0].claim.gatewayId);
+  const child = await startRelay(aPort, 'accept', isolatedPath);
+  children.push(child);
+  const base = `http://127.0.0.1:${aPort}`;
+  try {
+    for (let index = 0; index < 94; index += 1) {
+      const target = targets[index % targets.length];
+      const result = await api(base, '/v1/events', {
+        method: 'POST', credential: target.gatewayCredential,
+        body: { event_id: `plugin:ingress-${index}`, type: 'plugin.hello' },
+      });
+      assert.equal(result.status, 202);
+    }
+
+    const noOpUpdate = await api(base, `/v1/installations/${targets[0].created.installation.id}`, {
+      method: 'PUT', credential: targets[0].deviceCredential,
+      body: { preferences: { show_previews: false, enabled: true } },
+    });
+    assert.equal(noOpUpdate.status, 200, 'a semantic no-op still returns the installation DTO');
+    const noMetadataDuplicate = await api(base, '/v1/events', {
+      method: 'POST', credential: targets[0].gatewayCredential,
+      body: { event_id: 'plugin:duplicate-no-meta', type: 'plugin.hello' },
+    });
+    assert.deepEqual(noMetadataDuplicate, { status: 200, json: { accepted: true, duplicate: true } });
+
+    const metadataDuplicate = await api(base, '/v1/events', {
+      method: 'POST', credential: targets[0].gatewayCredential,
+      body: { event_id: 'plugin:duplicate-no-meta', type: 'plugin.hello', plugin_version: '9.9.9' },
+    });
+    assert.deepEqual(metadataDuplicate, { status: 200, json: { accepted: true, duplicate: true } });
+
+    const event96 = await api(base, '/v1/events', {
+      method: 'POST', credential: targets[3].gatewayCredential,
+      body: { event_id: 'plugin:ingress-96', type: 'plugin.hello' },
+    });
+    assert.equal(event96.status, 202, 'no-op update and metadata-free duplicate must not consume ingress budget');
+    const persisted = JSON.parse(readFileSync(isolatedPath, 'utf8'));
+    assert.equal(persisted.installations[targets[0].created.installation.id].gateways[targets[0].claim.gatewayId].pluginVersion, '9.9.9', 'metadata-bearing duplicate still records plugin state');
+    const event97 = await api(base, '/v1/events', {
+      method: 'POST', credential: targets[3].gatewayCredential,
+      body: { event_id: 'plugin:ingress-97', type: 'plugin.hello' },
+    });
+    assert.equal(event97.status, 429);
+    assert.equal(event97.json.error, 'rate_limited');
+  } finally {
+    await stopRelay(child);
+  }
+});
+
+test('non-mutating decision responses do not consume the shared decision budget', async () => {
+  const aPort = await closedPort();
+  const isolatedPath = join(dir, 'relay-data-noop-decision-budget.json');
+  const fixture = new RelayStore(isolatedPath);
+  const targets = [];
+  for (let index = 0; index < 7; index += 1) {
+    const created = fixture.createInstallation({ bundleId: 'com.milim.relay', deviceToken: String(index + 2).repeat(64), environment: 'production' });
+    const pairing = fixture.createPairing(created.installation.id);
+    const claim = fixture.claimPairing(pairing.code, `response quota ${index}`);
+    targets.push({ created, claim, deviceCredential: `${created.installation.id}.${created.deviceSecret}`, gatewayCredential: `${created.installation.id}.${claim.gatewayId}.${claim.gatewaySecret}` });
+  }
+  const answeredId = 'conduit-push-already-answered';
+  fixture.savePendingDecision({ id: answeredId, installationId: targets[1].created.installation.id, gatewayId: targets[1].claim.gatewayId, question: 'Done?' });
+  fixture.respondPendingDecision(targets[1].created.installation.id, targets[1].claim.gatewayId, answeredId, 'yes');
+  const batchId = 'conduit-push-duplicate-first';
+  fixture.savePendingDecision({ id: batchId, installationId: targets[2].created.installation.id, gatewayId: targets[2].claim.gatewayId, question: 'First?', questions: [
+    { qid: 'q0', question: 'First?', choices: ['a'] }, { qid: 'q1', question: 'Second?', choices: ['b'] },
+  ] });
+  fixture.respondPendingDecision(targets[2].created.installation.id, targets[2].claim.gatewayId, batchId, 'a', 'q0');
+  const invalidQidId = 'conduit-push-invalid-qid';
+  fixture.savePendingDecision({ id: invalidQidId, installationId: targets[3].created.installation.id, gatewayId: targets[3].claim.gatewayId, question: 'Batch?', questions: [
+    { qid: 'q0', question: 'First?', choices: ['a'] }, { qid: 'q1', question: 'Second?', choices: ['b'] },
+  ] });
+  const releasedId = 'conduit-push-released-response';
+  fixture.savePendingDecision({ id: releasedId, installationId: targets[4].created.installation.id, gatewayId: targets[4].claim.gatewayId, question: 'Released?' });
+  fixture.cancelPendingDecision(targets[4].created.installation.id, targets[4].claim.gatewayId, releasedId);
+  const answerId = 'conduit-push-valid-after-noops';
+  fixture.savePendingDecision({ id: answerId, installationId: targets[5].created.installation.id, gatewayId: targets[5].claim.gatewayId, question: 'Still answerable?' });
+  const releaseId = 'conduit-push-release-after-noops';
+  fixture.savePendingDecision({ id: releaseId, installationId: targets[6].created.installation.id, gatewayId: targets[6].claim.gatewayId, question: 'Still releasable?' });
+
+  const child = await startRelay(aPort, 'accept', isolatedPath, { TRUST_PROXY: '1' });
+  children.push(child);
+  const base = `http://127.0.0.1:${aPort}`;
+  try {
+    for (let index = 0; index < 100; index += 1) {
+      const targetIndex = index % 5;
+      const target = targets[targetIndex];
+      let id;
+      let body;
+      let expectedStatus;
+      if (targetIndex === 0) {
+        id = 'conduit-push-no-such-decision';
+        body = { answer: 'yes', ...(index % 2 === 0 ? { gateway_id: 'missing-gateway' } : {}) };
+        expectedStatus = 404;
+      } else if (targetIndex === 1) {
+        id = answeredId;
+        body = { answer: 'again', gateway_id: target.claim.gatewayId };
+        expectedStatus = 409;
+      } else if (targetIndex === 2) {
+        id = batchId;
+        body = { answer: 'again', gateway_id: target.claim.gatewayId, ...(index % 2 === 0 ? { question_id: 'q0' } : {}) };
+        expectedStatus = 409;
+      } else if (targetIndex === 3) {
+        id = invalidQidId;
+        body = { answer: 'bad-qid', gateway_id: target.claim.gatewayId, question_id: 'q9' };
+        expectedStatus = 400;
+      } else {
+        id = releasedId;
+        body = { answer: 'late', gateway_id: target.claim.gatewayId };
+        expectedStatus = 410;
+      }
+      const result = await api(base, `/v1/decisions/${id}/respond`, {
+        method: 'POST', credential: target.deviceCredential, body,
+        headers: { 'x-forwarded-for': `10.12.0.${targetIndex + 1}` },
+      });
+      assert.equal(result.status, expectedStatus);
+    }
+
+    const answered = await api(base, `/v1/decisions/${answerId}/respond`, {
+      method: 'POST', credential: targets[5].deviceCredential,
+      body: { answer: 'yes', gateway_id: targets[5].claim.gatewayId },
+      headers: { 'x-forwarded-for': '10.12.0.6' },
+    });
+    assert.equal(answered.status, 200, '100 non-mutating responses leave the budget for a real answer');
+    const released = await api(base, `/v1/decisions/${releaseId}`, {
+      method: 'DELETE', credential: targets[6].gatewayCredential,
+      headers: { 'x-forwarded-for': '10.12.0.7' },
+    });
+    assert.equal(released.status, 200, 'a valid release also remains available');
+  } finally {
+    await stopRelay(child);
+  }
+});
+
+test('a full installation store rejects a valid registration before charging its public budget', async () => {
+  const aPort = await closedPort();
+  const isolatedPath = join(dir, 'relay-data-full-registration-capacity.json');
+  const installations = {};
+  for (let index = 0; index < 1024; index += 1) {
+    const id = `20000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`;
+    installations[id] = { id, active: false, gateways: {}, deviceSecretHash: 'synthetic', preferences: {} };
+  }
+  writeFileSync(isolatedPath, JSON.stringify({ version: 1, installations, pairings: {}, eventIds: {}, pendingDecisions: {} }));
+  const before = readFileSync(isolatedPath, 'utf8');
+  const child = await startRelay(aPort, 'accept', isolatedPath, { TRUST_PROXY: '1' });
+  children.push(child);
+  try {
+    for (let index = 0; index < 125; index += 1) {
+      const response = await fetch(`http://127.0.0.1:${aPort}/v1/installations`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-forwarded-for': `10.11.0.${index + 1}`,
+        },
+        body: JSON.stringify({ bundle_id: 'com.milim.relay', device_token: 'a'.repeat(64), environment: 'production' }),
+      });
+      const result = await response.json();
+      assert.equal(response.status, 429);
+      assert.equal(result.error, 'installation_limit_reached', 'capacity rejection must stay actionable across rotated client IPs');
+    }
+    assert.equal(readFileSync(isolatedPath, 'utf8'), before, 'rejected registrations do not rewrite the full store');
+  } finally {
+    await stopRelay(child);
+  }
+});
+
+test('global event capacity rejects before recording plugin metadata or a new event ID', async () => {
+  const aPort = await closedPort();
+  const isolatedPath = join(dir, 'relay-data-event-capacity.json');
+  const relayStore = new RelayStore(isolatedPath);
+  let target;
+  for (let installationIndex = 0; installationIndex < 17; installationIndex += 1) {
+    const name = String.fromCharCode(97 + installationIndex);
+    const created = relayStore.createInstallation({ bundleId: 'com.milim.relay', deviceToken: name.repeat(64), environment: 'production' });
+    if (installationIndex === 16) {
+      const pairing = relayStore.createPairing(created.installation.id);
+      const claim = relayStore.claimPairing(pairing.code, 'capacity target');
+      target = { installation: created.installation, claim };
+    } else {
+      for (let eventIndex = 0; eventIndex < 512; eventIndex += 1) {
+        relayStore.data.eventIds[`${created.installation.id}:legacy-gateway:${eventIndex}`] = Date.now();
+      }
+    }
+  }
+  relayStore.save();
+  assert.equal(Object.keys(relayStore.data.eventIds).length, 8192);
+  const before = readFileSync(isolatedPath, 'utf8');
+  const child = await startRelay(aPort, 'accept', isolatedPath);
+  children.push(child);
+  try {
+    const result = await api(`http://127.0.0.1:${aPort}`, '/v1/events', {
+      method: 'POST',
+      credential: `${target.installation.id}.${target.claim.gatewayId}.${target.claim.gatewaySecret}`,
+      body: { event_id: 'plugin:capacity-new', type: 'plugin.hello', plugin_version: '9.9.9', plugin_capabilities: ['new-capability'] },
+    });
+    assert.equal(result.status, 429);
+    assert.equal(result.json.error, 'event_limit_reached');
+    const afterBytes = readFileSync(isolatedPath, 'utf8');
+    assert.equal(afterBytes, before, 'capacity rejection must not rewrite the persistent store');
+    const persisted = JSON.parse(afterBytes);
+    assert.equal(persisted.eventIds[`${target.installation.id}:${target.claim.gatewayId}:plugin:capacity-new`], undefined);
+    assert.equal(persisted.installations[target.installation.id].gateways[target.claim.gatewayId].pluginVersion, undefined);
+  } finally {
+    await stopRelay(child);
+  }
 });
 
 after(() => {

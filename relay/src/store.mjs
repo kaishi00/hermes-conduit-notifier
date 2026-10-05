@@ -30,6 +30,16 @@ const MAX_RETAINED_DECISIONS_PER_INSTALLATION = 128;
 export class RelayStore {
   constructor(path, limits = {}) {
     this.path = path;
+    limits ??= {};
+    this.limits = {
+      maxInstallations: limits.maxInstallations ?? MAX_INSTALLATIONS,
+      maxGatewaysPerInstallation: limits.maxGatewaysPerInstallation ?? MAX_GATEWAYS_PER_INSTALLATION,
+      maxEventIdsPerInstallation: limits.maxEventIdsPerInstallation ?? MAX_EVENT_IDS_PER_INSTALLATION,
+      maxGlobalEventIds: limits.maxGlobalEventIds ?? MAX_GLOBAL_EVENT_IDS,
+    };
+    for (const limit of Object.values(this.limits)) {
+      if (!Number.isSafeInteger(limit) || limit <= 0) throw new TypeError('Storage limits must be positive integers.');
+    }
     this.decisionLimits = {
       activeGlobal: limits.activeGlobal ?? MAX_PENDING_DECISIONS,
       activePerInstallation: limits.activePerInstallation ?? MAX_PENDING_DECISIONS_PER_INSTALLATION,
@@ -136,6 +146,7 @@ export class RelayStore {
   }
 
   createInstallation({ bundleId, deviceToken, environment, preferences }) {
+    this.assertInstallationCapacity();
     const id = randomUUID();
     const deviceSecret = randomBytes(32).toString('base64url');
     const now = new Date().toISOString();
@@ -155,6 +166,11 @@ export class RelayStore {
     return { installation: publicInstallation(this.data.installations[id]), deviceSecret };
   }
 
+  assertInstallationCapacity() {
+    if (Object.keys(this.data.installations).length >= this.limits.maxInstallations) throw capacityError('installation_limit_reached');
+    return true;
+  }
+
   authenticate(id, secret, scope) {
     const installation = this.data.installations[id];
     if (!installation?.active || !secret) return null;
@@ -169,12 +185,33 @@ export class RelayStore {
     return secretMatches(secret, gateway.secretHash) ? { installation, gateway } : null;
   }
 
-  updateInstallation(id, changes) {
+  normalizedInstallationChanges(id, changes) {
     const installation = this.data.installations[id];
     if (!installation) return null;
-    if (changes.deviceToken) installation.deviceToken = changes.deviceToken;
-    if (changes.preferences) installation.preferences = normalizePreferences({ ...installation.preferences, ...changes.preferences });
-    installation.active = changes.active ?? installation.active;
+    const deviceToken = changes.deviceToken || installation.deviceToken;
+    const preferences = changes.preferences
+      ? normalizePreferences({ ...installation.preferences, ...changes.preferences })
+      : installation.preferences;
+    const active = changes.active ?? installation.active;
+    return { installation, deviceToken, preferences, active };
+  }
+
+  wouldUpdateInstallation(id, changes) {
+    const normalized = this.normalizedInstallationChanges(id, changes);
+    if (!normalized) return false;
+    const { installation, deviceToken, preferences, active } = normalized;
+    const preferencesChanged = !preferencesEqual(preferences, installation.preferences);
+    return deviceToken !== installation.deviceToken || preferencesChanged || active !== installation.active;
+  }
+
+  updateInstallation(id, changes) {
+    const normalized = this.normalizedInstallationChanges(id, changes);
+    if (!normalized) return null;
+    const { installation, deviceToken, preferences, active } = normalized;
+    if (!this.wouldUpdateInstallation(id, changes)) return publicInstallation(installation);
+    installation.deviceToken = deviceToken;
+    installation.preferences = preferences;
+    installation.active = active;
     installation.updatedAt = new Date().toISOString();
     this.save();
     return publicInstallation(installation);
@@ -213,6 +250,9 @@ export class RelayStore {
     const pairing = this.data.pairings[key];
     if (!pairing) return null;
     const installation = this.data.installations[pairing.installationId];
+    if (installation?.active && Object.keys(installation.gateways ?? {}).length >= this.limits.maxGatewaysPerInstallation) {
+      throw capacityError('gateway_limit_reached');
+    }
     delete this.data.pairings[key];
     if (!installation?.active) { this.save(); return null; }
     const gatewayId = randomUUID();
@@ -242,6 +282,19 @@ export class RelayStore {
     installation.updatedAt = new Date().toISOString();
     this.save();
     return { gatewayId, installationId: installation.id, gatewaySecret };
+  }
+
+  canClaimPairing(code) {
+    const key = hashSecret(normalizeCode(code));
+    const pairing = this.data.pairings[key];
+    const expiresAt = Date.parse(pairing?.expiresAt);
+    if (!pairing || !Number.isFinite(expiresAt) || expiresAt <= Date.now()) return false;
+    const installation = this.data.installations[pairing.installationId];
+    if (!installation?.active) return false;
+    if (Object.keys(installation.gateways ?? {}).length >= this.limits.maxGatewaysPerInstallation) {
+      throw capacityError('gateway_limit_reached');
+    }
+    return true;
   }
 
   // ── Gateway plugin compatibility (Settings > Notifications) ─────────
@@ -279,6 +332,7 @@ export class RelayStore {
     // event swallow another's.
     const key = `${installationId}:${gatewayId}:${eventId}`;
     if (this.data.eventIds[key]) return false;
+    this.assertEventCapacity(installationId, eventId, gatewayId);
     this.data.eventIds[key] = Date.now();
     // Last-seen is stamped on every accepted event, version-carrying or not,
     // so /v1/meta can distinguish "gateway never reported a plugin version
@@ -295,6 +349,19 @@ export class RelayStore {
   hasAcceptedEvent(installationId, eventId, gatewayId) {
     this.prune();
     return Boolean(this.data.eventIds[`${installationId}:${gatewayId}:${eventId}`]);
+  }
+
+  assertEventCapacity(installationId, eventId, gatewayId) {
+    this.prune();
+    const eventKey = `${installationId}:${gatewayId}:${eventId}`;
+    if (this.data.eventIds[eventKey]) return false;
+    const prefix = `${installationId}:`;
+    let count = 0;
+    for (const key of Object.keys(this.data.eventIds)) if (key.startsWith(prefix)) count += 1;
+    if (count >= this.limits.maxEventIdsPerInstallation || Object.keys(this.data.eventIds).length >= this.limits.maxGlobalEventIds) {
+      throw capacityError('event_limit_reached');
+    }
+    return true;
   }
 
   // ── Pending decisions (clarify answer loop) ─────────────────────────
@@ -391,6 +458,19 @@ export class RelayStore {
     return true;
   }
 
+  wouldRespondPendingDecision(installationId, gatewayId, id, questionId = '') {
+    const decision = this.data.pendingDecisions[RelayStore.decisionKey(installationId, gatewayId, id)];
+    const createdAt = Number(decision?.createdAt);
+    if (!decision || !Number.isFinite(createdAt) || createdAt < Date.now() - 2 * 60 * 60_000) return false;
+    if (decision.cancelledAt || decision.answer !== undefined) return false;
+    const batchQuestions = decisionQuestions(decision);
+    if (!batchQuestions.length) return true;
+    const target = questionId || batchQuestions[0].qid;
+    if (!batchQuestions.some((question) => question.qid === target)) return false;
+    const answers = decision.answers ?? {};
+    return !Object.hasOwn(answers, target);
+  }
+
   respondPendingDecision(installationId, gatewayId, id, answer, questionId = '') {
     this.prune();
     const decision = this.data.pendingDecisions[RelayStore.decisionKey(installationId, gatewayId, id)];
@@ -479,6 +559,7 @@ export class RelayStore {
     if (this.pendingDecisionStatus(installationId, gatewayId, id).status === 'answered') {
       return 'answered';
     }
+    if (decision.cancelledAt) return 'cancelled';
     decision.cancelledAt = Date.now();
     this.save();
     return 'cancelled';
@@ -511,10 +592,12 @@ export class RelayStore {
   prune() {
     const now = Date.now();
     for (const [key, pairing] of Object.entries(this.data.pairings)) {
-      if (Date.parse(pairing.expiresAt) <= now) delete this.data.pairings[key];
+      const expiresAt = pairing && typeof pairing === 'object' ? Date.parse(pairing.expiresAt) : NaN;
+      if (!Number.isFinite(expiresAt) || expiresAt <= now) delete this.data.pairings[key];
     }
     for (const [key, timestamp] of Object.entries(this.data.eventIds)) {
-      if (Number(timestamp) < now - 24 * 60 * 60_000) delete this.data.eventIds[key];
+      const parsedTimestamp = Number(timestamp);
+      if (!Number.isFinite(parsedTimestamp) || parsedTimestamp < now - 24 * 60 * 60_000) delete this.data.eventIds[key];
     }
     // Clarify prompts live at most ~1h server-side (agent.clarify_timeout
     // default 3600s); 2h covers drift and unlimited-config edge cases while
@@ -525,6 +608,20 @@ export class RelayStore {
     }
   }
 }
+
+function capacityError(code) {
+  const error = new Error(code);
+  error.status = 429;
+  return error;
+}
+
+// Hard bounds on persistent records. Existing files are intentionally loaded
+// intact; operators must remove/revoke records explicitly before new admission
+// when a legacy store is already above a limit.
+export const MAX_INSTALLATIONS = 1_024;
+export const MAX_GATEWAYS_PER_INSTALLATION = 16;
+export const MAX_EVENT_IDS_PER_INSTALLATION = 512;
+export const MAX_GLOBAL_EVENT_IDS = 8_192;
 
 function decisionIsActive(decision) {
   if (!decision || typeof decision !== 'object' || decision.cancelledAt) return false;
@@ -542,7 +639,12 @@ function decisionQuestions(decision) {
 }
 
 export function normalizePreferences(value = {}) {
+  value ??= {};
   return Object.fromEntries(Object.entries(defaultPreferences).map(([key, fallback]) => [key, typeof value[key] === 'boolean' ? value[key] : fallback]));
+}
+
+function preferencesEqual(left, right) {
+  return Object.keys(defaultPreferences).every((key) => left?.[key] === right?.[key]);
 }
 
 // Batch decision bounds — mirror the plugin's sanitizer so a malformed push

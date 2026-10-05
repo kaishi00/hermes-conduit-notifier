@@ -114,6 +114,59 @@ The relay listens on port 9120. Put it behind an HTTPS reverse proxy (the relay 
 
 See [`relay/deploy/.env.example`](relay/deploy/.env.example) for all required environment variables.
 
+Check retained installation capacity without changing the data file. From the
+repository root, pass the mounted JSON path directly:
+
+```shell
+node relay/src/storage-status.mjs relay/deploy/data/relay.json
+```
+
+Or, from `relay/deploy`, inspect the running Compose service:
+
+```shell
+docker compose exec conduit-push npm run --silent storage:status
+```
+
+The command prints only total, active, inactive, and maximum installation
+counts. Inactive installations remain in the store and still consume slots:
+automatic APNs deactivation and repeated uninstall/reinstall cycles can use up
+the 1,024 retained-record limit. Review counts before scheduling offline data
+maintenance; the relay never deletes installation records or their
+credentials automatically. `DELETE /v1/installations/:id` deactivates an
+installation and does not free its slot.
+
+For offline reclamation, `storage:prune-inactive` previews the number of
+eligible records by default. It removes only installations that have been
+inactive and unchanged for at least 30 days, have no gateway credentials,
+and have no pairing or pending-decision references. Active, recent, legacy
+gateway-bound, and referenced records are preserved; other store sections
+are left unchanged. Malformed state causes a generic failure without writes.
+
+From `relay/deploy`, stop every relay writer before previewing or applying:
+
+```shell
+docker compose stop conduit-push
+docker compose run --rm --no-deps conduit-push npm run --silent storage:prune-inactive
+```
+
+Review the counts, then explicitly apply and restart:
+
+```shell
+docker compose run --rm --no-deps conduit-push npm run --silent storage:prune-inactive -- --apply --relay-stopped
+docker compose start conduit-push
+```
+
+The command creates an exclusive, exact-byte `relay.json.backup-*` beside
+the data file before atomically replacing it. Backups contain credentials
+and private messages: protect them like the original data file. The
+`--relay-stopped` flag acknowledges the offline requirement; it does not
+stop running writers. A byte comparison detects changes before replacement,
+but cannot make concurrent maintenance safe. Preview and zero-eligible runs
+create no backup and change no files. For a direct Node invocation, use
+`node relay/src/storage-prune-inactive.mjs PATH_TO_RELAY_JSON` and the same
+explicit flags when applying. Reclamation is operator-run, never automatic;
+gateway-bound inactive records still require separately reviewed maintenance.
+
 ### Relay API
 
 | Method | Path | Purpose |
@@ -126,6 +179,46 @@ See [`relay/deploy/.env.example`](relay/deploy/.env.example) for all required en
 | POST | `/v1/pairings/claim` | Claim a pairing code (gateway side) |
 | POST | `/v1/events` | Deliver a notification event |
 | DELETE | `/v1/gateways/current` | Revoke a gateway credential |
+
+The relay bounds persistent admission at 1,024 installations, 16 gateways per
+installation, 512 retained event IDs per installation, and 8,192 event IDs
+across the whole relay (event IDs expire after 24 hours). New records are
+rejected with HTTP 429 when a bound is full; the relay does not evict existing
+credentials or event owners. An installation already above a limit when
+upgraded keeps all its current records, but cannot add records of that kind
+until the operator performs reviewed data maintenance while the relay is
+stopped, preserving active credentials and unexpired event IDs.
+
+Public registration has a process-wide admission limit of 24 requests per
+minute. Authenticated device updates, pairing creation/valid claims, and event
+intake share a separate 96-request-per-minute budget. Together these reserve
+120 mutation admissions per minute without letting public registration drain
+event capacity. Existing per-installation and per-client limits still apply;
+validation and capacity rejection happen before shared budget charging.
+Authenticated update, pairing, or event churn can consume the shared ingress
+pool and temporarily block other events until its window resets.
+Unchanged device updates and already-accepted events without plugin metadata
+do not consume the ingress budget or rewrite the store. A duplicate carrying
+plugin metadata still records that gateway's plugin state and uses the budget.
+
+State-changing decision answers and releases share a separate process-wide
+budget of 96 actions per minute. Unknown, released, invalid-question, and
+already-answered responses do not consume it. Installation deactivation and
+gateway revocation share another 24-action-per-minute budget, so revocation
+traffic cannot exhaust the answer/release quota or block the native clarify
+path. These are admission limits, not literal file-write counts: one event can
+make up to five full-store saves while recording plugin state, parking a
+decision, and handling an APNs failure. Health checks and decision polling
+consume none of these four budgets. Device updates remain limited to 30
+requests per minute per installation, including unchanged updates. Repeated
+decision cancellation does not rewrite the store or use the shared decision
+budget, though its per-gateway limit still applies.
+
+Run exactly one relay process/replica per `DATA_PATH`. The relay caches its
+state and rewrites the whole JSON file; atomic replacement does not coordinate
+multiple writers, and sharing the file between processes can lose updates.
+The budgets are per process. Finite storage and request quotas remain
+saturable and do not guarantee fair admission under a hostile flood.
 
 ## Batch clarify decisions (plugin 0.3+)
 

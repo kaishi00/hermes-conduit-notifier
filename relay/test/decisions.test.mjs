@@ -1,5 +1,5 @@
 import { strict as assert } from 'node:assert';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
@@ -13,6 +13,63 @@ after(() => rmSync(dir, { recursive: true, force: true }));
 function store(limits) {
   return new RelayStore(join(dir, `store-${Math.random().toString(36).slice(2)}.json`), limits);
 }
+
+test('storage limits must be positive safe integers before store files are touched', () => {
+  const invalidValues = [0, -1, Number.NaN, 1.5, Number.MAX_SAFE_INTEGER + 1];
+  const limitNames = [
+    'maxInstallations',
+    'maxGatewaysPerInstallation',
+    'maxEventIdsPerInstallation',
+    'maxGlobalEventIds',
+  ];
+
+  for (const limitName of limitNames) {
+    for (const invalidValue of invalidValues) {
+      const path = join(dir, `invalid-${limitName}-${Math.random().toString(36).slice(2)}.json`);
+      assert.throws(
+        () => new RelayStore(path, { [limitName]: invalidValue }),
+        /Storage limits must be positive integers\./,
+        `${limitName}=${String(invalidValue)} must be rejected`,
+      );
+      assert.equal(existsSync(path), false, 'invalid limits must be rejected before loading or creating store state');
+    }
+  }
+});
+
+test('registration with null preferences uses the default preferences', () => {
+  const relay = store();
+  const created = relay.createInstallation({
+    bundleId: 'com.milim.relay', deviceToken: 'n'.repeat(64), environment: 'production', preferences: null,
+  });
+
+  assert.equal(created.installation.preferences.enabled, true);
+  assert.equal(created.installation.preferences.approval_needed, true);
+  assert.equal(created.installation.preferences.show_previews, false);
+  assert.equal(created.installation.preferences.decision_cards, true);
+});
+
+test('loading and pruning malformed pairings removes corrupt entries and preserves a valid future pairing', () => {
+  const path = join(dir, `malformed-pairings-${Math.random().toString(36).slice(2)}.json`);
+  const validKey = 'valid-future';
+  writeFileSync(path, JSON.stringify({
+    version: 1,
+    installations: {},
+    pairings: {
+      nullRecord: null,
+      stringRecord: 'corrupt',
+      invalidDate: { expiresAt: 'not-a-date' },
+      expired: { expiresAt: new Date(Date.now() - 60_000).toISOString() },
+      [validKey]: { installationId: 'inst-future', expiresAt: new Date(Date.now() + 60_000).toISOString() },
+    },
+    eventIds: {},
+    pendingDecisions: {},
+  }));
+
+  const relay = new RelayStore(path);
+
+  assert.deepEqual(Object.keys(relay.data.pairings), [validKey]);
+  assert.equal(relay.data.pairings[validKey].installationId, 'inst-future');
+});
 
 test('same-id decisions from two gateways coexist and never mutate each other', () => {
   // Gateway-scoped ownership: two gateways on one installation (identical
@@ -65,6 +122,86 @@ test('same-id decisions from two gateways coexist and never mutate each other', 
   assert.deepEqual(relay.resolveLegacyRespond('inst-1', 'conduit-push-never'), { resolution: 'unknown' });
 });
 
+test('event pruning removes corrupt or non-finite persisted timestamps', () => {
+  const relay = store();
+  relay.data.eventIds = {
+    'inst:gw:old-number': Date.now() - 25 * 60 * 60_000,
+    'inst:gw:nan': 'not-a-time',
+    'inst:gw:infinity': Infinity,
+    'inst:gw:valid': Date.now(),
+  };
+
+  relay.prune();
+
+  assert.deepEqual(Object.keys(relay.data.eventIds), ['inst:gw:valid']);
+});
+
+test('installation update preflight compares preference meaning, not key order', () => {
+  const relay = store();
+  const created = relay.createInstallation({
+    bundleId: 'com.milim.relay', deviceToken: 'a'.repeat(64), environment: 'production',
+    preferences: { enabled: false, show_previews: true },
+  });
+  const installation = relay.data.installations[created.installation.id];
+  installation.preferences = Object.fromEntries(Object.entries(installation.preferences).reverse());
+  relay.save();
+  const before = readFileSync(relay.path, 'utf8');
+
+  assert.equal(relay.wouldUpdateInstallation(created.installation.id, {
+    preferences: { show_previews: true, enabled: false },
+  }), false);
+  const updated = relay.updateInstallation(created.installation.id, {
+    preferences: { show_previews: true, enabled: false },
+  });
+
+  assert.deepEqual(updated.preferences, created.installation.preferences);
+  assert.equal(readFileSync(relay.path, 'utf8'), before, 'semantic no-op does not rewrite stored state');
+});
+
+test('installation update preflight preserves explicit enablement for legacy preferences', () => {
+  const relay = store();
+  const created = relay.createInstallation({
+    bundleId: 'com.milim.relay', deviceToken: 'b'.repeat(64), environment: 'production', preferences: {},
+  });
+  relay.data.installations[created.installation.id].preferences = {};
+  relay.save();
+
+  const changes = { preferences: { enabled: true } };
+  assert.equal(relay.wouldUpdateInstallation(created.installation.id, changes), true);
+  const updated = relay.updateInstallation(created.installation.id, changes);
+
+  assert.equal(updated.preferences.enabled, true);
+  assert.equal(relay.data.installations[created.installation.id].preferences.enabled, true);
+});
+
+test('response preflight matches scalar, batch-first, duplicate, invalid, released, and unknown outcomes', () => {
+  const relay = store();
+  relay.savePendingDecision({ id: 'conduit-push-scalar', installationId: 'inst-r', gatewayId: 'gw-r', question: 'Scalar?' });
+  relay.savePendingDecision({ id: 'conduit-push-answered', installationId: 'inst-r', gatewayId: 'gw-r', question: 'Done?' });
+  relay.respondPendingDecision('inst-r', 'gw-r', 'conduit-push-answered', 'yes');
+  relay.savePendingDecision({ id: 'conduit-push-batch-preflight', installationId: 'inst-r', gatewayId: 'gw-r', question: 'First?', questions: [
+    { qid: 'q0', question: 'First?', choices: ['a'] },
+    { qid: 'q1', question: 'Second?', choices: ['b'] },
+  ] });
+  relay.respondPendingDecision('inst-r', 'gw-r', 'conduit-push-batch-preflight', 'a', 'q0');
+  relay.savePendingDecision({ id: 'conduit-push-released', installationId: 'inst-r', gatewayId: 'gw-r', question: 'Released?' });
+  relay.cancelPendingDecision('inst-r', 'gw-r', 'conduit-push-released');
+  relay.savePendingDecision({ id: 'conduit-push-corrupt-time', installationId: 'inst-r', gatewayId: 'gw-r', question: 'Corrupt time?' });
+  relay.data.pendingDecisions[RelayStore.decisionKey('inst-r', 'gw-r', 'conduit-push-corrupt-time')].createdAt = Number.NaN;
+  const before = JSON.stringify(relay.data.pendingDecisions);
+
+  assert.equal(relay.wouldRespondPendingDecision('inst-r', 'gw-r', 'conduit-push-scalar', 'ignored-qid'), true, 'scalar responses ignore question ids');
+  assert.equal(relay.wouldRespondPendingDecision('inst-r', 'gw-r', 'conduit-push-answered'), false);
+  assert.equal(relay.wouldRespondPendingDecision('inst-r', 'gw-r', 'conduit-push-batch-preflight'), false, 'omitted qid targets the already-answered first batch question');
+  assert.equal(relay.wouldRespondPendingDecision('inst-r', 'gw-r', 'conduit-push-batch-preflight', 'q0'), false);
+  assert.equal(relay.wouldRespondPendingDecision('inst-r', 'gw-r', 'conduit-push-batch-preflight', 'q1'), true);
+  assert.equal(relay.wouldRespondPendingDecision('inst-r', 'gw-r', 'conduit-push-batch-preflight', 'q9'), false);
+  assert.equal(relay.wouldRespondPendingDecision('inst-r', 'gw-r', 'conduit-push-released'), false);
+  assert.equal(relay.wouldRespondPendingDecision('inst-r', 'gw-r', 'conduit-push-missing'), false);
+  assert.equal(relay.wouldRespondPendingDecision('inst-r', 'gw-r', 'conduit-push-corrupt-time'), false);
+  assert.equal(JSON.stringify(relay.data.pendingDecisions), before, 'preflight reads state without mutating it');
+});
+
 test('event dedupe is gateway-scoped: same event id from different gateways both accepted', () => {
   const relay = store();
   assert.equal(relay.acceptEvent('inst-1', 'approval:42', 'gw-A'), true);
@@ -75,6 +212,85 @@ test('event dedupe is gateway-scoped: same event id from different gateways both
   assert.equal(relay.acceptEvent('inst-1', 'approval:42', 'gw-B'), true);
   // Third installation, same gateway-id and event id → accepted.
   assert.equal(relay.acceptEvent('inst-2', 'approval:42', 'gw-A'), true);
+});
+
+test('storage quotas reject new records without evicting existing credentials or owners', () => {
+  const relay = new RelayStore(join(dir, `limits-${Math.random().toString(36).slice(2)}.json`), {
+    maxInstallations: 1, maxGatewaysPerInstallation: 1, maxEventIdsPerInstallation: 1,
+  });
+  const first = relay.createInstallation({ bundleId: 'app', deviceToken: 'a'.repeat(64), environment: 'production' });
+  const pairing = relay.createPairing(first.installation.id);
+  const claim = relay.claimPairing(pairing.code, 'first');
+  assert.throws(() => relay.createInstallation({ bundleId: 'app', deviceToken: 'b'.repeat(64), environment: 'production' }), /installation_limit_reached/);
+  const secondPairing = relay.createPairing(first.installation.id);
+  assert.throws(() => relay.claimPairing(secondPairing.code, 'second'), /gateway_limit_reached/);
+  assert.equal(Object.keys(relay.data.pairings).length, 1, 'a rejected claim keeps its pairing available');
+  assert.ok(relay.authenticate(first.installation.id, first.deviceSecret, 'device'));
+  assert.ok(relay.authenticateGateway(first.installation.id, claim.gatewayId, claim.gatewaySecret));
+  assert.equal(relay.acceptEvent(first.installation.id, 'event-0001', claim.gatewayId), true);
+  assert.throws(() => relay.acceptEvent(first.installation.id, 'event-0002', claim.gatewayId), /event_limit_reached/);
+  assert.equal(relay.acceptEvent(first.installation.id, 'event-0001', claim.gatewayId), false);
+  relay.deactivateInstallation(first.installation.id);
+  assert.equal(relay.data.installations[first.installation.id].active, false);
+  assert.throws(() => relay.createInstallation({ bundleId: 'app', deviceToken: 'c'.repeat(64), environment: 'production' }), /installation_limit_reached/);
+});
+
+test('loading a store already above a configured quota preserves all existing records', () => {
+  const path = join(dir, `legacy-limit-${Math.random().toString(36).slice(2)}.json`);
+  const installations = Object.fromEntries(['first', 'second'].map((id) => [id, { id, active: true, deviceSecretHash: id, gateways: {} }]));
+  writeFileSync(path, JSON.stringify({ version: 1, installations, pairings: {}, eventIds: {}, pendingDecisions: {} }));
+  const relay = new RelayStore(path, { maxInstallations: 1 });
+  assert.deepEqual(Object.keys(relay.data.installations), ['first', 'second']);
+  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')).installations, installations);
+  assert.throws(() => relay.createInstallation({ bundleId: 'app', deviceToken: 'c'.repeat(64), environment: 'production' }), /installation_limit_reached/);
+});
+
+test('event-ID quota spans installations and survives gateway revocation and re-pairing', () => {
+  const relay = new RelayStore(join(dir, `global-events-${Math.random().toString(36).slice(2)}.json`), {
+    maxInstallations: 3, maxGatewaysPerInstallation: 2,
+    maxEventIdsPerInstallation: 2, maxGlobalEventIds: 2,
+  });
+  const createGateway = (name) => {
+    const created = relay.createInstallation({ bundleId: 'app', deviceToken: name.repeat(64).slice(0, 64), environment: 'production' });
+    const pairing = relay.createPairing(created.installation.id);
+    return { installation: created.installation, gateway: relay.claimPairing(pairing.code, name) };
+  };
+  const first = createGateway('a');
+  const second = createGateway('b');
+  assert.equal(relay.acceptEvent(first.installation.id, 'event-0001', first.gateway.gatewayId), true);
+  assert.equal(relay.acceptEvent(first.installation.id, 'event-0002', first.gateway.gatewayId), true);
+  assert.throws(() => relay.assertEventCapacity(second.installation.id, 'event-0003', second.gateway.gatewayId), /event_limit_reached/);
+  assert.equal(Object.keys(relay.data.eventIds).length, 2, 'preflight leaves accepted owners untouched');
+
+  relay.removeGateway(first.installation.id, first.gateway.gatewayId);
+  const replacementPairing = relay.createPairing(first.installation.id);
+  const replacement = relay.claimPairing(replacementPairing.code, 'replacement');
+  assert.throws(() => relay.acceptEvent(first.installation.id, 'event-0004', replacement.gatewayId), /event_limit_reached/);
+  assert.equal(Object.keys(relay.data.eventIds).length, 2, 'gateway replacement cannot reset per-installation retention');
+
+  for (const key of Object.keys(relay.data.eventIds)) relay.data.eventIds[key] = Date.now() - 24 * 60 * 60_000 - 1;
+  assert.equal(relay.assertEventCapacity(second.installation.id, 'event-0003', second.gateway.gatewayId), true, 'expired IDs release global capacity');
+  assert.equal(Object.keys(relay.data.eventIds).length, 0, 'expiry prunes only expired IDs');
+  assert.equal(relay.acceptEvent(second.installation.id, 'event-0003', second.gateway.gatewayId), true);
+});
+
+test('no-op installation updates and repeated cancellation do not save or rewrite state', () => {
+  const relay = store();
+  const created = relay.createInstallation({ bundleId: 'app', deviceToken: 'a'.repeat(64), environment: 'production' });
+  relay.savePendingDecision({ id: 'conduit-push-cancel', installationId: created.installation.id, gatewayId: 'gw-1', question: 'q' });
+  const installation = relay.data.installations[created.installation.id];
+  const updatedAt = installation.updatedAt;
+  let writes = 0;
+  relay.save = () => { writes += 1; };
+
+  assert.deepEqual(relay.updateInstallation(installation.id, { deviceToken: installation.deviceToken, preferences: installation.preferences }), {
+    id: installation.id, active: true, gateways: [], preferences: installation.preferences, updated_at: updatedAt,
+  });
+  assert.equal(relay.cancelPendingDecision(installation.id, 'gw-1', 'conduit-push-cancel'), 'cancelled');
+  const cancelledAt = relay.data.pendingDecisions[RelayStore.decisionKey(installation.id, 'gw-1', 'conduit-push-cancel')].cancelledAt;
+  assert.equal(relay.cancelPendingDecision(installation.id, 'gw-1', 'conduit-push-cancel'), 'cancelled');
+  assert.equal(relay.data.pendingDecisions[RelayStore.decisionKey(installation.id, 'gw-1', 'conduit-push-cancel')].cancelledAt, cancelledAt);
+  assert.equal(writes, 1, 'only the first cancellation persists');
 });
 
 test('pending decision lifecycle: save → pending → answered → already', () => {

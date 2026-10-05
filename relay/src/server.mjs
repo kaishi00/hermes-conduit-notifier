@@ -127,6 +127,8 @@ async function route(request, response) {
     const deviceToken = validateDeviceToken(body.device_token);
     if (body.bundle_id !== config.topic) return sendJson(response, 400, { error: 'invalid_topic' });
     if (body.environment !== 'production') return sendJson(response, 400, { error: 'production_only' });
+    store.assertInstallationCapacity();
+    enforceRegistrationBudget();
     const created = store.createInstallation({ bundleId: body.bundle_id, deviceToken, environment: body.environment, preferences: body.preferences });
     return sendJson(response, 201, {
       installation: created.installation,
@@ -139,13 +141,17 @@ async function route(request, response) {
   if (installationMatch && request.method === 'PUT') {
     const installation = authorize(request, installationMatch[1], 'device');
     if (!installation) return sendJson(response, 401, { error: 'unauthorized' });
+    enforceRateLimit(`installation-update:${installation.id}`, 30, 60_000);
     const body = await readJson(request);
     const deviceToken = body.device_token === undefined ? undefined : validateDeviceToken(body.device_token);
-    return sendJson(response, 200, { installation: store.updateInstallation(installation.id, { deviceToken, preferences: body.preferences }) });
+    const changes = { deviceToken, preferences: body.preferences };
+    if (store.wouldUpdateInstallation(installation.id, changes)) enforceIngressBudget();
+    return sendJson(response, 200, { installation: store.updateInstallation(installation.id, changes) });
   }
   if (installationMatch && request.method === 'DELETE') {
     const installation = authorize(request, installationMatch[1], 'device');
     if (!installation) return sendJson(response, 401, { error: 'unauthorized' });
+    enforceRevocationBudget();
     store.deactivateInstallation(installation.id);
     response.writeHead(204).end();
     return;
@@ -173,6 +179,7 @@ async function route(request, response) {
         return sendJson(response, 400, { error: 'invalid_dashboard_id' });
       }
     }
+    enforceIngressBudget();
     const pairing = store.createPairing(installation.id, dashboardId);
     return sendJson(response, 201, { pairing_code: pairing.code, expires_at: pairing.expiresAt });
   }
@@ -180,6 +187,8 @@ async function route(request, response) {
   if (request.method === 'POST' && url.pathname === '/v1/pairings/claim') {
     enforceRateLimit(`claim:${client}`, 20, 60_000);
     const body = await readJson(request);
+    if (!store.canClaimPairing(body.pairing_code)) return sendJson(response, 404, { error: 'invalid_or_expired_pairing' });
+    enforceIngressBudget();
     const claimed = store.claimPairing(body.pairing_code, body.gateway_name);
     if (!claimed) return sendJson(response, 404, { error: 'invalid_or_expired_pairing' });
     return sendJson(response, 200, {
@@ -199,6 +208,10 @@ async function route(request, response) {
     enforceRateLimit(`event:${installation.id}`, 30, 60_000);
     const body = await readJson(request);
     const event = validateEvent(body);
+    // Capacity rejection must precede plugin metadata persistence: otherwise
+    // a caller could fill the dedupe table while still forcing a JSON rewrite
+    // (and an event retry would misleadingly appear accepted as duplicate).
+    store.assertEventCapacity(installation.id, event.eventId, credential.gatewayId);
     // The event body is NOT a source of dashboard identity: validateEvent
     // whitelists fields, so any plugin-supplied dashboard_id is dropped
     // here. Outgoing routing carries the dashboard binding of the
@@ -220,6 +233,8 @@ async function route(request, response) {
         throw error;
       }
     }
+    if (duplicateEvent && !event.pluginVersion) return sendJson(response, 200, { accepted: true, duplicate: true });
+    enforceIngressBudget();
     // Plugin version recording runs BEFORE the dedupe return: a second
     // gateway on the same installation running the same plugin version sends
     // the same deterministic plugin.hello id, and it must still be recorded.
@@ -350,11 +365,13 @@ async function route(request, response) {
     let result;
     const responseGatewayId = cleanIdentifier(body.gateway_id, 80);
     if (responseGatewayId) {
+      if (store.wouldRespondPendingDecision(installation.id, responseGatewayId, id, questionId)) enforceDecisionBudget();
       result = store.respondPendingDecision(installation.id, responseGatewayId, id, answer, questionId);
     } else {
       // Legacy: resolve {installation, request id} without a discriminator.
       const legacy = store.resolveLegacyRespond(installation.id, id);
       if (legacy.resolution === 'unique') {
+        if (store.wouldRespondPendingDecision(installation.id, legacy.gatewayId, id, questionId)) enforceDecisionBudget();
         result = store.respondPendingDecision(installation.id, legacy.gatewayId, id, answer, questionId);
       } else if (legacy.resolution === 'ambiguous') {
         return sendJson(response, 400, { error: 'ambiguous_decision' });
@@ -399,6 +416,8 @@ async function route(request, response) {
     // Release has its OWN bucket: heavy clarify polling must never be able
     // to starve the DELETE that cleans up when the native path wins.
     enforceRateLimit(`decision-cancel:${credential.gatewayId}`, 30, 60_000);
+    const beforeCancel = store.pendingDecisionStatus(credential.installationId, credential.gatewayId, decisionMatch[1]);
+    if (beforeCancel.status === 'pending') enforceDecisionBudget();
     const outcome = store.cancelPendingDecision(credential.installationId, credential.gatewayId, decisionMatch[1]);
     if (outcome === 'unknown') return sendJson(response, 404, { error: 'unknown_decision' });
     // Diagnostic distinction only (same 200, Conduit never parses this
@@ -412,6 +431,7 @@ async function route(request, response) {
   if (request.method === 'DELETE' && url.pathname === '/v1/gateways/current') {
     const credential = gatewayCredential(request);
     if (!credential || !store.authenticateGateway(credential.installationId, credential.gatewayId, credential.secret)) return sendJson(response, 401, { error: 'unauthorized' });
+    enforceRevocationBudget();
     store.removeGateway(credential.installationId, credential.gatewayId);
     response.writeHead(204).end();
     return;
@@ -728,6 +748,24 @@ function enforceRateLimit(key, maximum, windowMs) {
   if (!value || value.resetAt <= now) { limits.set(key, { count: 1, resetAt: now + windowMs }); return; }
   value.count += 1;
   if (value.count > maximum) throw httpError(429, 'rate_limited');
+}
+
+// Process-wide admission budgets reserve capacity for each class of action.
+// They bound admitted requests; one event may perform multiple bounded saves.
+function enforceRegistrationBudget() {
+  enforceRateLimit('registration-global', 24, 60_000);
+}
+
+function enforceIngressBudget() {
+  enforceRateLimit('ingress-global', 96, 60_000);
+}
+
+function enforceDecisionBudget() {
+  enforceRateLimit('decision-global', 96, 60_000);
+}
+
+function enforceRevocationBudget() {
+  enforceRateLimit('revocation-global', 24, 60_000);
 }
 
 function clientAddress(request) {

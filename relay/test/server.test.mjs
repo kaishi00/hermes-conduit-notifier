@@ -462,3 +462,7 @@ test('normalizePreferences defaults attention_sound on and keeps an explicit opt
   assert.equal(normalizePreferences({}).attention_sound, true);
   assert.equal(normalizePreferences({ attention_sound: false }).attention_sound, false);
 });
+
+test('normalizePreferences treats null as the default preference object', () => {
+  assert.deepEqual(normalizePreferences(null), normalizePreferences());
+});
