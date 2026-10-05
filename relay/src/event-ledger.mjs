@@ -5,7 +5,7 @@
 // rewrite the whole data file. Both bounds forget old IDs rather than reject
 // new events, so a busy relay never drops a notification to make room.
 export const EVENT_ID_TTL_MS = 24 * 60 * 60_000;
-const SWEEP_INTERVAL_MS = 60_000;
+export const SWEEP_INTERVAL_MS = 60_000;
 
 export class EventLedger {
   constructor({ perInstallation, total }) {
@@ -64,8 +64,10 @@ export class EventLedger {
     for (const [key, value] of Object.entries(eventIds)) {
       // A future time (hand edit, clock step) would outlive the TTL, so it
       // counts from now instead.
-      const acceptedAt = Math.min(Number(value), now);
-      if (!Number.isFinite(acceptedAt) || acceptedAt < now - EVENT_ID_TTL_MS) continue;
+      const recordedAt = Number(value);
+      if (!Number.isFinite(recordedAt)) continue;
+      const acceptedAt = Math.min(recordedAt, now);
+      if (acceptedAt < now - EVENT_ID_TTL_MS) continue;
       const first = key.indexOf(':');
       const second = first < 0 ? -1 : key.indexOf(':', first + 1);
       if (first <= 0 || second <= first + 1 || second === key.length - 1) continue;

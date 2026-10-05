@@ -69,12 +69,15 @@ async function waitFor(check, message, timeoutMs = 15_000) {
   for (;;) {
     try {
       if (check()) return;
-      lastError = undefined;
     } catch (error) {
       // Not ready yet, for example while the file is being replaced.
       lastError = error;
     }
-    if (Date.now() > deadline) throw new Error(lastError ? `${message} (last error: ${lastError.message})` : message);
+    if (Date.now() > deadline) {
+      if (lastError === undefined) throw new Error(message);
+      const detail = String(lastError?.message ?? lastError).replace(/\s+/g, ' ').slice(0, 300);
+      throw new Error(`${message} (last error: ${detail})`);
+    }
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
 }

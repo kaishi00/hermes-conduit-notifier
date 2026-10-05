@@ -4,6 +4,7 @@ import { appendFileSync, chmodSync, readFileSync, realpathSync } from 'node:fs';
 import { isIP } from 'node:net';
 import { pathToFileURL } from 'node:url';
 import { ApnsClient } from './apns.mjs';
+import { SWEEP_INTERVAL_MS } from './event-ledger.mjs';
 import { limitsFromEnv } from './limits.mjs';
 import { normalizeDashboardId, RelayStore, sanitizeBatchQuestions } from './store.mjs';
 
@@ -37,7 +38,8 @@ function main() {
   config = readConfig();
   store = new RelayStore(config.dataPath, config.storeLimits);
   // Accepting an event sweeps expired IDs; this frees them on a quiet relay.
-  setInterval(() => store.events.sweep(), 60_000).unref();
+  // Sweeps throttle themselves, so the timer runs just past that interval.
+  setInterval(() => store.events.sweep(), SWEEP_INTERVAL_MS + 1_000).unref();
   apns = new ApnsClient(config);
   limits = new Map();
   // Test seam: APNS_MODE=accept makes every send succeed, reject makes it

@@ -44,7 +44,8 @@ test('importing persisted IDs skips malformed keys and keeps acceptance order fo
 test('an imported ID with a future time expires a day after the import', () => {
   const now = Date.now();
   const ledger = new EventLedger({ perInstallation: 10, total: 10 });
-  ledger.importPersisted({ 'inst:gw:future': now + 10 * EVENT_ID_TTL_MS }, now);
+  ledger.importPersisted({ 'inst:gw:future': now + 10 * EVENT_ID_TTL_MS, 'inst:gw:infinite': Infinity }, now);
+  assert.equal(ledger.size, 1, 'a non-finite time is skipped');
   assert.equal(ledger.has('inst', 'gw', 'future', now + EVENT_ID_TTL_MS), true);
   assert.equal(ledger.has('inst', 'gw', 'future', now + EVENT_ID_TTL_MS + 1), false);
 });
