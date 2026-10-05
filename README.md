@@ -205,12 +205,16 @@ integer stops the relay at boot.
 
 Event IDs only prevent a repeated delivery of the same event within 24 hours,
 so the relay keeps them in memory and never writes them to the data file. A
-restart forgets them, which costs at most one duplicate push. An installation
+restart forgets them, which costs at most one duplicate push; replaying an
+event after a restart needs that gateway's credential, which can send new
+events anyway. An installation
 at its event-ID bound forgets its own oldest ID, and at the relay-wide bound
 the installation holding the most IDs forgets its oldest, so neither bound
 rejects an event. A gateway's last-seen time and plugin version are written
-at most once a second, and on shutdown, instead of on every event, so
-ordinary notifications do not rewrite the data file.
+at most every five seconds, and on shutdown, instead of on every event. Each
+of those writes is still a full rewrite of the data file, so a busy relay
+spends one whole-file write per five seconds on them rather than two per
+event.
 
 Installations, gateways, and clarify decisions are persistent. A new record is
 rejected with HTTP 429 when its bound is full; the relay never evicts existing

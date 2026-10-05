@@ -148,6 +148,30 @@ test('event IDs from an older data file keep deduping and leave the file on the 
   assert.equal(JSON.parse(readFileSync(path, 'utf8')).eventIds, undefined);
 });
 
+test('a failed save keeps its changes pending and retries after the save delay', async () => {
+  const path = join(dir, `retry-${Math.random().toString(36).slice(2)}.json`);
+  const relay = new RelayStore(path, {}, { saveDelayMs: 20 });
+  const created = relay.createInstallation({ bundleId: 'app', deviceToken: 'a'.repeat(64), environment: 'production' });
+  const blocker = join(dir, `not-a-directory-${Math.random().toString(36).slice(2)}`);
+  writeFileSync(blocker, '');
+  relay.path = join(blocker, 'relay.json');
+  const errors = [];
+  const consoleError = console.error;
+  console.error = (line) => errors.push(line);
+  try {
+    assert.throws(() => relay.deactivateInstallation(created.installation.id));
+    assert.equal(relay.dirty, true, 'the unsaved change stays pending');
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.ok(errors.some((line) => line.includes('deferred relay save failed')), 'the retry ran and was logged');
+    relay.path = path;
+    await new Promise((resolve) => setTimeout(resolve, 60));
+  } finally {
+    console.error = consoleError;
+  }
+  assert.equal(relay.dirty, false);
+  assert.equal(JSON.parse(readFileSync(path, 'utf8')).installations[created.installation.id].active, false, 'a later retry wrote the change');
+});
+
 test('event metadata is written by a deferred save, and an immediate save includes it', async () => {
   const path = join(dir, `deferred-${Math.random().toString(36).slice(2)}.json`);
   const relay = new RelayStore(path, {}, { saveDelayMs: 20 });

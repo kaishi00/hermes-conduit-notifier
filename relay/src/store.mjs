@@ -25,8 +25,9 @@ const defaultPreferences = Object.freeze({
 });
 
 // Metadata-only changes (a gateway's last-seen time and plugin version) are
-// written at most this often instead of on every event.
-const DEFAULT_SAVE_DELAY_MS = 1_000;
+// written at most this often instead of on every event. Each write is still
+// the whole file, so on a busy relay this is one full rewrite per interval.
+const DEFAULT_SAVE_DELAY_MS = 5_000;
 
 export class RelayStore {
   constructor(path, limits = {}, { saveDelayMs = DEFAULT_SAVE_DELAY_MS } = {}) {
@@ -146,14 +147,21 @@ export class RelayStore {
   }
 
   save() {
+    this.dirty = true;
+    try {
+      mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
+      const temporary = `${this.path}.${process.pid}.tmp`;
+      writeFileSync(temporary, `${JSON.stringify(this.data)}\n`, { encoding: 'utf8', mode: 0o600 });
+      chmodSync(temporary, 0o600);
+      renameSync(temporary, this.path);
+    } catch (error) {
+      // Keep the change pending and try again after the save delay.
+      this.saveSoon();
+      throw error;
+    }
+    this.dirty = false;
     clearTimeout(this.saveTimer);
     this.saveTimer = undefined;
-    mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
-    const temporary = `${this.path}.${process.pid}.tmp`;
-    writeFileSync(temporary, `${JSON.stringify(this.data)}\n`, { encoding: 'utf8', mode: 0o600 });
-    chmodSync(temporary, 0o600);
-    renameSync(temporary, this.path);
-    this.dirty = false;
   }
 
   // Deferred save for metadata a crash may lose without harm. Any full save

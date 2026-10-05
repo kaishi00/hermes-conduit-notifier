@@ -39,6 +39,14 @@ test('storage status reports only installation counts and never changes the data
   assert.equal(configured.status, 0, configured.stderr);
   assert.equal(JSON.parse(configured.stdout).installations.capacity, 1_024, 'capacity follows the relay setting');
 
+  const misconfigured = spawnSync(process.execPath, [commandPath, dataPath], {
+    encoding: 'utf8', env: { ...process.env, RELAY_MAX_INSTALLATIONS: '10k' },
+  });
+  assert.equal(misconfigured.status, 1);
+  assert.equal(misconfigured.stdout, '');
+  assert.equal(misconfigured.stderr, 'RELAY_MAX_INSTALLATIONS must be a positive integer.\nstorage_status_unavailable\n',
+    'a bad setting is named, as at relay boot');
+
   const envPath = spawnSync(process.execPath, [commandPath], {
     encoding: 'utf8', env: { ...process.env, DATA_PATH: dataPath },
   });

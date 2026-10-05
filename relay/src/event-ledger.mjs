@@ -9,6 +9,9 @@ const SWEEP_INTERVAL_MS = 60_000;
 
 export class EventLedger {
   constructor({ perInstallation, total }) {
+    for (const bound of [perInstallation, total]) {
+      if (!Number.isSafeInteger(bound) || bound <= 0) throw new TypeError('Event ID bounds must be positive integers.');
+    }
     this.perInstallation = perInstallation;
     this.total = total;
     // installationId -> Map(`${gatewayId}:${eventId}` -> acceptedAt), each
@@ -44,7 +47,7 @@ export class EventLedger {
     if (events.size >= this.perInstallation) this.dropOldest(events);
     events.set(key, acceptedAt);
     this.size += 1;
-    if (this.size > this.total) this.dropOldestOfLargest();
+    if (this.size > this.total) this.trimLargest();
     return true;
   }
 
@@ -74,9 +77,11 @@ export class EventLedger {
     if (now - this.lastSweepAt < SWEEP_INTERVAL_MS) return;
     this.lastSweepAt = now;
     const cutoff = now - EVENT_ID_TTL_MS;
+    // A full pass rather than stopping at the first live entry: a clock step
+    // backwards can leave an expired ID behind a newer one.
     for (const [installationId, events] of this.byInstallation) {
       for (const [key, acceptedAt] of events) {
-        if (acceptedAt >= cutoff) break;
+        if (acceptedAt >= cutoff) continue;
         events.delete(key);
         this.size -= 1;
       }
@@ -91,9 +96,11 @@ export class EventLedger {
     this.size -= 1;
   }
 
-  // At the total bound the installation holding the most IDs gives up its
-  // oldest one: the heaviest sender pays for the space.
-  dropOldestOfLargest() {
+  // Over the total bound the installation holding the most IDs gives up its
+  // oldest ones: the heaviest sender pays for the space. It gives up 0.1% of
+  // the bound beyond what is needed, so the scan for it runs once per batch
+  // of events rather than on every event while the ledger stays full.
+  trimLargest() {
     let largestId;
     let largest;
     for (const [installationId, events] of this.byInstallation) {
@@ -103,7 +110,8 @@ export class EventLedger {
       }
     }
     if (!largest) return;
-    this.dropOldest(largest);
+    const excess = this.size - this.total + Math.floor(this.total / 1_000);
+    for (let dropped = 0; dropped < excess && largest.size; dropped += 1) this.dropOldest(largest);
     if (!largest.size) this.byInstallation.delete(largestId);
   }
 }

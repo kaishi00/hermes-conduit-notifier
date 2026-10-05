@@ -63,10 +63,14 @@ async function api(base, path, { method = 'GET', body, credential, headers: extr
   return { status: response.status, json: await response.json().catch(() => null) };
 }
 
-async function waitFor(check, message, timeoutMs = 5_000) {
+async function waitFor(check, message, timeoutMs = 15_000) {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
-    if (check()) return;
+    try {
+      if (check()) return;
+    } catch {
+      // Not ready yet, for example while the file is being replaced.
+    }
     if (Date.now() > deadline) throw new Error(message);
     await new Promise((resolve) => setTimeout(resolve, 50));
   }

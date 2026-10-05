@@ -4,9 +4,16 @@ import { limitsFromEnv } from './limits.mjs';
 function main() {
   const dataPath = process.argv[2] || process.env.DATA_PATH;
   if (!dataPath || process.argv.length > 3) return fail();
+  let capacity;
+  try {
+    capacity = limitsFromEnv(process.env).storeLimits.maxInstallations;
+  } catch (error) {
+    // Name the misconfigured variable, as the relay does at boot.
+    process.stderr.write(`${error.message}\n`);
+    return fail();
+  }
 
   try {
-    const capacity = limitsFromEnv(process.env).storeLimits.maxInstallations;
     const data = JSON.parse(readFileSync(dataPath, 'utf8'));
     if (data?.version !== 1 || !data.installations || typeof data.installations !== 'object' || Array.isArray(data.installations)) {
       return fail();
