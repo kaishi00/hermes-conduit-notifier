@@ -1,11 +1,12 @@
 import { readFileSync } from 'node:fs';
-import { MAX_INSTALLATIONS } from './store.mjs';
+import { limitsFromEnv } from './limits.mjs';
 
 function main() {
   const dataPath = process.argv[2] || process.env.DATA_PATH;
   if (!dataPath || process.argv.length > 3) return fail();
 
   try {
+    const capacity = limitsFromEnv(process.env).storeLimits.maxInstallations;
     const data = JSON.parse(readFileSync(dataPath, 'utf8'));
     if (data?.version !== 1 || !data.installations || typeof data.installations !== 'object' || Array.isArray(data.installations)) {
       return fail();
@@ -13,7 +14,7 @@ function main() {
     const records = Object.values(data.installations);
     const active = records.filter((installation) => installation?.active === true).length;
     process.stdout.write(`${JSON.stringify({
-      installations: { total: records.length, active, inactive: records.length - active, capacity: MAX_INSTALLATIONS },
+      installations: { total: records.length, active, inactive: records.length - active, capacity },
     })}\n`);
   } catch {
     return fail();

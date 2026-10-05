@@ -29,9 +29,15 @@ test('storage status reports only installation counts and never changes the data
   const explicitPath = spawnSync(process.execPath, [commandPath, dataPath], { encoding: 'utf8' });
   assert.equal(explicitPath.status, 0, explicitPath.stderr);
   assert.deepEqual(JSON.parse(explicitPath.stdout), {
-    installations: { total: 3, active: 1, inactive: 2, capacity: 1_024 },
+    installations: { total: 3, active: 1, inactive: 2, capacity: 50_000 },
   });
   assert.equal(explicitPath.stderr, '');
+
+  const configured = spawnSync(process.execPath, [commandPath, dataPath], {
+    encoding: 'utf8', env: { ...process.env, RELAY_MAX_INSTALLATIONS: '1024' },
+  });
+  assert.equal(configured.status, 0, configured.stderr);
+  assert.equal(JSON.parse(configured.stdout).installations.capacity, 1_024, 'capacity follows the relay setting');
 
   const envPath = spawnSync(process.execPath, [commandPath], {
     encoding: 'utf8', env: { ...process.env, DATA_PATH: dataPath },

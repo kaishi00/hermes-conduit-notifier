@@ -63,6 +63,15 @@ async function api(base, path, { method = 'GET', body, credential, headers: extr
   return { status: response.status, json: await response.json().catch(() => null) };
 }
 
+async function waitFor(check, message, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (check()) return;
+    if (Date.now() > deadline) throw new Error(message);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
 async function stopRelay(child) {
   if (child.exitCode !== null || child.signalCode !== null) return;
   const waitForExit = (timeoutMs) => new Promise((resolve) => {
@@ -332,7 +341,7 @@ test('revocation budget leaves decision answer and release actions available', a
   }
 });
 
-test('no-op updates and metadata-free duplicates leave authenticated ingress capacity available', async () => {
+test('no-op updates and metadata-free duplicates leave event capacity available', async () => {
   const aPort = await closedPort();
   const isolatedPath = join(dir, 'relay-data-noop-ingress.json');
   const fixture = new RelayStore(isolatedPath);
@@ -343,12 +352,16 @@ test('no-op updates and metadata-free duplicates leave authenticated ingress cap
     const claim = fixture.claimPairing(pairing.code, `quota gateway ${index}`);
     targets.push({ created, claim, deviceCredential: `${created.installation.id}.${created.deviceSecret}`, gatewayCredential: `${created.installation.id}.${claim.gatewayId}.${claim.gatewaySecret}` });
   }
-  fixture.acceptEvent(targets[0].created.installation.id, 'plugin:duplicate-no-meta', targets[0].claim.gatewayId);
-  const child = await startRelay(aPort, 'accept', isolatedPath);
+  const child = await startRelay(aPort, 'accept', isolatedPath, { RELAY_EVENTS_PER_MINUTE: '96' });
   children.push(child);
   const base = `http://127.0.0.1:${aPort}`;
   try {
-    for (let index = 0; index < 94; index += 1) {
+    const original = await api(base, '/v1/events', {
+      method: 'POST', credential: targets[0].gatewayCredential,
+      body: { event_id: 'plugin:duplicate-no-meta', type: 'plugin.hello' },
+    });
+    assert.equal(original.status, 202);
+    for (let index = 0; index < 93; index += 1) {
       const target = targets[index % targets.length];
       const result = await api(base, '/v1/events', {
         method: 'POST', credential: target.gatewayCredential,
@@ -378,9 +391,10 @@ test('no-op updates and metadata-free duplicates leave authenticated ingress cap
       method: 'POST', credential: targets[3].gatewayCredential,
       body: { event_id: 'plugin:ingress-96', type: 'plugin.hello' },
     });
-    assert.equal(event96.status, 202, 'no-op update and metadata-free duplicate must not consume ingress budget');
-    const persisted = JSON.parse(readFileSync(isolatedPath, 'utf8'));
-    assert.equal(persisted.installations[targets[0].created.installation.id].gateways[targets[0].claim.gatewayId].pluginVersion, '9.9.9', 'metadata-bearing duplicate still records plugin state');
+    assert.equal(event96.status, 202, 'no-op update and metadata-free duplicate must not consume the event budget');
+    const pluginVersion = () => JSON.parse(readFileSync(isolatedPath, 'utf8'))
+      .installations[targets[0].created.installation.id].gateways[targets[0].claim.gatewayId].pluginVersion;
+    await waitFor(() => pluginVersion() === '9.9.9', 'metadata-bearing duplicate still records plugin state');
     const event97 = await api(base, '/v1/events', {
       method: 'POST', credential: targets[3].gatewayCredential,
       body: { event_id: 'plugin:ingress-97', type: 'plugin.hello' },
@@ -487,7 +501,7 @@ test('a full installation store rejects a valid registration before charging its
   }
   writeFileSync(isolatedPath, JSON.stringify({ version: 1, installations, pairings: {}, eventIds: {}, pendingDecisions: {} }));
   const before = readFileSync(isolatedPath, 'utf8');
-  const child = await startRelay(aPort, 'accept', isolatedPath, { TRUST_PROXY: '1' });
+  const child = await startRelay(aPort, 'accept', isolatedPath, { TRUST_PROXY: '1', RELAY_MAX_INSTALLATIONS: '1024' });
   children.push(child);
   try {
     for (let index = 0; index < 125; index += 1) {
@@ -509,49 +523,68 @@ test('a full installation store rejects a valid registration before charging its
   }
 });
 
-test('global event capacity rejects before recording plugin metadata or a new event ID', async () => {
+test('event IDs stay out of the data file and a full event ledger keeps accepting events', async () => {
   const aPort = await closedPort();
-  const isolatedPath = join(dir, 'relay-data-event-capacity.json');
-  const relayStore = new RelayStore(isolatedPath);
-  let target;
-  for (let installationIndex = 0; installationIndex < 17; installationIndex += 1) {
-    const name = String.fromCharCode(97 + installationIndex);
-    const created = relayStore.createInstallation({ bundleId: 'com.milim.relay', deviceToken: name.repeat(64), environment: 'production' });
-    if (installationIndex === 16) {
-      const pairing = relayStore.createPairing(created.installation.id);
-      const claim = relayStore.claimPairing(pairing.code, 'capacity target');
-      target = { installation: created.installation, claim };
-    } else {
-      for (let eventIndex = 0; eventIndex < 512; eventIndex += 1) {
-        relayStore.data.eventIds[`${created.installation.id}:legacy-gateway:${eventIndex}`] = Date.now();
-      }
-    }
-  }
-  relayStore.save();
-  assert.equal(Object.keys(relayStore.data.eventIds).length, 8192);
-  const before = readFileSync(isolatedPath, 'utf8');
-  const child = await startRelay(aPort, 'accept', isolatedPath);
+  const isolatedPath = join(dir, 'relay-data-event-ledger.json');
+  const fixture = new RelayStore(isolatedPath);
+  const created = fixture.createInstallation({ bundleId: 'com.milim.relay', deviceToken: 'a'.repeat(64), environment: 'production' });
+  const pairing = fixture.createPairing(created.installation.id);
+  const claim = fixture.claimPairing(pairing.code, 'ledger target');
+  const child = await startRelay(aPort, 'accept', isolatedPath, {
+    RELAY_MAX_EVENT_IDS_PER_INSTALLATION: '2', RELAY_MAX_EVENT_IDS: '2',
+  });
   children.push(child);
+  const base = `http://127.0.0.1:${aPort}`;
+  const send = (eventId, extra = {}) => api(base, '/v1/events', {
+    method: 'POST',
+    credential: `${created.installation.id}.${claim.gatewayId}.${claim.gatewaySecret}`,
+    body: { event_id: eventId, type: 'plugin.hello', ...extra },
+  });
   try {
-    const result = await api(`http://127.0.0.1:${aPort}`, '/v1/events', {
-      method: 'POST',
-      credential: `${target.installation.id}.${target.claim.gatewayId}.${target.claim.gatewaySecret}`,
-      body: { event_id: 'plugin:capacity-new', type: 'plugin.hello', plugin_version: '9.9.9', plugin_capabilities: ['new-capability'] },
-    });
-    assert.equal(result.status, 429);
-    assert.equal(result.json.error, 'event_limit_reached');
-    const afterBytes = readFileSync(isolatedPath, 'utf8');
-    assert.equal(afterBytes, before, 'capacity rejection must not rewrite the persistent store');
-    const persisted = JSON.parse(afterBytes);
-    assert.equal(persisted.eventIds[`${target.installation.id}:${target.claim.gatewayId}:plugin:capacity-new`], undefined);
-    assert.equal(persisted.installations[target.installation.id].gateways[target.claim.gatewayId].pluginVersion, undefined);
+    for (const eventId of ['plugin:ledger-1', 'plugin:ledger-2', 'plugin:ledger-3']) {
+      assert.equal((await send(eventId)).status, 202, 'a full ledger never rejects an event');
+    }
+    assert.deepEqual(await send('plugin:ledger-3'), { status: 200, json: { accepted: true, duplicate: true } }, 'recent IDs still dedupe');
+    assert.equal((await send('plugin:ledger-1')).status, 202, 'the oldest ID was forgotten to make room');
+    assert.equal((await send('plugin:ledger-4', { plugin_version: '9.9.9' })).status, 202);
   } finally {
     await stopRelay(child);
   }
+  const persisted = JSON.parse(readFileSync(isolatedPath, 'utf8'));
+  assert.equal(persisted.eventIds, undefined, 'event IDs never reach the data file');
+  assert.equal(persisted.installations[created.installation.id].gateways[claim.gatewayId].pluginVersion, '9.9.9',
+    'deferred plugin metadata is written on shutdown');
 });
 
-after(() => {
-  for (const child of children) child?.kill('SIGTERM');
+test('an invalid capacity setting stops the relay at boot', async () => {
+  const child = spawn(process.execPath, ['src/server.mjs'], {
+    cwd: fileURLToPath(new URL('..', import.meta.url)),
+    env: {
+      ...process.env,
+      HOST: '127.0.0.1',
+      PORT: String(await closedPort()),
+      PUBLIC_URL: 'https://relay-invalid-limit.example',
+      DATA_PATH: join(dir, 'relay-data-invalid-limit.json'),
+      APNS_KEY_PATH: keyPath,
+      APNS_KEY_ID: 'AAAAAAAAAA',
+      APNS_TEAM_ID: 'BBBBBBBBBB',
+      APNS_TOPIC: 'com.milim.relay',
+      APNS_MODE: 'accept',
+      RELAY_MAX_INSTALLATIONS: '10k',
+    },
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  let stderr = '';
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  const code = await new Promise((resolve) => child.once('exit', resolve));
+  assert.notEqual(code, 0);
+  assert.match(stderr, /RELAY_MAX_INSTALLATIONS must be a positive integer\./);
+});
+
+after(async () => {
+  // Relays write deferred metadata on SIGTERM, so wait for every exit before
+  // removing their data directory.
+  await Promise.all(children.filter(Boolean).map(stopRelay));
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -1006,7 +1039,7 @@ test('full decision capacity rejects before event persistence and leaves another
     }
   }
   assert.equal(Object.keys(seed.data.pendingDecisions).length, 256);
-  children.push(await startRelay(capacityPort, 'accept', capacityDataPath));
+  children.push(await startRelay(capacityPort, 'accept', capacityDataPath, { RELAY_MAX_ACTIVE_DECISIONS: '256' }));
   const rejected = await api(`http://127.0.0.1:${capacityPort}`, '/v1/events', {
     method: 'POST',
     credential: attacker.gatewayCredential,
@@ -1021,8 +1054,7 @@ test('full decision capacity rejects before event persistence and leaves another
   assert.equal(rejected.status, 429);
   assert.deepEqual(rejected.json, { error: 'decision_capacity_exceeded' });
   const persisted = JSON.parse(readFileSync(capacityDataPath, 'utf8'));
-  assert.equal(persisted.eventIds[`${attacker.installationId}:${attacker.gatewayId}:input:capacity-over`], undefined,
-    'capacity rejection leaves the event retryable');
+  assert.equal(persisted.eventIds, undefined, 'event IDs never reach the data file');
   assert.equal(persisted.pendingDecisions[RelayStore.decisionKey(attacker.installationId, attacker.gatewayId, 'conduit-push-capacity-over')], undefined,
     'no unstored answerable decision is created');
 

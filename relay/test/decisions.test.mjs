@@ -122,18 +122,58 @@ test('same-id decisions from two gateways coexist and never mutate each other', 
   assert.deepEqual(relay.resolveLegacyRespond('inst-1', 'conduit-push-never'), { resolution: 'unknown' });
 });
 
-test('event pruning removes corrupt or non-finite persisted timestamps', () => {
-  const relay = store();
-  relay.data.eventIds = {
-    'inst:gw:old-number': Date.now() - 25 * 60 * 60_000,
-    'inst:gw:nan': 'not-a-time',
-    'inst:gw:infinity': Infinity,
-    'inst:gw:valid': Date.now(),
-  };
+test('event IDs from an older data file keep deduping and leave the file on the next save', () => {
+  const path = join(dir, `legacy-events-${Math.random().toString(36).slice(2)}.json`);
+  writeFileSync(path, JSON.stringify({
+    version: 1,
+    installations: {},
+    pairings: {},
+    eventIds: {
+      'inst:gw:old-number': Date.now() - 25 * 60 * 60_000,
+      'inst:gw:nan': 'not-a-time',
+      'inst:gw:infinity': Infinity,
+      'inst:gw:plugin:valid': Date.now(),
+      'malformed-key': Date.now(),
+    },
+    pendingDecisions: {},
+  }));
 
-  relay.prune();
+  const relay = new RelayStore(path);
 
-  assert.deepEqual(Object.keys(relay.data.eventIds), ['inst:gw:valid']);
+  assert.equal(relay.hasAcceptedEvent('inst', 'plugin:valid', 'gw'), true, 'event IDs keep their colons after the gateway');
+  assert.equal(relay.acceptEvent('inst', 'plugin:valid', 'gw'), false);
+  for (const eventId of ['old-number', 'nan', 'infinity']) assert.equal(relay.hasAcceptedEvent('inst', eventId, 'gw'), false);
+  assert.equal(relay.events.size, 1);
+  relay.save();
+  assert.equal(JSON.parse(readFileSync(path, 'utf8')).eventIds, undefined);
+});
+
+test('event metadata is written by a deferred save, and an immediate save includes it', async () => {
+  const path = join(dir, `deferred-${Math.random().toString(36).slice(2)}.json`);
+  const relay = new RelayStore(path, {}, { saveDelayMs: 20 });
+  const created = relay.createInstallation({ bundleId: 'app', deviceToken: 'a'.repeat(64), environment: 'production' });
+  const claim = relay.claimPairing(relay.createPairing(created.installation.id).code, 'gateway');
+  const persistedGateway = () => JSON.parse(readFileSync(path, 'utf8')).installations[created.installation.id].gateways[claim.gatewayId];
+  let writes = 0;
+  const save = relay.save.bind(relay);
+  relay.save = () => { writes += 1; save(); };
+
+  assert.equal(relay.acceptEvent(created.installation.id, 'response:1', claim.gatewayId), true);
+  relay.recordGatewayPlugin(created.installation.id, claim.gatewayId, { version: '1.2.3' });
+  assert.equal(writes, 0, 'accepting an event does not rewrite the data file');
+  assert.equal(persistedGateway().pluginVersion, undefined);
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(writes, 1, 'repeated metadata changes collapse into one write');
+  assert.equal(persistedGateway().pluginVersion, '1.2.3');
+  assert.ok(persistedGateway().lastEventAt);
+
+  relay.recordGatewayPlugin(created.installation.id, claim.gatewayId, { version: '1.2.4' });
+  relay.deactivateInstallation(created.installation.id);
+  assert.equal(persistedGateway().pluginVersion, '1.2.4', 'a full save writes pending metadata too');
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(writes, 2, 'the full save cancelled the deferred one');
+  relay.flush();
+  assert.equal(writes, 2, 'flush only writes pending changes');
 });
 
 test('installation update preflight compares preference meaning, not key order', () => {
@@ -214,7 +254,7 @@ test('event dedupe is gateway-scoped: same event id from different gateways both
   assert.equal(relay.acceptEvent('inst-2', 'approval:42', 'gw-A'), true);
 });
 
-test('storage quotas reject new records without evicting existing credentials or owners', () => {
+test('installation and gateway quotas reject new records without evicting existing credentials', () => {
   const relay = new RelayStore(join(dir, `limits-${Math.random().toString(36).slice(2)}.json`), {
     maxInstallations: 1, maxGatewaysPerInstallation: 1, maxEventIdsPerInstallation: 1,
   });
@@ -228,8 +268,8 @@ test('storage quotas reject new records without evicting existing credentials or
   assert.ok(relay.authenticate(first.installation.id, first.deviceSecret, 'device'));
   assert.ok(relay.authenticateGateway(first.installation.id, claim.gatewayId, claim.gatewaySecret));
   assert.equal(relay.acceptEvent(first.installation.id, 'event-0001', claim.gatewayId), true);
-  assert.throws(() => relay.acceptEvent(first.installation.id, 'event-0002', claim.gatewayId), /event_limit_reached/);
-  assert.equal(relay.acceptEvent(first.installation.id, 'event-0001', claim.gatewayId), false);
+  assert.equal(relay.acceptEvent(first.installation.id, 'event-0002', claim.gatewayId), true, 'a full event ledger forgets instead of rejecting');
+  assert.equal(relay.acceptEvent(first.installation.id, 'event-0002', claim.gatewayId), false);
   relay.deactivateInstallation(first.installation.id);
   assert.equal(relay.data.installations[first.installation.id].active, false);
   assert.throws(() => relay.createInstallation({ bundleId: 'app', deviceToken: 'c'.repeat(64), environment: 'production' }), /installation_limit_reached/);
@@ -245,33 +285,26 @@ test('loading a store already above a configured quota preserves all existing re
   assert.throws(() => relay.createInstallation({ bundleId: 'app', deviceToken: 'c'.repeat(64), environment: 'production' }), /installation_limit_reached/);
 });
 
-test('event-ID quota spans installations and survives gateway revocation and re-pairing', () => {
+test('event-ID bounds forget the heaviest installation first and never reject an event', () => {
   const relay = new RelayStore(join(dir, `global-events-${Math.random().toString(36).slice(2)}.json`), {
-    maxInstallations: 3, maxGatewaysPerInstallation: 2,
-    maxEventIdsPerInstallation: 2, maxGlobalEventIds: 2,
+    maxEventIdsPerInstallation: 2, maxGlobalEventIds: 3,
   });
-  const createGateway = (name) => {
-    const created = relay.createInstallation({ bundleId: 'app', deviceToken: name.repeat(64).slice(0, 64), environment: 'production' });
-    const pairing = relay.createPairing(created.installation.id);
-    return { installation: created.installation, gateway: relay.claimPairing(pairing.code, name) };
-  };
-  const first = createGateway('a');
-  const second = createGateway('b');
-  assert.equal(relay.acceptEvent(first.installation.id, 'event-0001', first.gateway.gatewayId), true);
-  assert.equal(relay.acceptEvent(first.installation.id, 'event-0002', first.gateway.gatewayId), true);
-  assert.throws(() => relay.assertEventCapacity(second.installation.id, 'event-0003', second.gateway.gatewayId), /event_limit_reached/);
-  assert.equal(Object.keys(relay.data.eventIds).length, 2, 'preflight leaves accepted owners untouched');
+  assert.equal(relay.acceptEvent('inst-a', 'a1', 'gw-a'), true);
+  assert.equal(relay.acceptEvent('inst-a', 'a2', 'gw-a'), true);
+  assert.equal(relay.acceptEvent('inst-a', 'a3', 'gw-a'), true, 'an installation at its bound forgets its own oldest ID');
+  assert.equal(relay.hasAcceptedEvent('inst-a', 'a1', 'gw-a'), false);
+  assert.equal(relay.acceptEvent('inst-b', 'b1', 'gw-b'), true);
+  assert.equal(relay.acceptEvent('inst-c', 'c1', 'gw-c'), true, 'the relay-wide bound forgets instead of rejecting');
+  assert.equal(relay.hasAcceptedEvent('inst-a', 'a2', 'gw-a'), false, 'the installation holding the most IDs gives one up');
+  assert.equal(relay.hasAcceptedEvent('inst-a', 'a3', 'gw-a'), true);
+  assert.equal(relay.hasAcceptedEvent('inst-b', 'b1', 'gw-b'), true, 'lighter installations keep their IDs');
+  assert.equal(relay.hasAcceptedEvent('inst-c', 'c1', 'gw-c'), true);
+  assert.equal(relay.events.size, 3);
+  assert.equal(relay.acceptEvent('inst-a', 'a3', 'gw-replacement'), true, 'dedupe stays gateway-scoped');
 
-  relay.removeGateway(first.installation.id, first.gateway.gatewayId);
-  const replacementPairing = relay.createPairing(first.installation.id);
-  const replacement = relay.claimPairing(replacementPairing.code, 'replacement');
-  assert.throws(() => relay.acceptEvent(first.installation.id, 'event-0004', replacement.gatewayId), /event_limit_reached/);
-  assert.equal(Object.keys(relay.data.eventIds).length, 2, 'gateway replacement cannot reset per-installation retention');
-
-  for (const key of Object.keys(relay.data.eventIds)) relay.data.eventIds[key] = Date.now() - 24 * 60 * 60_000 - 1;
-  assert.equal(relay.assertEventCapacity(second.installation.id, 'event-0003', second.gateway.gatewayId), true, 'expired IDs release global capacity');
-  assert.equal(Object.keys(relay.data.eventIds).length, 0, 'expiry prunes only expired IDs');
-  assert.equal(relay.acceptEvent(second.installation.id, 'event-0003', second.gateway.gatewayId), true);
+  relay.events.add('inst-d', 'gw-d', 'stale', Date.now() - 24 * 60 * 60_000 - 1);
+  assert.equal(relay.hasAcceptedEvent('inst-d', 'stale', 'gw-d'), false, 'IDs older than 24 hours no longer count');
+  assert.equal(relay.acceptEvent('inst-d', 'stale', 'gw-d'), true);
 });
 
 test('no-op installation updates and repeated cancellation do not save or rewrite state', () => {
@@ -592,7 +625,7 @@ test('persisted malformed batch rows do not break capacity, polling, answering, 
 });
 
 test('global active decision limit rejects new tenants without evicting a live decision', () => {
-  const relay = store();
+  const relay = store({ activeGlobal: 256 });
   for (let i = 0; i < 256; i += 1) {
     relay.savePendingDecision({ id: `conduit-push-${i}`, installationId: `inst-${i}`, gatewayId: 'gw-1', question: 'q' });
   }
