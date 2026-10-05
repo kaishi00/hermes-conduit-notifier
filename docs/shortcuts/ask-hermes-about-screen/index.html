@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Get the Ask Hermes About Screen shortcut for the Hermes Conduit iPhone app.">
+  <title>Ask Hermes About Screen · Hermes Conduit</title>
+  <link rel="stylesheet" href="../../assets/styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <nav class="nav" aria-label="Primary navigation">
+      <a class="brand" href="../../"><span class="mark" aria-hidden="true">⌁</span>Hermes Conduit</a>
+      <a class="nav-link" href="../../support/">Support</a>
+      <a class="nav-link" href="../../privacy/">Privacy</a>
+    </nav>
+  </header>
+  <main class="document">
+    <div class="eyebrow">Shortcut</div>
+    <h1>Ask Hermes About Screen</h1>
+    <p class="lede">One button takes a screenshot and opens Conduit with it attached to a chat, ready for your question.</p>
+
+    <!-- Shown once the shared shortcut link is published in ../ask-hermes-about-screen.json. -->
+    <div id="ready" class="callout" hidden>
+      <strong>Opening Shortcuts…</strong><br>
+      If nothing happens, <a id="shortcut-link" href="#">add the shortcut</a>, then come back to Conduit.
+    </div>
+
+    <div id="pending" class="callout">
+      <strong>The ready-made shortcut isn't published yet.</strong><br>
+      You can build the same shortcut in Shortcuts in under a minute. It has two actions.
+    </div>
+
+    <h2>Build it yourself</h2>
+    <ol class="steps">
+      <li>Open <strong>Shortcuts</strong> and tap <strong>+</strong> to make a new shortcut.</li>
+      <li>Add the <strong>Take Screenshot</strong> action.</li>
+      <li>Add the <strong>Ask Hermes About Screen</strong> action from Conduit. It picks up the screenshot from the step above.</li>
+      <li>Name the shortcut <strong>Ask Hermes About Screen</strong> and tap <strong>Done</strong>.</li>
+    </ol>
+
+    <h2>Put it on a button</h2>
+    <p>On iPhone 15 Pro and later, open <strong>Settings → Action Button</strong>, choose <strong>Shortcut</strong>, and pick <strong>Ask Hermes About Screen</strong>. On any iPhone you can also run it by saying “Ask Hermes About Screen” to Siri, from Back Tap (<strong>Settings → Accessibility → Touch → Back Tap</strong>), or from a Home Screen or Lock Screen shortcut widget.</p>
+
+    <h2>Privacy</h2>
+    <p>The shortcut only runs when you press it. The screenshot goes to your own Hermes gateway with the question you ask, the same way a photo you attach does. See the <a href="../../privacy/">privacy policy</a>.</p>
+  </main>
+  <footer><div class="footer-inner"><span>© 2026 Milim</span><div class="footer-links"><a href="../../">Home</a><a href="../../support/">Support</a></div></div></footer>
+  <script>
+    // Conduit links here instead of to the iCloud link itself, so a new
+    // version of the shortcut only needs a new link in the JSON file.
+    (function () {
+      var prefix = "https://www.icloud.com/shortcuts/";
+      fetch("../ask-hermes-about-screen.json", { cache: "no-store" })
+        .then(function (response) { return response.ok ? response.json() : null; })
+        .then(function (info) {
+          var url = info && typeof info.url === "string" ? info.url : "";
+          if (url.indexOf(prefix) !== 0) { return; }
+          document.getElementById("shortcut-link").href = url;
+          document.getElementById("pending").hidden = true;
+          document.getElementById("ready").hidden = false;
+          if (!/[?&]stay\b/.test(window.location.search)) { window.location.replace(url); }
+        })
+        .catch(function () {});
+    })();
+  </script>
+</body>
+</html>
