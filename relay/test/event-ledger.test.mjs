@@ -41,6 +41,14 @@ test('importing persisted IDs skips malformed keys and keeps acceptance order fo
   assert.equal(ledger.size, 2);
 });
 
+test('an imported ID with a future time expires a day after the import', () => {
+  const now = Date.now();
+  const ledger = new EventLedger({ perInstallation: 10, total: 10 });
+  ledger.importPersisted({ 'inst:gw:future': now + 10 * EVENT_ID_TTL_MS }, now);
+  assert.equal(ledger.has('inst', 'gw', 'future', now + EVENT_ID_TTL_MS), true);
+  assert.equal(ledger.has('inst', 'gw', 'future', now + EVENT_ID_TTL_MS + 1), false);
+});
+
 test('a full ledger trims the largest holder in batches so it is not rescanned on every event', () => {
   const ledger = new EventLedger({ perInstallation: 2_000, total: 2_000 });
   for (let index = 0; index < 1_500; index += 1) ledger.add('heavy', 'gw', `heavy-${index}`);

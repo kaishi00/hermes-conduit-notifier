@@ -119,6 +119,20 @@ test('applying with no eligible installations creates neither backup nor replace
   assert.equal(readdirSync(directory).some((name) => name.startsWith('nothing-eligible.json.backup-')), false);
 });
 
+test('a file with a null eventIds field is accepted, as the relay accepts it', () => {
+  const dataPath = join(directory, 'null-event-ids.json');
+  writeFileSync(dataPath, `${JSON.stringify({
+    version: 1,
+    installations: { active: installation(true, new Date(0).toISOString()) },
+    pairings: {}, pendingDecisions: {}, eventIds: null,
+  })}\n`, { mode: 0o600 });
+
+  const result = run(dataPath, []);
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), { eligible: 0, removed: 0, remaining: 1 });
+});
+
 test('a changed original is preserved and the replacement temporary file is removed', () => {
   const dataPath = join(directory, 'concurrent-change.json');
   const preloadPath = join(directory, 'concurrent-writer.mjs');

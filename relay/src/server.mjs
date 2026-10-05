@@ -36,6 +36,8 @@ const MAX_NOTIFICATION_BYTES = 3800;
 function main() {
   config = readConfig();
   store = new RelayStore(config.dataPath, config.storeLimits);
+  // Accepting an event sweeps expired IDs; this frees them on a quiet relay.
+  setInterval(() => store.events.sweep(), 60_000).unref();
   apns = new ApnsClient(config);
   limits = new Map();
   // Test seam: APNS_MODE=accept makes every send succeed, reject makes it

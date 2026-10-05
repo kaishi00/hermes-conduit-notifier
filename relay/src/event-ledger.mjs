@@ -62,7 +62,9 @@ export class EventLedger {
     if (!eventIds || typeof eventIds !== 'object' || Array.isArray(eventIds)) return;
     const entries = [];
     for (const [key, value] of Object.entries(eventIds)) {
-      const acceptedAt = Number(value);
+      // A future time (hand edit, clock step) would outlive the TTL, so it
+      // counts from now instead.
+      const acceptedAt = Math.min(Number(value), now);
       if (!Number.isFinite(acceptedAt) || acceptedAt < now - EVENT_ID_TTL_MS) continue;
       const first = key.indexOf(':');
       const second = first < 0 ? -1 : key.indexOf(':', first + 1);
@@ -99,7 +101,9 @@ export class EventLedger {
   // Over the total bound the installation holding the most IDs gives up its
   // oldest ones: the heaviest sender pays for the space. It gives up 0.1% of
   // the bound beyond what is needed, so the scan for it runs once per batch
-  // of events rather than on every event while the ledger stays full.
+  // of events rather than on every event while the ledger stays full. The
+  // scan only visits installations that hold IDs, so it never costs more
+  // than the ledger's size even when the bound is too small to batch.
   trimLargest() {
     let largestId;
     let largest;
