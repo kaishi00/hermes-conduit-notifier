@@ -41,7 +41,7 @@ const E2E_MAX_CT_CHARS = 2600;
 // characters of text (up to 4 bytes each in UTF-8).
 export const E2E_ANSWER_PREFIX = 'e2e1.';
 const E2E_MAX_ANSWER_CHARS = 11_000;
-const E2E_ANSWER_PATTERN = new RegExp(`^${E2E_ANSWER_PREFIX.replace('.', '\\.')}[0-9a-f]{32}\\.[A-Za-z0-9_-]{16}\\.[A-Za-z0-9_-]{22,10900}$`);
+const E2E_ANSWER_PATTERN = new RegExp(`^${E2E_ANSWER_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[0-9a-f]{32}\\.[A-Za-z0-9_-]{16}\\.[A-Za-z0-9_-]{22,10900}$`);
 // Stands in for question text the relay can't read, so a parked batch keeps
 // its qids (the store sanitizer drops questions without text).
 const E2E_QUESTION_PLACEHOLDER = '[encrypted]';
