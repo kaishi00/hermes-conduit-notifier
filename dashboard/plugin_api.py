@@ -1914,8 +1914,9 @@ def _voice_lock() -> threading.Lock:
     from hermes_constants import get_hermes_home
     with _voice_locks_guard:
         return _voice_locks.setdefault(str(get_hermes_home()), threading.Lock())
-# Conduit writes about once a minute per call plus a tag or summary; this only
-# stops a runaway client from growing state.db without bound.
+# Conduit saves a call once, when it ends (retried from its outbox if that
+# fails), plus a tag or summary; this only stops a runaway client from growing
+# state.db without bound.
 _voice_write_limiter = _MintLimiter(VOICE_WRITE_LIMIT, VOICE_WRITE_WINDOW_S,
                                     message="Too many voice history writes; try again shortly")
 _voice_read_limiter = _MintLimiter(VOICE_READ_LIMIT, VOICE_WRITE_WINDOW_S,
@@ -2215,14 +2216,15 @@ def save_voice_turns(body: Dict[str, Any],
                 if created:
                     _discard_new_voice_session(db, session_id)
                 raise
-            if messages and on_end is not None:
-                on_end(session_id, engine, messages)
             # `written` is one past the highest index the host has for this
             # call: where the next save starts.
-            return {"session_id": session_id, "written": last + 1, "appended": len(messages),
-                    "skipped": skipped, "created": created}
+            result = {"session_id": session_id, "written": last + 1, "appended": len(messages),
+                      "skipped": skipped, "created": created}
         finally:
             db.close()
+    if messages and on_end is not None:
+        on_end(session_id, engine, messages)
+    return result
 
 
 def set_voice_tag(body: Dict[str, Any]) -> Dict[str, Any]:
@@ -2493,8 +2495,8 @@ def _commit_voice_call_memory(session_id: str, messages: list) -> None:
     manager = MemoryManager()
     manager.add_provider(provider)
     kwargs = {**_memory_provider_init_kwargs(), "platform": VOICE_END_PLATFORM, **_voice_session_title(session_id)}
-    manager.initialize_all(session_id=session_id, **kwargs)
     try:
+        manager.initialize_all(session_id=session_id, **kwargs)
         for user, assistant in _voice_exchanges(messages):
             manager.sync_all(user, assistant, session_id=session_id)
         # sync_all writes on the manager's worker: let those land before the end.
@@ -2530,7 +2532,11 @@ def _end_voice_call(session_id: str, engine: str, messages: list) -> None:
 
 def _run_voice_call_end(profile: Optional[str], session_id: str, engine: str, messages: list) -> None:
     """Runs the end on its own thread and waits up to VOICE_END_TIMEOUT_S, so a
-    wedged provider costs one abandoned thread, not every later call's end."""
+    wedged provider costs one abandoned thread, not every later call's end.
+
+    The next call's end can then overlap the abandoned one, each with its own
+    provider instance. Hermes' gateway does the same (one provider per agent,
+    abandoned on a cleanup timeout), so providers already allow it."""
     done = threading.Event()
 
     def run() -> None:
@@ -2563,7 +2569,14 @@ def _voice_end_loop() -> None:
 
 def _queue_voice_call_end(profile: Optional[str], session_id: str, engine: str, messages: list) -> None:
     """Ends the call's session off the request. Never raises: the turns are
-    already stored."""
+    already stored, and a failed save would make Conduit send them again."""
+    try:
+        _enqueue_voice_call_end(profile, session_id, engine, messages)
+    except Exception:  # noqa: BLE001
+        logger.warning("Conduit voice session %s ends without hooks: queueing failed", session_id, exc_info=True)
+
+
+def _enqueue_voice_call_end(profile: Optional[str], session_id: str, engine: str, messages: list) -> None:
     global _voice_end_pending, _voice_end_worker
 
     def run() -> None:

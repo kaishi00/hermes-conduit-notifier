@@ -807,3 +807,36 @@ def test_ends_past_the_backlog_are_skipped(hermes, monkeypatch):
     monkeypatch.setattr(api, "_run_voice_call_end", lambda *args: ran.append(args))
     _queue_voice_call_end(None, "s_call", "gpt-live", CALL)
     assert ran == [] and api._voice_end_pending == 0 and api._voice_end_jobs.empty()
+
+
+def test_a_provider_that_fails_to_start_is_still_shut_down(hermes, lifecycle, monkeypatch):
+    def broken(session_id, **kwargs):
+        raise RuntimeError("honcho unreachable")
+
+    monkeypatch.setattr(lifecycle.provider, "initialize", broken)
+    api._run_voice_call_end(None, "s_call", "gpt-live", CALL)
+    assert [event[0] for event in lifecycle.events] == ["on_session_end", "shutdown", "on_session_finalize"]
+
+
+def test_a_queueing_failure_never_fails_a_stored_save(client, hermes, monkeypatch):
+    def broken(*args):
+        raise RuntimeError("queue gone")
+
+    monkeypatch.setattr(api, "_queue_voice_call_end", _queue_voice_call_end)
+    monkeypatch.setattr(api, "_enqueue_voice_call_end", broken)
+    assert save(client, turns=turns(("user", "a"))).status_code == 200
+
+
+def test_the_end_runs_after_the_store_is_closed(hermes, monkeypatch):
+    opened = []
+    original = FakeSessionDB.__init__
+
+    def tracked(self, db_path=None):
+        original(self, db_path)
+        opened.append(self)
+
+    monkeypatch.setattr(FakeSessionDB, "__init__", tracked)
+    seen = []
+    api.save_voice_turns({"call_id": "c", "engine": "gemini-live", "turns": turns(("user", "a"))},
+                         on_end=lambda *args: seen.append(all(db.closed for db in opened)))
+    assert seen == [True]
