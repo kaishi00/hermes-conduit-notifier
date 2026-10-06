@@ -37,6 +37,7 @@ import json
 import logging
 import math
 import os
+import queue
 import re
 import threading
 import time
@@ -645,8 +646,9 @@ def _memory_provider_init_kwargs() -> Dict[str, Any]:
     kwargs: Dict[str, Any] = {
         "platform": MEMORY_PLATFORM,
         "hermes_home": str(get_hermes_home()),
-        # Some providers skip recall as well as writes outside "primary"; this
-        # caller never writes (no sync_turn, no memory tool), so it is safe.
+        # Some providers skip recall as well as writes outside "primary". The
+        # recall provider never writes (no sync_turn, no memory tool), so it is
+        # safe there; a call's end needs it to write the call to memory.
         "agent_context": "primary",
     }
     try:
@@ -2130,8 +2132,13 @@ def _discard_new_voice_session(db, session_id: str) -> None:
         logger.warning("Couldn't discard the failed Conduit voice session %s", session_id, exc_info=True)
 
 
-def save_voice_turns(body: Dict[str, Any]) -> Dict[str, Any]:
-    """Create a voice-call session or append to one; turns already written for the call are skipped."""
+def save_voice_turns(body: Dict[str, Any],
+                     on_end: Optional[Callable[[str, str, list], None]] = None) -> Dict[str, Any]:
+    """Create a voice-call session or append to one; turns already written for the call are skipped.
+
+    ``on_end(session_id, engine, messages)`` runs once new turns are stored:
+    Conduit saves a call only after it has ended, so those turns end it.
+    """
     call_id = _voice_id(body.get("call_id"), "call_id")
     engine = str(body.get("engine") or "").strip()
     if engine not in VOICE_ENGINES:
@@ -2208,6 +2215,8 @@ def save_voice_turns(body: Dict[str, Any]) -> Dict[str, Any]:
                 if created:
                     _discard_new_voice_session(db, session_id)
                 raise
+            if messages and on_end is not None:
+                on_end(session_id, engine, messages)
             # `written` is one past the highest index the host has for this
             # call: where the next save starts.
             return {"session_id": session_id, "written": last + 1, "appended": len(messages),
@@ -2330,7 +2339,11 @@ async def post_voice_session(request: Request, response: Response, profile: Opti
     response.headers["Cache-Control"] = "no-store"
     _voice_limit(write=True)
     body = await _voice_body(request)
-    return {"ok": True, **(await _run_voice(profile, lambda: save_voice_turns(body), "save"))}
+
+    def ended(session_id: str, engine: str, messages: list) -> None:
+        _queue_voice_call_end(profile, session_id, engine, messages)
+
+    return {"ok": True, **(await _run_voice(profile, lambda: save_voice_turns(body, on_end=ended), "save"))}
 
 
 @router.get("/voice/tags")
@@ -2362,6 +2375,218 @@ async def post_voice_summary(request: Request, response: Response, profile: Opti
     _voice_limit(write=True)
     body = await _voice_body(request)
     return {"ok": True, **(await _run_voice(profile, lambda: set_voice_summary(body), "summary"))}
+
+
+# --- Call end ------------------------------------------------------------------
+#
+# A live call never runs a Hermes turn, so Hermes never learns it is over: no
+# session-end hook fires and the memory provider (Honcho, Mem0, …) never sees
+# the conversation (hermes-conduit#416). Conduit saves a call only once it has
+# ended (hung up, dropped or timed out), so a save that stores new turns is
+# that call's end. The plugin then ends the session the way Hermes ends a
+# Desktop chat (tui_gateway's _finalize_session): the on_session_end hook, the
+# memory provider's sync_turn per exchange and its on_session_end, then
+# on_session_finalize. A retried save that stores nothing new ends nothing.
+#
+# It runs off the request, one call at a time, so a slow provider never holds
+# up a save. Memory gets only the call's new turns: a resumed call's earlier
+# turns went there when their own call ended.
+# Hermes runs a "desktop" row as the desktop platform.
+VOICE_END_PLATFORM = VOICE_SESSION_SOURCE
+VOICE_END_HOOK_REASON = "voice_call_ended"
+# Past this a wedged hook or provider is left running, so the next call still ends.
+VOICE_END_TIMEOUT_S = 120.0
+# The wait for queued sync_turn writes before the provider's on_session_end.
+VOICE_END_FLUSH_TIMEOUT_S = 30.0
+# Calls waiting behind a slow one; past this a call's end is skipped (and logged).
+VOICE_END_MAX_PENDING = 20
+
+_VOICE_END_MODULES = _MISSING_MEMORY_MODULES | {"hermes_cli.lifecycle", "hermes_cli.plugins", "agent.memory_manager"}
+
+# A daemon worker, not an executor: an executor's worker is joined at exit,
+# so a wedged provider could hold up a gateway restart. An end still running
+# when the dashboard exits is dropped, as Hermes drops its own memory writes.
+_voice_end_jobs: "queue.SimpleQueue[Callable[[], None]]" = queue.SimpleQueue()
+_voice_end_worker: Optional[threading.Thread] = None
+_voice_end_guard = threading.Lock()
+_voice_end_pending = 0
+
+
+def _voice_exchanges(messages: list) -> list:
+    """(user, assistant) pairs as Hermes syncs a turn: what the user said, then
+    everything said back. Hermes skips a turn missing either side, so a greeting
+    before the user spoke and an unanswered last question stay out."""
+    exchanges = []
+    user: list = []
+    assistant: list = []
+    for message in messages:
+        if message["role"] == "user":
+            if assistant:
+                if user:
+                    exchanges.append(("\n".join(user), "\n".join(assistant)))
+                user, assistant = [], []
+            user.append(message["content"])
+        else:
+            assistant.append(message["content"])
+    if user and assistant:
+        exchanges.append(("\n".join(user), "\n".join(assistant)))
+    return exchanges
+
+
+def _fire_voice_hook(name: str, **kwargs: Any) -> None:
+    """Fire a lifecycle hook as Hermes does: its own observers, then plugins.
+    on_session_finalize goes through finalize_session, which also closes the
+    session's Relay conversation. A Hermes without hermes_cli.lifecycle calls
+    the plugin hooks directly."""
+    try:
+        from hermes_cli import lifecycle
+    except ImportError as exc:
+        if exc.name not in ("hermes_cli", "hermes_cli.lifecycle"):
+            raise
+        from hermes_cli.plugins import invoke_hook
+
+        invoke_hook(name, **kwargs)
+        return
+    if name == "on_session_finalize" and hasattr(lifecycle, "finalize_session"):
+        lifecycle.finalize_session(**kwargs)
+    else:
+        lifecycle.invoke_hook(name, **kwargs)
+
+
+def _voice_session_title(session_id: str) -> Dict[str, str]:
+    """The row's title and its provenance, which Hermes hands a provider too
+    (Honcho can name its session after the title). Empty when unreadable."""
+    try:
+        db = _open_voice_db()
+    except Exception:  # noqa: BLE001 — the title is optional
+        return {}
+    try:
+        title = db.get_session_title(session_id) if hasattr(db, "get_session_title") else None
+        if not title:
+            return {}
+        found = {"session_title": title}
+        source = db.get_session_title_source(session_id) if hasattr(db, "get_session_title_source") else None
+        if source:
+            found["session_title_source"] = source
+        return found
+    except Exception:  # noqa: BLE001
+        logger.debug("Couldn't read the title of Conduit voice session %s", session_id, exc_info=True)
+        return {}
+    finally:
+        db.close()
+
+
+def _commit_voice_call_memory(session_id: str, messages: list) -> None:
+    """Write a finished call to the profile's memory provider the way Hermes
+    writes a chat: initialize it for the session, sync_turn each exchange, then
+    on_session_end and shutdown. A provider instance of its own: the cached
+    recall one is bound to the conduit-voice session."""
+    name = _configured_memory_provider(_hermes_memory_config())
+    if name is None:
+        return
+    from agent.memory_manager import MemoryManager
+
+    provider = _hermes_load_memory_provider(name)
+    if provider is None or not provider.is_available():
+        logger.info("Memory provider %r is not available; a Conduit voice call isn't written to it", name)
+        return
+    manager = MemoryManager()
+    manager.add_provider(provider)
+    kwargs = {**_memory_provider_init_kwargs(), "platform": VOICE_END_PLATFORM, **_voice_session_title(session_id)}
+    manager.initialize_all(session_id=session_id, **kwargs)
+    try:
+        for user, assistant in _voice_exchanges(messages):
+            manager.sync_all(user, assistant, session_id=session_id)
+        # sync_all writes on the manager's worker: let those land before the end.
+        flush = getattr(manager, "flush_pending", None)
+        if callable(flush):
+            flush(timeout=VOICE_END_FLUSH_TIMEOUT_S)
+        manager.on_session_end([{"role": m["role"], "content": m["content"]} for m in messages])
+    finally:
+        manager.shutdown_all()
+
+
+def _end_voice_call(session_id: str, engine: str, messages: list) -> None:
+    """End a saved call's session in Hermes (inside the profile's scope). Each
+    step runs even if an earlier one failed."""
+    hook = {"session_id": session_id, "platform": VOICE_END_PLATFORM, "reason": VOICE_END_HOOK_REASON}
+    steps = (
+        ("on_session_end hook", lambda: _fire_voice_hook(
+            "on_session_end", completed=True, interrupted=False, model=engine, **hook)),
+        ("memory write", lambda: _commit_voice_call_memory(session_id, messages)),
+        ("on_session_finalize hook", lambda: _fire_voice_hook("on_session_finalize", **hook)),
+    )
+    for what, step in steps:
+        try:
+            step()
+        except ImportError as exc:
+            if exc.name not in _VOICE_END_MODULES:
+                logger.warning("Conduit voice call end: %s failed for %s", what, session_id, exc_info=True)
+            else:
+                logger.debug("Conduit voice call end: this Hermes has no %s (%s)", what, exc.name)
+        except Exception:  # noqa: BLE001 — a hook or provider must never stop the rest
+            logger.warning("Conduit voice call end: %s failed for %s", what, session_id, exc_info=True)
+
+
+def _run_voice_call_end(profile: Optional[str], session_id: str, engine: str, messages: list) -> None:
+    """Runs the end on its own thread and waits up to VOICE_END_TIMEOUT_S, so a
+    wedged provider costs one abandoned thread, not every later call's end."""
+    done = threading.Event()
+
+    def run() -> None:
+        try:
+            with _profile_scope(profile):
+                _end_voice_call(session_id, engine, messages)
+        except Exception:  # noqa: BLE001 — the scope itself failed; nothing ran
+            logger.warning("Conduit voice call end failed for %s", session_id, exc_info=True)
+        finally:
+            done.set()
+
+    try:
+        threading.Thread(target=run, name="conduit-voice-end-call", daemon=True).start()
+    except RuntimeError:  # no thread to spare
+        logger.warning("Conduit voice session %s ends without hooks: no thread to run them", session_id)
+        return
+    if not done.wait(VOICE_END_TIMEOUT_S):
+        logger.warning("Ending Conduit voice session %s took over %ss; moving on (it may still finish)",
+                       session_id, VOICE_END_TIMEOUT_S)
+
+
+def _voice_end_loop() -> None:
+    while True:
+        job = _voice_end_jobs.get()
+        try:
+            job()
+        except Exception:  # noqa: BLE001 — one call's end never stops the next
+            logger.warning("A Conduit voice call end failed", exc_info=True)
+
+
+def _queue_voice_call_end(profile: Optional[str], session_id: str, engine: str, messages: list) -> None:
+    """Ends the call's session off the request. Never raises: the turns are
+    already stored."""
+    global _voice_end_pending, _voice_end_worker
+
+    def run() -> None:
+        global _voice_end_pending
+        try:
+            _run_voice_call_end(profile, session_id, engine, messages)
+        finally:
+            with _voice_end_guard:
+                _voice_end_pending -= 1
+
+    with _voice_end_guard:
+        if _voice_end_pending >= VOICE_END_MAX_PENDING:
+            logger.warning("Too many Conduit voice calls waiting to end; session %s ends without hooks", session_id)
+            return
+        try:
+            if _voice_end_worker is None or not _voice_end_worker.is_alive():
+                _voice_end_worker = threading.Thread(target=_voice_end_loop, name="conduit-voice-end", daemon=True)
+                _voice_end_worker.start()
+        except RuntimeError:  # no thread to spare, or the dashboard is exiting
+            logger.warning("Conduit voice session %s ends without hooks: no thread to run them", session_id)
+            return
+        _voice_end_pending += 1
+        _voice_end_jobs.put(run)
 
 
 # --- Chat takeover -----------------------------------------------------------

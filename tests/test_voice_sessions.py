@@ -4,6 +4,8 @@ import importlib.util
 import pathlib
 import sys
 import tempfile
+import threading
+import time
 import types
 from pathlib import Path
 
@@ -28,6 +30,7 @@ def _load_plugin_api():
 
 
 api = _load_plugin_api()
+_queue_voice_call_end = api._queue_voice_call_end
 
 _active_profile = contextvars.ContextVar("active_profile", default=None)
 
@@ -88,6 +91,12 @@ class FakeSessionDB:
         self.store.titles[session_id] = title
         return True
 
+    def get_session_title(self, session_id):
+        return self.store.titles.get(session_id)
+
+    def get_session_title_source(self, session_id):
+        return "user" if session_id in self.store.titles else None
+
     def delete_session(self, session_id):
         self.store.sessions.pop(session_id, None)
         self.store.messages.pop(session_id, None)
@@ -124,6 +133,10 @@ def hermes(monkeypatch, tmp_path):
                         api._MintLimiter(api.VOICE_READ_LIMIT, api.VOICE_WRITE_WINDOW_S))
     FakeSessionDB.stores = {}
     entered = []
+    # A save that stores new turns ends its call; these tests record that
+    # instead of running it (the call-end tests below run it).
+    ends = []
+    monkeypatch.setattr(api, "_queue_voice_call_end", lambda *args: ends.append(args))
 
     def home():
         return tmp_path / (_active_profile.get() or "default")
@@ -151,7 +164,7 @@ def hermes(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "hermes_cli.web_server_profiles", profiles)
     monkeypatch.setitem(sys.modules, "hermes_state", state)
     monkeypatch.setitem(sys.modules, "hermes_state_ids", ids)
-    return types.SimpleNamespace(stores=FakeSessionDB.stores, entered=entered)
+    return types.SimpleNamespace(stores=FakeSessionDB.stores, entered=entered, ends=ends)
 
 
 @pytest.fixture
@@ -547,3 +560,250 @@ def test_summary_for_a_deleted_session_is_422(client, hermes):
 def test_summary_needs_text_and_covers(client, hermes, body):
     session_id = save(client, turns=turns(("user", "a"))).json()["session_id"]
     assert client.post(f"{BASE}/voice/summary", json={"session_id": session_id, **body}).status_code == 400
+
+
+# --- Call end -------------------------------------------------------------------
+
+
+def test_a_save_with_new_turns_ends_the_call(client, hermes):
+    session_id = save(client, engine="gpt-live", turns=turns(("user", "hi"), ("assistant", "hello"))).json()["session_id"]
+    assert hermes.ends == [(None, session_id, "gpt-live", [
+        {"role": "user", "content": "hi", "timestamp": 1_780_000_000},
+        {"role": "assistant", "content": "hello", "timestamp": 1_780_000_001}])]
+
+
+def test_a_replayed_save_ends_nothing_twice(client, hermes):
+    first = save(client, turns=turns(("user", "a"))).json()
+    # The response was lost and Conduit resends the same turns.
+    save(client, turns=turns(("user", "a")))
+    save(client, session_id=first["session_id"], turns=turns(("user", "a")))
+    assert len(hermes.ends) == 1
+
+
+def test_nothing_saved_ends_nothing(client, hermes):
+    save(client, turns=[])
+    assert save(client, turns=turns(("user", "a"), ("assistant", " "))).status_code == 400
+    assert hermes.ends == []
+
+
+def test_a_resumed_call_ends_with_only_its_own_turns(client, hermes):
+    session_id = save(client, turns=turns(("user", "one"), ("assistant", "two"))).json()["session_id"]
+    save(client, session_id=session_id, call_id="call-2", turns=turns(("user", "back"), ("assistant", "hi again")))
+    assert [m["content"] for m in hermes.ends[-1][3]] == ["back", "hi again"]
+    assert hermes.ends[-1][1] == session_id
+
+
+def test_a_call_ends_in_the_profile_it_was_saved_to(client, hermes):
+    client.post(f"{BASE}/voice/sessions?profile=coder", json={"engine": "gemini-live", "call_id": "c",
+                                                               "turns": turns(("user", "a"))})
+    assert hermes.ends[0][0] == "coder"
+
+
+def test_exchanges_pair_what_the_user_said_with_the_reply():
+    messages = [{"role": role, "content": text} for role, text in (
+        ("assistant", "Hi, what's up?"),  # a greeting before the user spoke
+        ("user", "What's the weather"), ("user", "in Paris?"),
+        ("assistant", "Sunny."), ("assistant", "Started a background job: forecast."),
+        ("user", "Thanks"), ("assistant", "Anytime."),
+        ("user", "One more thing"),  # hung up before the answer
+    )]
+    assert api._voice_exchanges(messages) == [
+        ("What's the weather\nin Paris?", "Sunny.\nStarted a background job: forecast."),
+        ("Thanks", "Anytime."),
+    ]
+
+
+class EndProvider:
+    """A memory provider that logs each call with the profile it ran in."""
+
+    name = "honcho"
+
+    def __init__(self, events, available=True):
+        self.events = events
+        self.available = available
+
+    def is_available(self):
+        return self.available
+
+    def initialize(self, session_id, **kwargs):
+        self.events.append(("initialize", _active_profile.get(), session_id, kwargs))
+
+    def sync_turn(self, user, assistant, *, session_id=""):
+        self.events.append(("sync_turn", user, assistant, session_id))
+
+    def on_session_end(self, messages):
+        self.events.append(("provider on_session_end", messages))
+
+    def shutdown(self):
+        self.events.append(("shutdown",))
+
+
+class EndMemoryManager:
+    """Hermes' MemoryManager, cut down to the calls a call's end makes."""
+
+    events = None
+
+    def __init__(self):
+        self.providers = []
+
+    def add_provider(self, provider):
+        self.providers.append(provider)
+
+    def initialize_all(self, session_id, **kwargs):
+        for provider in self.providers:
+            provider.initialize(session_id=session_id, **kwargs)
+
+    def sync_all(self, user, assistant, *, session_id=""):
+        for provider in self.providers:
+            provider.sync_turn(user, assistant, session_id=session_id)
+
+    def flush_pending(self, timeout=None):
+        self.events.append(("flush_pending", timeout))
+        return True
+
+    def on_session_end(self, messages):
+        for provider in self.providers:
+            provider.on_session_end(messages)
+
+    def shutdown_all(self):
+        for provider in self.providers[::-1]:
+            provider.shutdown()
+
+
+@pytest.fixture
+def lifecycle(hermes, monkeypatch):
+    """Hermes' side of a call's end: lifecycle hooks, memory config and manager."""
+    events = []
+    module = types.ModuleType("hermes_cli.lifecycle")
+    module.invoke_hook = lambda name, **kwargs: events.append((name, _active_profile.get(), kwargs))
+    module.finalize_session = lambda **kwargs: events.append(("on_session_finalize", _active_profile.get(), kwargs))
+    monkeypatch.setattr(sys.modules["hermes_cli"], "lifecycle", module, raising=False)
+    monkeypatch.setitem(sys.modules, "hermes_cli.lifecycle", module)
+    memory_provider = types.ModuleType("agent.memory_provider")
+    memory_provider.is_core_memory_provider = lambda name: str(name or "").strip().lower() in {
+        "", "default", "builtin", "built-in", "none"}
+    manager = types.ModuleType("agent.memory_manager")
+    EndMemoryManager.events = events
+    manager.MemoryManager = EndMemoryManager
+    monkeypatch.setitem(sys.modules, "agent", types.ModuleType("agent"))
+    monkeypatch.setitem(sys.modules, "agent.memory_provider", memory_provider)
+    monkeypatch.setitem(sys.modules, "agent.memory_manager", manager)
+    state = types.SimpleNamespace(events=events, config={"memory": {"provider": "honcho"}},
+                                  provider=EndProvider(events))
+    monkeypatch.setattr(api, "_hermes_memory_config", lambda: state.config)
+    monkeypatch.setattr(api, "_hermes_load_memory_provider", lambda name: state.provider)
+    return state
+
+
+CALL = [{"role": "user", "content": "remind me to call mum", "timestamp": 1.0},
+        {"role": "assistant", "content": "Will do.", "timestamp": 2.0}]
+
+
+def test_a_call_ends_like_a_desktop_chat(hermes, lifecycle):
+    api._run_voice_call_end("coder", "s_call", "gemini-live", CALL)
+    hook = {"session_id": "s_call", "platform": "desktop", "reason": "voice_call_ended"}
+    events = lifecycle.events
+    assert events[0] == ("on_session_end", "coder",
+                         {**hook, "completed": True, "interrupted": False, "model": "gemini-live"})
+    name, profile, session_id, kwargs = events[1]
+    assert (name, profile, session_id) == ("initialize", "coder", "s_call")
+    # Written as the row's own platform and as the primary agent, so the
+    # provider writes; the recall provider's conduit_voice platform isn't used.
+    assert kwargs["platform"] == "desktop" and kwargs["agent_context"] == "primary"
+    assert kwargs["hermes_home"].endswith("coder")
+    assert events[2:] == [
+        ("sync_turn", "remind me to call mum", "Will do.", "s_call"),
+        ("flush_pending", api.VOICE_END_FLUSH_TIMEOUT_S),
+        ("provider on_session_end", [{"role": "user", "content": "remind me to call mum"},
+                                     {"role": "assistant", "content": "Will do."}]),
+        ("shutdown",),
+        ("on_session_finalize", "coder", hook),
+    ]
+
+
+def test_the_provider_gets_the_rows_title(client, hermes, lifecycle):
+    session_id = save(client, title="Groceries", turns=turns(("user", "a"), ("assistant", "b"))).json()["session_id"]
+    api._run_voice_call_end(None, session_id, "gemini-live", CALL)
+    kwargs = next(event for event in lifecycle.events if event[0] == "initialize")[3]
+    assert kwargs["session_title"] == "Groceries" and kwargs["session_title_source"] == "user"
+
+
+def test_without_an_external_provider_only_the_hooks_fire(hermes, lifecycle):
+    lifecycle.config = {"memory": {"provider": "builtin"}}
+    api._run_voice_call_end(None, "s_call", "gpt-live", CALL)
+    assert [event[0] for event in lifecycle.events] == ["on_session_end", "on_session_finalize"]
+
+
+def test_an_unavailable_provider_is_left_alone(hermes, lifecycle):
+    lifecycle.provider.available = False
+    api._run_voice_call_end(None, "s_call", "gpt-live", CALL)
+    assert [event[0] for event in lifecycle.events] == ["on_session_end", "on_session_finalize"]
+
+
+def test_a_failing_step_doesnt_stop_the_others(hermes, lifecycle, monkeypatch):
+    def hook(name, **kwargs):
+        raise RuntimeError("plugin bug")
+
+    monkeypatch.setattr(sys.modules["hermes_cli.lifecycle"], "invoke_hook", hook)
+
+    def broken_sync(*args, **kwargs):
+        raise RuntimeError("honcho down")
+
+    monkeypatch.setattr(lifecycle.provider, "sync_turn", broken_sync)
+    api._run_voice_call_end(None, "s_call", "gpt-live", CALL)
+    # The memory write stopped at sync_turn but still shut its provider down.
+    assert [event[0] for event in lifecycle.events] == ["initialize", "shutdown", "on_session_finalize"]
+
+
+def test_an_older_hermes_calls_the_plugin_hooks_directly(hermes, monkeypatch):
+    events = []
+    plugins = types.ModuleType("hermes_cli.plugins")
+    plugins.invoke_hook = lambda name, **kwargs: events.append(name)
+    monkeypatch.setitem(sys.modules, "hermes_cli.plugins", plugins)
+    monkeypatch.setattr(api, "_hermes_memory_config", lambda: {})
+    api._run_voice_call_end(None, "s_call", "gpt-live", CALL)
+    assert events == ["on_session_end", "on_session_finalize"]
+
+
+def test_a_hermes_without_any_of_it_ends_quietly(hermes, caplog):
+    # No lifecycle, plugin or memory modules: nothing to call, nothing to warn about.
+    with caplog.at_level("DEBUG"):
+        api._run_voice_call_end(None, "s_call", "gpt-live", CALL)
+    assert [r.message for r in caplog.records if r.levelname == "WARNING"] == []
+    assert any("this Hermes has no" in r.message for r in caplog.records)
+
+
+def test_a_wedged_end_is_abandoned(hermes, lifecycle, monkeypatch):
+    release = threading.Event()
+    monkeypatch.setattr(sys.modules["hermes_cli.lifecycle"], "invoke_hook", lambda name, **kwargs: release.wait(5))
+    monkeypatch.setattr(api, "VOICE_END_TIMEOUT_S", 0.05)
+    started = time.monotonic()
+    api._run_voice_call_end(None, "s_call", "gpt-live", CALL)
+    assert time.monotonic() - started < 2
+    release.set()
+
+
+def test_a_saved_call_ends_in_the_background(client, hermes, lifecycle, monkeypatch):
+    finalized = threading.Event()
+    finalize = sys.modules["hermes_cli.lifecycle"].finalize_session
+
+    def finalize_and_signal(**kwargs):
+        finalize(**kwargs)
+        finalized.set()
+
+    monkeypatch.setattr(sys.modules["hermes_cli.lifecycle"], "finalize_session", finalize_and_signal)
+    monkeypatch.setattr(api, "_queue_voice_call_end", _queue_voice_call_end)
+    session_id = client.post(f"{BASE}/voice/sessions?profile=coder", json={
+        "engine": "grok-live", "call_id": "c", "turns": turns(("user", "hi"), ("assistant", "hello"))}).json()["session_id"]
+    assert finalized.wait(5)
+    assert ("on_session_finalize", "coder",
+            {"session_id": session_id, "platform": "desktop", "reason": "voice_call_ended"}) in lifecycle.events
+    assert ("sync_turn", "hi", "hello", session_id) in lifecycle.events
+
+
+def test_ends_past_the_backlog_are_skipped(hermes, monkeypatch):
+    monkeypatch.setattr(api, "VOICE_END_MAX_PENDING", 0)
+    ran = []
+    monkeypatch.setattr(api, "_run_voice_call_end", lambda *args: ran.append(args))
+    _queue_voice_call_end(None, "s_call", "gpt-live", CALL)
+    assert ran == [] and api._voice_end_pending == 0 and api._voice_end_jobs.empty()
