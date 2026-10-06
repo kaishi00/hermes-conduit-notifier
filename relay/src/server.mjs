@@ -13,9 +13,9 @@ import { normalizeDashboardId, RelayStore, sanitizeBatchQuestions } from './stor
 const RELAY_INFO = (() => {
   try {
     const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-    return { version: String(pkg.version || 'unknown'), capabilities: ['decisions', 'decision-cards', 'meta'] };
+    return { version: String(pkg.version || 'unknown'), capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1'] };
   } catch {
-    return { version: 'unknown', capabilities: ['decisions', 'decision-cards', 'meta'] };
+    return { version: 'unknown', capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1'] };
   }
 })();
 
@@ -29,6 +29,22 @@ let apnsSend;
 // headroom for JSON escaping and delivery headers, dropping decision content
 // (not the notification) when a payload would exceed the bound.
 const MAX_NOTIFICATION_BYTES = 3800;
+
+// End-to-end encrypted events (#431): the plugin seals the content with a
+// key this relay never sees and sends an `e2e` envelope instead. The relay
+// routes on the visible fields (type, event id, thread token, clarify
+// request id and question ids) and forwards the ciphertext untouched.
+// The ciphertext cap leaves room for the alert, routing stub and envelope
+// fields inside MAX_NOTIFICATION_BYTES; the plugin keeps under it.
+const E2E_MAX_CT_CHARS = 2600;
+// Encrypted clarify answers are base64url ciphertext of up to 2,000
+// characters of text (up to 4 bytes each in UTF-8).
+export const E2E_ANSWER_PREFIX = 'e2e1.';
+const E2E_MAX_ANSWER_CHARS = 11_000;
+const E2E_ANSWER_PATTERN = new RegExp(`^${E2E_ANSWER_PREFIX.replace('.', '\\.')}[0-9a-f]{32}\\.[A-Za-z0-9_-]{16}\\.[A-Za-z0-9_-]{22,10900}$`);
+// Stands in for question text the relay can't read, so a parked batch keeps
+// its qids (the store sanitizer drops questions without text).
+const E2E_QUESTION_PLACEHOLDER = '[encrypted]';
 
 // Conduit dashboard UUIDs (opaque app-generated identity, #148) are
 // canonicalized and validated in the store (normalizeDashboardId); the route
@@ -236,11 +252,14 @@ async function route(request, response) {
     // Keep capacity preflight through savePendingDecision synchronous with no
     // await: otherwise requests could interleave after this check and consume
     // the same last slot. A catch after acceptEvent would still consume the ID.
-    if (!duplicateEvent && event.decision?.kind === 'clarify' && event.decision.request_id) {
+    const clarifyRequestId = event.e2e
+      ? event.clarify?.request_id
+      : (event.decision?.kind === 'clarify' ? event.decision.request_id : undefined);
+    if (!duplicateEvent && clarifyRequestId) {
       try {
         store.assertPendingDecisionCapacity(
           installation.id,
-          RelayStore.decisionKey(installation.id, credential.gatewayId, event.decision.request_id),
+          RelayStore.decisionKey(installation.id, credential.gatewayId, clarifyRequestId),
         );
       } catch (error) {
         if (error?.code === 'decision_capacity_exceeded') {
@@ -288,25 +307,41 @@ async function route(request, response) {
     // Hermes' native clarify path — it never suppresses the ordinary
     // notification.
     let parkedDecisionId = null;
-    if (event.decision?.kind === 'clarify' && event.decision.request_id) {
-      parkedDecisionId = event.decision.request_id;
+    if (clarifyRequestId) {
+      parkedDecisionId = clarifyRequestId;
       const deliverableBase = shouldDeliver(installation.preferences, event.type);
       const notification = deliverableBase
         ? notificationFor(event, installation.preferences, gateway)
         : null;
       // The rich body copy is the canonical payload the iOS path reads, and
       // (since the top-level copy became a routing stub) the only place the
-      // structured decision lives.
-      const decisionDeliverable = notification?.payload?.body?.conduit?.decision != null;
-      const saved = store.savePendingDecision({
-        id: parkedDecisionId,
-        installationId: installation.id,
-        gatewayId: credential.gatewayId,
-        question: event.decision.question,
-        choices: event.decision.choices,
-        questions: event.decision.questions,
-        deliverable: decisionDeliverable,
-      });
+      // structured decision lives. An encrypted card is deliverable when the
+      // plugin fit it in the envelope, the device wants cards, and the
+      // envelope survived the size guard.
+      const decisionDeliverable = event.e2e
+        ? Boolean(notification?.payload?.conduit_e2e) && event.clarify.card && installation.preferences.decision_cards !== false
+        : notification?.payload?.body?.conduit?.decision != null;
+      // An encrypted decision parks only what routing needs: its question
+      // ids, never question text or choices.
+      const saved = store.savePendingDecision(event.e2e
+        ? {
+            id: parkedDecisionId,
+            installationId: installation.id,
+            gatewayId: credential.gatewayId,
+            question: E2E_QUESTION_PLACEHOLDER,
+            choices: [],
+            questions: event.clarify.qids.map((qid) => ({ qid, question: E2E_QUESTION_PLACEHOLDER, choices: [] })),
+            deliverable: decisionDeliverable,
+          }
+        : {
+            id: parkedDecisionId,
+            installationId: installation.id,
+            gatewayId: credential.gatewayId,
+            question: event.decision.question,
+            choices: event.decision.choices,
+            questions: event.decision.questions,
+            deliverable: decisionDeliverable,
+          });
       if (!saved) return sendJson(response, 200, { accepted: true, duplicate: true });
       if (!notification) return sendJson(response, 202, { accepted: true, delivered: false });
       let result;
@@ -366,7 +401,13 @@ async function route(request, response) {
     if (!installation) return sendJson(response, 401, { error: 'unauthorized' });
     enforceRateLimit(`decision-respond:${installation.id}`, 30, 60_000);
     const body = await readJson(request);
-    const answer = cleanText(body.answer, 2000);
+    // An encrypted answer is opaque base64url: kept whole (never trimmed or
+    // truncated, which would break it) and only for the strict wire shape.
+    // Anything else, including plaintext that merely starts like one, is an
+    // ordinary answer (the plugin of an encrypted pairing rejects it).
+    const answer = typeof body.answer === 'string' && E2E_ANSWER_PATTERN.test(body.answer) && body.answer.length <= E2E_MAX_ANSWER_CHARS
+      ? body.answer
+      : cleanText(body.answer, 2000);
     if (!answer) return sendJson(response, 400, { error: 'invalid_answer' });
     // question_id scopes the answer to ONE question of a batch decision
     // (first-answer-wins per qid, other qids stay open); its absence keeps
@@ -517,6 +558,7 @@ function notificationFor(event, preferences, gateway = undefined) {
   // type + UUID + session could exceed APNs' 64-byte collapse-id cap.
   const scopeToken = (seed) =>
     gatewayId ? createHash('sha256').update(`${gatewayId}:${seed}`).digest('hex').slice(0, 16) : undefined;
+  if (event.e2e) return encryptedNotificationFor(event, preferences, { gatewayId, dashboardId, scopeToken });
   const generic = genericCopy(event.type);
   const title = preferences.show_previews && event.title ? event.title : generic.title;
   // Keep previews private by default, while still making notifications from
@@ -600,6 +642,41 @@ function notificationFor(event, preferences, gateway = undefined) {
   };
 }
 
+// An end-to-end encrypted event: the relay can't read the content, so the
+// alert is the generic copy for the type (no profile or session context),
+// `mutable-content` lets Conduit's Notification Service Extension decrypt
+// and replace it on the phone, and the envelope rides along untouched.
+// Threading and collapsing use the plugin's keyed thread token, scoped by
+// gateway like the plaintext path.
+function encryptedNotificationFor(event, preferences, { gatewayId, dashboardId, scopeToken }) {
+  const generic = genericCopy(event.type);
+  const completion = event.type === 'response.ready' || event.type === 'background_task.finished';
+  const attention = event.type === 'approval.needed' || event.type === 'input.needed';
+  const sound = (completion && preferences.completion_sound) || (attention && preferences.attention_sound !== false);
+  const threadId = scopeToken(event.e2e.tok) ?? event.e2e.tok;
+  const routing = {
+    type: event.type,
+    e2e: 1,
+    ...(gatewayId ? { gateway_id: gatewayId } : {}),
+    ...(dashboardId ? { dashboard_id: dashboardId } : {}),
+  };
+  const aps = {
+    alert: { title: generic.title, body: generic.body },
+    ...(sound ? { sound: 'default' } : {}),
+    'mutable-content': 1,
+    'thread-id': threadId,
+  };
+  let payload = { aps, conduit_e2e: event.e2e, body: { conduit: routing }, conduit: routing };
+  // Last guard: an envelope that would push the payload past APNs' cap is
+  // dropped, never truncated. The phone shows the generic alert and a
+  // clarify card is parked undeliverable.
+  if (Buffer.byteLength(JSON.stringify(payload)) > MAX_NOTIFICATION_BYTES) {
+    const { 'mutable-content': _unused, ...plainAps } = aps;
+    payload = { aps: plainAps, body: { conduit: routing }, conduit: routing };
+  }
+  return { collapseId: `${event.type}:${threadId}`, payload, threadId };
+}
+
 function notificationContext(message, event) {
   const profile = String(event.profile ?? '').trim();
   const sessionId = String(event.sessionId ?? '').trim();
@@ -629,6 +706,23 @@ function validateEvent(body) {
   if (!types.has(body.type)) throw httpError(400, 'invalid_event_type');
   const eventId = String(body.event_id ?? '');
   if (!/^[A-Za-z0-9:_-]{8,128}$/.test(eventId)) throw httpError(400, 'invalid_event_id');
+  if (body.e2e !== undefined && body.e2e !== null) {
+    // An encrypted event carries no readable content: any plaintext content
+    // fields beside the envelope are ignored, never forwarded.
+    const e2e = validateEnvelope(body.e2e, eventId);
+    return {
+      eventId,
+      type: body.type,
+      pluginVersion: cleanIdentifier(body.plugin_version, 40),
+      pluginCapabilities: validCapabilities(body.plugin_capabilities),
+      e2e,
+      // The clarify request id the relay parks must be the one the
+      // ciphertext is bound to (the envelope's `req`).
+      clarify: body.type === 'input.needed' && e2e.req
+        ? validateClarifyRouting(body.clarify, e2e.req)
+        : undefined,
+    };
+  }
   return {
     eventId,
     type: body.type,
@@ -638,11 +732,59 @@ function validateEvent(body) {
     profile: cleanText(body.profile, 80),
     gateway: cleanIdentifier(body.gateway, 80),
     pluginVersion: cleanIdentifier(body.plugin_version, 40),
-    pluginCapabilities: Array.isArray(body.plugin_capabilities)
-      ? body.plugin_capabilities.map((capability) => cleanIdentifier(capability, 40)).filter((capability) => capability !== undefined).slice(0, 16)
-      : [],
+    pluginCapabilities: validCapabilities(body.plugin_capabilities),
     decision: validateDecision(body.decision, body.type),
   };
+}
+
+function validCapabilities(value) {
+  return Array.isArray(value)
+    ? value.map((capability) => cleanIdentifier(capability, 40)).filter((capability) => capability !== undefined).slice(0, 16)
+    : [];
+}
+
+// The `e2e` envelope is forwarded byte for byte, so it is validated
+// strictly: only the known fields, each in its exact wire shape. A
+// malformed envelope is a 400, never a fallback to plaintext.
+// Defense in depth against replaying a captured envelope after the event-id
+// ledger forgot it: the phone rejects anything older than 24 hours (or more
+// than an hour ahead) itself; the relay refuses the same, with an extra hour
+// of slack for clocks that disagree.
+const E2E_MAX_AGE_S = 25 * 60 * 60;
+const E2E_MAX_FUTURE_S = 2 * 60 * 60;
+
+export function validateEnvelope(value, eventId, nowSeconds = Math.floor(Date.now() / 1000)) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw httpError(400, 'invalid_e2e');
+  const { v, kid, msg, iat, tok, z, req, n, ct } = value;
+  const valid = v === 1
+    && typeof kid === 'string' && /^[0-9a-f]{32}$/.test(kid)
+    && msg === eventId
+    && Number.isSafeInteger(iat) && iat >= nowSeconds - E2E_MAX_AGE_S && iat <= nowSeconds + E2E_MAX_FUTURE_S
+    && typeof tok === 'string' && /^[0-9a-f]{16}$/.test(tok)
+    && (z === 0 || z === 1)
+    && typeof req === 'string' && /^([A-Za-z0-9_-]{4,128})?$/.test(req)
+    && typeof n === 'string' && /^[A-Za-z0-9_-]{16}$/.test(n)
+    && typeof ct === 'string' && /^[A-Za-z0-9_-]{22,}$/.test(ct) && ct.length <= E2E_MAX_CT_CHARS;
+  if (!valid) throw httpError(400, 'invalid_e2e');
+  return { v, kid, msg, iat, tok, z, req, n, ct };
+}
+
+// Routing metadata for an encrypted clarify: the plugin-minted request id,
+// the gateway's question ids (empty for a single question) and whether the
+// card fit the envelope. Malformed metadata parks nothing. qids and card are
+// routing hints only: a relay that alters them can at most make a question
+// unanswerable, since each sealed answer is bound to its request and qid.
+function validateClarifyRouting(value, boundRequestId) {
+  if (!value || typeof value !== 'object') return undefined;
+  if (value.request_id !== boundRequestId) throw httpError(400, 'invalid_e2e');
+  const requestId = boundRequestId;
+  const qids = [];
+  for (const qid of Array.isArray(value.qids) ? value.qids : []) {
+    if (typeof qid !== 'string' || !/^[A-Za-z0-9_-]{1,40}$/.test(qid)) continue;
+    if (['__proto__', 'constructor', 'prototype'].includes(qid) || qids.includes(qid)) continue;
+    qids.push(qid);
+  }
+  return { request_id: requestId, qids: qids.slice(0, 8), card: value.card !== false };
 }
 
 // Mirror the plugin's decision sanitization at the relay trust boundary.

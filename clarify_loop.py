@@ -269,6 +269,12 @@ def _first_answer_wins(
                 if previous_remaining is not None and len(remaining) < previous_remaining:
                     unanswered_polls = 0
                 previous_remaining = len(remaining)
+        elif state == "rejected":
+            # An answer for an end-to-end encrypted pairing that the paired
+            # phone did not seal (client.opened_answers). It never answers
+            # the tool call: release the decision and let Hermes' own clarify
+            # path take the question.
+            break
         elif state == "unknown" and saw_pending:
             # unknown-after-pending: the relay expired the decision (2h TTL,
             # far under an unlimited clarify timeout).

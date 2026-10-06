@@ -134,6 +134,8 @@ def relay():
         # the answer (a rejected/thrown send would flip it undeliverable and
         # the middleware would fall back to the native path instead).
         "APNS_MODE": "accept",
+        # Every "delivered" APNs payload, for the end-to-end encryption test.
+        "APNS_CAPTURE_PATH": str(tmpdir / "apns-capture.jsonl"),
     }
     process = subprocess.Popen(
         [node, "src/server.mjs"],
@@ -144,7 +146,7 @@ def relay():
     )
     try:
         _wait_healthy(base, process)
-        yield {"base": base}
+        yield {"base": base, "capture": tmpdir / "apns-capture.jsonl"}
     finally:
         process.terminate()
         try:
@@ -203,7 +205,7 @@ def gateway(relay, restore_real_client, monkeypatch, tmp_path):
     # local process so the plugin's requests reach the relay under test.
     state["relay_url"] = base
     loop.client.save_state(state)
-    return {"base": base, "device_credential": device_credential}
+    return {"base": base, "device_credential": device_credential, "state": state}
 
 
 @pytest.fixture()
@@ -367,5 +369,117 @@ def test_one_entry_questions_invocation_round_trips_batch_through_the_real_relay
         # The gateway's poll sees the per-qid answers map, never a scalar answer.
         poll = loop.client.poll_decision(decision["request_id"])
         assert poll == {"status": "answered", "answers": {"q0": "staging"}, "remaining": []}, poll
+    finally:
+        release.set()
+
+
+def _parked(relay, request_id):
+    data = json.loads((relay["capture"].parent / "relay-data.json").read_text(encoding="utf-8"))
+    matches = [entry for entry in data["pendingDecisions"].values() if entry["id"] == request_id]
+    assert len(matches) == 1
+    return matches[0]
+
+
+def _captured(relay):
+    path = relay["capture"]
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def test_encrypted_batch_clarify_round_trips_without_the_relay_seeing_content(relay, gateway, fast_poll, monkeypatch):
+    e2e = sys.modules["conduit_push.e2e"]
+    kid = "0123456789abcdef0123456789abcdef"
+    secret = bytes(range(32))
+    state = dict(gateway["state"])
+    state["e2e"] = {"kid": kid, "secret": e2e.b64u(secret)}
+    loop.client.save_state(state)
+    keys = e2e.derive_keys(kid, secret)
+    context = {"installation_id": state["installation_id"], "gateway_id": state["gateway_id"]}
+    before = len(_captured(relay))
+    released = []
+    real_cancel = loop.client.cancel_decision
+    monkeypatch.setattr(loop.client, "cancel_decision", lambda request_id: released.append(request_id) or real_cancel(request_id))
+
+    worker, holder, events, release = _run_clarify(monkeypatch, {
+        "questions": [
+            {"question": "Which environment?", "choices": ["staging", "prod"]},
+            {"question": "Ship the migration too?", "choices": ["yes", "no"]},
+        ],
+    })
+    try:
+        assert events, "the middleware never pushed the input.needed event"
+        # What the APNs layer received: the generic alert, the envelope, and
+        # no question text, choices or session id anywhere.
+        delivered = _captured(relay)[before:]
+        assert len(delivered) == 1
+        payload = delivered[0]["notification"]["payload"]
+        wire = json.dumps(payload)
+        for text in ("Which environment?", "staging", "Ship the migration", "sess-e2e"):
+            assert text not in wire
+        assert payload["aps"]["mutable-content"] == 1
+        assert payload["aps"]["alert"] == {"title": "Input needed", "body": "Hermes needs your response before it can continue."}
+        assert payload["conduit"]["e2e"] == 1
+        envelope = payload["conduit_e2e"]
+        # The relay data file parked question ids only.
+        assert "Which environment?" not in json.dumps(_parked(relay, envelope["req"]))
+
+        # The phone opens the envelope exactly as delivered.
+        inner = e2e.open_event({"type": "input.needed", "e2e": envelope}, keys, **context)
+        decision = inner["decision"]
+        request_id = decision["request_id"]
+        assert envelope["req"] == request_id
+        assert [q["question"] for q in decision["questions"]] == ["Which environment?", "Ship the migration too?"]
+
+        # A plaintext answer from anywhere but the phone never answers: the
+        # plugin releases the decision and Hermes' own clarify path decides.
+        forged = _request(gateway["base"], f"/v1/decisions/{request_id}/respond", method="POST",
+                          body={"answer": "prod", "question_id": "q0"}, credential=gateway["device_credential"])
+        assert forged[0] == 200
+        deadline = time.time() + 5
+        while request_id not in released and time.time() < deadline:
+            time.sleep(0.01)
+        assert request_id in released, "the forged answer should have released the decision"
+        assert worker.is_alive(), "the forged answer must not become the tool result"
+        release.set()
+        worker.join(timeout=10)
+        assert holder.get("result") == "native answer"
+    finally:
+        release.set()
+
+
+def test_sealed_answers_complete_an_encrypted_batch_clarify(relay, gateway, fast_poll, monkeypatch):
+    e2e = sys.modules["conduit_push.e2e"]
+    kid = "fedcba9876543210fedcba9876543210"
+    secret = bytes(range(1, 33))
+    state = dict(gateway["state"])
+    state["e2e"] = {"kid": kid, "secret": e2e.b64u(secret)}
+    loop.client.save_state(state)
+    keys = e2e.derive_keys(kid, secret)
+    context = {"installation_id": state["installation_id"], "gateway_id": state["gateway_id"]}
+    before = len(_captured(relay))
+
+    worker, holder, events, release = _run_clarify(monkeypatch, {
+        "questions": [
+            {"question": "Which environment?", "choices": ["staging", "prod"]},
+            {"question": "Notify the team?", "choices": ["yes", "no"]},
+        ],
+    })
+    try:
+        envelope = _captured(relay)[before:][0]["notification"]["payload"]["conduit_e2e"]
+        request_id = e2e.open_event({"type": "input.needed", "e2e": envelope}, keys, **context)["decision"]["request_id"]
+        for qid, answer in (("q0", "staging"), ("q1", "yes")):
+            sealed = e2e.seal_answer(answer, keys, request_id=request_id, question_id=qid, **context)
+            status, payload = _request(gateway["base"], f"/v1/decisions/{request_id}/respond", method="POST",
+                                       body={"answer": sealed, "question_id": qid}, credential=gateway["device_credential"])
+            assert status == 200, payload
+        parked = _parked(relay, request_id)
+        assert [q["qid"] for q in parked["questions"]] == ["q0", "q1"]
+        assert "staging" not in json.dumps(parked)
+        worker.join(timeout=10)
+        assert not worker.is_alive(), "middleware did not observe the sealed answers"
+        assert "error" not in holder, holder.get("error")
+        responses = json.loads(holder["result"])["responses"]
+        assert [row["user_response"] for row in responses] == ["staging", "yes"]
     finally:
         release.set()

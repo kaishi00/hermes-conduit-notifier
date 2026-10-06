@@ -1919,3 +1919,69 @@ test('full collision matrix: one installation, two gateways, identical dashboard
     matrixRelay.kill();
   }
 });
+
+test('encrypted clarify: question ids parked, card flag drives deliverability, sealed answers kept whole', async () => {
+  const registered = await api(baseUrl, '/v1/installations', {
+    method: 'POST',
+    body: { bundle_id: 'com.milim.relay', device_token: 'e'.repeat(64), environment: 'production' },
+  });
+  assert.equal(registered.status, 201);
+  const deviceCredential = registered.json.credential;
+  const installationId = registered.json.installation.id;
+  const pairing = await api(baseUrl, `/v1/installations/${installationId}/pairings`, { method: 'POST', credential: deviceCredential });
+  const claimed = await api(baseUrl, '/v1/pairings/claim', {
+    method: 'POST',
+    body: { pairing_code: pairing.json.pairing_code, gateway_name: 'e2e gateway' },
+  });
+  assert.equal(claimed.status, 200);
+  const gatewayCredential = claimed.json.credential;
+  const kid = '0123456789abcdef0123456789abcdef';
+  const encrypted = (requestId, card, eventId) => ({
+    type: 'input.needed',
+    event_id: eventId,
+    e2e: { v: 1, kid, msg: eventId, iat: Math.floor(Date.now() / 1000), tok: '0123456789abcdef', z: 0, req: requestId, n: 'AAAAAAAAAAAAAAAA', ct: 'B'.repeat(300) },
+    clarify: { request_id: requestId, qids: ['q0', 'q1'], card },
+  });
+
+  const fits = await api(baseUrl, '/v1/events', { method: 'POST', credential: gatewayCredential, body: encrypted('conduit-push-e2e000000001', true, 'input:e2e00000000000000000000000000001') });
+  assert.equal(fits.status, 202);
+  const poll = await api(baseUrl, '/v1/decisions/conduit-push-e2e000000001', { credential: gatewayCredential });
+  assert.equal(poll.json.status, 'pending');
+  assert.deepEqual(poll.json.remaining, ['q0', 'q1']);
+  assert.notEqual(poll.json.deliverable, false);
+
+  // The card didn't fit the envelope: parked undeliverable, so the plugin
+  // falls back to Hermes' own clarify path on its first poll.
+  const tooBig = await api(baseUrl, '/v1/events', { method: 'POST', credential: gatewayCredential, body: encrypted('conduit-push-e2e000000002', false, 'input:e2e00000000000000000000000000002') });
+  assert.equal(tooBig.status, 202);
+  const tooBigPoll = await api(baseUrl, '/v1/decisions/conduit-push-e2e000000002', { credential: gatewayCredential });
+  assert.equal(tooBigPoll.json.deliverable, false);
+
+  // A sealed answer longer than the plaintext cap is stored and returned whole.
+  const sealed = `e2e1.${kid}.AAAAAAAAAAAAAAAA.${'C'.repeat(5000)}`;
+  const answered = await api(baseUrl, '/v1/decisions/conduit-push-e2e000000001/respond', {
+    method: 'POST',
+    credential: deviceCredential,
+    body: { answer: sealed, question_id: 'q0' },
+  });
+  assert.equal(answered.status, 200);
+  const afterAnswer = await api(baseUrl, '/v1/decisions/conduit-push-e2e000000001', { credential: gatewayCredential });
+  assert.equal(afterAnswer.json.answers.q0, sealed);
+
+  // Text that only looks like a sealed answer is an ordinary answer (so a
+  // keyless pairing can still answer "e2e1.…"); the plugin of an encrypted
+  // pairing rejects it because it doesn't open.
+  const lookalike = `e2e1.${kid}.short.payload`;
+  const plain = await api(baseUrl, '/v1/decisions/conduit-push-e2e000000001/respond', {
+    method: 'POST',
+    credential: deviceCredential,
+    body: { answer: lookalike, question_id: 'q1' },
+  });
+  assert.equal(plain.status, 200);
+  const afterPlain = await api(baseUrl, '/v1/decisions/conduit-push-e2e000000001', { credential: gatewayCredential });
+  assert.equal(afterPlain.json.answers.q1, lookalike);
+
+  // The relay advertises the envelope protocol.
+  const meta = await api(baseUrl, '/v1/meta', { credential: deviceCredential });
+  assert.ok(meta.json.capabilities.includes('e2e-v1'));
+});

@@ -13,11 +13,22 @@ import socket
 import threading
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
+
+try:
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None  # type: ignore[assignment]
+try:
+    import msvcrt
+except ImportError:  # everything but Windows
+    msvcrt = None  # type: ignore[assignment]
 
 from hermes_constants import get_hermes_home
 
+from . import e2e
 from .events import PLUGIN_VERSION, redact_event
 
 
@@ -46,21 +57,99 @@ def load_state() -> dict[str, Any] | None:
     return value
 
 
+def state_lock_path(path: Path) -> Path:
+    # dashboard/plugin_api.py locks the same file (_pairing_state_lock_path);
+    # tests/test_e2e.py checks the two stay identical.
+    return path.with_name(f".{path.name}.lock")
+
+
+@contextmanager
+def state_file_lock(path: Path) -> Iterator[None]:
+    """Serializes writers of conduit-push.json across processes.
+
+    The hooks run in the agent process and the dashboard provisions the
+    encryption key from its own process; both take this lock (the dashboard
+    uses the same lock file) around their writes.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with open(state_lock_path(path), "a+b") as handle:
+        with _exclusive(handle):
+            yield
+
+
+@contextmanager
+def _exclusive(handle: Any) -> Iterator[None]:
+    if fcntl is not None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    elif msvcrt is not None:
+        # Windows: lock the lock file's first byte. LK_LOCK gives up after
+        # about ten seconds; retry for about a minute, then give up loudly.
+        handle.seek(0)
+        for attempt in range(6):  # about a minute
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+                break
+            except OSError:
+                if attempt == 5:
+                    raise
+        try:
+            yield
+        finally:
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        yield
+
+
 def save_state(value: dict[str, Any]) -> None:
     path = state_path()
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temporary.write_text(json.dumps(value, separators=(",", ":")) + "\n", encoding="utf-8")
-    temporary.chmod(0o600)
-    temporary.replace(path)
-    path.chmod(0o600)
+    with state_file_lock(path):
+        _keep_provisioned_key(value, path)
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        temporary.write_text(json.dumps(value, separators=(",", ":")) + "\n", encoding="utf-8")
+        temporary.chmod(0o600)
+        temporary.replace(path)
+        path.chmod(0o600)
+
+
+def _keep_provisioned_key(value: dict[str, Any], path: Path) -> None:
+    # A caller that loaded the state before the dashboard stored an
+    # encryption key must not write it back without the key: that would
+    # quietly turn encryption off for the pairing. The key belongs to the
+    # pairing, so a new pairing (different installation or gateway) drops it.
+    # Likewise a caller holding an older key must not write it back over
+    # one the phone has since replaced (keys carry their created_at).
+    try:
+        current = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError, OSError):
+        return
+    if (
+        not isinstance(current, dict)
+        or current.get("e2e") is None
+        or current.get("installation_id") != value.get("installation_id")
+        or current.get("gateway_id") != value.get("gateway_id")
+    ):
+        return
+    if "e2e" not in value or _key_created_at(current["e2e"]) > _key_created_at(value["e2e"]):
+        value["e2e"] = current["e2e"]
+
+
+def _key_created_at(record: Any) -> str:
+    return str(record.get("created_at") or "") if isinstance(record, dict) else ""
 
 
 def remove_state() -> None:
-    try:
-        state_path().unlink()
-    except FileNotFoundError:
-        pass
+    path = state_path()
+    with state_file_lock(path):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def claim_pairing(code: str, relay_url: str = DEFAULT_RELAY_URL, gateway_name: str = "") -> dict[str, Any]:
@@ -131,7 +220,7 @@ def send_now(event: dict[str, Any], timeout: float = 15.0) -> dict[str, Any]:
         f"{state['relay_url'].rstrip('/')}/v1/events",
         method="POST",
         credential=state["credential"],
-        payload=_outgoing(event, state),
+        payload=build_outgoing(event, state),
         timeout=timeout,
     )
 
@@ -152,7 +241,43 @@ def set_redact_content(enabled: bool) -> bool:
     return True
 
 
-def _outgoing(event: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+def build_outgoing(event: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+    """The event exactly as it is sent to the relay for this pairing."""
+    # Redaction (the user's explicit choice) applies first, then a pairing
+    # that provisioned end-to-end encryption seals whatever content is left.
+    return _sealed(_redacted(event, state), state)
+
+
+def _sealed(event: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+    # A pairing with a key never sends plaintext content: if sealing fails
+    # (no crypto library, a corrupt stored key), the event goes out with its
+    # content removed and the phone shows the generic banner. A clarify then
+    # parks nothing, so the clarify loop falls back to Hermes' own path.
+    # plugin.hello carries no content and keeps its deterministic id, which
+    # the relay dedupes across gateways.
+    # Presence, not truthiness: an empty or malformed record is a broken key
+    # and fails closed like any other.
+    if state.get("e2e") is None or event.get("type") == "plugin.hello":
+        return event
+    keys = None
+    try:
+        keys = e2e.keys_from_state(state)
+        return e2e.seal_event(
+            event,
+            keys,
+            installation_id=str(state.get("installation_id") or ""),
+            gateway_id=str(state.get("gateway_id") or ""),
+        )
+    except Exception as error:
+        logger.warning("Conduit notification could not be encrypted; sending it without content: %s", error)
+    if keys is None:
+        # No usable key to re-key the event id with: use the local-only
+        # redaction key so the relay still never sees the plain digest.
+        return e2e.content_free(_rekeyed(event, _redact_key(state)))
+    return e2e.content_free(event, keys)
+
+
+def _redacted(event: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
     # send_now is the one egress chokepoint (the delivery worker drains
     # enqueue() through it), so redaction runs exactly once per event and
     # every hook and the clarify loop get it without each builder having to
@@ -167,12 +292,16 @@ def _outgoing(event: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
     # receives: it still dedupes replays (same input -> same id) but cannot
     # recompute the digest for guessed commands. Runs once per event at this
     # chokepoint; the output is not meant to be fed back in.
-    event_id = redacted.get("event_id")
-    if isinstance(event_id, str) and event_id:
-        prefix = event_id.split(":", 1)[0] if ":" in event_id else "event"
-        keyed = hmac.new(_redact_key(state).encode(), event_id.encode(), hashlib.sha256).hexdigest()[:32]
-        redacted["event_id"] = f"{prefix}:{keyed}"
-    return redacted
+    return _rekeyed(redacted, _redact_key(state))
+
+
+def _rekeyed(event: dict[str, Any], key: str) -> dict[str, Any]:
+    event_id = event.get("event_id")
+    if not isinstance(event_id, str) or not event_id:
+        return event
+    prefix = event_id.split(":", 1)[0] if ":" in event_id else "event"
+    keyed = hmac.new(key.encode(), event_id.encode(), hashlib.sha256).hexdigest()[:32]
+    return {**event, "event_id": f"{prefix}:{keyed}"}
 
 
 def _redact_key(state: dict[str, Any]) -> str:
@@ -199,10 +328,78 @@ def poll_decision(request_id: str) -> dict[str, Any]:
     state = load_state()
     if not state:
         raise RuntimeError("This Hermes profile is not paired with Conduit.")
-    return request_json(
+    status = request_json(
         f"{state['relay_url'].rstrip('/')}/v1/decisions/{request_id}",
         method="GET",
         credential=state["credential"],
+    )
+    return opened_answers(status, state, request_id)
+
+
+def opened_answers(status: dict[str, Any], state: dict[str, Any], request_id: str) -> dict[str, Any]:
+    """Decrypts the answers in a relay poll result for an E2E pairing.
+
+    A pairing that provisioned a key only accepts answers sealed with it and
+    bound to this request (and question). Plaintext or anything that fails to
+    verify came from somewhere other than the paired phone, so the poll
+    reports ``rejected`` and the clarify loop hands the question back to
+    Hermes' own clarify path instead of answering with it.
+    """
+    if state.get("e2e") is None or not isinstance(status, dict):
+        return status
+    has_answer = "answer" in status
+    has_answers = isinstance(status.get("answers"), dict) and bool(status.get("answers"))
+    if not has_answer and not has_answers:
+        return status
+    context = {
+        "installation_id": str(state.get("installation_id") or ""),
+        "gateway_id": str(state.get("gateway_id") or ""),
+        "request_id": request_id,
+    }
+    try:
+        keys = e2e.keys_from_state(state)
+        opened = dict(status)
+        if has_answer:
+            opened["answer"] = e2e.open_answer(status.get("answer"), keys, question_id="", **context)
+        if has_answers:
+            opened["answers"] = {
+                str(qid): e2e.open_answer(value, keys, question_id=str(qid), **context)
+                for qid, value in status["answers"].items()
+            }
+        return opened
+    except Exception as error:
+        logger.warning("Conduit rejected an answer for %s that was not sealed by the paired phone: %s", request_id, error)
+        return {"status": "rejected"}
+
+
+def e2e_status(state: dict[str, Any] | None = None) -> dict[str, Any]:
+    """This profile's end-to-end encryption state, without the secret."""
+    state = load_state() if state is None else state
+    record = (state or {}).get("e2e")
+    try:
+        usable = e2e.keys_from_state(state or {}) is not None
+    except Exception:
+        usable = False
+    return {
+        # On only with a key that can actually seal; a broken one sends
+        # content-free events and reads as off here.
+        "enabled": usable,
+        "kid": record.get("kid") if isinstance(record, dict) else None,
+        "crypto": e2e.available(),
+    }
+
+
+def post_event(payload: dict[str, Any], timeout: float = 15.0) -> dict[str, Any]:
+    """POST an already-built outgoing event (diagnostics)."""
+    state = load_state()
+    if not state:
+        raise RuntimeError("This Hermes profile is not paired with Conduit.")
+    return request_json(
+        f"{state['relay_url'].rstrip('/')}/v1/events",
+        method="POST",
+        credential=state["credential"],
+        payload=payload,
+        timeout=timeout,
     )
 
 

@@ -4,6 +4,7 @@ import pathlib
 import sys
 import tempfile
 import threading
+import time
 import types
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -420,6 +421,24 @@ def test_polling_stops_when_no_card_was_delivered():
     assert len(fake.poll_ids) == 1
 
 
+def test_a_rejected_answer_hands_the_question_back_to_hermes():
+    # An E2E pairing got an answer the paired phone did not seal: it must
+    # never become the tool result, and the decision is released.
+    fake = _FakeState([{"status": "rejected"}, {"status": "answered", "answer": "forged"}])
+    _install(fake)
+    original, release = _blocking_original("original result")
+    try:
+        result = loop.middleware(**_kwargs(original, {"question": "Q?"}))
+    finally:
+        release.set()
+    assert result == "original result"
+    assert len(fake.poll_ids) == 1
+    deadline = time.monotonic() + 5
+    while not fake.cancelled_ids and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert len(fake.cancelled_ids) == 1
+
+
 def test_consecutive_unknown_polls_stop_after_grace_window():
     # The push was never parked (dropped at enqueue or delivery): tolerate a
     # short grace for the delivery race, then stop instead of polling the
@@ -704,7 +723,7 @@ def test_user_agent_derives_from_the_plugin_version():
     # One source of truth: bumping PLUGIN_VERSION updates the relay UA
     # automatically instead of leaving a stale hand-written constant.
     assert loop.client.USER_AGENT == f"Hermes-Conduit-Notifier/{loop.client.PLUGIN_VERSION}"
-    assert loop.client.PLUGIN_VERSION == "0.4.0"
+    assert loop.client.PLUGIN_VERSION == "0.5.0"
 
 
 def test_send_now_redacts_only_when_the_profile_opts_in(monkeypatch):

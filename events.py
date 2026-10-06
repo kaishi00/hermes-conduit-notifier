@@ -10,12 +10,13 @@ from typing import Any
 
 # Keep in sync with plugin.yaml. Reported on every event so the relay can
 # expose per-gateway compatibility state to the app (Settings > Notifications).
-PLUGIN_VERSION = "0.4.0"
+PLUGIN_VERSION = "0.5.0"
 PLUGIN_CAPABILITIES = [
     "approval-decisions",
     "clarify-loop",
     "batch-clarify-decisions",
     "version-reporting",
+    "e2e-v1",
 ]
 
 # PROTOCOL/STORE bounds for batch clarify decisions (8 questions x 8
