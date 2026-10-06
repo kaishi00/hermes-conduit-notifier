@@ -2,6 +2,7 @@ import contextlib
 import contextvars
 import importlib.util
 import pathlib
+import queue
 import sys
 import tempfile
 import threading
@@ -796,12 +797,20 @@ def test_a_saved_call_ends_in_the_background(client, hermes, lifecycle, monkeypa
     session_id = client.post(f"{BASE}/voice/sessions?profile=coder", json={
         "engine": "grok-live", "call_id": "c", "turns": turns(("user", "hi"), ("assistant", "hello"))}).json()["session_id"]
     assert finalized.wait(5)
+    # Let the worker finish the job (its count drops after the hooks) so no
+    # other test sees it.
+    deadline = time.monotonic() + 5
+    while api._voice_end_pending and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert api._voice_end_pending == 0
     assert ("on_session_finalize", "coder",
             {"session_id": session_id, "platform": "desktop", "reason": "voice_call_ended"}) in lifecycle.events
     assert ("sync_turn", "hi", "hello", session_id) in lifecycle.events
 
 
 def test_ends_past_the_backlog_are_skipped(hermes, monkeypatch):
+    monkeypatch.setattr(api, "_voice_end_pending", 0)
+    monkeypatch.setattr(api, "_voice_end_jobs", queue.SimpleQueue())
     monkeypatch.setattr(api, "VOICE_END_MAX_PENDING", 0)
     ran = []
     monkeypatch.setattr(api, "_run_voice_call_end", lambda *args: ran.append(args))
