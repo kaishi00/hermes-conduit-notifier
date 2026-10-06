@@ -523,14 +523,14 @@ export class RelayStore {
       // hasOwn, not truthiness: a stored "" answer must still read as
       // locked, and sanitized qids can never collide with Object.prototype.
       if (Object.hasOwn(answers, target)) return { outcome: 'already_answered' };
-      answers[target] = String(answer ?? '').slice(0, 2000);
+      answers[target] = boundedAnswer(answer);
       decision.answeredAt = Date.now();
       const remaining = batchQuestions.map((question) => question.qid)
         .filter((qid) => !Object.hasOwn(answers, qid));
       this.save();
       return { outcome: 'answered', remaining };
     }
-    decision.answer = String(answer ?? '').slice(0, 2000);
+    decision.answer = boundedAnswer(answer);
     decision.answeredAt = Date.now();
     this.save();
     return { outcome: 'answered' };
@@ -628,6 +628,14 @@ export class RelayStore {
       if (!Number.isFinite(createdAt) || createdAt < now - 2 * 60 * 60_000) delete this.data.pendingDecisions[key];
     }
   }
+}
+
+// Plain answers keep their 2,000-character bound. An end-to-end encrypted
+// answer (`e2e1.` + base64url, validated at the route) is stored whole:
+// truncating it would only break it.
+function boundedAnswer(answer) {
+  const value = String(answer ?? '');
+  return value.startsWith('e2e1.') ? value.slice(0, 11_000) : value.slice(0, 2000);
 }
 
 function capacityError(code) {

@@ -2896,6 +2896,142 @@ async def post_session_takeover(request: Request, response: Response,
     return {"ok": True, **result}
 
 
+# --- End-to-end encrypted notifications (#431) -------------------------------
+#
+# Conduit creates a per-pairing secret on the phone and hands it to this
+# profile here, over the dashboard connection, so it never passes through the
+# push relay. The hooks (client.py) read it from the profile's
+# conduit-push.json, seal every notification with it and only accept clarify
+# answers sealed by the phone. GET never returns the secret.
+
+E2E_LIMIT = 10
+E2E_WINDOW_S = 60.0
+E2E_MAX_BODY_BYTES = 4 * 1024
+_E2E_KID = re.compile(r"^[0-9a-f]{32}$")
+_E2E_B64URL = re.compile(r"^[A-Za-z0-9_-]{43}$")  # 32 bytes, unpadded
+_e2e_limiter = _MintLimiter(E2E_LIMIT, E2E_WINDOW_S, message="Too many encryption key requests; try again shortly")
+_e2e_lock = threading.Lock()
+
+
+def _pairing_state_path() -> Any:
+    from hermes_constants import get_hermes_home
+
+    return get_hermes_home() / "conduit-push.json"
+
+
+def _load_pairing_state(path: Any) -> Optional[Dict[str, Any]]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError, OSError):
+        return None
+    if not isinstance(value, dict) or not value.get("credential"):
+        return None
+    return value
+
+
+def _save_pairing_state(path: Any, value: Dict[str, Any]) -> None:
+    # Same atomic, owner-only write as client.save_state.
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    temporary.write_text(json.dumps(value, separators=(",", ":")) + "\n", encoding="utf-8")
+    temporary.chmod(0o600)
+    temporary.replace(path)
+    path.chmod(0o600)
+
+
+def _e2e_crypto_available() -> bool:
+    try:
+        from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305  # noqa: F401
+        from cryptography.hazmat.primitives.kdf.hkdf import HKDF  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
+def e2e_status(path: Any = None) -> Dict[str, Any]:
+    """This profile's pairing and key state. Never includes the secret."""
+    state = _load_pairing_state(path if path is not None else _pairing_state_path())
+    crypto = _e2e_crypto_available()
+    if not state:
+        return {"paired": False, "crypto": crypto}
+    record = state.get("e2e")
+    kid = record.get("kid") if isinstance(record, dict) else None
+    return {
+        "paired": True,
+        "installation_id": state.get("installation_id"),
+        "gateway_id": state.get("gateway_id"),
+        "e2e": {"kid": kid} if isinstance(kid, str) and _E2E_KID.match(kid) else None,
+        "crypto": crypto,
+    }
+
+
+def provision_e2e(body: Any, path: Any = None) -> Dict[str, Any]:
+    """Stores the phone's pairing secret for this profile.
+
+    Only for the pairing the phone owns: the installation and gateway ids
+    must match this profile's pairing, so a key for another phone (or an old
+    pairing) is refused. Replaces an earlier key for the same pairing.
+    """
+    if not isinstance(body, dict):
+        raise TokenError(400, "Expected a JSON object")
+    installation_id = body.get("installation_id")
+    gateway_id = body.get("gateway_id")
+    kid = body.get("kid")
+    secret = body.get("secret")
+    if not isinstance(installation_id, str) or not installation_id or not isinstance(gateway_id, str) or not gateway_id:
+        raise TokenError(400, "installation_id and gateway_id are required")
+    if not isinstance(kid, str) or not _E2E_KID.match(kid):
+        raise TokenError(400, "kid must be 32 lowercase hex characters")
+    if not isinstance(secret, str) or not _E2E_B64URL.match(secret):
+        raise TokenError(400, "secret must be 32 bytes, base64url without padding")
+    if not _e2e_crypto_available():
+        raise TokenError(501, "Encrypted notifications need the cryptography package on this host")
+    path = path if path is not None else _pairing_state_path()
+    with _e2e_lock:
+        state = _load_pairing_state(path)
+        if not state:
+            raise TokenError(409, "This Hermes profile isn't paired with Conduit")
+        if not state.get("gateway_id"):
+            raise TokenError(409, "Pair this Hermes profile with Conduit again to turn on encryption")
+        if state.get("installation_id") != installation_id or state.get("gateway_id") != gateway_id:
+            raise TokenError(409, "This Hermes profile is paired with a different device")
+        state["e2e"] = {
+            "kid": kid,
+            "secret": secret,
+            "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        _save_pairing_state(path, state)
+    return {"kid": kid}
+
+
+@router.get("/e2e")
+async def get_e2e(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return {"ok": True, **(await _run_scoped(profile, e2e_status))}
+    except TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _unexpected("status", exc, feature="Encrypted notifications")
+
+
+@router.post("/e2e")
+async def post_e2e(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    # The body is a secret: never cached on the way back either.
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        _e2e_limiter.acquire(_limiter_key(profile))
+        body = await _read_json_body(request, E2E_MAX_BODY_BYTES)
+        return {"ok": True, **(await _run_scoped(profile, lambda: provision_e2e(body)))}
+    except TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _unexpected("key", exc, feature="Encrypted notifications")
+
+
 # --- Capabilities ------------------------------------------------------------
 #
 # Conduit reads this once per connection to tell which of its features this
@@ -2914,6 +3050,7 @@ ROUTE_CAPABILITIES = (
     "voice-tags",
     "voice-summary",
     "session-takeover",
+    "e2e-notifications",
 )
 
 

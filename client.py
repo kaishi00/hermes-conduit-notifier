@@ -18,6 +18,7 @@ from typing import Any
 
 from hermes_constants import get_hermes_home
 
+from . import e2e
 from .events import PLUGIN_VERSION, redact_event
 
 
@@ -153,6 +154,36 @@ def set_redact_content(enabled: bool) -> bool:
 
 
 def _outgoing(event: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+    # Redaction (the user's explicit choice) applies first, then a pairing
+    # that provisioned end-to-end encryption seals whatever content is left.
+    return _sealed(_redacted(event, state), state)
+
+
+def _sealed(event: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+    # A pairing with a key never sends plaintext content: if sealing fails
+    # (no crypto library, a corrupt stored key), the event goes out with its
+    # content removed and the phone shows the generic banner. A clarify then
+    # parks nothing, so the clarify loop falls back to Hermes' own path.
+    # plugin.hello carries no content and keeps its deterministic id, which
+    # the relay dedupes across gateways.
+    if not state.get("e2e") or event.get("type") == "plugin.hello":
+        return event
+    keys = None
+    try:
+        keys = e2e.keys_from_state(state)
+        if keys is not None:
+            return e2e.seal_event(
+                event,
+                keys,
+                installation_id=str(state.get("installation_id") or ""),
+                gateway_id=str(state.get("gateway_id") or ""),
+            )
+    except Exception as error:
+        logger.warning("Conduit notification could not be encrypted; sending it without content: %s", error)
+    return e2e.content_free(event, keys)
+
+
+def _redacted(event: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
     # send_now is the one egress chokepoint (the delivery worker drains
     # enqueue() through it), so redaction runs exactly once per event and
     # every hook and the clarify loop get it without each builder having to
@@ -199,10 +230,74 @@ def poll_decision(request_id: str) -> dict[str, Any]:
     state = load_state()
     if not state:
         raise RuntimeError("This Hermes profile is not paired with Conduit.")
-    return request_json(
+    status = request_json(
         f"{state['relay_url'].rstrip('/')}/v1/decisions/{request_id}",
         method="GET",
         credential=state["credential"],
+    )
+    return opened_answers(status, state, request_id)
+
+
+def opened_answers(status: dict[str, Any], state: dict[str, Any], request_id: str) -> dict[str, Any]:
+    """Decrypts the answers in a relay poll result for an E2E pairing.
+
+    A pairing that provisioned a key only accepts answers sealed with it and
+    bound to this request (and question). Plaintext or anything that fails to
+    verify came from somewhere other than the paired phone, so the poll
+    reports ``rejected`` and the clarify loop hands the question back to
+    Hermes' own clarify path instead of answering with it.
+    """
+    if not state.get("e2e") or not isinstance(status, dict):
+        return status
+    has_answer = "answer" in status
+    has_answers = isinstance(status.get("answers"), dict) and bool(status.get("answers"))
+    if not has_answer and not has_answers:
+        return status
+    context = {
+        "installation_id": str(state.get("installation_id") or ""),
+        "gateway_id": str(state.get("gateway_id") or ""),
+        "request_id": request_id,
+    }
+    try:
+        keys = e2e.keys_from_state(state)
+        if keys is None:
+            return status
+        opened = dict(status)
+        if has_answer:
+            opened["answer"] = e2e.open_answer(status.get("answer"), keys, question_id="", **context)
+        if has_answers:
+            opened["answers"] = {
+                str(qid): e2e.open_answer(value, keys, question_id=str(qid), **context)
+                for qid, value in status["answers"].items()
+            }
+        return opened
+    except Exception as error:
+        logger.warning("Conduit rejected an answer for %s that was not sealed by the paired phone: %s", request_id, error)
+        return {"status": "rejected"}
+
+
+def e2e_status(state: dict[str, Any] | None = None) -> dict[str, Any]:
+    """This profile's end-to-end encryption state, without the secret."""
+    state = load_state() if state is None else state
+    record = (state or {}).get("e2e")
+    return {
+        "enabled": isinstance(record, dict) and e2e.valid_kid(record.get("kid")),
+        "kid": record.get("kid") if isinstance(record, dict) else None,
+        "crypto": e2e.available(),
+    }
+
+
+def post_event(payload: dict[str, Any], timeout: float = 15.0) -> dict[str, Any]:
+    """POST an already-built outgoing event (diagnostics)."""
+    state = load_state()
+    if not state:
+        raise RuntimeError("This Hermes profile is not paired with Conduit.")
+    return request_json(
+        f"{state['relay_url'].rstrip('/')}/v1/events",
+        method="POST",
+        credential=state["credential"],
+        payload=payload,
+        timeout=timeout,
     )
 
 

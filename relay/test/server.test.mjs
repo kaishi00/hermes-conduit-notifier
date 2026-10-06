@@ -466,3 +466,90 @@ test('normalizePreferences defaults attention_sound on and keeps an explicit opt
 test('normalizePreferences treats null as the default preference object', () => {
   assert.deepEqual(normalizePreferences(null), normalizePreferences());
 });
+
+// ── End-to-end encrypted events (#431) ─────────────────────────────────
+
+const envelope = {
+  v: 1,
+  kid: '0123456789abcdef0123456789abcdef',
+  msg: 'input:0123456789abcdef0123456789abcdef',
+  iat: 1760000000,
+  tok: '0123456789abcdef',
+  z: 1,
+  req: 'conduit-push-abc123def456',
+  n: 'AAAAAAAAAAAAAAAA',
+  ct: 'A'.repeat(400),
+};
+
+function encryptedEvent(overrides = {}) {
+  return {
+    type: 'input.needed',
+    event_id: envelope.msg,
+    e2e: { ...envelope },
+    clarify: { request_id: envelope.req, qids: ['q0', 'q1'], card: true },
+    // Plaintext content beside an envelope is never forwarded.
+    title: 'Secret title',
+    body: 'Secret body',
+    session_id: 'sess-secret',
+    profile: 'secret-profile',
+    decision: clarifyDecision,
+    ...overrides,
+  };
+}
+
+test('validateEvent keeps an envelope and drops every plaintext content field', () => {
+  const event = validateEvent(encryptedEvent());
+  assert.deepEqual(event.e2e, envelope);
+  assert.deepEqual(event.clarify, { request_id: envelope.req, qids: ['q0', 'q1'], card: true });
+  for (const field of ['title', 'body', 'sessionId', 'profile', 'gateway', 'decision']) {
+    assert.equal(event[field], undefined, field);
+  }
+});
+
+test('validateEvent rejects malformed envelopes instead of falling back to plaintext', () => {
+  const broken = [
+    { v: 2 },
+    { kid: 'ABC' },
+    { msg: 'input:other0000000000' },
+    { iat: 1.5 },
+    { tok: 'zz' },
+    { z: 2 },
+    { req: 'x' },
+    { n: 'short' },
+    { ct: 'A'.repeat(2601) },
+    { ct: 'not base64url!' },
+  ];
+  for (const patch of broken) {
+    assert.throws(() => validateEvent(encryptedEvent({ e2e: { ...envelope, ...patch } })), /invalid_e2e/, JSON.stringify(patch));
+  }
+  // The parked request id must be the one the ciphertext is bound to.
+  assert.throws(
+    () => validateEvent(encryptedEvent({ clarify: { request_id: 'conduit-push-000000000000', qids: [] } })),
+    /invalid_e2e/,
+  );
+});
+
+test('notificationFor sends the generic alert, mutable-content and the untouched envelope', () => {
+  const event = validateEvent(encryptedEvent());
+  const { payload, collapseId, threadId } = notificationFor(event, { show_previews: true, attention_sound: true }, { id: 'gw-1', dashboardId: '0f5c8a34-1b2d-4e5f-8a9b-0c1d2e3f4a5b' });
+  assert.deepEqual(payload.aps.alert, { title: 'Input needed', body: 'Hermes needs your response before it can continue.' });
+  assert.equal(payload.aps['mutable-content'], 1);
+  assert.equal(payload.aps.sound, 'default');
+  assert.deepEqual(payload.conduit_e2e, envelope);
+  assert.deepEqual(payload.conduit, { type: 'input.needed', e2e: 1, gateway_id: 'gw-1', dashboard_id: '0f5c8a34-1b2d-4e5f-8a9b-0c1d2e3f4a5b' });
+  assert.deepEqual(payload.body.conduit, payload.conduit);
+  assert.equal(collapseId, `input.needed:${threadId}`);
+  assert.notEqual(threadId, envelope.tok, 'the thread token is scoped by gateway');
+  for (const secret of ['Secret', 'sess-secret', 'secret-profile', 'Which color?']) {
+    assert.ok(!JSON.stringify(payload).includes(secret), secret);
+  }
+});
+
+test('an envelope that would overflow APNs is dropped, never truncated', () => {
+  const event = validateEvent(encryptedEvent({ e2e: { ...envelope, ct: 'A'.repeat(2600) }, event_id: envelope.msg }));
+  // Push the payload over the cap with a long dashboard binding stand-in.
+  const { payload } = notificationFor(event, {}, { id: 'g'.repeat(1400) });
+  assert.equal(payload.conduit_e2e, undefined);
+  assert.equal(payload.aps['mutable-content'], undefined);
+  assert.equal(payload.aps.alert.title, 'Input needed');
+});
