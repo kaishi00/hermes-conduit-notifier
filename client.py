@@ -53,6 +53,12 @@ def load_state() -> dict[str, Any] | None:
     return value
 
 
+def state_lock_path(path: Path) -> Path:
+    # dashboard/plugin_api.py locks the same file (_pairing_state_lock_path);
+    # tests/test_e2e.py checks the two stay identical.
+    return path.with_name(f".{path.name}.lock")
+
+
 @contextmanager
 def state_file_lock(path: Path) -> Iterator[None]:
     """Serializes writers of conduit-push.json across processes.
@@ -65,7 +71,7 @@ def state_file_lock(path: Path) -> Iterator[None]:
         yield
         return
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with open(path.with_name(f".{path.name}.lock"), "a") as handle:
+    with open(state_lock_path(path), "a") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         try:
             yield

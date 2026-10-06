@@ -2929,6 +2929,10 @@ def _load_pairing_state(path: Any) -> Optional[Dict[str, Any]]:
     return value
 
 
+def _pairing_state_lock_path(path: Any) -> Any:
+    return path.with_name(f".{path.name}.lock")
+
+
 @contextlib.contextmanager
 def _pairing_state_lock(path: Any):
     # The same lock file client.state_file_lock takes in the agent process,
@@ -2939,7 +2943,7 @@ def _pairing_state_lock(path: Any):
     except ImportError:  # Windows: no advisory locks; writes stay atomic.
         yield
         return
-    with open(path.with_name(f".{path.name}.lock"), "a") as handle:
+    with open(_pairing_state_lock_path(path), "a") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         try:
             yield

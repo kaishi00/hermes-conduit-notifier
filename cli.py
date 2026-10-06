@@ -81,14 +81,14 @@ def dispatch(args: argparse.Namespace) -> int:
             outgoing["e2e"]["ct"] = _flipped(outgoing["e2e"]["ct"])
             try:
                 post_event(outgoing)
-            except RuntimeError as error:
+            except (RuntimeError, OSError) as error:
                 print(f"The Conduit relay did not accept the test notification: {error}")
                 return 1
             print("Broken encrypted test notification accepted by the Conduit relay. The phone should show only generic text.")
             return 0
         try:
             send_now(event)
-        except RuntimeError as error:
+        except (RuntimeError, OSError) as error:
             print(f"The Conduit relay did not accept the test notification: {error}")
             return 1
         print("Test notification accepted by the Conduit relay.")

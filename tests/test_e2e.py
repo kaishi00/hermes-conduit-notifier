@@ -207,7 +207,10 @@ def test_redaction_still_applies_before_encryption(monkeypatch):
 
 def test_a_broken_key_never_falls_back_to_plaintext(monkeypatch):
     sent = _capture(monkeypatch, _state(e2e={"kid": KID, "secret": "not-base64!"}))
+    saved = []
+    monkeypatch.setattr(client, "save_state", saved.append)
     client.send_now(_clarify_event())
+    assert len(saved) == 1  # the local re-keying key, minted once
     assert set(sent[0]) == {"event_id", "type", "plugin_version", "plugin_capabilities"}
     assert "Deploy" not in json.dumps(sent[0])
 
@@ -254,6 +257,23 @@ def test_a_stale_state_write_keeps_the_provisioned_key(monkeypatch, tmp_path):
     # A new pairing doesn't inherit the old pairing's key.
     client.save_state(dict(stale, installation_id="other"))
     assert "e2e" not in json.loads(path.read_text())
+
+
+def test_client_and_dashboard_lock_the_same_file(tmp_path):
+    path = tmp_path / "conduit-push.json"
+    assert client.state_lock_path(path) == api._pairing_state_lock_path(path)
+
+
+def test_an_answer_that_is_not_text_is_an_e2e_error():
+    keys = _keys()
+    aad = e2e.answer_aad(kid=KID, installation_id=INSTALLATION, gateway_id=GATEWAY,
+                         request_id="conduit-push-abc123def456", question_id="")
+    nonce = bytes(12)
+    sealed = e2e._aead(keys.answer).encrypt(nonce, b"\xff\xfe", aad)
+    answer = f"e2e1.{KID}.{e2e.b64u(nonce)}.{e2e.b64u(sealed)}"
+    with pytest.raises(e2e.E2EError):
+        e2e.open_answer(answer, keys, installation_id=INSTALLATION, gateway_id=GATEWAY,
+                        request_id="conduit-push-abc123def456", question_id="")
 
 
 @pytest.mark.parametrize("data,z", [(b"\xff\xfe", 0), (b"[1]", 0), (b"\x00\x01garbage", 1)])

@@ -306,4 +306,7 @@ def open_answer(sealed: Any, keys: Keys, *, installation_id: str, gateway_id: st
         raise
     except Exception as error:
         raise E2EError("the answer did not verify") from error
-    return plain.decode("utf-8")
+    try:
+        return plain.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise E2EError("the answer is not valid text") from error
