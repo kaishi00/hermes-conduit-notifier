@@ -2,7 +2,7 @@
 
 Hermes Conduit Notifier is the open-source Hermes plugin that delivers lifecycle notifications to the Hermes Conduit iOS app. It observes normal Hermes hooks and sends small HTTPS events to the Conduit push relay.
 
-The plugin does **not** contain an Apple Push Notification service key, dashboard credentials, or access to your Hermes gateway. (Its only dashboard routes hand Conduit short-lived Gemini Live tokens, start GPT-Live sessions on the host's ChatGPT subscription, relay Grok Live calls with the host's SuperGrok sign-in, run its voice web lookups, read memory and personality for voice, and save live voice transcripts to this host's session history; see below.) Apple credentials remain on the central push relay, so self-hosted users never need to copy a shared signing key onto their gateway.
+The plugin does **not** contain an Apple Push Notification service key, dashboard credentials, or access to your Hermes gateway. (Its only dashboard routes hand Conduit short-lived Gemini Live tokens, start GPT-Live sessions on the host's ChatGPT subscription, relay Grok Live calls with the host's SuperGrok sign-in, run its voice web lookups, read memory and personality for voice, and save live voice transcripts to this host's session history, ending each call's session there so session hooks and memory see it; see below.) Apple credentials remain on the central push relay, so self-hosted users never need to copy a shared signing key onto their gateway.
 
 ## Install
 
@@ -380,9 +380,10 @@ backend and keys, as the Gemini Live routes do.
 
 Gemini Live can use what this host's Hermes remembers, whichever memory setup
 it runs, without Conduit knowing the backend. Both routes are read-only in the
-sense that the plugin issues no write calls: no `sync_turn`, no memory tool, so
-the voice conversation is never recorded to memory. A provider may still keep
-its own caches or bookkeeping while it recalls.
+sense that the plugin issues no write calls: no `sync_turn`, no memory tool. A
+provider may still keep its own caches or bookkeeping while it recalls. A
+saved call is written to memory once it ends instead, as a chat is (see
+[Call end](#call-end)).
 
 | Method | Path | Returns |
 |--------|------|---------|
@@ -554,6 +555,34 @@ start the agent or call a model. A resumed call appends to the same session.
   a 504 doesn't mean the write didn't land (a retried save skips what did). Writes are serialized per profile, so a slow
   store in one profile doesn't hold up another. A 404 only ever means
   the plugin is too old to have the route.
+
+### Call end
+
+A live call runs no Hermes turn, so on its own Hermes never learns that it is
+over. Conduit saves a call only once it has ended (hung up, dropped or timed
+out), so a save that stores new turns ends that call's session, the same way
+Hermes ends a Desktop chat:
+
+1. The `on_session_end` hook fires with `session_id`, `completed: true`,
+   `interrupted: false`, `model` (the voice engine, such as `gemini-live`),
+   `platform: "desktop"` and `reason: "voice_call_ended"`.
+2. The memory provider named by `memory.provider` (Honcho, Mem0, …) gets the
+   call: it is started for that session (with the session's title, as Hermes
+   does), sees each exchange through `sync_turn`, then `on_session_end` with the
+   call's turns, and is shut down. A turn missing either side (a greeting
+   before you spoke, a question the call ended on) isn't synced, as in Hermes.
+3. The `on_session_finalize` hook fires with `session_id`, `platform` and
+   `reason`, through Hermes' own `finalize_session`.
+
+Only the call's new turns go to memory: a resumed call's earlier turns went
+there when their own call ended. A retried save that stores nothing new ends
+nothing. This runs in the background, one call at a time, so a slow provider
+never holds up a save. A step that fails is logged and the rest still run. A
+call whose end takes more than two minutes is left to finish on its own while
+the next call ends; once three are stuck like that in a profile, that profile's
+calls end without these steps until one finishes, and past 20 calls waiting a
+call ends without them too (the log says so each time). A call that isn't saved
+(saving turned off in Conduit, or no speech from you) ends nothing.
 
 ## Chat takeover
 
