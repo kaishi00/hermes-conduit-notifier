@@ -269,9 +269,10 @@ def open_event(outgoing: dict[str, Any], keys: Keys, *, installation_id: str, ga
     """Device-side mirror of seal_event; used by tests and diagnostics."""
     envelope = outgoing.get("e2e")
     try:
+        z = int(envelope["z"])
         aad = push_aad(kid=keys.kid, installation_id=installation_id, gateway_id=gateway_id,
                        msg=envelope["msg"], kind=str(outgoing.get("type") or ""), iat=int(envelope["iat"]),
-                       tok=envelope["tok"], z=int(envelope["z"]), request_id=str(envelope.get("req") or ""))
+                       tok=envelope["tok"], z=z, request_id=str(envelope.get("req") or ""))
         nonce, ciphertext = unb64u(envelope["n"]), unb64u(envelope["ct"])
     except (KeyError, TypeError, ValueError, AttributeError) as error:
         raise E2EError("the envelope is malformed") from error
@@ -281,7 +282,7 @@ def open_event(outgoing: dict[str, Any], keys: Keys, *, installation_id: str, ga
         raise
     except Exception as error:
         raise E2EError("the envelope did not verify") from error
-    return unpack(packed, int(envelope["z"]))
+    return unpack(packed, z)
 
 
 def seal_answer(answer: str, keys: Keys, *, installation_id: str, gateway_id: str,

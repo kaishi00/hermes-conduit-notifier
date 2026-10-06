@@ -439,7 +439,8 @@ def test_provisioning_is_rate_limited(state_file):
     assert codes[-1] == 429
 
 
-@pytest.mark.parametrize("outgoing", [{}, {"e2e": None}, {"e2e": {"msg": "m"}}, {"e2e": {"msg": "m", "iat": "x", "tok": "t", "z": 0, "n": "AA", "ct": "AA"}}])
+@pytest.mark.parametrize("outgoing", [{}, {"e2e": None}, {"e2e": "x"}, {"e2e": []},
+    {"e2e": {"msg": "m", "iat": 1, "tok": "t", "z": 0, "n": "not base64!", "ct": "AA"}}, {"e2e": {"msg": "m"}}, {"e2e": {"msg": "m", "iat": "x", "tok": "t", "z": 0, "n": "AA", "ct": "AA"}}])
 def test_open_event_reports_malformed_envelopes_as_e2e_errors(outgoing):
     with pytest.raises(e2e.E2EError):
         e2e.open_event(outgoing, _keys(), installation_id=INSTALLATION, gateway_id=GATEWAY)
