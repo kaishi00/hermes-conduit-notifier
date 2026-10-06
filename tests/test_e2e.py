@@ -259,6 +259,21 @@ def test_a_stale_state_write_keeps_the_provisioned_key(monkeypatch, tmp_path):
     assert "e2e" not in json.loads(path.read_text())
 
 
+def test_client_and_dashboard_agree_on_the_kid_shape():
+    assert api._E2E_KID.pattern == e2e.KID_PATTERN.pattern
+
+
+def test_a_stale_write_never_replaces_a_newer_key(monkeypatch, tmp_path):
+    path = tmp_path / "conduit-push.json"
+    monkeypatch.setattr(client, "state_path", lambda: path)
+    newer = _state(e2e={"kid": "b" * 32, "secret": e2e.b64u(SECRET), "created_at": "2026-10-06T21:00:00Z"})
+    path.write_text(json.dumps(newer))
+    stale = _state(e2e={"kid": KID, "secret": e2e.b64u(SECRET), "created_at": "2026-10-06T20:00:00Z"})
+    client.save_state(dict(stale, redact_content=True))
+    stored = json.loads(path.read_text())
+    assert stored["e2e"]["kid"] == "b" * 32 and stored["redact_content"] is True
+
+
 def test_client_and_dashboard_lock_the_same_file(tmp_path):
     path = tmp_path / "conduit-push.json"
     assert client.state_lock_path(path) == api._pairing_state_lock_path(path)

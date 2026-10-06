@@ -96,26 +96,34 @@ def _keep_provisioned_key(value: dict[str, Any], path: Path) -> None:
     # encryption key must not write it back without the key: that would
     # quietly turn encryption off for the pairing. The key belongs to the
     # pairing, so a new pairing (different installation or gateway) drops it.
-    if "e2e" in value:
-        return
+    # Likewise a caller holding an older key must not write it back over
+    # one the phone has since replaced (keys carry their created_at).
     try:
         current = json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, ValueError, OSError):
         return
     if (
-        isinstance(current, dict)
-        and current.get("e2e") is not None
-        and current.get("installation_id") == value.get("installation_id")
-        and current.get("gateway_id") == value.get("gateway_id")
+        not isinstance(current, dict)
+        or current.get("e2e") is None
+        or current.get("installation_id") != value.get("installation_id")
+        or current.get("gateway_id") != value.get("gateway_id")
     ):
+        return
+    if "e2e" not in value or _key_created_at(current["e2e"]) > _key_created_at(value["e2e"]):
         value["e2e"] = current["e2e"]
 
 
+def _key_created_at(record: Any) -> str:
+    return str(record.get("created_at") or "") if isinstance(record, dict) else ""
+
+
 def remove_state() -> None:
-    try:
-        state_path().unlink()
-    except FileNotFoundError:
-        pass
+    path = state_path()
+    with state_file_lock(path):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def claim_pairing(code: str, relay_url: str = DEFAULT_RELAY_URL, gateway_name: str = "") -> dict[str, Any]:
