@@ -2938,17 +2938,36 @@ def _pairing_state_lock(path: Any):
     # The same lock file client.state_file_lock takes in the agent process,
     # so a hook rewriting the state can't drop a key stored here (or the
     # other way round).
-    try:
-        import fcntl
-    except ImportError:  # Windows: no advisory locks; writes stay atomic.
-        yield
-        return
-    with open(_pairing_state_lock_path(path), "a") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    with open(_pairing_state_lock_path(path), "a+b") as handle:
+        try:
+            import fcntl
+        except ImportError:
+            fcntl = None
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            return
+        try:
+            import msvcrt
+        except ImportError:
+            yield
+            return
+        # Windows: the same first-byte lock client.state_file_lock takes.
+        handle.seek(0)
+        while True:
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+                break
+            except OSError:
+                continue
         try:
             yield
         finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 def _save_pairing_state(path: Any, value: Dict[str, Any]) -> None:

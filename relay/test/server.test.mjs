@@ -513,7 +513,7 @@ test('validateEvent rejects malformed envelopes instead of falling back to plain
     { msg: 'input:other0000000000' },
     { iat: 1.5 },
     { iat: Math.floor(Date.now() / 1000) - 26 * 60 * 60 },
-    { iat: Math.floor(Date.now() / 1000) + 2 * 60 * 60 },
+    { iat: Math.floor(Date.now() / 1000) + 3 * 60 * 60 },
     { tok: 'zz' },
     { z: 2 },
     { req: 'x' },

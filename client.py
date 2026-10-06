@@ -19,8 +19,12 @@ from typing import Any, Iterator
 
 try:
     import fcntl
-except ImportError:  # Windows: no advisory locks; writes stay atomic.
+except ImportError:  # Windows
     fcntl = None  # type: ignore[assignment]
+try:
+    import msvcrt
+except ImportError:  # everything but Windows
+    msvcrt = None  # type: ignore[assignment]
 
 from hermes_constants import get_hermes_home
 
@@ -67,16 +71,37 @@ def state_file_lock(path: Path) -> Iterator[None]:
     encryption key from its own process; both take this lock (the dashboard
     uses the same lock file) around their writes.
     """
-    if fcntl is None:
-        yield
-        return
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with open(state_lock_path(path), "a") as handle:
+    with open(state_lock_path(path), "a+b") as handle:
+        with _exclusive(handle):
+            yield
+
+
+@contextmanager
+def _exclusive(handle: Any) -> Iterator[None]:
+    if fcntl is not None:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         try:
             yield
         finally:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    elif msvcrt is not None:
+        # Windows: lock the lock file's first byte. LK_LOCK gives up after
+        # about ten seconds, so keep waiting like flock does.
+        handle.seek(0)
+        while True:
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+                break
+            except OSError:
+                continue
+        try:
+            yield
+        finally:
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        yield
 
 
 def save_state(value: dict[str, Any]) -> None:
@@ -350,8 +375,14 @@ def e2e_status(state: dict[str, Any] | None = None) -> dict[str, Any]:
     """This profile's end-to-end encryption state, without the secret."""
     state = load_state() if state is None else state
     record = (state or {}).get("e2e")
+    try:
+        usable = e2e.keys_from_state(state or {}) is not None
+    except Exception:
+        usable = False
     return {
-        "enabled": isinstance(record, dict) and e2e.valid_kid(record.get("kid")),
+        # On only with a key that can actually seal; a broken one sends
+        # content-free events and reads as off here.
+        "enabled": usable,
         "kid": record.get("kid") if isinstance(record, dict) else None,
         "crypto": e2e.available(),
     }
