@@ -579,9 +579,10 @@ there when their own call ended. A retried save that stores nothing new ends
 nothing. This runs in the background, one call at a time, so a slow provider
 never holds up a save. A step that fails is logged and the rest still run. A
 call whose end takes more than two minutes is left to finish on its own while
-the next call ends; past 20 calls waiting, a call ends without these steps (and
-the log says so). A call that isn't saved (saving turned off in Conduit, or no
-speech from you) ends nothing.
+the next call ends; once three are stuck like that in a profile, that profile's
+calls end without these steps until one finishes, and past 20 calls waiting a
+call ends without them too (the log says so each time). A call that isn't saved
+(saving turned off in Conduit, or no speech from you) ends nothing.
 
 ## Chat takeover
 

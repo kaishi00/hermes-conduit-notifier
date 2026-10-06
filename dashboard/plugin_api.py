@@ -2138,7 +2138,10 @@ def save_voice_turns(body: Dict[str, Any],
     """Create a voice-call session or append to one; turns already written for the call are skipped.
 
     ``on_end(session_id, engine, messages)`` runs once new turns are stored:
-    Conduit saves a call only after it has ended, so those turns end it.
+    Conduit saves a call only after it has ended, so those turns end it. It runs
+    with the store closed but the save lock held, so a session's ends keep the
+    order its turns were stored in; it must be quick and must not raise (the
+    turns are already stored).
     """
     call_id = _voice_id(body.get("call_id"), "call_id")
     engine = str(body.get("engine") or "").strip()
@@ -2222,8 +2225,8 @@ def save_voice_turns(body: Dict[str, Any],
                       "skipped": skipped, "created": created}
         finally:
             db.close()
-    if messages and on_end is not None:
-        on_end(session_id, engine, messages)
+        if messages and on_end is not None:
+            on_end(session_id, engine, messages)
     return result
 
 
@@ -2402,6 +2405,9 @@ VOICE_END_TIMEOUT_S = 120.0
 VOICE_END_FLUSH_TIMEOUT_S = 30.0
 # Calls waiting behind a slow one; past this a call's end is skipped (and logged).
 VOICE_END_MAX_PENDING = 20
+# Ends left running past VOICE_END_TIMEOUT_S in one profile; past this that
+# profile's calls end without these steps (and logged) until one finishes.
+VOICE_END_MAX_ABANDONED = 3
 
 _VOICE_END_MODULES = _MISSING_MEMORY_MODULES | {"hermes_cli.lifecycle", "hermes_cli.plugins", "agent.memory_manager"}
 
@@ -2412,6 +2418,7 @@ _voice_end_jobs: "queue.SimpleQueue[Callable[[], None]]" = queue.SimpleQueue()
 _voice_end_worker: Optional[threading.Thread] = None
 _voice_end_guard = threading.Lock()
 _voice_end_pending = 0
+_voice_end_abandoned: Dict[str, int] = {}
 
 
 def _voice_exchanges(messages: list) -> list:
@@ -2536,8 +2543,17 @@ def _run_voice_call_end(profile: Optional[str], session_id: str, engine: str, me
 
     The next call's end can then overlap the abandoned one, each with its own
     provider instance. Hermes' gateway does the same (one provider per agent,
-    abandoned on a cleanup timeout), so providers already allow it."""
+    abandoned on a cleanup timeout), so providers already allow it. A profile
+    keeps at most VOICE_END_MAX_ABANDONED of them, so a provider that never
+    returns can't pile up threads, and other profiles' calls still end."""
+    key = profile or ""
+    with _voice_end_guard:
+        if _voice_end_abandoned.get(key, 0) >= VOICE_END_MAX_ABANDONED:
+            logger.warning("Conduit voice session %s ends without hooks: earlier call ends in this profile "
+                           "are still stuck", session_id)
+            return
     done = threading.Event()
+    abandoned = False
 
     def run() -> None:
         try:
@@ -2546,7 +2562,12 @@ def _run_voice_call_end(profile: Optional[str], session_id: str, engine: str, me
         except Exception:  # noqa: BLE001 — the scope itself failed; nothing ran
             logger.warning("Conduit voice call end failed for %s", session_id, exc_info=True)
         finally:
-            done.set()
+            with _voice_end_guard:
+                done.set()
+                if abandoned:
+                    _voice_end_abandoned[key] -= 1
+                    if not _voice_end_abandoned[key]:
+                        del _voice_end_abandoned[key]
 
     try:
         threading.Thread(target=run, name="conduit-voice-end-call", daemon=True).start()
@@ -2554,8 +2575,12 @@ def _run_voice_call_end(profile: Optional[str], session_id: str, engine: str, me
         logger.warning("Conduit voice session %s ends without hooks: no thread to run them", session_id)
         return
     if not done.wait(VOICE_END_TIMEOUT_S):
-        logger.warning("Ending Conduit voice session %s took over %ss; moving on (it may still finish)",
-                       session_id, VOICE_END_TIMEOUT_S)
+        with _voice_end_guard:
+            if not done.is_set():
+                abandoned = True
+                _voice_end_abandoned[key] = _voice_end_abandoned.get(key, 0) + 1
+                logger.warning("Ending Conduit voice session %s took over %ss; moving on (it may still finish)",
+                               session_id, VOICE_END_TIMEOUT_S)
 
 
 def _voice_end_loop() -> None:
@@ -2598,8 +2623,10 @@ def _enqueue_voice_call_end(profile: Optional[str], session_id: str, engine: str
         except RuntimeError:  # no thread to spare, or the dashboard is exiting
             logger.warning("Conduit voice session %s ends without hooks: no thread to run them", session_id)
             return
-        _voice_end_pending += 1
+        # Counted once queued, so a failed put holds no slot (the worker's
+        # count down waits for this guard).
         _voice_end_jobs.put(run)
+        _voice_end_pending += 1
 
 
 # --- Chat takeover -----------------------------------------------------------

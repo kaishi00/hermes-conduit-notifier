@@ -776,12 +776,35 @@ def test_a_hermes_without_any_of_it_ends_quietly(hermes, caplog):
 
 def test_a_wedged_end_is_abandoned(hermes, lifecycle, monkeypatch):
     release = threading.Event()
-    monkeypatch.setattr(sys.modules["hermes_cli.lifecycle"], "invoke_hook", lambda name, **kwargs: release.wait(5))
+    finished = threading.Event()
+
+    def wedged(name, **kwargs):
+        release.wait(5)
+        finished.set()
+
+    monkeypatch.setattr(sys.modules["hermes_cli.lifecycle"], "invoke_hook", wedged)
+    monkeypatch.setattr(api, "_voice_end_abandoned", {})
     monkeypatch.setattr(api, "VOICE_END_TIMEOUT_S", 0.05)
     started = time.monotonic()
     api._run_voice_call_end(None, "s_call", "gpt-live", CALL)
     assert time.monotonic() - started < 2
+    assert api._voice_end_abandoned == {"": 1}
     release.set()
+    # Once it finishes it no longer counts as stuck.
+    assert finished.wait(5)
+    deadline = time.monotonic() + 5
+    while api._voice_end_abandoned and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert api._voice_end_abandoned == {}
+
+
+def test_a_profile_with_stuck_ends_skips_its_next_calls_only(hermes, lifecycle, monkeypatch):
+    monkeypatch.setattr(api, "_voice_end_abandoned", {"coder": api.VOICE_END_MAX_ABANDONED})
+    api._run_voice_call_end("coder", "s_coder", "gpt-live", CALL)
+    assert lifecycle.events == []
+    api._run_voice_call_end("writer", "s_writer", "gpt-live", CALL)
+    assert ("on_session_finalize", "writer",
+            {"session_id": "s_writer", "platform": "desktop", "reason": "voice_call_ended"}) in lifecycle.events
 
 
 def test_a_saved_call_ends_in_the_background(client, hermes, lifecycle, monkeypatch):
@@ -818,6 +841,17 @@ def test_ends_past_the_backlog_are_skipped(hermes, monkeypatch):
     assert ran == [] and api._voice_end_pending == 0 and api._voice_end_jobs.empty()
 
 
+def test_an_end_that_cant_be_queued_holds_no_slot(hermes, monkeypatch):
+    class Full:
+        def put(self, job):
+            raise MemoryError
+
+    monkeypatch.setattr(api, "_voice_end_pending", 0)
+    monkeypatch.setattr(api, "_voice_end_jobs", Full())
+    _queue_voice_call_end(None, "s_call", "gpt-live", CALL)
+    assert api._voice_end_pending == 0
+
+
 def test_a_provider_that_fails_to_start_is_still_shut_down(hermes, lifecycle, monkeypatch):
     def broken(session_id, **kwargs):
         raise RuntimeError("honcho unreachable")
@@ -836,7 +870,7 @@ def test_a_queueing_failure_never_fails_a_stored_save(client, hermes, monkeypatc
     assert save(client, turns=turns(("user", "a"))).status_code == 200
 
 
-def test_the_end_runs_after_the_store_is_closed(hermes, monkeypatch):
+def test_the_end_runs_after_the_store_is_closed_under_the_save_lock(hermes, monkeypatch):
     opened = []
     original = FakeSessionDB.__init__
 
@@ -847,5 +881,6 @@ def test_the_end_runs_after_the_store_is_closed(hermes, monkeypatch):
     monkeypatch.setattr(FakeSessionDB, "__init__", tracked)
     seen = []
     api.save_voice_turns({"call_id": "c", "engine": "gemini-live", "turns": turns(("user", "a"))},
-                         on_end=lambda *args: seen.append(all(db.closed for db in opened)))
-    assert seen == [True]
+                         on_end=lambda *args: seen.append((all(db.closed for db in opened),
+                                                           api._voice_lock().locked())))
+    assert seen == [(True, True)]
