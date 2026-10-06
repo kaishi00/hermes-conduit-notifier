@@ -1939,7 +1939,7 @@ test('encrypted clarify: question ids parked, card flag drives deliverability, s
   const encrypted = (requestId, card, eventId) => ({
     type: 'input.needed',
     event_id: eventId,
-    e2e: { v: 1, kid, msg: eventId, iat: 1760000000, tok: '0123456789abcdef', z: 0, req: requestId, n: 'AAAAAAAAAAAAAAAA', ct: 'B'.repeat(300) },
+    e2e: { v: 1, kid, msg: eventId, iat: Math.floor(Date.now() / 1000), tok: '0123456789abcdef', z: 0, req: requestId, n: 'AAAAAAAAAAAAAAAA', ct: 'B'.repeat(300) },
     clarify: { request_id: requestId, qids: ['q0', 'q1'], card },
   });
 
@@ -1968,13 +1968,18 @@ test('encrypted clarify: question ids parked, card flag drives deliverability, s
   const afterAnswer = await api(baseUrl, '/v1/decisions/conduit-push-e2e000000001', { credential: gatewayCredential });
   assert.equal(afterAnswer.json.answers.q0, sealed);
 
-  // A malformed sealed answer is refused rather than trimmed into plaintext.
-  const malformed = await api(baseUrl, '/v1/decisions/conduit-push-e2e000000001/respond', {
+  // Text that only looks like a sealed answer is an ordinary answer (so a
+  // keyless pairing can still answer "e2e1.…"); the plugin of an encrypted
+  // pairing rejects it because it doesn't open.
+  const lookalike = `e2e1.${kid}.short.payload`;
+  const plain = await api(baseUrl, '/v1/decisions/conduit-push-e2e000000001/respond', {
     method: 'POST',
     credential: deviceCredential,
-    body: { answer: `e2e1.${kid}.short.payload`, question_id: 'q1' },
+    body: { answer: lookalike, question_id: 'q1' },
   });
-  assert.equal(malformed.status, 400);
+  assert.equal(plain.status, 200);
+  const afterPlain = await api(baseUrl, '/v1/decisions/conduit-push-e2e000000001', { credential: gatewayCredential });
+  assert.equal(afterPlain.json.answers.q1, lookalike);
 
   // The relay advertises the envelope protocol.
   const meta = await api(baseUrl, '/v1/meta', { credential: deviceCredential });

@@ -213,15 +213,62 @@ def test_a_broken_key_never_falls_back_to_plaintext(monkeypatch):
 
 
 def test_missing_crypto_never_falls_back_to_plaintext(monkeypatch):
-    sent = _capture(monkeypatch, _state())
+    state = _state()
+    sent = _capture(monkeypatch, state)
+    saved = []
+    monkeypatch.setattr(client, "save_state", saved.append)
 
     def unavailable(*args, **kwargs):
         raise e2e.E2EError("the cryptography package is not available")
 
-    monkeypatch.setattr(e2e, "seal_event", unavailable)
+    monkeypatch.setattr(e2e, "keys_from_state", unavailable)
+    event = _clarify_event()
+    client.send_now(event)
+    assert set(sent[0]) == {"event_id", "type", "plugin_version", "plugin_capabilities"}
+    # The plain digest never reaches the relay: re-keyed with the local key.
+    assert sent[0]["event_id"] != event["event_id"]
+    assert sent[0]["event_id"].startswith("input:")
+    assert state["redact_key"] and saved == [state]
+
+
+@pytest.mark.parametrize("record", [{}, [], ""])
+def test_an_empty_key_record_fails_closed(monkeypatch, record):
+    sent = _capture(monkeypatch, _state(e2e=record, redact_key="k"))
     client.send_now(_clarify_event())
     assert set(sent[0]) == {"event_id", "type", "plugin_version", "plugin_capabilities"}
-    assert sent[0]["event_id"] != "input:0123456789abcdef"
+    assert "Deploy" not in json.dumps(sent[0])
+    status = {"status": "answered", "answer": "Yes"}
+    assert client.opened_answers(status, _state(e2e=record), "conduit-push-abc123def456") == {"status": "rejected"}
+
+
+def test_a_stale_state_write_keeps_the_provisioned_key(monkeypatch, tmp_path):
+    path = tmp_path / "conduit-push.json"
+    monkeypatch.setattr(client, "state_path", lambda: path)
+    stale = _state()
+    del stale["e2e"]
+    path.write_text(json.dumps(_state()))
+    # A hook that loaded the state before the key arrived writes it back.
+    client.save_state(dict(stale, redact_content=True))
+    stored = json.loads(path.read_text())
+    assert stored["e2e"] == _state()["e2e"] and stored["redact_content"] is True
+    # A new pairing doesn't inherit the old pairing's key.
+    client.save_state(dict(stale, installation_id="other"))
+    assert "e2e" not in json.loads(path.read_text())
+
+
+@pytest.mark.parametrize("data,z", [(b"\xff\xfe", 0), (b"[1]", 0), (b"\x00\x01garbage", 1)])
+def test_unpack_reports_bad_payloads_as_e2e_errors(data, z):
+    with pytest.raises(e2e.E2EError):
+        e2e.unpack(data, z)
+
+
+def test_unpack_rejects_a_truncated_deflate_stream():
+    import zlib
+
+    compressor = zlib.compressobj(wbits=-15)
+    packed = compressor.compress(json.dumps({"title": "x" * 200}).encode()) + compressor.flush()
+    with pytest.raises(e2e.E2EError):
+        e2e.unpack(packed[: len(packed) // 2], 1)
 
 
 def test_plugin_hello_stays_plain(monkeypatch):

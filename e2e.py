@@ -111,9 +111,9 @@ def keys_from_state(state: dict[str, Any]) -> Keys | None:
     must then fail closed instead of falling back to plaintext.
     """
     record = state.get("e2e")
-    if not record:
+    if record is None:
         return None
-    if not isinstance(record, dict):
+    if not isinstance(record, dict) or not record:
         raise E2EError("the stored key is malformed")
     return derive_keys(str(record.get("kid") or ""), unb64u(str(record.get("secret") or "")))
 
@@ -162,10 +162,18 @@ def unpack(data: bytes, z: int) -> dict[str, Any]:
     if z == 1:
         decompressor = zlib.decompressobj(wbits=-15)
         # Bounded: a valid envelope never inflates past this.
-        data = decompressor.decompress(data, 64 * 1024)
+        try:
+            data = decompressor.decompress(data, 64 * 1024)
+        except zlib.error as error:
+            raise E2EError("inner payload is not valid deflate") from error
         if decompressor.unconsumed_tail:
             raise E2EError("inner payload too large")
-    value = json.loads(data.decode("utf-8"))
+        if not decompressor.eof:
+            raise E2EError("inner payload is truncated")
+    try:
+        value = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as error:
+        raise E2EError("inner payload is not JSON") from error
     if not isinstance(value, dict):
         raise E2EError("inner payload is not an object")
     return value

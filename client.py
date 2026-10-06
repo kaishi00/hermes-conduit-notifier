@@ -13,8 +13,14 @@ import socket
 import threading
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
+
+try:
+    import fcntl
+except ImportError:  # Windows: no advisory locks; writes stay atomic.
+    fcntl = None  # type: ignore[assignment]
 
 from hermes_constants import get_hermes_home
 
@@ -47,14 +53,56 @@ def load_state() -> dict[str, Any] | None:
     return value
 
 
+@contextmanager
+def state_file_lock(path: Path) -> Iterator[None]:
+    """Serializes writers of conduit-push.json across processes.
+
+    The hooks run in the agent process and the dashboard provisions the
+    encryption key from its own process; both take this lock (the dashboard
+    uses the same lock file) around their writes.
+    """
+    if fcntl is None:
+        yield
+        return
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with open(path.with_name(f".{path.name}.lock"), "a") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def save_state(value: dict[str, Any]) -> None:
     path = state_path()
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temporary.write_text(json.dumps(value, separators=(",", ":")) + "\n", encoding="utf-8")
-    temporary.chmod(0o600)
-    temporary.replace(path)
-    path.chmod(0o600)
+    with state_file_lock(path):
+        _keep_provisioned_key(value, path)
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        temporary.write_text(json.dumps(value, separators=(",", ":")) + "\n", encoding="utf-8")
+        temporary.chmod(0o600)
+        temporary.replace(path)
+        path.chmod(0o600)
+
+
+def _keep_provisioned_key(value: dict[str, Any], path: Path) -> None:
+    # A caller that loaded the state before the dashboard stored an
+    # encryption key must not write it back without the key: that would
+    # quietly turn encryption off for the pairing. The key belongs to the
+    # pairing, so a new pairing (different installation or gateway) drops it.
+    if "e2e" in value:
+        return
+    try:
+        current = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError, OSError):
+        return
+    if (
+        isinstance(current, dict)
+        and current.get("e2e") is not None
+        and current.get("installation_id") == value.get("installation_id")
+        and current.get("gateway_id") == value.get("gateway_id")
+    ):
+        value["e2e"] = current["e2e"]
 
 
 def remove_state() -> None:
@@ -132,7 +180,7 @@ def send_now(event: dict[str, Any], timeout: float = 15.0) -> dict[str, Any]:
         f"{state['relay_url'].rstrip('/')}/v1/events",
         method="POST",
         credential=state["credential"],
-        payload=_outgoing(event, state),
+        payload=build_outgoing(event, state),
         timeout=timeout,
     )
 
@@ -153,7 +201,8 @@ def set_redact_content(enabled: bool) -> bool:
     return True
 
 
-def _outgoing(event: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+def build_outgoing(event: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+    """The event exactly as it is sent to the relay for this pairing."""
     # Redaction (the user's explicit choice) applies first, then a pairing
     # that provisioned end-to-end encryption seals whatever content is left.
     return _sealed(_redacted(event, state), state)
@@ -166,20 +215,25 @@ def _sealed(event: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
     # parks nothing, so the clarify loop falls back to Hermes' own path.
     # plugin.hello carries no content and keeps its deterministic id, which
     # the relay dedupes across gateways.
-    if not state.get("e2e") or event.get("type") == "plugin.hello":
+    # Presence, not truthiness: an empty or malformed record is a broken key
+    # and fails closed like any other.
+    if state.get("e2e") is None or event.get("type") == "plugin.hello":
         return event
     keys = None
     try:
         keys = e2e.keys_from_state(state)
-        if keys is not None:
-            return e2e.seal_event(
-                event,
-                keys,
-                installation_id=str(state.get("installation_id") or ""),
-                gateway_id=str(state.get("gateway_id") or ""),
-            )
+        return e2e.seal_event(
+            event,
+            keys,
+            installation_id=str(state.get("installation_id") or ""),
+            gateway_id=str(state.get("gateway_id") or ""),
+        )
     except Exception as error:
         logger.warning("Conduit notification could not be encrypted; sending it without content: %s", error)
+    if keys is None:
+        # No usable key to re-key the event id with: use the local-only
+        # redaction key so the relay still never sees the plain digest.
+        return e2e.content_free(_rekeyed(event, _redact_key(state)))
     return e2e.content_free(event, keys)
 
 
@@ -198,12 +252,16 @@ def _redacted(event: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
     # receives: it still dedupes replays (same input -> same id) but cannot
     # recompute the digest for guessed commands. Runs once per event at this
     # chokepoint; the output is not meant to be fed back in.
-    event_id = redacted.get("event_id")
-    if isinstance(event_id, str) and event_id:
-        prefix = event_id.split(":", 1)[0] if ":" in event_id else "event"
-        keyed = hmac.new(_redact_key(state).encode(), event_id.encode(), hashlib.sha256).hexdigest()[:32]
-        redacted["event_id"] = f"{prefix}:{keyed}"
-    return redacted
+    return _rekeyed(redacted, _redact_key(state))
+
+
+def _rekeyed(event: dict[str, Any], key: str) -> dict[str, Any]:
+    event_id = event.get("event_id")
+    if not isinstance(event_id, str) or not event_id:
+        return event
+    prefix = event_id.split(":", 1)[0] if ":" in event_id else "event"
+    keyed = hmac.new(key.encode(), event_id.encode(), hashlib.sha256).hexdigest()[:32]
+    return {**event, "event_id": f"{prefix}:{keyed}"}
 
 
 def _redact_key(state: dict[str, Any]) -> str:
@@ -247,7 +305,7 @@ def opened_answers(status: dict[str, Any], state: dict[str, Any], request_id: st
     reports ``rejected`` and the clarify loop hands the question back to
     Hermes' own clarify path instead of answering with it.
     """
-    if not state.get("e2e") or not isinstance(status, dict):
+    if state.get("e2e") is None or not isinstance(status, dict):
         return status
     has_answer = "answer" in status
     has_answers = isinstance(status.get("answers"), dict) and bool(status.get("answers"))
@@ -260,8 +318,6 @@ def opened_answers(status: dict[str, Any], state: dict[str, Any], request_id: st
     }
     try:
         keys = e2e.keys_from_state(state)
-        if keys is None:
-            return status
         opened = dict(status)
         if has_answer:
             opened["answer"] = e2e.open_answer(status.get("answer"), keys, question_id="", **context)

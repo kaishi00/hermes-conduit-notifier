@@ -6,7 +6,7 @@ import argparse
 import socket
 
 from . import e2e
-from .client import DEFAULT_RELAY_URL, _outgoing, claim_pairing, e2e_status, load_state, post_event, send_now, set_redact_content, state_path, unpair
+from .client import DEFAULT_RELAY_URL, build_outgoing, claim_pairing, e2e_status, load_state, post_event, send_now, set_redact_content, state_path, unpair
 from .events import event_id, plugin_hello, push_event
 
 
@@ -74,15 +74,23 @@ def dispatch(args: argparse.Namespace) -> int:
             if not state:
                 print("This Hermes profile is not paired with Conduit.")
                 return 1
-            outgoing = _outgoing(event, state)
+            outgoing = build_outgoing(event, state)
             if "e2e" not in outgoing:
                 print("End-to-end encryption is off for this profile; nothing to corrupt.")
                 return 1
             outgoing["e2e"]["ct"] = _flipped(outgoing["e2e"]["ct"])
-            post_event(outgoing)
+            try:
+                post_event(outgoing)
+            except RuntimeError as error:
+                print(f"The Conduit relay did not accept the test notification: {error}")
+                return 1
             print("Broken encrypted test notification accepted by the Conduit relay. The phone should show only generic text.")
             return 0
-        send_now(event)
+        try:
+            send_now(event)
+        except RuntimeError as error:
+            print(f"The Conduit relay did not accept the test notification: {error}")
+            return 1
         print("Test notification accepted by the Conduit relay.")
         return 0
     if action == "redact":

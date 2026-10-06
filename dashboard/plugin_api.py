@@ -2929,6 +2929,24 @@ def _load_pairing_state(path: Any) -> Optional[Dict[str, Any]]:
     return value
 
 
+@contextlib.contextmanager
+def _pairing_state_lock(path: Any):
+    # The same lock file client.state_file_lock takes in the agent process,
+    # so a hook rewriting the state can't drop a key stored here (or the
+    # other way round).
+    try:
+        import fcntl
+    except ImportError:  # Windows: no advisory locks; writes stay atomic.
+        yield
+        return
+    with open(path.with_name(f".{path.name}.lock"), "a") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def _save_pairing_state(path: Any, value: Dict[str, Any]) -> None:
     # Same atomic, owner-only write as client.save_state.
     temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
@@ -2986,7 +3004,7 @@ def provision_e2e(body: Any, path: Any = None) -> Dict[str, Any]:
     if not _e2e_crypto_available():
         raise TokenError(501, "Encrypted notifications need the cryptography package on this host")
     path = path if path is not None else _pairing_state_path()
-    with _e2e_lock:
+    with _e2e_lock, _pairing_state_lock(path):
         state = _load_pairing_state(path)
         if not state:
             raise TokenError(409, "This Hermes profile isn't paired with Conduit")
@@ -3009,7 +3027,7 @@ async def get_e2e(response: Response, profile: Optional[str] = None) -> Dict[str
     try:
         return {"ok": True, **(await _run_scoped(profile, e2e_status))}
     except TokenError as exc:
-        raise HTTPException(status_code=exc.status, detail=str(exc))
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
     except HTTPException:
         raise
     except Exception as exc:

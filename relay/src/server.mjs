@@ -403,8 +403,10 @@ async function route(request, response) {
     const body = await readJson(request);
     // An encrypted answer is opaque base64url: kept whole (never trimmed or
     // truncated, which would break it) and only for the strict wire shape.
-    const answer = typeof body.answer === 'string' && body.answer.startsWith(E2E_ANSWER_PREFIX)
-      ? (E2E_ANSWER_PATTERN.test(body.answer) && body.answer.length <= E2E_MAX_ANSWER_CHARS ? body.answer : undefined)
+    // Anything else, including plaintext that merely starts like one, is an
+    // ordinary answer (the plugin of an encrypted pairing rejects it).
+    const answer = typeof body.answer === 'string' && E2E_ANSWER_PATTERN.test(body.answer) && body.answer.length <= E2E_MAX_ANSWER_CHARS
+      ? body.answer
       : cleanText(body.answer, 2000);
     if (!answer) return sendJson(response, 400, { error: 'invalid_answer' });
     // question_id scopes the answer to ONE question of a batch decision
@@ -744,13 +746,20 @@ function validCapabilities(value) {
 // The `e2e` envelope is forwarded byte for byte, so it is validated
 // strictly: only the known fields, each in its exact wire shape. A
 // malformed envelope is a 400, never a fallback to plaintext.
-export function validateEnvelope(value, eventId) {
+// Defense in depth against replaying a captured envelope after the event-id
+// ledger forgot it: the phone rejects anything older than 24 hours (or more
+// than 10 minutes ahead) itself; the relay refuses the same, with an extra
+// hour of slack for clocks that disagree.
+const E2E_MAX_AGE_S = 25 * 60 * 60;
+const E2E_MAX_FUTURE_S = 60 * 60;
+
+export function validateEnvelope(value, eventId, nowSeconds = Math.floor(Date.now() / 1000)) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw httpError(400, 'invalid_e2e');
   const { v, kid, msg, iat, tok, z, req, n, ct } = value;
   const valid = v === 1
     && typeof kid === 'string' && /^[0-9a-f]{32}$/.test(kid)
     && msg === eventId
-    && Number.isSafeInteger(iat) && iat > 0
+    && Number.isSafeInteger(iat) && iat >= nowSeconds - E2E_MAX_AGE_S && iat <= nowSeconds + E2E_MAX_FUTURE_S
     && typeof tok === 'string' && /^[0-9a-f]{16}$/.test(tok)
     && (z === 0 || z === 1)
     && typeof req === 'string' && /^([A-Za-z0-9_-]{4,128})?$/.test(req)
@@ -762,7 +771,9 @@ export function validateEnvelope(value, eventId) {
 
 // Routing metadata for an encrypted clarify: the plugin-minted request id,
 // the gateway's question ids (empty for a single question) and whether the
-// card fit the envelope. Malformed metadata parks nothing.
+// card fit the envelope. Malformed metadata parks nothing. qids and card are
+// routing hints only: a relay that alters them can at most make a question
+// unanswerable, since each sealed answer is bound to its request and qid.
 function validateClarifyRouting(value, boundRequestId) {
   if (!value || typeof value !== 'object') return undefined;
   if (value.request_id !== boundRequestId) throw httpError(400, 'invalid_e2e');
