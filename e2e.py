@@ -267,12 +267,16 @@ def content_free(event: dict[str, Any], keys: Keys | None = None) -> dict[str, A
 
 def open_event(outgoing: dict[str, Any], keys: Keys, *, installation_id: str, gateway_id: str) -> dict[str, Any]:
     """Device-side mirror of seal_event; used by tests and diagnostics."""
-    envelope = outgoing["e2e"]
-    aad = push_aad(kid=keys.kid, installation_id=installation_id, gateway_id=gateway_id,
-                   msg=envelope["msg"], kind=str(outgoing.get("type") or ""), iat=int(envelope["iat"]),
-                   tok=envelope["tok"], z=int(envelope["z"]), request_id=str(envelope.get("req") or ""))
+    envelope = outgoing.get("e2e")
     try:
-        packed = _aead(keys.push).decrypt(unb64u(envelope["n"]), unb64u(envelope["ct"]), aad)
+        aad = push_aad(kid=keys.kid, installation_id=installation_id, gateway_id=gateway_id,
+                       msg=envelope["msg"], kind=str(outgoing.get("type") or ""), iat=int(envelope["iat"]),
+                       tok=envelope["tok"], z=int(envelope["z"]), request_id=str(envelope.get("req") or ""))
+        nonce, ciphertext = unb64u(envelope["n"]), unb64u(envelope["ct"])
+    except (KeyError, TypeError, ValueError, AttributeError) as error:
+        raise E2EError("the envelope is malformed") from error
+    try:
+        packed = _aead(keys.push).decrypt(nonce, ciphertext, aad)
     except E2EError:
         raise
     except Exception as error:
