@@ -2957,12 +2957,13 @@ def _pairing_state_lock(path: Any):
             return
         # Windows: the same first-byte lock client.state_file_lock takes.
         handle.seek(0)
-        while True:
+        for attempt in range(6):  # about a minute
             try:
                 msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
                 break
             except OSError:
-                continue
+                if attempt == 5:
+                    raise
         try:
             yield
         finally:
@@ -2996,6 +2997,10 @@ def e2e_status(path: Any = None) -> Dict[str, Any]:
         return {"paired": False, "crypto": crypto}
     record = state.get("e2e")
     kid = record.get("kid") if isinstance(record, dict) else None
+    secret = record.get("secret") if isinstance(record, dict) else None
+    # A key whose secret is unusable reads as none, so the phone replaces it.
+    if not isinstance(secret, str) or not _E2E_B64URL.match(secret):
+        kid = None
     return {
         "paired": True,
         "installation_id": state.get("installation_id"),

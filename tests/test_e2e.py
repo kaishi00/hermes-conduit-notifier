@@ -259,6 +259,12 @@ def test_a_stale_state_write_keeps_the_provisioned_key(monkeypatch, tmp_path):
     assert "e2e" not in json.loads(path.read_text())
 
 
+def test_ciphertext_cap_matches_the_relay():
+    # relay/src/server.mjs E2E_MAX_CT_CHARS: the relay refuses anything larger.
+    source = (ROOT / "relay" / "src" / "server.mjs").read_text()
+    assert f"E2E_MAX_CT_CHARS = {e2e.MAX_CT_CHARS:_}" in source or f"E2E_MAX_CT_CHARS = {e2e.MAX_CT_CHARS}" in source
+
+
 def test_client_and_dashboard_agree_on_the_kid_shape():
     assert api._E2E_KID.pattern == e2e.KID_PATTERN.pattern
 
@@ -399,6 +405,13 @@ def test_provisioning_stores_the_key_owner_only_and_never_returns_it(state_file)
     status = _http().get(f"{BASE}/e2e").json()
     assert status["e2e"] == {"kid": KID}
     assert e2e.b64u(SECRET) not in json.dumps(status)
+
+
+def test_status_reports_an_unusable_key_as_none(state_file):
+    state = json.loads(state_file.read_text())
+    state["e2e"] = {"kid": KID, "secret": "broken"}
+    state_file.write_text(json.dumps(state))
+    assert _http().get(f"{BASE}/e2e").json()["e2e"] is None
 
 
 @pytest.mark.parametrize("extra,code", [

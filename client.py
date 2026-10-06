@@ -87,14 +87,15 @@ def _exclusive(handle: Any) -> Iterator[None]:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
     elif msvcrt is not None:
         # Windows: lock the lock file's first byte. LK_LOCK gives up after
-        # about ten seconds, so keep waiting like flock does.
+        # about ten seconds; retry for about a minute, then give up loudly.
         handle.seek(0)
-        while True:
+        for attempt in range(6):  # about a minute
             try:
                 msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
                 break
             except OSError:
-                continue
+                if attempt == 5:
+                    raise
         try:
             yield
         finally:
