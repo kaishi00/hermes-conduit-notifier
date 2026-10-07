@@ -3779,7 +3779,10 @@ async def post_watch_tool_revoke(request: Request, response: Response, profile: 
 # Voice Jobs like a job the phone started. Two more calls come only from the
 # Watch app, never from the model as such: job_news (settled jobs and
 # approval requests, held until there is some) and answer_approval (Approve
-# or Deny on the Watch, or by voice when the user turned that on). Hermes'
+# or Deny on the Watch, or by voice when the user turned that on, after the
+# Watch's own checks). Sealed with the same key, the host can't tell who
+# sent a call: the Watch app holds that line, and must never pass the model
+# either call as it is. Hermes'
 # own approval settings decide what needs approving; the Watch can only
 # approve once or deny. (hermes-conduit designs/apple-watch-voice-direct.md,
 # "Wrist-down jobs through the relay")
@@ -3866,6 +3869,11 @@ def _clip_job_result(text: str) -> str:
                       cut=len(text) > WATCH_JOB_RESULT_CHARS)
 
 
+def _rpc_id(value: Any) -> str:
+    """A JSON-RPC id as a string: ids can be numbers, 0 among them."""
+    return "" if value is None else str(value)
+
+
 def _json_bytes(value: Any) -> int:
     return len(json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
 
@@ -3923,6 +3931,10 @@ class _WatchJob:
         self.answer_pending = True
         self.answered_late = False
         self.start_answer: Optional[Dict[str, Any]] = None
+        # While a cancel's interrupt is on its way: the end of the turn,
+        # kept in case Hermes refuses the interrupt (cancel).
+        self.cancelling = False
+        self.held_end: Optional[Tuple[str, Dict[str, Any]]] = None
 
     @property
     def active(self) -> bool:
@@ -4043,7 +4055,7 @@ class _WatchJobs:
             self._event(str(params.get("type") or ""), sid, payload)
         elif method == "approval":
             # A server request: its fields sit beside session_id.
-            self._approval_requested(sid, str(obj.get("id") or ""), params)
+            self._approval_requested(sid, _rpc_id(obj.get("id")), params)
 
     def _job_for(self, sid: str) -> Optional[_WatchJob]:
         if not sid:
@@ -4061,31 +4073,19 @@ class _WatchJobs:
                 # turn ended. The id is compared as a string, as it was
                 # stored: JSON-RPC ids can be numbers.
                 server_id = job.approval["server_request_id"] if job.approval else ""
-                if server_id and str(payload.get("id") or "") == server_id:
+                if server_id and _rpc_id(payload.get("id")) == server_id:
                     self._approval_gone(job)
             elif kind == "approval.cancelled":
                 ids = payload.get("request_ids")
                 if job.approval and (not isinstance(ids, list) or not ids or job.approval["request_id"] in ids):
                     self._approval_gone(job)
-            elif job.active and kind == "message.complete":
-                text = payload.get("text")
-                if not isinstance(text, str) or not text.strip():
-                    text = payload.get("rendered") if isinstance(payload.get("rendered"), str) else ""
-                status = payload.get("status")
-                if status == "interrupted":
-                    job.status = "cancelled"
-                elif status == "error":
-                    detail = payload.get("error") if isinstance(payload.get("error"), str) else text
-                    job.status, job.error = "failed", (detail or "").strip()[:300] or "Hermes reported an error"
-                else:
-                    job.status, job.result = "finished", text.strip()
-                job.approval = None
-                settled = True
-            elif job.active and kind == "error":
-                message = payload.get("message")
-                job.status = "failed"
-                job.error = (message if isinstance(message, str) else "").strip()[:300] or "Hermes reported an error"
-                job.approval = None
+            elif kind in ("message.complete", "error") and (job.active or job.cancelling):
+                if not job.active:
+                    # Cancelled meanwhile: this end reads as the cancel,
+                    # unless Hermes refuses the interrupt.
+                    job.held_end = (kind, payload)
+                    return
+                self._settle(job, kind, payload)
                 settled = True
             else:
                 return
@@ -4093,6 +4093,28 @@ class _WatchJobs:
             ended = self.ended
         if settled and ended:
             self._close_session_later(job)
+
+    @staticmethod
+    def _settle(job: _WatchJob, kind: str, payload: Dict[str, Any]) -> None:
+        """The job's turn ended: ``message.complete`` or ``error``."""
+        job.approval = None
+        if kind == "error":
+            message = payload.get("message")
+            job.status = "failed"
+            job.error = (message if isinstance(message, str) else "").strip()[:300] or "Hermes reported an error"
+            return
+        text = payload.get("text")
+        if not isinstance(text, str) or not text.strip():
+            text = payload.get("rendered") if isinstance(payload.get("rendered"), str) else ""
+        status = payload.get("status")
+        if status == "interrupted":
+            job.status = "cancelled"
+        elif status == "error":
+            detail = payload.get("error") if isinstance(payload.get("error"), str) else text
+            job.status, job.error = "failed", (detail or "").strip()[:300] or "Hermes reported an error"
+        else:
+            # News clips it; one more character marks the cut.
+            job.status, job.result = "finished", text.strip()[:WATCH_JOB_RESULT_CHARS + 1]
 
     @staticmethod
     def _approval_gone(job: _WatchJob) -> None:
@@ -4197,8 +4219,8 @@ class _WatchJobs:
                     "message": "Hermes is starting the job. Its result will arrive later as a message; don't wait "
                                "for it."}
         undelivered = _watch_undelivered.get()
-        if undelivered is not None and answer.get("status") == "not_started" and job.status == "failed":
-            # Lost on the way, the failure goes out as news instead.
+        if undelivered is not None and answer.get("status") == "not_started":
+            # Lost on the way, the failure or cancel goes out as news instead.
             undelivered.append(lambda: self._untake([(job, "outcome_told", False)]))
         return answer
 
@@ -4293,6 +4315,7 @@ class _WatchJobs:
                 job.status = "cancelled"
                 job.approval = None
                 job.outcome_told = True
+                job.cancelling = bool(job.session_id)
             self.changed.notify_all()
         failed = []
         for job in targets:
@@ -4306,8 +4329,17 @@ class _WatchJobs:
                     if job.status == "cancelled":
                         job.status, job.approval = before[job.job_id]
                         job.outcome_told = False
+                        if job.held_end is not None:
+                            # Its turn ended meanwhile: that end stands.
+                            self._settle(job, *job.held_end)
+                    job.cancelling, job.held_end = False, None
                     self.changed.notify_all()
                 failed.append(job)
+                if self.ended and not job.active:
+                    self._close_session_later(job)
+            else:
+                with self.changed:
+                    job.cancelling, job.held_end = False, None
         cancelled = [job for job in targets if job not in failed]
         undelivered = _watch_undelivered.get()
         if undelivered is not None and cancelled:
@@ -4426,7 +4458,8 @@ class _WatchJobs:
             if job.approval and job.approval["request_id"] == approval["request_id"]:
                 self._approval_gone(job)
             self.changed.notify_all()
-        if resolved == 0:
+        # Hermes answers how many approvals the decision unblocked.
+        if not isinstance(resolved, int) or resolved <= 0:
             return {"ok": True, "status": "not_pending", "message": "That job isn't waiting for an approval any more."}
         return {"ok": True, "status": "approved" if choice == "once" else "denied", "job_id": job.job_id}
 

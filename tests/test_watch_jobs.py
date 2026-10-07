@@ -694,10 +694,11 @@ def test_an_approval_answered_elsewhere_or_timed_out_is_withdrawn():
     assert news(grant)["news"] == []
 
 
-def test_hermes_resolving_nothing_reads_as_not_pending():
+@pytest.mark.parametrize("resolved", [0, None, "1"])
+def test_hermes_resolving_nothing_reads_as_not_pending(resolved):
     grant = make_jobs()
     server = grant.jobs.server
-    server.resolved = 0
+    server.resolved = resolved
     start(grant)
     server.ask_approval("rt-1")
     answer = api.run_watch_job_call(grant, "answer_approval",
@@ -757,6 +758,54 @@ def test_a_cancel_hermes_refuses_leaves_the_job_followed():
     assert answer == {"ok": True, "message": "Couldn't cancel Check the build logs. It may still be running."}
     job = grant.jobs.jobs["watch-1"]
     assert (job.status, job.approval["request_id"], job.outcome_told) == ("needs_approval", "appr-1", False)
+
+
+def test_a_long_result_is_kept_only_as_long_as_news_can_tell_it():
+    grant = make_jobs()
+    start(grant)
+    grant.jobs.server.emit("rt-1", "message.complete", {"text": "a" * 50_000, "status": "complete"})
+    assert len(grant.jobs.jobs["watch-1"].result) == api.WATCH_JOB_RESULT_CHARS + 1
+    [item] = news(grant)["news"]
+    assert item["result"] == "a" * api.WATCH_JOB_RESULT_CHARS + "\n[…]"
+
+
+def test_a_turn_that_ends_while_its_cancel_is_refused_is_told():
+    grant = make_jobs()
+    server = grant.jobs.server
+    start(grant)
+    server.fail["session.interrupt"] = "no such session"
+    dispatch = server.dispatch
+
+    def ending(req, transport=None):
+        if req["method"] == "session.interrupt":
+            server.emit("rt-1", "message.complete", {"text": "All green", "status": "complete"})
+        return dispatch(req, transport)
+
+    server.dispatch = ending
+    answer = api.run_watch_job_call(grant, "cancel_job", {"job_id": "watch-1"})
+    assert answer == {"ok": True, "message": "Couldn't cancel Check the build logs. It may still be running."}
+    [item] = news(grant)["news"]
+    assert (item["job_id"], item["status"], item["result"]) == ("watch-1", "finished", "All green")
+    job = grant.jobs.jobs["watch-1"]
+    assert (job.cancelling, job.held_end) == (False, None)
+
+
+def test_a_cancelled_turns_own_end_reads_as_the_cancel():
+    grant = make_jobs()
+    server = grant.jobs.server
+    start(grant)
+    dispatch = server.dispatch
+
+    def ending(req, transport=None):
+        if req["method"] == "session.interrupt":
+            server.emit("rt-1", "message.complete", {"text": "", "status": "interrupted"})
+        return dispatch(req, transport)
+
+    server.dispatch = ending
+    assert api.run_watch_job_call(grant, "cancel_job", {})["message"] == "Cancelled 1 background jobs."
+    job = grant.jobs.jobs["watch-1"]
+    assert (job.status, job.cancelling, job.held_end) == ("cancelled", False, None)
+    assert news(grant)["news"] == []
 
 
 # --- Ending ----------------------------------------------------------------------
@@ -890,6 +939,16 @@ def test_a_failed_start_whose_answer_is_lost_is_told_as_news():
     assert (item["status"], item["error"]) == ("failed", "no provider")
 
 
+def test_a_start_cancelled_first_whose_answer_is_lost_is_told_as_news():
+    grant = make_jobs()
+    grant.jobs.server.on_create = lambda: api.run_watch_job_call(grant, "cancel_job", {})
+    _, call = sealed(grant, "start_job", {"instructions": "Check the build logs"}, 5)
+    assert api.answer_watch_call(grant, call, relay=lambda *a: (404, {})) == "gone"
+    [item] = news(grant)["news"]
+    assert (item["job_id"], item["status"]) == ("watch-1", "cancelled")
+    assert grant.jobs.started == 0
+
+
 def test_a_cancel_whose_answer_is_lost_is_told_as_news():
     grant = make_jobs()
     start(grant)
@@ -930,15 +989,16 @@ def test_a_new_approval_under_the_same_id_is_news_again():
     assert [item["status"] for item in news(grant)["news"]] == ["needs_approval"]
 
 
-def test_a_numeric_server_request_id_is_withdrawn_too():
+@pytest.mark.parametrize("server_id", [5, 0])
+def test_a_numeric_server_request_id_is_withdrawn_too(server_id):
     grant = make_jobs()
     server = grant.jobs.server
     start(grant)
-    server.ask_approval("rt-1", request_id="appr-1", server_id=5)
+    server.ask_approval("rt-1", request_id="appr-1", server_id=server_id)
     assert grant.jobs.jobs["watch-1"].status == "needs_approval"
-    server.emit("rt-1", "request.cancel", {"id": 6})
+    server.emit("rt-1", "request.cancel", {"id": server_id + 1})
     assert grant.jobs.jobs["watch-1"].status == "needs_approval"
-    server.emit("rt-1", "request.cancel", {"id": 5})
+    server.emit("rt-1", "request.cancel", {"id": server_id})
     assert grant.jobs.jobs["watch-1"].status == "running"
 
 
