@@ -34,8 +34,11 @@ export const MAX_CALLS_PER_GRANT = 120;
 // Calls of one grant waiting for an answer at once.
 export const MAX_PENDING_PER_GRANT = 2;
 // Sealed sizes, base64url: a call is a tool name and a short query; an
-// answer is at most a few search results or a 4,000-character recall.
-export const MAX_CALL_CT_CHARS = 6_000;
+// answer is at most a few search results or a 4,000-character recall. A call
+// is at most 4 KB before sealing on the Watch and the host alike, so the
+// relay takes no call the host would refuse to open.
+export const MAX_CALL_BYTES = 4 * 1024;
+export const MAX_CALL_CT_CHARS = Math.ceil(((MAX_CALL_BYTES + 16) * 4) / 3);
 export const MAX_RESULT_CT_CHARS = 24_000;
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{22}$/;
@@ -164,18 +167,18 @@ export class WatchToolGrants {
       return;
     }
     const waiter = { response, timer: null };
-    const finish = () => {
+    waiter.timer = setTimeout(() => {
       if (grant.hostWaiter !== waiter) return;
       grant.hostWaiter = null;
+      // A poll that ran its course: the host is there.
       grant.hostSeenAt = this.now();
-    };
-    waiter.timer = setTimeout(() => {
-      finish();
       sendJson(response, 200, { calls: [] });
     }, Math.min(waitMs, this.hostPollWaitMs));
+    // A poll that dropped says nothing about the host (it may have died), so
+    // only a completed or a new poll counts as seeing it.
     response.on('close', () => {
       clearTimeout(waiter.timer);
-      finish();
+      if (grant.hostWaiter === waiter) grant.hostWaiter = null;
     });
     grant.hostWaiter = waiter;
   }
@@ -230,7 +233,15 @@ export class WatchToolGrants {
 }
 
 // Routes under /v1/watch-tools/. Returns false for any other path.
-export function watchToolRoutes({ grants, readJson, enforceRateLimit, enforceCallBudget, authenticateGateway, clientAddress }) {
+export function watchToolRoutes({
+  grants,
+  readJson,
+  enforceRateLimit,
+  enforceCallBudget,
+  authenticateGateway,
+  clientAddress,
+  warn = () => {},
+}) {
   return async function route(request, response, url) {
     const match = url.pathname.match(ROUTE);
     if (!match) return false;
@@ -250,13 +261,22 @@ export function watchToolRoutes({ grants, readJson, enforceRateLimit, enforceCal
         || !Number.isSafeInteger(maxCalls) || maxCalls < 1 || maxCalls > MAX_CALLS_PER_GRANT) {
         return answered(response, 400, { error: 'invalid_grant' });
       }
-      const grant = grants.create({
-        installationId: gateway.installationId,
-        gatewayId: gateway.gatewayId,
-        watchKeyHash: body.watch_key_sha256,
-        ttlS,
-        maxCalls,
-      });
+      let grant;
+      try {
+        grant = grants.create({
+          installationId: gateway.installationId,
+          gatewayId: gateway.gatewayId,
+          watchKeyHash: body.watch_key_sha256,
+          ttlS,
+          maxCalls,
+        });
+      } catch (error) {
+        if (error?.message !== 'watch_grant_capacity') throw error;
+        // An expected limit, not a relay failure: the call's lookups go
+        // through the iPhone instead.
+        warn('watch tool grants at capacity', { grants: grants.size });
+        return answered(response, 503, { error: 'watch_grant_capacity' });
+      }
       return answered(response, 201, {
         grant_id: grant.id,
         expires_at: new Date(grant.expiresAt).toISOString(),
@@ -291,7 +311,9 @@ export function watchToolRoutes({ grants, readJson, enforceRateLimit, enforceCal
       const grant = grants.owned(id, gateway.installationId, gateway.gatewayId);
       if (!grant) return answered(response, 410, { error: 'grant_closed' });
       enforceRateLimit(`watch-poll:${grant.id}`, 240, 60_000);
-      const requested = Number(url.searchParams.get('wait_ms'));
+      // A missing or empty wait_ms is the default, not a 0 ms poll.
+      const raw = url.searchParams.get('wait_ms');
+      const requested = raw === null || raw.trim() === '' ? NaN : Number(raw);
       grants.poll(grant, response, Number.isFinite(requested) && requested >= 0 ? requested : grants.hostPollWaitMs);
       return true;
     }
@@ -311,7 +333,9 @@ export function watchToolRoutes({ grants, readJson, enforceRateLimit, enforceCal
 
     if (!kind && request.method === 'DELETE') {
       // Either end can close the grant: the host when the call ends or the
-      // grant is replaced, the Watch when its call ends.
+      // grant is replaced, the Watch when its call ends. Every DELETE gets the
+      // same 204, so a wrong key or another gateway's grant reads as gone and
+      // doesn't tell whether a grant id is live.
       const gateway = authenticateGateway(request);
       let grant;
       if (gateway) {
@@ -319,9 +343,6 @@ export function watchToolRoutes({ grants, readJson, enforceRateLimit, enforceCal
       } else {
         enforceRateLimit(`watch-call-ip:${client}`, 120, 60_000);
         grant = grants.authorizedWatch(id, bearerToken(request));
-        // An unknown grant is already gone, but a wrong key for a live one
-        // is refused.
-        if (!grant && grants.live(id)) return answered(response, 401, { error: 'unauthorized' });
       }
       if (grant) grants.close(grant, gateway ? 'host' : 'watch');
       response.writeHead(204).end();

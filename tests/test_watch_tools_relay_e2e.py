@@ -165,7 +165,9 @@ def test_a_watch_lookup_goes_through_the_relay_and_ends_with_the_grant(relay, pa
 
     # A call sealed with another key never reaches a tool; the Watch's
     # request just times out at the relay, so only check nothing ran.
-    assert api.revoke_watch_grant({"grant_id": grant["grant_id"]}, profile=None) == {"revoked": True}
+    # The relay is told synchronously here, so the next call meets a closed grant.
+    assert api.revoke_watch_grant({"grant_id": grant["grant_id"]}, profile=None,
+                                  tell_relay=api._close_watch_grant_on_relay) == {"revoked": True}
     status, _ = watch_call(relay, grant, b64u(os.urandom(16)), {"tool": "web_search", "args": {"query": "again"}})
     assert status == 401
     assert len(searches) == 1

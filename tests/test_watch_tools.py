@@ -4,9 +4,12 @@ import base64
 import hashlib
 import importlib.util
 import json
+import logging
 import pathlib
 import threading
 import time
+import types
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi import FastAPI
@@ -128,6 +131,23 @@ def test_oversized_or_malformed_envelopes_are_refused_before_decrypting():
             api.open_watch_tool(keys["call"], "call", GRANT_ID, "R" * 22, sealed)
 
 
+# relay/src/watch-tools.mjs MAX_CALL_CT_CHARS: a sealed 4 KB call, base64url.
+RELAY_MAX_CALL_CT_CHARS = 5483
+
+
+def test_the_largest_call_the_relay_takes_is_one_the_host_opens():
+    keys = api.watch_tool_keys(bytes(range(32)))
+    empty = len(json.dumps({"tool": "web_search", "args": {"query": ""}}, separators=(",", ":")))
+    payload = {"tool": "web_search", "args": {"query": "x" * (api.WATCH_MAX_CALL_BYTES - empty)}}
+    sealed = api.seal_watch_tool(keys["call"], "call", GRANT_ID, "R" * 22, payload)
+    assert len(sealed["ct"]) == RELAY_MAX_CALL_CT_CHARS
+    assert api.open_watch_tool(keys["call"], "call", GRANT_ID, "R" * 22, sealed) == payload
+    # Anything the relay passes on is opened, not refused for its size.
+    with pytest.raises(api.WatchToolError, match="did not verify"):
+        api.open_watch_tool(keys["call"], "call", GRANT_ID, "R" * 22,
+                            {"n": "A" * 16, "ct": "A" * RELAY_MAX_CALL_CT_CHARS})
+
+
 # Vectors for Conduit's Swift side (WatchToolSealTests in hermes-conduit): a
 # fixed root, grant, call id and nonce. Conduit seals VECTOR_CALL_JSON and must
 # get CALL_VECTOR_CT, and opens RESULT_VECTOR_CT to VECTOR_RESULT.
@@ -188,6 +208,41 @@ def test_a_grant_carries_its_keys_to_the_phone_and_only_a_hash_of_the_relay_key_
     [live] = started
     assert live.grant_id == GRANT_ID
     assert live.call_key != base64.urlsafe_b64decode(grant["key"] + "=")
+
+
+def test_a_grant_ends_here_no_later_than_on_the_relay(tmp_path):
+    relay_expiry = datetime.now(timezone.utc) + timedelta(seconds=600)
+    relay = FakeRelay([(201, {"grant_id": GRANT_ID, "expires_at": api._timestamp(relay_expiry)})])
+    started = []
+    grant = api.open_watch_grant({"tools": ["web_search"]}, profile=None, path=write_pairing(tmp_path),
+                                 relay=relay, start=started.append)
+    [live] = started
+    assert 590 < live.expires_at - time.monotonic() <= 600
+    told = datetime.fromisoformat(grant["expires_at"].replace("Z", "+00:00"))
+    assert abs((told - relay_expiry).total_seconds()) < 2
+
+
+def test_the_grant_lifetime_is_capped_only_by_a_relay_time_it_can_use():
+    now = datetime(2026, 10, 7, 11, 0, tzinfo=timezone.utc)
+    assert api._watch_grant_ttl("2026-10-07T11:10:00.000Z", now) == 600
+    assert api._watch_grant_ttl("2026-10-07T12:00:00Z", now) == 1800
+    for value in (None, 7, "", "soon", "2026-10-07T11:10:00", "2026-10-07T10:00:00Z"):
+        assert api._watch_grant_ttl(value, now) == 1800, value
+
+
+def test_a_grant_whose_poller_cant_start_is_closed_on_the_relay(tmp_path):
+    relay = FakeRelay()
+
+    def start(grant):
+        raise RuntimeError("can't start new thread")
+
+    with pytest.raises(api.TokenError) as err:
+        api.open_watch_grant({"tools": ["web_search"]}, profile=None, path=write_pairing(tmp_path),
+                             relay=relay, start=start)
+    assert err.value.status == 503
+    assert [(r["method"], r["url"]) for r in relay.requests][-1] == (
+        "DELETE", f"{RELAY}/v1/watch-tools/grants/{GRANT_ID}")
+    assert api._watch_grants.all() == []
 
 
 @pytest.mark.parametrize("body, status", [
@@ -362,6 +417,43 @@ def test_memory_recall_runs_the_same_code_as_the_dashboard_route(monkeypatch):
     assert queries == ["drinks"]
 
 
+def test_watch_args_keep_text_and_whole_numbers_only():
+    assert api._clean_watch_args({"query": "q", "limit": 3, "flag": True, "ratio": 0.5, 4: "x"}) == {
+        "query": "q", "limit": 3}
+    assert api._clean_watch_args(["query"]) == {}
+
+
+class _Future:
+    def __init__(self, error):
+        self.error = error
+        self.cancelled = False
+
+    def result(self, timeout):
+        raise self.error
+
+    def cancel(self):
+        self.cancelled = True
+        return True
+
+
+def test_a_lookup_that_outlasts_its_wait_is_cancelled(monkeypatch):
+    future = _Future(api.FutureTimeoutError())
+    monkeypatch.setattr(api, "_search_executor", types.SimpleNamespace(submit=lambda *args: future))
+    answer = api.run_watch_tool(make_grant(), {"tool": "web_search", "args": {"query": "q"}})
+    assert answer == {"ok": False, "status": 504, "detail": "Web search timed out"}
+    assert future.cancelled
+
+
+def test_an_unexpected_failure_is_logged_without_its_message(monkeypatch, caplog):
+    future = _Future(RuntimeError("weather in tokyo"))
+    monkeypatch.setattr(api, "_memory_executor", types.SimpleNamespace(submit=lambda *args: future))
+    with caplog.at_level(logging.INFO, logger=api.logger.name):
+        answer = api.run_watch_tool(make_grant(), {"tool": "recall_memory", "args": {"query": "weather in tokyo"}})
+    assert answer == {"ok": False, "status": 500, "detail": "Memory recall failed on the host (RuntimeError)"}
+    assert "RuntimeError" in caplog.text
+    assert "weather in tokyo" not in caplog.text
+
+
 # --- Polling -----------------------------------------------------------------
 
 def test_the_poller_answers_each_call_and_stops_when_the_relay_closes_the_grant():
@@ -376,6 +468,24 @@ def test_the_poller_answers_each_call_and_stops_when_the_relay_closes_the_grant(
     assert relay.requests[0]["url"] == f"{RELAY}/v1/watch-tools/grants/{GRANT_ID}/calls?wait_ms=25000"
     assert grant.closed.is_set()
     assert api._watch_grants.all() == []
+
+
+def test_what_escapes_answering_a_call_is_logged_by_type(monkeypatch, caplog):
+    grant = make_grant()
+    call = sealed_call(grant, {"tool": "web_search", "args": {"query": "q"}})
+    relay = FakeRelay([(200, {"calls": [call]}), (410, {})])
+    submitted = []
+    api.poll_watch_grant(grant, relay=relay, submit=submitted.append)
+
+    def broken(grant, call, relay=None):
+        raise ValueError("weather in tokyo")
+
+    monkeypatch.setattr(api, "answer_watch_call", broken)
+    with caplog.at_level(logging.INFO, logger=api.logger.name):
+        [job] = submitted
+        assert job() is None
+    assert "ValueError" in caplog.text
+    assert "weather in tokyo" not in caplog.text
 
 
 def test_the_poller_closes_the_grant_on_the_relay_when_it_expires_here():
@@ -395,10 +505,56 @@ def test_the_poller_retries_after_a_network_failure(monkeypatch):
     assert len(relay.requests) == 2
 
 
+# --- Revoking ----------------------------------------------------------------
+
+def test_revoke_ends_the_grant_here_at_once_and_tells_the_relay_after():
+    grant = make_grant()
+    api._watch_grants.add(grant)
+    told = []
+    assert api.revoke_watch_grant({"grant_id": GRANT_ID}, profile=None,
+                                  tell_relay=lambda g, relay: told.append(g)) == {"revoked": True}
+    assert grant.closed.is_set()
+    assert api._watch_grants.all() == []
+    assert told == [grant]
+    assert api.revoke_watch_grant({"grant_id": GRANT_ID}, profile=None,
+                                  tell_relay=lambda g, relay: told.append(g)) == {"revoked": False}
+    assert told == [grant]
+
+
+def test_revoke_tells_the_relay_on_a_thread_of_its_own():
+    grant = make_grant()
+    delivered = threading.Event()
+    seen = []
+
+    def relay(url, method, credential, payload, timeout):
+        seen.append((method, url, threading.current_thread().name))
+        delivered.set()
+        return 204, {}
+
+    api._close_watch_grant_on_relay_later(grant, relay)
+    assert delivered.wait(5)
+    assert seen == [("DELETE", f"{RELAY}/v1/watch-tools/grants/{GRANT_ID}", "conduit-watch-revoke")]
+
+
+def test_another_profile_cannot_revoke_a_grant():
+    grant = make_grant()
+    api._watch_grants.add(grant)
+    assert api.revoke_watch_grant({"grant_id": GRANT_ID}, profile="other",
+                                  tell_relay=lambda g, relay: pytest.fail("must not close")) == {"revoked": False}
+    assert not grant.closed.is_set()
+
+
 # --- Routes ------------------------------------------------------------------
 
 @pytest.fixture
-def client(tmp_path, monkeypatch):
+def told_relay(monkeypatch):
+    told = []
+    monkeypatch.setattr(api, "_close_watch_grant_on_relay_later", lambda grant, relay=None: told.append(grant.grant_id))
+    return told
+
+
+@pytest.fixture
+def client(tmp_path, monkeypatch, told_relay):
     monkeypatch.setattr(api, "_pairing_state_path", lambda: write_pairing(tmp_path))
     monkeypatch.setattr(api, "_relay_request", FakeRelay())
     monkeypatch.setattr(api, "_start_watch_poller", lambda grant: None)
@@ -407,7 +563,7 @@ def client(tmp_path, monkeypatch):
     return TestClient(app)
 
 
-def test_grant_route_returns_the_grant_uncached_and_revoke_closes_it(client):
+def test_grant_route_returns_the_grant_uncached_and_revoke_closes_it(client, told_relay):
     response = client.post(f"{BASE}/watch-tools/grant", json={"tools": ["web_search"]})
     assert response.status_code == 200, response.text
     assert response.headers["cache-control"] == "no-store"
@@ -415,6 +571,7 @@ def test_grant_route_returns_the_grant_uncached_and_revoke_closes_it(client):
     assert body["ok"] is True and body["grant_id"] == GRANT_ID and body["tools"] == ["web_search"]
     revoked = client.post(f"{BASE}/watch-tools/revoke", json={"grant_id": GRANT_ID})
     assert revoked.json() == {"ok": True, "revoked": True}
+    assert told_relay == [GRANT_ID]
     assert client.post(f"{BASE}/watch-tools/revoke", json={"grant_id": GRANT_ID}).json() == {"ok": True, "revoked": False}
 
 
