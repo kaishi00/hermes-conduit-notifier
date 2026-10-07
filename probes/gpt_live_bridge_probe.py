@@ -92,10 +92,10 @@ class Microphone(AudioStreamTrack):
         if self.readyState != "live":
             raise MediaStreamError
         if self._start is None:
-            self._start = time.time()
+            self._start = time.monotonic()
         else:
             self._timestamp += FRAME_SAMPLES
-            await asyncio.sleep(max(0.0, self._start + self._timestamp / RATE - time.time()))
+            await asyncio.sleep(max(0.0, self._start + self._timestamp / RATE - time.monotonic()))
         size = FRAME_SAMPLES * 2
         chunk = b""
         if self.start_speaking.is_set() and self.offset < len(self.pcm):
@@ -147,6 +147,12 @@ async def one_try(api, profile: Optional[str], number: int, speech: bytes, secon
     @channel.on("message")
     def _message(text):
         try:
+            _handle(text)
+        except Exception as exc:  # keep the channel's receive loop alive
+            print(f"  handler error: {exc.__class__.__name__}")
+
+    def _handle(text):
+        try:
             event = json.loads(text)
         except (TypeError, ValueError):
             return
@@ -197,6 +203,8 @@ async def one_try(api, profile: Optional[str], number: int, speech: bytes, secon
                     data = bytes(converted.planes[0])[: converted.samples * 2]
                     run.audio += data
                     samples = array.array("h", data)
+                    if sys.byteorder == "big":
+                        samples.byteswap()
                     if samples and max(abs(s) for s in samples) > SPEECH_PEAK:
                         run.mark("first model audio")
 
@@ -233,19 +241,25 @@ async def one_try(api, profile: Optional[str], number: int, speech: bytes, secon
                 await asyncio.sleep(0.3)
         except Exception:
             pass
-        await pc.close()
+        try:
+            await pc.close()
+        except Exception as exc:
+            print(f"  close failed: {exc.__class__.__name__}")
         for reader in readers:
             reader.cancel()
         await asyncio.gather(*readers, return_exceptions=True)
 
     path = out_dir / f"gpt-live-probe-{number}.wav"
     if run.audio:
-        with wave.open(str(path), "wb") as wav:
-            wav.setnchannels(1)
-            wav.setsampwidth(2)
-            wav.setframerate(24_000)
-            wav.writeframes(bytes(run.audio))
-        result["recording"] = str(path)
+        try:
+            with wave.open(str(path), "wb") as wav:
+                wav.setnchannels(1)
+                wav.setsampwidth(2)
+                wav.setframerate(24_000)
+                wav.writeframes(bytes(run.audio))
+            result["recording"] = str(path)
+        except Exception as exc:  # the summary matters more than the file
+            result["recording_error"] = exc.__class__.__name__
     result.update(marks=run.marks, events=sorted(set(run.events)), transcripts=run.transcripts[-12:],
                   audio_seconds=round(len(run.audio) / 48_000, 1))
     result["ok"] = "first model audio" in run.marks and "error" not in result
@@ -268,7 +282,10 @@ async def main() -> int:
         parser.error(f"--out {args.out} is not a folder")
 
     api = load_plugin_api()
-    speech = pcm_from_wav(args.wav) if args.wav else b""
+    try:
+        speech = pcm_from_wav(args.wav) if args.wav else b""
+    except Exception as exc:
+        parser.error(f"--wav {args.wav}: {exc.__class__.__name__}: {str(exc)[:120]}")
     status = await asyncio.to_thread(scoped, api, args.profile, api.gpt_live_status)
     print(f"GPT-Live status: available={status.get('available')} model={status.get('model')} "
           f"source={status.get('source')} reason={status.get('reason')}")
