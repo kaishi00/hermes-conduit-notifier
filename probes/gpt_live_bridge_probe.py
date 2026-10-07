@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import array
 import asyncio
+import collections
 import fractions
 import importlib.util
 import json
@@ -56,7 +57,11 @@ def load_plugin_api():
     if spec is None or spec.loader is None:
         sys.exit(f"plugin_api.py not found at {path}; run the probe from a hermes-conduit-notifier checkout")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        sys.exit(f"Could not load {path} ({exc.__class__.__name__}: {str(exc)[:120]}); "
+                 "run the probe with the Python Hermes itself uses")
     missing = [name for name in ("_profile_scope", "create_gpt_live_session", "gpt_live_status", "TokenError")
                if not hasattr(module, name)]
     if missing:
@@ -165,7 +170,7 @@ async def one_try(api, profile: Optional[str], number: int, speech: bytes, secon
         elif kind in ("input_transcript.added", "output_transcript.added"):
             item = event.get("item") if isinstance(event.get("item"), dict) else {}
             run.mark("first " + kind.split("_")[0] + " transcript")
-            run.transcripts.append(f"{kind.split('_')[0]}: {item.get('text', '')}")
+            run.transcripts.append(f"{kind.split('_')[0]}: {item.get('text') or ''}")
         elif kind == "turn.done":
             turn = event.get("turn") if isinstance(event.get("turn"), dict) else {}
             print(f"  turn.done {turn.get('role')}: {str(turn.get('transcript', ''))[:200]}")
@@ -260,7 +265,7 @@ async def one_try(api, profile: Optional[str], number: int, speech: bytes, secon
             result["recording"] = str(path)
         except Exception as exc:  # the summary matters more than the file
             result["recording_error"] = exc.__class__.__name__
-    result.update(marks=run.marks, events=sorted(set(run.events)), transcripts=run.transcripts[-12:],
+    result.update(marks=run.marks, events=dict(collections.Counter(run.events)), transcripts=run.transcripts[-12:],
                   audio_seconds=round(len(run.audio) / 48_000, 1))
     result["ok"] = "first model audio" in run.marks and "error" not in result
     return result
