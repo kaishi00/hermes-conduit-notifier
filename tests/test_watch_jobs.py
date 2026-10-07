@@ -113,6 +113,7 @@ def fresh(monkeypatch):
     meta = {}
     monkeypatch.setattr(api, "_open_voice_db", lambda needs=None: FakeDB(meta))
     monkeypatch.setattr(api, "_voice_lock", lambda: threading.Lock())
+    monkeypatch.setattr(api, "_watch_job_numbers", api.itertools.count(1))
     return meta
 
 
@@ -252,6 +253,8 @@ def test_a_job_title_mirrors_the_phones():
     ({"instructions": "quick:  "}, "instructions is required"),
     ({"instructions": "do it", "profile": "fam"}, "Jobs on another profile start from the iPhone"),
     ({"instructions": "x" * 3001}, "The task is too long for a Watch job"),
+    # Bytes, as the sealed call counts them.
+    ({"instructions": "結" * 1001}, "The task is too long for a Watch job"),
 ])
 def test_a_job_the_watch_shouldnt_send_is_refused_without_ending_the_grant(args, detail):
     grant = make_jobs()
@@ -272,6 +275,15 @@ def test_a_call_starts_no_more_jobs_than_the_user_allows():
     assert answer["status"] == "not_started"
     assert answer["message"].startswith("This call has started 2 jobs, the most the user allows per call.")
     assert len(server.methods("session.create")) == 2
+
+
+def test_a_renewed_grants_jobs_never_reuse_the_last_grants_ids():
+    first, second = make_jobs(), make_jobs()
+    assert start(first)["job_id"] == "watch-1"
+    assert start(second)["job_id"] == "watch-2"
+    assert api.run_watch_job_call(second, "cancel_job", {"job_id": "watch-1"}) == {
+        "ok": True, "message": "There are no background jobs to cancel."}
+    assert first.jobs.jobs["watch-1"].status != "cancelled"
 
 
 def test_three_jobs_run_at_once():
@@ -405,6 +417,90 @@ def test_more_news_than_one_answer_holds_waits_for_the_next_call():
     for answer in (first, second):
         sealed = api.seal_watch_tool(grant.result_key, "result", GRANT_ID, b64u(bytes(16)), answer)
         assert len(sealed["ct"]) <= api.WATCH_MAX_RESULT_CT_CHARS
+
+
+def test_any_mix_of_long_results_and_approvals_fits_the_relays_bound_sealed():
+    grant = make_jobs()
+    server = grant.jobs.server
+    start(grant, "Job 1")
+    # Quotes and control characters take two to six bytes each as JSON.
+    server.emit("rt-1", "message.complete", {"text": '"\x01' * 3_000, "status": "complete"})
+    for n in (2, 3, 4):
+        start(grant, f"Job {n}")
+        server._sessions[f"rt-{n}"]["transport"].write({
+            "jsonrpc": "2.0", "id": f"srq-{n}", "method": "approval",
+            "params": {"session_id": f"rt-{n}", "request_id": "\x02" * 200, "command": "\x03" * 3_000,
+                       "description": "\x04" * 900, "choices": ["once", "deny"]},
+        })
+    told, answers = [], 0
+    while True:
+        answer = news(grant)
+        answers += 1
+        sealed = api.seal_watch_tool(grant.result_key, "result", GRANT_ID, b64u(bytes(16)), answer)
+        assert len(sealed["ct"]) <= api.WATCH_MAX_RESULT_CT_CHARS
+        told += answer["news"]
+        if not answer["more"]:
+            break
+        assert answers < 5
+    assert sorted(item["job_id"] for item in told) == ["watch-1", "watch-2", "watch-3", "watch-4"]
+    assert all(item["status"] == "needs_approval" for item in told if item["job_id"] != "watch-1")
+    assert all("approval" in item for item in told if item["job_id"] != "watch-1")
+    assert next(item for item in told if item["job_id"] == "watch-1")["result"].endswith("\n[…]")
+
+
+def test_more_counts_approval_requests_not_yet_told(monkeypatch):
+    grant = make_jobs()
+    server = grant.jobs.server
+    for n in (1, 2):
+        start(grant, f"Job {n}")
+        server.ask_approval(f"rt-{n}", request_id=f"appr-{n}", server_id=f"srq-{n}")
+    monkeypatch.setattr(api, "WATCH_JOB_ANSWER_BYTES", 450)
+    first = news(grant)
+    assert (len(first["news"]), first["more"]) == (1, True)
+    second = news(grant)
+    assert (len(second["news"]), second["more"]) == (1, False)
+
+
+def test_an_item_too_large_for_any_answer_still_tells_its_status(monkeypatch):
+    grant = make_jobs()
+    start(grant)
+    grant.jobs.server.emit("rt-1", "message.complete", {"text": "done " * 100, "status": "complete"})
+    monkeypatch.setattr(api, "WATCH_JOB_ANSWER_BYTES", 200)
+    answer = news(grant)
+    assert answer["news"] == [{"job_id": "watch-1", "title": "Check the build logs", "status": "finished"}]
+    assert answer["more"] is False
+
+
+def test_an_approval_request_without_ids_is_still_told_once():
+    grant = make_jobs()
+    start(grant)
+    grant.jobs.server.ask_approval("rt-1", request_id="", server_id="")
+    [item] = news(grant)["news"]
+    assert item["status"] == "needs_approval" and item["approval"]["request_id"] == ""
+    assert news(grant)["news"] == []
+
+
+@pytest.mark.parametrize("wait_s, expected", [(True, 15.0), (2.5, 2.5), (10 ** 400, 15.0), (-1, 15.0), ("3", 15.0)])
+def test_job_news_reads_its_wait_as_a_number_of_seconds(monkeypatch, wait_s, expected):
+    grant = make_jobs()
+    waits = []
+    monkeypatch.setattr(api.time, "monotonic", lambda: 0.0)
+
+    class Changed:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def wait(self, timeout):
+            waits.append(timeout)
+            grant.jobs.ended = True
+
+    start(grant)
+    monkeypatch.setattr(grant.jobs, "changed", Changed())
+    grant.jobs.news({"wait_s": wait_s})
+    assert waits == [min(expected, 1.0)]
 
 
 def test_a_long_ascii_result_is_cut_at_the_phones_length():

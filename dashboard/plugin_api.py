@@ -40,6 +40,7 @@ import base64
 import contextvars
 import hashlib
 import inspect
+import itertools
 import json
 import logging
 import math
@@ -3703,23 +3704,32 @@ WATCH_JOB_GRANT_MAX_CALLS = 120
 # request 25 s.
 WATCH_JOB_NEWS_WAIT_S = 15.0
 WATCH_JOB_RPC_TIMEOUT_S = 20.0
-WATCH_JOB_MAX_INSTRUCTIONS = 3_000
+# UTF-8 bytes, so a task that fits here also fits the sealed call
+# (WATCH_MAX_CALL_BYTES); the Watch sends a longer one through the iPhone.
+WATCH_JOB_MAX_INSTRUCTION_BYTES = 3_000
 # As Conduit's VoiceBackgroundJobSupervisor: maximumResultCharacters and
 # maximumTitleCharacters.
 WATCH_JOB_RESULT_CHARS = 6_000
 WATCH_JOB_TITLE_CHARS = 60
 WATCH_JOB_MAX_OPTION_CHARS = 120
-# UTF-8 bytes of one answer's job news: its sealed form stays inside the
-# relay's bound on an answer (WATCH_MAX_RESULT_CT_CHARS). A result is cut to
-# fit on its own; more news than fits waits for the next call.
-WATCH_JOB_RESULT_BYTES = 12_000
-WATCH_JOB_NEWS_BYTES = 15_000
+# Bytes as JSON. A whole job_news answer, sealed, stays inside the relay's
+# bound on an answer (WATCH_MAX_RESULT_CT_CHARS, about 17,980 bytes before
+# sealing); more news than fits waits for the next call. A job's texts are
+# cut so any one item fits next to every open approval.
+WATCH_JOB_ANSWER_BYTES = 17_000
+WATCH_JOB_RESULT_BYTES = 11_000
+WATCH_JOB_COMMAND_BYTES = 6_000
+WATCH_JOB_DETAIL_BYTES = 1_200
 # What the Watch may answer an approval with: never "session" or "always".
 WATCH_APPROVAL_CHOICES = ("once", "deny")
 # Mirrors Conduit's VoiceBackgroundJobSupervisor.jobPrompt.
 WATCH_JOB_PROMPT = ("[Background job started from a Conduit voice conversation. Nobody is watching this chat live, "
                     "so work on it on your own. When you are done, end your final message with a plain-language "
                     "summary that can be read aloud: what you found or did, with the key details.]\n\n{instructions}")
+# Job ids are unique in this process, not per grant: a renewed grant's jobs
+# never share an id with the last grant's, so a cancel can't hit the wrong
+# job.
+_watch_job_numbers = itertools.count(1)
 
 
 class WatchJobError(Exception):
@@ -3754,15 +3764,31 @@ def watch_job_title(instructions: str) -> str:
 
 def _clip_job_result(text: str) -> str:
     """At most WATCH_JOB_RESULT_CHARS characters and WATCH_JOB_RESULT_BYTES
-    bytes, marked when cut."""
-    if len(text) <= WATCH_JOB_RESULT_CHARS and len(text.encode("utf-8")) <= WATCH_JOB_RESULT_BYTES:
-        return text
-    cut = text[:WATCH_JOB_RESULT_CHARS].encode("utf-8")[:WATCH_JOB_RESULT_BYTES - 8]
-    return cut.decode("utf-8", "ignore") + "\n[…]"
+    bytes as JSON, marked when cut."""
+    if len(text) > WATCH_JOB_RESULT_CHARS:
+        text = text[:WATCH_JOB_RESULT_CHARS] + "\n[…]"
+    return _json_clip(text, WATCH_JOB_RESULT_BYTES)
 
 
 def _json_bytes(value: Any) -> int:
     return len(json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+
+
+def _json_clip(text: str, limit: int) -> str:
+    """``text`` cut so it takes at most ``limit`` bytes as a JSON string
+    (quotes and escapes included), marked when cut."""
+    if _json_bytes(text) <= limit:
+        return text
+    marker = "\n[…]"
+    room = limit - (_json_bytes(marker) - 2)
+    low, high = 0, len(text)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if _json_bytes(text[:middle]) <= room:
+            low = middle
+        else:
+            high = middle - 1
+    return text[:low] + marker
 
 
 def _clean_job_options(value: Any) -> Dict[str, str]:
@@ -3789,9 +3815,10 @@ class _WatchJob:
         # The pending approval: Hermes' request id, its server request's id
         # (for request.cancel), the redacted command and its description.
         self.approval: Optional[Dict[str, str]] = None
-        # Told to the Watch: the outcome, and the approval request last told.
+        # Told to the Watch: the outcome, and the approval request last told
+        # (None before any, as a request's key can be empty).
         self.outcome_told = False
-        self.approval_told = ""
+        self.approval_told: Optional[str] = None
         self.closed = False
 
     @property
@@ -3800,13 +3827,17 @@ class _WatchJob:
 
     def news(self) -> Dict[str, Any]:
         item: Dict[str, Any] = {"job_id": self.job_id, "title": self.title, "status": self.status,
-                                "session_id": self.stored_session_id or self.session_id}
+                                "session_id": (self.stored_session_id or self.session_id)[:128]}
         if self.status == "finished":
             item["result"] = _clip_job_result(self.result)
         if self.error:
-            item["error"] = self.error
+            item["error"] = _json_clip(self.error, WATCH_JOB_DETAIL_BYTES)
         if self.approval and self.status == "needs_approval":
-            item["approval"] = {key: self.approval[key] for key in ("request_id", "command", "description")}
+            item["approval"] = {
+                "request_id": self.approval["request_id"],
+                "command": _json_clip(self.approval["command"], WATCH_JOB_COMMAND_BYTES),
+                "description": _json_clip(self.approval["description"], WATCH_JOB_DETAIL_BYTES),
+            }
         return item
 
     @property
@@ -3993,7 +4024,7 @@ class _WatchJobs:
             return {"ok": False, "status": 400, "detail": "instructions is required"}
         if str(args.get("profile") or "").strip():
             return {"ok": False, "status": 400, "detail": "Jobs on another profile start from the iPhone"}
-        if len(instructions) > WATCH_JOB_MAX_INSTRUCTIONS:
+        if len(instructions.encode("utf-8")) > WATCH_JOB_MAX_INSTRUCTION_BYTES:
             return {"ok": False, "status": 413, "detail": "The task is too long for a Watch job"}
         with self.lock:
             if self.ended:
@@ -4009,7 +4040,7 @@ class _WatchJobs:
                         "message": f"You already have {running} background jobs running. Cancel them before "
                                    "starting another."}
             self.started += 1
-            job = _WatchJob(f"watch-{self.started}", watch_job_title(instructions))
+            job = _WatchJob(f"watch-{next(_watch_job_numbers)}", watch_job_title(instructions))
             self.jobs[job.job_id] = job
         try:
             params: Dict[str, Any] = {"cols": 96, "source": "desktop", "title": job.title, **self.options}
@@ -4126,38 +4157,55 @@ class _WatchJobs:
         """Settled jobs and approval requests not yet told, waiting up to
         ``wait_s`` (at most WATCH_JOB_NEWS_WAIT_S) for some while jobs run."""
         wait = args.get("wait_s")
-        wait = min(float(wait), WATCH_JOB_NEWS_WAIT_S) if isinstance(wait, int) and wait >= 0 else WATCH_JOB_NEWS_WAIT_S
+        if isinstance(wait, (int, float)) and not isinstance(wait, bool) and wait >= 0:
+            wait = float(min(wait, WATCH_JOB_NEWS_WAIT_S))
+        else:
+            wait = WATCH_JOB_NEWS_WAIT_S
         deadline = time.monotonic() + wait
         with self.changed:
             while True:
-                news = self._take_news()
                 running = sum(1 for job in self.jobs.values() if job.active)
+                # Every request still open, so the Watch drops a card
+                # answered elsewhere or timed out.
+                approvals = [{"job_id": job.job_id, "request_id": job.approval["request_id"]}
+                             for job in self.jobs.values() if job.approval and job.status == "needs_approval"]
+                answer = {"ok": True, "news": [], "running": running, "more": True, "approvals": approvals}
+                news = self._take_news(WATCH_JOB_ANSWER_BYTES - _json_bytes(answer))
                 remaining = deadline - time.monotonic()
                 if news or not running or self.ended or self.grant.closed.is_set() or remaining <= 0:
                     break
                 self.changed.wait(min(remaining, 1.0))
-            waiting = sum(1 for job in self.jobs.values() if not job.active and not job.outcome_told)
-            # Every request still open, so the Watch drops a card answered
-            # elsewhere or timed out.
-            approvals = [{"job_id": job.job_id, "request_id": job.approval["request_id"]}
-                         for job in self.jobs.values() if job.approval and job.status == "needs_approval"]
-        return {"ok": True, "news": news, "running": running, "more": waiting > 0, "approvals": approvals}
+            answer["news"] = news
+            answer["more"] = any(self._untold(job) is not False for job in self.jobs.values())
+        return answer
 
-    def _take_news(self) -> list:
-        """Called with the lock held."""
+    @staticmethod
+    def _untold(job: "_WatchJob") -> Any:
+        """False when the Watch has heard all of ``job``'s news; else None
+        for its outcome or the approval request's key."""
+        if not job.active and not job.outcome_told:
+            return None
+        if job.approval and job.status == "needs_approval" and job.approval_told != job.approval_key:
+            return job.approval_key
+        return False
+
+    def _take_news(self, budget: int) -> list:
+        """Untold news within ``budget`` bytes; called with the lock held."""
         news: list = []
         used = 0
         for job in self.jobs.values():
-            if not job.active and not job.outcome_told:
-                told = None
-            elif job.approval and job.status == "needs_approval" and job.approval_told != job.approval_key:
-                told = job.approval_key
-            else:
+            told = self._untold(job)
+            if told is False:
                 continue
             item = job.news()
-            size = _json_bytes(item)
-            if news and used + size > WATCH_JOB_NEWS_BYTES:
-                break  # the rest goes with the next call
+            size = _json_bytes(item) + 1
+            if used + size > budget:
+                if news:
+                    break  # the rest goes with the next call
+                # The clips above make any one item fit; should one not,
+                # its status still goes rather than holding up all news.
+                item = {key: item[key] for key in ("job_id", "title", "status")}
+                size = _json_bytes(item) + 1
             used += size
             news.append(item)
             if told is None:
