@@ -51,9 +51,16 @@ SPEECH_PEAK = 1_000
 
 
 def load_plugin_api():
-    spec = importlib.util.spec_from_file_location("conduit_push_plugin_api_probe", ROOT / "dashboard" / "plugin_api.py")
+    path = ROOT / "dashboard" / "plugin_api.py"
+    spec = importlib.util.spec_from_file_location("conduit_push_plugin_api_probe", path)
+    if spec is None or spec.loader is None:
+        sys.exit(f"plugin_api.py not found at {path}; run the probe from a hermes-conduit-notifier checkout")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    missing = [name for name in ("_profile_scope", "create_gpt_live_session", "gpt_live_status", "TokenError")
+               if not hasattr(module, name)]
+    if missing:
+        sys.exit(f"This plugin checkout lacks {', '.join(missing)}; use the probe's own branch")
     return module
 
 
@@ -146,6 +153,8 @@ async def one_try(api, profile: Optional[str], number: int, speech: bytes, secon
             event = json.loads(text)
         except (TypeError, ValueError):
             return
+        if not isinstance(event, dict):
+            return
         kind = str(event.get("type"))
         run.events.append(kind)
         if kind in ("session.started", "session.updated"):
@@ -210,16 +219,21 @@ async def one_try(api, profile: Optional[str], number: int, speech: bytes, secon
             mic.start_speaking.set()
         await asyncio.sleep(max(0.0, deadline - time.monotonic()))
     except Exception as exc:  # the probe reports, never raises
-        detail = str(exc) if exc.__class__.__name__ == "TokenError" else exc.__class__.__name__
+        # TokenError texts are the plugin's own user-facing messages, never provider text.
+        detail = str(exc)[:300] if isinstance(exc, api.TokenError) else exc.__class__.__name__
         print(f"  failed: {detail}")
         result["error"] = detail
     finally:
-        if channel.readyState == "open":
-            channel.send(json.dumps({"type": "session.close"}))
-            await asyncio.sleep(0.3)
+        try:
+            if channel.readyState == "open":
+                channel.send(json.dumps({"type": "session.close"}))
+                await asyncio.sleep(0.3)
+        except Exception:
+            pass
         await pc.close()
         for reader in readers:
             reader.cancel()
+        await asyncio.gather(*readers, return_exceptions=True)
 
     path = out_dir / f"gpt-live-probe-{number}.wav"
     if run.audio:
@@ -243,6 +257,8 @@ async def main() -> int:
     parser.add_argument("--profile", help="Hermes profile whose voice.gpt_live settings to use")
     parser.add_argument("--out", type=Path, default=Path.cwd(), help="where the model's audio is saved")
     args = parser.parse_args()
+    if args.tries < 1:
+        parser.error("--tries must be at least 1")
 
     api = load_plugin_api()
     speech = pcm_from_wav(args.wav) if args.wav else b""
