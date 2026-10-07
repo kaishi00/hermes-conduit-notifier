@@ -12,10 +12,16 @@ create_gpt_live_session, same Codex sign-in, same URL), asks the model to
 greet first, optionally plays a WAV as the microphone, saves what the model
 says to a WAV, and prints timings. Nothing is sent to Conduit or the relay.
 
-Run it with Hermes' own Python, from this plugin's folder:
+Run it with the Python Hermes itself runs on, the one that can
+`import hermes_cli`, from a checkout of this repo. On a managed Hermes install
+that's the dependency venv its launcher puts on sys.path (named in
+~/.hermes/installs/*/facts.json); it has no pip, so give aiortc its own
+throwaway folder, installed with a pip-capable Python of the same version:
 
-    <hermes venv>/bin/python -m pip install aiortc
-    <hermes venv>/bin/python probes/gpt_live_bridge_probe.py --tries 3 [--wav question.wav]
+    <python with pip> -m pip install --target /tmp/probe-deps aiortc
+    PYTHONPATH=/tmp/probe-deps <hermes python> probes/gpt_live_bridge_probe.py --tries 3 [--wav question.wav]
+
+With a plain Hermes venv, `<hermes venv>/bin/python -m pip install aiortc` does too.
 
 The printed log carries event types, timings and transcripts only; no
 tokens, SDP or account details.
@@ -41,7 +47,7 @@ try:
     from aiortc import RTCPeerConnection, RTCSessionDescription
     from aiortc.mediastreams import AudioStreamTrack, MediaStreamError
 except ImportError:
-    sys.exit("This probe needs aiortc in Hermes' Python: <hermes venv>/bin/python -m pip install aiortc")
+    sys.exit("This probe needs aiortc; see the run notes at the top of this file")
 
 ROOT = Path(__file__).resolve().parents[1]
 RATE = 48_000
