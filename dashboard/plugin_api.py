@@ -23,6 +23,11 @@ token and account id stay on the host (hermes-agent#108940, host half).
 Grok Live: relays Conduit's realtime socket to xAI, adding this host's
 SuperGrok sign-in (or XAI_API_KEY) on the way. The bearer stays on the host.
 
+Watch tools: a Conduit Watch call's lookups while the Watch can't reach the
+iPhone. Each call gets a short-lived grant on the push relay; the plugin
+answers the Watch's sealed calls by polling the relay, so nothing new is
+reachable here from outside.
+
 Routes sit behind the dashboard's own auth, the same as /api/audio/*.
 The API key is never returned, logged, or written anywhere.
 """
@@ -31,7 +36,9 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import base64
 import contextvars
+import hashlib
 import inspect
 import json
 import logging
@@ -46,6 +53,7 @@ import urllib.parse
 import urllib.request
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 import contextlib
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
@@ -3078,6 +3086,465 @@ async def post_e2e(request: Request, response: Response, profile: Optional[str] 
         raise _unexpected("key", exc, feature="Encrypted notifications")
 
 
+# --- Watch tools (wrist-down lookups for a Conduit Watch call) ---------------
+#
+# With the wrist down, a Conduit Watch call can't reach Conduit on the iPhone,
+# but it can reach the push relay over its own internet. For each call Conduit
+# asks this profile for a grant (dashboard auth, as every route here); the
+# plugin opens it on the relay, long-polls the relay for the Watch's calls,
+# runs them with the same code as /web-search and /memory/recall, and posts
+# the answers back. This host opens no inbound route of its own.
+#
+# The Watch gets only the grant: a per-call key (HKDF-SHA256 root for the two
+# ChaCha20-Poly1305 directions, never sent to the relay) and a relay key the
+# relay keeps only as a SHA-256. It allows web_search and recall_memory, for
+# this profile, for 30 minutes and 60 calls. Grants live in memory: a
+# dashboard restart drops them and the Watch falls back to the iPhone.
+# (hermes-conduit designs/apple-watch-voice-direct.md)
+
+WATCH_TOOLS = ("web_search", "recall_memory")
+WATCH_GRANT_TTL_S = 30 * 60
+WATCH_GRANT_MAX_CALLS = 60
+# Live grants per profile: a new one closes the oldest.
+WATCH_GRANTS_PER_PROFILE = 2
+WATCH_GRANT_LIMIT = 10
+WATCH_GRANT_WINDOW_S = 60.0
+WATCH_GRANT_MAX_BODY_BYTES = 1024
+# The relay holds a poll this long when no call waits.
+WATCH_POLL_WAIT_MS = 25_000
+WATCH_POLL_TIMEOUT_S = WATCH_POLL_WAIT_MS / 1000 + 10
+WATCH_RELAY_TIMEOUT_S = 10.0
+WATCH_POLL_BACKOFF_MAX_S = 10.0
+# A sealed call is a tool name and a short query.
+WATCH_MAX_CALL_BYTES = 4 * 1024
+# The relay's bound on a sealed answer (base64url characters).
+WATCH_MAX_RESULT_CT_CHARS = 24_000
+WATCH_WORKERS = 4
+_WATCH_SALT = b"conduit-watch-tools-v1"
+_WATCH_INFO = {
+    "call": b"conduit-watch-tools-v1 call watch-to-host",
+    "result": b"conduit-watch-tools-v1 result host-to-watch",
+}
+_WATCH_AAD_TAG = "conduit-watch-tools/1"
+_WATCH_ID = re.compile(r"^[A-Za-z0-9_-]{22}$")
+_WATCH_NONCE = re.compile(r"^[A-Za-z0-9_-]{16}$")
+_WATCH_CT = re.compile(r"^[A-Za-z0-9_-]{22,}$")
+# The relay keys travel to it: HTTPS only (tests widen this for a local relay).
+_WATCH_RELAY_SCHEMES: Tuple[str, ...] = ("https://",)
+_watch_grant_limiter = _MintLimiter(WATCH_GRANT_LIMIT, WATCH_GRANT_WINDOW_S,
+                                    message="Too many Watch tool grants; try again shortly")
+
+
+class WatchToolError(Exception):
+    """A sealed Watch call or answer that can't be opened or built."""
+
+
+def _b64u(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+
+def _unb64u(value: Any) -> bytes:
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_-]*", value) or len(value) % 4 == 1:
+        raise WatchToolError("malformed base64url")
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
+def watch_tool_keys(secret: bytes) -> Dict[str, bytes]:
+    """The grant's two directional keys, derived from its 32-byte root."""
+    if len(secret) != 32:
+        raise WatchToolError("the grant secret must be 32 bytes")
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+    return {
+        direction: HKDF(algorithm=hashes.SHA256(), length=32, salt=_WATCH_SALT, info=info).derive(secret)
+        for direction, info in _WATCH_INFO.items()
+    }
+
+
+def watch_tool_aad(direction: str, grant_id: str, rid: str) -> bytes:
+    return "\n".join([_WATCH_AAD_TAG, direction, f"grant={grant_id}", f"rid={rid}"]).encode("utf-8")
+
+
+def seal_watch_tool(key: bytes, direction: str, grant_id: str, rid: str, payload: Dict[str, Any],
+                    nonce: Optional[bytes] = None) -> Dict[str, str]:
+    from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+
+    # A fixed nonce is for test vectors only.
+    nonce = nonce if nonce is not None else os.urandom(12)
+    data = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ciphertext = ChaCha20Poly1305(key).encrypt(nonce, data, watch_tool_aad(direction, grant_id, rid))
+    return {"n": _b64u(nonce), "ct": _b64u(ciphertext)}
+
+
+def open_watch_tool(key: bytes, direction: str, grant_id: str, rid: str, sealed: Any,
+                    max_bytes: int = WATCH_MAX_CALL_BYTES) -> Dict[str, Any]:
+    from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+
+    if not isinstance(sealed, dict):
+        raise WatchToolError("the envelope is malformed")
+    nonce_text, ct_text = sealed.get("n"), sealed.get("ct")
+    if not isinstance(nonce_text, str) or not _WATCH_NONCE.match(nonce_text):
+        raise WatchToolError("the envelope is malformed")
+    # Bounded before decoding: base64url is 4 characters per 3 bytes, plus
+    # the 16-byte tag.
+    if not isinstance(ct_text, str) or not _WATCH_CT.match(ct_text) or len(ct_text) > (max_bytes + 16) * 4 // 3 + 4:
+        raise WatchToolError("the envelope is malformed")
+    try:
+        plain = ChaCha20Poly1305(key).decrypt(_unb64u(nonce_text), _unb64u(ct_text), watch_tool_aad(direction, grant_id, rid))
+    except WatchToolError:
+        raise
+    except Exception as error:
+        raise WatchToolError("the envelope did not verify") from error
+    try:
+        value = json.loads(plain.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as error:
+        raise WatchToolError("the payload is not JSON") from error
+    if not isinstance(value, dict):
+        raise WatchToolError("the payload is not an object")
+    return value
+
+
+class _NoRedirectRelay(urllib.request.HTTPRedirectHandler):
+    # The relay credential travels in a header: never to another host.
+    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+
+_relay_opener = urllib.request.build_opener(_NoRedirectRelay)
+
+
+def _relay_request(url: str, method: str, credential: str, payload: Optional[Dict[str, Any]],
+                   timeout: float) -> Tuple[int, Dict[str, Any]]:
+    """One relay request: (status, JSON body). Network failures raise."""
+    data = None if payload is None else json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {credential}",
+               "User-Agent": f"Hermes-Conduit-Notifier/{_plugin_version() or 'unknown'}"}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with _relay_opener.open(request, timeout=timeout) as response:
+            raw = response.read(64 * 1024)
+            status = response.status
+    except urllib.error.HTTPError as error:
+        raw = error.read(4 * 1024)
+        status = error.code
+    try:
+        body = json.loads(raw) if raw else {}
+    except ValueError:
+        body = {}
+    return status, body if isinstance(body, dict) else {}
+
+
+class _WatchGrant:
+    def __init__(self, *, grant_id: str, profile: Optional[str], tools: Tuple[str, ...], secret: bytes,
+                 relay_url: str, credential: str, expires_at: float) -> None:
+        keys = watch_tool_keys(secret)
+        self.grant_id = grant_id
+        self.profile = profile
+        self.limiter_key = _limiter_key(profile)
+        self.tools = tools
+        self.call_key = keys["call"]
+        self.result_key = keys["result"]
+        self.relay_url = relay_url
+        self.credential = credential
+        self.expires_at = expires_at
+        self.created_at = time.monotonic()
+        self.used = 0
+        self.seen: set = set()
+        self.lock = threading.Lock()
+        self.closed = threading.Event()
+
+    def url(self, suffix: str = "") -> str:
+        return f"{self.relay_url}/v1/watch-tools/grants/{self.grant_id}{suffix}"
+
+
+class _WatchGrants:
+    """The live grants of this dashboard process."""
+
+    def __init__(self) -> None:
+        self._grants: Dict[str, _WatchGrant] = {}
+        self._lock = threading.Lock()
+
+    def add(self, grant: _WatchGrant) -> list:
+        """Adds ``grant``; returns the grants it pushed out (oldest first)."""
+        with self._lock:
+            owned = sorted((g for g in self._grants.values() if g.limiter_key == grant.limiter_key),
+                           key=lambda g: g.created_at)
+            evicted = owned[: max(0, len(owned) - WATCH_GRANTS_PER_PROFILE + 1)]
+            for old in evicted:
+                self._grants.pop(old.grant_id, None)
+            self._grants[grant.grant_id] = grant
+            return evicted
+
+    def get(self, grant_id: str) -> Optional[_WatchGrant]:
+        with self._lock:
+            return self._grants.get(grant_id)
+
+    def remove(self, grant: _WatchGrant) -> bool:
+        with self._lock:
+            if self._grants.get(grant.grant_id) is grant:
+                del self._grants[grant.grant_id]
+                return True
+            return False
+
+    def all(self) -> list:
+        with self._lock:
+            return list(self._grants.values())
+
+
+_watch_grants = _WatchGrants()
+_watch_executor = ThreadPoolExecutor(max_workers=WATCH_WORKERS, thread_name_prefix="conduit-watch-tools")
+
+
+def _close_watch_grant(grant: _WatchGrant, *, tell_relay: bool,
+                       relay: Optional[Callable[..., Tuple[int, Dict[str, Any]]]] = None) -> None:
+    """Stops answering for ``grant``; best effort at the relay."""
+    relay = relay or _relay_request
+    already = grant.closed.is_set()
+    grant.closed.set()
+    _watch_grants.remove(grant)
+    if already or not tell_relay:
+        return
+    try:
+        relay(grant.url(), "DELETE", grant.credential, None, WATCH_RELAY_TIMEOUT_S)
+    except Exception as exc:  # noqa: BLE001 — it expires on the relay anyway
+        logger.info("Closing a Watch tool grant on the relay failed: %s", type(exc).__name__)
+
+
+def _scoped_call(profile: Optional[str], fn: Callable[[], Dict[str, Any]]) -> Dict[str, Any]:
+    with _profile_scope(profile):
+        return fn()
+
+
+def _clean_watch_args(value: Any) -> Dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    return {str(k): v for k, v in value.items() if isinstance(k, str) and isinstance(v, (str, int))}
+
+
+def run_watch_tool(grant: _WatchGrant, request: Dict[str, Any]) -> Dict[str, Any]:
+    """One Watch call, answered with the body its dashboard route would give.
+
+    Failures come back as {"ok": false, "status": ..., "detail": ...}, the
+    detail being what the route's HTTPException would carry.
+    """
+    tool = request.get("tool")
+    args = _clean_watch_args(request.get("args"))
+    if tool not in grant.tools:
+        return {"ok": False, "status": 403, "detail": "This tool isn't available to the Watch"}
+    if tool == "web_search":
+        feature, what, executor, timeout = "Web search", "request", _search_executor, SEARCH_TIMEOUT_S
+        job: Callable[[], Dict[str, Any]] = lambda: run_web_search(  # noqa: E731
+            args.get("query"), args.get("limit", 3), limiter_key=grant.limiter_key)
+        timeout_detail = "Web search timed out"
+    else:
+        feature, what, executor, timeout = "Memory", "recall", _memory_executor, MEMORY_TIMEOUT_S + 2.0
+        job = _memory_job(grant.profile, lambda key, limiter_key: run_memory_recall(
+            args.get("query"), key, limiter_key=limiter_key))
+        timeout_detail = "Memory recall timed out"
+    future = executor.submit(_scoped_call, grant.profile, job)
+    try:
+        return {"ok": True, **future.result(timeout=timeout)}
+    except (FutureTimeoutError, TimeoutError):
+        logger.warning("%s for a Conduit Watch timed out after %ss", feature, timeout)
+        return {"ok": False, "status": 504, "detail": timeout_detail}
+    except TokenError as exc:
+        logger.warning("%s for a Conduit Watch failed: %s", feature, exc)
+        return {"ok": False, "status": exc.status, "detail": str(exc)}
+    except HTTPException as exc:
+        return {"ok": False, "status": exc.status_code, "detail": str(exc.detail)}
+    except Exception as exc:  # noqa: BLE001 — named, details stay in the log
+        logger.exception("%s %s for a Conduit Watch failed", feature, what)
+        return {"ok": False, "status": 500, "detail": f"{feature} {what} failed on the host ({type(exc).__name__})"}
+
+
+def answer_watch_call(grant: _WatchGrant, call: Any,
+                      relay: Optional[Callable[..., Tuple[int, Dict[str, Any]]]] = None,
+                      run: Optional[Callable[[_WatchGrant, Dict[str, Any]], Dict[str, Any]]] = None) -> Optional[str]:
+    """Opens, runs and answers one call the relay handed over.
+
+    Returns what happened, for logs and tests: "answered", "gone" (the Watch
+    stopped waiting), or None when the call wasn't the Watch's (it doesn't
+    open with this grant's key, or repeats one) and is dropped.
+    """
+    relay = relay or _relay_request
+    run = run or run_watch_tool
+    rid = call.get("rid") if isinstance(call, dict) else None
+    if not isinstance(rid, str) or not _WATCH_ID.match(rid):
+        return None
+    try:
+        request = open_watch_tool(grant.call_key, "call", grant.grant_id, rid, call)
+    except WatchToolError as exc:
+        logger.warning("Dropped a Watch tool call that wasn't sealed with its grant: %s", exc)
+        return None
+    with grant.lock:
+        if rid in grant.seen:
+            logger.warning("Dropped a repeated Watch tool call")
+            return None
+        grant.seen.add(rid)
+        grant.used += 1
+        exhausted = grant.used > WATCH_GRANT_MAX_CALLS
+    if grant.closed.is_set() or time.monotonic() >= grant.expires_at:
+        answer = {"ok": False, "status": 410, "detail": "This call's Watch lookups have ended"}
+    elif exhausted:
+        answer = {"ok": False, "status": 429, "detail": "This call has used all its Watch lookups"}
+    else:
+        answer = run(grant, request)
+    sealed = seal_watch_tool(grant.result_key, "result", grant.grant_id, rid, answer)
+    if len(sealed["ct"]) > WATCH_MAX_RESULT_CT_CHARS:
+        sealed = seal_watch_tool(grant.result_key, "result", grant.grant_id, rid,
+                                 {"ok": False, "status": 502, "detail": "The answer was too large for the Watch"})
+    try:
+        status, _ = relay(grant.url(f"/results/{rid}"), "POST", grant.credential, sealed, WATCH_RELAY_TIMEOUT_S)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("A Watch tool answer didn't reach the relay: %s", type(exc).__name__)
+        return "gone"
+    return "answered" if status == 200 else "gone"
+
+
+def poll_watch_grant(grant: _WatchGrant,
+                     relay: Optional[Callable[..., Tuple[int, Dict[str, Any]]]] = None,
+                     submit: Optional[Callable[[Callable[[], Any]], Any]] = None,
+                     clock: Callable[[], float] = time.monotonic) -> None:
+    """Answers the grant's calls until it closes, expires or the relay drops it."""
+    relay = relay or _relay_request
+    submit = submit or (lambda fn: _watch_executor.submit(fn))
+    backoff = 1.0
+    tell_relay = True
+    try:
+        while not grant.closed.is_set() and clock() < grant.expires_at:
+            try:
+                status, body = relay(grant.url(f"/calls?wait_ms={WATCH_POLL_WAIT_MS}"), "GET",
+                                     grant.credential, None, WATCH_POLL_TIMEOUT_S)
+            except Exception as exc:  # noqa: BLE001 — retried; the grant expires anyway
+                logger.info("Watch tool poll failed (%s); retrying in %ss", type(exc).__name__, backoff)
+                grant.closed.wait(backoff)
+                backoff = min(backoff * 2, WATCH_POLL_BACKOFF_MAX_S)
+                continue
+            if status in (401, 404, 410):
+                # Closed or expired on the relay, or the pairing is gone.
+                tell_relay = False
+                return
+            if status != 200:
+                grant.closed.wait(backoff)
+                backoff = min(backoff * 2, WATCH_POLL_BACKOFF_MAX_S)
+                continue
+            backoff = 1.0
+            calls = body.get("calls")
+            for call in calls if isinstance(calls, list) else []:
+                submit(lambda call=call: answer_watch_call(grant, call, relay))
+    finally:
+        _close_watch_grant(grant, tell_relay=tell_relay, relay=relay)
+
+
+def _start_watch_poller(grant: _WatchGrant) -> None:
+    threading.Thread(target=poll_watch_grant, args=(grant,), name="conduit-watch-poll", daemon=True).start()
+
+
+def open_watch_grant(body: Any, *, profile: Optional[str], path: Any = None,
+                     relay: Optional[Callable[..., Tuple[int, Dict[str, Any]]]] = None,
+                     start: Optional[Callable[[_WatchGrant], None]] = None) -> Dict[str, Any]:
+    """Opens a grant for one Watch call on this profile's relay pairing."""
+    relay = relay or _relay_request
+    start = start or _start_watch_poller
+    if not isinstance(body, dict):
+        raise TokenError(400, "Expected a JSON object")
+    requested = body.get("tools")
+    if not isinstance(requested, list) or not requested or not all(isinstance(t, str) for t in requested):
+        raise TokenError(400, "tools must be a non-empty list")
+    if any(tool not in WATCH_TOOLS for tool in requested):
+        raise TokenError(400, f"The Watch can only be granted {', '.join(WATCH_TOOLS)}")
+    tools = tuple(tool for tool in WATCH_TOOLS if tool in requested)
+    if not _e2e_crypto_available():
+        raise TokenError(501, "Watch tools need the cryptography package on this host")
+    state = _load_pairing_state(path if path is not None else _pairing_state_path())
+    relay_url = str((state or {}).get("relay_url") or "").rstrip("/")
+    credential = str((state or {}).get("credential") or "")
+    if not state or not state.get("gateway_id") or not credential:
+        raise TokenError(409, "This Hermes profile isn't paired with Conduit notifications")
+    if not relay_url.startswith(_WATCH_RELAY_SCHEMES):
+        raise TokenError(409, "The push relay must use HTTPS")
+    _watch_grant_limiter.acquire(_limiter_key(profile))
+    secret = os.urandom(32)
+    watch_key = _b64u(os.urandom(32))
+    try:
+        status, response = relay(f"{relay_url}/v1/watch-tools/grants", "POST", credential, {
+            "watch_key_sha256": hashlib.sha256(watch_key.encode("ascii")).hexdigest(),
+            "ttl_s": WATCH_GRANT_TTL_S,
+            "max_calls": WATCH_GRANT_MAX_CALLS,
+        }, WATCH_RELAY_TIMEOUT_S)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Opening a Watch tool grant on the relay failed: %s", type(exc).__name__)
+        raise TokenError(502, "Couldn't reach the push relay")
+    if status == 404:
+        raise TokenError(501, "The push relay doesn't support Watch tools yet")
+    grant_id = response.get("grant_id")
+    if status != 201 or not isinstance(grant_id, str) or not _WATCH_ID.match(grant_id):
+        logger.warning("The relay refused a Watch tool grant (%s %s)", status, response.get("error"))
+        raise TokenError(502, "The push relay refused the Watch tool grant")
+    grant = _WatchGrant(grant_id=grant_id, profile=profile, tools=tools, secret=secret, relay_url=relay_url,
+                        credential=credential, expires_at=time.monotonic() + WATCH_GRANT_TTL_S)
+    for old in _watch_grants.add(grant):
+        _watch_executor.submit(_close_watch_grant, old, tell_relay=True, relay=relay)
+    start(grant)
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=WATCH_GRANT_TTL_S)
+    return {
+        "grant_id": grant_id,
+        "relay_url": relay_url,
+        "key": _b64u(secret),
+        "watch_key": watch_key,
+        "expires_at": _timestamp(expires_at),
+        "tools": list(tools),
+        "max_calls": WATCH_GRANT_MAX_CALLS,
+    }
+
+
+def revoke_watch_grant(body: Any, *, profile: Optional[str],
+                       relay: Optional[Callable[..., Tuple[int, Dict[str, Any]]]] = None) -> Dict[str, Any]:
+    if not isinstance(body, dict) or not isinstance(body.get("grant_id"), str):
+        raise TokenError(400, "grant_id is required")
+    grant = _watch_grants.get(body["grant_id"])
+    # Only this profile's own grants.
+    if grant is None or grant.limiter_key != _limiter_key(profile):
+        return {"revoked": False}
+    _close_watch_grant(grant, tell_relay=True, relay=relay)
+    return {"revoked": True}
+
+
+@router.post("/watch-tools/grant")
+async def post_watch_tool_grant(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    # The body carries the grant's keys: never cached on the way back.
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    no_store = {"Cache-Control": "no-store"}
+    body = await _read_json_body(request, WATCH_GRANT_MAX_BODY_BYTES)
+    try:
+        return {"ok": True, **(await _run_scoped(profile, lambda: open_watch_grant(body, profile=profile)))}
+    except TokenError as exc:
+        logger.warning("Watch tool grant failed: %s", exc)
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers=no_store)
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), **no_store}
+        raise
+    except Exception as exc:
+        raise _unexpected("grant", exc, feature="Watch tools")
+
+
+@router.post("/watch-tools/revoke")
+async def post_watch_tool_revoke(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    body = await _read_json_body(request, WATCH_GRANT_MAX_BODY_BYTES)
+    try:
+        return {"ok": True, **(await asyncio.get_running_loop().run_in_executor(
+            _watch_executor, lambda: revoke_watch_grant(body, profile=profile)))}
+    except TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+    except Exception as exc:
+        raise _unexpected("revoke", exc, feature="Watch tools")
+
+
 # --- Capabilities ------------------------------------------------------------
 #
 # Conduit reads this once per connection to tell which of its features this
@@ -3097,6 +3564,7 @@ ROUTE_CAPABILITIES = (
     "voice-summary",
     "session-takeover",
     "e2e-notifications",
+    "watch-tools",
 )
 
 

@@ -7,15 +7,16 @@ import { ApnsClient } from './apns.mjs';
 import { SWEEP_INTERVAL_MS } from './event-ledger.mjs';
 import { limitsFromEnv } from './limits.mjs';
 import { normalizeDashboardId, RelayStore, sanitizeBatchQuestions } from './store.mjs';
+import { WATCH_TOOLS_CAPABILITY, WatchToolGrants, watchToolRoutes } from './watch-tools.mjs';
 
 // Self-reported relay version/capabilities, surfaced via GET /v1/meta so the
 // app can show compatibility state (keep the version in sync with package.json).
 const RELAY_INFO = (() => {
   try {
     const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-    return { version: String(pkg.version || 'unknown'), capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1'] };
+    return { version: String(pkg.version || 'unknown'), capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY] };
   } catch {
-    return { version: 'unknown', capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1'] };
+    return { version: 'unknown', capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY] };
   }
 })();
 
@@ -24,6 +25,7 @@ let store;
 let apns;
 let limits;
 let apnsSend;
+let watchTools;
 
 // APNs hard-caps a notification payload at 4096 bytes; stay under it with
 // headroom for JSON escaping and delivery headers, dropping decision content
@@ -58,6 +60,20 @@ function main() {
   setInterval(() => store.events.sweep(), SWEEP_INTERVAL_MS + 1_000).unref();
   apns = new ApnsClient(config);
   limits = new Map();
+  const watchGrants = new WatchToolGrants({
+    maxGrants: config.watchLimits.maxGrants,
+    maxPerGateway: config.watchLimits.maxGrantsPerGateway,
+    ...config.watchWaits,
+  });
+  setInterval(() => watchGrants.sweep(), 30_000).unref();
+  watchTools = watchToolRoutes({
+    grants: watchGrants,
+    readJson,
+    enforceRateLimit,
+    enforceCallBudget: () => enforceRateLimit('watch-call-global', config.budgets.watchCallsPerMinute, 60_000),
+    authenticateGateway: authenticatedGateway,
+    clientAddress,
+  });
   // Test seam: APNS_MODE=accept makes every send succeed, reject makes it
   // return a 403 failure, and throw makes it RAISE (a dropped connection) —
   // all without touching the network — so the e2e suite can exercise
@@ -520,7 +536,18 @@ async function route(request, response) {
     });
   }
 
+  // Wrist-down tools for a Watch call: a sealed rendezvous between the
+  // Watch and its host (watch-tools.mjs).
+  if (await watchTools(request, response, url)) return;
+
   sendJson(response, 404, { error: 'not_found' });
+}
+
+// The authenticated gateway's ids, or null.
+function authenticatedGateway(request) {
+  const credential = gatewayCredential(request);
+  if (!credential || !store.authenticateGateway(credential.installationId, credential.gatewayId, credential.secret)) return null;
+  return { installationId: credential.installationId, gatewayId: credential.gatewayId };
 }
 
 function authorize(request, id, scope) {
@@ -975,8 +1002,23 @@ function readConfig() {
     // (they bypass ApnsClient entirely) cannot.
     origin: apnsOrigin,
     trustProxy: process.env.TRUST_PROXY === '1',
+    // Test seams: shorter Watch tool waits, so the e2e suite can run the
+    // timeouts. Unset in production.
+    watchWaits: {
+      ...optionalMilliseconds('WATCH_CALL_WAIT_MS', 'callWaitMs'),
+      ...optionalMilliseconds('WATCH_HOST_POLL_WAIT_MS', 'hostPollWaitMs'),
+      ...optionalMilliseconds('WATCH_HOST_GONE_MS', 'hostGoneMs'),
+    },
     ...limitsFromEnv(process.env),
   };
+}
+
+function optionalMilliseconds(name, key) {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === '') return {};
+  const value = Number(raw.trim());
+  if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${name} must be a positive integer.`);
+  return { [key]: value };
 }
 
 export { notificationFor, validateEvent, validateDecision };
