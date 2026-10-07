@@ -364,6 +364,16 @@ def test_only_an_open_grant_of_the_same_profile_with_its_own_jobs_is_carried(tmp
         assert old.jobs.grant is old
 
 
+def test_a_renewal_without_a_cap_or_options_keeps_the_calls(tmp_path):
+    server, relay = FakeHermes(), RenewingRelay()
+    _, old = open_jobs_grant(tmp_path, server, relay, job_options={"reasoning_effort": "low"})
+    renewed = api.open_watch_grant({"tools": ["start_job"], "carry_jobs_from": old.grant_id}, profile="coder",
+                                   path=write_pairing(tmp_path), relay=relay, start=lambda g: None,
+                                   session_api=lambda: server)
+    assert (renewed["jobs_carried_from"], renewed["max_jobs"]) == (old.grant_id, 3)
+    assert (old.jobs.max_jobs, old.jobs.options) == (3, {"reasoning_effort": "low"})
+
+
 @pytest.mark.parametrize("value", [7, "", "not a grant id", ["A" * 22]])
 def test_carry_jobs_from_must_be_a_grant_id(tmp_path, value):
     with pytest.raises(api.TokenError) as err:
@@ -398,6 +408,12 @@ def test_three_jobs_run_at_once():
     assert grant.jobs.started == 3
 
 
+def test_a_grant_carries_only_the_job_tools_asked_for(tmp_path):
+    grant = api.open_watch_grant({"tools": ["list_jobs"]}, profile=None, path=write_pairing(tmp_path),
+                                 relay=FakeRelay(), start=lambda g: None, session_api=FakeHermes)
+    assert grant["tools"] == ["list_jobs", "job_news", "answer_approval"]
+
+
 def test_a_job_hermes_refuses_to_start_is_reported_and_its_session_closed():
     grant = make_jobs()
     server = grant.jobs.server
@@ -408,6 +424,8 @@ def test_a_job_hermes_refuses_to_start_is_reported_and_its_session_closed():
     assert server.methods("session.close") == [{"session_id": "rt-1"}]
     # Told in the answer: no news later.
     assert news(grant)["news"] == []
+    # Nothing ran, so it didn't spend one of the call's jobs.
+    assert grant.jobs.started == 0
 
 
 def test_a_job_cancelled_while_it_starts_never_gets_its_prompt():
@@ -860,6 +878,7 @@ def test_a_slow_start_that_fails_is_told_as_news(monkeypatch):
     release.set()
     [item] = news(grant, wait_s=5)["news"]
     assert (item["job_id"], item["status"], item["error"]) == ("watch-1", "failed", "model not configured")
+    assert grant.jobs.started == 0
 
 
 def test_a_failed_start_whose_answer_is_lost_is_told_as_news():
@@ -909,6 +928,18 @@ def test_a_new_approval_under_the_same_id_is_news_again():
     assert grant.jobs.jobs["watch-1"].status == "running"
     server.ask_approval("rt-1", request_id="", server_id="srq-1")
     assert [item["status"] for item in news(grant)["news"]] == ["needs_approval"]
+
+
+def test_a_numeric_server_request_id_is_withdrawn_too():
+    grant = make_jobs()
+    server = grant.jobs.server
+    start(grant)
+    server.ask_approval("rt-1", request_id="appr-1", server_id=5)
+    assert grant.jobs.jobs["watch-1"].status == "needs_approval"
+    server.emit("rt-1", "request.cancel", {"id": 6})
+    assert grant.jobs.jobs["watch-1"].status == "needs_approval"
+    server.emit("rt-1", "request.cancel", {"id": 5})
+    assert grant.jobs.jobs["watch-1"].status == "running"
 
 
 def test_a_grant_without_jobs_refuses_job_calls():

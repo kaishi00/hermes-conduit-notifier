@@ -650,22 +650,25 @@ seals the answers back. This host opens no inbound route of its own.
 
 - `tools` names what the call may run: `web_search` and `recall_memory`
   (the same code as the voice lookup routes), and with plugin 0.7
-  `start_job`, `list_jobs` and `cancel_job`. A grant lasts at most 30
+  `start_job`, `list_jobs` and `cancel_job` (granted with the Watch app's
+  own `job_news` and `answer_approval`). A grant lasts at most 30
   minutes, holds one profile, and ends when the call does.
 - **Jobs** start an ordinary Hermes chat on the grant's profile through
   Hermes' own session API in the dashboard process, filed under Voice Jobs in
   Conduit like a job started from the phone; `job_options` carries the
   phone's voice-job model, provider and reasoning effort. `max_jobs` is the
-  user's per-call limit (default 5, at most 20, 0 for none); three run at
-  once. A grant with jobs allows 120 calls, since the Watch also asks for job
-  news (finished jobs and approval requests) while they run. A start Hermes
-  takes longer than 18 s to accept is answered `accepted`, inside the relay's
-  wait, and a start that then fails comes as job news. News whose answer
-  doesn't reach the relay is sent again with the next call. A renewal names
-  the call's previous grant in `carry_jobs_from`: while that grant is open
-  and on the same profile, its jobs move to the new one
-  (`jobs_carried_from`), so a call keeps hearing about, listing and
-  cancelling them past a renewal, and the job limit counts per call.
+  user's per-call limit (default 5, at most 20, 0 for none), counting the
+  jobs that started; three run at once. A grant with jobs allows 120 calls,
+  since the Watch also asks for job news (finished jobs and approval
+  requests) while they run. A start Hermes takes longer than 18 s to accept
+  is answered `accepted`, inside the relay's wait, and a start that then
+  fails comes as job news. News whose answer doesn't reach the relay is
+  sent again with the next call. A renewal names the call's previous grant
+  in `carry_jobs_from`: while that grant is open and on the same profile, its
+  jobs move to the new one (`jobs_carried_from`), so a call keeps hearing
+  about, listing and cancelling them past a renewal, and the job limit
+  counts per call. A renewal that leaves out `max_jobs` or `job_options`
+  keeps the call's.
 - **Approvals** follow the profile's own Hermes approval settings. A command
   that needs one shows on the Watch, which can only approve it once or deny
   it, never for the session or always. Hermes denies it after its own

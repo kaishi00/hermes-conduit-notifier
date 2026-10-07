@@ -3576,7 +3576,8 @@ def open_watch_grant(body: Any, *, profile: Optional[str], path: Any = None,
     server = session_api() if max_jobs > 0 and any(tool in WATCH_JOB_TOOLS for tool in requested) else None
     tools = tuple(tool for tool in WATCH_TOOLS if tool in requested)
     if server is not None:
-        tools += WATCH_JOB_TOOLS + WATCH_JOB_CALLS
+        # The job tools asked for, and the Watch app's own calls with them.
+        tools += tuple(tool for tool in WATCH_JOB_TOOLS if tool in requested) + WATCH_JOB_CALLS
     if not tools:
         raise TokenError(501, "This host can't run Hermes jobs for the Watch")
     max_calls = WATCH_JOB_GRANT_MAX_CALLS if server is not None else WATCH_GRANT_MAX_CALLS
@@ -3619,7 +3620,11 @@ def open_watch_grant(body: Any, *, profile: Optional[str], path: Any = None,
     if server is not None:
         options = _clean_job_options(body.get("job_options"))
         if carry_from is not None:
-            carried_from = _carry_watch_jobs(carry_from, grant, max_jobs=max_jobs, options=options)
+            # A renewal that leaves out the cap or the options keeps the call's.
+            carried_from = _carry_watch_jobs(
+                carry_from, grant,
+                max_jobs=max_jobs if body.get("max_jobs") is not None else None,
+                options=options if body.get("job_options") is not None else None)
         if carried_from is None:
             grant.jobs = _WatchJobs(grant, max_jobs=max_jobs, options=options, server=server)
     for old in _watch_grants.add(grant):
@@ -3644,18 +3649,23 @@ def open_watch_grant(body: Any, *, profile: Optional[str], path: Any = None,
         "expires_at": _timestamp(expires_at),
         "tools": list(tools),
         "max_calls": max_calls,
-        "max_jobs": max_jobs if server is not None else 0,
+        "max_jobs": grant.jobs.max_jobs if grant.jobs is not None else 0,
         **({"jobs_carried_from": carried_from.grant_id} if carried_from is not None else {}),
     }
 
 
-def _carry_watch_jobs(old_id: str, grant: _WatchGrant, *, max_jobs: int,
-                      options: Dict[str, str]) -> Optional[_WatchGrant]:
+def _carry_watch_jobs(old_id: str, grant: _WatchGrant, *, max_jobs: Optional[int],
+                      options: Optional[Dict[str, str]]) -> Optional[_WatchGrant]:
     """Moves the jobs of a call's previous grant ``old_id`` to its renewal
     ``grant``: the Watch keeps hearing their news and can list, cancel and
     approve them through the new grant, and the job cap counts across the
-    call. Only an open grant of the same profile whose jobs are still its
-    own; returns it, or None when nothing moved."""
+    call (``max_jobs`` and ``options`` replace the call's when given). Only
+    an open grant of the same profile whose jobs are still its own; returns
+    it, or None when nothing moved.
+
+    The old grant keeps answering for the jobs until it closes: the Watch
+    may have sent a call through it before it heard of the renewal, and it
+    closes the old grant once it has."""
     old = _watch_grants.get(old_id)
     if old is None or old is grant or old.profile != grant.profile:
         return None
@@ -3669,8 +3679,10 @@ def _carry_watch_jobs(old_id: str, grant: _WatchGrant, *, max_jobs: int,
             if jobs.ended:
                 return None
             jobs.grant = grant
-            jobs.max_jobs = max_jobs
-            jobs.options = options
+            if max_jobs is not None:
+                jobs.max_jobs = max_jobs
+            if options is not None:
+                jobs.options = options
             jobs.changed.notify_all()
     grant.jobs = jobs
     return old
@@ -4046,8 +4058,10 @@ class _WatchJobs:
                 return
             if kind == "request.cancel":
                 # Answered elsewhere (the app, the phone), timed out, or the
-                # turn ended.
-                if job.approval and payload.get("id") == job.approval["server_request_id"]:
+                # turn ended. The id is compared as a string, as it was
+                # stored: JSON-RPC ids can be numbers.
+                server_id = job.approval["server_request_id"] if job.approval else ""
+                if server_id and str(payload.get("id") or "") == server_id:
                     self._approval_gone(job)
             elif kind == "approval.cancelled":
                 ids = payload.get("request_ids")
@@ -4149,6 +4163,9 @@ class _WatchJobs:
                         job.status, job.error = "failed", type(exc).__name__
             with self.changed:
                 job.answer_pending = False
+                if answer.get("status") == "not_started":
+                    # Nothing ran: it doesn't spend one of the call's jobs.
+                    self.started -= 1
                 if not job.answered_late:
                     job.start_answer = answer
                     if answer.get("status") == "not_started":
