@@ -641,14 +641,21 @@ TOKEN = {
 
 
 def test_live_token_is_granted_only_where_the_profile_has_a_gemini_key(tmp_path):
+    keys_read = []
+
     def grant(tools, key):
+        def live_key():
+            keys_read.append(tools)
+            return key
         return api.open_watch_grant({"tools": tools}, profile=None, path=write_pairing(tmp_path), relay=FakeRelay(),
-                                    start=lambda g: None, live_key=lambda: key)
+                                    start=lambda g: None, live_key=live_key)
 
     assert grant(["web_search", "live_token"], "AIza-key")["tools"] == ["web_search", "live_token"]
     assert grant(["web_search", "live_token"], None)["tools"] == ["web_search"]
     # Not asked for: not granted, and no key read.
+    keys_read.clear()
     assert grant(["web_search"], "AIza-key")["tools"] == ["web_search"]
+    assert keys_read == []
     with pytest.raises(api.TokenError) as err:
         grant(["live_token"], None)
     assert err.value.status == 503
@@ -710,6 +717,9 @@ def test_a_grant_without_live_token_refuses_to_mint(monkeypatch):
     call = sealed_call(grant, {"tool": "live_token"})
     api.answer_watch_call(grant, call, relay=relay)
     assert opened_answer(grant, relay, call["rid"])["status"] == 403
+    # Its own check too, not only the dispatcher's.
+    assert api.run_watch_live_token(grant)["status"] == 403
+    assert grant.live_tokens == 0
 
 
 def test_capabilities_name_watch_live_token():

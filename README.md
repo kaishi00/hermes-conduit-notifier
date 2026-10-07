@@ -675,8 +675,9 @@ seals the answers back. This host opens no inbound route of its own.
   and answered with the same fields. It's for a call whose Gemini session
   broke and can't be resumed while the iPhone is out of reach. It travels
   sealed like every answer, so the relay never sees it, and the Gemini key
-  never leaves this host. A grant mints at most 6; a mint that fails, or
-  whose answer never reaches the Watch, doesn't count. A request for
+  never leaves this host. A grant mints at most 6, and a renewal, which only
+  the iPhone can ask for, counts its own; a mint that fails, or whose answer
+  never reaches the relay, doesn't count. A request for
   `live_token` alone on a profile without a key is refused (503).
 - **Approvals** follow the profile's own Hermes approval settings. A command
   that needs one shows on the Watch, which can only approve it once or deny
