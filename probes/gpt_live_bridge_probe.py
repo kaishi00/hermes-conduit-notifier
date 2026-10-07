@@ -85,7 +85,6 @@ class Microphone(AudioStreamTrack):
         self.pcm = pcm
         self.offset = 0
         self.start_speaking = asyncio.Event()
-        self.done_speaking = asyncio.Event()
         self._start: Optional[float] = None
         self._timestamp = 0
 
@@ -102,8 +101,6 @@ class Microphone(AudioStreamTrack):
         if self.start_speaking.is_set() and self.offset < len(self.pcm):
             chunk = self.pcm[self.offset:self.offset + size]
             self.offset += size
-            if self.offset >= len(self.pcm):
-                self.done_speaking.set()
         frame = av.AudioFrame(format="s16", layout="mono", samples=FRAME_SAMPLES)
         frame.planes[0].update(chunk.ljust(size, b"\0"))
         frame.pts = self._timestamp
@@ -169,7 +166,10 @@ async def one_try(api, profile: Optional[str], number: int, speech: bytes, secon
             if turn.get("role") == "assistant":
                 greeted.set()
         elif kind in ("error", "session.closed"):
-            print(f"  {kind}: {json.dumps(event)[:300]}")
+            # Only the code and message, never the whole provider payload.
+            error = event.get("error") if isinstance(event.get("error"), dict) else {}
+            message = error.get("message") or event.get("message") or event.get("reason") or ""
+            print(f"  {kind}: code={error.get('code')} {str(message)[:200]}")
 
     @pc.on("connectionstatechange")
     def _state():
@@ -189,6 +189,9 @@ async def one_try(api, profile: Optional[str], number: int, speech: bytes, secon
                 try:
                     frame = await track.recv()
                 except MediaStreamError:
+                    return
+                except Exception as exc:
+                    print(f"  audio reader stopped: {exc.__class__.__name__}")
                     return
                 for converted in resampler.resample(frame):
                     data = bytes(converted.planes[0])[: converted.samples * 2]
@@ -259,6 +262,10 @@ async def main() -> int:
     args = parser.parse_args()
     if args.tries < 1:
         parser.error("--tries must be at least 1")
+    if args.seconds <= 0:
+        parser.error("--seconds must be positive")
+    if not args.out.is_dir():
+        parser.error(f"--out {args.out} is not a folder")
 
     api = load_plugin_api()
     speech = pcm_from_wav(args.wav) if args.wav else b""
@@ -270,6 +277,8 @@ async def main() -> int:
 
     results = []
     for number in range(1, args.tries + 1):
+        if number > 1:
+            await asyncio.sleep(3)  # the plugin's rate limiter is bypassed here; stay gentle
         results.append(await one_try(api, args.profile, number, speech, args.seconds, args.out))
     print("\nSummary (paste this back into the thread):")
     print(json.dumps({"aiortc": __import__("aiortc").__version__, "results": results}, indent=2))
