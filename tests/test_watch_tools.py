@@ -230,8 +230,10 @@ def test_the_grant_lifetime_is_capped_only_by_a_relay_time_it_can_use():
         assert api._watch_grant_ttl(value, now) == 1800, value
 
 
-def test_a_grant_whose_poller_cant_start_is_closed_on_the_relay(tmp_path):
+def test_a_grant_whose_poller_cant_start_is_closed_on_the_relay(tmp_path, monkeypatch):
     relay = FakeRelay()
+    told = []
+    monkeypatch.setattr(api, "_close_watch_grant_on_relay_later", lambda grant, relay=None: told.append(grant))
 
     def start(grant):
         raise RuntimeError("can't start new thread")
@@ -240,9 +242,17 @@ def test_a_grant_whose_poller_cant_start_is_closed_on_the_relay(tmp_path):
         api.open_watch_grant({"tools": ["web_search"]}, profile=None, path=write_pairing(tmp_path),
                              relay=relay, start=start)
     assert err.value.status == 503
-    assert [(r["method"], r["url"]) for r in relay.requests][-1] == (
-        "DELETE", f"{RELAY}/v1/watch-tools/grants/{GRANT_ID}")
+    [grant] = told
+    assert grant.grant_id == GRANT_ID and grant.closed.is_set()
     assert api._watch_grants.all() == []
+
+
+def test_a_full_relay_reads_as_at_capacity_not_broken(tmp_path):
+    relay = FakeRelay([(503, {"error": "watch_grant_capacity"})])
+    with pytest.raises(api.TokenError) as err:
+        api.open_watch_grant({"tools": ["web_search"]}, profile=None, path=write_pairing(tmp_path), relay=relay,
+                             start=lambda g: None)
+    assert (err.value.status, str(err.value)) == (503, "The push relay is at capacity for Watch tools")
 
 
 @pytest.mark.parametrize("body, status", [
@@ -444,13 +454,21 @@ def test_a_lookup_that_outlasts_its_wait_is_cancelled(monkeypatch):
     assert future.cancelled
 
 
-def test_an_unexpected_failure_is_logged_without_its_message(monkeypatch, caplog):
-    future = _Future(RuntimeError("weather in tokyo"))
+def test_an_unexpected_failure_is_logged_without_its_message_at_any_level(monkeypatch, caplog):
+    def fail():
+        raise RuntimeError("weather in tokyo")
+
+    try:
+        fail()
+    except RuntimeError as error:
+        future = _Future(error)
     monkeypatch.setattr(api, "_memory_executor", types.SimpleNamespace(submit=lambda *args: future))
-    with caplog.at_level(logging.INFO, logger=api.logger.name):
+    with caplog.at_level(logging.DEBUG, logger=api.logger.name):
         answer = api.run_watch_tool(make_grant(), {"tool": "recall_memory", "args": {"query": "weather in tokyo"}})
     assert answer == {"ok": False, "status": 500, "detail": "Memory recall failed on the host (RuntimeError)"}
     assert "RuntimeError" in caplog.text
+    # Debug carries where it failed, still not what it said.
+    assert "in fail" in caplog.text
     assert "weather in tokyo" not in caplog.text
 
 
@@ -481,7 +499,7 @@ def test_what_escapes_answering_a_call_is_logged_by_type(monkeypatch, caplog):
         raise ValueError("weather in tokyo")
 
     monkeypatch.setattr(api, "answer_watch_call", broken)
-    with caplog.at_level(logging.INFO, logger=api.logger.name):
+    with caplog.at_level(logging.DEBUG, logger=api.logger.name):
         [job] = submitted
         assert job() is None
     assert "ValueError" in caplog.text
@@ -534,6 +552,30 @@ def test_revoke_tells_the_relay_on_a_thread_of_its_own():
     api._close_watch_grant_on_relay_later(grant, relay)
     assert delivered.wait(5)
     assert seen == [("DELETE", f"{RELAY}/v1/watch-tools/grants/{GRANT_ID}", "conduit-watch-revoke")]
+
+
+def test_without_a_thread_to_spare_a_lookup_worker_tells_the_relay(monkeypatch, caplog):
+    grant = make_grant()
+    relay = FakeRelay()
+
+    def no_thread(self):
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(api.threading.Thread, "start", no_thread)
+    monkeypatch.setattr(api, "_watch_executor", types.SimpleNamespace(submit=lambda fn, *args: fn(*args)))
+    with caplog.at_level(logging.INFO, logger=api.logger.name):
+        api._close_watch_grant_on_relay_later(grant, relay)
+    assert [(r["method"], r["url"]) for r in relay.requests] == [("DELETE", f"{RELAY}/v1/watch-tools/grants/{GRANT_ID}")]
+    assert "queueing it" in caplog.text
+
+    def no_worker(fn, *args):
+        raise RuntimeError("cannot schedule new futures after shutdown")
+
+    monkeypatch.setattr(api, "_watch_executor", types.SimpleNamespace(submit=no_worker))
+    with caplog.at_level(logging.INFO, logger=api.logger.name):
+        api._close_watch_grant_on_relay_later(grant, relay)
+    assert len(relay.requests) == 1
+    assert "it ends there at its expiry" in caplog.text
 
 
 def test_another_profile_cannot_revoke_a_grant():

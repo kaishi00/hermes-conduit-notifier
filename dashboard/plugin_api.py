@@ -48,6 +48,7 @@ import queue
 import re
 import threading
 import time
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -3318,6 +3319,17 @@ def _close_watch_grant_on_relay(grant: _WatchGrant,
         logger.info("Closing a Watch tool grant on the relay failed: %s", type(exc).__name__)
 
 
+def _log_watch_failure(message: str, exc: BaseException) -> None:
+    """Logs a Watch tool failure by its type. The message can carry the
+    query, so it isn't logged at any level; debug adds where it failed
+    (file, line and function of each frame, no source text)."""
+    logger.warning("%s: %s", message, type(exc).__name__)
+    if logger.isEnabledFor(logging.DEBUG):
+        frames = "".join(f"  {frame.filename}:{frame.lineno} in {frame.name}\n"
+                         for frame in traceback.extract_tb(exc.__traceback__))
+        logger.debug("%s: %s at\n%s", message, type(exc).__name__, frames)
+
+
 def _close_watch_grant(grant: _WatchGrant, *, tell_relay: bool,
                        relay: Optional[Callable[..., Tuple[int, Dict[str, Any]]]] = None) -> None:
     """Stops answering for ``grant``; best effort at the relay."""
@@ -3330,7 +3342,7 @@ def _scoped_call(profile: Optional[str], fn: Callable[[], Dict[str, Any]]) -> Di
         return fn()
 
 
-def _clean_watch_args(value: Any) -> Dict[str, str]:
+def _clean_watch_args(value: Any) -> Dict[str, Any]:
     if not isinstance(value, dict):
         return {}
     return {k: v for k, v in value.items()
@@ -3372,8 +3384,7 @@ def run_watch_tool(grant: _WatchGrant, request: Dict[str, Any]) -> Dict[str, Any
     except HTTPException as exc:
         return {"ok": False, "status": exc.status_code, "detail": str(exc.detail)}
     except Exception as exc:  # noqa: BLE001 — named; the message can carry the query
-        logger.warning("%s %s for a Conduit Watch failed: %s", feature, what, type(exc).__name__)
-        logger.debug("%s %s for a Conduit Watch failed", feature, what, exc_info=True)
+        _log_watch_failure(f"{feature} {what} for a Conduit Watch failed", exc)
         return {"ok": False, "status": 500, "detail": f"{feature} {what} failed on the host ({type(exc).__name__})"}
 
 
@@ -3427,8 +3438,7 @@ def _answer_watch_call_logged(grant: _WatchGrant, call: Any,
     try:
         return answer_watch_call(grant, call, relay)
     except Exception as exc:  # noqa: BLE001 — the Watch's own wait ends the call
-        logger.warning("Answering a Watch tool call failed: %s", type(exc).__name__)
-        logger.debug("Answering a Watch tool call failed", exc_info=True)
+        _log_watch_failure("Answering a Watch tool call failed", exc)
         return None
 
 
@@ -3527,6 +3537,10 @@ def open_watch_grant(body: Any, *, profile: Optional[str], path: Any = None,
         raise TokenError(502, "Couldn't reach the push relay")
     if status == 404:
         raise TokenError(501, "The push relay doesn't support Watch tools yet")
+    if status == 503 and response.get("error") == "watch_grant_capacity":
+        # A full relay, not a broken one: the call's lookups go through the
+        # iPhone.
+        raise TokenError(503, "The push relay is at capacity for Watch tools")
     grant_id = response.get("grant_id")
     if status != 201 or not isinstance(grant_id, str) or not _WATCH_ID.match(grant_id):
         logger.warning("The relay refused a Watch tool grant (%s %s)", status, response.get("error"))
@@ -3543,7 +3557,8 @@ def open_watch_grant(body: Any, *, profile: Optional[str], path: Any = None,
         logger.warning("Starting the Watch tool poller failed: %s", type(exc).__name__)
         # Nothing would answer its calls: the Watch learns at once instead
         # of meeting host_offline for half an hour.
-        _close_watch_grant(grant, tell_relay=True, relay=relay)
+        if _close_watch_grant_here(grant):
+            _close_watch_grant_on_relay_later(grant, relay)
         raise TokenError(503, "This host couldn't start answering Watch lookups")
     expires_at = now + timedelta(seconds=ttl)
     return {
@@ -3560,12 +3575,18 @@ def open_watch_grant(body: Any, *, profile: Optional[str], path: Any = None,
 def _close_watch_grant_on_relay_later(grant: _WatchGrant,
                                       relay: Optional[Callable[..., Tuple[int, Dict[str, Any]]]] = None) -> None:
     # Its own short-lived thread: a slow relay doesn't hold a worker that
-    # answers lookups.
+    # answers lookups. Without a thread to spare, a lookup worker does it.
     try:
         threading.Thread(target=_close_watch_grant_on_relay, args=(grant, relay),
                          name="conduit-watch-revoke", daemon=True).start()
-    except RuntimeError as exc:  # it expires on the relay anyway
-        logger.info("Closing a Watch tool grant on the relay failed: %s", type(exc).__name__)
+        return
+    except RuntimeError as exc:
+        logger.warning("Couldn't start closing a Watch tool grant on the relay (%s); queueing it", type(exc).__name__)
+    try:
+        _watch_executor.submit(_close_watch_grant_on_relay, grant, relay)
+    except RuntimeError as exc:
+        logger.warning("Couldn't close a Watch tool grant on the relay (%s); it ends there at its expiry",
+                       type(exc).__name__)
 
 
 def revoke_watch_grant(body: Any, *, profile: Optional[str],
