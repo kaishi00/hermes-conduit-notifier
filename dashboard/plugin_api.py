@@ -3308,6 +3308,10 @@ class _WatchGrants:
 
 _watch_grants = _WatchGrants()
 _watch_executor = ThreadPoolExecutor(max_workers=WATCH_WORKERS, thread_name_prefix="conduit-watch-tools")
+# While a call runs: where it registers what to undo if its answer never
+# reaches the Watch (answer_watch_call).
+_watch_undelivered: contextvars.ContextVar[Optional[list]] = contextvars.ContextVar(
+    "conduit_watch_undelivered", default=None)
 
 
 def _close_watch_grant_here(grant: _WatchGrant) -> bool:
@@ -3427,22 +3431,43 @@ def answer_watch_call(grant: _WatchGrant, call: Any,
         grant.seen.add(rid)
         grant.used += 1
         exhausted = grant.used > grant.max_calls
+    # What the answer marked as told (job news) is undone if it never
+    # reaches the Watch, so the next job_news carries it again.
+    undo: list = []
     if grant.closed.is_set() or time.monotonic() >= grant.expires_at:
         answer = {"ok": False, "status": 410, "detail": "This call's Watch lookups have ended"}
     elif exhausted:
         answer = {"ok": False, "status": 429, "detail": "This call has used all its Watch lookups"}
     else:
-        answer = run(grant, request)
+        token = _watch_undelivered.set(undo)
+        try:
+            answer = run(grant, request)
+        finally:
+            _watch_undelivered.reset(token)
     sealed = seal_watch_tool(grant.result_key, "result", grant.grant_id, rid, answer)
     if len(sealed["ct"]) > WATCH_MAX_RESULT_CT_CHARS:
+        _undo_watch_answer(undo)
+        undo = []
         sealed = seal_watch_tool(grant.result_key, "result", grant.grant_id, rid,
                                  {"ok": False, "status": 502, "detail": "The answer was too large for the Watch"})
     try:
         status, _ = relay(grant.url(f"/results/{rid}"), "POST", grant.credential, sealed, WATCH_RELAY_TIMEOUT_S)
     except Exception as exc:  # noqa: BLE001
         logger.warning("A Watch tool answer didn't reach the relay: %s", type(exc).__name__)
+        _undo_watch_answer(undo)
         return "gone"
-    return "answered" if status == 200 else "gone"
+    if status != 200:
+        _undo_watch_answer(undo)
+        return "gone"
+    return "answered"
+
+
+def _undo_watch_answer(undo: list) -> None:
+    for step in undo:
+        try:
+            step()
+        except Exception as exc:  # noqa: BLE001 — best effort, logged by type
+            logger.warning("Undoing an undelivered Watch answer failed: %s", type(exc).__name__)
 
 
 def _answer_watch_call_logged(grant: _WatchGrant, call: Any,
@@ -3704,7 +3729,11 @@ WATCH_JOB_GRANT_MAX_CALLS = 120
 # request 25 s.
 WATCH_JOB_NEWS_WAIT_S = 15.0
 WATCH_JOB_RPC_TIMEOUT_S = 20.0
-# UTF-8 bytes, so a task that fits here also fits the sealed call
+# A start_job is answered within this, inside the relay's 25 s wait; a
+# start Hermes is still taking is answered "accepted" and goes on, its
+# outcome then told as news (as the iPhone's broker answers within 8 s).
+WATCH_JOB_START_ANSWER_S = 18.0
+# Bytes as JSON, so a task that fits here also fits the sealed call
 # (WATCH_MAX_CALL_BYTES); the Watch sends a longer one through the iPhone.
 WATCH_JOB_MAX_INSTRUCTION_BYTES = 3_000
 # As Conduit's VoiceBackgroundJobSupervisor: maximumResultCharacters and
@@ -3764,23 +3793,24 @@ def watch_job_title(instructions: str) -> str:
 
 def _clip_job_result(text: str) -> str:
     """At most WATCH_JOB_RESULT_CHARS characters and WATCH_JOB_RESULT_BYTES
-    bytes as JSON, marked when cut."""
-    if len(text) > WATCH_JOB_RESULT_CHARS:
-        text = text[:WATCH_JOB_RESULT_CHARS] + "\n[…]"
-    return _json_clip(text, WATCH_JOB_RESULT_BYTES)
+    bytes as JSON, marked once when cut."""
+    return _json_clip(text[:WATCH_JOB_RESULT_CHARS], WATCH_JOB_RESULT_BYTES,
+                      cut=len(text) > WATCH_JOB_RESULT_CHARS)
 
 
 def _json_bytes(value: Any) -> int:
     return len(json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
 
 
-def _json_clip(text: str, limit: int) -> str:
+def _json_clip(text: str, limit: int, cut: bool = False) -> str:
     """``text`` cut so it takes at most ``limit`` bytes as a JSON string
-    (quotes and escapes included), marked when cut."""
-    if _json_bytes(text) <= limit:
+    (quotes and escapes included), marked when cut here or already (``cut``)."""
+    if not cut and _json_bytes(text) <= limit:
         return text
     marker = "\n[…]"
     room = limit - (_json_bytes(marker) - 2)
+    if _json_bytes(text) <= room:
+        return text + marker
     low, high = 0, len(text)
     while low < high:
         middle = (low + high + 1) // 2
@@ -3820,6 +3850,11 @@ class _WatchJob:
         self.outcome_told = False
         self.approval_told: Optional[str] = None
         self.closed = False
+        # The start's own answer: pending until the start settles or is
+        # answered "accepted"; its outcome isn't news meanwhile.
+        self.answer_pending = True
+        self.answered_late = False
+        self.start_answer: Optional[Dict[str, Any]] = None
 
     @property
     def active(self) -> bool:
@@ -4024,7 +4059,7 @@ class _WatchJobs:
             return {"ok": False, "status": 400, "detail": "instructions is required"}
         if str(args.get("profile") or "").strip():
             return {"ok": False, "status": 400, "detail": "Jobs on another profile start from the iPhone"}
-        if len(instructions.encode("utf-8")) > WATCH_JOB_MAX_INSTRUCTION_BYTES:
+        if _json_bytes(instructions) > WATCH_JOB_MAX_INSTRUCTION_BYTES:
             return {"ok": False, "status": 413, "detail": "The task is too long for a Watch job"}
         with self.lock:
             if self.ended:
@@ -4042,6 +4077,48 @@ class _WatchJobs:
             self.started += 1
             job = _WatchJob(f"watch-{next(_watch_job_numbers)}", watch_job_title(instructions))
             self.jobs[job.job_id] = job
+        done = threading.Event()
+
+        def run() -> None:
+            try:
+                answer = self._start_session(job, instructions)
+            except Exception as exc:  # noqa: BLE001 — _start_session catches its own
+                _log_watch_failure("Starting a Watch job failed", exc)
+                answer = {"ok": True, "status": "not_started", "title": job.title,
+                          "message": "Hermes couldn't start the job."}
+                with self.changed:
+                    if job.active:
+                        job.status, job.error = "failed", type(exc).__name__
+            with self.changed:
+                job.answer_pending = False
+                if not job.answered_late:
+                    job.start_answer = answer
+                    if answer.get("status") == "not_started":
+                        job.outcome_told = True  # this answer tells it
+                # Answered late: a job that didn't start is news.
+                self.changed.notify_all()
+            done.set()
+
+        threading.Thread(target=run, name="conduit-watch-job-start", daemon=True).start()
+        done.wait(WATCH_JOB_START_ANSWER_S)
+        with self.changed:
+            answer = job.start_answer
+            if answer is None:
+                job.answered_late = True
+                job.answer_pending = False
+                self.changed.notify_all()
+        if answer is None:
+            return {"ok": True, "status": "accepted", "job_id": job.job_id, "title": job.title,
+                    "message": "Hermes is starting the job. Its result will arrive later as a message; don't wait "
+                               "for it."}
+        undelivered = _watch_undelivered.get()
+        if undelivered is not None and answer.get("status") == "not_started" and job.status == "failed":
+            # Lost on the way, the failure goes out as news instead.
+            undelivered.append(lambda: self._untake([(job, "outcome_told", False)]))
+        return answer
+
+    def _start_session(self, job: "_WatchJob", instructions: str) -> Dict[str, Any]:
+        """Creates the job's Hermes chat and submits its task; the start's answer."""
         try:
             params: Dict[str, Any] = {"cols": 96, "source": "desktop", "title": job.title, **self.options}
             if self.grant.profile:
@@ -4070,7 +4147,6 @@ class _WatchJobs:
                 if job.active:
                     job.status = "failed"
                     job.error = str(exc)[:300] if isinstance(exc, WatchJobError) else type(exc).__name__
-                job.outcome_told = True
                 self.changed.notify_all()
             if not isinstance(exc, WatchJobError):
                 _log_watch_failure("Starting a Watch job failed", exc)
@@ -4162,6 +4238,7 @@ class _WatchJobs:
         else:
             wait = WATCH_JOB_NEWS_WAIT_S
         deadline = time.monotonic() + wait
+        marks: list = []
         with self.changed:
             while True:
                 running = sum(1 for job in self.jobs.values() if job.active)
@@ -4170,27 +4247,40 @@ class _WatchJobs:
                 approvals = [{"job_id": job.job_id, "request_id": job.approval["request_id"]}
                              for job in self.jobs.values() if job.approval and job.status == "needs_approval"]
                 answer = {"ok": True, "news": [], "running": running, "more": True, "approvals": approvals}
-                news = self._take_news(WATCH_JOB_ANSWER_BYTES - _json_bytes(answer))
+                news = self._take_news(WATCH_JOB_ANSWER_BYTES - _json_bytes(answer), marks)
                 remaining = deadline - time.monotonic()
                 if news or not running or self.ended or self.grant.closed.is_set() or remaining <= 0:
                     break
                 self.changed.wait(min(remaining, 1.0))
             answer["news"] = news
             answer["more"] = any(self._untold(job) is not False for job in self.jobs.values())
+        undelivered = _watch_undelivered.get()
+        if undelivered is not None and marks:
+            undelivered.append(lambda: self._untake(marks))
         return answer
+
+    def _untake(self, marks: list) -> None:
+        """Marks news as not told again: its answer never reached the Watch."""
+        with self.changed:
+            for job, field, previous in marks:
+                setattr(job, field, previous)
+            self.changed.notify_all()
 
     @staticmethod
     def _untold(job: "_WatchJob") -> Any:
         """False when the Watch has heard all of ``job``'s news; else None
         for its outcome or the approval request's key."""
+        if job.answer_pending:
+            return False
         if not job.active and not job.outcome_told:
             return None
         if job.approval and job.status == "needs_approval" and job.approval_told != job.approval_key:
             return job.approval_key
         return False
 
-    def _take_news(self, budget: int) -> list:
-        """Untold news within ``budget`` bytes; called with the lock held."""
+    def _take_news(self, budget: int, marks: list) -> list:
+        """Untold news within ``budget`` bytes, each mark it moves added to
+        ``marks``; called with the lock held."""
         news: list = []
         used = 0
         for job in self.jobs.values():
@@ -4209,8 +4299,10 @@ class _WatchJobs:
             used += size
             news.append(item)
             if told is None:
+                marks.append((job, "outcome_told", job.outcome_told))
                 job.outcome_told = True
             else:
+                marks.append((job, "approval_told", job.approval_told))
                 job.approval_told = told
         return news
 

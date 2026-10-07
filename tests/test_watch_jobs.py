@@ -507,6 +507,8 @@ def test_a_long_ascii_result_is_cut_at_the_phones_length():
     text = "a" * 7_000
     assert api._clip_job_result(text) == "a" * 6_000 + "\n[…]"
     assert api._clip_job_result("short") == "short"
+    # Cut by length and by size, it's marked once.
+    assert api._clip_job_result("😀" * 7_000).count("[…]") == 1
 
 
 # --- Approvals -------------------------------------------------------------------
@@ -696,6 +698,76 @@ def test_a_sealed_start_job_runs_and_its_answer_goes_back_sealed():
     [post] = relay.requests
     answer = api.open_watch_tool(grant.result_key, "result", GRANT_ID, rid, post["payload"], max_bytes=64 * 1024)
     assert (answer["status"], answer["job_id"]) == ("started", "watch-1")
+
+
+def sealed(grant, tool, args, n):
+    rid = b64u(bytes([n]) * 16)
+    return rid, {"rid": rid, **api.seal_watch_tool(grant.call_key, "call", GRANT_ID, rid, {"tool": tool, "args": args})}
+
+
+@pytest.mark.parametrize("delivery", ["refused", "raised"])
+def test_job_news_that_never_reaches_the_watch_is_sent_again(delivery):
+    grant = make_jobs()
+    start(grant)
+    grant.jobs.server.emit("rt-1", "message.complete", {"text": "All green.", "status": "complete"})
+
+    def lost(url, method, credential, payload, timeout):
+        if delivery == "raised":
+            raise OSError("relay unreachable")
+        return 404, {"error": "unknown_call"}
+
+    _, call = sealed(grant, "job_news", {"wait_s": 0}, 1)
+    assert api.answer_watch_call(grant, call, relay=lost) == "gone"
+    relay = FakeRelay()
+    rid, call = sealed(grant, "job_news", {"wait_s": 0}, 2)
+    assert api.answer_watch_call(grant, call, relay=relay) == "answered"
+    answer = api.open_watch_tool(grant.result_key, "result", GRANT_ID, rid, relay.requests[0]["payload"],
+                                 max_bytes=64 * 1024)
+    assert [(item["job_id"], item["result"]) for item in answer["news"]] == [("watch-1", "All green.")]
+    # Delivered once, it isn't sent again.
+    assert news(grant)["news"] == []
+
+
+def test_a_start_hermes_is_slow_to_take_is_answered_accepted_and_followed(monkeypatch):
+    monkeypatch.setattr(api, "WATCH_JOB_START_ANSWER_S", 0.05)
+    grant = make_jobs()
+    server = grant.jobs.server
+    release = threading.Event()
+    server.on_create = lambda: release.wait(5)
+    answer = start(grant)
+    assert answer == {"ok": True, "status": "accepted", "job_id": "watch-1", "title": "Check the build logs",
+                      "message": "Hermes is starting the job. Its result will arrive later as a message; don't "
+                                 "wait for it."}
+    release.set()
+    deadline = time.monotonic() + 5
+    while grant.jobs.jobs["watch-1"].status == "starting" and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert grant.jobs.jobs["watch-1"].status == "running"
+    assert news(grant)["news"] == []
+    server.emit("rt-1", "message.complete", {"text": "All green.", "status": "complete"})
+    assert [item["status"] for item in news(grant)["news"]] == ["finished"]
+
+
+def test_a_slow_start_that_fails_is_told_as_news(monkeypatch):
+    monkeypatch.setattr(api, "WATCH_JOB_START_ANSWER_S", 0.05)
+    grant = make_jobs()
+    server = grant.jobs.server
+    release = threading.Event()
+    server.on_create = lambda: release.wait(5)
+    server.fail["prompt.submit"] = "model not configured"
+    assert start(grant)["status"] == "accepted"
+    release.set()
+    [item] = news(grant, wait_s=5)["news"]
+    assert (item["job_id"], item["status"], item["error"]) == ("watch-1", "failed", "model not configured")
+
+
+def test_a_failed_start_whose_answer_is_lost_is_told_as_news():
+    grant = make_jobs()
+    grant.jobs.server.fail["session.create"] = "no provider"
+    _, call = sealed(grant, "start_job", {"instructions": "Check the build logs"}, 3)
+    assert api.answer_watch_call(grant, call, relay=lambda *a: (404, {})) == "gone"
+    [item] = news(grant)["news"]
+    assert (item["status"], item["error"]) == ("failed", "no provider")
 
 
 def test_a_grant_without_jobs_refuses_job_calls():

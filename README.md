@@ -658,7 +658,10 @@ seals the answers back. This host opens no inbound route of its own.
   phone's voice-job model, provider and reasoning effort. `max_jobs` is the
   user's per-call limit (default 5, at most 20, 0 for none); three run at
   once. A grant with jobs allows 120 calls, since the Watch also asks for job
-  news (finished jobs and approval requests) while they run.
+  news (finished jobs and approval requests) while they run. A start Hermes
+  takes longer than 18 s to accept is answered `accepted`, inside the relay's
+  wait, and a start that then fails comes as job news. News whose answer
+  doesn't reach the relay is sent again with the next call.
 - **Approvals** follow the profile's own Hermes approval settings. A command
   that needs one shows on the Watch, which can only approve it once or deny
   it, never for the session or always. Hermes denies it after its own
