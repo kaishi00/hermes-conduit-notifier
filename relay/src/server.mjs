@@ -73,7 +73,7 @@ function main() {
     enforceCallBudget: () => enforceRateLimit('watch-call-global', config.budgets.watchCallsPerMinute, 60_000),
     authenticateGateway: authenticatedGateway,
     clientAddress,
-    warn: (message, fields) => console.warn(JSON.stringify({ level: 'warn', message, ...fields })),
+    warn: (message, fields) => console.warn(JSON.stringify({ ...fields, level: 'warn', message })),
   });
   // Test seam: APNS_MODE=accept makes every send succeed, reject makes it
   // return a 403 failure, and throw makes it RAISE (a dropped connection) —
