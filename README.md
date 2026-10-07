@@ -635,7 +635,7 @@ lock, and Conduit's next send claims the chat.
   when the registry can't be read (ownership is never guessed), 429 past 60
   requests a minute, 504 if the takeover doesn't finish within 20 seconds (ask again: nothing is written after that, short of a write already under way).
 
-## Apple Watch lookups and jobs (plugin 0.6+, jobs 0.7+)
+## Apple Watch lookups and jobs (plugin 0.6+, jobs 0.7+, Gemini tokens 0.8+)
 
 With the wrist down, a Conduit Watch call can't reach Conduit on the iPhone,
 but it can reach the push relay over its own internet. For each call Conduit
@@ -669,6 +669,15 @@ seals the answers back. This host opens no inbound route of its own.
   about, listing and cancelling them past a renewal, and the job limit
   counts per call. A renewal that leaves out `max_jobs` or `job_options`
   keeps the call's.
+- **Gemini Live tokens** (plugin 0.8): with `live_token` in `tools`, and
+  only where this profile has a Gemini key, the Watch can ask for a fresh
+  single-use Gemini Live token, minted as `/gemini-live/token` mints one
+  and answered with the same fields. It's for a call whose Gemini session
+  broke and can't be resumed while the iPhone is out of reach. It travels
+  sealed like every answer, so the relay never sees it, and the Gemini key
+  never leaves this host. A grant mints at most 6; a mint that fails, or
+  whose answer never reaches the Watch, doesn't count. A request for
+  `live_token` alone on a profile without a key is refused (503).
 - **Approvals** follow the profile's own Hermes approval settings. A command
   that needs one shows on the Watch, which can only approve it once or deny
   it, never for the session or always. Hermes denies it after its own
