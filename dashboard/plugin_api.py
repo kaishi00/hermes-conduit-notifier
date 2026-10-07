@@ -3115,7 +3115,9 @@ WATCH_POLL_WAIT_MS = 25_000
 WATCH_POLL_TIMEOUT_S = WATCH_POLL_WAIT_MS / 1000 + 10
 WATCH_RELAY_TIMEOUT_S = 10.0
 WATCH_POLL_BACKOFF_MAX_S = 10.0
-# A sealed call is a tool name and a short query.
+# A sealed call is a tool name and a short query. The relay's bound is the
+# same 4 KB sealed (relay/src/watch-tools.mjs MAX_CALL_CT_CHARS), so it passes
+# on no call this host would refuse to open.
 WATCH_MAX_CALL_BYTES = 4 * 1024
 # The relay's bound on a sealed answer (base64url characters).
 WATCH_MAX_RESULT_CT_CHARS = 24_000
@@ -3298,19 +3300,29 @@ _watch_grants = _WatchGrants()
 _watch_executor = ThreadPoolExecutor(max_workers=WATCH_WORKERS, thread_name_prefix="conduit-watch-tools")
 
 
-def _close_watch_grant(grant: _WatchGrant, *, tell_relay: bool,
-                       relay: Optional[Callable[..., Tuple[int, Dict[str, Any]]]] = None) -> None:
-    """Stops answering for ``grant``; best effort at the relay."""
-    relay = relay or _relay_request
-    already = grant.closed.is_set()
-    grant.closed.set()
+def _close_watch_grant_here(grant: _WatchGrant) -> bool:
+    """Stops answering for ``grant``; True when this call closed it."""
+    with grant.lock:
+        already = grant.closed.is_set()
+        grant.closed.set()
     _watch_grants.remove(grant)
-    if already or not tell_relay:
-        return
+    return not already
+
+
+def _close_watch_grant_on_relay(grant: _WatchGrant,
+                                relay: Optional[Callable[..., Tuple[int, Dict[str, Any]]]] = None) -> None:
+    relay = relay or _relay_request
     try:
         relay(grant.url(), "DELETE", grant.credential, None, WATCH_RELAY_TIMEOUT_S)
     except Exception as exc:  # noqa: BLE001 — it expires on the relay anyway
         logger.info("Closing a Watch tool grant on the relay failed: %s", type(exc).__name__)
+
+
+def _close_watch_grant(grant: _WatchGrant, *, tell_relay: bool,
+                       relay: Optional[Callable[..., Tuple[int, Dict[str, Any]]]] = None) -> None:
+    """Stops answering for ``grant``; best effort at the relay."""
+    if _close_watch_grant_here(grant) and tell_relay:
+        _close_watch_grant_on_relay(grant, relay)
 
 
 def _scoped_call(profile: Optional[str], fn: Callable[[], Dict[str, Any]]) -> Dict[str, Any]:
@@ -3321,7 +3333,8 @@ def _scoped_call(profile: Optional[str], fn: Callable[[], Dict[str, Any]]) -> Di
 def _clean_watch_args(value: Any) -> Dict[str, str]:
     if not isinstance(value, dict):
         return {}
-    return {str(k): v for k, v in value.items() if isinstance(k, str) and isinstance(v, (str, int))}
+    return {k: v for k, v in value.items()
+            if isinstance(k, str) and (isinstance(v, str) or (isinstance(v, int) and not isinstance(v, bool)))}
 
 
 def run_watch_tool(grant: _WatchGrant, request: Dict[str, Any]) -> Dict[str, Any]:
@@ -3348,6 +3361,9 @@ def run_watch_tool(grant: _WatchGrant, request: Dict[str, Any]) -> Dict[str, Any
     try:
         return {"ok": True, **future.result(timeout=timeout)}
     except (FutureTimeoutError, TimeoutError):
+        # Frees the worker if the run hadn't started; a running backend
+        # call still ends at its own timeout.
+        future.cancel()
         logger.warning("%s for a Conduit Watch timed out after %ss", feature, timeout)
         return {"ok": False, "status": 504, "detail": timeout_detail}
     except TokenError as exc:
@@ -3355,8 +3371,9 @@ def run_watch_tool(grant: _WatchGrant, request: Dict[str, Any]) -> Dict[str, Any
         return {"ok": False, "status": exc.status, "detail": str(exc)}
     except HTTPException as exc:
         return {"ok": False, "status": exc.status_code, "detail": str(exc.detail)}
-    except Exception as exc:  # noqa: BLE001 — named, details stay in the log
-        logger.exception("%s %s for a Conduit Watch failed", feature, what)
+    except Exception as exc:  # noqa: BLE001 — named; the message can carry the query
+        logger.warning("%s %s for a Conduit Watch failed: %s", feature, what, type(exc).__name__)
+        logger.debug("%s %s for a Conduit Watch failed", feature, what, exc_info=True)
         return {"ok": False, "status": 500, "detail": f"{feature} {what} failed on the host ({type(exc).__name__})"}
 
 
@@ -3404,6 +3421,17 @@ def answer_watch_call(grant: _WatchGrant, call: Any,
     return "answered" if status == 200 else "gone"
 
 
+def _answer_watch_call_logged(grant: _WatchGrant, call: Any,
+                              relay: Optional[Callable[..., Tuple[int, Dict[str, Any]]]] = None) -> Optional[str]:
+    """answer_watch_call on a worker: what escapes it is logged, by type only."""
+    try:
+        return answer_watch_call(grant, call, relay)
+    except Exception as exc:  # noqa: BLE001 — the Watch's own wait ends the call
+        logger.warning("Answering a Watch tool call failed: %s", type(exc).__name__)
+        logger.debug("Answering a Watch tool call failed", exc_info=True)
+        return None
+
+
 def poll_watch_grant(grant: _WatchGrant,
                      relay: Optional[Callable[..., Tuple[int, Dict[str, Any]]]] = None,
                      submit: Optional[Callable[[Callable[[], Any]], Any]] = None,
@@ -3434,13 +3462,32 @@ def poll_watch_grant(grant: _WatchGrant,
             backoff = 1.0
             calls = body.get("calls")
             for call in calls if isinstance(calls, list) else []:
-                submit(lambda call=call: answer_watch_call(grant, call, relay))
+                submit(lambda call=call: _answer_watch_call_logged(grant, call, relay))
     finally:
         _close_watch_grant(grant, tell_relay=tell_relay, relay=relay)
 
 
 def _start_watch_poller(grant: _WatchGrant) -> None:
     threading.Thread(target=poll_watch_grant, args=(grant,), name="conduit-watch-poll", daemon=True).start()
+
+
+def _watch_grant_ttl(relay_expires_at: Any, now: datetime) -> float:
+    """The grant's lifetime here: ours, capped at the relay's expiry.
+
+    A relay time that can't be read, or is already past (a skewed clock),
+    leaves ours: the relay still ends the grant at its own expiry.
+    """
+    ttl = float(WATCH_GRANT_TTL_S)
+    if not isinstance(relay_expires_at, str):
+        return ttl
+    try:
+        expires = datetime.fromisoformat(relay_expires_at.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return ttl
+    if expires.tzinfo is None:
+        return ttl
+    remaining = (expires - now).total_seconds()
+    return min(ttl, remaining) if remaining > 0 else ttl
 
 
 def open_watch_grant(body: Any, *, profile: Optional[str], path: Any = None,
@@ -3484,12 +3531,21 @@ def open_watch_grant(body: Any, *, profile: Optional[str], path: Any = None,
     if status != 201 or not isinstance(grant_id, str) or not _WATCH_ID.match(grant_id):
         logger.warning("The relay refused a Watch tool grant (%s %s)", status, response.get("error"))
         raise TokenError(502, "The push relay refused the Watch tool grant")
+    now = datetime.now(timezone.utc)
+    ttl = _watch_grant_ttl(response.get("expires_at"), now)
     grant = _WatchGrant(grant_id=grant_id, profile=profile, tools=tools, secret=secret, relay_url=relay_url,
-                        credential=credential, expires_at=time.monotonic() + WATCH_GRANT_TTL_S)
+                        credential=credential, expires_at=time.monotonic() + ttl)
     for old in _watch_grants.add(grant):
         _watch_executor.submit(_close_watch_grant, old, tell_relay=True, relay=relay)
-    start(grant)
-    expires_at = datetime.now(timezone.utc) + timedelta(seconds=WATCH_GRANT_TTL_S)
+    try:
+        start(grant)
+    except Exception as exc:  # noqa: BLE001 — e.g. no thread to spare
+        logger.warning("Starting the Watch tool poller failed: %s", type(exc).__name__)
+        # Nothing would answer its calls: the Watch learns at once instead
+        # of meeting host_offline for half an hour.
+        _close_watch_grant(grant, tell_relay=True, relay=relay)
+        raise TokenError(503, "This host couldn't start answering Watch lookups")
+    expires_at = now + timedelta(seconds=ttl)
     return {
         "grant_id": grant_id,
         "relay_url": relay_url,
@@ -3501,15 +3557,30 @@ def open_watch_grant(body: Any, *, profile: Optional[str], path: Any = None,
     }
 
 
+def _close_watch_grant_on_relay_later(grant: _WatchGrant,
+                                      relay: Optional[Callable[..., Tuple[int, Dict[str, Any]]]] = None) -> None:
+    # Its own short-lived thread: a slow relay doesn't hold a worker that
+    # answers lookups.
+    try:
+        threading.Thread(target=_close_watch_grant_on_relay, args=(grant, relay),
+                         name="conduit-watch-revoke", daemon=True).start()
+    except RuntimeError as exc:  # it expires on the relay anyway
+        logger.info("Closing a Watch tool grant on the relay failed: %s", type(exc).__name__)
+
+
 def revoke_watch_grant(body: Any, *, profile: Optional[str],
-                       relay: Optional[Callable[..., Tuple[int, Dict[str, Any]]]] = None) -> Dict[str, Any]:
+                       relay: Optional[Callable[..., Tuple[int, Dict[str, Any]]]] = None,
+                       tell_relay: Optional[Callable[..., None]] = None) -> Dict[str, Any]:
+    """Ends one of this profile's grants here at once; the relay hears after."""
+    tell_relay = tell_relay or _close_watch_grant_on_relay_later
     if not isinstance(body, dict) or not isinstance(body.get("grant_id"), str):
         raise TokenError(400, "grant_id is required")
     grant = _watch_grants.get(body["grant_id"])
     # Only this profile's own grants.
     if grant is None or grant.limiter_key != _limiter_key(profile):
         return {"revoked": False}
-    _close_watch_grant(grant, tell_relay=True, relay=relay)
+    if _close_watch_grant_here(grant):
+        tell_relay(grant, relay)
     return {"revoked": True}
 
 
@@ -3537,8 +3608,8 @@ async def post_watch_tool_revoke(request: Request, response: Response, profile: 
     response.headers["Cache-Control"] = "no-store"
     body = await _read_json_body(request, WATCH_GRANT_MAX_BODY_BYTES)
     try:
-        return {"ok": True, **(await asyncio.get_running_loop().run_in_executor(
-            _watch_executor, lambda: revoke_watch_grant(body, profile=profile)))}
+        # Closing here is quick; the relay is told on a thread of its own.
+        return {"ok": True, **revoke_watch_grant(body, profile=profile)}
     except TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
     except Exception as exc:

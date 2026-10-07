@@ -7,6 +7,8 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { after, before, test } from 'node:test';
 
+import { MAX_CALL_CT_CHARS } from '../src/watch-tools.mjs';
+
 // Watch tool grants against a real relay process: a paired gateway opens a
 // grant, a "Watch" posts sealed calls with the grant's relay key, and the
 // gateway long-polls and answers. The relay only ever sees opaque strings
@@ -173,6 +175,9 @@ test('only the grant relay key opens a Watch call, and a call id is accepted onc
   assert.equal(malformed.status, 400);
   const tooBig = await watchCall(grant, { rid: rid(), ...sealed(6_000) });
   assert.equal(tooBig.status, 400);
+  // Just past a sealed 4 KB call: the host would refuse to open it.
+  const overLimit = await watchCall(grant, { rid: rid(), n: sealed().n, ct: 'A'.repeat(MAX_CALL_CT_CHARS + 1) });
+  assert.equal(overLimit.status, 400);
 
   const call = { rid: rid(), ...sealed() };
   const first = watchCall(grant, call);
@@ -226,7 +231,7 @@ test('at most two calls of a grant wait at once, and a grant runs out after its 
   assert.equal(fifth.json.error, 'grant_exhausted');
 });
 
-test('another gateway cannot poll, answer or close a grant', async () => {
+test('another gateway cannot poll, answer or close a grant, and is told nothing', async () => {
   const gateway = gateways.b;
   const other = gateways.c;
   const grant = await openGrant(gateway);
@@ -241,10 +246,12 @@ test('another gateway cannot poll, answer or close a grant', async () => {
 test('the Watch closing its grant ends the host poll and refuses later calls', async () => {
   const gateway = gateways.b;
   const grant = await openGrant(gateway);
+  // A wrong key gets the same answer as an unknown grant, and closes nothing.
+  const wrongKey = await api(`/v1/watch-tools/grants/${grant.id}`, { method: 'DELETE', credential: newWatchKey().key });
+  assert.equal(wrongKey.status, 204);
+  assert.equal((await hostPoll(gateway, grant, 50)).status, 200, 'still open');
   const polled = hostPoll(gateway, grant, 5_000);
   await new Promise((resolve) => setTimeout(resolve, 100));
-  const wrongKey = await api(`/v1/watch-tools/grants/${grant.id}`, { method: 'DELETE', credential: newWatchKey().key });
-  assert.equal(wrongKey.status, 401);
   const closed = await api(`/v1/watch-tools/grants/${grant.id}`, { method: 'DELETE', credential: grant.watchKey });
   assert.equal(closed.status, 204);
   assert.equal((await polled).status, 410);
