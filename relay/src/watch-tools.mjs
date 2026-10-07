@@ -271,7 +271,7 @@ export function watchToolRoutes({
           maxCalls,
         });
       } catch (error) {
-        if (error?.status !== 503) throw error;
+        if (error?.status !== 503 || error.message !== 'watch_grant_capacity') throw error;
         // An expected limit, not a relay failure: the call's lookups go
         // through the iPhone instead.
         warn('watch tool grants at capacity', { grants: grants.size });
