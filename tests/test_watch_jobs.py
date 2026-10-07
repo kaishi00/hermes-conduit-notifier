@@ -871,6 +871,46 @@ def test_a_failed_start_whose_answer_is_lost_is_told_as_news():
     assert (item["status"], item["error"]) == ("failed", "no provider")
 
 
+def test_a_cancel_whose_answer_is_lost_is_told_as_news():
+    grant = make_jobs()
+    start(grant)
+    _, call = sealed(grant, "cancel_job", {"job_id": "watch-1"}, 4)
+    assert api.answer_watch_call(grant, call, relay=lambda *a: (404, {})) == "gone"
+    [item] = news(grant)["news"]
+    assert (item["job_id"], item["status"]) == ("watch-1", "cancelled")
+    assert news(grant)["news"] == []
+
+
+def test_a_start_with_no_thread_to_spare_never_was(monkeypatch):
+    grant = make_jobs()
+
+    class NoThreads:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(api.threading, "Thread", NoThreads)
+    answer = start(grant)
+    assert (answer["status"], answer["message"]) == ("not_started", "Hermes couldn't start the job: the host is "
+                                                                      "too busy right now.")
+    assert (grant.jobs.jobs, grant.jobs.started) == ({}, 0)
+    assert news(grant)["running"] == 0
+
+
+def test_a_new_approval_under_the_same_id_is_news_again():
+    grant = make_jobs()
+    server = grant.jobs.server
+    start(grant)
+    server.ask_approval("rt-1", request_id="", server_id="srq-1")
+    assert [item["status"] for item in news(grant)["news"]] == ["needs_approval"]
+    server.emit("rt-1", "request.cancel", {"id": "srq-1"})
+    assert grant.jobs.jobs["watch-1"].status == "running"
+    server.ask_approval("rt-1", request_id="", server_id="srq-1")
+    assert [item["status"] for item in news(grant)["news"]] == ["needs_approval"]
+
+
 def test_a_grant_without_jobs_refuses_job_calls():
     grant = make_jobs()
     grant.jobs = None

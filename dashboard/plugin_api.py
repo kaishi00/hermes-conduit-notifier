@@ -4083,6 +4083,8 @@ class _WatchJobs:
     @staticmethod
     def _approval_gone(job: _WatchJob) -> None:
         job.approval = None
+        # A later request, even under the same id, is news again.
+        job.approval_told = None
         if job.status == "needs_approval":
             job.status = "running"
 
@@ -4155,7 +4157,17 @@ class _WatchJobs:
                 self.changed.notify_all()
             done.set()
 
-        threading.Thread(target=run, name="conduit-watch-job-start", daemon=True).start()
+        try:
+            threading.Thread(target=run, name="conduit-watch-job-start", daemon=True).start()
+        except RuntimeError as exc:
+            # No thread to spare: nothing reached Hermes, so the job never was.
+            logger.warning("Couldn't start a Watch job (%s)", type(exc).__name__)
+            with self.changed:
+                self.jobs.pop(job.job_id, None)
+                self.started -= 1
+                self.changed.notify_all()
+            return {"ok": True, "status": "not_started", "title": job.title,
+                    "message": "Hermes couldn't start the job: the host is too busy right now."}
         done.wait(WATCH_JOB_START_ANSWER_S)
         with self.changed:
             answer = job.start_answer
@@ -4220,7 +4232,14 @@ class _WatchJobs:
         with self.changed:
             if job.status == "starting":
                 job.status = "running"
+            # A cancel between the prompt and here interrupted the turn
+            # itself and told the Watch.
+            cancelled = job.status == "cancelled"
             self.changed.notify_all()
+        if cancelled:
+            self._close_session(job)
+            return {"ok": True, "status": "not_started", "title": job.title,
+                    "message": f"{job.title} was cancelled before it started."}
         self._tag(job)
         return {"ok": True, "status": "started", "job_id": job.job_id, "title": job.title,
                 "session_id": job.stored_session_id or sid,
@@ -4272,10 +4291,14 @@ class _WatchJobs:
                         job.outcome_told = False
                     self.changed.notify_all()
                 failed.append(job)
+        cancelled = [job for job in targets if job not in failed]
+        undelivered = _watch_undelivered.get()
+        if undelivered is not None and cancelled:
+            # Lost on the way, the cancel goes out as news instead.
+            undelivered.append(lambda: self._untake([(job, "outcome_told", False) for job in cancelled]))
         if self.ended:
-            for job in targets:
-                if job not in failed:
-                    self._close_session_later(job)
+            for job in cancelled:
+                self._close_session_later(job)
         if wanted:
             title = targets[0].title
             return {"ok": True, "message": f"Couldn't cancel {title}. It may still be running." if failed
@@ -4303,7 +4326,7 @@ class _WatchJobs:
                 approvals = [{"job_id": job.job_id, "request_id": job.approval["request_id"]}
                              for job in self.jobs.values() if job.approval and job.status == "needs_approval"]
                 answer = {"ok": True, "news": [], "running": running, "more": True, "approvals": approvals}
-                news = self._take_news(WATCH_JOB_ANSWER_BYTES - _json_bytes(answer), marks)
+                news = self._take_news(max(0, WATCH_JOB_ANSWER_BYTES - _json_bytes(answer)), marks)
                 remaining = deadline - time.monotonic()
                 if news or not running or self.ended or self.grant.closed.is_set() or remaining <= 0:
                     break
