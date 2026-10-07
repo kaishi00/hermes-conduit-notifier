@@ -4137,7 +4137,11 @@ class _WatchJobs:
                     break
                 self.changed.wait(min(remaining, 1.0))
             waiting = sum(1 for job in self.jobs.values() if not job.active and not job.outcome_told)
-        return {"ok": True, "news": news, "running": running, "more": waiting > 0}
+            # Every request still open, so the Watch drops a card answered
+            # elsewhere or timed out.
+            approvals = [{"job_id": job.job_id, "request_id": job.approval["request_id"]}
+                         for job in self.jobs.values() if job.approval and job.status == "needs_approval"]
+        return {"ok": True, "news": news, "running": running, "more": waiting > 0, "approvals": approvals}
 
     def _take_news(self) -> list:
         """Called with the lock held."""

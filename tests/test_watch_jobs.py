@@ -332,7 +332,7 @@ def test_a_finished_jobs_result_is_news_once():
     server.emit("rt-1", "message.complete", {"text": "  All green.  ", "status": "complete"})
     assert news(grant) == {"ok": True, "news": [{"job_id": "watch-1", "title": "Check the build logs",
                                                  "status": "finished", "session_id": "st-1", "result": "All green."}],
-                           "running": 0, "more": False}
+                           "running": 0, "more": False, "approvals": []}
     assert news(grant)["news"] == []
 
 
@@ -350,9 +350,9 @@ def test_job_news_waits_for_a_job_to_settle():
 def test_job_news_returns_at_once_when_nothing_runs_and_at_its_wait_otherwise():
     grant = make_jobs()
     began = time.monotonic()
-    assert news(grant, wait_s=10) == {"ok": True, "news": [], "running": 0, "more": False}
+    assert news(grant, wait_s=10) == {"ok": True, "news": [], "running": 0, "more": False, "approvals": []}
     start(grant)
-    assert news(grant, wait_s=0) == {"ok": True, "news": [], "running": 1, "more": False}
+    assert news(grant, wait_s=0) == {"ok": True, "news": [], "running": 1, "more": False, "approvals": []}
     assert time.monotonic() - began < 1
 
 
@@ -424,10 +424,13 @@ def test_an_approval_request_is_news_once_and_approving_it_answers_hermes():
     assert item["status"] == "needs_approval"
     assert item["approval"] == {"request_id": "appr-1", "command": "rm -rf build",
                                 "description": "Delete the build folder"}
-    assert news(grant)["news"] == []
+    # Told once, but listed as open on every answer until it settles.
+    again = news(grant)
+    assert again["news"] == [] and again["approvals"] == [{"job_id": "watch-1", "request_id": "appr-1"}]
     answer = api.run_watch_job_call(grant, "answer_approval",
                                     {"job_id": "watch-1", "request_id": "appr-1", "choice": "once"})
     assert answer == {"ok": True, "status": "approved", "job_id": "watch-1"}
+    assert news(grant)["approvals"] == []
     assert server.methods("approval.respond") == [{"session_id": "rt-1", "choice": "once", "request_id": "appr-1"}]
     assert grant.jobs.jobs["watch-1"].status == "running"
     # A second request is news again.
