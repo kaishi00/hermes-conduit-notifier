@@ -3101,8 +3101,9 @@ async def post_e2e(request: Request, response: Response, profile: Optional[str] 
 # The Watch gets only the grant: a per-call key (HKDF-SHA256 root for the two
 # ChaCha20-Poly1305 directions, never sent to the relay) and a relay key the
 # relay keeps only as a SHA-256. It allows web_search and recall_memory, for
-# this profile, for 30 minutes and 60 calls, and with the user's say-so
-# Hermes jobs too (Watch jobs, below). Grants live in memory: a dashboard
+# this profile, for 30 minutes and 60 calls, with the user's say-so Hermes
+# jobs too (Watch jobs, below), and Gemini Live tokens where the profile has
+# a key (live_token). Grants live in memory: a dashboard
 # restart drops them and the Watch falls back to the iPhone.
 # (hermes-conduit designs/apple-watch-voice-direct.md)
 #
@@ -3115,6 +3116,7 @@ async def post_e2e(request: Request, response: Response, profile: Optional[str] 
 WATCH_TOOLS = ("web_search", "recall_memory")
 WATCH_LIVE_TOKEN = "live_token"
 # Tokens one grant may mint: a few fresh sessions per call, never a stream.
+# A renewal, which only the iPhone can ask for, counts its own.
 WATCH_LIVE_TOKENS_PER_GRANT = 6
 WATCH_GRANT_TTL_S = 30 * 60
 WATCH_GRANT_MAX_CALLS = 60
@@ -3423,9 +3425,11 @@ def run_watch_live_token(grant: _WatchGrant,
                          mint: Optional[Callable[..., Dict[str, Any]]] = None) -> Dict[str, Any]:
     """A fresh single-use Gemini Live token for the grant's call, as
     /gemini-live/token answers. A mint that fails, or whose answer never
-    reaches the Watch, doesn't count against the grant's tokens; the token
+    reaches the relay, doesn't count against the grant's tokens; the token
     itself is never logged."""
     mint = mint or mint_gemini_live_token
+    if WATCH_LIVE_TOKEN not in grant.tools:
+        return {"ok": False, "status": 403, "detail": "This tool isn't available to the Watch"}
     with grant.lock:
         if grant.live_tokens >= WATCH_LIVE_TOKENS_PER_GRANT:
             return {"ok": False, "status": 429, "detail": "This call has used all its Gemini Live tokens"}
