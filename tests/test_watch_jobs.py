@@ -1,0 +1,616 @@
+"""Watch jobs: a Conduit Watch call's Hermes jobs, run through Hermes' session API in this process."""
+
+import base64
+import contextlib
+import importlib.util
+import json
+import pathlib
+import sys
+import threading
+import time
+import types
+
+import pytest
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+RELAY = "https://relay.example"
+GRANT_ID = "J" * 22
+
+
+def _load_plugin_api():
+    spec = importlib.util.spec_from_file_location("conduit_plugin_api_watch_jobs", ROOT / "dashboard" / "plugin_api.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+api = _load_plugin_api()
+
+
+def b64u(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+class FakeHermes:
+    """tui_gateway.server as the dashboard loads it: dispatch() and _sessions."""
+
+    def __init__(self):
+        self._sessions = {}
+        self.calls = []
+        self.fail = {}
+        self.slow = set()
+        self.resolved = 1
+        self.on_create = None
+        self.lock = threading.Lock()
+
+    def dispatch(self, req, transport=None):
+        method, params = req["method"], req["params"]
+        with self.lock:
+            self.calls.append((method, dict(params)))
+        if method in self.fail:
+            return {"jsonrpc": "2.0", "id": req["id"], "error": {"code": 4000, "message": self.fail[method]}}
+        if method == "session.create":
+            n = sum(1 for m, _ in self.calls if m == "session.create")
+            sid = f"rt-{n}"
+            self._sessions[sid] = {"transport": transport}
+            if self.on_create:
+                self.on_create()
+            result = {"session_id": sid, "stored_session_id": f"st-{n}"}
+        elif method == "session.close":
+            result = {"closed": self._sessions.pop(params["session_id"], None) is not None}
+        elif method == "approval.respond":
+            result = {"resolved": self.resolved}
+        elif method == "session.interrupt":
+            result = {"status": "interrupted"}
+        else:
+            result = {"status": "started"}
+        response = {"jsonrpc": "2.0", "id": req["id"], "result": result}
+        if method in self.slow:
+            # A long handler: answered from Hermes' worker pool.
+            threading.Timer(0.05, transport.write, args=(response,)).start()
+            return None
+        return response
+
+    def methods(self, name):
+        return [params for method, params in self.calls if method == name]
+
+    def emit(self, sid, kind, payload=None):
+        transport = self._sessions[sid]["transport"]
+        params = {"type": kind, "session_id": sid}
+        if payload is not None:
+            params["payload"] = payload
+        transport.write({"jsonrpc": "2.0", "method": "event", "params": params})
+
+    def ask_approval(self, sid, request_id="appr-1", server_id="srq-1", command="rm -rf build"):
+        self._sessions[sid]["transport"].write({
+            "jsonrpc": "2.0", "id": server_id, "method": "approval",
+            "params": {"session_id": sid, "request_id": request_id, "command": command,
+                       "description": "Delete the build folder", "choices": ["once", "session", "always", "deny"]},
+        })
+
+
+class FakeDB:
+    def __init__(self, meta):
+        self.meta = meta
+
+    def get_meta(self, key):
+        return self.meta.get(key)
+
+    def set_meta(self, key, value):
+        self.meta[key] = value
+
+    def get_session(self, sid):
+        return {"id": sid}
+
+    def close(self):
+        pass
+
+
+@pytest.fixture(autouse=True)
+def fresh(monkeypatch):
+    monkeypatch.setattr(api, "_watch_grants", api._WatchGrants())
+    monkeypatch.setattr(api, "_watch_grant_limiter", api._MintLimiter(1000, 60.0))
+    meta = {}
+    monkeypatch.setattr(api, "_open_voice_db", lambda needs=None: FakeDB(meta))
+    monkeypatch.setattr(api, "_voice_lock", lambda: threading.Lock())
+    return meta
+
+
+@pytest.fixture
+def tags(fresh):
+    return lambda: json.loads(fresh.get(api.VOICE_TAGS_KEY) or "{}")
+
+
+def make_jobs(server=None, max_jobs=5, options=None, profile=None):
+    grant = api._WatchGrant(grant_id=GRANT_ID, profile=profile, tools=api.WATCH_JOB_TOOLS + api.WATCH_JOB_CALLS,
+                            secret=bytes(range(32)), relay_url=RELAY, credential="install-1.gateway-1.secret",
+                            expires_at=time.monotonic() + 600, max_calls=api.WATCH_JOB_GRANT_MAX_CALLS)
+    grant.jobs = api._WatchJobs(grant, max_jobs=max_jobs, options=options or {}, server=server or FakeHermes())
+    return grant
+
+
+def start(grant, instructions="Check the build logs"):
+    return api.run_watch_job_call(grant, "start_job", {"instructions": instructions})
+
+
+def news(grant, wait_s=0):
+    return api.run_watch_job_call(grant, "job_news", {"wait_s": wait_s})
+
+
+def write_pairing(tmp_path):
+    path = tmp_path / "conduit-push.json"
+    path.write_text(json.dumps({"credential": "install-1.gateway-1.secret", "installation_id": "install-1",
+                                "gateway_id": "gateway-1", "relay_url": RELAY}), encoding="utf-8")
+    return path
+
+
+class FakeRelay:
+    def __init__(self):
+        self.requests = []
+
+    def __call__(self, url, method, credential, payload, timeout):
+        self.requests.append({"url": url, "method": method, "payload": payload})
+        if method == "POST" and url.endswith("/v1/watch-tools/grants"):
+            return 201, {"grant_id": GRANT_ID, "expires_at": "2026-10-07T12:00:00.000Z"}
+        return 200, {"status": "delivered"}
+
+
+# --- Granting jobs -----------------------------------------------------------
+
+def test_a_grant_with_jobs_carries_them_with_the_users_cap_and_more_calls(tmp_path):
+    relay, started, server = FakeRelay(), [], FakeHermes()
+    grant = api.open_watch_grant(
+        {"tools": ["web_search", "recall_memory", "start_job", "list_jobs", "cancel_job"], "max_jobs": 2,
+         "job_options": {"model": "gpt-5.5", "provider": "openai", "reasoning_effort": "low", "cwd": "/"}},
+        profile="coder", path=write_pairing(tmp_path), relay=relay, start=started.append,
+        session_api=lambda: server)
+    assert grant["tools"] == ["web_search", "recall_memory", "start_job", "list_jobs", "cancel_job",
+                              "job_news", "answer_approval"]
+    assert (grant["max_calls"], grant["max_jobs"]) == (120, 2)
+    assert relay.requests[0]["payload"]["max_calls"] == 120
+    [live] = started
+    assert live.max_calls == 120
+    assert (live.jobs.max_jobs, live.jobs.server) == (2, server)
+    assert live.jobs.options == {"model": "gpt-5.5", "provider": "openai", "reasoning_effort": "low"}
+
+
+def test_a_provider_goes_only_with_its_model():
+    assert api._clean_job_options({"provider": "openai", "reasoning_effort": "high"}) == {"reasoning_effort": "high"}
+    assert api._clean_job_options({"model": " ", "provider": "openai"}) == {}
+    assert api._clean_job_options({"model": "x" * 121}) == {}
+    assert api._clean_job_options("gpt") == {}
+
+
+@pytest.mark.parametrize("body, api_available", [
+    ({"tools": ["web_search", "start_job"], "max_jobs": 0}, True),
+    ({"tools": ["web_search", "start_job"]}, False),
+])
+def test_without_jobs_allowed_or_runnable_the_grant_is_lookups_only(tmp_path, body, api_available):
+    relay, started = FakeRelay(), []
+    grant = api.open_watch_grant(body, profile=None, path=write_pairing(tmp_path), relay=relay,
+                                 start=started.append, session_api=lambda: FakeHermes() if api_available else None)
+    assert (grant["tools"], grant["max_calls"], grant["max_jobs"]) == (["web_search"], 60, 0)
+    assert started[0].jobs is None
+
+
+@pytest.mark.parametrize("value, expected", [(None, 5), (0, 0), (7, 7), (50, 20)])
+def test_the_job_cap_defaults_to_five_and_is_capped_at_twenty(value, expected):
+    assert api._watch_max_jobs(value) == expected
+
+
+@pytest.mark.parametrize("value", [-1, "5", True, 2.5])
+def test_a_job_cap_that_isnt_a_whole_number_is_refused(tmp_path, value):
+    with pytest.raises(api.TokenError) as err:
+        api.open_watch_grant({"tools": ["start_job"], "max_jobs": value}, profile=None, path=write_pairing(tmp_path),
+                             relay=FakeRelay(), start=lambda g: None, session_api=FakeHermes)
+    assert err.value.status == 400
+
+
+def test_only_a_session_api_the_dashboard_loaded_counts(monkeypatch):
+    monkeypatch.delitem(sys.modules, "tui_gateway.server", raising=False)
+    assert api._hermes_session_api() is None
+    module = types.ModuleType("tui_gateway.server")
+    monkeypatch.setitem(sys.modules, "tui_gateway.server", module)
+    assert api._hermes_session_api() is None
+    module.dispatch = lambda req, transport=None: None
+    module._sessions = {}
+    assert api._hermes_session_api() is module
+
+
+# --- Starting ------------------------------------------------------------------
+
+def test_a_job_is_an_ordinary_hermes_chat_on_the_grants_profile_filed_as_a_voice_job(tags, monkeypatch):
+    scoped = []
+    monkeypatch.setattr(api, "_profile_scope", lambda profile: scoped.append(profile) or contextlib.nullcontext())
+    grant = make_jobs(options={"model": "gpt-5.5"}, profile="coder")
+    server = grant.jobs.server
+    answer = start(grant, "Quick: summarise   today's\nbuild failures")
+    assert answer == {"ok": True, "status": "started", "job_id": "watch-1", "title": "summarise today's build failures",
+                      "session_id": "st-1",
+                      "message": "The job is running on Hermes. Its result will arrive later as a message; don't wait for it."}
+    [create] = server.methods("session.create")
+    assert create == {"cols": 96, "source": "desktop", "title": "summarise today's build failures", "model": "gpt-5.5",
+                      "profile": "coder"}
+    [submit] = server.methods("prompt.submit")
+    assert submit["session_id"] == "rt-1"
+    assert submit["text"].startswith("[Background job started from a Conduit voice conversation.")
+    assert submit["text"].endswith("]\n\nsummarise   today's\nbuild failures")
+    assert server._sessions["rt-1"]["transport"] is grant.jobs.transport
+    assert tags() == {"st-1": {"kind": "job"}}
+    assert scoped == ["coder"]
+
+
+def test_a_job_title_mirrors_the_phones():
+    assert api.watch_job_title("  a   b ") == "a b"
+    long = "word " * 20
+    assert api.watch_job_title(long) == ("word " * 12).strip() + "…"
+    assert api.watch_job_title("x" * 70) == "x" * 60 + "…"
+
+
+@pytest.mark.parametrize("args, detail", [
+    ({}, "instructions is required"),
+    ({"instructions": "quick:  "}, "instructions is required"),
+    ({"instructions": "do it", "profile": "fam"}, "Jobs on another profile start from the iPhone"),
+    ({"instructions": "x" * 3001}, "The task is too long for a Watch job"),
+])
+def test_a_job_the_watch_shouldnt_send_is_refused_without_ending_the_grant(args, detail):
+    grant = make_jobs()
+    answer = api.run_watch_job_call(grant, "start_job", args)
+    assert answer["ok"] is False and answer["detail"] == detail
+    # 403 and 410 tell the Watch its grant is over; these don't.
+    assert answer["status"] not in (403, 410)
+    assert grant.jobs.server.calls == []
+
+
+def test_a_call_starts_no_more_jobs_than_the_user_allows():
+    grant = make_jobs(max_jobs=2)
+    server = grant.jobs.server
+    start(grant)
+    server.emit("rt-1", "message.complete", {"text": "done", "status": "complete"})
+    start(grant)
+    answer = start(grant)
+    assert answer["status"] == "not_started"
+    assert answer["message"].startswith("This call has started 2 jobs, the most the user allows per call.")
+    assert len(server.methods("session.create")) == 2
+
+
+def test_three_jobs_run_at_once():
+    grant = make_jobs(max_jobs=10)
+    for _ in range(3):
+        assert start(grant)["status"] == "started"
+    answer = start(grant)
+    assert answer == {"ok": True, "status": "not_started",
+                      "message": "You already have 3 background jobs running. Cancel them before starting another."}
+    # The refused start didn't spend one of the call's jobs.
+    assert grant.jobs.started == 3
+
+
+def test_a_job_hermes_refuses_to_start_is_reported_and_its_session_closed():
+    grant = make_jobs()
+    server = grant.jobs.server
+    server.fail["prompt.submit"] = "model not configured"
+    answer = start(grant)
+    assert answer == {"ok": True, "status": "not_started", "title": "Check the build logs",
+                      "message": "Hermes couldn't start the job: model not configured"}
+    assert server.methods("session.close") == [{"session_id": "rt-1"}]
+    # Told in the answer: no news later.
+    assert news(grant)["news"] == []
+
+
+def test_a_job_cancelled_while_it_starts_never_gets_its_prompt():
+    grant = make_jobs()
+    server = grant.jobs.server
+    server.on_create = lambda: api.run_watch_job_call(grant, "cancel_job", {})
+    answer = start(grant)
+    assert answer["status"] == "not_started"
+    assert answer["message"] == "Check the build logs was cancelled before it started."
+    assert server.methods("prompt.submit") == []
+    assert server.methods("session.close") == [{"session_id": "rt-1"}]
+
+
+def test_a_slow_hermes_method_is_answered_through_the_transport():
+    grant = make_jobs()
+    grant.jobs.server.slow.add("session.create")
+    assert start(grant)["status"] == "started"
+
+
+def test_a_method_hermes_never_answers_times_out(monkeypatch):
+    grant = make_jobs()
+    server = grant.jobs.server
+    server.dispatch = lambda req, transport=None: None
+    with pytest.raises(api.WatchJobError, match="session.create timed out"):
+        grant.jobs.rpc("session.create", {}, timeout=0.05)
+    assert grant.jobs._waiters == {}
+
+
+# --- News ----------------------------------------------------------------------
+
+def test_a_finished_jobs_result_is_news_once():
+    grant = make_jobs()
+    server = grant.jobs.server
+    start(grant)
+    server.emit("rt-1", "message.complete", {"text": "  All green.  ", "status": "complete"})
+    assert news(grant) == {"ok": True, "news": [{"job_id": "watch-1", "title": "Check the build logs",
+                                                 "status": "finished", "session_id": "st-1", "result": "All green."}],
+                           "running": 0, "more": False}
+    assert news(grant)["news"] == []
+
+
+def test_job_news_waits_for_a_job_to_settle():
+    grant = make_jobs()
+    server = grant.jobs.server
+    start(grant)
+    threading.Timer(0.2, server.emit, args=("rt-1", "message.complete", {"text": "Done", "status": "complete"})).start()
+    began = time.monotonic()
+    answer = news(grant, wait_s=10)
+    assert [item["result"] for item in answer["news"]] == ["Done"]
+    assert 0.1 < time.monotonic() - began < 5
+
+
+def test_job_news_returns_at_once_when_nothing_runs_and_at_its_wait_otherwise():
+    grant = make_jobs()
+    began = time.monotonic()
+    assert news(grant, wait_s=10) == {"ok": True, "news": [], "running": 0, "more": False}
+    start(grant)
+    assert news(grant, wait_s=0) == {"ok": True, "news": [], "running": 1, "more": False}
+    assert time.monotonic() - began < 1
+
+
+def test_a_failed_or_interrupted_turn_settles_the_job():
+    grant = make_jobs()
+    server = grant.jobs.server
+    start(grant)
+    start(grant, "Second")
+    server.emit("rt-1", "message.complete", {"text": "", "status": "error", "error": "provider overloaded"})
+    server.emit("rt-2", "message.complete", {"text": "partial", "status": "interrupted"})
+    items = {item["job_id"]: item for item in news(grant)["news"]}
+    assert (items["watch-1"]["status"], items["watch-1"]["error"]) == ("failed", "provider overloaded")
+    assert items["watch-2"]["status"] == "cancelled" and "result" not in items["watch-2"]
+
+
+def test_a_session_error_fails_its_job():
+    grant = make_jobs()
+    start(grant)
+    grant.jobs.server.emit("rt-1", "error", {"message": "agent init failed"})
+    [item] = news(grant)["news"]
+    assert (item["status"], item["error"]) == ("failed", "agent init failed")
+
+
+def test_events_of_other_sessions_are_ignored():
+    grant = make_jobs()
+    server = grant.jobs.server
+    start(grant)
+    server._sessions["rt-9"] = {"transport": grant.jobs.transport}
+    server.emit("rt-9", "message.complete", {"text": "not ours", "status": "complete"})
+    grant.jobs.transport.write("garbage")
+    grant.jobs.transport.write({"method": "event", "params": "garbage"})
+    assert news(grant)["news"] == []
+
+
+def test_more_news_than_one_answer_holds_waits_for_the_next_call():
+    grant = make_jobs()
+    server = grant.jobs.server
+    for i in range(3):
+        start(grant, f"Job {i}")
+        server.emit(f"rt-{i + 1}", "message.complete", {"text": "結果" * 3_000, "status": "complete"})
+    first = news(grant)
+    assert first["more"] is True and 1 <= len(first["news"]) < 3
+    second = news(grant)
+    told = first["news"] + second["news"] + (news(grant)["news"] if second["more"] else [])
+    assert sorted(item["job_id"] for item in told) == ["watch-1", "watch-2", "watch-3"]
+    # Each result was cut to fit, and each answer fits the relay's bound sealed.
+    for item in told:
+        assert item["result"].endswith("\n[…]")
+        assert len(item["result"].encode()) <= api.WATCH_JOB_RESULT_BYTES
+    for answer in (first, second):
+        sealed = api.seal_watch_tool(grant.result_key, "result", GRANT_ID, b64u(bytes(16)), answer)
+        assert len(sealed["ct"]) <= api.WATCH_MAX_RESULT_CT_CHARS
+
+
+def test_a_long_ascii_result_is_cut_at_the_phones_length():
+    text = "a" * 7_000
+    assert api._clip_job_result(text) == "a" * 6_000 + "\n[…]"
+    assert api._clip_job_result("short") == "short"
+
+
+# --- Approvals -------------------------------------------------------------------
+
+def test_an_approval_request_is_news_once_and_approving_it_answers_hermes():
+    grant = make_jobs()
+    server = grant.jobs.server
+    start(grant)
+    server.ask_approval("rt-1")
+    [item] = news(grant)["news"]
+    assert item["status"] == "needs_approval"
+    assert item["approval"] == {"request_id": "appr-1", "command": "rm -rf build",
+                                "description": "Delete the build folder"}
+    assert news(grant)["news"] == []
+    answer = api.run_watch_job_call(grant, "answer_approval",
+                                    {"job_id": "watch-1", "request_id": "appr-1", "choice": "once"})
+    assert answer == {"ok": True, "status": "approved", "job_id": "watch-1"}
+    assert server.methods("approval.respond") == [{"session_id": "rt-1", "choice": "once", "request_id": "appr-1"}]
+    assert grant.jobs.jobs["watch-1"].status == "running"
+    # A second request is news again.
+    server.ask_approval("rt-1", request_id="appr-2", server_id="srq-2")
+    assert news(grant)["news"][0]["approval"]["request_id"] == "appr-2"
+
+
+@pytest.mark.parametrize("choice", ["session", "always", "", "yes"])
+def test_the_watch_can_only_approve_once_or_deny(choice):
+    grant = make_jobs()
+    start(grant)
+    grant.jobs.server.ask_approval("rt-1")
+    answer = api.run_watch_job_call(grant, "answer_approval",
+                                    {"job_id": "watch-1", "request_id": "appr-1", "choice": choice})
+    assert (answer["ok"], answer["status"]) == (False, 400)
+    assert grant.jobs.server.methods("approval.respond") == []
+
+
+def test_an_answer_for_a_replaced_or_settled_request_isnt_sent():
+    grant = make_jobs()
+    server = grant.jobs.server
+    start(grant)
+    server.ask_approval("rt-1", request_id="appr-2")
+    for args in ({"job_id": "watch-1", "request_id": "appr-1", "choice": "once"},
+                 {"job_id": "watch-1", "choice": "once"},
+                 {"job_id": "watch-7", "request_id": "appr-2", "choice": "once"}):
+        assert api.run_watch_job_call(grant, "answer_approval", args)["status"] == "not_pending"
+    assert server.methods("approval.respond") == []
+
+
+def test_an_approval_answered_elsewhere_or_timed_out_is_withdrawn():
+    grant = make_jobs()
+    server = grant.jobs.server
+    start(grant)
+    start(grant, "Second")
+    server.ask_approval("rt-1", server_id="srq-1")
+    server.ask_approval("rt-2", request_id="appr-9", server_id="srq-9")
+    server.emit("rt-1", "request.cancel", {"id": "srq-other", "method": "approval", "reason": "resolved"})
+    assert grant.jobs.jobs["watch-1"].status == "needs_approval"
+    server.emit("rt-1", "request.cancel", {"id": "srq-1", "method": "approval", "reason": "timeout"})
+    server.emit("rt-2", "approval.cancelled", {"session_id": "rt-2", "stored_session_id": "st-2", "reason": "interrupt",
+                                               "cancelled_count": 1, "request_ids": ["appr-9"]})
+    assert [job.status for job in grant.jobs.jobs.values()] == ["running", "running"]
+    assert news(grant)["news"] == []
+
+
+def test_hermes_resolving_nothing_reads_as_not_pending():
+    grant = make_jobs()
+    server = grant.jobs.server
+    server.resolved = 0
+    start(grant)
+    server.ask_approval("rt-1")
+    answer = api.run_watch_job_call(grant, "answer_approval",
+                                    {"job_id": "watch-1", "request_id": "appr-1", "choice": "deny"})
+    assert answer["status"] == "not_pending"
+
+
+# --- Listing and cancelling -----------------------------------------------------
+
+def test_list_jobs_mirrors_the_phones_answer():
+    grant = make_jobs()
+    server = grant.jobs.server
+    assert api.run_watch_job_call(grant, "list_jobs", {}) == {"ok": True, "summary": "No background jobs are running."}
+    start(grant)
+    start(grant, "Second")
+    server.emit("rt-2", "message.complete", {"text": "ok", "status": "complete"})
+    assert api.run_watch_job_call(grant, "list_jobs", {}) == {
+        "ok": True,
+        "summary": "Check the build logs is still running. Second has finished.",
+        "job_1": "id=watch-1; title=Check the build logs; status=running",
+        "job_2": "id=watch-2; title=Second; status=finished",
+    }
+    news(grant)
+    assert "job_2" not in api.run_watch_job_call(grant, "list_jobs", {})
+
+
+def test_cancel_interrupts_the_running_jobs_and_says_so_once():
+    grant = make_jobs()
+    server = grant.jobs.server
+    start(grant)
+    start(grant, "Second")
+    answer = api.run_watch_job_call(grant, "cancel_job", {})
+    assert answer == {"ok": True, "message": "Cancelled 2 background jobs."}
+    assert server.methods("session.interrupt") == [{"session_id": "rt-1"}, {"session_id": "rt-2"}]
+    server.emit("rt-1", "message.complete", {"text": "", "status": "interrupted"})
+    assert news(grant)["news"] == []
+    assert api.run_watch_job_call(grant, "cancel_job", {}) == {"ok": True,
+                                                               "message": "There are no background jobs to cancel."}
+
+
+def test_cancelling_one_job_by_id():
+    grant = make_jobs()
+    start(grant)
+    start(grant, "Second")
+    assert api.run_watch_job_call(grant, "cancel_job", {"job_id": "watch-2"}) == {"ok": True,
+                                                                                 "message": "Second was cancelled."}
+    assert [job.status for job in grant.jobs.jobs.values()] == ["running", "cancelled"]
+
+
+def test_a_cancel_hermes_refuses_leaves_the_job_followed():
+    grant = make_jobs()
+    server = grant.jobs.server
+    start(grant)
+    server.ask_approval("rt-1")
+    server.fail["session.interrupt"] = "no such session"
+    answer = api.run_watch_job_call(grant, "cancel_job", {"job_id": "watch-1"})
+    assert answer == {"ok": True, "message": "Couldn't cancel Check the build logs. It may still be running."}
+    job = grant.jobs.jobs["watch-1"]
+    assert (job.status, job.approval["request_id"], job.outcome_told) == ("needs_approval", "appr-1", False)
+
+
+# --- Ending ----------------------------------------------------------------------
+
+def wait_for(condition, timeout=2.0):
+    deadline = time.monotonic() + timeout
+    while not condition():
+        assert time.monotonic() < deadline, "timed out"
+        time.sleep(0.01)
+
+
+def test_when_the_grant_ends_settled_jobs_close_now_and_running_ones_once_they_finish():
+    grant = make_jobs()
+    server = grant.jobs.server
+    start(grant)
+    start(grant, "Second")
+    server.emit("rt-1", "message.complete", {"text": "done", "status": "complete"})
+    assert api._close_watch_grant_here(grant)
+    wait_for(lambda: server.methods("session.close") == [{"session_id": "rt-1"}])
+    assert not grant.jobs.transport._closed
+    # The running job keeps running, and can't be told to the Watch any more.
+    assert api.run_watch_job_call(grant, "start_job", {"instructions": "more"})["status"] == 410
+    server.emit("rt-2", "message.complete", {"text": "late", "status": "complete"})
+    wait_for(lambda: {"session_id": "rt-2"} in server.methods("session.close"))
+    wait_for(lambda: grant.jobs.transport._closed)
+
+
+def test_a_session_the_app_joined_is_left_to_the_app():
+    grant = make_jobs()
+    server = grant.jobs.server
+    start(grant)
+    server._sessions["rt-1"]["transport"] = object()  # Conduit opened the chat: a fan-out now
+    grant.jobs.transport.write({"jsonrpc": "2.0", "method": "event", "params": {
+        "type": "message.complete", "session_id": "rt-1", "payload": {"text": "done", "status": "complete"}}})
+    grant.jobs.end()
+    wait_for(lambda: grant.jobs.transport._closed)
+    assert server.methods("session.close") == []
+
+
+def test_job_news_stops_waiting_when_the_grant_ends():
+    grant = make_jobs()
+    start(grant)
+    threading.Timer(0.2, api._close_watch_grant_here, args=(grant,)).start()
+    began = time.monotonic()
+    assert news(grant, wait_s=10)["news"] == []
+    assert time.monotonic() - began < 5
+
+
+# --- Through the relay --------------------------------------------------------------
+
+def test_a_sealed_start_job_runs_and_its_answer_goes_back_sealed():
+    grant = make_jobs()
+    relay = FakeRelay()
+    rid = b64u(bytes(16))
+    call = {"rid": rid, **api.seal_watch_tool(grant.call_key, "call", GRANT_ID, rid,
+                                               {"tool": "start_job", "args": {"instructions": "Check the build logs"}})}
+    assert api.answer_watch_call(grant, call, relay=relay) == "answered"
+    [post] = relay.requests
+    answer = api.open_watch_tool(grant.result_key, "result", GRANT_ID, rid, post["payload"], max_bytes=64 * 1024)
+    assert (answer["status"], answer["job_id"]) == ("started", "watch-1")
+
+
+def test_a_grant_without_jobs_refuses_job_calls():
+    grant = make_jobs()
+    grant.jobs = None
+    assert api.run_watch_job_call(grant, "job_news", {})["status"] == 403
+
+
+def test_a_failure_in_a_job_call_is_answered_by_type(monkeypatch):
+    grant = make_jobs()
+    monkeypatch.setattr(grant.jobs, "list", lambda: 1 / 0)
+    assert api.run_watch_job_call(grant, "list_jobs", {}) == {
+        "ok": False, "status": 500, "detail": "The job call failed on the host (ZeroDivisionError)"}
+
+
+def test_capabilities_name_watch_jobs():
+    assert "watch-jobs" in api.ROUTE_CAPABILITIES

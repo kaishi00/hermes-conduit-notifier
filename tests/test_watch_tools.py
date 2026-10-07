@@ -259,11 +259,13 @@ def test_a_full_relay_reads_as_at_capacity_not_broken(tmp_path):
     (None, 400),
     ({}, 400),
     ({"tools": []}, 400),
-    ({"tools": ["start_job"]}, 400),
-    ({"tools": ["web_search", "cancel_job"]}, 400),
+    ({"tools": ["terminal"]}, 400),
+    ({"tools": ["web_search", "execute_code"]}, 400),
     ({"tools": "web_search"}, 400),
+    # Jobs alone where this process can't run them (tests/test_watch_jobs.py).
+    ({"tools": ["start_job"]}, 501),
 ])
-def test_only_lookups_and_memory_can_be_granted(tmp_path, body, status):
+def test_only_lookups_memory_and_jobs_can_be_granted(tmp_path, body, status):
     relay = FakeRelay()
     with pytest.raises(api.TokenError) as err:
         api.open_watch_grant(body, profile=None, path=write_pairing(tmp_path), relay=relay, start=lambda g: None)
@@ -617,8 +619,8 @@ def test_grant_route_returns_the_grant_uncached_and_revoke_closes_it(client, tol
     assert client.post(f"{BASE}/watch-tools/revoke", json={"grant_id": GRANT_ID}).json() == {"ok": True, "revoked": False}
 
 
-def test_grant_route_refuses_actions(client):
-    response = client.post(f"{BASE}/watch-tools/grant", json={"tools": ["start_job"]})
+def test_grant_route_refuses_other_tools(client):
+    response = client.post(f"{BASE}/watch-tools/grant", json={"tools": ["terminal"]})
     assert response.status_code == 400
     assert response.headers["cache-control"] == "no-store"
 

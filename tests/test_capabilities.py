@@ -46,6 +46,8 @@ def test_every_capability_names_a_served_route_family():
         "personality": "/personality", "gpt-live": "/gpt-live/", "grok-live": "/grok-live/",
         "voice-sessions": "/voice/sessions", "voice-tags": "/voice/tags", "voice-summary": "/voice/summary",
         "session-takeover": "/sessions/takeover", "e2e-notifications": "/e2e", "watch-tools": "/watch-tools/",
+        # Jobs ride the watch-tools grant route.
+        "watch-jobs": "/watch-tools/",
     }
     assert set(prefixes) == set(api.ROUTE_CAPABILITIES)
     for capability, prefix in prefixes.items():

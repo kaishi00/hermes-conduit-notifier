@@ -46,6 +46,7 @@ import math
 import os
 import queue
 import re
+import sys
 import threading
 import time
 import traceback
@@ -3099,8 +3100,9 @@ async def post_e2e(request: Request, response: Response, profile: Optional[str] 
 # The Watch gets only the grant: a per-call key (HKDF-SHA256 root for the two
 # ChaCha20-Poly1305 directions, never sent to the relay) and a relay key the
 # relay keeps only as a SHA-256. It allows web_search and recall_memory, for
-# this profile, for 30 minutes and 60 calls. Grants live in memory: a
-# dashboard restart drops them and the Watch falls back to the iPhone.
+# this profile, for 30 minutes and 60 calls, and with the user's say-so
+# Hermes jobs too (Watch jobs, below). Grants live in memory: a dashboard
+# restart drops them and the Watch falls back to the iPhone.
 # (hermes-conduit designs/apple-watch-voice-direct.md)
 
 WATCH_TOOLS = ("web_search", "recall_memory")
@@ -3110,7 +3112,8 @@ WATCH_GRANT_MAX_CALLS = 60
 WATCH_GRANTS_PER_PROFILE = 2
 WATCH_GRANT_LIMIT = 10
 WATCH_GRANT_WINDOW_S = 60.0
-WATCH_GRANT_MAX_BODY_BYTES = 1024
+# Tools, the job cap and the phone's job model settings.
+WATCH_GRANT_MAX_BODY_BYTES = 2048
 # The relay holds a poll this long when no call waits.
 WATCH_POLL_WAIT_MS = 25_000
 WATCH_POLL_TIMEOUT_S = WATCH_POLL_WAIT_MS / 1000 + 10
@@ -3122,7 +3125,8 @@ WATCH_POLL_BACKOFF_MAX_S = 10.0
 WATCH_MAX_CALL_BYTES = 4 * 1024
 # The relay's bound on a sealed answer (base64url characters).
 WATCH_MAX_RESULT_CT_CHARS = 24_000
-WATCH_WORKERS = 4
+# A job_news call holds its worker while it waits for news.
+WATCH_WORKERS = 8
 _WATCH_SALT = b"conduit-watch-tools-v1"
 _WATCH_INFO = {
     "call": b"conduit-watch-tools-v1 call watch-to-host",
@@ -3242,7 +3246,8 @@ def _relay_request(url: str, method: str, credential: str, payload: Optional[Dic
 
 class _WatchGrant:
     def __init__(self, *, grant_id: str, profile: Optional[str], tools: Tuple[str, ...], secret: bytes,
-                 relay_url: str, credential: str, expires_at: float) -> None:
+                 relay_url: str, credential: str, expires_at: float,
+                 max_calls: Optional[int] = None) -> None:
         keys = watch_tool_keys(secret)
         self.grant_id = grant_id
         self.profile = profile
@@ -3253,7 +3258,10 @@ class _WatchGrant:
         self.relay_url = relay_url
         self.credential = credential
         self.expires_at = expires_at
+        self.max_calls = max_calls if max_calls is not None else WATCH_GRANT_MAX_CALLS
         self.created_at = time.monotonic()
+        # Set when the grant has jobs (_WatchJobs).
+        self.jobs: Optional["_WatchJobs"] = None
         self.used = 0
         self.seen: set = set()
         self.lock = threading.Lock()
@@ -3307,6 +3315,8 @@ def _close_watch_grant_here(grant: _WatchGrant) -> bool:
         already = grant.closed.is_set()
         grant.closed.set()
     _watch_grants.remove(grant)
+    if grant.jobs is not None and not already:
+        grant.jobs.end()
     return not already
 
 
@@ -3359,6 +3369,8 @@ def run_watch_tool(grant: _WatchGrant, request: Dict[str, Any]) -> Dict[str, Any
     args = _clean_watch_args(request.get("args"))
     if tool not in grant.tools:
         return {"ok": False, "status": 403, "detail": "This tool isn't available to the Watch"}
+    if tool in WATCH_JOB_TOOLS or tool in WATCH_JOB_CALLS:
+        return run_watch_job_call(grant, tool, args)
     if tool == "web_search":
         feature, what, executor, timeout = "Web search", "request", _search_executor, SEARCH_TIMEOUT_S
         job: Callable[[], Dict[str, Any]] = lambda: run_web_search(  # noqa: E731
@@ -3413,7 +3425,7 @@ def answer_watch_call(grant: _WatchGrant, call: Any,
             return None
         grant.seen.add(rid)
         grant.used += 1
-        exhausted = grant.used > WATCH_GRANT_MAX_CALLS
+        exhausted = grant.used > grant.max_calls
     if grant.closed.is_set() or time.monotonic() >= grant.expires_at:
         answer = {"ok": False, "status": 410, "detail": "This call's Watch lookups have ended"}
     elif exhausted:
@@ -3500,20 +3512,42 @@ def _watch_grant_ttl(relay_expires_at: Any, now: datetime) -> float:
     return min(ttl, remaining) if remaining > 0 else ttl
 
 
+def _watch_max_jobs(value: Any) -> int:
+    if value is None:
+        return WATCH_JOBS_DEFAULT
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise TokenError(400, "max_jobs must be a whole number from 0")
+    return min(value, WATCH_JOBS_MAX)
+
+
 def open_watch_grant(body: Any, *, profile: Optional[str], path: Any = None,
                      relay: Optional[Callable[..., Tuple[int, Dict[str, Any]]]] = None,
-                     start: Optional[Callable[[_WatchGrant], None]] = None) -> Dict[str, Any]:
-    """Opens a grant for one Watch call on this profile's relay pairing."""
+                     start: Optional[Callable[[_WatchGrant], None]] = None,
+                     session_api: Optional[Callable[[], Any]] = None) -> Dict[str, Any]:
+    """Opens a grant for one Watch call on this profile's relay pairing.
+
+    Jobs (any of WATCH_JOB_TOOLS asked for, ``max_jobs`` above 0) are granted
+    only where this process serves Hermes' chats; elsewhere the grant leaves
+    them out and the Watch's jobs go through the iPhone.
+    """
     relay = relay or _relay_request
     start = start or _start_watch_poller
+    session_api = session_api or _hermes_session_api
     if not isinstance(body, dict):
         raise TokenError(400, "Expected a JSON object")
     requested = body.get("tools")
     if not isinstance(requested, list) or not requested or not all(isinstance(t, str) for t in requested):
         raise TokenError(400, "tools must be a non-empty list")
-    if any(tool not in WATCH_TOOLS for tool in requested):
-        raise TokenError(400, f"The Watch can only be granted {', '.join(WATCH_TOOLS)}")
+    if any(tool not in WATCH_TOOLS + WATCH_JOB_TOOLS for tool in requested):
+        raise TokenError(400, f"The Watch can only be granted {', '.join(WATCH_TOOLS + WATCH_JOB_TOOLS)}")
+    max_jobs = _watch_max_jobs(body.get("max_jobs"))
+    server = session_api() if max_jobs > 0 and any(tool in WATCH_JOB_TOOLS for tool in requested) else None
     tools = tuple(tool for tool in WATCH_TOOLS if tool in requested)
+    if server is not None:
+        tools += WATCH_JOB_TOOLS + WATCH_JOB_CALLS
+    if not tools:
+        raise TokenError(501, "This host can't run Hermes jobs for the Watch")
+    max_calls = WATCH_JOB_GRANT_MAX_CALLS if server is not None else WATCH_GRANT_MAX_CALLS
     if not _e2e_crypto_available():
         raise TokenError(501, "Watch tools need the cryptography package on this host")
     state = _load_pairing_state(path if path is not None else _pairing_state_path())
@@ -3530,7 +3564,7 @@ def open_watch_grant(body: Any, *, profile: Optional[str], path: Any = None,
         status, response = relay(f"{relay_url}/v1/watch-tools/grants", "POST", credential, {
             "watch_key_sha256": hashlib.sha256(watch_key.encode("ascii")).hexdigest(),
             "ttl_s": WATCH_GRANT_TTL_S,
-            "max_calls": WATCH_GRANT_MAX_CALLS,
+            "max_calls": max_calls,
         }, WATCH_RELAY_TIMEOUT_S)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Opening a Watch tool grant on the relay failed: %s", type(exc).__name__)
@@ -3548,7 +3582,10 @@ def open_watch_grant(body: Any, *, profile: Optional[str], path: Any = None,
     now = datetime.now(timezone.utc)
     ttl = _watch_grant_ttl(response.get("expires_at"), now)
     grant = _WatchGrant(grant_id=grant_id, profile=profile, tools=tools, secret=secret, relay_url=relay_url,
-                        credential=credential, expires_at=time.monotonic() + ttl)
+                        credential=credential, expires_at=time.monotonic() + ttl, max_calls=max_calls)
+    if server is not None:
+        grant.jobs = _WatchJobs(grant, max_jobs=max_jobs, options=_clean_job_options(body.get("job_options")),
+                                server=server)
     for old in _watch_grants.add(grant):
         _watch_executor.submit(_close_watch_grant, old, tell_relay=True, relay=relay)
     try:
@@ -3568,7 +3605,8 @@ def open_watch_grant(body: Any, *, profile: Optional[str], path: Any = None,
         "watch_key": watch_key,
         "expires_at": _timestamp(expires_at),
         "tools": list(tools),
-        "max_calls": WATCH_GRANT_MAX_CALLS,
+        "max_calls": max_calls,
+        "max_jobs": max_jobs if server is not None else 0,
     }
 
 
@@ -3637,6 +3675,600 @@ async def post_watch_tool_revoke(request: Request, response: Response, profile: 
         raise _unexpected("revoke", exc, feature="Watch tools")
 
 
+# --- Watch jobs through the relay ---------------------------------------------
+#
+# With jobs in its grant, a Watch call's start_job, list_jobs and cancel_job
+# run here instead of on the iPhone, so they work with the wrist down. The
+# plugin drives Hermes' own session API in this dashboard process (the
+# methods the app calls over its WebSocket) through a transport of its own:
+# each job is an ordinary Hermes chat on the grant's profile, filed under
+# Voice Jobs like a job the phone started. Two more calls come only from the
+# Watch app, never from the model as such: job_news (settled jobs and
+# approval requests, held until there is some) and answer_approval (Approve
+# or Deny on the Watch, or by voice when the user turned that on). Hermes'
+# own approval settings decide what needs approving; the Watch can only
+# approve once or deny. (hermes-conduit designs/apple-watch-voice-direct.md,
+# "Wrist-down jobs through the relay")
+
+WATCH_JOB_TOOLS = ("start_job", "list_jobs", "cancel_job")
+WATCH_JOB_CALLS = ("job_news", "answer_approval")
+# Jobs one call may start: the user's setting, capped here.
+WATCH_JOBS_DEFAULT = 5
+WATCH_JOBS_MAX = 20
+# Running at once, as on the phone (VoiceBackgroundJobSupervisor.maximumActiveJobs).
+WATCH_JOBS_RUNNING_MAX = 3
+# A grant with jobs polls job_news while they run: the relay's own cap.
+WATCH_JOB_GRANT_MAX_CALLS = 120
+# A job_news call waits this long for news; the relay holds the Watch's
+# request 25 s.
+WATCH_JOB_NEWS_WAIT_S = 15.0
+WATCH_JOB_RPC_TIMEOUT_S = 20.0
+WATCH_JOB_MAX_INSTRUCTIONS = 3_000
+# As Conduit's VoiceBackgroundJobSupervisor: maximumResultCharacters and
+# maximumTitleCharacters.
+WATCH_JOB_RESULT_CHARS = 6_000
+WATCH_JOB_TITLE_CHARS = 60
+WATCH_JOB_MAX_OPTION_CHARS = 120
+# UTF-8 bytes of one answer's job news: its sealed form stays inside the
+# relay's bound on an answer (WATCH_MAX_RESULT_CT_CHARS). A result is cut to
+# fit on its own; more news than fits waits for the next call.
+WATCH_JOB_RESULT_BYTES = 12_000
+WATCH_JOB_NEWS_BYTES = 15_000
+# What the Watch may answer an approval with: never "session" or "always".
+WATCH_APPROVAL_CHOICES = ("once", "deny")
+# Mirrors Conduit's VoiceBackgroundJobSupervisor.jobPrompt.
+WATCH_JOB_PROMPT = ("[Background job started from a Conduit voice conversation. Nobody is watching this chat live, "
+                    "so work on it on your own. When you are done, end your final message with a plain-language "
+                    "summary that can be read aloud: what you found or did, with the key details.]\n\n{instructions}")
+
+
+class WatchJobError(Exception):
+    """A Hermes session call for a Watch job that failed; the message is Hermes' own."""
+
+
+def _hermes_session_api() -> Any:
+    """Hermes' session API module when it serves this process's chats, else None.
+
+    Only a module the dashboard itself loaded counts: importing it here (a
+    plugin host process, an older Hermes) would make a second, private
+    registry whose chats the app never sees.
+    """
+    server = sys.modules.get("tui_gateway.server")
+    if server is None or not callable(getattr(server, "dispatch", None)):
+        return None
+    sessions = getattr(server, "_sessions", None)
+    return server if sessions is not None and callable(getattr(sessions, "get", None)) else None
+
+
+def watch_job_title(instructions: str) -> str:
+    """Mirrors Conduit's VoiceBackgroundJobSupervisor.title(for:)."""
+    collapsed = " ".join(instructions.split())
+    if len(collapsed) <= WATCH_JOB_TITLE_CHARS:
+        return collapsed
+    cut = collapsed[:WATCH_JOB_TITLE_CHARS]
+    space = cut.rfind(" ")
+    if space > WATCH_JOB_TITLE_CHARS // 2:
+        return cut[:space] + "…"
+    return cut + "…"
+
+
+def _clip_job_result(text: str) -> str:
+    """At most WATCH_JOB_RESULT_CHARS characters and WATCH_JOB_RESULT_BYTES
+    bytes, marked when cut."""
+    if len(text) <= WATCH_JOB_RESULT_CHARS and len(text.encode("utf-8")) <= WATCH_JOB_RESULT_BYTES:
+        return text
+    cut = text[:WATCH_JOB_RESULT_CHARS].encode("utf-8")[:WATCH_JOB_RESULT_BYTES - 8]
+    return cut.decode("utf-8", "ignore") + "\n[…]"
+
+
+def _json_bytes(value: Any) -> int:
+    return len(json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+
+
+def _clean_job_options(value: Any) -> Dict[str, str]:
+    """The phone's voice-job model settings for this profile, as it would send them."""
+    if not isinstance(value, dict):
+        return {}
+    options = {key: value[key].strip() for key in ("model", "provider", "reasoning_effort")
+               if isinstance(value.get(key), str) and 0 < len(value[key].strip()) <= WATCH_JOB_MAX_OPTION_CHARS}
+    # A provider only goes with its model (HermesClient.createSession).
+    if "model" not in options:
+        options.pop("provider", None)
+    return options
+
+
+class _WatchJob:
+    def __init__(self, job_id: str, title: str) -> None:
+        self.job_id = job_id
+        self.title = title
+        self.session_id = ""
+        self.stored_session_id = ""
+        self.status = "starting"
+        self.result = ""
+        self.error = ""
+        # The pending approval: Hermes' request id, its server request's id
+        # (for request.cancel), the redacted command and its description.
+        self.approval: Optional[Dict[str, str]] = None
+        # Told to the Watch: the outcome, and the approval request last told.
+        self.outcome_told = False
+        self.approval_told = ""
+        self.closed = False
+
+    @property
+    def active(self) -> bool:
+        return self.status in ("starting", "running", "needs_approval")
+
+    def news(self) -> Dict[str, Any]:
+        item: Dict[str, Any] = {"job_id": self.job_id, "title": self.title, "status": self.status,
+                                "session_id": self.stored_session_id or self.session_id}
+        if self.status == "finished":
+            item["result"] = _clip_job_result(self.result)
+        if self.error:
+            item["error"] = self.error
+        if self.approval and self.status == "needs_approval":
+            item["approval"] = {key: self.approval[key] for key in ("request_id", "command", "description")}
+        return item
+
+    @property
+    def approval_key(self) -> str:
+        """Which approval request is pending, for telling each one once."""
+        if not self.approval:
+            return ""
+        return self.approval["request_id"] or self.approval["server_request_id"]
+
+
+class _WatchJobTransport:
+    """This plugin's end of its jobs' sessions: Hermes writes their responses
+    and events here, as it would to the app's WebSocket. ``_closed`` is what
+    Hermes' session reaper reads."""
+
+    def __init__(self, jobs: "_WatchJobs") -> None:
+        self._jobs = jobs
+        self._closed = False
+
+    def write(self, obj: dict) -> bool:
+        if self._closed:
+            return False
+        try:
+            self._jobs.frame(obj)
+        except Exception as exc:  # noqa: BLE001 — Hermes' writer must never see our failure
+            _log_watch_failure("A Watch job event couldn't be read", exc)
+        return True
+
+    def close(self) -> None:
+        self._closed = True
+
+
+class _RpcWaiter:
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.response: Optional[Dict[str, Any]] = None
+
+
+class _WatchJobs:
+    """One grant's jobs: started, followed and ended through Hermes' session API."""
+
+    def __init__(self, grant: "_WatchGrant", *, max_jobs: int, options: Dict[str, str], server: Any) -> None:
+        self.grant = grant
+        self.max_jobs = max_jobs
+        self.options = options
+        self.server = server
+        self.jobs: Dict[str, _WatchJob] = {}
+        self.started = 0
+        self.lock = threading.Lock()
+        self.changed = threading.Condition(self.lock)
+        self.transport = _WatchJobTransport(self)
+        self._waiters: Dict[str, _RpcWaiter] = {}
+        self._rpc_ids = 0
+        self.ended = False
+
+    # Hermes' session API
+
+    def rpc(self, method: str, params: Dict[str, Any], timeout: float = WATCH_JOB_RPC_TIMEOUT_S) -> Dict[str, Any]:
+        with self.lock:
+            self._rpc_ids += 1
+            rid = f"conduit-watch-{self.grant.grant_id[:8]}-{self._rpc_ids}"
+            waiter = self._waiters[rid] = _RpcWaiter()
+        try:
+            response = self.server.dispatch({"jsonrpc": "2.0", "id": rid, "method": method, "params": params},
+                                            self.transport)
+            if response is None:
+                # A slow method answers from Hermes' worker pool.
+                if not waiter.done.wait(timeout):
+                    raise WatchJobError(f"{method} timed out")
+                response = waiter.response
+        finally:
+            with self.lock:
+                self._waiters.pop(rid, None)
+        if not isinstance(response, dict):
+            raise WatchJobError(f"{method} gave no answer")
+        error = response.get("error")
+        if error:
+            message = error.get("message") if isinstance(error, dict) else str(error)
+            raise WatchJobError(str(message or f"{method} failed")[:300])
+        result = response.get("result")
+        return result if isinstance(result, dict) else {}
+
+    def frame(self, obj: Any) -> None:
+        """A frame Hermes wrote to this transport."""
+        if not isinstance(obj, dict):
+            return
+        method = obj.get("method")
+        if method is None:
+            # A response to one of our calls.
+            with self.lock:
+                waiter = self._waiters.get(obj.get("id")) if isinstance(obj.get("id"), str) else None
+            if waiter is not None:
+                waiter.response = obj
+                waiter.done.set()
+            return
+        params = obj.get("params") if isinstance(obj.get("params"), dict) else {}
+        sid = params.get("session_id") if isinstance(params.get("session_id"), str) else ""
+        if method == "event":
+            payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
+            self._event(str(params.get("type") or ""), sid, payload)
+        elif method == "approval":
+            # A server request: its fields sit beside session_id.
+            self._approval_requested(sid, str(obj.get("id") or ""), params)
+
+    def _job_for(self, sid: str) -> Optional[_WatchJob]:
+        if not sid:
+            return None
+        return next((job for job in self.jobs.values() if sid in (job.session_id, job.stored_session_id)), None)
+
+    def _event(self, kind: str, sid: str, payload: Dict[str, Any]) -> None:
+        settled = False
+        with self.changed:
+            job = self._job_for(sid)
+            if job is None:
+                return
+            if kind == "request.cancel":
+                # Answered elsewhere (the app, the phone), timed out, or the
+                # turn ended.
+                if job.approval and payload.get("id") == job.approval["server_request_id"]:
+                    self._approval_gone(job)
+            elif kind == "approval.cancelled":
+                ids = payload.get("request_ids")
+                if job.approval and (not isinstance(ids, list) or not ids or job.approval["request_id"] in ids):
+                    self._approval_gone(job)
+            elif job.active and kind == "message.complete":
+                text = payload.get("text")
+                if not isinstance(text, str) or not text.strip():
+                    text = payload.get("rendered") if isinstance(payload.get("rendered"), str) else ""
+                status = payload.get("status")
+                if status == "interrupted":
+                    job.status = "cancelled"
+                elif status == "error":
+                    detail = payload.get("error") if isinstance(payload.get("error"), str) else text
+                    job.status, job.error = "failed", (detail or "").strip()[:300] or "Hermes reported an error"
+                else:
+                    job.status, job.result = "finished", text.strip()
+                job.approval = None
+                settled = True
+            elif job.active and kind == "error":
+                message = payload.get("message")
+                job.status = "failed"
+                job.error = (message if isinstance(message, str) else "").strip()[:300] or "Hermes reported an error"
+                job.approval = None
+                settled = True
+            else:
+                return
+            self.changed.notify_all()
+            ended = self.ended
+        if settled and ended:
+            self._close_session_later(job)
+
+    @staticmethod
+    def _approval_gone(job: _WatchJob) -> None:
+        job.approval = None
+        if job.status == "needs_approval":
+            job.status = "running"
+
+    def _approval_requested(self, sid: str, server_request_id: str, params: Dict[str, Any]) -> None:
+        def text(key: str, limit: int) -> str:
+            value = params.get(key)
+            return value.strip()[:limit] if isinstance(value, str) else ""
+
+        with self.changed:
+            job = self._job_for(sid)
+            if job is None or not job.active:
+                return
+            job.approval = {
+                "request_id": text("request_id", 128),
+                "server_request_id": server_request_id,
+                "command": text("command", 2_000),
+                "description": text("description", 500) or "Approval required",
+            }
+            job.status = "needs_approval"
+            self.changed.notify_all()
+
+    # The Watch's calls
+
+    def start(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        instructions = str(args.get("instructions") or "").strip()
+        # "Quick:" only routes work on the phone; it isn't part of the task.
+        if instructions[:6].lower() == "quick:":
+            instructions = instructions[6:].strip()
+        if not instructions:
+            return {"ok": False, "status": 400, "detail": "instructions is required"}
+        if str(args.get("profile") or "").strip():
+            return {"ok": False, "status": 400, "detail": "Jobs on another profile start from the iPhone"}
+        if len(instructions) > WATCH_JOB_MAX_INSTRUCTIONS:
+            return {"ok": False, "status": 413, "detail": "The task is too long for a Watch job"}
+        with self.lock:
+            if self.ended:
+                return {"ok": False, "status": 410, "detail": "This call's Watch jobs have ended"}
+            if self.started >= self.max_jobs:
+                return {"ok": True, "status": "not_started",
+                        "message": f"This call has started {self.max_jobs} jobs, the most the user allows per call. "
+                                   "Tell them; they can raise it in Conduit's Watch settings or start more from "
+                                   "their iPhone."}
+            running = sum(1 for job in self.jobs.values() if job.active)
+            if running >= WATCH_JOBS_RUNNING_MAX:
+                return {"ok": True, "status": "not_started",
+                        "message": f"You already have {running} background jobs running. Cancel them before "
+                                   "starting another."}
+            self.started += 1
+            job = _WatchJob(f"watch-{self.started}", watch_job_title(instructions))
+            self.jobs[job.job_id] = job
+        try:
+            params: Dict[str, Any] = {"cols": 96, "source": "desktop", "title": job.title, **self.options}
+            if self.grant.profile:
+                params["profile"] = self.grant.profile
+            created = self.rpc("session.create", params)
+            sid = created.get("session_id")
+            if not isinstance(sid, str) or not sid:
+                raise WatchJobError("session.create gave no session")
+            stored = created.get("stored_session_id")
+            with self.lock:
+                job.session_id = sid
+                job.stored_session_id = stored if isinstance(stored, str) else ""
+                cancelled = job.status == "cancelled"
+            if not cancelled:
+                self.rpc("prompt.submit", {"session_id": sid, "text": WATCH_JOB_PROMPT.format(instructions=instructions)})
+                with self.lock:
+                    cancelled = job.status == "cancelled"
+                if cancelled:
+                    # Cancelled while its prompt went in: stop that turn.
+                    try:
+                        self.rpc("session.interrupt", {"session_id": sid})
+                    except WatchJobError as exc:
+                        logger.info("Cancelling a starting Watch job failed: %s", exc)
+        except Exception as exc:  # noqa: BLE001 — the job didn't start; the model is told
+            with self.changed:
+                if job.active:
+                    job.status = "failed"
+                    job.error = str(exc)[:300] if isinstance(exc, WatchJobError) else type(exc).__name__
+                job.outcome_told = True
+                self.changed.notify_all()
+            if not isinstance(exc, WatchJobError):
+                _log_watch_failure("Starting a Watch job failed", exc)
+            self._close_session(job)
+            if job.status == "cancelled":
+                return {"ok": True, "status": "not_started", "title": job.title,
+                        "message": f"{job.title} was cancelled before it started."}
+            return {"ok": True, "status": "not_started", "title": job.title,
+                    "message": f"Hermes couldn't start the job: {job.error}"}
+        if cancelled:
+            # cancel_job got there while it started, and said so.
+            self._close_session(job)
+            return {"ok": True, "status": "not_started", "title": job.title,
+                    "message": f"{job.title} was cancelled before it started."}
+        with self.changed:
+            if job.status == "starting":
+                job.status = "running"
+            self.changed.notify_all()
+        self._tag(job)
+        return {"ok": True, "status": "started", "job_id": job.job_id, "title": job.title,
+                "session_id": job.stored_session_id or sid,
+                "message": "The job is running on Hermes. Its result will arrive later as a message; don't wait for it."}
+
+    def list(self) -> Dict[str, Any]:
+        """Mirrors the phone's list_jobs answer (GeminiLiveToolBridge.listResult)."""
+        with self.lock:
+            visible = [job for job in self.jobs.values() if job.active or not job.outcome_told]
+            lines = {
+                "starting": "{} is still running.", "running": "{} is still running.",
+                "needs_approval": "{} is waiting for your approval.", "finished": "{} has finished.",
+                "failed": "{} failed.", "cancelled": "{} was cancelled.",
+            }
+            result: Dict[str, Any] = {
+                "ok": True,
+                "summary": " ".join(lines[job.status].format(job.title) for job in visible)
+                or "No background jobs are running.",
+            }
+            for index, job in enumerate(visible, 1):
+                result[f"job_{index}"] = f"id={job.job_id}; title={job.title}; status={job.status}"
+        return result
+
+    def cancel(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        wanted = str(args.get("job_id") or "").strip()
+        with self.changed:
+            targets = [job for job in self.jobs.values() if job.active and (not wanted or job.job_id == wanted)]
+            if not targets:
+                return {"ok": True, "message": "There are no background jobs to cancel."}
+            # Marked first, as on the phone: the interrupt's own end of turn
+            # reads as this cancel, which the user hears in this answer.
+            before = {job.job_id: (job.status, job.approval) for job in targets}
+            for job in targets:
+                job.status = "cancelled"
+                job.approval = None
+                job.outcome_told = True
+            self.changed.notify_all()
+        failed = []
+        for job in targets:
+            if not job.session_id:
+                continue  # still starting: its start sees the cancel
+            try:
+                self.rpc("session.interrupt", {"session_id": job.session_id})
+            except Exception as exc:  # noqa: BLE001 — it stays followed
+                logger.info("Cancelling a Watch job failed: %s", type(exc).__name__)
+                with self.changed:
+                    if job.status == "cancelled":
+                        job.status, job.approval = before[job.job_id]
+                        job.outcome_told = False
+                    self.changed.notify_all()
+                failed.append(job)
+        if self.ended:
+            for job in targets:
+                if job not in failed:
+                    self._close_session_later(job)
+        if wanted:
+            title = targets[0].title
+            return {"ok": True, "message": f"Couldn't cancel {title}. It may still be running." if failed
+                    else f"{title} was cancelled."}
+        count = len(targets) - len(failed)
+        parts = [f"Cancelled {count} background jobs."] if count else []
+        parts += [f"Couldn't cancel {job.title}. It may still be running." for job in failed]
+        return {"ok": True, "message": " ".join(parts)}
+
+    def news(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Settled jobs and approval requests not yet told, waiting up to
+        ``wait_s`` (at most WATCH_JOB_NEWS_WAIT_S) for some while jobs run."""
+        wait = args.get("wait_s")
+        wait = min(float(wait), WATCH_JOB_NEWS_WAIT_S) if isinstance(wait, int) and wait >= 0 else WATCH_JOB_NEWS_WAIT_S
+        deadline = time.monotonic() + wait
+        with self.changed:
+            while True:
+                news = self._take_news()
+                running = sum(1 for job in self.jobs.values() if job.active)
+                remaining = deadline - time.monotonic()
+                if news or not running or self.ended or self.grant.closed.is_set() or remaining <= 0:
+                    break
+                self.changed.wait(min(remaining, 1.0))
+            waiting = sum(1 for job in self.jobs.values() if not job.active and not job.outcome_told)
+        return {"ok": True, "news": news, "running": running, "more": waiting > 0}
+
+    def _take_news(self) -> list:
+        """Called with the lock held."""
+        news: list = []
+        used = 0
+        for job in self.jobs.values():
+            if not job.active and not job.outcome_told:
+                told = None
+            elif job.approval and job.status == "needs_approval" and job.approval_told != job.approval_key:
+                told = job.approval_key
+            else:
+                continue
+            item = job.news()
+            size = _json_bytes(item)
+            if news and used + size > WATCH_JOB_NEWS_BYTES:
+                break  # the rest goes with the next call
+            used += size
+            news.append(item)
+            if told is None:
+                job.outcome_told = True
+            else:
+                job.approval_told = told
+        return news
+
+    def answer_approval(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        choice = str(args.get("choice") or "")
+        if choice not in WATCH_APPROVAL_CHOICES:
+            return {"ok": False, "status": 400, "detail": "choice must be once or deny"}
+        with self.lock:
+            job = self.jobs.get(str(args.get("job_id") or ""))
+            approval = dict(job.approval) if job and job.approval and job.status == "needs_approval" else None
+        if job is None or approval is None:
+            return {"ok": True, "status": "not_pending", "message": "That job isn't waiting for an approval any more."}
+        wanted = str(args.get("request_id") or "")
+        if wanted != approval["request_id"]:
+            # Only the request the Watch showed: a newer one needs its own answer.
+            return {"ok": True, "status": "not_pending", "message": "That approval request has been replaced."}
+        params: Dict[str, Any] = {"session_id": job.session_id, "choice": choice}
+        if approval["request_id"]:
+            params["request_id"] = approval["request_id"]
+        try:
+            resolved = self.rpc("approval.respond", params).get("resolved")
+        except WatchJobError as exc:
+            return {"ok": True, "status": "failed", "message": f"Hermes didn't take the answer: {exc}"}
+        with self.changed:
+            if job.approval and job.approval["request_id"] == approval["request_id"]:
+                self._approval_gone(job)
+            self.changed.notify_all()
+        if resolved == 0:
+            return {"ok": True, "status": "not_pending", "message": "That job isn't waiting for an approval any more."}
+        return {"ok": True, "status": "approved" if choice == "once" else "denied", "job_id": job.job_id}
+
+    # Ending
+
+    def end(self) -> None:
+        """The grant ended: settled jobs' sessions close now, running ones'
+        once they settle. A job still running keeps running in Hermes."""
+        with self.changed:
+            if self.ended:
+                return
+            self.ended = True
+            settled = [job for job in self.jobs.values() if not job.active]
+            self.changed.notify_all()
+        for job in settled:
+            self._close_session_later(job)
+        self._close_transport_if_idle()
+
+    def _close_session_later(self, job: _WatchJob) -> None:
+        try:
+            threading.Thread(target=self._close_session, args=(job,), name="conduit-watch-job-close",
+                             daemon=True).start()
+        except RuntimeError:
+            self._close_session(job)
+
+    def _close_session(self, job: _WatchJob) -> None:
+        """Closes the job's live session, unless the app has joined it; its
+        chat stays in history either way."""
+        with self.lock:
+            if job.closed or not job.session_id:
+                return
+            job.closed = True
+        record = self.server._sessions.get(job.session_id)
+        if isinstance(record, dict) and record.get("transport") is self.transport:
+            try:
+                self.rpc("session.close", {"session_id": job.session_id})
+            except Exception as exc:  # noqa: BLE001 — Hermes' reaper closes it once our transport closes
+                _log_watch_failure("Closing a Watch job's session failed", exc)
+        self._close_transport_if_idle()
+
+    def _close_transport_if_idle(self) -> None:
+        # Once the call has ended and nothing runs: a session the app joined
+        # then lives or ends with the app alone.
+        with self.lock:
+            if self.ended and not any(job.active for job in self.jobs.values()):
+                self.transport.close()
+
+    def _tag(self, job: _WatchJob) -> None:
+        """Files the job under Voice Jobs in Conduit, as a phone job is."""
+        session_id = job.stored_session_id or job.session_id
+        try:
+            with _profile_scope(self.grant.profile):
+                with _voice_lock():
+                    db = _open_voice_db(_VOICE_WRITE)
+                    try:
+                        if _voice_tags(db).get(session_id, {}).get("kind") != "call":
+                            _set_voice_tag(db, session_id, {"kind": "job"})
+                    finally:
+                        db.close()
+        except Exception as exc:  # noqa: BLE001 — the job runs untagged
+            _log_watch_failure("Tagging a Watch job failed", exc)
+
+
+def run_watch_job_call(grant: "_WatchGrant", tool: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    jobs = grant.jobs
+    if jobs is None:
+        return {"ok": False, "status": 403, "detail": "This tool isn't available to the Watch"}
+    try:
+        if tool == "start_job":
+            return jobs.start(args)
+        if tool == "list_jobs":
+            return jobs.list()
+        if tool == "cancel_job":
+            return jobs.cancel(args)
+        if tool == "job_news":
+            return jobs.news(args)
+        return jobs.answer_approval(args)
+    except Exception as exc:  # noqa: BLE001 — named; the message can carry the task
+        _log_watch_failure(f"A Watch {tool} call failed", exc)
+        return {"ok": False, "status": 500, "detail": f"The job call failed on the host ({type(exc).__name__})"}
+
+
 # --- Capabilities ------------------------------------------------------------
 #
 # Conduit reads this once per connection to tell which of its features this
@@ -3657,6 +4289,7 @@ ROUTE_CAPABILITIES = (
     "session-takeover",
     "e2e-notifications",
     "watch-tools",
+    "watch-jobs",
 )
 
 
