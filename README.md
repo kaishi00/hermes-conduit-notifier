@@ -2,7 +2,7 @@
 
 Hermes Conduit Notifier is the open-source Hermes plugin that delivers lifecycle notifications to the Hermes Conduit iOS app. It observes normal Hermes hooks and sends small HTTPS events to the Conduit push relay.
 
-The plugin does **not** contain an Apple Push Notification service key, dashboard credentials, or access to your Hermes gateway. (Its only dashboard routes hand Conduit short-lived Gemini Live tokens, start GPT-Live sessions on the host's ChatGPT subscription, relay Grok Live calls with the host's SuperGrok sign-in, run its voice web lookups, read memory and personality for voice, and save live voice transcripts to this host's session history, ending each call's session there so session hooks and memory see it; see below.) Apple credentials remain on the central push relay, so self-hosted users never need to copy a shared signing key onto their gateway.
+The plugin does **not** contain an Apple Push Notification service key, dashboard credentials, or access to your Hermes gateway. (Its only dashboard routes hand Conduit short-lived Gemini Live tokens, start GPT-Live sessions on the host's ChatGPT subscription, relay Grok Live calls with the host's SuperGrok sign-in, run its voice web lookups, read memory and personality for voice, save live voice transcripts to this host's session history, ending each call's session there so session hooks and memory see it, and open short-lived grants that let an Apple Watch call run lookups and Hermes jobs through the relay; see below.) Apple credentials remain on the central push relay, so self-hosted users never need to copy a shared signing key onto their gateway.
 
 ## Install
 
@@ -634,6 +634,53 @@ lock, and Conduit's next send claims the chat.
   400 for a bad body, 501 on a Hermes without the ownership registry or turn markers, 503
   when the registry can't be read (ownership is never guessed), 429 past 60
   requests a minute, 504 if the takeover doesn't finish within 20 seconds (ask again: nothing is written after that, short of a write already under way).
+
+## Apple Watch lookups and jobs (plugin 0.6+, jobs 0.7+)
+
+With the wrist down, a Conduit Watch call can't reach Conduit on the iPhone,
+but it can reach the push relay over its own internet. For each call Conduit
+asks this profile for a grant; the plugin opens it on the relay (see Relay API
+above), long-polls the relay for the Watch's sealed calls, runs them here and
+seals the answers back. This host opens no inbound route of its own.
+
+| Method | Route | Returns |
+| --- | --- | --- |
+| POST | `/api/plugins/conduit_push/watch-tools/grant` with `{tools, max_jobs?, job_options?, carry_jobs_from?}` | `{ok, grant_id, relay_url, key, watch_key, expires_at, tools, max_calls, max_jobs, jobs_carried_from?}` |
+| POST | `/api/plugins/conduit_push/watch-tools/revoke` with `{grant_id}` | `{ok, revoked}` |
+
+- `tools` names what the call may run: `web_search` and `recall_memory`
+  (the same code as the voice lookup routes), and with plugin 0.7
+  `start_job`, `list_jobs` and `cancel_job` (granted with the Watch app's
+  own `job_news` and `answer_approval`). A grant lasts at most 30
+  minutes, holds one profile, and ends when the call does.
+- **Jobs** start an ordinary Hermes chat on the grant's profile through
+  Hermes' own session API in the dashboard process, filed under Voice Jobs in
+  Conduit like a job started from the phone; `job_options` carries the
+  phone's voice-job model, provider and reasoning effort. `max_jobs` is the
+  user's per-call limit (default 5, at most 20, 0 for none), counting the
+  jobs that started; three run at once. A grant with jobs allows 120 calls,
+  since the Watch also asks for job news (finished jobs and approval
+  requests) while they run. A start Hermes takes longer than 18 s to accept
+  is answered `accepted`, inside the relay's wait, and a start that then
+  fails comes as job news. News whose answer doesn't reach the relay is
+  sent again with the next call. A renewal names the call's previous grant
+  in `carry_jobs_from`: while that grant is open and on the same profile, its
+  jobs move to the new one (`jobs_carried_from`), so a call keeps hearing
+  about, listing and cancelling them past a renewal, and the job limit
+  counts per call. A renewal that leaves out `max_jobs` or `job_options`
+  keeps the call's.
+- **Approvals** follow the profile's own Hermes approval settings. A command
+  that needs one shows on the Watch, which can only approve it once or deny
+  it, never for the session or always. Hermes denies it after its own
+  approval timeout.
+- Jobs need the dashboard to serve Hermes' chats in the same process (not
+  `plugins.isolation: host`). Where it doesn't, the grant leaves jobs out and
+  the Watch's jobs go through the iPhone. A job still running when its call
+  ends keeps running in Hermes, and its chat is closed here once it finishes.
+- 400 for a bad body, 409 when this profile isn't paired with Conduit
+  notifications, 501 without the `cryptography` package or a relay that
+  predates Watch tools, 502/503 when the relay can't open the grant (the call
+  then uses the iPhone).
 
 ## Capabilities (plugin 0.4+)
 
