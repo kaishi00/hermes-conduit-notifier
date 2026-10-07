@@ -627,3 +627,90 @@ def test_grant_route_refuses_other_tools(client):
 
 def test_capabilities_name_watch_tools():
     assert "watch-tools" in api.ROUTE_CAPABILITIES
+
+
+# --- Gemini Live tokens ------------------------------------------------------
+
+TOKEN = {
+    "token": "auth_tokens/secret-token",
+    "expires_at": "2026-10-07T23:00:00Z",
+    "new_session_expires_at": "2026-10-07T22:31:00Z",
+    "model": "gemini-3.8-live",
+    "websocket_url": "wss://generativelanguage.googleapis.com/ws/x",
+}
+
+
+def test_live_token_is_granted_only_where_the_profile_has_a_gemini_key(tmp_path):
+    def grant(tools, key):
+        return api.open_watch_grant({"tools": tools}, profile=None, path=write_pairing(tmp_path), relay=FakeRelay(),
+                                    start=lambda g: None, live_key=lambda: key)
+
+    assert grant(["web_search", "live_token"], "AIza-key")["tools"] == ["web_search", "live_token"]
+    assert grant(["web_search", "live_token"], None)["tools"] == ["web_search"]
+    # Not asked for: not granted, and no key read.
+    assert grant(["web_search"], "AIza-key")["tools"] == ["web_search"]
+    with pytest.raises(api.TokenError) as err:
+        grant(["live_token"], None)
+    assert err.value.status == 503
+    # The key itself never leaves the host.
+    assert "AIza-key" not in json.dumps(grant(["web_search", "live_token"], "AIza-key"))
+
+
+def test_a_live_token_is_minted_in_the_grants_profile_and_comes_back_sealed(monkeypatch):
+    grant = make_grant(tools=("web_search", "live_token"))
+    grant.profile = "work"
+    scopes = []
+    monkeypatch.setattr(api, "_scoped_call", lambda profile, fn: (scopes.append(profile), fn())[1])
+    minted = []
+    monkeypatch.setattr(api, "mint_gemini_live_token", lambda **kw: (minted.append(kw), dict(TOKEN))[1])
+    relay = FakeRelay()
+    call = sealed_call(grant, {"tool": "live_token", "args": {}})
+    assert api.answer_watch_call(grant, call, relay=relay) == "answered"
+    assert opened_answer(grant, relay, call["rid"]) == {"ok": True, **TOKEN}
+    assert scopes == ["work"]
+    assert minted == [{"limiter_key": grant.limiter_key}]
+    assert grant.live_tokens == 1
+    # The relay carries it sealed only.
+    assert "secret-token" not in json.dumps(relay.requests)
+
+
+def test_a_grant_mints_at_most_its_live_tokens_and_failed_mints_dont_count():
+    grant = make_grant(tools=("live_token",))
+    failures = [api.TokenError(502, "Google rejected the token request (500)"), RuntimeError("boom")]
+
+    def mint(**kw):
+        if failures:
+            raise failures.pop(0)
+        return dict(TOKEN)
+
+    assert api.run_watch_live_token(grant, mint=mint) == {
+        "ok": False, "status": 502, "detail": "Google rejected the token request (500)"}
+    assert api.run_watch_live_token(grant, mint=mint)["status"] == 500
+    assert grant.live_tokens == 0
+    for _ in range(api.WATCH_LIVE_TOKENS_PER_GRANT):
+        assert api.run_watch_live_token(grant, mint=mint)["ok"] is True
+    assert api.run_watch_live_token(grant, mint=lambda **kw: pytest.fail("must not mint")) == {
+        "ok": False, "status": 429, "detail": "This call has used all its Gemini Live tokens"}
+
+
+def test_a_live_token_that_never_reaches_the_watch_doesnt_count(monkeypatch, caplog):
+    grant = make_grant(tools=("live_token",))
+    monkeypatch.setattr(api, "mint_gemini_live_token", lambda **kw: dict(TOKEN))
+    relay = FakeRelay([OSError("relay down")])
+    with caplog.at_level(logging.DEBUG, logger=api.logger.name):
+        assert api.answer_watch_call(grant, sealed_call(grant, {"tool": "live_token"}), relay=relay) == "gone"
+    assert grant.live_tokens == 0
+    assert "secret-token" not in caplog.text
+
+
+def test_a_grant_without_live_token_refuses_to_mint(monkeypatch):
+    grant = make_grant()
+    monkeypatch.setattr(api, "mint_gemini_live_token", lambda **kw: pytest.fail("must not mint"))
+    relay = FakeRelay()
+    call = sealed_call(grant, {"tool": "live_token"})
+    api.answer_watch_call(grant, call, relay=relay)
+    assert opened_answer(grant, relay, call["rid"])["status"] == 403
+
+
+def test_capabilities_name_watch_live_token():
+    assert "watch-live-token" in api.ROUTE_CAPABILITIES

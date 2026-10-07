@@ -3105,8 +3105,17 @@ async def post_e2e(request: Request, response: Response, profile: Optional[str] 
 # Hermes jobs too (Watch jobs, below). Grants live in memory: a dashboard
 # restart drops them and the Watch falls back to the iPhone.
 # (hermes-conduit designs/apple-watch-voice-direct.md)
+#
+# A grant can also carry live_token: a fresh single-use Gemini Live token,
+# minted as /gemini-live/token mints one, for a Watch whose Gemini session
+# broke and can't be resumed while the iPhone is out of reach. It travels
+# sealed like any answer, so the relay never sees it; the Gemini key stays
+# here.
 
 WATCH_TOOLS = ("web_search", "recall_memory")
+WATCH_LIVE_TOKEN = "live_token"
+# Tokens one grant may mint: a few fresh sessions per call, never a stream.
+WATCH_LIVE_TOKENS_PER_GRANT = 6
 WATCH_GRANT_TTL_S = 30 * 60
 WATCH_GRANT_MAX_CALLS = 60
 # Live grants per profile: a new one closes the oldest.
@@ -3264,6 +3273,8 @@ class _WatchGrant:
         # Set when the grant has jobs (_WatchJobs).
         self.jobs: Optional["_WatchJobs"] = None
         self.used = 0
+        # Gemini Live tokens minted for the Watch (run_watch_live_token).
+        self.live_tokens = 0
         self.seen: set = set()
         self.lock = threading.Lock()
         self.closed = threading.Event()
@@ -3377,6 +3388,8 @@ def run_watch_tool(grant: _WatchGrant, request: Dict[str, Any]) -> Dict[str, Any
         return {"ok": False, "status": 403, "detail": "This tool isn't available to the Watch"}
     if tool in WATCH_JOB_TOOLS or tool in WATCH_JOB_CALLS:
         return run_watch_job_call(grant, tool, args)
+    if tool == WATCH_LIVE_TOKEN:
+        return run_watch_live_token(grant)
     if tool == "web_search":
         feature, what, executor, timeout = "Web search", "request", _search_executor, SEARCH_TIMEOUT_S
         job: Callable[[], Dict[str, Any]] = lambda: run_web_search(  # noqa: E731
@@ -3404,6 +3417,41 @@ def run_watch_tool(grant: _WatchGrant, request: Dict[str, Any]) -> Dict[str, Any
     except Exception as exc:  # noqa: BLE001 — named; the message can carry the query
         _log_watch_failure(f"{feature} {what} for a Conduit Watch failed", exc)
         return {"ok": False, "status": 500, "detail": f"{feature} {what} failed on the host ({type(exc).__name__})"}
+
+
+def run_watch_live_token(grant: _WatchGrant,
+                         mint: Optional[Callable[..., Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """A fresh single-use Gemini Live token for the grant's call, as
+    /gemini-live/token answers. A mint that fails, or whose answer never
+    reaches the Watch, doesn't count against the grant's tokens; the token
+    itself is never logged."""
+    mint = mint or mint_gemini_live_token
+    with grant.lock:
+        if grant.live_tokens >= WATCH_LIVE_TOKENS_PER_GRANT:
+            return {"ok": False, "status": 429, "detail": "This call has used all its Gemini Live tokens"}
+        grant.live_tokens += 1
+
+    def give_back() -> None:
+        with grant.lock:
+            grant.live_tokens = max(0, grant.live_tokens - 1)
+
+    try:
+        token = _scoped_call(grant.profile, lambda: mint(limiter_key=grant.limiter_key))
+    except TokenError as exc:
+        give_back()
+        logger.warning("Gemini Live token for a Conduit Watch failed: %s", exc)
+        return {"ok": False, "status": exc.status, "detail": str(exc)}
+    except HTTPException as exc:
+        give_back()
+        return {"ok": False, "status": exc.status_code, "detail": str(exc.detail)}
+    except Exception as exc:  # noqa: BLE001 — named only
+        give_back()
+        _log_watch_failure("Gemini Live token for a Conduit Watch failed", exc)
+        return {"ok": False, "status": 500, "detail": f"Minting a Gemini Live token failed on the host ({type(exc).__name__})"}
+    undelivered = _watch_undelivered.get()
+    if undelivered is not None:
+        undelivered.append(give_back)
+    return {"ok": True, **token}
 
 
 def answer_watch_call(grant: _WatchGrant, call: Any,
@@ -3550,25 +3598,29 @@ def _watch_max_jobs(value: Any) -> int:
 def open_watch_grant(body: Any, *, profile: Optional[str], path: Any = None,
                      relay: Optional[Callable[..., Tuple[int, Dict[str, Any]]]] = None,
                      start: Optional[Callable[[_WatchGrant], None]] = None,
-                     session_api: Optional[Callable[[], Any]] = None) -> Dict[str, Any]:
+                     session_api: Optional[Callable[[], Any]] = None,
+                     live_key: Optional[Callable[[], Optional[str]]] = None) -> Dict[str, Any]:
     """Opens a grant for one Watch call on this profile's relay pairing.
 
     Jobs (any of WATCH_JOB_TOOLS asked for, ``max_jobs`` above 0) are granted
     only where this process serves Hermes' chats; elsewhere the grant leaves
     them out and the Watch's jobs go through the iPhone. A renewal names the
     call's previous grant in ``carry_jobs_from``: its jobs move to the new
-    grant (_carry_watch_jobs).
+    grant (_carry_watch_jobs). live_token is granted only where this profile
+    has a Gemini key to mint with.
     """
     relay = relay or _relay_request
     start = start or _start_watch_poller
     session_api = session_api or _hermes_session_api
+    live_key = live_key or resolve_api_key
     if not isinstance(body, dict):
         raise TokenError(400, "Expected a JSON object")
     requested = body.get("tools")
     if not isinstance(requested, list) or not requested or not all(isinstance(t, str) for t in requested):
         raise TokenError(400, "tools must be a non-empty list")
-    if any(tool not in WATCH_TOOLS + WATCH_JOB_TOOLS for tool in requested):
-        raise TokenError(400, f"The Watch can only be granted {', '.join(WATCH_TOOLS + WATCH_JOB_TOOLS)}")
+    grantable = WATCH_TOOLS + WATCH_JOB_TOOLS + (WATCH_LIVE_TOKEN,)
+    if any(tool not in grantable for tool in requested):
+        raise TokenError(400, f"The Watch can only be granted {', '.join(grantable)}")
     max_jobs = _watch_max_jobs(body.get("max_jobs"))
     carry_from = body.get("carry_jobs_from")
     if carry_from is not None and (not isinstance(carry_from, str) or not _WATCH_ID.match(carry_from)):
@@ -3578,7 +3630,11 @@ def open_watch_grant(body: Any, *, profile: Optional[str], path: Any = None,
     if server is not None:
         # The job tools asked for, and the Watch app's own calls with them.
         tools += tuple(tool for tool in WATCH_JOB_TOOLS if tool in requested) + WATCH_JOB_CALLS
+    if WATCH_LIVE_TOKEN in requested and live_key() is not None:
+        tools += (WATCH_LIVE_TOKEN,)
     if not tools:
+        if WATCH_LIVE_TOKEN in requested and not any(tool in WATCH_JOB_TOOLS for tool in requested):
+            raise TokenError(503, "GEMINI_API_KEY is not set on this Hermes host")
         raise TokenError(501, "This host can't run Hermes jobs for the Watch")
     max_calls = WATCH_JOB_GRANT_MAX_CALLS if server is not None else WATCH_GRANT_MAX_CALLS
     if not _e2e_crypto_available():
@@ -4569,6 +4625,7 @@ ROUTE_CAPABILITIES = (
     "e2e-notifications",
     "watch-tools",
     "watch-jobs",
+    "watch-live-token",
 )
 
 
