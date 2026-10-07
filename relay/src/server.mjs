@@ -7,6 +7,7 @@ import { ApnsClient } from './apns.mjs';
 import { SWEEP_INTERVAL_MS } from './event-ledger.mjs';
 import { limitsFromEnv } from './limits.mjs';
 import { normalizeDashboardId, RelayStore, sanitizeBatchQuestions } from './store.mjs';
+import { WATCH_AUDIO_CAPABILITY, WatchAudioBridges, watchAudioUpgrade } from './watch-audio.mjs';
 import { WATCH_TOOLS_CAPABILITY, WatchToolGrants, watchToolRoutes } from './watch-tools.mjs';
 
 // Self-reported relay version/capabilities, surfaced via GET /v1/meta so the
@@ -14,9 +15,9 @@ import { WATCH_TOOLS_CAPABILITY, WatchToolGrants, watchToolRoutes } from './watc
 const RELAY_INFO = (() => {
   try {
     const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-    return { version: String(pkg.version || 'unknown'), capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY] };
+    return { version: String(pkg.version || 'unknown'), capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY] };
   } catch {
-    return { version: 'unknown', capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY] };
+    return { version: 'unknown', capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY] };
   }
 })();
 
@@ -65,7 +66,27 @@ function main() {
     maxPerGateway: config.watchLimits.maxGrantsPerGateway,
     ...config.watchWaits,
   });
-  setInterval(() => watchGrants.sweep(), 30_000).unref();
+  const audioBridges = new WatchAudioBridges({
+    grants: watchGrants,
+    maxBridges: config.watchLimits.maxAudioBridges,
+    maxPerGateway: config.watchLimits.maxAudioBridgesPerGateway,
+  });
+  watchGrants.onClose = (grant) => {
+    const bridge = audioBridges.bridges.get(grant.id);
+    if (bridge?.grant === grant) audioBridges.end(bridge, 4010, 'grant_closed');
+  };
+  setInterval(() => {
+    watchGrants.sweep();
+    audioBridges.sweep();
+  }, 30_000).unref();
+  const watchAudio = watchAudioUpgrade({
+    bridges: audioBridges,
+    grants: watchGrants,
+    enforceRateLimit,
+    authenticateGateway: authenticatedGateway,
+    clientAddress,
+    socketOptions: config.watchAudioIdleMs ? { idleMs: config.watchAudioIdleMs } : {},
+  });
   watchTools = watchToolRoutes({
     grants: watchGrants,
     readJson,
@@ -119,6 +140,23 @@ function main() {
     } finally {
       console.log(JSON.stringify({ level: 'info', method: request.method, path: safePath(request.url), status: response.statusCode, duration_ms: Date.now() - startedAt }));
     }
+  });
+
+  // Live audio for Watch calls (watch-audio.mjs); no other path upgrades.
+  server.on('upgrade', (request, socket, head) => {
+    let url;
+    try {
+      url = new URL(request.url ?? '/', config.publicUrl);
+    } catch {
+      socket.destroy();
+      return;
+    }
+    const handled = watchAudio(request, socket, head, url);
+    if (!handled) {
+      socket.on('error', () => socket.destroy());
+      socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+    }
+    console.log(JSON.stringify({ level: 'info', method: 'UPGRADE', path: safePath(request.url), handled }));
   });
 
   server.listen(config.port, config.host, () => {
@@ -1010,6 +1048,8 @@ function readConfig() {
       ...optionalMilliseconds('WATCH_HOST_POLL_WAIT_MS', 'hostPollWaitMs'),
       ...optionalMilliseconds('WATCH_HOST_GONE_MS', 'hostGoneMs'),
     },
+    // Test seam: a shorter idle cut for live Watch audio.
+    ...optionalMilliseconds('WATCH_AUDIO_IDLE_MS', 'watchAudioIdleMs'),
     ...limitsFromEnv(process.env),
   };
 }
