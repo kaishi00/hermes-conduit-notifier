@@ -26,6 +26,10 @@ export const DEFAULT_STORE_LIMITS = Object.freeze({
 export const DEFAULT_WATCH_LIMITS = Object.freeze({
   maxGrants: 2_048,
   maxGrantsPerGateway: 4,
+  // Live audio bridges (watch-audio.mjs): each carries one Watch call's
+  // audio, about 0.3 Mbps up and 0.4 Mbps down.
+  maxAudioBridges: 200,
+  maxAudioBridgesPerGateway: 2,
 });
 
 // Process-wide admissions per minute, per class of action.
@@ -54,6 +58,8 @@ const STORE_LIMIT_VARIABLES = Object.freeze({
 const WATCH_LIMIT_VARIABLES = Object.freeze({
   maxGrants: 'RELAY_MAX_WATCH_GRANTS',
   maxGrantsPerGateway: 'RELAY_MAX_WATCH_GRANTS_PER_GATEWAY',
+  maxAudioBridges: 'RELAY_MAX_WATCH_AUDIO_BRIDGES',
+  maxAudioBridgesPerGateway: 'RELAY_MAX_WATCH_AUDIO_BRIDGES_PER_GATEWAY',
 });
 
 const BUDGET_VARIABLES = Object.freeze({

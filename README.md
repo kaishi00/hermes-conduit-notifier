@@ -221,6 +221,8 @@ integer stops the relay at boot.
 | Installation deactivations and gateway revocations per minute | 24 | `RELAY_REVOCATIONS_PER_MINUTE` |
 | Live Watch tool grants across the relay | 2,048 | `RELAY_MAX_WATCH_GRANTS` |
 | Live Watch tool grants per gateway (a new one closes the oldest) | 4 | `RELAY_MAX_WATCH_GRANTS_PER_GATEWAY` |
+| Live Watch audio bridges across the relay (GPT-Live and Grok on the Watch) | 200 | `RELAY_MAX_WATCH_AUDIO_BRIDGES` |
+| Live Watch audio bridges per gateway | 2 | `RELAY_MAX_WATCH_AUDIO_BRIDGES_PER_GATEWAY` |
 | Watch tool calls per minute | 1,200 | `RELAY_WATCH_CALLS_PER_MINUTE` |
 
 Event IDs only prevent a repeated delivery of the same event within 24 hours,

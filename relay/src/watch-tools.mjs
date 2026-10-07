@@ -64,13 +64,16 @@ export class WatchToolGrants {
     this.hostGoneMs = hostGoneMs;
     this.now = now;
     this.grants = new Map();
+    // Called with (grant, reason) once a grant closes (watch-audio.mjs ends
+    // its bridge).
+    this.onClose = null;
   }
 
   get size() {
     return this.grants.size;
   }
 
-  create({ installationId, gatewayId, watchKeyHash, ttlS, maxCalls }) {
+  create({ installationId, gatewayId, watchKeyHash, ttlS, maxCalls, audio = false }) {
     this.sweep();
     const owned = [...this.grants.values()]
       .filter((grant) => grant.installationId === installationId && grant.gatewayId === gatewayId)
@@ -90,6 +93,8 @@ export class WatchToolGrants {
       createdAt: now,
       expiresAt: now + ttlS * 1000,
       maxCalls,
+      // The host may open a live audio bridge for this grant (watch-audio.mjs).
+      audio: audio === true,
       calls: 0,
       seen: new Set(),
       // Calls the host hasn't picked up yet: { rid, n, ct }.
@@ -131,6 +136,7 @@ export class WatchToolGrants {
 
   close(grant, reason) {
     if (!this.grants.delete(grant.id)) return;
+    this.onClose?.(grant, reason);
     for (const entry of grant.waiting.values()) {
       clearTimeout(entry.timer);
       sendJson(entry.response, 410, { error: 'grant_closed', reason });
@@ -258,7 +264,8 @@ export function watchToolRoutes({
       const maxCalls = body.max_calls;
       if (typeof body.watch_key_sha256 !== 'string' || !KEY_HASH_PATTERN.test(body.watch_key_sha256)
         || !Number.isSafeInteger(ttlS) || ttlS < MIN_TTL_S || ttlS > MAX_TTL_S
-        || !Number.isSafeInteger(maxCalls) || maxCalls < 1 || maxCalls > MAX_CALLS_PER_GRANT) {
+        || !Number.isSafeInteger(maxCalls) || maxCalls < 1 || maxCalls > MAX_CALLS_PER_GRANT
+        || (body.audio !== undefined && typeof body.audio !== 'boolean')) {
         return answered(response, 400, { error: 'invalid_grant' });
       }
       let grant;
@@ -269,6 +276,7 @@ export function watchToolRoutes({
           watchKeyHash: body.watch_key_sha256,
           ttlS,
           maxCalls,
+          audio: body.audio === true,
         });
       } catch (error) {
         if (error?.status !== 503 || error.message !== 'watch_grant_capacity') throw error;
@@ -281,6 +289,7 @@ export function watchToolRoutes({
         grant_id: grant.id,
         expires_at: new Date(grant.expiresAt).toISOString(),
         call_wait_ms: grants.callWaitMs,
+        audio: grant.audio,
       });
     }
 

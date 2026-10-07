@@ -27,6 +27,8 @@ test('relay limits default when unset or empty and accept positive integer overr
     RELAY_MAX_WATCH_GRANTS: '4096',
     RELAY_MAX_WATCH_GRANTS_PER_GATEWAY: '8',
     RELAY_WATCH_CALLS_PER_MINUTE: '2400',
+    RELAY_MAX_WATCH_AUDIO_BRIDGES: '50',
+    RELAY_MAX_WATCH_AUDIO_BRIDGES_PER_GATEWAY: '1',
   });
   assert.deepEqual(configured.storeLimits, {
     ...DEFAULT_STORE_LIMITS,
@@ -45,7 +47,12 @@ test('relay limits default when unset or empty and accept positive integer overr
     revocationsPerMinute: 48,
     watchCallsPerMinute: 2_400,
   });
-  assert.deepEqual(configured.watchLimits, { maxGrants: 4_096, maxGrantsPerGateway: 8 });
+  assert.deepEqual(configured.watchLimits, {
+    maxGrants: 4_096,
+    maxGrantsPerGateway: 8,
+    maxAudioBridges: 50,
+    maxAudioBridgesPerGateway: 1,
+  });
 });
 
 test('an invalid relay limit names its variable instead of disabling the bound', () => {
