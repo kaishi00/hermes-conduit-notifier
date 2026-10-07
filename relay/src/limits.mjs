@@ -20,6 +20,14 @@ export const DEFAULT_STORE_LIMITS = Object.freeze({
   retainedPerInstallation: 128,
 });
 
+// Watch tool grants (watch-tools.mjs) live in memory only. A host replaces
+// its oldest grant past the per-gateway bound, so neither one refuses a
+// host that lost track of its grants.
+export const DEFAULT_WATCH_LIMITS = Object.freeze({
+  maxGrants: 2_048,
+  maxGrantsPerGateway: 4,
+});
+
 // Process-wide admissions per minute, per class of action.
 export const DEFAULT_BUDGETS = Object.freeze({
   registrationsPerMinute: 24,
@@ -30,6 +38,8 @@ export const DEFAULT_BUDGETS = Object.freeze({
   decisionActionsPerMinute: 600,
   // Installation deactivation and gateway revocation.
   revocationsPerMinute: 24,
+  // Watch tool calls (each one runs a lookup on its host).
+  watchCallsPerMinute: 1_200,
 });
 
 const STORE_LIMIT_VARIABLES = Object.freeze({
@@ -41,12 +51,18 @@ const STORE_LIMIT_VARIABLES = Object.freeze({
   retainedGlobal: 'RELAY_MAX_RETAINED_DECISIONS',
 });
 
+const WATCH_LIMIT_VARIABLES = Object.freeze({
+  maxGrants: 'RELAY_MAX_WATCH_GRANTS',
+  maxGrantsPerGateway: 'RELAY_MAX_WATCH_GRANTS_PER_GATEWAY',
+});
+
 const BUDGET_VARIABLES = Object.freeze({
   registrationsPerMinute: 'RELAY_REGISTRATIONS_PER_MINUTE',
   eventsPerMinute: 'RELAY_EVENTS_PER_MINUTE',
   deviceChangesPerMinute: 'RELAY_DEVICE_CHANGES_PER_MINUTE',
   decisionActionsPerMinute: 'RELAY_DECISION_ACTIONS_PER_MINUTE',
   revocationsPerMinute: 'RELAY_REVOCATIONS_PER_MINUTE',
+  watchCallsPerMinute: 'RELAY_WATCH_CALLS_PER_MINUTE',
 });
 
 // Unset or empty variables keep the default (Compose passes `${VAR:-}` as an
@@ -55,6 +71,7 @@ const BUDGET_VARIABLES = Object.freeze({
 export function limitsFromEnv(env = process.env) {
   return {
     storeLimits: readIntegers(DEFAULT_STORE_LIMITS, STORE_LIMIT_VARIABLES, env),
+    watchLimits: readIntegers(DEFAULT_WATCH_LIMITS, WATCH_LIMIT_VARIABLES, env),
     budgets: readIntegers(DEFAULT_BUDGETS, BUDGET_VARIABLES, env),
   };
 }

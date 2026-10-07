@@ -183,6 +183,18 @@ gateway-bound inactive records still require separately reviewed maintenance.
 | POST | `/v1/pairings/claim` | Claim a pairing code (gateway side) |
 | POST | `/v1/events` | Deliver a notification event |
 | DELETE | `/v1/gateways/current` | Revoke a gateway credential |
+| POST | `/v1/watch-tools/grants` | Open a Watch tool grant for one call (gateway side) |
+| GET | `/v1/watch-tools/grants/:id/calls` | Long-poll for the grant's Watch tool calls (gateway side) |
+| POST | `/v1/watch-tools/grants/:id/results/:rid` | Answer one Watch tool call (gateway side) |
+| POST | `/v1/watch-tools/grants/:id/calls` | A Watch tool call, held open until the gateway answers (Watch side, the grant's relay key) |
+| DELETE | `/v1/watch-tools/grants/:id` | Close a grant (either side) |
+
+Watch tool grants carry an Apple Watch call's lookups while the Watch can't
+reach Conduit on the iPhone. Calls and answers are sealed with a per-call key
+the relay never sees (ChaCha20-Poly1305, bound to the grant, call id and
+direction), so the relay only forwards ciphertext. Grants live in memory,
+last at most 30 minutes and 120 calls, and a restart drops them; the Watch
+then falls back to the iPhone.
 
 ### Capacity and admission limits
 
@@ -205,6 +217,9 @@ integer stops the relay at boot.
 | Device updates that change state, pairing creations, and valid claims per minute | 240 | `RELAY_DEVICE_CHANGES_PER_MINUTE` |
 | Decision answers and releases that change state per minute | 600 | `RELAY_DECISION_ACTIONS_PER_MINUTE` |
 | Installation deactivations and gateway revocations per minute | 24 | `RELAY_REVOCATIONS_PER_MINUTE` |
+| Live Watch tool grants across the relay | 2,048 | `RELAY_MAX_WATCH_GRANTS` |
+| Live Watch tool grants per gateway (a new one closes the oldest) | 4 | `RELAY_MAX_WATCH_GRANTS_PER_GATEWAY` |
+| Watch tool calls per minute | 1,200 | `RELAY_WATCH_CALLS_PER_MINUTE` |
 
 Event IDs only prevent a repeated delivery of the same event within 24 hours,
 so the relay keeps them in memory and never writes them to the data file. A

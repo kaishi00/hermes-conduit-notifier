@@ -1,10 +1,14 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 
-import { DEFAULT_BUDGETS, DEFAULT_STORE_LIMITS, limitsFromEnv } from '../src/limits.mjs';
+import { DEFAULT_BUDGETS, DEFAULT_STORE_LIMITS, DEFAULT_WATCH_LIMITS, limitsFromEnv } from '../src/limits.mjs';
 
 test('relay limits default when unset or empty and accept positive integer overrides', () => {
-  assert.deepEqual(limitsFromEnv({}), { storeLimits: { ...DEFAULT_STORE_LIMITS }, budgets: { ...DEFAULT_BUDGETS } });
+  assert.deepEqual(limitsFromEnv({}), {
+    storeLimits: { ...DEFAULT_STORE_LIMITS },
+    watchLimits: { ...DEFAULT_WATCH_LIMITS },
+    budgets: { ...DEFAULT_BUDGETS },
+  });
   assert.deepEqual(limitsFromEnv({ RELAY_MAX_INSTALLATIONS: '', RELAY_EVENTS_PER_MINUTE: '  ' }).storeLimits, { ...DEFAULT_STORE_LIMITS },
     'Compose passes unset optional variables as empty strings');
 
@@ -20,6 +24,9 @@ test('relay limits default when unset or empty and accept positive integer overr
     RELAY_DEVICE_CHANGES_PER_MINUTE: '480',
     RELAY_DECISION_ACTIONS_PER_MINUTE: '1200',
     RELAY_REVOCATIONS_PER_MINUTE: '48',
+    RELAY_MAX_WATCH_GRANTS: '4096',
+    RELAY_MAX_WATCH_GRANTS_PER_GATEWAY: '8',
+    RELAY_WATCH_CALLS_PER_MINUTE: '2400',
   });
   assert.deepEqual(configured.storeLimits, {
     ...DEFAULT_STORE_LIMITS,
@@ -36,7 +43,9 @@ test('relay limits default when unset or empty and accept positive integer overr
     deviceChangesPerMinute: 480,
     decisionActionsPerMinute: 1_200,
     revocationsPerMinute: 48,
+    watchCallsPerMinute: 2_400,
   });
+  assert.deepEqual(configured.watchLimits, { maxGrants: 4_096, maxGrantsPerGateway: 8 });
 });
 
 test('an invalid relay limit names its variable instead of disabling the bound', () => {
