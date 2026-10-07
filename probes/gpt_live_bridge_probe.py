@@ -55,6 +55,8 @@ FRAME_SAMPLES = 960  # 20 ms, what aiortc's Opus encoder takes
 GREETING = "Hi, this is a GPT-Live bridge test."
 # Peak above which a received frame counts as speech rather than comfort noise.
 SPEECH_PEAK = 1_000
+# Room for the model to answer once the --wav question has played.
+ANSWER_TAIL_S = 15.0
 
 
 def load_plugin_api():
@@ -169,7 +171,7 @@ async def one_try(api, profile: Optional[str], number: int, speech: bytes, secon
             return
         if not isinstance(event, dict):
             return
-        kind = str(event.get("type"))
+        kind = str(event.get("type") or "<no type>")
         run.events.append(kind)
         if kind in ("session.started", "session.updated"):
             run.mark("session started")
@@ -179,7 +181,7 @@ async def one_try(api, profile: Optional[str], number: int, speech: bytes, secon
             run.transcripts.append(f"{kind.split('_')[0]}: {item.get('text') or ''}")
         elif kind == "turn.done":
             turn = event.get("turn") if isinstance(event.get("turn"), dict) else {}
-            print(f"  turn.done {turn.get('role')}: {str(turn.get('transcript', ''))[:200]}")
+            print(f"  turn.done {turn.get('role')}: {str(turn.get('transcript') or '')[:200]}")
             if turn.get("role") == "assistant":
                 greeted.set()
         elif kind in ("error", "session.closed"):
@@ -233,12 +235,15 @@ async def one_try(api, profile: Optional[str], number: int, speech: bytes, secon
         await pc.setRemoteDescription(RTCSessionDescription(sdp=answer["transport"]["sdp"], type="answer"))
         deadline = time.monotonic() + seconds
         if speech:
+            # The greeting gets a bounded wait; the question then always gets its
+            # own playback time plus room for the answer.
             try:
-                await asyncio.wait_for(greeted.wait(), timeout=max(1.0, deadline - time.monotonic()))
+                await asyncio.wait_for(greeted.wait(), timeout=min(10.0, seconds))
             except asyncio.TimeoutError:
                 pass
             run.mark("mic speaking")
             mic.start_speaking.set()
+            deadline = max(deadline, time.monotonic() + len(speech) / (RATE * 2) + ANSWER_TAIL_S)
         await asyncio.sleep(max(0.0, deadline - time.monotonic()))
     except Exception as exc:  # the probe reports, never raises
         # TokenError texts are the plugin's own user-facing messages, never provider text.
@@ -297,11 +302,15 @@ async def main() -> int:
         speech = pcm_from_wav(args.wav) if args.wav else b""
     except Exception as exc:
         parser.error(f"--wav {args.wav}: {exc.__class__.__name__}: {str(exc)[:120]}")
-    status = await asyncio.to_thread(scoped, api, args.profile, api.gpt_live_status)
+    try:
+        status = await asyncio.to_thread(scoped, api, args.profile, api.gpt_live_status)
+    except Exception as exc:
+        print(f"GPT-Live status check failed: {exc.__class__.__name__}")
+        return 3
     print(f"GPT-Live status: available={status.get('available')} model={status.get('model')} "
           f"source={status.get('source')} reason={status.get('reason')}")
     if not status.get("available"):
-        return 2
+        return 3
 
     results = []
     for number in range(1, args.tries + 1):
