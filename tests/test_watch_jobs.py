@@ -286,6 +286,107 @@ def test_a_renewed_grants_jobs_never_reuse_the_last_grants_ids():
     assert first.jobs.jobs["watch-1"].status != "cancelled"
 
 
+class RenewingRelay(FakeRelay):
+    """Gives each grant its own id, as the relay does."""
+
+    def __init__(self):
+        super().__init__()
+        self.ids = iter(c * 22 for c in "ABCDEFGH")
+
+    def __call__(self, url, method, credential, payload, timeout):
+        if method == "POST" and url.endswith("/v1/watch-tools/grants"):
+            self.requests.append({"url": url, "method": method, "payload": payload})
+            return 201, {"grant_id": next(self.ids), "expires_at": "2026-10-07T12:00:00.000Z"}
+        return super().__call__(url, method, credential, payload, timeout)
+
+
+def open_jobs_grant(tmp_path, server, relay, profile="coder", started=None, **extra):
+    started = [] if started is None else started
+    answer = api.open_watch_grant({"tools": ["web_search", "start_job"], "max_jobs": 3, **extra}, profile=profile,
+                                  path=write_pairing(tmp_path), relay=relay, start=started.append,
+                                  session_api=lambda: server)
+    return answer, api._watch_grants.get(answer["grant_id"])
+
+
+def test_a_renewal_carries_the_last_grants_jobs_and_their_news(tmp_path):
+    server, relay = FakeHermes(), RenewingRelay()
+    first, old = open_jobs_grant(tmp_path, server, relay)
+    assert "jobs_carried_from" not in first
+    assert start(old)["job_id"] == "watch-1"
+    server.ask_approval("rt-1")
+    assert news(old)["news"][0]["status"] == "needs_approval"
+    renewed, new = open_jobs_grant(tmp_path, server, relay, carry_jobs_from=old.grant_id, max_jobs=4)
+    assert renewed["jobs_carried_from"] == old.grant_id
+    assert new.jobs is old.jobs and new.jobs.grant is new
+    assert new.jobs.max_jobs == 4
+    # The approval already told isn't told again; the new grant answers it,
+    # lists the job, and hears it finish.
+    assert news(new)["news"] == []
+    assert api.run_watch_job_call(new, "answer_approval", {"job_id": "watch-1", "request_id": "appr-1",
+                                                            "choice": "once"})["status"] == "approved"
+    assert "watch-1" in api.run_watch_job_call(new, "list_jobs", {})["job_1"]
+    # The old grant closing (the Watch lets it go) leaves the jobs running.
+    assert api._close_watch_grant_here(old)
+    assert not new.jobs.ended
+    server.emit("rt-1", "message.complete", {"text": "All green", "status": "complete"})
+    [item] = news(new)["news"]
+    assert (item["job_id"], item["status"], item["result"]) == ("watch-1", "finished", "All green")
+    # The cap counts across the call: one started, three more.
+    for _ in range(2):
+        start(new)
+    assert start(new)["status"] == "started"
+    assert start(new)["message"].startswith("This call has started 4 jobs")
+    assert api._close_watch_grant_here(new)
+    assert new.jobs.ended
+
+
+@pytest.mark.parametrize("case", ["other profile", "closed", "unknown", "already carried", "no jobs"])
+def test_only_an_open_grant_of_the_same_profile_with_its_own_jobs_is_carried(tmp_path, case):
+    server, relay = FakeHermes(), RenewingRelay()
+    _, old = open_jobs_grant(tmp_path, server, relay)
+    start(old)
+    carry = old.grant_id
+    profile = "coder"
+    if case == "other profile":
+        profile = "writer"
+    elif case == "closed":
+        api._close_watch_grant_here(old)
+    elif case == "unknown":
+        carry = "Z" * 22
+    elif case == "already carried":
+        open_jobs_grant(tmp_path, server, relay, carry_jobs_from=old.grant_id)
+    elif case == "no jobs":
+        old.jobs = None
+    renewed, new = open_jobs_grant(tmp_path, server, relay, profile=profile, carry_jobs_from=carry)
+    assert "jobs_carried_from" not in renewed
+    assert new.jobs is not None and new.jobs.jobs == {}
+    if case == "other profile":
+        assert old.jobs.grant is old
+
+
+@pytest.mark.parametrize("value", [7, "", "not a grant id", ["A" * 22]])
+def test_carry_jobs_from_must_be_a_grant_id(tmp_path, value):
+    with pytest.raises(api.TokenError) as err:
+        open_jobs_grant(tmp_path, FakeHermes(), RenewingRelay(), carry_jobs_from=value)
+    assert err.value.status == 400
+
+
+def test_a_renewal_that_cant_start_answering_gives_the_jobs_back(tmp_path):
+    server, relay = FakeHermes(), RenewingRelay()
+    _, old = open_jobs_grant(tmp_path, server, relay)
+    start(old)
+    jobs = old.jobs
+
+    def broken(grant):
+        raise RuntimeError("no thread to spare")
+
+    with pytest.raises(api.TokenError):
+        api.open_watch_grant({"tools": ["start_job"], "carry_jobs_from": old.grant_id}, profile="coder",
+                             path=write_pairing(tmp_path), relay=relay, start=broken, session_api=lambda: server)
+    assert jobs.grant is old and not jobs.ended
+    assert news(old)["running"] == 1
+
+
 def test_three_jobs_run_at_once():
     grant = make_jobs(max_jobs=10)
     for _ in range(3):

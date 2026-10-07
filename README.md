@@ -645,7 +645,7 @@ seals the answers back. This host opens no inbound route of its own.
 
 | Method | Route | Returns |
 | --- | --- | --- |
-| POST | `/api/plugins/conduit_push/watch-tools/grant` with `{tools, max_jobs?, job_options?}` | `{ok, grant_id, relay_url, key, watch_key, expires_at, tools, max_calls, max_jobs}` |
+| POST | `/api/plugins/conduit_push/watch-tools/grant` with `{tools, max_jobs?, job_options?, carry_jobs_from?}` | `{ok, grant_id, relay_url, key, watch_key, expires_at, tools, max_calls, max_jobs, jobs_carried_from?}` |
 | POST | `/api/plugins/conduit_push/watch-tools/revoke` with `{grant_id}` | `{ok, revoked}` |
 
 - `tools` names what the call may run: `web_search` and `recall_memory`
@@ -661,7 +661,11 @@ seals the answers back. This host opens no inbound route of its own.
   news (finished jobs and approval requests) while they run. A start Hermes
   takes longer than 18 s to accept is answered `accepted`, inside the relay's
   wait, and a start that then fails comes as job news. News whose answer
-  doesn't reach the relay is sent again with the next call.
+  doesn't reach the relay is sent again with the next call. A renewal names
+  the call's previous grant in `carry_jobs_from`: while that grant is open
+  and on the same profile, its jobs move to the new one
+  (`jobs_carried_from`), so a call keeps hearing about, listing and
+  cancelling them past a renewal, and the job limit counts per call.
 - **Approvals** follow the profile's own Hermes approval settings. A command
   that needs one shows on the Watch, which can only approve it once or deny
   it, never for the session or always. Hermes denies it after its own

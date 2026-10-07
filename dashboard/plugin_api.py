@@ -3320,7 +3320,8 @@ def _close_watch_grant_here(grant: _WatchGrant) -> bool:
         already = grant.closed.is_set()
         grant.closed.set()
     _watch_grants.remove(grant)
-    if grant.jobs is not None and not already:
+    # Jobs a renewal carried away live on with the newer grant.
+    if grant.jobs is not None and not already and grant.jobs.grant is grant:
         grant.jobs.end()
     return not already
 
@@ -3554,7 +3555,9 @@ def open_watch_grant(body: Any, *, profile: Optional[str], path: Any = None,
 
     Jobs (any of WATCH_JOB_TOOLS asked for, ``max_jobs`` above 0) are granted
     only where this process serves Hermes' chats; elsewhere the grant leaves
-    them out and the Watch's jobs go through the iPhone.
+    them out and the Watch's jobs go through the iPhone. A renewal names the
+    call's previous grant in ``carry_jobs_from``: its jobs move to the new
+    grant (_carry_watch_jobs).
     """
     relay = relay or _relay_request
     start = start or _start_watch_poller
@@ -3567,6 +3570,9 @@ def open_watch_grant(body: Any, *, profile: Optional[str], path: Any = None,
     if any(tool not in WATCH_TOOLS + WATCH_JOB_TOOLS for tool in requested):
         raise TokenError(400, f"The Watch can only be granted {', '.join(WATCH_TOOLS + WATCH_JOB_TOOLS)}")
     max_jobs = _watch_max_jobs(body.get("max_jobs"))
+    carry_from = body.get("carry_jobs_from")
+    if carry_from is not None and (not isinstance(carry_from, str) or not _WATCH_ID.match(carry_from)):
+        raise TokenError(400, "carry_jobs_from must be a grant id")
     server = session_api() if max_jobs > 0 and any(tool in WATCH_JOB_TOOLS for tool in requested) else None
     tools = tuple(tool for tool in WATCH_TOOLS if tool in requested)
     if server is not None:
@@ -3609,15 +3615,21 @@ def open_watch_grant(body: Any, *, profile: Optional[str], path: Any = None,
     ttl = _watch_grant_ttl(response.get("expires_at"), now)
     grant = _WatchGrant(grant_id=grant_id, profile=profile, tools=tools, secret=secret, relay_url=relay_url,
                         credential=credential, expires_at=time.monotonic() + ttl, max_calls=max_calls)
+    carried_from: Optional[_WatchGrant] = None
     if server is not None:
-        grant.jobs = _WatchJobs(grant, max_jobs=max_jobs, options=_clean_job_options(body.get("job_options")),
-                                server=server)
+        options = _clean_job_options(body.get("job_options"))
+        if carry_from is not None:
+            carried_from = _carry_watch_jobs(carry_from, grant, max_jobs=max_jobs, options=options)
+        if carried_from is None:
+            grant.jobs = _WatchJobs(grant, max_jobs=max_jobs, options=options, server=server)
     for old in _watch_grants.add(grant):
         _watch_executor.submit(_close_watch_grant, old, tell_relay=True, relay=relay)
     try:
         start(grant)
     except Exception as exc:  # noqa: BLE001 — e.g. no thread to spare
         logger.warning("Starting the Watch tool poller failed: %s", type(exc).__name__)
+        if carried_from is not None:
+            _hand_back_watch_jobs(grant, carried_from)
         # Nothing would answer its calls: the Watch learns at once instead
         # of meeting host_offline for half an hour.
         if _close_watch_grant_here(grant):
@@ -3633,7 +3645,51 @@ def open_watch_grant(body: Any, *, profile: Optional[str], path: Any = None,
         "tools": list(tools),
         "max_calls": max_calls,
         "max_jobs": max_jobs if server is not None else 0,
+        **({"jobs_carried_from": carried_from.grant_id} if carried_from is not None else {}),
     }
+
+
+def _carry_watch_jobs(old_id: str, grant: _WatchGrant, *, max_jobs: int,
+                      options: Dict[str, str]) -> Optional[_WatchGrant]:
+    """Moves the jobs of a call's previous grant ``old_id`` to its renewal
+    ``grant``: the Watch keeps hearing their news and can list, cancel and
+    approve them through the new grant, and the job cap counts across the
+    call. Only an open grant of the same profile whose jobs are still its
+    own; returns it, or None when nothing moved."""
+    old = _watch_grants.get(old_id)
+    if old is None or old is grant or old.profile != grant.profile:
+        return None
+    with old.lock:
+        jobs = old.jobs
+        # Checked under the lock its closing sets `closed` under, so a grant
+        # closing now either keeps its jobs (and ends them) or lets them go.
+        if old.closed.is_set() or jobs is None or jobs.grant is not old:
+            return None
+        with jobs.changed:
+            if jobs.ended:
+                return None
+            jobs.grant = grant
+            jobs.max_jobs = max_jobs
+            jobs.options = options
+            jobs.changed.notify_all()
+    grant.jobs = jobs
+    return old
+
+
+def _hand_back_watch_jobs(grant: _WatchGrant, old: _WatchGrant) -> None:
+    """A renewal that couldn't start answering gives the carried jobs back
+    to the grant they came from, while it's open; otherwise they end with
+    the renewal."""
+    jobs = grant.jobs
+    if jobs is None:
+        return
+    with old.lock:
+        if old.closed.is_set():
+            return
+        with jobs.changed:
+            jobs.grant = old
+            jobs.changed.notify_all()
+    grant.jobs = None
 
 
 def _close_watch_grant_on_relay_later(grant: _WatchGrant,
