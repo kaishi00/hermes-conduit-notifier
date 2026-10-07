@@ -3885,6 +3885,9 @@ def _json_clip(text: str, limit: int, cut: bool = False) -> str:
         return text
     marker = "\n[…]"
     room = limit - (_json_bytes(marker) - 2)
+    if room < 2:
+        # Too small for the marker: as much of the text as fits.
+        marker, room = "", limit
     if _json_bytes(text) <= room:
         return text + marker
     low, high = 0, len(text)
@@ -4179,7 +4182,7 @@ class _WatchJobs:
             except Exception as exc:  # noqa: BLE001 — _start_session catches its own
                 _log_watch_failure("Starting a Watch job failed", exc)
                 answer = {"ok": True, "status": "not_started", "title": job.title,
-                          "message": "Hermes couldn't start the job."}
+                          "message": f"Hermes couldn't start the job: {type(exc).__name__}"}
                 with self.changed:
                     if job.active:
                         job.status, job.error = "failed", type(exc).__name__
@@ -4357,9 +4360,11 @@ class _WatchJobs:
         parts += [f"Couldn't cancel {job.title}. It may still be running." for job in failed]
         return {"ok": True, "message": " ".join(parts)}
 
-    def news(self, args: Dict[str, Any]) -> Dict[str, Any]:
+    def news(self, args: Dict[str, Any], caller: Optional["_WatchGrant"] = None) -> Dict[str, Any]:
         """Settled jobs and approval requests not yet told, waiting up to
-        ``wait_s`` (at most WATCH_JOB_NEWS_WAIT_S) for some while jobs run."""
+        ``wait_s`` (at most WATCH_JOB_NEWS_WAIT_S) for some while jobs run.
+        The wait also ends with ``caller``, the grant asking: after a carry,
+        the call's previous grant still answers until it closes."""
         wait = args.get("wait_s")
         if isinstance(wait, (int, float)) and not isinstance(wait, bool) and wait >= 0:
             wait = float(min(wait, WATCH_JOB_NEWS_WAIT_S))
@@ -4377,7 +4382,8 @@ class _WatchJobs:
                 answer = {"ok": True, "news": [], "running": running, "more": True, "approvals": approvals}
                 news = self._take_news(max(0, WATCH_JOB_ANSWER_BYTES - _json_bytes(answer)), marks)
                 remaining = deadline - time.monotonic()
-                if news or not running or self.ended or self.grant.closed.is_set() or remaining <= 0:
+                closed = self.grant.closed.is_set() or (caller is not None and caller.closed.is_set())
+                if news or not running or self.ended or closed or remaining <= 0:
                     break
                 self.changed.wait(min(remaining, 1.0))
             answer["news"] = news
@@ -4535,7 +4541,7 @@ def run_watch_job_call(grant: "_WatchGrant", tool: str, args: Dict[str, Any]) ->
         if tool == "cancel_job":
             return jobs.cancel(args)
         if tool == "job_news":
-            return jobs.news(args)
+            return jobs.news(args, caller=grant)
         return jobs.answer_approval(args)
     except Exception as exc:  # noqa: BLE001 — named; the message can carry the task
         _log_watch_failure(f"A Watch {tool} call failed", exc)

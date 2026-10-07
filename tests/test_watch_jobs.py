@@ -630,6 +630,24 @@ def test_a_long_ascii_result_is_cut_at_the_phones_length():
     assert api._clip_job_result("😀" * 7_000).count("[…]") == 1
 
 
+@pytest.mark.parametrize("limit", range(2, 14))
+def test_a_clip_never_takes_more_than_its_limit(limit):
+    clipped = api._json_clip("abcdefghijklmnop", limit)
+    assert api._json_bytes(clipped) <= limit
+    assert clipped.endswith("\n[…]") or limit < 9
+
+
+def test_a_start_that_breaks_unexpectedly_says_why(monkeypatch):
+    grant = make_jobs()
+
+    def broken(job, instructions):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(grant.jobs, "_start_session", broken)
+    answer = start(grant)
+    assert (answer["status"], answer["message"]) == ("not_started", "Hermes couldn't start the job: RuntimeError")
+
+
 # --- Approvals -------------------------------------------------------------------
 
 def test_an_approval_request_is_news_once_and_approving_it_answers_hermes():
@@ -852,6 +870,19 @@ def test_job_news_stops_waiting_when_the_grant_ends():
     began = time.monotonic()
     assert news(grant, wait_s=10)["news"] == []
     assert time.monotonic() - began < 5
+
+
+def test_job_news_through_a_carried_grant_stops_waiting_when_that_grant_ends(tmp_path):
+    server, relay = FakeHermes(), RenewingRelay()
+    _, old = open_jobs_grant(tmp_path, server, relay)
+    start(old)
+    _, new = open_jobs_grant(tmp_path, server, relay, carry_jobs_from=old.grant_id)
+    assert new.jobs is old.jobs
+    threading.Timer(0.2, api._close_watch_grant_here, args=(old,)).start()
+    began = time.monotonic()
+    assert news(old, wait_s=10)["news"] == []
+    assert time.monotonic() - began < 5
+    assert not new.jobs.ended
 
 
 # --- Through the relay --------------------------------------------------------------
