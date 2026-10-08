@@ -4895,18 +4895,24 @@ def _last_line(text: Any) -> str:
     return lines[-1][:200] if lines else ""
 
 
+def _watch_audio_marker_pin(env_dir: str) -> Optional[str]:
+    """The aiortc pin the plugin's environment was made for; None without a readable marker."""
+    try:
+        with open(os.path.join(env_dir, _WATCH_AUDIO_MARKER), encoding="utf-8") as handle:
+            marker = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    pin = marker.get("requirement") if isinstance(marker, dict) else None
+    return pin if isinstance(pin, str) else None
+
+
 def _watch_audio_marker_current(env_dir: str) -> bool:
     """Whether the plugin's environment was made for this plugin's aiortc pin.
 
     An upgrade that moves the pin leaves the old environment unready, so
     Conduit's prepare makes it again.
     """
-    try:
-        with open(os.path.join(env_dir, _WATCH_AUDIO_MARKER), encoding="utf-8") as handle:
-            marker = json.load(handle)
-    except (OSError, ValueError):
-        return False
-    return isinstance(marker, dict) and marker.get("requirement") == WATCH_AUDIO_AIORTC
+    return _watch_audio_marker_pin(env_dir) == WATCH_AUDIO_AIORTC
 
 
 def _watch_audio_helper_env(extra: Tuple[str, ...] = ()) -> Dict[str, str]:
@@ -4965,10 +4971,12 @@ class _WatchAudioRuntime:
             return {"runtime": "preparing", "source": None, "reason": None}
         if failure:
             return {"runtime": "failed", "source": None, "reason": failure}
-        # Still "missing" (Conduit offers the same Prepare); the reason says why.
-        made = os.path.isfile(os.path.join(self._env_dir(), _WATCH_AUDIO_MARKER))
-        return {"runtime": "missing", "source": None,
-                "reason": WATCH_AUDIO_STALE_RUNTIME if made else WATCH_AUDIO_NEEDS_RUNTIME}
+        return {"runtime": "missing", "source": None, "reason": self.missing_reason()}
+
+    def missing_reason(self) -> str:
+        """Why there's no runtime. Either way Conduit offers the same Prepare."""
+        pin = _watch_audio_marker_pin(self._env_dir())
+        return WATCH_AUDIO_STALE_RUNTIME if pin is not None and pin != WATCH_AUDIO_AIORTC else WATCH_AUDIO_NEEDS_RUNTIME
 
     def prepare(self, start: Optional[Callable[[Callable[[], None]], None]] = None) -> Dict[str, Any]:
         """Starts making the environment unless it's there or on its way; returns the status."""
@@ -5250,7 +5258,7 @@ class _GptLiveWatchSession(_WatchAudioSession):
     async def run(self) -> None:
         runtime = self.bridge.runtime.python()
         if runtime is None:
-            raise WatchAudioFailure("unavailable", WATCH_AUDIO_NEEDS_RUNTIME)
+            raise WatchAudioFailure("unavailable", self.bridge.runtime.missing_reason())
         for stun in ((), WATCH_AUDIO_STUN):
             helper = _GptLiveHelper(self)
             self.helper = helper

@@ -299,7 +299,10 @@ def test_an_environment_made_for_another_pin_is_not_ready(tmp_path, marker, herm
     # Not even Hermes' own aiortc stands in for it.
     has["aiortc"] = hermes_has_aiortc
     assert runtime.python() is None
-    assert runtime.status() == {"runtime": "missing", "source": None, "reason": api.WATCH_AUDIO_STALE_RUNTIME}
+    # Only a marker naming another pin says the runtime is out of date.
+    reason = api.WATCH_AUDIO_STALE_RUNTIME if "requirement" in marker else api.WATCH_AUDIO_NEEDS_RUNTIME
+    assert runtime.status() == {"runtime": "missing", "source": None, "reason": reason}
+    assert runtime.missing_reason() == reason
     # Prepare makes it again for the current pin.
     assert runtime.prepare(start=lambda target: target())["runtime"] == "ready"
 
