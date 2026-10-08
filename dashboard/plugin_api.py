@@ -4747,6 +4747,8 @@ _WATCH_AUDIO_HELPER_ENV = ("PATH", "HOME", "USER", "LOGNAME", "LANG", "TZ", "TMP
 _GROK_AUDIO_DELTAS = ("response.output_audio.delta", "response.audio.delta")
 WATCH_AUDIO_NEEDS_RUNTIME = ("GPT-Live on the Watch needs its WebRTC runtime on the Hermes host; "
                              "prepare it from Conduit's Voice settings")
+WATCH_AUDIO_STALE_RUNTIME = ("GPT-Live on the Watch needs its WebRTC runtime made again for this plugin version; "
+                             "prepare it from Conduit's Voice settings")
 
 
 class WatchAudioError(Exception):
@@ -4893,18 +4895,24 @@ def _last_line(text: Any) -> str:
     return lines[-1][:200] if lines else ""
 
 
+def _watch_audio_marker_pin(env_dir: str) -> Optional[str]:
+    """The aiortc pin the plugin's environment was made for; None without a readable marker."""
+    try:
+        with open(os.path.join(env_dir, _WATCH_AUDIO_MARKER), encoding="utf-8") as handle:
+            marker = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    pin = marker.get("requirement") if isinstance(marker, dict) else None
+    return pin if isinstance(pin, str) else None
+
+
 def _watch_audio_marker_current(env_dir: str) -> bool:
     """Whether the plugin's environment was made for this plugin's aiortc pin.
 
     An upgrade that moves the pin leaves the old environment unready, so
     Conduit's prepare makes it again.
     """
-    try:
-        with open(os.path.join(env_dir, _WATCH_AUDIO_MARKER), encoding="utf-8") as handle:
-            marker = json.load(handle)
-    except (OSError, ValueError):
-        return False
-    return isinstance(marker, dict) and marker.get("requirement") == WATCH_AUDIO_AIORTC
+    return _watch_audio_marker_pin(env_dir) == WATCH_AUDIO_AIORTC
 
 
 def _watch_audio_helper_env(extra: Tuple[str, ...] = ()) -> Dict[str, str]:
@@ -4963,7 +4971,15 @@ class _WatchAudioRuntime:
             return {"runtime": "preparing", "source": None, "reason": None}
         if failure:
             return {"runtime": "failed", "source": None, "reason": failure}
-        return {"runtime": "missing", "source": None, "reason": WATCH_AUDIO_NEEDS_RUNTIME}
+        return {"runtime": "missing", "source": None, "reason": self.missing_reason()}
+
+    def missing_reason(self) -> str:
+        """Why there's no runtime: a failed prepare's own reason, else whether one was ever made."""
+        with self._lock:
+            if self.failure:
+                return self.failure
+        pin = _watch_audio_marker_pin(self._env_dir())
+        return WATCH_AUDIO_STALE_RUNTIME if pin is not None and pin != WATCH_AUDIO_AIORTC else WATCH_AUDIO_NEEDS_RUNTIME
 
     def prepare(self, start: Optional[Callable[[Callable[[], None]], None]] = None) -> Dict[str, Any]:
         """Starts making the environment unless it's there or on its way; returns the status."""
@@ -5245,7 +5261,7 @@ class _GptLiveWatchSession(_WatchAudioSession):
     async def run(self) -> None:
         runtime = self.bridge.runtime.python()
         if runtime is None:
-            raise WatchAudioFailure("unavailable", WATCH_AUDIO_NEEDS_RUNTIME)
+            raise WatchAudioFailure("unavailable", self.bridge.runtime.missing_reason())
         for stun in ((), WATCH_AUDIO_STUN):
             helper = _GptLiveHelper(self)
             self.helper = helper
