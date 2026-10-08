@@ -63,7 +63,7 @@ from concurrent.futures import TimeoutError as FutureTimeoutError
 import contextlib
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, Optional, Tuple, TypeVar
+from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
 
 from fastapi import APIRouter, HTTPException, Request, Response, WebSocket
 
@@ -3621,6 +3621,10 @@ def open_watch_grant(body: Any, *, profile: Optional[str], path: Any = None,
     grant (_carry_watch_jobs). live_token is granted only where this profile
     has a Gemini key to mint with. ``audio`` (true) adds the call's audio
     bridge for GPT-Live and Grok (Watch audio, below), where the relay has it.
+    ``job_profiles`` names the user's other profiles the call's jobs may run
+    on ("for Fam, …"), as the phone's own jobs may. Like every route here it
+    sits behind the dashboard's own auth, whose holder can already start
+    chats on any profile; the list only narrows what the Watch may name.
     """
     relay = relay or _relay_request
     start_audio = start_audio or (lambda grant: grant.audio.start())
@@ -3647,6 +3651,8 @@ def open_watch_grant(body: Any, *, profile: Optional[str], path: Any = None,
         raise TokenError(400, "carry_jobs_from must be a grant id")
     wants_jobs = any(tool in WATCH_JOB_TOOLS or tool == WATCH_JOB_FOLLOW_UP for tool in requested)
     server = session_api() if max_jobs > 0 and wants_jobs else None
+    # Only a grant that runs jobs reads them, as job_options.
+    job_profiles = _clean_job_profiles(body.get("job_profiles"), own=profile) if server is not None else ()
     tools = tuple(tool for tool in WATCH_TOOLS if tool in requested)
     if server is not None:
         # The job tools asked for, and the Watch app's own calls and
@@ -3709,13 +3715,15 @@ def open_watch_grant(body: Any, *, profile: Optional[str], path: Any = None,
     if server is not None:
         options = _clean_job_options(body.get("job_options"))
         if carry_from is not None:
-            # A renewal that leaves out the cap or the options keeps the call's.
+            # A renewal that leaves out the cap, the options or the profiles
+            # keeps the call's.
             carried_from = _carry_watch_jobs(
                 carry_from, grant,
                 max_jobs=max_jobs if body.get("max_jobs") is not None else None,
-                options=options if body.get("job_options") is not None else None)
+                options=options if body.get("job_options") is not None else None,
+                profiles=job_profiles if body.get("job_profiles") is not None else None)
         if carried_from is None:
-            grant.jobs = _WatchJobs(grant, max_jobs=max_jobs, options=options, server=server)
+            grant.jobs = _WatchJobs(grant, max_jobs=max_jobs, options=options, server=server, profiles=job_profiles)
     for old in _watch_grants.add(grant):
         _watch_executor.submit(_close_watch_grant, old, tell_relay=True, relay=relay)
     try:
@@ -3749,6 +3757,9 @@ def open_watch_grant(body: Any, *, profile: Optional[str], path: Any = None,
         "tools": list(tools),
         "max_calls": max_calls,
         "max_jobs": grant.jobs.max_jobs if grant.jobs is not None else 0,
+        # Present, even empty, where jobs can run on another profile: an
+        # older plugin's Watch sends those jobs through the iPhone.
+        **({"job_profiles": list(grant.jobs.profiles)} if grant.jobs is not None else {}),
         **({"jobs_carried_from": carried_from.grant_id} if carried_from is not None else {}),
         **({"audio": {"url": grant.audio.watch_url(), "version": WATCH_AUDIO_VERSION,
                       "engines": _watch_audio_grant_engines(grant.audio.runtime)}} if grant.audio is not None else {}),
@@ -3756,13 +3767,14 @@ def open_watch_grant(body: Any, *, profile: Optional[str], path: Any = None,
 
 
 def _carry_watch_jobs(old_id: str, grant: _WatchGrant, *, max_jobs: Optional[int],
-                      options: Optional[Dict[str, str]]) -> Optional[_WatchGrant]:
+                      options: Optional[Dict[str, str]],
+                      profiles: Optional[Tuple[str, ...]] = None) -> Optional[_WatchGrant]:
     """Moves the jobs of a call's previous grant ``old_id`` to its renewal
     ``grant``: the Watch keeps hearing their news and can list, cancel and
     approve them through the new grant, and the job cap counts across the
-    call (``max_jobs`` and ``options`` replace the call's when given). Only
-    an open grant of the same profile whose jobs are still its own; returns
-    it, or None when nothing moved.
+    call (``max_jobs``, ``options`` and ``profiles`` replace the call's when
+    given). Only an open grant of the same profile whose jobs are still its
+    own; returns it, or None when nothing moved.
 
     The old grant keeps answering for the jobs until it closes: the Watch
     may have sent a call through it before it heard of the renewal, and it
@@ -3784,6 +3796,8 @@ def _carry_watch_jobs(old_id: str, grant: _WatchGrant, *, max_jobs: Optional[int
                 jobs.max_jobs = max_jobs
             if options is not None:
                 jobs.options = options
+            if profiles is not None:
+                jobs.profiles = profiles
             jobs.changed.notify_all()
     grant.jobs = jobs
     return old
@@ -3946,6 +3960,10 @@ WATCH_JOB_MAX_INSTRUCTION_BYTES = 3_000
 WATCH_JOB_RESULT_CHARS = 6_000
 WATCH_JOB_TITLE_CHARS = 60
 WATCH_JOB_MAX_OPTION_CHARS = 120
+# The user's other profiles a call's jobs may run on, as the phone lists
+# them ("for Fam, …"): at most this many, each a Hermes profile name.
+WATCH_JOB_MAX_PROFILES = 32
+_WATCH_PROFILE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 # Bytes as JSON. A whole job_news answer, sealed, stays inside the relay's
 # bound on an answer (WATCH_MAX_RESULT_CT_CHARS, about 17,980 bytes before
 # sealing); more news than fits waits for the next call. A job's texts are
@@ -4057,10 +4075,32 @@ def _clean_job_options(value: Any) -> Dict[str, str]:
     return options
 
 
+def _clean_job_profiles(value: Any, *, own: Optional[str]) -> Tuple[str, ...]:
+    """The user's other profiles a Watch call's jobs may run on, as the
+    phone names them; the grant's own profile needs no naming."""
+    if value is None:
+        return ()
+    if not isinstance(value, list) or len(value) > WATCH_JOB_MAX_PROFILES:
+        raise TokenError(400, f"job_profiles must be a list of at most {WATCH_JOB_MAX_PROFILES} profile names")
+    if not all(isinstance(name, str) and _WATCH_PROFILE_NAME.fullmatch(name) for name in value):
+        raise TokenError(400, "Each job profile starts with a letter or digit, then up to 63 letters, digits, '.', '_' or '-'")
+    names: List[str] = []
+    seen = {_limiter_key(own)}
+    for name in value:
+        # As Hermes' scope folds them: "current" is the grant's own profile.
+        key = _limiter_key(name)
+        if key and key not in seen:
+            seen.add(key)
+            names.append(name)
+    return tuple(names)
+
+
 class _WatchJob:
-    def __init__(self, job_id: str, title: str) -> None:
+    def __init__(self, job_id: str, title: str, profile: Optional[str] = None) -> None:
         self.job_id = job_id
         self.title = title
+        # Another of the user's profiles it runs on; None: the grant's.
+        self.profile = profile
         self.session_id = ""
         self.stored_session_id = ""
         self.status = "starting"
@@ -4100,7 +4140,8 @@ class _WatchJob:
 
     def news(self) -> Dict[str, Any]:
         item: Dict[str, Any] = {"job_id": self.job_id, "title": self.title, "status": self.status,
-                                "session_id": (self.stored_session_id or self.session_id)[:128]}
+                                "session_id": (self.stored_session_id or self.session_id)[:128],
+                                **({"profile": self.profile} if self.profile else {})}
         if self.status == "finished":
             item["result"] = _clip_job_result(self.result)
         if self.error:
@@ -4152,10 +4193,12 @@ class _RpcWaiter:
 class _WatchJobs:
     """One grant's jobs: started, followed and ended through Hermes' session API."""
 
-    def __init__(self, grant: "_WatchGrant", *, max_jobs: int, options: Dict[str, str], server: Any) -> None:
+    def __init__(self, grant: "_WatchGrant", *, max_jobs: int, options: Dict[str, str], server: Any,
+                 profiles: Tuple[str, ...] = ()) -> None:
         self.grant = grant
         self.max_jobs = max_jobs
         self.options = options
+        self.profiles = profiles
         self.server = server
         self.jobs: Dict[str, _WatchJob] = {}
         self.started = 0
@@ -4351,13 +4394,19 @@ class _WatchJobs:
             instructions = instructions[6:].strip()
         if not instructions:
             return {"ok": False, "status": 400, "detail": "instructions is required"}
-        if str(args.get("profile") or "").strip():
-            return {"ok": False, "status": 400, "detail": "Jobs on another profile start from the iPhone"}
+        named = str(args.get("profile") or "").strip()
         if _json_bytes(instructions) > WATCH_JOB_MAX_INSTRUCTION_BYTES:
             return {"ok": False, "status": 413, "detail": "The task is too long for a Watch job"}
         with self.lock:
             if self.ended:
                 return {"ok": False, "status": 410, "detail": "This call's Watch jobs have ended"}
+            profile: Optional[str] = None
+            if named and _limiter_key(named) not in ("", _limiter_key(self.grant.profile)):
+                # Only a profile the phone listed: a name is never guessed at.
+                profile = next((name for name in self.profiles if _limiter_key(name) == _limiter_key(named)), None)
+                if profile is None:
+                    return {"ok": True, "status": "not_started",
+                            "message": f"I don't know a profile or bot called {named[:64]}, so I didn't start the job."}
             if self.started >= self.max_jobs:
                 return {"ok": True, "status": "not_started",
                         "message": f"This call has started {self.max_jobs} jobs, the most the user allows per call. "
@@ -4369,7 +4418,7 @@ class _WatchJobs:
                         "message": f"You already have {running} background jobs running. Cancel them before "
                                    "starting another."}
             self.started += 1
-            job = _WatchJob(f"watch-{next(_watch_job_numbers)}", watch_job_title(instructions))
+            job = _WatchJob(f"watch-{next(_watch_job_numbers)}", watch_job_title(instructions), profile)
             self.jobs[job.job_id] = job
         done = threading.Event()
 
@@ -4427,13 +4476,25 @@ class _WatchJobs:
     def _start_session(self, job: "_WatchJob", instructions: str) -> Dict[str, Any]:
         """Creates the job's Hermes chat and submits its task; the start's answer."""
         try:
-            params: Dict[str, Any] = {"cols": 96, "source": "desktop", "title": job.title, **self.options}
-            if self.grant.profile:
-                params["profile"] = self.grant.profile
+            # A job on another profile runs on that profile's own model, as
+            # the phone's does: the voice-job model is this profile's.
+            params: Dict[str, Any] = {"cols": 96, "source": "desktop", "title": job.title,
+                                      **(self.options if job.profile is None else {})}
+            profile = job.profile or self.grant.profile
+            if profile:
+                params["profile"] = profile
             created = self.rpc("session.create", params)
             sid = created.get("session_id")
             if not isinstance(sid, str) or not sid:
                 raise WatchJobError("session.create gave no session")
+            landed = created.get("profile")
+            if job.profile is not None and isinstance(landed, str) and _limiter_key(landed) != _limiter_key(job.profile):
+                # As the phone refuses it (AppState's createSession): only a
+                # profile Hermes names, as a Hermes that names none is trusted
+                # with the one asked for.
+                with self.lock:
+                    job.session_id = sid
+                raise WatchJobError(f"Hermes put it on {landed[:64]} instead of {job.profile}")
             stored = created.get("stored_session_id")
             with self.lock:
                 job.session_id = sid
@@ -4480,9 +4541,12 @@ class _WatchJobs:
             return {"ok": True, "status": "not_started", "title": job.title,
                     "message": f"{job.title} was cancelled before it started."}
         self._tag(job)
+        where = f" on {job.profile}" if job.profile else ""
         return {"ok": True, "status": "started", "job_id": job.job_id, "title": job.title,
                 "session_id": job.stored_session_id or sid,
-                "message": "The job is running on Hermes. Its result will arrive later as a message; don't wait for it."}
+                **({"profile": job.profile} if job.profile else {}),
+                "message": f"The job is running on Hermes{where}. Its result will arrive later as a message; "
+                           "don't wait for it."}
 
     def list(self) -> Dict[str, Any]:
         """Mirrors the phone's list_jobs answer (GeminiLiveToolBridge.listResult)."""
@@ -4499,7 +4563,8 @@ class _WatchJobs:
                 or "No background jobs are running.",
             }
             for index, job in enumerate(visible, 1):
-                result[f"job_{index}"] = f"id={job.job_id}; title={job.title}; status={job.status}"
+                result[f"job_{index}"] = f"id={job.job_id}; title={job.title}; status={job.status}" + (
+                    f"; profile={job.profile}" if job.profile else "")
         return result
 
     def cancel(self, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -4897,7 +4962,7 @@ class _WatchJobs:
         """Files the job under Voice Jobs in Conduit, as a phone job is."""
         session_id = job.stored_session_id or job.session_id
         try:
-            with _profile_scope(self.grant.profile):
+            with _profile_scope(job.profile or self.grant.profile):
                 with _voice_lock():
                     db = _open_voice_db(_VOICE_WRITE)
                     try:
