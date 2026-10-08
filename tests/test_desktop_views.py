@@ -188,6 +188,31 @@ def test_a_socket_type_that_isnt_a_class_falls_back_to_the_name():
     assert api.desktop_view_client(WSTransport({"user-agent": CHROME}), socket_type=(WSTransport,)) == "browser"
 
 
+def test_raw_header_names_are_decoded():
+    class RawHeaders:
+        def items(self):
+            return [(b"User-Agent", ELECTRON)]
+
+    socket = WSTransport({})
+    socket._ws = types.SimpleNamespace(headers=RawHeaders())
+    assert api.desktop_view_client(socket) == "desktop"
+
+
+def test_a_reloaded_socket_module_is_followed(monkeypatch, tmp_path):
+    gateway = FakeGateway(tmp_path)
+    gateway.install(monkeypatch)
+    hook = _hook()
+    hook.try_install()
+
+    class ReloadedWSTransport(WSTransport):
+        pass
+
+    ReloadedWSTransport.__name__ = "WSTransport"
+    gateway.ws.WSTransport = ReloadedWSTransport
+    hook.verify()
+    assert hook.socket_type is ReloadedWSTransport
+
+
 def test_an_open_at_the_same_moment_takes_the_newer_client():
     merged = api._merge_desktop_view({"opened_at": 5.0, "seen_through": 5.0, "client": "browser"},
                                      {"opened_at": 5.0, "seen_through": 5.0, "client": "desktop"})

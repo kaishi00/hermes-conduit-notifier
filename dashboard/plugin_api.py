@@ -6284,19 +6284,22 @@ def desktop_view_client(transport: Any, socket_type: Optional[type] = None) -> O
     engine, whose User-Agent starts with Mozilla/ (Desktop's adds Electron/).
     Conduit's socket comes from URLSession and also names itself in
     X-Conduit-Client. Stdio, hosted rooms and this plugin's own job transport
-    aren't WebSocket transports, so they never count. The User-Agent is the
-    client's own claim: this is best-effort sorting among clients that already
-    hold a dashboard login, not proof of which app is on the other end.
+    aren't WebSocket transports, so they never count: a socket is the
+    gateway's when it is an instance of ``socket_type`` (Hermes'
+    tui_gateway.ws.WSTransport, subclasses included), or, without that class,
+    when its class is named WSTransport. The User-Agent is the client's own
+    claim: this is best-effort sorting among clients that already hold a
+    dashboard login, not proof of which app is on the other end.
     """
     if not _is_gateway_socket(transport, socket_type):
         return None
-    headers = _transport_headers(transport)
-    try:
-        if headers is None or headers.get("x-conduit-client") is not None:
-            return None
-        agent = str(headers.get("user-agent") or "")
-    except Exception:  # noqa: BLE001 — a header object we don't understand counts as no view
+    return _client_from_headers(_transport_headers(transport))
+
+
+def _client_from_headers(headers: Optional[Dict[str, Any]]) -> Optional[str]:
+    if headers is None or headers.get("x-conduit-client") is not None:
         return None
+    agent = str(headers.get("user-agent") or "")
     if not agent.startswith("Mozilla/"):
         return None
     return "desktop" if "Electron/" in agent else "browser"
@@ -6321,6 +6324,8 @@ def _transport_headers(transport: Any) -> Optional[Dict[str, Any]]:
             return None
         lowered: Dict[str, Any] = {}
         for name, value in items():
+            if isinstance(name, bytes):
+                name = name.decode("latin-1")  # raw ASGI header names
             # The first of repeated headers, as Starlette's own get() reads.
             lowered.setdefault(str(name).lower(), value)
         return lowered
@@ -6570,6 +6575,10 @@ class _DesktopViewHook:
             intact = isinstance(methods, dict) and all(
                 getattr(methods.get(name), _DESKTOP_VIEW_MARKER, None) is not None for name in DESKTOP_VIEW_METHODS)
             if intact:
+                # The wrappers stayed; follow a reloaded socket module anyway.
+                ws_transport = getattr(sys.modules.get("tui_gateway.ws"), "WSTransport", None)
+                if isinstance(ws_transport, type):
+                    self.socket_type = ws_transport
                 return
             self.reason = "waiting"
         self.try_install()
@@ -6633,15 +6642,17 @@ class _DesktopViewHook:
         result = response.get("result") if isinstance(response, dict) else None
         if not isinstance(result, dict):
             return
-        if _is_gateway_socket(transport, self.socket_type):
-            readable = _transport_headers(transport) is not None
-            if readable == self.headers_unreadable:
-                logger.warning("Conduit: gateway socket headers %s",
-                               "readable again" if readable else "unreadable; not marking Desktop's chats read")
-            self.headers_unreadable = not readable
-            if not readable:
-                return
-        client = desktop_view_client(transport, self.socket_type)
+        if not _is_gateway_socket(transport, self.socket_type):
+            return
+        headers = _transport_headers(transport)
+        readable = headers is not None
+        if readable == self.headers_unreadable:
+            logger.warning("Conduit: gateway socket headers %s",
+                           "readable again" if readable else "unreadable; not marking Desktop's chats read")
+        self.headers_unreadable = not readable
+        if not readable:
+            return
+        client = _client_from_headers(headers)
         stored_id = str(result.get("session_key") or "").strip()
         if client is None or not stored_id:
             return
