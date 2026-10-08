@@ -1209,3 +1209,10 @@ def test_a_follow_up_is_answered_inside_the_relays_wait(monkeypatch):
     started = time.monotonic()
     assert follow_up(grant)["outcome"] == "failed"
     assert time.monotonic() - started < 1.0
+
+
+def test_a_follow_up_after_the_call_ended_is_refused():
+    grant, server = running_job()
+    grant.jobs.end()
+    assert follow_up(grant)["status"] == 410
+    assert server.methods("session.redirect") == []

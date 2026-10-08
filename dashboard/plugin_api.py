@@ -4543,6 +4543,8 @@ class _WatchJobs:
             return {"ok": False, "status": 413, "detail": "The words are too long for a Watch job"}
         deadline = time.monotonic() + WATCH_FOLLOW_UP_DEADLINE_S
         with self.lock:
+            if self.ended:
+                return {"ok": False, "status": 410, "detail": "This call's Watch jobs have ended"}
             job = self.jobs.get(wanted)
         if job is None:
             return {"ok": True, "outcome": "unknown_job"}
@@ -4649,9 +4651,10 @@ class _WatchJobs:
             wait = WATCH_JOB_NEWS_WAIT_S
         deadline = time.monotonic() + wait
         marks: list = []
+        reaped: list = []
         with self.changed:
             while True:
-                self._settle_stale_holds()
+                reaped += self._settle_stale_holds()
                 running = sum(1 for job in self.jobs.values() if job.active)
                 # Every request still open, so the Watch drops a card
                 # answered elsewhere or timed out.
@@ -4666,19 +4669,26 @@ class _WatchJobs:
                 self.changed.wait(min(remaining, 1.0))
             answer["news"] = news
             answer["more"] = any(self._untold(job) is not False for job in self.jobs.values())
+            ended = self.ended
+        if ended:
+            for job in reaped:
+                self._close_session_later(job)
         undelivered = _watch_undelivered.get()
         if undelivered is not None and marks:
             undelivered.append(lambda: self._untake(marks))
         return answer
 
-    def _settle_stale_holds(self) -> None:
+    def _settle_stale_holds(self) -> list:
         """An end held for queued words whose turn never showed: it was the
-        job's last after all. Called with the lock held."""
+        job's last after all. Called with the lock held; the jobs settled."""
         now = time.monotonic()
+        settled = []
         for job in self.jobs.values():
             if (job.active and job.held_completion is not None and job.follow_up == "accepted"
                     and now - job.held_at >= WATCH_FOLLOW_UP_HOLD_S):
                 self._settle(job, *job.held_completion)
+                settled.append(job)
+        return settled
 
     def _untake(self, marks: list) -> None:
         """Marks news as not told again: its answer never reached the Watch."""
