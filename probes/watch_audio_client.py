@@ -131,6 +131,8 @@ async def call(api, grant: dict, engine: str, speech: Dict[int, bytes], seconds:
             break
         except Exception:
             pass
+        with contextlib.suppress(Exception):
+            await candidate.close()
         await asyncio.sleep(0.2)
     if socket is None:
         return {"error": "the host's bridge never reached the relay"}
@@ -316,16 +318,18 @@ def main() -> int:
                                tell_relay=api._close_watch_grant_on_relay)
 
     path = args.out / f"watch-audio-{args.engine}.wav"
+    output_rate = int((result.get("started") or {}).get("output_rate") or 24_000)
     if run.audio:
         with wave.open(str(path), "wb") as wav:
             wav.setnchannels(1)
             wav.setsampwidth(2)
-            wav.setframerate(int((result.get("started") or {}).get("output_rate") or 24_000))
+            wav.setframerate(output_rate)
             wav.writeframes(bytes(run.audio))
         summary["recording"] = str(path)
     summary.update(result)
+    # 16-bit mono: two bytes a sample.
     summary.update(marks=run.marks, events=dict(collections.Counter(run.events)), transcripts=run.transcripts[-12:],
-                   audio_seconds=round(len(run.audio) / 48_000, 1))
+                   audio_seconds=round(len(run.audio) / (2 * output_rate), 1))
     summary["ok"] = "first model audio" in run.marks and "error" not in result
     print("\nSummary (paste this back into the thread):")
     print(json.dumps(summary, indent=2))

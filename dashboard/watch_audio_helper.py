@@ -97,10 +97,17 @@ async def run(stdin: Any, stdout: Any) -> int:
     if kind != "C":
         print("expected config first", file=sys.stderr)
         return 2
-    config = json.loads(payload or b"{}")
-    input_rate = int(config.get("input_rate") or 16_000)
-    output_rate = int(config.get("output_rate") or 24_000)
-    ice = [RTCIceServer(urls=[url]) for url in config.get("stun") or [] if isinstance(url, str)]
+    try:
+        config = json.loads(payload or b"{}")
+        input_rate = int(config.get("input_rate") or 16_000)
+        output_rate = int(config.get("output_rate") or 24_000)
+        stun = config.get("stun") or []
+        if not isinstance(stun, list) or input_rate <= 0 or output_rate <= 0:
+            raise ValueError
+    except (ValueError, TypeError, AttributeError):
+        print("config isn't usable", file=sys.stderr)
+        return 2
+    ice = [RTCIceServer(urls=[url]) for url in stun if isinstance(url, str)]
 
     class Microphone(AudioStreamTrack):
         """The Watch's audio as a WebRTC track, paced at 20 ms."""
