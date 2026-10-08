@@ -99,6 +99,15 @@ def shape(body: Any) -> Any:
     return type(body).__name__
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    # The sign-in travels in a header: never to wherever a redirect points.
+    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+
+_opener = urllib.request.build_opener(_NoRedirect)
+
+
 def mint(api_base: str, bearer: str, seconds: int) -> Dict[str, Any]:
     request = urllib.request.Request(
         f"{api_base}/realtime/client_secrets",
@@ -109,7 +118,7 @@ def mint(api_base: str, bearer: str, seconds: int) -> Dict[str, Any]:
     started = time.monotonic()
     result: Dict[str, Any] = {}
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with _opener.open(request, timeout=20) as response:
             result["status"] = response.status
             raw = response.read()
     except urllib.error.HTTPError as exc:
@@ -127,11 +136,11 @@ def mint(api_base: str, bearer: str, seconds: int) -> Dict[str, Any]:
     if token:
         result.update(token=token, expires_at=expires_at, shape=shape(body))
     else:
-        # A refusal: xAI's own error text only, short (it never carries the bearer).
+        # A refusal: its error code only, never xAI's text, which could
+        # name the account.
         detail = body.get("error") if isinstance(body, dict) else None
-        if isinstance(detail, dict):
-            detail = detail.get("message") or detail.get("code")
-        result["error"] = str(detail or (body.get("message") if isinstance(body, dict) else "") or "")[:200]
+        code = detail.get("code") if isinstance(detail, dict) else body.get("code") if isinstance(body, dict) else None
+        result["error"] = str(code)[:60] if isinstance(code, (str, int)) else "refused"
     return result
 
 
@@ -351,6 +360,9 @@ def main() -> int:
     args = parser.parse_args()
     if not 10 <= args.expires <= 3600:
         parser.error("--expires must be between 10 and 3600 seconds")
+    # The sign-in goes to xAI over HTTPS, or to a local stand-in for tests.
+    if not (args.api_base == API_BASE or args.api_base.startswith("http://127.0.0.1:")):
+        parser.error("--api-base must be xAI's or a local test server")
     api = load_plugin_api()
     summary = asyncio.run(run(args, api))
     print("\nSummary (paste this back into the thread):")

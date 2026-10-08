@@ -233,8 +233,8 @@ export class RelaySocket {
       }
       this.buffer = this.buffer.subarray(frame.length);
       this.touch();
-      // Every frame counts, control frames included.
-      if (!this.meter(frame.length + FRAME_COST_BYTES)) {
+      // Every frame counts, control frames included; a close is always answered.
+      if (frame.opcode !== 0x8 && !this.meter(frame.length + FRAME_COST_BYTES)) {
         this.close(CLOSE_TOO_FAST, 'too_fast');
         return;
       }
