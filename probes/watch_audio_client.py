@@ -67,6 +67,8 @@ APPEND_MAX_BYTES = 500
 APPENDS_PER_ANSWER = 3
 # The relay holds a Watch call 25 s for the host (relay/src/watch-tools.mjs).
 LOOKUP_TIMEOUT_S = 35.0
+# Ends an answer cut to APPENDS_PER_ANSWER appends, so the model knows.
+CLIPPED = " [The rest was cut.]"
 UP = "watch-to-host"
 DOWN = "host-to-watch"
 
@@ -146,23 +148,23 @@ class Run:
         self.last_loud = now
 
 
-def latency(timeline: List[list]) -> dict:
-    """Seconds from the end of the question, and from each lookup's answer,
-    to what came next."""
-
-    def first(prefix: str, since: float = 0.0) -> Optional[float]:
-        return next((at for at, label in timeline if at >= since and label.startswith(prefix)), None)
-
-    result: dict = {}
+def latency(timeline: List[list]) -> Dict[str, List[Optional[float]]]:
+    """Seconds from the end of each question, each delegation and each
+    lookup's answer to what came next: one value per start in call order,
+    None when nothing followed before the next start of its kind (a
+    delegation that failed, or the call ended)."""
+    result: Dict[str, List[Optional[float]]] = {}
     pairs = [("question_end_to_heard_s", "question sent", "heard:"),
              ("question_end_to_speech_s", "question sent", "model speech starts"),
              ("delegation_to_lookup_answer_s", "delegation:", "lookup answered"),
              ("lookup_answer_to_speech_s", "lookup answered", "model speech starts")]
     for name, start, end in pairs:
-        began = first(start)
-        finished = first(end, began) if began is not None else None
-        if finished is not None:
-            result[name] = round(finished - began, 2)
+        starts = [at for at, label in timeline if label.startswith(start)]
+        for index, began in enumerate(starts):
+            until = starts[index + 1] if index + 1 < len(starts) else float("inf")
+            finished = next((at for at, label in timeline
+                             if began <= at < until and label.startswith(end)), None)
+            result.setdefault(name, []).append(None if finished is None else round(finished - began, 2))
     return result
 
 
@@ -183,12 +185,18 @@ def lookup(api, grant: dict, query: str) -> dict:
     try:
         # The plugin's opener follows no redirect: the relay key stays with the relay.
         with api._relay_opener.open(request, timeout=LOOKUP_TIMEOUT_S) as response:
-            body = json.loads(response.read(64 * 1024))
+            raw = response.read(64 * 1024)
     except urllib.error.HTTPError as exc:
         exc.close()
         return {"ok": False, "detail": f"the relay answered HTTP {exc.code}"}
     except (urllib.error.URLError, OSError, ValueError) as exc:
         return {"ok": False, "detail": f"the relay couldn't be reached ({exc.__class__.__name__})"}
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        body = None
+    if not isinstance(body, dict):
+        return {"ok": False, "detail": "the relay's answer wasn't a JSON object"}
     try:
         return api.open_watch_tool(keys["result"], "result", grant["grant_id"], rid, body, max_bytes=64 * 1024)
     except api.WatchToolError as exc:
@@ -208,21 +216,31 @@ def lookup_text(answer: dict) -> str:
 
 def delegation_appends(text: str, item_id: str) -> List[dict]:
     """The answer on a delegation, as the phone sends it: speakable appends of
-    at most APPEND_MAX_BYTES each (GPTLiveProtocol.contextAppendMessages)."""
+    at most APPEND_MAX_BYTES each (GPTLiveProtocol.contextAppendMessages), at
+    most APPENDS_PER_ANSWER of them; a longer answer ends with CLIPPED."""
     chunks: List[str] = []
     current, size = "", 0
+    clipped = False
     for char in text.strip():
         width = len(char.encode("utf-8"))
         if size + width > APPEND_MAX_BYTES and current:
             chunks.append(current)
             current, size = "", 0
+            if len(chunks) == APPENDS_PER_ANSWER:
+                clipped = True
+                break
         current += char
         size += width
-    if current:
+    if current and not clipped:
         chunks.append(current)
+    if clipped:
+        last = chunks[-1]
+        while len((last + CLIPPED).encode("utf-8")) > APPEND_MAX_BYTES:
+            last = last[:-1]
+        chunks[-1] = last + CLIPPED
     return [{"type": "delegation.context.append", "channel": "speakable",
              "content": [{"type": "input_text", "text": chunk}], "delegation_item_id": item_id}
-            for chunk in chunks[:APPENDS_PER_ANSWER]]
+            for chunk in chunks]
 
 
 async def call(api, grant: dict, engine: str, speech: Dict[int, bytes], seconds: float, run: Run,
@@ -263,7 +281,7 @@ async def call(api, grant: dict, engine: str, speech: Dict[int, bytes], seconds:
     # The mic and the lookups both send: one at a time, so counters rise in order.
     sending = asyncio.Lock()
     state = {"deadline": time.monotonic() + seconds, "heard": "", "lookups": 0}
-    lookups: List[asyncio.Future] = []
+    lookups: List[asyncio.Task[None]] = []
 
     async def send(kind: int, plain: bytes) -> None:
         async with sending:
@@ -275,15 +293,28 @@ async def call(api, grant: dict, engine: str, speech: Dict[int, bytes], seconds:
     result: dict = {}
 
     async def answer_delegation(item_id: str, request: str) -> None:
-        run.note(f"delegation: {request[:120] or '(no request)'}")
         try:
+            run.note(f"delegation: {request[:120] or '(no request)'}")
             answer = await asyncio.to_thread(lookup, api, grant, request)
             found = len(answer.get("results") or []) if answer.get("ok") else 0
             run.note(f"lookup answered ({found} result{'' if found == 1 else 's'})" if answer.get("ok")
                      else f"lookup answered (failed: {str(answer.get('detail'))[:120]})")
-            result["lookups"] = result.get("lookups", 0) + 1
             for event in delegation_appends(lookup_text(answer), item_id):
                 await send(2, json.dumps(event).encode("utf-8"))
+            # Lookups answered, a failed search included (its failure is said);
+            # counted once the answer went out, so a failed send counts only below.
+            result["lookups"] = result.get("lookups", 0) + 1
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # A delegation the stand-in couldn't run. Said, so the model isn't
+            # left waiting on it; the class only, since the text could carry a secret.
+            result["delegations_failed"] = result.get("delegations_failed", 0) + 1
+            with contextlib.suppress(Exception):
+                run.note(f"delegation failed ({exc.__class__.__name__})")
+            with contextlib.suppress(Exception):
+                for event in delegation_appends(lookup_text({"ok": False, "detail": "the Watch couldn't run it"}), item_id):
+                    await send(2, json.dumps(event).encode("utf-8"))
         finally:
             state["lookups"] -= 1
             # Room for the model to speak what it found.
@@ -412,6 +443,8 @@ async def call(api, grant: dict, engine: str, speech: Dict[int, bytes], seconds:
         return result
     finally:
         reader.cancel()
+        # A lookup still out keeps its thread until the relay answers, at most
+        # LOOKUP_TIMEOUT_S, so the probe's exit can wait that long.
         for task in lookups:
             task.cancel()
         await asyncio.gather(reader, *lookups, return_exceptions=True)
