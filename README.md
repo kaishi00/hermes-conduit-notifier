@@ -679,8 +679,11 @@ writes Hermes' own read flag, so Desktop's unread dots don't change.
   when a Hermes update moved those handlers or the socket's headers
   (`gateway-unsupported`). The
   wrapper never fails a call and always returns Hermes' own response.
-- `since` returns only chats seen after that time (seconds since the epoch).
-  429 past 60 reads a minute per profile.
+- `since` returns only chats seen after that time (seconds since the epoch);
+  a value that isn't a finite number returns every chat. 429 past 60 reads a
+  minute per profile.
+- An open is skipped when the gateway can't say which profile its chat
+  belongs to, rather than guessed onto the default profile.
 
 ## Apple Watch lookups and jobs (plugin 0.6+, jobs 0.7+, Gemini tokens 0.8+)
 

@@ -4,6 +4,7 @@ import os
 import pathlib
 import sys
 import tempfile
+import threading
 import types
 from pathlib import Path
 
@@ -330,9 +331,45 @@ def test_a_watcher_that_gave_up_can_start_again(monkeypatch):
     monkeypatch.setattr(api, "DESKTOP_VIEWS_INSTALL_WINDOW_S", 0.0)
     monkeypatch.delitem(sys.modules, "tui_gateway.server", raising=False)
     hook = _hook()
-    hook._thread = object()
+    hook._thread = threading.current_thread()
     hook._run()
     assert hook._thread is None
+
+
+def test_a_failing_install_attempt_keeps_the_watcher_restartable(monkeypatch):
+    monkeypatch.setattr(api, "DESKTOP_VIEWS_INSTALL_WINDOW_S", 0.0)
+    hook = _hook()
+    attempts = []
+
+    def broken():
+        attempts.append(1)
+        raise RuntimeError("gateway half-loaded")
+
+    monkeypatch.setattr(hook, "try_install", broken)
+    hook._thread = threading.current_thread()
+    hook._run()
+    assert attempts and hook._thread is None
+
+
+def test_an_open_whose_profile_is_unknown_is_not_recorded(monkeypatch, tmp_path):
+    gateway = FakeGateway(tmp_path, WSTransport({"user-agent": ELECTRON}))
+    gateway.install(monkeypatch)
+    hook = _hook()
+    hook.try_install()
+    # The live session is gone by the time the open is seen: the default
+    # profile is not assumed.
+    gateway.server._sessions = {}
+    gateway.call("session.activate")
+    assert hook.store.read(tmp_path) == {}
+
+
+def test_a_gateway_that_cant_name_a_sessions_profile_is_unsupported(monkeypatch, tmp_path):
+    gateway = FakeGateway(tmp_path)
+    del gateway.server._session_home
+    gateway.install(monkeypatch)
+    hook = _hook()
+    assert not hook.try_install()
+    assert hook.reason == "gateway-unsupported"
 
 
 def test_a_socket_whose_state_cant_be_read_ends_its_selection(monkeypatch, tmp_path):

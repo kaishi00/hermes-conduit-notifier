@@ -6499,13 +6499,26 @@ class _DesktopViewHook:
             self._thread.start()
 
     def _run(self) -> None:
-        deadline = time.monotonic() + DESKTOP_VIEWS_INSTALL_WINDOW_S
-        while not self.try_install():
-            if time.monotonic() >= deadline:
-                logger.info("Conduit: not marking chats Desktop opens as read here (%s)", self.reason)
-                with self._lock:
+        try:
+            self._watch()
+        finally:
+            with self._lock:
+                if self._thread is threading.current_thread():
                     # The next route call starts a fresh watcher.
                     self._thread = None
+
+    def _try_install_quietly(self) -> bool:
+        try:
+            return self.try_install()
+        except Exception:  # noqa: BLE001 — keep waiting for the gateway
+            logger.debug("Conduit: Desktop view install failed", exc_info=True)
+            return False
+
+    def _watch(self) -> None:
+        deadline = time.monotonic() + DESKTOP_VIEWS_INSTALL_WINDOW_S
+        while not self._try_install_quietly():
+            if time.monotonic() >= deadline:
+                logger.info("Conduit: not marking chats Desktop opens as read here (%s)", self.reason)
                 return
             time.sleep(DESKTOP_VIEWS_INSTALL_POLL_S)
         while True:
@@ -6550,6 +6563,7 @@ class _DesktopViewHook:
             # Opens are sorted by the WebSocket transport's class name.
             ws_transport = getattr(sys.modules.get("tui_gateway.ws"), "WSTransport", None)
             if (not isinstance(methods, dict) or not callable(getattr(sessions, "get", None))
+                    or not callable(getattr(server, "_session_home", None))
                     or not callable(current_transport) or not isinstance(ws_transport, type)
                     or not all(callable(methods.get(name)) for name in DESKTOP_VIEW_METHODS)
                     # The wrapper reads the handler's return value: a
@@ -6599,7 +6613,9 @@ class _DesktopViewHook:
             return
         session = server._sessions.get(str(result.get("session_id") or ""))
         home_of = getattr(server, "_session_home", None)
-        home = home_of(session) if isinstance(session, dict) and callable(home_of) else getattr(server, "_hermes_home", None)
+        if not isinstance(session, dict) or not callable(home_of):
+            return  # whose profile it is is unknown: a guess could mark another profile's chat
+        home = home_of(session)
         if home is None:
             return
         now = time.time()
