@@ -7,7 +7,7 @@ import { ApnsClient } from './apns.mjs';
 import { SWEEP_INTERVAL_MS } from './event-ledger.mjs';
 import { limitsFromEnv } from './limits.mjs';
 import { normalizeDashboardId, RelayStore, sanitizeBatchQuestions } from './store.mjs';
-import { WATCH_AUDIO_CAPABILITY, WatchAudioBridges, watchAudioUpgrade } from './watch-audio.mjs';
+import { CLOSE_GRANT_CLOSED, WATCH_AUDIO_CAPABILITY, WatchAudioBridges, watchAudioUpgrade } from './watch-audio.mjs';
 import { WATCH_TOOLS_CAPABILITY, WatchToolGrants, watchToolRoutes } from './watch-tools.mjs';
 
 // Self-reported relay version/capabilities, surfaced via GET /v1/meta so the
@@ -73,7 +73,7 @@ function main() {
   });
   watchGrants.onClose = (grant) => {
     const bridge = audioBridges.bridges.get(grant.id);
-    if (bridge?.grant === grant) audioBridges.end(bridge, 4010, 'grant_closed');
+    if (bridge?.grant === grant) audioBridges.end(bridge, CLOSE_GRANT_CLOSED, 'grant_closed');
   };
   setInterval(() => {
     watchGrants.sweep();
@@ -167,6 +167,8 @@ function main() {
   // server.close waiting until the container is killed.
   const shutdown = () => {
     flushStore();
+    // Upgraded sockets would hold server.close open; both ends reconnect.
+    audioBridges.endAll(1001, 'going_away');
     server.close(() => process.exit(0));
   };
   process.on('SIGTERM', shutdown);

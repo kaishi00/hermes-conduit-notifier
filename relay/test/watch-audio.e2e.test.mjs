@@ -233,6 +233,8 @@ test('closing the grant ends the bridge on both sides', async () => {
   assert.equal(deleted.status, 204);
   assert.equal((await watch.closing).code, 4010);
   assert.equal((await host.closing).code, 4010);
+  // The host isn't told the Watch left a bridge that is ending anyway.
+  assert.deepEqual(host.messages, []);
 });
 
 test('only the relay sends notices', async () => {

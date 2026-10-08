@@ -13,7 +13,11 @@ import { createHash } from 'node:crypto';
 // this relay never sees, so it can neither read nor forge one.
 //
 // The one exception is a relay notice, a two-byte message the relay itself
-// sends to the host: [0x00, NOTICE_*]. Sealed messages never start with 0x00.
+// sends to the host: [0x00, NOTICE_*]. That makes the first byte part of the
+// watch-audio-v1 contract: every message a host or Watch sends is non-empty
+// and starts with its message type, 1-255 (the plugin's and Conduit's sealed
+// frames, hello included). A message that is empty or starts with 0x00 is a
+// protocol error and closes the sender's socket with 1002.
 //
 // The WebSocket server is the small subset of RFC 6455 both clients use
 // (URLSessionWebSocketTask on the Watch, the `websockets` package on the
@@ -31,6 +35,10 @@ export const MAX_BYTES_PER_S = 96 * 1024;
 export const RATE_WINDOW_MS = 5_000;
 // Both ends ping well inside this; a silent socket is a dead one.
 export const IDLE_MS = 60_000;
+// What every frame costs against the rate limit on top of its size, so a
+// stream of tiny frames (pings, say) can't outrun it. 50 audio frames a
+// second spend 3.2 KB/s of it.
+export const FRAME_COST_BYTES = 64;
 
 export const NOTICE_WATCH_CONNECTED = 1;
 export const NOTICE_WATCH_GONE = 2;
@@ -47,12 +55,10 @@ const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 const KEY_PATTERN = /^[A-Za-z0-9+/]{22}==$/;
 
 export class WatchAudioBridges {
-  constructor({ grants, maxBridges, maxPerGateway, idleMs = IDLE_MS, now = Date.now }) {
+  constructor({ grants, maxBridges, maxPerGateway }) {
     this.grants = grants;
     this.maxBridges = maxBridges;
     this.maxPerGateway = maxPerGateway;
-    this.idleMs = idleMs;
-    this.now = now;
     // grant id -> { grant, host, watch }
     this.bridges = new Map();
   }
@@ -71,18 +77,36 @@ export class WatchAudioBridges {
   }
 
   end(bridge, code, reason) {
-    this.bridges.delete(bridge.grant.id);
-    bridge.watch?.close(code, reason);
-    bridge.host?.close(code, reason);
+    if (this.bridges.get(bridge.grant.id) === bridge) this.bridges.delete(bridge.grant.id);
+    // Both sides are cleared first, so neither close sends the other a notice.
+    const { watch, host } = bridge;
+    bridge.watch = null;
+    bridge.host = null;
+    watch?.close(code, reason);
+    host?.close(code, reason);
+  }
+
+  // Every bridge, for a relay that is shutting down.
+  endAll(code, reason) {
+    for (const bridge of [...this.bridges.values()]) this.end(bridge, code, reason);
+  }
+
+  // Whether a host socket for `grant` would be taken: a bridge that exists
+  // always takes its host back; a new one needs room.
+  canAttachHost(grant) {
+    if (this.bridges.has(grant.id)) return true;
+    let owned = 0;
+    for (const other of this.bridges.values()) {
+      if (other.grant.installationId === grant.installationId && other.grant.gatewayId === grant.gatewayId) owned += 1;
+    }
+    return owned < this.maxPerGateway && this.bridges.size < this.maxBridges;
   }
 
   // A host socket for `grant` (already authenticated as its gateway).
   attachHost(grant, socket) {
     let bridge = this.bridges.get(grant.id);
     if (!bridge) {
-      const owned = [...this.bridges.values()].filter((other) =>
-        other.grant.installationId === grant.installationId && other.grant.gatewayId === grant.gatewayId);
-      if (owned.length >= this.maxPerGateway || this.bridges.size >= this.maxBridges) return false;
+      if (!this.canAttachHost(grant)) return false;
       bridge = { grant, host: null, watch: null };
       this.bridges.set(grant.id, bridge);
     }
@@ -209,32 +233,35 @@ export class RelaySocket {
       }
       this.buffer = this.buffer.subarray(frame.length);
       this.touch();
+      // Every frame counts, control frames included.
+      if (!this.meter(frame.length + FRAME_COST_BYTES)) {
+        this.close(CLOSE_TOO_FAST, 'too_fast');
+        return;
+      }
       this.handle(frame);
     }
   }
 
+  // False once this socket has sent more than its window allows.
+  meter(bytes) {
+    const now = this.now();
+    if (now - this.windowStart >= RATE_WINDOW_MS) {
+      this.windowStart = now;
+      this.windowBytes = 0;
+    }
+    this.windowBytes += bytes;
+    return this.windowBytes <= this.maxWindowBytes;
+  }
+
   handle({ opcode, payload }) {
     switch (opcode) {
-      case 0x2: {
-        const now = this.now();
-        if (now - this.windowStart >= RATE_WINDOW_MS) {
-          this.windowStart = now;
-          this.windowBytes = 0;
-        }
-        this.windowBytes += payload.length;
-        if (this.windowBytes > this.maxWindowBytes) {
-          this.close(CLOSE_TOO_FAST, 'too_fast');
-          return;
-        }
+      case 0x2:
         this.onMessage(payload);
         return;
-      }
-      case 0x8: {
+      case 0x8:
         // Echo the peer's code, then hang up.
-        const code = payload.length >= 2 ? payload.readUInt16BE(0) : 1000;
-        this.close(code >= 1000 && code < 5000 && code !== 1005 && code !== 1006 ? code : 1000, '');
+        this.close(closeReply(payload), '');
         return;
-      }
       case 0x9:
         this.write(0xA, payload);
         return;
@@ -298,17 +325,22 @@ export function parseFrame(buffer, maxBytes = MAX_MESSAGE_BYTES) {
   if (rsv) return { error: { code: 1002, reason: 'rsv' } };
   // RFC 6455 5.1: a server closes on an unmasked client frame.
   if (!masked) return { error: { code: 1002, reason: 'unmasked' } };
-  if (!fin) return { error: { code: 1003, reason: 'fragmented' } };
+  // A fragmented control frame breaks the protocol; a fragmented message is
+  // only one this server doesn't take.
+  if (!fin) return { error: opcode >= 0x8 ? { code: 1002, reason: 'fragmented_control' } : { code: 1003, reason: 'fragmented' } };
   if (length === 126) {
     if (buffer.length < 4) return undefined;
     length = buffer.readUInt16BE(2);
     offset = 4;
+    // RFC 6455 5.2: the shortest length encoding only.
+    if (length < 126) return { error: { code: 1002, reason: 'length_encoding' } };
   } else if (length === 127) {
     if (buffer.length < 10) return undefined;
     const high = buffer.readUInt32BE(2);
     if (high !== 0) return { error: { code: 1009, reason: 'too_big' } };
     length = buffer.readUInt32BE(6);
     offset = 10;
+    if (length < 65536) return { error: { code: 1002, reason: 'length_encoding' } };
   }
   if (opcode >= 0x8 && length > 125) return { error: { code: 1002, reason: 'control_too_big' } };
   if (length > maxBytes) return { error: { code: 1009, reason: 'too_big' } };
@@ -317,6 +349,16 @@ export function parseFrame(buffer, maxBytes = MAX_MESSAGE_BYTES) {
   const payload = Buffer.alloc(length);
   for (let i = 0; i < length; i += 1) payload[i] = buffer[offset + 4 + i] ^ mask[i & 3];
   return { opcode, payload, length: offset + 4 + length };
+}
+
+// The code to answer a peer's close with: theirs when it may go on the wire
+// (RFC 6455 7.4 and the IANA registry), 1000 when they sent none, else 1002.
+export function closeReply(payload) {
+  if (payload.length === 0) return 1000;
+  if (payload.length < 2) return 1002;
+  const code = payload.readUInt16BE(0);
+  const valid = (code >= 1000 && code <= 1003) || (code >= 1007 && code <= 1014) || (code >= 3000 && code <= 4999);
+  return valid ? code : 1002;
 }
 
 export function frameHeader(opcode, length) {
@@ -356,6 +398,7 @@ export function watchAudioUpgrade({
     const [, id, side] = match;
     // An error on a socket nobody listens to would take the process down.
     socket.on('error', () => socket.destroy());
+    let upgraded = false;
     try {
       const key = String(request.headers['sec-websocket-key'] ?? '');
       if (request.method !== 'GET'
@@ -366,6 +409,8 @@ export function watchAudioUpgrade({
       }
       let grant;
       if (side === 'host') {
+        // Rate-limited before the credential is checked, like the Watch's side.
+        enforceRateLimit(`watch-audio-host-ip:${clientAddress(request)}`, 120, 60_000);
         const gateway = authenticateGateway(request);
         if (!gateway) return refuse(socket, 401, 'unauthorized');
         grant = grants.owned(id, gateway.installationId, gateway.gatewayId);
@@ -379,13 +424,10 @@ export function watchAudioUpgrade({
         enforceRateLimit(`watch-audio-watch:${grant.id}`, 30, 60_000);
       }
       if (!grant.audio) return refuse(socket, 403, 'audio_not_granted');
-      if (side === 'host' && !bridges.bridges.has(grant.id)) {
-        const owned = [...bridges.bridges.values()].filter((other) =>
-          other.grant.installationId === grant.installationId && other.grant.gatewayId === grant.gatewayId);
-        if (owned.length >= bridges.maxPerGateway || bridges.size >= bridges.maxBridges) {
-          return refuse(socket, 503, 'watch_audio_capacity');
-        }
-      }
+      // Checked before the 101, so a full relay answers in HTTP; attachHost
+      // below asks the same question synchronously, so it can't change.
+      if (side === 'host' && !bridges.canAttachHost(grant)) return refuse(socket, 503, 'watch_audio_capacity');
+      upgraded = true;
       socket.write([
         'HTTP/1.1 101 Switching Protocols',
         'Upgrade: websocket',
@@ -402,6 +444,11 @@ export function watchAudioUpgrade({
       if (head?.length) relaySocket.receive(head);
       return true;
     } catch (error) {
+      // Past the 101 the stream is WebSocket, where an HTTP answer has no place.
+      if (upgraded) {
+        socket.destroy();
+        return true;
+      }
       const status = Number(error?.status ?? 500);
       return refuse(socket, status, status < 500 && error instanceof Error ? error.message : 'internal_error');
     }
