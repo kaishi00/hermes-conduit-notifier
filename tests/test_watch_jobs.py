@@ -1216,3 +1216,9 @@ def test_a_follow_up_after_the_call_ended_is_refused():
     grant.jobs.end()
     assert follow_up(grant)["status"] == 410
     assert server.methods("session.redirect") == []
+
+
+def test_a_grant_that_names_interrupt_job_is_taken(tmp_path):
+    grant = api.open_watch_grant({"tools": ["start_job", "interrupt_job"]}, profile=None, path=write_pairing(tmp_path),
+                                 relay=FakeRelay(), start=lambda g: None, session_api=FakeHermes)
+    assert grant["tools"] == ["start_job", "job_news", "answer_approval", "interrupt_job"]

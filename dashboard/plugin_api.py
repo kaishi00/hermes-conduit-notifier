@@ -3632,7 +3632,8 @@ def open_watch_grant(body: Any, *, profile: Optional[str], path: Any = None,
     requested = body.get("tools")
     if not isinstance(requested, list) or not requested or not all(isinstance(t, str) for t in requested):
         raise TokenError(400, "tools must be a non-empty list")
-    grantable = WATCH_TOOLS + WATCH_JOB_TOOLS + (WATCH_LIVE_TOKEN,)
+    # interrupt_job comes with jobs; named, it's taken rather than refused.
+    grantable = WATCH_TOOLS + WATCH_JOB_TOOLS + (WATCH_JOB_FOLLOW_UP, WATCH_LIVE_TOKEN)
     if any(tool not in grantable for tool in requested):
         raise TokenError(400, f"The Watch can only be granted {', '.join(grantable)}")
     max_jobs = _watch_max_jobs(body.get("max_jobs"))
