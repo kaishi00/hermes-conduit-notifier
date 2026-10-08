@@ -658,7 +658,7 @@ seals the answers back. This host opens no inbound route of its own.
 
 | Method | Route | Returns |
 | --- | --- | --- |
-| POST | `/api/plugins/conduit_push/watch-tools/grant` with `{tools, max_jobs?, job_options?, carry_jobs_from?, audio?}` | `{ok, grant_id, relay_url, key, watch_key, expires_at, tools, max_calls, max_jobs, jobs_carried_from?, audio?}` |
+| POST | `/api/plugins/conduit_push/watch-tools/grant` with `{tools, max_jobs?, job_options?, job_profiles?, carry_jobs_from?, audio?}` | `{ok, grant_id, relay_url, key, watch_key, expires_at, tools, max_calls, max_jobs, job_profiles?, jobs_carried_from?, audio?}` |
 | POST | `/api/plugins/conduit_push/watch-tools/revoke` with `{grant_id}` | `{ok, revoked}` |
 
 - `tools` names what the call may run: `web_search` and `recall_memory`
@@ -680,8 +680,16 @@ seals the answers back. This host opens no inbound route of its own.
   in `carry_jobs_from`: while that grant is open and on the same profile, its
   jobs move to the new one (`jobs_carried_from`), so a call keeps hearing
   about, listing and cancelling them past a renewal, and the job limit
-  counts per call. A renewal that leaves out `max_jobs` or `job_options`
-  keeps the call's.
+  counts per call. A renewal that leaves out `max_jobs`, `job_options` or
+  `job_profiles` keeps the call's.
+- **Jobs on another profile** (plugin 0.11): `job_profiles` lists the user's
+  other profiles (at most 32 names) a call's jobs may run on, as the phone's
+  "for Fam, …" jobs do. A `start_job` with `profile` naming one of them runs
+  there, on that profile's own model (`job_options` stays with the grant's
+  profile) and filed under that profile's Voice Jobs; a name not listed is
+  answered `not_started` and never guessed at. A grant with jobs answers
+  `job_profiles` (the listed names, possibly none); an older plugin's
+  answer leaves it out, and the Watch then sends such jobs through the iPhone.
 - **Follow-ups** (plugin 0.10): a grant that can start or cancel jobs also
   carries `interrupt_job` (`{job_id, message}`), as does one that names it. It puts the
   user's words into a job Hermes is still working on, through Hermes'

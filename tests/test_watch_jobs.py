@@ -41,6 +41,8 @@ class FakeHermes:
         self.slow = set()
         self.resolved = 1
         self.on_create = None
+        # The profile session.create says the chat landed on, when set.
+        self.created_profile = None
         # Canned results by method: a dict, or a function of the params.
         self.results = {}
         self.lock = threading.Lock()
@@ -58,6 +60,8 @@ class FakeHermes:
             if self.on_create:
                 self.on_create()
             result = {"session_id": sid, "stored_session_id": f"st-{n}"}
+            if self.created_profile:
+                result["profile"] = self.created_profile
         elif method == "session.close":
             result = {"closed": self._sessions.pop(params["session_id"], None) is not None}
         elif method == "approval.respond":
@@ -256,7 +260,6 @@ def test_a_job_title_mirrors_the_phones():
 @pytest.mark.parametrize("args, detail", [
     ({}, "instructions is required"),
     ({"instructions": "quick:  "}, "instructions is required"),
-    ({"instructions": "do it", "profile": "fam"}, "Jobs on another profile start from the iPhone"),
     ({"instructions": "x" * 3001}, "The task is too long for a Watch job"),
     # Bytes, as the sealed call counts them.
     ({"instructions": "結" * 1001}, "The task is too long for a Watch job"),
@@ -268,6 +271,81 @@ def test_a_job_the_watch_shouldnt_send_is_refused_without_ending_the_grant(args,
     # 403 and 410 tell the Watch its grant is over; these don't.
     assert answer["status"] not in (403, 410)
     assert grant.jobs.server.calls == []
+
+
+# --- Jobs on the user's other profiles ("for Fam, …") ---------------------------
+
+def test_a_grant_keeps_the_other_profiles_its_jobs_may_run_on(tmp_path):
+    started = []
+    grant = api.open_watch_grant(
+        {"tools": ["start_job"], "job_profiles": ["Fam", "coder", "fam", "writer"]}, profile="Coder",
+        path=write_pairing(tmp_path), relay=FakeRelay(), start=started.append, session_api=FakeHermes)
+    # The grant's own profile needs no naming; a name counts once.
+    assert grant["job_profiles"] == ["Fam", "writer"]
+    assert started[0].jobs.profiles == ("Fam", "writer")
+
+
+def test_a_grant_without_jobs_names_no_profiles(tmp_path):
+    grant = api.open_watch_grant({"tools": ["web_search"], "job_profiles": ["fam"]}, profile=None,
+                                 path=write_pairing(tmp_path), relay=FakeRelay(), start=lambda g: None,
+                                 session_api=FakeHermes)
+    assert "job_profiles" not in grant
+
+
+@pytest.mark.parametrize("value", ["fam", [""], ["../fam"], ["fam", 3], ["x" * 65], ["p"] * 33])
+def test_job_profiles_that_arent_profile_names_are_refused(tmp_path, value):
+    with pytest.raises(api.TokenError) as err:
+        api.open_watch_grant({"tools": ["start_job"], "job_profiles": value}, profile=None,
+                             path=write_pairing(tmp_path), relay=FakeRelay(), start=lambda g: None,
+                             session_api=FakeHermes)
+    assert err.value.status == 400
+
+
+def test_a_job_for_a_listed_profile_runs_there_on_its_own_model(tags, monkeypatch):
+    scoped = []
+    monkeypatch.setattr(api, "_profile_scope", lambda profile: scoped.append(profile) or contextlib.nullcontext())
+    grant = make_jobs(options={"model": "gpt-5.5"}, profile="coder")
+    grant.jobs.profiles = ("Fam",)
+    server = grant.jobs.server
+    answer = api.run_watch_job_call(grant, "start_job", {"instructions": "check the router", "profile": "fam"})
+    assert answer["status"] == "started" and answer["profile"] == "Fam"
+    assert answer["message"].startswith("The job is running on Hermes on Fam.")
+    [create] = server.methods("session.create")
+    assert create == {"cols": 96, "source": "desktop", "title": "check the router", "profile": "Fam"}
+    assert scoped == ["Fam"]
+    assert tags() == {"st-1": {"kind": "job"}}
+    assert api.run_watch_job_call(grant, "list_jobs", {})["job_1"].endswith("; profile=Fam")
+
+
+def test_naming_the_calls_own_profile_runs_the_job_as_usual():
+    grant = make_jobs(options={"model": "gpt-5.5"}, profile="coder")
+    answer = api.run_watch_job_call(grant, "start_job", {"instructions": "check the router", "profile": "Coder"})
+    assert answer["status"] == "started" and "profile" not in answer
+    [create] = grant.jobs.server.methods("session.create")
+    assert (create["profile"], create["model"]) == ("coder", "gpt-5.5")
+
+
+def test_a_profile_the_phone_didnt_list_is_never_guessed_at():
+    grant = make_jobs(max_jobs=1)
+    grant.jobs.profiles = ("Fam",)
+    answer = api.run_watch_job_call(grant, "start_job", {"instructions": "do it", "profile": "work"})
+    assert answer == {"ok": True, "status": "not_started",
+                      "message": "I don't know a profile or bot called work, so I didn't start the job."}
+    assert grant.jobs.server.calls == []
+    # It spent none of the call's jobs.
+    assert start(grant)["status"] == "started"
+
+
+def test_a_job_hermes_lands_on_another_profile_is_refused_and_closed():
+    server = FakeHermes()
+    server.created_profile = "default"
+    grant = make_jobs(server=server)
+    grant.jobs.profiles = ("Fam",)
+    answer = api.run_watch_job_call(grant, "start_job", {"instructions": "do it", "profile": "Fam"})
+    assert answer["status"] == "not_started"
+    assert answer["message"] == "Hermes couldn't start the job: Hermes started the job on default instead of Fam"
+    assert server.methods("prompt.submit") == []
+    assert server.methods("session.close") == [{"session_id": "rt-1"}]
 
 
 def test_a_call_starts_no_more_jobs_than_the_user_allows():
@@ -369,14 +447,22 @@ def test_only_an_open_grant_of_the_same_profile_with_its_own_jobs_is_carried(tmp
         assert old.jobs.grant is old
 
 
-def test_a_renewal_without_a_cap_or_options_keeps_the_calls(tmp_path):
+def test_a_renewal_without_a_cap_options_or_profiles_keeps_the_calls(tmp_path):
     server, relay = FakeHermes(), RenewingRelay()
-    _, old = open_jobs_grant(tmp_path, server, relay, job_options={"reasoning_effort": "low"})
+    _, old = open_jobs_grant(tmp_path, server, relay, job_options={"reasoning_effort": "low"}, job_profiles=["fam"])
     renewed = api.open_watch_grant({"tools": ["start_job"], "carry_jobs_from": old.grant_id}, profile="coder",
                                    path=write_pairing(tmp_path), relay=relay, start=lambda g: None,
                                    session_api=lambda: server)
-    assert (renewed["jobs_carried_from"], renewed["max_jobs"]) == (old.grant_id, 3)
+    assert (renewed["jobs_carried_from"], renewed["max_jobs"], renewed["job_profiles"]) == (old.grant_id, 3, ["fam"])
     assert (old.jobs.max_jobs, old.jobs.options) == (3, {"reasoning_effort": "low"})
+
+
+def test_a_renewal_naming_profiles_replaces_the_calls(tmp_path):
+    server, relay = FakeHermes(), RenewingRelay()
+    _, old = open_jobs_grant(tmp_path, server, relay, job_profiles=["fam"])
+    renewed, new = open_jobs_grant(tmp_path, server, relay, carry_jobs_from=old.grant_id, job_profiles=["work"])
+    assert renewed["job_profiles"] == ["work"]
+    assert new.jobs.profiles == ("work",)
 
 
 @pytest.mark.parametrize("value", [7, "", "not a grant id", ["A" * 22]])
