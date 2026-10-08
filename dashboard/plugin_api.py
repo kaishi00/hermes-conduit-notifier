@@ -6306,9 +6306,10 @@ def _client_from_headers(headers: Optional[Dict[str, Any]]) -> Optional[str]:
 
 
 def _is_gateway_socket(transport: Any, socket_type: Optional[type]) -> bool:
-    """Hermes' WSTransport: an instance of the gateway's class (subclasses
-    included), or a class named WSTransport, which also covers sockets opened
-    before the gateway's socket module was reloaded."""
+    """Hermes' WSTransport: an instance of the gateway's class (``socket_type``,
+    a single class; subclasses included), or a class named WSTransport, which
+    also covers sockets opened before the gateway's socket module was
+    reloaded."""
     if transport is None:
         return False
     if isinstance(socket_type, type) and isinstance(transport, socket_type):
@@ -6325,8 +6326,11 @@ def _transport_headers(transport: Any) -> Optional[Dict[str, Any]]:
             return None
         lowered: Dict[str, Any] = {}
         for name, value in items():
+            # Raw ASGI headers are latin-1 bytes pairs.
             if isinstance(name, bytes):
-                name = name.decode("latin-1")  # raw ASGI header names
+                name = name.decode("latin-1")
+            if isinstance(value, bytes):
+                value = value.decode("latin-1")
             # The first of repeated headers, as Starlette's own get() reads.
             lowered.setdefault(str(name).lower(), value)
         return lowered

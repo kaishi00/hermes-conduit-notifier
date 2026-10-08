@@ -191,7 +191,7 @@ def test_a_socket_type_that_isnt_a_class_falls_back_to_the_name():
 def test_raw_header_names_are_decoded():
     class RawHeaders:
         def items(self):
-            return [(b"User-Agent", ELECTRON)]
+            return [(b"User-Agent", ELECTRON.encode("latin-1"))]
 
     socket = WSTransport({})
     socket._ws = types.SimpleNamespace(headers=RawHeaders())
