@@ -65,6 +65,8 @@ class FakeGateway:
         }
         self.transports = types.ModuleType("tui_gateway.transport")
         self.transports.current_transport = lambda: self.transport
+        self.ws = types.ModuleType("tui_gateway.ws")
+        self.ws.WSTransport = WSTransport
 
     def _handler(self, name):
         def handler(rid, params):
@@ -78,6 +80,7 @@ class FakeGateway:
     def install(self, monkeypatch):
         monkeypatch.setitem(sys.modules, "tui_gateway.server", self.server)
         monkeypatch.setitem(sys.modules, "tui_gateway.transport", self.transports)
+        monkeypatch.setitem(sys.modules, "tui_gateway.ws", self.ws)
 
     def call(self, method, **params):
         return self.server._methods[method](7, params)
@@ -177,6 +180,7 @@ def test_flush_merges_newest_wins_with_the_file_and_keeps_it_private(tmp_path):
         "junk": {"opened_at": "soon", "seen_through": 1.0},
         "flag": {"opened_at": True, "seen_through": 1.0},
         "huge": {"opened_at": 10**400, "seen_through": 1.0},
+        "negative": {"opened_at": -5, "seen_through": 1.0},
     }}))
     store = api._DesktopViewStore(flush_delay=3600.0)
     store.record(tmp_path, "a", "desktop", 210.0, opened_at=200.0)
@@ -343,3 +347,43 @@ def test_a_socket_whose_state_cant_be_read_ends_its_selection(monkeypatch, tmp_p
     gateway.call("session.activate", key="a")
     clock.now = 1100.0
     assert "open" not in hook.read(tmp_path)["a"]
+
+
+def test_unreadable_socket_headers_are_reported_not_ignored(monkeypatch, tmp_path):
+    desktop = WSTransport({"user-agent": ELECTRON})
+    desktop._ws = types.SimpleNamespace()
+    gateway = FakeGateway(tmp_path, desktop)
+    gateway.install(monkeypatch)
+    hook = _hook()
+    hook.try_install()
+    gateway.call("session.activate")
+    assert hook.status() == (False, "gateway-unsupported")
+    assert hook.store.read(tmp_path) == {}
+
+
+def test_a_gateway_without_its_websocket_transport_is_unsupported(monkeypatch, tmp_path):
+    gateway = FakeGateway(tmp_path)
+    gateway.install(monkeypatch)
+    monkeypatch.setitem(sys.modules, "tui_gateway.ws", types.ModuleType("tui_gateway.ws"))
+    hook = _hook()
+    assert not hook.try_install()
+    assert hook.reason == "gateway-unsupported"
+
+
+def test_a_selection_end_merges_into_any_stored_entry():
+    merged = api._merge_desktop_view({"opened_at": 0.0, "seen_through": 5.0, "client": "browser"},
+                                     {"seen_through": 9.0, "client": "desktop"})
+    assert merged == {"opened_at": 0.0, "seen_through": 9.0, "client": "browser"}
+
+
+def test_reads_are_rate_limited(monkeypatch, tmp_path):
+    hook = _hook()
+    monkeypatch.setattr(hook, "ensure_started", lambda: None)
+    monkeypatch.setattr(api, "_desktop_view_hook", hook)
+    monkeypatch.setattr(api, "_desktop_views_limiter", api._MintLimiter(1, 60.0, message="slow down"))
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path)
+    app = FastAPI()
+    app.include_router(api.router, prefix=BASE)
+    client = TestClient(app)
+    assert client.get(f"{BASE}/sessions/desktop-views").status_code == 200
+    assert client.get(f"{BASE}/sessions/desktop-views").status_code == 429

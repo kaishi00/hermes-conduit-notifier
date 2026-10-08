@@ -676,9 +676,11 @@ writes Hermes' own read flag, so Desktop's unread dots don't change.
   re-attaches chats after a reconnect.
 - `observing` is false, with a `reason`, while the gateway hasn't loaded
   (`gateway-not-in-process`, also what `plugins.isolation: host` reports) or
-  when a Hermes update moved those handlers (`gateway-unsupported`). The
+  when a Hermes update moved those handlers or the socket's headers
+  (`gateway-unsupported`). The
   wrapper never fails a call and always returns Hermes' own response.
 - `since` returns only chats seen after that time (seconds since the epoch).
+  429 past 60 reads a minute per profile.
 
 ## Apple Watch lookups and jobs (plugin 0.6+, jobs 0.7+, Gemini tokens 0.8+)
 

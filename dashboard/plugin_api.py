@@ -6287,8 +6287,8 @@ def desktop_view_client(transport: Any) -> Optional[str]:
     """
     if transport is None or type(transport).__name__ != "WSTransport":
         return None
+    headers = _transport_headers(transport)
     try:
-        headers = getattr(getattr(transport, "_ws", None), "headers", None)
         if headers is None or headers.get("x-conduit-client"):
             return None
         agent = str(headers.get("user-agent") or "")
@@ -6299,6 +6299,15 @@ def desktop_view_client(transport: Any) -> Optional[str]:
     return "desktop" if "Electron/" in agent else "browser"
 
 
+def _transport_headers(transport: Any) -> Any:
+    """The WebSocket upgrade's headers (Starlette's, case-insensitive), or None."""
+    try:
+        headers = getattr(getattr(transport, "_ws", None), "headers", None)
+    except Exception:  # noqa: BLE001
+        return None
+    return headers if callable(getattr(headers, "get", None)) else None
+
+
 def _desktop_views_key(home: Any) -> str:
     return os.path.realpath(str(home))
 
@@ -6307,7 +6316,7 @@ def _desktop_view_time(value: Any) -> bool:
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return False
     try:
-        return math.isfinite(value)
+        return math.isfinite(value) and value >= 0
     except OverflowError:  # an int too large for a float
         return False
 
@@ -6327,7 +6336,7 @@ def _merge_desktop_view(current: Optional[Dict[str, Any]], newer: Dict[str, Any]
     if current is None:
         return dict(newer)
     merged = dict(current)
-    if newer.get("opened_at", 0.0) > merged.get("opened_at", 0.0):
+    if "opened_at" in newer and newer["opened_at"] > merged.get("opened_at", 0.0):
         merged["opened_at"] = newer["opened_at"]
         merged["client"] = newer.get("client", merged.get("client"))
     merged["seen_through"] = max(merged.get("seen_through", 0.0), newer.get("seen_through", 0.0))
@@ -6463,10 +6472,22 @@ class _DesktopViewHook:
         self._focus: Dict[int, Dict[str, Any]] = {}
         self._thread: Optional[threading.Thread] = None
         self.reason: Optional[str] = "waiting"
+        # Set when a gateway socket's upgrade headers can't be read, which
+        # leaves every open unsortable: reported, not silently ignored.
+        self.headers_unreadable = False
+
+    @property
+    def installed(self) -> bool:
+        return self.reason is None
 
     @property
     def observing(self) -> bool:
-        return self.reason is None
+        return self.installed and not self.headers_unreadable
+
+    def status(self) -> Tuple[bool, Optional[str]]:
+        if self.installed and self.headers_unreadable:
+            return False, "gateway-unsupported"
+        return self.observing, self.reason
 
     def ensure_started(self) -> None:
         with self._lock:
@@ -6488,7 +6509,10 @@ class _DesktopViewHook:
         while True:
             time.sleep(DESKTOP_VIEWS_SWEEP_S)
             try:
-                self.verify()
+                if self.installed:
+                    self.verify()
+                else:
+                    self.try_install()  # a re-install that failed earlier
                 self.sweep()
             except Exception:  # noqa: BLE001 — keep watching
                 logger.debug("Conduit: Desktop view sweep failed", exc_info=True)
@@ -6497,7 +6521,7 @@ class _DesktopViewHook:
         """Re-installs if the gateway's handlers were replaced (a reload), and
         says so meanwhile instead of claiming to observe."""
         with self._lock:
-            if not self.observing:
+            if not self.installed:
                 return
             server = sys.modules.get("tui_gateway.server")
             methods = getattr(server, "_methods", None)
@@ -6510,7 +6534,7 @@ class _DesktopViewHook:
 
     def try_install(self) -> bool:
         with self._lock:
-            if self.observing:
+            if self.installed:
                 return True
             server = sys.modules.get("tui_gateway.server")
             if server is None:
@@ -6521,8 +6545,10 @@ class _DesktopViewHook:
             sessions = getattr(server, "_sessions", None)
             transports = sys.modules.get("tui_gateway.transport")
             current_transport = getattr(transports, "current_transport", None)
+            # Opens are sorted by the WebSocket transport's class name.
+            ws_transport = getattr(sys.modules.get("tui_gateway.ws"), "WSTransport", None)
             if (not isinstance(methods, dict) or not callable(getattr(sessions, "get", None))
-                    or not callable(current_transport)
+                    or not callable(current_transport) or not isinstance(ws_transport, type)
                     or not all(callable(methods.get(name)) for name in DESKTOP_VIEW_METHODS)
                     # The wrapper reads the handler's return value: a
                     # coroutine handler would hand it an awaitable instead.
@@ -6556,6 +6582,11 @@ class _DesktopViewHook:
     def _observe(self, response: Any, server: Any, transport: Any) -> None:
         result = response.get("result") if isinstance(response, dict) else None
         if not isinstance(result, dict):
+            return
+        if type(transport).__name__ == "WSTransport" and _transport_headers(transport) is None:
+            if not self.headers_unreadable:
+                logger.warning("Conduit: can't read gateway socket headers; not marking Desktop's chats read")
+            self.headers_unreadable = True
             return
         client = desktop_view_client(transport)
         stored_id = str(result.get("session_key") or "").strip()
@@ -6612,6 +6643,8 @@ class _DesktopViewHook:
 
 _desktop_view_store = _DesktopViewStore()
 _desktop_view_hook = _DesktopViewHook(_desktop_view_store)
+# Conduit reads every 15 s per profile while its chat list is on screen.
+_desktop_views_limiter = _MintLimiter(60, 60.0, message="Too many Desktop view reads; try again shortly")
 atexit.register(_desktop_view_store.flush)
 if "hermes_cli.web_server" in sys.modules:
     # Loaded by the dashboard (not a test or the CLI): start watching for the
@@ -6630,6 +6663,7 @@ async def get_desktop_views(response: Response, profile: Optional[str] = None,
     _desktop_view_hook.try_install()
 
     def read() -> Dict[str, Dict[str, Any]]:
+        _desktop_views_limiter.acquire(_limiter_key(profile))
         from hermes_constants import get_hermes_home
 
         return _desktop_view_hook.read(get_hermes_home())
@@ -6644,7 +6678,8 @@ async def get_desktop_views(response: Response, profile: Optional[str] = None,
         raise _unexpected("read", exc, feature="Desktop views")
     if since is not None and math.isfinite(since):
         views = {stored_id: entry for stored_id, entry in views.items() if entry["seen_through"] > since}
-    return {"ok": True, "observing": _desktop_view_hook.observing, "reason": _desktop_view_hook.reason, "views": views}
+    observing, reason = _desktop_view_hook.status()
+    return {"ok": True, "observing": observing, "reason": reason, "views": views}
 
 
 # --- Capabilities ------------------------------------------------------------
