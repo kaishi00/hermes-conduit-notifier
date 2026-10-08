@@ -52,6 +52,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -6274,13 +6275,15 @@ _DESKTOP_VIEW_MARKER = "__conduit_desktop_view__"
 
 
 def desktop_view_client(transport: Any) -> Optional[str]:
-    """"desktop" or "browser" for a browser engine's gateway socket, else None.
+    """Returns "desktop" or "browser" for a browser engine's gateway socket, else None.
 
     Desktop's renderer and the web dashboard open /api/ws from a browser
     engine, whose User-Agent starts with Mozilla/ (Desktop's adds Electron/).
     Conduit's socket comes from URLSession and also names itself in
     X-Conduit-Client. Stdio, hosted rooms and this plugin's own job transport
-    aren't WebSocket transports, so they never count.
+    aren't WebSocket transports, so they never count. The User-Agent is the
+    client's own claim: this is best-effort sorting among clients that already
+    hold a dashboard login, not proof of which app is on the other end.
     """
     if transport is None or type(transport).__name__ != "WSTransport":
         return None
@@ -6298,6 +6301,17 @@ def desktop_view_client(transport: Any) -> Optional[str]:
 
 def _desktop_views_key(home: Any) -> str:
     return os.path.realpath(str(home))
+
+
+def _desktop_view_time(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _transport_closed(transport: Any) -> bool:
+    """Hermes' WSTransport.closed; anything else counts as closed, so a
+    selection is never held open on a socket whose state can't be read."""
+    closed = getattr(transport, "closed", None)
+    return closed if isinstance(closed, bool) else True
 
 
 def _merge_desktop_view(current: Optional[Dict[str, Any]], newer: Dict[str, Any]) -> Dict[str, Any]:
@@ -6320,6 +6334,8 @@ class _DesktopViewStore:
     def __init__(self, flush_delay: float = DESKTOP_VIEWS_FLUSH_DELAY_S) -> None:
         self._lock = threading.Lock()
         self._pending: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        # Batches taken by a flush and not yet on disk; reads still see them.
+        self._inflight: list = []
         self._timer: Optional[threading.Timer] = None
         self._flush_delay = flush_delay
 
@@ -6340,21 +6356,29 @@ class _DesktopViewStore:
     def flush(self) -> None:
         with self._lock:
             pending, self._pending = self._pending, {}
+            self._inflight.append(pending)
             if self._timer is not None:
                 self._timer.cancel()
                 self._timer = None
-        for key, views in pending.items():
-            try:
-                self._merge_to_disk(key, views)
-            except Exception:  # noqa: BLE001 — a lost write only leaves a chat unread
-                logger.warning("Conduit: could not save Desktop views under %s", key, exc_info=True)
+        try:
+            for key, views in pending.items():
+                try:
+                    self._merge_to_disk(key, views)
+                except Exception:  # noqa: BLE001 — a lost write only leaves a chat unread
+                    logger.warning("Conduit: could not save Desktop views under %s", key, exc_info=True)
+        finally:
+            with self._lock:
+                self._inflight = [batch for batch in self._inflight if batch is not pending]
 
     def read(self, home: Any) -> Dict[str, Dict[str, Any]]:
         key = _desktop_views_key(home)
         views = self._load(self._path(key))
         with self._lock:
-            pending = dict(self._pending.get(key, {}))
-        return self._merged(views, pending)
+            batches = [dict(batch.get(key, {})) for batch in self._inflight]
+            batches.append(dict(self._pending.get(key, {})))
+        for batch in batches:
+            views = self._merged(views, batch)
+        return views
 
     @staticmethod
     def _path(key: str) -> str:
@@ -6375,7 +6399,7 @@ class _DesktopViewStore:
             if not isinstance(stored_id, str) or not isinstance(entry, dict):
                 continue
             times = [entry.get("opened_at"), entry.get("seen_through")]
-            if not all(isinstance(value, (int, float)) and math.isfinite(value) for value in times):
+            if not all(_desktop_view_time(value) for value in times):
                 continue
             clean[stored_id] = {"opened_at": float(times[0]), "seen_through": float(times[1]),
                                 "client": str(entry.get("client") or "desktop")}
@@ -6400,11 +6424,17 @@ class _DesktopViewStore:
         # Path-generic: locks the sibling ".conduit-desktop-views.json.lock".
         with _pairing_state_lock(Path(path)):
             merged = self._merged(self._load(path), views)
-            temp = f"{path}.{os.getpid()}.tmp"
-            fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump({"version": 1, "views": merged}, handle, separators=(",", ":"))
-            os.replace(temp, path)
+            # A fresh, exclusively created 0600 name, so nothing planted in
+            # the home can redirect the write.
+            fd, temp = tempfile.mkstemp(dir=key, prefix=f".{DESKTOP_VIEWS_FILE}.", suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    json.dump({"version": 1, "views": merged}, handle, separators=(",", ":"))
+                os.replace(temp, path)
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    os.unlink(temp)
+                raise
 
 
 class _DesktopViewHook:
@@ -6442,14 +6472,33 @@ class _DesktopViewHook:
         while not self.try_install():
             if time.monotonic() >= deadline:
                 logger.info("Conduit: not marking chats Desktop opens as read here (%s)", self.reason)
+                with self._lock:
+                    # The next route call starts a fresh watcher.
+                    self._thread = None
                 return
             time.sleep(DESKTOP_VIEWS_INSTALL_POLL_S)
         while True:
             time.sleep(DESKTOP_VIEWS_SWEEP_S)
             try:
+                self.verify()
                 self.sweep()
             except Exception:  # noqa: BLE001 — keep watching
                 logger.debug("Conduit: Desktop view sweep failed", exc_info=True)
+
+    def verify(self) -> None:
+        """Re-installs if the gateway's handlers were replaced (a reload), and
+        says so meanwhile instead of claiming to observe."""
+        with self._lock:
+            if not self.observing:
+                return
+            server = sys.modules.get("tui_gateway.server")
+            methods = getattr(server, "_methods", None)
+            intact = isinstance(methods, dict) and all(
+                getattr(methods.get(name), _DESKTOP_VIEW_MARKER, None) is not None for name in DESKTOP_VIEW_METHODS)
+            if intact:
+                return
+            self.reason = "waiting"
+        self.try_install()
 
     def try_install(self) -> bool:
         with self._lock:
@@ -6466,7 +6515,10 @@ class _DesktopViewHook:
             current_transport = getattr(transports, "current_transport", None)
             if (not isinstance(methods, dict) or not callable(getattr(sessions, "get", None))
                     or not callable(current_transport)
-                    or not all(callable(methods.get(name)) for name in DESKTOP_VIEW_METHODS)):
+                    or not all(callable(methods.get(name)) for name in DESKTOP_VIEW_METHODS)
+                    # The wrapper reads the handler's return value: a
+                    # coroutine handler would hand it an awaitable instead.
+                    or any(inspect.iscoroutinefunction(methods[name]) for name in DESKTOP_VIEW_METHODS)):
                 # Mid-import (the table fills as the gateway loads), or a
                 # Hermes that moved these.
                 self.reason = "gateway-unsupported"
@@ -6507,10 +6559,11 @@ class _DesktopViewHook:
         if home is None:
             return
         now = time.time()
+        self.store.record(home, stored_id, client, now, opened_at=now)
         try:
-            ref: Callable[[], Any] = weakref.ref(transport)
+            ref = weakref.ref(transport)
         except TypeError:
-            ref = lambda: transport  # noqa: E731 — dropped once the socket closes
+            return  # can't follow this socket's life: the open alone counts
         with self._focus_lock:
             previous = self._focus.get(id(transport))
             if previous is not None:
@@ -6520,7 +6573,6 @@ class _DesktopViewHook:
                 self.store.record(previous["home"], previous["stored_id"], previous["client"], seen_until)
             self._focus[id(transport)] = {"ref": ref, "home": _desktop_views_key(home), "stored_id": stored_id,
                                           "client": client, "alive_at": now}
-        self.store.record(home, stored_id, client, now, opened_at=now)
 
     def sweep(self, now: Optional[float] = None) -> None:
         """Ends the selection of connections that closed, at their last check."""
@@ -6528,7 +6580,7 @@ class _DesktopViewHook:
         with self._focus_lock:
             for key, focus in list(self._focus.items()):
                 transport = focus["ref"]()
-                if transport is None or getattr(transport, "_closed", True):
+                if transport is None or _transport_closed(transport):
                     self.store.record(focus["home"], focus["stored_id"], focus["client"], focus["alive_at"])
                     del self._focus[key]
                 else:
@@ -6578,6 +6630,8 @@ async def get_desktop_views(response: Response, profile: Optional[str] = None,
         views = await _run_scoped(profile, read)
     except TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+    except HTTPException:
+        raise  # Hermes' own 400/404 for a bad or unknown profile
     except Exception as exc:
         raise _unexpected("read", exc, feature="Desktop views")
     if since is not None and math.isfinite(since):

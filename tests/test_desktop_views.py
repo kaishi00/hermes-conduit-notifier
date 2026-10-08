@@ -40,7 +40,7 @@ class WSTransport:
 
     def __init__(self, headers):
         self._ws = types.SimpleNamespace(headers=headers)
-        self._closed = False
+        self.closed = False
 
 
 class StdioTransport:
@@ -175,6 +175,7 @@ def test_flush_merges_newest_wins_with_the_file_and_keeps_it_private(tmp_path):
         "a": {"opened_at": 100.0, "seen_through": 150.0, "client": "browser"},
         "b": {"opened_at": 300.0, "seen_through": 400.0, "client": "browser"},
         "junk": {"opened_at": "soon", "seen_through": 1.0},
+        "flag": {"opened_at": True, "seen_through": 1.0},
     }}))
     store = api._DesktopViewStore(flush_delay=3600.0)
     store.record(tmp_path, "a", "desktop", 210.0, opened_at=200.0)
@@ -253,7 +254,7 @@ def test_a_chat_stays_seen_while_its_desktop_has_it_selected(monkeypatch, tmp_pa
     assert views["b"]["seen_through"] == 1200.0 and views["b"]["open"] is True
 
     # Closing Desktop ends b's at the last check that found it connected.
-    desktop._closed = True
+    desktop.closed = True
     clock.now = 1300.0
     views = hook.read(tmp_path)
     assert views["b"] == {"opened_at": 1100.0, "seen_through": 1200.0, "client": "desktop"}
@@ -276,3 +277,68 @@ def test_each_desktop_connection_keeps_its_own_selection(monkeypatch, tmp_path):
     views = hook.read(tmp_path)
     assert views["a"]["open"] and views["a"]["seen_through"] == 1050.0
     assert views["b"]["open"] and views["b"]["client"] == "browser"
+
+
+def test_a_bad_profile_keeps_hermes_own_status(monkeypatch):
+    from fastapi import HTTPException
+
+    def unknown_profile(profile):
+        raise HTTPException(status_code=404, detail="Unknown profile")
+
+    hook = _hook()
+    monkeypatch.setattr(hook, "ensure_started", lambda: None)
+    monkeypatch.setattr(api, "_desktop_view_hook", hook)
+    monkeypatch.setattr(api, "_profile_scope", unknown_profile)
+    app = FastAPI()
+    app.include_router(api.router, prefix=BASE)
+    response = TestClient(app).get(f"{BASE}/sessions/desktop-views", params={"profile": "nope"})
+    assert response.status_code == 404
+
+
+def test_replaced_handlers_are_wrapped_again(monkeypatch, tmp_path):
+    gateway = FakeGateway(tmp_path, WSTransport({"user-agent": ELECTRON}))
+    gateway.install(monkeypatch)
+    hook = _hook()
+    hook.try_install()
+    gateway.server._methods["session.activate"] = gateway._handler("session.activate")  # a gateway reload
+    hook.verify()
+    assert hook.observing
+    gateway.call("session.activate", key="after-reload")
+    assert "after-reload" in hook.store.read(tmp_path)
+
+
+def test_coroutine_handlers_are_not_wrapped(monkeypatch, tmp_path):
+    gateway = FakeGateway(tmp_path)
+
+    async def resume(rid, params):
+        return {}
+
+    gateway.server._methods["session.resume"] = resume
+    gateway.install(monkeypatch)
+    hook = _hook()
+    assert not hook.try_install()
+    assert hook.reason == "gateway-unsupported"
+    assert gateway.server._methods["session.resume"] is resume
+
+
+def test_a_watcher_that_gave_up_can_start_again(monkeypatch):
+    monkeypatch.setattr(api, "DESKTOP_VIEWS_INSTALL_WINDOW_S", 0.0)
+    monkeypatch.delitem(sys.modules, "tui_gateway.server", raising=False)
+    hook = _hook()
+    hook._thread = object()
+    hook._run()
+    assert hook._thread is None
+
+
+def test_a_socket_whose_state_cant_be_read_ends_its_selection(monkeypatch, tmp_path):
+    clock = Clock(1000.0)
+    monkeypatch.setattr(api, "time", types.SimpleNamespace(time=clock.time, monotonic=clock.time, sleep=lambda _: None))
+    desktop = WSTransport({"user-agent": ELECTRON})
+    del desktop.closed
+    gateway = FakeGateway(tmp_path, desktop)
+    gateway.install(monkeypatch)
+    hook = _hook()
+    hook.try_install()
+    gateway.call("session.activate", key="a")
+    clock.now = 1100.0
+    assert "open" not in hook.read(tmp_path)["a"]

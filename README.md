@@ -666,7 +666,9 @@ writes Hermes' own read flag, so Desktop's unread dots don't change.
 - An open counts when it comes over the gateway's WebSocket from a browser
   engine (Desktop's renderer or the web dashboard: a `Mozilla/` User-Agent);
   `client` is `desktop` when it also says `Electron/`, else `browser`.
-  Conduit's own socket, the TUI and hosted rooms never count.
+  Conduit's own socket, the TUI and hosted rooms never count. The
+  User-Agent is the client's own claim, so this is best-effort sorting
+  among clients that already hold a dashboard login.
 - A connection's selection moves with its next open and ends when its socket
   closes (noticed within 5 seconds). `open: true` marks a chat that is
   selected right now; its `seen_through` is the moment of the read. The host
