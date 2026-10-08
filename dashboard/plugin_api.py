@@ -6272,6 +6272,9 @@ DESKTOP_VIEWS_SWEEP_S = 5.0
 # Set on each wrapper (to the handler it wraps), so a second load of this
 # module in the same process never wraps a wrapper.
 _DESKTOP_VIEW_MARKER = "__conduit_desktop_view__"
+# The hook a wrapper reports to: the newest load of this module takes over
+# the wrappers an earlier load installed.
+_DESKTOP_VIEW_OWNER = "__conduit_desktop_view_owner__"
 
 
 def desktop_view_client(transport: Any) -> Optional[str]:
@@ -6289,7 +6292,7 @@ def desktop_view_client(transport: Any) -> Optional[str]:
         return None
     headers = _transport_headers(transport)
     try:
-        if headers is None or headers.get("x-conduit-client"):
+        if headers is None or headers.get("x-conduit-client") is not None:
             return None
         agent = str(headers.get("user-agent") or "")
     except Exception:  # noqa: BLE001 — a header object we don't understand counts as no view
@@ -6408,7 +6411,7 @@ class _DesktopViewStore:
         try:
             with open(path, encoding="utf-8") as handle:
                 value = json.load(handle)
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):  # RecursionError: absurdly nested JSON
             return {}
         views = value.get("views") if isinstance(value, dict) else None
         if not isinstance(views, dict):
@@ -6583,6 +6586,10 @@ class _DesktopViewHook:
                 if getattr(handler, _DESKTOP_VIEW_MARKER, None) is None:
                     # In place: the dispatcher looks handlers up at call time.
                     methods[name] = self._wrap(handler, server, current_transport)
+                else:
+                    # An earlier load of this module wrapped it: opens now
+                    # come here, where the route reads.
+                    setattr(handler, _DESKTOP_VIEW_OWNER, self)
             self.reason = None
             logger.info("Conduit: marking chats Desktop opens as read")
             return True
@@ -6592,12 +6599,14 @@ class _DesktopViewHook:
         def wrapper(*args: Any, **kwargs: Any) -> Any:
             response = handler(*args, **kwargs)
             try:
-                self._observe(response, server, current_transport())
+                owner = getattr(wrapper, _DESKTOP_VIEW_OWNER, self)
+                owner._observe(response, server, current_transport())
             except Exception:  # noqa: BLE001 — never fails the client's call
                 logger.debug("Conduit: Desktop view not recorded", exc_info=True)
             return response
 
         setattr(wrapper, _DESKTOP_VIEW_MARKER, handler)
+        setattr(wrapper, _DESKTOP_VIEW_OWNER, self)
         return wrapper
 
     def _observe(self, response: Any, server: Any, transport: Any) -> None:

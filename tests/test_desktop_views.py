@@ -154,10 +154,26 @@ def test_the_wrapper_never_fails_the_call(monkeypatch, tmp_path):
 def test_installing_twice_never_wraps_a_wrapper(monkeypatch, tmp_path):
     gateway = FakeGateway(tmp_path, WSTransport({"user-agent": ELECTRON}))
     gateway.install(monkeypatch)
-    _hook().try_install()
+    first = _hook()
+    first.try_install()
     wrapped = gateway.server._methods["session.activate"]
-    _hook().try_install()
+    second = _hook()
+    assert second.try_install()
     assert gateway.server._methods["session.activate"] is wrapped
+
+    # The newer load observes, so the route it serves sees the live selection.
+    gateway.call("session.activate", key="a")
+    assert second.read(tmp_path)["a"]["open"] is True
+    assert first.read(tmp_path) == {}
+
+
+def test_a_blank_conduit_header_still_marks_conduit():
+    assert api.desktop_view_client(WSTransport({"user-agent": ELECTRON, "x-conduit-client": ""})) is None
+
+
+def test_an_absurdly_nested_file_reads_as_empty(tmp_path):
+    (tmp_path / api.DESKTOP_VIEWS_FILE).write_text("[" * 100000)
+    assert api._DesktopViewStore(flush_delay=3600.0).read(tmp_path) == {}
 
 
 def test_reports_why_it_is_not_observing(monkeypatch, tmp_path):
