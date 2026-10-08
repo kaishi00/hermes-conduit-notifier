@@ -3622,7 +3622,9 @@ def open_watch_grant(body: Any, *, profile: Optional[str], path: Any = None,
     has a Gemini key to mint with. ``audio`` (true) adds the call's audio
     bridge for GPT-Live and Grok (Watch audio, below), where the relay has it.
     ``job_profiles`` names the user's other profiles the call's jobs may run
-    on ("for Fam, …"), as the phone's own jobs may.
+    on ("for Fam, …"), as the phone's own jobs may. Like every route here it
+    sits behind the dashboard's own auth, whose holder can already start
+    chats on any profile; the list only narrows what the Watch may name.
     """
     relay = relay or _relay_request
     start_audio = start_audio or (lambda grant: grant.audio.start())
@@ -4081,12 +4083,14 @@ def _clean_job_profiles(value: Any, *, own: Optional[str]) -> Tuple[str, ...]:
     if not isinstance(value, list) or len(value) > WATCH_JOB_MAX_PROFILES:
         raise TokenError(400, f"job_profiles must be a list of at most {WATCH_JOB_MAX_PROFILES} profile names")
     if not all(isinstance(name, str) and _WATCH_PROFILE_NAME.fullmatch(name) for name in value):
-        raise TokenError(400, "Each job profile is a name of up to 64 letters, digits, '.', '_' or '-'")
+        raise TokenError(400, "Each job profile starts with a letter or digit, then up to 63 letters, digits, '.', '_' or '-'")
     names: List[str] = []
+    seen = {_limiter_key(own)}
     for name in value:
         # As Hermes' scope folds them: "current" is the grant's own profile.
         key = _limiter_key(name)
-        if key and key != _limiter_key(own) and key not in (_limiter_key(n) for n in names):
+        if key and key not in seen:
+            seen.add(key)
             names.append(name)
     return tuple(names)
 
@@ -4490,7 +4494,7 @@ class _WatchJobs:
                 # with the one asked for.
                 with self.lock:
                     job.session_id = sid
-                raise WatchJobError(f"Hermes started the job on {landed[:64]} instead of {job.profile}")
+                raise WatchJobError(f"Hermes put it on {landed[:64]} instead of {job.profile}")
             stored = created.get("stored_session_id")
             with self.lock:
                 job.session_id = sid

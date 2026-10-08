@@ -340,6 +340,14 @@ def test_a_profile_the_phone_didnt_list_is_never_guessed_at():
     assert start(grant)["status"] == "started"
 
 
+def test_a_hermes_that_names_no_profile_is_trusted_with_the_one_asked_for():
+    # As the phone's createSession: only a profile Hermes names is checked.
+    grant = make_jobs()
+    grant.jobs.profiles = ("Fam",)
+    answer = api.run_watch_job_call(grant, "start_job", {"instructions": "do it", "profile": "Fam"})
+    assert answer["status"] == "started" and answer["profile"] == "Fam"
+
+
 def test_a_job_hermes_lands_on_another_profile_is_refused_and_closed():
     server = FakeHermes()
     server.created_profile = "default"
@@ -347,7 +355,7 @@ def test_a_job_hermes_lands_on_another_profile_is_refused_and_closed():
     grant.jobs.profiles = ("Fam",)
     answer = api.run_watch_job_call(grant, "start_job", {"instructions": "do it", "profile": "Fam"})
     assert answer["status"] == "not_started"
-    assert answer["message"] == "Hermes couldn't start the job: Hermes started the job on default instead of Fam"
+    assert answer["message"] == "Hermes couldn't start the job: Hermes put it on default instead of Fam"
     assert server.methods("prompt.submit") == []
     assert server.methods("session.close") == [{"session_id": "rt-1"}]
 
