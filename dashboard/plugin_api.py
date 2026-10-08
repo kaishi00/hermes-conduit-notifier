@@ -6304,13 +6304,21 @@ def _desktop_views_key(home: Any) -> str:
 
 
 def _desktop_view_time(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:  # an int too large for a float
+        return False
 
 
 def _transport_closed(transport: Any) -> bool:
     """Hermes' WSTransport.closed; anything else counts as closed, so a
     selection is never held open on a socket whose state can't be read."""
-    closed = getattr(transport, "closed", None)
+    try:
+        closed = getattr(transport, "closed", None)
+    except Exception:  # noqa: BLE001 — a property that fails reads as closed
+        return True
     return closed if isinstance(closed, bool) else True
 
 

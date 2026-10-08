@@ -176,6 +176,7 @@ def test_flush_merges_newest_wins_with_the_file_and_keeps_it_private(tmp_path):
         "b": {"opened_at": 300.0, "seen_through": 400.0, "client": "browser"},
         "junk": {"opened_at": "soon", "seen_through": 1.0},
         "flag": {"opened_at": True, "seen_through": 1.0},
+        "huge": {"opened_at": 10**400, "seen_through": 1.0},
     }}))
     store = api._DesktopViewStore(flush_delay=3600.0)
     store.record(tmp_path, "a", "desktop", 210.0, opened_at=200.0)
