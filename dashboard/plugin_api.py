@@ -4325,6 +4325,9 @@ class _WatchJobs:
             job = self._job_for(sid)
             if job is None or not job.active:
                 return
+            if job.held_completion is not None:
+                # Still at work, as any frame for the session says.
+                job.held_at = time.monotonic()
             job.approval = {
                 "request_id": text("request_id", 128),
                 "server_request_id": server_request_id,
