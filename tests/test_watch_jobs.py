@@ -1200,6 +1200,25 @@ def test_an_end_held_when_the_call_ends_still_settles_and_closes(monkeypatch):
     wait_for(lambda: grant.jobs.transport._closed)
 
 
+def test_a_follow_up_waiting_its_turn_when_the_call_ends_still_has_its_hold_reaped(monkeypatch):
+    grant, server = running_job()
+    server.results["session.redirect"] = {"status": "queued"}
+    monkeypatch.setattr(api, "WATCH_FOLLOW_UP_HOLD_S", 0)
+    job = grant.jobs.jobs["watch-1"]
+    job.follow_up_lock.acquire()  # another follow-up still running
+    answers = []
+    waiting = threading.Thread(target=lambda: answers.append(follow_up(grant)))
+    waiting.start()
+    wait_for(lambda: grant.jobs.follow_ups_in_flight == 1)
+    grant.jobs.end()
+    job.follow_up_lock.release()
+    waiting.join(5)
+    assert answers[0]["outcome"] == "queued"
+    server.emit("rt-1", "message.complete", {"text": "Step one done."})
+    wait_for(lambda: server.methods("session.close") == [{"session_id": "rt-1"}])
+    wait_for(lambda: grant.jobs.transport._closed)
+
+
 def test_words_taken_as_the_turn_failed_are_reported_too_late():
     grant, server = running_job()
 

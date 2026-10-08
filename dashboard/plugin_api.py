@@ -3887,7 +3887,8 @@ async def post_watch_tool_revoke(request: Request, response: Response, profile: 
 # (a correction, "hold that", "never mind"), as the phone's live calls do
 # (Conduit #451/#455): Hermes' session.redirect, which keeps the work so far
 # and ends the turn with one completion. It comes with every grant that has
-# jobs, never asked for by name: a plugin without it would refuse the grant.
+# jobs, so the Watch never needs to name it (an older plugin would refuse a
+# grant that did); named, it is taken rather than refused.
 
 WATCH_JOB_TOOLS = ("start_job", "list_jobs", "cancel_job")
 WATCH_JOB_CALLS = ("job_news", "answer_approval")
@@ -4153,6 +4154,9 @@ class _WatchJobs:
         self._waiters: Dict[str, _RpcWaiter] = {}
         self._rpc_ids = 0
         self.ended = False
+        # Follow-ups between their 410 check and their answer: the hold
+        # reaper keeps watching while any is in flight.
+        self.follow_ups_in_flight = 0
 
     # Hermes' session API
 
@@ -4547,15 +4551,20 @@ class _WatchJobs:
             if self.ended:
                 return {"ok": False, "status": 410, "detail": "This call's Watch jobs have ended"}
             job = self.jobs.get(wanted)
-        if job is None:
-            return {"ok": True, "outcome": "unknown_job"}
-        if not job.follow_up_lock.acquire(timeout=WATCH_FOLLOW_UP_QUEUE_S):
-            return {"ok": True, "outcome": "failed", "title": job.title,
-                    "error": "Hermes is still taking the user's last words for this job."}
+            if job is None:
+                return {"ok": True, "outcome": "unknown_job"}
+            self.follow_ups_in_flight += 1
         try:
-            outcome = self._follow_up(job, words, deadline)
+            if not job.follow_up_lock.acquire(timeout=WATCH_FOLLOW_UP_QUEUE_S):
+                return {"ok": True, "outcome": "failed", "title": job.title,
+                        "error": "Hermes is still taking the user's last words for this job."}
+            try:
+                outcome = self._follow_up(job, words, deadline)
+            finally:
+                job.follow_up_lock.release()
         finally:
-            job.follow_up_lock.release()
+            with self.lock:
+                self.follow_ups_in_flight -= 1
         return {"ok": True, "title": job.title, **outcome}
 
     def _follow_up(self, job: _WatchJob, words: str, deadline: float) -> Dict[str, Any]:
@@ -4771,8 +4780,7 @@ class _WatchJobs:
                 return
             self.ended = True
             settled = [job for job in self.jobs.values() if not job.active]
-            holding = any(job.follow_up is not None or job.held_completion is not None
-                          for job in self.jobs.values())
+            holding = self._holding()
             self.changed.notify_all()
         for job in settled:
             self._close_session_later(job)
@@ -4781,9 +4789,14 @@ class _WatchJobs:
             try:
                 threading.Thread(target=self._reap_holds_after_end, name="conduit-watch-job-holds",
                                  daemon=True).start()
-            except RuntimeError:
-                pass
+            except RuntimeError as exc:
+                logger.warning("Couldn't start the Watch job hold reaper (%s)", type(exc).__name__)
         self._close_transport_if_idle()
+
+    def _holding(self) -> bool:
+        """A follow-up in flight or an end held for one. Called with the lock held."""
+        return self.follow_ups_in_flight > 0 or any(
+            job.follow_up is not None or job.held_completion is not None for job in self.jobs.values())
 
     def _reap_holds_after_end(self) -> None:
         """Settles ends held for follow-up words that never ran, after the
@@ -4794,8 +4807,7 @@ class _WatchJobs:
                 reaped = self._settle_stale_holds()
                 if reaped:
                     self.changed.notify_all()
-                holding = any(job.follow_up is not None or job.held_completion is not None
-                              for job in self.jobs.values())
+                holding = self._holding()
             for job in reaped:
                 self._close_session_later(job)
             if not holding:
