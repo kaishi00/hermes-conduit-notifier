@@ -46,8 +46,9 @@ def test_every_capability_names_a_served_route_family():
         "personality": "/personality", "gpt-live": "/gpt-live/", "grok-live": "/grok-live/",
         "voice-sessions": "/voice/sessions", "voice-tags": "/voice/tags", "voice-summary": "/voice/summary",
         "session-takeover": "/sessions/takeover", "e2e-notifications": "/e2e", "watch-tools": "/watch-tools/",
-        # Jobs and Gemini Live tokens ride the watch-tools grant route.
+        # Jobs, their follow-ups and Gemini Live tokens ride the watch-tools grant route.
         "watch-jobs": "/watch-tools/",
+        "watch-job-follow-ups": "/watch-tools/",
         "watch-live-token": "/watch-tools/",
         "watch-audio": "/watch-audio/",
     }

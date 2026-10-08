@@ -3395,7 +3395,7 @@ def run_watch_tool(grant: _WatchGrant, request: Dict[str, Any]) -> Dict[str, Any
     args = _clean_watch_args(request.get("args"))
     if tool not in grant.tools:
         return {"ok": False, "status": 403, "detail": "This tool isn't available to the Watch"}
-    if tool in WATCH_JOB_TOOLS or tool in WATCH_JOB_CALLS:
+    if tool in WATCH_JOB_TOOLS or tool in WATCH_JOB_CALLS or tool == WATCH_JOB_FOLLOW_UP:
         return run_watch_job_call(grant, tool, args)
     if tool == WATCH_LIVE_TOKEN:
         return run_watch_live_token(grant)
@@ -3632,7 +3632,8 @@ def open_watch_grant(body: Any, *, profile: Optional[str], path: Any = None,
     requested = body.get("tools")
     if not isinstance(requested, list) or not requested or not all(isinstance(t, str) for t in requested):
         raise TokenError(400, "tools must be a non-empty list")
-    grantable = WATCH_TOOLS + WATCH_JOB_TOOLS + (WATCH_LIVE_TOKEN,)
+    # interrupt_job comes with jobs; named, it's taken rather than refused.
+    grantable = WATCH_TOOLS + WATCH_JOB_TOOLS + (WATCH_JOB_FOLLOW_UP, WATCH_LIVE_TOKEN)
     if any(tool not in grantable for tool in requested):
         raise TokenError(400, f"The Watch can only be granted {', '.join(grantable)}")
     max_jobs = _watch_max_jobs(body.get("max_jobs"))
@@ -3644,11 +3645,17 @@ def open_watch_grant(body: Any, *, profile: Optional[str], path: Any = None,
     carry_from = body.get("carry_jobs_from")
     if carry_from is not None and (not isinstance(carry_from, str) or not _WATCH_ID.match(carry_from)):
         raise TokenError(400, "carry_jobs_from must be a grant id")
-    server = session_api() if max_jobs > 0 and any(tool in WATCH_JOB_TOOLS for tool in requested) else None
+    wants_jobs = any(tool in WATCH_JOB_TOOLS or tool == WATCH_JOB_FOLLOW_UP for tool in requested)
+    server = session_api() if max_jobs > 0 and wants_jobs else None
     tools = tuple(tool for tool in WATCH_TOOLS if tool in requested)
     if server is not None:
-        # The job tools asked for, and the Watch app's own calls with them.
+        # The job tools asked for, and the Watch app's own calls and
+        # follow-ups with them.
         tools += tuple(tool for tool in WATCH_JOB_TOOLS if tool in requested) + WATCH_JOB_CALLS
+        # Corrections reach jobs, so they come with the tools that make or
+        # stop them: a grant that only lists jobs doesn't get them unasked.
+        if WATCH_JOB_FOLLOW_UP in requested or any(tool in WATCH_JOB_WRITE_TOOLS for tool in requested):
+            tools += (WATCH_JOB_FOLLOW_UP,)
     if WATCH_LIVE_TOKEN in requested and live_key() is not None:
         tools += (WATCH_LIVE_TOKEN,)
     if not tools:
@@ -3880,9 +3887,42 @@ async def post_watch_tool_revoke(request: Request, response: Response, profile: 
 # own approval settings decide what needs approving; the Watch can only
 # approve once or deny. (hermes-conduit designs/apple-watch-voice-direct.md,
 # "Wrist-down jobs through the relay")
+#
+# interrupt_job puts the user's words into a job Hermes is still working on
+# (a correction, "hold that", "never mind"), as the phone's live calls do
+# (Conduit #451/#455): Hermes' session.redirect, which keeps the work so far
+# and ends the turn with one completion. It comes with every grant that can
+# start or cancel jobs, so the Watch never needs to name it (an older plugin
+# would refuse a grant that did); named, it is taken rather than refused.
 
 WATCH_JOB_TOOLS = ("start_job", "list_jobs", "cancel_job")
+# The job tools that change jobs: a grant with one also takes corrections.
+WATCH_JOB_WRITE_TOOLS = ("start_job", "cancel_job")
 WATCH_JOB_CALLS = ("job_news", "answer_approval")
+WATCH_JOB_FOLLOW_UP = "interrupt_job"
+# Tries and the wait between them while Hermes isn't working on the job
+# just then, as the phone (VoiceBackgroundJobSupervisor.followUpAttempts,
+# followUpRetryInterval); waits for a job still starting count up to three
+# times as many.
+WATCH_FOLLOW_UP_ATTEMPTS = 4
+WATCH_FOLLOW_UP_RETRY_S = 1.0
+# Another follow-up to the same job goes first: this one waits at most this
+# long for it. A follow-up is answered within WATCH_FOLLOW_UP_DEADLINE_S in
+# all, inside the relay's 25 s wait.
+WATCH_FOLLOW_UP_QUEUE_S = 8.0
+WATCH_FOLLOW_UP_DEADLINE_S = 22.0
+# An end held for words Hermes queued settles the job if the words' turn
+# shows no sign of life for this long (the phone's liveness poll does it there).
+WATCH_FOLLOW_UP_HOLD_S = 30.0
+# Frames from the session renew that wait, but never past this in all: a
+# session that only chatters doesn't keep the job open forever.
+WATCH_FOLLOW_UP_HOLD_MAX_S = 180.0
+# Hermes' marker for a reply a correction cut off, never a result
+# (Conduit's MessageNormalizer.isUserCorrectionInterruptionNotice).
+WATCH_CORRECTION_NOTICE = "[this response was interrupted by a user correction.]"
+# Events that show a turn carrying on (Conduit's StreamEventParser names).
+WATCH_TURN_PROGRESS = ("message.start", "message.delta", "reasoning.delta", "message.reasoning",
+                       "message.reasoning.delta", "tool.start", "tool_call", "tool.complete", "tool_result")
 # Jobs one call may start: the user's setting, capped here.
 WATCH_JOBS_DEFAULT = 5
 WATCH_JOBS_MAX = 20
@@ -3928,6 +3968,17 @@ _watch_job_numbers = itertools.count(1)
 
 class WatchJobError(Exception):
     """A Hermes session call for a Watch job that failed; the message is Hermes' own."""
+
+    def __init__(self, message: str, code: Any = None) -> None:
+        super().__init__(message)
+        self.code = code
+
+    @property
+    def unsupported_redirect(self) -> bool:
+        """Hermes has no session.redirect (Conduit's AppState.isUnsupportedRedirect)."""
+        message = str(self).lower()
+        return (self.code in (4010, -32601) or "does not support active-turn redirect" in message
+                or "method not found" in message or "unknown method" in message)
 
 
 def _hermes_session_api() -> Any:
@@ -4032,6 +4083,16 @@ class _WatchJob:
         # kept in case Hermes refuses the interrupt (cancel).
         self.cancelling = False
         self.held_end: Optional[Tuple[str, Dict[str, Any]]] = None
+        # A follow-up going into the running turn (interrupt_job): None,
+        # "sending", "accepted" (Hermes took it into the turn) or "queued"
+        # (Hermes runs it as the next turn). Until the turn carries on, an
+        # end of turn may not be the last: it is held here.
+        self.follow_up: Optional[str] = None
+        self.held_completion: Optional[Tuple[str, Dict[str, Any]]] = None
+        self.held_at = 0.0
+        self.held_since = 0.0
+        # Follow-ups to one job go one at a time, in the order they came.
+        self.follow_up_lock = threading.Lock()
 
     @property
     def active(self) -> bool:
@@ -4104,6 +4165,10 @@ class _WatchJobs:
         self._waiters: Dict[str, _RpcWaiter] = {}
         self._rpc_ids = 0
         self.ended = False
+        # Follow-ups between their 410 check and their answer: the hold
+        # reaper keeps watching while any is in flight.
+        self.follow_ups_in_flight = 0
+        self.reaping = False
 
     # Hermes' session API
 
@@ -4128,7 +4193,8 @@ class _WatchJobs:
         error = response.get("error")
         if error:
             message = error.get("message") if isinstance(error, dict) else str(error)
-            raise WatchJobError(str(message or f"{method} failed")[:300])
+            code = error.get("code") if isinstance(error, dict) else None
+            raise WatchJobError(str(message or f"{method} failed")[:300], code=code)
         result = response.get("result")
         return result if isinstance(result, dict) else {}
 
@@ -4165,6 +4231,10 @@ class _WatchJobs:
             job = self._job_for(sid)
             if job is None:
                 return
+            if job.held_completion is not None and kind not in ("message.complete", "error"):
+                # Hermes is still at work on the session: the end it held
+                # waits on, so a quiet stretch isn't read as no turn coming.
+                job.held_at = time.monotonic()
             if kind == "request.cancel":
                 # Answered elsewhere (the app, the phone), timed out, or the
                 # turn ended. The id is compared as a string, as it was
@@ -4176,11 +4246,29 @@ class _WatchJobs:
                 ids = payload.get("request_ids")
                 if job.approval and (not isinstance(ids, list) or not ids or job.approval["request_id"] in ids):
                     self._approval_gone(job)
+            elif kind in WATCH_TURN_PROGRESS:
+                # Hermes carries on with the follow-up it took: the end it
+                # held was the step it was finishing.
+                if job.active and job.follow_up == "accepted":
+                    job.follow_up, job.held_completion = None, None
+                return
             elif kind in ("message.complete", "error") and (job.active or job.cancelling):
                 if not job.active:
                     # Cancelled meanwhile: this end reads as the cancel,
                     # unless Hermes refuses the interrupt.
                     job.held_end = (kind, payload)
+                    return
+                if kind == "message.complete" and self._cut_by_correction(job, payload):
+                    return
+                if kind == "message.complete" and job.follow_up is not None and job.follow_up != "accepted":
+                    # Maybe not the last: held until Hermes takes the words.
+                    job.held_completion, job.held_at = (kind, payload), time.monotonic()
+                    job.held_since = job.held_at
+                    if job.follow_up == "queued":
+                        job.follow_up = "accepted"
+                    if self.ended:
+                        # No news poll reaps it once the call is gone.
+                        self._reap_holds_later()
                     return
                 self._settle(job, kind, payload)
                 settled = True
@@ -4192,9 +4280,21 @@ class _WatchJobs:
             self._close_session_later(job)
 
     @staticmethod
+    def _cut_by_correction(job: _WatchJob, payload: Dict[str, Any]) -> bool:
+        """The end of a reply a follow-up cut off: never the job's result."""
+        text = payload.get("text")
+        if job.follow_up is None:
+            # No correction went in: whatever this says is the job's own.
+            return False
+        if isinstance(text, str) and text.strip().lower() == WATCH_CORRECTION_NOTICE:
+            return True
+        return payload.get("status") == "interrupted"
+
+    @staticmethod
     def _settle(job: _WatchJob, kind: str, payload: Dict[str, Any]) -> None:
         """The job's turn ended: ``message.complete`` or ``error``."""
         job.approval = None
+        job.follow_up, job.held_completion = None, None
         if kind == "error":
             message = payload.get("message")
             job.status = "failed"
@@ -4230,6 +4330,9 @@ class _WatchJobs:
             job = self._job_for(sid)
             if job is None or not job.active:
                 return
+            if job.held_completion is not None:
+                # Still at work, as any frame for the session says.
+                job.held_at = time.monotonic()
             job.approval = {
                 "request_id": text("request_id", 128),
                 "server_request_id": server_request_id,
@@ -4454,6 +4557,122 @@ class _WatchJobs:
         parts += [f"Couldn't cancel {job.title}. It may still be running." for job in failed]
         return {"ok": True, "message": " ".join(parts)}
 
+    def interrupt(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Puts the user's words into a job Hermes is still working on.
+
+        The answer is the outcome, as the phone's VoiceFollowUpOutcome:
+        "interrupted" (taken into the running turn), "queued" (Hermes takes
+        it right after the step it is finishing), "finished" (too late),
+        "failed" (with ``error``) or "unknown_job". The Watch words it for
+        its model.
+        """
+        wanted = str(args.get("job_id") or "").strip()
+        words = str(args.get("message") or "").strip()
+        if not wanted:
+            return {"ok": False, "status": 400, "detail": "job_id is required"}
+        if not words:
+            return {"ok": False, "status": 400, "detail": "message is required"}
+        if _json_bytes(words) > WATCH_JOB_MAX_INSTRUCTION_BYTES:
+            return {"ok": False, "status": 413, "detail": "The words are too long for a Watch job"}
+        deadline = time.monotonic() + WATCH_FOLLOW_UP_DEADLINE_S
+        with self.lock:
+            if self.ended:
+                return {"ok": False, "status": 410, "detail": "This call's Watch jobs have ended"}
+            job = self.jobs.get(wanted)
+            if job is None:
+                return {"ok": True, "outcome": "unknown_job"}
+            self.follow_ups_in_flight += 1
+        try:
+            if not job.follow_up_lock.acquire(timeout=WATCH_FOLLOW_UP_QUEUE_S):
+                return {"ok": True, "outcome": "failed", "title": job.title,
+                        "error": "Hermes is still taking the user's last words for this job."}
+            try:
+                outcome = self._follow_up(job, words, deadline)
+            finally:
+                job.follow_up_lock.release()
+        finally:
+            with self.lock:
+                self.follow_ups_in_flight -= 1
+        return {"ok": True, "title": job.title, **outcome}
+
+    def _follow_up(self, job: _WatchJob, words: str, deadline: float) -> Dict[str, Any]:
+        attempts = waits = 0
+        while True:
+            with self.lock:
+                # Ended: the call is gone, so no more words go in.
+                if not job.active or self.ended:
+                    return {"outcome": "finished"}
+                sid = job.session_id
+                # Words Hermes already runs as its next turn keep this
+                # turn's end from ending the job, whatever comes now.
+                was_queued = job.follow_up == "queued"
+                if sid and not was_queued:
+                    job.follow_up = "sending"
+            if sid:
+                attempts += 1
+                try:
+                    result = self._redirect(sid, words, timeout=max(1.0, deadline - time.monotonic()))
+                except WatchJobError as exc:
+                    if not was_queued:
+                        self._end_follow_up(job)
+                    return {"outcome": "failed", "error": str(exc)[:300]}
+                except Exception as exc:  # noqa: BLE001 — named; the words stay out of the log
+                    _log_watch_failure("A Watch job follow-up failed", exc)
+                    if not was_queued:
+                        self._end_follow_up(job)
+                    return {"outcome": "failed", "error": type(exc).__name__}
+                if result in ("redirected", "queued"):
+                    with self.changed:
+                        # Settled meanwhile (an error ended the turn): the
+                        # words came too late. A call that ended meanwhile
+                        # still hears they went in: they were sent during it.
+                        if not job.active:
+                            return {"outcome": "finished"}
+                        if job.follow_up == "sending":
+                            # A queued turn's end held meanwhile was the step
+                            # Hermes was finishing; the words' own turn ends the job.
+                            job.follow_up = ("accepted" if result == "redirected" or job.held_completion is not None
+                                             else "queued")
+                    return {"outcome": "interrupted" if result == "redirected" else "queued"}
+                if not was_queued:
+                    self._end_follow_up(job)
+            # Not running: the turn just ended (its end settles the job), or
+            # Hermes hasn't started it yet. Asked again shortly while open.
+            with self.lock:
+                if not job.active or self.ended:
+                    return {"outcome": "finished"}
+            waits += 1
+            if (attempts >= WATCH_FOLLOW_UP_ATTEMPTS or waits >= WATCH_FOLLOW_UP_ATTEMPTS * 3
+                    or time.monotonic() + WATCH_FOLLOW_UP_RETRY_S >= deadline):
+                return {"outcome": "failed", "error": f"Hermes wasn't working on \"{job.title}\" just then."}
+            time.sleep(WATCH_FOLLOW_UP_RETRY_S)
+
+    def _redirect(self, sid: str, words: str, timeout: float = WATCH_JOB_RPC_TIMEOUT_S) -> str:
+        """Hermes' answer: "redirected", "queued" or "not_running". A Hermes
+        without redirect gets a steer, as the phone sends it."""
+        try:
+            status = self.rpc("session.redirect", {"session_id": sid, "text": words}, timeout=timeout).get("status")
+        except WatchJobError as exc:
+            if not exc.unsupported_redirect:
+                raise
+            status = self.rpc("session.steer", {"session_id": sid, "text": words}, timeout=timeout).get("status")
+            return "not_running" if status == "rejected" else "redirected"
+        status = status.lower() if isinstance(status, str) else ""
+        return status if status in ("redirected", "queued") else "not_running"
+
+    def _end_follow_up(self, job: _WatchJob) -> None:
+        """The follow-up didn't take: an end held meanwhile was the turn's last after all."""
+        with self.changed:
+            held = job.held_completion
+            job.follow_up, job.held_completion = None, None
+            if held is None or not job.active:
+                return
+            self._settle(job, *held)
+            self.changed.notify_all()
+            ended = self.ended
+        if ended:
+            self._close_session_later(job)
+
     def news(self, args: Dict[str, Any], caller: Optional["_WatchGrant"] = None) -> Dict[str, Any]:
         """Settled jobs and approval requests not yet told, waiting up to
         ``wait_s`` (at most WATCH_JOB_NEWS_WAIT_S) for some while jobs run.
@@ -4466,8 +4685,10 @@ class _WatchJobs:
             wait = WATCH_JOB_NEWS_WAIT_S
         deadline = time.monotonic() + wait
         marks: list = []
+        reaped: list = []
         with self.changed:
             while True:
+                reaped += self._settle_stale_holds()
                 running = sum(1 for job in self.jobs.values() if job.active)
                 # Every request still open, so the Watch drops a card
                 # answered elsewhere or timed out.
@@ -4482,10 +4703,27 @@ class _WatchJobs:
                 self.changed.wait(min(remaining, 1.0))
             answer["news"] = news
             answer["more"] = any(self._untold(job) is not False for job in self.jobs.values())
+            ended = self.ended
+        if ended:
+            for job in reaped:
+                self._close_session_later(job)
         undelivered = _watch_undelivered.get()
         if undelivered is not None and marks:
             undelivered.append(lambda: self._untake(marks))
         return answer
+
+    def _settle_stale_holds(self) -> list:
+        """An end held for queued words whose turn never showed: it was the
+        job's last after all. Called with the lock held; the jobs settled."""
+        now = time.monotonic()
+        settled = []
+        for job in self.jobs.values():
+            if (job.active and job.held_completion is not None and job.follow_up == "accepted"
+                    and (now - job.held_at >= WATCH_FOLLOW_UP_HOLD_S
+                         or now - job.held_since >= WATCH_FOLLOW_UP_HOLD_MAX_S)):
+                self._settle(job, *job.held_completion)
+                settled.append(job)
+        return settled
 
     def _untake(self, marks: list) -> None:
         """Marks news as not told again: its answer never reached the Watch."""
@@ -4573,10 +4811,58 @@ class _WatchJobs:
                 return
             self.ended = True
             settled = [job for job in self.jobs.values() if not job.active]
+            if self._holding():
+                # No news poll reaps a held end once the call is gone.
+                self._reap_holds_later()
             self.changed.notify_all()
         for job in settled:
             self._close_session_later(job)
         self._close_transport_if_idle()
+
+    def _reap_holds_later(self) -> None:
+        """Starts the hold reaper unless it runs. Called with the lock held."""
+        if self.reaping:
+            return
+        try:
+            threading.Thread(target=self._reap_holds_after_end, name="conduit-watch-job-holds", daemon=True).start()
+        except RuntimeError as exc:
+            logger.warning("Couldn't start the Watch job hold reaper (%s)", type(exc).__name__)
+            return
+        self.reaping = True
+
+    def _holding(self) -> bool:
+        """A follow-up in flight or an end held for one. Called with the lock
+        held. Words Hermes queued with no end held yet need nothing: their
+        job runs on, and its next end starts the reaper again."""
+        return self.follow_ups_in_flight > 0 or any(
+            job.active and job.held_completion is not None for job in self.jobs.values())
+
+    def _reap_holds_after_end(self) -> None:
+        """Settles ends held for follow-up words that never ran, after the
+        call ended, so their sessions and the transport close. Runs while
+        anything holds; a hold taken later starts it again."""
+        holding = True
+        try:
+            while holding:
+                with self.changed:
+                    reaped = self._settle_stale_holds()
+                    if reaped:
+                        self.changed.notify_all()
+                    holding = self._holding()
+                    if not holding:
+                        self.reaping = False
+                for job in reaped:
+                    self._close_session_later(job)
+                self._close_transport_if_idle()
+                if holding:
+                    time.sleep(1.0)
+        except Exception as exc:  # noqa: BLE001 — a later hold starts a new reaper
+            _log_watch_failure("The Watch job hold reaper failed", exc)
+        finally:
+            if holding:
+                # Left early: a later hold starts a new reaper.
+                with self.changed:
+                    self.reaping = False
 
     def _close_session_later(self, job: _WatchJob) -> None:
         try:
@@ -4634,6 +4920,8 @@ def run_watch_job_call(grant: "_WatchGrant", tool: str, args: Dict[str, Any]) ->
             return jobs.list()
         if tool == "cancel_job":
             return jobs.cancel(args)
+        if tool == WATCH_JOB_FOLLOW_UP:
+            return jobs.interrupt(args)
         if tool == "job_news":
             return jobs.news(args, caller=grant)
         return jobs.answer_approval(args)
@@ -5907,6 +6195,7 @@ ROUTE_CAPABILITIES = (
     "e2e-notifications",
     "watch-tools",
     "watch-jobs",
+    "watch-job-follow-ups",
     "watch-live-token",
     "watch-audio",
 )
