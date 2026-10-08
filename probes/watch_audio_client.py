@@ -152,19 +152,22 @@ def latency(timeline: List[list]) -> Dict[str, List[Optional[float]]]:
     """Seconds from the end of each question, each delegation and each
     lookup's answer to what came next: one value per start in call order,
     None when nothing followed before the next start of its kind (a
-    delegation that failed, or the call ended)."""
-    result: Dict[str, List[Optional[float]]] = {}
+    delegation that failed, or the call ended). A failed delegation has no
+    lookup answer, so lookup_answer_to_speech_s counts answered lookups only
+    and its entries can sit at other positions than the delegations'. Every
+    key is there, empty when nothing of its kind happened."""
     pairs = [("question_end_to_heard_s", "question sent", "heard:"),
              ("question_end_to_speech_s", "question sent", "model speech starts"),
              ("delegation_to_lookup_answer_s", "delegation:", "lookup answered"),
              ("lookup_answer_to_speech_s", "lookup answered", "model speech starts")]
+    result: Dict[str, List[Optional[float]]] = {name: [] for name, _, _ in pairs}
     for name, start, end in pairs:
         starts = [at for at, label in timeline if label.startswith(start)]
         for index, began in enumerate(starts):
             until = starts[index + 1] if index + 1 < len(starts) else float("inf")
             finished = next((at for at, label in timeline
                              if began <= at < until and label.startswith(end)), None)
-            result.setdefault(name, []).append(None if finished is None else round(finished - began, 2))
+            result[name].append(None if finished is None else round(finished - began, 2))
     return result
 
 
@@ -196,7 +199,8 @@ def lookup(api, grant: dict, query: str) -> dict:
     except ValueError:
         body = None
     if not isinstance(body, dict):
-        return {"ok": False, "detail": "the relay's answer wasn't a JSON object"}
+        # Cut at 64 KB, or not an object.
+        return {"ok": False, "detail": "the relay's answer wasn't a readable JSON object"}
     try:
         return api.open_watch_tool(keys["result"], "result", grant["grant_id"], rid, body, max_bytes=64 * 1024)
     except api.WatchToolError as exc:
@@ -293,28 +297,37 @@ async def call(api, grant: dict, engine: str, speech: Dict[int, bytes], seconds:
     result: dict = {}
 
     async def answer_delegation(item_id: str, request: str) -> None:
+        # Part of the answer reached the model: a later failure isn't said on top of it.
+        answering = False
         try:
-            run.note(f"delegation: {request[:120] or '(no request)'}")
+            # The notes can't fail the answer (print can raise on a closed pipe).
+            with contextlib.suppress(Exception):
+                run.note(f"delegation: {request[:120] or '(no request)'}")
             answer = await asyncio.to_thread(lookup, api, grant, request)
             found = len(answer.get("results") or []) if answer.get("ok") else 0
-            run.note(f"lookup answered ({found} result{'' if found == 1 else 's'})" if answer.get("ok")
-                     else f"lookup answered (failed: {str(answer.get('detail'))[:120]})")
+            with contextlib.suppress(Exception):
+                run.note(f"lookup answered ({found} result{'' if found == 1 else 's'})" if answer.get("ok")
+                         else f"lookup answered (failed: {str(answer.get('detail'))[:120]})")
             for event in delegation_appends(lookup_text(answer), item_id):
                 await send(2, json.dumps(event).encode("utf-8"))
+                answering = True
             # Lookups answered, a failed search included (its failure is said);
             # counted once the answer went out, so a failed send counts only below.
             result["lookups"] = result.get("lookups", 0) + 1
         except asyncio.CancelledError:
+            # Cancellation first: the call is ending, nothing more is said.
             raise
         except Exception as exc:
-            # A delegation the stand-in couldn't run. Said, so the model isn't
-            # left waiting on it; the class only, since the text could carry a secret.
+            # A delegation the stand-in couldn't run, or whose answer was cut
+            # off. Said unless part of it went out, so the model isn't left
+            # waiting on it; the class only, since the text could carry a secret.
             result["delegations_failed"] = result.get("delegations_failed", 0) + 1
             with contextlib.suppress(Exception):
-                run.note(f"delegation failed ({exc.__class__.__name__})")
-            with contextlib.suppress(Exception):
-                for event in delegation_appends(lookup_text({"ok": False, "detail": "the Watch couldn't run it"}), item_id):
-                    await send(2, json.dumps(event).encode("utf-8"))
+                run.note(f"delegation {'answer cut off' if answering else 'failed'} ({exc.__class__.__name__})")
+            if not answering:
+                with contextlib.suppress(Exception):
+                    for event in delegation_appends(lookup_text({"ok": False, "detail": "the Watch couldn't run it"}), item_id):
+                        await send(2, json.dumps(event).encode("utf-8"))
         finally:
             state["lookups"] -= 1
             # Room for the model to speak what it found.

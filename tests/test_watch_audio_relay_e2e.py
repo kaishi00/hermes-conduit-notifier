@@ -604,6 +604,34 @@ def test_the_stand_in_answers_a_delegation_it_could_not_run(paired, monkeypatch)
         peer.close()
 
 
+def test_the_stand_in_says_nothing_more_once_part_of_an_answer_went_out(paired, monkeypatch):
+    pytest.importorskip("aiortc")
+    probe = _load_probe()
+    peer = FakeGptLive(delegation={"type": "delegation", "target": "client", "id": "item_del_1",
+                                   "content": [{"type": "input_text", "text": "capital of France"}]})
+    appends = probe.delegation_appends
+
+    def cut_off(text, item_id):
+        yield from appends(text, item_id)[:1]
+        raise RuntimeError("the socket closed")
+
+    try:
+        monkeypatch.setattr(probe, "lookup", lambda *_: {"ok": True, "results": [{"title": "France", "snippet": "Paris"}]})
+        monkeypatch.setattr(probe, "delegation_appends", cut_off)
+        monkeypatch.setattr(api, "create_gpt_live_session", peer.create_session)
+        monkeypatch.setattr(api, "_watch_audio_runtime", api._WatchAudioRuntime(env_dir=lambda: "/nonexistent/env"))
+        grant = api.open_watch_grant({"tools": ["web_search"], "audio": True}, profile=None, path=paired)
+        run = probe.Run()
+        result = asyncio.run(probe.call(api, grant, "gpt_live", {}, 2.0, run, answer_tail_s=1.0))
+        assert result["delegations_failed"] == 1 and "lookups" not in result
+        # The results that went out, with no failure said on top of them.
+        sent = [m["content"][0]["text"] for m in peer.received if m.get("type") == "delegation.context.append"]
+        assert sent == ["Web search results for the user's question:\n- France: Paris"]
+        assert "delegation answer cut off (RuntimeError)" in [label for _, label in run.timeline]
+    finally:
+        peer.close()
+
+
 def test_the_stand_in_reports_an_unreadable_relay_answer(monkeypatch):
     probe = _load_probe()
 
@@ -624,7 +652,7 @@ def test_the_stand_in_reports_an_unreadable_relay_answer(monkeypatch):
              "relay_url": "https://relay.example.test", "watch_key": "w"}
     for body in (b"not json", b"[1, 2]"):
         monkeypatch.setattr(api, "_relay_opener", types.SimpleNamespace(open=lambda *_a, body=body, **_k: Answer(body)))
-        assert probe.lookup(api, grant, "weather") == {"ok": False, "detail": "the relay's answer wasn't a JSON object"}
+        assert probe.lookup(api, grant, "weather") == {"ok": False, "detail": "the relay's answer wasn't a readable JSON object"}
 
 
 def test_the_stand_in_splits_a_long_answer_and_times_each_turn():
@@ -651,7 +679,8 @@ def test_the_stand_in_splits_a_long_answer_and_times_each_turn():
     # A failed delegation keeps its place and doesn't borrow the next one's answer.
     failed = [[5.0, "delegation: a"], [6.0, "delegation failed (RuntimeError)"], [8.0, "delegation: b"],
               [9.0, "lookup answered (1 result)"]]
-    assert probe.latency(failed)["delegation_to_lookup_answer_s"] == [None, 1.0]
+    assert probe.latency(failed) == {"question_end_to_heard_s": [], "question_end_to_speech_s": [],
+                                     "delegation_to_lookup_answer_s": [None, 1.0], "lookup_answer_to_speech_s": [None]}
 
 
 def test_the_stand_in_reads_any_pcm16_wav(tmp_path):
