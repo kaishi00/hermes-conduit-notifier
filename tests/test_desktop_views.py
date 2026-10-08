@@ -167,6 +167,18 @@ def test_installing_twice_never_wraps_a_wrapper(monkeypatch, tmp_path):
     assert first.read(tmp_path) == {}
 
 
+def test_a_subclass_of_the_gateway_socket_still_counts(monkeypatch, tmp_path):
+    class TLSSocket(WSTransport):
+        pass
+
+    gateway = FakeGateway(tmp_path, TLSSocket({"user-agent": ELECTRON}))
+    gateway.install(monkeypatch)
+    hook = _hook()
+    hook.try_install()
+    gateway.call("session.activate", key="a")
+    assert hook.store.read(tmp_path)["a"]["client"] == "desktop"
+
+
 def test_a_blank_conduit_header_still_marks_conduit():
     assert api.desktop_view_client(WSTransport({"user-agent": ELECTRON, "x-conduit-client": ""})) is None
 
@@ -198,6 +210,7 @@ def test_flush_merges_newest_wins_with_the_file_and_keeps_it_private(tmp_path):
         "flag": {"opened_at": True, "seen_through": 1.0},
         "huge": {"opened_at": 10**400, "seen_through": 1.0},
         "negative": {"opened_at": -5, "seen_through": 1.0},
+        "odd": {"opened_at": 1.0, "seen_through": 2.0, "client": 7},
     }}))
     store = api._DesktopViewStore(flush_delay=3600.0)
     store.record(tmp_path, "a", "desktop", 210.0, opened_at=200.0)
@@ -206,7 +219,8 @@ def test_flush_merges_newest_wins_with_the_file_and_keeps_it_private(tmp_path):
 
     views = json.loads(path.read_text())["views"]
     assert views == {"a": {"opened_at": 200.0, "seen_through": 210.0, "client": "desktop"},
-                     "b": {"opened_at": 300.0, "seen_through": 400.0, "client": "browser"}}
+                     "b": {"opened_at": 300.0, "seen_through": 400.0, "client": "browser"},
+                     "odd": {"opened_at": 1.0, "seen_through": 2.0, "client": "desktop"}}
     if os.name == "posix":
         assert path.stat().st_mode & 0o777 == 0o600
     assert not list(tmp_path.glob("*.tmp"))
@@ -350,6 +364,7 @@ def test_a_bad_profile_keeps_hermes_own_status(monkeypatch):
     app.include_router(api.router, prefix=BASE)
     response = TestClient(app).get(f"{BASE}/sessions/desktop-views", params={"profile": "nope"})
     assert response.status_code == 404
+    assert response.headers["cache-control"] == "no-store"
 
 
 def test_replaced_handlers_are_wrapped_again(monkeypatch, tmp_path):

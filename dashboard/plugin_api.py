@@ -6277,7 +6277,7 @@ _DESKTOP_VIEW_MARKER = "__conduit_desktop_view__"
 _DESKTOP_VIEW_OWNER = "__conduit_desktop_view_owner__"
 
 
-def desktop_view_client(transport: Any) -> Optional[str]:
+def desktop_view_client(transport: Any, socket_type: Optional[type] = None) -> Optional[str]:
     """Returns "desktop" or "browser" for a browser engine's gateway socket, else None.
 
     Desktop's renderer and the web dashboard open /api/ws from a browser
@@ -6288,7 +6288,7 @@ def desktop_view_client(transport: Any) -> Optional[str]:
     client's own claim: this is best-effort sorting among clients that already
     hold a dashboard login, not proof of which app is on the other end.
     """
-    if transport is None or type(transport).__name__ != "WSTransport":
+    if not _is_gateway_socket(transport, socket_type):
         return None
     headers = _transport_headers(transport)
     try:
@@ -6300,6 +6300,16 @@ def desktop_view_client(transport: Any) -> Optional[str]:
     if not agent.startswith("Mozilla/"):
         return None
     return "desktop" if "Electron/" in agent else "browser"
+
+
+def _is_gateway_socket(transport: Any, socket_type: Optional[type]) -> bool:
+    """Hermes' WSTransport (or a subclass) when the gateway's class is known,
+    else by name."""
+    if transport is None:
+        return False
+    if socket_type is not None:
+        return isinstance(transport, socket_type)
+    return type(transport).__name__ == "WSTransport"
 
 
 def _transport_headers(transport: Any) -> Any:
@@ -6424,7 +6434,7 @@ class _DesktopViewStore:
             if not all(_desktop_view_time(stamp) for stamp in times):
                 continue
             clean[stored_id] = {"opened_at": float(times[0]), "seen_through": float(times[1]),
-                                "client": str(entry.get("client") or "desktop")}
+                                "client": "browser" if entry.get("client") == "browser" else "desktop"}
         return clean
 
     @staticmethod
@@ -6480,6 +6490,8 @@ class _DesktopViewHook:
         # Set when a gateway socket's upgrade headers can't be read, which
         # leaves every open unsortable: reported, not silently ignored.
         self.headers_unreadable = False
+        # tui_gateway.ws.WSTransport, found at install.
+        self.socket_type: Optional[type] = None
 
     @property
     def installed(self) -> bool:
@@ -6581,6 +6593,7 @@ class _DesktopViewHook:
                 # Hermes that moved these.
                 self.reason = "gateway-unsupported"
                 return False
+            self.socket_type = ws_transport
             for name in DESKTOP_VIEW_METHODS:
                 handler = methods[name]
                 if getattr(handler, _DESKTOP_VIEW_MARKER, None) is None:
@@ -6613,7 +6626,7 @@ class _DesktopViewHook:
         result = response.get("result") if isinstance(response, dict) else None
         if not isinstance(result, dict):
             return
-        if type(transport).__name__ == "WSTransport":
+        if _is_gateway_socket(transport, self.socket_type):
             readable = _transport_headers(transport) is not None
             if readable == self.headers_unreadable:
                 logger.warning("Conduit: gateway socket headers %s",
@@ -6621,7 +6634,7 @@ class _DesktopViewHook:
             self.headers_unreadable = not readable
             if not readable:
                 return
-        client = desktop_view_client(transport)
+        client = desktop_view_client(transport, self.socket_type)
         stored_id = str(result.get("session_key") or "").strip()
         if client is None or not stored_id:
             return
@@ -6707,8 +6720,10 @@ async def get_desktop_views(response: Response, profile: Optional[str] = None,
         views = await _run_scoped(profile, read)
     except TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
-    except HTTPException:
-        raise  # Hermes' own 400/404 for a bad or unknown profile
+    except HTTPException as exc:
+        # Hermes' own 400/404 for a bad or unknown profile, kept out of caches too.
+        exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
+        raise
     except Exception as exc:
         raise _unexpected("read", exc, feature="Desktop views")
     if since is not None and math.isfinite(since):
