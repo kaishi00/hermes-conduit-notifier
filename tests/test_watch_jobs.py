@@ -1189,6 +1189,17 @@ def test_an_end_held_for_queued_words_whose_turn_never_comes_settles_the_job(mon
     assert (item["status"], item["result"]) == ("finished", "Step one done.")
 
 
+def test_an_end_held_when_the_call_ends_still_settles_and_closes(monkeypatch):
+    grant, server = running_job()
+    server.results["session.redirect"] = {"status": "queued"}
+    assert follow_up(grant)["outcome"] == "queued"
+    server.emit("rt-1", "message.complete", {"text": "Step one done."})
+    monkeypatch.setattr(api, "WATCH_FOLLOW_UP_HOLD_S", 0)
+    grant.jobs.end()
+    wait_for(lambda: server.methods("session.close") == [{"session_id": "rt-1"}])
+    wait_for(lambda: grant.jobs.transport._closed)
+
+
 def test_words_taken_as_the_turn_failed_are_reported_too_late():
     grant, server = running_job()
 

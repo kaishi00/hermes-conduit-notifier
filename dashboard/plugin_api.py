@@ -4584,23 +4584,17 @@ class _WatchJobs:
                         self._end_follow_up(job)
                     return {"outcome": "failed", "error": type(exc).__name__}
                 if result in ("redirected", "queued"):
-                    with self.lock:
+                    with self.changed:
                         # Settled meanwhile (an error ended the turn): the
                         # words came too late.
                         if not job.active:
                             return {"outcome": "finished"}
-                if result == "redirected":
-                    with self.changed:
                         if job.follow_up == "sending":
-                            job.follow_up = "accepted"
-                    return {"outcome": "interrupted"}
-                if result == "queued":
-                    with self.changed:
-                        if job.follow_up == "sending":
-                            # An end held meanwhile was the step Hermes was
-                            # finishing; the words' own turn ends the job.
-                            job.follow_up = "queued" if job.held_completion is None else "accepted"
-                    return {"outcome": "queued"}
+                            # A queued turn's end held meanwhile was the step
+                            # Hermes was finishing; the words' own turn ends the job.
+                            job.follow_up = ("accepted" if result == "redirected" or job.held_completion is not None
+                                             else "queued")
+                    return {"outcome": "interrupted" if result == "redirected" else "queued"}
                 if not was_queued:
                     self._end_follow_up(job)
             # Not running: the turn just ended (its end settles the job), or
@@ -4777,10 +4771,36 @@ class _WatchJobs:
                 return
             self.ended = True
             settled = [job for job in self.jobs.values() if not job.active]
+            holding = any(job.follow_up is not None or job.held_completion is not None
+                          for job in self.jobs.values())
             self.changed.notify_all()
         for job in settled:
             self._close_session_later(job)
+        if holding:
+            # No news poll reaps a held end once the call is gone.
+            try:
+                threading.Thread(target=self._reap_holds_after_end, name="conduit-watch-job-holds",
+                                 daemon=True).start()
+            except RuntimeError:
+                pass
         self._close_transport_if_idle()
+
+    def _reap_holds_after_end(self) -> None:
+        """Settles ends held for follow-up words that never ran, after the
+        call ended, so their sessions and the transport close."""
+        stop = time.monotonic() + WATCH_FOLLOW_UP_DEADLINE_S + WATCH_FOLLOW_UP_HOLD_S + 5.0
+        while time.monotonic() < stop:
+            with self.changed:
+                reaped = self._settle_stale_holds()
+                if reaped:
+                    self.changed.notify_all()
+                holding = any(job.follow_up is not None or job.held_completion is not None
+                              for job in self.jobs.values())
+            for job in reaped:
+                self._close_session_later(job)
+            if not holding:
+                return
+            time.sleep(1.0)
 
     def _close_session_later(self, job: _WatchJob) -> None:
         try:
