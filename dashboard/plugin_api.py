@@ -4971,13 +4971,16 @@ class _WatchAudioRuntime:
             return {"runtime": "preparing", "source": None, "reason": None}
         if failure:
             return {"runtime": "failed", "source": None, "reason": failure}
-        return {"runtime": "missing", "source": None, "reason": self.missing_reason()}
+        # The failure snapshot above already said there's none.
+        return {"runtime": "missing", "source": None, "reason": self._marker_reason()}
 
     def missing_reason(self) -> str:
         """Why there's no runtime: a failed prepare's own reason, else whether one was ever made."""
         with self._lock:
-            if self.failure:
-                return self.failure
+            failure = self.failure
+        return failure or self._marker_reason()
+
+    def _marker_reason(self) -> str:
         pin = _watch_audio_marker_pin(self._env_dir())
         return WATCH_AUDIO_STALE_RUNTIME if pin is not None and pin != WATCH_AUDIO_AIORTC else WATCH_AUDIO_NEEDS_RUNTIME
 

@@ -304,7 +304,8 @@ def test_an_environment_made_for_another_pin_is_not_ready(tmp_path, marker, herm
         pin = json.loads(marker).get("requirement")
     except (ValueError, AttributeError):
         pin = None
-    reason = api.WATCH_AUDIO_STALE_RUNTIME if pin else api.WATCH_AUDIO_NEEDS_RUNTIME
+    reason = (api.WATCH_AUDIO_STALE_RUNTIME if pin is not None and pin != api.WATCH_AUDIO_AIORTC
+              else api.WATCH_AUDIO_NEEDS_RUNTIME)
     assert runtime.status() == {"runtime": "missing", "source": None, "reason": reason}
     assert runtime.missing_reason() == reason
     # Prepare makes it again for the current pin.
@@ -691,6 +692,35 @@ def test_an_unknown_engine_a_full_host_and_a_failing_engine_each_say_why(monkeyp
         assert slots.used == 0
 
     _run(scenario())
+
+
+@pytest.mark.parametrize("state", ["failed", "stale"])
+def test_a_gpt_live_start_without_its_runtime_says_why(tmp_path, state):
+    if state == "failed":
+        runtime = _runtime(tmp_path, run=FakeRun(fail=("-m venv",)))
+        runtime.prepare(start=lambda target: target())
+    else:
+        runtime = _runtime(tmp_path)
+        runtime.prepare(start=lambda target: target())
+        (tmp_path / "env" / "conduit-watch-audio.json").write_text('{"requirement": "aiortc==1.14.0"}')
+
+    async def scenario():
+        bridge = _bridge()
+        bridge.runtime = runtime
+        socket = await _attach(bridge)
+        watch = Watch()
+        await bridge._handle(watch.hello())
+        await bridge._handle(watch.control({"type": "start", "engine": "gpt_live"}))
+        await _until(lambda: len(socket.sent) == 2)
+        return [watch.open(message)[1] for message in socket.sent]
+
+    error, ended = _run(scenario())
+    assert error["type"] == "error" and error["code"] == "unavailable"
+    if state == "failed":
+        assert "ensurepip is not available" in error["message"]
+    else:
+        assert error["message"] == api.WATCH_AUDIO_STALE_RUNTIME
+    assert ended == {"type": "ended", "engine": "gpt_live", "reason": "error"}
 
 
 def test_a_watch_on_another_version_is_told_so(monkeypatch):
