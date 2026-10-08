@@ -3651,7 +3651,11 @@ def open_watch_grant(body: Any, *, profile: Optional[str], path: Any = None,
     if server is not None:
         # The job tools asked for, and the Watch app's own calls and
         # follow-ups with them.
-        tools += tuple(tool for tool in WATCH_JOB_TOOLS if tool in requested) + WATCH_JOB_CALLS + (WATCH_JOB_FOLLOW_UP,)
+        tools += tuple(tool for tool in WATCH_JOB_TOOLS if tool in requested) + WATCH_JOB_CALLS
+        # Corrections reach jobs, so they come with the tools that make or
+        # stop them: a grant that only lists jobs doesn't get them unasked.
+        if WATCH_JOB_FOLLOW_UP in requested or any(tool in ("start_job", "cancel_job") for tool in requested):
+            tools += (WATCH_JOB_FOLLOW_UP,)
     if WATCH_LIVE_TOKEN in requested and live_key() is not None:
         tools += (WATCH_LIVE_TOKEN,)
     if not tools:
@@ -4158,6 +4162,7 @@ class _WatchJobs:
         # Follow-ups between their 410 check and their answer: the hold
         # reaper keeps watching while any is in flight.
         self.follow_ups_in_flight = 0
+        self.reaping = False
 
     # Hermes' session API
 
@@ -4250,6 +4255,9 @@ class _WatchJobs:
                     job.held_completion, job.held_at = (kind, payload), time.monotonic()
                     if job.follow_up == "queued":
                         job.follow_up = "accepted"
+                    if self.ended:
+                        # No news poll reaps it once the call is gone.
+                        self._reap_holds_later()
                     return
                 self._settle(job, kind, payload)
                 settled = True
@@ -4264,9 +4272,12 @@ class _WatchJobs:
     def _cut_by_correction(job: _WatchJob, payload: Dict[str, Any]) -> bool:
         """The end of a reply a follow-up cut off: never the job's result."""
         text = payload.get("text")
+        if job.follow_up is None:
+            # No correction went in: whatever this says is the job's own.
+            return False
         if isinstance(text, str) and text.strip().lower() == WATCH_CORRECTION_NOTICE:
             return True
-        return job.follow_up is not None and payload.get("status") == "interrupted"
+        return payload.get("status") == "interrupted"
 
     @staticmethod
     def _settle(job: _WatchJob, kind: str, payload: Dict[str, Any]) -> None:
@@ -4543,6 +4554,8 @@ class _WatchJobs:
         """
         wanted = str(args.get("job_id") or "").strip()
         words = str(args.get("message") or "").strip()
+        if not wanted:
+            return {"ok": False, "status": 400, "detail": "job_id is required"}
         if not words:
             return {"ok": False, "status": 400, "detail": "message is required"}
         if _json_bytes(words) > WATCH_JOB_MAX_INSTRUCTION_BYTES:
@@ -4781,36 +4794,47 @@ class _WatchJobs:
                 return
             self.ended = True
             settled = [job for job in self.jobs.values() if not job.active]
-            holding = self._holding()
+            if self._holding():
+                # No news poll reaps a held end once the call is gone.
+                self._reap_holds_later()
             self.changed.notify_all()
         for job in settled:
             self._close_session_later(job)
-        if holding:
-            # No news poll reaps a held end once the call is gone.
-            try:
-                threading.Thread(target=self._reap_holds_after_end, name="conduit-watch-job-holds",
-                                 daemon=True).start()
-            except RuntimeError as exc:
-                logger.warning("Couldn't start the Watch job hold reaper (%s)", type(exc).__name__)
         self._close_transport_if_idle()
 
+    def _reap_holds_later(self) -> None:
+        """Starts the hold reaper unless it runs. Called with the lock held."""
+        if self.reaping:
+            return
+        try:
+            threading.Thread(target=self._reap_holds_after_end, name="conduit-watch-job-holds", daemon=True).start()
+        except RuntimeError as exc:
+            logger.warning("Couldn't start the Watch job hold reaper (%s)", type(exc).__name__)
+            return
+        self.reaping = True
+
     def _holding(self) -> bool:
-        """A follow-up in flight or an end held for one. Called with the lock held."""
+        """A follow-up in flight or an end held for one. Called with the lock
+        held. Words Hermes queued with no end held yet need nothing: their
+        job runs on, and its next end starts the reaper again."""
         return self.follow_ups_in_flight > 0 or any(
-            job.follow_up is not None or job.held_completion is not None for job in self.jobs.values())
+            job.active and job.held_completion is not None for job in self.jobs.values())
 
     def _reap_holds_after_end(self) -> None:
         """Settles ends held for follow-up words that never ran, after the
-        call ended, so their sessions and the transport close."""
-        stop = time.monotonic() + WATCH_FOLLOW_UP_DEADLINE_S + WATCH_FOLLOW_UP_HOLD_S + 5.0
-        while time.monotonic() < stop:
+        call ended, so their sessions and the transport close. Runs while
+        anything holds; a hold taken later starts it again."""
+        while True:
             with self.changed:
                 reaped = self._settle_stale_holds()
                 if reaped:
                     self.changed.notify_all()
                 holding = self._holding()
+                if not holding:
+                    self.reaping = False
             for job in reaped:
                 self._close_session_later(job)
+            self._close_transport_if_idle()
             if not holding:
                 return
             time.sleep(1.0)

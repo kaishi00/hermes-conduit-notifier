@@ -416,7 +416,8 @@ def test_three_jobs_run_at_once():
 def test_a_grant_carries_only_the_job_tools_asked_for(tmp_path):
     grant = api.open_watch_grant({"tools": ["list_jobs"]}, profile=None, path=write_pairing(tmp_path),
                                  relay=FakeRelay(), start=lambda g: None, session_api=FakeHermes)
-    assert grant["tools"] == ["list_jobs", "job_news", "answer_approval", "interrupt_job"]
+    # Corrections come with the tools that start or stop jobs, not with a list.
+    assert grant["tools"] == ["list_jobs", "job_news", "answer_approval"]
 
 
 def test_a_job_hermes_refuses_to_start_is_reported_and_its_session_closed():
@@ -1157,7 +1158,7 @@ def test_a_follow_up_to_a_settled_or_unknown_job_isnt_sent():
     assert server.methods("session.redirect") == []
 
 
-@pytest.mark.parametrize("args, status", [({"job_id": "watch-1"}, 400),
+@pytest.mark.parametrize("args, status", [({"job_id": "watch-1"}, 400), ({"message": "make it Alex"}, 400),
                                           ({"job_id": "watch-1", "message": "x" * 4_000}, 413)])
 def test_a_follow_up_without_fitting_words_is_refused(args, status):
     grant, _ = running_job()
@@ -1166,8 +1167,29 @@ def test_a_follow_up_without_fitting_words_is_refused(args, status):
 
 def test_a_correction_marker_is_never_a_result():
     grant, server = running_job()
+    server.results["session.redirect"] = {"status": "redirected"}
+    assert follow_up(grant)["outcome"] == "interrupted"
     server.emit("rt-1", "message.complete", {"text": " [This response was interrupted by a user correction.] "})
     assert grant.jobs.jobs["watch-1"].status == "running"
+
+
+def test_the_marker_text_with_no_correction_sent_is_the_jobs_own_result():
+    grant, server = running_job()
+    server.emit("rt-1", "message.complete", {"text": "[This response was interrupted by a user correction.]"})
+    assert grant.jobs.jobs["watch-1"].status == "finished"
+
+
+def test_an_end_held_long_after_the_call_ended_still_settles_and_closes(monkeypatch):
+    grant, server = running_job()
+    server.results["session.redirect"] = {"status": "queued"}
+    assert follow_up(grant)["outcome"] == "queued"
+    grant.jobs.end()
+    # The reaper had nothing to hold and stopped; the step ends much later.
+    wait_for(lambda: not grant.jobs.reaping)
+    monkeypatch.setattr(api, "WATCH_FOLLOW_UP_HOLD_S", 0)
+    server.emit("rt-1", "message.complete", {"text": "Step one done."})
+    wait_for(lambda: server.methods("session.close") == [{"session_id": "rt-1"}])
+    wait_for(lambda: grant.jobs.transport._closed)
 
 
 def test_follow_ups_reach_the_job_through_the_sealed_grant_route():

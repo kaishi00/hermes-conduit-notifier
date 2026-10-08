@@ -682,8 +682,8 @@ seals the answers back. This host opens no inbound route of its own.
   about, listing and cancelling them past a renewal, and the job limit
   counts per call. A renewal that leaves out `max_jobs` or `job_options`
   keeps the call's.
-- **Follow-ups** (plugin 0.10): a grant with jobs also carries
-  `interrupt_job` (`{job_id, message}`), never asked for by name. It puts the
+- **Follow-ups** (plugin 0.10): a grant that can start or cancel jobs also
+  carries `interrupt_job` (`{job_id, message}`), as does one that names it. It puts the
   user's words into a job Hermes is still working on, through Hermes'
   `session.redirect` (a steer on a Hermes without it), as Conduit's phone
   calls do: Hermes keeps the work so far and the job's result still comes as
