@@ -51,6 +51,7 @@ def test_every_capability_names_a_served_route_family():
         "watch-job-follow-ups": "/watch-tools/",
         "watch-live-token": "/watch-tools/",
         "watch-audio": "/watch-audio/",
+        "desktop-views": "/sessions/desktop-views",
     }
     assert set(prefixes) == set(api.ROUTE_CAPABILITIES)
     for capability, prefix in prefixes.items():

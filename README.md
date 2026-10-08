@@ -648,6 +648,36 @@ lock, and Conduit's next send claims the chat.
   when the registry can't be read (ownership is never guessed), 429 past 60
   requests a minute, 504 if the takeover doesn't finish within 20 seconds (ask again: nothing is written after that, short of a write already under way).
 
+## Chats opened on Desktop (plugin 0.12+)
+
+Conduit's Unread filter can count a chat as read when you have it open in
+Hermes Desktop or the web dashboard on the same host. Hermes has no hook for
+a client opening a chat, so the plugin wraps the gateway's `session.activate`
+and `session.resume` handlers in the dashboard process. Per chat it keeps the
+newest open (`opened_at`) and how long that chat then stayed the one its
+Desktop connection had selected (`seen_through`), in
+`<hermes home>/conduit-desktop-views.json` (at most 2,000 chats). It never
+writes Hermes' own read flag, so Desktop's unread dots don't change.
+
+| Method | Route | Returns |
+| --- | --- | --- |
+| GET | `/api/plugins/conduit_push/sessions/desktop-views?profile=&since=` | `{ok, observing, reason, views: {stored id: {opened_at, seen_through, client, open?}}}` |
+
+- An open counts when it comes over the gateway's WebSocket from a browser
+  engine (Desktop's renderer or the web dashboard: a `Mozilla/` User-Agent);
+  `client` is `desktop` when it also says `Electron/`, else `browser`.
+  Conduit's own socket, the TUI and hosted rooms never count.
+- A connection's selection moves with its next open and ends when its socket
+  closes (noticed within 5 seconds). `open: true` marks a chat that is
+  selected right now; its `seen_through` is the moment of the read. The host
+  can't tell whether anyone is looking at the window, and Desktop also
+  re-attaches chats after a reconnect.
+- `observing` is false, with a `reason`, while the gateway hasn't loaded
+  (`gateway-not-in-process`, also what `plugins.isolation: host` reports) or
+  when a Hermes update moved those handlers (`gateway-unsupported`). The
+  wrapper never fails a call and always returns Hermes' own response.
+- `since` returns only chats seen after that time (seconds since the epoch).
+
 ## Apple Watch lookups and jobs (plugin 0.6+, jobs 0.7+, Gemini tokens 0.8+)
 
 With the wrist down, a Conduit Watch call can't reach Conduit on the iPhone,

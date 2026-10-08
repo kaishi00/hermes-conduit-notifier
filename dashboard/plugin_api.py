@@ -38,6 +38,7 @@ import asyncio
 import atexit
 import base64
 import contextvars
+import functools
 import hashlib
 import importlib.util
 import inspect
@@ -57,12 +58,14 @@ import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
+import weakref
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 import contextlib
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
 
 from fastapi import APIRouter, HTTPException, Request, Response, WebSocket
@@ -6239,6 +6242,349 @@ _watch_audio_prepare_limiter = _MintLimiter(5, 300.0, message="Preparing GPT-Liv
                                                                "try again in a few minutes")
 
 
+# --- Desktop views (#454) ----------------------------------------------------
+#
+# Which chats Hermes Desktop (or the web dashboard) has open on this host, so
+# Conduit can count them as read without writing Hermes' own read flag (that
+# flag would light Desktop's unread dot on the chat it has open). Hermes has
+# no hook for "a client opened a chat", so this wraps the gateway's
+# session.activate / session.resume handlers in this process. That is an
+# unofficial seam: every attribute is feature-detected, the wrapper never
+# raises and always returns the handler's own response, and when something
+# is missing (a Hermes refactor, plugins.isolation: host) the route says
+# observing: false and Conduit keeps its own read tracking.
+#
+# Per chat it keeps ``opened_at`` (the newest open) and ``seen_through``: how
+# long the chat then stayed the one that Desktop connection had selected. A
+# connection's selection moves with its next open and ends when its socket
+# closes; the host can't tell whether anyone is looking at the window.
+
+DESKTOP_VIEW_METHODS = ("session.activate", "session.resume")
+DESKTOP_VIEWS_FILE = "conduit-desktop-views.json"
+DESKTOP_VIEWS_MAX = 2000
+DESKTOP_VIEWS_FLUSH_DELAY_S = 2.0
+DESKTOP_VIEWS_INSTALL_POLL_S = 1.0
+DESKTOP_VIEWS_INSTALL_WINDOW_S = 600.0
+# How often a selected chat's connection is checked: a chat stops counting as
+# seen at most this long after its Desktop disconnects.
+DESKTOP_VIEWS_SWEEP_S = 5.0
+# Set on each wrapper (to the handler it wraps), so a second load of this
+# module in the same process never wraps a wrapper.
+_DESKTOP_VIEW_MARKER = "__conduit_desktop_view__"
+
+
+def desktop_view_client(transport: Any) -> Optional[str]:
+    """"desktop" or "browser" for a browser engine's gateway socket, else None.
+
+    Desktop's renderer and the web dashboard open /api/ws from a browser
+    engine, whose User-Agent starts with Mozilla/ (Desktop's adds Electron/).
+    Conduit's socket comes from URLSession and also names itself in
+    X-Conduit-Client. Stdio, hosted rooms and this plugin's own job transport
+    aren't WebSocket transports, so they never count.
+    """
+    if transport is None or type(transport).__name__ != "WSTransport":
+        return None
+    try:
+        headers = getattr(getattr(transport, "_ws", None), "headers", None)
+        if headers is None or headers.get("x-conduit-client"):
+            return None
+        agent = str(headers.get("user-agent") or "")
+    except Exception:  # noqa: BLE001 — a header object we don't understand counts as no view
+        return None
+    if not agent.startswith("Mozilla/"):
+        return None
+    return "desktop" if "Electron/" in agent else "browser"
+
+
+def _desktop_views_key(home: Any) -> str:
+    return os.path.realpath(str(home))
+
+
+def _merge_desktop_view(current: Optional[Dict[str, Any]], newer: Dict[str, Any]) -> Dict[str, Any]:
+    """Each time keeps its newest value; the client follows the newest open."""
+    if current is None:
+        return dict(newer)
+    merged = dict(current)
+    if newer.get("opened_at", 0.0) > merged.get("opened_at", 0.0):
+        merged["opened_at"] = newer["opened_at"]
+        merged["client"] = newer.get("client", merged.get("client"))
+    merged["seen_through"] = max(merged.get("seen_through", 0.0), newer.get("seen_through", 0.0))
+    return merged
+
+
+class _DesktopViewStore:
+    """Per Hermes home, in ``<home>/conduit-desktop-views.json``. Records land
+    in memory at once and reach disk in one debounced write, so a chat switch
+    never waits on I/O."""
+
+    def __init__(self, flush_delay: float = DESKTOP_VIEWS_FLUSH_DELAY_S) -> None:
+        self._lock = threading.Lock()
+        self._pending: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        self._timer: Optional[threading.Timer] = None
+        self._flush_delay = flush_delay
+
+    def record(self, home: Any, stored_id: str, client: str, seen_through: float,
+               opened_at: Optional[float] = None) -> None:
+        entry: Dict[str, Any] = {"client": client, "seen_through": seen_through}
+        if opened_at is not None:
+            entry["opened_at"] = opened_at
+        key = _desktop_views_key(home)
+        with self._lock:
+            views = self._pending.setdefault(key, {})
+            views[stored_id] = _merge_desktop_view(views.get(stored_id), entry)
+            if self._timer is None:
+                self._timer = threading.Timer(self._flush_delay, self.flush)
+                self._timer.daemon = True
+                self._timer.start()
+
+    def flush(self) -> None:
+        with self._lock:
+            pending, self._pending = self._pending, {}
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
+        for key, views in pending.items():
+            try:
+                self._merge_to_disk(key, views)
+            except Exception:  # noqa: BLE001 — a lost write only leaves a chat unread
+                logger.warning("Conduit: could not save Desktop views under %s", key, exc_info=True)
+
+    def read(self, home: Any) -> Dict[str, Dict[str, Any]]:
+        key = _desktop_views_key(home)
+        views = self._load(self._path(key))
+        with self._lock:
+            pending = dict(self._pending.get(key, {}))
+        return self._merged(views, pending)
+
+    @staticmethod
+    def _path(key: str) -> str:
+        return os.path.join(key, DESKTOP_VIEWS_FILE)
+
+    @staticmethod
+    def _load(path: str) -> Dict[str, Dict[str, Any]]:
+        try:
+            with open(path, encoding="utf-8") as handle:
+                value = json.load(handle)
+        except (OSError, ValueError):
+            return {}
+        views = value.get("views") if isinstance(value, dict) else None
+        if not isinstance(views, dict):
+            return {}
+        clean: Dict[str, Dict[str, Any]] = {}
+        for stored_id, entry in views.items():
+            if not isinstance(stored_id, str) or not isinstance(entry, dict):
+                continue
+            times = [entry.get("opened_at"), entry.get("seen_through")]
+            if not all(isinstance(value, (int, float)) and math.isfinite(value) for value in times):
+                continue
+            clean[stored_id] = {"opened_at": float(times[0]), "seen_through": float(times[1]),
+                                "client": str(entry.get("client") or "desktop")}
+        return clean
+
+    @staticmethod
+    def _merged(base: Dict[str, Dict[str, Any]], newer: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        merged = dict(base)
+        for stored_id, entry in newer.items():
+            merged[stored_id] = _merge_desktop_view(merged.get(stored_id), entry)
+        # A pending focus change for a chat this file no longer has (pruned)
+        # carries no open time; it is still at least seen until then.
+        for entry in merged.values():
+            entry.setdefault("opened_at", entry["seen_through"])
+        if len(merged) > DESKTOP_VIEWS_MAX:
+            newest = sorted(merged.items(), key=lambda item: item[1]["seen_through"], reverse=True)
+            merged = dict(newest[:DESKTOP_VIEWS_MAX])
+        return merged
+
+    def _merge_to_disk(self, key: str, views: Dict[str, Dict[str, Any]]) -> None:
+        path = self._path(key)
+        # Path-generic: locks the sibling ".conduit-desktop-views.json.lock".
+        with _pairing_state_lock(Path(path)):
+            merged = self._merged(self._load(path), views)
+            temp = f"{path}.{os.getpid()}.tmp"
+            fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump({"version": 1, "views": merged}, handle, separators=(",", ":"))
+            os.replace(temp, path)
+
+
+class _DesktopViewHook:
+    """Wraps the gateway's open handlers once ``tui_gateway.server`` is loaded,
+    and follows which chat each Desktop connection has selected.
+
+    The plugin loads before the gateway module (the dashboard imports it in
+    its lifespan), so installation waits for it on a daemon thread, and every
+    route call retries too. Never imports the gateway itself: a module this
+    plugin imported would be a private copy whose chats no client uses.
+    """
+
+    def __init__(self, store: _DesktopViewStore) -> None:
+        self.store = store
+        self._lock = threading.Lock()
+        self._focus_lock = threading.Lock()
+        # id(transport) -> the chat that connection has selected.
+        self._focus: Dict[int, Dict[str, Any]] = {}
+        self._thread: Optional[threading.Thread] = None
+        self.reason: Optional[str] = "waiting"
+
+    @property
+    def observing(self) -> bool:
+        return self.reason is None
+
+    def ensure_started(self) -> None:
+        with self._lock:
+            if self._thread is not None:
+                return
+            self._thread = threading.Thread(target=self._run, name="conduit-desktop-views", daemon=True)
+            self._thread.start()
+
+    def _run(self) -> None:
+        deadline = time.monotonic() + DESKTOP_VIEWS_INSTALL_WINDOW_S
+        while not self.try_install():
+            if time.monotonic() >= deadline:
+                logger.info("Conduit: not marking chats Desktop opens as read here (%s)", self.reason)
+                return
+            time.sleep(DESKTOP_VIEWS_INSTALL_POLL_S)
+        while True:
+            time.sleep(DESKTOP_VIEWS_SWEEP_S)
+            try:
+                self.sweep()
+            except Exception:  # noqa: BLE001 — keep watching
+                logger.debug("Conduit: Desktop view sweep failed", exc_info=True)
+
+    def try_install(self) -> bool:
+        with self._lock:
+            if self.observing:
+                return True
+            server = sys.modules.get("tui_gateway.server")
+            if server is None:
+                # Under plugins.isolation: host this process never gets one.
+                self.reason = "gateway-not-in-process"
+                return False
+            methods = getattr(server, "_methods", None)
+            sessions = getattr(server, "_sessions", None)
+            transports = sys.modules.get("tui_gateway.transport")
+            current_transport = getattr(transports, "current_transport", None)
+            if (not isinstance(methods, dict) or not callable(getattr(sessions, "get", None))
+                    or not callable(current_transport)
+                    or not all(callable(methods.get(name)) for name in DESKTOP_VIEW_METHODS)):
+                # Mid-import (the table fills as the gateway loads), or a
+                # Hermes that moved these.
+                self.reason = "gateway-unsupported"
+                return False
+            for name in DESKTOP_VIEW_METHODS:
+                handler = methods[name]
+                if getattr(handler, _DESKTOP_VIEW_MARKER, None) is None:
+                    # In place: the dispatcher looks handlers up at call time.
+                    methods[name] = self._wrap(handler, server, current_transport)
+            self.reason = None
+            logger.info("Conduit: marking chats Desktop opens as read")
+            return True
+
+    def _wrap(self, handler: Callable[..., Any], server: Any, current_transport: Callable[[], Any]) -> Callable[..., Any]:
+        @functools.wraps(handler)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            response = handler(*args, **kwargs)
+            try:
+                self._observe(response, server, current_transport())
+            except Exception:  # noqa: BLE001 — never fails the client's call
+                logger.debug("Conduit: Desktop view not recorded", exc_info=True)
+            return response
+
+        setattr(wrapper, _DESKTOP_VIEW_MARKER, handler)
+        return wrapper
+
+    def _observe(self, response: Any, server: Any, transport: Any) -> None:
+        result = response.get("result") if isinstance(response, dict) else None
+        if not isinstance(result, dict):
+            return
+        client = desktop_view_client(transport)
+        stored_id = str(result.get("session_key") or "").strip()
+        if client is None or not stored_id:
+            return
+        session = server._sessions.get(str(result.get("session_id") or ""))
+        home_of = getattr(server, "_session_home", None)
+        home = home_of(session) if isinstance(session, dict) and callable(home_of) else getattr(server, "_hermes_home", None)
+        if home is None:
+            return
+        now = time.time()
+        try:
+            ref: Callable[[], Any] = weakref.ref(transport)
+        except TypeError:
+            ref = lambda: transport  # noqa: E731 — dropped once the socket closes
+        with self._focus_lock:
+            previous = self._focus.get(id(transport))
+            if previous is not None:
+                # The connection moved on: its last chat was seen until now
+                # (or, for a closed socket whose id was reused, its last check).
+                seen_until = now if previous["ref"]() is transport else previous["alive_at"]
+                self.store.record(previous["home"], previous["stored_id"], previous["client"], seen_until)
+            self._focus[id(transport)] = {"ref": ref, "home": _desktop_views_key(home), "stored_id": stored_id,
+                                          "client": client, "alive_at": now}
+        self.store.record(home, stored_id, client, now, opened_at=now)
+
+    def sweep(self, now: Optional[float] = None) -> None:
+        """Ends the selection of connections that closed, at their last check."""
+        now = time.time() if now is None else now
+        with self._focus_lock:
+            for key, focus in list(self._focus.items()):
+                transport = focus["ref"]()
+                if transport is None or getattr(transport, "_closed", True):
+                    self.store.record(focus["home"], focus["stored_id"], focus["client"], focus["alive_at"])
+                    del self._focus[key]
+                else:
+                    focus["alive_at"] = now
+
+    def read(self, home: Any) -> Dict[str, Dict[str, Any]]:
+        """Saved views plus the chats Desktop has selected right now."""
+        self.sweep()
+        views = self.store.read(home)
+        key = _desktop_views_key(home)
+        with self._focus_lock:
+            selected = [dict(focus) for focus in self._focus.values() if focus["home"] == key]
+        for focus in selected:
+            entry = _merge_desktop_view(views.get(focus["stored_id"]),
+                                        {"client": focus["client"], "seen_through": focus["alive_at"]})
+            entry.setdefault("opened_at", focus["alive_at"])
+            entry["open"] = True
+            views[focus["stored_id"]] = entry
+        return views
+
+
+_desktop_view_store = _DesktopViewStore()
+_desktop_view_hook = _DesktopViewHook(_desktop_view_store)
+atexit.register(_desktop_view_store.flush)
+if "hermes_cli.web_server" in sys.modules:
+    # Loaded by the dashboard (not a test or the CLI): start watching for the
+    # gateway module now rather than at Conduit's first read.
+    _desktop_view_hook.ensure_started()
+
+
+@router.get("/sessions/desktop-views")
+async def get_desktop_views(response: Response, profile: Optional[str] = None,
+                            since: Optional[float] = None) -> Dict[str, Any]:
+    """Chats Desktop or the web dashboard opened in ``profile``: per stored id,
+    the newest open and how long it then stayed selected (seconds since the
+    epoch), optionally only those seen after ``since``."""
+    response.headers["Cache-Control"] = "no-store"
+    _desktop_view_hook.ensure_started()
+    _desktop_view_hook.try_install()
+
+    def read() -> Dict[str, Dict[str, Any]]:
+        from hermes_constants import get_hermes_home
+
+        return _desktop_view_hook.read(get_hermes_home())
+
+    try:
+        views = await _run_scoped(profile, read)
+    except TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+    except Exception as exc:
+        raise _unexpected("read", exc, feature="Desktop views")
+    if since is not None and math.isfinite(since):
+        views = {stored_id: entry for stored_id, entry in views.items() if entry["seen_through"] > since}
+    return {"ok": True, "observing": _desktop_view_hook.observing, "reason": _desktop_view_hook.reason, "views": views}
+
+
 # --- Capabilities ------------------------------------------------------------
 #
 # Conduit reads this once per connection to tell which of its features this
@@ -6263,6 +6609,7 @@ ROUTE_CAPABILITIES = (
     "watch-job-follow-ups",
     "watch-live-token",
     "watch-audio",
+    "desktop-views",
 )
 
 
