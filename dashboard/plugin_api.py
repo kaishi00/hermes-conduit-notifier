@@ -6286,8 +6286,8 @@ def desktop_view_client(transport: Any, socket_type: Optional[type] = None) -> O
     X-Conduit-Client. Stdio, hosted rooms and this plugin's own job transport
     aren't WebSocket transports, so they never count: a socket is the
     gateway's when it is an instance of ``socket_type`` (Hermes'
-    tui_gateway.ws.WSTransport, subclasses included), or, without that class,
-    when its class is named WSTransport. The User-Agent is the client's own
+    tui_gateway.ws.WSTransport, subclasses included), or else when its class
+    is named WSTransport. The User-Agent is the client's own
     claim: this is best-effort sorting among clients that already hold a
     dashboard login, not proof of which app is on the other end.
     """
