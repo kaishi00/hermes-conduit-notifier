@@ -6277,38 +6277,65 @@ _DESKTOP_VIEW_MARKER = "__conduit_desktop_view__"
 _DESKTOP_VIEW_OWNER = "__conduit_desktop_view_owner__"
 
 
-def desktop_view_client(transport: Any) -> Optional[str]:
+def desktop_view_client(transport: Any, socket_type: Optional[type] = None) -> Optional[str]:
     """Returns "desktop" or "browser" for a browser engine's gateway socket, else None.
 
     Desktop's renderer and the web dashboard open /api/ws from a browser
     engine, whose User-Agent starts with Mozilla/ (Desktop's adds Electron/).
     Conduit's socket comes from URLSession and also names itself in
     X-Conduit-Client. Stdio, hosted rooms and this plugin's own job transport
-    aren't WebSocket transports, so they never count. The User-Agent is the
-    client's own claim: this is best-effort sorting among clients that already
-    hold a dashboard login, not proof of which app is on the other end.
+    aren't WebSocket transports, so they never count: a socket is the
+    gateway's when it is an instance of ``socket_type`` (Hermes'
+    tui_gateway.ws.WSTransport, subclasses included), or else when its class
+    is named WSTransport. The User-Agent is the client's own
+    claim: this is best-effort sorting among clients that already hold a
+    dashboard login, not proof of which app is on the other end.
     """
-    if transport is None or type(transport).__name__ != "WSTransport":
+    if not _is_gateway_socket(transport, socket_type):
         return None
-    headers = _transport_headers(transport)
-    try:
-        if headers is None or headers.get("x-conduit-client") is not None:
-            return None
-        agent = str(headers.get("user-agent") or "")
-    except Exception:  # noqa: BLE001 — a header object we don't understand counts as no view
+    return _client_from_headers(_transport_headers(transport))
+
+
+def _client_from_headers(headers: Optional[Dict[str, Any]]) -> Optional[str]:
+    if headers is None or headers.get("x-conduit-client") is not None:
         return None
+    agent = str(headers.get("user-agent") or "")
     if not agent.startswith("Mozilla/"):
         return None
     return "desktop" if "Electron/" in agent else "browser"
 
 
-def _transport_headers(transport: Any) -> Any:
-    """The WebSocket upgrade's headers (Starlette's, case-insensitive), or None."""
+def _is_gateway_socket(transport: Any, socket_type: Optional[type]) -> bool:
+    """Hermes' WSTransport: an instance of the gateway's class (``socket_type``,
+    a single class; subclasses included), or a class named WSTransport, which
+    also covers sockets opened before the gateway's socket module was
+    reloaded."""
+    if transport is None:
+        return False
+    if isinstance(socket_type, type) and isinstance(transport, socket_type):
+        return True
+    return type(transport).__name__ == "WSTransport"
+
+
+def _transport_headers(transport: Any) -> Optional[Dict[str, Any]]:
+    """The WebSocket upgrade's headers with lower-cased names, or None."""
     try:
         headers = getattr(getattr(transport, "_ws", None), "headers", None)
+        items = getattr(headers, "items", None)
+        if not callable(items):
+            return None
+        lowered: Dict[str, Any] = {}
+        for name, value in items():
+            # Raw ASGI headers are latin-1 bytes pairs.
+            if isinstance(name, bytes):
+                name = name.decode("latin-1")
+            if isinstance(value, bytes):
+                value = value.decode("latin-1")
+            # The first of repeated headers, as Starlette's own get() reads.
+            lowered.setdefault(str(name).lower(), value)
+        return lowered
     except Exception:  # noqa: BLE001
         return None
-    return headers if callable(getattr(headers, "get", None)) else None
 
 
 def _desktop_views_key(home: Any) -> str:
@@ -6339,7 +6366,7 @@ def _merge_desktop_view(current: Optional[Dict[str, Any]], newer: Dict[str, Any]
     if current is None:
         return dict(newer)
     merged = dict(current)
-    if "opened_at" in newer and newer["opened_at"] > merged.get("opened_at", 0.0):
+    if "opened_at" in newer and newer["opened_at"] >= merged.get("opened_at", 0.0):
         merged["opened_at"] = newer["opened_at"]
         merged["client"] = newer.get("client", merged.get("client"))
     merged["seen_through"] = max(merged.get("seen_through", 0.0), newer.get("seen_through", 0.0))
@@ -6424,7 +6451,7 @@ class _DesktopViewStore:
             if not all(_desktop_view_time(stamp) for stamp in times):
                 continue
             clean[stored_id] = {"opened_at": float(times[0]), "seen_through": float(times[1]),
-                                "client": str(entry.get("client") or "desktop")}
+                                "client": "browser" if entry.get("client") == "browser" else "desktop"}
         return clean
 
     @staticmethod
@@ -6480,6 +6507,10 @@ class _DesktopViewHook:
         # Set when a gateway socket's upgrade headers can't be read, which
         # leaves every open unsortable: reported, not silently ignored.
         self.headers_unreadable = False
+        # tui_gateway.ws.WSTransport, found at install. Like headers_unreadable
+        # it is read from handler threads without a lock: one attribute
+        # read is atomic, and a stale value only affects that one open.
+        self.socket_type: Optional[type] = None
 
     @property
     def installed(self) -> bool:
@@ -6551,6 +6582,10 @@ class _DesktopViewHook:
             intact = isinstance(methods, dict) and all(
                 getattr(methods.get(name), _DESKTOP_VIEW_MARKER, None) is not None for name in DESKTOP_VIEW_METHODS)
             if intact:
+                # The wrappers stayed; follow a reloaded socket module anyway.
+                ws_transport = getattr(sys.modules.get("tui_gateway.ws"), "WSTransport", None)
+                if isinstance(ws_transport, type):
+                    self.socket_type = ws_transport
                 return
             self.reason = "waiting"
         self.try_install()
@@ -6581,6 +6616,7 @@ class _DesktopViewHook:
                 # Hermes that moved these.
                 self.reason = "gateway-unsupported"
                 return False
+            self.socket_type = ws_transport
             for name in DESKTOP_VIEW_METHODS:
                 handler = methods[name]
                 if getattr(handler, _DESKTOP_VIEW_MARKER, None) is None:
@@ -6613,15 +6649,17 @@ class _DesktopViewHook:
         result = response.get("result") if isinstance(response, dict) else None
         if not isinstance(result, dict):
             return
-        if type(transport).__name__ == "WSTransport":
-            readable = _transport_headers(transport) is not None
-            if readable == self.headers_unreadable:
-                logger.warning("Conduit: gateway socket headers %s",
-                               "readable again" if readable else "unreadable; not marking Desktop's chats read")
-            self.headers_unreadable = not readable
-            if not readable:
-                return
-        client = desktop_view_client(transport)
+        if not _is_gateway_socket(transport, self.socket_type):
+            return
+        headers = _transport_headers(transport)
+        readable = headers is not None
+        if readable == self.headers_unreadable:
+            logger.warning("Conduit: gateway socket headers %s",
+                           "readable again" if readable else "unreadable; not marking Desktop's chats read")
+        self.headers_unreadable = not readable
+        if not readable:
+            return
+        client = _client_from_headers(headers)
         stored_id = str(result.get("session_key") or "").strip()
         if client is None or not stored_id:
             return
@@ -6707,8 +6745,10 @@ async def get_desktop_views(response: Response, profile: Optional[str] = None,
         views = await _run_scoped(profile, read)
     except TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
-    except HTTPException:
-        raise  # Hermes' own 400/404 for a bad or unknown profile
+    except HTTPException as exc:
+        # Hermes' own 400/404 for a bad or unknown profile, kept out of caches too.
+        exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
+        raise
     except Exception as exc:
         raise _unexpected("read", exc, feature="Desktop views")
     if since is not None and math.isfinite(since):

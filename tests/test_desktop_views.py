@@ -167,6 +167,60 @@ def test_installing_twice_never_wraps_a_wrapper(monkeypatch, tmp_path):
     assert first.read(tmp_path) == {}
 
 
+def test_a_subclass_of_the_gateway_socket_still_counts(monkeypatch, tmp_path):
+    class TLSSocket(WSTransport):
+        pass
+
+    gateway = FakeGateway(tmp_path, TLSSocket({"user-agent": ELECTRON}))
+    gateway.install(monkeypatch)
+    hook = _hook()
+    hook.try_install()
+    gateway.call("session.activate", key="a")
+    assert hook.store.read(tmp_path)["a"]["client"] == "desktop"
+
+
+def test_header_names_are_matched_in_any_case():
+    assert api.desktop_view_client(WSTransport({"User-Agent": ELECTRON})) == "desktop"
+    assert api.desktop_view_client(WSTransport({"User-Agent": ELECTRON, "X-Conduit-Client": "conduit"})) is None
+
+
+def test_a_socket_type_that_isnt_a_class_falls_back_to_the_name():
+    assert api.desktop_view_client(WSTransport({"user-agent": CHROME}), socket_type=(WSTransport,)) == "browser"
+
+
+def test_raw_header_names_are_decoded():
+    class RawHeaders:
+        def items(self):
+            return [(b"User-Agent", ELECTRON.encode("latin-1"))]
+
+    socket = WSTransport({})
+    socket._ws = types.SimpleNamespace(headers=RawHeaders())
+    assert api.desktop_view_client(socket) == "desktop"
+
+
+def test_a_reloaded_socket_module_is_followed(monkeypatch, tmp_path):
+    gateway = FakeGateway(tmp_path)
+    gateway.install(monkeypatch)
+    hook = _hook()
+    hook.try_install()
+
+    class ReloadedWSTransport(WSTransport):
+        pass
+
+    ReloadedWSTransport.__name__ = "WSTransport"
+    gateway.ws.WSTransport = ReloadedWSTransport
+    hook.verify()
+    assert hook.socket_type is ReloadedWSTransport
+    # A socket opened before the reload still counts.
+    assert api.desktop_view_client(WSTransport({"user-agent": ELECTRON}), hook.socket_type) == "desktop"
+
+
+def test_an_open_at_the_same_moment_takes_the_newer_client():
+    merged = api._merge_desktop_view({"opened_at": 5.0, "seen_through": 5.0, "client": "browser"},
+                                     {"opened_at": 5.0, "seen_through": 5.0, "client": "desktop"})
+    assert merged["client"] == "desktop"
+
+
 def test_a_blank_conduit_header_still_marks_conduit():
     assert api.desktop_view_client(WSTransport({"user-agent": ELECTRON, "x-conduit-client": ""})) is None
 
@@ -198,6 +252,7 @@ def test_flush_merges_newest_wins_with_the_file_and_keeps_it_private(tmp_path):
         "flag": {"opened_at": True, "seen_through": 1.0},
         "huge": {"opened_at": 10**400, "seen_through": 1.0},
         "negative": {"opened_at": -5, "seen_through": 1.0},
+        "odd": {"opened_at": 1.0, "seen_through": 2.0, "client": 7},
     }}))
     store = api._DesktopViewStore(flush_delay=3600.0)
     store.record(tmp_path, "a", "desktop", 210.0, opened_at=200.0)
@@ -206,10 +261,11 @@ def test_flush_merges_newest_wins_with_the_file_and_keeps_it_private(tmp_path):
 
     views = json.loads(path.read_text())["views"]
     assert views == {"a": {"opened_at": 200.0, "seen_through": 210.0, "client": "desktop"},
-                     "b": {"opened_at": 300.0, "seen_through": 400.0, "client": "browser"}}
+                     "b": {"opened_at": 300.0, "seen_through": 400.0, "client": "browser"},
+                     "odd": {"opened_at": 1.0, "seen_through": 2.0, "client": "desktop"}}
     if os.name == "posix":
         assert path.stat().st_mode & 0o777 == 0o600
-    assert not list(tmp_path.glob("*.tmp"))
+    assert not [name for name in os.listdir(tmp_path) if name.endswith(".tmp")]
 
 
 def test_the_store_keeps_only_the_newest_chats(monkeypatch, tmp_path):
@@ -350,6 +406,7 @@ def test_a_bad_profile_keeps_hermes_own_status(monkeypatch):
     app.include_router(api.router, prefix=BASE)
     response = TestClient(app).get(f"{BASE}/sessions/desktop-views", params={"profile": "nope"})
     assert response.status_code == 404
+    assert response.headers["cache-control"] == "no-store"
 
 
 def test_replaced_handlers_are_wrapped_again(monkeypatch, tmp_path):
