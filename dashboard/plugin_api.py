@@ -6306,12 +6306,13 @@ def _client_from_headers(headers: Optional[Dict[str, Any]]) -> Optional[str]:
 
 
 def _is_gateway_socket(transport: Any, socket_type: Optional[type]) -> bool:
-    """Hermes' WSTransport (or a subclass) when the gateway's class is known,
-    else by name."""
+    """Hermes' WSTransport: an instance of the gateway's class (subclasses
+    included), or a class named WSTransport, which also covers sockets opened
+    before the gateway's socket module was reloaded."""
     if transport is None:
         return False
-    if isinstance(socket_type, type):
-        return isinstance(transport, socket_type)
+    if isinstance(socket_type, type) and isinstance(transport, socket_type):
+        return True
     return type(transport).__name__ == "WSTransport"
 
 
@@ -6502,7 +6503,9 @@ class _DesktopViewHook:
         # Set when a gateway socket's upgrade headers can't be read, which
         # leaves every open unsortable: reported, not silently ignored.
         self.headers_unreadable = False
-        # tui_gateway.ws.WSTransport, found at install.
+        # tui_gateway.ws.WSTransport, found at install. Like headers_unreadable
+        # it is read from handler threads without a lock: one attribute
+        # read is atomic, and a stale value only affects that one open.
         self.socket_type: Optional[type] = None
 
     @property

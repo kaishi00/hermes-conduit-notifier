@@ -211,6 +211,8 @@ def test_a_reloaded_socket_module_is_followed(monkeypatch, tmp_path):
     gateway.ws.WSTransport = ReloadedWSTransport
     hook.verify()
     assert hook.socket_type is ReloadedWSTransport
+    # A socket opened before the reload still counts.
+    assert api.desktop_view_client(WSTransport({"user-agent": ELECTRON}), hook.socket_type) == "desktop"
 
 
 def test_an_open_at_the_same_moment_takes_the_newer_client():
