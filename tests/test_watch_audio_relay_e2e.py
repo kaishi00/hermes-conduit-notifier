@@ -572,7 +572,7 @@ def test_the_stand_in_answers_a_delegation_through_the_grant(paired, monkeypatch
                                                                        "- France: Its capital is Paris."}]}]
         labels = [label for _, label in run.timeline]
         assert "delegation: capital of France" in labels and "lookup answered (1 result)" in labels
-        assert probe.latency(run.timeline)["delegation_to_lookup_answer_s"] >= 0
+        assert probe.latency(run.timeline)["delegation_to_lookup_answer_s"][0] >= 0
     finally:
         peer.close()
 
@@ -581,15 +581,23 @@ def test_the_stand_in_splits_a_long_answer_and_times_each_turn():
     probe = _load_probe()
     appends = probe.delegation_appends("é" * 600, "item_1")
     assert [len(a["content"][0]["text"].encode("utf-8")) for a in appends] == [500, 500, 200]
-    assert len(probe.delegation_appends("x" * 5000, "item_1")) == probe.APPENDS_PER_ANSWER
+    clipped = [a["content"][0]["text"] for a in probe.delegation_appends("x" * 5000, "item_1")]
+    assert len(clipped) == probe.APPENDS_PER_ANSWER
+    assert clipped[-1].endswith(probe.CLIPPED) and len(clipped[-1].encode("utf-8")) <= probe.APPEND_MAX_BYTES
+    # Exactly full: nothing was cut.
+    assert not probe.delegation_appends("x" * 1500, "item_1")[-1]["content"][0]["text"].endswith(probe.CLIPPED)
     assert probe.delegation_appends("  ", "item_1") == []
     assert probe.lookup_text({"ok": False, "detail": "the relay answered HTTP 401"}).startswith(
         "The lookup failed (the relay answered HTTP 401)")
     timeline = [[3.0, "model speech starts"], [10.0, "question sent"], [10.9, "heard: capital"],
                 [11.6, "model speech starts"], [12.0, "delegation: capital"], [14.5, "lookup answered (3 results)"],
-                [15.4, "model speech starts"]]
-    assert probe.latency(timeline) == {"question_end_to_heard_s": 0.9, "question_end_to_speech_s": 1.6,
-                                       "delegation_to_lookup_answer_s": 2.5, "lookup_answer_to_speech_s": 0.9}
+                [15.4, "model speech starts"], [20.0, "question sent"], [20.7, "heard: and Spain"],
+                [21.0, "delegation: Spain"], [21.2, "model speech starts"], [22.0, "lookup answered (1 result)"],
+                [23.1, "model speech starts"]]
+    # Each turn, in call order.
+    assert probe.latency(timeline) == {"question_end_to_heard_s": [0.9, 0.7], "question_end_to_speech_s": [1.6, 1.2],
+                                       "delegation_to_lookup_answer_s": [2.5, 1.0],
+                                       "lookup_answer_to_speech_s": [0.9, 1.1]}
 
 
 def test_the_stand_in_reads_any_pcm16_wav(tmp_path):
