@@ -179,6 +179,17 @@ def test_a_subclass_of_the_gateway_socket_still_counts(monkeypatch, tmp_path):
     assert hook.store.read(tmp_path)["a"]["client"] == "desktop"
 
 
+def test_header_names_are_matched_in_any_case():
+    assert api.desktop_view_client(WSTransport({"User-Agent": ELECTRON})) == "desktop"
+    assert api.desktop_view_client(WSTransport({"User-Agent": ELECTRON, "X-Conduit-Client": "conduit"})) is None
+
+
+def test_an_open_at_the_same_moment_takes_the_newer_client():
+    merged = api._merge_desktop_view({"opened_at": 5.0, "seen_through": 5.0, "client": "browser"},
+                                     {"opened_at": 5.0, "seen_through": 5.0, "client": "desktop"})
+    assert merged["client"] == "desktop"
+
+
 def test_a_blank_conduit_header_still_marks_conduit():
     assert api.desktop_view_client(WSTransport({"user-agent": ELECTRON, "x-conduit-client": ""})) is None
 
@@ -223,7 +234,7 @@ def test_flush_merges_newest_wins_with_the_file_and_keeps_it_private(tmp_path):
                      "odd": {"opened_at": 1.0, "seen_through": 2.0, "client": "desktop"}}
     if os.name == "posix":
         assert path.stat().st_mode & 0o777 == 0o600
-    assert not list(tmp_path.glob("*.tmp"))
+    assert not [name for name in os.listdir(tmp_path) if name.endswith(".tmp")]
 
 
 def test_the_store_keeps_only_the_newest_chats(monkeypatch, tmp_path):

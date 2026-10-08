@@ -6312,13 +6312,16 @@ def _is_gateway_socket(transport: Any, socket_type: Optional[type]) -> bool:
     return type(transport).__name__ == "WSTransport"
 
 
-def _transport_headers(transport: Any) -> Any:
-    """The WebSocket upgrade's headers (Starlette's, case-insensitive), or None."""
+def _transport_headers(transport: Any) -> Optional[Dict[str, Any]]:
+    """The WebSocket upgrade's headers with lower-cased names, or None."""
     try:
         headers = getattr(getattr(transport, "_ws", None), "headers", None)
+        items = getattr(headers, "items", None)
+        if not callable(items):
+            return None
+        return {str(name).lower(): value for name, value in items()}
     except Exception:  # noqa: BLE001
         return None
-    return headers if callable(getattr(headers, "get", None)) else None
 
 
 def _desktop_views_key(home: Any) -> str:
@@ -6349,7 +6352,7 @@ def _merge_desktop_view(current: Optional[Dict[str, Any]], newer: Dict[str, Any]
     if current is None:
         return dict(newer)
     merged = dict(current)
-    if "opened_at" in newer and newer["opened_at"] > merged.get("opened_at", 0.0):
+    if "opened_at" in newer and newer["opened_at"] >= merged.get("opened_at", 0.0):
         merged["opened_at"] = newer["opened_at"]
         merged["client"] = newer.get("client", merged.get("client"))
     merged["seen_through"] = max(merged.get("seen_through", 0.0), newer.get("seen_through", 0.0))
