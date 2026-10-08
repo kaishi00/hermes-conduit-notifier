@@ -278,9 +278,9 @@ def test_a_job_the_watch_shouldnt_send_is_refused_without_ending_the_grant(args,
 def test_a_grant_keeps_the_other_profiles_its_jobs_may_run_on(tmp_path):
     started = []
     grant = api.open_watch_grant(
-        {"tools": ["start_job"], "job_profiles": ["Fam", "coder", "fam", "writer"]}, profile="Coder",
+        {"tools": ["start_job"], "job_profiles": ["Fam", "coder", "fam", "current", "writer"]}, profile="Coder",
         path=write_pairing(tmp_path), relay=FakeRelay(), start=started.append, session_api=FakeHermes)
-    # The grant's own profile needs no naming; a name counts once.
+    # The grant's own profile ("current" too) needs no naming; a name counts once.
     assert grant["job_profiles"] == ["Fam", "writer"]
     assert started[0].jobs.profiles == ("Fam", "writer")
 
@@ -292,7 +292,7 @@ def test_a_grant_without_jobs_names_no_profiles(tmp_path):
     assert "job_profiles" not in grant
 
 
-@pytest.mark.parametrize("value", ["fam", [""], ["../fam"], ["fam", 3], ["x" * 65], ["p"] * 33])
+@pytest.mark.parametrize("value", ["fam", [""], ["../fam"], ["fam", 3], ["x" * 65], ["fam\n"], ["p"] * 33])
 def test_job_profiles_that_arent_profile_names_are_refused(tmp_path, value):
     with pytest.raises(api.TokenError) as err:
         api.open_watch_grant({"tools": ["start_job"], "job_profiles": value}, profile=None,
@@ -315,6 +315,9 @@ def test_a_job_for_a_listed_profile_runs_there_on_its_own_model(tags, monkeypatc
     assert scoped == ["Fam"]
     assert tags() == {"st-1": {"kind": "job"}}
     assert api.run_watch_job_call(grant, "list_jobs", {})["job_1"].endswith("; profile=Fam")
+    server.emit("rt-1", "message.complete", {"text": "Router is fine", "status": "complete"})
+    [item] = news(grant)["news"]
+    assert (item["status"], item["profile"]) == ("finished", "Fam")
 
 
 def test_naming_the_calls_own_profile_runs_the_job_as_usual():

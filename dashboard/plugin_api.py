@@ -3770,9 +3770,8 @@ def _carry_watch_jobs(old_id: str, grant: _WatchGrant, *, max_jobs: Optional[int
     ``grant``: the Watch keeps hearing their news and can list, cancel and
     approve them through the new grant, and the job cap counts across the
     call (``max_jobs``, ``options`` and ``profiles`` replace the call's when
-    given). Only
-    an open grant of the same profile whose jobs are still its own; returns
-    it, or None when nothing moved.
+    given). Only an open grant of the same profile whose jobs are still its
+    own; returns it, or None when nothing moved.
 
     The old grant keeps answering for the jobs until it closes: the Watch
     may have sent a call through it before it heard of the renewal, and it
@@ -3961,7 +3960,7 @@ WATCH_JOB_MAX_OPTION_CHARS = 120
 # The user's other profiles a call's jobs may run on, as the phone lists
 # them ("for Fam, …"): at most this many, each a Hermes profile name.
 WATCH_JOB_MAX_PROFILES = 32
-_WATCH_PROFILE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_WATCH_PROFILE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 # Bytes as JSON. A whole job_news answer, sealed, stays inside the relay's
 # bound on an answer (WATCH_MAX_RESULT_CT_CHARS, about 17,980 bytes before
 # sealing); more news than fits waits for the next call. A job's texts are
@@ -4078,13 +4077,15 @@ def _clean_job_profiles(value: Any, *, own: Optional[str]) -> Tuple[str, ...]:
     phone names them; the grant's own profile needs no naming."""
     if value is None:
         return ()
-    if (not isinstance(value, list) or len(value) > WATCH_JOB_MAX_PROFILES
-            or not all(isinstance(name, str) and _WATCH_PROFILE_NAME.match(name) for name in value)):
-        raise TokenError(400, f"job_profiles must be up to {WATCH_JOB_MAX_PROFILES} profile names")
+    if not isinstance(value, list) or len(value) > WATCH_JOB_MAX_PROFILES:
+        raise TokenError(400, f"job_profiles must be a list of at most {WATCH_JOB_MAX_PROFILES} profile names")
+    if not all(isinstance(name, str) and _WATCH_PROFILE_NAME.fullmatch(name) for name in value):
+        raise TokenError(400, "Each job profile is a name of up to 64 letters, digits, '.', '_' or '-'")
     names: List[str] = []
     for name in value:
-        key = name.lower()
-        if key != _limiter_key(own) and key not in (n.lower() for n in names):
+        # As Hermes' scope folds them: "current" is the grant's own profile.
+        key = _limiter_key(name)
+        if key and key != _limiter_key(own) and key not in (_limiter_key(n) for n in names):
             names.append(name)
     return tuple(names)
 
@@ -4134,7 +4135,8 @@ class _WatchJob:
 
     def news(self) -> Dict[str, Any]:
         item: Dict[str, Any] = {"job_id": self.job_id, "title": self.title, "status": self.status,
-                                "session_id": (self.stored_session_id or self.session_id)[:128]}
+                                "session_id": (self.stored_session_id or self.session_id)[:128],
+                                **({"profile": self.profile} if self.profile else {})}
         if self.status == "finished":
             item["result"] = _clip_job_result(self.result)
         if self.error:
@@ -4394,9 +4396,9 @@ class _WatchJobs:
             if self.ended:
                 return {"ok": False, "status": 410, "detail": "This call's Watch jobs have ended"}
             profile: Optional[str] = None
-            if named and named.lower() != _limiter_key(self.grant.profile):
+            if named and _limiter_key(named) not in ("", _limiter_key(self.grant.profile)):
                 # Only a profile the phone listed: a name is never guessed at.
-                profile = next((name for name in self.profiles if name.lower() == named.lower()), None)
+                profile = next((name for name in self.profiles if _limiter_key(name) == _limiter_key(named)), None)
                 if profile is None:
                     return {"ok": True, "status": "not_started",
                             "message": f"I don't know a profile or bot called {named[:64]}, so I didn't start the job."}
@@ -4481,8 +4483,10 @@ class _WatchJobs:
             if not isinstance(sid, str) or not sid:
                 raise WatchJobError("session.create gave no session")
             landed = created.get("profile")
-            if job.profile is not None and isinstance(landed, str) and landed.lower() != job.profile.lower():
-                # As the phone refuses it (HermesClient.createSession).
+            if job.profile is not None and isinstance(landed, str) and _limiter_key(landed) != _limiter_key(job.profile):
+                # As the phone refuses it (AppState's createSession): only a
+                # profile Hermes names, as a Hermes that names none is trusted
+                # with the one asked for.
                 with self.lock:
                     job.session_id = sid
                 raise WatchJobError(f"Hermes started the job on {landed[:64]} instead of {job.profile}")
