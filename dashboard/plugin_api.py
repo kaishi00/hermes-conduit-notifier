@@ -4747,6 +4747,8 @@ _WATCH_AUDIO_HELPER_ENV = ("PATH", "HOME", "USER", "LOGNAME", "LANG", "TZ", "TMP
 _GROK_AUDIO_DELTAS = ("response.output_audio.delta", "response.audio.delta")
 WATCH_AUDIO_NEEDS_RUNTIME = ("GPT-Live on the Watch needs its WebRTC runtime on the Hermes host; "
                              "prepare it from Conduit's Voice settings")
+WATCH_AUDIO_STALE_RUNTIME = ("GPT-Live on the Watch needs its WebRTC runtime made again for this plugin version; "
+                             "prepare it from Conduit's Voice settings")
 
 
 class WatchAudioError(Exception):
@@ -4963,7 +4965,10 @@ class _WatchAudioRuntime:
             return {"runtime": "preparing", "source": None, "reason": None}
         if failure:
             return {"runtime": "failed", "source": None, "reason": failure}
-        return {"runtime": "missing", "source": None, "reason": WATCH_AUDIO_NEEDS_RUNTIME}
+        # Still "missing" (Conduit offers the same Prepare); the reason says why.
+        made = os.path.isfile(os.path.join(self._env_dir(), _WATCH_AUDIO_MARKER))
+        return {"runtime": "missing", "source": None,
+                "reason": WATCH_AUDIO_STALE_RUNTIME if made else WATCH_AUDIO_NEEDS_RUNTIME}
 
     def prepare(self, start: Optional[Callable[[Callable[[], None]], None]] = None) -> Dict[str, Any]:
         """Starts making the environment unless it's there or on its way; returns the status."""
