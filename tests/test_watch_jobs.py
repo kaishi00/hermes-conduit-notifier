@@ -1222,10 +1222,9 @@ def test_an_end_held_when_the_call_ends_still_settles_and_closes(monkeypatch):
     wait_for(lambda: grant.jobs.transport._closed)
 
 
-def test_a_follow_up_waiting_its_turn_when_the_call_ends_still_has_its_hold_reaped(monkeypatch):
+def test_a_follow_up_waiting_its_turn_when_the_call_ends_sends_nothing():
     grant, server = running_job()
     server.results["session.redirect"] = {"status": "queued"}
-    monkeypatch.setattr(api, "WATCH_FOLLOW_UP_HOLD_S", 0)
     job = grant.jobs.jobs["watch-1"]
     job.follow_up_lock.acquire()  # another follow-up still running
     answers = []
@@ -1233,12 +1232,12 @@ def test_a_follow_up_waiting_its_turn_when_the_call_ends_still_has_its_hold_reap
     waiting.start()
     wait_for(lambda: grant.jobs.follow_ups_in_flight == 1)
     grant.jobs.end()
+    assert grant.jobs.reaping
     job.follow_up_lock.release()
     waiting.join(5)
-    assert answers[0]["outcome"] == "queued"
-    server.emit("rt-1", "message.complete", {"text": "Step one done."})
-    wait_for(lambda: server.methods("session.close") == [{"session_id": "rt-1"}])
-    wait_for(lambda: grant.jobs.transport._closed)
+    assert answers[0]["outcome"] == "finished"
+    assert server.methods("session.redirect") == []
+    wait_for(lambda: not grant.jobs.reaping)
 
 
 def test_words_taken_as_the_turn_failed_are_reported_too_late():
@@ -1296,3 +1295,19 @@ def test_a_second_follow_up_while_words_wait_keeps_the_job_for_their_turn():
     server.emit("rt-1", "message.complete", {"text": "Done for Alex, cc Sam."})
     [item] = news(grant)["news"]
     assert (item["status"], item["result"]) == ("finished", "Done for Alex, cc Sam.")
+
+
+def test_hermes_still_at_work_keeps_a_held_end_from_being_reaped(monkeypatch):
+    grant, server = running_job()
+    server.results["session.redirect"] = {"status": "queued"}
+    assert follow_up(grant)["outcome"] == "queued"
+    server.emit("rt-1", "message.complete", {"text": "Step one done."})
+    monkeypatch.setattr(api, "WATCH_FOLLOW_UP_HOLD_S", 0.2)
+    time.sleep(0.3)
+    # Any frame for the session renews the hold before the reap looks.
+    server.emit("rt-1", "status.update", {"status": "working"})
+    monkeypatch.setattr(api, "WATCH_FOLLOW_UP_HOLD_S", 5)
+    assert news(grant, wait_s=0)["news"] == []
+    server.emit("rt-1", "message.complete", {"text": "Done for Alex."})
+    [item] = news(grant)["news"]
+    assert item["result"] == "Done for Alex."

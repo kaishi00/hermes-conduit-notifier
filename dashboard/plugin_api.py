@@ -4227,6 +4227,10 @@ class _WatchJobs:
             job = self._job_for(sid)
             if job is None:
                 return
+            if job.held_completion is not None and kind not in ("message.complete", "error"):
+                # Hermes is still at work on the session: the end it held
+                # waits on, so a quiet stretch isn't read as no turn coming.
+                job.held_at = time.monotonic()
             if kind == "request.cancel":
                 # Answered elsewhere (the app, the phone), timed out, or the
                 # turn ended. The id is compared as a string, as it was
@@ -4587,7 +4591,8 @@ class _WatchJobs:
         attempts = waits = 0
         while True:
             with self.lock:
-                if not job.active:
+                # Ended: the call is gone, so no more words go in.
+                if not job.active or self.ended:
                     return {"outcome": "finished"}
                 sid = job.session_id
                 # Words Hermes already runs as its next turn keep this
@@ -4625,7 +4630,7 @@ class _WatchJobs:
             # Not running: the turn just ended (its end settles the job), or
             # Hermes hasn't started it yet. Asked again shortly while open.
             with self.lock:
-                if not job.active:
+                if not job.active or self.ended:
                     return {"outcome": "finished"}
             waits += 1
             if (attempts >= WATCH_FOLLOW_UP_ATTEMPTS or waits >= WATCH_FOLLOW_UP_ATTEMPTS * 3
@@ -4826,20 +4831,25 @@ class _WatchJobs:
         """Settles ends held for follow-up words that never ran, after the
         call ended, so their sessions and the transport close. Runs while
         anything holds; a hold taken later starts it again."""
-        while True:
+        holding = True
+        try:
+            while holding:
+                with self.changed:
+                    reaped = self._settle_stale_holds()
+                    if reaped:
+                        self.changed.notify_all()
+                    holding = self._holding()
+                    if not holding:
+                        self.reaping = False
+                for job in reaped:
+                    self._close_session_later(job)
+                self._close_transport_if_idle()
+                if holding:
+                    time.sleep(1.0)
+        except Exception as exc:  # noqa: BLE001 — a later hold starts a new reaper
+            _log_watch_failure("The Watch job hold reaper failed", exc)
             with self.changed:
-                reaped = self._settle_stale_holds()
-                if reaped:
-                    self.changed.notify_all()
-                holding = self._holding()
-                if not holding:
-                    self.reaping = False
-            for job in reaped:
-                self._close_session_later(job)
-            self._close_transport_if_idle()
-            if not holding:
-                return
-            time.sleep(1.0)
+                self.reaping = False
 
     def _close_session_later(self, job: _WatchJob) -> None:
         try:
