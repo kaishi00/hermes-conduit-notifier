@@ -6389,10 +6389,12 @@ class _DesktopViewStore:
 
     def read(self, home: Any) -> Dict[str, Dict[str, Any]]:
         key = _desktop_views_key(home)
-        views = self._load(self._path(key))
+        # Memory first, then the file: a flush that lands in between is then
+        # in the file, and merging it twice changes nothing.
         with self._lock:
             batches = [dict(batch.get(key, {})) for batch in self._inflight]
             batches.append(dict(self._pending.get(key, {})))
+        views = self._load(self._path(key))
         for batch in batches:
             views = self._merged(views, batch)
         return views
@@ -6583,11 +6585,14 @@ class _DesktopViewHook:
         result = response.get("result") if isinstance(response, dict) else None
         if not isinstance(result, dict):
             return
-        if type(transport).__name__ == "WSTransport" and _transport_headers(transport) is None:
-            if not self.headers_unreadable:
-                logger.warning("Conduit: can't read gateway socket headers; not marking Desktop's chats read")
-            self.headers_unreadable = True
-            return
+        if type(transport).__name__ == "WSTransport":
+            readable = _transport_headers(transport) is not None
+            if readable == self.headers_unreadable:
+                logger.warning("Conduit: gateway socket headers %s",
+                               "readable again" if readable else "unreadable; not marking Desktop's chats read")
+            self.headers_unreadable = not readable
+            if not readable:
+                return
         client = desktop_view_client(transport)
         stored_id = str(result.get("session_key") or "").strip()
         if client is None or not stored_id:

@@ -360,6 +360,10 @@ def test_unreadable_socket_headers_are_reported_not_ignored(monkeypatch, tmp_pat
     assert hook.status() == (False, "gateway-unsupported")
     assert hook.store.read(tmp_path) == {}
 
+    gateway.transport = WSTransport({"user-agent": ELECTRON})
+    gateway.call("session.activate")
+    assert hook.status() == (True, None)
+
 
 def test_a_gateway_without_its_websocket_transport_is_unsupported(monkeypatch, tmp_path):
     gateway = FakeGateway(tmp_path)
