@@ -35,6 +35,7 @@ from typing import Any, Optional
 KINDS = set(b"CAPEQOR" + b"pex")
 MAX_FRAME = 1024 * 1024
 WEBRTC_RATE = 48_000
+MIN_RATE = 8_000  # config rates outside MIN_RATE..WEBRTC_RATE are refused
 FRAME_SAMPLES = 960  # 20 ms at 48 kHz, what aiortc's Opus encoder takes
 # Mic audio waiting to be sent, at 48 kHz: past this, the oldest is dropped
 # so a stall never turns into lasting delay.
@@ -99,12 +100,12 @@ async def run(stdin: Any, stdout: Any) -> int:
         return 2
     try:
         config = json.loads(payload or b"{}")
-        input_rate = int(config.get("input_rate") or 16_000)
-        output_rate = int(config.get("output_rate") or 24_000)
+        input_rate = int(config.get("input_rate", 16_000))
+        output_rate = int(config.get("output_rate", 24_000))
         stun = config.get("stun") or []
-        if not isinstance(stun, list) or input_rate <= 0 or output_rate <= 0:
+        if not isinstance(stun, list) or not all(MIN_RATE <= rate <= WEBRTC_RATE for rate in (input_rate, output_rate)):
             raise ValueError
-    except (ValueError, TypeError, AttributeError):
+    except (ValueError, TypeError, AttributeError, OverflowError):
         print("config isn't usable", file=sys.stderr)
         return 2
     ice = [RTCIceServer(urls=[url]) for url in stun if isinstance(url, str)]

@@ -4908,7 +4908,7 @@ def _watch_audio_marker_current(env_dir: str) -> bool:
 
 
 def _watch_audio_helper_env(extra: Tuple[str, ...] = ()) -> Dict[str, str]:
-    names = _WATCH_AUDIO_HELPER_ENV + extra
+    names = frozenset(_WATCH_AUDIO_HELPER_ENV + extra)
     return {name: value for name, value in os.environ.items() if name in names or name.startswith("LC_")}
 
 
@@ -4938,8 +4938,12 @@ class _WatchAudioRuntime:
         """(python, environment, flags, source) for the helper, or None when no Python here has aiortc."""
         env_dir = self._env_dir()
         python = _env_python(env_dir)
-        if _watch_audio_marker_current(env_dir) and os.path.isfile(python):
-            return python, _watch_audio_helper_env(), ("-I",), "plugin"
+        if os.path.isfile(os.path.join(env_dir, _WATCH_AUDIO_MARKER)):
+            # The plugin's own environment wins once made; one made for
+            # another pin is unready until prepare makes it again.
+            if _watch_audio_marker_current(env_dir) and os.path.isfile(python):
+                return python, _watch_audio_helper_env(), ("-I",), "plugin"
+            return None
         if self._has_module("aiortc") and self._has_module("av"):
             # Some installs add Hermes' packages to sys.path at start, so the
             # helper gets this process's import path. PYTHONHOME too, where
@@ -5649,7 +5653,7 @@ class _WatchAudioBridge:
                 backoff = min(backoff * 2, WATCH_AUDIO_RECONNECT_MAX_S)
                 continue
             self.socket = socket
-            opened = time.monotonic()
+            opened = self.clock()
             try:
                 await self._serve(socket)
             finally:
@@ -5660,7 +5664,7 @@ class _WatchAudioBridge:
                     await socket.close()
             if getattr(socket, "close_code", None) == 4010:  # the relay's grant_closed
                 return
-            if time.monotonic() - opened >= WATCH_AUDIO_STABLE_S:
+            if self.clock() - opened >= WATCH_AUDIO_STABLE_S:
                 backoff = 1.0
                 await self._sleep(0.5)
             else:
