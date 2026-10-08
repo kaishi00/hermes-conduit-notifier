@@ -3914,6 +3914,9 @@ WATCH_FOLLOW_UP_DEADLINE_S = 22.0
 # An end held for words Hermes queued settles the job if the words' turn
 # shows no sign of life for this long (the phone's liveness poll does it there).
 WATCH_FOLLOW_UP_HOLD_S = 30.0
+# Frames from the session renew that wait, but never past this in all: a
+# session that only chatters doesn't keep the job open forever.
+WATCH_FOLLOW_UP_HOLD_MAX_S = 180.0
 # Hermes' marker for a reply a correction cut off, never a result
 # (Conduit's MessageNormalizer.isUserCorrectionInterruptionNotice).
 WATCH_CORRECTION_NOTICE = "[this response was interrupted by a user correction.]"
@@ -4087,6 +4090,7 @@ class _WatchJob:
         self.follow_up: Optional[str] = None
         self.held_completion: Optional[Tuple[str, Dict[str, Any]]] = None
         self.held_at = 0.0
+        self.held_since = 0.0
         # Follow-ups to one job go one at a time, in the order they came.
         self.follow_up_lock = threading.Lock()
 
@@ -4259,6 +4263,7 @@ class _WatchJobs:
                 if kind == "message.complete" and job.follow_up is not None and job.follow_up != "accepted":
                     # Maybe not the last: held until Hermes takes the words.
                     job.held_completion, job.held_at = (kind, payload), time.monotonic()
+                    job.held_since = job.held_at
                     if job.follow_up == "queued":
                         job.follow_up = "accepted"
                     if self.ended:
@@ -4619,7 +4624,8 @@ class _WatchJobs:
                 if result in ("redirected", "queued"):
                     with self.changed:
                         # Settled meanwhile (an error ended the turn): the
-                        # words came too late.
+                        # words came too late. A call that ended meanwhile
+                        # still hears they went in: they were sent during it.
                         if not job.active:
                             return {"outcome": "finished"}
                         if job.follow_up == "sending":
@@ -4713,7 +4719,8 @@ class _WatchJobs:
         settled = []
         for job in self.jobs.values():
             if (job.active and job.held_completion is not None and job.follow_up == "accepted"
-                    and now - job.held_at >= WATCH_FOLLOW_UP_HOLD_S):
+                    and (now - job.held_at >= WATCH_FOLLOW_UP_HOLD_S
+                         or now - job.held_since >= WATCH_FOLLOW_UP_HOLD_MAX_S)):
                 self._settle(job, *job.held_completion)
                 settled.append(job)
         return settled
@@ -4851,8 +4858,11 @@ class _WatchJobs:
                     time.sleep(1.0)
         except Exception as exc:  # noqa: BLE001 — a later hold starts a new reaper
             _log_watch_failure("The Watch job hold reaper failed", exc)
-            with self.changed:
-                self.reaping = False
+        finally:
+            if holding:
+                # Left early: a later hold starts a new reaper.
+                with self.changed:
+                    self.reaping = False
 
     def _close_session_later(self, job: _WatchJob) -> None:
         try:

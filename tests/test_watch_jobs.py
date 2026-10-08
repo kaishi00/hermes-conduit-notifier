@@ -1311,3 +1311,14 @@ def test_hermes_still_at_work_keeps_a_held_end_from_being_reaped(monkeypatch):
     server.emit("rt-1", "message.complete", {"text": "Done for Alex."})
     [item] = news(grant)["news"]
     assert item["result"] == "Done for Alex."
+
+
+def test_a_chattering_session_still_settles_a_held_end_in_the_end(monkeypatch):
+    grant, server = running_job()
+    server.results["session.redirect"] = {"status": "queued"}
+    assert follow_up(grant)["outcome"] == "queued"
+    server.emit("rt-1", "message.complete", {"text": "Step one done."})
+    monkeypatch.setattr(api, "WATCH_FOLLOW_UP_HOLD_MAX_S", 0)
+    server.emit("rt-1", "status.update", {"status": "working"})
+    [item] = news(grant)["news"]
+    assert item["result"] == "Step one done."
