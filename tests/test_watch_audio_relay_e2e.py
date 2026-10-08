@@ -389,13 +389,16 @@ def test_grok_without_a_sign_in_tells_the_watch(paired, monkeypatch):
 
 class FakeGptLive:
     """A WebRTC peer standing in for chatgpt.com: it answers the helper's offer,
-    plays a tone, says hello on the data channel and echoes what it hears there."""
+    plays a tone, says hello on the data channel and echoes what it hears there.
+    With ``delegation``, it hands that item to the app after the hello."""
 
-    def __init__(self):
+    def __init__(self, delegation=None):
         self.loop = asyncio.new_event_loop()
         self.peers = []
         self.offers = []
         self.requests = []
+        self.received = []
+        self.delegation = delegation
         self.thread = threading.Thread(target=self.loop.run_forever, daemon=True)
         self.thread.start()
 
@@ -442,9 +445,12 @@ class FakeGptLive:
         @pc.on("datachannel")
         def _channel(channel):
             channel.send(json.dumps({"type": "session.started"}))
+            if self.delegation is not None:
+                channel.send(json.dumps({"type": "delegation.created", "item": self.delegation}))
 
             @channel.on("message")
             def _message(text):
+                self.received.append(json.loads(text))
                 channel.send(json.dumps({"type": "echo", "of": json.loads(text)}))
 
         @pc.on("track")
@@ -537,6 +543,53 @@ def test_the_command_line_watch_stand_in_holds_a_gpt_live_call(paired, monkeypat
         assert peer.requests[0]["greeting"] == probe.GREETING
     finally:
         peer.close()
+
+
+def test_the_stand_in_answers_a_delegation_through_the_grant(paired, monkeypatch):
+    pytest.importorskip("aiortc")
+    probe = _load_probe()
+    peer = FakeGptLive(delegation={"type": "delegation", "target": "client", "id": "item_del_1",
+                                   "content": [{"type": "input_text", "text": "capital of France"}]})
+    searches = []
+
+    def search(query, limit):
+        searches.append((query, limit))
+        return json.dumps({"success": True, "data": {"web": [
+            {"title": "France", "url": "https://example.com/france", "description": "Its capital is Paris."}]}})
+
+    try:
+        monkeypatch.setattr(api, "_hermes_web_search", search)
+        monkeypatch.setattr(api, "create_gpt_live_session", peer.create_session)
+        monkeypatch.setattr(api, "_watch_audio_runtime", api._WatchAudioRuntime(env_dir=lambda: "/nonexistent/env"))
+        grant = api.open_watch_grant({"tools": ["web_search"], "audio": True}, profile=None, path=paired)
+        run = probe.Run()
+        result = asyncio.run(probe.call(api, grant, "gpt_live", {}, 2.0, run, answer_tail_s=1.0))
+        assert "error" not in result and result["lookups"] == 1
+        assert searches == [("capital of France", 3)]
+        appends = [m for m in peer.received if m.get("type") == "delegation.context.append"]
+        assert appends == [{"type": "delegation.context.append", "channel": "speakable", "delegation_item_id": "item_del_1",
+                            "content": [{"type": "input_text", "text": "Web search results for the user's question:\n"
+                                                                       "- France: Its capital is Paris."}]}]
+        labels = [label for _, label in run.timeline]
+        assert "delegation: capital of France" in labels and "lookup answered (1 result)" in labels
+        assert probe.latency(run.timeline)["delegation_to_lookup_answer_s"] >= 0
+    finally:
+        peer.close()
+
+
+def test_the_stand_in_splits_a_long_answer_and_times_each_turn():
+    probe = _load_probe()
+    appends = probe.delegation_appends("é" * 600, "item_1")
+    assert [len(a["content"][0]["text"].encode("utf-8")) for a in appends] == [500, 500, 200]
+    assert len(probe.delegation_appends("x" * 5000, "item_1")) == probe.APPENDS_PER_ANSWER
+    assert probe.delegation_appends("  ", "item_1") == []
+    assert probe.lookup_text({"ok": False, "detail": "the relay answered HTTP 401"}).startswith(
+        "The lookup failed (the relay answered HTTP 401)")
+    timeline = [[3.0, "model speech starts"], [10.0, "question sent"], [10.9, "heard: capital"],
+                [11.6, "model speech starts"], [12.0, "delegation: capital"], [14.5, "lookup answered (3 results)"],
+                [15.4, "model speech starts"]]
+    assert probe.latency(timeline) == {"question_end_to_heard_s": 0.9, "question_end_to_speech_s": 1.6,
+                                       "delegation_to_lookup_answer_s": 2.5, "lookup_answer_to_speech_s": 0.9}
 
 
 def test_the_stand_in_reads_any_pcm16_wav(tmp_path):

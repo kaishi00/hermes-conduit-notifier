@@ -9,6 +9,15 @@ relay key, says hello, seals a start, streams a WAV question as the mic in
 real time and records the answer to a WAV. Everything goes through the relay
 sealed, exactly as from a Watch; only the Watch is missing.
 
+When GPT-Live hands a lookup to the app (a delegation), the stand-in answers
+it through the grant as the Watch would: a web_search sealed to this host
+via the relay's Watch tools route, its results appended on the delegation.
+The Watch app will run delegations as Hermes jobs, as the phone does; a job
+needs the gateway's own process, so the stand-in looks things up instead.
+The summary's timeline and latency show how long each turn took: from the
+end of the question to the model's first speech, and from the lookup's
+answer to the model speaking it.
+
 GPT-Live needs its WebRTC runtime, the plugin's own small Python environment
 with aiortc. --prepare makes it first, the same way Conduit's "Prepare"
 button will, and works on any Hermes install (it never installs into
@@ -38,14 +47,26 @@ import json
 import os
 import sys
 import time
+import urllib.error
+import urllib.request
 import wave
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 ROOT = Path(__file__).resolve().parents[1]
 FRAME_S = 0.02
 GREETING = "Hi, this is a Watch audio bridge test."
 ANSWER_TAIL_S = 15.0
+# Model audio louder than this is speech; a pause longer than SPEECH_GAP_S
+# ends a stretch of it.
+LOUD = 1000
+SPEECH_GAP_S = 0.6
+# GPT-Live's bound on one context append, in UTF-8 bytes, as on the phone
+# (GPTLiveProtocol.contextAppendMaxBytes), and how many one answer may use.
+APPEND_MAX_BYTES = 500
+APPENDS_PER_ANSWER = 3
+# The relay holds a Watch call 25 s for the host (relay/src/watch-tools.mjs).
+LOOKUP_TIMEOUT_S = 35.0
 UP = "watch-to-host"
 DOWN = "host-to-watch"
 
@@ -97,17 +118,115 @@ class Run:
     def __init__(self) -> None:
         self.t0 = time.monotonic()
         self.marks: dict = {}
+        self.timeline: List[list] = []
         self.events: List[str] = []
         self.transcripts: List[str] = []
         self.audio = bytearray()
+        self.last_loud: Optional[float] = None
 
     def mark(self, name: str) -> None:
         if name not in self.marks:
             self.marks[name] = round(time.monotonic() - self.t0, 2)
             print(f"  [{self.marks[name]:6.2f}s] {name}")
 
+    def note(self, label: str) -> None:
+        """A step of the conversation, for the timeline."""
+        at = round(time.monotonic() - self.t0, 2)
+        self.timeline.append([at, label])
+        print(f"  [{at:6.2f}s] {label}")
 
-async def call(api, grant: dict, engine: str, speech: Dict[int, bytes], seconds: float, run: Run) -> dict:
+    def model_audio(self, pcm: bytes) -> None:
+        self.audio += pcm
+        if peak(pcm) <= LOUD:
+            return
+        self.mark("first model audio")
+        now = time.monotonic()
+        if self.last_loud is None or now - self.last_loud > SPEECH_GAP_S:
+            self.note("model speech starts")
+        self.last_loud = now
+
+
+def latency(timeline: List[list]) -> dict:
+    """Seconds from the end of the question, and from each lookup's answer,
+    to what came next."""
+
+    def first(prefix: str, since: float = 0.0) -> Optional[float]:
+        return next((at for at, label in timeline if at >= since and label.startswith(prefix)), None)
+
+    result: dict = {}
+    pairs = [("question_end_to_heard_s", "question sent", "heard:"),
+             ("question_end_to_speech_s", "question sent", "model speech starts"),
+             ("delegation_to_lookup_answer_s", "delegation:", "lookup answered"),
+             ("lookup_answer_to_speech_s", "lookup answered", "model speech starts")]
+    for name, start, end in pairs:
+        began = first(start)
+        finished = first(end, began) if began is not None else None
+        if finished is not None:
+            result[name] = round(finished - began, 2)
+    return result
+
+
+def lookup(api, grant: dict, query: str) -> dict:
+    """A web_search through the grant, as the Watch calls it: sealed, to this
+    host's poller via the relay."""
+    if not query.strip():
+        return {"ok": False, "detail": "nothing to look up"}
+    secret = base64.urlsafe_b64decode(grant["key"] + "=" * (-len(grant["key"]) % 4))
+    keys = api.watch_tool_keys(secret)
+    rid = base64.urlsafe_b64encode(os.urandom(16)).rstrip(b"=").decode("ascii")
+    sealed = api.seal_watch_tool(keys["call"], "call", grant["grant_id"], rid,
+                                 {"tool": "web_search", "args": {"query": query.strip()[:300], "limit": 3}})
+    request = urllib.request.Request(
+        f"{grant['relay_url']}/v1/watch-tools/grants/{grant['grant_id']}/calls",
+        data=json.dumps({"rid": rid, **sealed}).encode("utf-8"), method="POST",
+        headers={"Authorization": f"Bearer {grant['watch_key']}", "Content-Type": "application/json"})
+    try:
+        # The plugin's opener follows no redirect: the relay key stays with the relay.
+        with api._relay_opener.open(request, timeout=LOOKUP_TIMEOUT_S) as response:
+            body = json.loads(response.read(64 * 1024))
+    except urllib.error.HTTPError as exc:
+        exc.close()
+        return {"ok": False, "detail": f"the relay answered HTTP {exc.code}"}
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        return {"ok": False, "detail": f"the relay couldn't be reached ({exc.__class__.__name__})"}
+    try:
+        return api.open_watch_tool(keys["result"], "result", grant["grant_id"], rid, body, max_bytes=64 * 1024)
+    except api.WatchToolError as exc:
+        return {"ok": False, "detail": f"the answer didn't open ({exc})"}
+
+
+def lookup_text(answer: dict) -> str:
+    """A web_search answer as the text GPT-Live speaks from."""
+    if not answer.get("ok"):
+        return f"The lookup failed ({answer.get('detail') or 'no answer'}). Tell the user it didn't work."
+    lines = [f"- {result.get('title') or ''}: {result.get('snippet') or ''}"
+             for result in answer.get("results") or [] if isinstance(result, dict)]
+    if not lines:
+        return "The web search found nothing for that."
+    return "Web search results for the user's question:\n" + "\n".join(lines)
+
+
+def delegation_appends(text: str, item_id: str) -> List[dict]:
+    """The answer on a delegation, as the phone sends it: speakable appends of
+    at most APPEND_MAX_BYTES each (GPTLiveProtocol.contextAppendMessages)."""
+    chunks: List[str] = []
+    current, size = "", 0
+    for char in text.strip():
+        width = len(char.encode("utf-8"))
+        if size + width > APPEND_MAX_BYTES and current:
+            chunks.append(current)
+            current, size = "", 0
+        current += char
+        size += width
+    if current:
+        chunks.append(current)
+    return [{"type": "delegation.context.append", "channel": "speakable",
+             "content": [{"type": "input_text", "text": chunk}], "delegation_item_id": item_id}
+            for chunk in chunks[:APPENDS_PER_ANSWER]]
+
+
+async def call(api, grant: dict, engine: str, speech: Dict[int, bytes], seconds: float, run: Run,
+               answer_tail_s: float = ANSWER_TAIL_S) -> dict:
     """One Watch call; ``speech`` is the question at each rate the engine may ask for."""
     try:
         from websockets.asyncio.client import connect
@@ -141,20 +260,38 @@ async def call(api, grant: dict, engine: str, speech: Dict[int, bytes], seconds:
     keys = api.watch_audio_keys(secret, sid)
     sent = {"n": 0}
     received = {"n": -1}
+    # The mic and the lookups both send: one at a time, so counters rise in order.
+    sending = asyncio.Lock()
+    state = {"deadline": time.monotonic() + seconds, "heard": "", "lookups": 0}
+    lookups: List[asyncio.Future] = []
 
     async def send(kind: int, plain: bytes) -> None:
-        await socket.send(api.seal_watch_audio(keys[UP], UP, grant["grant_id"], sid, kind, sent["n"], plain))
-        sent["n"] += 1
+        async with sending:
+            await socket.send(api.seal_watch_audio(keys[UP], UP, grant["grant_id"], sid, kind, sent["n"], plain))
+            sent["n"] += 1
 
     started = asyncio.get_running_loop().create_future()
     ended = asyncio.Event()
     result: dict = {}
 
+    async def answer_delegation(item_id: str, request: str) -> None:
+        run.note(f"delegation: {request[:120] or '(no request)'}")
+        try:
+            answer = await asyncio.to_thread(lookup, api, grant, request)
+            found = len(answer.get("results") or []) if answer.get("ok") else 0
+            run.note(f"lookup answered ({found} result{'' if found == 1 else 's'})" if answer.get("ok")
+                     else f"lookup answered (failed: {str(answer.get('detail'))[:120]})")
+            result["lookups"] = result.get("lookups", 0) + 1
+            for event in delegation_appends(lookup_text(answer), item_id):
+                await send(2, json.dumps(event).encode("utf-8"))
+        finally:
+            state["lookups"] -= 1
+            # Room for the model to speak what it found.
+            state["deadline"] = max(state["deadline"], time.monotonic() + answer_tail_s)
+
     def handle(kind: int, plain: bytes) -> None:
         if kind == 1:
-            run.audio += plain
-            if peak(plain) > 1000:
-                run.mark("first model audio")
+            run.model_audio(plain)
             return
         try:
             message = json.loads(plain)
@@ -183,7 +320,22 @@ async def call(api, grant: dict, engine: str, speech: Dict[int, bytes], seconds:
             run.transcripts.append(f"{name.split('_')[0]}: {item.get('text') or ''}")
         elif name == "turn.done":
             turn = message.get("turn") if isinstance(message.get("turn"), dict) else {}
-            print(f"  turn.done {turn.get('role')}: {str(turn.get('transcript') or '')[:200]}")
+            transcript = str(turn.get("transcript") or "").strip()
+            print(f"  turn.done {turn.get('role')}: {transcript[:200]}")
+            if turn.get("role") == "user" and transcript:
+                state["heard"] = transcript
+                run.note(f"heard: {transcript[:120]}")
+        elif name == "delegation.created":
+            item = message.get("item") if isinstance(message.get("item"), dict) else {}
+            if item.get("type") != "delegation" or item.get("target") != "client" or not item.get("id"):
+                run.note("delegation not for the app; skipped")
+                return
+            text = "".join(str(part.get("text") or "") for part in item.get("content") or []
+                           if isinstance(part, dict) and part.get("type") == "input_text").strip()
+            # An empty delegation means the request is what the user just said.
+            # Counted now, so the call can't close before the lookup starts.
+            state["lookups"] += 1
+            lookups.append(asyncio.ensure_future(answer_delegation(str(item["id"]), text or state["heard"])))
         elif name == "conversation.item.input_audio_transcription.completed":
             run.transcripts.append(f"input: {message.get('transcript') or ''}")
         elif name in ("response.output_audio_transcript.done", "response.audio_transcript.done"):
@@ -235,12 +387,12 @@ async def call(api, grant: dict, engine: str, speech: Dict[int, bytes], seconds:
             await send(2, b'{"type":"response.create"}')
         frame = int(input_rate * FRAME_S) * 2
         question = speech.get(input_rate, b"")
-        # Let the greeting play, then the question, then room for the answer.
-        deadline = time.monotonic() + seconds
+        # Let the greeting play, then the question, then room for the answer;
+        # open while a lookup is out.
         clock = time.monotonic()
         offset = 0
         speak_at = time.monotonic() + (8.0 if question else seconds)
-        while time.monotonic() < deadline and not ended.is_set():
+        while (time.monotonic() < state["deadline"] or state["lookups"]) and not ended.is_set():
             chunk = b""
             if question and time.monotonic() >= speak_at and offset < len(question):
                 if offset == 0:
@@ -248,7 +400,8 @@ async def call(api, grant: dict, engine: str, speech: Dict[int, bytes], seconds:
                 chunk = question[offset:offset + frame]
                 offset += frame
                 if offset >= len(question):
-                    deadline = max(deadline, time.monotonic() + ANSWER_TAIL_S)
+                    run.note("question sent")
+                    state["deadline"] = max(state["deadline"], time.monotonic() + answer_tail_s)
             await send(1, chunk.ljust(frame, b"\0"))
             clock += FRAME_S
             await asyncio.sleep(max(0.0, clock - time.monotonic()))
@@ -259,7 +412,9 @@ async def call(api, grant: dict, engine: str, speech: Dict[int, bytes], seconds:
         return result
     finally:
         reader.cancel()
-        await asyncio.gather(reader, return_exceptions=True)
+        for task in lookups:
+            task.cancel()
+        await asyncio.gather(reader, *lookups, return_exceptions=True)
         await socket.close()
 
 
@@ -328,7 +483,8 @@ def main() -> int:
         summary["recording"] = str(path)
     summary.update(result)
     # 16-bit mono: two bytes a sample.
-    summary.update(marks=run.marks, events=dict(collections.Counter(run.events)), transcripts=run.transcripts[-12:],
+    summary.update(marks=run.marks, timeline=run.timeline, latency=latency(run.timeline),
+                   events=dict(collections.Counter(run.events)), transcripts=run.transcripts[-20:],
                    audio_seconds=round(len(run.audio) / (2 * output_rate), 1))
     summary["ok"] = "first model audio" in run.marks and "error" not in result
     print("\nSummary (paste this back into the thread):")
