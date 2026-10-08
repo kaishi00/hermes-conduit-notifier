@@ -300,7 +300,11 @@ def test_an_environment_made_for_another_pin_is_not_ready(tmp_path, marker, herm
     has["aiortc"] = hermes_has_aiortc
     assert runtime.python() is None
     # Only a marker naming another pin says the runtime is out of date.
-    reason = api.WATCH_AUDIO_STALE_RUNTIME if "requirement" in marker else api.WATCH_AUDIO_NEEDS_RUNTIME
+    try:
+        pin = json.loads(marker).get("requirement")
+    except (ValueError, AttributeError):
+        pin = None
+    reason = api.WATCH_AUDIO_STALE_RUNTIME if pin else api.WATCH_AUDIO_NEEDS_RUNTIME
     assert runtime.status() == {"runtime": "missing", "source": None, "reason": reason}
     assert runtime.missing_reason() == reason
     # Prepare makes it again for the current pin.
@@ -333,6 +337,8 @@ def test_a_failed_prepare_says_why_and_can_be_asked_again(tmp_path):
     status = runtime.prepare(start=lambda target: target())
     assert status["runtime"] == "failed"
     assert "ensurepip is not available" in status["reason"] and "uv" in status["reason"]
+    # A Watch starting GPT-Live hears the same reason.
+    assert runtime.missing_reason() == status["reason"]
     runtime._run = FakeRun()
     assert runtime.prepare(start=lambda target: target())["runtime"] == "ready"
 
@@ -720,3 +726,11 @@ def test_the_helper_refuses_an_unusable_config_in_one_line(config):
                           capture_output=True, timeout=60)
     assert done.returncode == 2
     assert done.stderr.decode().strip() == "config isn't usable"
+
+
+def test_a_current_environment_missing_its_python_is_not_called_out_of_date(tmp_path):
+    runtime = _runtime(tmp_path)
+    runtime.prepare(start=lambda target: target())
+    (tmp_path / "env" / "bin" / "python").unlink()
+    assert runtime.python() is None
+    assert runtime.missing_reason() == api.WATCH_AUDIO_NEEDS_RUNTIME
