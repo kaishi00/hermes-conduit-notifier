@@ -184,6 +184,10 @@ def test_header_names_are_matched_in_any_case():
     assert api.desktop_view_client(WSTransport({"User-Agent": ELECTRON, "X-Conduit-Client": "conduit"})) is None
 
 
+def test_a_socket_type_that_isnt_a_class_falls_back_to_the_name():
+    assert api.desktop_view_client(WSTransport({"user-agent": CHROME}), socket_type=(WSTransport,)) == "browser"
+
+
 def test_an_open_at_the_same_moment_takes_the_newer_client():
     merged = api._merge_desktop_view({"opened_at": 5.0, "seen_through": 5.0, "client": "browser"},
                                      {"opened_at": 5.0, "seen_through": 5.0, "client": "desktop"})

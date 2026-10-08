@@ -6307,7 +6307,7 @@ def _is_gateway_socket(transport: Any, socket_type: Optional[type]) -> bool:
     else by name."""
     if transport is None:
         return False
-    if socket_type is not None:
+    if isinstance(socket_type, type):
         return isinstance(transport, socket_type)
     return type(transport).__name__ == "WSTransport"
 
@@ -6319,7 +6319,11 @@ def _transport_headers(transport: Any) -> Optional[Dict[str, Any]]:
         items = getattr(headers, "items", None)
         if not callable(items):
             return None
-        return {str(name).lower(): value for name, value in items()}
+        lowered: Dict[str, Any] = {}
+        for name, value in items():
+            # The first of repeated headers, as Starlette's own get() reads.
+            lowered.setdefault(str(name).lower(), value)
+        return lowered
     except Exception:  # noqa: BLE001
         return None
 
