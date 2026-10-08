@@ -3654,7 +3654,7 @@ def open_watch_grant(body: Any, *, profile: Optional[str], path: Any = None,
         tools += tuple(tool for tool in WATCH_JOB_TOOLS if tool in requested) + WATCH_JOB_CALLS
         # Corrections reach jobs, so they come with the tools that make or
         # stop them: a grant that only lists jobs doesn't get them unasked.
-        if WATCH_JOB_FOLLOW_UP in requested or any(tool in ("start_job", "cancel_job") for tool in requested):
+        if WATCH_JOB_FOLLOW_UP in requested or any(tool in WATCH_JOB_WRITE_TOOLS for tool in requested):
             tools += (WATCH_JOB_FOLLOW_UP,)
     if WATCH_LIVE_TOKEN in requested and live_key() is not None:
         tools += (WATCH_LIVE_TOKEN,)
@@ -3891,11 +3891,13 @@ async def post_watch_tool_revoke(request: Request, response: Response, profile: 
 # interrupt_job puts the user's words into a job Hermes is still working on
 # (a correction, "hold that", "never mind"), as the phone's live calls do
 # (Conduit #451/#455): Hermes' session.redirect, which keeps the work so far
-# and ends the turn with one completion. It comes with every grant that has
-# jobs, so the Watch never needs to name it (an older plugin would refuse a
-# grant that did); named, it is taken rather than refused.
+# and ends the turn with one completion. It comes with every grant that can
+# start or cancel jobs, so the Watch never needs to name it (an older plugin
+# would refuse a grant that did); named, it is taken rather than refused.
 
 WATCH_JOB_TOOLS = ("start_job", "list_jobs", "cancel_job")
+# The job tools that change jobs: a grant with one also takes corrections.
+WATCH_JOB_WRITE_TOOLS = ("start_job", "cancel_job")
 WATCH_JOB_CALLS = ("job_news", "answer_approval")
 WATCH_JOB_FOLLOW_UP = "interrupt_job"
 # Tries and the wait between them while Hermes isn't working on the job
