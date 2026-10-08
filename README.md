@@ -682,6 +682,15 @@ seals the answers back. This host opens no inbound route of its own.
   about, listing and cancelling them past a renewal, and the job limit
   counts per call. A renewal that leaves out `max_jobs` or `job_options`
   keeps the call's.
+- **Follow-ups** (plugin 0.10): a grant with jobs also carries
+  `interrupt_job` (`{job_id, message}`), never asked for by name. It puts the
+  user's words into a job Hermes is still working on, through Hermes'
+  `session.redirect` (a steer on a Hermes without it), as Conduit's phone
+  calls do: Hermes keeps the work so far and the job's result still comes as
+  news. The answer is `{ok, outcome, title?, error?}`, the outcome being
+  `interrupted`, `queued` (taken right after the step Hermes is finishing),
+  `finished`, `failed` or `unknown_job`; follow-ups to one job go one at a
+  time.
 - **Gemini Live tokens** (plugin 0.8): with `live_token` in `tools`, and
   only where this profile has a Gemini key, the Watch can ask for a fresh
   single-use Gemini Live token, minted as `/gemini-live/token` mints one
