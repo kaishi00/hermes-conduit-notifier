@@ -229,6 +229,41 @@ def test_route_returns_views_for_the_profile_home(monkeypatch, tmp_path):
     assert newer["views"] == {"b": {"opened_at": 180.0, "seen_through": 200.0, "client": "browser"}}
 
 
+def test_a_half_loaded_gateway_never_fails_the_route(monkeypatch, tmp_path):
+    hook = _hook()
+    monkeypatch.setattr(hook, "ensure_started", lambda: None)
+
+    def broken():
+        raise ValueError("wrapper loop")
+
+    monkeypatch.setattr(hook, "try_install", broken)
+    monkeypatch.setattr(api, "_desktop_view_hook", hook)
+    monkeypatch.setattr(api, "_desktop_view_store", hook.store)
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path)
+    hook.store.record(tmp_path, "a", "desktop", 120.0, opened_at=100.0)
+
+    app = FastAPI()
+    app.include_router(api.router, prefix=BASE)
+    response = TestClient(app).get(f"{BASE}/sessions/desktop-views")
+    assert response.status_code == 200
+    assert set(response.json()["views"]) == {"a"}
+
+
+def test_a_watcher_that_cant_start_is_retried(monkeypatch):
+    hook = _hook()
+
+    class Unstartable:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(api.threading, "Thread", Unstartable)
+    hook.ensure_started()
+    assert hook._thread is None
+
+
 class Clock:
     def __init__(self, now):
         self.now = now

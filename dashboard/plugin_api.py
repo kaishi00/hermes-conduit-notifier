@@ -6352,7 +6352,7 @@ class _DesktopViewStore:
         self._lock = threading.Lock()
         self._pending: Dict[str, Dict[str, Dict[str, Any]]] = {}
         # Batches taken by a flush and not yet on disk; reads still see them.
-        self._inflight: list = []
+        self._inflight: List[Dict[str, Dict[str, Dict[str, Any]]]] = []
         self._timer: Optional[threading.Timer] = None
         self._flush_delay = flush_delay
 
@@ -6418,7 +6418,7 @@ class _DesktopViewStore:
             if not isinstance(stored_id, str) or not isinstance(entry, dict):
                 continue
             times = [entry.get("opened_at"), entry.get("seen_through")]
-            if not all(_desktop_view_time(value) for value in times):
+            if not all(_desktop_view_time(stamp) for stamp in times):
                 continue
             clean[stored_id] = {"opened_at": float(times[0]), "seen_through": float(times[1]),
                                 "client": str(entry.get("client") or "desktop")}
@@ -6495,8 +6495,13 @@ class _DesktopViewHook:
         with self._lock:
             if self._thread is not None:
                 return
-            self._thread = threading.Thread(target=self._run, name="conduit-desktop-views", daemon=True)
-            self._thread.start()
+            thread = threading.Thread(target=self._run, name="conduit-desktop-views", daemon=True)
+            try:
+                thread.start()
+            except Exception:  # noqa: BLE001 — the next route call tries again
+                logger.debug("Conduit: Desktop view watcher not started", exc_info=True)
+                return
+            self._thread = thread
 
     def _run(self) -> None:
         try:
@@ -6507,7 +6512,7 @@ class _DesktopViewHook:
                     # The next route call starts a fresh watcher.
                     self._thread = None
 
-    def _try_install_quietly(self) -> bool:
+    def try_install_quietly(self) -> bool:
         try:
             return self.try_install()
         except Exception:  # noqa: BLE001 — keep waiting for the gateway
@@ -6516,7 +6521,7 @@ class _DesktopViewHook:
 
     def _watch(self) -> None:
         deadline = time.monotonic() + DESKTOP_VIEWS_INSTALL_WINDOW_S
-        while not self._try_install_quietly():
+        while not self.try_install_quietly():
             if time.monotonic() >= deadline:
                 logger.info("Conduit: not marking chats Desktop opens as read here (%s)", self.reason)
                 return
@@ -6681,7 +6686,7 @@ async def get_desktop_views(response: Response, profile: Optional[str] = None,
     epoch), optionally only those seen after ``since``."""
     response.headers["Cache-Control"] = "no-store"
     _desktop_view_hook.ensure_started()
-    _desktop_view_hook.try_install()
+    _desktop_view_hook.try_install_quietly()  # a half-loaded gateway never fails the read
 
     def read() -> Dict[str, Dict[str, Any]]:
         _desktop_views_limiter.acquire(_limiter_key(profile))
