@@ -188,6 +188,8 @@ gateway-bound inactive records still require separately reviewed maintenance.
 | POST | `/v1/watch-tools/grants/:id/results/:rid` | Answer one Watch tool call (gateway side) |
 | POST | `/v1/watch-tools/grants/:id/calls` | A Watch tool call, held open until the gateway answers (Watch side, the grant's relay key) |
 | DELETE | `/v1/watch-tools/grants/:id` | Close a grant (either side; always 204, so a wrong key learns nothing) |
+| GET (WebSocket) | `/v1/watch-audio/:id/host` | The gateway's side of a Watch call's audio (a grant opened with `audio: true`) |
+| GET (WebSocket) | `/v1/watch-audio/:id/watch` | The Watch's side of it (the grant's relay key) |
 
 Watch tool grants carry an Apple Watch call's lookups while the Watch can't
 reach Conduit on the iPhone. Calls and answers are sealed with a per-call key
@@ -197,6 +199,15 @@ last at most 30 minutes and 120 calls, and a restart drops them; the Watch
 then falls back to the iPhone. A relay holding its maximum of grants answers a
 new one with 503 `watch_grant_capacity`, and that call's lookups go through
 the iPhone.
+
+A grant opened with `audio: true` (relay 0.7+) can also carry the call's live
+audio for GPT-Live and Grok on the Watch: the gateway and the Watch each open
+a WebSocket, and the relay copies binary messages between them. They are
+sealed end to end like the tool calls; the relay reads only a message's first
+byte, which is never 0 (its own two-byte notices to the gateway: Watch
+connected, Watch gone). Limits per socket: 64 KB a message, 96 KB/s averaged
+over 5 s, 60 s of silence; bridges are capped per gateway and per relay (see
+below).
 
 ### Capacity and admission limits
 
@@ -647,7 +658,7 @@ seals the answers back. This host opens no inbound route of its own.
 
 | Method | Route | Returns |
 | --- | --- | --- |
-| POST | `/api/plugins/conduit_push/watch-tools/grant` with `{tools, max_jobs?, job_options?, carry_jobs_from?}` | `{ok, grant_id, relay_url, key, watch_key, expires_at, tools, max_calls, max_jobs, jobs_carried_from?}` |
+| POST | `/api/plugins/conduit_push/watch-tools/grant` with `{tools, max_jobs?, job_options?, carry_jobs_from?, audio?}` | `{ok, grant_id, relay_url, key, watch_key, expires_at, tools, max_calls, max_jobs, jobs_carried_from?, audio?}` |
 | POST | `/api/plugins/conduit_push/watch-tools/revoke` with `{grant_id}` | `{ok, revoked}` |
 
 - `tools` names what the call may run: `web_search` and `recall_memory`
@@ -693,6 +704,52 @@ seals the answers back. This host opens no inbound route of its own.
   notifications, 501 without the `cryptography` package or a relay that
   predates Watch tools, 502/503 when the relay can't open the grant (the call
   then uses the iPhone).
+
+## Apple Watch voice: GPT-Live and Grok (plugin 0.9+)
+
+Gemini Live runs on the Watch itself. GPT-Live on a ChatGPT subscription
+speaks only WebRTC, which the Watch can't run, and Grok runs on this host's
+xAI sign-in, which never leaves it. So for those two the host holds the
+provider session and the Watch streams its audio to it through the push
+relay. A Watch grant opened with `audio: true` returns
+`audio: {url, version, engines}`. The plugin then dials the relay's gateway
+side for that grant and waits, and the Watch dials `url` with the grant's
+relay key. The host still opens no inbound route.
+
+| Method | Route | Returns |
+| --- | --- | --- |
+| GET | `/api/plugins/conduit_push/watch-audio/status` | `{ok, version, engines: {gpt_live: {runtime, source, reason}, grok: {...}}}` |
+| POST | `/api/plugins/conduit_push/watch-audio/prepare` | `{ok, version, engines: {gpt_live: {runtime, source, reason}}}` |
+
+- **Messages** are sealed per Watch connection with a key from the grant's
+  root, so the relay can neither read nor forge one. The Watch speaks each
+  engine's own events, as the phone does, and its tools and jobs go through
+  the grant's lookups. The wire format, keys and control messages are
+  described where they're built (`dashboard/plugin_api.py`, "Watch audio").
+- **GPT-Live** runs WebRTC in a small helper process
+  (`dashboard/watch_audio_helper.py`) under a Python that has `aiortc`. The
+  plugin does the SDP exchange with the Codex sign-in itself, so the
+  sign-in never enters the helper. On any Hermes install, `prepare` makes the
+  plugin's own environment for it: `python -m venv` from the Python Hermes
+  runs, or `uv` where that Python has no venv or pip, then
+  `pip install aiortc==1.15.0` (about 150 MB). It goes in
+  `~/.hermes/conduit_push/watch-audio-env` (under `HERMES_HOME` when that's
+  set, or `CONDUIT_WATCH_AUDIO_ENV`). Nothing is installed into Hermes' own
+  Python; if that Python already has `aiortc`, it's used as it is.
+  `runtime` reads `ready`, `preparing`, `failed` (with the reason) or
+  `missing`, and `engines` in a grant lists `gpt_live` only once it's
+  ready.
+- **Grok** connects to xAI the way the phone's Grok relay does. Grok sends
+  a reply's audio faster than it plays, so the plugin paces it to the Watch
+  at real time with a little lead, and drops what's left when the user
+  speaks over it.
+- A host holds at most 4 Watch calls at once, one per grant. 501 when the
+  relay predates Watch audio (the grant is closed again) or this Python has
+  no `websockets`.
+- `probes/watch_audio_client.py` is a command-line stand-in for the Watch:
+  it opens a grant with audio, calls through the real relay, plays a WAV
+  question and records the answer. `--prepare` makes the GPT-Live runtime
+  first.
 
 ## Capabilities (plugin 0.4+)
 

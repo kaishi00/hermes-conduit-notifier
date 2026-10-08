@@ -49,6 +49,7 @@ def test_every_capability_names_a_served_route_family():
         # Jobs and Gemini Live tokens ride the watch-tools grant route.
         "watch-jobs": "/watch-tools/",
         "watch-live-token": "/watch-tools/",
+        "watch-audio": "/watch-audio/",
     }
     assert set(prefixes) == set(api.ROUTE_CAPABILITIES)
     for capability, prefix in prefixes.items():
