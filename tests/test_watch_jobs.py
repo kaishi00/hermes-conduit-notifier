@@ -286,7 +286,8 @@ def test_a_grant_keeps_the_other_profiles_its_jobs_may_run_on(tmp_path):
 
 
 def test_a_grant_without_jobs_names_no_profiles(tmp_path):
-    grant = api.open_watch_grant({"tools": ["web_search"], "job_profiles": ["fam"]}, profile=None,
+    # Unread there, as job_options: even a malformed list.
+    grant = api.open_watch_grant({"tools": ["web_search"], "job_profiles": ["../fam"]}, profile=None,
                                  path=write_pairing(tmp_path), relay=FakeRelay(), start=lambda g: None,
                                  session_api=FakeHermes)
     assert "job_profiles" not in grant
