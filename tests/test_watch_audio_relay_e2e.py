@@ -9,6 +9,7 @@ real WebRTC helper against a fake GPT-Live peer (when aiortc is installed).
 
 import asyncio
 import base64
+import contextlib
 import importlib.util
 import json
 import math
@@ -169,6 +170,8 @@ class Watch:
                 break  # still open: the host is there
             except Exception:
                 pass
+            with contextlib.suppress(Exception):
+                await socket.close()
             if time.monotonic() > deadline:
                 raise AssertionError("the host never reached the relay")
             await asyncio.sleep(0.2)

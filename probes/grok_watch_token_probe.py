@@ -138,8 +138,9 @@ def mint(api_base: str, bearer: str, seconds: int) -> Dict[str, Any]:
     else:
         # A refusal: its error code only, never xAI's text, which could
         # name the account.
-        detail = body.get("error") if isinstance(body, dict) else None
-        code = detail.get("code") if isinstance(detail, dict) else body.get("code") if isinstance(body, dict) else None
+        envelope = body if isinstance(body, dict) else {}
+        detail = envelope.get("error")
+        code = (detail.get("code") if isinstance(detail, dict) else None) or envelope.get("code")
         result["error"] = str(code)[:60] if isinstance(code, (str, int)) else "refused"
     return result
 

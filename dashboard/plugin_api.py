@@ -4703,6 +4703,9 @@ WATCH_AUDIO_STREAMS_PER_GRANT = 32
 WATCH_AUDIO_MAX_SESSIONS = 4
 WATCH_AUDIO_RELAY_TIMEOUT_S = 15.0
 WATCH_AUDIO_RECONNECT_MAX_S = 10.0
+# A host socket the relay drops sooner than this (another host took the
+# grant's socket, say) reconnects with backoff rather than at once.
+WATCH_AUDIO_STABLE_S = 5.0
 # A session that won't stop when asked is cancelled after this.
 WATCH_AUDIO_STOP_TIMEOUT_S = 5.0
 # GPT-Live: the helper's offer (ICE gathering included), then WebRTC
@@ -4726,6 +4729,8 @@ WATCH_AUDIO_LEAD_S = 1.5
 WATCH_AUDIO_CHUNK_S = 0.1
 # Audio held for pacing past this (a stalled Watch) drops its oldest.
 WATCH_AUDIO_MAX_QUEUED_S = 60.0
+# Events held behind that audio past this many bytes drop their oldest too.
+WATCH_AUDIO_MAX_QUEUED_EVENT_BYTES = 1024 * 1024
 # Audio a GPT-Live helper sends before "started" is out, held until it is.
 WATCH_AUDIO_MAX_HELD = 200
 WATCH_AUDIO_AIORTC = "aiortc==1.15.0"
@@ -4734,6 +4739,11 @@ _WATCH_AUDIO_MARKER = "conduit-watch-audio.json"
 WATCH_AUDIO_VENV_TIMEOUT_S = 180.0
 WATCH_AUDIO_PIP_TIMEOUT_S = 900.0
 _WATCH_AUDIO_HELPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "watch_audio_helper.py")
+# What the helper gets of Hermes' environment: enough to start Python and
+# find the system's libraries, never the keys Hermes may hold there.
+_WATCH_AUDIO_HELPER_ENV = ("PATH", "HOME", "USER", "LOGNAME", "LANG", "TZ", "TMPDIR", "TEMP", "TMP",
+                           "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH",
+                           "DYLD_FALLBACK_LIBRARY_PATH")
 _GROK_AUDIO_DELTAS = ("response.output_audio.delta", "response.audio.delta")
 WATCH_AUDIO_NEEDS_RUNTIME = ("GPT-Live on the Watch needs its WebRTC runtime on the Hermes host; "
                              "prepare it from Conduit's Voice settings")
@@ -4883,6 +4893,25 @@ def _last_line(text: Any) -> str:
     return lines[-1][:200] if lines else ""
 
 
+def _watch_audio_marker_current(env_dir: str) -> bool:
+    """Whether the plugin's environment was made for this plugin's aiortc pin.
+
+    An upgrade that moves the pin leaves the old environment unready, so
+    Conduit's prepare makes it again.
+    """
+    try:
+        with open(os.path.join(env_dir, _WATCH_AUDIO_MARKER), encoding="utf-8") as handle:
+            marker = json.load(handle)
+    except (OSError, ValueError):
+        return False
+    return isinstance(marker, dict) and marker.get("requirement") == WATCH_AUDIO_AIORTC
+
+
+def _watch_audio_helper_env(extra: Tuple[str, ...] = ()) -> Dict[str, str]:
+    names = _WATCH_AUDIO_HELPER_ENV + extra
+    return {name: value for name, value in os.environ.items() if name in names or name.startswith("LC_")}
+
+
 class _WatchAudioRuntime:
     """The Python that runs watch_audio_helper.py, and making one.
 
@@ -4909,12 +4938,14 @@ class _WatchAudioRuntime:
         """(python, environment, flags, source) for the helper, or None when no Python here has aiortc."""
         env_dir = self._env_dir()
         python = _env_python(env_dir)
-        if os.path.isfile(os.path.join(env_dir, _WATCH_AUDIO_MARKER)) and os.path.isfile(python):
-            return python, dict(os.environ), ("-I",), "plugin"
+        if _watch_audio_marker_current(env_dir) and os.path.isfile(python):
+            return python, _watch_audio_helper_env(), ("-I",), "plugin"
         if self._has_module("aiortc") and self._has_module("av"):
             # Some installs add Hermes' packages to sys.path at start, so the
-            # helper gets this process's import path.
-            env = {**os.environ, "PYTHONPATH": os.pathsep.join(path for path in sys.path if path)}
+            # helper gets this process's import path. PYTHONHOME too, where
+            # a bundled Python needs it to start.
+            env = _watch_audio_helper_env(("PYTHONHOME",))
+            env["PYTHONPATH"] = os.pathsep.join(path for path in sys.path if path)
             return self._base_python, env, (), "hermes"
         return None
 
@@ -5307,6 +5338,7 @@ class _WatchAudioPacer:
         self.lead_s = WATCH_AUDIO_LEAD_S if lead_s is None else lead_s
         self.items: deque = deque()
         self.queued_s = 0.0
+        self.queued_event_bytes = 0
         self.playout: Optional[float] = None
         self.wake = asyncio.Event()
 
@@ -5323,16 +5355,32 @@ class _WatchAudioPacer:
             self._drop_oldest_audio()
         self.wake.set()
 
-    def _drop_oldest_audio(self) -> None:
+    def _drop_oldest(self, wanted: int) -> None:
         for index, (kind, data) in enumerate(self.items):
-            if kind == WATCH_AUDIO_AUDIO:
+            if kind == wanted:
                 del self.items[index]
-                self.queued_s -= self._seconds(data)
+                self._forget(kind, data)
                 return
-        self.queued_s = 0.0
+        if wanted == WATCH_AUDIO_AUDIO:
+            self.queued_s = 0.0
+        else:
+            self.queued_event_bytes = 0
+
+    def _drop_oldest_audio(self) -> None:
+        self._drop_oldest(WATCH_AUDIO_AUDIO)
+
+    def _forget(self, kind: int, data: bytes) -> None:
+        if kind == WATCH_AUDIO_AUDIO:
+            self.queued_s -= self._seconds(data)
+        else:
+            self.queued_event_bytes -= len(data)
 
     def event(self, text: str) -> None:
-        self.items.append((WATCH_AUDIO_EVENT, _watch_audio_event_text(text)))
+        data = _watch_audio_event_text(text)
+        self.items.append((WATCH_AUDIO_EVENT, data))
+        self.queued_event_bytes += len(data)
+        while self.queued_event_bytes > WATCH_AUDIO_MAX_QUEUED_EVENT_BYTES:
+            self._drop_oldest(WATCH_AUDIO_EVENT)
         self.wake.set()
 
     def interrupt(self) -> None:
@@ -5360,7 +5408,7 @@ class _WatchAudioPacer:
                         await asyncio.wait_for(self.wake.wait(), wait)
                     continue
                 self.playout += self._seconds(data)
-                self.queued_s -= self._seconds(data)
+            self._forget(kind, data)
             self.items.popleft()
             if await self.send(kind, data) is False:
                 return
@@ -5498,27 +5546,27 @@ def _watch_audio_client_available() -> bool:
 async def _connect_watch_audio_relay(url: str, credential: str) -> Any:
     """The host's socket to the relay (the `websockets` package Hermes ships)."""
     headers = {"Authorization": f"Bearer {credential}"}
+    # Each client has its own refusal: InvalidStatus from the new one,
+    # InvalidStatusCode from the legacy one.
     try:
         from websockets.asyncio.client import connect
+        from websockets.exceptions import InvalidStatus as Refused
         kwargs: Dict[str, Any] = {"additional_headers": headers}
+
+        def status_of(exc: Any) -> int:
+            return int(getattr(exc.response, "status_code", 0) or 0)
     except ImportError:  # websockets < 13
         from websockets import connect  # type: ignore[no-redef]
+        from websockets.exceptions import InvalidStatusCode as Refused  # type: ignore[no-redef]
         kwargs = {"extra_headers": headers}
-    InvalidStatus = InvalidStatusCode = None
-    try:
-        from websockets.exceptions import InvalidStatus
-    except ImportError:  # websockets < 14 names it InvalidStatusCode
-        with contextlib.suppress(ImportError):
-            from websockets.exceptions import InvalidStatusCode
+
+        def status_of(exc: Any) -> int:
+            return int(getattr(exc, "status_code", 0) or 0)
     try:
         return await connect(url, max_size=WATCH_AUDIO_MAX_MESSAGE_BYTES, open_timeout=WATCH_AUDIO_RELAY_TIMEOUT_S,
                              compression=None, **kwargs)
-    except Exception as exc:
-        if InvalidStatus is not None and isinstance(exc, InvalidStatus):
-            raise WatchAudioRelayRefused(int(getattr(exc.response, "status_code", 0) or 0))
-        if InvalidStatusCode is not None and isinstance(exc, InvalidStatusCode):
-            raise WatchAudioRelayRefused(int(getattr(exc, "status_code", 0) or 0))
-        raise
+    except Refused as exc:
+        raise WatchAudioRelayRefused(status_of(exc))
 
 
 class _WatchAudioBridge:
@@ -5600,8 +5648,8 @@ class _WatchAudioBridge:
                 await self._sleep(backoff)
                 backoff = min(backoff * 2, WATCH_AUDIO_RECONNECT_MAX_S)
                 continue
-            backoff = 1.0
             self.socket = socket
+            opened = time.monotonic()
             try:
                 await self._serve(socket)
             finally:
@@ -5612,7 +5660,12 @@ class _WatchAudioBridge:
                     await socket.close()
             if getattr(socket, "close_code", None) == 4010:  # the relay's grant_closed
                 return
-            await self._sleep(0.5)
+            if time.monotonic() - opened >= WATCH_AUDIO_STABLE_S:
+                backoff = 1.0
+                await self._sleep(0.5)
+            else:
+                await self._sleep(backoff)
+                backoff = min(backoff * 2, WATCH_AUDIO_RECONNECT_MAX_S)
 
     async def _sleep(self, seconds: float) -> None:
         with contextlib.suppress(asyncio.TimeoutError):

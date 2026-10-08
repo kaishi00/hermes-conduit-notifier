@@ -208,6 +208,34 @@ def test_the_lead_lets_the_watch_buffer_ahead():
     assert 10 <= len(_run(scenario())) <= 12
 
 
+def test_events_held_behind_audio_are_bounded(monkeypatch):
+    monkeypatch.setattr(api, "WATCH_AUDIO_MAX_QUEUED_EVENT_BYTES", 100)
+    pacer = api._WatchAudioPacer(lambda kind, data: True, 24_000)
+    pacer.audio(b"\1\0" * 2_400)
+    for index in range(10):
+        pacer.event(json.dumps({"type": "delta", "n": index}))
+    events = [json.loads(data)["n"] for kind, data in pacer.items if kind == 2]
+    # The newest fit; the audio ahead of them stays.
+    assert events == list(range(10 - len(events), 10)) and 0 < len(events) < 10
+    assert pacer.queued_event_bytes == sum(len(data) for kind, data in pacer.items if kind == 2) <= 100
+    assert [kind for kind, _ in pacer.items][:1] == [1]
+
+
+def test_sent_events_leave_the_bound():
+    async def scenario():
+        async def send(kind, data):
+            return True
+
+        pacer = api._WatchAudioPacer(send, 24_000, lead_s=0.0)
+        task = asyncio.ensure_future(pacer.run())
+        pacer.event('{"type":"response.done"}')
+        await asyncio.sleep(0.05)
+        task.cancel()
+        return pacer.queued_event_bytes
+
+    assert _run(scenario()) == 0
+
+
 # --- The helper's Python --------------------------------------------------------
 
 
@@ -245,6 +273,30 @@ def test_hermes_own_python_is_used_when_it_has_aiortc(tmp_path):
     python, env, flags, source = runtime.python()
     assert (python, flags, source) == ("/usr/bin/python3", (), "hermes")
     assert env["PYTHONPATH"]
+
+
+@pytest.mark.parametrize("has", [False, True])
+def test_the_helper_never_gets_hermes_keys(tmp_path, monkeypatch, has):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("HERMES_GATEWAY_TOKEN", "secret")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("LC_ALL", "C.UTF-8")
+    runtime = _runtime(tmp_path, has=lambda name: has)
+    if not has:
+        runtime.prepare(start=lambda target: target())
+    _, env, _, _ = runtime.python()
+    assert "OPENAI_API_KEY" not in env and "HERMES_GATEWAY_TOKEN" not in env
+    assert env["PATH"] == "/usr/bin" and env["LC_ALL"] == "C.UTF-8"
+
+
+@pytest.mark.parametrize("marker", ['{"aiortc": "1.14.0", "requirement": "aiortc==1.14.0"}', "not json", "[]"])
+def test_an_environment_made_for_another_pin_is_not_ready(tmp_path, marker):
+    runtime = _runtime(tmp_path)
+    runtime.prepare(start=lambda target: target())
+    (tmp_path / "env" / "conduit-watch-audio.json").write_text(marker)
+    assert runtime.python() is None
+    # Prepare makes it again for the current pin.
+    assert runtime.prepare(start=lambda target: target())["runtime"] == "ready"
 
 
 def test_preparing_makes_a_private_environment_with_venv_and_pip(tmp_path):
@@ -477,6 +529,33 @@ def _bridge(sessions=None, slots=None):
     return bridge
 
 
+@pytest.mark.parametrize("lives", [0.0, 6.0])
+def test_a_host_socket_dropped_at_once_reconnects_with_backoff(monkeypatch, lives):
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(api.time, "monotonic", lambda: clock["now"])
+    bridge = _bridge()
+    bridge.clock = lambda: 0.0
+    delays = []
+
+    class DroppedSocket(FakeSocket):
+        async def __anext__(self):
+            clock["now"] += lives  # how long the relay kept it
+            raise StopAsyncIteration
+
+    async def connect(url, credential):
+        return DroppedSocket()
+
+    async def sleep(seconds):
+        delays.append(seconds)
+        if len(delays) == 4:
+            bridge.stop_requested.set()
+
+    bridge.connect = connect
+    bridge._sleep = sleep
+    _run(bridge._main())
+    assert delays == ([1.0, 2.0, 4.0, 8.0] if lives == 0.0 else [0.5, 0.5, 0.5, 0.5])
+
+
 async def _attach(bridge):
     socket = FakeSocket()
     bridge.loop = asyncio.get_running_loop()
@@ -618,3 +697,17 @@ def test_the_watch_url_is_the_relay_over_websocket():
         f"wss://push.example/v1/watch-audio/{'A' * 22}/watch"
     assert api._watch_audio_ws_url("http://127.0.0.1:9000", "A" * 22, "host") == \
         f"ws://127.0.0.1:9000/v1/watch-audio/{'A' * 22}/host"
+
+
+@pytest.mark.parametrize("config", [b"not json", b'{"input_rate": "fast"}', b'{"stun": "stun:x"}', b"[]"])
+def test_the_helper_refuses_an_unusable_config_in_one_line(config):
+    pytest.importorskip("aiortc")
+    import struct
+    import subprocess
+    import sys
+
+    helper = pathlib.Path(api.__file__).with_name("watch_audio_helper.py")
+    done = subprocess.run([sys.executable, str(helper)], input=b"C" + struct.pack(">I", len(config)) + config,
+                          capture_output=True, timeout=60)
+    assert done.returncode == 2
+    assert done.stderr.decode().strip() == "config isn't usable"
