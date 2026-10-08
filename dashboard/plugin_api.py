@@ -3645,7 +3645,8 @@ def open_watch_grant(body: Any, *, profile: Optional[str], path: Any = None,
     carry_from = body.get("carry_jobs_from")
     if carry_from is not None and (not isinstance(carry_from, str) or not _WATCH_ID.match(carry_from)):
         raise TokenError(400, "carry_jobs_from must be a grant id")
-    server = session_api() if max_jobs > 0 and any(tool in WATCH_JOB_TOOLS for tool in requested) else None
+    wants_jobs = any(tool in WATCH_JOB_TOOLS or tool == WATCH_JOB_FOLLOW_UP for tool in requested)
+    server = session_api() if max_jobs > 0 and wants_jobs else None
     tools = tuple(tool for tool in WATCH_TOOLS if tool in requested)
     if server is not None:
         # The job tools asked for, and the Watch app's own calls and

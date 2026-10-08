@@ -1252,3 +1252,25 @@ def test_a_grant_that_names_interrupt_job_is_taken(tmp_path):
     grant = api.open_watch_grant({"tools": ["start_job", "interrupt_job"]}, profile=None, path=write_pairing(tmp_path),
                                  relay=FakeRelay(), start=lambda g: None, session_api=FakeHermes)
     assert grant["tools"] == ["start_job", "job_news", "answer_approval", "interrupt_job"]
+
+
+def test_a_grant_that_names_only_interrupt_job_opens_the_jobs(tmp_path):
+    grant = api.open_watch_grant({"tools": ["interrupt_job"]}, profile=None, path=write_pairing(tmp_path),
+                                 relay=FakeRelay(), start=lambda g: None, session_api=FakeHermes)
+    assert grant["tools"] == ["job_news", "answer_approval", "interrupt_job"]
+
+
+def test_a_second_follow_up_while_words_wait_keeps_the_job_for_their_turn():
+    grant, server = running_job()
+    server.results["session.redirect"] = {"status": "queued"}
+    assert follow_up(grant)["outcome"] == "queued"
+    server.results["session.redirect"] = {"status": "redirected"}
+    assert follow_up(grant, "and cc Sam")["outcome"] == "interrupted"
+    # The cut-off step, then the corrected step: the queued words still run.
+    server.emit("rt-1", "message.complete", {"text": "[This response was interrupted by a user correction.]"})
+    server.emit("rt-1", "message.complete", {"text": "Step one done, cc Sam."})
+    assert grant.jobs.jobs["watch-1"].status == "running"
+    server.emit("rt-1", "message.start", {})
+    server.emit("rt-1", "message.complete", {"text": "Done for Alex, cc Sam."})
+    [item] = news(grant)["news"]
+    assert (item["status"], item["result"]) == ("finished", "Done for Alex, cc Sam.")
