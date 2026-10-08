@@ -3898,8 +3898,13 @@ WATCH_JOB_FOLLOW_UP = "interrupt_job"
 WATCH_FOLLOW_UP_ATTEMPTS = 4
 WATCH_FOLLOW_UP_RETRY_S = 1.0
 # Another follow-up to the same job goes first: this one waits at most this
-# long for it, inside the relay's 25 s wait.
+# long for it. A follow-up is answered within WATCH_FOLLOW_UP_DEADLINE_S in
+# all, inside the relay's 25 s wait.
 WATCH_FOLLOW_UP_QUEUE_S = 8.0
+WATCH_FOLLOW_UP_DEADLINE_S = 22.0
+# An end held for words Hermes queued settles the job if the words' turn
+# shows no sign of life for this long (the phone's liveness poll does it there).
+WATCH_FOLLOW_UP_HOLD_S = 30.0
 # Hermes' marker for a reply a correction cut off, never a result
 # (Conduit's MessageNormalizer.isUserCorrectionInterruptionNotice).
 WATCH_CORRECTION_NOTICE = "[this response was interrupted by a user correction.]"
@@ -4072,6 +4077,7 @@ class _WatchJob:
         # end of turn may not be the last: it is held here.
         self.follow_up: Optional[str] = None
         self.held_completion: Optional[Tuple[str, Dict[str, Any]]] = None
+        self.held_at = 0.0
         # Follow-ups to one job go one at a time, in the order they came.
         self.follow_up_lock = threading.Lock()
 
@@ -4235,7 +4241,7 @@ class _WatchJobs:
                     return
                 if kind == "message.complete" and job.follow_up is not None and job.follow_up != "accepted":
                     # Maybe not the last: held until Hermes takes the words.
-                    job.held_completion = (kind, payload)
+                    job.held_completion, job.held_at = (kind, payload), time.monotonic()
                     if job.follow_up == "queued":
                         job.follow_up = "accepted"
                     return
@@ -4535,6 +4541,7 @@ class _WatchJobs:
             return {"ok": False, "status": 400, "detail": "message is required"}
         if _json_bytes(words) > WATCH_JOB_MAX_INSTRUCTION_BYTES:
             return {"ok": False, "status": 413, "detail": "The words are too long for a Watch job"}
+        deadline = time.monotonic() + WATCH_FOLLOW_UP_DEADLINE_S
         with self.lock:
             job = self.jobs.get(wanted)
         if job is None:
@@ -4543,12 +4550,12 @@ class _WatchJobs:
             return {"ok": True, "outcome": "failed", "title": job.title,
                     "error": "Hermes is still taking the user's last words for this job."}
         try:
-            outcome = self._follow_up(job, words)
+            outcome = self._follow_up(job, words, deadline)
         finally:
             job.follow_up_lock.release()
         return {"ok": True, "title": job.title, **outcome}
 
-    def _follow_up(self, job: _WatchJob, words: str) -> Dict[str, Any]:
+    def _follow_up(self, job: _WatchJob, words: str, deadline: float) -> Dict[str, Any]:
         attempts = waits = 0
         while True:
             with self.lock:
@@ -4563,7 +4570,7 @@ class _WatchJobs:
             if sid:
                 attempts += 1
                 try:
-                    result = self._redirect(sid, words)
+                    result = self._redirect(sid, words, timeout=max(1.0, deadline - time.monotonic()))
                 except WatchJobError as exc:
                     if not was_queued:
                         self._end_follow_up(job)
@@ -4573,6 +4580,12 @@ class _WatchJobs:
                     if not was_queued:
                         self._end_follow_up(job)
                     return {"outcome": "failed", "error": type(exc).__name__}
+                if result in ("redirected", "queued"):
+                    with self.lock:
+                        # Settled meanwhile (an error ended the turn): the
+                        # words came too late.
+                        if not job.active:
+                            return {"outcome": "finished"}
                 if result == "redirected":
                     with self.changed:
                         if job.follow_up == "sending":
@@ -4593,19 +4606,20 @@ class _WatchJobs:
                 if not job.active:
                     return {"outcome": "finished"}
             waits += 1
-            if attempts >= WATCH_FOLLOW_UP_ATTEMPTS or waits >= WATCH_FOLLOW_UP_ATTEMPTS * 3:
+            if (attempts >= WATCH_FOLLOW_UP_ATTEMPTS or waits >= WATCH_FOLLOW_UP_ATTEMPTS * 3
+                    or time.monotonic() + WATCH_FOLLOW_UP_RETRY_S >= deadline):
                 return {"outcome": "failed", "error": f"Hermes wasn't working on \"{job.title}\" just then."}
             time.sleep(WATCH_FOLLOW_UP_RETRY_S)
 
-    def _redirect(self, sid: str, words: str) -> str:
+    def _redirect(self, sid: str, words: str, timeout: float = WATCH_JOB_RPC_TIMEOUT_S) -> str:
         """Hermes' answer: "redirected", "queued" or "not_running". A Hermes
         without redirect gets a steer, as the phone sends it."""
         try:
-            status = self.rpc("session.redirect", {"session_id": sid, "text": words}).get("status")
+            status = self.rpc("session.redirect", {"session_id": sid, "text": words}, timeout=timeout).get("status")
         except WatchJobError as exc:
             if not exc.unsupported_redirect:
                 raise
-            status = self.rpc("session.steer", {"session_id": sid, "text": words}).get("status")
+            status = self.rpc("session.steer", {"session_id": sid, "text": words}, timeout=timeout).get("status")
             return "not_running" if status == "rejected" else "redirected"
         status = status.lower() if isinstance(status, str) else ""
         return status if status in ("redirected", "queued") else "not_running"
@@ -4637,6 +4651,7 @@ class _WatchJobs:
         marks: list = []
         with self.changed:
             while True:
+                self._settle_stale_holds()
                 running = sum(1 for job in self.jobs.values() if job.active)
                 # Every request still open, so the Watch drops a card
                 # answered elsewhere or timed out.
@@ -4655,6 +4670,15 @@ class _WatchJobs:
         if undelivered is not None and marks:
             undelivered.append(lambda: self._untake(marks))
         return answer
+
+    def _settle_stale_holds(self) -> None:
+        """An end held for queued words whose turn never showed: it was the
+        job's last after all. Called with the lock held."""
+        now = time.monotonic()
+        for job in self.jobs.values():
+            if (job.active and job.held_completion is not None and job.follow_up == "accepted"
+                    and now - job.held_at >= WATCH_FOLLOW_UP_HOLD_S):
+                self._settle(job, *job.held_completion)
 
     def _untake(self, marks: list) -> None:
         """Marks news as not told again: its answer never reached the Watch."""

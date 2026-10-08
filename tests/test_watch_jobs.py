@@ -1176,3 +1176,36 @@ def test_follow_ups_reach_the_job_through_the_sealed_grant_route():
     grant.tools = grant.tools + (api.WATCH_JOB_FOLLOW_UP,)
     answer = api.run_watch_tool(grant, {"tool": "interrupt_job", "args": {"job_id": "watch-1", "message": "hold that"}})
     assert answer["outcome"] == "interrupted"
+
+
+def test_an_end_held_for_queued_words_whose_turn_never_comes_settles_the_job(monkeypatch):
+    grant, server = running_job()
+    server.results["session.redirect"] = {"status": "queued"}
+    assert follow_up(grant)["outcome"] == "queued"
+    server.emit("rt-1", "message.complete", {"text": "Step one done."})
+    assert news(grant)["news"] == []
+    monkeypatch.setattr(api, "WATCH_FOLLOW_UP_HOLD_S", 0)
+    [item] = news(grant)["news"]
+    assert (item["status"], item["result"]) == ("finished", "Step one done.")
+
+
+def test_words_taken_as_the_turn_failed_are_reported_too_late():
+    grant, server = running_job()
+
+    def failed_meanwhile(params):
+        server.emit("rt-1", "error", {"message": "model overloaded"})
+        return {"status": "redirected"}
+
+    server.results["session.redirect"] = failed_meanwhile
+    assert follow_up(grant)["outcome"] == "finished"
+    assert news(grant)["news"][0]["status"] == "failed"
+
+
+def test_a_follow_up_is_answered_inside_the_relays_wait(monkeypatch):
+    monkeypatch.setattr(api, "WATCH_FOLLOW_UP_DEADLINE_S", 0.5)
+    monkeypatch.setattr(api, "WATCH_FOLLOW_UP_RETRY_S", 0.2)
+    grant, server = running_job()
+    server.results["session.redirect"] = {"status": "idle"}
+    started = time.monotonic()
+    assert follow_up(grant)["outcome"] == "failed"
+    assert time.monotonic() - started < 1.0
