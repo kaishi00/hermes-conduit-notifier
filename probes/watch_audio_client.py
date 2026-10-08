@@ -148,25 +148,23 @@ class Run:
         self.last_loud = now
 
 
-def latency(timeline: List[list]) -> Dict[str, List[float]]:
+def latency(timeline: List[list]) -> Dict[str, List[Optional[float]]]:
     """Seconds from the end of each question, each delegation and each
-    lookup's answer to what came next, one value per turn in call order."""
-
-    def first(prefix: str, since: float) -> Optional[float]:
-        return next((at for at, label in timeline if at >= since and label.startswith(prefix)), None)
-
-    result: Dict[str, List[float]] = {}
+    lookup's answer to what came next: one value per start in call order,
+    None when nothing followed before the next start of its kind (a
+    delegation that failed, or the call ended)."""
+    result: Dict[str, List[Optional[float]]] = {}
     pairs = [("question_end_to_heard_s", "question sent", "heard:"),
              ("question_end_to_speech_s", "question sent", "model speech starts"),
              ("delegation_to_lookup_answer_s", "delegation:", "lookup answered"),
              ("lookup_answer_to_speech_s", "lookup answered", "model speech starts")]
     for name, start, end in pairs:
-        for began, label in timeline:
-            if not label.startswith(start):
-                continue
-            finished = first(end, began)
-            if finished is not None:
-                result.setdefault(name, []).append(round(finished - began, 2))
+        starts = [at for at, label in timeline if label.startswith(start)]
+        for index, began in enumerate(starts):
+            until = starts[index + 1] if index + 1 < len(starts) else float("inf")
+            finished = next((at for at, label in timeline
+                             if began <= at < until and label.startswith(end)), None)
+            result.setdefault(name, []).append(None if finished is None else round(finished - began, 2))
     return result
 
 
@@ -198,7 +196,7 @@ def lookup(api, grant: dict, query: str) -> dict:
     except ValueError:
         body = None
     if not isinstance(body, dict):
-        return {"ok": False, "detail": "the relay's answer wasn't JSON"}
+        return {"ok": False, "detail": "the relay's answer wasn't a JSON object"}
     try:
         return api.open_watch_tool(keys["result"], "result", grant["grant_id"], rid, body, max_bytes=64 * 1024)
     except api.WatchToolError as exc:
@@ -283,7 +281,7 @@ async def call(api, grant: dict, engine: str, speech: Dict[int, bytes], seconds:
     # The mic and the lookups both send: one at a time, so counters rise in order.
     sending = asyncio.Lock()
     state = {"deadline": time.monotonic() + seconds, "heard": "", "lookups": 0}
-    lookups: List[asyncio.Task] = []
+    lookups: List[asyncio.Task[None]] = []
 
     async def send(kind: int, plain: bytes) -> None:
         async with sending:
@@ -301,16 +299,20 @@ async def call(api, grant: dict, engine: str, speech: Dict[int, bytes], seconds:
             found = len(answer.get("results") or []) if answer.get("ok") else 0
             run.note(f"lookup answered ({found} result{'' if found == 1 else 's'})" if answer.get("ok")
                      else f"lookup answered (failed: {str(answer.get('detail'))[:120]})")
-            result["lookups"] = result.get("lookups", 0) + 1
             for event in delegation_appends(lookup_text(answer), item_id):
                 await send(2, json.dumps(event).encode("utf-8"))
+            # Lookups answered, a failed search included (its failure is said);
+            # counted once the answer went out, so a failed send counts only below.
+            result["lookups"] = result.get("lookups", 0) + 1
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            # Said, so the model isn't left waiting on the delegation.
-            result["lookup_failures"] = result.get("lookup_failures", 0) + 1
+            # A delegation the stand-in couldn't run. Said, so the model isn't
+            # left waiting on it; the class only, since the text could carry a secret.
+            result["delegations_failed"] = result.get("delegations_failed", 0) + 1
             with contextlib.suppress(Exception):
-                run.note(f"delegation failed ({exc.__class__.__name__}: {str(exc)[:120]})")
+                run.note(f"delegation failed ({exc.__class__.__name__})")
+            with contextlib.suppress(Exception):
                 for event in delegation_appends(lookup_text({"ok": False, "detail": "the Watch couldn't run it"}), item_id):
                     await send(2, json.dumps(event).encode("utf-8"))
         finally:
