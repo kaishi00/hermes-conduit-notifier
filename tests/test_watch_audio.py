@@ -289,11 +289,15 @@ def test_the_helper_never_gets_hermes_keys(tmp_path, monkeypatch, has):
     assert env["PATH"] == "/usr/bin" and env["LC_ALL"] == "C.UTF-8"
 
 
+@pytest.mark.parametrize("hermes_has_aiortc", [False, True])
 @pytest.mark.parametrize("marker", ['{"aiortc": "1.14.0", "requirement": "aiortc==1.14.0"}', "not json", "[]"])
-def test_an_environment_made_for_another_pin_is_not_ready(tmp_path, marker):
-    runtime = _runtime(tmp_path)
+def test_an_environment_made_for_another_pin_is_not_ready(tmp_path, marker, hermes_has_aiortc):
+    has = {"aiortc": False}
+    runtime = _runtime(tmp_path, has=lambda name: has["aiortc"])
     runtime.prepare(start=lambda target: target())
     (tmp_path / "env" / "conduit-watch-audio.json").write_text(marker)
+    # Not even Hermes' own aiortc stands in for it.
+    has["aiortc"] = hermes_has_aiortc
     assert runtime.python() is None
     # Prepare makes it again for the current pin.
     assert runtime.prepare(start=lambda target: target())["runtime"] == "ready"
@@ -530,11 +534,11 @@ def _bridge(sessions=None, slots=None):
 
 
 @pytest.mark.parametrize("lives", [0.0, 6.0])
-def test_a_host_socket_dropped_at_once_reconnects_with_backoff(monkeypatch, lives):
-    clock = {"now": 1000.0}
-    monkeypatch.setattr(api.time, "monotonic", lambda: clock["now"])
+def test_a_host_socket_dropped_at_once_reconnects_with_backoff(lives):
+    clock = {"now": 0.0}
     bridge = _bridge()
-    bridge.clock = lambda: 0.0
+    bridge.clock = lambda: clock["now"]
+    bridge.grant.expires_at = 1000.0
     delays = []
 
     class DroppedSocket(FakeSocket):
@@ -699,7 +703,8 @@ def test_the_watch_url_is_the_relay_over_websocket():
         f"ws://127.0.0.1:9000/v1/watch-audio/{'A' * 22}/host"
 
 
-@pytest.mark.parametrize("config", [b"not json", b'{"input_rate": "fast"}', b'{"stun": "stun:x"}', b"[]"])
+@pytest.mark.parametrize("config", [b"not json", b'{"input_rate": "fast"}', b'{"input_rate": 1e999}',
+                                    b'{"input_rate": 0}', b'{"output_rate": 96000}', b'{"stun": "stun:x"}', b"[]"])
 def test_the_helper_refuses_an_unusable_config_in_one_line(config):
     pytest.importorskip("aiortc")
     import struct
