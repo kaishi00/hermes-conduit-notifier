@@ -10,13 +10,14 @@ from typing import Any
 
 # Keep in sync with plugin.yaml. Reported on every event so the relay can
 # expose per-gateway compatibility state to the app (Settings > Notifications).
-PLUGIN_VERSION = "0.12.1"
+PLUGIN_VERSION = "0.13.0"
 PLUGIN_CAPABILITIES = [
     "approval-decisions",
     "clarify-loop",
     "batch-clarify-decisions",
     "version-reporting",
     "e2e-v1",
+    "hermes-calls",
 ]
 
 # PROTOCOL/STORE bounds for batch clarify decisions (8 questions x 8
@@ -52,6 +53,7 @@ def push_event(
     title: str = "",
     body: str = "",
     decision: dict[str, Any] | None = None,
+    call: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     event: dict[str, Any] = {
         "event_id": identifier,
@@ -78,7 +80,45 @@ def push_event(
         expected_kind = "approval" if kind == "approval.needed" else "clarify"
         if sanitized and sanitized.get("kind") == expected_kind:
             event["decision"] = sanitized
+    # `call` (#449) names the job a call request is about, so Conduit can open
+    # its chat and tell the user how it ended.
+    if call is not None and kind == "call.requested":
+        sanitized_call = sanitize_call(call)
+        if sanitized_call:
+            event["call"] = sanitized_call
     return event
+
+
+CALL_KINDS = ("done", "failed", "stopped")
+_CALL_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+_CALL_SESSION_ID = re.compile(r"^[A-Za-z0-9:_./-]{1,180}$")
+
+
+def sanitize_call(value: Any) -> dict[str, Any] | None:
+    """A call request's job, bounded: the watch id, how the job ended, its
+    title and its session ids (runtime and stored). None when malformed."""
+    if not isinstance(value, dict):
+        return None
+    call_id = value.get("id")
+    kind = value.get("kind")
+    raw_ids = value.get("session_ids")
+    if not isinstance(call_id, str) or not _CALL_ID.match(call_id) or kind not in CALL_KINDS:
+        return None
+    if not isinstance(raw_ids, list):
+        return None
+    session_ids: list[str] = []
+    for item in raw_ids:
+        if not isinstance(item, str) or not _CALL_SESSION_ID.match(item):
+            return None
+        if item not in session_ids:
+            session_ids.append(item)
+    if not session_ids:
+        return None
+    call: dict[str, Any] = {"id": call_id, "kind": kind, "session_ids": session_ids[:4]}
+    title = _clean(value.get("title") if isinstance(value.get("title"), str) else "", 120)
+    if title:
+        call["title"] = title
+    return call
 
 
 REDACTED_APPROVAL_TEXT = "Hermes needs your approval. Open Conduit for details."
@@ -132,6 +172,10 @@ def redact_event(event: dict[str, Any]) -> dict[str, Any]:
                 for index, entry in enumerate(entries)
             ]
         redacted["decision"] = clarify
+    call = sanitize_call(event.get("call")) if event.get("type") == "call.requested" else None
+    if call:
+        # The job's title is chat content; its id, outcome and sessions route.
+        redacted["call"] = {key: call[key] for key in ("id", "kind", "session_ids")}
     return redacted
 
 

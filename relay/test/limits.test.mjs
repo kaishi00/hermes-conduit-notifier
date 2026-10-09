@@ -1,13 +1,14 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 
-import { DEFAULT_BUDGETS, DEFAULT_STORE_LIMITS, DEFAULT_WATCH_LIMITS, limitsFromEnv } from '../src/limits.mjs';
+import { DEFAULT_BUDGETS, DEFAULT_CALL_LIMITS, DEFAULT_STORE_LIMITS, DEFAULT_WATCH_LIMITS, limitsFromEnv } from '../src/limits.mjs';
 
 test('relay limits default when unset or empty and accept positive integer overrides', () => {
   assert.deepEqual(limitsFromEnv({}), {
     storeLimits: { ...DEFAULT_STORE_LIMITS },
     watchLimits: { ...DEFAULT_WATCH_LIMITS },
     budgets: { ...DEFAULT_BUDGETS },
+    callLimits: { ...DEFAULT_CALL_LIMITS },
   });
   assert.deepEqual(limitsFromEnv({ RELAY_MAX_INSTALLATIONS: '', RELAY_EVENTS_PER_MINUTE: '  ' }).storeLimits, { ...DEFAULT_STORE_LIMITS },
     'Compose passes unset optional variables as empty strings');
@@ -29,7 +30,9 @@ test('relay limits default when unset or empty and accept positive integer overr
     RELAY_WATCH_CALLS_PER_MINUTE: '2400',
     RELAY_MAX_WATCH_AUDIO_BRIDGES: '50',
     RELAY_MAX_WATCH_AUDIO_BRIDGES_PER_GATEWAY: '1',
+    RELAY_CALLS_PER_INSTALLATION_PER_DAY: '30',
   });
+  assert.deepEqual(configured.callLimits, { callsPerInstallationPerDay: 30 });
   assert.deepEqual(configured.storeLimits, {
     ...DEFAULT_STORE_LIMITS,
     maxInstallations: 200_000,

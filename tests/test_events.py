@@ -2,9 +2,11 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from events import REDACTED_APPROVAL_TEXT, REDACTED_QUESTION_TEXT, approval_decision, clarify_decision, clarification_text, event_id, is_silent_response, normalize_clarify_questions, push_event, redact_event, sanitize_decision
+from events import REDACTED_APPROVAL_TEXT, REDACTED_QUESTION_TEXT, approval_decision, clarify_decision, clarification_text, event_id, is_silent_response, normalize_clarify_questions, push_event, redact_event, sanitize_call, sanitize_decision
 
 
 def test_event_identifiers_are_stable_for_replayed_hooks():
@@ -425,3 +427,59 @@ def test_redact_event_applies_sanitizer_and_approval_vocabulary():
         {"qid": "q1", "question": "q", "choices": ["a"]},
     ]}})
     assert [q["qid"] for q in clarify["decision"]["questions"]] == ["q1"]
+
+
+CALL = {"id": "0123456789abcdef01234567", "kind": "done", "title": "Check the server", "session_ids": ["rt-1", "st-1"]}
+
+
+def test_call_request_carries_a_sanitized_call():
+    event = push_event(
+        "call.requested",
+        identifier="call:0123456789abcdef01234567",
+        session_id="rt-1",
+        profile="default",
+        title="Hermes wants to talk",
+        body="Check the server finished.",
+        call={**CALL, "title": "Check\nthe server " + "x" * 300, "extra": "dropped"},
+    )
+    assert event["call"]["id"] == CALL["id"]
+    assert event["call"]["kind"] == "done"
+    assert event["call"]["session_ids"] == ["rt-1", "st-1"]
+    assert len(event["call"]["title"]) == 120
+    assert "extra" not in event["call"]
+
+
+def test_call_is_only_attached_to_call_requests():
+    event = push_event("response.ready", identifier="response:12345678", call=CALL)
+    assert "call" not in event
+
+
+@pytest.mark.parametrize("call", [
+    {**CALL, "id": "short"},
+    {**CALL, "id": "has space in it here"},
+    {**CALL, "kind": "maybe"},
+    {**CALL, "session_ids": ["bad id"]},
+    {**CALL, "session_ids": []},
+    "not a dict",
+])
+def test_a_malformed_call_is_dropped(call):
+    assert sanitize_call(call) is None
+
+
+def test_call_sessions_are_bounded():
+    assert sanitize_call({**CALL, "session_ids": ["a", "b", "c", "d", "e"]})["session_ids"] == ["a", "b", "c", "d"]
+
+
+def test_redact_event_keeps_only_the_call_routing():
+    event = push_event(
+        "call.requested",
+        identifier="call:0123456789abcdef01234567",
+        session_id="rt-1",
+        title="Hermes wants to talk",
+        body="Check the server finished.",
+        call=CALL,
+    )
+    redacted = redact_event(event)
+    assert redacted["call"] == {"id": CALL["id"], "kind": "done", "session_ids": ["rt-1", "st-1"]}
+    assert "title" not in redacted
+    assert "body" not in redacted

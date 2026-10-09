@@ -11,9 +11,11 @@ const defaultPreferences = Object.freeze({
   response_ready: true,
   turn_failed: true,
   background_task_finished: true,
+  // "Hermes wants to talk" (#449); the host's own setting decides first.
+  call_requested: true,
   completion_sound: true,
   // Sound for the notifications that wait on the user (approval.needed,
-  // input.needed). Approvals time out and fail closed, so a silent banner
+  // input.needed, call.requested). Approvals time out and fail closed, so a silent banner
   // is easy to miss; default on, with its own opt-out.
   attention_sound: true,
   show_previews: false,

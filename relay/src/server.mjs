@@ -15,9 +15,9 @@ import { WATCH_TOOLS_CAPABILITY, WatchToolGrants, watchToolRoutes } from './watc
 const RELAY_INFO = (() => {
   try {
     const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-    return { version: String(pkg.version || 'unknown'), capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY] };
+    return { version: String(pkg.version || 'unknown'), capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls'] };
   } catch {
-    return { version: 'unknown', capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY] };
+    return { version: 'unknown', capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls'] };
   }
 })();
 
@@ -48,6 +48,12 @@ const E2E_ANSWER_PATTERN = new RegExp(`^${E2E_ANSWER_PREFIX.replace(/[.*+?^${}()
 // Stands in for question text the relay can't read, so a parked batch keeps
 // its qids (the store sanitizer drops questions without text).
 const E2E_QUESTION_PLACEHOLDER = '[encrypted]';
+
+// Hermes calls you (#449): a call request is a notification Conduit shows
+// with a Talk action (this category), about one job: `call` names it.
+const CALL_CATEGORY = 'HERMES_CALL';
+const CALL_KINDS = new Set(['done', 'failed', 'stopped']);
+const CALL_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 // Conduit dashboard UUIDs (opaque app-generated identity, #148) are
 // canonicalized and validated in the store (normalizeDashboardId); the route
@@ -327,6 +333,7 @@ async function route(request, response) {
     }
     if (duplicateEvent && !event.pluginVersion) return sendJson(response, 200, { accepted: true, duplicate: true });
     enforceEventBudget();
+    if (!duplicateEvent && event.type === 'call.requested') enforceCallCeiling(installation.id);
     // Plugin version recording runs BEFORE the dedupe return: a second
     // gateway on the same installation running the same plugin version sends
     // the same deterministic plugin.hello id, and it must still be recorded.
@@ -633,12 +640,12 @@ function notificationFor(event, preferences, gateway = undefined) {
   // different profiles and sessions distinguishable in Notification Center.
   const body = preferences.show_previews && event.body ? event.body : notificationContext(generic.body, event);
   const completion = event.type === 'response.ready' || event.type === 'background_task.finished';
-  // Approval and clarify pushes wait on the user, so they chime by default:
-  // `!== false` keeps installations whose stored preferences predate
+  // Approval, clarify and call pushes wait on the user, so they chime by
+  // default: `!== false` keeps installations whose stored preferences predate
   // attention_sound on that default. completion_sound keeps its original
   // truthy test, so its behavior for any stored shape is unchanged.
   // turn.failed is deliberately excluded: it reports, it doesn't wait on the user.
-  const attention = event.type === 'approval.needed' || event.type === 'input.needed';
+  const attention = waitsOnUser(event.type);
   const sound = (completion && preferences.completion_sound) || (attention && preferences.attention_sound !== false);
   // `decision` carries structured approval card content so Conduit can render
   // an answerable card from the push payload alone — the one-shot gateway
@@ -666,10 +673,16 @@ function notificationFor(event, preferences, gateway = undefined) {
   // `conduit` copy stays ROUTING-ONLY for raw-APNs consumers: duplicating
   // the structured decision there once doubled the decision's byte cost and
   // pushed ordinary multi-question batches over the size guard.
-  const bodyConduit = { ...routing, ...(decision ? { decision } : {}) };
+  // The job's title is chat content: like the banner text, it rides only
+  // with previews on (Conduit falls back to the chat's own title).
+  const call = event.type === 'call.requested' && event.call
+    ? (preferences.show_previews ? event.call : (({ title: _title, ...rest }) => rest)(event.call))
+    : undefined;
+  const bodyConduit = { ...routing, ...(decision ? { decision } : {}), ...(call ? { call } : {}) };
   const aps = {
     alert: { title, body },
     ...(sound ? { sound: 'default' } : {}),
+    ...(event.type === 'call.requested' ? { category: CALL_CATEGORY } : {}),
     // Thread grouping is gateway-scoped: two dashboards both using session
     // "default" must never share a Notification Center thread. Gateway-less
     // callers (direct/test use) keep the legacy raw-session shape.
@@ -684,7 +697,7 @@ function notificationFor(event, preferences, gateway = undefined) {
   // the budget degrades to the routing stub instead of losing the whole
   // notification. The headroom under the 4096 cap absorbs per-request APNs
   // headers and JSON escaping.
-  if (decision && Buffer.byteLength(JSON.stringify(payload)) > MAX_NOTIFICATION_BYTES) {
+  if ((decision || call) && Buffer.byteLength(JSON.stringify(payload)) > MAX_NOTIFICATION_BYTES) {
     payload = { aps, body: { conduit: routing }, conduit: routing };
   }
   // Collapse key: same gateway + session + type collapses (repeat alerts
@@ -719,7 +732,7 @@ function notificationFor(event, preferences, gateway = undefined) {
 function encryptedNotificationFor(event, preferences, { gatewayId, dashboardId, scopeToken }) {
   const generic = genericCopy(event.type);
   const completion = event.type === 'response.ready' || event.type === 'background_task.finished';
-  const attention = event.type === 'approval.needed' || event.type === 'input.needed';
+  const attention = waitsOnUser(event.type);
   const sound = (completion && preferences.completion_sound) || (attention && preferences.attention_sound !== false);
   const threadId = scopeToken(event.e2e.tok) ?? event.e2e.tok;
   const routing = {
@@ -731,6 +744,7 @@ function encryptedNotificationFor(event, preferences, { gatewayId, dashboardId, 
   const aps = {
     alert: { title: generic.title, body: generic.body },
     ...(sound ? { sound: 'default' } : {}),
+    ...(event.type === 'call.requested' ? { category: CALL_CATEGORY } : {}),
     'mutable-content': 1,
     'thread-id': threadId,
   };
@@ -756,7 +770,12 @@ function shortSessionId(sessionId) {
   return sessionId.length > 10 ? `…${sessionId.slice(-8)}` : sessionId;
 }
 
+function waitsOnUser(type) {
+  return type === 'approval.needed' || type === 'input.needed' || type === 'call.requested';
+}
+
 function genericCopy(type) {
+  if (type === 'call.requested') return { title: 'Hermes wants to talk', body: 'Tap to talk to Hermes.' };
   if (type === 'approval.needed') return { title: 'Approval needed', body: 'Hermes is waiting for your approval.' };
   if (type === 'input.needed') return { title: 'Input needed', body: 'Hermes needs your response before it can continue.' };
   if (type === 'turn.failed') return { title: 'Turn failed', body: 'A Hermes turn could not be completed.' };
@@ -770,7 +789,7 @@ function shouldDeliver(preferences, type) {
 }
 
 function validateEvent(body) {
-  const types = new Set(['approval.needed', 'input.needed', 'response.ready', 'turn.failed', 'background_task.finished', 'plugin.hello']);
+  const types = new Set(['approval.needed', 'input.needed', 'response.ready', 'turn.failed', 'background_task.finished', 'call.requested', 'plugin.hello']);
   if (!types.has(body.type)) throw httpError(400, 'invalid_event_type');
   const eventId = String(body.event_id ?? '');
   if (!/^[A-Za-z0-9:_-]{8,128}$/.test(eventId)) throw httpError(400, 'invalid_event_id');
@@ -802,7 +821,25 @@ function validateEvent(body) {
     pluginVersion: cleanIdentifier(body.plugin_version, 40),
     pluginCapabilities: validCapabilities(body.plugin_capabilities),
     decision: validateDecision(body.decision, body.type),
+    call: body.type === 'call.requested' ? validateCall(body.call) : undefined,
   };
+}
+
+// The job a call request is about (#449), mirroring the plugin's
+// sanitize_call. A malformed one is dropped: the notification still opens
+// the event's session.
+function validateCall(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  if (typeof value.id !== 'string' || !/^[A-Za-z0-9_-]{8,64}$/.test(value.id) || !CALL_KINDS.has(value.kind)) return undefined;
+  const sessionIds = [];
+  for (const item of Array.isArray(value.session_ids) ? value.session_ids : []) {
+    const sessionId = typeof item === 'string' && item.length <= 180 ? cleanIdentifier(item, 180) : undefined;
+    if (sessionId && !sessionIds.includes(sessionId)) sessionIds.push(sessionId);
+  }
+  // A call with no session has no chat to open; the plugin never sends one.
+  if (!sessionIds.length) return undefined;
+  const title = cleanText(value.title, 120);
+  return { id: value.id, kind: value.kind, session_ids: sessionIds.slice(0, 4), ...(title ? { title } : {}) };
 }
 
 function validCapabilities(value) {
@@ -992,6 +1029,17 @@ function enforceDeviceChangeBudget() {
 
 function enforceDecisionBudget() {
   enforceRateLimit('decision-global', config.budgets.decisionActionsPerMinute, 60_000);
+}
+
+// Each host holds its user to their own call limits; this backstops one that
+// doesn't, per installation over 24 hours.
+function enforceCallCeiling(installationId) {
+  try {
+    enforceRateLimit(`call:${installationId}`, config.callLimits.callsPerInstallationPerDay, CALL_WINDOW_MS);
+  } catch (error) {
+    if (error?.status === 429) throw httpError(429, 'call_limit');
+    throw error;
+  }
 }
 
 function enforceRevocationBudget() {

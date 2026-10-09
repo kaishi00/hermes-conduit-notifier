@@ -46,6 +46,13 @@ export const DEFAULT_BUDGETS = Object.freeze({
   watchCallsPerMinute: 1_200,
 });
 
+// Hermes calls you (#449): call requests per installation in 24 hours.
+// Each host holds its user to their own limits (at most 60 a day); this
+// backstops a host that doesn't.
+export const DEFAULT_CALL_LIMITS = Object.freeze({
+  callsPerInstallationPerDay: 60,
+});
+
 const STORE_LIMIT_VARIABLES = Object.freeze({
   maxInstallations: 'RELAY_MAX_INSTALLATIONS',
   maxGatewaysPerInstallation: 'RELAY_MAX_GATEWAYS_PER_INSTALLATION',
@@ -60,6 +67,10 @@ const WATCH_LIMIT_VARIABLES = Object.freeze({
   maxGrantsPerGateway: 'RELAY_MAX_WATCH_GRANTS_PER_GATEWAY',
   maxAudioBridges: 'RELAY_MAX_WATCH_AUDIO_BRIDGES',
   maxAudioBridgesPerGateway: 'RELAY_MAX_WATCH_AUDIO_BRIDGES_PER_GATEWAY',
+});
+
+const CALL_LIMIT_VARIABLES = Object.freeze({
+  callsPerInstallationPerDay: 'RELAY_CALLS_PER_INSTALLATION_PER_DAY',
 });
 
 const BUDGET_VARIABLES = Object.freeze({
@@ -79,6 +90,7 @@ export function limitsFromEnv(env = process.env) {
     storeLimits: readIntegers(DEFAULT_STORE_LIMITS, STORE_LIMIT_VARIABLES, env),
     watchLimits: readIntegers(DEFAULT_WATCH_LIMITS, WATCH_LIMIT_VARIABLES, env),
     budgets: readIntegers(DEFAULT_BUDGETS, BUDGET_VARIABLES, env),
+    callLimits: readIntegers(DEFAULT_CALL_LIMITS, CALL_LIMIT_VARIABLES, env),
   };
 }
 
