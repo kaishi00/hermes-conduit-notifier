@@ -204,5 +204,5 @@ def deliver(event: dict[str, Any], fallback: dict[str, Any] | None) -> None:
             break
         except Exception as error:  # noqa: BLE001 — transport: try again
             logger.warning("Conduit call request delivery failed: %s", error)
-    if fallback is not None:
-        client.enqueue(fallback)
+    if fallback is not None and not client.enqueue(fallback):
+        logger.warning("Conduit could not queue the usual push for a call that didn't go out")

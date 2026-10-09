@@ -75,6 +75,8 @@ HOUR_S = 3600
 DAY_S = 24 * 3600
 
 _SESSION_ID = re.compile(r"^[A-Za-z0-9:_./-]{1,180}$")
+# The shape the call event carries (events.sanitize_call).
+_WATCH_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 _thread_lock = threading.Lock()
 
 
@@ -130,6 +132,13 @@ class CallStore:
                 for end in state["ends"]:
                     if end["session_id"] in ids and end["outcome"] != "stopped" and now - end["at"] <= within:
                         return {"status": "ended", "outcome": end["outcome"]}
+            # A retried request (the first answer lost) gets the same watch,
+            # never a second one that would call again.
+            for watch in state["watches"]:
+                if set(watch["session_ids"]) == set(ids):
+                    if hold:
+                        watch["hold_until"] = max(watch["hold_until"], now + hold)
+                    return {"status": "watching", "id": watch["id"]}
             if len(state["watches"]) >= MAX_WATCHES:
                 raise ValueError("too_many")
             watch = {
@@ -319,7 +328,7 @@ def _normalized(raw: Any, now: float) -> dict[str, Any]:
     watches = []
     for watch in raw.get("watches") if isinstance(raw.get("watches"), list) else []:
         try:
-            if watch["expires_at"] > now:
+            if watch["expires_at"] > now and _WATCH_ID.match(str(watch["id"])):
                 pending = watch.get("pending")
                 if not (isinstance(pending, dict) and pending.get("outcome") in OUTCOMES
                         and isinstance(pending.get("session_id"), str)):

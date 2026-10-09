@@ -401,3 +401,25 @@ def test_a_turn_end_that_changes_nothing_writes_nothing(tmp_path):
     assert store.fire_due() == []
     after = store.path.stat()
     assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)  # saving replaces the file
+
+
+def test_a_retried_watch_for_the_same_job_is_the_same_watch(tmp_path):
+    clock = Clock()
+    store = _store(tmp_path, clock=clock, enabled=True)
+    first = store.add_watch(["rt-1", "st-1"], "Check the server", hold_s=90)["id"]
+    clock.now += 30
+    # The first answer was lost; the phone asks again.
+    assert store.add_watch(["st-1", "rt-1"], "Check the server", hold_s=90) == {"status": "watching", "id": first}
+    assert store.watch_count() == 1
+    store.fire("rt-1", "done")
+    assert store.next_due() == clock.now + 90
+
+
+def test_a_watch_with_a_malformed_id_is_dropped(tmp_path):
+    store = _store(tmp_path, enabled=True)
+    store.add_watch(["rt-1"], "Check the server")
+    state = json.loads(store.path.read_text())
+    state["watches"][0]["id"] = "bad id!"
+    store.path.write_text(json.dumps(state))
+    assert store.watch_count() == 0
+    assert store.fire("rt-1", "done") is None
