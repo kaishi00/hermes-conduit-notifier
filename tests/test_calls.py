@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import pathlib
 import sys
 import tempfile
@@ -461,3 +462,183 @@ def test_one_held_call_that_cannot_go_out_never_stops_the_rest(home, fake):
     broken = {**good, "session_id": "a", "watch": None}  # building its event raises
     calls._send_due([broken, good], "default")
     assert [event["session_id"] for event in fake.sent] == ["b"]
+
+
+# --- Calls Hermes asks for, and alert calls ----------------------------------
+
+call_tool = sys.modules["conduit_push.call_tool"]
+
+
+@pytest.fixture
+def paired(monkeypatch):
+    monkeypatch.setattr(call_tool.client, "load_state", lambda: {"credential": "x"})
+
+
+def _settings(home, **settings):
+    calls._store(home).update_settings({"enabled": True, **settings})
+
+
+def _tool(args, session_id="st-1", **kwargs):
+    return json.loads(call_tool.handle(args, session_id=session_id, **kwargs))
+
+
+def test_the_tool_calls_when_the_asking_turn_ends_with_its_reason(home, fake, paired):
+    _settings(home)
+    answer = _tool({"reason": "The deploy finished; two tests failed.", "asked_by_user": True})
+    assert answer["ok"] is True and answer["status"] == "call_at_turn_end"
+    assert fake.sent == [], "nothing rings before the turn ends"
+    plugin._post_llm_call(session_id="st-1", turn_id="t1", assistant_response="Here's what happened…")
+    [event] = fake.sent
+    assert event["type"] == "call.requested"
+    assert event["body"] == "The deploy finished; two tests failed."
+    assert event["call"]["kind"] == "done"
+    assert event["call"]["reason"] == "The deploy finished; two tests failed."
+    assert event["call"]["session_ids"] == ["st-1"]
+    assert "title" not in event["call"]
+    assert fake.enqueued == [], "the call takes the ready push's place"
+
+
+def test_the_tool_follows_the_users_settings(home, fake, paired):
+    assert _tool({"reason": "Done.", "asked_by_user": True})["error"] == "calls_off"
+    _settings(home)
+    assert _tool({"reason": "Heads up.", "asked_by_user": False})["error"] == "calls_off", "Hermes decides is off"
+    _settings(home, decides=True)
+    assert _tool({"reason": "Heads up.", "asked_by_user": False})["ok"] is True
+
+
+def test_the_tool_refuses_what_cannot_ring(home, fake, monkeypatch):
+    _settings(home)
+    monkeypatch.setattr(call_tool.client, "load_state", lambda: None)
+    assert _tool({"reason": "Done.", "asked_by_user": True})["error"] == "not_paired"
+    monkeypatch.setattr(call_tool.client, "load_state", lambda: {"credential": "x"})
+    assert _tool({"reason": " ", "asked_by_user": True})["error"] == "no_reason"
+    assert _tool({"reason": "Done.", "asked_by_user": True}, session_id=None)["error"] == "no_session"
+    assert _tool({"reason": "Done.", "asked_by_user": True}, is_child=lambda s: s == "st-1")["error"] == "subagent"
+    assert calls._store(home).watch_count() == 0
+
+
+def test_the_tool_never_raises(home, fake, paired, monkeypatch):
+    def broken(*args, **kwargs):
+        raise OSError("disk")
+    monkeypatch.setattr(calls, "tool_watch", broken)
+    assert _tool({"reason": "Done.", "asked_by_user": True})["error"] == "unavailable"
+
+
+def test_the_tool_shows_only_while_calls_it_can_ask_for_are_on(home, paired, monkeypatch):
+    assert call_tool.available() is False
+    _settings(home, when_asked=False)
+    assert call_tool.available() is False
+    _settings(home, decides=True)
+    assert call_tool.available() is True
+    monkeypatch.setattr(call_tool.client, "load_state", lambda: None)
+    assert call_tool.available() is False
+
+
+def test_register_adds_the_tool_and_its_skill():
+    tools, skills = [], []
+    ctx = types.SimpleNamespace(profile_name="default", register_hook=lambda name, fn: None,
+                                register_cli_command=lambda **kwargs: None,
+                                register_tool=lambda **kwargs: tools.append(kwargs),
+                                register_skill=lambda name, path: skills.append((name, path)))
+    plugin.register(ctx)
+    [tool] = tools
+    assert (tool["name"], tool["toolset"], tool["schema"]["name"]) == ("conduit_call_user", "conduit", "conduit_call_user")
+    assert tool["schema"]["parameters"]["required"] == ["reason", "asked_by_user"]
+    [(name, path)] = skills
+    assert name == "calling-the-user" and path.is_file()
+    assert "conduit_push:calling-the-user" in tool["schema"]["description"]
+    assert path.read_text().startswith("---\nname: calling-the-user\n")
+
+
+def test_a_hermes_without_the_display_fields_still_gets_the_tool(home, paired):
+    tools = []
+
+    def register_tool(name, toolset, schema, handler, check_fn=None):
+        tools.append(handler)
+    ctx = types.SimpleNamespace(profile_name="default", register_hook=lambda name, fn: None,
+                                register_cli_command=lambda **kwargs: None, register_tool=register_tool)
+    plugin.register(ctx)
+    [handler] = tools
+    _settings(home)
+    # Hermes passes the agent itself as parent_agent; only a child session is refused.
+    assert json.loads(handler({"reason": "Done.", "asked_by_user": True}, session_id="st-1", parent_agent=object(),
+                              task_id="t"))["ok"] is True
+
+
+def test_a_hermes_that_refuses_the_tool_keeps_the_hooks():
+    hooks = []
+
+    def refuse(**kwargs):
+        raise TypeError("unexpected keyword")
+    ctx = types.SimpleNamespace(profile_name="default", register_hook=lambda name, fn: hooks.append(name),
+                                register_cli_command=lambda **kwargs: None, register_tool=refuse,
+                                register_skill=lambda name, path: (_ for _ in ()).throw(ValueError("no")))
+    plugin.register(ctx)
+    assert "post_llm_call" in hooks and "post_approval_response" in hooks
+
+
+def test_an_unanswered_approval_calls_beside_its_notification(home, fake, clock, monkeypatch):
+    def sleep(seconds):
+        clock[0] += seconds
+    monkeypatch.setattr(calls, "_sleep", sleep)
+    _settings(home, alerts=True)
+    plugin._pre_approval_request(session_key="sk-1", description="Run the migration", turn_id="t1")
+    assert [event["type"] for event in fake.enqueued] == ["approval.needed"]
+    [event] = fake.sent
+    assert event["type"] == "call.requested"
+    assert event["body"] == "Hermes needs your OK: Run the migration"
+    assert (event["call"]["kind"], event["call"]["reason"], event["call"]["session_ids"]) == ("approval", "Run the migration", ["sk-1"])
+
+
+def test_an_answered_approval_does_not_call(home, fake, clock, monkeypatch):
+    def sleep(seconds):
+        # The user answered from the notification while the waiter slept.
+        plugin._post_approval_response(session_key="sk-1", choice="once")
+        clock[0] += seconds
+    monkeypatch.setattr(calls, "_sleep", sleep)
+    _settings(home, alerts=True)
+    plugin._pre_approval_request(session_key="sk-1", description="Run the migration", turn_id="t1")
+    assert fake.sent == []
+
+
+def test_approvals_do_not_call_with_alerts_off(home, fake, monkeypatch):
+    started = []
+    monkeypatch.setattr(calls, "_wait_for_holds", lambda home, profile: started.append(home))
+    _settings(home)
+    plugin._pre_approval_request(session_key="sk-1", description="Run the migration", turn_id="t1")
+    assert started == [] and calls._store(home).watch_count() == 0
+
+
+def test_a_failed_turn_calls_in_place_of_its_push_with_alerts_on(home, fake):
+    _settings(home, alerts=True)
+    plugin._on_session_end(session_id="st-9", turn_id="t1", completed=False, interrupted=False)
+    [event] = fake.sent
+    assert (event["call"]["kind"], event["body"]) == ("failed", "Hermes ran into a problem with your request.")
+    assert fake.enqueued == []
+    # Within the gap: the usual failure push.
+    plugin._on_session_end(session_id="st-8", turn_id="t2", completed=False, interrupted=False)
+    assert [event["type"] for event in fake.enqueued] == ["turn.failed"]
+
+
+def test_nothing_rings_during_a_live_voice_call(home, fake, paired):
+    _settings(home)
+    _tool({"reason": "Done.", "asked_by_user": True})
+    calls._store(home).set_presence(90)
+    plugin._post_llm_call(session_id="st-1", turn_id="t1", assistant_response="Done.")
+    assert fake.sent == []
+    assert [event["type"] for event in fake.enqueued] == ["response.ready"]
+
+
+def test_a_question_left_unanswered_calls_and_an_answer_stops_it(home, fake, clock, monkeypatch):
+    loop = sys.modules["conduit_push.clarify_loop"]
+    _settings(home, alerts=True)
+    scheduled = []
+    monkeypatch.setattr(calls, "_wait_for_holds", lambda home, profile: scheduled.append(home))
+    monkeypatch.setattr(loop.client, "enqueue", lambda event: True)
+    monkeypatch.setattr(loop, "_first_answer_wins", lambda **kwargs: (
+        scheduled.append(calls._store(home).next_due()) or "answered"))
+    result = loop.middleware(session_id="st-1", tool_name="clarify", args={"question": "Which branch?", "choices": ["main", "dev"]},
+                             next_call=lambda args: "native")
+    assert result == "answered"
+    assert scheduled == [home, clock[0] + 60], "the alert waited a minute while the question was open"
+    assert calls._store(home).watch_count() == 0, "the answer cancelled it"

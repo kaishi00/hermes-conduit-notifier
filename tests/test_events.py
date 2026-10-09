@@ -483,3 +483,19 @@ def test_redact_event_keeps_only_the_call_routing():
     assert redacted["call"] == {"id": CALL["id"], "kind": "done", "session_ids": ["rt-1", "st-1"]}
     assert "title" not in redacted
     assert "body" not in redacted
+
+
+def test_a_call_carries_why_hermes_calls_and_redaction_drops_it():
+    event = push_event(
+        "call.requested",
+        identifier="call:0123456789abcdef01234567",
+        session_id="sk-1",
+        title="Hermes wants to talk",
+        body="Hermes needs your OK: Run the migration",
+        call={**CALL, "kind": "approval", "reason": "Run\nthe migration " + "x" * 300},
+    )
+    assert event["call"]["kind"] == "approval"
+    assert event["call"]["reason"].startswith("Run the migration ") and len(event["call"]["reason"]) == 200
+    assert sanitize_call({**CALL, "kind": "question"})["kind"] == "question"
+    assert sanitize_call({**CALL, "reason": 5}).get("reason") is None
+    assert "reason" not in redact_event(event)["call"]

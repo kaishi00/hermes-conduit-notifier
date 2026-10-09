@@ -13,6 +13,11 @@ A job that ends while its watch is held (the user's call is still going)
 gets its ordinary push; the call waits. A waiter thread calls once the hold
 runs out unreleased (the phone went away mid-call), and every turn end
 sweeps for such calls too, so a gateway restart doesn't lose one.
+
+Hermes asks for a call itself through the ``conduit_call_user`` tool (a watch
+on the asking session, see ``tool_watch``). With alert calls on, an approval
+or question left unanswered calls through the same waiter (``alert``), and a
+failed turn calls in place of its push (``failed_turn``).
 """
 
 from __future__ import annotations
@@ -173,14 +178,82 @@ def _waiter(home: Any, profile: str, key: str) -> Callable[[], None]:
     return wait
 
 
+def settings() -> dict[str, Any]:
+    return _store(get_hermes_home()).settings()
+
+
+def tool_watch(session_id: str, reason: str, *, asked: bool) -> dict[str, Any]:
+    """The conduit_call_user tool: call when this turn of ``session_id``
+    ends. The store's answer; raises ValueError like ``add_tool_watch``."""
+    return _store(get_hermes_home()).add_tool_watch(session_id, reason, asked)
+
+
+def alert(session_id: str, kind: str, reason: str, *, profile: str) -> None:
+    """Hermes waits on the user's approval or answer: call if it stays
+    unanswered (alert calls on). Never raises: a hook calls this."""
+    if not session_id:
+        return
+    try:
+        home = get_hermes_home()
+        if _store(home).add_alert(session_id, kind, reason) is not None:
+            _wait_for_holds(home, profile)
+    except Exception:  # noqa: BLE001
+        logger.warning("Conduit could not set up an alert call", exc_info=True)
+
+
+def cancel_alerts(session_id: str, kind: str | None = None) -> None:
+    """The user answered: no call for it. Never raises."""
+    if not session_id:
+        return
+    try:
+        _store(get_hermes_home()).cancel_alerts(session_id, kind)
+    except Exception:  # noqa: BLE001
+        logger.warning("Conduit could not cancel an alert call", exc_info=True)
+
+
+def failed_turn(session_id: str, *, profile: str, fallback: dict[str, Any] | None) -> bool:
+    """A turn no watch covers failed: with alert calls on, the call takes the
+    place of ``fallback`` (True, like ``turn_ended``)."""
+    if not session_id:
+        return False
+    try:
+        result = _store(get_hermes_home()).alert_now(session_id, "failed", "")
+    except Exception:  # noqa: BLE001
+        logger.warning("Conduit could not check alert calls for a failed turn", exc_info=True)
+        return False
+    if result is None:
+        return False
+    if result["status"] != "call":
+        logger.info("Conduit call for a failed turn held back: %s", result.get("reason") or result["status"])
+        return False
+    try:
+        event = call_event(result["watch"], "failed", session_id=session_id, profile=profile)
+        _spawn(lambda: deliver(event, fallback))
+    except Exception:  # noqa: BLE001 — the caller sends its usual push
+        logger.warning("Conduit could not send a call request", exc_info=True)
+        return False
+    return True
+
+
 def call_event(watch: dict[str, Any], outcome: str, *, session_id: str, profile: str) -> dict[str, Any]:
     title = str(watch.get("title") or "")
+    reason = str(watch.get("reason") or "")
     subject = f"“{title}”" if title else "Your job"
-    body = {
-        "done": f"{subject} finished.",
-        "failed": f"{subject} failed.",
-        "stopped": f"{subject} stopped before finishing.",
-    }[outcome]
+    if outcome in ("approval", "question"):
+        lead = "Hermes needs your OK" if outcome == "approval" else "Hermes has a question for you"
+        body = f"{lead}: {reason}" if reason else f"{lead}."
+    elif watch.get("origin") == "alert":
+        body = "Hermes ran into a problem with your request."
+    else:
+        # What Hermes said it calls about, else how the job ended.
+        body = reason or {
+            "done": f"{subject} finished.",
+            "failed": f"{subject} failed.",
+            "stopped": f"{subject} stopped before finishing.",
+        }[outcome]
+    call = {"id": watch["id"], "kind": outcome, "title": title, "session_ids": watch["session_ids"]}
+    if reason:
+        call["reason"] = reason
     return push_event(
         "call.requested",
         # From the watch: a resend of this call is the same event to the relay.
@@ -189,7 +262,7 @@ def call_event(watch: dict[str, Any], outcome: str, *, session_id: str, profile:
         profile=profile,
         title=CALL_TITLE,
         body=body,
-        call={"id": watch["id"], "kind": outcome, "title": title, "session_ids": watch["session_ids"]},
+        call=call,
     )
 
 
