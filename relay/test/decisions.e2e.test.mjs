@@ -613,6 +613,77 @@ test('call requests reach APNs with the call category and stop at the per-instal
   assert.equal(sent[2].aps.category, undefined);
 });
 
+test('a phone with a PushKit token gets a call as a VoIP push and can stop ringing', async () => {
+  const aPort = await closedPort();
+  const isolatedPath = join(dir, 'relay-data-voip.json');
+  const capturePath = join(dir, `capture-voip-${Date.now()}.jsonl`);
+  const fixture = new RelayStore(isolatedPath);
+  const created = fixture.createInstallation({ bundleId: 'com.milim.relay', deviceToken: 'd'.repeat(64), environment: 'production' });
+  const pairing = fixture.createPairing(created.installation.id);
+  const claim = fixture.claimPairing(pairing.code, 'voip target');
+  const child = await startRelay(aPort, 'accept', isolatedPath, { APNS_CAPTURE_PATH: capturePath });
+  children.push(child);
+  const base = `http://127.0.0.1:${aPort}`;
+  const device = `${created.installation.id}.${created.deviceSecret}`;
+  const register = (voipToken) => api(base, `/v1/installations/${created.installation.id}`, { method: 'PUT', credential: device, body: { voip_token: voipToken } });
+  const send = (eventId) => api(base, '/v1/events', {
+    method: 'POST',
+    credential: `${created.installation.id}.${claim.gatewayId}.${claim.gatewaySecret}`,
+    body: { type: 'call.requested', event_id: eventId, session_id: 'st-1', call: { id: eventId.slice(5), kind: 'done', session_ids: ['st-1'] } },
+  });
+  try {
+    assert.deepEqual(await register('nope'), { status: 400, json: { error: 'invalid_voip_token' } });
+    assert.equal((await register('9'.repeat(64))).json.installation.voip, true);
+    assert.deepEqual(await send('call:000000000000000000000011'), { status: 202, json: { accepted: true, delivered: true, rang: true } });
+    assert.equal((await register(null)).json.installation.voip, false, 'null stops it ringing');
+    assert.deepEqual(await send('call:000000000000000000000012'), { status: 202, json: { accepted: true, delivered: true } });
+    const meta = await api(base, '/v1/meta', { credential: device });
+    assert.ok(meta.json.capabilities.includes('voip-calls'));
+  } finally {
+    await stopRelay(child);
+  }
+  const sent = readFileSync(capturePath, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+  assert.equal(sent.length, 2);
+  assert.equal(sent[0].deviceToken, '9'.repeat(64));
+  assert.equal(sent[0].notification.pushType, 'voip');
+  assert.equal(sent[0].notification.topic, 'com.milim.relay.voip');
+  assert.equal(sent[0].notification.payload.aps, undefined);
+  assert.deepEqual(sent[0].notification.payload.body.conduit.call, { id: '000000000000000000000011', kind: 'done', session_ids: ['st-1'] });
+  assert.equal(sent[1].deviceToken, 'd'.repeat(64));
+  assert.equal(sent[1].notification.pushType, undefined);
+  assert.equal(sent[1].notification.payload.aps.category, 'HERMES_CALL');
+});
+
+test('a call APNs will not ring falls back to the notification, and a refused PushKit token is forgotten', async () => {
+  const aPort = await closedPort();
+  const isolatedPath = join(dir, 'relay-data-voip-gone.json');
+  const capturePath = join(dir, `capture-voip-gone-${Date.now()}.jsonl`);
+  const fixture = new RelayStore(isolatedPath);
+  const created = fixture.createInstallation({ bundleId: 'com.milim.relay', deviceToken: 'd'.repeat(64), voipToken: '8'.repeat(64), environment: 'production' });
+  const pairing = fixture.createPairing(created.installation.id);
+  const claim = fixture.claimPairing(pairing.code, 'voip gone');
+  const child = await startRelay(aPort, 'accept', isolatedPath, { APNS_CAPTURE_PATH: capturePath, APNS_VOIP_FAILURE: 'BadDeviceToken' });
+  children.push(child);
+  const base = `http://127.0.0.1:${aPort}`;
+  try {
+    const response = await api(base, '/v1/events', {
+      method: 'POST',
+      credential: `${created.installation.id}.${claim.gatewayId}.${claim.gatewaySecret}`,
+      body: { type: 'call.requested', event_id: 'call:000000000000000000000021', session_id: 'st-1', call: { id: '000000000000000000000021', kind: 'failed', session_ids: ['st-1'] } },
+    });
+    assert.deepEqual(response, { status: 202, json: { accepted: true, delivered: true } });
+    const current = await api(base, `/v1/installations/${created.installation.id}`, { method: 'PUT', credential: `${created.installation.id}.${created.deviceSecret}`, body: {} });
+    assert.equal(current.json.installation.voip, false);
+    assert.equal(current.json.installation.active, true, 'the phone itself stays registered');
+  } finally {
+    await stopRelay(child);
+  }
+  const sent = readFileSync(capturePath, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+  assert.equal(sent.length, 1, 'only the notification is captured');
+  assert.equal(sent[0].deviceToken, 'd'.repeat(64));
+  assert.equal(sent[0].notification.payload.aps.category, 'HERMES_CALL');
+});
+
 test('an invalid capacity setting stops the relay at boot', async () => {
   const child = spawn(process.execPath, ['src/server.mjs'], {
     cwd: fileURLToPath(new URL('..', import.meta.url)),

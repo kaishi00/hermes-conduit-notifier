@@ -178,7 +178,7 @@ gateway-bound inactive records still require separately reviewed maintenance.
 |--------|------|---------|
 | GET | `/healthz` | Health check |
 | POST | `/v1/installations` | Register a device |
-| PUT | `/v1/installations/:id` | Update device token / preferences |
+| PUT | `/v1/installations/:id` | Update device token, PushKit token (`voip_token`, `null` clears it) / preferences |
 | DELETE | `/v1/installations/:id` | Deactivate a device |
 | POST | `/v1/installations/:id/pairings` | Create a pairing code |
 | POST | `/v1/pairings/claim` | Claim a pairing code (gateway side) |
@@ -756,6 +756,16 @@ lock, so they survive restarts:
 - The call request carries the job's id, outcome, title and session ids so
   Conduit can open the right chat. With end-to-end encryption they are sealed
   like any other content; with `redact on` the title is dropped.
+- **Ringing (relay 0.9+):** a phone that registered a PushKit token
+  (`voip_token`) gets the call request as a VoIP push on the app's `.voip`
+  topic, with no alert, the same routing or sealed envelope, and `sent_at`,
+  so it rings as a native call. APNs drops it after 5 minutes. Anything that
+  stops it ringing (APNs refusing or unreachable, a call with no chat to open)
+  sends the usual "Hermes wants to talk" notification instead, and a PushKit
+  token APNs calls gone is forgotten until the phone registers a new one. The
+  relay answers `rang: true` when it rang. Calls carry a `reason` of up to
+  200 characters (dropped with previews off, like the title), and the kinds
+  `approval` and `question` besides how a job ended.
 
 ## Apple Watch lookups and jobs (plugin 0.6+, jobs 0.7+, Gemini tokens 0.8+)
 

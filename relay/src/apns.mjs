@@ -59,9 +59,12 @@ export class ApnsClient {
           ':method': 'POST',
           ':path': `/3/device/${deviceToken}`,
           authorization: `bearer ${this.authorizationToken()}`,
-          'apns-topic': this.topic,
-          'apns-push-type': 'alert',
+          // A call (#449) rings through PushKit: its own push type, the
+          // app's `.voip` topic and a short expiration.
+          'apns-topic': notification.topic || this.topic,
+          'apns-push-type': notification.pushType || 'alert',
           'apns-priority': '10',
+          ...(notification.expiration ? { 'apns-expiration': String(notification.expiration) } : {}),
           ...(notification.collapseId ? { 'apns-collapse-id': notification.collapseId.slice(0, 64) } : {}),
         });
       } catch (error) {

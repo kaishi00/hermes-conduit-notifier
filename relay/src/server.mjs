@@ -15,9 +15,9 @@ import { WATCH_TOOLS_CAPABILITY, WatchToolGrants, watchToolRoutes } from './watc
 const RELAY_INFO = (() => {
   try {
     const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-    return { version: String(pkg.version || 'unknown'), capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls'] };
+    return { version: String(pkg.version || 'unknown'), capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls', 'voip-calls'] };
   } catch {
-    return { version: 'unknown', capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls'] };
+    return { version: 'unknown', capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls', 'voip-calls'] };
   }
 })();
 
@@ -51,9 +51,17 @@ const E2E_QUESTION_PLACEHOLDER = '[encrypted]';
 
 // Hermes calls you (#449): a call request is a notification Conduit shows
 // with a Talk action (this category), about one job: `call` names it.
+// Kinds: how the job ended, or (asked through Hermes itself) why it calls.
 const CALL_CATEGORY = 'HERMES_CALL';
-const CALL_KINDS = new Set(['done', 'failed', 'stopped']);
+const CALL_KINDS = new Set(['done', 'failed', 'stopped', 'approval', 'question']);
 const CALL_WINDOW_MS = 24 * 60 * 60 * 1000;
+// A phone that registered a PushKit token gets the call as a VoIP push and
+// rings. APNs drops one it couldn't deliver in this long; the phone shows
+// an older one it gets as the notification rather than ringing late.
+const CALL_RING_TTL_S = 5 * 60;
+// APNs refused the PushKit token itself: the phone gets notifications until
+// it registers a new one.
+const VOIP_TOKEN_GONE = new Set(['BadDeviceToken', 'Unregistered', 'DeviceTokenNotForTopic']);
 
 // Conduit dashboard UUIDs (opaque app-generated identity, #148) are
 // canonicalized and validated in the store (normalizeDashboardId); the route
@@ -110,7 +118,11 @@ function main() {
   // Unset = real APNs.
   if (process.env.APNS_MODE === 'accept') {
     const capturePath = process.env.APNS_CAPTURE_PATH;
+    // Test seam: APNs refuses VoIP pushes with this reason (calls fall back
+    // to the notification).
+    const voipFailure = process.env.APNS_VOIP_FAILURE;
     apnsSend = async (deviceToken, notification) => {
+      if (voipFailure && notification.pushType === 'voip') return { ok: false, status: 400, reason: voipFailure };
       // Test seam: when set, every "delivered" notification is recorded so
       // e2e tests can assert on the REAL outgoing APNs payload.
       if (capturePath) {
@@ -224,11 +236,12 @@ async function route(request, response) {
     enforceRateLimit(`registration:${client}`, 12, 60_000);
     const body = await readJson(request);
     const deviceToken = validateDeviceToken(body.device_token);
+    const voipToken = validateVoipToken(body.voip_token) ?? undefined;
     if (body.bundle_id !== config.topic) return sendJson(response, 400, { error: 'invalid_topic' });
     if (body.environment !== 'production') return sendJson(response, 400, { error: 'production_only' });
     store.assertInstallationCapacity();
     enforceRegistrationBudget();
-    const created = store.createInstallation({ bundleId: body.bundle_id, deviceToken, environment: body.environment, preferences: body.preferences });
+    const created = store.createInstallation({ bundleId: body.bundle_id, deviceToken, voipToken, environment: body.environment, preferences: body.preferences });
     return sendJson(response, 201, {
       installation: created.installation,
       credential: `${created.installation.id}.${created.deviceSecret}`,
@@ -243,7 +256,7 @@ async function route(request, response) {
     enforceRateLimit(`installation-update:${installation.id}`, 30, 60_000);
     const body = await readJson(request);
     const deviceToken = body.device_token === undefined ? undefined : validateDeviceToken(body.device_token);
-    const changes = { deviceToken, preferences: body.preferences };
+    const changes = { deviceToken, voipToken: validateVoipToken(body.voip_token), preferences: body.preferences };
     if (store.wouldUpdateInstallation(installation.id, changes)) enforceDeviceChangeBudget();
     return sendJson(response, 200, { installation: store.updateInstallation(installation.id, changes) });
   }
@@ -434,6 +447,11 @@ async function route(request, response) {
       return sendJson(response, 202, { accepted: true, delivered: true });
     }
     if (!shouldDeliver(installation.preferences, event.type)) return sendJson(response, 202, { accepted: true, delivered: false });
+    // A phone that can ring gets the call as a VoIP push; anything that stops
+    // it ringing sends the usual notification below instead.
+    if (event.type === 'call.requested' && installation.voipToken && await ring(installation, event, gateway)) {
+      return sendJson(response, 202, { accepted: true, delivered: true, rang: true });
+    }
     const notification = notificationFor(event, installation.preferences, gateway);
     let result;
     try {
@@ -679,7 +697,7 @@ function notificationFor(event, preferences, gateway = undefined) {
   // The job's title is chat content: like the banner text, it rides only
   // with previews on (Conduit falls back to the chat's own title).
   const call = event.type === 'call.requested' && event.call
-    ? (preferences.show_previews ? event.call : (({ title: _title, ...rest }) => rest)(event.call))
+    ? (preferences.show_previews ? event.call : (({ title: _title, reason: _reason, ...rest }) => rest)(event.call))
     : undefined;
   const bodyConduit = { ...routing, ...(decision ? { decision } : {}), ...(call ? { call } : {}) };
   const aps = {
@@ -724,6 +742,43 @@ function notificationFor(event, preferences, gateway = undefined) {
     payload,
     threadId,
   };
+}
+
+// A call request as a VoIP push (#449): the phone's PushKit callback reports
+// it to CallKit at once, so it carries what the notification carries (the
+// sealed envelope or the plaintext call) without an alert, plus when it was
+// sent, so a phone that gets it late shows the notification instead. null
+// when it would ring with no chat to open (no call, or a sealed envelope too
+// big to carry): the notification goes instead.
+function callPushFor(event, preferences, gateway, { topic, nowSeconds = Math.floor(Date.now() / 1000) }) {
+  const { payload } = notificationFor(event, preferences, gateway);
+  const { aps: _aps, ...rest } = payload;
+  if (event.e2e ? !rest.conduit_e2e : !rest.body.conduit.call) return null;
+  const stamp = (routing) => ({ ...routing, sent_at: nowSeconds });
+  return {
+    payload: { ...rest, body: { conduit: stamp(rest.body.conduit) }, conduit: stamp(rest.conduit) },
+    pushType: 'voip',
+    topic: `${topic}.voip`,
+    expiration: nowSeconds + CALL_RING_TTL_S,
+  };
+}
+
+// True when the call rang (APNs took the VoIP push). A refused PushKit token
+// is forgotten; any other failure leaves it for the next call.
+async function ring(installation, event, gateway) {
+  const push = callPushFor(event, installation.preferences, gateway, { topic: config.topic });
+  if (!push) return false;
+  let result;
+  try {
+    result = await apnsSend(installation.voipToken, push);
+  } catch (error) {
+    console.error(JSON.stringify({ level: 'error', message: 'apns voip send threw', error: error instanceof Error ? error.message : String(error) }));
+    return false;
+  }
+  if (result.ok) return true;
+  if (result.status === 410 || VOIP_TOKEN_GONE.has(result.reason)) store.clearVoipToken(installation.id);
+  console.warn(JSON.stringify({ level: 'warn', message: 'apns voip send refused', status: result.status, reason: result.reason }));
+  return false;
 }
 
 // An end-to-end encrypted event: the relay can't read the content, so the
@@ -845,7 +900,8 @@ function validateCall(value) {
   // A call with no session has no chat to open; the plugin never sends one.
   if (!sessionIds.length) return undefined;
   const title = cleanText(value.title, 120);
-  return { id: value.id, kind: value.kind, session_ids: sessionIds.slice(0, 4), ...(title ? { title } : {}) };
+  const reason = cleanText(value.reason, 200);
+  return { id: value.id, kind: value.kind, session_ids: sessionIds.slice(0, 4), ...(title ? { title } : {}), ...(reason ? { reason } : {}) };
 }
 
 function validCapabilities(value) {
@@ -954,6 +1010,14 @@ function validateDecision(value, eventType) {
 function validateDeviceToken(value) {
   const token = String(value ?? '').replace(/[<>\s]/g, '').toLowerCase();
   if (!/^[0-9a-f]{64,200}$/.test(token)) throw httpError(400, 'invalid_device_token');
+  return token;
+}
+
+// A PushKit token: undefined when absent, null to clear it.
+function validateVoipToken(value) {
+  if (value === undefined || value === null) return value;
+  const token = String(value).replace(/[<>\s]/g, '').toLowerCase();
+  if (!/^[0-9a-f]{64,200}$/.test(token)) throw httpError(400, 'invalid_voip_token');
   return token;
 }
 
@@ -1118,4 +1182,4 @@ function optionalMilliseconds(name, key) {
   return { [key]: value };
 }
 
-export { notificationFor, validateEvent, validateDecision };
+export { callPushFor, notificationFor, validateEvent, validateDecision };
