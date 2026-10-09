@@ -113,8 +113,9 @@ class CallStore:
         "outcome"}`` when one of the job's sessions ended within the last
         ``ended_within_s`` seconds (how long ago the job's request went out,
         on the phone's clock, so an earlier turn of the same chat never
-        counts): no watch is kept and the caller tells the user itself.
-        Raises ValueError("calls_off") unless calls and "call when I ask" are
+        counts): no watch is kept and the caller tells the user itself. An
+        interrupted turn doesn't count: during a call that is the call putting
+        a correction into the job, which goes on in a new turn. Raises ValueError("calls_off") unless calls and "call when I ask" are
         on."""
         ids = _session_ids(session_ids)
         clean_title = _title(title)
@@ -127,7 +128,7 @@ class CallStore:
             now = self.clock()
             if within is not None:
                 for end in state["ends"]:
-                    if end["session_id"] in ids and now - end["at"] <= within:
+                    if end["session_id"] in ids and end["outcome"] != "stopped" and now - end["at"] <= within:
                         return {"status": "ended", "outcome": end["outcome"]}
             if len(state["watches"]) >= MAX_WATCHES:
                 raise ValueError("too_many")
@@ -190,7 +191,10 @@ class CallStore:
 
         None when no watch covers the session. A held watch keeps the first
         outcome and answers ``held`` (with ``until``): the call waits for the
-        hold to end. Otherwise the watch is consumed and the result says what
+        hold to end. An interrupted turn isn't kept while held: the call
+        interrupts a job to put a correction into it, and the job goes on in
+        a new turn (a job the user stops in the call has its watch removed).
+        Otherwise the watch is consumed and the result says what
         to do: ``call`` (counted against the limits), ``limited`` (with
         ``reason`` gap, hour or day) or ``off`` (calls were turned off after
         the watch was registered).
@@ -212,9 +216,10 @@ class CallStore:
                 return None
             watch = state["watches"][index]
             if watch["hold_until"] > now:
-                if watch["pending"] is None:
+                if watch["pending"] is None and outcome != "stopped":
                     watch["pending"] = {"outcome": outcome, "session_id": session_id}
-                return {"watch": dict(watch), "outcome": watch["pending"]["outcome"], "status": "held",
+                pending = watch["pending"]
+                return {"watch": dict(watch), "outcome": pending["outcome"] if pending else None, "status": "held",
                         "until": watch["hold_until"]}
             state["watches"].pop(index)
             return _decide(state, watch, outcome, now)

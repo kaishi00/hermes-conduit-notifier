@@ -266,6 +266,36 @@ def test_a_due_call_still_obeys_the_limits(tmp_path):
     assert due["reason"] == "gap"
 
 
+def test_a_correction_during_the_call_is_not_the_job_ending(tmp_path):
+    clock = Clock()
+    store = _store(tmp_path, clock=clock, enabled=True)
+    watch_id = store.add_watch(["rt-1"], "Check the server", hold_s=90)["id"]
+    # The call interrupts the job to put a correction into it.
+    held = store.fire("rt-1", "stopped")
+    assert held["status"] == "held"
+    assert held["outcome"] is None
+    assert store.next_due() is None
+    # Hang-up while the corrected turn runs: still watching.
+    assert store.hold(watch_id, 0) == {"status": "watching"}
+    assert store.fire("rt-1", "done")["status"] == "call"
+
+
+def test_a_correction_before_the_watch_is_not_a_recent_end(tmp_path):
+    clock = Clock()
+    store = _store(tmp_path, clock=clock, enabled=True)
+    store.fire("rt-1", "stopped")  # the call put a correction into the job
+    clock.now += 5
+    assert store.add_watch(["rt-1"], "Check the server", hold_s=90, ended_within_s=300)["status"] == "watching"
+
+
+def test_a_job_stopped_after_hang_up_still_calls(tmp_path):
+    store = _store(tmp_path, enabled=True)
+    store.add_watch(["rt-1"], "Check the server")
+    result = store.fire("rt-1", "stopped")
+    assert result["status"] == "call"
+    assert result["outcome"] == "stopped"
+
+
 def test_a_removed_held_watch_never_calls(tmp_path):
     clock = Clock()
     store = _store(tmp_path, clock=clock, enabled=True)
