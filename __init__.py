@@ -29,6 +29,8 @@ def register(ctx: Any) -> None:
     ctx.register_hook("pre_approval_request", _pre_approval_request)
     ctx.register_hook("subagent_start", _subagent_start)
     ctx.register_hook("subagent_stop", _subagent_stop)
+    # A call held over a restart goes out when its hold runs out (#449).
+    calls.resume(_profile)
     # The voice hint is an extra: a Hermes that refuses the hook must not
     # take the notifications down with it.
     try:

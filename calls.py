@@ -111,8 +111,23 @@ def _send_due(results: list[dict[str, Any]], profile: str) -> None:
         if result["status"] != "call":
             logger.info("Conduit call for a finished job held back: %s", result.get("reason") or result["status"])
             continue
-        event = call_event(result["watch"], result["outcome"], session_id=result["session_id"], profile=profile)
-        _spawn(lambda event=event: deliver(event, None))
+        # One that can't go out never stops the rest: they're consumed too.
+        try:
+            event = call_event(result["watch"], result["outcome"], session_id=result["session_id"], profile=profile)
+            _spawn(lambda event=event: deliver(event, None))
+        except Exception:  # noqa: BLE001
+            logger.warning("Conduit could not send a held call", exc_info=True)
+
+
+def resume(profile: str) -> None:
+    """At start-up: a hold over an ended job that was waiting when the
+    agent stopped gets its waiter back, so it doesn't wait for a turn."""
+    try:
+        home = get_hermes_home()
+        if _store(home).next_due() is not None:
+            _wait_for_holds(home, profile)
+    except Exception:  # noqa: BLE001 — the next turn end sweeps again
+        logger.warning("Conduit could not resume held calls", exc_info=True)
 
 
 def _wait_for_holds(home: Any, profile: str) -> None:

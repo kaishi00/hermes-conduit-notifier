@@ -341,3 +341,28 @@ def test_a_call_that_cannot_be_spawned_leaves_the_usual_push(home, fake, monkeyp
     monkeypatch.setattr(calls, "_spawn", no_threads)
     _watch(home, "rt-1")
     assert calls.turn_ended("rt-1", "done", profile="default", fallback=READY) is False
+
+
+def test_a_held_call_waiting_at_start_up_gets_its_waiter_back(home, fake, clock, monkeypatch):
+    def sleep(seconds):
+        clock[0] += seconds
+    monkeypatch.setattr(calls, "_sleep", sleep)
+    _held_watch(home, "rt-1", hold_s=60)
+    # The job ended during the call; then the agent restarted.
+    assert calls._store(home).fire("rt-1", "done")["status"] == "held"
+    calls.resume("default")
+    assert [event["type"] for event in fake.sent] == ["call.requested"]
+
+
+def test_start_up_with_nothing_held_starts_nothing(home, fake, monkeypatch):
+    started = []
+    monkeypatch.setattr(calls, "_spawn", started.append)
+    calls.resume("default")
+    assert started == []
+
+
+def test_one_held_call_that_cannot_go_out_never_stops_the_rest(home, fake):
+    good = {"status": "call", "outcome": "done", "session_id": "b", "watch": {"id": "1" * 24, "title": "B", "session_ids": ["b"]}}
+    broken = {**good, "session_id": "a", "watch": None}  # building its event raises
+    calls._send_due([broken, good], "default")
+    assert [event["session_id"] for event in fake.sent] == ["b"]
