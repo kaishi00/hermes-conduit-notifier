@@ -468,7 +468,9 @@ def request_json(
             detail = json.loads(error.read(4096)).get("error", "request_rejected")
         except Exception:
             detail = "request_rejected"
-        raise RelayRejected(error.code, str(detail)[:200]) from error
+        # Logged as is: one short line of printable text, whatever the relay sent.
+        detail = " ".join("".join(ch if ch.isprintable() else " " for ch in str(detail)).split())[:200]
+        raise RelayRejected(error.code, detail or "request_rejected") from error
 
 
 def _start_worker() -> None:

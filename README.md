@@ -750,8 +750,9 @@ lock, so they survive restarts:
   that refuses the call request (relays before 0.8 don't know it; 0.8 caps
   call requests at 60 a day per installation, `call_limit`), one that took
   the request but couldn't reach Apple, or one that stays unreachable or keeps
-  failing (5xx) after three tries (2 s and 4 s apart, same event id). One malformed session id drops the job details from the
-  request, on the host and on the relay alike; it still opens the chat.
+  failing (5xx) after three tries (2 s and 4 s apart, same event id). One
+  malformed session id drops the job details from the request, on the host
+  and on the relay alike; it still opens the chat.
 - The call request carries the job's id, outcome, title and session ids so
   Conduit can open the right chat. With end-to-end encryption they are sealed
   like any other content; with `redact on` the title is dropped.

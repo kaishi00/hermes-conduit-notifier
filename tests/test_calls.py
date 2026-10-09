@@ -168,7 +168,7 @@ def test_a_call_that_never_goes_out_sends_the_usual_push(home, fake):
 
 def test_a_refused_call_sends_the_usual_push_at_once(home, fake):
     # An older relay doesn't know call.requested.
-    fake.failures = [RuntimeError("Conduit relay rejected the request: invalid_event_type (400).")]
+    fake.failures = [_Rejected(400, "invalid_event_type")]
     _watch(home, "rt-1")
     calls.turn_ended("rt-1", "done", profile="default", fallback=READY)
     assert len(fake.sent) == 1
@@ -197,8 +197,9 @@ def test_a_retry_the_relay_answers_as_a_duplicate_sends_the_usual_push(home, fak
     assert fake.enqueued == [READY]
 
 
-def test_a_call_apple_didnt_take_sends_the_usual_push_at_once(home, fake, sleeps):
-    fake.failures = [_Rejected(502, "apns_unreachable")]
+@pytest.mark.parametrize("detail", ["apns_unreachable", "apns_rejected"])
+def test_a_call_apple_didnt_take_sends_the_usual_push_at_once(home, fake, sleeps, detail):
+    fake.failures = [_Rejected(502, detail)]
     _watch(home, "rt-1")
     calls.turn_ended("rt-1", "done", profile="default", fallback=READY)
     assert len(fake.sent) == 1
@@ -234,6 +235,12 @@ def test_relay_errors_carry_their_status_and_a_bounded_detail(monkeypatch):
     with pytest.raises(real.RelayRejected) as caught:
         real.request_json("https://relay.example/v1/events", method="POST", payload={})
     assert isinstance(caught.value.detail, str) and len(caught.value.detail) == 200
+
+    # A relay can't split or forge log lines through it.
+    monkeypatch.setattr(real.urllib.request, "urlopen", refuse(b'{"error": "bad\\nWARNING forged\\r\\u001b[31m"}'))
+    with pytest.raises(real.RelayRejected) as caught:
+        real.request_json("https://relay.example/v1/events", method="POST", payload={})
+    assert caught.value.detail == "bad WARNING forged [31m"
 
     monkeypatch.setattr(real.urllib.request, "urlopen", refuse(b"<html>proxy</html>"))
     with pytest.raises(real.RelayRejected) as caught:
