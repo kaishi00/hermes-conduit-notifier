@@ -13,7 +13,7 @@ const defaultPreferences = Object.freeze({
   background_task_finished: true,
   completion_sound: true,
   // Sound for the notifications that wait on the user (approval.needed,
-  // input.needed). Approvals time out and fail closed, so a silent banner
+  // input.needed, call.requested). Approvals time out and fail closed, so a silent banner
   // is easy to miss; default on, with its own opt-out.
   attention_sound: true,
   show_previews: false,

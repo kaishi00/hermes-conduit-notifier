@@ -567,6 +567,52 @@ test('event IDs stay out of the data file and a full event ledger keeps acceptin
     'deferred plugin metadata is written on shutdown');
 });
 
+test('call requests reach APNs with the call category and stop at the per-installation ceiling', async () => {
+  const aPort = await closedPort();
+  const isolatedPath = join(dir, 'relay-data-calls.json');
+  const capturePath = join(dir, `capture-calls-${Date.now()}.jsonl`);
+  const fixture = new RelayStore(isolatedPath);
+  const created = fixture.createInstallation({ bundleId: 'com.milim.relay', deviceToken: 'd'.repeat(64), environment: 'production' });
+  const pairing = fixture.createPairing(created.installation.id);
+  const claim = fixture.claimPairing(pairing.code, 'calls target');
+  const child = await startRelay(aPort, 'accept', isolatedPath, {
+    APNS_CAPTURE_PATH: capturePath, RELAY_CALLS_PER_INSTALLATION_PER_DAY: '2',
+  });
+  children.push(child);
+  const base = `http://127.0.0.1:${aPort}`;
+  const send = (eventId, type = 'call.requested') => api(base, '/v1/events', {
+    method: 'POST',
+    credential: `${created.installation.id}.${claim.gatewayId}.${claim.gatewaySecret}`,
+    body: {
+      type,
+      event_id: eventId,
+      session_id: 'st-1',
+      plugin_version: '0.13.0',
+      title: 'Hermes wants to talk',
+      body: 'Your job finished.',
+      call: { id: eventId.slice(5), kind: 'done', session_ids: ['rt-1', 'st-1'] },
+    },
+  });
+  try {
+    assert.equal((await send('call:000000000000000000000001')).status, 202);
+    assert.deepEqual(await send('call:000000000000000000000001'), { status: 200, json: { accepted: true, duplicate: true } },
+      'a resent call is a duplicate, not a second call');
+    assert.equal((await send('call:000000000000000000000002')).status, 202);
+    assert.deepEqual(await send('call:000000000000000000000003'), { status: 429, json: { error: 'call_limit' } });
+    assert.equal((await send('response:000000000000000000000004', 'response.ready')).status, 202,
+      'ordinary pushes are not held to the call ceiling');
+    const meta = await api(base, '/v1/meta', { credential: `${created.installation.id}.${created.deviceSecret}` });
+    assert.ok(meta.json.capabilities.includes('calls'));
+  } finally {
+    await stopRelay(child);
+  }
+  const sent = readFileSync(capturePath, 'utf8').trim().split('\n').map((line) => JSON.parse(line).notification.payload);
+  assert.equal(sent.length, 3);
+  assert.equal(sent[0].aps.category, 'HERMES_CALL');
+  assert.deepEqual(sent[0].body.conduit.call, { id: '000000000000000000000001', kind: 'done', session_ids: ['rt-1', 'st-1'] });
+  assert.equal(sent[2].aps.category, undefined);
+});
+
 test('an invalid capacity setting stops the relay at boot', async () => {
   const child = spawn(process.execPath, ['src/server.mjs'], {
     cwd: fileURLToPath(new URL('..', import.meta.url)),

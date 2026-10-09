@@ -555,3 +555,61 @@ test('an envelope that would overflow APNs is dropped, never truncated', () => {
   assert.equal(payload.aps['mutable-content'], undefined);
   assert.equal(payload.aps.alert.title, 'Input needed');
 });
+
+// ── Hermes calls you (#449) ──────────────────────────────────────────────
+
+const callBody = {
+  type: 'call.requested',
+  event_id: 'call:0123456789abcdef01234567',
+  session_id: 'st-1',
+  profile: 'default',
+  title: 'Hermes wants to talk',
+  body: '“Check the server” finished.',
+  call: { id: '0123456789abcdef01234567', kind: 'done', title: 'Check the server', session_ids: ['rt-1', 'st-1'] },
+};
+
+test('validateEvent accepts a call request and keeps its job', () => {
+  const event = validateEvent(callBody);
+  assert.equal(event.type, 'call.requested');
+  assert.deepEqual(event.call, { id: '0123456789abcdef01234567', kind: 'done', title: 'Check the server', session_ids: ['rt-1', 'st-1'] });
+});
+
+test('validateEvent bounds the call and drops a malformed one', () => {
+  const bounded = validateEvent({ ...callBody, call: { ...callBody.call, title: undefined, session_ids: ['a', 'a', 'bad id', 'b', 'c', 'd', 'e', 'x'.repeat(181)] } });
+  assert.deepEqual(bounded.call, { id: callBody.call.id, kind: 'done', session_ids: ['a', 'b', 'c', 'd'] });
+  for (const call of [null, [], { ...callBody.call, kind: 'maybe' }, { ...callBody.call, id: 'short' }, { ...callBody.call, id: 'has space here' }]) {
+    assert.equal(validateEvent({ ...callBody, call }).call, undefined, JSON.stringify(call));
+  }
+  // Only a call request carries a call.
+  assert.equal(validateEvent({ ...callBody, type: 'response.ready' }).call, undefined);
+});
+
+test('a call request rings with the call category, its job and the generic copy when previews are off', () => {
+  const { payload } = notificationFor(validateEvent(callBody), { show_previews: false }, { id: 'gw-1' });
+  assert.equal(payload.aps.category, 'HERMES_CALL');
+  assert.equal(payload.aps.sound, 'default');
+  assert.equal(payload.aps.alert.title, 'Hermes wants to talk');
+  assert.match(payload.aps.alert.body, /^Tap to talk to Hermes\./);
+  assert.ok(!payload.aps.alert.body.includes('Check the server'));
+  assert.deepEqual(payload.body.conduit.call, validateEvent(callBody).call);
+  assert.equal(payload.conduit.call, undefined, 'the top-level copy stays routing-only');
+  const silenced = notificationFor(validateEvent(callBody), { attention_sound: false }, { id: 'gw-1' });
+  assert.equal(silenced.payload.aps.sound, undefined);
+});
+
+test('a call request with previews on shows the plugin copy; other pushes get no call category', () => {
+  const { payload } = notificationFor(validateEvent(callBody), { show_previews: true }, { id: 'gw-1' });
+  assert.deepEqual(payload.aps.alert, { title: 'Hermes wants to talk', body: '“Check the server” finished.' });
+  const ready = notificationFor(validateEvent({ ...callBody, type: 'response.ready' }), { show_previews: true }, { id: 'gw-1' });
+  assert.equal(ready.payload.aps.category, undefined);
+});
+
+test('an encrypted call request keeps the call category and seals its job', () => {
+  const event = validateEvent({ ...callBody, event_id: envelope.msg, e2e: { ...envelope, req: '' } });
+  assert.equal(event.call, undefined);
+  const { payload } = notificationFor(event, {}, { id: 'gw-1' });
+  assert.equal(payload.aps.category, 'HERMES_CALL');
+  assert.equal(payload.aps['mutable-content'], 1);
+  assert.deepEqual(payload.aps.alert, { title: 'Hermes wants to talk', body: 'Tap to talk to Hermes.' });
+  assert.ok(!JSON.stringify(payload).includes('Check the server'));
+});

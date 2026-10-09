@@ -3096,6 +3096,131 @@ async def post_e2e(request: Request, response: Response, profile: Optional[str] 
         raise _unexpected("key", exc, feature="Encrypted notifications")
 
 
+# --- Hermes calls you (#449) -------------------------------------------------
+#
+# Conduit asks to be called when a job the user handed to a Live Voice call
+# ends. When the call ends with such a job still running, Conduit registers a
+# watch on the job's own Hermes session ids here; the plugin's turn-end hooks
+# (agent process) fire it once that session's turn ends, and send the call
+# request through the push relay. The watches and the per-profile call
+# settings live in the profile's conduit-calls.json, shared with the hooks
+# through calls_store.py (loaded by path: this module can't import the plugin
+# package). (hermes-conduit designs/hermes-calls-you-449.md)
+
+CALLS_LIMIT = 30
+CALLS_WINDOW_S = 60.0
+CALLS_MAX_BODY_BYTES = 4096
+_CALL_WATCH_ID = re.compile(r"^[0-9a-f]{24}$")
+_calls_limiter = _MintLimiter(CALLS_LIMIT, CALLS_WINDOW_S, message="Too many call requests; try again shortly")
+_calls_store_module: Any = None
+_calls_store_lock = threading.Lock()
+
+
+def _calls_store() -> Any:
+    """calls_store.py beside this folder, loaded once."""
+    global _calls_store_module
+    with _calls_store_lock:
+        if _calls_store_module is None:
+            path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "calls_store.py")
+            spec = importlib.util.spec_from_file_location("conduit_push_dashboard_calls_store", path)
+            if spec is None or spec.loader is None:
+                raise TokenError(501, "This plugin install is missing calls_store.py; update the plugin")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _calls_store_module = module
+        return _calls_store_module
+
+
+def _calls_home() -> Any:
+    from hermes_constants import get_hermes_home
+
+    return get_hermes_home()
+
+
+def calls_status() -> Dict[str, Any]:
+    module = _calls_store()
+    store = module.CallStore(_calls_home())
+    return {
+        "paired": _load_pairing_state(_pairing_state_path()) is not None,
+        "settings": store.settings(),
+        "bounds": {key: {"min": low, "max": high} for key, (low, high) in module.INT_BOUNDS.items()},
+        "watches": store.watch_count(),
+    }
+
+
+def update_call_settings(body: Any) -> Dict[str, Any]:
+    if not isinstance(body, dict) or not isinstance(body.get("settings"), dict):
+        raise TokenError(400, "Expected a JSON object with settings")
+    store = _calls_store().CallStore(_calls_home())
+    try:
+        return {"settings": store.update_settings(body["settings"])}
+    except ValueError as exc:
+        raise TokenError(400, str(exc))
+
+
+def add_call_watch(body: Any) -> Dict[str, Any]:
+    """Watches a job for the user's call. ``status`` is ``watching``, or
+    ``ended`` (with ``outcome``) when the job's turn already ended: Conduit
+    then tells the user itself."""
+    if not isinstance(body, dict):
+        raise TokenError(400, "Expected a JSON object")
+    if _load_pairing_state(_pairing_state_path()) is None:
+        raise TokenError(409, "This Hermes profile isn't paired with Conduit")
+    store = _calls_store().CallStore(_calls_home())
+    try:
+        return store.add_watch(body.get("session_ids"), body.get("title", ""))
+    except ValueError as exc:
+        reason = str(exc)
+        if reason == "calls_off":
+            raise TokenError(409, "Calls are off for this Hermes profile")
+        if reason == "too_many":
+            raise TokenError(429, "Too many jobs are already waiting to call you")
+        raise TokenError(400, reason)
+
+
+def remove_call_watch(watch_id: str) -> Dict[str, Any]:
+    if not _CALL_WATCH_ID.match(watch_id):
+        raise TokenError(400, "Unknown watch id")
+    return {"removed": _calls_store().CallStore(_calls_home()).remove_watch(watch_id)}
+
+
+async def _calls_route(profile: Optional[str], response: Response, fn: Callable[[], Dict[str, Any]],
+                       route: str) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        _calls_limiter.acquire(_limiter_key(profile))
+        return {"ok": True, **(await _run_scoped(profile, fn))}
+    except TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
+        raise
+    except Exception as exc:
+        raise _unexpected(route, exc, feature="Calls")
+
+
+@router.get("/calls")
+async def get_calls(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    return await _calls_route(profile, response, calls_status, "status")
+
+
+@router.put("/calls")
+async def put_calls(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    body = await _read_json_body(request, CALLS_MAX_BODY_BYTES)
+    return await _calls_route(profile, response, lambda: update_call_settings(body), "settings")
+
+
+@router.post("/calls/watches")
+async def post_call_watch(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    body = await _read_json_body(request, CALLS_MAX_BODY_BYTES)
+    return await _calls_route(profile, response, lambda: add_call_watch(body), "watch")
+
+
+@router.delete("/calls/watches/{watch_id}")
+async def delete_call_watch(watch_id: str, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    return await _calls_route(profile, response, lambda: remove_call_watch(watch_id), "watch")
+
+
 # --- Watch tools (wrist-down lookups for a Conduit Watch call) ---------------
 #
 # With the wrist down, a Conduit Watch call can't reach Conduit on the iPhone,
@@ -6782,6 +6907,7 @@ ROUTE_CAPABILITIES = (
     "watch-live-token",
     "watch-audio",
     "desktop-views",
+    "hermes-calls",
 )
 
 

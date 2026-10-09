@@ -8,7 +8,7 @@ import threading
 import uuid
 from typing import Any
 
-from . import clarify_loop
+from . import calls, clarify_loop
 from .client import enqueue
 from .events import approval_decision, clarification_text, event_id, is_silent_response, push_event
 
@@ -75,27 +75,46 @@ def _pre_tool_call(**kwargs: Any) -> None:
 def _post_llm_call(**kwargs: Any) -> None:
     session_id = _text(kwargs.get("session_id"))
     response = kwargs.get("assistant_response")
-    if _is_child(session_id) or is_silent_response(response):
+    if _is_child(session_id):
         return
-    enqueue(push_event(
+    ready = None if is_silent_response(response) else push_event(
         "response.ready",
         identifier=event_id("response", kwargs.get("turn_id"), session_id),
         session_id=session_id,
         profile=_profile,
         body=_text(response),
-    ))
+    )
+    # A job the user asked to be called about (#449) ends here: the call
+    # request takes the place of the ready notification.
+    if calls.turn_ended(session_id, "done", profile=_profile, fallback=ready):
+        return
+    if ready is not None:
+        enqueue(ready)
 
 
 def _on_session_end(**kwargs: Any) -> None:
+    # Fires at the end of every turn, whatever happened (post_llm_call only
+    # after a turn that finished): the one place a watched job's failure or
+    # stop shows up. A finished turn's watch was normally consumed by
+    # post_llm_call already, so this finds nothing then.
     session_id = _text(kwargs.get("session_id"))
-    if kwargs.get("completed") or kwargs.get("interrupted") or _is_child(session_id):
+    if _is_child(session_id):
         return
-    enqueue(push_event(
+    if kwargs.get("completed"):
+        calls.turn_ended(session_id, "done", profile=_profile, fallback=None)
+        return
+    if kwargs.get("interrupted"):
+        calls.turn_ended(session_id, "stopped", profile=_profile, fallback=None)
+        return
+    failed = push_event(
         "turn.failed",
         identifier=event_id("failure", kwargs.get("turn_id"), session_id),
         session_id=session_id,
         profile=_profile,
-    ))
+    )
+    if calls.turn_ended(session_id, "failed", profile=_profile, fallback=failed):
+        return
+    enqueue(failed)
 
 
 def _pre_approval_request(**kwargs: Any) -> None:

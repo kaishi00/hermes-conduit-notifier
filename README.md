@@ -60,6 +60,7 @@ The plugin currently emits notifications for:
 - response ready
 - failed turns
 - completed delegated tasks
+- call requests: a job you asked to be called about has ended (see [Hermes calls you](#hermes-calls-you-plugin-013))
 
 An exact `[Silent]` assistant response does not emit a completion notification.
 
@@ -235,6 +236,7 @@ integer stops the relay at boot.
 | Live Watch audio bridges across the relay (GPT-Live and Grok on the Watch) | 200 | `RELAY_MAX_WATCH_AUDIO_BRIDGES` |
 | Live Watch audio bridges per gateway | 2 | `RELAY_MAX_WATCH_AUDIO_BRIDGES_PER_GATEWAY` |
 | Watch tool calls per minute | 1,200 | `RELAY_WATCH_CALLS_PER_MINUTE` |
+| Hermes call requests per installation per day | 60 | `RELAY_CALLS_PER_INSTALLATION_PER_DAY` |
 
 Event IDs only prevent a repeated delivery of the same event within 24 hours,
 so the relay keeps them in memory and never writes them to the data file. A
@@ -684,6 +686,57 @@ writes Hermes' own read flag, so Desktop's unread dots don't change.
   minute per profile.
 - An open is skipped when the gateway can't say which profile its chat
   belongs to, rather than guessed onto the default profile.
+
+## Hermes calls you (plugin 0.13+)
+
+In a Live Voice call you can hand Hermes a long job and say "call me when
+it's done". When you hang up with that job still running, Conduit asks this
+profile to watch the job's own Hermes session. The first time a turn of that
+session ends, the plugin sends a **call request** through the relay instead of
+the usual "Response ready" or "Turn failed" push: a "Hermes wants to talk"
+notification whose Talk button opens Live Voice in the job's chat, where
+Hermes opens with how the job went. A native ringing call (CallKit) is the
+next step; this is its foundation and fallback.
+
+Calls are off until you turn them on in Conduit's Voice settings. Settings
+and watches live per profile in `<hermes home>/conduit-calls.json` (mode
+`0600`), shared by the turn-end hooks and the dashboard routes under one file
+lock, so they survive restarts:
+
+| Setting | Default | Range |
+| --- | --- | --- |
+| `enabled` (Hermes can call me) | off | |
+| `when_asked` (call when I explicitly ask) | on | |
+| `min_gap_s` (time between calls) | 120 s | 30–3600 s |
+| `per_hour` | 6 | 1–30 |
+| `per_day` | 20 | 1–60 |
+
+| Method | Route | Body | Returns |
+| --- | --- | --- | --- |
+| GET | `/api/plugins/conduit_push/calls?profile=` | | `{ok, paired, settings, bounds, watches}` |
+| PUT | `/api/plugins/conduit_push/calls?profile=` | `{settings: {...}}` (any subset) | `{ok, settings}` |
+| POST | `/api/plugins/conduit_push/calls/watches?profile=` | `{session_ids: [...], title}` | `{ok, status: "watching", id}` or `{ok, status: "ended", outcome}` |
+| DELETE | `/api/plugins/conduit_push/calls/watches/{id}?profile=` | | `{ok, removed}` |
+
+- A watch names up to 4 session ids (the job's runtime and stored ids) and a
+  title of up to 120 characters. It fires once, on the first turn end of any
+  of them: `done` (the turn finished), `failed`, or `stopped` (interrupted).
+  A replayed hook finds nothing left, so a job calls at most once. Watches
+  expire after 24 hours; a profile holds at most 20 (429 past that).
+- `ended` means the job's turn ended just before the watch arrived (the
+  plugin remembers turn ends for 30 minutes while calls are on); Conduit then
+  tells you itself.
+- 409 when the profile isn't paired with Conduit, or calls (or "call when I
+  ask") are off. 400 for an unknown setting or a value outside its range.
+  429 past 30 requests a minute per profile.
+- A call held back by your limits, or calls turned off after the watch was
+  made, consumes the watch and sends the usual push instead. So does a relay
+  that refuses the call request (relays before 0.8 don't know it; 0.8 caps
+  call requests at 60 a day per installation, `call_limit`) or one that stays
+  unreachable after three tries (2 s and 4 s apart, same event id).
+- The call request carries the job's id, outcome, title and session ids so
+  Conduit can open the right chat. With end-to-end encryption they are sealed
+  like any other content; with `redact on` the title is dropped.
 
 ## Apple Watch lookups and jobs (plugin 0.6+, jobs 0.7+, Gemini tokens 0.8+)
 

@@ -126,6 +126,24 @@ def test_sealed_event_hides_content_and_round_trips():
     assert inner["session_id"] == "sess-1"
 
 
+def test_a_sealed_call_request_carries_its_call_inside():
+    keys = _keys()
+    event = {
+        "event_id": "call:0123456789abcdef01234567",
+        "type": "call.requested",
+        "session_id": "rt-1",
+        "title": "Hermes wants to talk",
+        "body": "Check the server finished.",
+        "call": {"id": "0123456789abcdef01234567", "kind": "done", "title": "Check the server", "session_ids": ["rt-1", "st-1"]},
+    }
+    sealed = e2e.seal_event(event, keys, installation_id=INSTALLATION, gateway_id=GATEWAY, now=1_760_000_000)
+    assert "Check the server" not in json.dumps(sealed)
+    assert "call" not in sealed
+    inner = e2e.open_event(sealed, keys, installation_id=INSTALLATION, gateway_id=GATEWAY)
+    assert inner["call"]["title"] == "Check the server"
+    assert inner["call"]["session_ids"] == ["rt-1", "st-1"]
+
+
 @pytest.mark.parametrize("tamper", [
     lambda s: s.__setitem__("type", "approval.needed"),
     lambda s: s["e2e"].__setitem__("tok", "0" * 16),
