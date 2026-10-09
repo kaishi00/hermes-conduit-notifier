@@ -333,6 +333,8 @@ async function route(request, response) {
     }
     if (duplicateEvent && !event.pluginVersion) return sendJson(response, 200, { accepted: true, duplicate: true });
     enforceEventBudget();
+    // The ceiling counts call requests the relay accepted, delivered or not
+    // (paused, previews off, no device): a host past it is misbehaving.
     if (!duplicateEvent && event.type === 'call.requested') enforceCallCeiling(installation.id);
     // Plugin version recording runs BEFORE the dedupe return: a second
     // gateway on the same installation running the same plugin version sends
@@ -831,10 +833,13 @@ function validateEvent(body) {
 function validateCall(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
   if (typeof value.id !== 'string' || !/^[A-Za-z0-9_-]{8,64}$/.test(value.id) || !CALL_KINDS.has(value.kind)) return undefined;
+  if (!Array.isArray(value.session_ids)) return undefined;
   const sessionIds = [];
-  for (const item of Array.isArray(value.session_ids) ? value.session_ids : []) {
+  for (const item of value.session_ids) {
+    // Like the plugin (events.sanitize_call): one malformed id drops the call.
     const sessionId = typeof item === 'string' && item.length <= 180 ? cleanIdentifier(item, 180) : undefined;
-    if (sessionId && !sessionIds.includes(sessionId)) sessionIds.push(sessionId);
+    if (!sessionId) return undefined;
+    if (!sessionIds.includes(sessionId)) sessionIds.push(sessionId);
   }
   // A call with no session has no chat to open; the plugin never sends one.
   if (!sessionIds.length) return undefined;

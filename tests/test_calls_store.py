@@ -423,3 +423,15 @@ def test_a_watch_with_a_malformed_id_is_dropped(tmp_path):
     store.path.write_text(json.dumps(state))
     assert store.watch_count() == 0
     assert store.fire("rt-1", "done") is None
+
+
+def test_call_history_on_disk_is_capped_to_the_newest_calls(tmp_path):
+    clock = Clock()
+    store = _store(tmp_path, clock=clock, enabled=True)
+    store.add_watch(["rt-1"], "Check the server")
+    state = json.loads(store.path.read_text())
+    state["history"] = [clock.now - 10 - at for at in range(500)]
+    normalized = calls_store._normalized(state, clock.now)
+    assert len(normalized["history"]) == calls_store.MAX_HISTORY == 60
+    assert normalized["history"][-1] == clock.now - 10
+    assert normalized["history"] == sorted(normalized["history"])

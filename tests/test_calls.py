@@ -171,6 +171,29 @@ def test_a_refused_call_sends_the_usual_push_at_once(home, fake):
     assert fake.enqueued == [READY]
 
 
+class _Rejected(RuntimeError):
+    # client.RelayRejected's shape: the relay answered with this status.
+    def __init__(self, status):
+        super().__init__(f"Conduit relay rejected the request: x ({status}).")
+        self.status = status
+
+
+def test_a_relay_that_fails_to_handle_the_call_is_tried_again(home, fake, sleeps):
+    fake.failures = [_Rejected(503), _Rejected(500)]
+    _watch(home, "rt-1")
+    calls.turn_ended("rt-1", "done", profile="default", fallback=READY)
+    assert len(fake.sent) == 3
+    assert fake.enqueued == []
+
+
+def test_a_rate_limited_call_is_not_tried_again(home, fake, sleeps):
+    fake.failures = [_Rejected(429)]
+    _watch(home, "rt-1")
+    calls.turn_ended("rt-1", "done", profile="default", fallback=READY)
+    assert len(fake.sent) == 1
+    assert fake.enqueued == [READY]
+
+
 def test_a_broken_watch_file_never_breaks_the_turn(home, fake, monkeypatch):
     def broken(*_args, **_kwargs):
         raise OSError("disk")

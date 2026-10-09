@@ -198,6 +198,10 @@ def deliver(event: dict[str, Any], fallback: dict[str, Any] | None) -> None:
             client.send_now(event)
             return
         except RuntimeError as error:
+            if getattr(error, "status", 0) >= 500:
+                # The relay failed to handle it: worth another try.
+                logger.warning("Conduit call request delivery failed: %s", error)
+                continue
             # The relay answered and refused (or the profile lost its
             # pairing): sending the same thing again won't change that.
             logger.warning("Conduit call request refused: %s", error)

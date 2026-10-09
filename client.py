@@ -428,6 +428,16 @@ def cancel_decision(request_id: str) -> bool:
         return False
 
 
+class RelayRejected(RuntimeError):
+    """The relay answered with an HTTP error. ``status`` tells a refusal (4xx)
+    from the relay failing to handle the request (5xx)."""
+
+    def __init__(self, status: int, detail: str) -> None:
+        super().__init__(f"Conduit relay rejected the request: {detail} ({status}).")
+        self.status = status
+        self.detail = detail
+
+
 def request_json(
     url: str,
     *,
@@ -458,7 +468,7 @@ def request_json(
             detail = json.loads(error.read()).get("error", "request_rejected")
         except Exception:
             detail = "request_rejected"
-        raise RuntimeError(f"Conduit relay rejected the request: {detail} ({error.code}).") from error
+        raise RelayRejected(error.code, detail) from error
 
 
 def _start_worker() -> None:
