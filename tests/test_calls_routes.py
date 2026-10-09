@@ -55,7 +55,8 @@ def test_status_reports_the_defaults_and_their_bounds(paired):
     assert response.json() == {
         "ok": True,
         "paired": True,
-        "settings": {"enabled": False, "when_asked": True, "min_gap_s": 120, "per_hour": 6, "per_day": 20},
+        "settings": {"enabled": False, "when_asked": True, "decides": False, "alerts": False,
+                     "min_gap_s": 120, "per_hour": 6, "per_day": 20},
         "bounds": {
             "min_gap_s": {"min": 30, "max": 3600},
             "per_hour": {"min": 1, "max": 30},
@@ -185,3 +186,29 @@ def test_an_oversized_body_is_refused(paired):
     response = _http().post(f"{BASE}/calls/watches", content=b"{" + b" " * 5000 + b"}",
                             headers={"content-type": "application/json"})
     assert response.status_code == 413
+
+
+def test_new_settings_for_hermes_decides_and_alerts_change(paired):
+    http = _http()
+    response = http.put(f"{BASE}/calls", json={"settings": {"enabled": True, "decides": True, "alerts": True}})
+    assert response.status_code == 200
+    settings = http.get(f"{BASE}/calls").json()["settings"]
+    assert (settings["decides"], settings["alerts"]) == (True, True)
+    assert http.put(f"{BASE}/calls", json={"settings": {"alerts": "yes"}}).status_code == 400
+
+
+def test_presence_holds_calls_during_a_live_voice_call(paired):
+    http = _http()
+    _turn_calls_on(http)
+    present = http.put(f"{BASE}/calls/presence", json={"hold_s": 90})
+    assert present.json() == {"ok": True, "status": "present"}
+    assert present.headers["cache-control"] == "no-store"
+    store = api._calls_store().CallStore(paired)
+    store.add_watch(["rt-1"], "Job")
+    assert store.fire("rt-1", "done")["status"] == "busy"
+    assert http.put(f"{BASE}/calls/presence", json={"hold_s": 0}).json() == {"ok": True, "status": "away"}
+
+
+@pytest.mark.parametrize("body", [{"hold_s": 601}, {"hold_s": -1}, {}, []])
+def test_a_bad_presence_is_refused(paired, body):
+    assert _http().put(f"{BASE}/calls/presence", json=body).status_code == 400

@@ -3200,6 +3200,17 @@ def remove_call_watch(watch_id: str) -> Dict[str, Any]:
     return {"removed": _calls_store().CallStore(_calls_home()).remove_watch(watch_id)}
 
 
+def set_call_presence(body: Any) -> Dict[str, Any]:
+    """The user is in a Live Voice call for ``hold_s`` more seconds (Conduit
+    renews it during the call), or not (0): nothing rings meanwhile."""
+    if not isinstance(body, dict):
+        raise TokenError(400, "Expected a JSON object")
+    try:
+        return _calls_store().CallStore(_calls_home()).set_presence(body.get("hold_s"))
+    except ValueError as exc:
+        raise TokenError(400, str(exc))
+
+
 async def _calls_route(profile: Optional[str], response: Response, fn: Callable[[], Dict[str, Any]],
                        route: str) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
@@ -3242,6 +3253,12 @@ async def put_call_watch(watch_id: str, request: Request, response: Response,
 @router.delete("/calls/watches/{watch_id}")
 async def delete_call_watch(watch_id: str, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     return await _calls_route(profile, response, lambda: remove_call_watch(watch_id), "watch")
+
+
+@router.put("/calls/presence")
+async def put_call_presence(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    body = await _read_json_body(request, CALLS_MAX_BODY_BYTES)
+    return await _calls_route(profile, response, lambda: set_call_presence(body), "presence")
 
 
 # --- Watch tools (wrist-down lookups for a Conduit Watch call) ---------------
@@ -6931,6 +6948,7 @@ ROUTE_CAPABILITIES = (
     "watch-audio",
     "desktop-views",
     "hermes-calls",
+    "hermes-call-presence",
 )
 
 

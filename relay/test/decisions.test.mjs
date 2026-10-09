@@ -357,7 +357,7 @@ test('no-op installation updates and repeated cancellation do not save or rewrit
   relay.save = () => { writes += 1; };
 
   assert.deepEqual(relay.updateInstallation(installation.id, { deviceToken: installation.deviceToken, preferences: installation.preferences }), {
-    id: installation.id, active: true, gateways: [], preferences: installation.preferences, updated_at: updatedAt,
+    id: installation.id, active: true, gateways: [], preferences: installation.preferences, voip: false, updated_at: updatedAt,
   });
   assert.equal(relay.cancelPendingDecision(installation.id, 'gw-1', 'conduit-push-cancel'), 'cancelled');
   const cancelledAt = relay.data.pendingDecisions[RelayStore.decisionKey(installation.id, 'gw-1', 'conduit-push-cancel')].cancelledAt;
@@ -946,4 +946,22 @@ test('a legacy record colliding with a newer scoped decision retires, never turn
     reloaded.resolveLegacyRespond('inst-1', 'conduit-push-dual'),
     { resolution: 'unique', gatewayId: 'gw-1' },
   );
+});
+
+test('an installation keeps a PushKit token until it is cleared', () => {
+  const relay = store();
+  const created = relay.createInstallation({ bundleId: 'app', deviceToken: 'a'.repeat(64), voipToken: 'b'.repeat(64), environment: 'production' });
+  assert.equal(created.installation.voip, true);
+  const id = created.installation.id;
+  assert.equal(relay.wouldUpdateInstallation(id, { voipToken: undefined }), false, 'absent keeps it');
+  assert.equal(relay.wouldUpdateInstallation(id, { voipToken: 'b'.repeat(64) }), false);
+  assert.equal(relay.updateInstallation(id, { voipToken: 'c'.repeat(64) }).voip, true);
+  assert.equal(relay.data.installations[id].voipToken, 'c'.repeat(64));
+  assert.equal(relay.clearVoipToken(id, 'b'.repeat(64)), null, 'a token the phone replaced meanwhile stays');
+  assert.equal(relay.data.installations[id].voipToken, 'c'.repeat(64));
+  assert.equal(relay.clearVoipToken(id, 'c'.repeat(64)).voip, false);
+  assert.equal('voipToken' in relay.data.installations[id], false);
+  assert.equal(relay.data.installations[id].active, true);
+  assert.equal(relay.wouldUpdateInstallation(id, { voipToken: null }), false);
+  assert.equal(relay.createInstallation({ bundleId: 'app', deviceToken: 'd'.repeat(64), environment: 'production' }).installation.voip, false);
 });

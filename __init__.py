@@ -6,9 +6,10 @@ import functools
 import logging
 import threading
 import uuid
+from pathlib import Path
 from typing import Any
 
-from . import calls, clarify_loop
+from . import call_tool, calls, clarify_loop
 from .client import enqueue
 from .events import approval_decision, clarification_text, event_id, is_silent_response, push_event
 
@@ -31,6 +32,15 @@ def register(ctx: Any) -> None:
     ctx.register_hook("subagent_stop", _subagent_stop)
     # A call held over a restart goes out when its hold runs out (#449).
     calls.resume(_profile)
+    # Hermes asks for calls itself (#449): the tool and its skill. An answered
+    # approval stops its alert call; a Hermes without the hook leaves that to
+    # the turn's end.
+    call_tool.register(ctx, is_child=_is_child,
+                       skill_path=Path(__file__).resolve().parent / "skills" / call_tool.SKILL_NAME / "SKILL.md")
+    try:
+        ctx.register_hook("post_approval_response", _post_approval_response)
+    except Exception:  # noqa: BLE001
+        logger.warning("conduit_push: post_approval_response hook unavailable", exc_info=True)
     # The voice hint is an extra: a Hermes that refuses the hook must not
     # take the notifications down with it.
     try:
@@ -116,6 +126,9 @@ def _on_session_end(**kwargs: Any) -> None:
     )
     if calls.turn_ended(session_id, "failed", profile=_profile, fallback=failed):
         return
+    # With alert calls on, a failed turn calls instead.
+    if calls.failed_turn(session_id, profile=_profile, fallback=failed):
+        return
     enqueue(failed)
 
 
@@ -152,6 +165,13 @@ def _pre_approval_request(**kwargs: Any) -> None:
             else None
         ),
     ))
+    # With alert calls on, an approval left unanswered for a minute calls the
+    # user too (#449), beside the answerable notification.
+    calls.alert(session_id, "approval", description, profile=_profile)
+
+
+def _post_approval_response(**kwargs: Any) -> None:
+    calls.cancel_alerts(_text(kwargs.get("session_key")), "approval")
 
 
 def _subagent_start(**kwargs: Any) -> None:

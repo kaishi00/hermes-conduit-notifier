@@ -124,6 +124,28 @@ test('a real APNs rejection response resolves with ok:false and the reason', asy
   }
 });
 
+test('a call goes out as a VoIP push on the voip topic with its expiration; others stay alerts', async () => {
+  const seen = [];
+  const { server, origin } = await startH2Server((stream, headers) => {
+    seen.push(headers);
+    stream.respond({ ':status': 200, 'content-type': 'application/json' });
+    stream.end('{}');
+  });
+  try {
+    await client(origin).send('e'.repeat(64), { payload: { conduit: {} }, pushType: 'voip', topic: 'com.milim.relay.voip', expiration: 1_800_000_300 });
+    await client(origin).send('e'.repeat(64), notification);
+    assert.equal(seen[0]['apns-push-type'], 'voip');
+    assert.equal(seen[0]['apns-topic'], 'com.milim.relay.voip');
+    assert.equal(seen[0]['apns-expiration'], '1800000300');
+    assert.equal(seen[1]['apns-push-type'], 'alert');
+    assert.equal(seen[1]['apns-topic'], 'com.milim.relay');
+    assert.equal(seen[1]['apns-expiration'], undefined);
+  } finally {
+    server.close();
+    server.closeAllConnections?.();
+  }
+});
+
 // Guard the default origin so the DI seam cannot silently change production.
 test('the default origin is production APNs', () => {
   const apns = new ApnsClient({ keyPath, keyId: 'AAAAAAAAAA', teamId: 'BBBBBBBBBB', topic: 'com.milim.relay' });

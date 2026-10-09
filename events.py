@@ -10,7 +10,7 @@ from typing import Any
 
 # Keep in sync with plugin.yaml. Reported on every event so the relay can
 # expose per-gateway compatibility state to the app (Settings > Notifications).
-PLUGIN_VERSION = "0.13.3"
+PLUGIN_VERSION = "0.14.0"
 PLUGIN_CAPABILITIES = [
     "approval-decisions",
     "clarify-loop",
@@ -89,14 +89,16 @@ def push_event(
     return event
 
 
-CALL_KINDS = ("done", "failed", "stopped")
+# How a watched job ended, or (an alert call) what Hermes waits on.
+CALL_KINDS = ("done", "failed", "stopped", "approval", "question")
 _CALL_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 _CALL_SESSION_ID = re.compile(r"^[A-Za-z0-9:_./-]{1,180}$")
 
 
 def sanitize_call(value: Any) -> dict[str, Any] | None:
-    """A call request's job, bounded: the watch id, how the job ended, its
-    title and its session ids (runtime and stored). None when malformed."""
+    """A call request's job, bounded: the watch id, how the job ended (or
+    what Hermes waits on), its title, why Hermes calls and its session ids
+    (runtime and stored). None when malformed."""
     if not isinstance(value, dict):
         return None
     call_id = value.get("id")
@@ -118,6 +120,9 @@ def sanitize_call(value: Any) -> dict[str, Any] | None:
     title = _clean(value.get("title") if isinstance(value.get("title"), str) else "", 120)
     if title:
         call["title"] = title
+    reason = _clean(value.get("reason") if isinstance(value.get("reason"), str) else "", 200)
+    if reason:
+        call["reason"] = reason
     return call
 
 
@@ -174,7 +179,8 @@ def redact_event(event: dict[str, Any]) -> dict[str, Any]:
         redacted["decision"] = clarify
     call = sanitize_call(event.get("call")) if event.get("type") == "call.requested" else None
     if call:
-        # The job's title is chat content; its id, outcome and sessions route.
+        # The job's title and the reason are chat content; its id, outcome
+        # and sessions route.
         redacted["call"] = {key: call[key] for key in ("id", "kind", "session_ids")}
     return redacted
 

@@ -25,7 +25,7 @@ import time
 import uuid
 from typing import Any, Callable
 
-from . import client
+from . import calls, client
 from .events import (
     clarify_decision,
     event_id,
@@ -152,13 +152,19 @@ def middleware(is_child_session: Callable[[str], bool] | None = None, **kwargs: 
         # fallback. Use the native path immediately.
         return kwargs["next_call"](args)
 
-    return _first_answer_wins(
-        request_id=request_id,
-        next_call=kwargs["next_call"],
-        args=args,
-        batch=batch,
-        batch_protocol=batch_protocol,
-    )
+    # With alert calls on, a question left unanswered for a minute calls
+    # the user (#449); any answer, from anywhere, stops it.
+    calls.alert(session_id, "question", question, profile=profile)
+    try:
+        return _first_answer_wins(
+            request_id=request_id,
+            next_call=kwargs["next_call"],
+            args=args,
+            batch=batch,
+            batch_protocol=batch_protocol,
+        )
+    finally:
+        calls.cancel_alerts(session_id, "question")
 
 
 def _first_answer_wins(

@@ -188,7 +188,7 @@ export class RelayStore {
     if (this.dirty) this.save();
   }
 
-  createInstallation({ bundleId, deviceToken, environment, preferences }) {
+  createInstallation({ bundleId, deviceToken, voipToken, environment, preferences }) {
     this.assertInstallationCapacity();
     const id = randomUUID();
     const deviceSecret = randomBytes(32).toString('base64url');
@@ -197,6 +197,9 @@ export class RelayStore {
       id,
       bundleId,
       deviceToken,
+      // Hermes calls you (#449): the phone's PushKit token, for a call that
+      // rings. Absent on phones that can't ring (China storefront, older app).
+      ...(voipToken ? { voipToken } : {}),
       environment,
       deviceSecretHash: hashSecret(deviceSecret),
       gateways: {},
@@ -232,27 +235,32 @@ export class RelayStore {
     const installation = this.data.installations[id];
     if (!installation) return null;
     const deviceToken = changes.deviceToken || installation.deviceToken;
+    // null clears it (the phone can no longer ring); undefined keeps it.
+    const voipToken = changes.voipToken === undefined ? (installation.voipToken ?? null) : changes.voipToken;
     const preferences = changes.preferences
       ? normalizePreferences({ ...installation.preferences, ...changes.preferences })
       : installation.preferences;
     const active = changes.active ?? installation.active;
-    return { installation, deviceToken, preferences, active };
+    return { installation, deviceToken, voipToken, preferences, active };
   }
 
   wouldUpdateInstallation(id, changes) {
     const normalized = this.normalizedInstallationChanges(id, changes);
     if (!normalized) return false;
-    const { installation, deviceToken, preferences, active } = normalized;
+    const { installation, deviceToken, voipToken, preferences, active } = normalized;
     const preferencesChanged = !preferencesEqual(preferences, installation.preferences);
-    return deviceToken !== installation.deviceToken || preferencesChanged || active !== installation.active;
+    return deviceToken !== installation.deviceToken || voipToken !== (installation.voipToken ?? null)
+      || preferencesChanged || active !== installation.active;
   }
 
   updateInstallation(id, changes) {
     const normalized = this.normalizedInstallationChanges(id, changes);
     if (!normalized) return null;
-    const { installation, deviceToken, preferences, active } = normalized;
+    const { installation, deviceToken, voipToken, preferences, active } = normalized;
     if (!this.wouldUpdateInstallation(id, changes)) return publicInstallation(installation);
     installation.deviceToken = deviceToken;
+    if (voipToken) installation.voipToken = voipToken;
+    else delete installation.voipToken;
     installation.preferences = preferences;
     installation.active = active;
     installation.updatedAt = new Date().toISOString();
@@ -262,6 +270,14 @@ export class RelayStore {
 
   deactivateInstallation(id) {
     return this.updateInstallation(id, { active: false });
+  }
+
+  // APNs refused the PushKit token: calls go out as notifications until the
+  // phone registers a new one. Only that token: one the phone registered
+  // while the refused push was in flight stays.
+  clearVoipToken(id, token) {
+    if (this.data.installations[id]?.voipToken !== token) return null;
+    return this.updateInstallation(id, { voipToken: null });
   }
 
   // Optional dashboard binding (#148): `dashboardId` is the opaque Conduit
@@ -741,6 +757,7 @@ function publicInstallation(installation) {
     active: installation.active,
     gateways: Object.values(installation.gateways ?? {}).map((gateway) => ({ id: gateway.id, name: gateway.name })),
     preferences: installation.preferences,
+    voip: Boolean(installation.voipToken),
     updated_at: installation.updatedAt,
   };
 }

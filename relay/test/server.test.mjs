@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 
-import { notificationFor, validateEvent, validateDecision } from '../src/server.mjs';
+import { callPushFor, notificationFor, validateEvent, validateDecision } from '../src/server.mjs';
 import { normalizePreferences } from '../src/store.mjs';
 
 const preferences = { show_previews: true, completion_sound: false };
@@ -621,4 +621,44 @@ test('an encrypted call request keeps the call category and seals its job', () =
   assert.equal(payload.aps['mutable-content'], 1);
   assert.deepEqual(payload.aps.alert, { title: 'Hermes wants to talk', body: 'Tap to talk to Hermes.' });
   assert.ok(!JSON.stringify(payload).includes('Check the server'));
+});
+
+test('a call can say why Hermes calls and be about an approval or a question', () => {
+  const event = validateEvent({ ...callBody, call: { ...callBody.call, kind: 'approval', reason: `  Needs your OK\n${'x'.repeat(300)}` } });
+  assert.equal(event.call.kind, 'approval');
+  assert.equal(event.call.reason.length, 200);
+  assert.ok(event.call.reason.startsWith('Needs your OK'));
+  assert.equal(validateEvent({ ...callBody, call: { ...callBody.call, kind: 'question' } }).call.kind, 'question');
+  const { payload } = notificationFor(event, { show_previews: false }, { id: 'gw-1' });
+  assert.equal(payload.body.conduit.call.reason, undefined, 'the reason stays home with previews off, like the title');
+  assert.ok(notificationFor(event, { show_previews: true }, { id: 'gw-1' }).payload.body.conduit.call.reason);
+});
+
+test('a call rings as a VoIP push: no alert, the voip topic, a day to reach an offline phone and when it was sent', () => {
+  const push = callPushFor(validateEvent(callBody), { show_previews: true }, { id: 'gw-1' }, { topic: 'com.milim.relay', nowSeconds: 1_800_000_000 });
+  assert.equal(push.pushType, 'voip');
+  assert.equal(push.topic, 'com.milim.relay.voip');
+  assert.equal(push.expiration, 1_800_086_400);
+  assert.equal(push.payload.aps, undefined);
+  assert.equal(push.payload.conduit.sent_at, 1_800_000_000);
+  assert.equal(push.payload.body.conduit.sent_at, 1_800_000_000);
+  assert.deepEqual(push.payload.body.conduit.call, validateEvent(callBody).call);
+  assert.equal(push.payload.conduit.type, 'call.requested');
+});
+
+test('an encrypted call rings with its envelope untouched', () => {
+  const event = validateEvent({ ...callBody, event_id: envelope.msg, e2e: { ...envelope, req: '' } });
+  const push = callPushFor(event, {}, { id: 'gw-1' }, { topic: 'com.milim.relay', nowSeconds: 1_800_000_000 });
+  assert.deepEqual(push.payload.conduit_e2e, event.e2e);
+  assert.equal(push.payload.conduit.e2e, 1);
+  assert.equal(push.payload.aps, undefined);
+  assert.ok(!JSON.stringify(push.payload).includes('Check the server'));
+});
+
+test('a call that would ring with no chat to open goes as the notification instead', () => {
+  const valid = validateEvent({ ...callBody, event_id: envelope.msg, e2e: { ...envelope, req: '' } });
+  const sealed = { ...valid, e2e: { ...valid.e2e, ct: 'A'.repeat(4000) } };
+  assert.equal(callPushFor(sealed, {}, { id: 'gw-1' }, { topic: 'com.milim.relay' }), null, 'an envelope too big for APNs');
+  const { call: _call, ...noCall } = validateEvent(callBody);
+  assert.equal(callPushFor(noCall, { show_previews: true }, { id: 'gw-1' }, { topic: 'com.milim.relay' }), null);
 });

@@ -60,7 +60,7 @@ The plugin currently emits notifications for:
 - response ready
 - failed turns
 - completed delegated tasks
-- call requests: a job you asked to be called about has ended (see [Hermes calls you](#hermes-calls-you-plugin-013))
+- call requests: a job you asked to be called about has ended, Hermes asked to call you, or (alert calls) Hermes has waited a minute on your approval or answer, or a turn failed (see [Hermes calls you](#hermes-calls-you-plugin-013))
 
 An exact `[Silent]` assistant response does not emit a completion notification.
 
@@ -178,7 +178,7 @@ gateway-bound inactive records still require separately reviewed maintenance.
 |--------|------|---------|
 | GET | `/healthz` | Health check |
 | POST | `/v1/installations` | Register a device |
-| PUT | `/v1/installations/:id` | Update device token / preferences |
+| PUT | `/v1/installations/:id` | Update device token, PushKit token (`voip_token`, `null` clears it) / preferences |
 | DELETE | `/v1/installations/:id` | Deactivate a device |
 | POST | `/v1/installations/:id/pairings` | Create a pairing code |
 | POST | `/v1/pairings/claim` | Claim a pairing code (gateway side) |
@@ -695,8 +695,9 @@ Hermes session, held while the call goes on. The first time a turn of that
 session ends after you hang up, the plugin sends a **call request** through
 the relay instead of the usual "Response ready" or "Turn failed" push: a
 "Hermes wants to talk" notification whose Talk button opens Live Voice in the
-job's chat, where Hermes opens with how the job went. A native ringing call
-(CallKit) is the next step; this is its foundation and fallback.
+job's chat, where Hermes opens with how the job went. With relay 0.9+ and a
+Conduit build that rings, it arrives as a native incoming call (CallKit)
+instead, and the notification is the fallback.
 
 While the call goes on, Conduit renews the hold every minute and releases it
 when you hang up. A job that ends during the hold gets its usual push and the
@@ -715,6 +716,8 @@ lock, so they survive restarts:
 | --- | --- | --- |
 | `enabled` (Hermes can call me) | off | |
 | `when_asked` (call when I explicitly ask) | on | |
+| `decides` (Hermes decides when to call, 0.14+) | off | |
+| `alerts` (approval, question and failure calls, 0.14+) | off | |
 | `min_gap_s` (time between calls) | 120 s | 30–3600 s |
 | `per_hour` | 6 | 1–30 |
 | `per_day` | 20 | 1–60 |
@@ -726,6 +729,7 @@ lock, so they survive restarts:
 | POST | `/api/plugins/conduit_push/calls/watches?profile=` | `{session_ids: [...], title, hold_s?, ended_within_s?}` | `{ok, status: "watching", id}` or `{ok, status: "ended", outcome}` |
 | PUT | `/api/plugins/conduit_push/calls/watches/{id}?profile=` | `{hold_s}` (0 releases) | `{ok, status: "watching"}`, `{ok, status: "ended", outcome}` or `{ok, status: "gone"}` |
 | DELETE | `/api/plugins/conduit_push/calls/watches/{id}?profile=` | | `{ok, removed}` |
+| PUT | `/api/plugins/conduit_push/calls/presence?profile=` (0.14+) | `{hold_s}` (0 releases) | `{ok, status: "present"}` or `{ok, status: "away"}` |
 
 - A watch names up to 4 session ids (the job's runtime and stored ids) and a
   title of up to 120 characters. It fires once, on the first turn end of any
@@ -753,9 +757,62 @@ lock, so they survive restarts:
   failing (5xx) after three tries (2 s and 4 s apart, same event id). One
   malformed session id drops the job details from the request, on the host
   and on the relay alike; it still opens the chat.
+- **Presence (0.14+):** while you're in a Live Voice call, Conduit holds
+  presence (`hold_s` up to 600, renewed during the call, 0 at hang-up).
+  Nothing rings meanwhile: a call that would go out sends the usual push.
 - The call request carries the job's id, outcome, title and session ids so
   Conduit can open the right chat. With end-to-end encryption they are sealed
   like any other content; with `redact on` the title is dropped.
+- **Ringing (relay 0.9+):** a phone that registered a PushKit token
+  (`voip_token`) gets the call request as a VoIP push on the app's `.voip`
+  topic, with no alert, the same routing or sealed envelope, and `sent_at`,
+  so it rings as a native call. Like a notification, APNs keeps it for a
+  phone that's offline (for up to a day), and Conduit shows one that arrives
+  late as a missed call rather than ringing. Anything that stops it ringing
+  (APNs refusing or unreachable, a call with no chat to open) sends the usual
+  "Hermes wants to talk" notification instead, and a PushKit token APNs calls
+  gone is forgotten until the phone registers a new one. The
+  relay answers `rang: true` when it rang. Calls carry a `reason` of up to
+  200 characters (dropped with previews off, like the title), and the kinds
+  `approval` and `question` besides how a job ended.
+
+### Hermes asks to call (plugin 0.14+)
+
+The plugin gives Hermes a `conduit_call_user` tool (toolset `conduit`) and a
+bundled skill, `conduit_push:calling-the-user` (plugin skills aren't listed in
+the skill index, so the tool's description points to it). Hermes calls it
+with a `reason` (one spoken sentence, up to 200 characters) and
+`asked_by_user`:
+
+- The call rings when the asking turn ends, so it opens on the finished
+  result: the turn's final reply is in the chat the call opens, and the
+  reason is said first. This works from any chat Hermes runs in (typed
+  chats in Conduit or Desktop, other platforms, cron jobs), not only Live
+  Voice.
+- `asked_by_user: true` needs "call when I ask"; `false` needs "Hermes
+  decides". Either way the limits apply, presence holds it, and a session
+  already watched keeps one watch (it takes the reason).
+- The tool shows only while this profile is paired and one of those is on.
+  Subagents can't call; their parent can.
+- If `hermes tools` lists the `conduit` toolset as off for a platform, turn
+  it on there.
+
+### Alert calls (plugin 0.14+)
+
+With `alerts` on, Hermes also calls when it waits on you:
+
+- **Approval:** an approval request still unanswered after a minute rings
+  (kind `approval`, the request's description as the reason), beside its
+  usual answerable notification. Answering it anywhere first
+  (`post_approval_response`) or the turn ending cancels the call.
+- **Question:** the same for a clarify question (kind `question`), answered
+  through Conduit's card, Desktop or the CLI. Needs the clarify middleware
+  (Hermes with `register_middleware`).
+- **Failed turn:** a turn that fails calls in place of its "Turn failed"
+  push (kind `failed`).
+
+Alert calls count against the same limits. In the call, Conduit can read the
+approval out and answer it by voice.
 
 ## Apple Watch lookups and jobs (plugin 0.6+, jobs 0.7+, Gemini tokens 0.8+)
 
