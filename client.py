@@ -433,6 +433,10 @@ class RelayRejected(RuntimeError):
     from the relay failing to handle the request (5xx)."""
 
     def __init__(self, status: int, detail: str) -> None:
+        # Safe to log verbatim: one printable line of 200 characters at most,
+        # whatever the relay sent.
+        detail = " ".join("".join(ch if ch.isprintable() else " " for ch in str(detail)).split())[:200]
+        detail = detail or "request_rejected"
         super().__init__(f"Conduit relay rejected the request: {detail} ({status}).")
         self.status = status
         self.detail = detail
@@ -465,12 +469,10 @@ def request_json(
             return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as error:
         try:
-            detail = json.loads(error.read(4096)).get("error", "request_rejected")
+            detail = json.loads(error.read(4096)).get("error") or "request_rejected"
         except Exception:
             detail = "request_rejected"
-        # Logged as is: one short line of printable text, whatever the relay sent.
-        detail = " ".join("".join(ch if ch.isprintable() else " " for ch in str(detail)).split())[:200]
-        raise RelayRejected(error.code, detail or "request_rejected") from error
+        raise RelayRejected(error.code, detail) from error
 
 
 def _start_worker() -> None:

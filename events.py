@@ -10,7 +10,7 @@ from typing import Any
 
 # Keep in sync with plugin.yaml. Reported on every event so the relay can
 # expose per-gateway compatibility state to the app (Settings > Notifications).
-PLUGIN_VERSION = "0.13.2"
+PLUGIN_VERSION = "0.13.3"
 PLUGIN_CAPABILITIES = [
     "approval-decisions",
     "clarify-loop",
