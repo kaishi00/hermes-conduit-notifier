@@ -242,10 +242,20 @@ def test_relay_errors_carry_their_status_and_a_bounded_detail(monkeypatch):
         real.request_json("https://relay.example/v1/events", method="POST", payload={})
     assert caught.value.detail == "bad WARNING forged [31m"
 
+    monkeypatch.setattr(real.urllib.request, "urlopen", refuse(b'{"error": null}'))
+    with pytest.raises(real.RelayRejected) as caught:
+        real.request_json("https://relay.example/v1/events", method="POST", payload={})
+    assert caught.value.detail == "request_rejected"
+
     monkeypatch.setattr(real.urllib.request, "urlopen", refuse(b"<html>proxy</html>"))
     with pytest.raises(real.RelayRejected) as caught:
         real.request_json("https://relay.example/v1/events", method="POST", payload={})
     assert caught.value.detail == "request_rejected"
+
+    # However it is raised.
+    raised = real.RelayRejected(500, "a\nb")
+    assert raised.detail == "a b" and "\n" not in str(raised)
+    assert real.RelayRejected(500, " \t ").detail == "request_rejected"
 
 
 def test_a_rate_limited_call_is_not_tried_again(home, fake, sleeps):
