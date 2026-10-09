@@ -347,8 +347,10 @@ def _normalized(raw: Any, now: float) -> dict[str, Any]:
                 })
         except (KeyError, TypeError, ValueError):
             continue
-    history = sorted(float(at) for at in raw.get("history") if isinstance(at, (int, float)) and not isinstance(at, bool)
-                     and now - at < DAY_S)[-MAX_HISTORY:] if isinstance(raw.get("history"), list) else []
+    stored_history = raw.get("history") if isinstance(raw.get("history"), list) else []
+    history = sorted(float(at) for at in stored_history
+                     if isinstance(at, (int, float)) and not isinstance(at, bool) and now - at < DAY_S)
+    history = history[-MAX_HISTORY:]
     ends = []
     for end in raw.get("ends") if isinstance(raw.get("ends"), list) else []:
         if (isinstance(end, dict) and isinstance(end.get("session_id"), str) and end.get("outcome") in OUTCOMES

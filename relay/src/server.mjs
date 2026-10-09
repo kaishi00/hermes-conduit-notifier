@@ -333,8 +333,9 @@ async function route(request, response) {
     }
     if (duplicateEvent && !event.pluginVersion) return sendJson(response, 200, { accepted: true, duplicate: true });
     enforceEventBudget();
-    // The ceiling counts call requests the relay accepted, delivered or not
-    // (paused, previews off, no device): a host past it is misbehaving.
+    // The ceiling counts every new call request that gets this far, delivered
+    // or not (paused, previews off, no device), and each retry of one that
+    // failed before it was taken: a host past it is misbehaving.
     if (!duplicateEvent && event.type === 'call.requested') enforceCallCeiling(installation.id);
     // Plugin version recording runs BEFORE the dedupe return: a second
     // gateway on the same installation running the same plugin version sends

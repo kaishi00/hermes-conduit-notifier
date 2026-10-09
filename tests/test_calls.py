@@ -53,6 +53,8 @@ CallStore = sys.modules["conduit_push.calls_store"].CallStore
 class FakeClient:
     def __init__(self, failures=()):
         self.failures = list(failures)
+        # What the relay answers once the failures are used up.
+        self.answers = []
         self.sent = []
         self.enqueued = []
 
@@ -60,6 +62,8 @@ class FakeClient:
         self.sent.append(event)
         if self.failures:
             raise self.failures.pop(0)
+        if self.answers:
+            return self.answers.pop(0)
         return {"accepted": True}
 
     def enqueue(self, event):
@@ -171,11 +175,8 @@ def test_a_refused_call_sends_the_usual_push_at_once(home, fake):
     assert fake.enqueued == [READY]
 
 
-class _Rejected(RuntimeError):
-    # client.RelayRejected's shape: the relay answered with this status.
-    def __init__(self, status):
-        super().__init__(f"Conduit relay rejected the request: x ({status}).")
-        self.status = status
+def _Rejected(status, detail="request_rejected"):
+    return sys.modules["conduit_push.client"].RelayRejected(status, detail)
 
 
 def test_a_relay_that_fails_to_handle_the_call_is_tried_again(home, fake, sleeps):
@@ -184,6 +185,60 @@ def test_a_relay_that_fails_to_handle_the_call_is_tried_again(home, fake, sleeps
     calls.turn_ended("rt-1", "done", profile="default", fallback=READY)
     assert len(fake.sent) == 3
     assert fake.enqueued == []
+
+
+def test_a_retry_the_relay_answers_as_a_duplicate_sends_the_usual_push(home, fake, sleeps):
+    # The relay took the event before failing, so a retry is only deduped.
+    fake.failures = [_Rejected(500, "internal_error")]
+    fake.answers = [{"accepted": True, "duplicate": True}]
+    _watch(home, "rt-1")
+    calls.turn_ended("rt-1", "done", profile="default", fallback=READY)
+    assert len(fake.sent) == 2
+    assert fake.enqueued == [READY]
+
+
+def test_a_call_apple_didnt_take_sends_the_usual_push_at_once(home, fake, sleeps):
+    fake.failures = [_Rejected(502, "apns_unreachable")]
+    _watch(home, "rt-1")
+    calls.turn_ended("rt-1", "done", profile="default", fallback=READY)
+    assert len(fake.sent) == 1
+    assert fake.enqueued == [READY]
+
+
+def test_a_duplicate_after_a_dropped_connection_counts_as_sent(home, fake, sleeps):
+    fake.failures = [OSError("reset")]
+    fake.answers = [{"accepted": True, "duplicate": True}]
+    _watch(home, "rt-1")
+    calls.turn_ended("rt-1", "done", profile="default", fallback=READY)
+    assert len(fake.sent) == 2
+    assert fake.enqueued == []
+
+
+def test_relay_errors_carry_their_status_and_a_bounded_detail(monkeypatch):
+    import io
+    import urllib.error
+
+    real = sys.modules["conduit_push.client"]
+
+    def refuse(body):
+        def urlopen(request, timeout):
+            raise urllib.error.HTTPError(request.full_url, 502, "Bad Gateway", {}, io.BytesIO(body))
+        return urlopen
+
+    monkeypatch.setattr(real.urllib.request, "urlopen", refuse(b'{"error": "apns_unreachable"}'))
+    with pytest.raises(real.RelayRejected) as caught:
+        real.request_json("https://relay.example/v1/events", method="POST", payload={})
+    assert (caught.value.status, caught.value.detail) == (502, "apns_unreachable")
+
+    monkeypatch.setattr(real.urllib.request, "urlopen", refuse(b'{"error": {"nested": "' + b"x" * 500 + b'"}}'))
+    with pytest.raises(real.RelayRejected) as caught:
+        real.request_json("https://relay.example/v1/events", method="POST", payload={})
+    assert isinstance(caught.value.detail, str) and len(caught.value.detail) == 200
+
+    monkeypatch.setattr(real.urllib.request, "urlopen", refuse(b"<html>proxy</html>"))
+    with pytest.raises(real.RelayRejected) as caught:
+        real.request_json("https://relay.example/v1/events", method="POST", payload={})
+    assert caught.value.detail == "request_rejected"
 
 
 def test_a_rate_limited_call_is_not_tried_again(home, fake, sleeps):

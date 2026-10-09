@@ -465,10 +465,10 @@ def request_json(
             return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as error:
         try:
-            detail = json.loads(error.read()).get("error", "request_rejected")
+            detail = json.loads(error.read(4096)).get("error", "request_rejected")
         except Exception:
             detail = "request_rejected"
-        raise RelayRejected(error.code, detail) from error
+        raise RelayRejected(error.code, str(detail)[:200]) from error
 
 
 def _start_worker() -> None:
