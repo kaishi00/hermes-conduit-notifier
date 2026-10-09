@@ -766,10 +766,12 @@ lock, so they survive restarts:
 - **Ringing (relay 0.9+):** a phone that registered a PushKit token
   (`voip_token`) gets the call request as a VoIP push on the app's `.voip`
   topic, with no alert, the same routing or sealed envelope, and `sent_at`,
-  so it rings as a native call. APNs drops it after 5 minutes. Anything that
-  stops it ringing (APNs refusing or unreachable, a call with no chat to open)
-  sends the usual "Hermes wants to talk" notification instead, and a PushKit
-  token APNs calls gone is forgotten until the phone registers a new one. The
+  so it rings as a native call. Like a notification, APNs keeps it for a
+  phone that's offline (for up to a day), and Conduit shows one that arrives
+  late as a missed call rather than ringing. Anything that stops it ringing
+  (APNs refusing or unreachable, a call with no chat to open) sends the usual
+  "Hermes wants to talk" notification instead, and a PushKit token APNs calls
+  gone is forgotten until the phone registers a new one. The
   relay answers `rang: true` when it rang. Calls carry a `reason` of up to
   200 characters (dropped with previews off, like the title), and the kinds
   `approval` and `question` besides how a job ended.

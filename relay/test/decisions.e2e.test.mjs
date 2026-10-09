@@ -654,35 +654,37 @@ test('a phone with a PushKit token gets a call as a VoIP push and can stop ringi
   assert.equal(sent[1].notification.payload.aps.category, 'HERMES_CALL');
 });
 
-test('a call APNs will not ring falls back to the notification, and a refused PushKit token is forgotten', async () => {
-  const aPort = await closedPort();
-  const isolatedPath = join(dir, 'relay-data-voip-gone.json');
-  const capturePath = join(dir, `capture-voip-gone-${Date.now()}.jsonl`);
-  const fixture = new RelayStore(isolatedPath);
-  const created = fixture.createInstallation({ bundleId: 'com.milim.relay', deviceToken: 'd'.repeat(64), voipToken: '8'.repeat(64), environment: 'production' });
-  const pairing = fixture.createPairing(created.installation.id);
-  const claim = fixture.claimPairing(pairing.code, 'voip gone');
-  const child = await startRelay(aPort, 'accept', isolatedPath, { APNS_CAPTURE_PATH: capturePath, APNS_VOIP_FAILURE: 'BadDeviceToken' });
-  children.push(child);
-  const base = `http://127.0.0.1:${aPort}`;
-  try {
-    const response = await api(base, '/v1/events', {
-      method: 'POST',
-      credential: `${created.installation.id}.${claim.gatewayId}.${claim.gatewaySecret}`,
-      body: { type: 'call.requested', event_id: 'call:000000000000000000000021', session_id: 'st-1', call: { id: '000000000000000000000021', kind: 'failed', session_ids: ['st-1'] } },
-    });
-    assert.deepEqual(response, { status: 202, json: { accepted: true, delivered: true } });
-    const current = await api(base, `/v1/installations/${created.installation.id}`, { method: 'PUT', credential: `${created.installation.id}.${created.deviceSecret}`, body: {} });
-    assert.equal(current.json.installation.voip, false);
-    assert.equal(current.json.installation.active, true, 'the phone itself stays registered');
-  } finally {
-    await stopRelay(child);
-  }
-  const sent = readFileSync(capturePath, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
-  assert.equal(sent.length, 1, 'only the notification is captured');
-  assert.equal(sent[0].deviceToken, 'd'.repeat(64));
-  assert.equal(sent[0].notification.payload.aps.category, 'HERMES_CALL');
-});
+for (const [failure, forgotten] of [['BadDeviceToken', true], ['Unregistered', true], ['DeviceTokenNotForTopic', true], ['TooManyRequests', false], ['throw', false]]) {
+  test(`a call APNs will not ring (${failure}) falls back to the notification${forgotten ? ', and the PushKit token is forgotten' : ''}`, async () => {
+    const aPort = await closedPort();
+    const isolatedPath = join(dir, `relay-data-voip-${failure}.json`);
+    const capturePath = join(dir, `capture-voip-${failure}-${Date.now()}.jsonl`);
+    const fixture = new RelayStore(isolatedPath);
+    const created = fixture.createInstallation({ bundleId: 'com.milim.relay', deviceToken: 'd'.repeat(64), voipToken: '8'.repeat(64), environment: 'production' });
+    const pairing = fixture.createPairing(created.installation.id);
+    const claim = fixture.claimPairing(pairing.code, `voip ${failure}`);
+    const child = await startRelay(aPort, 'accept', isolatedPath, { APNS_CAPTURE_PATH: capturePath, APNS_VOIP_FAILURE: failure });
+    children.push(child);
+    const base = `http://127.0.0.1:${aPort}`;
+    try {
+      const response = await api(base, '/v1/events', {
+        method: 'POST',
+        credential: `${created.installation.id}.${claim.gatewayId}.${claim.gatewaySecret}`,
+        body: { type: 'call.requested', event_id: 'call:000000000000000000000021', session_id: 'st-1', call: { id: '000000000000000000000021', kind: 'failed', session_ids: ['st-1'] } },
+      });
+      assert.deepEqual(response, { status: 202, json: { accepted: true, delivered: true } });
+      const current = await api(base, `/v1/installations/${created.installation.id}`, { method: 'PUT', credential: `${created.installation.id}.${created.deviceSecret}`, body: {} });
+      assert.equal(current.json.installation.voip, !forgotten);
+      assert.equal(current.json.installation.active, true, 'the phone itself stays registered');
+    } finally {
+      await stopRelay(child);
+    }
+    const sent = readFileSync(capturePath, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+    assert.equal(sent.length, 1, 'only the notification is captured');
+    assert.equal(sent[0].deviceToken, 'd'.repeat(64));
+    assert.equal(sent[0].notification.payload.aps.category, 'HERMES_CALL');
+  });
+}
 
 test('an invalid capacity setting stops the relay at boot', async () => {
   const child = spawn(process.execPath, ['src/server.mjs'], {

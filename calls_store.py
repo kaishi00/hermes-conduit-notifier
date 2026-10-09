@@ -443,7 +443,7 @@ def _decide(state: dict[str, Any], watch: dict[str, Any], outcome: str, now: flo
     result: dict[str, Any] = {"watch": watch, "outcome": outcome}
     if not _allowed(settings, watch):
         return {**result, "status": "off"}
-    if state["presence_until"] > now:
+    if state["presence_until"] > now or (watch["origin"] != "conduit" and _in_call(state, now)):
         # The user is talking to Hermes right now: no ringing over it.
         return {**result, "status": "busy"}
     history = state["history"]
@@ -455,6 +455,13 @@ def _decide(state: dict[str, Any], watch: dict[str, Any], outcome: str, now: flo
         return {**result, "status": "limited", "reason": "day"}
     history.append(now)
     return {**result, "status": "call"}
+
+
+def _in_call(state: dict[str, Any], now: float) -> bool:
+    """Conduit holds a watch through the call it was asked for in (an app
+    without presence too). Not for a held watch's own call: its siblings in
+    that call run out moments apart once the phone has gone away."""
+    return any(watch["origin"] == "conduit" and watch["hold_until"] > now for watch in state["watches"])
 
 
 def _normalized(raw: Any, now: float) -> dict[str, Any]:

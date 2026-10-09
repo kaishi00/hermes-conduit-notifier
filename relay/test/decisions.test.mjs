@@ -957,7 +957,9 @@ test('an installation keeps a PushKit token until it is cleared', () => {
   assert.equal(relay.wouldUpdateInstallation(id, { voipToken: 'b'.repeat(64) }), false);
   assert.equal(relay.updateInstallation(id, { voipToken: 'c'.repeat(64) }).voip, true);
   assert.equal(relay.data.installations[id].voipToken, 'c'.repeat(64));
-  assert.equal(relay.clearVoipToken(id).voip, false);
+  assert.equal(relay.clearVoipToken(id, 'b'.repeat(64)), null, 'a token the phone replaced meanwhile stays');
+  assert.equal(relay.data.installations[id].voipToken, 'c'.repeat(64));
+  assert.equal(relay.clearVoipToken(id, 'c'.repeat(64)).voip, false);
   assert.equal('voipToken' in relay.data.installations[id], false);
   assert.equal(relay.data.installations[id].active, true);
   assert.equal(relay.wouldUpdateInstallation(id, { voipToken: null }), false);

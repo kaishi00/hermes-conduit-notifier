@@ -536,6 +536,23 @@ def test_nothing_rings_while_the_user_is_in_a_call(tmp_path):
     assert store.fire("st-4", "done")["status"] == "call"
 
 
+def test_a_watch_held_through_a_call_keeps_hermes_calls_from_ringing_over_it(tmp_path):
+    clock = Clock()
+    store = _store(tmp_path, clock=clock, enabled=True, alerts=True)
+    # An app without presence holds the watch it registered in the call.
+    store.add_watch(["st-1"], "Check the server", hold_s=180)
+    store.add_watch(["st-2"], "Check the logs", hold_s=185)
+    assert store.alert_now("st-3", "failed", "")["status"] == "busy"
+    store.add_tool_watch("st-4", "The deploy finished.", True)
+    assert store.fire("st-4", "done")["status"] == "busy"
+    # Both jobs end in the call, then the phone goes away: the first hold
+    # to run out still calls, although its sibling's hold has seconds left.
+    assert store.fire("st-1", "done")["status"] == "held"
+    assert store.fire("st-2", "done")["status"] == "held"
+    clock.now += 181
+    assert [result["status"] for result in store.fire_due()] == ["call"]
+
+
 def test_presence_released_before_any_state_writes_nothing(tmp_path):
     store = CallStore(tmp_path, clock=Clock())
     assert store.set_presence(0) == {"status": "away"}

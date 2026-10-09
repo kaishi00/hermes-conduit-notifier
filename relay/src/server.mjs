@@ -56,9 +56,10 @@ const CALL_CATEGORY = 'HERMES_CALL';
 const CALL_KINDS = new Set(['done', 'failed', 'stopped', 'approval', 'question']);
 const CALL_WINDOW_MS = 24 * 60 * 60 * 1000;
 // A phone that registered a PushKit token gets the call as a VoIP push and
-// rings. APNs drops one it couldn't deliver in this long; the phone shows
-// an older one it gets as the notification rather than ringing late.
-const CALL_RING_TTL_S = 5 * 60;
+// rings. APNs keeps one for a phone that's offline this long, like it keeps
+// a notification, so the call is never lost once APNs took it: a phone that
+// gets it late (sent_at) shows it as a missed call instead of ringing.
+const CALL_RING_TTL_S = 24 * 60 * 60;
 // APNs refused the PushKit token itself: the phone gets notifications until
 // it registers a new one.
 const VOIP_TOKEN_GONE = new Set(['BadDeviceToken', 'Unregistered', 'DeviceTokenNotForTopic']);
@@ -118,11 +119,15 @@ function main() {
   // Unset = real APNs.
   if (process.env.APNS_MODE === 'accept') {
     const capturePath = process.env.APNS_CAPTURE_PATH;
-    // Test seam: APNs refuses VoIP pushes with this reason (calls fall back
-    // to the notification).
+    // Test seam: APNs refuses VoIP pushes with this reason (410 for
+    // Unregistered, like APNs), or `throw` drops the connection for them
+    // (calls fall back to the notification).
     const voipFailure = process.env.APNS_VOIP_FAILURE;
     apnsSend = async (deviceToken, notification) => {
-      if (voipFailure && notification.pushType === 'voip') return { ok: false, status: 400, reason: voipFailure };
+      if (voipFailure && notification.pushType === 'voip') {
+        if (voipFailure === 'throw') throw new Error('voip connection dropped');
+        return { ok: false, status: voipFailure === 'Unregistered' ? 410 : 400, reason: voipFailure };
+      }
       // Test seam: when set, every "delivered" notification is recorded so
       // e2e tests can assert on the REAL outgoing APNs payload.
       if (capturePath) {
@@ -747,9 +752,10 @@ function notificationFor(event, preferences, gateway = undefined) {
 // A call request as a VoIP push (#449): the phone's PushKit callback reports
 // it to CallKit at once, so it carries what the notification carries (the
 // sealed envelope or the plaintext call) without an alert, plus when it was
-// sent, so a phone that gets it late shows the notification instead. null
-// when it would ring with no chat to open (no call, or a sealed envelope too
-// big to carry): the notification goes instead.
+// sent, so a phone that gets it late shows a missed call instead. null when
+// it would ring with no chat to open (no call, or a sealed envelope too big
+// to carry): the notification goes instead. No collapse id: the event ledger
+// and the call ceiling already stop a call from ringing twice.
 function callPushFor(event, preferences, gateway, { topic, nowSeconds = Math.floor(Date.now() / 1000) }) {
   const { payload } = notificationFor(event, preferences, gateway);
   const { aps: _aps, ...rest } = payload;
@@ -768,16 +774,30 @@ function callPushFor(event, preferences, gateway, { topic, nowSeconds = Math.flo
 async function ring(installation, event, gateway) {
   const push = callPushFor(event, installation.preferences, gateway, { topic: config.topic });
   if (!push) return false;
+  // The token this push went to: the phone can register a new one meanwhile.
+  const token = installation.voipToken;
   let result;
   try {
-    result = await apnsSend(installation.voipToken, push);
+    result = await apnsSend(token, push);
   } catch (error) {
     console.error(JSON.stringify({ level: 'error', message: 'apns voip send threw', error: error instanceof Error ? error.message : String(error) }));
     return false;
   }
   if (result.ok) return true;
-  if (result.status === 410 || VOIP_TOKEN_GONE.has(result.reason)) store.clearVoipToken(installation.id);
   console.warn(JSON.stringify({ level: 'warn', message: 'apns voip send refused', status: result.status, reason: result.reason }));
+  if (result.reason === 'DeviceTokenNotForTopic') {
+    // Every phone would lose its token this way if the `.voip` topic were
+    // wrong for the app: say so where an operator looks.
+    console.warn(JSON.stringify({ level: 'warn', message: 'apns voip topic refused, check APNS_TOPIC', topic: push.topic }));
+  }
+  if (result.status === 410 || VOIP_TOKEN_GONE.has(result.reason)) {
+    try {
+      store.clearVoipToken(installation.id, token);
+    } catch (error) {
+      // The notification still goes; the next refused call clears it.
+      console.error(JSON.stringify({ level: 'error', message: 'voip token clear failed', error: error instanceof Error ? error.message : String(error) }));
+    }
+  }
   return false;
 }
 
@@ -1008,16 +1028,18 @@ function validateDecision(value, eventType) {
 }
 
 function validateDeviceToken(value) {
-  const token = String(value ?? '').replace(/[<>\s]/g, '').toLowerCase();
-  if (!/^[0-9a-f]{64,200}$/.test(token)) throw httpError(400, 'invalid_device_token');
-  return token;
+  return validatedToken(value, 'invalid_device_token');
 }
 
 // A PushKit token: undefined when absent, null to clear it.
 function validateVoipToken(value) {
   if (value === undefined || value === null) return value;
-  const token = String(value).replace(/[<>\s]/g, '').toLowerCase();
-  if (!/^[0-9a-f]{64,200}$/.test(token)) throw httpError(400, 'invalid_voip_token');
+  return validatedToken(value, 'invalid_voip_token');
+}
+
+function validatedToken(value, error) {
+  const token = String(value ?? '').replace(/[<>\s]/g, '').toLowerCase();
+  if (!/^[0-9a-f]{64,200}$/.test(token)) throw httpError(400, error);
   return token;
 }
 

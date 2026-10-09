@@ -634,11 +634,11 @@ test('a call can say why Hermes calls and be about an approval or a question', (
   assert.ok(notificationFor(event, { show_previews: true }, { id: 'gw-1' }).payload.body.conduit.call.reason);
 });
 
-test('a call rings as a VoIP push: no alert, the voip topic, a short expiration and when it was sent', () => {
+test('a call rings as a VoIP push: no alert, the voip topic, a day to reach an offline phone and when it was sent', () => {
   const push = callPushFor(validateEvent(callBody), { show_previews: true }, { id: 'gw-1' }, { topic: 'com.milim.relay', nowSeconds: 1_800_000_000 });
   assert.equal(push.pushType, 'voip');
   assert.equal(push.topic, 'com.milim.relay.voip');
-  assert.equal(push.expiration, 1_800_000_300);
+  assert.equal(push.expiration, 1_800_086_400);
   assert.equal(push.payload.aps, undefined);
   assert.equal(push.payload.conduit.sent_at, 1_800_000_000);
   assert.equal(push.payload.body.conduit.sent_at, 1_800_000_000);

@@ -273,8 +273,10 @@ export class RelayStore {
   }
 
   // APNs refused the PushKit token: calls go out as notifications until the
-  // phone registers a new one.
-  clearVoipToken(id) {
+  // phone registers a new one. Only that token: one the phone registered
+  // while the refused push was in flight stays.
+  clearVoipToken(id, token) {
+    if (this.data.installations[id]?.voipToken !== token) return null;
     return this.updateInstallation(id, { voipToken: null });
   }
 
