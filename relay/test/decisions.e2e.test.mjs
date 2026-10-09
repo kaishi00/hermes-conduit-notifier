@@ -647,7 +647,7 @@ test('a phone with a PushKit token gets a call as a VoIP push and can stop ringi
   assert.equal(sent[0].deviceToken, '9'.repeat(64));
   assert.equal(sent[0].notification.pushType, 'voip');
   assert.equal(sent[0].notification.topic, 'com.milim.relay.voip');
-  assert.equal(sent[0].notification.payload.aps, undefined);
+  assert.deepEqual(sent[0].notification.payload.aps, {});
   assert.deepEqual(sent[0].notification.payload.body.conduit.call, { id: '000000000000000000000011', kind: 'done', session_ids: ['st-1'] });
   assert.equal(sent[1].deviceToken, 'd'.repeat(64));
   assert.equal(sent[1].notification.pushType, undefined);

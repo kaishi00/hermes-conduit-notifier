@@ -75,7 +75,7 @@ class FakeClient:
 @pytest.fixture
 def sleeps(monkeypatch):
     waited = []
-    monkeypatch.setattr(calls, "_sleep", waited.append)
+    monkeypatch.setattr(calls, "_sleep", lambda seconds, wake=None: waited.append(seconds))
     return waited
 
 
@@ -360,7 +360,7 @@ def test_a_job_ending_during_the_call_gets_its_usual_push(home, fake, clock, mon
 
 def test_a_hold_that_runs_out_calls_without_a_second_push(home, fake, clock, monkeypatch):
     # The phone went away mid-call: nobody renews or releases the hold.
-    def sleep(seconds):
+    def sleep(seconds, wake=None):
         clock[0] += seconds
     monkeypatch.setattr(calls, "_sleep", sleep)
     watch_id = _held_watch(home, "rt-1", "st-1")
@@ -376,7 +376,7 @@ def test_a_hold_that_runs_out_calls_without_a_second_push(home, fake, clock, mon
 def test_a_hold_released_at_hang_up_leaves_the_call_to_conduit(home, fake, clock, monkeypatch):
     watch_id = _held_watch(home, "rt-1")
 
-    def sleep(seconds):
+    def sleep(seconds, wake=None):
         # Conduit hung up and released the watch while the waiter slept.
         assert calls._store(home).hold(watch_id, 0) == {"status": "ended", "outcome": "done"}
         clock[0] += seconds
@@ -388,7 +388,7 @@ def test_a_hold_released_at_hang_up_leaves_the_call_to_conduit(home, fake, clock
 def test_a_watch_removed_during_the_call_never_calls(home, fake, clock, monkeypatch):
     watch_id = _held_watch(home, "rt-1")
 
-    def sleep(seconds):
+    def sleep(seconds, wake=None):
         # Conduit told the user in the call and removed the watch.
         calls._store(home).remove_watch(watch_id)
         clock[0] += seconds
@@ -440,7 +440,7 @@ def test_a_call_that_cannot_be_spawned_leaves_the_usual_push(home, fake, monkeyp
 
 
 def test_a_held_call_waiting_at_start_up_gets_its_waiter_back(home, fake, clock, monkeypatch):
-    def sleep(seconds):
+    def sleep(seconds, wake=None):
         clock[0] += seconds
     monkeypatch.setattr(calls, "_sleep", sleep)
     _held_watch(home, "rt-1", hold_s=60)
@@ -578,7 +578,7 @@ def test_a_hermes_that_refuses_the_tool_keeps_the_hooks():
 
 
 def test_an_unanswered_approval_calls_beside_its_notification(home, fake, clock, monkeypatch):
-    def sleep(seconds):
+    def sleep(seconds, wake=None):
         clock[0] += seconds
     monkeypatch.setattr(calls, "_sleep", sleep)
     _settings(home, alerts=True)
@@ -590,8 +590,29 @@ def test_an_unanswered_approval_calls_beside_its_notification(home, fake, clock,
     assert (event["call"]["kind"], event["call"]["reason"], event["call"]["session_ids"]) == ("approval", "Run the migration", ["sk-1"])
 
 
+def test_an_alert_due_before_a_held_call_is_not_kept_waiting(home, fake, clock, monkeypatch):
+    naps = []
+
+    def sleep(seconds, wake=None):
+        naps.append(seconds)
+        if len(naps) == 1:
+            # The waiter sleeps on a long hold; an approval comes in meanwhile.
+            plugin._pre_approval_request(session_key="sk-1", description="Run the migration", turn_id="t1")
+            assert wake is not None and wake.is_set()
+            return
+        clock[0] += seconds
+    monkeypatch.setattr(calls, "_sleep", sleep)
+    _held_watch(home, "rt-1", hold_s=300)
+    _settings(home, alerts=True)
+    calls.turn_ended("rt-1", "done", profile="default", fallback=READY)
+    # Woken, the waiter takes the approval at its minute, not the hold's end:
+    # busy then (the user is still in the call), so only its notification.
+    assert naps[:2] == [301.0, 61.0]
+    assert [event["call"]["kind"] for event in fake.sent] == ["done"]
+
+
 def test_an_answered_approval_does_not_call(home, fake, clock, monkeypatch):
-    def sleep(seconds):
+    def sleep(seconds, wake=None):
         # The user answered from the notification while the waiter slept.
         plugin._post_approval_response(session_key="sk-1", choice="once")
         clock[0] += seconds
@@ -607,6 +628,34 @@ def test_approvals_do_not_call_with_alerts_off(home, fake, monkeypatch):
     _settings(home)
     plugin._pre_approval_request(session_key="sk-1", description="Run the migration", turn_id="t1")
     assert started == [] and calls._store(home).watch_count() == 0
+
+
+def test_a_replayed_failure_hook_is_the_same_call_to_the_relay(home, fake, clock):
+    _settings(home, alerts=True)
+    plugin._on_session_end(session_id="st-9", turn_id="t1", completed=False, interrupted=False)
+    clock[0] += 3_600
+    plugin._on_session_end(session_id="st-9", turn_id="t1", completed=False, interrupted=False)
+    clock[0] += 3_600
+    plugin._on_session_end(session_id="st-9", turn_id="t2", completed=False, interrupted=False)
+    first, replay, other = fake.sent
+    # The relay rings an event id once: the replay never rings again.
+    assert replay["event_id"] == first["event_id"]
+    assert other["event_id"] != first["event_id"]
+
+
+def test_a_failure_hook_replayed_at_once_rings_once_and_sends_no_push(home, fake, clock):
+    _settings(home, alerts=True)
+    plugin._on_session_end(session_id="st-9", turn_id="t1", completed=False, interrupted=False)
+    clock[0] += 5
+    # Inside the gap the first call opened: the same decision, not "limited".
+    plugin._on_session_end(session_id="st-9", turn_id="t1", completed=False, interrupted=False)
+    first, replay = fake.sent
+    assert replay["event_id"] == first["event_id"]
+    assert fake.enqueued == [], "no failure notification beside the ring"
+    assert len(calls._store(home)._load()["history"]) == 1, "counted once"
+    # Another turn in that gap is held back as usual.
+    plugin._on_session_end(session_id="st-9", turn_id="t2", completed=False, interrupted=False)
+    assert [event["type"] for event in fake.enqueued] == ["turn.failed"]
 
 
 def test_a_failed_turn_calls_in_place_of_its_push_with_alerts_on(home, fake):
@@ -629,7 +678,7 @@ def test_nothing_rings_during_a_live_voice_call(home, fake, paired):
     assert [event["type"] for event in fake.enqueued] == ["response.ready"]
 
 
-def test_a_question_left_unanswered_calls_and_an_answer_stops_it(home, fake, clock, monkeypatch):
+def test_a_question_left_unanswered_calls_and_an_answer_stops_it(home, fake, clock, monkeypatch, paired):
     loop = sys.modules["conduit_push.clarify_loop"]
     _settings(home, alerts=True)
     scheduled = []
@@ -642,3 +691,16 @@ def test_a_question_left_unanswered_calls_and_an_answer_stops_it(home, fake, clo
     assert result == "answered"
     assert scheduled == [home, clock[0] + 60], "the alert waited a minute while the question was open"
     assert calls._store(home).watch_count() == 0, "the answer cancelled it"
+
+
+def test_a_batch_of_questions_says_how_many_wait(home, fake, monkeypatch, paired):
+    loop = sys.modules["conduit_push.clarify_loop"]
+    _settings(home, alerts=True)
+    reasons = []
+    monkeypatch.setattr(calls, "_wait_for_holds", lambda home, profile: None)
+    monkeypatch.setattr(loop.client, "enqueue", lambda event: True)
+    monkeypatch.setattr(loop, "_first_answer_wins", lambda **kwargs: (
+        reasons.extend(watch["reason"] for watch in calls._store(home)._load()["watches"]) or "answered"))
+    questions = [{"question": "Which branch?", "choices": ["main", "dev"]}, {"question": "Ship it?", "choices": ["yes", "no"]}]
+    loop.middleware(session_id="st-1", tool_name="clarify", args={"questions": questions}, next_call=lambda args: "native")
+    assert reasons == ["2 questions, first: Which branch?"]

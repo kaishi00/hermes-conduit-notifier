@@ -46,13 +46,19 @@ def _spawn(work: Callable[[], None]) -> None:
     threading.Thread(target=work, name="conduit-call", daemon=True).start()
 
 
-# Homes with a waiter thread running, so a burst of held turn ends starts one.
+# Homes with a waiter thread running, so a burst of held turn ends starts one,
+# and what wakes each early.
 _waiting: set[str] = set()
+_wakes: dict[str, threading.Event] = {}
 _waiting_lock = threading.Lock()
 
 
-def _sleep(seconds: float) -> None:
-    time.sleep(seconds)
+def _sleep(seconds: float, wake: threading.Event | None = None) -> None:
+    """Sleeps ``seconds``, or until ``wake`` is set."""
+    if wake is None:
+        time.sleep(seconds)
+    else:
+        wake.wait(seconds)
 
 
 def _clock() -> float:
@@ -144,6 +150,10 @@ def _wait_for_holds(home: Any, profile: str) -> None:
     key = str(home)
     with _waiting_lock:
         if key in _waiting:
+            # It may now be due sooner than the waiter wakes (an alert's
+            # minute beside a long hold): the waiter looks again.
+            if key in _wakes:
+                _wakes[key].set()
             return
         _waiting.add(key)
     try:
@@ -159,21 +169,23 @@ def _waiter(home: Any, profile: str, key: str) -> Callable[[], None]:
         store = _store(home)
         try:
             while True:
-                due_at = store.next_due()
-                if due_at is None:
-                    # Checked again under the lock: a hold that starts now
-                    # either shows up here or starts its own waiter.
-                    with _waiting_lock:
-                        if store.next_due() is None:
-                            _waiting.discard(key)
-                            return
-                    continue
-                _sleep(max(0.0, due_at - store.clock()) + 1.0)
+                # Under the lock: a hold that starts now either shows up here
+                # or wakes this waiter, or starts its own.
+                with _waiting_lock:
+                    due_at = store.next_due()
+                    if due_at is None:
+                        _waiting.discard(key)
+                        _wakes.pop(key, None)
+                        return
+                    wake = _wakes.setdefault(key, threading.Event())
+                    wake.clear()
+                _sleep(max(0.0, due_at - store.clock()) + 1.0, wake)
                 _send_due(store.fire_due(), profile)
         except Exception:  # noqa: BLE001 — the next turn end sweeps again
             logger.warning("Conduit stopped waiting on a held call", exc_info=True)
             with _waiting_lock:
                 _waiting.discard(key)
+                _wakes.pop(key, None)
 
     return wait
 
@@ -211,13 +223,15 @@ def cancel_alerts(session_id: str, kind: str | None = None) -> None:
         logger.warning("Conduit could not cancel an alert call", exc_info=True)
 
 
-def failed_turn(session_id: str, *, profile: str, fallback: dict[str, Any] | None) -> bool:
+def failed_turn(session_id: str, *, profile: str, fallback: dict[str, Any] | None, turn_id: Any = None) -> bool:
     """A turn no watch covers failed: with alert calls on, the call takes the
-    place of ``fallback`` (True, like ``turn_ended``)."""
+    place of ``fallback`` (True, like ``turn_ended``). ``turn_id`` keeps a
+    replayed hook to the same call."""
     if not session_id:
         return False
     try:
-        result = _store(get_hermes_home()).alert_now(session_id, "failed", "")
+        seed = "" if turn_id is None else str(turn_id)
+        result = _store(get_hermes_home()).alert_now(session_id, "failed", "", seed=seed)
     except Exception:  # noqa: BLE001
         logger.warning("Conduit could not check alert calls for a failed turn", exc_info=True)
         return False

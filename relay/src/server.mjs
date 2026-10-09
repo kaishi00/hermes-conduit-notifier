@@ -56,8 +56,8 @@ const CALL_CATEGORY = 'HERMES_CALL';
 const CALL_KINDS = new Set(['done', 'failed', 'stopped', 'approval', 'question']);
 const CALL_WINDOW_MS = 24 * 60 * 60 * 1000;
 // A phone that registered a PushKit token gets the call as a VoIP push and
-// rings. APNs keeps one for a phone that's offline this long, like it keeps
-// a notification, so the call is never lost once APNs took it: a phone that
+// rings. APNs tries to keep one for a phone that's offline this long, like a
+// notification (best effort: it keeps only the newest per app): a phone that
 // gets it late (sent_at) shows it as a missed call instead of ringing.
 const CALL_RING_TTL_S = 24 * 60 * 60;
 // APNs refused the PushKit token itself: the phone gets notifications until
@@ -762,7 +762,8 @@ function callPushFor(event, preferences, gateway, { topic, nowSeconds = Math.flo
   if (event.e2e ? !rest.conduit_e2e : !rest.body.conduit.call) return null;
   const stamp = (routing) => ({ ...routing, sent_at: nowSeconds });
   return {
-    payload: { ...rest, body: { conduit: stamp(rest.body.conduit) }, conduit: stamp(rest.conduit) },
+    // An empty aps, as Apple's VoIP examples carry: nothing for iOS to show.
+    payload: { aps: {}, ...rest, body: { conduit: stamp(rest.body.conduit) }, conduit: stamp(rest.conduit) },
     pushType: 'voip',
     topic: `${topic}.voip`,
     expiration: nowSeconds + CALL_RING_TTL_S,
