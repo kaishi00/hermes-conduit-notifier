@@ -155,8 +155,24 @@ def test_a_job_that_ended_just_before_its_watch_is_reported_as_ended(tmp_path):
     store = _store(tmp_path, clock=clock, enabled=True)
     assert store.fire("rt-1", "failed") is None  # the turn ended, no watch yet
     clock.now += 60
-    assert store.add_watch(["st-1", "rt-1"], "Check the server") == {"status": "ended", "outcome": "failed"}
+    # The job's request went out 5 minutes ago on the phone's clock.
+    assert store.add_watch(["st-1", "rt-1"], "Check the server", ended_within_s=300) == {"status": "ended", "outcome": "failed"}
     assert store.watch_count() == 0
+
+
+def test_an_earlier_turn_of_the_same_chat_is_not_the_job_ending(tmp_path):
+    clock = Clock()
+    store = _store(tmp_path, clock=clock, enabled=True)
+    store.fire("chat-1", "done")  # the chat's typed turn, before the voice request
+    clock.now += 120
+    # The voice request went out 60 seconds ago: that end was before it.
+    assert store.add_watch(["chat-1"], "Check the server", ended_within_s=60)["status"] == "watching"
+
+
+def test_without_a_window_recent_ends_are_not_checked(tmp_path):
+    store = _store(tmp_path, enabled=True)
+    store.fire("rt-1", "done")
+    assert store.add_watch(["rt-1"], "Check the server")["status"] == "watching"
 
 
 def test_recent_ends_are_forgotten_after_half_an_hour(tmp_path):
@@ -164,14 +180,115 @@ def test_recent_ends_are_forgotten_after_half_an_hour(tmp_path):
     store = _store(tmp_path, clock=clock, enabled=True)
     store.fire("rt-1", "done")
     clock.now += 31 * 60
-    assert store.add_watch(["rt-1"], "Check the server")["status"] == "watching"
+    assert store.add_watch(["rt-1"], "Check the server", ended_within_s=1800)["status"] == "watching"
 
 
 def test_recent_ends_are_not_recorded_while_calls_are_off(tmp_path):
     store = _store(tmp_path)
     store.fire("rt-1", "done")
     store.update_settings({"enabled": True})
-    assert store.add_watch(["rt-1"], "Check the server")["status"] == "watching"
+    assert store.add_watch(["rt-1"], "Check the server", ended_within_s=60)["status"] == "watching"
+
+
+# --- Holds: registered during the call, called after it ---------------------
+
+
+def test_a_job_that_ends_during_the_call_waits_for_the_hold(tmp_path):
+    clock = Clock()
+    store = _store(tmp_path, clock=clock, enabled=True)
+    watch_id = store.add_watch(["rt-1", "st-1"], "Check the server", hold_s=180)["id"]
+    held = store.fire("st-1", "done")
+    assert held["status"] == "held"
+    assert held["until"] == clock.now + 180
+    # A replayed hook keeps the first outcome and still doesn't call.
+    assert store.fire("rt-1", "failed")["outcome"] == "done"
+    assert store.watch_count() == 1
+    assert store.fire_due() == []
+    assert store.next_due() == clock.now + 180
+    assert store.hold(watch_id, 180) == {"status": "watching"}  # still on the call
+
+
+def test_released_at_hang_up_after_the_job_ended_answers_ended(tmp_path):
+    store = _store(tmp_path, enabled=True)
+    watch_id = store.add_watch(["rt-1"], "Check the server", hold_s=180)["id"]
+    store.fire("rt-1", "failed")
+    assert store.hold(watch_id, 0) == {"status": "ended", "outcome": "failed"}
+    assert store.watch_count() == 0
+    assert store.hold(watch_id, 0) == {"status": "gone"}
+    assert store.fire_due() == []
+
+
+def test_released_before_the_job_ends_calls_when_it_does(tmp_path):
+    store = _store(tmp_path, enabled=True)
+    watch_id = store.add_watch(["rt-1"], "Check the server", hold_s=180)["id"]
+    assert store.hold(watch_id, 0) == {"status": "watching"}
+    assert store.fire("rt-1", "done")["status"] == "call"
+
+
+def test_a_hold_that_runs_out_calls_for_a_job_that_ended_during_it(tmp_path):
+    clock = Clock()
+    store = _store(tmp_path, clock=clock, enabled=True)
+    store.add_watch(["rt-1", "st-1"], "Check the server", hold_s=180)
+    store.fire("st-1", "done")
+    clock.now += 179
+    assert store.fire_due() == []
+    clock.now += 2  # the phone went away mid-call: no renewal, no release
+    [due] = store.fire_due()
+    assert due["status"] == "call"
+    assert due["outcome"] == "done"
+    assert due["session_id"] == "st-1"
+    assert due["watch"]["title"] == "Check the server"
+    assert store.fire_due() == []
+    assert store.next_due() is None
+
+
+def test_a_renewed_hold_keeps_waiting(tmp_path):
+    clock = Clock()
+    store = _store(tmp_path, clock=clock, enabled=True)
+    watch_id = store.add_watch(["rt-1"], "Check the server", hold_s=180)["id"]
+    store.fire("rt-1", "done")
+    clock.now += 120
+    store.hold(watch_id, 180)
+    clock.now += 120
+    assert store.fire_due() == []
+
+
+def test_a_due_call_still_obeys_the_limits(tmp_path):
+    clock = Clock()
+    store = _store(tmp_path, clock=clock, enabled=True)
+    store.add_watch(["a"], "A")
+    store.add_watch(["b"], "B", hold_s=60)
+    assert store.fire("a", "done")["status"] == "call"
+    store.fire("b", "done")
+    clock.now += 61
+    [due] = store.fire_due()
+    assert due["status"] == "limited"
+    assert due["reason"] == "gap"
+
+
+def test_a_removed_held_watch_never_calls(tmp_path):
+    clock = Clock()
+    store = _store(tmp_path, clock=clock, enabled=True)
+    watch_id = store.add_watch(["rt-1"], "Check the server", hold_s=60)["id"]
+    store.fire("rt-1", "done")
+    assert store.remove_watch(watch_id) is True  # Conduit told the user in the call
+    clock.now += 61
+    assert store.fire_due() == []
+
+
+@pytest.mark.parametrize("hold_s", [-1, 601, "60", True, 1.5])
+def test_a_hold_is_whole_seconds_within_bounds(tmp_path, hold_s):
+    store = _store(tmp_path, enabled=True)
+    with pytest.raises(ValueError, match="hold_s"):
+        store.add_watch(["rt-1"], "Job", hold_s=hold_s)
+    watch_id = store.add_watch(["rt-1"], "Job")["id"]
+    with pytest.raises(ValueError, match="hold_s"):
+        store.hold(watch_id, hold_s)
+
+
+def test_holding_an_unknown_watch_is_gone(tmp_path):
+    store = _store(tmp_path, enabled=True)
+    assert store.hold("0" * 24, 60) == {"status": "gone"}
 
 
 def test_watches_expire_after_a_day(tmp_path):

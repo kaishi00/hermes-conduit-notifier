@@ -690,13 +690,21 @@ writes Hermes' own read flag, so Desktop's unread dots don't change.
 ## Hermes calls you (plugin 0.13+)
 
 In a Live Voice call you can hand Hermes a long job and say "call me when
-it's done". When you hang up with that job still running, Conduit asks this
-profile to watch the job's own Hermes session. The first time a turn of that
-session ends, the plugin sends a **call request** through the relay instead of
-the usual "Response ready" or "Turn failed" push: a "Hermes wants to talk"
-notification whose Talk button opens Live Voice in the job's chat, where
-Hermes opens with how the job went. A native ringing call (CallKit) is the
-next step; this is its foundation and fallback.
+it's done". Conduit asks this profile right away to watch the job's own
+Hermes session, held while the call goes on. The first time a turn of that
+session ends after you hang up, the plugin sends a **call request** through
+the relay instead of the usual "Response ready" or "Turn failed" push: a
+"Hermes wants to talk" notification whose Talk button opens Live Voice in the
+job's chat, where Hermes opens with how the job went. A native ringing call
+(CallKit) is the next step; this is its foundation and fallback.
+
+While the call goes on, Conduit renews the hold every minute and releases it
+when you hang up. A job that ends during the hold gets its usual push and the
+call waits: Conduit tells you in the call (and removes the watch), or, if you
+hang up first, tells you itself when it releases the hold. If the phone goes
+away mid-call (crash, no signal), the hold runs out and the plugin calls on
+its own, so the call never depends on the phone reaching this host after the
+call.
 
 Calls are off until you turn them on in Conduit's Voice settings. Settings
 and watches live per profile in `<hermes home>/conduit-calls.json` (mode
@@ -715,7 +723,8 @@ lock, so they survive restarts:
 | --- | --- | --- | --- |
 | GET | `/api/plugins/conduit_push/calls?profile=` | | `{ok, paired, settings, bounds, watches}` |
 | PUT | `/api/plugins/conduit_push/calls?profile=` | `{settings: {...}}` (any subset) | `{ok, settings}` |
-| POST | `/api/plugins/conduit_push/calls/watches?profile=` | `{session_ids: [...], title}` | `{ok, status: "watching", id}` or `{ok, status: "ended", outcome}` |
+| POST | `/api/plugins/conduit_push/calls/watches?profile=` | `{session_ids: [...], title, hold_s?, ended_within_s?}` | `{ok, status: "watching", id}` or `{ok, status: "ended", outcome}` |
+| PUT | `/api/plugins/conduit_push/calls/watches/{id}?profile=` | `{hold_s}` (0 releases) | `{ok, status: "watching"}`, `{ok, status: "ended", outcome}` or `{ok, status: "gone"}` |
 | DELETE | `/api/plugins/conduit_push/calls/watches/{id}?profile=` | | `{ok, removed}` |
 
 - A watch names up to 4 session ids (the job's runtime and stored ids) and a
@@ -723,9 +732,16 @@ lock, so they survive restarts:
   of them: `done` (the turn finished), `failed`, or `stopped` (interrupted).
   A replayed hook finds nothing left, so a job calls at most once. Watches
   expire after 24 hours; a profile holds at most 20 (429 past that).
-- `ended` means the job's turn ended just before the watch arrived (the
-  plugin remembers turn ends for 30 minutes while calls are on); Conduit then
-  tells you itself.
+- `hold_s` (0–600) holds the watch while the call goes on. A job that ends
+  during the hold keeps its outcome; releasing the hold (`hold_s: 0`) then
+  answers `ended` and consumes the watch, and a hold that runs out calls.
+  The waiting runs in the agent process, and every turn end also sweeps for
+  overdue calls, so a gateway restart doesn't lose one.
+- `ended` from POST means one of the job's sessions ended within the last
+  `ended_within_s` seconds (how long ago the job's request went out, on the
+  phone's clock, so an earlier turn of the same chat doesn't count; the plugin
+  remembers turn ends for 30 minutes while calls are on); Conduit then tells
+  you itself.
 - 409 when the profile isn't paired with Conduit, or calls (or "call when I
   ask") are off. 400 for an unknown setting or a value outside its range.
   429 past 30 requests a minute per profile.

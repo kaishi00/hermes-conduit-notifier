@@ -237,3 +237,76 @@ def test_a_subagent_turn_never_fires_a_watch(home, fake):
         plugin._child_sessions.discard("child-1")
     assert fake.sent == []
     assert CallStore(home).watch_count() == 1
+
+
+# --- Held watches: registered during the call ------------------------------
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    now = [1_000_000.0]
+    monkeypatch.setattr(calls, "_clock", lambda: now[0])
+    return now
+
+
+def _held_watch(home, *session_ids, hold_s=180, title="Check the server"):
+    store = calls._store(home)
+    store.update_settings({"enabled": True})
+    return store.add_watch(list(session_ids), title, hold_s=hold_s)["id"]
+
+
+def test_a_job_ending_during_the_call_gets_its_usual_push(home, fake, clock, monkeypatch):
+    monkeypatch.setattr(calls, "_wait_for_holds", lambda home, profile: None)
+    _held_watch(home, "rt-1")
+    assert calls.turn_ended("rt-1", "done", profile="default", fallback=READY) is False
+    assert fake.sent == []
+
+
+def test_a_hold_that_runs_out_calls_without_a_second_push(home, fake, clock, monkeypatch):
+    # The phone went away mid-call: nobody renews or releases the hold.
+    def sleep(seconds):
+        clock[0] += seconds
+    monkeypatch.setattr(calls, "_sleep", sleep)
+    watch_id = _held_watch(home, "rt-1", "st-1")
+    assert calls.turn_ended("st-1", "done", profile="default", fallback=READY) is False
+    [event] = fake.sent
+    assert event["type"] == "call.requested"
+    assert event["event_id"] == f"call:{watch_id}"
+    assert event["session_id"] == "st-1"
+    assert event["body"] == "“Check the server” finished."
+    assert fake.enqueued == []
+
+
+def test_a_hold_released_at_hang_up_leaves_the_call_to_conduit(home, fake, clock, monkeypatch):
+    watch_id = _held_watch(home, "rt-1")
+
+    def sleep(seconds):
+        # Conduit hung up and released the watch while the waiter slept.
+        assert calls._store(home).hold(watch_id, 0) == {"status": "ended", "outcome": "done"}
+        clock[0] += seconds
+    monkeypatch.setattr(calls, "_sleep", sleep)
+    calls.turn_ended("rt-1", "done", profile="default", fallback=READY)
+    assert fake.sent == []
+
+
+def test_a_watch_removed_during_the_call_never_calls(home, fake, clock, monkeypatch):
+    watch_id = _held_watch(home, "rt-1")
+
+    def sleep(seconds):
+        # Conduit told the user in the call and removed the watch.
+        calls._store(home).remove_watch(watch_id)
+        clock[0] += seconds
+    monkeypatch.setattr(calls, "_sleep", sleep)
+    calls.turn_ended("rt-1", "done", profile="default", fallback=READY)
+    assert fake.sent == []
+
+
+def test_the_next_turn_end_sweeps_a_call_a_restart_dropped(home, fake, clock, monkeypatch):
+    monkeypatch.setattr(calls, "_wait_for_holds", lambda home, profile: None)
+    _held_watch(home, "rt-1", hold_s=60)
+    calls.turn_ended("rt-1", "done", profile="default", fallback=READY)
+    clock[0] += 61
+    # Any other session's turn end finds the overdue call.
+    assert calls.turn_ended("other", "done", profile="default", fallback=READY) is False
+    assert [event["type"] for event in fake.sent] == ["call.requested"]
+    assert fake.sent[0]["session_id"] == "rt-1"

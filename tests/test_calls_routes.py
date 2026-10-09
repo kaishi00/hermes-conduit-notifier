@@ -121,11 +121,37 @@ def test_a_job_that_already_ended_answers_ended(paired):
     _turn_calls_on(http)
     # The job's turn ended in the agent process just before Conduit hung up.
     api._calls_store().CallStore(paired).fire("rt-1", "done")
-    response = http.post(f"{BASE}/calls/watches", json={"session_ids": ["rt-1"], "title": "Job"})
+    response = http.post(f"{BASE}/calls/watches", json={"session_ids": ["rt-1"], "title": "Job", "ended_within_s": 300})
     assert response.json() == {"ok": True, "status": "ended", "outcome": "done"}
 
 
-@pytest.mark.parametrize("body", [{"session_ids": []}, {"session_ids": "rt-1"}, {"session_ids": ["bad id"]}, {}])
+def test_a_watch_held_during_the_call_is_renewed_and_released(paired):
+    http = _http()
+    _turn_calls_on(http)
+    watch_id = http.post(f"{BASE}/calls/watches", json={"session_ids": ["rt-1"], "title": "Job", "hold_s": 180}).json()["id"]
+    assert http.put(f"{BASE}/calls/watches/{watch_id}", json={"hold_s": 180}).json() == {"ok": True, "status": "watching"}
+    # The job ends during the call, then the user hangs up.
+    assert api._calls_store().CallStore(paired).fire("rt-1", "failed")["status"] == "held"
+    released = http.put(f"{BASE}/calls/watches/{watch_id}", json={"hold_s": 0})
+    assert released.json() == {"ok": True, "status": "ended", "outcome": "failed"}
+    assert released.headers["cache-control"] == "no-store"
+    assert http.put(f"{BASE}/calls/watches/{watch_id}", json={"hold_s": 0}).json() == {"ok": True, "status": "gone"}
+
+
+@pytest.mark.parametrize("body", [{"hold_s": 601}, {"hold_s": "60"}, {}, []])
+def test_a_bad_hold_is_refused(paired, body):
+    http = _http()
+    _turn_calls_on(http)
+    watch_id = http.post(f"{BASE}/calls/watches", json={"session_ids": ["rt-1"], "title": "Job"}).json()["id"]
+    assert http.put(f"{BASE}/calls/watches/{watch_id}", json=body).status_code == 400
+
+
+def test_holding_a_malformed_watch_id_is_refused(paired):
+    assert _http().put(f"{BASE}/calls/watches/not-a-watch", json={"hold_s": 0}).status_code == 400
+
+
+@pytest.mark.parametrize("body", [{"session_ids": []}, {"session_ids": "rt-1"}, {"session_ids": ["bad id"]}, {},
+                                  {"session_ids": ["rt-1"], "hold_s": 601}, {"session_ids": ["rt-1"], "ended_within_s": -1}])
 def test_a_watch_needs_session_ids(paired, body):
     http = _http()
     _turn_calls_on(http)

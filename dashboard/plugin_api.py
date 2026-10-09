@@ -3099,10 +3099,11 @@ async def post_e2e(request: Request, response: Response, profile: Optional[str] 
 # --- Hermes calls you (#449) -------------------------------------------------
 #
 # Conduit asks to be called when a job the user handed to a Live Voice call
-# ends. When the call ends with such a job still running, Conduit registers a
-# watch on the job's own Hermes session ids here; the plugin's turn-end hooks
-# (agent process) fire it once that session's turn ends, and send the call
-# request through the push relay. The watches and the per-profile call
+# ends. As soon as the user asks ("call me when it's done"), Conduit registers
+# a watch on the job's own Hermes session ids here, held while the call goes
+# on: Conduit renews the hold during the call and releases it at hang-up. The
+# plugin's turn-end hooks (agent process) fire it once that session's turn
+# ends, and send the call request through the push relay. The watches and the per-profile call
 # settings live in the profile's conduit-calls.json, shared with the hooks
 # through calls_store.py (loaded by path: this module can't import the plugin
 # package). (hermes-conduit designs/hermes-calls-you-449.md)
@@ -3159,16 +3160,18 @@ def update_call_settings(body: Any) -> Dict[str, Any]:
 
 
 def add_call_watch(body: Any) -> Dict[str, Any]:
-    """Watches a job for the user's call. ``status`` is ``watching``, or
-    ``ended`` (with ``outcome``) when the job's turn already ended: Conduit
-    then tells the user itself."""
+    """Watches a job for the user's call, held for ``hold_s`` seconds.
+    ``status`` is ``watching``, or ``ended`` (with ``outcome``) when the
+    job's turn ended within the last ``ended_within_s`` seconds: Conduit then
+    tells the user itself."""
     if not isinstance(body, dict):
         raise TokenError(400, "Expected a JSON object")
     if _load_pairing_state(_pairing_state_path()) is None:
         raise TokenError(409, "This Hermes profile isn't paired with Conduit")
     store = _calls_store().CallStore(_calls_home())
     try:
-        return store.add_watch(body.get("session_ids"), body.get("title", ""))
+        return store.add_watch(body.get("session_ids"), body.get("title", ""),
+                               hold_s=body.get("hold_s", 0), ended_within_s=body.get("ended_within_s"))
     except ValueError as exc:
         reason = str(exc)
         if reason == "calls_off":
@@ -3176,6 +3179,19 @@ def add_call_watch(body: Any) -> Dict[str, Any]:
         if reason == "too_many":
             raise TokenError(429, "Too many jobs are already waiting to call you")
         raise TokenError(400, reason)
+
+
+def hold_call_watch(watch_id: str, body: Any) -> Dict[str, Any]:
+    """Renews a watch's hold (``hold_s`` > 0) or releases it (0). Releasing
+    one whose job ended during the hold answers ``ended``."""
+    if not _CALL_WATCH_ID.match(watch_id):
+        raise TokenError(400, "Unknown watch id")
+    if not isinstance(body, dict):
+        raise TokenError(400, "Expected a JSON object")
+    try:
+        return _calls_store().CallStore(_calls_home()).hold(watch_id, body.get("hold_s"))
+    except ValueError as exc:
+        raise TokenError(400, str(exc))
 
 
 def remove_call_watch(watch_id: str) -> Dict[str, Any]:
@@ -3214,6 +3230,13 @@ async def put_calls(request: Request, response: Response, profile: Optional[str]
 async def post_call_watch(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     body = await _read_json_body(request, CALLS_MAX_BODY_BYTES)
     return await _calls_route(profile, response, lambda: add_call_watch(body), "watch")
+
+
+@router.put("/calls/watches/{watch_id}")
+async def put_call_watch(watch_id: str, request: Request, response: Response,
+                         profile: Optional[str] = None) -> Dict[str, Any]:
+    body = await _read_json_body(request, CALLS_MAX_BODY_BYTES)
+    return await _calls_route(profile, response, lambda: hold_call_watch(watch_id, body), "watch")
 
 
 @router.delete("/calls/watches/{watch_id}")

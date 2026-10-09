@@ -1,11 +1,18 @@
 """Hermes calls you (#449): this profile's call settings and job watches.
 
-A watch says "call the user when this job ends". Conduit registers one when
-a Live Voice call ends with a job the user asked to be called about; it is
+A watch says "call the user when this job ends". Conduit registers one as
+soon as the user asks a Live Voice call for it ("call me when it's done"),
 keyed to the job's own Hermes session ids (runtime and stored), never to the
 voice conversation. The agent's turn-end hooks fire it: the first turn end of
 any of its sessions consumes it, under the file lock, so a replayed hook finds
 nothing and the user is called at most once per watch.
+
+While the call is still going the watch is held: Conduit renews a short hold
+during the call and releases it at hang-up. A job that ends while held is
+told in the call itself (Conduit then removes the watch), or, when the call
+ends without that, at release (Conduit tells the user itself) or once the
+hold runs out because the phone went away (the hooks' delivery calls then).
+So the call never depends on the phone reaching the host after hanging up.
 
 State lives in the profile's ``conduit-calls.json`` beside the pairing state,
 so watches survive gateway and dashboard restarts. The hooks (agent process)
@@ -58,6 +65,8 @@ WATCH_TTL_S = 24 * 3600
 MAX_WATCHES = 20
 MAX_WATCH_SESSIONS = 4
 MAX_TITLE_CHARS = 120
+# A hold covers a running call between Conduit's renewals.
+MAX_HOLD_S = 600
 # Turn ends remembered so a watch that arrives just after its job ended still
 # calls (the user hung up as the job finished). Only kept while calls are on.
 RECENT_END_TTL_S = 30 * 60
@@ -98,32 +107,66 @@ class CallStore:
 
     # --- Watches ------------------------------------------------------------
 
-    def add_watch(self, session_ids: Any, title: Any) -> dict[str, Any]:
-        """Watches a job. ``{"status": "watching", "id"}``, or ``{"status":
-        "ended", "outcome"}`` when the job's turn already ended (no watch is
-        kept; the caller tells the user itself). Raises ValueError("calls_off")
-        unless calls and "call when I ask" are on."""
+    def add_watch(self, session_ids: Any, title: Any, hold_s: Any = 0, ended_within_s: Any = None) -> dict[str, Any]:
+        """Watches a job, held for ``hold_s`` seconds while the user's call
+        goes on. ``{"status": "watching", "id"}``, or ``{"status": "ended",
+        "outcome"}`` when one of the job's sessions ended within the last
+        ``ended_within_s`` seconds (how long ago the job's request went out,
+        on the phone's clock, so an earlier turn of the same chat never
+        counts): no watch is kept and the caller tells the user itself.
+        Raises ValueError("calls_off") unless calls and "call when I ask" are
+        on."""
         ids = _session_ids(session_ids)
         clean_title = _title(title)
+        hold = _seconds(hold_s, "hold_s", MAX_HOLD_S)
+        within = None if ended_within_s is None else _seconds(ended_within_s, "ended_within_s", RECENT_END_TTL_S)
         with self._locked() as state:
             settings = state["settings"]
             if not settings["enabled"] or not settings["when_asked"]:
                 raise ValueError("calls_off")
-            for end in state["ends"]:
-                if end["session_id"] in ids:
-                    return {"status": "ended", "outcome": end["outcome"]}
+            now = self.clock()
+            if within is not None:
+                for end in state["ends"]:
+                    if end["session_id"] in ids and now - end["at"] <= within:
+                        return {"status": "ended", "outcome": end["outcome"]}
             if len(state["watches"]) >= MAX_WATCHES:
                 raise ValueError("too_many")
-            now = self.clock()
             watch = {
                 "id": secrets.token_hex(12),
                 "session_ids": ids,
                 "title": clean_title,
                 "created_at": now,
                 "expires_at": now + WATCH_TTL_S,
+                "hold_until": now + hold if hold else 0.0,
+                "pending": None,
             }
             state["watches"].append(watch)
             return {"status": "watching", "id": watch["id"]}
+
+    def hold(self, watch_id: Any, hold_s: Any) -> dict[str, Any]:
+        """Renews a watch's hold for ``hold_s`` seconds while the call goes
+        on, or releases it with 0 at hang-up. Releasing a watch whose job
+        ended during the hold answers ``{"status": "ended", "outcome"}`` and
+        consumes it: the caller tells the user itself. Otherwise
+        ``{"status": "watching"}``, or ``{"status": "gone"}`` for a watch that
+        no longer exists (fired, removed or expired)."""
+        hold = _seconds(hold_s, "hold_s", MAX_HOLD_S)
+        if not isinstance(watch_id, str) or not watch_id or not self.path.exists():
+            return {"status": "gone"}
+        with self._locked() as state:
+            now = self.clock()
+            index = next((i for i, watch in enumerate(state["watches"]) if watch["id"] == watch_id), None)
+            if index is None:
+                return {"status": "gone"}
+            watch = state["watches"][index]
+            if hold:
+                watch["hold_until"] = now + hold
+                return {"status": "watching"}
+            if watch["pending"] is not None:
+                state["watches"].pop(index)
+                return {"status": "ended", "outcome": watch["pending"]["outcome"]}
+            watch["hold_until"] = 0.0
+            return {"status": "watching"}
 
     def remove_watch(self, watch_id: Any) -> bool:
         if not isinstance(watch_id, str) or not watch_id:
@@ -145,10 +188,12 @@ class CallStore:
     def fire(self, session_id: Any, outcome: str) -> dict[str, Any] | None:
         """A turn of ``session_id`` ended with ``outcome``.
 
-        None when no watch covers the session. Otherwise the watch is
-        consumed and the result says what to do: ``call`` (counted against the
-        limits), ``limited`` (with ``reason`` gap, hour or day) or ``off``
-        (calls were turned off after the watch was registered).
+        None when no watch covers the session. A held watch keeps the first
+        outcome and answers ``held`` (with ``until``): the call waits for the
+        hold to end. Otherwise the watch is consumed and the result says what
+        to do: ``call`` (counted against the limits), ``limited`` (with
+        ``reason`` gap, hour or day) or ``off`` (calls were turned off after
+        the watch was registered).
         """
         if outcome not in OUTCOMES:
             raise ValueError(f"unknown outcome {outcome}")
@@ -165,19 +210,36 @@ class CallStore:
             index = next((i for i, watch in enumerate(state["watches"]) if session_id in watch["session_ids"]), None)
             if index is None:
                 return None
-            watch = state["watches"].pop(index)
-            result: dict[str, Any] = {"watch": watch, "outcome": outcome}
-            if not settings["enabled"]:
-                return {**result, "status": "off"}
-            history = state["history"]
-            if history and now - max(history) < settings["min_gap_s"]:
-                return {**result, "status": "limited", "reason": "gap"}
-            if sum(1 for at in history if now - at < HOUR_S) >= settings["per_hour"]:
-                return {**result, "status": "limited", "reason": "hour"}
-            if sum(1 for at in history if now - at < DAY_S) >= settings["per_day"]:
-                return {**result, "status": "limited", "reason": "day"}
-            history.append(now)
-            return {**result, "status": "call"}
+            watch = state["watches"][index]
+            if watch["hold_until"] > now:
+                if watch["pending"] is None:
+                    watch["pending"] = {"outcome": outcome, "session_id": session_id}
+                return {"watch": dict(watch), "outcome": watch["pending"]["outcome"], "status": "held",
+                        "until": watch["hold_until"]}
+            state["watches"].pop(index)
+            return _decide(state, watch, outcome, now)
+
+    def fire_due(self) -> list[dict[str, Any]]:
+        """Watches whose job ended while held and whose hold has run out
+        (the call's phone went away without releasing them): consumed, each
+        with the result ``fire`` would give, plus the ``session_id`` that
+        ended."""
+        if not self.path.exists():
+            return []
+        with self._locked() as state:
+            now = self.clock()
+            due = [watch for watch in state["watches"] if watch["pending"] is not None and watch["hold_until"] <= now]
+            if not due:
+                return []
+            due_ids = {watch["id"] for watch in due}
+            state["watches"] = [watch for watch in state["watches"] if watch["id"] not in due_ids]
+            return [{**_decide(state, watch, watch["pending"]["outcome"], now),
+                     "session_id": watch["pending"]["session_id"]} for watch in due]
+
+    def next_due(self) -> float | None:
+        """When the earliest hold over an ended job runs out, if any."""
+        holds = [watch["hold_until"] for watch in self._load()["watches"] if watch["pending"] is not None]
+        return min(holds) if holds else None
 
     # --- Storage ------------------------------------------------------------
 
@@ -206,6 +268,23 @@ class CallStore:
         self.path.chmod(0o600)
 
 
+def _decide(state: dict[str, Any], watch: dict[str, Any], outcome: str, now: float) -> dict[str, Any]:
+    """Whether a consumed watch calls, within the user's settings and limits."""
+    settings = state["settings"]
+    result: dict[str, Any] = {"watch": watch, "outcome": outcome}
+    if not settings["enabled"]:
+        return {**result, "status": "off"}
+    history = state["history"]
+    if history and now - max(history) < settings["min_gap_s"]:
+        return {**result, "status": "limited", "reason": "gap"}
+    if sum(1 for at in history if now - at < HOUR_S) >= settings["per_hour"]:
+        return {**result, "status": "limited", "reason": "hour"}
+    if sum(1 for at in history if now - at < DAY_S) >= settings["per_day"]:
+        return {**result, "status": "limited", "reason": "day"}
+    history.append(now)
+    return {**result, "status": "call"}
+
+
 def _normalized(raw: Any, now: float) -> dict[str, Any]:
     """A well-formed state from whatever is on disk, with expired entries
     dropped. Anything malformed reads as its default."""
@@ -223,12 +302,19 @@ def _normalized(raw: Any, now: float) -> dict[str, Any]:
     for watch in raw.get("watches") if isinstance(raw.get("watches"), list) else []:
         try:
             if watch["expires_at"] > now:
+                pending = watch.get("pending")
+                if not (isinstance(pending, dict) and pending.get("outcome") in OUTCOMES
+                        and isinstance(pending.get("session_id"), str)):
+                    pending = None
+                hold_until = watch.get("hold_until", 0.0)
                 watches.append({
                     "id": str(watch["id"]),
                     "session_ids": _session_ids(watch["session_ids"]),
                     "title": _title(watch.get("title")),
                     "created_at": float(watch["created_at"]),
                     "expires_at": float(watch["expires_at"]),
+                    "hold_until": float(hold_until) if isinstance(hold_until, (int, float)) and not isinstance(hold_until, bool) else 0.0,
+                    "pending": {"outcome": pending["outcome"], "session_id": pending["session_id"]} if pending else None,
                 })
         except (KeyError, TypeError, ValueError):
             continue
@@ -255,6 +341,12 @@ def _session_ids(value: Any) -> list[str]:
     if not ids:
         raise ValueError("session_ids must name the job's session")
     return ids[:MAX_WATCH_SESSIONS]
+
+
+def _seconds(value: Any, name: str, maximum: int) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= maximum:
+        raise ValueError(f"{name} must be a whole number of seconds from 0 to {maximum}")
+    return value
 
 
 def _title(value: Any) -> str:
