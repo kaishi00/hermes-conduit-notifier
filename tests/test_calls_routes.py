@@ -212,3 +212,9 @@ def test_presence_holds_calls_during_a_live_voice_call(paired):
 @pytest.mark.parametrize("body", [{"hold_s": 601}, {"hold_s": -1}, {}, []])
 def test_a_bad_presence_is_refused(paired, body):
     assert _http().put(f"{BASE}/calls/presence", json=body).status_code == 400
+
+
+def test_presence_needs_a_paired_profile(home):
+    response = _http().put(f"{BASE}/calls/presence", json={"hold_s": 90})
+    assert response.status_code == 409
+    assert not (home / "conduit-calls.json").exists()

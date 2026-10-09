@@ -31,6 +31,7 @@ dashboard loads it by path, so it imports nothing from the plugin package.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -237,10 +238,12 @@ class CallStore:
             state["watches"] = kept
             return removed
 
-    def alert_now(self, session_id: Any, kind: str, reason: Any) -> dict[str, Any] | None:
+    def alert_now(self, session_id: Any, kind: str, reason: Any, *, seed: str = "") -> dict[str, Any] | None:
         """A failed turn with alerts on: the result ``fire`` would give for a
         watch on it (``call``, ``limited``, ``busy``), counted against the
-        limits. None when alerts are off: nothing is written then."""
+        limits. None when alerts are off: nothing is written then. ``seed``
+        (the turn) fixes the call's id, so a replayed hook is the same call
+        to the relay, which rings it once."""
         ids = _session_ids([session_id])
         settings = self.settings()
         if not settings["enabled"] or not settings["alerts"]:
@@ -248,6 +251,8 @@ class CallStore:
         with self._locked() as state:
             now = self.clock()
             watch = _new_watch(ids, now, origin="alert", reason=_reason(reason))
+            if seed:
+                watch["id"] = hashlib.sha256("\0".join([kind, *ids, seed]).encode()).hexdigest()[:24]
             return _decide(state, watch, kind, now)
 
     # --- Presence -----------------------------------------------------------
@@ -460,7 +465,9 @@ def _decide(state: dict[str, Any], watch: dict[str, Any], outcome: str, now: flo
 def _in_call(state: dict[str, Any], now: float) -> bool:
     """Conduit holds a watch through the call it was asked for in (an app
     without presence too). Not for a held watch's own call: its siblings in
-    that call run out moments apart once the phone has gone away."""
+    that call run out moments apart once the phone has gone away. A call
+    with no held watch (one a ringing call opened) is covered by presence
+    alone."""
     return any(watch["origin"] == "conduit" and watch["hold_until"] > now for watch in state["watches"])
 
 

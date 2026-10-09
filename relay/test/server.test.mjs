@@ -639,7 +639,7 @@ test('a call rings as a VoIP push: no alert, the voip topic, a day to reach an o
   assert.equal(push.pushType, 'voip');
   assert.equal(push.topic, 'com.milim.relay.voip');
   assert.equal(push.expiration, 1_800_086_400);
-  assert.equal(push.payload.aps, undefined);
+  assert.deepEqual(push.payload.aps, {}, 'nothing for iOS to show');
   assert.equal(push.payload.conduit.sent_at, 1_800_000_000);
   assert.equal(push.payload.body.conduit.sent_at, 1_800_000_000);
   assert.deepEqual(push.payload.body.conduit.call, validateEvent(callBody).call);
@@ -651,7 +651,7 @@ test('an encrypted call rings with its envelope untouched', () => {
   const push = callPushFor(event, {}, { id: 'gw-1' }, { topic: 'com.milim.relay', nowSeconds: 1_800_000_000 });
   assert.deepEqual(push.payload.conduit_e2e, event.e2e);
   assert.equal(push.payload.conduit.e2e, 1);
-  assert.equal(push.payload.aps, undefined);
+  assert.deepEqual(push.payload.aps, {}, 'nothing for iOS to show');
   assert.ok(!JSON.stringify(push.payload).includes('Check the server'));
 });
 

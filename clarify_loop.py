@@ -154,7 +154,9 @@ def middleware(is_child_session: Callable[[str], bool] | None = None, **kwargs: 
 
     # With alert calls on, a question left unanswered for a minute calls
     # the user (#449); any answer, from anywhere, stops it.
-    calls.alert(session_id, "question", question, profile=profile)
+    # A batch says how many wait, so a reason clipped to its length keeps it.
+    reason = question if len(batch) == 1 else f"{len(batch)} questions, first: {question}"
+    calls.alert(session_id, "question", reason, profile=profile)
     try:
         return _first_answer_wins(
             request_id=request_id,

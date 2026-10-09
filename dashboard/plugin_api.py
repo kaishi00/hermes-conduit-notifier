@@ -3205,6 +3205,8 @@ def set_call_presence(body: Any) -> Dict[str, Any]:
     renews it during the call), or not (0): nothing rings meanwhile."""
     if not isinstance(body, dict):
         raise TokenError(400, "Expected a JSON object")
+    if _load_pairing_state(_pairing_state_path()) is None:
+        raise TokenError(409, "This Hermes profile isn't paired with Conduit")
     try:
         return _calls_store().CallStore(_calls_home()).set_presence(body.get("hold_s"))
     except ValueError as exc:

@@ -127,7 +127,7 @@ def _on_session_end(**kwargs: Any) -> None:
     if calls.turn_ended(session_id, "failed", profile=_profile, fallback=failed):
         return
     # With alert calls on, a failed turn calls instead.
-    if calls.failed_turn(session_id, profile=_profile, fallback=failed):
+    if calls.failed_turn(session_id, profile=_profile, fallback=failed, turn_id=kwargs.get("turn_id")):
         return
     enqueue(failed)
 
