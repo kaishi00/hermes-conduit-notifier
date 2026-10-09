@@ -97,6 +97,9 @@ MAX_RECENT_ENDS = 64
 MAX_HISTORY = INT_BOUNDS["per_day"][1]
 HOUR_S = 3600
 DAY_S = 24 * 3600
+# Failed turns' decisions by seeded call id, for a replayed hook: kept as long
+# as the relay remembers an event id.
+MAX_SEEDED = 64
 
 _SESSION_ID = re.compile(r"^[A-Za-z0-9:_./-]{1,180}$")
 # The shape the call event carries (events.sanitize_call).
@@ -243,7 +246,8 @@ class CallStore:
         watch on it (``call``, ``limited``, ``busy``), counted against the
         limits. None when alerts are off: nothing is written then. ``seed``
         (the turn) fixes the call's id, so a replayed hook is the same call
-        to the relay, which rings it once."""
+        to the relay, which rings it once, and gets the first hook's
+        decision without counting again."""
         ids = _session_ids([session_id])
         settings = self.settings()
         if not settings["enabled"] or not settings["alerts"]:
@@ -251,9 +255,17 @@ class CallStore:
         with self._locked() as state:
             now = self.clock()
             watch = _new_watch(ids, now, origin="alert", reason=_reason(reason))
-            if seed:
-                watch["id"] = hashlib.sha256("\0".join([kind, *ids, seed]).encode()).hexdigest()[:24]
-            return _decide(state, watch, kind, now)
+            if not seed:
+                return _decide(state, watch, kind, now)
+            watch["id"] = hashlib.sha256("\0".join([kind, *ids, seed]).encode()).hexdigest()[:24]
+            earlier = next((entry for entry in state["seeded"] if entry["id"] == watch["id"]), None)
+            if earlier is not None:
+                # Not held back by the gap the first call opened: that would
+                # send the failure notification beside its ring.
+                return {"watch": watch, "outcome": kind, "status": earlier["status"]}
+            result = _decide(state, watch, kind, now)
+            state["seeded"] = [*state["seeded"], {"id": watch["id"], "status": result["status"], "at": now}][-MAX_SEEDED:]
+            return result
 
     # --- Presence -----------------------------------------------------------
 
@@ -520,10 +532,16 @@ def _normalized(raw: Any, now: float) -> dict[str, Any]:
         if (isinstance(end, dict) and isinstance(end.get("session_id"), str) and end.get("outcome") in OUTCOMES
                 and isinstance(end.get("at"), (int, float)) and now - end["at"] < RECENT_END_TTL_S):
             ends.append({"session_id": end["session_id"], "outcome": end["outcome"], "at": float(end["at"])})
+    seeded = []
+    for entry in raw.get("seeded") if isinstance(raw.get("seeded"), list) else []:
+        if (isinstance(entry, dict) and isinstance(entry.get("id"), str) and _WATCH_ID.match(entry["id"])
+                and isinstance(entry.get("status"), str) and isinstance(entry.get("at"), (int, float))
+                and not isinstance(entry.get("at"), bool) and now - entry["at"] < DAY_S):
+            seeded.append({"id": entry["id"], "status": entry["status"], "at": float(entry["at"])})
     presence = raw.get("presence_until", 0.0)
     presence_until = float(presence) if isinstance(presence, (int, float)) and not isinstance(presence, bool) and presence > now else 0.0
     return {"v": VERSION, "settings": settings, "watches": watches, "history": history,
-            "ends": ends[-MAX_RECENT_ENDS:], "presence_until": presence_until}
+            "ends": ends[-MAX_RECENT_ENDS:], "seeded": seeded[-MAX_SEEDED:], "presence_until": presence_until}
 
 
 def _session_ids(value: Any) -> list[str]:

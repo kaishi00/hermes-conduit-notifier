@@ -643,6 +643,21 @@ def test_a_replayed_failure_hook_is_the_same_call_to_the_relay(home, fake, clock
     assert other["event_id"] != first["event_id"]
 
 
+def test_a_failure_hook_replayed_at_once_rings_once_and_sends_no_push(home, fake, clock):
+    _settings(home, alerts=True)
+    plugin._on_session_end(session_id="st-9", turn_id="t1", completed=False, interrupted=False)
+    clock[0] += 5
+    # Inside the gap the first call opened: the same decision, not "limited".
+    plugin._on_session_end(session_id="st-9", turn_id="t1", completed=False, interrupted=False)
+    first, replay = fake.sent
+    assert replay["event_id"] == first["event_id"]
+    assert fake.enqueued == [], "no failure notification beside the ring"
+    assert len(calls._store(home)._load()["history"]) == 1, "counted once"
+    # Another turn in that gap is held back as usual.
+    plugin._on_session_end(session_id="st-9", turn_id="t2", completed=False, interrupted=False)
+    assert [event["type"] for event in fake.enqueued] == ["turn.failed"]
+
+
 def test_a_failed_turn_calls_in_place_of_its_push_with_alerts_on(home, fake):
     _settings(home, alerts=True)
     plugin._on_session_end(session_id="st-9", turn_id="t1", completed=False, interrupted=False)
@@ -663,7 +678,7 @@ def test_nothing_rings_during_a_live_voice_call(home, fake, paired):
     assert [event["type"] for event in fake.enqueued] == ["response.ready"]
 
 
-def test_a_question_left_unanswered_calls_and_an_answer_stops_it(home, fake, clock, monkeypatch):
+def test_a_question_left_unanswered_calls_and_an_answer_stops_it(home, fake, clock, monkeypatch, paired):
     loop = sys.modules["conduit_push.clarify_loop"]
     _settings(home, alerts=True)
     scheduled = []
@@ -678,7 +693,7 @@ def test_a_question_left_unanswered_calls_and_an_answer_stops_it(home, fake, clo
     assert calls._store(home).watch_count() == 0, "the answer cancelled it"
 
 
-def test_a_batch_of_questions_says_how_many_wait(home, fake, clock, monkeypatch):
+def test_a_batch_of_questions_says_how_many_wait(home, fake, monkeypatch, paired):
     loop = sys.modules["conduit_push.clarify_loop"]
     _settings(home, alerts=True)
     reasons = []
