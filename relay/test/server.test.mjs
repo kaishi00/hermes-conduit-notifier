@@ -577,7 +577,7 @@ test('validateEvent accepts a call request and keeps its job', () => {
 test('validateEvent bounds the call and drops a malformed one', () => {
   const bounded = validateEvent({ ...callBody, call: { ...callBody.call, title: undefined, session_ids: ['a', 'a', 'bad id', 'b', 'c', 'd', 'e', 'x'.repeat(181)] } });
   assert.deepEqual(bounded.call, { id: callBody.call.id, kind: 'done', session_ids: ['a', 'b', 'c', 'd'] });
-  for (const call of [null, [], { ...callBody.call, kind: 'maybe' }, { ...callBody.call, id: 'short' }, { ...callBody.call, id: 'has space here' }]) {
+  for (const call of [null, [], { ...callBody.call, kind: 'maybe' }, { ...callBody.call, id: 'short' }, { ...callBody.call, id: 'has space here' }, { ...callBody.call, session_ids: [] }, { ...callBody.call, session_ids: ['bad id'] }]) {
     assert.equal(validateEvent({ ...callBody, call }).call, undefined, JSON.stringify(call));
   }
   // Only a call request carries a call.
@@ -591,7 +591,9 @@ test('a call request rings with the call category, its job and the generic copy 
   assert.equal(payload.aps.alert.title, 'Hermes wants to talk');
   assert.match(payload.aps.alert.body, /^Tap to talk to Hermes\./);
   assert.ok(!payload.aps.alert.body.includes('Check the server'));
-  assert.deepEqual(payload.body.conduit.call, validateEvent(callBody).call);
+  const { title: _title, ...untitled } = validateEvent(callBody).call;
+  assert.deepEqual(payload.body.conduit.call, untitled, 'the job title stays home with previews off');
+  assert.ok(!JSON.stringify(payload).includes('Check the server'));
   assert.equal(payload.conduit.call, undefined, 'the top-level copy stays routing-only');
   const silenced = notificationFor(validateEvent(callBody), { attention_sound: false }, { id: 'gw-1' });
   assert.equal(silenced.payload.aps.sound, undefined);
@@ -600,8 +602,14 @@ test('a call request rings with the call category, its job and the generic copy 
 test('a call request with previews on shows the plugin copy; other pushes get no call category', () => {
   const { payload } = notificationFor(validateEvent(callBody), { show_previews: true }, { id: 'gw-1' });
   assert.deepEqual(payload.aps.alert, { title: 'Hermes wants to talk', body: '“Check the server” finished.' });
+  assert.deepEqual(payload.body.conduit.call, validateEvent(callBody).call);
   const ready = notificationFor(validateEvent({ ...callBody, type: 'response.ready' }), { show_previews: true }, { id: 'gw-1' });
   assert.equal(ready.payload.aps.category, undefined);
+});
+
+test('call requests have their own preference, on by default', () => {
+  assert.equal(normalizePreferences({}).call_requested, true);
+  assert.equal(normalizePreferences({ call_requested: false }).call_requested, false);
 });
 
 test('an encrypted call request keeps the call category and seals its job', () => {

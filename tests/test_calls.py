@@ -310,3 +310,34 @@ def test_the_next_turn_end_sweeps_a_call_a_restart_dropped(home, fake, clock, mo
     assert calls.turn_ended("other", "done", profile="default", fallback=READY) is False
     assert [event["type"] for event in fake.sent] == ["call.requested"]
     assert fake.sent[0]["session_id"] == "rt-1"
+
+
+def test_a_sweep_still_sends_when_this_turns_check_fails(home, fake, clock, monkeypatch):
+    monkeypatch.setattr(calls, "_wait_for_holds", lambda home, profile: None)
+    _held_watch(home, "rt-1", hold_s=60)
+    calls.turn_ended("rt-1", "done", profile="default", fallback=READY)
+    clock[0] += 61
+
+    def broken(self, session_id, outcome):
+        raise OSError("disk full")
+    monkeypatch.setattr(CallStore, "fire", broken)
+    assert calls.turn_ended("other", "done", profile="default", fallback=READY) is False
+    assert [event["type"] for event in fake.sent] == ["call.requested"]
+
+
+def test_a_waiter_that_cannot_start_lets_the_next_turn_try(home, fake, clock, monkeypatch):
+    def no_threads(work):
+        raise RuntimeError("can't start new thread")
+    monkeypatch.setattr(calls, "_spawn", no_threads)
+    _held_watch(home, "rt-1")
+    # The turn goes on, and the home isn't left marked as waiting.
+    assert calls.turn_ended("rt-1", "done", profile="default", fallback=READY) is False
+    assert str(home) not in calls._waiting
+
+
+def test_a_call_that_cannot_be_spawned_leaves_the_usual_push(home, fake, monkeypatch):
+    def no_threads(work):
+        raise RuntimeError("can't start new thread")
+    monkeypatch.setattr(calls, "_spawn", no_threads)
+    _watch(home, "rt-1")
+    assert calls.turn_ended("rt-1", "done", profile="default", fallback=READY) is False

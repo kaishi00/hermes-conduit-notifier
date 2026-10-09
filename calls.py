@@ -65,27 +65,42 @@ def turn_ended(session_id: str, outcome: str, *, profile: str, fallback: dict[st
     """
     if not session_id:
         return False
-    home = get_hermes_home()
+    # A hook must never break the turn: every step below is guarded.
     try:
+        home = get_hermes_home()
         store = _store(home)
-        due = store.fire_due()
+    except Exception:  # noqa: BLE001
+        logger.warning("Conduit could not open call watches for this turn", exc_info=True)
+        return False
+    try:
+        # Watches consumed here are sent even if this turn's own check fails.
+        _send_due(store.fire_due(), profile)
+    except Exception:  # noqa: BLE001
+        logger.warning("Conduit could not sweep held calls", exc_info=True)
+    try:
         result = store.fire(session_id, outcome)
-    except Exception:  # noqa: BLE001 — a hook must never break the turn
+    except Exception:  # noqa: BLE001
         logger.warning("Conduit could not check call watches for this turn", exc_info=True)
         return False
-    _send_due(due, profile)
     if result is None:
         return False
     if result["status"] == "held":
         # The call waits for the user's call to end; this turn's own push
         # goes out as usual.
-        _wait_for_holds(home, profile)
+        try:
+            _wait_for_holds(home, profile)
+        except Exception:  # noqa: BLE001 — the next turn end sweeps again
+            logger.warning("Conduit could not wait on a held call", exc_info=True)
         return False
     if result["status"] != "call":
         logger.info("Conduit call for a finished job held back: %s", result.get("reason") or result["status"])
         return False
-    event = call_event(result["watch"], outcome, session_id=session_id, profile=profile)
-    _spawn(lambda: deliver(event, fallback))
+    try:
+        event = call_event(result["watch"], outcome, session_id=session_id, profile=profile)
+        _spawn(lambda: deliver(event, fallback))
+    except Exception:  # noqa: BLE001 — the caller sends its usual push
+        logger.warning("Conduit could not send a call request", exc_info=True)
+        return False
     return True
 
 
@@ -108,7 +123,15 @@ def _wait_for_holds(home: Any, profile: str) -> None:
         if key in _waiting:
             return
         _waiting.add(key)
+    try:
+        _spawn(_waiter(home, profile, key))
+    except BaseException:
+        with _waiting_lock:
+            _waiting.discard(key)
+        raise
 
+
+def _waiter(home: Any, profile: str, key: str) -> Callable[[], None]:
     def wait() -> None:
         store = _store(home)
         try:
@@ -129,7 +152,7 @@ def _wait_for_holds(home: Any, profile: str) -> None:
             with _waiting_lock:
                 _waiting.discard(key)
 
-    _spawn(wait)
+    return wait
 
 
 def call_event(watch: dict[str, Any], outcome: str, *, session_id: str, profile: str) -> dict[str, Any]:

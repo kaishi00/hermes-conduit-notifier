@@ -673,7 +673,11 @@ function notificationFor(event, preferences, gateway = undefined) {
   // `conduit` copy stays ROUTING-ONLY for raw-APNs consumers: duplicating
   // the structured decision there once doubled the decision's byte cost and
   // pushed ordinary multi-question batches over the size guard.
-  const call = event.type === 'call.requested' ? event.call : undefined;
+  // The job's title is chat content: like the banner text, it rides only
+  // with previews on (Conduit falls back to the chat's own title).
+  const call = event.type === 'call.requested' && event.call
+    ? (preferences.show_previews ? event.call : (({ title: _title, ...rest }) => rest)(event.call))
+    : undefined;
   const bodyConduit = { ...routing, ...(decision ? { decision } : {}), ...(call ? { call } : {}) };
   const aps = {
     alert: { title, body },
@@ -832,6 +836,8 @@ function validateCall(value) {
     const sessionId = typeof item === 'string' && item.length <= 180 ? cleanIdentifier(item, 180) : undefined;
     if (sessionId && !sessionIds.includes(sessionId)) sessionIds.push(sessionId);
   }
+  // A call with no session has no chat to open; the plugin never sends one.
+  if (!sessionIds.length) return undefined;
   const title = cleanText(value.title, 120);
   return { id: value.id, kind: value.kind, session_ids: sessionIds.slice(0, 4), ...(title ? { title } : {}) };
 }

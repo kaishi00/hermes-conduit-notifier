@@ -262,19 +262,32 @@ class CallStore:
         lock_path = self.path.with_name(f".{self.path.name}.lock")
         with _thread_lock, open(lock_path, "a+b") as handle, _exclusive(handle):
             state = self._load()
+            before = _encoded(state)
             yield state
-            self._save(state)
+            # Most turn ends change nothing: no write then.
+            after = _encoded(state)
+            if after != before or not self.path.exists():
+                self._save(after)
 
-    def _save(self, state: dict[str, Any]) -> None:
+    def _save(self, encoded: str) -> None:
         temporary = self.path.with_name(f".{self.path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-        temporary.write_text(json.dumps(state, separators=(",", ":")) + "\n", encoding="utf-8")
+        # Private from the first byte: it holds job titles and session ids.
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(encoded)
         temporary.chmod(0o600)
         temporary.replace(self.path)
         self.path.chmod(0o600)
 
 
+def _encoded(state: dict[str, Any]) -> str:
+    return json.dumps(state, separators=(",", ":")) + "\n"
+
+
 def _decide(state: dict[str, Any], watch: dict[str, Any], outcome: str, now: float) -> dict[str, Any]:
-    """Whether a consumed watch calls, within the user's settings and limits."""
+    """Whether a consumed watch calls, within the user's settings and limits.
+    A call counts against them once decided, even if its delivery later fails
+    (the usual push goes out then): erring towards fewer calls, never more."""
     settings = state["settings"]
     result: dict[str, Any] = {"watch": watch, "outcome": outcome}
     if not settings["enabled"]:

@@ -390,3 +390,14 @@ def test_an_unknown_outcome_is_refused(tmp_path):
     store = _store(tmp_path, enabled=True)
     with pytest.raises(ValueError):
         store.fire("rt-1", "maybe")
+
+
+def test_a_turn_end_that_changes_nothing_writes_nothing(tmp_path):
+    store = _store(tmp_path, enabled=True)
+    store.add_watch(["rt-1"], "Check the server")
+    store.update_settings({"enabled": False})  # no recent ends while off
+    before = store.path.stat()
+    assert store.fire("other", "done") is None
+    assert store.fire_due() == []
+    after = store.path.stat()
+    assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)  # saving replaces the file
