@@ -71,6 +71,8 @@ MAX_HOLD_S = 600
 # calls (the user hung up as the job finished). Only kept while calls are on.
 RECENT_END_TTL_S = 30 * 60
 MAX_RECENT_ENDS = 64
+# Call times kept for the limits: no more than the highest daily limit allows.
+MAX_HISTORY = INT_BOUNDS["per_day"][1]
 HOUR_S = 3600
 DAY_S = 24 * 3600
 
@@ -345,8 +347,10 @@ def _normalized(raw: Any, now: float) -> dict[str, Any]:
                 })
         except (KeyError, TypeError, ValueError):
             continue
-    history = [float(at) for at in raw.get("history") if isinstance(at, (int, float)) and not isinstance(at, bool)
-               and now - at < DAY_S] if isinstance(raw.get("history"), list) else []
+    stored_history = raw.get("history") if isinstance(raw.get("history"), list) else []
+    history = sorted(float(at) for at in stored_history
+                     if isinstance(at, (int, float)) and not isinstance(at, bool) and now - at < DAY_S)
+    history = history[-MAX_HISTORY:]
     ends = []
     for end in raw.get("ends") if isinstance(raw.get("ends"), list) else []:
         if (isinstance(end, dict) and isinstance(end.get("session_id"), str) and end.get("outcome") in OUTCOMES

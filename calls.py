@@ -3,10 +3,11 @@
 The turn-end hooks hand every top-level turn end here. A turn of a session
 Conduit watches consumes the watch (calls_store) and, within the user's
 limits, sends a ``call.requested`` event in place of the push the hook would
-have sent. Delivery retries a transport failure with the same event id, which
-the relay dedupes; a rejection (an older relay, the relay's daily ceiling) or
-a final failure sends that ordinary push instead, so the user still hears
-about the job.
+have sent. Delivery retries a transport or relay failure with the same event
+id, which the relay dedupes; a rejection (an older relay, the relay's daily
+ceiling), a relay that took the event but couldn't reach Apple, or a final
+failure sends that ordinary push instead, so the user still hears about the
+job.
 
 A job that ends while its watch is held (the user's call is still going)
 gets its ordinary push; the call waits. A waiter thread calls once the hold
@@ -32,6 +33,8 @@ logger = logging.getLogger("hermes.plugins.conduit_push")
 CALL_TITLE = "Hermes wants to talk"
 # Seconds to wait before each delivery attempt.
 DELIVERY_DELAYS_S = (0.0, 2.0, 4.0)
+# The relay's errors for an event it took but Apple didn't (relay/src/server.mjs).
+APNS_FAILURES = frozenset({"apns_rejected", "apns_unreachable"})
 
 
 def _spawn(work: Callable[[], None]) -> None:
@@ -191,18 +194,32 @@ def call_event(watch: dict[str, Any], outcome: str, *, session_id: str, profile:
 
 
 def deliver(event: dict[str, Any], fallback: dict[str, Any] | None) -> None:
+    relay_failed = False
     for delay in DELIVERY_DELAYS_S:
         if delay:
             _sleep(delay)
         try:
-            client.send_now(event)
-            return
+            answer = client.send_now(event)
         except RuntimeError as error:
-            # The relay answered and refused (or the profile lost its
-            # pairing): sending the same thing again won't change that.
+            if getattr(error, "status", 0) >= 500 and getattr(error, "detail", "") not in APNS_FAILURES:
+                # The relay (or a proxy in front of it) failed to handle it:
+                # worth another try.
+                logger.warning("Conduit call request delivery failed: %s", error)
+                relay_failed = True
+                continue
+            # The relay refused it, the profile lost its pairing, or the
+            # relay took it and Apple didn't: sending the same event again
+            # won't change that (a retry only answers "duplicate").
             logger.warning("Conduit call request refused: %s", error)
             break
         except Exception as error:  # noqa: BLE001 — transport: try again
             logger.warning("Conduit call request delivery failed: %s", error)
+            continue
+        # A relay that failed after taking the event answers the retry as a
+        # duplicate without sending it again.
+        if not (relay_failed and isinstance(answer, dict) and answer.get("duplicate")):
+            return
+        logger.warning("Conduit call request was taken but never sent")
+        break
     if fallback is not None and not client.enqueue(fallback):
         logger.warning("Conduit could not queue the usual push for a call that didn't go out")

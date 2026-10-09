@@ -575,9 +575,10 @@ test('validateEvent accepts a call request and keeps its job', () => {
 });
 
 test('validateEvent bounds the call and drops a malformed one', () => {
-  const bounded = validateEvent({ ...callBody, call: { ...callBody.call, title: undefined, session_ids: ['a', 'a', 'bad id', 'b', 'c', 'd', 'e', 'x'.repeat(181)] } });
+  const bounded = validateEvent({ ...callBody, call: { ...callBody.call, title: undefined, session_ids: ['a', 'a', 'b', 'c', 'd', 'e'] } });
   assert.deepEqual(bounded.call, { id: callBody.call.id, kind: 'done', session_ids: ['a', 'b', 'c', 'd'] });
-  for (const call of [null, [], { ...callBody.call, kind: 'maybe' }, { ...callBody.call, id: 'short' }, { ...callBody.call, id: 'has space here' }, { ...callBody.call, session_ids: [] }, { ...callBody.call, session_ids: ['bad id'] }]) {
+  for (const call of [null, [], { ...callBody.call, kind: 'maybe' }, { ...callBody.call, id: 'short' }, { ...callBody.call, id: 'has space here' }, { ...callBody.call, session_ids: [] }, { ...callBody.call, session_ids: 'rt-1' },
+    { ...callBody.call, session_ids: ['bad id'] }, { ...callBody.call, session_ids: ['a', 'bad id'] }, { ...callBody.call, session_ids: ['a', 'x'.repeat(181)] }, { ...callBody.call, session_ids: ['a', 7] }]) {
     assert.equal(validateEvent({ ...callBody, call }).call, undefined, JSON.stringify(call));
   }
   // Only a call request carries a call.

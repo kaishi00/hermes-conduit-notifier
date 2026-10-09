@@ -236,7 +236,7 @@ integer stops the relay at boot.
 | Live Watch audio bridges across the relay (GPT-Live and Grok on the Watch) | 200 | `RELAY_MAX_WATCH_AUDIO_BRIDGES` |
 | Live Watch audio bridges per gateway | 2 | `RELAY_MAX_WATCH_AUDIO_BRIDGES_PER_GATEWAY` |
 | Watch tool calls per minute | 1,200 | `RELAY_WATCH_CALLS_PER_MINUTE` |
-| Hermes call requests per installation per day | 60 | `RELAY_CALLS_PER_INSTALLATION_PER_DAY` |
+| Hermes call requests per installation per day (each new request counts, even one that rings no device) | 60 | `RELAY_CALLS_PER_INSTALLATION_PER_DAY` |
 
 Event IDs only prevent a repeated delivery of the same event within 24 hours,
 so the relay keeps them in memory and never writes them to the data file. A
@@ -748,8 +748,10 @@ lock, so they survive restarts:
 - A call held back by your limits, or calls turned off after the watch was
   made, consumes the watch and sends the usual push instead. So does a relay
   that refuses the call request (relays before 0.8 don't know it; 0.8 caps
-  call requests at 60 a day per installation, `call_limit`) or one that stays
-  unreachable after three tries (2 s and 4 s apart, same event id).
+  call requests at 60 a day per installation, `call_limit`), one that took
+  the request but couldn't reach Apple, or one that stays unreachable or keeps
+  failing (5xx) after three tries (2 s and 4 s apart, same event id). One malformed session id drops the job details from the
+  request, on the host and on the relay alike; it still opens the chat.
 - The call request carries the job's id, outcome, title and session ids so
   Conduit can open the right chat. With end-to-end encryption they are sealed
   like any other content; with `redact on` the title is dropped.
