@@ -686,6 +686,105 @@ for (const [failure, forgotten] of [['BadDeviceToken', true], ['Unregistered', t
   });
 }
 
+test('a paired Watch rings too, and whichever device answers stops the other', async () => {
+  const aPort = await closedPort();
+  const isolatedPath = join(dir, 'relay-data-watch-ring.json');
+  const capturePath = join(dir, `capture-watch-ring-${Date.now()}.jsonl`);
+  const fixture = new RelayStore(isolatedPath);
+  const created = fixture.createInstallation({ bundleId: 'com.milim.relay', deviceToken: 'd'.repeat(64), voipToken: '9'.repeat(64), environment: 'production' });
+  const pairing = fixture.createPairing(created.installation.id);
+  const claim = fixture.claimPairing(pairing.code, 'watch ring target');
+  const child = await startRelay(aPort, 'accept', isolatedPath, { APNS_CAPTURE_PATH: capturePath });
+  children.push(child);
+  const base = `http://127.0.0.1:${aPort}`;
+  const device = `${created.installation.id}.${created.deviceSecret}`;
+  const register = (token) => api(base, `/v1/installations/${created.installation.id}`, { method: 'PUT', credential: device, body: { watch_voip_token: token } });
+  const send = (eventId) => api(base, '/v1/events', {
+    method: 'POST',
+    credential: `${created.installation.id}.${claim.gatewayId}.${claim.gatewaySecret}`,
+    body: { type: 'call.requested', event_id: eventId, session_id: 'st-1', call: { id: eventId.slice(5), kind: 'done', session_ids: ['st-1'] } },
+  });
+  const captured = () => readFileSync(capturePath, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+  const settle = (ring, body) => api(base, `/v1/rings/${ring.id}/settled`, { method: 'POST', body: { token: ring.token, ...body } });
+  try {
+    assert.deepEqual(await register('nope'), { status: 400, json: { error: 'invalid_watch_voip_token' } });
+    const registered = await register('7'.repeat(64));
+    assert.equal(registered.json.installation.watch_voip, true);
+    assert.equal(registered.json.installation.voip, true, 'the phone keeps its own token');
+    const meta = await api(base, '/v1/meta', { credential: device });
+    assert.ok(meta.json.capabilities.includes('watch-calls'));
+
+    assert.deepEqual(await send('call:000000000000000000000031'), { status: 202, json: { accepted: true, delivered: true, rang: true } });
+    const [phone, watch] = captured();
+    assert.equal(phone.deviceToken, '9'.repeat(64));
+    assert.equal(phone.notification.topic, 'com.milim.relay.voip');
+    assert.equal(watch.deviceToken, '7'.repeat(64));
+    assert.equal(watch.notification.topic, 'com.milim.relay.watchkitapp.voip');
+    assert.equal(watch.notification.pushType, 'voip');
+    const ring = phone.notification.payload.conduit.ring;
+    assert.deepEqual(watch.notification.payload.conduit.ring, ring, 'both ring with the same ring');
+    assert.deepEqual(watch.notification.payload.body.conduit.call, phone.notification.payload.body.conduit.call);
+
+    assert.deepEqual(await settle(ring, { by: 'watch', outcome: 'banana' }), { status: 400, json: { error: 'invalid_settle' } });
+    assert.deepEqual(await settle({ id: ring.id, token: 'x'.repeat(43) }, { by: 'watch', outcome: 'answered' }), { status: 404, json: { error: 'unknown_ring' } });
+    assert.deepEqual(await settle(ring, { by: 'watch', outcome: 'answered' }), { status: 200, json: { settled: true, notified: true } });
+    assert.deepEqual(await settle(ring, { by: 'phone', outcome: 'answered' }),
+      { status: 409, json: { error: 'already_settled', settled: { by: 'watch', outcome: 'answered' } } },
+      'the phone answered too late and learns the Watch has the call');
+    const stop = captured()[2];
+    assert.equal(stop.deviceToken, '9'.repeat(64), 'the phone stops ringing');
+    assert.equal(stop.notification.topic, 'com.milim.relay.voip');
+    assert.deepEqual(stop.notification.payload, { aps: {}, conduit: { ring: { id: ring.id, settled: 'answered', by: 'watch' } } });
+
+    assert.equal((await send('call:000000000000000000000032')).status, 202);
+    const second = captured()[3].notification.payload.conduit.ring;
+    assert.notEqual(second.id, ring.id, 'every call has its own ring');
+    assert.deepEqual(await settle(second, { by: 'phone', outcome: 'declined' }), { status: 200, json: { settled: true, notified: true } });
+    const watchStop = captured()[5];
+    assert.equal(watchStop.deviceToken, '7'.repeat(64), 'the Watch stops ringing');
+    assert.equal(watchStop.notification.topic, 'com.milim.relay.watchkitapp.voip');
+    assert.equal(watchStop.notification.payload.conduit.ring.settled, 'declined');
+
+    assert.equal((await register(null)).json.installation.watch_voip, false, 'null stops the Watch ringing');
+    assert.equal((await send('call:000000000000000000000033')).status, 202);
+    assert.equal(captured()[6].notification.payload.conduit.ring, undefined, 'the phone rings alone, with no ring to settle');
+    assert.equal(captured().length, 7);
+  } finally {
+    await stopRelay(child);
+  }
+});
+
+test('a Watch token APNs refuses is forgotten and the phone still rings', async () => {
+  const aPort = await closedPort();
+  const isolatedPath = join(dir, 'relay-data-watch-refused.json');
+  const capturePath = join(dir, `capture-watch-refused-${Date.now()}.jsonl`);
+  const fixture = new RelayStore(isolatedPath);
+  const created = fixture.createInstallation({ bundleId: 'com.milim.relay', deviceToken: 'd'.repeat(64), voipToken: '9'.repeat(64), watchVoipToken: '7'.repeat(64), environment: 'production' });
+  const pairing = fixture.createPairing(created.installation.id);
+  const claim = fixture.claimPairing(pairing.code, 'watch refused');
+  const child = await startRelay(aPort, 'accept', isolatedPath, {
+    APNS_CAPTURE_PATH: capturePath, APNS_VOIP_FAILURE: 'Unregistered', APNS_VOIP_FAILURE_TOPIC: 'com.milim.relay.watchkitapp.voip',
+  });
+  children.push(child);
+  const base = `http://127.0.0.1:${aPort}`;
+  try {
+    const response = await api(base, '/v1/events', {
+      method: 'POST',
+      credential: `${created.installation.id}.${claim.gatewayId}.${claim.gatewaySecret}`,
+      body: { type: 'call.requested', event_id: 'call:000000000000000000000041', session_id: 'st-1', call: { id: '000000000000000000000041', kind: 'done', session_ids: ['st-1'] } },
+    });
+    assert.deepEqual(response, { status: 202, json: { accepted: true, delivered: true, rang: true } });
+    const current = await api(base, `/v1/installations/${created.installation.id}`, { method: 'PUT', credential: `${created.installation.id}.${created.deviceSecret}`, body: {} });
+    assert.equal(current.json.installation.watch_voip, false);
+    assert.equal(current.json.installation.voip, true);
+  } finally {
+    await stopRelay(child);
+  }
+  const sent = readFileSync(capturePath, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+  assert.equal(sent.length, 1, 'only the phone push is captured');
+  assert.equal(sent[0].notification.topic, 'com.milim.relay.voip');
+});
+
 test('an invalid capacity setting stops the relay at boot', async () => {
   const child = spawn(process.execPath, ['src/server.mjs'], {
     cwd: fileURLToPath(new URL('..', import.meta.url)),

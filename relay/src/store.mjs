@@ -188,7 +188,7 @@ export class RelayStore {
     if (this.dirty) this.save();
   }
 
-  createInstallation({ bundleId, deviceToken, voipToken, environment, preferences }) {
+  createInstallation({ bundleId, deviceToken, voipToken, watchVoipToken, environment, preferences }) {
     this.assertInstallationCapacity();
     const id = randomUUID();
     const deviceSecret = randomBytes(32).toString('base64url');
@@ -200,6 +200,9 @@ export class RelayStore {
       // Hermes calls you (#449): the phone's PushKit token, for a call that
       // rings. Absent on phones that can't ring (China storefront, older app).
       ...(voipToken ? { voipToken } : {}),
+      // The paired Apple Watch's own PushKit token: a call rings there too
+      // (rings.mjs). Absent without a Watch app that rings.
+      ...(watchVoipToken ? { watchVoipToken } : {}),
       environment,
       deviceSecretHash: hashSecret(deviceSecret),
       gateways: {},
@@ -215,6 +218,13 @@ export class RelayStore {
   assertInstallationCapacity() {
     if (Object.keys(this.data.installations).length >= this.limits.maxInstallations) throw capacityError('installation_limit_reached');
     return true;
+  }
+
+  // The installation record for a ring settled with its token (rings.mjs),
+  // or null once it's gone or deactivated.
+  activeInstallation(id) {
+    const installation = this.data.installations[id];
+    return installation?.active ? installation : null;
   }
 
   authenticate(id, secret, scope) {
@@ -237,30 +247,34 @@ export class RelayStore {
     const deviceToken = changes.deviceToken || installation.deviceToken;
     // null clears it (the phone can no longer ring); undefined keeps it.
     const voipToken = changes.voipToken === undefined ? (installation.voipToken ?? null) : changes.voipToken;
+    const watchVoipToken = changes.watchVoipToken === undefined ? (installation.watchVoipToken ?? null) : changes.watchVoipToken;
     const preferences = changes.preferences
       ? normalizePreferences({ ...installation.preferences, ...changes.preferences })
       : installation.preferences;
     const active = changes.active ?? installation.active;
-    return { installation, deviceToken, voipToken, preferences, active };
+    return { installation, deviceToken, voipToken, watchVoipToken, preferences, active };
   }
 
   wouldUpdateInstallation(id, changes) {
     const normalized = this.normalizedInstallationChanges(id, changes);
     if (!normalized) return false;
-    const { installation, deviceToken, voipToken, preferences, active } = normalized;
+    const { installation, deviceToken, voipToken, watchVoipToken, preferences, active } = normalized;
     const preferencesChanged = !preferencesEqual(preferences, installation.preferences);
     return deviceToken !== installation.deviceToken || voipToken !== (installation.voipToken ?? null)
+      || watchVoipToken !== (installation.watchVoipToken ?? null)
       || preferencesChanged || active !== installation.active;
   }
 
   updateInstallation(id, changes) {
     const normalized = this.normalizedInstallationChanges(id, changes);
     if (!normalized) return null;
-    const { installation, deviceToken, voipToken, preferences, active } = normalized;
+    const { installation, deviceToken, voipToken, watchVoipToken, preferences, active } = normalized;
     if (!this.wouldUpdateInstallation(id, changes)) return publicInstallation(installation);
     installation.deviceToken = deviceToken;
     if (voipToken) installation.voipToken = voipToken;
     else delete installation.voipToken;
+    if (watchVoipToken) installation.watchVoipToken = watchVoipToken;
+    else delete installation.watchVoipToken;
     installation.preferences = preferences;
     installation.active = active;
     installation.updatedAt = new Date().toISOString();
@@ -278,6 +292,12 @@ export class RelayStore {
   clearVoipToken(id, token) {
     if (this.data.installations[id]?.voipToken !== token) return null;
     return this.updateInstallation(id, { voipToken: null });
+  }
+
+  // The same for the Watch's PushKit token: the phone still rings.
+  clearWatchVoipToken(id, token) {
+    if (this.data.installations[id]?.watchVoipToken !== token) return null;
+    return this.updateInstallation(id, { watchVoipToken: null });
   }
 
   // Optional dashboard binding (#148): `dashboardId` is the opaque Conduit
@@ -758,6 +778,7 @@ function publicInstallation(installation) {
     gateways: Object.values(installation.gateways ?? {}).map((gateway) => ({ id: gateway.id, name: gateway.name })),
     preferences: installation.preferences,
     voip: Boolean(installation.voipToken),
+    watch_voip: Boolean(installation.watchVoipToken),
     updated_at: installation.updatedAt,
   };
 }

@@ -6,6 +6,7 @@ import { pathToFileURL } from 'node:url';
 import { ApnsClient } from './apns.mjs';
 import { SWEEP_INTERVAL_MS } from './event-ledger.mjs';
 import { limitsFromEnv } from './limits.mjs';
+import { RING_ROUTE, Rings, validSettle } from './rings.mjs';
 import { normalizeDashboardId, RelayStore, sanitizeBatchQuestions } from './store.mjs';
 import { CLOSE_GRANT_CLOSED, WATCH_AUDIO_CAPABILITY, WatchAudioBridges, watchAudioUpgrade } from './watch-audio.mjs';
 import { WATCH_TOOLS_CAPABILITY, WatchToolGrants, watchToolRoutes } from './watch-tools.mjs';
@@ -15,9 +16,9 @@ import { WATCH_TOOLS_CAPABILITY, WatchToolGrants, watchToolRoutes } from './watc
 const RELAY_INFO = (() => {
   try {
     const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-    return { version: String(pkg.version || 'unknown'), capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls', 'voip-calls'] };
+    return { version: String(pkg.version || 'unknown'), capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls', 'voip-calls', 'watch-calls'] };
   } catch {
-    return { version: 'unknown', capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls', 'voip-calls'] };
+    return { version: 'unknown', capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls', 'voip-calls', 'watch-calls'] };
   }
 })();
 
@@ -27,6 +28,7 @@ let apns;
 let limits;
 let apnsSend;
 let watchTools;
+let rings;
 
 // APNs hard-caps a notification payload at 4096 bytes; stay under it with
 // headroom for JSON escaping and delivery headers, dropping decision content
@@ -63,6 +65,9 @@ const CALL_RING_TTL_S = 24 * 60 * 60;
 // APNs refused the PushKit token itself: the phone gets notifications until
 // it registers a new one.
 const VOIP_TOKEN_GONE = new Set(['BadDeviceToken', 'Unregistered', 'DeviceTokenNotForTopic']);
+// "Stop ringing, it was answered or declined on the other device" is only
+// worth delivering while that device could still be ringing.
+const RING_SETTLE_TTL_S = 60;
 
 // Conduit dashboard UUIDs (opaque app-generated identity, #148) are
 // canonicalized and validated in the store (normalizeDashboardId); the route
@@ -76,6 +81,7 @@ function main() {
   setInterval(() => store.events.sweep(), SWEEP_INTERVAL_MS + 1_000).unref();
   apns = new ApnsClient(config);
   limits = new Map();
+  rings = new Rings();
   const watchGrants = new WatchToolGrants({
     maxGrants: config.watchLimits.maxGrants,
     maxPerGateway: config.watchLimits.maxGrantsPerGateway,
@@ -121,10 +127,12 @@ function main() {
     const capturePath = process.env.APNS_CAPTURE_PATH;
     // Test seam: APNs refuses VoIP pushes with this reason (410 for
     // Unregistered, like APNs), or `throw` drops the connection for them
-    // (calls fall back to the notification).
+    // (calls fall back to the notification). APNS_VOIP_FAILURE_TOPIC limits
+    // it to one topic (the Watch's, say).
     const voipFailure = process.env.APNS_VOIP_FAILURE;
+    const voipFailureTopic = process.env.APNS_VOIP_FAILURE_TOPIC;
     apnsSend = async (deviceToken, notification) => {
-      if (voipFailure && notification.pushType === 'voip') {
+      if (voipFailure && notification.pushType === 'voip' && (!voipFailureTopic || notification.topic === voipFailureTopic)) {
         if (voipFailure === 'throw') throw new Error('voip connection dropped');
         return { ok: false, status: voipFailure === 'Unregistered' ? 410 : 400, reason: voipFailure };
       }
@@ -242,11 +250,12 @@ async function route(request, response) {
     const body = await readJson(request);
     const deviceToken = validateDeviceToken(body.device_token);
     const voipToken = validateVoipToken(body.voip_token) ?? undefined;
+    const watchVoipToken = validateWatchVoipToken(body.watch_voip_token) ?? undefined;
     if (body.bundle_id !== config.topic) return sendJson(response, 400, { error: 'invalid_topic' });
     if (body.environment !== 'production') return sendJson(response, 400, { error: 'production_only' });
     store.assertInstallationCapacity();
     enforceRegistrationBudget();
-    const created = store.createInstallation({ bundleId: body.bundle_id, deviceToken, voipToken, environment: body.environment, preferences: body.preferences });
+    const created = store.createInstallation({ bundleId: body.bundle_id, deviceToken, voipToken, watchVoipToken, environment: body.environment, preferences: body.preferences });
     return sendJson(response, 201, {
       installation: created.installation,
       credential: `${created.installation.id}.${created.deviceSecret}`,
@@ -261,7 +270,12 @@ async function route(request, response) {
     enforceRateLimit(`installation-update:${installation.id}`, 30, 60_000);
     const body = await readJson(request);
     const deviceToken = body.device_token === undefined ? undefined : validateDeviceToken(body.device_token);
-    const changes = { deviceToken, voipToken: validateVoipToken(body.voip_token), preferences: body.preferences };
+    const changes = {
+      deviceToken,
+      voipToken: validateVoipToken(body.voip_token),
+      watchVoipToken: validateWatchVoipToken(body.watch_voip_token),
+      preferences: body.preferences,
+    };
     if (store.wouldUpdateInstallation(installation.id, changes)) enforceDeviceChangeBudget();
     return sendJson(response, 200, { installation: store.updateInstallation(installation.id, changes) });
   }
@@ -272,6 +286,24 @@ async function route(request, response) {
     store.deactivateInstallation(installation.id);
     response.writeHead(204).end();
     return;
+  }
+
+  // The phone or the Watch answered or declined a call that rings on both
+  // (rings.mjs): the ring's token is the credential, so the Watch needs no
+  // relay sign-in of its own.
+  const ringMatch = url.pathname.match(RING_ROUTE);
+  if (ringMatch && request.method === 'POST') {
+    enforceRateLimit(`ring-settle:${client}`, 30, 60_000);
+    const settle = validSettle(ringMatch[1], await readJson(request));
+    if (!settle) return sendJson(response, 400, { error: 'invalid_settle' });
+    const { ring, settled } = rings.settle(ringMatch[1], settle.token, settle.by, settle.outcome);
+    if (settled) return sendJson(response, 409, { error: 'already_settled', settled });
+    if (!ring) return sendJson(response, 404, { error: 'unknown_ring' });
+    const installation = store.activeInstallation(ring.installationId);
+    const other = settle.by === 'phone' ? 'watch' : 'phone';
+    const topic = other === 'watch' ? config.watchTopic : config.topic;
+    const notified = installation ? await sendVoip(installation, settlePushFor(ring.id, ring.settled, { topic }), other) : false;
+    return sendJson(response, 200, { settled: true, notified });
   }
 
   const pairingMatch = url.pathname.match(/^\/v1\/installations\/([0-9a-f-]+)\/pairings$/i);
@@ -756,11 +788,12 @@ function notificationFor(event, preferences, gateway = undefined) {
 // it would ring with no chat to open (no call, or a sealed envelope too big
 // to carry): the notification goes instead. No collapse id: the event ledger
 // and the call ceiling already stop a call from ringing twice.
-function callPushFor(event, preferences, gateway, { topic, nowSeconds = Math.floor(Date.now() / 1000) }) {
+function callPushFor(event, preferences, gateway, { topic, ring, nowSeconds = Math.floor(Date.now() / 1000) }) {
   const { payload } = notificationFor(event, preferences, gateway);
   const { aps: _aps, ...rest } = payload;
   if (event.e2e ? !rest.conduit_e2e : !rest.body.conduit.call) return null;
-  const stamp = (routing) => ({ ...routing, sent_at: nowSeconds });
+  // `ring`: the ring the phone and the Watch share, when both ring.
+  const stamp = (routing) => ({ ...routing, sent_at: nowSeconds, ...(ring ? { ring } : {}) });
   return {
     // An empty aps, as Apple's VoIP examples carry: nothing for iOS to show.
     payload: { aps: {}, ...rest, body: { conduit: stamp(rest.body.conduit) }, conduit: stamp(rest.conduit) },
@@ -770,33 +803,60 @@ function callPushFor(event, preferences, gateway, { topic, nowSeconds = Math.flo
   };
 }
 
-// True when the call rang (APNs took the VoIP push). A refused PushKit token
-// is forgotten; any other failure leaves it for the next call.
+// The other device's "stop ringing": the ring and how it was settled, outside
+// any sealed envelope. Short-lived, so a device that was offline never rings
+// for it later.
+function settlePushFor(ringId, settled, { topic, nowSeconds = Math.floor(Date.now() / 1000) }) {
+  return {
+    payload: { aps: {}, conduit: { ring: { id: ringId, settled: settled.outcome, by: settled.by } } },
+    pushType: 'voip',
+    topic: `${topic}.voip`,
+    expiration: nowSeconds + RING_SETTLE_TTL_S,
+  };
+}
+
+// True when the call rang on the phone (APNs took the VoIP push). A paired
+// Watch with its own PushKit token rings too, with the same ring; whether it
+// did never changes how the phone's call goes.
 async function ring(installation, event, gateway) {
-  const push = callPushFor(event, installation.preferences, gateway, { topic: config.topic });
+  const shared = installation.watchVoipToken ? rings.create(installation.id) : undefined;
+  const push = callPushFor(event, installation.preferences, gateway, { topic: config.topic, ring: shared });
   if (!push) return false;
-  // The token this push went to: the phone can register a new one meanwhile.
-  const token = installation.voipToken;
+  if (!await sendVoip(installation, push, 'phone')) return false;
+  if (shared) await sendVoip(installation, { ...push, topic: `${config.watchTopic}.voip` }, 'watch');
+  return true;
+}
+
+// True when APNs took a VoIP push for the phone's or the Watch's PushKit
+// token. A refused token is forgotten; any other failure leaves it for the
+// next call.
+async function sendVoip(installation, push, device) {
+  const field = device === 'watch' ? 'watchVoipToken' : 'voipToken';
+  // The token this push went to: the device can register a new one meanwhile.
+  const token = installation[field];
+  if (!token) return false;
   let result;
   try {
     result = await apnsSend(token, push);
   } catch (error) {
-    console.error(JSON.stringify({ level: 'error', message: 'apns voip send threw', error: error instanceof Error ? error.message : String(error) }));
+    console.error(JSON.stringify({ level: 'error', message: 'apns voip send threw', device, error: error instanceof Error ? error.message : String(error) }));
     return false;
   }
   if (result.ok) return true;
-  console.warn(JSON.stringify({ level: 'warn', message: 'apns voip send refused', status: result.status, reason: result.reason }));
+  console.warn(JSON.stringify({ level: 'warn', message: 'apns voip send refused', device, status: result.status, reason: result.reason }));
   if (result.reason === 'DeviceTokenNotForTopic') {
-    // Every phone would lose its token this way if the `.voip` topic were
+    // Every device would lose its token this way if the `.voip` topic were
     // wrong for the app: say so where an operator looks.
-    console.warn(JSON.stringify({ level: 'warn', message: 'apns voip topic refused, check APNS_TOPIC', topic: push.topic }));
+    const setting = device === 'watch' ? 'APNS_WATCH_TOPIC' : 'APNS_TOPIC';
+    console.warn(JSON.stringify({ level: 'warn', message: `apns voip topic refused, check ${setting}`, topic: push.topic }));
   }
   if (result.status === 410 || VOIP_TOKEN_GONE.has(result.reason)) {
     try {
-      store.clearVoipToken(installation.id, token);
+      if (device === 'watch') store.clearWatchVoipToken(installation.id, token);
+      else store.clearVoipToken(installation.id, token);
     } catch (error) {
-      // The notification still goes; the next refused call clears it.
-      console.error(JSON.stringify({ level: 'error', message: 'voip token clear failed', error: error instanceof Error ? error.message : String(error) }));
+      // The call still goes; the next refused call clears it.
+      console.error(JSON.stringify({ level: 'error', message: 'voip token clear failed', device, error: error instanceof Error ? error.message : String(error) }));
     }
   }
   return false;
@@ -1038,6 +1098,12 @@ function validateVoipToken(value) {
   return validatedToken(value, 'invalid_voip_token');
 }
 
+// The paired Watch's PushKit token, the same way.
+function validateWatchVoipToken(value) {
+  if (value === undefined || value === null) return value;
+  return validatedToken(value, 'invalid_watch_voip_token');
+}
+
 function validatedToken(value, error) {
   const token = String(value ?? '').replace(/[<>\s]/g, '').toLowerCase();
   if (!/^[0-9a-f]{64,200}$/.test(token)) throw httpError(400, error);
@@ -1178,6 +1244,8 @@ function readConfig() {
     keyId: process.env.APNS_KEY_ID,
     teamId: process.env.APNS_TEAM_ID,
     topic: process.env.APNS_TOPIC,
+    // The Apple Watch app's bundle id, whose `.voip` topic rings the Watch.
+    watchTopic: process.env.APNS_WATCH_TOPIC || `${process.env.APNS_TOPIC}.watchkitapp`,
     // Optional origin override (default: production APNs). Test seam for the
     // REAL transport: pointing it at a closed port exercises the actual
     // ClientHttp2Session failure path end to end, which the APNS_MODE seams
@@ -1205,4 +1273,4 @@ function optionalMilliseconds(name, key) {
   return { [key]: value };
 }
 
-export { callPushFor, notificationFor, validateEvent, validateDecision };
+export { callPushFor, notificationFor, settlePushFor, validateEvent, validateDecision };
