@@ -192,6 +192,8 @@ gateway-bound inactive records still require separately reviewed maintenance.
 | GET (WebSocket) | `/v1/watch-audio/:id/host` | The gateway's side of a Watch call's audio (a grant opened with `audio: true`) |
 | GET (WebSocket) | `/v1/watch-audio/:id/watch` | The Watch's side of it (the grant's relay key) |
 | POST | `/v1/rings/:id/settled` | The phone or the Watch answered or declined a call that rings on both (0.10+; the ring's token from the call push) |
+| PUT | `/v1/rings/:id/session` | The phone stores the sealed session of a call the Watch answered (0.11+; the ring's token) |
+| GET | `/v1/rings/:id/session` | The Watch fetches it, waiting up to `?wait=20` seconds (0.11+; the ring's token as the bearer) |
 
 Watch tool grants carry an Apple Watch call's lookups while the Watch can't
 reach Conduit on the iPhone. Calls and answers are sealed with a per-call key
@@ -229,12 +231,27 @@ push refused with `DeviceTokenNotForTopic` keeps the token and logs
 must be allowed to push to the Watch app's bundle id as well as the iPhone
 app's: a team-scoped key is, but a topic-specific key that lists only the
 iPhone app gets `TopicDisallowed` for every Watch push. The relay then keeps
-the token and logs `apns key not allowed for this topic`. A Watch push APNs
-takes logs `watch voip sent`.
+the token and logs `apns key not allowed for this topic`. A Watch push that
+APNs accepts logs `watch voip sent`.
 
 A stop push that doesn't land isn't sent again: the other device rings out on
 its own. The settle answer's `notified` says only that the other device has a
 PushKit token at the relay, so a stop push went to it, not that it arrived.
+
+A call answered on the Watch starts through the relay too (0.11+): the Watch's
+link to the iPhone stays down under the system call screen, so it can't ask
+Conduit there for the call's session. Its settle carries a sealed `start`,
+which the relay forwards untouched in the phone's stop push (`ring.start`).
+Conduit builds the session as for any Watch call and stores it, sealed, with
+`PUT /v1/rings/:id/session {token, sealed}`; the Watch fetches it with
+`GET /v1/rings/:id/session?wait=20` and the ring's token as the bearer (200
+with `sealed`, or 204 when nothing came in time). Both are sealed with a key
+only the phone and the Watch hold, so the relay sees their size and nothing
+else. A session can be stored only for a ring the Watch answered (409
+otherwise), lasts 2 minutes in memory, and is at most 96 KB; the relay holds
+32 MB of them at most, dropping the oldest first, and a ring takes two waiting
+fetches at a time. An older relay ignores `start`, and the Watch then starts
+the call over its link to the iPhone, as before.
 
 ### Capacity and admission limits
 

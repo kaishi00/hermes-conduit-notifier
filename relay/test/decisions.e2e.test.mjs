@@ -111,7 +111,8 @@ function closedPort() {
   });
 }
 
-async function startRelay(aPort, apnsMode, dataFile, extraEnv = {}) {
+// `logs`: the relay's JSON log lines are collected in `child.logs`.
+async function startRelay(aPort, apnsMode, dataFile, extraEnv = {}, { logs = false } = {}) {
   const child = spawn(process.execPath, ['src/server.mjs'], {
     // fileURLToPath: URL.pathname yields "/C:/…" on Windows, which spawn
     // rejects; the file-path form works on every platform.
@@ -129,8 +130,22 @@ async function startRelay(aPort, apnsMode, dataFile, extraEnv = {}) {
       APNS_MODE: apnsMode,
       ...extraEnv,
     },
-    stdio: 'ignore',
+    stdio: logs ? ['ignore', 'pipe', 'pipe'] : 'ignore',
   });
+  if (logs) {
+    child.logs = [];
+    for (const stream of [child.stdout, child.stderr]) {
+      let pending = '';
+      stream.setEncoding('utf8');
+      stream.on('data', (chunk) => {
+        const lines = (pending + chunk).split('\n');
+        pending = lines.pop();
+        for (const line of lines) {
+          try { child.logs.push(JSON.parse(line)); } catch {}
+        }
+      });
+    }
+  }
   const base = `http://127.0.0.1:${aPort}`;
   const deadline = Date.now() + 10_000;
   for (;;) {
@@ -694,7 +709,7 @@ test('a paired Watch rings too, and whichever device answers stops the other', a
   const created = fixture.createInstallation({ bundleId: 'com.milim.relay', deviceToken: 'd'.repeat(64), voipToken: '9'.repeat(64), environment: 'production' });
   const pairing = fixture.createPairing(created.installation.id);
   const claim = fixture.claimPairing(pairing.code, 'watch ring target');
-  const child = await startRelay(aPort, 'accept', isolatedPath, { APNS_CAPTURE_PATH: capturePath });
+  const child = await startRelay(aPort, 'accept', isolatedPath, { APNS_CAPTURE_PATH: capturePath }, { logs: true });
   children.push(child);
   const base = `http://127.0.0.1:${aPort}`;
   const device = `${created.installation.id}.${created.deviceSecret}`;
@@ -726,17 +741,35 @@ test('a paired Watch rings too, and whichever device answers stops the other', a
       'the ring says where to settle it');
     assert.deepEqual(watch.notification.payload.conduit.ring, ring, 'both ring with the same ring');
     assert.deepEqual(watch.notification.payload.body.conduit.call, phone.notification.payload.body.conduit.call);
+    await waitFor(() => child.logs.some((line) => line.message === 'watch voip sent' && line.device === 'watch'), 'the Watch push is logged');
 
+    const session = (target) => `/v1/rings/${target.id}/session`;
+    assert.deepEqual(await api(base, session(ring), { method: 'PUT', body: { token: ring.token, sealed: 'c2Vzc2lvbg' } }),
+      { status: 409, json: { error: 'not_answered_on_watch' } }, 'nothing to store while it rings');
     assert.deepEqual(await settle(ring, { by: 'watch', outcome: 'banana' }), { status: 400, json: { error: 'invalid_settle' } });
     assert.deepEqual(await settle({ id: ring.id, token: 'x'.repeat(43) }, { by: 'watch', outcome: 'answered' }), { status: 404, json: { error: 'unknown_ring' } });
-    assert.deepEqual(await settle(ring, { by: 'watch', outcome: 'answered' }), { status: 200, json: { settled: true, notified: true } });
+    assert.deepEqual(await settle(ring, { by: 'watch', outcome: 'answered', start: 'c3RhcnQ' }), { status: 200, json: { settled: true, notified: true } });
     assert.deepEqual(await settle(ring, { by: 'phone', outcome: 'answered' }),
       { status: 409, json: { error: 'already_settled', settled: { by: 'watch', outcome: 'answered' } } },
       'the phone answered too late and learns the Watch has the call');
     const stop = captured()[2];
     assert.equal(stop.deviceToken, '9'.repeat(64), 'the phone stops ringing');
     assert.equal(stop.notification.topic, 'com.milim.relay.voip');
-    assert.deepEqual(stop.notification.payload, { aps: {}, conduit: { ring: { id: ring.id, settled: 'answered', by: 'watch' } } });
+    assert.deepEqual(stop.notification.payload, { aps: {}, conduit: { ring: { id: ring.id, settled: 'answered', by: 'watch', start: 'c3RhcnQ' } } },
+      'the phone gets the Watch\'s sealed start with the stop');
+
+    // The Watch waits for the call's session; the phone stores it.
+    assert.deepEqual(await api(base, `${session(ring)}?wait=1`), { status: 401, json: { error: 'unauthorized' } });
+    assert.deepEqual(await api(base, session(ring), { credential: 'x'.repeat(43) }), { status: 404, json: { error: 'unknown_ring' } });
+    assert.deepEqual(await api(base, session(ring), { credential: ring.token }), { status: 204, json: null }, 'not stored yet');
+    const waiting = api(base, `${session(ring)}?wait=10`, { credential: ring.token });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.deepEqual(await api(base, session(ring), { method: 'PUT', body: { token: ring.token, sealed: 'not sealed' } }), { status: 400, json: { error: 'invalid_session' } });
+    const sealed = 'A'.repeat(80_000);
+    assert.deepEqual(await api(base, session(ring), { method: 'PUT', body: { token: ring.token, sealed } }), { status: 200, json: { stored: true } },
+      'a session larger than other requests');
+    assert.deepEqual(await waiting, { status: 200, json: { sealed } }, 'the waiting fetch gets it at once');
+    assert.deepEqual(await api(base, session(ring), { credential: ring.token }), { status: 200, json: { sealed } });
 
     assert.equal((await send('call:000000000000000000000032')).status, 202);
     const second = captured()[3].notification.payload.conduit.ring;
@@ -746,6 +779,8 @@ test('a paired Watch rings too, and whichever device answers stops the other', a
     assert.equal(watchStop.deviceToken, '7'.repeat(64), 'the Watch stops ringing');
     assert.equal(watchStop.notification.topic, 'com.milim.relay.watchkitapp.voip');
     assert.equal(watchStop.notification.payload.conduit.ring.settled, 'declined');
+    assert.deepEqual(await api(base, session(second), { credential: second.token }), { status: 409, json: { error: 'not_answered_on_watch' } },
+      'a call the phone has has no session for the Watch');
 
     assert.equal((await register(null)).json.installation.watch_voip, false, 'null stops the Watch ringing');
     assert.equal((await send('call:000000000000000000000033')).status, 202);
@@ -767,7 +802,7 @@ for (const [failure, forgotten] of [['Unregistered', true], ['DeviceTokenNotForT
     const claim = fixture.claimPairing(pairing.code, `watch refused ${failure}`);
     const child = await startRelay(aPort, 'accept', isolatedPath, {
       APNS_CAPTURE_PATH: capturePath, APNS_VOIP_FAILURE: failure, APNS_VOIP_FAILURE_TOPIC: 'com.milim.relay.watchkitapp.voip',
-    });
+    }, { logs: true });
     children.push(child);
     const base = `http://127.0.0.1:${aPort}`;
     try {
@@ -781,6 +816,11 @@ for (const [failure, forgotten] of [['Unregistered', true], ['DeviceTokenNotForT
       // A wrong APNS_WATCH_TOPIC must not cost every Watch its token.
       assert.equal(current.json.installation.watch_voip, !forgotten);
       assert.equal(current.json.installation.voip, true);
+      await waitFor(() => child.logs.some((line) => line.message === 'apns voip send refused' && line.device === 'watch' && line.reason === failure), 'the refusal is logged');
+      if (failure === 'TopicDisallowed') {
+        await waitFor(() => child.logs.some((line) => line.message?.startsWith('apns key not allowed for this topic') && line.device === 'watch'), 'the key hint is logged');
+      }
+      assert.ok(!child.logs.some((line) => line.message === 'watch voip sent'), 'a refused push is not logged as sent');
     } finally {
       await stopRelay(child);
     }

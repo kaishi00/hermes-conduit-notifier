@@ -656,13 +656,20 @@ test('a call that rings the Watch too carries the shared ring beside sent_at', (
 });
 
 test('the other device hears how a ring was settled, briefly, and nothing else', () => {
-  const push = settlePushFor('a'.repeat(22), { by: 'watch', outcome: 'answered' }, { topic: 'com.milim.relay', nowSeconds: 1_800_000_000 });
+  const ring = { id: 'a'.repeat(22), tokenHash: Buffer.alloc(32), settled: { by: 'phone', outcome: 'declined' } };
+  const push = settlePushFor(ring, { topic: 'com.milim.relay', nowSeconds: 1_800_000_000 });
   assert.deepEqual(push, {
-    payload: { aps: {}, conduit: { ring: { id: 'a'.repeat(22), settled: 'answered', by: 'watch' } } },
+    payload: { aps: {}, conduit: { ring: { id: 'a'.repeat(22), settled: 'declined', by: 'phone' } } },
     pushType: 'voip',
     topic: 'com.milim.relay.voip',
     expiration: 1_800_000_060,
   });
+});
+
+test('a Watch answer takes its sealed start to the phone', () => {
+  const ring = { id: 'a'.repeat(22), settled: { by: 'watch', outcome: 'answered' }, start: 'c'.repeat(200) };
+  const push = settlePushFor(ring, { topic: 'com.milim.relay', nowSeconds: 1_800_000_000 });
+  assert.deepEqual(push.payload.conduit.ring, { id: 'a'.repeat(22), settled: 'answered', by: 'watch', start: 'c'.repeat(200) });
 });
 
 test('an encrypted call rings with its envelope untouched', () => {
