@@ -839,7 +839,11 @@ async function ring(installation, event, gateway) {
     return false;
   }
   if (shared) {
-    sendVoip(installation, { ...push, topic: `${config.watchTopic}.voip` }, 'watch').catch((error) => {
+    // A refusal logs its own warning; a push Apple took is logged too, so
+    // an operator can tell a Watch that wasn't rung from one that didn't ring.
+    sendVoip(installation, { ...push, topic: `${config.watchTopic}.voip` }, 'watch').then((sent) => {
+      if (sent) console.log(JSON.stringify({ level: 'info', message: 'watch voip sent' }));
+    }).catch((error) => {
       console.error(JSON.stringify({ level: 'error', message: 'watch voip send failed', error: error instanceof Error ? error.message : String(error) }));
     });
   }
@@ -869,6 +873,12 @@ async function sendVoip(installation, push, device) {
     // looks.
     const setting = device === 'watch' ? 'APNS_WATCH_TOPIC' : 'APNS_TOPIC';
     console.warn(JSON.stringify({ level: 'warn', message: `apns voip topic refused, check ${setting}`, topic: push.topic }));
+  }
+  if (result.reason === 'TopicDisallowed') {
+    // The signing key may not push to this app at all: a topic-specific
+    // .p8 key that lists the iPhone app but not the Watch app, which has
+    // its own bundle id. The token is fine, so it stays.
+    console.warn(JSON.stringify({ level: 'warn', message: 'apns key not allowed for this topic: use a team-scoped key, or add the bundle id to the key', topic: push.topic }));
   }
   if (result.status === 410 || (device === 'watch' ? WATCH_VOIP_TOKEN_GONE : VOIP_TOKEN_GONE).has(result.reason)) {
     try {

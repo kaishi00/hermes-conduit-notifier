@@ -225,7 +225,16 @@ settled, and an unknown ring or wrong token gets 404. Rings live in memory for
 10 minutes, and a restart drops them: the other device then rings out. A Watch
 token APNs refuses as gone is forgotten, and the phone still rings. A Watch
 push refused with `DeviceTokenNotForTopic` keeps the token and logs
-`check APNS_WATCH_TOPIC`: the setting is wrong, not the token.
+`check APNS_WATCH_TOPIC`: the setting is wrong, not the token. The `.p8` key
+must be allowed to push to the Watch app's bundle id as well as the iPhone
+app's: a team-scoped key is, but a topic-specific key that lists only the
+iPhone app gets `TopicDisallowed` for every Watch push. The relay then keeps
+the token and logs `apns key not allowed for this topic`. A Watch push APNs
+takes logs `watch voip sent`.
+
+A stop push that doesn't land isn't sent again: the other device rings out on
+its own. The settle answer's `notified` says only that the other device has a
+PushKit token at the relay, so a stop push went to it, not that it arrived.
 
 ### Capacity and admission limits
 
