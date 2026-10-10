@@ -6,7 +6,7 @@ import { pathToFileURL } from 'node:url';
 import { ApnsClient } from './apns.mjs';
 import { SWEEP_INTERVAL_MS } from './event-ledger.mjs';
 import { limitsFromEnv } from './limits.mjs';
-import { RING_ROUTE, Rings, validSettle } from './rings.mjs';
+import { RING_ROUTE, RING_SESSION_MAX_CHARS, RING_SESSION_ROUTE, RING_SESSION_WAIT_MAX_MS, Rings, ringBearer, validSessionStore, validSettle } from './rings.mjs';
 import { normalizeDashboardId, RelayStore, sanitizeBatchQuestions } from './store.mjs';
 import { CLOSE_GRANT_CLOSED, WATCH_AUDIO_CAPABILITY, WatchAudioBridges, watchAudioUpgrade } from './watch-audio.mjs';
 import { WATCH_TOOLS_CAPABILITY, WatchToolGrants, watchToolRoutes } from './watch-tools.mjs';
@@ -16,9 +16,9 @@ import { WATCH_TOOLS_CAPABILITY, WatchToolGrants, watchToolRoutes } from './watc
 const RELAY_INFO = (() => {
   try {
     const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-    return { version: String(pkg.version || 'unknown'), capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls', 'voip-calls', 'watch-calls'] };
+    return { version: String(pkg.version || 'unknown'), capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls', 'voip-calls', 'watch-calls', 'ring-sessions'] };
   } catch {
-    return { version: 'unknown', capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls', 'voip-calls', 'watch-calls'] };
+    return { version: 'unknown', capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls', 'voip-calls', 'watch-calls', 'ring-sessions'] };
   }
 })();
 
@@ -300,7 +300,7 @@ async function route(request, response) {
     enforceRateLimit(`ring-settle:${client}`, 30, 60_000);
     const settle = validSettle(ringMatch[1], await readJson(request));
     if (!settle) return sendJson(response, 400, { error: 'invalid_settle' });
-    const { ring, settled } = rings.settle(ringMatch[1], settle.token, settle.by, settle.outcome);
+    const { ring, settled } = rings.settle(ringMatch[1], settle.token, settle.by, settle.outcome, settle.start);
     if (settled) return sendJson(response, 409, { error: 'already_settled', settled });
     if (!ring) return sendJson(response, 404, { error: 'unknown_ring' });
     const installation = store.activeInstallation(ring.installationId);
@@ -310,11 +310,43 @@ async function route(request, response) {
     // says a stop went out, not that APNs took it.
     const notified = Boolean(installation?.[other === 'watch' ? 'watchVoipToken' : 'voipToken']);
     if (notified) {
-      sendVoip(installation, settlePushFor(ring.id, ring.settled, { topic }), other).catch((error) => {
+      sendVoip(installation, settlePushFor(ring, { topic }), other).catch((error) => {
         console.error(JSON.stringify({ level: 'error', message: 'ring stop send failed', device: other, error: error instanceof Error ? error.message : String(error) }));
       });
     }
     return sendJson(response, 200, { settled: true, notified });
+  }
+
+  // A call answered on the Watch: the phone stores the call's session for the
+  // Watch, which fetches it with the ring's token (rings.mjs). Both sealed.
+  const sessionMatch = url.pathname.match(RING_SESSION_ROUTE);
+  if (sessionMatch && request.method === 'PUT') {
+    enforceRateLimit(`ring-session:${client}`, 30, 60_000);
+    const upload = validSessionStore(sessionMatch[1], await readJson(request, RING_SESSION_MAX_CHARS + 1_024));
+    if (!upload) return sendJson(response, 400, { error: 'invalid_session' });
+    const result = rings.storeSession(sessionMatch[1], upload.token, upload.sealed);
+    if (result === 'unknown') return sendJson(response, 404, { error: 'unknown_ring' });
+    if (result === 'not_answered') return sendJson(response, 409, { error: 'not_answered_on_watch' });
+    return sendJson(response, 200, { stored: true });
+  }
+  if (sessionMatch && request.method === 'GET') {
+    enforceRateLimit(`ring-session-take:${client}`, 60, 60_000);
+    const token = ringBearer(request.headers.authorization);
+    if (!token) return sendJson(response, 401, { error: 'unauthorized' });
+    const waitSeconds = Number(url.searchParams.get('wait') ?? 0);
+    const waitMs = Number.isFinite(waitSeconds) ? Math.min(Math.max(waitSeconds, 0) * 1000, RING_SESSION_WAIT_MAX_MS) : 0;
+    // A fetch that goes away stops waiting.
+    const gone = new AbortController();
+    response.on('close', () => gone.abort());
+    const taken = await rings.takeSession(sessionMatch[1], token, { waitMs, signal: gone.signal });
+    if (taken.status === 'unknown') return sendJson(response, 404, { error: 'unknown_ring' });
+    if (taken.status === 'not_answered') return sendJson(response, 409, { error: 'not_answered_on_watch' });
+    if (taken.status === 'busy') return sendJson(response, 429, { error: 'too_many_fetches' });
+    if (taken.status === 'pending') {
+      response.writeHead(204, { 'cache-control': 'no-store' }).end();
+      return;
+    }
+    return sendJson(response, 200, { sealed: taken.sealed });
   }
 
   const pairingMatch = url.pathname.match(/^\/v1\/installations\/([0-9a-f-]+)\/pairings$/i);
@@ -815,11 +847,12 @@ function callPushFor(event, preferences, gateway, { topic, ring, nowSeconds = Ma
 }
 
 // The other device's "stop ringing": the ring and how it was settled, outside
-// any sealed envelope. Short-lived, so a device that was offline never rings
-// for it later.
-function settlePushFor(ringId, settled, { topic, nowSeconds = Math.floor(Date.now() / 1000) }) {
+// any sealed envelope, with the Watch's sealed start when it answered.
+// Short-lived, so a device that was offline never rings for it later.
+function settlePushFor(ring, { topic, nowSeconds = Math.floor(Date.now() / 1000) }) {
+  const { settled } = ring;
   return {
-    payload: { aps: {}, conduit: { ring: { id: ringId, settled: settled.outcome, by: settled.by } } },
+    payload: { aps: {}, conduit: { ring: { id: ring.id, settled: settled.outcome, by: settled.by, ...(ring.start ? { start: ring.start } : {}) } } },
     pushType: 'voip',
     topic: `${topic}.voip`,
     expiration: nowSeconds + RING_SETTLE_TTL_S,
@@ -842,9 +875,9 @@ async function ring(installation, event, gateway) {
     // A refusal logs its own warning; a push Apple took is logged too, so
     // an operator can tell a Watch that wasn't rung from one that didn't ring.
     sendVoip(installation, { ...push, topic: `${config.watchTopic}.voip` }, 'watch').then((sent) => {
-      if (sent) console.log(JSON.stringify({ level: 'info', message: 'watch voip sent' }));
-    }).catch((error) => {
-      console.error(JSON.stringify({ level: 'error', message: 'watch voip send failed', error: error instanceof Error ? error.message : String(error) }));
+      if (sent) console.log(JSON.stringify({ level: 'info', message: 'watch voip sent', device: 'watch' }));
+    }, (error) => {
+      console.error(JSON.stringify({ level: 'error', message: 'watch voip send failed', device: 'watch', error: error instanceof Error ? error.message : String(error) }));
     });
   }
   return true;
@@ -878,7 +911,7 @@ async function sendVoip(installation, push, device) {
     // The signing key may not push to this app at all: a topic-specific
     // .p8 key that lists the iPhone app but not the Watch app, which has
     // its own bundle id. The token is fine, so it stays.
-    console.warn(JSON.stringify({ level: 'warn', message: 'apns key not allowed for this topic: use a team-scoped key, or add the bundle id to the key', topic: push.topic }));
+    console.warn(JSON.stringify({ level: 'warn', message: 'apns key not allowed for this topic: use a team-scoped key, or add the bundle id to the key', device, topic: push.topic }));
   }
   if (result.status === 410 || (device === 'watch' ? WATCH_VOIP_TOKEN_GONE : VOIP_TOKEN_GONE).has(result.reason)) {
     try {
@@ -1148,13 +1181,13 @@ function cleanIdentifier(value, max) {
   return typeof value === 'string' && /^[A-Za-z0-9:_.\/-]+$/.test(value) ? value.slice(0, max) : undefined;
 }
 
-function readJson(request) {
+function readJson(request, maxChars = 32_768) {
   return new Promise((resolve, reject) => {
     let data = '';
     request.setEncoding('utf8');
     request.on('data', (chunk) => {
       data += chunk;
-      if (data.length > 32_768) { reject(httpError(413, 'payload_too_large')); request.destroy(); }
+      if (data.length > maxChars) { reject(httpError(413, 'payload_too_large')); request.destroy(); }
     });
     request.on('end', () => {
       if (!data) { resolve({}); return; }
