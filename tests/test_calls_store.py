@@ -600,6 +600,19 @@ def test_a_retried_report_keeps_the_first(tmp_path):
     assert [entry["outcome"] for entry in store.take_outcomes("rt-1")] == ["missed"]
 
 
+def test_a_retry_that_arrives_after_the_note_was_heard_is_not_heard_again(tmp_path):
+    clock = Clock()
+    store = _store(tmp_path, clock)
+    store.record_outcome(CALL_ID, ["rt-1"], "missed")
+    assert len(store.take_outcomes("rt-1")) == 1
+    clock.now += 60
+    assert store.record_outcome(CALL_ID, ["rt-1"], "missed") == {"status": "recorded"}
+    assert store.take_outcomes("rt-1") == []
+    # Long after an outcome could still arrive, the id is forgotten.
+    clock.now += calls_store.OUTCOME_TTL_S
+    assert CallStore(tmp_path, clock=clock)._load()["told"] == []
+
+
 def test_outcomes_are_taken_oldest_first_and_capped(tmp_path):
     store = _store(tmp_path)
     for index in range(calls_store.MAX_OUTCOMES + 2):
@@ -632,7 +645,8 @@ def test_an_unknown_kind_reads_as_none(tmp_path):
     ((CALL_ID, "rt-1", "missed"), {}),
     ((CALL_ID, ["rt-1"], "answered"), {}),
     ((CALL_ID, ["rt-1"], "missed"), {"age_s": -1}),
-    ((CALL_ID, ["rt-1"], "missed"), {"age_s": 24 * 3600 + 1}),
+    ((CALL_ID, ["rt-1"], "missed"), {"age_s": 24 * 3600}),
+    ((CALL_ID + "\n", ["rt-1"], "missed"), {}),
     ((CALL_ID, ["rt-1"], "missed"), {"age_s": "30"}),
 ])
 def test_a_malformed_outcome_is_refused(tmp_path, args, kwargs):

@@ -114,6 +114,9 @@ CALL_KINDS = (*OUTCOMES, *ALERT_KINDS)
 # worth saying.
 OUTCOME_TTL_S = 24 * 3600
 MAX_OUTCOMES = 20
+# Calls whose outcome a turn has taken, so a late retry of the report isn't
+# heard twice: kept as long as an outcome could still arrive.
+MAX_TOLD = 64
 
 _SESSION_ID = re.compile(r"^[A-Za-z0-9:_./-]{1,180}$")
 # The shape the call event carries (events.sanitize_call).
@@ -339,14 +342,16 @@ class CallStore:
         kept until the next turn of one of ``session_ids`` takes it. A
         retried report keeps the first. ``{"status": "recorded"}``; raises
         ValueError for anything malformed."""
-        if not isinstance(call_id, str) or not _WATCH_ID.match(call_id):
+        if not isinstance(call_id, str) or not _WATCH_ID.fullmatch(call_id):
             raise ValueError("call_id must be the call's id")
         ids = _session_ids(session_ids)
         if outcome not in CALL_OUTCOMES:
             raise ValueError("outcome must be declined or missed")
-        age = _seconds(age_s, "age_s", OUTCOME_TTL_S)
+        # Below the TTL: one exactly a day old would be dropped unheard.
+        age = _seconds(age_s, "age_s", OUTCOME_TTL_S - 1)
         with self._locked() as state:
-            if not any(entry["id"] == call_id for entry in state["outcomes"]):
+            known = {entry["id"] for entry in state["outcomes"]} | {entry["id"] for entry in state["told"]}
+            if call_id not in known:
                 state["outcomes"] = [*state["outcomes"], {
                     "id": call_id,
                     "session_ids": ids,
@@ -361,7 +366,8 @@ class CallStore:
 
     def take_outcomes(self, session_id: Any) -> list[dict[str, Any]]:
         """The outcomes waiting for a turn of ``session_id``, oldest first:
-        taken, so the next turn doesn't hear them again."""
+        taken, so the next turn doesn't hear them again, nor a late retry of
+        their report."""
         if not isinstance(session_id, str) or not session_id.strip() or not self.path.exists():
             return []
         session_id = session_id.strip()
@@ -372,6 +378,8 @@ class CallStore:
             taken = sorted((entry for entry in state["outcomes"] if session_id in entry["session_ids"]),
                            key=lambda entry: entry["at"])
             state["outcomes"] = [entry for entry in state["outcomes"] if session_id not in entry["session_ids"]]
+            now = self.clock()
+            state["told"] = [*state["told"], *({"id": entry["id"], "at": now} for entry in taken)][-MAX_TOLD:]
             return taken
 
     def watch_count(self) -> int:
@@ -613,11 +621,17 @@ def _normalized(raw: Any, now: float) -> dict[str, Any]:
                 })
         except (KeyError, TypeError, ValueError):
             continue
+    told = []
+    for entry in raw.get("told") if isinstance(raw.get("told"), list) else []:
+        if (isinstance(entry, dict) and isinstance(entry.get("id"), str) and _WATCH_ID.fullmatch(entry["id"])
+                and isinstance(entry.get("at"), (int, float)) and not isinstance(entry.get("at"), bool)
+                and now - entry["at"] < OUTCOME_TTL_S):
+            told.append({"id": entry["id"], "at": float(entry["at"])})
     presence = raw.get("presence_until", 0.0)
     presence_until = float(presence) if isinstance(presence, (int, float)) and not isinstance(presence, bool) and presence > now else 0.0
     return {"v": VERSION, "settings": settings, "watches": watches, "history": history,
             "ends": ends[-MAX_RECENT_ENDS:], "seeded": seeded[-MAX_SEEDED:], "presence_until": presence_until,
-            "outcomes": outcomes[-MAX_OUTCOMES:]}
+            "outcomes": outcomes[-MAX_OUTCOMES:], "told": told[-MAX_TOLD:]}
 
 
 def _session_ids(value: Any) -> list[str]:

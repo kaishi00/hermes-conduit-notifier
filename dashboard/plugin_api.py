@@ -3221,6 +3221,8 @@ def record_call_outcome(body: Any) -> Dict[str, Any]:
     turn of its chat hears so."""
     if not isinstance(body, dict):
         raise TokenError(400, "Expected a JSON object")
+    if _load_pairing_state(_pairing_state_path()) is None:
+        raise TokenError(409, "This Hermes profile isn't paired with Conduit")
     try:
         return _calls_store().CallStore(_calls_home()).record_outcome(
             body.get("call_id"), body.get("session_ids"), body.get("outcome"), kind=body.get("kind"),

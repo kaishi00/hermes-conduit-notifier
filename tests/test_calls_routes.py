@@ -222,7 +222,15 @@ def test_presence_needs_a_paired_profile(home):
 
 # --- Outcomes ----------------------------------------------------------------
 
-def test_a_declined_call_is_recorded_for_its_chat(home):
+def test_an_outcome_needs_a_paired_profile(home):
+    body = {"call_id": "a1b2c3d4e5f6a1b2c3d4e5f6", "session_ids": ["rt-1"], "outcome": "missed"}
+    response = _http().post(f"{BASE}/calls/outcomes", json=body)
+    assert response.status_code == 409
+    assert not (home / "conduit-calls.json").exists()
+
+
+def test_a_declined_call_is_recorded_for_its_chat(paired):
+    home = paired
     http = _http()
     body = {"call_id": "a1b2c3d4e5f6a1b2c3d4e5f6", "session_ids": ["rt-1", "st-1"], "outcome": "declined",
             "kind": "done", "title": "Deploy", "reason": "The deploy finished.", "age_s": 4}
@@ -242,7 +250,7 @@ def test_a_declined_call_is_recorded_for_its_chat(home):
     {"call_id": "a1b2c3d4e5f6a1b2c3d4e5f6", "session_ids": ["rt-1"], "outcome": "missed", "age_s": 1.5},
     [],
 ])
-def test_a_malformed_outcome_is_refused(home, body):
+def test_a_malformed_outcome_is_refused(paired, body):
     response = _http().post(f"{BASE}/calls/outcomes", json=body)
     assert response.status_code == 400
     assert response.headers["cache-control"] == "no-store"
