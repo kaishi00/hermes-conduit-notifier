@@ -58,6 +58,14 @@ put it in your reply, and the user gets the usual notification.
 - `not_paired`, `too_many`, `subagent`: give the news in your reply. A
   subagent reports back; the main conversation decides whether to call.
 
+## When they don't pick up
+
+If the user declines the call or it goes unanswered, the next turn in this
+chat starts with a note from Conduit saying so. They got a missed-call
+notification that opens this chat, but they haven't heard your news: lead
+with it if it still matters. Don't call again about the same thing unless
+they ask you to.
+
 ## Writing the reason
 
 One short spoken sentence, said first when the user answers. Lead with the

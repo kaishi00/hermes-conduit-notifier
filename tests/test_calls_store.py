@@ -572,3 +572,91 @@ def test_watches_from_an_older_plugin_read_as_conduit_watches(tmp_path):
     store.path.write_text(json.dumps(state))
     [watch] = store._load()["watches"]
     assert (watch["origin"], watch["reason"], watch["asked"]) == ("conduit", "", False)
+
+
+# --- Outcomes: calls the user declined or missed ---------------------------
+
+CALL_ID = "a1b2c3d4e5f6a1b2c3d4e5f6"
+
+
+def test_a_declined_call_waits_for_the_next_turn_of_its_chat_and_is_heard_once(tmp_path):
+    clock = Clock()
+    store = _store(tmp_path, clock)
+    assert store.record_outcome(CALL_ID, ["rt-1", "st-1"], "declined", kind="done", title="Deploy",
+                                reason="The deploy finished.", age_s=30) == {"status": "recorded"}
+    assert store.take_outcomes("other") == []
+    clock.now += 60
+    assert CallStore(tmp_path, clock=clock).take_outcomes("st-1") == [{
+        "id": CALL_ID, "session_ids": ["rt-1", "st-1"], "outcome": "declined", "kind": "done",
+        "title": "Deploy", "reason": "The deploy finished.", "at": 1_000_000.0 - 30,
+    }]
+    assert store.take_outcomes("rt-1") == [], "the chat's other id doesn't hear it again"
+
+
+def test_a_retried_report_keeps_the_first(tmp_path):
+    store = _store(tmp_path)
+    store.record_outcome(CALL_ID, ["rt-1"], "missed", age_s=10)
+    store.record_outcome(CALL_ID, ["rt-1"], "declined", age_s=0)
+    assert [entry["outcome"] for entry in store.take_outcomes("rt-1")] == ["missed"]
+
+
+def test_outcomes_are_taken_oldest_first_and_capped(tmp_path):
+    store = _store(tmp_path)
+    for index in range(calls_store.MAX_OUTCOMES + 2):
+        store.record_outcome(f"call{index:04d}", ["rt-1"], "missed", age_s=calls_store.MAX_OUTCOMES + 2 - index)
+    store.record_outcome("call-late", ["rt-1"], "declined", age_s=500)
+    taken = store.take_outcomes("rt-1")
+    assert len(taken) == calls_store.MAX_OUTCOMES
+    assert taken[0]["id"] == "call-late", "reported last, but placed earliest"
+    assert "call0000" not in {entry["id"] for entry in taken}
+
+
+def test_an_outcome_older_than_a_day_says_nothing(tmp_path):
+    clock = Clock()
+    store = _store(tmp_path, clock)
+    store.record_outcome(CALL_ID, ["rt-1"], "missed", age_s=60)
+    clock.now += calls_store.OUTCOME_TTL_S
+    assert store.take_outcomes("rt-1") == []
+
+
+def test_an_unknown_kind_reads_as_none(tmp_path):
+    store = _store(tmp_path)
+    store.record_outcome(CALL_ID, ["rt-1"], "missed", kind="celebration")
+    assert store.take_outcomes("rt-1")[0]["kind"] is None
+
+
+@pytest.mark.parametrize("args, kwargs", [
+    (("short", ["rt-1"], "missed"), {}),
+    ((None, ["rt-1"], "missed"), {}),
+    ((CALL_ID, [], "missed"), {}),
+    ((CALL_ID, "rt-1", "missed"), {}),
+    ((CALL_ID, ["rt-1"], "answered"), {}),
+    ((CALL_ID, ["rt-1"], "missed"), {"age_s": -1}),
+    ((CALL_ID, ["rt-1"], "missed"), {"age_s": 24 * 3600 + 1}),
+    ((CALL_ID, ["rt-1"], "missed"), {"age_s": "30"}),
+])
+def test_a_malformed_outcome_is_refused(tmp_path, args, kwargs):
+    with pytest.raises(ValueError):
+        _store(tmp_path).record_outcome(*args, **kwargs)
+
+
+def test_a_turn_with_no_outcome_writes_nothing(tmp_path):
+    store = _store(tmp_path)
+    assert store.take_outcomes("rt-1") == []
+    assert not store.path.exists()
+    store.record_outcome(CALL_ID, ["rt-1"], "missed")
+    before = store.path.stat().st_mtime_ns
+    assert store.take_outcomes("rt-2") == []
+    assert store.path.stat().st_mtime_ns == before
+
+
+def test_malformed_outcomes_on_disk_are_dropped(tmp_path):
+    store = _store(tmp_path)
+    store.record_outcome(CALL_ID, ["rt-1"], "missed")
+    state = json.loads(store.path.read_text())
+    state["outcomes"] += [{"id": "bad id!", "session_ids": ["rt-1"], "outcome": "missed", "at": 1_000_000.0},
+                          {"id": "b" * 24, "session_ids": ["rt-1"], "outcome": "missed", "at": True},
+                          {"id": "c" * 24, "session_ids": "rt-1", "outcome": "missed", "at": 1_000_000.0},
+                          "not an entry"]
+    store.path.write_text(json.dumps(state))
+    assert [entry["id"] for entry in store.take_outcomes("rt-1")] == [CALL_ID]

@@ -218,3 +218,31 @@ def test_presence_needs_a_paired_profile(home):
     response = _http().put(f"{BASE}/calls/presence", json={"hold_s": 90})
     assert response.status_code == 409
     assert not (home / "conduit-calls.json").exists()
+
+
+# --- Outcomes ----------------------------------------------------------------
+
+def test_a_declined_call_is_recorded_for_its_chat(home):
+    http = _http()
+    body = {"call_id": "a1b2c3d4e5f6a1b2c3d4e5f6", "session_ids": ["rt-1", "st-1"], "outcome": "declined",
+            "kind": "done", "title": "Deploy", "reason": "The deploy finished.", "age_s": 4}
+    response = http.post(f"{BASE}/calls/outcomes", json=body)
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json() == {"ok": True, "status": "recorded"}
+    assert http.post(f"{BASE}/calls/outcomes", json=body).json() == {"ok": True, "status": "recorded"}
+    taken = api._calls_store().CallStore(home).take_outcomes("st-1")
+    assert [(entry["outcome"], entry["reason"]) for entry in taken] == [("declined", "The deploy finished.")]
+
+
+@pytest.mark.parametrize("body", [
+    {"call_id": "a1b2c3d4e5f6a1b2c3d4e5f6", "session_ids": ["rt-1"], "outcome": "answered"},
+    {"call_id": "", "session_ids": ["rt-1"], "outcome": "missed"},
+    {"call_id": "a1b2c3d4e5f6a1b2c3d4e5f6", "outcome": "missed"},
+    {"call_id": "a1b2c3d4e5f6a1b2c3d4e5f6", "session_ids": ["rt-1"], "outcome": "missed", "age_s": 1.5},
+    [],
+])
+def test_a_malformed_outcome_is_refused(home, body):
+    response = _http().post(f"{BASE}/calls/outcomes", json=body)
+    assert response.status_code == 400
+    assert response.headers["cache-control"] == "no-store"

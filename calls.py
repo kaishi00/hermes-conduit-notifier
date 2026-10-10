@@ -18,6 +18,10 @@ Hermes asks for a call itself through the ``conduit_call_user`` tool (a watch
 on the asking session, see ``tool_watch``). With alert calls on, an approval
 or question left unanswered calls through the same waiter (``alert``), and a
 failed turn calls in place of its push (``failed_turn``).
+
+A call the user declined or didn't answer comes back from Conduit (the
+dashboard's outcome route), and the next turn of its chat tells Hermes so
+(``outcome_note``): nothing rings again.
 """
 
 from __future__ import annotations
@@ -247,6 +251,48 @@ def failed_turn(session_id: str, *, profile: str, fallback: dict[str, Any] | Non
         logger.warning("Conduit could not send a call request", exc_info=True)
         return False
     return True
+
+
+def outcome_note(session_id: str) -> str | None:
+    """What this turn of ``session_id`` should know about calls the user
+    declined or didn't answer since its last turn, once. Never raises: a
+    hook calls this."""
+    if not session_id:
+        return None
+    try:
+        store = _store(get_hermes_home())
+        taken = store.take_outcomes(session_id)
+        now = store.clock()
+    except Exception:  # noqa: BLE001
+        logger.warning("Conduit could not read call outcomes for this turn", exc_info=True)
+        return None
+    return "\n".join(_outcome_line(entry, now) for entry in taken) or None
+
+
+def _outcome_line(entry: dict[str, Any], now: float) -> str:
+    ago = _ago(now - entry["at"])
+    if entry["outcome"] == "declined":
+        what = f"the user declined the phone call you placed {ago}"
+    else:
+        what = f"the phone call you placed {ago} went unanswered"
+    if entry["reason"]:
+        what += f' (you were calling to say: "{entry["reason"]}")'
+    elif entry["title"]:
+        what += f' (about "{entry["title"]}")'
+    elif entry["kind"] == "approval":
+        what += " (about an approval you were waiting for)"
+    elif entry["kind"] == "question":
+        what += " (about a question you asked them)"
+    return f"[Conduit: {what}. They haven't heard what you called about; if it still matters, tell them.]"
+
+
+def _ago(seconds: float) -> str:
+    minutes = int(max(0.0, seconds) // 60)
+    if minutes < 2:
+        return "just now"
+    if minutes < 90:
+        return f"{minutes} minutes ago"
+    return f"about {round(minutes / 60)} hours ago"
 
 
 def call_event(watch: dict[str, Any], outcome: str, *, session_id: str, profile: str) -> dict[str, Any]:
