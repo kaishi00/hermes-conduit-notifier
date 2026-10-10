@@ -767,9 +767,10 @@ lock, so they survive restarts:
   title and reason, and `age_s` (how long ago, on the phone's clock). The
   next turn of one of those sessions gets a one-line note through the
   `pre_llm_call` hook, for example "the user declined the phone call you
-  placed 12 minutes ago", and takes it, so Hermes hears it once. Nothing
-  rings again. A retried report keeps the first; a profile keeps at most 20
-  waiting, each for a day. 400 for anything malformed.
+  placed 12 minutes ago", and takes it, so Hermes hears it once, even if a
+  late retry of the report arrives after. Nothing rings again. A retried
+  report keeps the first; a profile keeps at most 20 waiting, each for a
+  day. 409 when the profile isn't paired, 400 for anything malformed.
 - The call request carries the job's id, outcome, title and session ids so
   Conduit can open the right chat. With end-to-end encryption they are sealed
   like any other content; with `redact on` the title is dropped.

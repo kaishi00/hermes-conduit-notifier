@@ -263,10 +263,10 @@ def outcome_note(session_id: str) -> str | None:
         store = _store(get_hermes_home())
         taken = store.take_outcomes(session_id)
         now = store.clock()
+        return "\n".join(_outcome_line(entry, now) for entry in taken) or None
     except Exception:  # noqa: BLE001
         logger.warning("Conduit could not read call outcomes for this turn", exc_info=True)
         return None
-    return "\n".join(_outcome_line(entry, now) for entry in taken) or None
 
 
 def _outcome_line(entry: dict[str, Any], now: float) -> str:
@@ -276,14 +276,23 @@ def _outcome_line(entry: dict[str, Any], now: float) -> str:
     else:
         what = f"the phone call you placed {ago} went unanswered"
     if entry["reason"]:
-        what += f' (you were calling to say: "{entry["reason"]}")'
+        what += f' (you were calling to say: "{_quoted(entry["reason"])}")'
     elif entry["title"]:
-        what += f' (about "{entry["title"]}")'
+        what += f' (about "{_quoted(entry["title"])}")'
     elif entry["kind"] == "approval":
         what += " (about an approval you were waiting for)"
     elif entry["kind"] == "question":
         what += " (about a question you asked them)"
     return f"[Conduit: {what}. They haven't heard what you called about; if it still matters, tell them.]"
+
+
+# What a reason or title can't carry into the note: it can't close the quote
+# or the bracket around it.
+_QUOTED = str.maketrans({'"': "'", "[": "(", "]": ")"})
+
+
+def _quoted(text: str) -> str:
+    return "".join(char for char in text.translate(_QUOTED) if char.isprintable())
 
 
 def _ago(seconds: float) -> str:
@@ -292,7 +301,7 @@ def _ago(seconds: float) -> str:
         return "just now"
     if minutes < 90:
         return f"{minutes} minutes ago"
-    return f"about {round(minutes / 60)} hours ago"
+    return f"about {int(minutes / 60 + 0.5)} hours ago"
 
 
 def call_event(watch: dict[str, Any], outcome: str, *, session_id: str, profile: str) -> dict[str, Any]:
