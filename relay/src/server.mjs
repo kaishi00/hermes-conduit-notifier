@@ -306,7 +306,14 @@ async function route(request, response) {
     const installation = store.activeInstallation(ring.installationId);
     const other = settle.by === 'phone' ? 'watch' : 'phone';
     const topic = other === 'watch' ? config.watchTopic : config.topic;
-    const notified = installation ? await sendVoip(installation, settlePushFor(ring.id, ring.settled, { topic }), other) : false;
+    // The device that settled doesn't wait on the other one's push: `notified`
+    // says a stop went out, not that APNs took it.
+    const notified = Boolean(installation?.[other === 'watch' ? 'watchVoipToken' : 'voipToken']);
+    if (notified) {
+      sendVoip(installation, settlePushFor(ring.id, ring.settled, { topic }), other).catch((error) => {
+        console.error(JSON.stringify({ level: 'error', message: 'ring stop send failed', device: other, error: error instanceof Error ? error.message : String(error) }));
+      });
+    }
     return sendJson(response, 200, { settled: true, notified });
   }
 
