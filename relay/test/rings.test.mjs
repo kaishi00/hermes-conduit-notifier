@@ -51,6 +51,22 @@ test('a settle names the ring, who settled it and how', () => {
   assert.equal(validSettle('a'.repeat(22), { token, by: 'ipad', outcome: 'answered' }), null);
   assert.equal(validSettle('a'.repeat(22), { token, by: 'phone', outcome: 'missed' }), null);
   assert.equal(validSettle('a'.repeat(22), null), null);
-  assert.equal(RING_ROUTE.exec('/v1/rings/abc/settled')[1], 'abc');
-  assert.equal(RING_ROUTE.exec('/v1/rings/abc'), null);
+  assert.equal(RING_ROUTE.exec(`/v1/rings/${'a'.repeat(22)}/settled`)[1], 'a'.repeat(22));
+  assert.equal(RING_ROUTE.exec('/v1/rings/abc/settled'), null, 'the route takes only a ring id');
+  assert.equal(RING_ROUTE.exec(`/v1/rings/${'a'.repeat(22)}`), null);
+});
+
+test('a ring no push carried is forgotten', () => {
+  const rings = ringsAt({ now: 1_000 });
+  const { id, token } = rings.create('install-1');
+  rings.forget(id);
+  assert.equal(rings.size, 0);
+  assert.deepEqual(rings.settle(id, token, 'phone', 'answered'), {});
+});
+
+test('the ring maximum is a positive whole number', () => {
+  for (const maxRings of [0, -1, 1.5, Number.NaN, '10']) {
+    assert.throws(() => new Rings({ maxRings }), RangeError, String(maxRings));
+  }
+  assert.equal(new Rings({ maxRings: 1 }).maxRings, 1);
 });

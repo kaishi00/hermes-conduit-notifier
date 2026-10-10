@@ -63,8 +63,12 @@ const CALL_WINDOW_MS = 24 * 60 * 60 * 1000;
 // gets it late (sent_at) shows it as a missed call instead of ringing.
 const CALL_RING_TTL_S = 24 * 60 * 60;
 // APNs refused the PushKit token itself: the phone gets notifications until
-// it registers a new one.
+// it registers a new one. The Watch's token isn't forgotten for
+// DeviceTokenNotForTopic: its topic is a relay setting (APNS_WATCH_TOPIC)
+// that may be wrong, while the phone's was checked against the app when it
+// registered.
 const VOIP_TOKEN_GONE = new Set(['BadDeviceToken', 'Unregistered', 'DeviceTokenNotForTopic']);
+const WATCH_VOIP_TOKEN_GONE = new Set(['BadDeviceToken', 'Unregistered']);
 // "Stop ringing, it was answered or declined on the other device" is only
 // worth delivering while that device could still be ringing.
 const RING_SETTLE_TTL_S = 60;
@@ -817,15 +821,21 @@ function settlePushFor(ringId, settled, { topic, nowSeconds = Math.floor(Date.no
 
 // True when the call rang on the phone (APNs took the VoIP push). A paired
 // Watch with its own PushKit token rings too, with the same ring; whether it
-// did never changes how the phone's call goes.
+// did never changes how the phone's call goes, nor holds up the answer.
 async function ring(installation, event, gateway) {
   const created = installation.watchVoipToken ? rings.create(installation.id) : undefined;
   // Where either device settles it: the Watch has no relay address of its own.
   const shared = created && { ...created, url: `${config.publicUrl}/v1/rings/${created.id}/settled` };
   const push = callPushFor(event, installation.preferences, gateway, { topic: config.topic, ring: shared });
-  if (!push) return false;
-  if (!await sendVoip(installation, push, 'phone')) return false;
-  if (shared) await sendVoip(installation, { ...push, topic: `${config.watchTopic}.voip` }, 'watch');
+  if (!push || !await sendVoip(installation, push, 'phone')) {
+    if (created) rings.forget(created.id);
+    return false;
+  }
+  if (shared) {
+    sendVoip(installation, { ...push, topic: `${config.watchTopic}.voip` }, 'watch').catch((error) => {
+      console.error(JSON.stringify({ level: 'error', message: 'watch voip send failed', error: error instanceof Error ? error.message : String(error) }));
+    });
+  }
   return true;
 }
 
@@ -847,12 +857,13 @@ async function sendVoip(installation, push, device) {
   if (result.ok) return true;
   console.warn(JSON.stringify({ level: 'warn', message: 'apns voip send refused', device, status: result.status, reason: result.reason }));
   if (result.reason === 'DeviceTokenNotForTopic') {
-    // Every device would lose its token this way if the `.voip` topic were
-    // wrong for the app: say so where an operator looks.
+    // Every phone would lose its token this way if the `.voip` topic were
+    // wrong for the app, and no Watch would ring: say so where an operator
+    // looks.
     const setting = device === 'watch' ? 'APNS_WATCH_TOPIC' : 'APNS_TOPIC';
     console.warn(JSON.stringify({ level: 'warn', message: `apns voip topic refused, check ${setting}`, topic: push.topic }));
   }
-  if (result.status === 410 || VOIP_TOKEN_GONE.has(result.reason)) {
+  if (result.status === 410 || (device === 'watch' ? WATCH_VOIP_TOKEN_GONE : VOIP_TOKEN_GONE).has(result.reason)) {
     try {
       if (device === 'watch') store.clearWatchVoipToken(installation.id, token);
       else store.clearVoipToken(installation.id, token);

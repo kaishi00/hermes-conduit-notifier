@@ -20,10 +20,11 @@ export const RING_OUTCOMES = new Set(['answered', 'declined']);
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{22}$/;
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
-export const RING_ROUTE = /^\/v1\/rings\/([A-Za-z0-9_-]{1,64})\/settled$/;
+export const RING_ROUTE = /^\/v1\/rings\/([A-Za-z0-9_-]{22})\/settled$/;
 
 export class Rings {
   constructor({ maxRings = 10_000, ttlMs = RING_TTL_MS, now = Date.now } = {}) {
+    if (!Number.isSafeInteger(maxRings) || maxRings < 1) throw new RangeError('maxRings must be a positive integer');
     this.maxRings = maxRings;
     this.ttlMs = ttlMs;
     this.now = now;
@@ -46,13 +47,19 @@ export class Rings {
     return { id, token };
   }
 
+  // A ring no push carried after all (the call went as a notification).
+  forget(id) {
+    this.rings.delete(id);
+  }
+
   // { ring } for the first settle, { settled } when the ring was already
   // settled, or {} for an unknown ring or a wrong token (alike, so a guess
-  // learns nothing).
+  // learns nothing: both hash the token).
   settle(id, token, by, outcome) {
     this.sweep();
     const ring = this.rings.get(id);
-    if (!ring || !tokenMatches(token, ring.tokenHash)) return {};
+    const matches = tokenMatches(token, ring?.tokenHash ?? NO_RING);
+    if (!ring || !matches) return {};
     if (ring.settled) return { settled: ring.settled };
     ring.settled = { by, outcome };
     return { ring };
@@ -75,6 +82,9 @@ export function validSettle(id, body) {
   if (!RING_SETTLED_BY.has(by) || !RING_OUTCOMES.has(outcome)) return null;
   return { token, by, outcome };
 }
+
+// What an unknown ring's token is compared with.
+const NO_RING = digest(randomBytes(32));
 
 function digest(value) {
   return createHash('sha256').update(value).digest();

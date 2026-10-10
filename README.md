@@ -223,7 +223,9 @@ to `/v1/rings/:id/settled`, and the relay sends the other device a VoIP push
 ringing. The first settle wins; a later one gets 409 with how the ring was
 settled, and an unknown ring or wrong token gets 404. Rings live in memory for
 10 minutes, and a restart drops them: the other device then rings out. A Watch
-token APNs refuses is forgotten, and the phone still rings.
+token APNs refuses as gone is forgotten, and the phone still rings. A Watch
+push refused with `DeviceTokenNotForTopic` keeps the token and logs
+`check APNS_WATCH_TOPIC`: the setting is wrong, not the token.
 
 ### Capacity and admission limits
 
