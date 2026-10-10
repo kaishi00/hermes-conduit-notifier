@@ -756,7 +756,7 @@ test('a paired Watch rings too, and whichever device answers stops the other', a
   }
 });
 
-for (const [failure, forgotten] of [['Unregistered', true], ['DeviceTokenNotForTopic', false]]) {
+for (const [failure, forgotten] of [['Unregistered', true], ['DeviceTokenNotForTopic', false], ['TopicDisallowed', false]]) {
   test(`a Watch token APNs refuses (${failure}) is ${forgotten ? 'forgotten' : 'kept'} and the phone still rings`, async () => {
     const aPort = await closedPort();
     const isolatedPath = join(dir, `relay-data-watch-refused-${failure}.json`);
