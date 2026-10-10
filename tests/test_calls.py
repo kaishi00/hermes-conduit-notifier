@@ -704,3 +704,61 @@ def test_a_batch_of_questions_says_how_many_wait(home, fake, monkeypatch, paired
     questions = [{"question": "Which branch?", "choices": ["main", "dev"]}, {"question": "Ship it?", "choices": ["yes", "no"]}]
     loop.middleware(session_id="st-1", tool_name="clarify", args={"questions": questions}, next_call=lambda args: "native")
     assert reasons == ["2 questions, first: Which branch?"]
+
+
+# --- Declined and missed calls (outcomes from Conduit) ----------------------
+
+CALL_ID = "a1b2c3d4e5f6a1b2c3d4e5f6"
+
+
+def test_the_next_turn_of_a_declined_calls_chat_hears_it_once(home, clock):
+    calls._store(home).record_outcome(CALL_ID, ["rt-1", "st-1"], "declined", kind="done", title="Deploy",
+                                      reason="The deploy finished, and two tests failed.", age_s=0)
+    clock[0] += 12 * 60
+    assert plugin._pre_llm_call(session_id="other", conversation_history=[]) is None
+    assert plugin._pre_llm_call(session_id="st-1", conversation_history=[]) == {"context": (
+        '[Conduit: the user declined the phone call you placed 12 minutes ago (you were calling to say: '
+        '"The deploy finished, and two tests failed."). They haven\'t heard what you called about; if it still '
+        'matters, tell them.]'
+    )}
+    assert plugin._pre_llm_call(session_id="rt-1", conversation_history=[]) is None
+
+
+@pytest.mark.parametrize("entry, ago, says", [
+    ({"outcome": "missed", "title": "Deploy"}, 30, 'the phone call you placed just now went unanswered (about "Deploy")'),
+    ({"outcome": "missed", "kind": "approval"}, 5 * 60, "the phone call you placed 5 minutes ago went unanswered "
+                                                        "(about an approval you were waiting for)"),
+    ({"outcome": "declined", "kind": "question"}, 3 * 3600, "the user declined the phone call you placed about 3 hours "
+                                                           "ago (about a question you asked them)"),
+    ({"outcome": "missed"}, 89 * 60, "the phone call you placed 89 minutes ago went unanswered"),
+])
+def test_the_note_says_how_the_call_ended_when_and_what_about(home, clock, entry, ago, says):
+    calls._store(home).record_outcome(CALL_ID, ["rt-1"], entry["outcome"], kind=entry.get("kind"),
+                                      title=entry.get("title", ""), age_s=0)
+    clock[0] += ago
+    assert calls.outcome_note("rt-1") == f"[Conduit: {says}. They haven't heard what you called about; if it still matters, tell them.]"
+
+
+def test_a_voice_turn_after_a_missed_call_gets_both_notes(home, clock):
+    calls._store(home).record_outcome(CALL_ID, ["rt-1"], "missed", age_s=0)
+    voice = "[Note: this message is a delegation from a live spoken conversation ...]\n\nhi"
+    context = plugin._pre_llm_call(session_id="rt-1", conversation_history=[{"role": "user", "content": voice}])["context"]
+    first, second = context.split("\n\n")
+    assert first.startswith("[Conduit: the phone call you placed just now went unanswered.")
+    assert second == plugin.PERSONA_VOICE_NOTE
+
+
+def test_a_subagent_turn_does_not_take_the_note(home, clock):
+    calls._store(home).record_outcome(CALL_ID, ["child-1"], "missed", age_s=0)
+    plugin._subagent_start(child_session_id="child-1")
+    try:
+        assert plugin._pre_llm_call(session_id="child-1") is None
+    finally:
+        plugin._subagent_stop(child_session_id="child-1", parent_session_id="")
+    assert calls.outcome_note("child-1") is not None, "still waiting"
+
+
+def test_an_unreadable_store_says_nothing_and_never_raises(home, monkeypatch):
+    monkeypatch.setattr(calls, "get_hermes_home", lambda: (_ for _ in ()).throw(RuntimeError("no home")))
+    assert calls.outcome_note("rt-1") is None
+    assert plugin._pre_llm_call(session_id="rt-1") is None

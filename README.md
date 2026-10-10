@@ -730,6 +730,7 @@ lock, so they survive restarts:
 | PUT | `/api/plugins/conduit_push/calls/watches/{id}?profile=` | `{hold_s}` (0 releases) | `{ok, status: "watching"}`, `{ok, status: "ended", outcome}` or `{ok, status: "gone"}` |
 | DELETE | `/api/plugins/conduit_push/calls/watches/{id}?profile=` | | `{ok, removed}` |
 | PUT | `/api/plugins/conduit_push/calls/presence?profile=` (0.14+) | `{hold_s}` (0 releases) | `{ok, status: "present"}` or `{ok, status: "away"}` |
+| POST | `/api/plugins/conduit_push/calls/outcomes?profile=` (0.15+) | `{call_id, session_ids: [...], outcome: "declined" or "missed", kind?, title?, reason?, age_s?}` | `{ok, status: "recorded"}` |
 
 - A watch names up to 4 session ids (the job's runtime and stored ids) and a
   title of up to 120 characters. It fires once, on the first turn end of any
@@ -760,6 +761,15 @@ lock, so they survive restarts:
 - **Presence (0.14+):** while you're in a Live Voice call, Conduit holds
   presence (`hold_s` up to 600, renewed during the call, 0 at hang-up).
   Nothing rings meanwhile: a call that would go out sends the usual push.
+- **Declined and missed calls (0.15+):** when you decline a call, or it
+  rings out, reaches a phone that was offline or is silenced by Do Not
+  Disturb, Conduit reports it here with the call's id, session ids, kind,
+  title and reason, and `age_s` (how long ago, on the phone's clock). The
+  next turn of one of those sessions gets a one-line note through the
+  `pre_llm_call` hook, for example "the user declined the phone call you
+  placed 12 minutes ago", and takes it, so Hermes hears it once. Nothing
+  rings again. A retried report keeps the first; a profile keeps at most 20
+  waiting, each for a day. 400 for anything malformed.
 - The call request carries the job's id, outcome, title and session ids so
   Conduit can open the right chat. With end-to-end encryption they are sealed
   like any other content; with `redact on` the title is dropped.

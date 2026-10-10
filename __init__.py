@@ -41,12 +41,14 @@ def register(ctx: Any) -> None:
         ctx.register_hook("post_approval_response", _post_approval_response)
     except Exception:  # noqa: BLE001
         logger.warning("conduit_push: post_approval_response hook unavailable", exc_info=True)
-    # The voice hint is an extra: a Hermes that refuses the hook must not
-    # take the notifications down with it.
+    # The voice hint and the note on calls the user declined or missed are
+    # extras: a Hermes that refuses the hook must not take the
+    # notifications down with it.
     try:
         ctx.register_hook("pre_llm_call", _pre_llm_call)
     except Exception:  # noqa: BLE001
-        logger.warning("conduit_push: pre_llm_call hook unavailable; voice replies get no persona hint", exc_info=True)
+        logger.warning("conduit_push: pre_llm_call hook unavailable; voice replies get no persona hint and "
+                       "Hermes doesn't hear about declined calls", exc_info=True)
     # Wrap clarify execution so a backgrounded device gets an answerable card
     # (plugin-minted id, answered through the relay). Older gateways without
     # middleware support simply keep the original clarify path.
@@ -232,6 +234,18 @@ def _text_parts(content: Any) -> list[str]:
 
 
 def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
+    """Context for this turn: calls from Hermes the user declined or missed
+    since the last turn of this chat (#449), and the voice persona hint."""
+    session_id = _text(kwargs.get("session_id"))
+    notes = [
+        None if _is_child(session_id) else calls.outcome_note(session_id),
+        _voice_persona_note(kwargs.get("conversation_history")),
+    ]
+    context = "\n\n".join(note for note in notes if note)
+    return {"context": context} if context else None
+
+
+def _voice_persona_note(history: Any) -> str | None:
     """Keep a voice-live delegation's reply speakable without flattening the persona.
 
     The TUI gateway prepends Hermes' voice-live note to the model input of a
@@ -240,14 +254,13 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
     ``conversation_history``.
     """
     try:
-        history = kwargs.get("conversation_history")
         if not isinstance(history, list):
             return None
         for message in reversed(history):
             if isinstance(message, dict) and message.get("role") == "user":
                 prefix = _voice_note_prefix()
                 if any(text.lstrip().startswith(prefix) for text in _text_parts(message.get("content"))):
-                    return {"context": PERSONA_VOICE_NOTE}
+                    return PERSONA_VOICE_NOTE
                 return None
     except Exception:  # noqa: BLE001 — a hook must never break the turn
         return None

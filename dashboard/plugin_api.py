@@ -3107,6 +3107,9 @@ async def post_e2e(request: Request, response: Response, profile: Optional[str] 
 # settings live in the profile's conduit-calls.json, shared with the hooks
 # through calls_store.py (loaded by path: this module can't import the plugin
 # package). (hermes-conduit designs/hermes-calls-you-449.md)
+#
+# A call the user declines or doesn't answer comes back here from Conduit as
+# an outcome; the next turn of its chat tells Hermes (calls.outcome_note).
 
 CALLS_LIMIT = 30
 CALLS_WINDOW_S = 60.0
@@ -3213,6 +3216,19 @@ def set_call_presence(body: Any) -> Dict[str, Any]:
         raise TokenError(400, str(exc))
 
 
+def record_call_outcome(body: Any) -> Dict[str, Any]:
+    """The user declined a call from Hermes, or didn't answer it: the next
+    turn of its chat hears so."""
+    if not isinstance(body, dict):
+        raise TokenError(400, "Expected a JSON object")
+    try:
+        return _calls_store().CallStore(_calls_home()).record_outcome(
+            body.get("call_id"), body.get("session_ids"), body.get("outcome"), kind=body.get("kind"),
+            title=body.get("title", ""), reason=body.get("reason", ""), age_s=body.get("age_s", 0))
+    except ValueError as exc:
+        raise TokenError(400, str(exc))
+
+
 async def _calls_route(profile: Optional[str], response: Response, fn: Callable[[], Dict[str, Any]],
                        route: str) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
@@ -3261,6 +3277,12 @@ async def delete_call_watch(watch_id: str, response: Response, profile: Optional
 async def put_call_presence(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     body = await _read_json_body(request, CALLS_MAX_BODY_BYTES)
     return await _calls_route(profile, response, lambda: set_call_presence(body), "presence")
+
+
+@router.post("/calls/outcomes")
+async def post_call_outcome(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    body = await _read_json_body(request, CALLS_MAX_BODY_BYTES)
+    return await _calls_route(profile, response, lambda: record_call_outcome(body), "outcome")
 
 
 # --- Watch tools (wrist-down lookups for a Conduit Watch call) ---------------
@@ -6951,6 +6973,7 @@ ROUTE_CAPABILITIES = (
     "desktop-views",
     "hermes-calls",
     "hermes-call-presence",
+    "hermes-call-outcomes",
 )
 
 
