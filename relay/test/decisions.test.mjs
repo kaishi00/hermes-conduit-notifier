@@ -357,7 +357,7 @@ test('no-op installation updates and repeated cancellation do not save or rewrit
   relay.save = () => { writes += 1; };
 
   assert.deepEqual(relay.updateInstallation(installation.id, { deviceToken: installation.deviceToken, preferences: installation.preferences }), {
-    id: installation.id, active: true, gateways: [], preferences: installation.preferences, voip: false, updated_at: updatedAt,
+    id: installation.id, active: true, gateways: [], preferences: installation.preferences, voip: false, watch_voip: false, updated_at: updatedAt,
   });
   assert.equal(relay.cancelPendingDecision(installation.id, 'gw-1', 'conduit-push-cancel'), 'cancelled');
   const cancelledAt = relay.data.pendingDecisions[RelayStore.decisionKey(installation.id, 'gw-1', 'conduit-push-cancel')].cancelledAt;

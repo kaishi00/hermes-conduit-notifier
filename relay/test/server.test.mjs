@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 
-import { callPushFor, notificationFor, validateEvent, validateDecision } from '../src/server.mjs';
+import { callPushFor, notificationFor, settlePushFor, validateEvent, validateDecision } from '../src/server.mjs';
 import { normalizePreferences } from '../src/store.mjs';
 
 const preferences = { show_previews: true, completion_sound: false };
@@ -644,6 +644,25 @@ test('a call rings as a VoIP push: no alert, the voip topic, a day to reach an o
   assert.equal(push.payload.body.conduit.sent_at, 1_800_000_000);
   assert.deepEqual(push.payload.body.conduit.call, validateEvent(callBody).call);
   assert.equal(push.payload.conduit.type, 'call.requested');
+});
+
+test('a call that rings the Watch too carries the shared ring beside sent_at', () => {
+  const ring = { id: 'a'.repeat(22), token: 'b'.repeat(43) };
+  const push = callPushFor(validateEvent(callBody), { show_previews: true }, { id: 'gw-1' }, { topic: 'com.milim.relay', ring, nowSeconds: 1_800_000_000 });
+  assert.deepEqual(push.payload.conduit.ring, ring);
+  assert.deepEqual(push.payload.body.conduit.ring, ring);
+  const alone = callPushFor(validateEvent(callBody), { show_previews: true }, { id: 'gw-1' }, { topic: 'com.milim.relay', nowSeconds: 1_800_000_000 });
+  assert.equal(alone.payload.conduit.ring, undefined, 'no Watch, no ring');
+});
+
+test('the other device hears how a ring was settled, briefly, and nothing else', () => {
+  const push = settlePushFor('a'.repeat(22), { by: 'watch', outcome: 'answered' }, { topic: 'com.milim.relay', nowSeconds: 1_800_000_000 });
+  assert.deepEqual(push, {
+    payload: { aps: {}, conduit: { ring: { id: 'a'.repeat(22), settled: 'answered', by: 'watch' } } },
+    pushType: 'voip',
+    topic: 'com.milim.relay.voip',
+    expiration: 1_800_000_060,
+  });
 });
 
 test('an encrypted call rings with its envelope untouched', () => {

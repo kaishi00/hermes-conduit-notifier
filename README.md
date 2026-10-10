@@ -178,7 +178,7 @@ gateway-bound inactive records still require separately reviewed maintenance.
 |--------|------|---------|
 | GET | `/healthz` | Health check |
 | POST | `/v1/installations` | Register a device |
-| PUT | `/v1/installations/:id` | Update device token, PushKit token (`voip_token`, `null` clears it) / preferences |
+| PUT | `/v1/installations/:id` | Update device token, PushKit token (`voip_token`, `null` clears it), the paired Apple Watch's PushKit token (`watch_voip_token`, 0.10+) / preferences |
 | DELETE | `/v1/installations/:id` | Deactivate a device |
 | POST | `/v1/installations/:id/pairings` | Create a pairing code |
 | POST | `/v1/pairings/claim` | Claim a pairing code (gateway side) |
@@ -191,6 +191,7 @@ gateway-bound inactive records still require separately reviewed maintenance.
 | DELETE | `/v1/watch-tools/grants/:id` | Close a grant (either side; always 204, so a wrong key learns nothing) |
 | GET (WebSocket) | `/v1/watch-audio/:id/host` | The gateway's side of a Watch call's audio (a grant opened with `audio: true`) |
 | GET (WebSocket) | `/v1/watch-audio/:id/watch` | The Watch's side of it (the grant's relay key) |
+| POST | `/v1/rings/:id/settled` | The phone or the Watch answered or declined a call that rings on both (0.10+; the ring's token from the call push) |
 
 Watch tool grants carry an Apple Watch call's lookups while the Watch can't
 reach Conduit on the iPhone. Calls and answers are sealed with a per-call key
@@ -209,6 +210,22 @@ byte, which is never 0 (its own two-byte notices to the gateway: Watch
 connected, Watch gone). Limits per socket: 64 KB a message, 96 KB/s averaged
 over 5 s, 60 s of silence; bridges are capped per gateway and per relay (see
 below).
+
+A call rings on the Apple Watch too (relay 0.10+) when the phone registered the
+Watch's own PushKit token: iOS doesn't pass a calling app's call to the Watch,
+so the relay sends the call push to both, with topic `APNS_WATCH_TOPIC`
+(default `<APNS_TOPIC>.watchkitapp`, then `.voip`). Both pushes carry the same
+`ring`: an id, a token that only those pushes hold, and the `url` to settle it
+at, since the Watch knows no relay address of its own. The device that answers
+or declines posts `{token, by: "phone"|"watch", outcome: "answered"|"declined"}`
+to `/v1/rings/:id/settled`, and the relay sends the other device a VoIP push
+`{conduit: {ring: {id, settled, by}}}` that expires after a minute, so it stops
+ringing. The first settle wins; a later one gets 409 with how the ring was
+settled, and an unknown ring or wrong token gets 404. Rings live in memory for
+10 minutes, and a restart drops them: the other device then rings out. A Watch
+token APNs refuses as gone is forgotten, and the phone still rings. A Watch
+push refused with `DeviceTokenNotForTopic` keeps the token and logs
+`check APNS_WATCH_TOPIC`: the setting is wrong, not the token.
 
 ### Capacity and admission limits
 
@@ -697,7 +714,9 @@ the relay instead of the usual "Response ready" or "Turn failed" push: a
 "Hermes wants to talk" notification whose Talk button opens Live Voice in the
 job's chat, where Hermes opens with how the job went. With relay 0.9+ and a
 Conduit build that rings, it arrives as a native incoming call (CallKit)
-instead, and the notification is the fallback.
+instead, and the notification is the fallback. With relay 0.10+ and a Watch
+app that rings, the Apple Watch rings too, and answering on either stops the
+other (see Relay API).
 
 While the call goes on, Conduit renews the hold every minute and releases it
 when you hang up. A job that ends during the hold gets its usual push and the
