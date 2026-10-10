@@ -215,7 +215,8 @@ A call rings on the Apple Watch too (relay 0.10+) when the phone registered the
 Watch's own PushKit token: iOS doesn't pass a calling app's call to the Watch,
 so the relay sends the call push to both, with topic `APNS_WATCH_TOPIC`
 (default `<APNS_TOPIC>.watchkitapp`, then `.voip`). Both pushes carry the same
-`ring`: an id and a token that only those pushes hold. The device that answers
+`ring`: an id, a token that only those pushes hold, and the `url` to settle it
+at, since the Watch knows no relay address of its own. The device that answers
 or declines posts `{token, by: "phone"|"watch", outcome: "answered"|"declined"}`
 to `/v1/rings/:id/settled`, and the relay sends the other device a VoIP push
 `{conduit: {ring: {id, settled, by}}}` that expires after a minute, so it stops

@@ -819,7 +819,9 @@ function settlePushFor(ringId, settled, { topic, nowSeconds = Math.floor(Date.no
 // Watch with its own PushKit token rings too, with the same ring; whether it
 // did never changes how the phone's call goes.
 async function ring(installation, event, gateway) {
-  const shared = installation.watchVoipToken ? rings.create(installation.id) : undefined;
+  const created = installation.watchVoipToken ? rings.create(installation.id) : undefined;
+  // Where either device settles it: the Watch has no relay address of its own.
+  const shared = created && { ...created, url: `${config.publicUrl}/v1/rings/${created.id}/settled` };
   const push = callPushFor(event, installation.preferences, gateway, { topic: config.topic, ring: shared });
   if (!push) return false;
   if (!await sendVoip(installation, push, 'phone')) return false;

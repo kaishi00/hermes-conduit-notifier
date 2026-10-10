@@ -722,6 +722,8 @@ test('a paired Watch rings too, and whichever device answers stops the other', a
     assert.equal(watch.notification.topic, 'com.milim.relay.watchkitapp.voip');
     assert.equal(watch.notification.pushType, 'voip');
     const ring = phone.notification.payload.conduit.ring;
+    assert.equal(ring.url, `${base.replace('http://127.0.0.1:', 'https://relay-')}.example/v1/rings/${ring.id}/settled`,
+      'the ring says where to settle it');
     assert.deepEqual(watch.notification.payload.conduit.ring, ring, 'both ring with the same ring');
     assert.deepEqual(watch.notification.payload.body.conduit.call, phone.notification.payload.body.conduit.call);
 
