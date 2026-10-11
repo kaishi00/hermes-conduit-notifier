@@ -3923,7 +3923,10 @@ def chat_readout(match: Dict[str, Any], summary: Optional[str], recent: list, no
 def _summarize_chat(turns: list) -> Optional[str]:
     text = _transcript_lines(turns)
     if len(text) > CHAT_SUMMARY_INPUT_CHARS:
-        text = text[-CHAT_SUMMARY_INPUT_CHARS:]
+        # The opening (where the topic was set) and the part just before the
+        # latest turns, which are shown word for word.
+        head = CHAT_SUMMARY_INPUT_CHARS * 2 // 3
+        text = text[:head] + "\n…\n" + text[-(CHAT_SUMMARY_INPUT_CHARS - head):]
     try:
         from agent.oneshot import run_oneshot
         summary = run_oneshot(instructions=CHAT_SUMMARY_INSTRUCTIONS, user_input=text, task="compression",
