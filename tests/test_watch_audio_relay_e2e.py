@@ -403,7 +403,7 @@ class FakeGptLive:
         self.thread = threading.Thread(target=self.loop.run_forever, daemon=True)
         self.thread.start()
 
-    def create_session(self, sdp, history=None, limiter_key=None, post=None, *, voice=None, briefing=None, greeting=None):
+    def create_session(self, sdp, history=None, limiter_key=None, post=None, *, voice=None, briefing=None, greeting=None, call_opening=None):
         self.requests.append({"voice": voice, "briefing": briefing, "greeting": greeting})
         answer = asyncio.run_coroutine_threadsafe(self._answer(sdp), self.loop).result(20)
         return {"auth": "subscription", "session": {"id": "sess_test"}, "transport": {"type": "webrtc", "sdp": answer},

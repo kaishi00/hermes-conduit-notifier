@@ -1287,6 +1287,13 @@ GPT_LIVE_WAIT_FOR_USER = (
     "speaks, then answer what they said. This applies whatever the persona above says."
 )
 GPT_LIVE_MAX_GREETING_CHARS = 200
+# A call Hermes placed: the user answered and is waiting to hear why it rang
+# (kaishi00/hermes-conduit#544). Conduit's briefing says what to open with.
+GPT_LIVE_CALL_OPENING = (
+    "Opening policy: speak first. You placed this call and the user just answered, so as soon "
+    "as it starts, open the way the part about this call above says, without waiting for the "
+    "user to speak. Then wait for them. This applies whatever the persona above says."
+)
 
 
 def _greet_first(greeting: str) -> str:
@@ -1314,6 +1321,16 @@ def _clean_greeting(greeting: Any) -> Optional[str]:
     if len(greeting) > GPT_LIVE_MAX_GREETING_CHARS:
         raise TokenError(400, "greeting is too long")
     return greeting
+
+
+def _clean_call_opening(call_opening: Any) -> bool:
+    """True when Conduit opens a call Hermes placed: the model speaks first with
+    the briefing's opening instead of a greeting or staying silent."""
+    if call_opening is None:
+        return False
+    if not isinstance(call_opening, bool):
+        raise TokenError(400, "call_opening must be true or false")
+    return call_opening
 
 
 def _clean_briefing(briefing: Any) -> Optional[str]:
@@ -1363,6 +1380,7 @@ def create_gpt_live_session(
     voice: Any = None,
     briefing: Any = None,
     greeting: Any = None,
+    call_opening: Any = None,
 ) -> Dict[str, Any]:
     if not isinstance(sdp, str) or not sdp.startswith("v=0"):
         raise TokenError(400, "sdp must be a WebRTC SDP offer")
@@ -1370,6 +1388,7 @@ def create_gpt_live_session(
     voice = _clean_voice(voice)
     briefing = _clean_briefing(briefing)
     greeting = _clean_greeting(greeting)
+    call_opening = _clean_call_opening(call_opening)
     if limiter_key is not None:
         _gpt_live_limiter.acquire(limiter_key)
     live = {**_gpt_live_settings(), "auth": "subscription"}
@@ -1380,7 +1399,12 @@ def create_gpt_live_session(
         # sent as context appends after the call starts, it answers each chunk out loud.
         extra = str(live.get("instructions") or "").strip()
         live["instructions"] = f"{extra}\n\n{briefing}" if extra else briefing
-    opening = GPT_LIVE_WAIT_FOR_USER if greeting is None else _greet_first(greeting)
+    if call_opening:
+        opening = GPT_LIVE_CALL_OPENING
+    else:
+        opening = GPT_LIVE_WAIT_FOR_USER if greeting is None else _greet_first(greeting)
+    # Conduit sends its own opening turn when the model won't speak first.
+    speaks_first = call_opening or greeting is not None
     extra = str(live.get("instructions") or "").strip()
     live["instructions"] = f"{extra}\n\n{opening}" if extra else opening
     # Echoed back so Conduit can tell a host that applied the chosen voice from one that ignored it.
@@ -1407,10 +1431,10 @@ def create_gpt_live_session(
         return {"auth": "subscription", "session": {"id": session["id"]},
                 "transport": {"type": "webrtc", "sdp": transport["sdp"]}, "source": "hermes",
                 "voice": applied_voice, "briefing_applied": _built_has_instructions(config, briefing),
-                "greeting_applied": greeting is not None and _built_has_instructions(config, opening)}
+                "greeting_applied": speaks_first and _built_has_instructions(config, opening)}
     config = gpt_live_session_config(history, live)
     return {**_plugin_gpt_live_session(sdp, config, post or _post_sdp), "source": "plugin", "voice": applied_voice,
-            "briefing_applied": bool(briefing), "greeting_applied": greeting is not None}
+            "briefing_applied": bool(briefing), "greeting_applied": speaks_first}
 
 
 @router.get("/gpt-live/status")
@@ -1443,7 +1467,8 @@ async def post_gpt_live_session(request: Request, response: Response, profile: O
             _run_scoped(
                 profile,
                 lambda: create_gpt_live_session(body.get("sdp"), body.get("history"), limiter_key=_limiter_key(profile), voice=body.get("voice"),
-                                                briefing=body.get("briefing"), greeting=body.get("greeting")),
+                                                briefing=body.get("briefing"), greeting=body.get("greeting"),
+                                                call_opening=body.get("call_opening")),
                 _gpt_live_executor,
             ),
             timeout=GPT_LIVE_REQUEST_TIMEOUT_S,
@@ -5219,7 +5244,7 @@ def run_watch_job_call(grant: "_WatchGrant", tool: str, args: Dict[str, Any]) ->
 # would repeat nonces.
 #
 # Control, Watch to host: {"type": "start", "engine": "gpt_live" | "grok",
-# "voice"?, "briefing"?, "greeting"?, "history"?} and {"type": "end"}. Host
+# "voice"?, "briefing"?, "greeting"?, "call_opening"?, "history"?} and {"type": "end"}. Host
 # to Watch: "started" (engine, model, voice, input_rate, output_rate; for
 # GPT-Live also briefing_applied and greeting_applied), "ended" (reason) and
 # "error" (code, message). The Watch waits for "started" before it sends
@@ -5848,7 +5873,8 @@ class _GptLiveWatchSession(_WatchAudioSession):
         try:
             answer = await asyncio.wait_for(_run_scoped(profile, lambda: create_gpt_live_session(
                 offer, request.get("history"), limiter_key=_limiter_key(profile), voice=request.get("voice"),
-                briefing=request.get("briefing"), greeting=request.get("greeting")), _gpt_live_executor),
+                briefing=request.get("briefing"), greeting=request.get("greeting"),
+                call_opening=request.get("call_opening")), _gpt_live_executor),
                 timeout=GPT_LIVE_REQUEST_TIMEOUT_S)
         except asyncio.TimeoutError:
             raise WatchAudioFailure("unreachable", "GPT-Live timed out starting the call")
