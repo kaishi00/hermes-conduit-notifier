@@ -1,6 +1,6 @@
 ---
 name: calling-the-user
-description: When and how to phone the user through Conduit with the conduit_call_user tool, including calls made on your own judgment.
+description: When and how to phone the user through Conduit with the conduit_call_user tool, including calls made on your own judgment and scheduled checks that call when something happens.
 ---
 
 # Calling the user through Conduit
@@ -34,6 +34,45 @@ call rings when that turn ends. Call the tool in the turn that has the result
 instead (for example the turn that handles the process's completion).
 
 In a scheduled job (cron) the same applies: call in the run that has the news.
+
+## When the user wants a call if something happens
+
+"Call me if the homelab is down for more than 10 minutes" needs something to
+watch, not only a call: a call rings when one of your turns ends, and no turn
+runs while the user is away. Offer a scheduled check that calls them, and say
+what it will check and how often. Once they agree, create it with
+`cronjob_manage` (action `create`):
+
+- `schedule`: often enough for what they asked, and no more (every 5 minutes
+  for "down for more than 10 minutes"). Every tick is a full run.
+- `skills`: `["conduit_push:calling-the-user"]`, so each run knows how to call.
+- `prompt`: everything a run needs on its own: what to check and how, what
+  counts as the event, and to call with `asked_by_user: true` when it
+  happens. The user asked for these calls, so their What's worth a call
+  rules don't apply.
+- No `enabled_toolsets` list: one without `conduit` leaves the runs without
+  `conduit_call_user`.
+
+Each run starts fresh. When the event takes time or should call once per
+incident ("down for more than 10 minutes"), keep what the next run needs:
+
+- Seed the job's notepad right after creating it, from the terminal:
+  `hermes cron notepad <job_id> set down_since none`. Every run sees the
+  notepad and how to update it.
+- Or, for a plain check (a URL, a host, a port), give the job a `script` that
+  keeps its own state and prints `{"wakeAgent": false}` until it's time to
+  call, so quiet ticks don't start a run at all.
+
+If `conduit_call_user` isn't among your tools, calls are off: the check can
+still run, but tell the user to turn on calls they ask for in
+[Calls from Hermes](conduit://settings/calls) first. Tell them the job's name,
+and that you can change or stop it whenever they ask.
+
+In a run of such a job: if nothing happened, answer `[SILENT]` and don't call.
+When it happens, call once, with a reason that carries the news ("The homelab
+has been down for 12 minutes; the router doesn't answer."), and end with the
+details. Don't call again about the same incident. Once it clears, reset what
+you kept and say so in your reply, without calling, so the next one can call.
 
 ## When you decide
 
@@ -78,6 +117,10 @@ change their call settings, so tell them where every conversation will see
 it: What's worth a call, in [Calls from Hermes](conduit://settings/calls) in
 Conduit. To turn calls on or off, or change the limits, they use the same
 place.
+
+Those rules only decide which calls you make; they don't watch anything. If
+what they describe needs watching ("only call if the site is down"), also
+offer a scheduled check that calls them (above).
 
 ## When they don't pick up
 

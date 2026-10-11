@@ -474,6 +474,13 @@ def paired(monkeypatch):
     monkeypatch.setattr(call_tool.client, "load_state", lambda: {"credential": "x"})
 
 
+@pytest.fixture(autouse=True)
+def no_rules_shown():
+    call_tool._rules_shown.clear()
+    yield
+    call_tool._rules_shown.clear()
+
+
 def _settings(home, **settings):
     calls._store(home).update_settings({"enabled": True, **settings})
 
@@ -527,6 +534,21 @@ def test_fits_rules_counts_only_for_the_rules_just_shown(home, fake, paired):
     assert answer["error"] == "check_rules", "the rules changed since"
     assert answer["rules"] == "Only outages, and never at night."
     assert _tool(heads_up)["ok"] is True
+
+
+def test_rules_shown_count_for_ten_minutes(home, fake, paired, monkeypatch):
+    now = [1000.0]
+    monkeypatch.setattr(call_tool, "time", types.SimpleNamespace(monotonic=lambda: now[0]))
+    _settings(home, decides=True, rules="Only outages.")
+    heads_up = {"reason": "Production is down.", "asked_by_user": False}
+    assert _tool(heads_up, session_id="st-2")["error"] == "check_rules"
+    now[0] += 400
+    assert _tool(heads_up)["error"] == "check_rules"
+    now[0] += call_tool.RULES_SEEN_S - 399
+    assert _tool({**heads_up, "fits_rules": True})["ok"] is True, "shown under 10 minutes ago"
+    assert "st-2" not in call_tool._rules_shown, "rules shown over 10 minutes ago are forgotten"
+    now[0] += call_tool.RULES_SEEN_S
+    assert _tool({**heads_up, "fits_rules": True})["error"] == "check_rules", "shown too long ago"
 
 
 def test_the_users_rules_leave_other_calls_alone(home, fake, paired):
@@ -586,6 +608,8 @@ def test_register_adds_the_tool_and_its_skill():
     assert name == "calling-the-user" and path.is_file()
     assert "conduit_push:calling-the-user" in tool["schema"]["description"]
     assert path.read_text().startswith("---\nname: calling-the-user\n")
+    # A scheduled check's runs load the skill by the name Hermes lists it under.
+    assert '`["conduit_push:calling-the-user"]`' in path.read_text()
 
 
 def test_a_hermes_without_the_display_fields_still_gets_the_tool(home, paired):

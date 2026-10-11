@@ -855,7 +855,19 @@ with a `reason` (one spoken sentence, up to 200 characters) and
   first answers `check_rules` with them. It goes only when Hermes calls again
   with `fits_rules: true` in the same chat, within 10 minutes, while the rules
   are unchanged. Calls the user asked for skip the rules, and Hermes can read
-  them but not change them.
+  them but not change them. The rules are checked when Hermes confirms the
+  call, not when it rings, and they steer Hermes rather than bind it:
+  `asked_by_user` is Hermes' own word (0.14+), so a call it marks as asked
+  for skips them.
+- **Scheduled checks (0.16.1+):** the rules only filter the calls Hermes
+  makes; they don't watch anything. When the user asks to be called if
+  something happens ("call me if the homelab is down for more than 10
+  minutes"), the skill has Hermes offer a cron job (`cronjob_manage`) that
+  loads `conduit_push:calling-the-user`, checks on a schedule, keeps state
+  across runs in the job's notepad or a `script`, answers `[SILENT]` while
+  nothing happened, and calls once per incident with `asked_by_user: true`.
+  The call opens that run's chat. A job given an `enabled_toolsets` list
+  needs `conduit` in it to call.
 - A call the user asked for while calls are off answers `calls_off` with a
   `conduit://settings/calls` link for Hermes' reply, which opens Calls from
   Hermes in Conduit.

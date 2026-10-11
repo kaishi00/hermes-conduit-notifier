@@ -142,6 +142,7 @@ class CallStore:
     def update_settings(self, changes: Any) -> dict[str, Any]:
         if not isinstance(changes, dict):
             raise ValueError("settings must be an object")
+        kept = dict(changes)
         for key, value in changes.items():
             if key in BOOL_SETTINGS:
                 if not isinstance(value, bool):
@@ -151,14 +152,14 @@ class CallStore:
                 if not isinstance(value, int) or isinstance(value, bool) or not low <= value <= high:
                     raise ValueError(f"{key} must be a whole number from {low} to {high}")
             elif key == "rules":
-                if _rules(value) is None:
+                rules = _rules(value)
+                if rules is None:
                     raise ValueError(f"rules must be text of up to {MAX_RULES_CHARS} characters")
+                kept[key] = rules
             else:
                 raise ValueError(f"unknown setting {key}")
-        if "rules" in changes:
-            changes = {**changes, "rules": _rules(changes["rules"])}
         with self._locked() as state:
-            state["settings"].update(changes)
+            state["settings"].update(kept)
             return dict(state["settings"])
 
     # --- Watches ------------------------------------------------------------
