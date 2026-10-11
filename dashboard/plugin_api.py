@@ -3767,15 +3767,21 @@ def _chat_epoch(value: Any) -> Optional[float]:
     return seconds if 0 < seconds < _CHAT_EPOCH_MAX else None
 
 
+def _chat_text(raw: Any) -> str:
+    """Text a route returned, with any lone surrogate replaced: it can't be
+    encoded, so it would sink the whole answer."""
+    return str(raw or "").encode("utf-8", "replace").decode("utf-8")
+
+
 def chat_title(raw: Any) -> str:
     """A chat's title as an answer carries it: one line, clipped, no angle
     brackets (a title outside the fence can't open or close a tag)."""
-    line = " ".join(str(raw or "").replace("<", "").replace(">", "").replace('"', "'").split())
+    line = " ".join(_chat_text(raw).replace("<", "").replace(">", "").replace('"', "'").split())
     return line if len(line) <= WATCH_CHAT_TITLE_CHARS else line[:WATCH_CHAT_TITLE_CHARS - 1] + "…"
 
 
 def chat_plain_snippet(raw: Any) -> str:
-    text = str(raw or "").replace(">>>", "").replace("<<<", "")
+    text = _chat_text(raw).replace(">>>", "").replace("<<<", "")
     line = " ".join(text.split())
     return line if len(line) <= WATCH_CHAT_SNIPPET_CHARS else line[:WATCH_CHAT_SNIPPET_CHARS] + "…"
 
@@ -3847,13 +3853,13 @@ def chat_summary(matches: list, now: float) -> str:
 def _row_text(row: Dict[str, Any]) -> str:
     shown = row.get("display_content")
     if isinstance(shown, str) and shown.strip():
-        return shown
+        return _chat_text(shown)
     content = row.get("content")
     if isinstance(content, str):
-        return content
+        return _chat_text(content)
     if isinstance(content, list):
-        return "\n".join(part.get("text", "") for part in content
-                         if isinstance(part, dict) and isinstance(part.get("text"), str))
+        return _chat_text("\n".join(part.get("text", "") for part in content
+                                    if isinstance(part, dict) and isinstance(part.get("text"), str)))
     return ""
 
 

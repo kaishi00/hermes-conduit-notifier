@@ -337,3 +337,8 @@ def test_a_search_given_up_on_before_it_started_retires_the_old_numbers():
     queued = {"dispatched_after": grant.chat_searches}
     api.abandon_watch_chat_search(grant, queued)
     assert grant.chat_matches == []
+
+
+def test_a_lone_surrogate_cant_sink_an_answer():
+    assert api.chat_title("Bad \ud800 title") == "Bad ? title"
+    assert api.chat_turns([{"role": "user", "content": "odd \udfff text"}]) == [("user", "odd ? text")]
