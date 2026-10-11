@@ -873,7 +873,10 @@ with a `reason` (one spoken sentence, up to 200 characters) and
   one and updates a watch that covers the same thing instead of adding
   another. Conduit's "Have Hermes watch for this" sends the What's worth a
   call note to sync with: watches are updated or added to match it, and
-  Hermes asks before stopping one the note no longer mentions.
+  Hermes asks before stopping one the note no longer mentions. A watch's
+  calls skip the rules check, so hours from the note ("never before 9 am")
+  go into each watch's prompt: outside them a run waits, then calls if the
+  incident is still on.
 - A call the user asked for while calls are off answers `calls_off` with a
   `conduit://settings/calls` link for Hermes' reply, which opens Calls from
   Hermes in Conduit.

@@ -613,8 +613,8 @@ def test_register_adds_the_tool_and_its_skill():
     # That skill is how Hermes finds the call watches it made, so an edited
     # note updates them instead of adding more.
     text = " ".join(path.read_text().split())
-    assert "list the jobs with `cronjob_manage` (action `list`)" in text
-    assert "call watches are the jobs whose `skills` include `conduit_push:calling-the-user`" in text
+    assert "`cronjob_manage` (action `list`)" in text
+    assert "`skills` include `conduit_push:calling-the-user`" in text
 
 
 def test_a_hermes_without_the_display_fields_still_gets_the_tool(home, paired):

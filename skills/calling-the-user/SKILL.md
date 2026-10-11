@@ -48,9 +48,11 @@ Before you create one, list the jobs with `cronjob_manage` (action `list`).
 The user's call watches are the jobs whose `skills` include
 `conduit_push:calling-the-user`. If one already watches the same thing,
 change it with action `update` (its `prompt`, `schedule` or `name`) instead
-of adding another; when what counts as the event changed, also reset what the
-job keeps (below). One job per thing watched: don't fold unrelated things
-into one job, and never make a second job for the same thing.
+of adding another. When what counts as the event changed, also reset what the
+job keeps: set its notepad keys back (`hermes cron notepad <job_id> set
+down_since none`), or have its `script` start over. One job per thing
+watched: don't fold unrelated things into one job, and never make a second
+job for the same thing.
 
 ### Creating a watch
 
@@ -63,8 +65,11 @@ Once they agree, create it with `cronjob_manage` (action `create`):
 - `skills`: `["conduit_push:calling-the-user"]`, so each run knows how to call.
 - `prompt`: everything a run needs on its own: what to check and how, what
   counts as the event, and to call with `asked_by_user: true` when it
-  happens. The user asked for these calls, so their What's worth a call
-  rules don't apply.
+  happens. The user asked for these calls, so the tool skips their What's
+  worth a call rules: put any hours they gave ("never before 9 am", in the
+  chat or the note) in the prompt. A run outside those hours doesn't call;
+  it keeps the incident and calls in the first run inside them if it's
+  still happening.
 - No `enabled_toolsets` list: one without `conduit` leaves the runs without
   `conduit_call_user`.
 
@@ -91,12 +96,15 @@ make their call watches match it. They tap it again after each edit, so treat
 it as an update, not a fresh start:
 
 1. Read the note line by line. A line about something happening ("the
-   homelab is down for more than 10 minutes") is a watch; a line that only
-   says when calls are fine ("never before 9 am") is not.
+   homelab is down for more than 10 minutes") is a watch. A line that only
+   says when calls are fine ("never before 9 am") is not a watch, but every
+   watch's prompt carries it (above), and a change to it is a change to
+   every watch.
 2. List the call watches. Leave alone the ones that still match, `update` the
-   ones whose condition or timing changed, and create watches only for
-   things no watch covers yet. Sending the note is their go-ahead for these,
-   so don't ask again.
+   ones whose condition, timing or hours changed, and create watches only
+   for things no watch covers yet, as "Creating a watch" says (name, skills,
+   schedule, state). Sending the note is their go-ahead for these, so don't
+   ask again.
 3. Call watches the note no longer mentions may have been set up in a chat:
    name them and ask whether to stop them. `remove` only after a yes.
 4. Say what you created, changed and kept, or that nothing needed changing.
