@@ -307,3 +307,24 @@ def test_an_empty_display_text_falls_back_to_the_content():
     assert api.chat_turns([{"role": "user", "display_content": "", "content": "Which slot?"},
                            {"role": "assistant", "display_content": "Slot two", "content": "raw"}]) == [
         ("user", "Which slot?"), ("assistant", "Slot two")]
+
+
+def test_a_stuck_route_gives_up_at_the_tools_own_deadline(monkeypatch):
+    import asyncio
+
+    class Stuck(FakeRoutes):
+        async def search_sessions(self, q="", limit=20, profile=None, **_):
+            await asyncio.sleep(5)
+
+    monkeypatch.setattr(api, "WATCH_CHAT_SEARCH_TIMEOUT_S", 0.05)
+    with pytest.raises(TimeoutError):
+        api.run_watch_find_chat(make_grant(), {"query": "GPU"}, routes=Stuck())
+
+
+def test_a_route_error_keeps_its_detail_off_the_watch(monkeypatch):
+    def boom():
+        raise HTTPException(status_code=500, detail="sqlite: /home/eric/.hermes/state.db locked")
+
+    answer = api._run_watch_chat_tool(make_grant(profile=None), "Chat search", 5, boom)
+    assert answer == {"ok": False, "status": 500, "detail": "Chat search failed on the host (500)"}
+    assert api.chat_title('He said "hi"') == "He said 'hi'"

@@ -3769,7 +3769,7 @@ def _chat_epoch(value: Any) -> Optional[float]:
 def chat_title(raw: Any) -> str:
     """A chat's title as an answer carries it: one line, clipped, no angle
     brackets (a title outside the fence can't open or close a tag)."""
-    line = " ".join(str(raw or "").replace("<", "").replace(">", "").split())
+    line = " ".join(str(raw or "").replace("<", "").replace(">", "").replace('"', "'").split())
     return line if len(line) <= WATCH_CHAT_TITLE_CHARS else line[:WATCH_CHAT_TITLE_CHARS - 1] + "…"
 
 
@@ -3969,8 +3969,9 @@ def run_watch_find_chat(grant: _WatchGrant, args: Dict[str, Any], routes=None,
         return {"ok": False, "status": 501, "detail": "Searching chats needs a newer Hermes on this host."}
 
     def search_for(words: str) -> list:
-        return chat_matches(asyncio.run(routes.search_sessions(
-            q=words, limit=WATCH_CHAT_RESULTS, profile=grant.profile)))
+        # Its own deadline, so a stuck route frees the worker too.
+        return chat_matches(asyncio.run(asyncio.wait_for(routes.search_sessions(
+            q=words, limit=WATCH_CHAT_RESULTS, profile=grant.profile), WATCH_CHAT_SEARCH_TIMEOUT_S)))
 
     matches = search_for(query)
     for word in chat_fallback_words(query) if not matches else []:
@@ -4010,9 +4011,9 @@ def run_watch_read_chat(grant: _WatchGrant, args: Dict[str, Any], routes=None,
     routes = routes or _hermes_session_routes()
     if routes is None:
         return {"ok": False, "status": 501, "detail": "Reading chats needs a newer Hermes on this host."}
-    response = asyncio.run(routes.get_session_messages(
+    response = asyncio.run(asyncio.wait_for(routes.get_session_messages(
         match["session_id"], profile=grant.profile, limit=WATCH_CHAT_PAGE, offset=0, order="latest",
-        include_compacted=True, inline_images=False))
+        include_compacted=True, inline_images=False), WATCH_CHAT_READ_TIMEOUT_S))
     rows = response.get("messages") if isinstance(response, dict) else None
     rows = rows if isinstance(rows, list) else []
     turns = chat_turns(rows)
@@ -4080,7 +4081,9 @@ def _run_watch_chat_tool(grant: _WatchGrant, feature: str, timeout: float,
     except HTTPException as exc:
         if exc.status_code == 404:
             return {"ok": False, "status": 404, "detail": "That chat no longer exists"}
-        return {"ok": False, "status": exc.status_code, "detail": str(exc.detail)}
+        # The route's own detail can carry chat text: named by status only.
+        logger.warning("%s for a Conduit Watch failed with HTTP %s", feature, exc.status_code)
+        return {"ok": False, "status": exc.status_code, "detail": f"{feature} failed on the host ({exc.status_code})"}
     except Exception as exc:  # noqa: BLE001 — named; the message can carry chat text
         _log_watch_failure(f"{feature} for a Conduit Watch failed", exc)
         return {"ok": False, "status": 500, "detail": f"{feature} failed on the host ({type(exc).__name__})"}
