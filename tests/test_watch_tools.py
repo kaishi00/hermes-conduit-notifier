@@ -736,6 +736,10 @@ def test_chats_are_granted_only_where_hermes_can_search_sessions(tmp_path):
     without = api.open_watch_grant({"tools": asked}, profile=None, path=write_pairing(tmp_path),
                                    relay=FakeRelay(), start=lambda g: None, session_routes=lambda: None)
     assert without["tools"] == ["web_search"], "the Watch asks the iPhone for chats instead"
+    with pytest.raises(api.TokenError) as refused:
+        api.open_watch_grant({"tools": ["find_chat", "read_chat"]}, profile=None, path=write_pairing(tmp_path),
+                             relay=FakeRelay(), start=lambda g: None, session_routes=lambda: None)
+    assert (refused.value.status, str(refused.value)) == (501, "Searching chats needs a newer Hermes on this host")
 
 
 def test_capabilities_name_watch_chats():

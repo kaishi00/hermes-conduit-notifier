@@ -3608,9 +3608,10 @@ def run_watch_tool(grant: _WatchGrant, request: Dict[str, Any]) -> Dict[str, Any
     if tool == WATCH_LIVE_TOKEN:
         return run_watch_live_token(grant)
     if tool == "find_chat":
+        run: Dict[str, Any] = {}
         return _run_watch_chat_tool(grant, "Chat search", WATCH_CHAT_SEARCH_TIMEOUT_S,
-                                    lambda: run_watch_find_chat(grant, args),
-                                    on_timeout=lambda: abandon_watch_chat_search(grant))
+                                    lambda: run_watch_find_chat(grant, args, run=run),
+                                    on_timeout=lambda: abandon_watch_chat_search(grant, run))
     if tool == "read_chat":
         return _run_watch_chat_tool(grant, "Chat reading", WATCH_CHAT_READ_TIMEOUT_S,
                                     lambda: run_watch_read_chat(grant, args))
@@ -3743,6 +3744,8 @@ def _chat_number(value: Any) -> Optional[str]:
     if isinstance(value, int) and not isinstance(value, bool):
         return str(value)
     if isinstance(value, float):
+        if not math.isfinite(value):
+            return None
         return str(int(value)) if value.is_integer() else repr(value)
     return None
 
@@ -3890,7 +3893,7 @@ def chat_read_plan(turns: list, stored: Optional[Tuple[str, int]]):
     split = len(clipped) - count
     if split <= 0:
         return ("verbatim", clipped)
-    if stored and stored[1] <= split and split - stored[1] <= CHAT_STALE_SUMMARY_TURNS:
+    if stored and 1 <= stored[1] <= split and split - stored[1] <= CHAT_STALE_SUMMARY_TURNS:
         return ("summarized", stored[0], clipped[stored[1]:])
     return ("needs_summary", clipped[:split], split, clipped[split:])
 
@@ -3941,13 +3944,19 @@ def _stored_chat_summary(session_id: str) -> Optional[Tuple[str, int]]:
 
 
 def run_watch_find_chat(grant: _WatchGrant, args: Dict[str, Any], routes=None,
-                        now: Optional[float] = None) -> Dict[str, Any]:
-    """find_chat: up to five numbered matches, as text for the model."""
+                        now: Optional[float] = None, run: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """find_chat: up to five numbered matches, as text for the model.
+    `run` records the search's number, and is marked abandoned when the
+    Watch stops waiting for it."""
+    run = run if run is not None else {}
     with grant.lock:
+        if run.get("abandoned"):
+            return {"ok": False, "status": 409, "detail": "The search was cut short; try again."}
         # Numbers only ever name the newest search's list.
         grant.chat_matches = []
         grant.chat_searches += 1
         search = grant.chat_searches
+        run["search"] = search
     query = chat_search_query(args.get("query"))
     if not query:
         return {"ok": False, "status": 400, "detail": "query is required"}
@@ -3968,7 +3977,7 @@ def run_watch_find_chat(grant: _WatchGrant, args: Dict[str, Any], routes=None,
         matches += [m for m in extra if all(m["session_id"] != n["session_id"] for n in matches)]
     matches = matches[:WATCH_CHAT_RESULTS]
     with grant.lock:
-        if grant.chat_searches != search:
+        if grant.chat_searches != search or run.get("abandoned"):
             return {"ok": False, "status": 409, "detail": "The search was cut short; try again."}
         grant.chat_matches = matches
     if not matches:
@@ -4032,19 +4041,22 @@ def run_watch_read_chat(grant: _WatchGrant, args: Dict[str, Any], routes=None,
     # UTF-8 bytes a character (CJK) can outgrow it, so older turns go first.
     # A clipped summary, title and turn always fit with one turn left.
     when = now if now is not None else time.time()
-    answer = {"ok": True, "chat": chat_readout(match, summary, recent, when), "title": match["title"]}
+    # The title is inside the fenced chat; only an empty chat names it apart.
+    answer = {"ok": True, "chat": chat_readout(match, summary, recent, when)}
     while len(recent) > 1 and len(json.dumps(answer, ensure_ascii=False).encode("utf-8")) > WATCH_CHAT_MAX_BYTES:
         recent = recent[1:]
         answer["chat"] = chat_readout(match, summary, recent, when)
     return answer
 
 
-def abandon_watch_chat_search(grant: _WatchGrant) -> None:
+def abandon_watch_chat_search(grant: _WatchGrant, run: Dict[str, Any]) -> None:
     """A search the Watch stopped waiting for: the model never heard its
-    numbers, so a late finish mustn't make them readable."""
+    numbers, so a late finish mustn't make them readable. A newer search
+    is left alone."""
     with grant.lock:
-        grant.chat_matches = []
-        grant.chat_searches += 1
+        run["abandoned"] = True
+        if run.get("search") is not None and grant.chat_searches == run["search"]:
+            grant.chat_matches = []
 
 
 def _run_watch_chat_tool(grant: _WatchGrant, feature: str, timeout: float,
@@ -4315,6 +4327,8 @@ def open_watch_grant(body: Any, *, profile: Optional[str], path: Any = None,
     if not tools:
         if WATCH_LIVE_TOKEN in requested and not any(tool in WATCH_JOB_TOOLS for tool in requested):
             raise TokenError(503, "GEMINI_API_KEY is not set on this Hermes host")
+        if all(tool in WATCH_CHAT_TOOLS for tool in requested):
+            raise TokenError(501, "Searching chats needs a newer Hermes on this host")
         raise TokenError(501, "This host can't run Hermes jobs for the Watch")
     max_calls = WATCH_JOB_GRANT_MAX_CALLS if server is not None else WATCH_GRANT_MAX_CALLS
     if not _e2e_crypto_available():
