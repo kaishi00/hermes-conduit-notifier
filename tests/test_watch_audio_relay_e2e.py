@@ -403,12 +403,12 @@ class FakeGptLive:
         self.thread = threading.Thread(target=self.loop.run_forever, daemon=True)
         self.thread.start()
 
-    def create_session(self, sdp, history=None, limiter_key=None, post=None, *, voice=None, briefing=None, greeting=None):
-        self.requests.append({"voice": voice, "briefing": briefing, "greeting": greeting})
+    def create_session(self, sdp, history=None, limiter_key=None, post=None, *, voice=None, briefing=None, greeting=None, call_opening=None):
+        self.requests.append({"voice": voice, "briefing": briefing, "greeting": greeting, "call_opening": call_opening})
         answer = asyncio.run_coroutine_threadsafe(self._answer(sdp), self.loop).result(20)
         return {"auth": "subscription", "session": {"id": "sess_test"}, "transport": {"type": "webrtc", "sdp": answer},
                 "source": "plugin", "voice": voice or "cove", "briefing_applied": bool(briefing),
-                "greeting_applied": greeting is not None}
+                "greeting_applied": greeting is not None or call_opening is True}
 
     async def _answer(self, sdp):
         import fractions
@@ -491,7 +491,8 @@ def test_gpt_live_runs_through_the_webrtc_helper(paired, monkeypatch):
         async def call():
             watch = Watch(grant)
             await watch.connect()
-            await watch.control({"type": "start", "engine": "gpt_live", "voice": "marin", "greeting": "Hi there"})
+            await watch.control({"type": "start", "engine": "gpt_live", "voice": "marin", "greeting": "Hi there",
+                                 "call_opening": True})
             kind, started = await watch.receive(30)
             assert kind == 3 and started["type"] == "started", started
             seen = await watch.until(lambda m: m[0] == 2 and m[1].get("type") == "session.started", 15)
@@ -511,7 +512,7 @@ def test_gpt_live_runs_through_the_webrtc_helper(paired, monkeypatch):
         started, seen, audio, echo, ended = asyncio.run(call())
         assert started == {"type": "started", "engine": "gpt_live", "voice": "marin", "input_rate": 16_000,
                            "output_rate": 24_000, "briefing_applied": False, "greeting_applied": True}
-        assert peer.requests == [{"voice": "marin", "briefing": None, "greeting": "Hi there"}]
+        assert peer.requests == [{"voice": "marin", "briefing": None, "greeting": "Hi there", "call_opening": True}]
         # The tone came through: loud samples, not comfort noise.
         samples = struct.unpack(f"<{len(audio) // 2}h", audio[: len(audio) // 2 * 2])
         assert max(abs(s) for s in samples) > 2000

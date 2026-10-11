@@ -171,6 +171,37 @@ def test_session_greets_first_only_when_conduit_asks(client, hermes, openai):
     assert 'Say: "Hey Neal, I\'m \'here\'."' in instructions, "the user's text stays on one line, inside the quotes"
 
 
+def test_session_opens_a_call_hermes_placed_by_speaking_first(client, hermes, openai):
+    body = client.post(f"{BASE}/gpt-live/session",
+                       json={"sdp": OFFER, "briefing": "About this call", "call_opening": True}).json()
+    assert body["greeting_applied"] is True, "Conduit must not send its own opening turn as well"
+    instructions = openai.calls[0][2]["session"]["instructions"]
+    assert instructions.endswith("About this call\n\n" + api.GPT_LIVE_CALL_OPENING)
+    assert api.GPT_LIVE_WAIT_FOR_USER not in instructions
+
+    # It wins over a greeting, and false keeps the usual policy.
+    assert client.post(f"{BASE}/gpt-live/session",
+                       json={"sdp": OFFER, "briefing": "About this call", "greeting": "Hi", "call_opening": True}).status_code == 200
+    assert openai.calls[1][2]["session"]["instructions"].endswith(api.GPT_LIVE_CALL_OPENING)
+    body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "call_opening": False}).json()
+    assert body["greeting_applied"] is False
+    assert openai.calls[2][2]["session"]["instructions"].endswith(api.GPT_LIVE_WAIT_FOR_USER)
+
+
+def test_call_opening_without_a_briefing_never_guesses_why(client, hermes, openai):
+    body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "call_opening": True}).json()
+    assert body["greeting_applied"] is True
+    instructions = openai.calls[0][2]["session"]["instructions"]
+    assert instructions.endswith(api.GPT_LIVE_CALL_OPENING_UNBRIEFED)
+    assert api.GPT_LIVE_CALL_OPENING not in instructions
+
+
+@pytest.mark.parametrize("call_opening", [1, "true", []])
+def test_session_rejects_a_bad_call_opening(client, openai, call_opening):
+    assert client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "call_opening": call_opening}).status_code == 400
+    assert openai.calls == []
+
+
 def test_greeting_control_characters_become_spaces():
     assert api._clean_greeting("Hi\x00there\u200b!") == "Hi there !"
 
@@ -319,6 +350,10 @@ def test_hermes_path_reports_the_greeting_only_when_its_config_carries_it(client
     assert calls[0][2]["instructions"].endswith(api._greet_first("Hi"))
     body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER}).json()
     assert body["greeting_applied"] is False
+    calls.clear()
+    body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "briefing": "About this call", "call_opening": True}).json()
+    assert body["greeting_applied"] is True
+    assert calls[0][0] == "build" and calls[0][2]["instructions"].endswith(api.GPT_LIVE_CALL_OPENING)
 
 
 @pytest.mark.parametrize("audio", ["loud", {"output": "x"}, {"output": {"voice": "bad voice!"}}])
