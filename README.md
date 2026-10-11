@@ -752,10 +752,10 @@ away mid-call (crash, no signal), the hold runs out and the plugin calls on
 its own, so the call never depends on the phone reaching this host after the
 call.
 
-Calls are off until you turn them on in Conduit's Voice settings. Settings
-and watches live per profile in `<hermes home>/conduit-calls.json` (mode
-`0600`), shared by the turn-end hooks and the dashboard routes under one file
-lock, so they survive restarts:
+Calls are off until you turn them on in Conduit's Settings, under Calls from
+Hermes. Settings and watches live per profile in
+`<hermes home>/conduit-calls.json` (mode `0600`), shared by the turn-end hooks
+and the dashboard routes under one file lock, so they survive restarts:
 
 | Setting | Default | Range |
 | --- | --- | --- |
@@ -766,10 +766,11 @@ lock, so they survive restarts:
 | `min_gap_s` (time between calls) | 120 s | 30–3600 s |
 | `per_hour` | 6 | 1–30 |
 | `per_day` | 20 | 1–60 |
+| `rules` (what's worth a call, 0.16+) | empty | up to 500 characters |
 
 | Method | Route | Body | Returns |
 | --- | --- | --- | --- |
-| GET | `/api/plugins/conduit_push/calls?profile=` | | `{ok, paired, settings, bounds, watches}` |
+| GET | `/api/plugins/conduit_push/calls?profile=` | | `{ok, paired, settings, bounds, rules_max, watches}` |
 | PUT | `/api/plugins/conduit_push/calls?profile=` | `{settings: {...}}` (any subset) | `{ok, settings}` |
 | POST | `/api/plugins/conduit_push/calls/watches?profile=` | `{session_ids: [...], title, hold_s?, ended_within_s?}` | `{ok, status: "watching", id}` or `{ok, status: "ended", outcome}` |
 | PUT | `/api/plugins/conduit_push/calls/watches/{id}?profile=` | `{hold_s}` (0 releases) | `{ok, status: "watching"}`, `{ok, status: "ended", outcome}` or `{ok, status: "gone"}` |
@@ -849,6 +850,15 @@ with a `reason` (one spoken sentence, up to 200 characters) and
 - `asked_by_user: true` needs "call when I ask"; `false` needs "Hermes
   decides". Either way the limits apply, presence holds it, and a session
   already watched keeps one watch (it takes the reason).
+- **What's worth a call (0.16+):** with `rules` written (the user's own
+  words, such as "only if production is down"), a call Hermes decides on
+  first answers `check_rules` with them. It goes only when Hermes calls again
+  with `fits_rules: true` in the same chat, within 10 minutes, while the rules
+  are unchanged. Calls the user asked for skip the rules, and Hermes can read
+  them but not change them.
+- A call the user asked for while calls are off answers `calls_off` with a
+  `conduit://settings/calls` link for Hermes' reply, which opens Calls from
+  Hermes in Conduit.
 - The tool shows only while this profile is paired and one of those is on.
   Subagents can't call; their parent can.
 - If `hermes tools` lists the `conduit` toolset as off for a platform, turn

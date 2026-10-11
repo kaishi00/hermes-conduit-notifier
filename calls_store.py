@@ -69,8 +69,13 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "min_gap_s": 120,
     "per_hour": 6,
     "per_day": 20,
+    # The user's own words on what's worth a call Hermes decides to make
+    # ("only if production is down"): Hermes reads them before such a call
+    # (call_tool). Empty: the skill's rule alone.
+    "rules": "",
 }
 BOOL_SETTINGS = ("enabled", "when_asked", "decides", "alerts")
+MAX_RULES_CHARS = 500
 # Inclusive bounds. per_day stops at the relay's own daily ceiling.
 INT_BOUNDS: dict[str, tuple[int, int]] = {
     "min_gap_s": (30, 3600),
@@ -145,8 +150,13 @@ class CallStore:
                 low, high = INT_BOUNDS[key]
                 if not isinstance(value, int) or isinstance(value, bool) or not low <= value <= high:
                     raise ValueError(f"{key} must be a whole number from {low} to {high}")
+            elif key == "rules":
+                if _rules(value) is None:
+                    raise ValueError(f"rules must be text of up to {MAX_RULES_CHARS} characters")
             else:
                 raise ValueError(f"unknown setting {key}")
+        if "rules" in changes:
+            changes = {**changes, "rules": _rules(changes["rules"])}
         with self._locked() as state:
             state["settings"].update(changes)
             return dict(state["settings"])
@@ -562,6 +572,7 @@ def _normalized(raw: Any, now: float) -> dict[str, Any]:
         value = stored.get(key)
         if isinstance(value, int) and not isinstance(value, bool) and low <= value <= high:
             settings[key] = value
+    settings["rules"] = _rules(stored.get("rules")) or ""
     watches = []
     for watch in raw.get("watches") if isinstance(raw.get("watches"), list) else []:
         try:
@@ -662,6 +673,16 @@ def _title(value: Any) -> str:
 def _reason(value: Any) -> str:
     text = " ".join(value.split()) if isinstance(value, str) else ""
     return text[:MAX_REASON_CHARS]
+
+
+def _rules(value: Any) -> str | None:
+    """The user's call rules as kept: lines trimmed, blank lines and control
+    characters dropped. None when ``value`` isn't text or is too long."""
+    if not isinstance(value, str):
+        return None
+    lines = ("".join(char for char in line if char.isprintable()).strip() for line in value.splitlines())
+    text = "\n".join(line for line in lines if line)
+    return text if len(text) <= MAX_RULES_CHARS else None
 
 
 @contextmanager

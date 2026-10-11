@@ -12,6 +12,8 @@ so they follow the user's own settings in the Conduit app:
 
 - **Calls they ask for** ("call when I ask", on by default once calls are on).
 - **Calls you decide to make** ("Hermes decides", off unless they turned it on).
+- **What's worth a call**: the user's own rules for calls you decide to make
+  ("only if production is down", "not before 9 am"), if they wrote any.
 - **Limits**: a minimum gap between calls and a cap per hour and per day. A
   call over a limit becomes the usual notification.
 
@@ -47,16 +49,35 @@ Never call for routine progress, a finished chat reply, small talk, or to
 ask something that can wait for their next message. When unsure, don't call:
 put it in your reply, and the user gets the usual notification.
 
+If the user wrote rules for these calls, the tool first answers
+`check_rules` with them. Their rules win where they speak: news they said is
+worth a call is, even if it isn't urgent, and what they ruled out (a topic,
+a time of day) isn't. Where they say nothing, the rule above holds. Call
+again with `fits_rules: true` only if this call clearly fits; otherwise don't
+call. Calls they ask for don't go through their rules.
+
 ## Reading the answer
 
 - `ok: true` means the phone rings when this turn ends (unless a limit holds
   it back or the user is already in a voice call with you). Don't tell the
   user it's ringing; just finish the turn.
-- `calls_off` when they asked: tell them calls are off in Conduit (Voice
-  settings, Calls from Hermes) and give the result in your reply.
+- `check_rules`: read the user's rules (above) before deciding.
+- `calls_off` when they asked: tell them calls are off in Conduit and give the
+  result in your reply. In a text reply, link the setting:
+  [Calls from Hermes](conduit://settings/calls) opens it in Conduit. Leave the
+  link out of anything spoken.
 - `calls_off` when you decided: don't mention it; give the news in your reply.
 - `not_paired`, `too_many`, `subagent`: give the news in your reply. A
   subagent reports back; the main conversation decides whether to call.
+
+## When the user says when to call
+
+If the user tells you when calls are fine or not ("don't call me before 9",
+"only call if the site is down"), follow it in this conversation. You can't
+change their call settings, so tell them where every conversation will see
+it: What's worth a call, in [Calls from Hermes](conduit://settings/calls) in
+Conduit. To turn calls on or off, or change the limits, they use the same
+place.
 
 ## When they don't pick up
 

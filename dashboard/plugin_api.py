@@ -3148,6 +3148,8 @@ def calls_status() -> Dict[str, Any]:
         "paired": _load_pairing_state(_pairing_state_path()) is not None,
         "settings": store.settings(),
         "bounds": {key: {"min": low, "max": high} for key, (low, high) in module.INT_BOUNDS.items()},
+        # The longest "what's worth a call" note the host keeps.
+        "rules_max": module.MAX_RULES_CHARS,
         "watches": store.watch_count(),
     }
 
