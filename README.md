@@ -978,7 +978,8 @@ seals the answers back. This host opens no inbound route of its own.
   the numbered matches as fenced text for the voice model. `read_chat`
   reads only a chat the grant's newest search returned, by its number,
   through Hermes' own `GET /api/sessions/{id}/messages` (newest 500 rows,
-  user and Hermes text only) and answers `{chat, title}`: word for word when
+  user and Hermes text only) and answers `{chat}` (`{chat: "", title}` for a
+  chat with no messages): word for word when
   short, else a summary of the older part (a saved voice call's stored one,
   or one made once per call with Hermes' `compression` model) plus the
   latest turns; `{unknown: true}` for a number the search didn't return. A

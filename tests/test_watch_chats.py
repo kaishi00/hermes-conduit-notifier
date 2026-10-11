@@ -301,3 +301,9 @@ def test_session_routes_prefer_the_dashboards_module_and_survive_a_broken_import
     real_import = builtins.__import__
     monkeypatch.setattr(builtins, "__import__", explode)
     assert api._hermes_session_routes() is None
+
+
+def test_an_empty_display_text_falls_back_to_the_content():
+    assert api.chat_turns([{"role": "user", "display_content": "", "content": "Which slot?"},
+                           {"role": "assistant", "display_content": "Slot two", "content": "raw"}]) == [
+        ("user", "Which slot?"), ("assistant", "Slot two")]

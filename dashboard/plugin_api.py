@@ -3488,8 +3488,9 @@ class _WatchGrant:
         # them; read_chat reads only these (run_watch_read_chat).
         self.chat_matches: list = []
         self.chat_searches = 0
-        # Summaries made for read_chat, by (session id, turns covered).
-        self.chat_summaries: Dict[Tuple[str, int], str] = {}
+        # Summaries made for read_chat, by (session id, turns covered,
+        # whether the page held the whole chat).
+        self.chat_summaries: Dict[Tuple[str, int, bool], str] = {}
         self.seen: set = set()
         self.lock = threading.Lock()
         self.closed = threading.Event()
@@ -3844,7 +3845,7 @@ def chat_summary(matches: list, now: float) -> str:
 
 def _row_text(row: Dict[str, Any]) -> str:
     shown = row.get("display_content")
-    if isinstance(shown, str):
+    if isinstance(shown, str) and shown.strip():
         return shown
     content = row.get("content")
     if isinstance(content, str):
