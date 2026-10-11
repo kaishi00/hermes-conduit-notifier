@@ -4047,6 +4047,8 @@ def run_watch_read_chat(grant: _WatchGrant, args: Dict[str, Any], routes=None,
             if summary:
                 with grant.lock:
                     grant.chat_summaries[key] = summary
+    # A stored or fresh summary can carry a lone surrogate too.
+    summary = _chat_text(summary) or None
     if summary and len(summary) > WATCH_CHAT_SUMMARY_CHARS:
         summary = summary[:WATCH_CHAT_SUMMARY_CHARS - 1] + "…"
     # The sealed answer has to fit the relay's bound: text that runs to three

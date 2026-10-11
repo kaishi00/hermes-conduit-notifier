@@ -342,3 +342,13 @@ def test_a_search_given_up_on_before_it_started_retires_the_old_numbers():
 def test_a_lone_surrogate_cant_sink_an_answer():
     assert api.chat_title("Bad \ud800 title") == "Bad ? title"
     assert api.chat_turns([{"role": "user", "content": "odd \udfff text"}]) == [("user", "odd ? text")]
+
+
+def test_a_lone_surrogate_in_a_summary_cant_sink_an_answer():
+    turns = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"turn {i}"} for i in range(api.WATCH_CHAT_PAGE)]
+    routes = FakeRoutes({"long": [{"session_id": "s", "title": "Long"}]}, {"s": turns})
+    grant = make_grant()
+    api.run_watch_find_chat(grant, {"query": "long"}, routes=routes)
+    answer = api.run_watch_read_chat(grant, {"number": "1"}, routes=routes,
+                                     summarize=lambda older: "Odd \ud800 summary.", now=NOW)
+    assert answer["ok"] and "Odd ? summary." in answer["chat"]
