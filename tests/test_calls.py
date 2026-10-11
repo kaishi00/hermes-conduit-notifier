@@ -506,6 +506,44 @@ def test_the_tool_follows_the_users_settings(home, fake, paired):
     assert _tool({"reason": "Heads up.", "asked_by_user": False})["ok"] is True
 
 
+def test_a_call_hermes_decides_on_first_reads_the_users_rules(home, fake, paired):
+    _settings(home, decides=True, rules="Only if production is down.")
+    heads_up = {"reason": "Production is down.", "asked_by_user": False}
+    answer = _tool(heads_up)
+    assert answer["error"] == "check_rules"
+    assert answer["rules"] == "Only if production is down."
+    assert calls._store(home).watch_count() == 0, "nothing waits to ring yet"
+    assert _tool({**heads_up, "fits_rules": True})["ok"] is True
+    assert calls._store(home).watch_count() == 1
+
+
+def test_fits_rules_counts_only_for_the_rules_just_shown(home, fake, paired):
+    _settings(home, decides=True, rules="Only outages.")
+    heads_up = {"reason": "Production is down.", "asked_by_user": False, "fits_rules": True}
+    assert _tool(heads_up)["error"] == "check_rules", "never shown"
+    assert _tool(heads_up, session_id="st-2")["error"] == "check_rules", "shown to another chat only"
+    _settings(home, decides=True, rules="Only outages, and never at night.")
+    answer = _tool(heads_up)
+    assert answer["error"] == "check_rules", "the rules changed since"
+    assert answer["rules"] == "Only outages, and never at night."
+    assert _tool(heads_up)["ok"] is True
+
+
+def test_the_users_rules_leave_other_calls_alone(home, fake, paired):
+    _settings(home, decides=False, rules="Only outages.")
+    assert _tool({"reason": "Heads up.", "asked_by_user": False})["error"] == "calls_off", "Hermes decides is off"
+    assert _tool({"reason": "Done.", "asked_by_user": True})["ok"] is True, "asking wins"
+    _settings(home, decides=True, rules="")
+    assert _tool({"reason": "Heads up.", "asked_by_user": False}, session_id="st-2")["ok"] is True, "no rules"
+
+
+def test_calls_off_links_the_setting_for_a_call_the_user_asked_for(home, fake, paired):
+    note = _tool({"reason": "Done.", "asked_by_user": True})["note"]
+    assert "[Calls from Hermes](conduit://settings/calls)" in note
+    _settings(home)
+    assert "conduit://" not in _tool({"reason": "Heads up.", "asked_by_user": False})["note"]
+
+
 def test_the_tool_refuses_what_cannot_ring(home, fake, monkeypatch):
     _settings(home)
     monkeypatch.setattr(call_tool.client, "load_state", lambda: None)

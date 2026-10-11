@@ -46,6 +46,7 @@ def test_calls_start_off_with_the_agreed_defaults(tmp_path):
         "min_gap_s": 120,
         "per_hour": 6,
         "per_day": 20,
+        "rules": "",
     }
 
 
@@ -71,6 +72,30 @@ def test_settings_outside_the_bounds_are_refused(tmp_path, changes):
     with pytest.raises(ValueError):
         store.update_settings(changes)
     assert store.settings()["per_day"] == 20
+
+
+def test_the_users_call_rules_are_kept_as_plain_lines(tmp_path):
+    store = _store(tmp_path)
+    saved = store.update_settings({"rules": "  Only if production is down.\r\n\n\tNot before 9 am.\x07  "})
+    assert saved["rules"] == "Only if production is down.\nNot before 9 am."
+    assert CallStore(tmp_path).settings()["rules"] == "Only if production is down.\nNot before 9 am."
+    assert store.update_settings({"rules": "x" * 500})["rules"] == "x" * 500
+    assert store.update_settings({"rules": "   "})["rules"] == ""
+
+
+@pytest.mark.parametrize("rules", ["x" * 501, 7, None, ["Only outages"]])
+def test_call_rules_that_arent_short_text_are_refused(tmp_path, rules):
+    store = _store(tmp_path, rules="Only outages.")
+    with pytest.raises(ValueError, match="rules"):
+        store.update_settings({"rules": rules})
+    assert store.settings()["rules"] == "Only outages."
+
+
+def test_call_rules_unreadable_on_disk_read_as_none(tmp_path):
+    (tmp_path / "conduit-calls.json").write_text(json.dumps({"version": 1, "settings": {"enabled": True, "rules": 3}}))
+    assert CallStore(tmp_path).settings()["rules"] == ""
+    (tmp_path / "conduit-calls.json").write_text(json.dumps({"version": 1, "settings": {"rules": "y" * 501}}))
+    assert CallStore(tmp_path).settings()["rules"] == ""
 
 
 def test_a_watch_needs_calls_on_and_call_when_asked(tmp_path):

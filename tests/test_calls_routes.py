@@ -56,12 +56,13 @@ def test_status_reports_the_defaults_and_their_bounds(paired):
         "ok": True,
         "paired": True,
         "settings": {"enabled": False, "when_asked": True, "decides": False, "alerts": False,
-                     "min_gap_s": 120, "per_hour": 6, "per_day": 20},
+                     "min_gap_s": 120, "per_hour": 6, "per_day": 20, "rules": ""},
         "bounds": {
             "min_gap_s": {"min": 30, "max": 3600},
             "per_hour": {"min": 1, "max": 30},
             "per_day": {"min": 1, "max": 60},
         },
+        "rules_max": 500,
         "watches": 0,
     }
 
@@ -186,6 +187,15 @@ def test_an_oversized_body_is_refused(paired):
     response = _http().post(f"{BASE}/calls/watches", content=b"{" + b" " * 5000 + b"}",
                             headers={"content-type": "application/json"})
     assert response.status_code == 413
+
+
+def test_the_users_call_rules_change_and_persist(paired):
+    http = _http()
+    response = http.put(f"{BASE}/calls", json={"settings": {"rules": "Only if production is down. "}})
+    assert response.status_code == 200
+    assert response.json()["settings"]["rules"] == "Only if production is down."
+    assert http.get(f"{BASE}/calls").json()["settings"]["rules"] == "Only if production is down."
+    assert http.put(f"{BASE}/calls", json={"settings": {"rules": "x" * 501}}).status_code == 400
 
 
 def test_new_settings_for_hermes_decides_and_alerts_change(paired):

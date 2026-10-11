@@ -5,7 +5,10 @@ ends, so it opens on the finished result: the turn's final reply is in the
 chat the call opens, and the reason Hermes gives is the first thing said.
 The user's Conduit settings decide whether it may: "call when I ask" for a
 call the user asked for, "Hermes decides" for one Hermes chose to make, and
-the usual limits (calls.py). The bundled skill carries the full guidance
+the usual limits (calls.py). A call Hermes chose to make is first checked
+against the user's own rules for such calls, when they wrote any: the tool
+hands them back, and the call goes only when Hermes asks again saying it fits
+(``fits_rules``). The bundled skill carries the full guidance
 (``skill_view("conduit_push:calling-the-user")``).
 """
 
@@ -13,6 +16,8 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
+import time
 from typing import Any, Callable
 
 from . import calls, client
@@ -22,6 +27,8 @@ logger = logging.getLogger("hermes.plugins.conduit_push")
 TOOL_NAME = "conduit_call_user"
 TOOLSET = "conduit"
 SKILL_NAME = "calling-the-user"
+# Opens Calls from Hermes in Conduit (Voice settings), from a text reply.
+SETTINGS_LINK = "[Calls from Hermes](conduit://settings/calls)"
 
 SCHEMA: dict[str, Any] = {
     "name": TOOL_NAME,
@@ -48,6 +55,13 @@ SCHEMA: dict[str, Any] = {
             "asked_by_user": {
                 "type": "boolean",
                 "description": "True only if the user asked you to call, phone or ring them.",
+            },
+            "fits_rules": {
+                "type": "boolean",
+                "description": (
+                    "Only after a check_rules answer: true when this call clearly fits the user's rules for "
+                    "calls you decide to make."
+                ),
             },
         },
         "required": ["reason", "asked_by_user"],
@@ -115,12 +129,23 @@ def _handle(args: Any, session_id: Any, is_child: Callable[[Any], bool]) -> dict
     if client.load_state() is None:
         return {"ok": False, "error": "not_paired",
                 "note": "This Hermes profile isn't paired with the Conduit app, so it can't call. Say so in your reply."}
+    if not asked:
+        settings = calls.settings()
+        rules = settings["rules"] if settings["enabled"] and settings["decides"] else ""
+        # Fits only rules this conversation was just shown, as they are now.
+        if rules and not (args.get("fits_rules") is True and _rules_seen(session, rules)):
+            _show_rules(session, rules)
+            return {"ok": False, "error": "check_rules", "rules": rules,
+                    "note": ("The user wrote these rules for calls you decide to make. If this news clearly fits "
+                             "them, call again with fits_rules true. If it doesn't, or you aren't sure, don't call: "
+                             "put the news in your reply.")}
     try:
         calls.tool_watch(session, reason, asked=asked)
     except ValueError as error:
         if str(error) == "calls_off":
-            note = ("The user hasn't turned on calls they ask for in Conduit (Voice settings, Calls from Hermes). "
-                    "Tell them in your reply.") if asked else (
+            note = ("The user hasn't turned on calls they ask for in Conduit. Tell them in your reply, and that "
+                    f"they turn them on in Conduit's Voice settings, under {SETTINGS_LINK} (a link that opens it; "
+                    "leave the link out of anything spoken).") if asked else (
                     "The user hasn't let Hermes decide when to call. Don't call; put the news in your reply.")
             return {"ok": False, "error": "calls_off", "note": note}
         if str(error) == "too_many":
@@ -131,6 +156,28 @@ def _handle(args: Any, session_id: Any, is_child: Callable[[Any], bool]) -> dict
                      "the usual notification then) or they're already in a voice call with you. Finish the work "
                      "and end the turn with the result: the call opens with your reason and that reply. Don't "
                      "say the phone is ringing yet.")}
+
+
+# Rules each conversation was shown, and when: a fits_rules call counts only
+# after them.
+RULES_SEEN_S = 600
+_rules_shown: dict[str, tuple[str, float]] = {}
+_rules_lock = threading.Lock()
+
+
+def _show_rules(session: str, rules: str) -> None:
+    now = time.monotonic()
+    with _rules_lock:
+        for key, (_, at) in list(_rules_shown.items()):
+            if now - at > RULES_SEEN_S:
+                del _rules_shown[key]
+        _rules_shown[session] = (rules, now)
+
+
+def _rules_seen(session: str, rules: str) -> bool:
+    with _rules_lock:
+        shown = _rules_shown.get(session)
+    return shown is not None and shown[0] == rules and time.monotonic() - shown[1] <= RULES_SEEN_S
 
 
 def _answer(**fields: Any) -> str:
