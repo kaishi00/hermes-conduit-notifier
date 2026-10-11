@@ -3609,7 +3609,8 @@ def run_watch_tool(grant: _WatchGrant, request: Dict[str, Any]) -> Dict[str, Any
         return run_watch_live_token(grant)
     if tool == "find_chat":
         return _run_watch_chat_tool(grant, "Chat search", WATCH_CHAT_SEARCH_TIMEOUT_S,
-                                    lambda: run_watch_find_chat(grant, args))
+                                    lambda: run_watch_find_chat(grant, args),
+                                    on_timeout=lambda: abandon_watch_chat_search(grant))
     if tool == "read_chat":
         return _run_watch_chat_tool(grant, "Chat reading", WATCH_CHAT_READ_TIMEOUT_S,
                                     lambda: run_watch_read_chat(grant, args))
@@ -3678,16 +3679,30 @@ CHAT_SUMMARY_INSTRUCTIONS = (
 _CHAT_MATCH_NUMBER = re.compile(r"^(?:(?:number|no\.?|#)\s*)?(\d{1,2})$", re.IGNORECASE)
 _CHAT_APP_LINK = re.compile(r"[ \t]*\[(?:\\.|[^\]\\\n])*\]\(conduit://[^)\s]*\)", re.IGNORECASE)
 
-_chat_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="conduit-watch-chats")
+# A read can take its whole budget (a summary included): enough workers that
+# a few Watch calls at once don't queue past the Watch's 35 s wait.
+_chat_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="conduit-watch-chats")
+# A chat title in an answer: one line, this long at most.
+WATCH_CHAT_TITLE_CHARS = 120
+# A stored voice summary in a read: its clipped length, so the answer fits.
+WATCH_CHAT_SUMMARY_CHARS = 3_000
+# _chat_epoch's sane range (2100-01-01): datetime refuses far-off values.
+_CHAT_EPOCH_MAX = 4_102_444_800
 
 
 def _hermes_session_routes():
     """Hermes' dashboard session routes, or None on a Hermes without the
-    search route."""
-    try:
-        from hermes_cli.web_routers import sessions
-    except ImportError:
-        return None
+    search route. The routes read the profile's session store on disk, so a
+    plugin host process reads the same chats; the dashboard's own module is
+    used when it's loaded."""
+    sessions = sys.modules.get("hermes_cli.web_routers.sessions")
+    if sessions is None:
+        try:
+            from hermes_cli.web_routers import sessions
+        except Exception as exc:  # noqa: BLE001 — a broken import only costs the chat tools
+            if not isinstance(exc, ImportError):
+                logger.warning("Hermes' session routes failed to load: %s", type(exc).__name__)
+            return None
     if not (hasattr(sessions, "search_sessions") and hasattr(sessions, "get_session_messages")):
         return None
     return sessions
@@ -3725,8 +3740,10 @@ def chat_fallback_words(query: str) -> list:
 def _chat_number(value: Any) -> Optional[str]:
     if isinstance(value, str):
         return value or None
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return format(value, "g")
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    if isinstance(value, float):
+        return str(int(value)) if value.is_integer() else repr(value)
     return None
 
 
@@ -3734,14 +3751,22 @@ def _chat_epoch(value: Any) -> Optional[float]:
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
-        return float(value) if value > 0 else None
-    if isinstance(value, str):
+        seconds = float(value)
+    elif isinstance(value, str):
         try:
             seconds = float(value)
         except ValueError:
             return None
-        return seconds if seconds > 0 else None
-    return None
+    else:
+        return None
+    return seconds if 0 < seconds < _CHAT_EPOCH_MAX else None
+
+
+def chat_title(raw: Any) -> str:
+    """A chat's title as an answer carries it: one line, clipped, no angle
+    brackets (a title outside the fence can't open or close a tag)."""
+    line = " ".join(str(raw or "").replace("<", "").replace(">", "").split())
+    return line if len(line) <= WATCH_CHAT_TITLE_CHARS else line[:WATCH_CHAT_TITLE_CHARS - 1] + "…"
 
 
 def chat_plain_snippet(raw: Any) -> str:
@@ -3766,7 +3791,7 @@ def chat_matches(response: Any) -> list:
         title = row.get("title")
         matches.append({
             "session_id": sid,
-            "title": title.strip() if isinstance(title, str) else "",
+            "title": chat_title(title) if isinstance(title, str) else "",
             "snippet": chat_plain_snippet(row.get("snippet") if isinstance(row.get("snippet"), str) else ""),
             "last_active": (_chat_epoch(row.get("last_active")) or _chat_epoch(row.get("session_started"))
                             or _chat_epoch(row.get("started_at"))),
@@ -3948,7 +3973,8 @@ def run_watch_find_chat(grant: _WatchGrant, args: Dict[str, Any], routes=None,
         grant.chat_matches = matches
     if not matches:
         return {"ok": True, "count": 0, "chats": ""}
-    return {"ok": True, "count": len(matches), "chats": chat_summary(matches, now or time.time())}
+    return {"ok": True, "count": len(matches),
+            "chats": chat_summary(matches, now if now is not None else time.time())}
 
 
 def run_watch_read_chat(grant: _WatchGrant, args: Dict[str, Any], routes=None,
@@ -3979,30 +4005,33 @@ def run_watch_read_chat(grant: _WatchGrant, args: Dict[str, Any], routes=None,
     turns = chat_turns(rows)
     if not turns:
         return {"ok": True, "chat": "", "title": match["title"]}
+    # The route pages from the newest row and returns the page oldest first.
     # The page holds the whole chat only when it isn't full; a stored
-    # summary counts turns from the chat's start, so it's checked only then.
+    # summary counts turns from the chat's start, so it's used only then.
+    # A longer chat's older visible turns are summarized instead.
     complete = len(rows) < WATCH_CHAT_PAGE
-    stored = (stored_summary or _stored_chat_summary)(match["session_id"])
-    plan = chat_read_plan(turns, stored if complete else None)
+    stored = (stored_summary or _stored_chat_summary)(match["session_id"]) if complete else None
+    plan = chat_read_plan(turns, stored)
     if plan[0] == "verbatim":
-        summary, recent = (None if complete else (stored[0] if stored else None)), plan[1]
+        summary, recent = None, plan[1]
     elif plan[0] == "summarized":
         summary, recent = plan[1], plan[2]
     else:
         _, older, covers, recent = plan
-        summary = None if complete else (stored[0] if stored else None)
-        if complete:
-            key = (match["session_id"], covers)
-            with grant.lock:
-                summary = grant.chat_summaries.get(key)
-            if summary is None:
-                summary = (summarize or _summarize_chat)(older)
-                if summary:
-                    with grant.lock:
-                        grant.chat_summaries[key] = summary
+        key = (match["session_id"], covers, complete)
+        with grant.lock:
+            summary = grant.chat_summaries.get(key)
+        if summary is None:
+            summary = (summarize or _summarize_chat)(older)
+            if summary:
+                with grant.lock:
+                    grant.chat_summaries[key] = summary
+    if summary and len(summary) > WATCH_CHAT_SUMMARY_CHARS:
+        summary = summary[:WATCH_CHAT_SUMMARY_CHARS - 1] + "…"
     # The sealed answer has to fit the relay's bound: text that runs to three
     # UTF-8 bytes a character (CJK) can outgrow it, so older turns go first.
-    when = now or time.time()
+    # A clipped summary, title and turn always fit with one turn left.
+    when = now if now is not None else time.time()
     answer = {"ok": True, "chat": chat_readout(match, summary, recent, when), "title": match["title"]}
     while len(recent) > 1 and len(json.dumps(answer, ensure_ascii=False).encode("utf-8")) > WATCH_CHAT_MAX_BYTES:
         recent = recent[1:]
@@ -4010,13 +4039,24 @@ def run_watch_read_chat(grant: _WatchGrant, args: Dict[str, Any], routes=None,
     return answer
 
 
+def abandon_watch_chat_search(grant: _WatchGrant) -> None:
+    """A search the Watch stopped waiting for: the model never heard its
+    numbers, so a late finish mustn't make them readable."""
+    with grant.lock:
+        grant.chat_matches = []
+        grant.chat_searches += 1
+
+
 def _run_watch_chat_tool(grant: _WatchGrant, feature: str, timeout: float,
-                         job: Callable[[], Dict[str, Any]]) -> Dict[str, Any]:
+                         job: Callable[[], Dict[str, Any]],
+                         on_timeout: Optional[Callable[[], None]] = None) -> Dict[str, Any]:
     future = _chat_executor.submit(_scoped_call, grant.profile, job)
     try:
         return future.result(timeout=timeout)
     except (FutureTimeoutError, TimeoutError):
         future.cancel()
+        if on_timeout:
+            on_timeout()
         logger.warning("%s for a Conduit Watch timed out after %ss", feature, timeout)
         return {"ok": False, "status": 504, "detail": f"{feature} took too long"}
     except TokenError as exc:
