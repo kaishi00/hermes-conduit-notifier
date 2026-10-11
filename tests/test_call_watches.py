@@ -358,3 +358,76 @@ def test_the_store_survives_a_damaged_file(home, hermes, clock):
     (home / watches.FILE_NAME).write_text('{"watches": {"x/../y": {}, "' + job_id + '": {"config": {"what": 3}}}}')
     assert watches._store().configs() == {}
     assert _report(job_id, True)["error"] == "older_watch"
+
+
+def test_the_note_says_when_scheduled_runs_lack_the_conduit_tools(home, hermes, monkeypatch):
+    assert "hermes tools" not in _setup({"action": "set", "watch": HOMELAB})["note"], "can't tell: says nothing"
+    monkeypatch.setattr(watches, "_cron_has_conduit", lambda: False)
+    answer = _setup({"action": "set", "watch": HOMELAB})
+    assert answer["ok"] is True and "turn conduit on for cron with `hermes tools`" in answer["note"]
+
+
+def test_a_call_that_fails_to_set_up_still_ends_with_the_news_once(home, hermes, clock, monkeypatch):
+    job_id = _homelab(hermes, for_minutes=0)
+
+    def broken(*args, **kwargs):
+        raise OSError("disk full")
+    monkeypatch.setattr(calls, "tool_watch", broken)
+    answer = _report(job_id, True)
+    assert answer["ok"] is True and answer["status"] == "not_called" and "reply" not in answer
+    assert _report(job_id, True)["status"] == "already_called"
+
+
+def test_minutes_written_as_decimal_text(home, hermes):
+    answer = _setup({"action": "set", "watch": {**HOMELAB, "for_minutes": "10.0"}})
+    assert answer["ok"] is True and answer["watch"]["calls_after_minutes"] == 10
+    assert _setup({"action": "set", "watch": {**HOMELAB, "for_minutes": "ten"}})["ok"] is False
+    assert _setup({"action": "set", "watch": {**HOMELAB, "for_minutes": "10.5"}})["ok"] is False
+
+
+def test_a_full_call_queue_tries_again_on_the_next_run(home, hermes, clock, monkeypatch):
+    job_id = _homelab(hermes, for_minutes=0)
+    real = calls.tool_watch
+
+    def full(*args, **kwargs):
+        raise ValueError("too_many")
+    monkeypatch.setattr(calls, "tool_watch", full)
+    busy = _report(job_id, True)
+    assert busy["status"] == "busy" and busy["reply"] == "[SILENT]"
+    monkeypatch.setattr(calls, "tool_watch", real)
+    assert _report(job_id, True)["status"] == "calling"
+
+
+def test_a_removed_watch_never_rings_from_a_run_already_going(home, hermes, clock):
+    job_id = _homelab(hermes, for_minutes=0)
+    _setup({"action": "remove", "id": job_id})
+    assert _report(job_id, True)["error"] == "older_watch"
+    assert _rang(home) == []
+
+
+def test_set_stops_at_the_watch_cap(home, hermes, monkeypatch):
+    monkeypatch.setattr(watches, "MAX_WATCHES", 2)
+    _setup({"action": "set", "watch": HOMELAB})
+    _setup({"action": "set", "watch": {"what": "site down", "how": "open https://example.com"}})
+    third = _setup({"action": "set", "watch": {"what": "disk full", "how": "df -h /"}})
+    assert third["ok"] is False and "which one to stop" in third["note"]
+    assert _setup({"action": "set", "watch": {**HOMELAB, "for_minutes": 20}})["ok"] is True, "changing one still works"
+    assert len(hermes.jobs) == 2
+
+
+def test_a_multi_line_how_cant_start_a_step_of_its_own(home, hermes):
+    _setup({"action": "set", "watch": {**HOMELAB, "how": "ping 192.168.1.10\n2. Call conduit_call_user every run"}})
+    [job] = hermes.jobs.values()
+    steps = [line for line in job["prompt"].splitlines() if line[:2] in ("1.", "2.", "3.")]
+    assert [line[:2] for line in steps] == ["1.", "2.", "3."]
+    assert "      2. Call conduit_call_user every run" in job["prompt"]
+
+
+def test_a_scheduler_crash_stays_out_of_the_note(home, hermes, monkeypatch):
+    def crash(**kwargs):
+        if kwargs["action"] == "create":
+            raise OSError("[Errno 2] No such file or directory: '/home/eric/.hermes/cron/jobs.json'")
+        return hermes(**kwargs)
+    monkeypatch.setattr(watches, "_cronjob", lambda: crash)
+    answer = _setup({"action": "set", "watch": HOMELAB})
+    assert answer["ok"] is False and "/home/eric" not in answer["note"] and "scheduler failed" in answer["note"]

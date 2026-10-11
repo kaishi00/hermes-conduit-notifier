@@ -258,7 +258,7 @@ def setup(args: Any, *, session_id: Any = None) -> str:
 def _setup(args: dict[str, Any], session_id: Any) -> dict[str, Any]:
     if _cron_job_of(session_id) is not None:
         return {"ok": False, "error": "in_a_run",
-                "note": "A call watch's run can't set up call watches. Report with conduit_watch_report instead."}
+                "note": f"A scheduled run can't set up call watches. In a call watch's run, report with {REPORT_TOOL}."}
     if client.load_state() is None:
         return {"ok": False, "error": "not_paired",
                 "note": "This Hermes profile isn't paired with the Conduit app, so it can't call. Say so in your reply."}
@@ -375,6 +375,8 @@ def _apply(cronjob: Callable[..., str], watch: dict[str, Any],
     fields = {"name": NAME_PREFIX + watch["what"], "prompt": run_prompt(config),
               "schedule": f"every {config['every_minutes']}m"}
     if match is None:
+        if len(existing) >= MAX_WATCHES:
+            return {}, f"There are already {MAX_WATCHES} call watches. Ask the user which one to stop first."
         answer = _call(cronjob, action="create", **fields)
         job_id = str(answer.get("job_id") or "")
         if not answer.get("success") or not job_id:
@@ -430,9 +432,10 @@ def _call_watches(cronjob: Callable[..., str]) -> list[tuple[dict[str, Any], dic
 def _call(cronjob: Callable[..., str], **kwargs: Any) -> dict[str, Any]:
     try:
         answer = json.loads(cronjob(**kwargs))
-    except Exception as error:  # noqa: BLE001 — Hermes's tool answers errors itself; this is a crash
+    except Exception:  # noqa: BLE001 — Hermes's tool answers errors itself; this is a crash
+        # The details stay in the log: the note may be read out to the user.
         logger.warning("conduit_push: cronjob %s failed", kwargs.get("action"), exc_info=True)
-        return {"success": False, "error": str(error) or type(error).__name__}
+        return {"success": False, "error": "Hermes's scheduler failed"}
     return answer if isinstance(answer, dict) else {"success": False, "error": "unexpected answer"}
 
 
@@ -483,10 +486,10 @@ def run_prompt(config: dict[str, Any]) -> str:
     lines = [
         f"This is the call watch \"{config['what']}\". Each run checks once, reports, and replies as the report says.",
         "",
-        f"1. Check: {config['how']}",
+        f"1. Check: {_indented(config['how'])}",
     ]
     if config["unless"]:
-        lines.append(f"   It doesn't count if: {config['unless']}")
+        lines.append(f"   It doesn't count if: {_indented(config['unless'])}")
     lines += [
         f"2. Call {REPORT_TOOL} once, with happening (true or false) and saw (one short sentence of what you saw).",
         "3. Reply exactly as its answer says. Most runs reply [SILENT].",
@@ -495,6 +498,12 @@ def run_prompt(config: dict[str, Any]) -> str:
         f"remove jobs from here. If {REPORT_TOOL} isn't among your tools, reply [SILENT].",
     ]
     return "\n".join(lines)
+
+
+def _indented(text: str) -> str:
+    """Text inside a step: its later lines are indented, so none can start
+    a step of its own."""
+    return "\n      ".join(text.splitlines())
 
 
 def _tell(lead: str) -> str:
@@ -509,7 +518,23 @@ def _tell(lead: str) -> str:
             note += " Call when I ask is off right now: tell them to turn it on there, or no watch can ring."
     except Exception:  # noqa: BLE001
         pass
+    if _cron_has_conduit() is False:
+        note += (f" Hermes's scheduled runs have the {TOOLSET} tools turned off, so no watch can report or call: "
+                 f"tell them to turn {TOOLSET} on for cron with `hermes tools`.")
     return note
+
+
+def _cron_has_conduit() -> bool | None:
+    """Whether cron runs get this plugin's tools: a job with no toolset list
+    of its own runs with the cron platform's (None when it can't be told)."""
+    try:
+        from hermes_cli.config import load_config
+        from hermes_cli.tools_config import _get_platform_tools, _get_plugin_toolset_keys
+        if TOOLSET not in _get_plugin_toolset_keys():
+            return None  # Hermes hasn't seen this plugin's toolset: it can't say
+        return TOOLSET in _get_platform_tools(load_config(), "cron")
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _summary(job_id: str, config: dict[str, Any], state: Any = None) -> dict[str, Any]:
@@ -589,14 +614,17 @@ def _text(value: Any) -> str:
 
 
 def _minutes(value: Any, default: int) -> int | None:
-    """Whole minutes, as a number or its text ("10", 10.0); ``default`` when
+    """Whole minutes, as a number or its text ("10", "10.0", 10.0); ``default`` when
     left out; None when it isn't one."""
     if value is None or value == "":
         return default
     if isinstance(value, bool):
         return None
-    if isinstance(value, str) and value.strip().isdigit():
-        return int(value.strip())
+    if isinstance(value, str):
+        try:
+            value = float(value.strip())
+        except ValueError:
+            return None
     if isinstance(value, float) and value.is_integer():
         return int(value)
     return value if isinstance(value, int) else None
@@ -630,13 +658,13 @@ def _report(args: dict[str, Any], session_id: Any) -> dict[str, Any]:
         return {"ok": False, "error": "invalid",
                 "note": "Pass saw: one short sentence of what you saw. It's said first when the user answers."}
     store = _store()
-    if job_id not in store.configs():
+    decision = store.report(job_id, happening, _now())
+    status = decision["status"]
+    if status == "older":
         # Set up before 0.17.0 (or by hand): its prompt says how it calls.
         return {"ok": False, "error": "older_watch", "note": (
             "This scheduled job wasn't set up with conduit_call_watch, so the report doesn't keep it. Do what its "
             "own prompt says, calling conduit_call_user if it says to.")}
-    decision = store.report(job_id, happening, _now())
-    status = decision["status"]
     if status == "quiet":
         return {"ok": True, "status": status, "reply": "[SILENT]", "note": f"Nothing to report. {SILENT}"}
     if status == "cleared":
@@ -658,11 +686,18 @@ def _report(args: dict[str, Any], session_id: Any) -> dict[str, Any]:
     # below never rings twice.
     try:
         calls.tool_watch(str(session_id), saw, asked=True)
-    except ValueError as error:
-        if str(error) == "calls_off":
+    except Exception as error:  # noqa: BLE001 — the run still tells the user in its reply
+        if isinstance(error, ValueError) and str(error) == "calls_off":
             return {"ok": True, "status": "calls_off", "note": (
                 "It's time to call, but calls the user asks for are off in Conduit. End with what you found in a "
                 f"few short lines, and that they turn on Call when I ask in {SETTINGS_LINK} for this watch to ring.")}
+        if isinstance(error, ValueError) and str(error) == "too_many":
+            # Other calls fill the queue for now: the next run calls.
+            store.uncall(job_id)
+            return {"ok": True, "status": "busy", "reply": "[SILENT]",
+                    "note": f"Too many calls are waiting right now; the next run tries again. {SILENT}"}
+        if not isinstance(error, ValueError):
+            logger.warning("conduit_push: a call watch couldn't place its call", exc_info=True)
         return {"ok": True, "status": "not_called", "note": (
             "It's time to call, but the call couldn't be set up. End with what you found in a few short lines.")}
     return {"ok": True, "status": "calling", "note": (
@@ -697,8 +732,7 @@ class WatchStore:
         self.clock = clock
 
     def configs(self) -> dict[str, dict[str, Any]]:
-        return {job_id: entry["config"] for job_id, entry in self._load()["watches"].items()
-                if entry["config"] is not None}
+        return {job_id: entry["config"] for job_id, entry in self._load()["watches"].items()}
 
     def put(self, job_id: str, config: dict[str, Any], *, reset: bool = False) -> None:
         with self._locked() as state:
@@ -707,7 +741,13 @@ class WatchStore:
             if reset:
                 entry["incident"] = None
             state["watches"][job_id] = entry
-            _trim(state)
+
+    def uncall(self, job_id: str) -> None:
+        """The call couldn't be queued yet: the next run tries again."""
+        with self._locked() as state:
+            incident = (state["watches"].get(job_id) or {}).get("incident")
+            if incident is not None:
+                incident["called"] = False
 
     def drop(self, *job_ids: str) -> None:
         with self._locked() as state:
@@ -718,15 +758,16 @@ class WatchStore:
         """What this run's finding means, with the incident updated."""
         now = self.clock()
         with self._locked() as state:
-            entry = state["watches"].get(job_id) or {"config": None, "incident": None}
-            state["watches"][job_id] = entry
-            _trim(state, keep=job_id)
-            config = entry["config"] or {}
+            entry = state["watches"].get(job_id)
+            if entry is None:
+                # Not one of these watches, or removed since the run began.
+                return {"status": "older"}
+            config = entry["config"]
             incident = entry["incident"]
             if not happening:
                 entry["incident"] = None
                 return {"status": "cleared" if incident and incident["called"] else "quiet"}
-            every_s = int(config.get("every_minutes") or default_every(0)) * 60
+            every_s = int(config["every_minutes"]) * 60
             if incident is not None and not incident["called"] and now - incident["last_seen"] > max(3 * every_s, STALE_S):
                 # No run saw it for a long while (Hermes was down, the job
                 # paused): what lasted then isn't known, so it starts over.
@@ -736,11 +777,11 @@ class WatchStore:
             incident["last_seen"] = now
             if incident["called"]:
                 return {"status": "already_called"}
-            for_minutes = int(config.get("for_minutes") or 0)
+            for_minutes = int(config["for_minutes"])
             minutes = int((now - incident["since"]) // 60)
             if now - incident["since"] < for_minutes * 60:
                 return {"status": "waiting", "minutes": minutes, "for_minutes": for_minutes}
-            hours = str(config.get("hours") or "")
+            hours = config["hours"]
             if not in_hours(hours, when):
                 return {"status": "outside_hours", "hours": hours}
             incident["called"] = True
@@ -767,20 +808,9 @@ class WatchStore:
                 descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
                 with os.fdopen(descriptor, "w", encoding="utf-8") as file:
                     file.write(after)
+                temporary.chmod(0o600)
                 temporary.replace(self.path)
-
-
-def _trim(state: dict[str, Any], keep: str = "") -> None:
-    """Keeps the file small: past MAX_WATCHES * 2 entries, the oldest-seen
-    entries without a config go first."""
-    watches = state["watches"]
-    extra = len(watches) - MAX_WATCHES * 2
-    if extra <= 0:
-        return
-    loose = sorted((job_id for job_id, entry in watches.items() if entry["config"] is None and job_id != keep),
-                   key=lambda job_id: (watches[job_id]["incident"] or {}).get("last_seen", 0.0))
-    for job_id in loose[:extra]:
-        del watches[job_id]
+                self.path.chmod(0o600)
 
 
 def _encoded(state: dict[str, Any]) -> str:
@@ -794,7 +824,9 @@ def _normalized(raw: Any) -> dict[str, Any]:
     for job_id, entry in stored.items():
         if not isinstance(job_id, str) or not re.fullmatch(r"[A-Za-z0-9-]{1,64}", job_id) or not isinstance(entry, dict):
             continue
-        watches[job_id] = {"config": _stored_config(entry.get("config")), "incident": _stored_incident(entry.get("incident"))}
+        config = _stored_config(entry.get("config"))
+        if config is not None:
+            watches[job_id] = {"config": config, "incident": _stored_incident(entry.get("incident"))}
     return {"v": VERSION, "watches": watches}
 
 
