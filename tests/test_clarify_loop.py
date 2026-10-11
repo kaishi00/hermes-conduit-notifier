@@ -723,7 +723,7 @@ def test_user_agent_derives_from_the_plugin_version():
     # One source of truth: bumping PLUGIN_VERSION updates the relay UA
     # automatically instead of leaving a stale hand-written constant.
     assert loop.client.USER_AGENT == f"Hermes-Conduit-Notifier/{loop.client.PLUGIN_VERSION}"
-    assert loop.client.PLUGIN_VERSION == "0.16.0"
+    assert loop.client.PLUGIN_VERSION == "0.16.1"
 
 
 def test_send_now_redacts_only_when_the_profile_opts_in(monkeypatch):

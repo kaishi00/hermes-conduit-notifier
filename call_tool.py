@@ -40,7 +40,9 @@ SCHEMA: dict[str, Any] = {
         "it's done\"), with asked_by_user true. Without such a request, only for news the user would want "
         "right away and can't wait for them to look (asked_by_user false; refused unless the user lets "
         "Hermes decide). Never for routine updates. It doesn't ring while the user is in a voice call "
-        f"with you. Before calling on your own judgment, load skill_view(\"conduit_push:{SKILL_NAME}\")."
+        "with you. Before calling on your own judgment, or to set up a scheduled check that calls when "
+        "something happens (\"call me if the site goes down\"), load "
+        f"skill_view(\"conduit_push:{SKILL_NAME}\")."
     ),
     "parameters": {
         "type": "object",
@@ -168,16 +170,21 @@ _rules_lock = threading.Lock()
 def _show_rules(session: str, rules: str) -> None:
     now = time.monotonic()
     with _rules_lock:
-        for key, (_, at) in list(_rules_shown.items()):
-            if now - at > RULES_SEEN_S:
-                del _rules_shown[key]
+        _forget_old_rules(now)
         _rules_shown[session] = (rules, now)
 
 
 def _rules_seen(session: str, rules: str) -> bool:
     with _rules_lock:
+        _forget_old_rules(time.monotonic())
         shown = _rules_shown.get(session)
-    return shown is not None and shown[0] == rules and time.monotonic() - shown[1] <= RULES_SEEN_S
+    return shown is not None and shown[0] == rules
+
+
+def _forget_old_rules(now: float) -> None:
+    for key, (_, at) in list(_rules_shown.items()):
+        if now - at > RULES_SEEN_S:
+            del _rules_shown[key]
 
 
 def _answer(**fields: Any) -> str:
