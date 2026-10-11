@@ -191,6 +191,7 @@ def test_session_opens_a_call_hermes_placed_by_speaking_first(client, hermes, op
 @pytest.mark.parametrize("call_opening", [1, "true", []])
 def test_session_rejects_a_bad_call_opening(client, openai, call_opening):
     assert client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "call_opening": call_opening}).status_code == 400
+    assert openai.calls == []
 
 
 def test_greeting_control_characters_become_spaces():
@@ -341,9 +342,10 @@ def test_hermes_path_reports_the_greeting_only_when_its_config_carries_it(client
     assert calls[0][2]["instructions"].endswith(api._greet_first("Hi"))
     body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER}).json()
     assert body["greeting_applied"] is False
+    calls.clear()
     body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "call_opening": True}).json()
     assert body["greeting_applied"] is True
-    assert calls[-2][2]["instructions"].endswith(api.GPT_LIVE_CALL_OPENING)
+    assert calls[0][0] == "build" and calls[0][2]["instructions"].endswith(api.GPT_LIVE_CALL_OPENING)
 
 
 @pytest.mark.parametrize("audio", ["loud", {"output": "x"}, {"output": {"voice": "bad voice!"}}])
