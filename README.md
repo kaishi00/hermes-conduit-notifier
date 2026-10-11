@@ -752,10 +752,10 @@ away mid-call (crash, no signal), the hold runs out and the plugin calls on
 its own, so the call never depends on the phone reaching this host after the
 call.
 
-Calls are off until you turn them on in Conduit's Voice settings. Settings
-and watches live per profile in `<hermes home>/conduit-calls.json` (mode
-`0600`), shared by the turn-end hooks and the dashboard routes under one file
-lock, so they survive restarts:
+Calls are off until you turn them on in Conduit's Settings, under Calls from
+Hermes. Settings and watches live per profile in
+`<hermes home>/conduit-calls.json` (mode `0600`), shared by the turn-end hooks
+and the dashboard routes under one file lock, so they survive restarts:
 
 | Setting | Default | Range |
 | --- | --- | --- |

@@ -27,7 +27,7 @@ logger = logging.getLogger("hermes.plugins.conduit_push")
 TOOL_NAME = "conduit_call_user"
 TOOLSET = "conduit"
 SKILL_NAME = "calling-the-user"
-# Opens Calls from Hermes in Conduit (Voice settings), from a text reply.
+# Opens Calls from Hermes in Conduit's Settings, from a text reply.
 SETTINGS_LINK = "[Calls from Hermes](conduit://settings/calls)"
 
 SCHEMA: dict[str, Any] = {
@@ -144,7 +144,7 @@ def _handle(args: Any, session_id: Any, is_child: Callable[[Any], bool]) -> dict
     except ValueError as error:
         if str(error) == "calls_off":
             note = ("The user hasn't turned on calls they ask for in Conduit. Tell them in your reply, and that "
-                    f"they turn them on in Conduit's Voice settings, under {SETTINGS_LINK} (a link that opens it; "
+                    f"they turn them on in Conduit's Settings, under {SETTINGS_LINK} (a link that opens it; "
                     "leave the link out of anything spoken).") if asked else (
                     "The user hasn't let Hermes decide when to call. Don't call; put the news in your reply.")
             return {"ok": False, "error": "calls_off", "note": note}
