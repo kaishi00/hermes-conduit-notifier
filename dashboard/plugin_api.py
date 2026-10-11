@@ -3609,7 +3609,8 @@ def run_watch_tool(grant: _WatchGrant, request: Dict[str, Any]) -> Dict[str, Any
     if tool == WATCH_LIVE_TOKEN:
         return run_watch_live_token(grant)
     if tool == "find_chat":
-        run: Dict[str, Any] = {}
+        with grant.lock:
+            run: Dict[str, Any] = {"dispatched_after": grant.chat_searches}
         return _run_watch_chat_tool(grant, "Chat search", WATCH_CHAT_SEARCH_TIMEOUT_S,
                                     lambda: run_watch_find_chat(grant, args, run=run),
                                     on_timeout=lambda: abandon_watch_chat_search(grant, run))
@@ -4060,7 +4061,10 @@ def abandon_watch_chat_search(grant: _WatchGrant, run: Dict[str, Any]) -> None:
     is left alone."""
     with grant.lock:
         run["abandoned"] = True
-        if run.get("search") is not None and grant.chat_searches == run["search"]:
+        # Its own list, or, when it never started, the list it would have
+        # replaced, unless a newer search has started since.
+        newest = run.get("search", run.get("dispatched_after"))
+        if newest is not None and grant.chat_searches == newest:
             grant.chat_matches = []
 
 

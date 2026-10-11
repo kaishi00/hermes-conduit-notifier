@@ -328,3 +328,12 @@ def test_a_route_error_keeps_its_detail_off_the_watch(monkeypatch):
     answer = api._run_watch_chat_tool(make_grant(profile=None), "Chat search", 5, boom)
     assert answer == {"ok": False, "status": 500, "detail": "Chat search failed on the host (500)"}
     assert api.chat_title('He said "hi"') == "He said 'hi'"
+
+
+def test_a_search_given_up_on_before_it_started_retires_the_old_numbers():
+    routes = FakeRoutes({"GPU": [{"session_id": "s-gpu", "title": "GPU"}]}, {"s-gpu": []})
+    grant = make_grant()
+    api.run_watch_find_chat(grant, {"query": "GPU"}, routes=routes, run={})
+    queued = {"dispatched_after": grant.chat_searches}
+    api.abandon_watch_chat_search(grant, queued)
+    assert grant.chat_matches == []
