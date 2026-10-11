@@ -180,7 +180,8 @@ def test_session_opens_a_call_hermes_placed_by_speaking_first(client, hermes, op
     assert api.GPT_LIVE_WAIT_FOR_USER not in instructions
 
     # It wins over a greeting, and false keeps the usual policy.
-    client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "greeting": "Hi", "call_opening": True})
+    assert client.post(f"{BASE}/gpt-live/session",
+                       json={"sdp": OFFER, "greeting": "Hi", "call_opening": True}).status_code == 200
     assert openai.calls[1][2]["session"]["instructions"].endswith(api.GPT_LIVE_CALL_OPENING)
     body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "call_opening": False}).json()
     assert body["greeting_applied"] is False

@@ -1291,8 +1291,8 @@ GPT_LIVE_MAX_GREETING_CHARS = 200
 # (kaishi00/hermes-conduit#544). Conduit's briefing says what to open with.
 GPT_LIVE_CALL_OPENING = (
     "Opening policy: speak first. You placed this call and the user just answered, so as soon "
-    "as it starts, open the way the part about this call above says, without waiting for the "
-    "user to speak. Then wait for them. This applies whatever the persona above says."
+    "as it starts, tell them why you called, as the part about this call above says, without "
+    "waiting for them to speak. Then wait for them. This applies whatever the persona above says."
 )
 
 
@@ -5246,7 +5246,8 @@ def run_watch_job_call(grant: "_WatchGrant", tool: str, args: Dict[str, Any]) ->
 # Control, Watch to host: {"type": "start", "engine": "gpt_live" | "grok",
 # "voice"?, "briefing"?, "greeting"?, "call_opening"?, "history"?} and {"type": "end"}. Host
 # to Watch: "started" (engine, model, voice, input_rate, output_rate; for
-# GPT-Live also briefing_applied and greeting_applied), "ended" (reason) and
+# GPT-Live also briefing_applied and greeting_applied: true whenever the model
+# was told to speak first, for a greeting or call_opening), "ended" (reason) and
 # "error" (code, message). The Watch waits for "started" before it sends
 # audio or events. It owns the conversation, as the phone does: it speaks each
 # engine's own events (GPT-Live's frameless ones, Grok's realtime ones), and
