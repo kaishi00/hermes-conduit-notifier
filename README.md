@@ -874,9 +874,9 @@ with a `reason` (one spoken sentence, up to 200 characters) and
   another. Conduit's "Have Hermes watch for this" sends the What's worth a
   call note to sync with: watches are updated or added to match it, and
   Hermes asks before stopping one the note no longer mentions. A watch's
-  calls skip the rules check, so hours from the note ("never before 9 am")
-  go into each watch's prompt: outside them a run waits, then calls if the
-  incident is still on.
+  calls skip the rules check, so limits from the note ("never before 9 am",
+  "not for planned maintenance") go into each watch they apply to: outside
+  allowed hours a run waits, then calls if the incident is still on.
 - A call the user asked for while calls are off answers `calls_off` with a
   `conduit://settings/calls` link for Hermes' reply, which opens Calls from
   Hermes in Conduit.

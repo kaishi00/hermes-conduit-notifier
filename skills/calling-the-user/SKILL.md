@@ -66,10 +66,11 @@ Once they agree, create it with `cronjob_manage` (action `create`):
 - `prompt`: everything a run needs on its own: what to check and how, what
   counts as the event, and to call with `asked_by_user: true` when it
   happens. The user asked for these calls, so the tool skips their What's
-  worth a call rules: put any hours they gave ("never before 9 am", in the
-  chat or the note) in the prompt. A run outside those hours doesn't call;
-  it keeps the incident and calls in the first run inside them if it's
-  still happening.
+  worth a call rules: put any limits they gave that apply to this watch, in
+  the chat or the note, in the prompt ("never before 9 am", "not for
+  planned maintenance"). A run outside allowed hours doesn't call; it keeps
+  the incident and calls in the first run inside them if it's still
+  happening. A case the limits rule out never calls.
 - No `enabled_toolsets` list: one without `conduit` leaves the runs without
   `conduit_call_user`.
 
@@ -77,8 +78,9 @@ Each run starts fresh. When the event takes time or should call once per
 incident ("down for more than 10 minutes"), keep what the next run needs:
 
 - Seed the job's notepad right after creating it, from the terminal:
-  `hermes cron notepad <job_id> set down_since none`. Every run sees the
-  notepad and how to update it.
+  `hermes cron notepad <job_id> set down_since none`, and say in the prompt
+  what each key holds ("down_since: none while it's up, else when it first
+  failed"). Every run sees the notepad and how to update it.
 - Or, for a plain check (a URL, a host, a port), give the job a `script` that
   keeps its own state and prints `{"wakeAgent": false}` until it's time to
   call, so quiet ticks don't start a run at all.
@@ -97,9 +99,9 @@ it as an update, not a fresh start:
 
 1. Read the note line by line. A line about something happening ("the
    homelab is down for more than 10 minutes") is a watch. A line that only
-   says when calls are fine ("never before 9 am") is not a watch, but every
-   watch's prompt carries it (above), and a change to it is a change to
-   every watch.
+   limits calls ("never before 9 am", "not for planned maintenance") is not
+   a watch, but each watch it applies to carries it in its prompt (above),
+   and a change to it is a change to those watches.
 2. List the call watches. Leave alone the ones that still match, `update` the
    ones whose condition, timing or hours changed, and create watches only
    for things no watch covers yet, as "Creating a watch" says (name, skills,
