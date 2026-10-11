@@ -884,8 +884,11 @@ with a `reason` (one spoken sentence, up to 200 characters) and
   `conduit://settings/calls` link for Hermes' reply, which opens Calls from
   Hermes in Conduit.
 - The tool shows only while this profile is paired and one of those is on.
-  Subagents can't call; their parent can. The watch tools show while the
-  profile is paired.
+  Subagents can't call; their parent can. `conduit_call_watch` shows while
+  the profile is paired on a Hermes with scheduled jobs, and
+  `conduit_watch_report` while it's paired (it only works in a watch's run).
+  When `conduit` is off for cron in `hermes tools`, each watch's job gets
+  its own toolset list (cron's, plus `conduit`) so its runs can report.
 - If `hermes tools` lists the `conduit` toolset as off for a platform, turn
   it on there.
 

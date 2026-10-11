@@ -62,7 +62,7 @@ class FakeHermes:
             key = f"{self.next_id:012x}"
             self.next_id += 1
             self.jobs[key] = {"name": fields["name"], "prompt": fields["prompt"], "schedule": fields["schedule"],
-                              "skills": fields.get("skills") or []}
+                              "skills": fields.get("skills") or [], "enabled_toolsets": fields.get("enabled_toolsets")}
             return json.dumps({"success": True, "job_id": key, "name": fields["name"]})
         if job_id not in self.jobs:
             return json.dumps({"success": False, "error": f"Job '{job_id}' not found"})
@@ -360,11 +360,33 @@ def test_the_store_survives_a_damaged_file(home, hermes, clock):
     assert _report(job_id, True)["error"] == "older_watch"
 
 
-def test_the_note_says_when_scheduled_runs_lack_the_conduit_tools(home, hermes, monkeypatch):
-    assert "hermes tools" not in _setup({"action": "set", "watch": HOMELAB})["note"], "can't tell: says nothing"
-    monkeypatch.setattr(watches, "_cron_has_conduit", lambda: False)
+def test_a_watch_gets_the_conduit_tools_when_scheduled_runs_leave_them_out(home, hermes, monkeypatch):
+    job_id = _setup({"action": "set", "watch": HOMELAB})["watch"]["id"]
+    assert hermes.jobs[job_id]["enabled_toolsets"] is None, "runs get conduit: the job follows cron's toolsets"
+    monkeypatch.setattr(watches, "_cron_toolsets", lambda: ["terminal", "web"])
+    assert "Set each of those again" in _setup({"action": "list"})["note"]
     answer = _setup({"action": "set", "watch": HOMELAB})
-    assert answer["ok"] is True and "turn conduit on for cron with `hermes tools`" in answer["note"]
+    assert answer["result"] == "changed", "the same watch is set again to fix it"
+    assert hermes.jobs[job_id]["enabled_toolsets"] == ["terminal", "web", "conduit"]
+    assert _setup({"action": "set", "watch": HOMELAB})["result"] == "unchanged"
+    assert "can't report" not in _setup({"action": "list"})["note"]
+    created = _setup({"action": "set", "watch": {**HOMELAB, "what": "site down"}})["watch"]["id"]
+    assert hermes.jobs[created]["enabled_toolsets"] == ["terminal", "web", "conduit"]
+
+
+def test_a_long_sentence_is_cut_between_words():
+    assert watches._clip("The homelab is down", 20) == "The homelab is down"
+    assert watches._clip("The homelab is down", 14) == "The homelab is"
+    assert watches._clip("The homelab is down", 13) == "The homelab"
+    assert watches._clip("Homelab", 4) == "Home", "one long word is cut where it must be"
+
+
+def test_incident_times_that_arent_numbers_are_dropped(home, hermes, clock):
+    job_id = _homelab(hermes, for_minutes=0)
+    state = json.loads((home / watches.FILE_NAME).read_text())
+    state["watches"][job_id]["incident"] = {"since": float("nan"), "last_seen": float("inf"), "called": False}
+    (home / watches.FILE_NAME).write_text(json.dumps(state))
+    assert _report(job_id, True)["status"] == "calling", "a new incident starts"
 
 
 def test_a_call_that_fails_to_set_up_still_ends_with_the_news_once(home, hermes, clock, monkeypatch):

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -279,10 +280,14 @@ def _setup(args: dict[str, Any], session_id: Any) -> dict[str, Any]:
 
 
 def _list(cronjob: Callable[..., str]) -> dict[str, Any]:
-    watches = [_view(job, config) for job, config in _call_watches(cronjob)]
+    found = _call_watches(cronjob)
+    watches = [_view(job, config) for job, config in found]
     note = "The user has no call watches yet." if not watches else (
         "These are the user's call watches. Older ones were set up before this tool: set one by its id to keep "
         "it up to date here.") if any(view.get("older") for view in watches) else "These are the user's call watches."
+    if any(_toolsets_with_conduit(job) is not None for job, _ in found):
+        note += (f" Some can't report: their runs don't get the {TOOLSET} tools. Set each of those again to fix "
+                 "it (the same watch is fine).")
     return {"ok": True, "watches": watches, "note": note}
 
 
@@ -334,8 +339,9 @@ def _sync(cronjob: Callable[..., str], raw: Any) -> dict[str, Any]:
         touched.add(job_id)
         # As the jobs are now, without listing them again.
         config = {key: watch[key] for key in CONFIG_KEYS}
+        previous = next((job for job, _ in existing if job["job_id"] == job_id), {})
         existing = [entry for entry in existing if entry[0]["job_id"] != job_id]
-        existing.append(({"job_id": job_id, "name": NAME_PREFIX + watch["what"]}, config))
+        existing.append(({**previous, "job_id": job_id, "name": NAME_PREFIX + watch["what"]}, config))
     left = [{"id": job["job_id"], "what": _what_of(job, config)}
             for job, config in existing if job["job_id"] not in touched]
     note = "Tell the user what you created and changed, or that nothing needed changing."
@@ -374,6 +380,11 @@ def _apply(cronjob: Callable[..., str], watch: dict[str, Any],
     config = {key: watch[key] for key in CONFIG_KEYS}
     fields = {"name": NAME_PREFIX + watch["what"], "prompt": run_prompt(config),
               "schedule": f"every {config['every_minutes']}m"}
+    # Its runs need the report: a job whose runs wouldn't get it lists the
+    # toolsets they'd have, plus this plugin's.
+    toolsets = _toolsets_with_conduit(match[0] if match else None)
+    if toolsets is not None:
+        fields["enabled_toolsets"] = toolsets
     if match is None:
         if len(existing) >= MAX_WATCHES:
             return {}, f"There are already {MAX_WATCHES} call watches. Ask the user which one to stop first."
@@ -386,15 +397,12 @@ def _apply(cronjob: Callable[..., str], watch: dict[str, Any],
     job, stored = match
     job_id = job["job_id"]
     summary = _summary(job_id, config, state=job.get("state"))
-    if stored == config and job.get("name") == fields["name"]:
+    if stored == config and job.get("name") == fields["name"] and toolsets is None:
         return {"result": "unchanged", "watch": summary}, None
     if stored is None:
         # An older watch: it loaded the calling skill and kept its own state,
         # maybe in a script that skips quiet runs. The report needs every run.
         fields.update(skills=[], script="", monitor_script="", monitor_url="")
-        toolsets = job.get("enabled_toolsets")
-        if isinstance(toolsets, list) and TOOLSET not in toolsets:
-            fields["enabled_toolsets"] = [*toolsets, TOOLSET]
     answer = _call(cronjob, action="update", job_id=job_id, **fields)
     if not answer.get("success"):
         return {}, f"The job couldn't be changed: {answer.get('error') or 'unknown error'}."
@@ -518,23 +526,33 @@ def _tell(lead: str) -> str:
             note += " Call when I ask is off right now: tell them to turn it on there, or no watch can ring."
     except Exception:  # noqa: BLE001
         pass
-    if _cron_has_conduit() is False:
-        note += (f" Hermes's scheduled runs have the {TOOLSET} tools turned off, so no watch can report or call: "
-                 f"tell them to turn {TOOLSET} on for cron with `hermes tools`.")
     return note
 
 
-def _cron_has_conduit() -> bool | None:
-    """Whether cron runs get this plugin's tools: a job with no toolset list
-    of its own runs with the cron platform's (None when it can't be told)."""
+def _toolsets_with_conduit(job: dict[str, Any] | None) -> list[str] | None:
+    """The toolsets a watch's job needs so its runs get this plugin's, or
+    None when they already do (or it can't be told)."""
+    own = (job or {}).get("enabled_toolsets")
+    if isinstance(own, list):
+        return None if TOOLSET in own else [*own, TOOLSET]
+    cron = _cron_toolsets()
+    return None if cron is None else [*cron, TOOLSET]
+
+
+def _cron_toolsets() -> list[str] | None:
+    """The toolsets a job without its own list runs with (the cron
+    platform's), when they leave this plugin's out; else None. Uses Hermes's
+    own helpers (hermes_cli.tools_config, as of hermes-agent c5733167): if
+    they change, this answers None and jobs keep cron's toolsets."""
     try:
         from hermes_cli.config import load_config
         from hermes_cli.tools_config import _get_platform_tools, _get_plugin_toolset_keys
         if TOOLSET not in _get_plugin_toolset_keys():
             return None  # Hermes hasn't seen this plugin's toolset: it can't say
-        return TOOLSET in _get_platform_tools(load_config(), "cron")
+        tools = _get_platform_tools(load_config(), "cron")
     except Exception:  # noqa: BLE001
         return None
+    return None if TOOLSET in tools else sorted(tools)
 
 
 def _summary(job_id: str, config: dict[str, Any], state: Any = None) -> dict[str, Any]:
@@ -605,6 +623,14 @@ def _line(value: Any) -> str:
     return " ".join(value.split()) if isinstance(value, str) else ""
 
 
+def _clip(text: str, limit: int) -> str:
+    """At most ``limit`` characters, cut between words when it's longer."""
+    if len(text) <= limit:
+        return text
+    cut = text[:limit + 1].rsplit(" ", 1)[0]
+    return cut if len(cut) <= limit else text[:limit]
+
+
 def _text(value: Any) -> str:
     """Text kept as written, lines trimmed and blank ones dropped."""
     if not isinstance(value, str):
@@ -653,7 +679,7 @@ def _report(args: dict[str, Any], session_id: Any) -> dict[str, Any]:
     happening = args.get("happening")
     if not isinstance(happening, bool):
         return {"ok": False, "error": "invalid", "note": "Pass happening: true or false."}
-    saw = _line(args.get("saw"))[:MAX_SAW_CHARS]
+    saw = _clip(_line(args.get("saw")), MAX_SAW_CHARS)
     if happening and not saw:
         return {"ok": False, "error": "invalid",
                 "note": "Pass saw: one short sentence of what you saw. It's said first when the user answers."}
@@ -683,7 +709,10 @@ def _report(args: dict[str, Any], session_id: Any) -> dict[str, Any]:
         return {"ok": True, "status": status, "reply": "[SILENT]",
                 "note": f"You already called about this, and it's still happening. Don't call again. {SILENT}"}
     # Time to call: the store already counts it as called, so a failure
-    # below never rings twice.
+    # below never rings twice. At most once per incident is the point: only
+    # a full queue (which clears soon) tries again; anything else lasting
+    # would post the same message every run, so this run's reply tells the
+    # user once instead.
     try:
         calls.tool_watch(str(session_id), saw, asked=True)
     except Exception as error:  # noqa: BLE001 — the run still tells the user in its reply
@@ -844,7 +873,8 @@ def _stored_incident(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
     since, last_seen = value.get("since"), value.get("last_seen")
-    if not all(isinstance(at, (int, float)) and not isinstance(at, bool) for at in (since, last_seen)):
+    if not all(isinstance(at, (int, float)) and not isinstance(at, bool) and math.isfinite(at)
+               for at in (since, last_seen)):
         return None
     return {"since": float(since), "last_seen": float(last_seen), "called": value.get("called") is True}
 
