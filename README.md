@@ -970,6 +970,20 @@ seals the answers back. This host opens no inbound route of its own.
   the iPhone can ask for, counts its own; a mint that fails, or whose answer
   never reaches the relay, doesn't count. A request for
   `live_token` alone on a profile without a key is refused (503).
+- **Chats** (plugin 0.18): `find_chat` (`{query}`) and `read_chat`
+  (`{number}`) let a call find one of the user's earlier chats on the
+  grant's profile and talk about it, as a phone call does. `find_chat` runs
+  Hermes' own `GET /api/sessions/search` in process (a query that matches
+  nothing as a whole is tried a word at a time) and answers `{count, chats}`,
+  the numbered matches as fenced text for the voice model. `read_chat`
+  reads only a chat the grant's newest search returned, by its number,
+  through Hermes' own `GET /api/sessions/{id}/messages` (newest 500 rows,
+  user and Hermes text only) and answers `{chat, title}`: word for word when
+  short, else a summary of the older part (a saved voice call's stored one,
+  or one made once per call with Hermes' `compression` model) plus the
+  latest turns; `{unknown: true}` for a number the search didn't return. A
+  Hermes without the search route leaves both out of the grant, so the
+  Watch asks the iPhone instead. Capability `watch-chats`.
 - **Approvals** follow the profile's own Hermes approval settings. A command
   that needs one shows on the Watch, which can only approve it once or deny
   it, never for the session or always. Hermes denies it after its own

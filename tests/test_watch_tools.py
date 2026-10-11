@@ -724,3 +724,19 @@ def test_a_grant_without_live_token_refuses_to_mint(monkeypatch):
 
 def test_capabilities_name_watch_live_token():
     assert "watch-live-token" in api.ROUTE_CAPABILITIES
+
+
+# --- Chats ---------------------------------------------------------------------
+
+def test_chats_are_granted_only_where_hermes_can_search_sessions(tmp_path):
+    asked = ["web_search", "find_chat", "read_chat"]
+    with_routes = api.open_watch_grant({"tools": asked}, profile=None, path=write_pairing(tmp_path),
+                                       relay=FakeRelay(), start=lambda g: None, session_routes=lambda: object())
+    assert with_routes["tools"] == ["web_search", "find_chat", "read_chat"]
+    without = api.open_watch_grant({"tools": asked}, profile=None, path=write_pairing(tmp_path),
+                                   relay=FakeRelay(), start=lambda g: None, session_routes=lambda: None)
+    assert without["tools"] == ["web_search"], "the Watch asks the iPhone for chats instead"
+
+
+def test_capabilities_name_watch_chats():
+    assert "watch-chats" in api.ROUTE_CAPABILITIES
