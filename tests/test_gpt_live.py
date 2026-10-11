@@ -181,11 +181,19 @@ def test_session_opens_a_call_hermes_placed_by_speaking_first(client, hermes, op
 
     # It wins over a greeting, and false keeps the usual policy.
     assert client.post(f"{BASE}/gpt-live/session",
-                       json={"sdp": OFFER, "greeting": "Hi", "call_opening": True}).status_code == 200
+                       json={"sdp": OFFER, "briefing": "About this call", "greeting": "Hi", "call_opening": True}).status_code == 200
     assert openai.calls[1][2]["session"]["instructions"].endswith(api.GPT_LIVE_CALL_OPENING)
     body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "call_opening": False}).json()
     assert body["greeting_applied"] is False
     assert openai.calls[2][2]["session"]["instructions"].endswith(api.GPT_LIVE_WAIT_FOR_USER)
+
+
+def test_call_opening_without_a_briefing_never_guesses_why(client, hermes, openai):
+    body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "call_opening": True}).json()
+    assert body["greeting_applied"] is True
+    instructions = openai.calls[0][2]["session"]["instructions"]
+    assert instructions.endswith(api.GPT_LIVE_CALL_OPENING_UNBRIEFED)
+    assert api.GPT_LIVE_CALL_OPENING not in instructions
 
 
 @pytest.mark.parametrize("call_opening", [1, "true", []])
@@ -343,7 +351,7 @@ def test_hermes_path_reports_the_greeting_only_when_its_config_carries_it(client
     body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER}).json()
     assert body["greeting_applied"] is False
     calls.clear()
-    body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "call_opening": True}).json()
+    body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "briefing": "About this call", "call_opening": True}).json()
     assert body["greeting_applied"] is True
     assert calls[0][0] == "build" and calls[0][2]["instructions"].endswith(api.GPT_LIVE_CALL_OPENING)
 

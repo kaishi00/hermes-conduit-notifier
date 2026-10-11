@@ -1294,6 +1294,13 @@ GPT_LIVE_CALL_OPENING = (
     "as it starts, tell them why you called, as the part about this call above says, without "
     "waiting for them to speak. Then wait for them. This applies whatever the persona above says."
 )
+# The same call without Conduit's briefing (a Watch call whose briefing couldn't be
+# read): nothing says why it rang, so the model mustn't guess a reason.
+GPT_LIVE_CALL_OPENING_UNBRIEFED = (
+    "Opening policy: speak first. You placed this call and the user just answered, so as soon "
+    "as it starts, say in one short sentence that it's you calling, without guessing why. Then "
+    "wait for them. This applies whatever the persona above says."
+)
 
 
 def _greet_first(greeting: str) -> str:
@@ -1400,7 +1407,7 @@ def create_gpt_live_session(
         extra = str(live.get("instructions") or "").strip()
         live["instructions"] = f"{extra}\n\n{briefing}" if extra else briefing
     if call_opening:
-        opening = GPT_LIVE_CALL_OPENING
+        opening = GPT_LIVE_CALL_OPENING if briefing else GPT_LIVE_CALL_OPENING_UNBRIEFED
     else:
         opening = GPT_LIVE_WAIT_FOR_USER if greeting is None else _greet_first(greeting)
     # Conduit sends its own opening turn when the model won't speak first.
