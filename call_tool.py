@@ -161,7 +161,8 @@ def _handle(args: Any, session_id: Any, is_child: Callable[[Any], bool]) -> dict
 
 
 # Rules each conversation was shown, and when: a fits_rules call counts only
-# after them.
+# after them. Both accessors drop entries older than RULES_SEEN_S under the
+# lock, so the map only holds chats shown the rules in the last 10 minutes.
 RULES_SEEN_S = 600
 _rules_shown: dict[str, tuple[str, float]] = {}
 _rules_lock = threading.Lock()

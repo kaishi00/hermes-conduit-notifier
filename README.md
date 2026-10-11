@@ -868,6 +868,12 @@ with a `reason` (one spoken sentence, up to 200 characters) and
   nothing happened, and calls once per incident with `asked_by_user: true`.
   The call opens that run's chat. A job given an `enabled_toolsets` list
   needs `conduit` in it to call.
+- **Call watches (0.16.2+):** one job per thing watched, named "Call watch:
+  ...", found again by the skill it loads. Hermes lists jobs before creating
+  one and updates a watch that covers the same thing instead of adding
+  another. Conduit's "Have Hermes watch for this" sends the What's worth a
+  call note to sync with: watches are updated or added to match it, and
+  Hermes asks before stopping one the note no longer mentions.
 - A call the user asked for while calls are off answers `calls_off` with a
   `conduit://settings/calls` link for Hermes' reply, which opens Calls from
   Hermes in Conduit.
