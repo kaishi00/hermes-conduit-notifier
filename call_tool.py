@@ -20,7 +20,7 @@ import threading
 import time
 from typing import Any, Callable
 
-from . import calls, client
+from . import call_watches, calls, client
 
 logger = logging.getLogger("hermes.plugins.conduit_push")
 
@@ -40,8 +40,8 @@ SCHEMA: dict[str, Any] = {
         "it's done\"), with asked_by_user true. Without such a request, only for news the user would want "
         "right away and can't wait for them to look (asked_by_user false; refused unless the user lets "
         "Hermes decide). Never for routine updates. It doesn't ring while the user is in a voice call "
-        "with you. Before calling on your own judgment, or to set up a scheduled check that calls when "
-        "something happens (\"call me if the site goes down\"), load "
+        "with you. To call when something happens later (\"call me if the site goes down\"), use "
+        "conduit_call_watch instead. Before calling on your own judgment, load "
         f"skill_view(\"conduit_push:{SKILL_NAME}\")."
     ),
     "parameters": {
@@ -128,6 +128,11 @@ def _handle(args: Any, session_id: Any, is_child: Callable[[Any], bool]) -> dict
                 "note": "Only the main conversation can call the user. Report back; the main agent can call."}
     if not session:
         return {"ok": False, "error": "no_session", "note": "This conversation can't place a call."}
+    if call_watches.is_watch_run(session):
+        # A watch's run calls through its report, once per incident.
+        return {"ok": False, "error": "use_report",
+                "note": (f"This is a run of a call watch: report with {call_watches.REPORT_TOOL} instead. It calls "
+                         "when it's time and tells you what to reply.")}
     if client.load_state() is None:
         return {"ok": False, "error": "not_paired",
                 "note": "This Hermes profile isn't paired with the Conduit app, so it can't call. Say so in your reply."}
@@ -161,8 +166,9 @@ def _handle(args: Any, session_id: Any, is_child: Callable[[Any], bool]) -> dict
 
 
 # Rules each conversation was shown, and when: a fits_rules call counts only
-# after them. Both entry points first drop entries older than RULES_SEEN_S
-# under the lock, so a stale entry never counts and the map stays small.
+# after them. Entries older than RULES_SEEN_S are dropped on the next access
+# (either entry point, under the lock), so a stale entry never counts and the
+# map stays small.
 RULES_SEEN_S = 600
 _rules_shown: dict[str, tuple[str, float]] = {}
 _rules_lock = threading.Lock()

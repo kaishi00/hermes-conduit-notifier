@@ -9,7 +9,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from . import call_tool, calls, clarify_loop
+from . import call_tool, call_watches, calls, clarify_loop
 from .client import enqueue
 from .events import approval_decision, clarification_text, event_id, is_silent_response, push_event
 
@@ -37,6 +37,9 @@ def register(ctx: Any) -> None:
     # the turn's end.
     call_tool.register(ctx, is_child=_is_child,
                        skill_path=Path(__file__).resolve().parent / "skills" / call_tool.SKILL_NAME / "SKILL.md")
+    # Scheduled checks that call when something happens: the plugin keeps
+    # the jobs and each one's incident, so the model only describes them.
+    call_watches.register(ctx)
     try:
         ctx.register_hook("post_approval_response", _post_approval_response)
     except Exception:  # noqa: BLE001

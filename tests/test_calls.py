@@ -601,31 +601,34 @@ def test_register_adds_the_tool_and_its_skill():
                                 register_tool=lambda **kwargs: tools.append(kwargs),
                                 register_skill=lambda name, path: skills.append((name, path)))
     plugin.register(ctx)
-    [tool] = tools
-    assert (tool["name"], tool["toolset"], tool["schema"]["name"]) == ("conduit_call_user", "conduit", "conduit_call_user")
+    assert [tool["name"] for tool in tools] == ["conduit_call_user", "conduit_call_watch", "conduit_watch_report"]
+    tool = tools[0]
+    assert (tool["toolset"], tool["schema"]["name"]) == ("conduit", "conduit_call_user")
     assert tool["schema"]["parameters"]["required"] == ["reason", "asked_by_user"]
+    assert all(other["toolset"] == "conduit" and other["schema"]["name"] == other["name"] for other in tools)
     [(name, path)] = skills
     assert name == "calling-the-user" and path.is_file()
     assert "conduit_push:calling-the-user" in tool["schema"]["description"]
+    # "Call me if X" goes to the watch tool, which keeps the jobs itself.
+    assert "conduit_call_watch" in tool["schema"]["description"]
     assert path.read_text().startswith("---\nname: calling-the-user\n")
-    # A scheduled check's runs load the skill by the name Hermes lists it under.
-    assert '`["conduit_push:calling-the-user"]`' in path.read_text()
-    # That skill is how Hermes finds the call watches it made, so an edited
-    # note updates them instead of adding more.
-    text = " ".join(path.read_text().split())
-    assert "`cronjob_manage` (action `list`)" in text
-    assert "`skills` include `conduit_push:calling-the-user`" in text
+    # The skill opens on which tool fits which case.
+    text = path.read_text()
+    table = text[text.index("## Which case is this?"):text.index("## When the user asked")]
+    for name in ("conduit_call_user", "conduit_call_watch", "conduit_watch_report", "`sync`", "`set`"):
+        assert name in table
 
 
 def test_a_hermes_without_the_display_fields_still_gets_the_tool(home, paired):
     tools = []
 
     def register_tool(name, toolset, schema, handler, check_fn=None):
-        tools.append(handler)
+        tools.append((name, handler))
     ctx = types.SimpleNamespace(profile_name="default", register_hook=lambda name, fn: None,
                                 register_cli_command=lambda **kwargs: None, register_tool=register_tool)
     plugin.register(ctx)
-    [handler] = tools
+    assert [name for name, _ in tools] == ["conduit_call_user", "conduit_call_watch", "conduit_watch_report"]
+    handler = tools[0][1]
     _settings(home)
     # Hermes passes the agent itself as parent_agent; only a child session is refused.
     assert json.loads(handler({"reason": "Done.", "asked_by_user": True}, session_id="st-1", parent_agent=object(),

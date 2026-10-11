@@ -859,29 +859,33 @@ with a `reason` (one spoken sentence, up to 200 characters) and
   call, not when it rings, and they steer Hermes rather than bind it:
   `asked_by_user` is Hermes' own word (0.14+), so a call it marks as asked
   for skips them.
-- **Scheduled checks (0.16.1+):** the rules only filter the calls Hermes
-  makes; they don't watch anything. When the user asks to be called if
-  something happens ("call me if the homelab is down for more than 10
-  minutes"), the skill has Hermes offer a cron job (`cronjob_manage`) that
-  loads `conduit_push:calling-the-user`, checks on a schedule, keeps state
-  across runs in the job's notepad or a `script`, answers `[SILENT]` while
-  nothing happened, and calls once per incident with `asked_by_user: true`.
-  The call opens that run's chat. A job given an `enabled_toolsets` list
-  needs `conduit` in it to call.
-- **Call watches (0.16.2+):** one job per thing watched, named "Call watch:
-  ...", found again by the skill it loads. Hermes lists jobs before creating
-  one and updates a watch that covers the same thing instead of adding
-  another. Conduit's "Have Hermes watch for this" sends the What's worth a
-  call note to sync with: watches are updated or added to match it, and
-  Hermes asks before stopping one the note no longer mentions. A watch's
-  calls skip the rules check, so limits from the note ("never before 9 am",
-  "not for planned maintenance") go into each watch they apply to: outside
-  allowed hours a run waits, then calls if the incident is still on.
+- **Call watches (0.17+):** the rules only filter the calls Hermes makes;
+  they don't watch anything. When the user asks to be called if something
+  happens ("call me if the homelab is down for more than 10 minutes"),
+  Hermes uses `conduit_call_watch` and only describes the watch: `what`,
+  `how` a run checks it, `for_minutes` it must last, and optional `hours`
+  (HH:MM-HH:MM) and `unless`. The plugin writes the cron job through
+  Hermes's own `cronjob` function: named "Call watch: <what>", checked every
+  few minutes (picked from `for_minutes`), with a fixed run prompt. The same
+  `what` is the same watch, so asking again changes it instead of adding
+  another. `sync` takes every watch the What's worth a call note describes
+  (Conduit's "Have Hermes watch for this"): it changes and adds watches to
+  match and lists the ones the note no longer mentions, which Hermes asks
+  about before removing.
+- **A watch's runs:** each run checks and calls `conduit_watch_report` with
+  whether it's happening. The plugin keeps the incident per job in
+  `conduit-call-watches.json`, waits out `for_minutes` and the allowed hours,
+  calls once per incident with the run's sentence as the reason, and tells
+  the run what to reply (`[SILENT]` while there's nothing to send).
+  `conduit_call_user` refuses in such a run. Watches set up by 0.16.x (jobs
+  that load the skill and keep their own state) keep running as written, and
+  setting one again by name or id moves it onto the report.
 - A call the user asked for while calls are off answers `calls_off` with a
   `conduit://settings/calls` link for Hermes' reply, which opens Calls from
   Hermes in Conduit.
 - The tool shows only while this profile is paired and one of those is on.
-  Subagents can't call; their parent can.
+  Subagents can't call; their parent can. The watch tools show while the
+  profile is paired.
 - If `hermes tools` lists the `conduit` toolset as off for a platform, turn
   it on there.
 
