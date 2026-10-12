@@ -42,7 +42,7 @@ MAX_IDS = 200
 
 def publish(home: Any, stored_ids: Iterable[str], *, now: float | None = None) -> None:
     """Records the chats Desktop has selected in ``home`` (none removes the file)."""
-    ids = sorted({value for value in stored_ids if isinstance(value, str) and value})[:MAX_IDS]
+    ids = sorted({value.strip() for value in stored_ids if isinstance(value, str) and value.strip()})[:MAX_IDS]
     path = Path(home) / FILE_NAME
     if not ids:
         try:
@@ -81,7 +81,12 @@ def selected(home: Any, session_id: Any, *, now: float | None = None) -> bool:
     if not isinstance(raw, dict):
         return False
     at, ids = raw.get("at"), raw.get("selected")
-    if not isinstance(at, (int, float)) or isinstance(at, bool) or not math.isfinite(at):
+    if not isinstance(at, (int, float)) or isinstance(at, bool):
+        return False
+    try:
+        if not math.isfinite(at):
+            return False
+    except OverflowError:  # an integer too large for a float
         return False
     # Only what publish writes: a longer list, or a time ahead of the clock
     # (an edited file, a clock step), counts as nothing selected.

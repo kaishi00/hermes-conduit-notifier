@@ -654,3 +654,13 @@ def test_a_selection_file_from_the_future_or_too_long_is_not_trusted(tmp_path):
     ids = ["a"] + [f"x{index}" for index in range(desktop_selected.MAX_IDS)]
     (tmp_path / desktop_selected.FILE_NAME).write_text(json.dumps({"selected": ids, "at": 1000.0}))
     assert not desktop_selected.selected(tmp_path, "a", now=1000.0)
+
+
+def test_a_huge_integer_time_counts_as_nothing_selected(tmp_path):
+    (tmp_path / desktop_selected.FILE_NAME).write_text('{"selected": ["a"], "at": ' + "9" * 400 + "}")
+    assert not desktop_selected.selected(tmp_path, "a", now=1000.0)
+
+
+def test_published_ids_are_trimmed_like_the_reader_trims(tmp_path):
+    desktop_selected.publish(tmp_path, [" a "], now=1000.0)
+    assert desktop_selected.selected(tmp_path, "a", now=1000.0)
