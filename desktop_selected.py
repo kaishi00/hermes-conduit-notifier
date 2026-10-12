@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 import math
 import os
-import threading
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Iterable
@@ -51,12 +51,18 @@ def publish(home: Any, stored_ids: Iterable[str], *, now: float | None = None) -
             pass
         return
     now = time.time() if now is None else now
-    temporary = path.with_name(f".{FILE_NAME}.{os.getpid()}.{threading.get_ident()}.tmp")
-    # Private from the first byte: it names the chats on screen.
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        json.dump({"selected": ids, "at": now}, handle, separators=(",", ":"))
-    temporary.replace(path)
+    # A fresh, private (0600) temp file of its own, never one already there.
+    descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{FILE_NAME}.", suffix=".tmp")
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump({"selected": ids, "at": now}, handle, separators=(",", ":"))
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
 
 
 def selected(home: Any, session_id: Any, *, now: float | None = None) -> bool:

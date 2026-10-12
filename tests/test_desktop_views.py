@@ -636,3 +636,13 @@ def test_only_quick_turns_count():
     assert not desktop_selected.quick(1000.0, now=1000.0 + desktop_selected.QUICK_TURN_S + 1)
     assert not desktop_selected.quick(None, now=1000.0)
     assert not desktop_selected.quick(2000.0, now=1000.0)
+
+
+def test_a_failed_selection_write_leaves_no_temp_file(monkeypatch, tmp_path):
+    def broken(*_args, **_kwargs):
+        raise OSError("disk")
+
+    monkeypatch.setattr(desktop_selected.json, "dump", broken)
+    with pytest.raises(OSError):
+        desktop_selected.publish(tmp_path, ["a"], now=1000.0)
+    assert list(tmp_path.iterdir()) == []
