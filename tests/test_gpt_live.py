@@ -274,7 +274,7 @@ def test_status_checks_credentials_without_refreshing(client, hermes):
     assert body == {"ok": True, "auth": "subscription", "model": "gpt-live-1-codex", "voice": "cove",
                     "source": "plugin", "available": True, "reason": None,
                     "api": {"auth": "api", "model": "gpt-live-1", "voice": "marin", "enabled": False,
-                            "daily_calls": api.GPT_LIVE_API_DAILY_CALLS, "available": False,
+                            "daily_limit": api.GPT_LIVE_API_DAILY_CALLS, "available": False,
                             "reason": body["api"]["reason"]}}
     assert "conduit_api_billing" in body["api"]["reason"]
     assert hermes.refresh == [False]
@@ -671,7 +671,7 @@ def test_status_reports_the_api_path_on_its_own(client, api_key):
     body = client.get(f"{BASE}/gpt-live/status").json()
     assert body["auth"] == "subscription" and body["available"] is True
     assert body["api"] == {"auth": "api", "model": "gpt-live-1", "voice": "marin", "enabled": True,
-                           "daily_calls": api.GPT_LIVE_API_DAILY_CALLS, "available": True, "reason": None,
+                           "daily_limit": api.GPT_LIVE_API_DAILY_CALLS, "available": True, "reason": None,
                            "host": "api.openai.com"}
     assert "sk-live-test" not in json.dumps(body)
 
@@ -681,3 +681,69 @@ def test_status_api_path_without_a_key_says_so(client, api_key, monkeypatch):
     body = client.get(f"{BASE}/gpt-live/status").json()["api"]
     assert body["available"] is False and "OPENAI_API_KEY" in body["reason"]
     assert "subscription was not used" not in body["reason"]
+
+
+def test_a_custom_base_url_never_gets_the_hosts_general_key(client, api_key, openai):
+    api_key.config["voice"]["gpt_live"]["base_url"] = "https://gateway.example.test/v1"
+    response = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "billing": "api"})
+    assert response.status_code == 503
+    assert "voice.gpt_live.api_key" in response.json()["detail"]
+    assert openai.calls == []
+    status = client.get(f"{BASE}/gpt-live/status").json()["api"]
+    assert status["available"] is False and "gateway.example.test" in status["reason"]
+
+
+@pytest.mark.parametrize("base_url", ["https://", "http://api.openai.com/v1", "https://api.openai.com/v1\r\nX: y", "ftp://x"])
+def test_a_base_url_without_https_and_a_host_is_refused(client, api_key, openai, base_url):
+    api_key.config["voice"]["gpt_live"].update(base_url=base_url, api_key="sk-profile")
+    assert client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "billing": "api"}).status_code == 503
+    assert openai.calls == []
+    status = client.get(f"{BASE}/gpt-live/status")
+    assert status.status_code == 200 and status.json()["api"]["available"] is False
+
+
+def test_a_call_openai_did_not_start_gives_its_daily_slot_back(client, api_key, openai):
+    api_key.config["voice"]["gpt_live"]["conduit_api_daily_calls"] = 1
+    openai.reply.update(status=401, answer="")
+    for _ in range(3):
+        assert client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "billing": "api"}).status_code == 502
+    openai.reply.update(status=200, answer=json.dumps(API_ANSWER))
+    assert client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "billing": "api"}).status_code == 200
+    assert client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "billing": "api"}).status_code == 429
+
+
+def test_a_daily_limit_of_zero_says_api_calls_are_off(client, api_key, openai):
+    api_key.config["voice"]["gpt_live"]["conduit_api_daily_calls"] = 0
+    response = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "billing": "api"})
+    assert response.status_code == 403 and "is 0" in response.json()["detail"]
+    assert "daily limit" not in response.json()["detail"]
+    assert client.get(f"{BASE}/gpt-live/status").json()["api"]["available"] is False
+    assert openai.calls == []
+
+
+@pytest.mark.parametrize("status, code, words", [(401, 502, "rejected the API key"), (429, 429, "rate-limiting")])
+def test_openai_key_and_quota_errors_are_told_apart(client, api_key, openai, status, code, words):
+    openai.reply.update(status=status, answer="")
+    response = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "billing": "api"})
+    assert response.status_code == code
+    assert words in response.json()["detail"] and "subscription was not used" in response.json()["detail"]
+
+
+def test_an_answer_on_another_transport_is_refused(client, api_key, openai):
+    openai.reply.update(answer=json.dumps({"session": {"id": "sess_1"}, "transport": {"type": "websocket", "sdp": ANSWER}}))
+    assert client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "billing": "api"}).status_code == 502
+
+
+def test_a_broken_hermes_key_lookup_is_a_failure_not_the_environment(client, api_key, openai, monkeypatch):
+    import builtins
+    real_import = builtins.__import__
+
+    def broken(name, *args, **kwargs):
+        if name == "tools.tool_backend_helpers":
+            raise ImportError("no module named 'httpx'", name="httpx")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", broken)
+    response = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "billing": "api"})
+    assert response.status_code == 503 and "could not read the OpenAI key" in response.json()["detail"]
+    assert openai.calls == []

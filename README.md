@@ -525,7 +525,7 @@ API key. First sign in on the Hermes host with `hermes auth` and choose OpenAI C
 | Method | Path | Returns |
 |--------|------|---------|
 | GET | `/api/plugins/conduit_push/gpt-live/status` | `{ok, auth, available, reason, model, voice, source, api}` |
-| POST | `/api/plugins/conduit_push/gpt-live/session` | `{ok, auth, session: {id}, transport: {type, sdp}, source, voice, briefing_applied, greeting_applied}` |
+| POST | `/api/plugins/conduit_push/gpt-live/session` | `{ok, auth, session: {id}, transport: {type, sdp}, source, voice, briefing_applied, greeting_applied}` (plus `model` on the API path) |
 
 The session route takes `{"sdp": "<WebRTC offer>", "history": [...], "voice": "cove", "briefing": "..."}` (history
 optional, last 40 items kept; voice optional and, when given, used instead of `subscription_voice`; briefing optional, up to 32 KB, and added to the session instructions so the model has Conduit's rules before it speaks; greeting optional: absent, the model stays silent until the user speaks; `""` or text, it greets the user first, saying the text when given, up to 200 characters; call_opening optional (0.17.1+): `true` for a call Hermes placed, so the model speaks first with the opening Conduit's briefing gives (without a briefing it only says it's calling, never guessing why) and any greeting is ignored; `greeting_applied` is then true too, as it means the model was told to speak first) and returns the SDP answer plus the `voice` it used. The plugin posts the
@@ -578,9 +578,17 @@ choose:
   or `"auth": "subscription"`. Conduit drops the call before any audio when it
   doesn't match what it asked for.
 - **A daily cap.** A profile may start `voice.gpt_live.conduit_api_daily_calls`
-  API-billed calls per day (default 20, `0` for none). The count is kept in
-  memory, so a dashboard restart starts it again. A call's length is capped by
-  Conduit, which holds the call.
+  API-billed calls per day (default 20; `0` turns API calls off, a 403). A
+  call OpenAI doesn't start (a rejected key, an outage) gives its slot back.
+  The count is kept in memory, per dashboard process: a restart starts it
+  again, and a dashboard run with several worker processes allows the cap in
+  each.
+- **What the host can't cap.** The cap counts calls started, not minutes.
+  Once a call is set up, its audio runs between Conduit and OpenAI without
+  passing through this host, so the host can't end a call or see how many are
+  open. Call length is limited by Conduit (a per-call time limit, 20 minutes
+  by default), which is a client-side control: set a spending limit on the
+  OpenAI key itself if you need a hard ceiling.
 
 ```yaml
 voice:
@@ -596,13 +604,22 @@ voice:
 The key is resolved the way Hermes desktop resolves it
 (`voice.gpt_live.api_key`, then `VOICE_TOOLS_OPENAI_KEY`, then
 `OPENAI_API_KEY`) and is never returned to Conduit or logged. `base_url` must
-be https. The status route reports the API path under its own key, leaving
+be an https URL with a host. The shared keys only ever go to
+`api.openai.com`: a `base_url` on any other host needs its own
+`voice.gpt_live.api_key`. Only OpenAI's GPT-Live contract is supported; other
+services behind `base_url` (Azure Foundry, say) are untested and may expect a
+different auth header.
+
+OpenAI's answer doesn't echo the session, so on the API path
+`briefing_applied`, `greeting_applied` and `voice` say what the plugin sent,
+not what OpenAI confirmed. A 401 from OpenAI is reported as a rejected key and
+a 429 is passed on as a 429; neither carries OpenAI's response body. The status route reports the API path under its own key, leaving
 the top-level fields the subscription's:
 
 ```json
 {"ok": true, "auth": "subscription", "available": true, "...": "...",
  "api": {"auth": "api", "enabled": true, "available": true, "reason": null,
-         "model": "gpt-live-1", "voice": "marin", "daily_calls": 20, "host": "api.openai.com"}}
+         "model": "gpt-live-1", "voice": "marin", "daily_limit": 20, "host": "api.openai.com"}}
 ```
 
 The Apple Watch's GPT-Live bridge always uses the subscription.
