@@ -21,10 +21,23 @@ if "conduit_push" not in sys.modules:
     package = types.ModuleType("conduit_push")
     package.__path__ = [str(ROOT)]
     sys.modules["conduit_push"] = package
-spec = importlib.util.spec_from_file_location("conduit_push.client", ROOT / "client.py")
-client = importlib.util.module_from_spec(spec)
-sys.modules[spec.name] = client
-spec.loader.exec_module(client)
+
+
+def _load(name, path):
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+client = _load("conduit_push.client", ROOT / "client.py")
+
+
+def test_client_loader_reuses_registered_module():
+    assert _load("conduit_push.client", ROOT / "missing-client.py") is client
 
 
 @pytest.fixture
