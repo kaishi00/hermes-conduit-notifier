@@ -287,6 +287,8 @@ def test_get_shows_settings_mode_and_what_hermes_owns(tool_home):
     assert tone["tier"] == "applies with Undo when the user allows"
     assert "stt.provider" in answer["hermes_owned"]
     assert "tap Apply" in answer["note"]
+    greeting = next(setting for setting in answer["settings"] if setting["key"] == "voice.live.greeting")
+    assert greeting["value"] == ""
 
 
 def test_change_says_it_waits_for_conduit(tool_home):
@@ -332,7 +334,25 @@ def test_a_name_two_devices_share_is_refused(tool_home):
     _sync(store, installation=IPAD)
     answer = _call({"action": "get", "device": "Eric's iPhone"})
     assert answer["error"] == "unknown_device"
-    assert _call({"action": "get", "device": IPAD})["device"]["id"] == IPAD
+    answer = _call({"action": "get", "device": IPAD})
+    assert answer["device"]["id"] == IPAD
+    # The others are every device but the one shown.
+    assert [entry["id"] for entry in answer["other_devices"]] == [PHONE]
+
+
+def test_a_subagent_reads_settings_but_cannot_change_them(tool_home):
+    _sync(SettingsStore(tool_home))
+    child = lambda session: session == "child"  # noqa: E731
+    answer = json.loads(tool.handle({"action": "change", "reason": "Calmer.",
+                                     "changes": [{"key": "voice.live.tone", "value": "relaxed", "from": "default"}]},
+                                    session_id="child", is_child=child))
+    assert answer["error"] == "subagent"
+    assert json.loads(tool.handle({"action": "get"}, session_id="child", is_child=child))["ok"] is True
+    assert SettingsStore(tool_home).view()["pending"] == []
+
+
+def test_line_breaks_in_text_become_spaces():
+    assert store_module._line("a\nb\tc\u00a0d", 40) == "a b c d"
 
 
 def test_a_bad_action_is_refused(tool_home):

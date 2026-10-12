@@ -42,7 +42,7 @@ def register(ctx: Any) -> None:
     call_watches.register(ctx)
     # Hermes configures Conduit: the settings Conduit shares, changed only
     # through requests Conduit checks and the user approves.
-    settings_tool.register(ctx)
+    settings_tool.register(ctx, is_child=_is_child)
     try:
         ctx.register_hook("post_approval_response", _post_approval_response)
     except Exception:  # noqa: BLE001

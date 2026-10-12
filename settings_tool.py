@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+from typing import Any, Callable
 
 from hermes_constants import get_hermes_home
 
@@ -77,13 +77,13 @@ SCHEMA: dict[str, Any] = {
 }
 
 
-def register(ctx: Any) -> None:
+def register(ctx: Any, *, is_child: Callable[[Any], bool] = lambda _: False) -> None:
     """Registers the tool, if this Hermes supports plugin tools."""
     if not hasattr(ctx, "register_tool"):
         return
 
     def handler(args: Any, session_id: Any = None, **_: Any) -> str:
-        return handle(args, session_id=session_id)
+        return handle(args, session_id=session_id, is_child=is_child)
 
     tool = {"name": TOOL_NAME, "toolset": TOOLSET, "schema": SCHEMA, "handler": handler, "check_fn": available}
     try:
@@ -108,19 +108,24 @@ def available() -> bool:
         return False
 
 
-def handle(args: Any, *, session_id: Any = None) -> str:
+def handle(args: Any, *, session_id: Any = None, is_child: Callable[[Any], bool] = lambda _: False) -> str:
     try:
-        return _answer(**_handle(args if isinstance(args, dict) else {}, session_id))
+        return _answer(**_handle(args if isinstance(args, dict) else {}, session_id, is_child))
     except Exception:  # noqa: BLE001 — a tool must never raise
         logger.warning("conduit_settings failed", exc_info=True)
         return _answer(ok=False, error="unavailable", note="Conduit's settings couldn't be read. Tell the user.")
 
 
-def _handle(args: dict[str, Any], session_id: Any) -> dict[str, Any]:
+def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], bool]) -> dict[str, Any]:
     action = args.get("action")
     store = _store()
     if action == "get":
         return _get(store, args.get("device"))
+    # A subagent can be steered by what its tools read, so changes come only
+    # from the main conversation, as calls do.
+    if action in ("change", "cancel") and is_child(session_id.strip() if isinstance(session_id, str) else ""):
+        return {"ok": False, "error": "subagent",
+                "note": "Only the main conversation can change Conduit settings. Report back; the main agent can ask."}
     if action == "change":
         try:
             made = store.request(args.get("changes"), args.get("reason"), device=args.get("device"),
@@ -168,13 +173,17 @@ def _get(store: SettingsStore, device: Any) -> dict[str, Any]:
         "note": _mode_note(chosen["mode"]),
     }
     if len(devices) > 1:
-        answer["other_devices"] = [{"id": entry["id"], "name": entry["name"]} for entry in devices[1:]]
+        answer["other_devices"] = [{"id": entry["id"], "name": entry["name"]} for entry in devices
+                                   if entry["id"] != chosen["id"]]
     return answer
 
 
 def _shown(setting: dict[str, Any]) -> dict[str, Any]:
-    shown = {key: setting[key] for key in ("key", "title", "section", "description", "kind", "value", "tier")
+    shown = {key: setting[key] for key in ("key", "title", "section", "description", "kind", "tier")
              if setting.get(key) not in (None, "")}
+    # An empty text value is still the value to pass back as "from".
+    if setting.get("value") is not None:
+        shown["value"] = setting["value"]
     if "choices" in setting:
         shown["choices"] = setting["choices"]
     if "max_length" in setting:

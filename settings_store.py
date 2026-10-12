@@ -256,7 +256,8 @@ def _line(value: Any, limit: int) -> str:
     """One line of printable text, trimmed; empty when ``value`` isn't text."""
     if not isinstance(value, str):
         return ""
-    text = " ".join("".join(char for char in value if char.isprintable()).split())
+    # Line breaks, tabs and other controls become spaces, not glue.
+    text = " ".join("".join(char if char.isprintable() else " " for char in value).split())
     return text[:limit]
 
 
