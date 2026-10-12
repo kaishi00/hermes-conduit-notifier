@@ -909,6 +909,37 @@ With `alerts` on, Hermes also calls when it waits on you:
 Alert calls count against the same limits. In the call, Conduit can read the
 approval out and answer it by voice.
 
+## Hermes changes Conduit settings (plugin 0.19+)
+
+Ask Hermes to set Conduit up ("make live calls more relaxed", "use Gemini
+Live with my memory") and it can, through the `conduit_settings` tool, within
+what Conduit allows:
+
+- **Conduit decides what Hermes sees.** Each Conduit uploads the settings it
+  shares (key, plain-language title and meaning, choices, value and tier) and
+  the user's **Let Hermes change settings** mode to
+  `PUT /api/plugins/conduit_push/conduit-settings` when it connects, comes to
+  the foreground, changes a shared setting, or a turn used the tool. Anything
+  it doesn't list (keys, wake phrase setup, Calls from Hermes, Watch access,
+  the mode itself) is out of Hermes' reach.
+- **Hermes only asks.** `get` lists the settings; `change` keeps a request
+  with the value Hermes saw and a reason; `cancel` takes back one Conduit
+  hasn't picked up. Requests wait in the profile's `conduit-settings.json`
+  for a day.
+- **Conduit applies or asks.** It checks every request against its own list
+  again. With the default mode, **Ask me every time**, each change waits for
+  the user's Apply. With **Small changes without asking**, the small tier
+  (how calls sound, voices) applies with an Undo and the rest still asks.
+  **Off** refuses everything. A setting the user changed after Hermes read it
+  keeps the user's value. Conduit reports each outcome (applied, dismissed,
+  conflict, refused, undone) on its next sync, and `get` shows it to Hermes.
+- Speech providers and their keys, `voice.gpt_live` and models are Hermes
+  settings, not Conduit's: the tool tells Hermes to change those in its own
+  config.
+
+The tool shows only once a Conduit has synced with the profile. Limits: 20
+requested changes per device per hour, 10 per call, 8 devices per profile.
+
 ## Apple Watch lookups and jobs (plugin 0.6+, jobs 0.7+, Gemini tokens 0.8+)
 
 With the wrist down, a Conduit Watch call can't reach Conduit on the iPhone,

@@ -3321,6 +3321,63 @@ async def post_call_outcome(request: Request, response: Response, profile: Optio
     return await _calls_route(profile, response, lambda: record_call_outcome(body), "outcome")
 
 
+# --- Conduit settings Hermes may change --------------------------------------
+#
+# Each Conduit uploads the settings it lets Hermes see (and the user's "Let
+# Hermes change settings" mode), reports what became of the requests it took,
+# and gets back the ones still waiting for it (settings_store.py). Conduit
+# stays the owner: it re-checks every request and asks the user as its mode
+# says.
+
+CONDUIT_SETTINGS_LIMIT = 30
+CONDUIT_SETTINGS_WINDOW_S = 60.0
+# Up to 80 settings with descriptions and choices.
+CONDUIT_SETTINGS_MAX_BODY_BYTES = 128 * 1024
+
+_conduit_settings_limiter = _MintLimiter(CONDUIT_SETTINGS_LIMIT, CONDUIT_SETTINGS_WINDOW_S,
+                                         message="Too many settings syncs; try again shortly")
+_settings_store_module: Any = None
+
+
+def _settings_store() -> Any:
+    """settings_store.py beside this folder, loaded once."""
+    global _settings_store_module
+    with _calls_store_lock:
+        if _settings_store_module is None:
+            path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "settings_store.py")
+            spec = importlib.util.spec_from_file_location("conduit_push_dashboard_settings_store", path)
+            if spec is None or spec.loader is None:
+                raise TokenError(501, "This plugin install is missing settings_store.py; update the plugin")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _settings_store_module = module
+        return _settings_store_module
+
+
+def sync_conduit_settings(body: Any) -> Dict[str, Any]:
+    module = _settings_store()
+    try:
+        return module.SettingsStore(_calls_home()).sync(body)
+    except module.SettingsError as exc:
+        raise TokenError(400, str(exc))
+
+
+@router.put("/conduit-settings")
+async def put_conduit_settings(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    body = await _read_json_body(request, CONDUIT_SETTINGS_MAX_BODY_BYTES)
+    try:
+        _conduit_settings_limiter.acquire(_limiter_key(profile))
+        return {"ok": True, **(await _run_scoped(profile, lambda: sync_conduit_settings(body)))}
+    except TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
+        raise
+    except Exception as exc:
+        raise _unexpected("settings", exc, feature="Conduit settings")
+
+
 # --- Watch tools (wrist-down lookups for a Conduit Watch call) ---------------
 #
 # With the wrist down, a Conduit Watch call can't reach Conduit on the iPhone,
@@ -7497,6 +7554,7 @@ ROUTE_CAPABILITIES = (
     "hermes-calls",
     "hermes-call-presence",
     "hermes-call-outcomes",
+    "conduit-settings",
 )
 
 

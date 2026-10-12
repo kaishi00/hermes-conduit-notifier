@@ -9,7 +9,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from . import call_tool, call_watches, calls, clarify_loop
+from . import call_tool, call_watches, calls, clarify_loop, settings_tool
 from .client import enqueue
 from .events import approval_decision, clarification_text, event_id, is_silent_response, push_event
 
@@ -40,6 +40,9 @@ def register(ctx: Any) -> None:
     # Scheduled checks that call when something happens: the plugin keeps
     # the jobs and each one's incident, so the model only describes them.
     call_watches.register(ctx)
+    # Hermes configures Conduit: the settings Conduit shares, changed only
+    # through requests Conduit checks and the user approves.
+    settings_tool.register(ctx)
     try:
         ctx.register_hook("post_approval_response", _post_approval_response)
     except Exception:  # noqa: BLE001

@@ -601,7 +601,8 @@ def test_register_adds_the_tool_and_its_skill():
                                 register_tool=lambda **kwargs: tools.append(kwargs),
                                 register_skill=lambda name, path: skills.append((name, path)))
     plugin.register(ctx)
-    assert [tool["name"] for tool in tools] == ["conduit_call_user", "conduit_call_watch", "conduit_watch_report"]
+    assert [tool["name"] for tool in tools] == ["conduit_call_user", "conduit_call_watch", "conduit_watch_report",
+                                                  "conduit_settings"]
     tool = tools[0]
     assert (tool["toolset"], tool["schema"]["name"]) == ("conduit", "conduit_call_user")
     assert tool["schema"]["parameters"]["required"] == ["reason", "asked_by_user"]
@@ -627,7 +628,7 @@ def test_a_hermes_without_the_display_fields_still_gets_the_tool(home, paired):
     ctx = types.SimpleNamespace(profile_name="default", register_hook=lambda name, fn: None,
                                 register_cli_command=lambda **kwargs: None, register_tool=register_tool)
     plugin.register(ctx)
-    assert [name for name, _ in tools] == ["conduit_call_user", "conduit_call_watch", "conduit_watch_report"]
+    assert [name for name, _ in tools] == ["conduit_call_user", "conduit_call_watch", "conduit_watch_report", "conduit_settings"]
     handler = tools[0][1]
     _settings(home)
     # Hermes passes the agent itself as parent_agent; only a child session is refused.
