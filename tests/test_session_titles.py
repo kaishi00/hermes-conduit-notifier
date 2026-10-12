@@ -1,5 +1,6 @@
 """Notifications carry the session's title, so a push says which chat it came from."""
 import importlib.util
+import itertools
 import pathlib
 import sys
 import tempfile
@@ -164,7 +165,7 @@ def test_without_an_id_lookup_the_gateway_key_still_resolves(sent, monkeypatch):
 
 
 def test_profiles_do_not_share_cached_titles(sent, monkeypatch):
-    homes = iter([pathlib.Path("/profiles/a"), pathlib.Path("/profiles/b")])
+    homes = itertools.cycle([pathlib.Path("/profiles/a"), pathlib.Path("/profiles/b")])
     monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: next(homes))
 
     class PerProfileDB(FakeSessionDB):

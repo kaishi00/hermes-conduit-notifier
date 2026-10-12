@@ -39,11 +39,13 @@ def title(key: Any) -> str:
         hit = _cache.get(entry)
         if hit and now - hit[0] < CACHE_SECONDS:
             return hit[1]
+        if hit:
+            del _cache[entry]
     value = _read(home, key)
     if value:
         with _cache_lock:
             _cache.pop(entry, None)
-            _cache[entry] = (now, value)
+            _cache[entry] = (time.monotonic(), value)
             while len(_cache) > MAX_CACHED:
                 _cache.pop(next(iter(_cache)))
     return value
