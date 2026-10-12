@@ -7506,14 +7506,19 @@ class _DesktopViewHook:
     def _publish_selection(self, selection: Dict[str, set], now: float) -> None:
         """Writes each home's selected chats for the turn hooks (#87) when they
         change, and renews a selection before readers stop trusting it."""
+        try:
+            module = _desktop_selected()
+        except Exception:  # noqa: BLE001 — a broken install publishes nothing; readers then push
+            logger.debug("Conduit: desktop_selected.py unavailable", exc_info=True)
+            return
         with self._publish_lock:
             for key in set(selection) | set(self._published):
                 ids = frozenset(selection.get(key, ()))
                 last = self._published.get(key)
-                if last is not None and last[0] == ids and (not ids or now - last[1] < _desktop_selected().RENEW_S):
+                if last is not None and last[0] == ids and (not ids or now - last[1] < module.RENEW_S):
                     continue
                 try:
-                    _desktop_selected().publish(key, ids, now=now)
+                    module.publish(key, ids, now=now)
                 except Exception:  # noqa: BLE001 — readers then see nothing selected; the next sweep retries
                     logger.debug("Conduit: could not publish Desktop's selected chats under %s", key, exc_info=True)
                     continue

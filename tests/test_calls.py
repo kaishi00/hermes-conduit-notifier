@@ -902,3 +902,24 @@ def test_turn_start_times_stay_bounded():
         plugin._note_turn_start(f"bound-{index}")
     assert len(plugin._turn_started) <= plugin.MAX_TURN_STARTS
     assert "bound-0" not in plugin._turn_started
+
+
+def test_a_repeated_turn_id_is_kept_as_the_newest(monkeypatch):
+    monkeypatch.setattr(plugin, "_turn_started", {})
+    plugin._note_turn_start("again")
+    for index in range(plugin.MAX_TURN_STARTS - 1):
+        plugin._note_turn_start(f"other-{index}")
+    plugin._note_turn_start("again")
+    plugin._note_turn_start("one-more")
+    assert "again" in plugin._turn_started
+
+
+def test_child_and_silent_turns_leave_no_start_time(home, fake, monkeypatch):
+    monkeypatch.setattr(plugin, "_turn_started", {})
+    plugin._subagent_start(child_session_id="child-9")
+    plugin._pre_llm_call(session_id="child-9", turn_id="c1")
+    plugin._pre_llm_call(session_id="st-1", turn_id="s1")
+    plugin._post_llm_call(session_id="st-1", turn_id="s1", assistant_response="[Silent]")
+    assert plugin._turn_started == {}
+    plugin._subagent_stop(child_session_id="child-9", parent_session_id="st-1")
+

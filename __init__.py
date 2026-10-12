@@ -104,6 +104,7 @@ def _post_llm_call(**kwargs: Any) -> None:
     response = kwargs.get("assistant_response")
     if _is_child(session_id):
         return
+    started = _take_turn_start(kwargs.get("turn_id"))
     ready = None if is_silent_response(response) else push_event(
         "response.ready",
         identifier=event_id("response", kwargs.get("turn_id"), session_id),
@@ -117,13 +118,19 @@ def _post_llm_call(**kwargs: Any) -> None:
         return
     # A quick reply in a chat Hermes Desktop has selected: the user most
     # likely watched it arrive there (#87).
-    if ready is not None and not _desktop_watched(session_id, kwargs.get("turn_id")):
+    if ready is not None and not _desktop_watched(session_id, started):
         enqueue(ready)
 
 
-def _desktop_watched(session_id: str, turn_id: Any) -> bool:
+def _take_turn_start(turn_id: Any) -> float | None:
+    """When this turn's pre_llm_call ran, if noted; the entry goes either way."""
+    if not isinstance(turn_id, str) or not turn_id:  # Hermes passes a str
+        return None
     with _turn_started_lock:
-        started = _turn_started.pop(turn_id, None) if isinstance(turn_id, str) else None
+        return _turn_started.pop(turn_id, None)
+
+
+def _desktop_watched(session_id: str, started: float | None) -> bool:
     try:
         return desktop_selected.quick(started) and desktop_selected.selected(get_hermes_home(), session_id)
     except Exception:  # noqa: BLE001 — can't tell, so the push goes out
@@ -262,7 +269,8 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
     """Context for this turn: calls from Hermes the user declined or missed
     since the last turn of this chat (#449), and the voice persona hint."""
     session_id = _text(kwargs.get("session_id"))
-    _note_turn_start(kwargs.get("turn_id"))
+    if not _is_child(session_id):
+        _note_turn_start(kwargs.get("turn_id"))
     notes = [
         None if _is_child(session_id) else calls.outcome_note(session_id),
         _voice_persona_note(kwargs.get("conversation_history")),
@@ -278,6 +286,8 @@ def _note_turn_start(turn_id: Any) -> None:
     if not isinstance(turn_id, str) or not turn_id:
         return
     with _turn_started_lock:
+        # A repeated id moves to the end, so eviction takes the oldest turn.
+        _turn_started.pop(turn_id, None)
         _turn_started[turn_id] = time.monotonic()
         while len(_turn_started) > MAX_TURN_STARTS:
             _turn_started.pop(next(iter(_turn_started)))
