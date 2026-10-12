@@ -13,6 +13,7 @@ from typing import Any
 from hermes_constants import get_hermes_home
 
 from . import call_tool, call_watches, calls, clarify_loop, desktop_selected, settings_tool
+from .session_titles import title as _session_title, titled as _titled
 from .client import enqueue
 from .events import approval_decision, clarification_text, event_id, is_silent_response, push_event
 
@@ -95,6 +96,7 @@ def _pre_tool_call(**kwargs: Any) -> None:
         identifier=event_id("input", kwargs.get("turn_id"), kwargs.get("tool_call_id")),
         session_id=_text(kwargs.get("session_id")),
         profile=_profile,
+        title=_titled("Input needed", kwargs.get("session_id")),
         body=clarification_text(kwargs.get("args")),
     ))
 
@@ -110,6 +112,7 @@ def _post_llm_call(**kwargs: Any) -> None:
         identifier=event_id("response", kwargs.get("turn_id"), session_id),
         session_id=session_id,
         profile=_profile,
+        title=_session_title(session_id),
         body=_text(response),
     )
     # A job the user asked to be called about (#449) ends here: the call
@@ -157,6 +160,7 @@ def _on_session_end(**kwargs: Any) -> None:
         identifier=event_id("failure", kwargs.get("turn_id"), session_id),
         session_id=session_id,
         profile=_profile,
+        title=_titled("Turn failed", session_id),
     )
     if calls.turn_ended(session_id, "failed", profile=_profile, fallback=failed):
         return
@@ -185,6 +189,7 @@ def _pre_approval_request(**kwargs: Any) -> None:
         identifier=event_id("approval", session_id, turn_id, kwargs.get("pattern_key"), kwargs.get("command")),
         session_id=session_id,
         profile=_profile,
+        title=_titled("Approval needed", session_id),
         body=description or "Hermes is waiting for your approval.",
         # Attach the structured card so Conduit can render an answerable
         # approval from the push payload while backgrounded. Requires both a
@@ -227,6 +232,7 @@ def _subagent_stop(**kwargs: Any) -> None:
         identifier=event_id("subagent", kwargs.get("parent_turn_id"), child, status),
         session_id=parent,
         profile=_profile,
+        title=_titled("Task finished", parent),
         body=_text(kwargs.get("child_summary")) or f"A delegated task {status}.",
     ))
 

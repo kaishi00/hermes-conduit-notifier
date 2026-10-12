@@ -26,6 +26,7 @@ import uuid
 from typing import Any, Callable
 
 from . import calls, client
+from .session_titles import titled
 from .events import (
     clarify_decision,
     event_id,
@@ -124,6 +125,7 @@ def middleware(is_child_session: Callable[[str], bool] | None = None, **kwargs: 
         identifier=event_id("input", kwargs.get("turn_id"), kwargs.get("tool_call_id"), request_id),
         session_id=session_id,
         profile=profile,
+        title=titled("Input needed", session_id),
         body=question,
         decision=clarify_decision(
             request_id=request_id,

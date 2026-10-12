@@ -64,6 +64,8 @@ The plugin currently emits notifications for:
 
 An exact `[Silent]` assistant response does not emit a completion notification.
 
+Each notification is titled with the session's title when it has one (for example a Telegram topic name), so you can tell which chat it came from: a reply shows the session title, and the others prefix it (`Approval needed · Infra`). Untitled sessions keep the generic copy. With previews off the title is not shown; `redact on` or end-to-end encryption keeps it from reaching the relay.
+
 The iOS app controls which categories are enabled, whether notification previews are shown, whether completion sounds play, and whether approval and input-needed notifications play a sound (on by default).
 
 ## Privacy and security
