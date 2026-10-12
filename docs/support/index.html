@@ -35,6 +35,8 @@
 
     <h2>Notifications</h2>
     <p>Notifications are optional. Enable them in <strong>Settings → Notifications</strong>, create a pairing code, and claim that code from the matching Hermes profile. Installation and pairing instructions are maintained in the <a href="https://github.com/kaishi00/hermes-conduit-notifier#install">notification plugin README</a>.</p>
+    <p>Fresh pairings redact notification content by default. Check the matching profile with <code>hermes conduit-push status</code>; <code>hermes conduit-push redact on</code> enables redaction and <code>hermes conduit-push redact off</code> explicitly restores full content. Re-pairing preserves either saved boolean choice; updating alone does not change existing pairings. Redaction is separate from notification previews and end-to-end encryption; see the <a href="../privacy/">privacy policy</a> for what still reaches the relay.</p>
+    <p>For a custom relay, pair against its final HTTPS base using <code>--relay-url</code>. Its certificate must be trusted by the Hermes host, and its URL must have no embedded credentials, query or fragment. The core relay client rejects redirects, including same-origin redirects. If pairing reports an origin mismatch, check that the relay's <code>PUBLIC_URL</code> advertises the hostname and effective port you requested; a rejected response does not replace an existing local pairing.</p>
 
     <h2>Attachments</h2>
     <p>Conduit supports user-selected images, PDFs, and text files. If an attachment is visible in your message but the agent cannot read it, confirm that the Hermes gateway has write access to its configured image and attachment directories.</p>

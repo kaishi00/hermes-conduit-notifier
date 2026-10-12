@@ -133,8 +133,9 @@ REDACTED_QUESTION_TEXT = "Hermes needs your answer. Open Conduit for details."
 def redact_event(event: dict[str, Any]) -> dict[str, Any]:
     """Strip chat content from an outgoing event, keeping answer routing.
 
-    For profiles that opt into `hermes conduit-push redact on` (#192): no
-    title/body text leaves the gateway, and a decision keeps only the
+    With redaction on (the fresh-pairing default, also set with
+    `hermes conduit-push redact on`), no title/body text leaves the gateway,
+    and a decision keeps only the
     structural fields the device needs to answer it (kind, session_key or
     request_id, qids, choices, multi_select), with its display text replaced
     by generic copy. Choice labels are kept because the answer is one of

@@ -34,7 +34,9 @@ over your signed-in dashboard connection (see [Pairing from Conduit](#pairing-fr
 
 Fresh pairings redact notification content by default, before the first event is sent. Re-pairing preserves an explicit prior `redact on` **or** `redact off` choice; a profile without a saved boolean choice defaults to redaction when paired again. Existing pairings are not changed just by updating the plugin.
 
-For a custom relay, use `hermes conduit-push pair XXXXX-XXXXX --relay-url https://relay.example`. Use an HTTPS URL with a valid trusted certificate, no embedded username/password, query, or fragment. The core relay client rejects redirects (including same-origin redirects); enter the final HTTPS endpoint directly. A `relay_url` returned by pairing must be valid HTTPS and have the same origin (scheme, hostname and effective port) as the requested relay before the new credential is saved. Custom HTTPS hosts, ports and base paths remain supported; a different relay origin requires an explicit new pairing against that origin.
+For a custom relay, use `hermes conduit-push pair XXXXX-XXXXX --relay-url https://relay.example`. Use an HTTPS URL with a host and a valid trusted certificate, no embedded username/password, query, fragment, whitespace, control characters or backslashes. The core relay client rejects redirects (including same-origin redirects); enter the final HTTPS endpoint directly. A `relay_url` returned by pairing must meet the same URL requirements and have the same origin (scheme, hostname and effective port) as the requested relay before the new credential is saved. Hostname comparison is case-insensitive, and an omitted port means 443. If the response omits `relay_url`, the requested base is saved without trailing slashes; an invalid returned URL leaves any existing local pairing unchanged. Custom HTTPS hosts, ports and base paths remain supported, including a returned base path that differs on the same origin; a different relay origin requires an explicit new pairing against that origin.
+
+Transport validation and redirect rejection also apply to requests from existing pairings after an update. If an older pairing uses HTTP or a redirecting endpoint, pair again against the final trusted HTTPS base; updating alone does not rewrite its saved URL.
 
 ## Manage the pairing
 
@@ -123,7 +125,7 @@ cp /path/to/AuthKey_XXXXXX.p8 secrets/apns-production.p8
 docker compose up -d
 ```
 
-The relay listens on port 9120. Put it behind an HTTPS reverse proxy (the relay validates that `PUBLIC_URL` uses HTTPS). If the proxy sends `X-Forwarded-For`, set `TRUST_PROXY=1`.
+The relay listens on port 9120. Put it behind an HTTPS reverse proxy (the relay validates that `PUBLIC_URL` uses HTTPS). Set `PUBLIC_URL` to the final public relay base that gateways pair against, with a trusted certificate and no credentials, query or fragment. The plugin rejects redirects and a pairing response advertising a different origin, including a different effective port. For a public base path, configure the proxy to strip that prefix before forwarding to the relay's root routes. Internal proxy-to-relay traffic and health checks can still use HTTP. If the proxy sends `X-Forwarded-For`, set `TRUST_PROXY=1`.
 
 **What stays secret:**
 
@@ -1311,11 +1313,13 @@ The static site source lives in [`docs/`](docs/).
 
 ## Development
 
-The runtime uses only the Python standard library plus Hermes APIs. Run the pure event tests with:
+Core relay delivery uses only the Python standard library plus Hermes APIs; end-to-end encryption uses `cryptography`. The Python suite needs `pytest` and `cryptography`, including for the transport tests' throwaway TLS certificates. Run the Python tests with:
 
 ```bash
 python -m pytest --rootdir=tests tests
 ```
+
+`tests/test_client_security.py` uses synthetic credentials and loopback HTTPS servers. `tests/test_clarify_relay_e2e.py` additionally requires Node.js (and skips without it): it runs the real relay behind a local TLS reverse proxy with `APNS_MODE=accept`, so no Apple credentials or APNs traffic are needed. These fixtures temporarily trust their generated certificate through `SSL_CERT_FILE`; certificate verification stays enabled. Protocol tests explicitly disable redaction where they need full decision content, while pairing regressions verify default redaction and preservation of explicit privacy choices.
 
 ## License
 

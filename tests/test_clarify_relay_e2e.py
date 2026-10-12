@@ -444,6 +444,88 @@ def _captured(relay):
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
+def test_private_pairing_first_push_and_repair_with_real_relay(relay, restore_real_client, monkeypatch, tmp_path):
+    monkeypatch.setattr(loop.client, "state_path", lambda: tmp_path / "conduit-push.json")
+    status, registered = _request(relay["base"], "/v1/installations", method="POST", body={
+        "bundle_id": "com.milim.relay", "device_token": "b" * 64, "environment": "production",
+    })
+    assert status == 201, registered
+    installation_id = registered["installation"]["id"]
+    transport = []
+    real_request = loop.client.request_json
+
+    def capture_request(url, **kwargs):
+        result = real_request(url, **kwargs)
+        if url.endswith("/v1/events"):
+            transport.append({"url": url, "event": kwargs["payload"], "response": result})
+        return result
+
+    monkeypatch.setattr(loop.client, "request_json", capture_request)
+    records = []
+    for index, (label, choice, expected) in enumerate([
+        ("fresh pairing", None, True),
+        ("explicit redaction on survives re-pairing", True, True),
+        ("explicit redaction off survives re-pairing", False, False),
+        ("missing choice defaults private on re-pairing", None, True),
+        ("non-boolean choice defaults private on re-pairing", "false", True),
+    ]):
+        previous = loop.client.load_state()
+        if previous:
+            previous.pop("redact_content", None)
+            if choice is not None:
+                previous["redact_content"] = choice
+            loop.client.save_state(previous)
+        status, pairing = _request(
+            relay["base"], f"/v1/installations/{installation_id}/pairings",
+            method="POST", credential=registered["credential"],
+        )
+        assert status == 201, pairing
+        state = loop.client.claim_pairing(
+            pairing["pairing_code"], relay_url=relay["base"], gateway_name="privacy evidence",
+        )
+        assert state["redact_content"] is expected
+        assert loop.client.load_state() == state
+        assert loop.client.state_path().stat().st_mode & 0o777 == 0o600
+        if previous:
+            assert state["redact_key"] == previous["redact_key"]
+        event = loop.push_event(
+            "response.ready", identifier=f"response:privacy-evidence-{index}",
+            session_id="synthetic-session", profile="synthetic-profile",
+            title="SYNTHETIC PRIVATE TITLE", body="SYNTHETIC PRIVATE CHAT SNIPPET",
+        )
+        before = len(_captured(relay))
+        response = loop.client.send_now(event)
+        assert response["accepted"] is True and response["delivered"] is True
+        delivered = _captured(relay)[before:]
+        assert len(delivered) == 1
+        outgoing = transport[-1]["event"]
+        assert ("SYNTHETIC PRIVATE CHAT SNIPPET" in json.dumps(outgoing)) is (not expected)
+        assert ("SYNTHETIC PRIVATE TITLE" in json.dumps(outgoing)) is (not expected)
+        if expected:
+            assert "SYNTHETIC PRIVATE" not in json.dumps(delivered)
+        assert (outgoing["event_id"] != event["event_id"]) is expected
+        assert state["redact_key"] not in json.dumps(outgoing)
+        assert state["credential"] not in json.dumps(outgoing)
+        records.append({
+            "scenario": label,
+            "persisted_state": {
+                "relay_url": state["relay_url"], "redact_content": state["redact_content"],
+                "redact_key_bytes": len(bytes.fromhex(state["redact_key"])),
+                "file_mode": "0600", "encryption_provisioned": "e2e" in state,
+            },
+            "relay_request": transport[-1],
+            "apns_payload": delivered[0]["notification"]["payload"],
+        })
+    evidence_dir = os.environ.get("CONDUIT_TEST_EVIDENCE_DIR")
+    if evidence_dir:
+        destination = pathlib.Path(evidence_dir)
+        destination.mkdir(parents=True, exist_ok=True)
+        (destination / "private-pairing-real-relay.json").write_text(
+            json.dumps({"transport": "trusted loopback HTTPS; APNs captured, not sent", "scenarios": records}, indent=2),
+            encoding="utf-8",
+        )
+
+
 def test_encrypted_batch_clarify_round_trips_without_the_relay_seeing_content(relay, gateway, fast_poll, monkeypatch):
     e2e = sys.modules["conduit_push.e2e"]
     kid = "0123456789abcdef0123456789abcdef"

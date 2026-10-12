@@ -329,3 +329,72 @@ def test_pairing_redirect_does_not_replay_code_or_save_state(tls_servers, state_
     assert len(source_requests) == 1
     assert json.loads(source_requests[0]["body"])["pairing_code"] == "SYNTHETIC-PRIVATE-CODE"
     assert not state_file.exists()
+
+
+def test_transport_boundary_evidence(tls_servers, state_file, monkeypatch):
+    sink_url, sink_requests = tls_servers(lambda path: (200, {}, {"ok": True}))
+    redirect_url, redirect_requests = tls_servers(
+        lambda path: (307, {"Location": sink_url + "/sink"}, {}))
+    records = []
+    for method in ("GET", "POST", "DELETE"):
+        with pytest.raises(client.RelayRejected) as caught:
+            client.request_json(
+                redirect_url + "/start", method=method, credential="synthetic-test-bearer",
+                payload={"pairing_code": "SYNTHETIC-CODE"} if method == "POST" else None,
+            )
+        records.append({"method": method, "error_status": caught.value.status})
+    assert len(redirect_requests) == 3 and not sink_requests
+    same_url, same_requests = tls_servers(lambda path: (302, {"Location": "/sink"}, {}))
+    with pytest.raises(client.RelayRejected) as same_error:
+        client.claim_pairing("SYNTHETIC-CODE", relay_url=same_url)
+    assert same_error.value.status == 302
+    assert [request["path"] for request in same_requests] == ["/v1/pairings/claim"]
+    assert not state_file.exists()
+    custom_body = {"credential": "synthetic-custom-credential", "installation_id": "synthetic-installation"}
+    custom_url, custom_requests = tls_servers(lambda path: (200, {}, custom_body))
+    custom_body["relay_url"] = custom_url + "/new-base"
+    custom_state = client.claim_pairing("SYNTHETIC-CODE", relay_url=custom_url + "/custom-base/")
+    assert custom_state["relay_url"] == custom_url + "/new-base"
+    assert custom_requests[0]["path"] == "/custom-base/v1/pairings/claim"
+    assert client.load_state() == custom_state
+    original = {"credential": "synthetic-old-credential", "relay_url": redirect_url, "redact_content": False}
+    client.save_state(original)
+    before = state_file.read_bytes()
+    replacement_url, replacement_requests = tls_servers(lambda path: (200, {}, {
+        "credential": "synthetic-new-credential", "installation_id": "synthetic-installation",
+        "relay_url": sink_url,
+    }))
+    with pytest.raises(ValueError, match="same HTTPS origin") as origin_error:
+        client.claim_pairing("SYNTHETIC-CODE", relay_url=replacement_url)
+    assert state_file.read_bytes() == before
+    assert len(replacement_requests) == 1
+    with pytest.raises(ValueError, match="query") as query_error:
+        client.claim_pairing("SYNTHETIC-CODE", relay_url=replacement_url + "?debug=1")
+    assert len(replacement_requests) == 1
+    monkeypatch.delenv("SSL_CERT_FILE")
+    with pytest.raises(client.urllib.error.URLError) as trust_error:
+        client.request_json(sink_url + "/untrusted", method="GET")
+    assert "CERTIFICATE_VERIFY_FAILED" in str(trust_error.value)
+    assert not sink_requests
+    evidence_dir = os.environ.get("CONDUIT_TEST_EVIDENCE_DIR")
+    if evidence_dir:
+        destination = Path(evidence_dir)
+        destination.mkdir(parents=True, exist_ok=True)
+        (destination / "transport-boundaries.json").write_text(json.dumps({
+            "redirect_responses": records,
+            "source_request_paths": [request["path"] for request in redirect_requests],
+            "redirect_sink_requests": sink_requests,
+            "same_origin_pairing_redirect_status": same_error.value.status,
+            "same_origin_request_paths": [request["path"] for request in same_requests],
+            "custom_https_pairing": {
+                "requested_url": custom_url + "/custom-base/",
+                "claim_path": custom_requests[0]["path"],
+                "persisted_relay_url": custom_state["relay_url"],
+                "persisted_redaction": custom_state["redact_content"],
+            },
+            "cross_origin_pairing_error": str(origin_error.value),
+            "previous_pairing_file_unchanged": state_file.read_bytes() == before,
+            "query_base_error": str(query_error.value),
+            "claim_requests_after_query_attempt": len(replacement_requests),
+            "untrusted_tls_error": str(trust_error.value),
+        }, indent=2), encoding="utf-8")

@@ -154,7 +154,12 @@ def remove_state() -> None:
 
 
 def _https_origin(url: str) -> tuple[str, str, int]:
-    """Validate transport URLs without echoing potentially sensitive input."""
+    """Return the HTTPS scheme, lowercase hostname and effective port.
+
+    Reject missing hosts, userinfo, fragments, invalid ports, whitespace,
+    control characters and backslashes without echoing sensitive input.
+    Request queries are allowed; pairing bases reject them separately.
+    """
     message = "Conduit relay URL must be HTTPS with a host, no credentials or fragments."
     if not isinstance(url, str) or any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in url) or "\\" in url or "#" in url:
         raise ValueError(message)
@@ -169,6 +174,14 @@ def _https_origin(url: str) -> tuple[str, str, int]:
 
 
 def claim_pairing(code: str, relay_url: str = DEFAULT_RELAY_URL, gateway_name: str = "") -> dict[str, Any]:
+    """Claim a code against a query-free HTTPS base and persist the pairing.
+
+    A returned relay base must be valid and share the requested origin;
+    omission uses the requested base without trailing slashes. URL validation
+    raises ValueError before replacing local state. Same-origin base paths
+    may differ. Saved boolean redaction choices survive re-pairing; otherwise
+    redaction defaults on, with a local key minted when needed.
+    """
     requested_origin = _https_origin(relay_url)
     if "?" in relay_url:
         raise ValueError("Conduit relay base URL must not contain a query.")
@@ -267,8 +280,8 @@ def set_redact_content(enabled: bool) -> bool:
 
 def build_outgoing(event: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
     """The event exactly as it is sent to the relay for this pairing."""
-    # Redaction (the user's explicit choice) applies first, then a pairing
-    # that provisioned end-to-end encryption seals whatever content is left.
+    # Redaction (default-on or the user's saved choice) applies first, then
+    # a pairing with end-to-end encryption seals whatever content is left.
     return _sealed(_redacted(event, state), state)
 
 
@@ -453,8 +466,11 @@ def cancel_decision(request_id: str) -> bool:
 
 
 class RelayRejected(RuntimeError):
-    """The relay answered with an HTTP error. ``status`` tells a refusal (4xx)
-    from the relay failing to handle the request (5xx)."""
+    """The relay answered with an HTTP error or a rejected redirect.
+
+    ``status`` distinguishes a redirect (3xx), refusal (4xx) and relay failure
+    (5xx); redirects are never followed, including within the same origin.
+    """
 
     def __init__(self, status: int, detail: str) -> None:
         # Safe to log verbatim: one printable line of 200 characters at most,
@@ -480,7 +496,11 @@ def request_json(
     credential: str = "",
     timeout: float = 15.0,
 ) -> dict[str, Any]:
-    """One relay request. ``timeout`` bounds connect and read, but urllib
+    """One HTTPS relay request with certificate verification and no redirects.
+
+    Invalid URLs raise ValueError before transport; HTTP errors and redirects
+    raise RelayRejected. Query-bearing request endpoints are allowed, unlike
+    pairing bases. ``timeout`` bounds connect and read, but urllib
     cannot bound a pathological DNS resolution — accepted technical debt;
     bounding it would mean a resolver redesign for no realistic gain."""
     _https_origin(url)
