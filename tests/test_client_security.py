@@ -2,8 +2,10 @@
 import importlib.util
 import ipaddress
 import json
+import os
 import ssl
 import sys
+import tempfile
 import threading
 import types
 from datetime import datetime, timedelta, timezone
@@ -17,6 +19,14 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
 ROOT = Path(__file__).resolve().parents[1]
+if "hermes_constants" not in sys.modules:
+    _hermes_constants = types.ModuleType("hermes_constants")
+    _hermes_constants.get_hermes_home = lambda: Path(
+        os.environ.get("HERMES_HOME")
+        or str(Path(os.environ.get("HOME") or tempfile.gettempdir()) / ".hermes")
+    )
+    sys.modules["hermes_constants"] = _hermes_constants
+
 if "conduit_push" not in sys.modules:
     package = types.ModuleType("conduit_push")
     package.__path__ = [str(ROOT)]
