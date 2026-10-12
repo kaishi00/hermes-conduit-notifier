@@ -275,7 +275,7 @@ def test_status_checks_credentials_without_refreshing(client, hermes):
                     "source": "plugin", "available": True, "reason": None,
                     "api": {"auth": "api", "model": "gpt-live-1", "voice": "marin", "enabled": False,
                             "daily_limit": api.GPT_LIVE_API_DAILY_CALLS, "available": False,
-                            "reason": body["api"]["reason"]}}
+                            "reason": api.GPT_LIVE_API_OFF}}
     assert "conduit_api_billing" in body["api"]["reason"]
     assert hermes.refresh == [False]
 
@@ -747,3 +747,28 @@ def test_a_broken_hermes_key_lookup_is_a_failure_not_the_environment(client, api
     response = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "billing": "api"})
     assert response.status_code == 503 and "could not read the OpenAI key" in response.json()["detail"]
     assert openai.calls == []
+
+
+def test_release_gives_back_the_failed_calls_own_slot():
+    now = [0.0]
+    limiter = api._MintLimiter(2, 100.0, clock=lambda: now[0], message="capped")
+    early = limiter.acquire("p")
+    now[0] = 90.0
+    limiter.acquire("p")
+    limiter.release("p", early)
+    # The later call's slot is still counted: it keeps the window busy until 190, not 100.
+    now[0] = 120.0
+    limiter.acquire("p")
+    with pytest.raises(api.TokenError):
+        limiter.acquire("p")
+
+
+def test_a_zero_limit_leaves_no_empty_bucket_behind():
+    limiter = api._MintLimiter(2, 100.0, clock=lambda: 0.0, message="capped")
+    with pytest.raises(api.TokenError):
+        limiter.acquire("p", limit=0)
+    limiter.acquire("other")
+    only = limiter.acquire("p")
+    limiter.release("p", only)
+    limiter.acquire("other")  # an emptied bucket never trips the next acquire
+    limiter.release("p", 12345.0)  # an unknown or aged-out mint is ignored

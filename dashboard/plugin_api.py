@@ -378,29 +378,37 @@ class _MintLimiter:
         self._mints: Dict[str, deque] = {}
         self._lock = threading.Lock()
 
-    def acquire(self, key: str, limit: Optional[int] = None) -> None:
-        """``limit`` overrides the cap for this call (a cap read from the profile's config)."""
+    def acquire(self, key: str, limit: Optional[int] = None) -> float:
+        """Takes a slot and returns its mint (for ``release``). ``limit`` overrides
+        the cap for this call (a cap read from the profile's config)."""
         limit = self.limit if limit is None else limit
         now = self.clock()
         with self._lock:
-            # Drop buckets whose newest mint has aged out, so idle keys don't pile up.
-            for stale in [k for k, q in self._mints.items() if now - q[-1] >= self.window_s]:
+            # Drop buckets whose newest mint has aged out (or that are empty), so idle keys don't pile up.
+            for stale in [k for k, q in self._mints.items() if not q or now - q[-1] >= self.window_s]:
                 del self._mints[stale]
+            if limit <= 0:
+                raise TokenError(429, self.message)
             mints = self._mints.setdefault(key, deque())
             while mints and now - mints[0] >= self.window_s:
                 mints.popleft()
             if len(mints) >= limit:
                 raise TokenError(429, self.message)
             mints.append(now)
+            return now
 
-    def release(self, key: str) -> None:
-        """Gives back the newest slot of ``key``: for a request that failed before it cost anything."""
+    def release(self, key: str, mint: float) -> None:
+        """Gives back the slot ``acquire`` returned, for a request that failed
+        before it cost anything. The other mints keep their own times."""
         with self._lock:
             mints = self._mints.get(key)
-            if mints:
-                mints.pop()
-            # acquire's cleanup reads each bucket's newest mint: none may be left empty.
-            if mints is not None and not mints:
+            if not mints:
+                return
+            try:
+                mints.remove(mint)
+            except ValueError:
+                return  # already aged out
+            if not mints:
                 del self._mints[key]
 
 
@@ -1299,16 +1307,18 @@ def _gpt_live_api_credentials(live: Dict[str, Any]) -> tuple:
                                   "(voice.gpt_live.api_key); the host's OPENAI_API_KEY only goes to OpenAI. "
                                   + GPT_LIVE_NO_SUBSCRIPTION)
         try:
-            from tools.tool_backend_helpers import resolve_openai_audio_api_key
+            import tools.tool_backend_helpers as helpers
         except ImportError as exc:
             # Only a Hermes without the helper falls back to the environment; a
             # broken import inside it is a failure, not an absent helper.
             if exc.name not in ("tools", "tools.tool_backend_helpers"):
                 logger.warning("GPT-Live could not load Hermes' OpenAI key lookup: %s", type(exc).__name__)
                 raise TokenError(503, "GPT-Live could not read the OpenAI key on the Hermes host. " + GPT_LIVE_NO_SUBSCRIPTION)
-            resolve_openai_audio_api_key = None
-        if resolve_openai_audio_api_key is None:
-            key = (os.environ.get("VOICE_TOOLS_OPENAI_KEY") or os.environ.get("OPENAI_API_KEY") or "").strip()
+            helpers = None
+        resolve_openai_audio_api_key = getattr(helpers, "resolve_openai_audio_api_key", None)
+        if not callable(resolve_openai_audio_api_key):
+            # The profile's own .env where Hermes can say, as its key chain reads it.
+            key = str(_env_value("VOICE_TOOLS_OPENAI_KEY") or _env_value("OPENAI_API_KEY") or "").strip()
         else:
             try:
                 key = str(resolve_openai_audio_api_key() or "").strip()
@@ -1437,12 +1447,12 @@ def _api_gpt_live_session(sdp: str, history: Optional[list], live: Dict[str, Any
     # Counted only once the call can really be billed, so a missing key doesn't use up the day,
     # and given back below when OpenAI doesn't start it.
     daily_key = limiter_key or ""
-    _gpt_live_api_daily.acquire(daily_key, limit=daily_limit)
+    mint = _gpt_live_api_daily.acquire(daily_key, limit=daily_limit)
     try:
         return _api_gpt_live_exchange(sdp, history, live, key, base_url, post,
                                       briefing_applied=briefing_applied, greeting_applied=greeting_applied)
     except BaseException:
-        _gpt_live_api_daily.release(daily_key)
+        _gpt_live_api_daily.release(daily_key, mint)
         raise
 
 
