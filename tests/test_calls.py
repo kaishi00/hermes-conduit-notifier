@@ -847,33 +847,58 @@ def test_an_unreadable_store_says_nothing_and_never_raises(home, monkeypatch):
     assert plugin._pre_llm_call(session_id="rt-1") is None
 
 
-def test_post_llm_call_skips_the_ready_push_for_a_chat_on_screen_in_desktop(home, fake, monkeypatch):
-    desktop_focus = sys.modules["conduit_push.desktop_focus"]
+
+def _desktop_selects(home, monkeypatch, *ids):
     monkeypatch.setattr(plugin, "get_hermes_home", lambda: home)
-    desktop_focus.report(home, "window0001", ["rt-1", "st-1"], 60)
+    sys.modules["conduit_push.desktop_selected"].publish(home, ids)
+
+
+def test_a_quick_reply_in_a_chat_desktop_has_selected_sends_no_ready_push(home, fake, monkeypatch):
+    _desktop_selects(home, monkeypatch, "st-1")
+    plugin._pre_llm_call(session_id="st-1", turn_id="t1")
     plugin._post_llm_call(session_id="st-1", turn_id="t1", assistant_response="All done.")
     assert fake.enqueued == []
     # Another chat still notifies.
-    plugin._post_llm_call(session_id="rt-2", turn_id="t2", assistant_response="Also done.")
-    assert [event["session_id"] for event in fake.enqueued] == ["rt-2"]
-    # Once the window loses focus, the chat notifies again.
-    desktop_focus.report(home, "window0001", [], 0)
-    plugin._post_llm_call(session_id="st-1", turn_id="t3", assistant_response="Done again.")
-    assert [event["session_id"] for event in fake.enqueued] == ["rt-2", "st-1"]
+    plugin._pre_llm_call(session_id="st-2", turn_id="t2")
+    plugin._post_llm_call(session_id="st-2", turn_id="t2", assistant_response="Also done.")
+    assert [event["session_id"] for event in fake.enqueued] == ["st-2"]
 
 
-def test_post_llm_call_still_calls_a_watched_job_on_screen_in_desktop(home, fake, monkeypatch):
-    monkeypatch.setattr(plugin, "get_hermes_home", lambda: home)
-    sys.modules["conduit_push.desktop_focus"].report(home, "window0001", ["rt-1"], 60)
+def test_a_long_turn_in_a_chat_desktop_has_selected_still_pushes(home, fake, monkeypatch):
+    _desktop_selects(home, monkeypatch, "st-1")
+    plugin._pre_llm_call(session_id="st-1", turn_id="t1")
+    desktop_selected = sys.modules["conduit_push.desktop_selected"]
+    plugin._turn_started["t1"] -= desktop_selected.QUICK_TURN_S + 1
+    plugin._post_llm_call(session_id="st-1", turn_id="t1", assistant_response="All done.")
+    assert [event["type"] for event in fake.enqueued] == ["response.ready"]
+
+
+def test_a_turn_without_a_start_time_still_pushes(home, fake, monkeypatch):
+    _desktop_selects(home, monkeypatch, "st-1")
+    plugin._post_llm_call(session_id="st-1", turn_id="t-unknown", assistant_response="All done.")
+    assert [event["type"] for event in fake.enqueued] == ["response.ready"]
+
+
+def test_a_watched_job_in_a_chat_desktop_has_selected_still_calls(home, fake, monkeypatch):
+    _desktop_selects(home, monkeypatch, "rt-1")
     _watch(home, "rt-1")
+    plugin._pre_llm_call(session_id="rt-1", turn_id="t1")
     plugin._post_llm_call(session_id="rt-1", turn_id="t1", assistant_response="All done.")
     assert fake.sent[0]["type"] == "call.requested"
 
 
-def test_an_unreadable_desktop_focus_never_drops_the_ready_push(home, fake, monkeypatch):
+def test_an_unreadable_desktop_selection_never_drops_the_ready_push(home, fake, monkeypatch):
     def broken(*_args, **_kwargs):
         raise OSError("disk")
 
-    monkeypatch.setattr(sys.modules["conduit_push.desktop_focus"], "on_screen", broken)
+    monkeypatch.setattr(sys.modules["conduit_push.desktop_selected"], "selected", broken)
+    plugin._pre_llm_call(session_id="rt-1", turn_id="t1")
     plugin._post_llm_call(session_id="rt-1", turn_id="t1", assistant_response="All done.")
     assert [event["type"] for event in fake.enqueued] == ["response.ready"]
+
+
+def test_turn_start_times_stay_bounded():
+    for index in range(plugin.MAX_TURN_STARTS + 10):
+        plugin._note_turn_start(f"bound-{index}")
+    assert len(plugin._turn_started) <= plugin.MAX_TURN_STARTS
+    assert "bound-0" not in plugin._turn_started

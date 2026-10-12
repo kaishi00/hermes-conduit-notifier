@@ -5,13 +5,14 @@ from __future__ import annotations
 import functools
 import logging
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any
 
 from hermes_constants import get_hermes_home
 
-from . import call_tool, call_watches, calls, clarify_loop, desktop_focus, settings_tool
+from . import call_tool, call_watches, calls, clarify_loop, desktop_selected, settings_tool
 from .client import enqueue
 from .events import approval_decision, clarification_text, event_id, is_silent_response, push_event
 
@@ -21,6 +22,10 @@ _child_sessions: set[str] = set()
 _children_lock = threading.Lock()
 _profile = "default"
 _clarify_loop_active = False
+# turn_id -> when its pre_llm_call ran (#87), oldest first.
+_turn_started: dict[str, float] = {}
+_turn_started_lock = threading.Lock()
+MAX_TURN_STARTS = 256
 
 
 def register(ctx: Any) -> None:
@@ -110,16 +115,19 @@ def _post_llm_call(**kwargs: Any) -> None:
     # request takes the place of the ready notification.
     if calls.turn_ended(session_id, "done", profile=_profile, fallback=ready):
         return
-    # The user is reading this chat in a focused Hermes Desktop window (#87).
-    if ready is not None and not _desktop_shows(session_id):
+    # A quick reply in a chat Hermes Desktop has selected: the user most
+    # likely watched it arrive there (#87).
+    if ready is not None and not _desktop_watched(session_id, kwargs.get("turn_id")):
         enqueue(ready)
 
 
-def _desktop_shows(session_id: str) -> bool:
+def _desktop_watched(session_id: str, turn_id: Any) -> bool:
+    with _turn_started_lock:
+        started = _turn_started.pop(turn_id, None) if isinstance(turn_id, str) else None
     try:
-        return desktop_focus.on_screen(get_hermes_home(), session_id)
+        return desktop_selected.quick(started) and desktop_selected.selected(get_hermes_home(), session_id)
     except Exception:  # noqa: BLE001 — can't tell, so the push goes out
-        logger.debug("conduit_push: Desktop focus unreadable", exc_info=True)
+        logger.debug("conduit_push: Desktop selection unreadable", exc_info=True)
         return False
 
 
@@ -254,12 +262,25 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
     """Context for this turn: calls from Hermes the user declined or missed
     since the last turn of this chat (#449), and the voice persona hint."""
     session_id = _text(kwargs.get("session_id"))
+    _note_turn_start(kwargs.get("turn_id"))
     notes = [
         None if _is_child(session_id) else calls.outcome_note(session_id),
         _voice_persona_note(kwargs.get("conversation_history")),
     ]
     context = "\n\n".join(note for note in notes if note)
     return {"context": context} if context else None
+
+
+def _note_turn_start(turn_id: Any) -> None:
+    """When each turn started, for the quick-reply check in post_llm_call. A
+    turn that never reaches post_llm_call leaves its entry, so the oldest go
+    once there are many."""
+    if not isinstance(turn_id, str) or not turn_id:
+        return
+    with _turn_started_lock:
+        _turn_started[turn_id] = time.time()
+        while len(_turn_started) > MAX_TURN_STARTS:
+            _turn_started.pop(next(iter(_turn_started)))
 
 
 def _voice_persona_note(history: Any) -> str | None:

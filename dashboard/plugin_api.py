@@ -3383,63 +3383,6 @@ async def put_conduit_settings(request: Request, response: Response, profile: Op
         raise _unexpected("settings", exc, feature="Conduit settings")
 
 
-# --- Desktop focus (#87) -------------------------------------------------------
-#
-# The plugin's Desktop half reports the chat a focused Hermes Desktop window
-# shows, so a reply that finishes there sends no "reply ready" push (the user
-# is reading it). State and rules live in desktop_focus.py beside this folder.
-
-DESKTOP_FOCUS_MAX_BODY_BYTES = 2048
-# A window reports on focus changes and chat switches and renews every 20 s;
-# a few windows switching chats quickly stay well inside this.
-DESKTOP_FOCUS_LIMIT = 240
-DESKTOP_FOCUS_WINDOW_S = 60.0
-_desktop_focus_limiter = _MintLimiter(DESKTOP_FOCUS_LIMIT, DESKTOP_FOCUS_WINDOW_S,
-                                      message="Too many Desktop focus reports; try again shortly")
-_desktop_focus_module: Any = None
-_desktop_focus_lock = threading.Lock()
-
-
-def _desktop_focus() -> Any:
-    """desktop_focus.py beside this folder, loaded once."""
-    global _desktop_focus_module
-    with _desktop_focus_lock:
-        if _desktop_focus_module is None:
-            path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "desktop_focus.py")
-            spec = importlib.util.spec_from_file_location("conduit_push_dashboard_desktop_focus", path)
-            if spec is None or spec.loader is None:
-                raise TokenError(501, "This plugin install is missing desktop_focus.py; update the plugin")
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            _desktop_focus_module = module
-        return _desktop_focus_module
-
-
-def report_desktop_focus(body: Any) -> Dict[str, Any]:
-    if not isinstance(body, dict):
-        raise TokenError(400, "Expected a JSON object with client, session_ids and hold_s")
-    try:
-        return _desktop_focus().report(_calls_home(), body.get("client"), body.get("session_ids"), body.get("hold_s"))
-    except ValueError as exc:
-        raise TokenError(400, str(exc))
-
-
-@router.put("/desktop/focus")
-async def put_desktop_focus(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
-    response.headers["Cache-Control"] = "no-store"
-    try:
-        _desktop_focus_limiter.acquire(_limiter_key(profile))
-        body = await _read_json_body(request, DESKTOP_FOCUS_MAX_BODY_BYTES)
-        return {"ok": True, **(await _run_scoped(profile, lambda: report_desktop_focus(body)))}
-    except TokenError as exc:
-        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
-    except HTTPException as exc:
-        exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
-        raise
-    except Exception as exc:
-        raise _unexpected("focus", exc, feature="Desktop focus")
-
-
 # --- Watch tools (wrist-down lookups for a Conduit Watch call) ---------------
 #
 # With the wrist down, a Conduit Watch call can't reach Conduit on the iPhone,
@@ -7316,6 +7259,25 @@ class _DesktopViewStore:
                 raise
 
 
+_desktop_selected_module: Any = None
+_desktop_selected_lock = threading.Lock()
+
+
+def _desktop_selected() -> Any:
+    """desktop_selected.py beside this folder, loaded once."""
+    global _desktop_selected_module
+    with _desktop_selected_lock:
+        if _desktop_selected_module is None:
+            path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "desktop_selected.py")
+            spec = importlib.util.spec_from_file_location("conduit_push_dashboard_desktop_selected", path)
+            if spec is None or spec.loader is None:
+                raise RuntimeError("This plugin install is missing desktop_selected.py; update the plugin")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _desktop_selected_module = module
+        return _desktop_selected_module
+
+
 class _DesktopViewHook:
     """Wraps the gateway's open handlers once ``tui_gateway.server`` is loaded,
     and follows which chat each Desktop connection has selected.
@@ -7332,6 +7294,13 @@ class _DesktopViewHook:
         self._focus_lock = threading.Lock()
         # id(transport) -> the chat that connection has selected.
         self._focus: Dict[int, Dict[str, Any]] = {}
+        # Home key -> (selected stored ids, when written) last published for
+        # the reply-ready push (#87, desktop_selected.py).
+        self._published: Dict[str, Tuple[frozenset, float]] = {}
+        self._publish_lock = threading.Lock()
+        # Wakes the sweep early after an open, so a new selection is published
+        # within moments rather than at the next 5 s sweep.
+        self._wake = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self.reason: Optional[str] = "waiting"
         # Set when a gateway socket's upgrade headers can't be read, which
@@ -7391,7 +7360,8 @@ class _DesktopViewHook:
                 return
             time.sleep(DESKTOP_VIEWS_INSTALL_POLL_S)
         while True:
-            time.sleep(DESKTOP_VIEWS_SWEEP_S)
+            self._wake.wait(DESKTOP_VIEWS_SWEEP_S)
+            self._wake.clear()
             try:
                 if self.installed:
                     self.verify()
@@ -7515,6 +7485,7 @@ class _DesktopViewHook:
                 self.store.record(previous["home"], previous["stored_id"], previous["client"], seen_until)
             self._focus[id(transport)] = {"ref": ref, "home": _desktop_views_key(home), "stored_id": stored_id,
                                           "client": client, "alive_at": now}
+        self._wake.set()
 
     def sweep(self, now: Optional[float] = None) -> None:
         """Ends the selection of connections that closed, at their last check."""
@@ -7527,6 +7498,29 @@ class _DesktopViewHook:
                     del self._focus[key]
                 else:
                     focus["alive_at"] = now
+            selection: Dict[str, set] = {}
+            for focus in self._focus.values():
+                selection.setdefault(focus["home"], set()).add(focus["stored_id"])
+        self._publish_selection(selection, now)
+
+    def _publish_selection(self, selection: Dict[str, set], now: float) -> None:
+        """Writes each home's selected chats for the turn hooks (#87) when they
+        change, and renews a selection before readers stop trusting it."""
+        with self._publish_lock:
+            for key in set(selection) | set(self._published):
+                ids = frozenset(selection.get(key, ()))
+                last = self._published.get(key)
+                if last is not None and last[0] == ids and (not ids or now - last[1] < _desktop_selected().RENEW_S):
+                    continue
+                try:
+                    _desktop_selected().publish(key, ids, now=now)
+                except Exception:  # noqa: BLE001 — readers then see nothing selected; the next sweep retries
+                    logger.debug("Conduit: could not publish Desktop's selected chats under %s", key, exc_info=True)
+                    continue
+                if ids:
+                    self._published[key] = (ids, now)
+                else:
+                    self._published.pop(key, None)
 
     def read(self, home: Any) -> Dict[str, Dict[str, Any]]:
         """Saved views plus the chats Desktop has selected right now."""

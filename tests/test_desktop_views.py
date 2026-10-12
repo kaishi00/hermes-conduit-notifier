@@ -536,3 +536,103 @@ def test_reads_are_rate_limited(monkeypatch, tmp_path):
     client = TestClient(app)
     assert client.get(f"{BASE}/sessions/desktop-views").status_code == 200
     assert client.get(f"{BASE}/sessions/desktop-views").status_code == 429
+
+
+# --- Selected chats for the reply-ready push (#87) -----------------------------
+
+_selected_spec = importlib.util.spec_from_file_location("conduit_desktop_selected_views_test", ROOT / "desktop_selected.py")
+desktop_selected = importlib.util.module_from_spec(_selected_spec)
+_selected_spec.loader.exec_module(desktop_selected)
+
+
+def test_the_selection_is_published_for_the_turn_hooks(monkeypatch, tmp_path):
+    clock = Clock(1000.0)
+    monkeypatch.setattr(api, "time", types.SimpleNamespace(time=clock.time, monotonic=clock.time, sleep=lambda _: None))
+    desktop = WSTransport({"user-agent": ELECTRON})
+    gateway = FakeGateway(tmp_path, desktop)
+    gateway.install(monkeypatch)
+    hook = _hook()
+    hook.try_install()
+
+    gateway.call("session.activate", key="a")
+    assert hook._wake.is_set()  # the sweep publishes it now, not in 5 s
+    hook.sweep()
+    assert desktop_selected.selected(tmp_path, "a", now=1000.0)
+    assert not desktop_selected.selected(tmp_path, "b", now=1000.0)
+    if os.name == "posix":
+        assert ((tmp_path / desktop_selected.FILE_NAME).stat().st_mode & 0o777) == 0o600
+
+    # Switching chats moves it.
+    clock.now = 1010.0
+    gateway.call("session.activate", key="b")
+    hook.sweep()
+    assert not desktop_selected.selected(tmp_path, "a", now=1010.0)
+    assert desktop_selected.selected(tmp_path, "b", now=1010.0)
+
+    # Renewed while it stays selected, so it never goes stale.
+    clock.now = 1010.0 + desktop_selected.RENEW_S
+    hook.sweep()
+    assert desktop_selected.selected(tmp_path, "b", now=clock.now + desktop_selected.STALE_S - 1)
+
+    # Closing Desktop clears it.
+    desktop.closed = True
+    hook.sweep()
+    assert not (tmp_path / desktop_selected.FILE_NAME).exists()
+
+
+def test_an_unchanged_selection_is_not_rewritten_every_sweep(monkeypatch, tmp_path):
+    clock = Clock(1000.0)
+    monkeypatch.setattr(api, "time", types.SimpleNamespace(time=clock.time, monotonic=clock.time, sleep=lambda _: None))
+    gateway = FakeGateway(tmp_path, WSTransport({"user-agent": ELECTRON}))
+    gateway.install(monkeypatch)
+    hook = _hook()
+    hook.try_install()
+    gateway.call("session.activate", key="a")
+    hook.sweep()
+    writes = []
+    monkeypatch.setattr(api._desktop_selected(), "publish", lambda *args, **kwargs: writes.append(args))
+    clock.now = 1005.0
+    hook.sweep()
+    assert writes == []
+
+
+def test_a_failed_publish_is_retried_on_the_next_sweep(monkeypatch, tmp_path):
+    clock = Clock(1000.0)
+    monkeypatch.setattr(api, "time", types.SimpleNamespace(time=clock.time, monotonic=clock.time, sleep=lambda _: None))
+    gateway = FakeGateway(tmp_path, WSTransport({"user-agent": ELECTRON}))
+    gateway.install(monkeypatch)
+    hook = _hook()
+    hook.try_install()
+    gateway.call("session.activate", key="a")
+    module = api._desktop_selected()
+    real = module.publish
+
+    def broken(*_args, **_kwargs):
+        raise OSError("disk")
+
+    monkeypatch.setattr(module, "publish", broken)
+    hook.sweep()  # never raises
+    monkeypatch.setattr(module, "publish", real)
+    hook.sweep()
+    assert desktop_selected.selected(tmp_path, "a", now=1000.0)
+
+
+def test_a_selection_file_that_is_not_renewed_goes_stale(tmp_path):
+    desktop_selected.publish(tmp_path, ["a"], now=1000.0)
+    assert desktop_selected.selected(tmp_path, "a", now=1000.0 + desktop_selected.STALE_S)
+    assert not desktop_selected.selected(tmp_path, "a", now=1000.0 + desktop_selected.STALE_S + 1)
+
+
+@pytest.mark.parametrize("content", ["{not json", json.dumps([]), json.dumps({"selected": "a", "at": 1000.0}),
+                                     json.dumps({"selected": ["a"], "at": "now"}),
+                                     json.dumps({"selected": ["a"], "at": True})])
+def test_an_unreadable_selection_counts_as_nothing_selected(tmp_path, content):
+    (tmp_path / desktop_selected.FILE_NAME).write_text(content)
+    assert not desktop_selected.selected(tmp_path, "a", now=1000.0)
+
+
+def test_only_quick_turns_count():
+    assert desktop_selected.quick(1000.0, now=1000.0 + desktop_selected.QUICK_TURN_S)
+    assert not desktop_selected.quick(1000.0, now=1000.0 + desktop_selected.QUICK_TURN_S + 1)
+    assert not desktop_selected.quick(None, now=1000.0)
+    assert not desktop_selected.quick(2000.0, now=1000.0)

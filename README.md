@@ -732,34 +732,27 @@ writes Hermes' own read flag, so Desktop's unread dots don't change.
 
 ## Quiet while you read in Desktop (plugin 0.20+)
 
-When a reply finishes in a chat you have on screen in Hermes Desktop, with
-the Desktop window in front, the plugin skips that reply's "response ready"
-push: you're already reading it. Every other notification stays as it was:
+A reply that comes back within 2 minutes in a chat Hermes Desktop (or the
+web dashboard) has selected on this host sends no "response ready" push:
+you most likely watched it arrive there. A longer turn still pushes, since
+you have likely walked away, and every other notification stays as it was:
 other chats, background jobs, approvals, questions, failed turns and calls.
+There is nothing to set up.
 
-Hermes can't see Desktop's window focus, so the plugin ships a small Desktop
-half (`desktop/plugin.js`). Hermes Desktop lists it under **Settings >
-Plugins** as **Conduit push** and keeps plugin Desktop halves off until you
-switch them on, once per Desktop install. Each Desktop window then reports,
-while it is visible and focused, the chat it shows (its runtime and stored
-ids), renews that every 20 seconds, and takes it back as soon as the window
-loses focus or switches chats. It uses Desktop's own rule for "in front", the
-one its native notifications follow.
-
-| Method | Route | Returns |
-| --- | --- | --- |
-| PUT | `/api/plugins/conduit_push/desktop/focus?profile=` with `{client, session_ids, hold_s}` | `{ok, status: "focused"}` or `{ok, status: "away"}` |
-
-- `client` names one window (8 to 64 letters, digits, `-` or `_`), with up
-  to 4 `session_ids` for its chat; `hold_s` (up to 120) is how long the
-  report holds without a renewal. No ids, or a hold of 0, clears the window.
-- Each window's report is its own file under
-  `<hermes home>/conduit-desktop-focus/` (private to the user); a window that
-  closes or loses the host without saying so stops counting when its hold
-  runs out. A report that can't be read counts as not on screen, so a
-  problem here can only let a push through, never hold one back.
-- A job you asked to be called about still calls. 429 past 240 reports a
-  minute per profile.
+- The selection is the one [Chats opened on Desktop](#chats-opened-on-desktop-plugin-012)
+  follows: each Desktop connection's selected chat, ended when it switches
+  chats or its socket closes. The host can't see whether the window is in
+  front, so a short reply in a chat left selected on an unattended Mac stays
+  quiet on the phone (Desktop's own notification still shows on the Mac
+  when its window is in the background).
+- The dashboard publishes the selected stored chat ids, per Hermes home, in
+  `<hermes home>/conduit-desktop-selected.json` (private to the user) when
+  they change, and renews the file every 30 seconds while anything is
+  selected. The turn hooks trust it for 45 seconds, so a stopped dashboard
+  stops quieting anything.
+- A turn's 2 minutes run from its `pre_llm_call` to its `post_llm_call`. A
+  turn with no start time, a file that can't be read, or `plugins.isolation:
+  host` (where Desktop views aren't observed) all push as before.
 
 ## Hermes calls you (plugin 0.13+)
 
