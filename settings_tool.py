@@ -132,7 +132,10 @@ def _handle(args: dict[str, Any], session_id: Any) -> dict[str, Any]:
         return {"ok": True, "status": "waiting_for_conduit", "requests": made["requests"],
                 "note": _waiting_note(made["mode"], made["requests"])}
     if action == "cancel":
-        dropped = store.cancel(args.get("request_ids"))
+        ids = args.get("request_ids")
+        if not isinstance(ids, list) or not any(isinstance(value, str) and value for value in ids):
+            return {"ok": False, "error": "no_ids", "note": "Give the ids of waiting requests, from get."}
+        dropped = store.cancel(ids)
         return {"ok": True, "cancelled": dropped,
                 "note": "Requests Conduit already took can't be taken back; ask for the old value instead."
                 if not dropped else "Taken back before Conduit picked them up."}
@@ -148,10 +151,13 @@ def _get(store: SettingsStore, device: Any) -> dict[str, Any]:
                         "version that does, connected to this profile."}
     chosen = devices[0]
     if isinstance(device, str) and device:
-        chosen = next((entry for entry in devices if entry["id"] == device
-                       or entry["name"].casefold() == device.casefold()), None)
-        if chosen is None:
-            return {"ok": False, "error": "unknown_device", "note": "No such device; leave device out."}
+        # The store's rule: an id, or a name only one device has.
+        matches = [entry for entry in devices if entry["id"] == device]
+        matches = matches or [entry for entry in devices if entry["name"].casefold() == device.casefold()]
+        if len(matches) != 1:
+            return {"ok": False, "error": "unknown_device",
+                    "note": "No single device has that id or name; use an id from get, or leave device out."}
+        chosen = matches[0]
     answer: dict[str, Any] = {
         "ok": True,
         "device": {"id": chosen["id"], "name": chosen["name"], "mode": chosen["mode"]},

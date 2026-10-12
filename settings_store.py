@@ -71,7 +71,9 @@ MAX_RESULTS = 20
 # week so the next chat can still tell what happened.
 PENDING_TTL_S = 24 * 3600
 RESULT_TTL_S = 7 * 24 * 3600
-# Changes Hermes may ask for per device in an hour.
+# Changes Hermes may ask for per device in an hour. Advisory: a device is
+# whatever installation id the dashboard caller names, so the route's own
+# limiter and the dashboard's auth are the boundary.
 PER_HOUR = 20
 HOUR_S = 3600
 # A device not seen for this long is forgotten.
@@ -195,7 +197,11 @@ class SettingsStore:
                            "reason": clean_reason, "session_id": session, "at": now}
                 state["pending"].append(request)
                 made.append(_public_request(request))
-            state["pending"] = state["pending"][-MAX_PENDING:]
+            mine = [request for request in state["pending"] if request["installation_id"] == installation]
+            if len(mine) > MAX_PENDING:
+                # The cap is per device, so a burst for one never drops another's.
+                dropped = {request["id"] for request in mine[:len(mine) - MAX_PENDING]}
+                state["pending"] = [request for request in state["pending"] if request["id"] not in dropped]
             state["asked"][installation] = (recent + [now] * len(prepared))[-PER_HOUR:]
             return {"device": installation, "mode": target["mode"], "requests": made}
 
@@ -398,6 +404,7 @@ def _normalized(raw: Any, now: float) -> dict[str, Any]:
     state: dict[str, Any] = {"version": VERSION, "devices": {}, "pending": [], "results": [], "asked": {}}
     if not isinstance(raw, dict):
         return state
+    asked = raw.get("asked")
     devices = raw.get("devices")
     for installation, device in devices.items() if isinstance(devices, dict) else ():
         if not isinstance(installation, str) or not _INSTALLATION.match(installation) or not isinstance(device, dict):
@@ -414,18 +421,20 @@ def _normalized(raw: Any, now: float) -> dict[str, Any]:
                                           "mode": device["mode"], "settings": settings, "seen_at": float(seen)}
     pending = raw.get("pending")
     for request in pending if isinstance(pending, list) else []:
-        if (isinstance(request, dict) and request.get("installation_id") in state["devices"]
+        if (isinstance(request, dict) and isinstance(request.get("installation_id"), str)
+                and request["installation_id"] in state["devices"]
                 and isinstance(request.get("id"), str) and isinstance(request.get("key"), str)
+                and "value" in request and request.get("tier") in TIERS
                 and isinstance(request.get("at"), (int, float)) and now - request["at"] <= PENDING_TTL_S):
             state["pending"].append(request)
-    state["pending"] = state["pending"][-MAX_PENDING:]
+    state["pending"] = state["pending"][-MAX_PENDING * MAX_DEVICES:]
     results = raw.get("results")
     for result in results if isinstance(results, list) else []:
-        if (isinstance(result, dict) and isinstance(result.get("id"), str)
+        if (isinstance(result, dict) and isinstance(result.get("id"), str) and isinstance(result.get("device"), str)
+                and isinstance(result.get("key"), str) and "value" in result and result.get("status") in RESULTS
                 and isinstance(result.get("at"), (int, float)) and now - result["at"] <= RESULT_TTL_S):
             state["results"].append(result)
     state["results"] = state["results"][-MAX_RESULTS:]
-    asked = raw.get("asked")
     if isinstance(asked, dict):
         for installation, times in asked.items():
             if installation in state["devices"] and isinstance(times, list):

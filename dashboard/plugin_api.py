@@ -3331,8 +3331,9 @@ async def post_call_outcome(request: Request, response: Response, profile: Optio
 
 CONDUIT_SETTINGS_LIMIT = 30
 CONDUIT_SETTINGS_WINDOW_S = 60.0
-# Up to 80 settings with descriptions and choices.
-CONDUIT_SETTINGS_MAX_BODY_BYTES = 128 * 1024
+# Room for the store's worst case: 80 settings, each with a description and
+# up to 40 choices.
+CONDUIT_SETTINGS_MAX_BODY_BYTES = 640 * 1024
 
 _conduit_settings_limiter = _MintLimiter(CONDUIT_SETTINGS_LIMIT, CONDUIT_SETTINGS_WINDOW_S,
                                          message="Too many settings syncs; try again shortly")
@@ -3355,6 +3356,10 @@ def _settings_store() -> Any:
 
 
 def sync_conduit_settings(body: Any) -> Dict[str, Any]:
+    """The installation id names a device; it doesn't authenticate one. The
+    dashboard's auth is the boundary, as on every route here."""
+    if _load_pairing_state(_pairing_state_path()) is None:
+        raise TokenError(409, "This Hermes profile isn't paired with Conduit")
     module = _settings_store()
     try:
         return module.SettingsStore(_calls_home()).sync(body)

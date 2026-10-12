@@ -221,6 +221,37 @@ def test_a_malformed_upload_is_refused(store):
     assert not store.has_device()
 
 
+def test_a_corrupted_file_reads_as_what_is_still_well_formed(store, tmp_path):
+    _sync(store)
+    [request] = store.request([{"key": "voice.live.tone", "value": "relaxed"}], "x")["requests"]
+    path = tmp_path / store_module.FILE_NAME
+    state = json.loads(path.read_text())
+    state["pending"] += [{"installation_id": ["x"], "id": "a", "key": "k", "at": 1}, {"id": "b"}, "junk",
+                         {**state["pending"][0], "id": "no-value-here", "value": None}]
+    del state["pending"][-1]["value"]
+    state["results"] = [{"id": "r", "at": state["pending"][0]["at"]}, 7]
+    path.write_text(json.dumps(state))
+    assert [item["id"] for item in store.view()["pending"]] == [request["id"]]
+    assert store.view()["results"] == []
+    assert _sync(store)["pending"][0]["id"] == request["id"]
+
+
+def test_a_burst_for_one_device_never_drops_anothers_requests(store, clock):
+    _sync(store)
+    _sync(store, installation=IPAD)
+    [kept] = store.request([{"key": "voice.live.tone", "value": "relaxed"}], "x", device=PHONE)["requests"]
+    many = [{"key": f"voice.k{index}", "title": "t", "kind": "bool", "tier": "small", "value": False}
+                       for index in range(store_module.MAX_PENDING + 2)]
+    store.sync({"installation_id": IPAD, "mode": "ask", "settings": many})
+    for start in range(0, len(many), 10):
+        clock.now += store_module.HOUR_S
+        store.request([{"key": item["key"], "value": True} for item in many[start:start + 10]], "x",
+                      device=IPAD)
+    pending = store.view()["pending"]
+    assert kept["id"] in [item["id"] for item in pending]
+    assert len([item for item in pending if item["device"] == IPAD]) == store_module.MAX_PENDING
+
+
 def test_the_file_is_private(store, tmp_path):
     _sync(store)
     assert (tmp_path / store_module.FILE_NAME).stat().st_mode & 0o777 == 0o600
@@ -290,6 +321,20 @@ def test_get_without_a_device_says_so(tool_home):
     assert _call({"action": "get"})["error"] == "no_device"
 
 
+def test_cancel_without_ids_says_what_it_needs(tool_home):
+    _sync(SettingsStore(tool_home))
+    assert _call({"action": "cancel"})["error"] == "no_ids"
+
+
+def test_a_name_two_devices_share_is_refused(tool_home):
+    store = SettingsStore(tool_home)
+    _sync(store)
+    _sync(store, installation=IPAD)
+    answer = _call({"action": "get", "device": "Eric's iPhone"})
+    assert answer["error"] == "unknown_device"
+    assert _call({"action": "get", "device": IPAD})["device"]["id"] == IPAD
+
+
 def test_a_bad_action_is_refused(tool_home):
     assert _call({"action": "delete"})["ok"] is False
 
@@ -300,8 +345,10 @@ def test_a_bad_action_is_refused(tool_home):
 @pytest.fixture()
 def route_home(tmp_path, monkeypatch):
     monkeypatch.setattr(api, "_calls_home", lambda: tmp_path)
+    monkeypatch.setattr(api, "_pairing_state_path", lambda: tmp_path / "conduit-push.json")
     monkeypatch.setattr(api, "_profile_scope", lambda profile: contextlib.nullcontext())
     api._conduit_settings_limiter._mints.clear()
+    (tmp_path / "conduit-push.json").write_text(json.dumps({"credential": "c", "installation_id": "i", "gateway_id": "g"}))
     return tmp_path
 
 
@@ -324,6 +371,12 @@ def test_the_route_syncs_and_returns_waiting_requests(route_home):
 def test_the_route_refuses_a_malformed_upload(route_home):
     response = _http().put(f"{BASE}/conduit-settings", json={"installation_id": PHONE, "mode": "maybe", "settings": []})
     assert response.status_code == 400
+
+
+def test_the_route_needs_a_paired_profile(route_home):
+    (route_home / "conduit-push.json").unlink()
+    body = {"installation_id": PHONE, "mode": "ask", "settings": _settings()}
+    assert _http().put(f"{BASE}/conduit-settings", json=body).status_code == 409
 
 
 def test_the_route_is_a_reported_capability():
