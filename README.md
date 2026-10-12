@@ -579,7 +579,9 @@ choose:
   doesn't match what it asked for.
 - **A daily cap.** A profile may start `voice.gpt_live.conduit_api_daily_calls`
   API-billed calls per day (default 20; `0` turns API calls off, a 403). A
-  call OpenAI doesn't start (a rejected key, an outage) gives its slot back.
+  call OpenAI refuses or never answers (a rejected key, an outage) gives its
+  slot back; once OpenAI has said yes, the slot stays counted even if its
+  answer turns out unusable, since a billed session may have started.
   The count is kept in memory, per dashboard process: a restart starts it
   again, and a dashboard run with several worker processes allows the cap in
   each.
@@ -604,8 +606,8 @@ voice:
 The key is resolved the way Hermes desktop resolves it
 (`voice.gpt_live.api_key`, then `VOICE_TOOLS_OPENAI_KEY`, then
 `OPENAI_API_KEY`) and is never returned to Conduit or logged. `base_url` must
-be an https URL with a host. The shared keys only ever go to
-`api.openai.com`: a `base_url` on any other host needs its own
+be an https URL with a host and no query or fragment. The shared keys only
+ever go to `api.openai.com` on the standard port: a `base_url` on any other host needs its own
 `voice.gpt_live.api_key`. Only OpenAI's GPT-Live contract is supported; other
 services behind `base_url` (Azure Foundry, say) are untested and may expect a
 different auth header.

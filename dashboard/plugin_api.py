@@ -1122,7 +1122,9 @@ GPT_LIVE_API_DAILY_KEY = "conduit_api_daily_calls"
 GPT_LIVE_API_HOST = "api.openai.com"
 GPT_LIVE_DAY_S = 24 * 60 * 60
 GPT_LIVE_NO_SUBSCRIPTION = "The ChatGPT subscription was not used."
-_GPT_LIVE_API_SESSION_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
+# Loose on purpose: the public API's id format is unverified and the id is only
+# echoed back to Conduit, never put in a URL or header.
+GPT_LIVE_API_SESSION_ID_MAX = 256
 
 # Hermes' own voice-layer persona (tools/voice_live.py), for a Hermes that
 # predates that module. Short on purpose: the live model delegates real work.
@@ -1287,9 +1289,17 @@ def _gpt_live_api_base_url(live: Dict[str, Any]) -> tuple:
         host = parsed.hostname or ""
     except ValueError:
         parsed, host = None, ""
-    if (parsed is None or parsed.scheme != "https" or not host
+    if (parsed is None or parsed.scheme != "https" or not host or parsed.query or parsed.fragment
             or any(c in base_url for c in "\r\n\t ")):
-        raise TokenError(503, "voice.gpt_live.base_url must be an https URL with a host. " + GPT_LIVE_NO_SUBSCRIPTION)
+        raise TokenError(503, "voice.gpt_live.base_url must be an https URL with a host and no query or "
+                              "fragment. " + GPT_LIVE_NO_SUBSCRIPTION)
+    try:
+        port = parsed.port
+    except ValueError:
+        raise TokenError(503, "voice.gpt_live.base_url has an invalid port. " + GPT_LIVE_NO_SUBSCRIPTION)
+    # The shared key's gate below compares the host; a non-standard port is another service.
+    if port not in (None, 443):
+        host = f"{host}:{port}"
     return base_url, host
 
 
@@ -1318,7 +1328,11 @@ def _gpt_live_api_credentials(live: Dict[str, Any]) -> tuple:
         resolve_openai_audio_api_key = getattr(helpers, "resolve_openai_audio_api_key", None)
         if not callable(resolve_openai_audio_api_key):
             # The profile's own .env where Hermes can say, as its key chain reads it.
-            key = str(_env_value("VOICE_TOOLS_OPENAI_KEY") or _env_value("OPENAI_API_KEY") or "").strip()
+            try:
+                key = str(_env_value("VOICE_TOOLS_OPENAI_KEY") or _env_value("OPENAI_API_KEY") or "").strip()
+            except Exception as exc:
+                logger.warning("GPT-Live could not read the OpenAI key: %s", type(exc).__name__)
+                key = ""
         else:
             try:
                 key = str(resolve_openai_audio_api_key() or "").strip()
@@ -1451,9 +1465,16 @@ def _api_gpt_live_session(sdp: str, history: Optional[list], live: Dict[str, Any
     try:
         return _api_gpt_live_exchange(sdp, history, live, key, base_url, post,
                                       briefing_applied=briefing_applied, greeting_applied=greeting_applied)
+    except _GPTLiveAPIAnsweredError:
+        # OpenAI said yes, so a billed session may exist: the slot stays counted.
+        raise
     except BaseException:
         _gpt_live_api_daily.release(daily_key, mint)
         raise
+
+
+class _GPTLiveAPIAnsweredError(TokenError):
+    """A failure after OpenAI answered 2xx: a session may have started, so its daily slot stays used."""
 
 
 def _api_gpt_live_exchange(sdp: str, history: Optional[list], live: Dict[str, Any], key: str, base_url: str,
@@ -1486,8 +1507,9 @@ def _api_gpt_live_exchange(sdp: str, history: Optional[list], live: Dict[str, An
     answer_sdp = transport.get("sdp") if isinstance(transport, dict) else None
     if (not isinstance(answer_sdp, str) or not answer_sdp.startswith("v=0")
             or transport.get("type") != "webrtc"
-            or not isinstance(session_id, str) or _GPT_LIVE_API_SESSION_ID.fullmatch(session_id) is None):
-        raise TokenError(502, "GPT-Live returned an invalid WebRTC answer. " + GPT_LIVE_NO_SUBSCRIPTION)
+            or not isinstance(session_id, str) or not session_id or len(session_id) > GPT_LIVE_API_SESSION_ID_MAX
+            or not session_id.isprintable()):
+        raise _GPTLiveAPIAnsweredError(502, "GPT-Live returned an invalid WebRTC answer. " + GPT_LIVE_NO_SUBSCRIPTION)
     model, voice = _gpt_live_api_model_voice(live)
     # Only the fields Conduit reads; "auth" names the path that was billed. The
     # public API's answer doesn't echo the session, so briefing_applied,

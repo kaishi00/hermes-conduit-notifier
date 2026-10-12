@@ -627,7 +627,8 @@ def test_a_failed_subscription_never_falls_back_to_the_api_key(client, api_key, 
 
 @pytest.mark.parametrize("status, answer", [
     (401, ""), (200, "not json"), (200, json.dumps({"session": {"id": "sess_1"}})),
-    (200, json.dumps({"session": {"id": "bad id!"}, "transport": {"type": "webrtc", "sdp": ANSWER}})),
+    (200, json.dumps({"session": {"id": "bad\nid"}, "transport": {"type": "webrtc", "sdp": ANSWER}})),
+    (200, json.dumps({"session": {"id": "x" * 257}, "transport": {"type": "webrtc", "sdp": ANSWER}})),
     (200, json.dumps({"session": {"id": "sess_1"}, "transport": {"type": "webrtc", "sdp": "nope"}})),
 ])
 def test_api_billing_rejects_a_bad_answer(client, api_key, openai, status, answer):
@@ -693,7 +694,9 @@ def test_a_custom_base_url_never_gets_the_hosts_general_key(client, api_key, ope
     assert status["available"] is False and "gateway.example.test" in status["reason"]
 
 
-@pytest.mark.parametrize("base_url", ["https://", "http://api.openai.com/v1", "https://api.openai.com/v1\r\nX: y", "ftp://x"])
+@pytest.mark.parametrize("base_url", ["https://", "http://api.openai.com/v1", "https://api.openai.com/v1\r\nX: y", "ftp://x",
+                                      "https://api.openai.com/v1?x=1", "https://api.openai.com/v1#f",
+                                      "https://api.openai.com:99999/v1"])
 def test_a_base_url_without_https_and_a_host_is_refused(client, api_key, openai, base_url):
     api_key.config["voice"]["gpt_live"].update(base_url=base_url, api_key="sk-profile")
     assert client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "billing": "api"}).status_code == 503
@@ -772,3 +775,35 @@ def test_a_zero_limit_leaves_no_empty_bucket_behind():
     limiter.release("p", only)
     limiter.acquire("other")  # an emptied bucket never trips the next acquire
     limiter.release("p", 12345.0)  # an unknown or aged-out mint is ignored
+
+
+def test_an_unfamiliar_session_id_format_is_accepted(client, api_key, openai):
+    openai.reply.update(answer=json.dumps({"session": {"id": "sess.2026:abc/1"}, "transport": {"type": "webrtc", "sdp": ANSWER}}))
+    response = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "billing": "api"})
+    assert response.status_code == 200 and response.json()["session"] == {"id": "sess.2026:abc/1"}
+
+
+def test_an_invalid_answer_after_a_2xx_keeps_its_daily_slot(client, api_key, openai):
+    api_key.config["voice"]["gpt_live"]["conduit_api_daily_calls"] = 1
+    openai.reply.update(status=200, answer="not json")
+    assert client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "billing": "api"}).status_code == 502
+    openai.reply.update(answer=json.dumps(API_ANSWER))
+    # OpenAI may have started (and billed) that session: the day's one call is used.
+    assert client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "billing": "api"}).status_code == 429
+
+
+def test_the_shared_key_never_goes_to_a_non_standard_port(client, api_key, openai):
+    api_key.config["voice"]["gpt_live"]["base_url"] = "https://api.openai.com:8443/v1"
+    response = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "billing": "api"})
+    assert response.status_code == 503 and "voice.gpt_live.api_key" in response.json()["detail"]
+    api_key.config["voice"]["gpt_live"]["base_url"] = "https://api.openai.com:443/v1"
+    assert client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "billing": "api"}).status_code == 200
+
+
+def test_a_failing_env_lookup_is_a_reason_not_a_500(client, api_key, openai, monkeypatch):
+    def boom(_key):
+        raise RuntimeError("unscoped secret")
+    monkeypatch.setattr(api, "_env_value", boom)
+    status = client.get(f"{BASE}/gpt-live/status")
+    assert status.status_code == 200 and status.json()["api"]["available"] is False
+    assert client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "billing": "api"}).status_code == 503
