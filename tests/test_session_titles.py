@@ -19,7 +19,16 @@ if "tools.clarify_tool" not in sys.modules:
     _tools = sys.modules.setdefault("tools", types.ModuleType("tools"))
     _tools.__path__ = getattr(_tools, "__path__", [])
     _clarify_tool = types.ModuleType("tools.clarify_tool")
-    _clarify_tool.strip_recommended = lambda text: str(text).strip()
+
+    def _strip_recommended(text):
+        # Same semantics as test_clarify_loop's stub, whichever module loads first.
+        stripped = str(text).strip()
+        suffix = "(Recommended)"
+        if stripped.casefold().endswith(suffix.casefold()):
+            return stripped[: -len(suffix)].strip()
+        return stripped
+
+    _clarify_tool.strip_recommended = _strip_recommended
     sys.modules["tools.clarify_tool"] = _clarify_tool
 if "conduit_push" not in sys.modules:
     _pkg = types.ModuleType("conduit_push")
@@ -126,3 +135,46 @@ def test_no_session_store_keeps_the_relay_copy(monkeypatch):
     monkeypatch.setattr(plugin, "enqueue", events.append)
     plugin._post_llm_call(session_id="s1", turn_id="t4", assistant_response="Hi.")
     assert "title" not in events[0]
+
+
+def test_a_failed_read_is_retried_on_the_next_event(sent, monkeypatch):
+    def locked(self, session_id):
+        raise RuntimeError("database is locked")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(FakeSessionDB, "get_session_title", locked)
+        plugin._post_llm_call(session_id="s1", turn_id="t8", assistant_response="Deployed.")
+    plugin._post_llm_call(session_id="s1", turn_id="t9", assistant_response="Again.")
+    assert "title" not in sent[0]
+    assert sent[1]["title"] == "Infra"
+
+
+def test_a_session_titled_after_its_first_reply_shows_the_title_next_time(sent, monkeypatch):
+    plugin._post_llm_call(session_id="s2", turn_id="t10", assistant_response="Hi.")
+    monkeypatch.setitem(FakeSessionDB.titles, "s2", "Groceries")
+    plugin._post_llm_call(session_id="s2", turn_id="t11", assistant_response="Again.")
+    assert "title" not in sent[0]
+    assert sent[1]["title"] == "Groceries"
+
+
+def test_without_an_id_lookup_the_gateway_key_still_resolves(sent, monkeypatch):
+    monkeypatch.delattr(FakeSessionDB, "get_session_title")
+    plugin._pre_approval_request(session_key="agent:main:telegram:group:-100:7", description="rm -rf build", turn_id="t12")
+    assert sent[0]["title"] == "Approval needed · Infra"
+
+
+def test_profiles_do_not_share_cached_titles(sent, monkeypatch):
+    homes = iter([pathlib.Path("/profiles/a"), pathlib.Path("/profiles/b")])
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: next(homes))
+
+    class PerProfileDB(FakeSessionDB):
+        def get_session_title(self, session_id):
+            return "Work" if str(self.home).startswith("/profiles/a") else "Home"
+
+        def __init__(self, db_path=None):
+            super().__init__(db_path)
+            self.home = db_path
+
+    monkeypatch.setattr(sys.modules["hermes_state"], "SessionDB", PerProfileDB)
+    assert titles.title("s1") == "Work"
+    assert titles.title("s1") == "Home"
