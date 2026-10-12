@@ -33,11 +33,11 @@ def _load(name, path):
     return module
 
 
-client = _load("conduit_push.client", ROOT / "client.py")
+client = _load("conduit_push._security_client", ROOT / "client.py")
 
 
 def test_client_loader_reuses_registered_module():
-    assert _load("conduit_push.client", ROOT / "missing-client.py") is client
+    assert _load("conduit_push._security_client", ROOT / "missing-client.py") is client
 
 
 @pytest.fixture
@@ -45,6 +45,16 @@ def state_file(tmp_path, monkeypatch):
     path = tmp_path / "conduit-push.json"
     monkeypatch.setattr(client, "state_path", lambda: path)
     return path
+
+
+def test_security_client_state_isolated_from_shared_client(state_file, monkeypatch):
+    shared_client = _load("conduit_push.client", ROOT / "client.py")
+    monkeypatch.setattr(shared_client, "load_state", lambda: {"credential": "x"})
+    state = {"credential": "synthetic-test-credential", "redact_content": False}
+    client.save_state(state)
+    assert client is not shared_client
+    assert client.load_state() == state
+    assert shared_client.load_state() == {"credential": "x"}
 
 
 @pytest.fixture
