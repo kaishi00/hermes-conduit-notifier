@@ -845,3 +845,35 @@ def test_an_unreadable_store_says_nothing_and_never_raises(home, monkeypatch):
     monkeypatch.setattr(calls, "get_hermes_home", lambda: (_ for _ in ()).throw(RuntimeError("no home")))
     assert calls.outcome_note("rt-1") is None
     assert plugin._pre_llm_call(session_id="rt-1") is None
+
+
+def test_post_llm_call_skips_the_ready_push_for_a_chat_on_screen_in_desktop(home, fake, monkeypatch):
+    desktop_focus = sys.modules["conduit_push.desktop_focus"]
+    monkeypatch.setattr(plugin, "get_hermes_home", lambda: home)
+    desktop_focus.report(home, "window0001", ["rt-1", "st-1"], 60)
+    plugin._post_llm_call(session_id="st-1", turn_id="t1", assistant_response="All done.")
+    assert fake.enqueued == []
+    # Another chat still notifies.
+    plugin._post_llm_call(session_id="rt-2", turn_id="t2", assistant_response="Also done.")
+    assert [event["session_id"] for event in fake.enqueued] == ["rt-2"]
+    # Once the window loses focus, the chat notifies again.
+    desktop_focus.report(home, "window0001", [], 0)
+    plugin._post_llm_call(session_id="st-1", turn_id="t3", assistant_response="Done again.")
+    assert [event["session_id"] for event in fake.enqueued] == ["rt-2", "st-1"]
+
+
+def test_post_llm_call_still_calls_a_watched_job_on_screen_in_desktop(home, fake, monkeypatch):
+    monkeypatch.setattr(plugin, "get_hermes_home", lambda: home)
+    sys.modules["conduit_push.desktop_focus"].report(home, "window0001", ["rt-1"], 60)
+    _watch(home, "rt-1")
+    plugin._post_llm_call(session_id="rt-1", turn_id="t1", assistant_response="All done.")
+    assert fake.sent[0]["type"] == "call.requested"
+
+
+def test_an_unreadable_desktop_focus_never_drops_the_ready_push(home, fake, monkeypatch):
+    def broken(*_args, **_kwargs):
+        raise OSError("disk")
+
+    monkeypatch.setattr(sys.modules["conduit_push.desktop_focus"], "on_screen", broken)
+    plugin._post_llm_call(session_id="rt-1", turn_id="t1", assistant_response="All done.")
+    assert [event["type"] for event in fake.enqueued] == ["response.ready"]

@@ -9,7 +9,9 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from . import call_tool, call_watches, calls, clarify_loop, settings_tool
+from hermes_constants import get_hermes_home
+
+from . import call_tool, call_watches, calls, clarify_loop, desktop_focus, settings_tool
 from .client import enqueue
 from .events import approval_decision, clarification_text, event_id, is_silent_response, push_event
 
@@ -108,8 +110,17 @@ def _post_llm_call(**kwargs: Any) -> None:
     # request takes the place of the ready notification.
     if calls.turn_ended(session_id, "done", profile=_profile, fallback=ready):
         return
-    if ready is not None:
+    # The user is reading this chat in a focused Hermes Desktop window (#87).
+    if ready is not None and not _desktop_shows(session_id):
         enqueue(ready)
+
+
+def _desktop_shows(session_id: str) -> bool:
+    try:
+        return desktop_focus.on_screen(get_hermes_home(), session_id)
+    except Exception:  # noqa: BLE001 — can't tell, so the push goes out
+        logger.debug("conduit_push: Desktop focus unreadable", exc_info=True)
+        return False
 
 
 def _on_session_end(**kwargs: Any) -> None:

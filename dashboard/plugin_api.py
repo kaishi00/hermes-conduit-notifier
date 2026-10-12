@@ -3383,6 +3383,63 @@ async def put_conduit_settings(request: Request, response: Response, profile: Op
         raise _unexpected("settings", exc, feature="Conduit settings")
 
 
+# --- Desktop focus (#87) -------------------------------------------------------
+#
+# The plugin's Desktop half reports the chat a focused Hermes Desktop window
+# shows, so a reply that finishes there sends no "reply ready" push (the user
+# is reading it). State and rules live in desktop_focus.py beside this folder.
+
+DESKTOP_FOCUS_MAX_BODY_BYTES = 2048
+# A window reports on focus changes and chat switches and renews every 20 s;
+# a few windows switching chats quickly stay well inside this.
+DESKTOP_FOCUS_LIMIT = 240
+DESKTOP_FOCUS_WINDOW_S = 60.0
+_desktop_focus_limiter = _MintLimiter(DESKTOP_FOCUS_LIMIT, DESKTOP_FOCUS_WINDOW_S,
+                                      message="Too many Desktop focus reports; try again shortly")
+_desktop_focus_module: Any = None
+_desktop_focus_lock = threading.Lock()
+
+
+def _desktop_focus() -> Any:
+    """desktop_focus.py beside this folder, loaded once."""
+    global _desktop_focus_module
+    with _desktop_focus_lock:
+        if _desktop_focus_module is None:
+            path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "desktop_focus.py")
+            spec = importlib.util.spec_from_file_location("conduit_push_dashboard_desktop_focus", path)
+            if spec is None or spec.loader is None:
+                raise TokenError(501, "This plugin install is missing desktop_focus.py; update the plugin")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _desktop_focus_module = module
+        return _desktop_focus_module
+
+
+def report_desktop_focus(body: Any) -> Dict[str, Any]:
+    if not isinstance(body, dict):
+        raise TokenError(400, "Expected a JSON object with client, session_ids and hold_s")
+    try:
+        return _desktop_focus().report(_calls_home(), body.get("client"), body.get("session_ids"), body.get("hold_s"))
+    except ValueError as exc:
+        raise TokenError(400, str(exc))
+
+
+@router.put("/desktop/focus")
+async def put_desktop_focus(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        _desktop_focus_limiter.acquire(_limiter_key(profile))
+        body = await _read_json_body(request, DESKTOP_FOCUS_MAX_BODY_BYTES)
+        return {"ok": True, **(await _run_scoped(profile, lambda: report_desktop_focus(body)))}
+    except TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
+        raise
+    except Exception as exc:
+        raise _unexpected("focus", exc, feature="Desktop focus")
+
+
 # --- Watch tools (wrist-down lookups for a Conduit Watch call) ---------------
 #
 # With the wrist down, a Conduit Watch call can't reach Conduit on the iPhone,

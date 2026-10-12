@@ -730,6 +730,37 @@ writes Hermes' own read flag, so Desktop's unread dots don't change.
 - An open is skipped when the gateway can't say which profile its chat
   belongs to, rather than guessed onto the default profile.
 
+## Quiet while you read in Desktop (plugin 0.20+)
+
+When a reply finishes in a chat you have on screen in Hermes Desktop, with
+the Desktop window in front, the plugin skips that reply's "response ready"
+push: you're already reading it. Every other notification stays as it was:
+other chats, background jobs, approvals, questions, failed turns and calls.
+
+Hermes can't see Desktop's window focus, so the plugin ships a small Desktop
+half (`desktop/plugin.js`). Hermes Desktop lists it under **Settings >
+Plugins** as **Conduit push** and keeps plugin Desktop halves off until you
+switch them on, once per Desktop install. Each Desktop window then reports,
+while it is visible and focused, the chat it shows (its runtime and stored
+ids), renews that every 20 seconds, and takes it back as soon as the window
+loses focus or switches chats. It uses Desktop's own rule for "in front", the
+one its native notifications follow.
+
+| Method | Route | Returns |
+| --- | --- | --- |
+| PUT | `/api/plugins/conduit_push/desktop/focus?profile=` with `{client, session_ids, hold_s}` | `{ok, status: "focused"}` or `{ok, status: "away"}` |
+
+- `client` names one window (8 to 64 letters, digits, `-` or `_`), with up
+  to 4 `session_ids` for its chat; `hold_s` (up to 120) is how long the
+  report holds without a renewal. No ids, or a hold of 0, clears the window.
+- Each window's report is its own file under
+  `<hermes home>/conduit-desktop-focus/` (private to the user); a window that
+  closes or loses the host without saying so stops counting when its hold
+  runs out. A report that can't be read counts as not on screen, so a
+  problem here can only let a push through, never hold one back.
+- A job you asked to be called about still calls. 429 past 240 reports a
+  minute per profile.
+
 ## Hermes calls you (plugin 0.13+)
 
 In a Live Voice call you can hand Hermes a long job and say "call me when
