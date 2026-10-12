@@ -646,3 +646,11 @@ def test_a_failed_selection_write_leaves_no_temp_file(monkeypatch, tmp_path):
     with pytest.raises(OSError):
         desktop_selected.publish(tmp_path, ["a"], now=1000.0)
     assert list(tmp_path.iterdir()) == []
+
+
+def test_a_selection_file_from_the_future_or_too_long_is_not_trusted(tmp_path):
+    (tmp_path / desktop_selected.FILE_NAME).write_text(json.dumps({"selected": ["a"], "at": 2000.0}))
+    assert not desktop_selected.selected(tmp_path, "a", now=1000.0)
+    ids = ["a"] + [f"x{index}" for index in range(desktop_selected.MAX_IDS)]
+    (tmp_path / desktop_selected.FILE_NAME).write_text(json.dumps({"selected": ids, "at": 1000.0}))
+    assert not desktop_selected.selected(tmp_path, "a", now=1000.0)

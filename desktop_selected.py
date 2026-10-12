@@ -54,7 +54,12 @@ def publish(home: Any, stored_ids: Iterable[str], *, now: float | None = None) -
     # A fresh, private (0600) temp file of its own, never one already there.
     descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{FILE_NAME}.", suffix=".tmp")
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        try:
+            handle = os.fdopen(descriptor, "w", encoding="utf-8")
+        except BaseException:
+            os.close(descriptor)
+            raise
+        with handle:
             json.dump({"selected": ids, "at": now}, handle, separators=(",", ":"))
         os.replace(temporary, path)
     except BaseException:
@@ -78,15 +83,18 @@ def selected(home: Any, session_id: Any, *, now: float | None = None) -> bool:
     at, ids = raw.get("at"), raw.get("selected")
     if not isinstance(at, (int, float)) or isinstance(at, bool) or not math.isfinite(at):
         return False
-    if not isinstance(ids, list):
+    # Only what publish writes: a longer list, or a time ahead of the clock
+    # (an edited file, a clock step), counts as nothing selected.
+    if not isinstance(ids, list) or len(ids) > MAX_IDS:
         return False
     now = time.time() if now is None else now
-    return now - at <= STALE_S and session_id.strip() in ids
+    return 0 <= now - at <= STALE_S and session_id.strip() in ids
 
 
 def quick(started_at: Any, *, now: float | None = None) -> bool:
-    """True for a turn that started at ``started_at`` and ended within QUICK_TURN_S."""
+    """True for a turn that started at ``started_at`` (``time.monotonic()``)
+    and ended within QUICK_TURN_S."""
     if not isinstance(started_at, (int, float)) or isinstance(started_at, bool):
         return False
-    now = time.time() if now is None else now
+    now = time.monotonic() if now is None else now
     return 0 <= now - started_at <= QUICK_TURN_S

@@ -22,7 +22,7 @@ _child_sessions: set[str] = set()
 _children_lock = threading.Lock()
 _profile = "default"
 _clarify_loop_active = False
-# turn_id -> when its pre_llm_call ran (#87), oldest first.
+# turn_id -> when its pre_llm_call ran (#87, time.monotonic()), oldest first.
 _turn_started: dict[str, float] = {}
 _turn_started_lock = threading.Lock()
 MAX_TURN_STARTS = 256
@@ -278,7 +278,7 @@ def _note_turn_start(turn_id: Any) -> None:
     if not isinstance(turn_id, str) or not turn_id:
         return
     with _turn_started_lock:
-        _turn_started[turn_id] = time.time()
+        _turn_started[turn_id] = time.monotonic()
         while len(_turn_started) > MAX_TURN_STARTS:
             _turn_started.pop(next(iter(_turn_started)))
 
