@@ -12,6 +12,7 @@ import secrets
 import socket
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
@@ -152,27 +153,50 @@ def remove_state() -> None:
             pass
 
 
+def _https_origin(url: str) -> tuple[str, str, int]:
+    """Validate transport URLs without echoing potentially sensitive input."""
+    message = "Conduit relay URL must be HTTPS with a host, no credentials or fragments."
+    if not isinstance(url, str) or any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in url) or "\\" in url or "#" in url:
+        raise ValueError(message)
+    try:
+        parts = urllib.parse.urlsplit(url)
+        host, port = parts.hostname, parts.port
+        if parts.scheme != "https" or not host or parts.username is not None or parts.password is not None or port == 0:
+            raise ValueError(message)
+    except ValueError:
+        raise ValueError(message) from None
+    return parts.scheme, host, port if port is not None else 443
+
+
 def claim_pairing(code: str, relay_url: str = DEFAULT_RELAY_URL, gateway_name: str = "") -> dict[str, Any]:
+    requested_origin = _https_origin(relay_url)
+    if "?" in relay_url:
+        raise ValueError("Conduit relay base URL must not contain a query.")
     name = gateway_name.strip() or f"{socket.gethostname()} Hermes"
     body = request_json(
         f"{relay_url.rstrip('/')}/v1/pairings/claim",
         method="POST",
         payload={"pairing_code": code, "gateway_name": name},
     )
+    paired_relay_url = body.get("relay_url", relay_url.rstrip("/"))
+    if _https_origin(paired_relay_url) != requested_origin or "?" in paired_relay_url:
+        raise ValueError("Conduit pairing relay URL must have the same HTTPS origin and no query.")
     state = {
         "credential": body["credential"],
         "gateway_id": body.get("gateway_id"),
         "gateway_name": name,
         "installation_id": body["installation_id"],
-        "relay_url": body.get("relay_url") or relay_url.rstrip("/"),
+        "relay_url": paired_relay_url,
     }
     # Re-pairing over an existing pairing must not silently drop the
     # profile's privacy choice.
     previous = load_state() or {}
-    if previous.get("redact_content"):
-        state["redact_content"] = True
+    privacy_choice = previous.get("redact_content")
+    state["redact_content"] = privacy_choice if isinstance(privacy_choice, bool) else True
     if previous.get("redact_key"):
         state["redact_key"] = previous["redact_key"]
+    if state["redact_content"] and not state.get("redact_key"):
+        state["redact_key"] = secrets.token_hex(32)
     save_state(state)
     return state
 
@@ -442,6 +466,12 @@ class RelayRejected(RuntimeError):
         self.detail = detail
 
 
+class _RejectRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # Never replay a bearer (or pairing code), even to the same origin.
+        return None
+
+
 def request_json(
     url: str,
     *,
@@ -453,6 +483,7 @@ def request_json(
     """One relay request. ``timeout`` bounds connect and read, but urllib
     cannot bound a pathological DNS resolution — accepted technical debt;
     bounding it would mean a resolver redesign for no realistic gain."""
+    _https_origin(url)
     data = None if payload is None else json.dumps(payload, separators=(",", ":")).encode("utf-8")
     headers = {
         "Accept": "application/json",
@@ -464,7 +495,7 @@ def request_json(
         headers["Authorization"] = f"Bearer {credential}"
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with urllib.request.build_opener(_RejectRedirects()).open(request, timeout=timeout) as response:
             raw = response.read()
             return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as error:

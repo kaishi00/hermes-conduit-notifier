@@ -21,7 +21,10 @@ import json
 import os
 import pathlib
 import shutil
+import http.client
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -116,42 +119,96 @@ def relay():
     node = shutil.which("node")
     tmpdir = pathlib.Path(tempfile.mkdtemp(prefix="conduit-clarify-e2e-"))
     port = _free_port()
-    base = f"http://127.0.0.1:{port}"
+    internal_base = f"http://127.0.0.1:{port}"
     key_path = tmpdir / "ephemeral-key.pem"
     key_path.write_text(_ephemeral_key_pem(node), encoding="utf-8")
+
+    # The Node relay is normally behind a TLS reverse proxy. Exercise that
+    # topology locally with a throwaway trusted certificate, not an HTTP
+    # exception in the production client or disabled certificate validation.
+    from datetime import datetime, timedelta, timezone
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+    import ipaddress
+
+    tls_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")])
+    now = datetime.now(timezone.utc)
+    certificate = (x509.CertificateBuilder().subject_name(name).issuer_name(name)
+                   .public_key(tls_key.public_key()).serial_number(x509.random_serial_number())
+                   .not_valid_before(now - timedelta(minutes=1)).not_valid_after(now + timedelta(days=1))
+                   .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+                   .add_extension(x509.SubjectAlternativeName([
+                       x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]), critical=False)
+                   .sign(tls_key, hashes.SHA256()))
+    cert_path, tls_key_path = tmpdir / "tls.pem", tmpdir / "tls.key"
+    cert_path.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
+    tls_key_path.write_bytes(tls_key.private_bytes(serialization.Encoding.PEM,
+                                                  serialization.PrivateFormat.PKCS8,
+                                                  serialization.NoEncryption()))
+    tls_key_path.chmod(0o600)
+
+    class Proxy(BaseHTTPRequestHandler):
+        def forward(self):
+            data = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            headers = {key: value for key, value in self.headers.items()
+                       if key.lower() not in ("host", "connection", "transfer-encoding")}
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=15)
+            try:
+                connection.request(self.command, self.path, body=data, headers=headers)
+                response = connection.getresponse()
+                payload = response.read()
+                self.send_response(response.status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+            finally:
+                connection.close()
+
+        do_GET = do_POST = do_PUT = do_DELETE = forward
+
+        def log_message(self, format, *args):
+            pass
+
+    proxy = ThreadingHTTPServer(("127.0.0.1", 0), Proxy)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(cert_path, tls_key_path)
+    proxy.socket = context.wrap_socket(proxy.socket, server_side=True)
+    base = f"https://127.0.0.1:{proxy.server_port}"
+    trust = pytest.MonkeyPatch()
+    trust.setenv("SSL_CERT_FILE", str(cert_path))
+    proxy_thread = threading.Thread(target=proxy.serve_forever, daemon=True)
+    proxy_thread.start()
     env = {
         **os.environ,
         "HOST": "127.0.0.1",
         "PORT": str(port),
-        "PUBLIC_URL": f"https://relay-{port}.example",
+        "PUBLIC_URL": base,
         "DATA_PATH": str(tmpdir / "relay-data.json"),
         "APNS_KEY_PATH": str(key_path),
         "APNS_KEY_ID": "AAAAAAAAAA",
         "APNS_TEAM_ID": "BBBBBBBBBB",
         "APNS_TOPIC": "com.milim.relay",
-        # Every APNs send succeeds without touching the network, so parked
-        # decisions stay deliverable and the middleware's poll loop runs to
-        # the answer (a rejected/thrown send would flip it undeliverable and
-        # the middleware would fall back to the native path instead).
         "APNS_MODE": "accept",
-        # Every "delivered" APNs payload, for the end-to-end encryption test.
         "APNS_CAPTURE_PATH": str(tmpdir / "apns-capture.jsonl"),
     }
     process = subprocess.Popen(
-        [node, "src/server.mjs"],
-        cwd=str(RELAY_DIR),
-        env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        [node, "src/server.mjs"], cwd=str(RELAY_DIR), env=env,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     try:
-        _wait_healthy(base, process)
+        _wait_healthy(internal_base, process)
         yield {"base": base, "capture": tmpdir / "apns-capture.jsonl"}
     finally:
+        proxy.shutdown()
+        proxy.server_close()
+        proxy_thread.join(timeout=5)
+        trust.undo()
         process.terminate()
         try:
-            # Generous for slow hosts: a still-exiting Node holding DATA_PATH
-            # open would race the tmpdir cleanup below.
             process.wait(timeout=15)
         except subprocess.TimeoutExpired:
             process.kill()
@@ -201,9 +258,9 @@ def gateway(relay, restore_real_client, monkeypatch, tmp_path):
     # The REAL pairing entry point — this saves the state that send_now and
     # poll_decision later read.
     state = loop.client.claim_pairing(pairing[1]["pairing_code"], relay_url=base, gateway_name="clarify e2e")
-    # PUBLIC_URL is a stand-in in tests; keep the saved state pointed at the
-    # local process so the plugin's requests reach the relay under test.
-    state["relay_url"] = base
+    # These protocol/E2E tests explicitly opt into full card content; the
+    # fresh-pairing default-redaction boundary is covered by client security tests.
+    state["redact_content"] = False
     loop.client.save_state(state)
     return {"base": base, "device_credential": device_credential, "state": state}
 

@@ -32,6 +32,10 @@ With plugin 0.24+ Conduit pairs the active dashboard's profile by itself: it
 creates the code and hands it to `POST /api/plugins/conduit_push/pair?profile=`
 over your signed-in dashboard connection (see [Pairing from Conduit](#pairing-from-conduit-plugin-024)).
 
+Fresh pairings redact notification content by default, before the first event is sent. Re-pairing preserves an explicit prior `redact on` **or** `redact off` choice; a profile without a saved boolean choice defaults to redaction when paired again. Existing pairings are not changed just by updating the plugin.
+
+For a custom relay, use `hermes conduit-push pair XXXXX-XXXXX --relay-url https://relay.example`. Use an HTTPS URL with a valid trusted certificate, no embedded username/password, query, or fragment. The core relay client rejects redirects (including same-origin redirects); enter the final HTTPS endpoint directly. A `relay_url` returned by pairing must be valid HTTPS and have the same origin (scheme, hostname and effective port) as the requested relay before the new credential is saved. Custom HTTPS hosts, ports and base paths remain supported; a different relay origin requires an explicit new pairing against that origin.
+
 ## Manage the pairing
 
 ```bash
@@ -41,8 +45,11 @@ hermes conduit-push status
 # Send a local test event through the relay
 hermes conduit-push test
 
-# Redact chat text from pushes (see Privacy and security)
+# Ensure content redaction is on (the default for fresh pairings)
 hermes conduit-push redact on
+
+# Explicitly opt into full notification content (see Privacy and security)
+hermes conduit-push redact off
 
 # Revoke this profile's credential
 hermes conduit-push unpair
@@ -85,7 +92,7 @@ The iOS app controls which categories are enabled, whether notification previews
 - Event titles and bodies are length-limited before delivery.
 - Lock Screen previews are disabled by default in Hermes Conduit.
 - **End-to-end encryption** (plugin 0.5+, relay 0.5+, a Conduit build with encrypted notifications): Conduit creates a secret for each pairing on the phone and hands it to this profile over your Hermes dashboard connection, so it never passes through the relay. From then on every notification's title, body, profile, session and decision card is sealed with it (ChaCha20-Poly1305, keys derived with HKDF-SHA256), the phone decrypts it in a Notification Service Extension, and clarify answers come back sealed for this profile. The relay and APNs see only routing data: the event type, opaque ids, a keyed thread token and timing. A pairing that has a key never sends plaintext content again, and only accepts clarify answers sealed by the phone. `hermes conduit-push status` shows whether it's on; Conduit turns it on by itself when it connects to this host. Run `hermes conduit-push test --corrupt` to check that the phone shows only generic text for a push it can't verify. The secret is only as private in transit as your dashboard connection (HTTPS or a private tunnel is recommended).
-- `hermes conduit-push redact on` keeps chat content from leaving the gateway: events carry no title or body text, approval cards say "Hermes needs your approval. Open Conduit for details.", and clarify cards replace question text with generic copy. The fields needed to answer stay (session key or request id, question ids, choice labels), so cards raised while the app is backgrounded remain recoverable and answerable. Clarify choice labels still transit the relay because the answer is one of them. `status` shows the current setting; `redact off` restores full content, including for events still waiting in the local delivery queue.
+- **Content redaction is on by default for fresh pairings.** `hermes conduit-push redact on` removes notification titles, bodies and approval/clarify question text: events carry no title or body text, approval cards say "Hermes needs your approval. Open Conduit for details.", and clarify cards replace question text with generic copy. The fields needed to answer stay (session key or request id, question ids, choice labels), so cards raised while the app is backgrounded remain recoverable and answerable. Redaction is not encryption or anonymity: routing metadata and clarify choice labels still transit the relay without end-to-end encryption. A local-only random redaction key re-keys event ids and is never included in outgoing events. `status` shows the current setting; `redact off` explicitly restores full content, including for events still waiting in the local delivery queue. Both explicit choices survive re-pairing. Redaction applies before any separately provisioned end-to-end encryption; pairing alone does not provision an encryption key.
 
 The public relay URL is part of the client protocol. APNs signing material (the `.p8` key) is never committed — see the relay directory below for how to deploy your own.
 
