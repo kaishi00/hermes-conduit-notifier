@@ -3548,6 +3548,129 @@ async def post_e2e(request: Request, response: Response, profile: Optional[str] 
         raise _unexpected("key", exc, feature="Encrypted notifications")
 
 
+# --- Pairing from Conduit ----------------------------------------------------
+#
+# The same claim `hermes conduit-push pair CODE` makes, with the code handed
+# over the signed-in dashboard connection instead of typed on the host. The
+# phone creates the one-time code at its relay and posts it here with that
+# relay's URL; this route claims it and saves the credential in the requested
+# profile's conduit-push.json, which the hooks re-read on every event, so no
+# restart is needed. A re-pair keeps the profile's privacy choice and drops
+# the old encryption key (the phone provisions one for the new pairing).
+
+PAIR_LIMIT = 10
+PAIR_WINDOW_S = 60.0
+PAIR_MAX_BODY_BYTES = 2 * 1024
+PAIR_TIMEOUT_S = 15.0
+DEFAULT_RELAY_URL = "https://push.milim.dev"
+_PAIRING_CODE = re.compile(r"^[A-HJ-NP-Z2-9]{5}-[A-HJ-NP-Z2-9]{5}$")
+_pair_limiter = _MintLimiter(PAIR_LIMIT, PAIR_WINDOW_S, message="Too many pairing requests; try again shortly")
+
+
+def _pair_relay_url(raw: Any, state: Optional[Dict[str, Any]]) -> str:
+    """The relay to claim at: the phone's, else this profile's current one, else the default.
+
+    Only a bare http(s) origin with an optional path: no credentials, query or
+    fragment, so the claim can't carry anything but the code to that host.
+    """
+    if raw is None or raw == "":
+        return str((state or {}).get("relay_url") or DEFAULT_RELAY_URL).rstrip("/")
+    if not isinstance(raw, str) or len(raw) > 512:
+        raise TokenError(400, "relay_url must be an http(s) URL")
+    parsed = urllib.parse.urlsplit(raw.strip())
+    if parsed.scheme not in ("https", "http") or not parsed.hostname or parsed.username or parsed.password \
+            or parsed.query or parsed.fragment:
+        raise TokenError(400, "relay_url must be an http(s) URL")
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", "")).rstrip("/")
+
+
+def _pair_gateway_name(raw: Any, profile: Optional[str]) -> str:
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()[:80]
+    import socket
+
+    name = f"{socket.gethostname()} Hermes"
+    scoped = (profile or "").strip()
+    return name if _limiter_key(scoped) in ("", "default") else f"{name} ({scoped})"
+
+
+def _claim_pairing(relay_url: str, code: str, gateway_name: str) -> Dict[str, Any]:
+    """POST /v1/pairings/claim without credentials or redirects: (status, body)."""
+    data = json.dumps({"pairing_code": code, "gateway_name": gateway_name}, separators=(",", ":")).encode("utf-8")
+    request = urllib.request.Request(f"{relay_url}/v1/pairings/claim", data=data, method="POST", headers={
+        "Accept": "application/json", "Content-Type": "application/json",
+        "User-Agent": f"Hermes-Conduit-Notifier/{_plugin_version() or 'unknown'}"})
+    try:
+        with _relay_opener.open(request, timeout=PAIR_TIMEOUT_S) as response:
+            raw, status = response.read(64 * 1024), response.status
+    except urllib.error.HTTPError as error:
+        raw, status = error.read(4 * 1024), error.code
+    except (urllib.error.URLError, OSError) as error:
+        raise TokenError(502, f"Couldn't reach the push relay from this host ({type(error).__name__})")
+    try:
+        body = json.loads(raw) if raw else {}
+    except ValueError:
+        body = {}
+    if status == 404:
+        raise TokenError(410, "This pairing code expired or was already used. Create a new one.")
+    if status == 429:
+        raise TokenError(429, "The push relay is rate limiting pairing; try again shortly")
+    if status != 200 or not isinstance(body, dict):
+        raise TokenError(502, f"The push relay refused the pairing (HTTP {status})")
+    credential, installation_id = body.get("credential"), body.get("installation_id")
+    if not isinstance(credential, str) or not credential or not isinstance(installation_id, str) or not installation_id:
+        raise TokenError(502, "The push relay sent an unexpected pairing answer")
+    return body
+
+
+def pair_profile(body: Any, profile: Optional[str] = None, path: Any = None,
+                 claim: Optional[Callable[[str, str, str], Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """Claims the phone's pairing code for this profile. Never returns the credential."""
+    if not isinstance(body, dict):
+        raise TokenError(400, "Expected a JSON object")
+    code = body.get("pairing_code")
+    code = code.strip().upper() if isinstance(code, str) else ""
+    if not _PAIRING_CODE.match(code):
+        raise TokenError(400, "pairing_code must look like ABCDE-FGHJK")
+    path = path if path is not None else _pairing_state_path()
+    relay_url = _pair_relay_url(body.get("relay_url"), _load_pairing_state(path))
+    gateway_name = _pair_gateway_name(body.get("gateway_name"), profile)
+    claimed = (claim or _claim_pairing)(relay_url, code, gateway_name)
+    state: Dict[str, Any] = {
+        "credential": claimed["credential"],
+        "gateway_id": claimed.get("gateway_id"),
+        "gateway_name": gateway_name,
+        "installation_id": claimed["installation_id"],
+        "relay_url": str(claimed.get("relay_url") or relay_url).rstrip("/"),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with _e2e_lock, _pairing_state_lock(path):
+        # Same carry-over as client.claim_pairing: the privacy choice stays.
+        previous = _load_pairing_state(path) or {}
+        if previous.get("redact_content"):
+            state["redact_content"] = True
+        if previous.get("redact_key"):
+            state["redact_key"] = previous["redact_key"]
+        _save_pairing_state(path, state)
+    return {"paired": True, "installation_id": state["installation_id"], "gateway_id": state["gateway_id"],
+            "gateway_name": gateway_name, "relay_url": state["relay_url"]}
+
+
+@router.post("/pair")
+async def post_pair(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        _pair_limiter.acquire(_limiter_key(profile))
+        body = await _read_json_body(request, PAIR_MAX_BODY_BYTES)
+        return {"ok": True, **(await _run_scoped(profile, lambda: pair_profile(body, profile)))}
+    except TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _unexpected("pairing", exc, feature="Pairing")
+
+
 # --- Hermes calls you (#449) -------------------------------------------------
 #
 # Conduit asks to be called when a job the user handed to a Live Voice call
@@ -8154,6 +8277,8 @@ ROUTE_CAPABILITIES = (
     "hermes-call-outcomes",
     "conduit-settings",
     "health-sync",
+    "pairing",
+    "self-restart",
 )
 
 
@@ -8171,8 +8296,128 @@ def _plugin_version() -> Optional[str]:
     return None
 
 
+# The version this process imported. Hermes imports this file once per
+# dashboard process, so after `hermes plugins update` the version on disk
+# moves ahead of the code that is serving until the dashboard restarts.
+LOADED_VERSION = _plugin_version()
+# Changes with every dashboard process, so Conduit can tell a restart landed.
+BOOT_ID = os.urandom(8).hex()
+
+
 @router.get("/capabilities")
 async def get_capabilities(response: Response) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
-    return {"ok": True, "version": _plugin_version(), "capabilities": list(ROUTE_CAPABILITIES)}
+    installed = _plugin_version()
+    return {"ok": True, "version": installed, "loaded_version": LOADED_VERSION,
+            "restart_needed": installed != LOADED_VERSION, "boot_id": BOOT_ID,
+            "capabilities": list(ROUTE_CAPABILITIES)}
+
+
+# --- Self restart -------------------------------------------------------------
+#
+# After an update, Hermes' gateway restart reloads the plugin's hooks and tools
+# for the gateway, but this dashboard keeps serving the routes (and the hooks of
+# the chats it runs) it imported at start. Conduit calls this last: the process
+# re-executes itself with the command line it started with, keeping its pid, so
+# systemd, launchd and a terminal launch all carry on. Refused while a chat turn
+# this process runs is still going, for the Desktop app's own backend (it
+# supervises and re-ports its child), inside a plugin host, and on Windows,
+# where exec spawns a new process instead of replacing this one.
+
+SELF_RESTART_DELAY_S = 1.0
+_self_restart_lock = threading.Lock()
+_self_restart_scheduled = False
+
+
+def _hermes_homes() -> List[Path]:
+    """Every profile home this host has: the root and each profiles/<name>."""
+    try:
+        from hermes_constants import get_default_hermes_root
+        root = Path(get_default_hermes_root())
+    except Exception:
+        from hermes_constants import get_hermes_home
+        root = Path(get_hermes_home())
+    homes = [root]
+    with contextlib.suppress(OSError):
+        homes.extend(sorted(p for p in (root / "profiles").iterdir() if p.is_dir()))
+    return homes
+
+
+def _running_turns(pid: int, homes: List[Path]) -> int:
+    """Turns this process has started and not finished, from Hermes' turn markers.
+
+    Every Desktop/TUI/dashboard chat turn writes a marker with its writer's pid
+    at start and clears it at the end, so a marker carrying this pid is a turn
+    still running here. An unreadable file counts as none (best effort, like
+    the markers themselves).
+    """
+    running = 0
+    for home in homes:
+        try:
+            entries = json.loads((home / "desktop" / "interrupted_turns.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(entries, dict):
+            running += sum(1 for entry in entries.values()
+                           if isinstance(entry, dict) and entry.get("writer_pid") == pid)
+    return running
+
+
+def _self_restart_refusal() -> Optional[Tuple[int, str]]:
+    if sys.platform == "win32":
+        return 501, "Restart the Hermes dashboard on this host to finish the update"
+    if os.environ.get("HERMES_PLUGIN_HOST_PROCESS") == "1":
+        return 501, "This plugin runs in a Hermes plugin host; restart Hermes to finish the update"
+    try:
+        from hermes_cli.anon_auth import on_local_desktop_backend
+        desktop = on_local_desktop_backend()
+    except Exception:
+        desktop = bool(os.environ.get("HERMES_DESKTOP_CHILD_PID"))
+    if desktop:
+        return 501, "This dashboard belongs to Hermes Desktop; restart Hermes Desktop to finish the update"
+    if not getattr(sys, "orig_argv", None):
+        return 501, "Restart the Hermes dashboard on this host to finish the update"
+    return None
+
+
+def _reexec() -> None:
+    logger.warning("Conduit plugin: restarting this dashboard to load plugin %s", _plugin_version())
+    # exec skips atexit: save what this module would have saved on the way out.
+    with contextlib.suppress(Exception):
+        _desktop_view_store.flush()
+    for handler in logging.getLogger().handlers:
+        with contextlib.suppress(Exception):
+            handler.flush()
+    with contextlib.suppress(Exception):
+        sys.stdout.flush()
+        sys.stderr.flush()
+    os.execv(sys.executable, [sys.executable, *sys.orig_argv[1:]])
+
+
+def self_restart(schedule: Callable[[float, Callable[[], None]], Any],
+                 homes: Optional[Callable[[], List[Path]]] = None) -> Dict[str, Any]:
+    global _self_restart_scheduled
+    refusal = _self_restart_refusal()
+    if refusal is not None:
+        raise TokenError(*refusal)
+    running = _running_turns(os.getpid(), (homes or _hermes_homes)())
+    if running:
+        raise TokenError(409, f"{running} chat turn{'s' if running != 1 else ''} still running on this dashboard")
+    with _self_restart_lock:
+        if not _self_restart_scheduled:
+            _self_restart_scheduled = True
+            schedule(SELF_RESTART_DELAY_S, _reexec)
+    return {"restarting": True, "boot_id": BOOT_ID, "loaded_version": LOADED_VERSION,
+            "version": _plugin_version()}
+
+
+@router.post("/self/restart")
+async def post_self_restart(response: Response) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    loop = asyncio.get_running_loop()
+    try:
+        # The answer goes out first; the exec follows a moment later.
+        return {"ok": True, **self_restart(loop.call_later)}
+    except TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
 

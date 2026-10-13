@@ -28,6 +28,10 @@ hermes -p coder conduit-push pair YYYYY-YYYYY
 
 Pairing codes expire after ten minutes and can only be claimed once.
 
+With plugin 0.24+ Conduit pairs the active dashboard's profile by itself: it
+creates the code and hands it to `POST /api/plugins/conduit_push/pair?profile=`
+over your signed-in dashboard connection (see [Pairing from Conduit](#pairing-from-conduit-plugin-024)).
+
 ## Manage the pairing
 
 ```bash
@@ -50,6 +54,10 @@ Update the plugin and restart Hermes:
 hermes plugins update conduit_push
 hermes gateway restart
 ```
+
+The dashboard imports the plugin's routes once, so restart the dashboard as
+well (or let Conduit do it: Settings > Conduit plugin > Update runs Hermes' own
+plugin update, the gateway restart and [the dashboard restart](#updating-from-conduit-plugin-024)).
 
 ## Events
 
@@ -1240,13 +1248,49 @@ relay key. The host still opens no inbound route.
 the Conduit features its routes serve:
 
 ```json
-{"ok": true, "version": "0.4.0", "capabilities": ["gemini-live", "web-search", "memory", "personality", "gpt-live", "grok-live", "voice-sessions", "voice-tags", "voice-summary", "session-takeover"]}
+{"ok": true, "version": "0.24.0", "loaded_version": "0.24.0", "restart_needed": false, "boot_id": "9f2c41d07a3b5e68", "capabilities": ["gemini-live", "web-search", "...", "pairing", "self-restart"]}
 ```
 
 Conduit reads it on connect. When a feature it uses is missing, or the route
 itself is (a plugin older than 0.4), Settings asks you to run
 `hermes plugins update conduit_push` and restart the gateway. Every new route
 family adds its name here.
+
+## Pairing from Conduit (plugin 0.24+)
+
+`POST /api/plugins/conduit_push/pair?profile=` with
+`{"pairing_code": "ABCDE-FGHJK", "relay_url": "https://push.milim.dev"}`
+makes the same claim as `hermes conduit-push pair` for that profile and saves
+the credential in its `conduit-push.json`. `relay_url` is optional (the
+profile's current relay, else push.milim.dev) and must be a bare http(s) URL;
+the claim carries only the code and the gateway name, never follows redirects,
+and the answer never includes the credential:
+`{ok, paired, installation_id, gateway_id, gateway_name, relay_url}`. A
+re-pair keeps the profile's redaction choice and drops the old encryption key
+(Conduit provisions a new one). 400 for a malformed code or URL, 410 when the
+code expired or was used, 429 past 10 requests a minute, 502 when the relay
+can't be reached.
+
+## Updating from Conduit (plugin 0.24+)
+
+Conduit updates the plugin with Hermes' own dashboard routes
+(`POST /api/dashboard/agent-plugins/install` and
+`POST /api/dashboard/agent-plugins/conduit_push/update`), then restarts the
+gateway (`POST /api/gateway/restart`), then this dashboard:
+
+- `GET /capabilities` also reports `loaded_version` (the version this
+  dashboard process imported), `restart_needed` (the version on disk is
+  different) and `boot_id` (new with every dashboard process).
+- `POST /api/plugins/conduit_push/self/restart` answers
+  `{ok, restarting, boot_id, loaded_version, version}` and a second later
+  re-executes the dashboard with the command line it started with, keeping its
+  pid, so systemd, launchd and terminal launches carry on. 409 while a chat
+  turn this process runs is still going (from Hermes' turn markers); 501 on
+  Windows, inside a plugin host, and for Hermes Desktop's own backend, where
+  you restart Hermes yourself.
+
+The first update to 0.24 still runs the old code, which has no restart route:
+restart the dashboard by hand once.
 
 ## Conduit support and privacy
 

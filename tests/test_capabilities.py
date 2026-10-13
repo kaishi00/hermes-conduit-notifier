@@ -32,7 +32,8 @@ def test_capabilities_report_the_manifest_version_and_route_features():
     assert response.headers["cache-control"] == "no-store"
     body = response.json()
     manifest = re.search(r"^version:\s*(\S+)", (ROOT / "plugin.yaml").read_text(), re.M).group(1)
-    assert body == {"ok": True, "version": manifest, "capabilities": list(api.ROUTE_CAPABILITIES)}
+    assert body == {"ok": True, "version": manifest, "loaded_version": manifest, "restart_needed": False,
+                    "boot_id": api.BOOT_ID, "capabilities": list(api.ROUTE_CAPABILITIES)}
     assert "session-takeover" in body["capabilities"]
     # The dashboard manifest must carry the same version the route reports.
     assert json.loads((ROOT / "dashboard" / "manifest.json").read_text())["version"] == manifest
@@ -59,6 +60,8 @@ def test_every_capability_names_a_served_route_family():
         "hermes-call-outcomes": "/calls/outcomes",
         "conduit-settings": "/conduit-settings",
         "health-sync": "/health/",
+        "pairing": "/pair",
+        "self-restart": "/self/restart",
     }
     assert set(prefixes) == set(api.ROUTE_CAPABILITIES)
     for capability, prefix in prefixes.items():
@@ -68,3 +71,11 @@ def test_every_capability_names_a_served_route_family():
 def test_an_unreadable_manifest_reports_no_version(monkeypatch):
     monkeypatch.setattr(api.os.path, "dirname", lambda path: "/nonexistent")
     assert api._plugin_version() is None
+
+
+def test_a_newer_version_on_disk_reads_as_restart_needed(monkeypatch):
+    monkeypatch.setattr(api, "_plugin_version", lambda: "99.0.0")
+    body = _client().get(f"{BASE}/capabilities").json()
+    assert body["version"] == "99.0.0"
+    assert body["loaded_version"] == api.LOADED_VERSION != "99.0.0"
+    assert body["restart_needed"] is True
