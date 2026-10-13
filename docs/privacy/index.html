@@ -19,7 +19,7 @@
   <main class="document">
     <div class="eyebrow">Hermes Conduit</div>
     <h1>Privacy Policy</h1>
-    <p class="meta">Effective October 4, 2026</p>
+    <p class="meta">Effective October 13, 2026</p>
     <p>This policy explains how Hermes Conduit handles information in the iOS app, the optional Hermes Conduit Notifier plugin, and the optional notification relay used to deliver Apple Push Notification service (APNs) alerts.</p>
 
     <h2>Summary</h2>
@@ -50,6 +50,17 @@
     <p>To limit content before it leaves your Hermes gateway, enable the plugin's profile-specific redaction setting with <code>hermes conduit-push redact on</code>. Redaction removes notification title and body text and replaces approval descriptions and clarify questions with generic text. Routing identifiers still reach the relay. Choice labels also remain for both card types: approval labels are limited to the fixed once, session, always, and deny vocabulary, while clarify labels remain as supplied. Answers you submit for clarify cards are sent to the relay for the gateway to retrieve, even when redaction is enabled.</p>
     <p>When end-to-end encryption is on for a pairing (Hermes Conduit Notifier 0.5 or later with a Conduit version that supports it), Conduit creates a secret for that pairing on your device and sends it to your Hermes gateway over your own dashboard connection, never through the relay. The plugin then encrypts notification titles, bodies, session identifiers, profile names and decision content with it, and your device encrypts clarify answers. The relay and Apple can't read that content; they still process the event type, opaque identifiers, a keyed thread token, timing and size. A pairing that has turned on encryption does not send unencrypted content again.</p>
     <p>The relay uses this information solely to authenticate paired installations, enforce notification preferences, prevent duplicate delivery, relay clarify answers to your gateway, troubleshoot failures, and send notifications through APNs. Apple processes the device token and notification payload under Apple's applicable privacy terms.</p>
+
+    <h2>Optional Apple Health sharing</h2>
+    <p>Conduit can share Apple Health data with your Hermes gateway so your agent can read it. It is off until you turn it on, and you choose the categories (activity, heart, sleep, workouts, body measurements, vitals, fitness) and how far back to share. Conduit reads Health data only with your permission in the system Health prompt and never writes to Health.</p>
+    <ul>
+      <li>Health data goes from your device directly to the Hermes gateway you configured, over your dashboard connection. It never passes through the Conduit notification relay or any server operated by Conduit, and Conduit's developer never receives it.</li>
+      <li>Conduit encrypts every upload end to end with a key that your device and your gateway agree on, in addition to any HTTPS, so it can only be read on your gateway.</li>
+      <li>By default Conduit shares hourly and daily totals, nightly sleep summaries, sleep stages and workouts. Individual readings are shared only for categories where you turn on detailed readings.</li>
+      <li>Your agent can read this data when it answers you, which means it is sent to the AI model provider your Hermes agent uses (and, for a hosted agent, to its host). Their privacy terms apply to what they receive.</li>
+      <li>Health data is not used for advertising, marketing or data mining, is not sold, and is not stored in iCloud. Conduit keeps only sync progress on your device, excluded from backups.</li>
+      <li>You can turn sharing off at any time and delete the copy on your gateway from Conduit's Health settings.</li>
+    </ul>
 
     <h2>Retention and deletion</h2>
     <p>On-device information remains until you remove it, sign out, disable the related feature, or uninstall the app. Notification registrations remain active until notifications are disabled, the registration is invalidated, or deletion is requested. Disabling notifications prevents further delivery and revokes the app's local notification credential. Short-lived pairing codes expire after ten minutes, and event identifiers used to prevent duplicate delivery expire after approximately 24 hours. Clarify decision records, including questions, choices, and submitted answers, expire after approximately two hours. When the relay processes state, it removes expired records from its in-memory state; an expired record may remain in the saved file until a later state update rewrites that file.</p>

@@ -3649,6 +3649,111 @@ async def put_conduit_settings(request: Request, response: Response, profile: Op
         raise _unexpected("settings", exc, feature="Conduit settings")
 
 
+# --- Health data (Apple Health shared from Conduit) ---------------------------
+#
+# The user turns on health sharing in Conduit, per category. The phone agrees
+# a key with this profile once (/health/key, X25519: only public keys cross
+# the wire) and then posts sealed batches of HealthKit totals and events
+# (/health/ingest) straight here, never through the push relay. The store
+# (health_store.py) keeps them in the profile's conduit-health.sqlite3 for the
+# conduit_health tool. No route returns health data: status reports counts
+# and dates only, and wipe deletes.
+
+HEALTH_KEY_LIMIT = 10
+HEALTH_KEY_WINDOW_S = 60.0
+# A backfill sends many batches in a row.
+HEALTH_INGEST_LIMIT = 120
+HEALTH_INGEST_WINDOW_S = 60.0
+HEALTH_MAX_KEY_BODY_BYTES = 4 * 1024
+# A sealed batch is base64url of at most ~3 MiB of JSON.
+HEALTH_MAX_INGEST_BODY_BYTES = 4 * 1024 * 1024
+
+_health_key_limiter = _MintLimiter(HEALTH_KEY_LIMIT, HEALTH_KEY_WINDOW_S,
+                                   message="Too many health key requests; try again shortly")
+_health_ingest_limiter = _MintLimiter(HEALTH_INGEST_LIMIT, HEALTH_INGEST_WINDOW_S,
+                                      message="Too many health uploads; try again shortly")
+_health_store_module: Any = None
+
+
+def _health_store() -> Any:
+    """health_store.py beside this folder, loaded once."""
+    global _health_store_module
+    with _calls_store_lock:
+        if _health_store_module is None:
+            path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "health_store.py")
+            spec = importlib.util.spec_from_file_location("conduit_push_dashboard_health_store", path)
+            if spec is None or spec.loader is None:
+                raise TokenError(501, "This plugin install is missing health_store.py; update the plugin")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _health_store_module = module
+        return _health_store_module
+
+
+def _health_call(fn: Callable[[Any], Dict[str, Any]]) -> Dict[str, Any]:
+    module = _health_store()
+    try:
+        return fn(module.HealthStore(_calls_home()))
+    except module.HealthError as exc:
+        raise TokenError(exc.status, str(exc))
+
+
+async def _health_route(response: Response, profile: Optional[str], fn: Callable[[], Dict[str, Any]],
+                        name: str) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return {"ok": True, **(await _run_scoped(profile, fn))}
+    except TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
+        raise
+    except Exception as exc:
+        raise _unexpected(name, exc, feature="Health sync")
+
+
+@router.get("/health/status")
+async def get_health_status(response: Response, profile: Optional[str] = None,
+                            device_id: Optional[str] = None) -> Dict[str, Any]:
+    return await _health_route(response, profile, lambda: _health_call(lambda store: {
+        **store.status(device_id), "crypto": _health_store().crypto_available()}), "status")
+
+
+@router.post("/health/key")
+async def post_health_key(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        _health_key_limiter.acquire(_limiter_key(profile))
+    except TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+    body = await _read_json_body(request, HEALTH_MAX_KEY_BODY_BYTES)
+    return await _health_route(response, profile, lambda: _health_call(lambda store: store.register_key(body)), "key")
+
+
+@router.post("/health/ingest")
+async def post_health_ingest(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        _health_ingest_limiter.acquire(_limiter_key(profile))
+    except TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+    body = await _read_json_body(request, HEALTH_MAX_INGEST_BODY_BYTES)
+    return await _health_route(response, profile, lambda: _health_call(lambda store: store.ingest(body)), "upload")
+
+
+@router.post("/health/wipe")
+async def post_health_wipe(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    body = await _read_json_body(request, HEALTH_MAX_KEY_BODY_BYTES)
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Expected a JSON object", headers={"Cache-Control": "no-store"})
+    # Everything only when asked for by name; a device id alone deletes that device's data.
+    device_id = None if body.get("all") is True else body.get("device_id")
+    if device_id is None and body.get("all") is not True:
+        raise HTTPException(status_code=400, detail="Name a device_id, or all: true",
+                            headers={"Cache-Control": "no-store"})
+    return await _health_route(response, profile, lambda: _health_call(lambda store: store.wipe(device_id)), "delete")
+
+
 # --- Watch tools (wrist-down lookups for a Conduit Watch call) ---------------
 #
 # With the wrist down, a Conduit Watch call can't reach Conduit on the iPhone,
@@ -7882,6 +7987,7 @@ ROUTE_CAPABILITIES = (
     "hermes-call-presence",
     "hermes-call-outcomes",
     "conduit-settings",
+    "health-sync",
 )
 
 

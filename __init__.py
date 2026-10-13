@@ -12,7 +12,7 @@ from typing import Any
 
 from hermes_constants import get_hermes_home
 
-from . import call_tool, call_watches, calls, clarify_loop, desktop_selected, settings_tool
+from . import call_tool, call_watches, calls, clarify_loop, desktop_selected, health_tool, settings_tool
 from .session_titles import title as _session_title, titled as _titled
 from .client import enqueue
 from .events import approval_decision, clarification_text, event_id, is_silent_response, push_event
@@ -51,6 +51,9 @@ def register(ctx: Any) -> None:
     # Hermes configures Conduit: the settings Conduit shares, changed only
     # through requests Conduit checks and the user approves.
     settings_tool.register(ctx, is_child=_is_child)
+    # Health data Conduit shares from Apple Health, read-only, with its skill.
+    health_tool.register(ctx, is_child=_is_child,
+                         skill_path=Path(__file__).resolve().parent / "skills" / health_tool.SKILL_NAME / "SKILL.md")
     try:
         ctx.register_hook("post_approval_response", _post_approval_response)
     except Exception:  # noqa: BLE001

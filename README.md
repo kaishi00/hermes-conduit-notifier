@@ -1042,6 +1042,45 @@ what Conduit allows:
 The tool shows only once a Conduit has synced with the profile. Limits: 20
 requested changes per device per hour, 10 per call, 8 devices per profile.
 
+## Health data from Conduit (plugin 0.23+)
+
+Conduit can share Apple Health data with a Hermes profile so the agent can
+answer "how did I sleep?" or "how active was I this week?". It's off until
+the user turns it on in Conduit, per category (activity, heart, sleep,
+workouts, body, vitals, fitness), with how far back to start.
+
+- **Straight to this host.** The phone posts to
+  `POST /api/plugins/conduit_push/health/ingest` over your dashboard
+  connection. Health data never passes through the push relay or any
+  Conduit server.
+- **Sealed end to end.** Each phone agrees a key with the profile once
+  (`POST /health/key`, X25519: only public keys cross the wire, so watching
+  that exchange doesn't reveal the key). Every batch is sealed with
+  ChaCha20-Poly1305 under an HKDF-SHA256 key from it, on top of any TLS, so
+  even a dashboard on plain http in your LAN never carries health data in
+  the clear. Like any plain-http service, someone actively tampering with
+  the connection while the key is set up could still intercept it: use
+  HTTPS or a private tunnel when you can.
+- **Summaries first.** Conduit sends the hourly and daily totals Apple
+  Health computes on the phone (iPhone and Watch already merged), a summary
+  per night of sleep, sleep stage segments and workouts. Raw readings go
+  only for categories where the user turns on detailed readings.
+- **Stored here only.** The profile's `conduit-health.sqlite3`, mode `0600`.
+  A newer computation of a window replaces the older one; a deleted workout
+  or reading stays deleted. `GET /health/status` reports counts and dates,
+  never values; `POST /health/wipe` deletes one device's data and key (or
+  everything with `{"all": true}`), and Conduit's "Delete health data on
+  this host" calls it. No route returns health data.
+- **Read-only tool.** `conduit_health` (actions `overview`, `daily`,
+  `hourly`, `sleep`, `workouts`, `samples`; at most 92 days per call) with
+  its skill `conduit_push:reading-health-data`. It shows only once a phone
+  has synced data, and subagents can't use it. What it returns goes to your
+  agent's model like any tool result, which Conduit tells the user before
+  they turn sharing on.
+
+Limits: 4 devices per profile, 6,000 items and 4 MiB per batch, 120 uploads
+a minute per profile.
+
 ## Apple Watch lookups and jobs (plugin 0.6+, jobs 0.7+, Gemini tokens 0.8+)
 
 With the wrist down, a Conduit Watch call can't reach Conduit on the iPhone,
