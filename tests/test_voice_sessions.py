@@ -535,6 +535,7 @@ def test_reads_work_on_a_store_without_the_write_helpers(client, hermes, monkeyp
     assert client.get(f"{BASE}/voice/tags").status_code == 200
     assert client.get(f"{BASE}/voice/summary", params={"session_id": "s_1"}).status_code == 200
     assert save(client, turns=turns(("user", "a"))).status_code == 501
+    assert client.get(f"{BASE}/voice/chat-calls", params={"chat_id": "chat-1"}).status_code == 501
 
 
 def test_unreadable_tags_start_over(client, hermes):
@@ -661,6 +662,15 @@ def test_a_chat_call_is_bounded(client, hermes, monkeypatch):
     monkeypatch.setattr(api, "VOICE_MAX_CHAT_CALL_TURNS", 2)
     save(client, chat_id="chat-1", turns=turns(("user", "a"), ("assistant", "b")))
     assert save(client, chat_id="chat-1", turns=turns(("user", "c"), start=2)).status_code == 413
+
+
+def test_a_gone_chats_unreadable_calls_are_dropped_too(client, hermes):
+    store = chat(hermes)
+    save(client, chat_id="chat-1", turns=turns(("user", "a")))
+    store.meta["conduit.voice.chat_call:call-1"] = "{not json"
+    del store.sessions["chat-1"]
+    assert save(client, chat_id="chat-1", call_id="call-2", turns=turns(("user", "b"))).status_code == 422
+    assert store.meta["conduit.voice.chat_call:call-1"] == ""
 
 
 def test_a_gone_chats_calls_are_dropped(client, hermes):

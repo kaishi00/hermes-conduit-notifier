@@ -2578,7 +2578,7 @@ def _chat_call_ids(db, chat_id: str) -> list:
     except ValueError:
         logger.warning("Conduit voice: chat %s's call list is unreadable", chat_id)
         return []
-    return [i for i in ids if isinstance(i, str)] if isinstance(ids, list) else []
+    return [i for i in ids if isinstance(i, str) and _VOICE_ID_RE.match(i)] if isinstance(ids, list) else []
 
 
 def _drop_chat_calls(db, chat_id: str) -> None:
@@ -2586,7 +2586,8 @@ def _drop_chat_calls(db, chat_id: str) -> None:
     ids = _chat_call_ids(db, chat_id)
     for call_id in ids:
         call = _chat_call(db, call_id)
-        if call is not None and call["chat_id"] == chat_id:
+        # A listed call whose body is gone or unreadable goes too.
+        if call is None or call["chat_id"] == chat_id:
             db.set_meta(VOICE_CHAT_CALL_KEY.format(call_id=call_id), "")
     if ids:
         db.set_meta(VOICE_CHAT_CALLS_KEY.format(chat_id=chat_id), "")
@@ -2648,7 +2649,7 @@ def voice_chat_calls(chat_id: Any) -> Dict[str, Any]:
     """An attached chat's saved calls, oldest first, with their turns; none
     once the chat is gone (its calls are cleared on the next save to it)."""
     chat_id = _voice_id(chat_id, "chat_id")
-    db = _open_voice_db()
+    db = _open_voice_db(("get_meta", "get_session"))
     try:
         calls = []
         for call_id in _chat_call_ids(db, chat_id) if db.get_session(chat_id) else []:
