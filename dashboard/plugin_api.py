@@ -43,6 +43,7 @@ import base64
 import contextvars
 import functools
 import hashlib
+import http.client
 import importlib.util
 import inspect
 import itertools
@@ -3607,7 +3608,7 @@ def _claim_pairing(relay_url: str, code: str, gateway_name: str) -> Dict[str, An
             raw, status = response.read(64 * 1024), response.status
     except urllib.error.HTTPError as error:
         raw, status = error.read(4 * 1024), error.code
-    except (urllib.error.URLError, OSError) as error:
+    except (urllib.error.URLError, OSError, http.client.HTTPException) as error:
         raise TokenError(502, f"Couldn't reach the push relay from this host ({type(error).__name__})")
     try:
         body = json.loads(raw) if raw else {}
