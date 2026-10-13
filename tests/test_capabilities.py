@@ -45,6 +45,7 @@ def test_every_capability_names_a_served_route_family():
         "gemini-live": "/gemini-live/", "web-search": "/web-search", "memory": "/memory/",
         "personality": "/personality", "gpt-live": "/gpt-live/", "grok-live": "/grok-live/",
         "voice-sessions": "/voice/sessions", "voice-tags": "/voice/tags", "voice-summary": "/voice/summary",
+        "voice-chat-calls": "/voice/chat-calls",
         "session-takeover": "/sessions/takeover", "e2e-notifications": "/e2e", "watch-tools": "/watch-tools/",
         # Jobs, their follow-ups and Gemini Live tokens ride the watch-tools grant route.
         "watch-jobs": "/watch-tools/",

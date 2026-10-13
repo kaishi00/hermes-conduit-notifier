@@ -137,7 +137,11 @@ def hermes(monkeypatch, tmp_path):
     # A save that stores new turns ends its call; these tests record that
     # instead of running it (the call-end tests below run it).
     ends = []
-    monkeypatch.setattr(api, "_queue_voice_call_end", lambda *args: ends.append(args))
+
+    def queue_end(*args, chat_call=False):
+        ends.append((*args, "chat") if chat_call else args)
+
+    monkeypatch.setattr(api, "_queue_voice_call_end", queue_end)
 
     def home():
         return tmp_path / (_active_profile.get() or "default")
@@ -561,6 +565,73 @@ def test_summary_for_a_deleted_session_is_422(client, hermes):
 def test_summary_needs_text_and_covers(client, hermes, body):
     session_id = save(client, turns=turns(("user", "a"))).json()["session_id"]
     assert client.post(f"{BASE}/voice/summary", json={"session_id": session_id, **body}).status_code == 400
+
+
+# --- Calls attached to a chat (#556) ---------------------------------------------
+
+
+def chat(hermes, chat_id="chat-1", profile="default"):
+    store = FakeSessionDB.stores.setdefault(profile, FakeStore())
+    store.sessions[chat_id] = {"id": chat_id, "source": "desktop", "end_reason": None}
+    store.messages[chat_id] = [{"role": "user", "content": "daily brief"}]
+    return store
+
+
+def test_an_attached_call_makes_no_session_and_leaves_the_chat_alone(client, hermes):
+    store = chat(hermes)
+    body = save(client, chat_id="chat-1", turns=turns(("user", "hi"), ("assistant", "hello"))).json()
+    assert body["ok"] and body["session_id"] is None and body["chat_id"] == "chat-1" and body["written"] == 2
+    assert set(store.sessions) == {"chat-1"}
+    assert store.messages["chat-1"] == [{"role": "user", "content": "daily brief"}]
+    assert api.VOICE_TAGS_KEY not in store.meta
+    calls = client.get(f"{BASE}/voice/chat-calls", params={"chat_id": "chat-1"}).json()["calls"]
+    assert calls == [{"call_id": "call-1", "engine": "gemini-live", "turns": [
+        {"role": "user", "text": "hi", "at": 1_780_000_000},
+        {"role": "assistant", "text": "hello", "at": 1_780_000_001}]}]
+
+
+def test_an_attached_call_continues_and_skips_replays(client, hermes):
+    chat(hermes)
+    save(client, chat_id="chat-1", turns=turns(("user", "a"), ("assistant", "b")))
+    body = save(client, chat_id="chat-1", turns=turns(("assistant", "b"), ("user", "c"), start=1)).json()
+    assert body["written"] == 3 and body["appended"] == 1 and body["skipped"] == 1
+    assert save(client, chat_id="chat-1", turns=turns(("user", "gap"), start=5)).status_code == 400
+    save(client, chat_id="chat-1", call_id="call-2", turns=turns(("user", "again")))
+    calls = client.get(f"{BASE}/voice/chat-calls", params={"chat_id": "chat-1"}).json()["calls"]
+    assert [[t["text"] for t in c["turns"]] for c in calls] == [["a", "b", "c"], ["again"]]
+
+
+def test_an_attached_call_ends_only_into_memory_under_the_chat(client, hermes):
+    chat(hermes)
+    save(client, engine="gpt-live", chat_id="chat-1", turns=turns(("user", "hi"), ("assistant", "hello")))
+    save(client, engine="gpt-live", chat_id="chat-1", turns=turns(("user", "hi"), ("assistant", "hello")))
+    assert hermes.ends == [(None, "chat-1", "gpt-live", [
+        {"role": "user", "content": "hi", "timestamp": 1_780_000_000},
+        {"role": "assistant", "content": "hello", "timestamp": 1_780_000_001}], "chat")]
+
+
+def test_a_gone_chat_is_422_and_a_call_keeps_its_chat(client, hermes):
+    assert save(client, chat_id="nope", turns=turns(("user", "a"))).status_code == 422
+    chat(hermes)
+    chat(hermes, "chat-2")
+    save(client, chat_id="chat-1", turns=turns(("user", "a")))
+    assert save(client, chat_id="chat-2", turns=turns(("user", "a"), ("user", "b"))).status_code == 400
+    assert client.get(f"{BASE}/voice/chat-calls", params={"chat_id": "chat-2"}).json()["calls"] == []
+
+
+def test_an_attached_call_with_a_row_appends_to_the_row(client, hermes):
+    chat(hermes)
+    session_id = save(client, turns=turns(("user", "a"))).json()["session_id"]
+    body = save(client, session_id=session_id, chat_id="chat-1", call_id="call-2", turns=turns(("user", "b"))).json()
+    assert body["session_id"] == session_id
+
+
+def test_an_attached_call_ends_without_ending_the_chat(hermes, lifecycle):
+    api._run_voice_call_end(None, "chat-1", "gpt-live", CALL, chat_call=True)
+    assert [event[0] for event in lifecycle.events] == [
+        "initialize", "sync_turn", "flush_pending", "provider on_session_end", "shutdown"]
+    assert lifecycle.events[0][2] == "chat-1"
+    assert lifecycle.events[1] == ("sync_turn", "remind me to call mum", "Will do.", "chat-1")
 
 
 # --- Call end -------------------------------------------------------------------

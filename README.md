@@ -676,7 +676,8 @@ start the agent or call a model. A resumed call appends to the same session.
 
 | Method | Route | Returns |
 | --- | --- | --- |
-| POST | `/api/plugins/conduit_push/voice/sessions` with `{call_id, engine, session_id?, title?, turns: [{index, role, text, at?}]}` | `{ok, session_id, written, appended, created}` |
+| POST | `/api/plugins/conduit_push/voice/sessions` with `{call_id, engine, session_id?, chat_id?, title?, turns: [{index, role, text, at?}]}` | `{ok, session_id, chat_id?, written, appended, created}` |
+| GET | `/api/plugins/conduit_push/voice/chat-calls?chat_id=` | `{ok, chat_id, calls: [{call_id, engine, turns: [{role, text, at}]}]}` |
 | GET | `/api/plugins/conduit_push/voice/tags` | `{ok, tags: {session_id: {kind, engine?, parent_id?, parent_title?}}}` |
 | POST | `/api/plugins/conduit_push/voice/tags` with `{session_id, kind: classic or job, parent_id?, parent_title?}` | `{ok, session_id, kind, ...}` |
 | GET | `/api/plugins/conduit_push/voice/summary?session_id=` | `{ok, available, text, covers}` |
@@ -695,6 +696,15 @@ start the agent or call a model. A resumed call appends to the same session.
   past that highest index, where the next save starts. One caveat: the
   append and that record are two separate writes, so a failure between them
   can repeat a line on retry (it never loses one).
+- A call attached to a chat (started in it, or a Hermes call from it) sends
+  `chat_id`, the chat's stored session id, and no `session_id`. Its turns are
+  kept with that chat in `state_meta` instead of a session of its own, under
+  the same index rules, and the chat's own messages are never touched;
+  `session_id` comes back null. `voice/chat-calls` lists them for the chat.
+  When the call ends it is written to the memory provider under the chat's
+  session, but no session-end hooks fire: the chat goes on. A chat that no
+  longer exists gets 422, and Conduit then saves the call on its own. Older
+  plugins ignore `chat_id` and save a session as before.
 - A create is idempotent per `call_id`: a retried first save whose response
   was lost continues the row it made instead of starting a second one.
 - Appends and summaries go only to rows saved as voice calls; any other
