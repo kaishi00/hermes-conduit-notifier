@@ -673,6 +673,18 @@ def test_a_gone_chats_unreadable_calls_are_dropped_too(client, hermes):
     assert store.meta["conduit.voice.chat_call:call-1"] == ""
 
 
+def test_a_chats_calls_can_be_read_one_at_a_time(client, hermes):
+    chat(hermes)
+    save(client, chat_id="chat-1", call_id="call-1", turns=turns(("user", "a")))
+    save(client, chat_id="chat-1", call_id="call-2", turns=turns(("user", "b")))
+    calls = client.get(f"{BASE}/voice/chat-calls", params={"chat_id": "chat-1", "call_id": "call-2"}).json()["calls"]
+    assert [call["call_id"] for call in calls] == ["call-2"]
+
+
+def test_an_empty_chat_id_is_refused(client, hermes):
+    assert save(client, chat_id="", turns=turns(("user", "a"))).status_code == 400
+
+
 def test_a_saved_call_row_is_not_a_chat(client, hermes):
     row = save(client, turns=turns(("user", "a"))).json()["session_id"]
     assert save(client, chat_id=row, call_id="call-2", turns=turns(("user", "b"))).status_code == 422
@@ -697,7 +709,7 @@ def test_a_gone_chat_lists_no_calls(client, hermes):
 
 def test_a_full_chat_list_forgets_its_oldest_call(client, hermes, monkeypatch):
     store = chat(hermes)
-    monkeypatch.setattr(api, "VOICE_MAX_CALLS", 2)
+    monkeypatch.setattr(api, "VOICE_MAX_CHAT_CALLS", 2)
     for call_id in ("call-1", "call-2", "call-3"):
         save(client, chat_id="chat-1", call_id=call_id, turns=turns(("user", call_id)))
     assert json.loads(store.meta["conduit.voice.chat_calls:chat-1"]) == ["call-2", "call-3"]

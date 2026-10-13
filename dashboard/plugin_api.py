@@ -2224,6 +2224,8 @@ VOICE_CHAT_CALL_KEY = "conduit.voice.chat_call:{call_id}"
 VOICE_CHAT_CALLS_KEY = "conduit.voice.chat_calls:{chat_id}"
 # A chat call is one meta value rewritten on each save: this bounds it.
 VOICE_MAX_CHAT_CALL_TURNS = 2000
+# Calls kept per chat; past it the oldest goes.
+VOICE_MAX_CHAT_CALLS = 50
 _VOICE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _VOICE_UNSUPPORTED = "This Hermes version can't store voice transcripts; update Hermes"
 
@@ -2479,7 +2481,7 @@ def save_voice_turns(body: Dict[str, Any],
     session_id = _voice_id(requested, "session_id") if requested else None
     # A call that already has a row keeps appending to it; chat_id only
     # decides where a call without one goes.
-    if body.get("chat_id") and not session_id:
+    if body.get("chat_id") is not None and not session_id:
         return _save_chat_call_turns(_voice_id(body.get("chat_id"), "chat_id"), call_id, engine, turns, on_end)
     with _voice_lock():
         db = _open_voice_db(_VOICE_SAVE, appends=True)
@@ -2633,7 +2635,7 @@ def _save_chat_call_turns(chat_id: str, call_id: str, engine: str, turns: list,
                 ids = _chat_call_ids(db, chat_id)
                 if call_id not in ids:
                     ids.append(call_id)
-                    evicted = ids[:-VOICE_MAX_CALLS] if len(ids) > VOICE_MAX_CALLS else []
+                    evicted = ids[:-VOICE_MAX_CHAT_CALLS] if len(ids) > VOICE_MAX_CHAT_CALLS else []
                     ids = ids[len(evicted):]
                     db.set_meta(VOICE_CHAT_CALLS_KEY.format(chat_id=chat_id), json.dumps(ids, separators=(",", ":")))
                     # Only once the list no longer names them.
@@ -2651,14 +2653,18 @@ def _save_chat_call_turns(chat_id: str, call_id: str, engine: str, turns: list,
     return result
 
 
-def voice_chat_calls(chat_id: Any) -> Dict[str, Any]:
-    """An attached chat's saved calls, oldest first, with their turns; none
-    once the chat is gone (its calls are cleared on the next save to it)."""
+def voice_chat_calls(chat_id: Any, only: Any = None) -> Dict[str, Any]:
+    """An attached chat's saved calls, oldest first, with their turns (just
+    *only*'s when given); none once the chat is gone (its calls are cleared on
+    the next save to it)."""
     chat_id = _voice_id(chat_id, "chat_id")
+    only = _voice_id(only, "call_id") if only is not None else None
     db = _open_voice_db(("get_meta", "get_session"))
     try:
         calls = []
         for call_id in _chat_call_ids(db, chat_id) if db.get_session(chat_id) else []:
+            if only is not None and call_id != only:
+                continue
             call = _chat_call(db, call_id)
             if call is None or call["chat_id"] != chat_id:
                 continue
@@ -2793,10 +2799,11 @@ async def post_voice_session(request: Request, response: Response, profile: Opti
 
 @router.get("/voice/chat-calls")
 async def get_voice_chat_calls(response: Response, chat_id: Optional[str] = None,
+                               call_id: Optional[str] = None,
                                profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     _voice_limit(write=False)
-    return {"ok": True, **(await _run_voice(profile, lambda: voice_chat_calls(chat_id), "chat calls"))}
+    return {"ok": True, **(await _run_voice(profile, lambda: voice_chat_calls(chat_id, call_id), "chat calls"))}
 
 
 @router.get("/voice/tags")

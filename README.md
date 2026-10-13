@@ -677,7 +677,7 @@ start the agent or call a model. A resumed call appends to the same session.
 | Method | Route | Returns |
 | --- | --- | --- |
 | POST | `/api/plugins/conduit_push/voice/sessions` with `{call_id, engine, session_id?, chat_id?, title?, turns: [{index, role, text, at?}]}` | `{ok, session_id, chat_id?, written, appended, created}` |
-| GET | `/api/plugins/conduit_push/voice/chat-calls?chat_id=` | `{ok, chat_id, calls: [{call_id, engine, turns: [{role, text, at}]}]}` |
+| GET | `/api/plugins/conduit_push/voice/chat-calls?chat_id=[&call_id=]` | `{ok, chat_id, calls: [{call_id, engine, turns: [{role, text, at}]}]}` |
 | GET | `/api/plugins/conduit_push/voice/tags` | `{ok, tags: {session_id: {kind, engine?, parent_id?, parent_title?}}}` |
 | POST | `/api/plugins/conduit_push/voice/tags` with `{session_id, kind: classic or job, parent_id?, parent_title?}` | `{ok, session_id, kind, ...}` |
 | GET | `/api/plugins/conduit_push/voice/summary?session_id=` | `{ok, available, text, covers}` |
@@ -700,7 +700,9 @@ start the agent or call a model. A resumed call appends to the same session.
   `chat_id`, the chat's stored session id, and no `session_id`. Its turns are
   kept with that chat in `state_meta` instead of a session of its own, under
   the same index rules, and the chat's own messages are never touched;
-  `session_id` comes back null. `voice/chat-calls` lists them for the chat.
+  `session_id` comes back null and `created` false (no session is made).
+  `voice/chat-calls` lists them for the chat, or just one with `call_id`.
+  A chat keeps its latest 50 calls of at most 2000 turns each.
   When the call ends it is written to the memory provider under the chat's
   session, but no session-end hooks fire: the chat goes on. A chat that no
   longer exists gets 422, and Conduit then saves the call on its own. Older
