@@ -654,10 +654,15 @@ def _migrate(db: sqlite3.Connection, now: float) -> None:
 _EVENT_FIELDS = frozenset({"id", "start", "end", "metric", "value", "unit", "source"})
 
 
+def _list_or_empty(container: dict[str, Any], field: str) -> Any:
+    """The field, or an empty list when it's missing or null. Anything else
+    goes to the caller's list check as it is (0 and "" are not lists)."""
+    value = container.get(field)
+    return [] if value is None else value
+
+
 def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: int) -> dict[str, Any]:
-    windows = batch.get("windows") or []
-    events = batch.get("events") or []
-    deleted = batch.get("deleted") or []
+    windows, events, deleted = (_list_or_empty(batch, field) for field in ("windows", "events", "deleted"))
     if not isinstance(windows, list) or not isinstance(events, list) or not isinstance(deleted, list):
         raise HealthError("malformed", "windows, events and deleted must be lists")
     if len(windows) > MAX_WINDOWS:
@@ -673,10 +678,14 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: i
     if tz is not None and (not isinstance(tz, str) or not _TZ.match(tz)):
         raise HealthError("malformed", "device.time_zone is malformed")
     for field in ("categories", "detailed"):
-        if not isinstance(batch.get(field) or [], list):
+        if not isinstance(_list_or_empty(batch, field), list):
             raise HealthError("malformed", f"{field} must be a list")
-    categories = [value for value in (batch.get("categories") or []) if isinstance(value, str) and value in CATEGORIES]
-    detailed = [value for value in (batch.get("detailed") or []) if isinstance(value, str) and value in CATEGORIES]
+    # Absent means "unchanged": a batch of only deletions keeps what the
+    # device said it shares.
+    categories = None if batch.get("categories") is None else [
+        value for value in batch["categories"] if isinstance(value, str) and value in CATEGORIES]
+    detailed = None if batch.get("detailed") is None else [
+        value for value in batch["detailed"] if isinstance(value, str) and value in CATEGORIES]
 
     # Validate everything before writing anything, so a bad item can't leave
     # half a batch behind.
@@ -734,8 +743,10 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: i
         removed += db.execute("DELETE FROM events WHERE device=? AND id=?", (device_id, event_id)).rowcount
         db.execute("INSERT OR IGNORE INTO tombstones VALUES(?,?,?)", (device_id, event_id, now))
 
-    db.execute("UPDATE devices SET last_seen=?, tz=COALESCE(?, tz), categories=?, detailed=? WHERE id=?",
-               (now, tz, json.dumps(categories), json.dumps(detailed), device_id))
+    db.execute("UPDATE devices SET last_seen=?, tz=COALESCE(?, tz), categories=COALESCE(?, categories),"
+               " detailed=COALESCE(?, detailed) WHERE id=?",
+               (now, tz, None if categories is None else json.dumps(categories),
+                None if detailed is None else json.dumps(detailed), device_id))
     return {"windows": replaced, "stale_windows": skipped, "events": added, "duplicates": duplicates,
             "deleted": len(deleted), "removed": removed}
 
@@ -756,7 +767,7 @@ def _parse_window(window: Any, index: int) -> dict[str, Any]:
     end = _parse_time(window.get("to"), f"{field}.to")
     if end <= start or end - start > timedelta(days=MAX_WINDOW_DAYS):
         raise HealthError("malformed", f"{field} must cover up to {MAX_WINDOW_DAYS} days, from before to")
-    buckets = window.get("buckets") or []
+    buckets = _list_or_empty(window, "buckets")
     if not isinstance(buckets, list):
         raise HealthError("malformed", f"{field}.buckets must be a list")
     parsed = []

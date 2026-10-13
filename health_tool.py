@@ -58,7 +58,7 @@ SCHEMA: dict[str, Any] = {
             },
             "metrics": {
                 "type": "array", "maxItems": MAX_METRICS, "items": {"type": "string", "enum": _BUCKET_METRICS},
-                "description": "For daily, hourly and samples (one metric): which metrics.",
+                "description": "For daily and hourly: up to 8 metrics. For samples: exactly one metric.",
             },
             "from": {"type": "string", "description": f"First local date, YYYY-MM-DD. Default: 6 days before to. "
                                                       f"At most {MAX_DAYS} days per call."},
