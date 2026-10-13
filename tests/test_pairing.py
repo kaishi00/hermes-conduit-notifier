@@ -38,6 +38,12 @@ def _recording_claim(calls, answer=None):
     return claim
 
 
+@pytest.fixture(autouse=True)
+def _short_hostname(monkeypatch):
+    import socket
+    monkeypatch.setattr(socket, "gethostname", lambda: "box")
+
+
 def test_pairing_claims_the_code_and_saves_the_credential(tmp_path):
     path = tmp_path / "conduit-push.json"
     calls = []
@@ -97,6 +103,15 @@ def test_re_pairing_the_same_phone_and_gateway_keeps_the_key(tmp_path):
     assert json.loads(path.read_text())["e2e"] == key
 
 
+def test_a_stored_relay_that_fails_the_check_is_not_used(tmp_path):
+    path = tmp_path / "s.json"
+    path.write_text(json.dumps({"credential": "old", "relay_url": "file:///etc"}))
+    calls = []
+    api.pair_profile({"pairing_code": CODE}, path=path, claim=_recording_claim(calls, _claimed(relay_url="http://[")))
+    assert calls[0][0] == api.DEFAULT_RELAY_URL
+    assert json.loads(path.read_text())["relay_url"] == api.DEFAULT_RELAY_URL
+
+
 def test_a_relay_named_url_with_extras_is_not_stored(tmp_path):
     path = tmp_path / "s.json"
     api.pair_profile({"pairing_code": CODE, "relay_url": "https://relay.example"}, path=path,
@@ -112,6 +127,7 @@ def test_a_relay_named_url_with_extras_is_not_stored(tmp_path):
     {"pairing_code": CODE, "relay_url": 5},
     {"pairing_code": CODE, "relay_url": "https://relay.example/a\r\nb"},
     {"pairing_code": CODE, "relay_url": "https://relay.example/\u00fc"},
+    {"pairing_code": CODE, "relay_url": "https://[::1"},
 ])
 def test_malformed_requests_are_refused_without_claiming(tmp_path, body):
     calls = []

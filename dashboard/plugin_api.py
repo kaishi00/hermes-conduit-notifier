@@ -3567,6 +3567,8 @@ PAIR_TIMEOUT_S = 15.0
 DEFAULT_RELAY_URL = "https://push.milim.dev"
 _PAIRING_CODE = re.compile(r"^[A-HJ-NP-Z2-9]{5}-[A-HJ-NP-Z2-9]{5}$")
 _pair_limiter = _MintLimiter(PAIR_LIMIT, PAIR_WINDOW_S, message="Too many pairing requests; try again shortly")
+# The claim waits on the relay; it gets its own threads, like the other network routes.
+_pair_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="conduit-pair")
 
 
 def _pair_relay_url(raw: Any, state: Optional[Dict[str, Any]]) -> str:
@@ -3576,11 +3578,20 @@ def _pair_relay_url(raw: Any, state: Optional[Dict[str, Any]]) -> str:
     fragment, so the claim can't carry anything but the code to that host.
     """
     if raw is None or raw == "":
-        return str((state or {}).get("relay_url") or DEFAULT_RELAY_URL).rstrip("/")
+        stored = (state or {}).get("relay_url")
+        if stored:
+            # A stored relay gets the same check; one that fails it isn't used.
+            with contextlib.suppress(TokenError):
+                return _pair_relay_url(stored, None)
+        return DEFAULT_RELAY_URL
     if not isinstance(raw, str) or len(raw) > 512 or any(not 0x21 <= ord(c) <= 0x7E for c in raw.strip()):
         raise TokenError(400, "relay_url must be an http(s) URL")
-    parsed = urllib.parse.urlsplit(raw.strip())
-    if parsed.scheme not in ("https", "http") or not parsed.hostname or parsed.username or parsed.password \
+    try:
+        parsed = urllib.parse.urlsplit(raw.strip())
+        hostname = parsed.hostname
+    except ValueError:  # an unclosed IPv6 bracket, a bad port
+        raise TokenError(400, "relay_url must be an http(s) URL")
+    if parsed.scheme not in ("https", "http") or not hostname or parsed.username or parsed.password \
             or parsed.query or parsed.fragment:
         raise TokenError(400, "relay_url must be an http(s) URL")
     return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", "")).rstrip("/")
@@ -3684,7 +3695,8 @@ async def post_pair(request: Request, response: Response, profile: Optional[str]
         # The dashboard's own profile has one window, named or not.
         key = "" if _limiter_key(profile) in ("", "default") else _limiter_key(profile)
         limit = lambda: _pair_limiter.acquire(key)  # noqa: E731
-        return {"ok": True, **(await _run_scoped(profile, lambda: pair_profile(body, profile, limit=limit)))}
+        return {"ok": True, **(await _run_scoped(profile, lambda: pair_profile(body, profile, limit=limit),
+                                                 _pair_executor))}
     except TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
     except HTTPException:
@@ -8386,25 +8398,41 @@ def _own_start_time() -> Optional[float]:
         return None
 
 
+def _descends_from(pid: int, ancestor: int) -> bool:
+    """Whether `pid` is a child (at any depth) of `ancestor`: an isolated turn's compute host."""
+    if pid <= 0:
+        return False
+    try:
+        import psutil  # a Hermes dependency
+        return any(parent.pid == ancestor for parent in psutil.Process(pid).parents())
+    except Exception:  # noqa: BLE001 — gone, or no psutil: not a child we can see
+        return False
+
+
 def _running_turns(pid: int, homes: List[Path], start_time: Optional[float] = None) -> int:
     """Turns this process has started and not finished, from Hermes' turn markers.
 
     Every Desktop/TUI/dashboard chat turn writes a marker with its writer's pid
     (and start time, tui_gateway.turn_marker) at start and clears it at the
-    end. A marker naming this pid is a turn still running here, unless its
-    start time shows an earlier process that had the same pid. An unreadable
-    file counts as none (best effort, like the markers themselves).
+    end. A marker naming this pid, or a child of it (an isolated turn's
+    compute host), is a turn still running here, unless its start time shows
+    an earlier process that had this pid. A missing file is none; one that
+    can't be read raises, and Hermes rewrites an unparseable one from scratch.
     """
     running = 0
     for home in homes:
         try:
             entries = json.loads(_turn_marker_file(home).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except (FileNotFoundError, ValueError):
             continue
         if not isinstance(entries, dict):
             continue
         for entry in entries.values():
-            if not isinstance(entry, dict) or _owner_pid({"pid": entry.get("writer_pid")}) != pid:
+            if not isinstance(entry, dict):
+                continue
+            writer = _owner_pid({"pid": entry.get("writer_pid")})
+            if writer != pid:
+                running += 1 if _descends_from(writer, pid) else 0
                 continue
             written = entry.get("writer_start_time")
             if start_time is not None and isinstance(written, (int, float)) and not isinstance(written, bool) \

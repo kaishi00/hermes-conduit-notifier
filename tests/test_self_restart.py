@@ -96,6 +96,12 @@ def test_a_string_pid_counts_and_an_earlier_process_with_this_pid_does_not(tmp_p
     assert api._running_turns(pid, [tmp_path], start_time=5000.0) == 2
 
 
+def test_a_turn_in_a_child_process_counts(monkeypatch, tmp_path):
+    _markers(tmp_path, {"s1": {"writer_pid": 4242}, "s2": {"writer_pid": 4343}})
+    monkeypatch.setattr(api, "_descends_from", lambda pid, ancestor: pid == 4242 and ancestor == api.os.getpid())
+    assert api._running_turns(api.os.getpid(), [tmp_path]) == 1
+
+
 def test_markers_are_read_where_hermes_writes_them(monkeypatch, tmp_path):
     marker = tmp_path / "elsewhere.json"
     marker.write_text(json.dumps({"s1": {"writer_pid": api.os.getpid()}}))
