@@ -2618,6 +2618,8 @@ def _save_chat_call_turns(chat_id: str, call_id: str, engine: str, turns: list,
             if call is not None and call["chat_id"] != chat_id:
                 raise TokenError(400, "That call belongs to another chat")
             stored = call["turns"] if call else []
+            # The call keeps the engine it was first saved with, as a row does.
+            engine = (call or {}).get("engine") or engine
             last = len(stored) - 1
             fresh = []
             for turn in turns:  # sorted by index
@@ -2644,8 +2646,7 @@ def _save_chat_call_turns(chat_id: str, call_id: str, engine: str, turns: list,
                         db.set_meta(VOICE_CHAT_CALL_KEY.format(call_id=old), "")
             if messages:
                 db.set_meta(VOICE_CHAT_CALL_KEY.format(call_id=call_id), json.dumps(
-                    # The call keeps the engine it was first saved with, as a row does.
-                    {"chat_id": chat_id, "engine": (call or {}).get("engine") or engine, "turns": stored + messages},
+                    {"chat_id": chat_id, "engine": engine, "turns": stored + messages},
                     separators=(",", ":")))
             result = {"session_id": None, "chat_id": chat_id, "written": last + 1, "appended": len(messages),
                       "skipped": len(turns) - len(fresh), "created": False}
