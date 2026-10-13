@@ -96,6 +96,20 @@ def test_a_string_pid_counts_and_an_earlier_process_with_this_pid_does_not(tmp_p
     assert api._running_turns(pid, [tmp_path], start_time=5000.0) == 2
 
 
+def test_markers_are_read_where_hermes_writes_them(monkeypatch, tmp_path):
+    marker = tmp_path / "elsewhere.json"
+    marker.write_text(json.dumps({"s1": {"writer_pid": api.os.getpid()}}))
+    package, module = types.ModuleType("tui_gateway"), types.ModuleType("tui_gateway.turn_marker")
+    module._marker_path = lambda home: marker
+    package.turn_marker = module
+    monkeypatch.setitem(sys.modules, "tui_gateway", package)
+    monkeypatch.setitem(sys.modules, "tui_gateway.turn_marker", module)
+    assert api._running_turns(api.os.getpid(), [tmp_path]) == 1
+    del module._marker_path
+    with pytest.raises(AttributeError):
+        api._running_turns(api.os.getpid(), [tmp_path])
+
+
 @pytest.mark.parametrize("setup", ["windows", "plugin-host", "desktop"])
 def test_backends_that_cannot_re_exec_refuse(monkeypatch, tmp_path, setup):
     if setup == "windows":

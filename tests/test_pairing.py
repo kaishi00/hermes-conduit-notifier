@@ -55,6 +55,13 @@ def test_pairing_claims_the_code_and_saves_the_credential(tmp_path):
     assert oct(path.stat().st_mode & 0o777) == "0o600"
 
 
+def test_control_characters_leave_the_gateway_name(tmp_path):
+    calls = []
+    api.pair_profile({"pairing_code": CODE, "gateway_name": "box\r\nX: y"}, path=tmp_path / "s.json",
+                     claim=_recording_claim(calls))
+    assert calls[0][2] == "boxX: y"
+
+
 def test_a_named_profile_is_in_the_gateway_name(tmp_path):
     calls = []
     api.pair_profile({"pairing_code": CODE}, profile="coder", path=tmp_path / "s.json", claim=_recording_claim(calls))
@@ -104,6 +111,7 @@ def test_a_relay_named_url_with_extras_is_not_stored(tmp_path):
     {"pairing_code": CODE, "relay_url": "https://relay?x=1"},
     {"pairing_code": CODE, "relay_url": 5},
     {"pairing_code": CODE, "relay_url": "https://relay.example/a\r\nb"},
+    {"pairing_code": CODE, "relay_url": "https://relay.example/\u00fc"},
 ])
 def test_malformed_requests_are_refused_without_claiming(tmp_path, body):
     calls = []

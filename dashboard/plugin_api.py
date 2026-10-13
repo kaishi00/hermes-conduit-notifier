@@ -3576,7 +3576,7 @@ def _pair_relay_url(raw: Any, state: Optional[Dict[str, Any]]) -> str:
     """
     if raw is None or raw == "":
         return str((state or {}).get("relay_url") or DEFAULT_RELAY_URL).rstrip("/")
-    if not isinstance(raw, str) or len(raw) > 512 or any(ord(c) < 0x21 or ord(c) == 0x7F for c in raw.strip()):
+    if not isinstance(raw, str) or len(raw) > 512 or any(not 0x21 <= ord(c) <= 0x7E for c in raw.strip()):
         raise TokenError(400, "relay_url must be an http(s) URL")
     parsed = urllib.parse.urlsplit(raw.strip())
     if parsed.scheme not in ("https", "http") or not parsed.hostname or parsed.username or parsed.password \
@@ -3586,8 +3586,9 @@ def _pair_relay_url(raw: Any, state: Optional[Dict[str, Any]]) -> str:
 
 
 def _pair_gateway_name(raw: Any, profile: Optional[str]) -> str:
-    if isinstance(raw, str) and raw.strip():
-        return raw.strip()[:80]
+    cleaned = "".join(c for c in raw if c.isprintable()).strip() if isinstance(raw, str) else ""
+    if cleaned:
+        return cleaned[:80]
     import socket
 
     name = f"{socket.gethostname()} Hermes"
@@ -3679,7 +3680,9 @@ async def post_pair(request: Request, response: Response, profile: Optional[str]
     response.headers["Cache-Control"] = "no-store"
     try:
         body = await _read_json_body(request, PAIR_MAX_BODY_BYTES)
-        limit = lambda: _pair_limiter.acquire(_limiter_key(profile))  # noqa: E731
+        # The dashboard's own profile has one window, named or not.
+        key = "" if _limiter_key(profile) in ("", "default") else _limiter_key(profile)
+        limit = lambda: _pair_limiter.acquire(key)  # noqa: E731
         return {"ok": True, **(await _run_scoped(profile, lambda: pair_profile(body, profile, limit=limit)))}
     except TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
@@ -8367,9 +8370,10 @@ def _hermes_homes() -> List[Path]:
 def _turn_marker_file(home: Path) -> Path:
     try:
         from tui_gateway import turn_marker
-        return Path(turn_marker._marker_path(home))
-    except Exception:  # noqa: BLE001 — the path Hermes has always used
+    except ImportError:  # a Hermes without turn markers: the path they used
         return home / "desktop" / "interrupted_turns.json"
+    # A Hermes that moved its markers raises here: guessing could miss a turn.
+    return Path(turn_marker._marker_path(home))
 
 
 def _own_start_time() -> Optional[float]:
