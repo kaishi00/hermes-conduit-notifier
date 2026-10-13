@@ -3609,7 +3609,7 @@ def _pair_gateway_name(raw: Any, profile: Optional[str]) -> str:
 
 
 def _claim_pairing(relay_url: str, code: str, gateway_name: str) -> Dict[str, Any]:
-    """POST /v1/pairings/claim without credentials or redirects: (status, body)."""
+    """POST /v1/pairings/claim without credentials or redirects: the relay's answer, else TokenError."""
     data = json.dumps({"pairing_code": code, "gateway_name": gateway_name}, separators=(",", ":")).encode("utf-8")
     request = urllib.request.Request(f"{relay_url}/v1/pairings/claim", data=data, method="POST", headers={
         "Accept": "application/json", "Content-Type": "application/json",
@@ -3618,7 +3618,11 @@ def _claim_pairing(relay_url: str, code: str, gateway_name: str) -> Dict[str, An
         with _relay_opener.open(request, timeout=PAIR_TIMEOUT_S) as response:
             raw, status = response.read(64 * 1024), response.status
     except urllib.error.HTTPError as error:
-        raw, status = error.read(4 * 1024), error.code
+        status = error.code
+        try:
+            raw = error.read(4 * 1024)
+        except (OSError, http.client.HTTPException):
+            raw = b""
     except (urllib.error.URLError, OSError, http.client.HTTPException) as error:
         raise TokenError(502, f"Couldn't reach the push relay from this host ({type(error).__name__})")
     try:
@@ -8500,7 +8504,11 @@ def self_restart(schedule: Callable[[float, Callable[[], None]], Any],
     with _self_restart_lock:
         if not _self_restart_scheduled:
             _self_restart_scheduled = True
-            schedule(SELF_RESTART_DELAY_S, lambda: _restart_when_idle(schedule, homes or _hermes_homes))
+            try:
+                schedule(SELF_RESTART_DELAY_S, lambda: _restart_when_idle(schedule, homes or _hermes_homes))
+            except BaseException:
+                _self_restart_scheduled = False
+                raise
     return {"restarting": True, "boot_id": BOOT_ID, "loaded_version": LOADED_VERSION,
             "version": _plugin_version()}
 

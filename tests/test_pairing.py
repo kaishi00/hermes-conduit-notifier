@@ -188,6 +188,20 @@ def test_a_broken_relay_answer_reads_as_unreachable(monkeypatch):
     assert raised.value.status == 502
 
 
+def test_a_broken_relay_error_body_still_reads_as_refused(monkeypatch):
+    class Broken(api.urllib.error.HTTPError):
+        def read(self, *_):
+            raise api.http.client.IncompleteRead(b"")
+
+    def fake_open(request, timeout):
+        raise Broken(request.full_url, 500, "boom", {}, None)
+
+    monkeypatch.setattr(api._relay_opener, "open", fake_open)
+    with pytest.raises(api.TokenError) as raised:
+        api._claim_pairing("https://relay.example", CODE, "n")
+    assert raised.value.status == 502
+
+
 def test_an_expired_code_reads_as_gone(monkeypatch):
     def fake_open(request, timeout):
         raise api.urllib.error.HTTPError(request.full_url, 404, "nf", {}, None)
