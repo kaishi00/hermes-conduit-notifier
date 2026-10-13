@@ -681,6 +681,13 @@ def test_a_chats_calls_can_be_read_one_at_a_time(client, hermes):
     assert [call["call_id"] for call in calls] == ["call-2"]
 
 
+def test_a_chat_call_keeps_its_first_engine(client, hermes):
+    store = chat(hermes)
+    save(client, chat_id="chat-1", engine="gpt-live", turns=turns(("user", "a")))
+    save(client, chat_id="chat-1", engine="gemini-live", turns=turns(("user", "b"), start=1))
+    assert json.loads(store.meta["conduit.voice.chat_call:call-1"])["engine"] == "gpt-live"
+
+
 def test_an_empty_chat_id_is_refused(client, hermes):
     assert save(client, chat_id="", turns=turns(("user", "a"))).status_code == 400
 
