@@ -3661,6 +3661,8 @@ async def put_conduit_settings(request: Request, response: Response, profile: Op
 
 HEALTH_KEY_LIMIT = 10
 HEALTH_KEY_WINDOW_S = 60.0
+HEALTH_WIPE_LIMIT = 5
+HEALTH_WIPE_WINDOW_S = 60.0
 # A backfill sends many batches in a row.
 HEALTH_INGEST_LIMIT = 120
 HEALTH_INGEST_WINDOW_S = 60.0
@@ -3672,6 +3674,8 @@ _health_key_limiter = _MintLimiter(HEALTH_KEY_LIMIT, HEALTH_KEY_WINDOW_S,
                                    message="Too many health key requests; try again shortly")
 _health_ingest_limiter = _MintLimiter(HEALTH_INGEST_LIMIT, HEALTH_INGEST_WINDOW_S,
                                       message="Too many health uploads; try again shortly")
+_health_wipe_limiter = _MintLimiter(HEALTH_WIPE_LIMIT, HEALTH_WIPE_WINDOW_S,
+                                    message="Too many health delete requests; try again shortly")
 _health_store_module: Any = None
 
 
@@ -3743,6 +3747,10 @@ async def post_health_ingest(request: Request, response: Response, profile: Opti
 
 @router.post("/health/wipe")
 async def post_health_wipe(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    try:
+        _health_wipe_limiter.acquire(_limiter_key(profile))
+    except TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
     body = await _read_json_body(request, HEALTH_MAX_KEY_BODY_BYTES)
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Expected a JSON object", headers={"Cache-Control": "no-store"})

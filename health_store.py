@@ -102,13 +102,17 @@ MAX_DEVICE_NAME_CHARS = 60
 MAX_WINDOW_DAYS = 400
 EARLIEST = datetime(2000, 1, 1, tzinfo=timezone.utc)
 
-_DEVICE_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
-_EVENT_ID = re.compile(r"^[A-Za-z0-9:_-]{1,80}$")
-_BATCH_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
-_KID = re.compile(r"^[0-9a-f]{32}$")
-_B64URL = re.compile(r"^[A-Za-z0-9_-]*$")
-_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-_TZ = re.compile(r"^[A-Za-z0-9_+\-/]{1,64}$")
+_DEVICE_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}\Z")
+_EVENT_ID = re.compile(r"^[A-Za-z0-9:_-]{1,80}\Z")
+_BATCH_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}\Z")
+_KID = re.compile(r"^[0-9a-f]{32}\Z")
+_B64URL = re.compile(r"^[A-Za-z0-9_-]*\Z")
+_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}\Z")
+_TZ = re.compile(r"^[A-Za-z0-9_+\-/]{1,64}\Z")
+
+# Line breaks and other control characters, which could make a device name
+# or source read like instructions in the agent's tool result.
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]+")
 
 _thread_lock = threading.Lock()
 
@@ -251,7 +255,7 @@ def _text(value: Any, field: str, limit: int = MAX_TEXT_CHARS) -> str | None:
         return None
     if not isinstance(value, str) or len(value) > limit:
         raise HealthError("malformed", f"{field} must be text of at most {limit} characters")
-    return value.strip() or None
+    return _CONTROL.sub(" ", value).strip() or None
 
 
 def _flat_data(value: Any, field: str) -> dict[str, Any]:
@@ -262,7 +266,7 @@ def _flat_data(value: Any, field: str) -> dict[str, Any]:
         raise HealthError("malformed", f"{field} must be an object with at most {MAX_EVENT_DATA_KEYS} keys")
     clean: dict[str, Any] = {}
     for key, item in value.items():
-        if not isinstance(key, str) or not re.match(r"^[a-z][a-z0-9_]{0,39}$", key):
+        if not isinstance(key, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,39}", key):
             raise HealthError("malformed", f"{field} keys must be short snake_case names")
         if isinstance(item, str):
             clean[key] = _text(item, f"{field}.{key}")
@@ -318,11 +322,14 @@ class HealthStore:
             return
         connection = sqlite3.connect(f"{self.path.as_uri()}?mode=ro", uri=True, timeout=15)
         try:
-            connection.execute("PRAGMA query_only=ON")
-            version = _meta(connection, "schema")
-            yield connection if version == str(SCHEMA_VERSION) else None
-        except sqlite3.DatabaseError:
-            yield None
+            # Only opening counts as "unreadable"; an error in the caller's
+            # own query goes up as it is.
+            try:
+                connection.execute("PRAGMA query_only=ON")
+                readable = _meta(connection, "schema") == str(SCHEMA_VERSION)
+            except sqlite3.DatabaseError:
+                readable = False
+            yield connection if readable else None
         finally:
             connection.close()
 
@@ -394,7 +401,7 @@ class HealthStore:
             plaintext = open_sealed(key, envelope.get("nonce"), envelope.get("ct"), ingest_aad(kid, device_id, batch_id))
             try:
                 batch = json.loads(plaintext)
-            except ValueError:
+            except (ValueError, RecursionError):
                 raise HealthError("malformed", "The sealed batch isn't JSON") from None
             if not isinstance(batch, dict) or batch.get("batch_id") != batch_id:
                 raise HealthError("malformed", "The sealed batch doesn't match its envelope")
@@ -429,19 +436,33 @@ class HealthStore:
         if not self.path.exists():
             return {"deleted": True, "remaining_devices": 0}
         with self._write() as db:
-            if device_id is None:
-                remaining = 0
-            else:
-                for table in ("buckets", "events", "tombstones", "windows"):
-                    db.execute(f"DELETE FROM {table} WHERE device=?", (device_id,))
-                db.execute("DELETE FROM devices WHERE id=?", (device_id,))
-                remaining = db.execute("SELECT COUNT(*) FROM devices").fetchone()[0]
-        if remaining == 0:
-            with _thread_lock:
+            for table in ("buckets", "events", "tombstones", "windows", "devices"):
+                column = "id" if table == "devices" else "device"
+                if device_id is None:
+                    db.execute(f"DELETE FROM {table}")
+                else:
+                    db.execute(f"DELETE FROM {table} WHERE {column}=?", (device_id,))
+        # The file goes once no device is left. Counted again under the
+        # writers' lock, so a key registered since the delete stays.
+        with _thread_lock:
+            remaining = self._device_count()
+            if remaining == 0:
                 for suffix in ("", "-wal", "-shm", "-journal"):
                     with contextlib.suppress(FileNotFoundError):
                         os.unlink(f"{self.path}{suffix}")
         return {"deleted": True, "remaining_devices": remaining}
+
+    def _device_count(self) -> int:
+        """Devices in the store; the caller holds ``_thread_lock``."""
+        if not self.path.exists():
+            return 0
+        connection = sqlite3.connect(self.path, timeout=15)
+        try:
+            return connection.execute("SELECT COUNT(*) FROM devices").fetchone()[0]
+        except sqlite3.DatabaseError:
+            return 0
+        finally:
+            connection.close()
 
     # Queries (the agent's tool) ------------------------------------------------------
 
@@ -542,7 +563,10 @@ class HealthStore:
             if value is not None:
                 entry["value"] = _round(value)
                 entry["unit"] = unit
-            entry.update(json.loads(data or "{}"))
+            # A workout's own details, never in place of the fixed fields.
+            for key, item in json.loads(data or "{}").items():
+                if key not in _EVENT_FIELDS:
+                    entry[key] = item
             if source:
                 entry["source"] = source
             found.append(entry)
@@ -614,6 +638,9 @@ def _migrate(db: sqlite3.Connection, now: float) -> None:
     db.execute("INSERT OR IGNORE INTO meta VALUES('created_at', ?)", (str(int(now)),))
 
 
+_EVENT_FIELDS = frozenset({"id", "start", "end", "metric", "value", "unit", "source"})
+
+
 def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: int) -> dict[str, Any]:
     windows = batch.get("windows") or []
     events = batch.get("events") or []
@@ -623,7 +650,8 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: i
     if len(windows) > MAX_WINDOWS:
         raise HealthError("too_large", f"At most {MAX_WINDOWS} windows per batch", status=413)
     total = len(events) + len(deleted) + sum(
-        len(window.get("buckets") or []) if isinstance(window, dict) else 0 for window in windows)
+        len(window["buckets"]) for window in windows
+        if isinstance(window, dict) and isinstance(window.get("buckets"), list))
     if total > MAX_ITEMS:
         raise HealthError("too_large", f"At most {MAX_ITEMS} items per batch", status=413)
     computed_at = _epoch(_parse_time(batch.get("computed_at"), "computed_at"))
@@ -631,8 +659,11 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: i
     tz = device.get("time_zone")
     if tz is not None and (not isinstance(tz, str) or not _TZ.match(tz)):
         raise HealthError("malformed", "device.time_zone is malformed")
-    categories = [value for value in (batch.get("categories") or []) if value in CATEGORIES]
-    detailed = [value for value in (batch.get("detailed") or []) if value in CATEGORIES]
+    for field in ("categories", "detailed"):
+        if not isinstance(batch.get(field) or [], list):
+            raise HealthError("malformed", f"{field} must be a list")
+    categories = [value for value in (batch.get("categories") or []) if isinstance(value, str) and value in CATEGORIES]
+    detailed = [value for value in (batch.get("detailed") or []) if isinstance(value, str) and value in CATEGORIES]
 
     # Validate everything before writing anything, so a bad item can't leave
     # half a batch behind.
@@ -653,6 +684,9 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: i
             # overwrites a newer one.
             skipped += 1
             continue
+        # Only this window's own range is replaced. An older window that
+        # reaches past it keeps its tail until the phone sends that range
+        # again, which it does for recent days on every pass.
         db.execute("DELETE FROM buckets WHERE device=? AND metric=? AND grain=? AND start_utc>=? AND start_utc<?",
                    (device_id, window["metric"], window["grain"], window["start"], window["end"]))
         db.execute("DELETE FROM windows WHERE device=? AND metric=? AND grain=? AND start_utc>=? AND end_utc<=?",
