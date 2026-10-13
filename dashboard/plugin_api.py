@@ -2222,6 +2222,8 @@ VOICE_MAX_CALLS = 500
 VOICE_SUMMARY_KEY = "conduit.voice.summary:{session_id}"
 VOICE_CHAT_CALL_KEY = "conduit.voice.chat_call:{call_id}"
 VOICE_CHAT_CALLS_KEY = "conduit.voice.chat_calls:{chat_id}"
+# A chat call is one meta value rewritten on each save: this bounds it.
+VOICE_MAX_CHAT_CALL_TURNS = 2000
 _VOICE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _VOICE_UNSUPPORTED = "This Hermes version can't store voice transcripts; update Hermes"
 
@@ -2458,7 +2460,7 @@ def _discard_new_voice_session(db, session_id: str) -> None:
 
 
 def save_voice_turns(body: Dict[str, Any],
-                     on_end: Optional[Callable[[str, str, list], None]] = None) -> Dict[str, Any]:
+                     on_end: Optional[Callable[..., None]] = None) -> Dict[str, Any]:
     """Create a voice-call session or append to one; turns already written for the call are skipped.
 
     ``on_end(session_id, engine, messages)`` runs once new turns are stored:
@@ -2475,6 +2477,8 @@ def save_voice_turns(body: Dict[str, Any],
     title = _voice_text(body.get("title"), VOICE_MAX_TITLE_CHARS)
     requested = body.get("session_id")
     session_id = _voice_id(requested, "session_id") if requested else None
+    # A call that already has a row keeps appending to it; chat_id only
+    # decides where a call without one goes.
     if body.get("chat_id") and not session_id:
         return _save_chat_call_turns(_voice_id(body.get("chat_id"), "chat_id"), call_id, engine, turns, on_end)
     with _voice_lock():
@@ -2575,6 +2579,17 @@ def _chat_call_ids(db, chat_id: str) -> list:
     return [i for i in ids if isinstance(i, str)] if isinstance(ids, list) else []
 
 
+def _drop_chat_calls(db, chat_id: str) -> None:
+    """A gone chat's calls and list (Hermes has no meta delete)."""
+    ids = _chat_call_ids(db, chat_id)
+    for call_id in ids:
+        call = _chat_call(db, call_id)
+        if call is not None and call["chat_id"] == chat_id:
+            db.set_meta(VOICE_CHAT_CALL_KEY.format(call_id=call_id), "")
+    if ids:
+        db.set_meta(VOICE_CHAT_CALLS_KEY.format(chat_id=chat_id), "")
+
+
 def _save_chat_call_turns(chat_id: str, call_id: str, engine: str, turns: list,
                           on_end: Optional[Callable[..., None]]) -> Dict[str, Any]:
     """Store an attached call's turns with its chat; same index rules as a row.
@@ -2585,6 +2600,7 @@ def _save_chat_call_turns(chat_id: str, call_id: str, engine: str, turns: list,
         db = _open_voice_db(_VOICE_WRITE)
         try:
             if not db.get_session(chat_id):
+                _drop_chat_calls(db, chat_id)
                 raise TokenError(422, "That chat no longer exists; save the call on its own")
             call = _chat_call(db, call_id)
             if call is not None and call["chat_id"] != chat_id:
@@ -2600,9 +2616,11 @@ def _save_chat_call_turns(chat_id: str, call_id: str, engine: str, turns: list,
                 fresh.append(turn)
                 last = turn["index"]
             messages = [{k: v for k, v in turn.items() if k != "index" and v is not None} for turn in fresh]
-            if messages:
-                db.set_meta(VOICE_CHAT_CALL_KEY.format(call_id=call_id), json.dumps(
-                    {"chat_id": chat_id, "engine": engine, "turns": stored + messages}, separators=(",", ":")))
+            if len(stored) + len(messages) > VOICE_MAX_CHAT_CALL_TURNS:
+                raise TokenError(413, f"A call kept with a chat holds at most {VOICE_MAX_CHAT_CALL_TURNS} turns")
+            if messages or call is not None:
+                # The chat's list first, and on every save of a stored call: a
+                # failure between the two writes never hides the call from it.
                 ids = _chat_call_ids(db, chat_id)
                 if call_id not in ids:
                     ids.append(call_id)
@@ -2610,6 +2628,9 @@ def _save_chat_call_turns(chat_id: str, call_id: str, engine: str, turns: list,
                         old = ids.pop(0)
                         db.set_meta(VOICE_CHAT_CALL_KEY.format(call_id=old), "")
                     db.set_meta(VOICE_CHAT_CALLS_KEY.format(chat_id=chat_id), json.dumps(ids, separators=(",", ":")))
+            if messages:
+                db.set_meta(VOICE_CHAT_CALL_KEY.format(call_id=call_id), json.dumps(
+                    {"chat_id": chat_id, "engine": engine, "turns": stored + messages}, separators=(",", ":")))
             result = {"session_id": None, "chat_id": chat_id, "written": last + 1, "appended": len(messages),
                       "skipped": len(turns) - len(fresh), "created": False}
         finally:
@@ -2753,10 +2774,7 @@ async def post_voice_session(request: Request, response: Response, profile: Opti
     body = await _voice_body(request)
 
     def ended(session_id: str, engine: str, messages: list, chat_call: bool = False) -> None:
-        if chat_call:
-            _queue_voice_call_end(profile, session_id, engine, messages, chat_call=True)
-        else:
-            _queue_voice_call_end(profile, session_id, engine, messages)
+        _queue_voice_call_end(profile, session_id, engine, messages, chat_call=chat_call)
 
     return {"ok": True, **(await _run_voice(profile, lambda: save_voice_turns(body, on_end=ended), "save"))}
 
@@ -2937,7 +2955,9 @@ def _end_voice_call(session_id: str, engine: str, messages: list, chat_call: boo
     """End a saved call's session in Hermes (inside the profile's scope). Each
     step runs even if an earlier one failed. A call attached to a chat only
     writes memory, under the chat's session: the chat goes on, so its session
-    isn't ended."""
+    isn't ended. The provider instance is this call's own, as for a row: its
+    on_session_end flushes what this instance queued, and the chat's own
+    agent keeps its separate instance (Hermes runs one per agent too)."""
     hook = {"session_id": session_id, "platform": VOICE_END_PLATFORM, "reason": VOICE_END_HOOK_REASON}
     memory = ("memory write", lambda: _commit_voice_call_memory(session_id, messages))
     steps = (memory,) if chat_call else (

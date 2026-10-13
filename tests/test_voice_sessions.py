@@ -626,6 +626,51 @@ def test_an_attached_call_with_a_row_appends_to_the_row(client, hermes):
     assert body["session_id"] == session_id
 
 
+def test_a_save_that_fails_midway_leaves_the_call_listed_after_the_retry(client, hermes, monkeypatch):
+    store = chat(hermes)
+    original = FakeSessionDB.set_meta
+    failed = []
+
+    def flaky(self, key, value):
+        if key.startswith("conduit.voice.chat_call:") and not failed:
+            failed.append(key)
+            raise RuntimeError("disk full")
+        original(self, key, value)
+
+    monkeypatch.setattr(FakeSessionDB, "set_meta", flaky)
+    assert save(client, chat_id="chat-1", turns=turns(("user", "a"))).status_code >= 500
+    # The list went first; a call it names but that isn't stored yet is skipped.
+    assert client.get(f"{BASE}/voice/chat-calls", params={"chat_id": "chat-1"}).json()["calls"] == []
+    assert save(client, chat_id="chat-1", turns=turns(("user", "a"))).status_code == 200
+    calls = client.get(f"{BASE}/voice/chat-calls", params={"chat_id": "chat-1"}).json()["calls"]
+    assert [c["call_id"] for c in calls] == ["call-1"]
+    assert store.meta["conduit.voice.chat_calls:chat-1"] == '["call-1"]'
+
+
+def test_a_stored_call_missing_from_the_list_is_listed_again(client, hermes):
+    store = chat(hermes)
+    save(client, chat_id="chat-1", turns=turns(("user", "a")))
+    store.meta["conduit.voice.chat_calls:chat-1"] = "[]"
+    save(client, chat_id="chat-1", turns=turns(("user", "a")))
+    assert [c["call_id"] for c in client.get(f"{BASE}/voice/chat-calls", params={"chat_id": "chat-1"}).json()["calls"]] == ["call-1"]
+
+
+def test_a_chat_call_is_bounded(client, hermes, monkeypatch):
+    chat(hermes)
+    monkeypatch.setattr(api, "VOICE_MAX_CHAT_CALL_TURNS", 2)
+    save(client, chat_id="chat-1", turns=turns(("user", "a"), ("assistant", "b")))
+    assert save(client, chat_id="chat-1", turns=turns(("user", "c"), start=2)).status_code == 413
+
+
+def test_a_gone_chats_calls_are_dropped(client, hermes):
+    store = chat(hermes)
+    save(client, chat_id="chat-1", turns=turns(("user", "a")))
+    del store.sessions["chat-1"]
+    assert save(client, chat_id="chat-1", call_id="call-2", turns=turns(("user", "b"))).status_code == 422
+    assert store.meta["conduit.voice.chat_calls:chat-1"] == ""
+    assert store.meta["conduit.voice.chat_call:call-1"] == ""
+
+
 def test_an_attached_call_ends_without_ending_the_chat(hermes, lifecycle):
     api._run_voice_call_end(None, "chat-1", "gpt-live", CALL, chat_call=True)
     assert [event[0] for event in lifecycle.events] == [
