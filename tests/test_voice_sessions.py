@@ -673,6 +673,11 @@ def test_a_gone_chats_unreadable_calls_are_dropped_too(client, hermes):
     assert store.meta["conduit.voice.chat_call:call-1"] == ""
 
 
+def test_a_saved_call_row_is_not_a_chat(client, hermes):
+    row = save(client, turns=turns(("user", "a"))).json()["session_id"]
+    assert save(client, chat_id=row, call_id="call-2", turns=turns(("user", "b"))).status_code == 422
+
+
 def test_a_gone_chats_calls_are_dropped(client, hermes):
     store = chat(hermes)
     save(client, chat_id="chat-1", turns=turns(("user", "a")))

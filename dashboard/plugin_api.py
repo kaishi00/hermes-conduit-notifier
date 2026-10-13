@@ -2602,9 +2602,15 @@ def _save_chat_call_turns(chat_id: str, call_id: str, engine: str, turns: list,
     with _voice_lock():
         db = _open_voice_db(_VOICE_WRITE)
         try:
-            if not db.get_session(chat_id):
-                _drop_chat_calls(db, chat_id)
+            row = db.get_session(chat_id)
+            if not row:
+                try:
+                    _drop_chat_calls(db, chat_id)
+                except Exception:  # noqa: BLE001 — the 422 must win; the next save retries
+                    logger.warning("Couldn't clear gone chat %s's calls", chat_id, exc_info=True)
                 raise TokenError(422, "That chat no longer exists; save the call on its own")
+            if _is_voice_row(db, chat_id, row):
+                raise TokenError(422, "That is a saved call, not a chat; save the call on its own")
             call = _chat_call(db, call_id)
             if call is not None and call["chat_id"] != chat_id:
                 raise TokenError(400, "That call belongs to another chat")
