@@ -152,10 +152,9 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
                     "nights": store.nights(db, device_id, start, end),
                     "note": "night_ending is the morning the night ended. asleep = core + deep + rem + unspecified."}
         if action == "workouts":
-            found, more = store.events(db, device_id, "workout", "workout", start, end, MAX_EVENTS)
             wanted = args.get("activity")
-            if isinstance(wanted, str) and wanted.strip():
-                found = [entry for entry in found if str(entry.get("activity", "")).casefold() == wanted.strip().casefold()]
+            activity = wanted.strip() if isinstance(wanted, str) and wanted.strip() else None
+            found, more = store.events(db, device_id, "workout", "workout", start, end, MAX_EVENTS, activity=activity)
             return {**base, "from": start, "to": end, "workouts": found, **({"truncated": True} if more else {})}
         metrics = _metrics(args.get("metrics"), default=[])
         if len(metrics) != 1:

@@ -110,9 +110,10 @@ _B64URL = re.compile(r"^[A-Za-z0-9_-]*\Z")
 _DATE = re.compile(r"^\d{4}-\d{2}-\d{2}\Z")
 _TZ = re.compile(r"^[A-Za-z0-9_+\-/]{1,64}\Z")
 
-# Line breaks and other control characters, which could make a device name
-# or source read like instructions in the agent's tool result.
-_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]+")
+# Line breaks, other control characters and invisible format characters
+# (bidi overrides, zero-width), which could make a device name or source
+# read like instructions in the agent's tool result.
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]+")
 
 _thread_lock = threading.Lock()
 
@@ -206,8 +207,11 @@ def open_sealed(key: bytes, nonce: str, ciphertext: str, aad: bytes) -> bytes:
     raw_nonce = unb64u(nonce)
     if len(raw_nonce) != NONCE_BYTES:
         raise HealthError("malformed", "nonce must be 12 bytes")
+    raw_ciphertext = unb64u(ciphertext)
+    if len(raw_ciphertext) < 16:
+        raise HealthError("malformed", "ct is shorter than its tag")
     try:
-        return ChaCha20Poly1305(key).decrypt(raw_nonce, unb64u(ciphertext), aad)
+        return ChaCha20Poly1305(key).decrypt(raw_nonce, raw_ciphertext, aad)
     except InvalidTag:
         raise HealthError("bad_seal", "The body didn't open with this device's key; set up health sync again",
                           status=409) from None
@@ -320,7 +324,12 @@ class HealthStore:
         if not self.path.exists():
             yield None
             return
-        connection = sqlite3.connect(f"{self.path.as_uri()}?mode=ro", uri=True, timeout=15)
+        try:
+            connection = sqlite3.connect(f"{self.path.as_uri()}?mode=ro", uri=True, timeout=15)
+        except sqlite3.DatabaseError:
+            # Deleted since the check above (a wipe).
+            yield None
+            return
         try:
             # Only opening counts as "unreadable"; an error in the caller's
             # own query goes up as it is.
@@ -384,7 +393,7 @@ class HealthStore:
     # Ingest --------------------------------------------------------------------
 
     def ingest(self, envelope: Any) -> dict[str, Any]:
-        if not isinstance(envelope, dict) or envelope.get("v") != 1:
+        if not isinstance(envelope, dict) or type(envelope.get("v")) is not int or envelope.get("v") != 1:
             raise HealthError("malformed", "Expected a version 1 sealed batch")
         device_id, kid, batch_id = envelope.get("device_id"), envelope.get("kid"), envelope.get("batch_id")
         if not isinstance(device_id, str) or not _DEVICE_ID.match(device_id):
@@ -546,13 +555,17 @@ class HealthStore:
         return answer
 
     def events(self, db: sqlite3.Connection, device: str, kind: str, metric: str | None, start: str, end: str,
-               limit: int) -> tuple[list[dict], bool]:
+               limit: int, activity: str | None = None) -> tuple[list[dict], bool]:
         query = ("SELECT id, metric, start_local, end_local, value, unit, data, source FROM events"
                  " WHERE device=? AND kind=? AND substr(start_local,1,10) BETWEEN ? AND ?")
         args: list[Any] = [device, kind, start, end]
         if metric:
             query += " AND metric=?"
             args.append(metric)
+        if activity:
+            # Filtered before the limit, so a busy range still finds them.
+            query += " AND lower(json_extract(data, '$.activity'))=?"
+            args.append(activity.lower())
         query += " ORDER BY start_utc LIMIT ?"
         args.append(limit + 1)
         found = []
@@ -779,6 +792,11 @@ def _parse_window(window: Any, index: int) -> dict[str, Any]:
             unknown = set(data) - set(NIGHT_FIELDS) - {"wake_count", "bedtime", "wake_time"}
             if unknown:
                 raise HealthError("malformed", f"{where}.data has unknown fields")
+            # Minutes and counts are numbers; only the two times are text.
+            if any(isinstance(data[key], str) for key in data if key not in ("bedtime", "wake_time")):
+                raise HealthError("malformed", f"{where}.data minutes must be numbers")
+            if any(not isinstance(data[key], str) for key in data if key in ("bedtime", "wake_time")):
+                raise HealthError("malformed", f"{where}.data bedtime and wake_time must be times")
             entry["data"] = json.dumps(data, sort_keys=True)
         parsed.append(entry)
     return {"metric": metric, "grain": grain, "unit": unit, "category": category,

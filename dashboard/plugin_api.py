@@ -3755,6 +3755,9 @@ async def post_health_wipe(request: Request, response: Response, profile: Option
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Expected a JSON object", headers={"Cache-Control": "no-store"})
     # Everything only when asked for by name; a device id alone deletes that device's data.
+    if body.get("all") is True and body.get("device_id") is not None:
+        raise HTTPException(status_code=400, detail="Name a device_id or all: true, not both",
+                            headers={"Cache-Control": "no-store"})
     device_id = None if body.get("all") is True else body.get("device_id")
     if device_id is None and body.get("all") is not True:
         raise HTTPException(status_code=400, detail="Name a device_id, or all: true",

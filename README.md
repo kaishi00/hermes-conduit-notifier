@@ -1061,6 +1061,11 @@ workouts, body, vitals, fitness), with how far back to start.
   the clear. Like any plain-http service, someone actively tampering with
   the connection while the key is set up could still intercept it: use
   HTTPS or a private tunnel when you can.
+- **Who can use these routes.** Anyone signed in to your dashboard, as
+  for every other dashboard route; push pairing isn't needed. A signed-in
+  client could register a new key under a phone's device id and send data
+  in its name (the phone notices on its next sync and sets up a new key),
+  so treat dashboard access as access to your health data.
 - **Summaries first.** Conduit sends the hourly and daily totals Apple
   Health computes on the phone (iPhone and Watch already merged), a summary
   per night of sleep, sleep stage segments and workouts. Raw readings go
