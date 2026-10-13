@@ -1,6 +1,7 @@
 import contextlib
 import contextvars
 import importlib.util
+import json
 import pathlib
 import queue
 import sys
@@ -671,10 +672,27 @@ def test_a_gone_chats_calls_are_dropped(client, hermes):
     assert store.meta["conduit.voice.chat_call:call-1"] == ""
 
 
+def test_a_gone_chat_lists_no_calls(client, hermes):
+    store = chat(hermes)
+    save(client, chat_id="chat-1", turns=turns(("user", "a")))
+    del store.sessions["chat-1"]
+    response = client.get(f"{BASE}/voice/chat-calls", params={"chat_id": "chat-1"})
+    assert response.json()["calls"] == []
+
+
+def test_a_full_chat_list_forgets_its_oldest_call(client, hermes, monkeypatch):
+    store = chat(hermes)
+    monkeypatch.setattr(api, "VOICE_MAX_CALLS", 2)
+    for call_id in ("call-1", "call-2", "call-3"):
+        save(client, chat_id="chat-1", call_id=call_id, turns=turns(("user", call_id)))
+    assert json.loads(store.meta["conduit.voice.chat_calls:chat-1"]) == ["call-2", "call-3"]
+    assert store.meta["conduit.voice.chat_call:call-1"] == ""
+
+
 def test_an_attached_call_ends_without_ending_the_chat(hermes, lifecycle):
     api._run_voice_call_end(None, "chat-1", "gpt-live", CALL, chat_call=True)
     assert [event[0] for event in lifecycle.events] == [
-        "initialize", "sync_turn", "flush_pending", "provider on_session_end", "shutdown"]
+        "initialize", "sync_turn", "flush_pending", "shutdown"], "the chat's memory session goes on"
     assert lifecycle.events[0][2] == "chat-1"
     assert lifecycle.events[1] == ("sync_turn", "remind me to call mum", "Will do.", "chat-1")
 
