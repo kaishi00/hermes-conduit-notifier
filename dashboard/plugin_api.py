@@ -3555,8 +3555,9 @@ async def post_e2e(request: Request, response: Response, profile: Optional[str] 
 # phone creates the one-time code at its relay and posts it here with that
 # relay's URL; this route claims it and saves the credential in the requested
 # profile's conduit-push.json, which the hooks re-read on every event, so no
-# restart is needed. A re-pair keeps the profile's privacy choice and drops
-# the old encryption key (the phone provisions one for the new pairing).
+# restart is needed. A re-pair keeps the profile's privacy choice, and its
+# encryption key when the same phone and gateway pair again; a new pairing
+# drops the key (the phone provisions one for it).
 
 PAIR_LIMIT = 10
 PAIR_WINDOW_S = 60.0
@@ -3575,7 +3576,7 @@ def _pair_relay_url(raw: Any, state: Optional[Dict[str, Any]]) -> str:
     """
     if raw is None or raw == "":
         return str((state or {}).get("relay_url") or DEFAULT_RELAY_URL).rstrip("/")
-    if not isinstance(raw, str) or len(raw) > 512:
+    if not isinstance(raw, str) or len(raw) > 512 or any(ord(c) < 0x21 or ord(c) == 0x7F for c in raw.strip()):
         raise TokenError(400, "relay_url must be an http(s) URL")
     parsed = urllib.parse.urlsplit(raw.strip())
     if parsed.scheme not in ("https", "http") or not parsed.hostname or parsed.username or parsed.password \
@@ -3626,8 +3627,13 @@ def _claim_pairing(relay_url: str, code: str, gateway_name: str) -> Dict[str, An
 
 
 def pair_profile(body: Any, profile: Optional[str] = None, path: Any = None,
-                 claim: Optional[Callable[[str, str, str], Dict[str, Any]]] = None) -> Dict[str, Any]:
-    """Claims the phone's pairing code for this profile. Never returns the credential."""
+                 claim: Optional[Callable[[str, str, str], Dict[str, Any]]] = None,
+                 limit: Optional[Callable[[], None]] = None) -> Dict[str, Any]:
+    """Claims the phone's pairing code for this profile. Never returns the credential.
+
+    `limit` runs once the request is well formed, so a mistyped code costs no
+    rate-limit slot.
+    """
     if not isinstance(body, dict):
         raise TokenError(400, "Expected a JSON object")
     code = body.get("pairing_code")
@@ -3637,6 +3643,8 @@ def pair_profile(body: Any, profile: Optional[str] = None, path: Any = None,
     path = path if path is not None else _pairing_state_path()
     relay_url = _pair_relay_url(body.get("relay_url"), _load_pairing_state(path))
     gateway_name = _pair_gateway_name(body.get("gateway_name"), profile)
+    if limit is not None:
+        limit()
     claimed = (claim or _claim_pairing)(relay_url, code, gateway_name)
     state: Dict[str, Any] = {
         "credential": claimed["credential"],
@@ -3670,9 +3678,9 @@ def pair_profile(body: Any, profile: Optional[str] = None, path: Any = None,
 async def post_pair(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     try:
-        _pair_limiter.acquire(_limiter_key(profile))
         body = await _read_json_body(request, PAIR_MAX_BODY_BYTES)
-        return {"ok": True, **(await _run_scoped(profile, lambda: pair_profile(body, profile)))}
+        limit = lambda: _pair_limiter.acquire(_limiter_key(profile))  # noqa: E731
+        return {"ok": True, **(await _run_scoped(profile, lambda: pair_profile(body, profile, limit=limit)))}
     except TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
     except HTTPException:
@@ -8344,33 +8352,60 @@ def _hermes_homes() -> List[Path]:
     """Every profile home this host has: the root and each profiles/<name>."""
     try:
         from hermes_constants import get_default_hermes_root
-        root = Path(get_default_hermes_root())
-    except Exception:
+    except (ImportError, AttributeError):  # an older Hermes: one home
         from hermes_constants import get_hermes_home
         root = Path(get_hermes_home())
+    else:
+        # A root that fails to resolve raises: guessing could miss a turn.
+        root = Path(get_default_hermes_root())
     homes = [root]
     with contextlib.suppress(OSError):
         homes.extend(sorted(p for p in (root / "profiles").iterdir() if p.is_dir()))
     return homes
 
 
-def _running_turns(pid: int, homes: List[Path]) -> int:
+def _turn_marker_file(home: Path) -> Path:
+    try:
+        from tui_gateway import turn_marker
+        return Path(turn_marker._marker_path(home))
+    except Exception:  # noqa: BLE001 — the path Hermes has always used
+        return home / "desktop" / "interrupted_turns.json"
+
+
+def _own_start_time() -> Optional[float]:
+    try:
+        from hermes_cli.active_sessions import _own_start_time as own
+        start = own()
+        return None if start is None else float(start)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _running_turns(pid: int, homes: List[Path], start_time: Optional[float] = None) -> int:
     """Turns this process has started and not finished, from Hermes' turn markers.
 
     Every Desktop/TUI/dashboard chat turn writes a marker with its writer's pid
-    at start and clears it at the end, so a marker carrying this pid is a turn
-    still running here. An unreadable file counts as none (best effort, like
-    the markers themselves).
+    (and start time, tui_gateway.turn_marker) at start and clears it at the
+    end. A marker naming this pid is a turn still running here, unless its
+    start time shows an earlier process that had the same pid. An unreadable
+    file counts as none (best effort, like the markers themselves).
     """
     running = 0
     for home in homes:
         try:
-            entries = json.loads((home / "desktop" / "interrupted_turns.json").read_text(encoding="utf-8"))
+            entries = json.loads(_turn_marker_file(home).read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        if isinstance(entries, dict):
-            running += sum(1 for entry in entries.values()
-                           if isinstance(entry, dict) and entry.get("writer_pid") == pid)
+        if not isinstance(entries, dict):
+            continue
+        for entry in entries.values():
+            if not isinstance(entry, dict) or _owner_pid({"pid": entry.get("writer_pid")}) != pid:
+                continue
+            written = entry.get("writer_start_time")
+            if start_time is not None and isinstance(written, (int, float)) and not isinstance(written, bool) \
+                    and abs(float(written) - start_time) > 1.0:
+                continue
+            running += 1
     return running
 
 
@@ -8410,7 +8445,7 @@ def _restart_when_idle(schedule: Callable[[float, Callable[[], None]], Any],
     """Re-execs once no chat turn runs here: one may have started since the request."""
     global _self_restart_scheduled
     try:
-        if _running_turns(os.getpid(), homes()):
+        if _running_turns(os.getpid(), homes(), _own_start_time()):
             schedule(SELF_RESTART_RECHECK_S, lambda: _restart_when_idle(schedule, homes))
             return
         _reexec()
@@ -8426,7 +8461,7 @@ def self_restart(schedule: Callable[[float, Callable[[], None]], Any],
     refusal = _self_restart_refusal()
     if refusal is not None:
         raise TokenError(*refusal)
-    running = _running_turns(os.getpid(), (homes or _hermes_homes)())
+    running = _running_turns(os.getpid(), (homes or _hermes_homes)(), _own_start_time())
     if running:
         raise TokenError(409, f"{running} chat turn{'s' if running != 1 else ''} still running on this dashboard")
     with _self_restart_lock:

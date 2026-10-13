@@ -87,6 +87,15 @@ def test_turns_of_other_processes_and_unreadable_markers_do_not_block(tmp_path):
     assert api._running_turns(api.os.getpid(), [tmp_path, tmp_path / "x", tmp_path / "missing"]) == 0
 
 
+def test_a_string_pid_counts_and_an_earlier_process_with_this_pid_does_not(tmp_path):
+    pid = api.os.getpid()
+    _markers(tmp_path, {"s1": {"writer_pid": str(pid)},
+                        "s2": {"writer_pid": pid, "writer_start_time": 1000.0},
+                        "s3": {"writer_pid": pid, "writer_start_time": 5000.4}})
+    assert api._running_turns(pid, [tmp_path]) == 3
+    assert api._running_turns(pid, [tmp_path], start_time=5000.0) == 2
+
+
 @pytest.mark.parametrize("setup", ["windows", "plugin-host", "desktop"])
 def test_backends_that_cannot_re_exec_refuse(monkeypatch, tmp_path, setup):
     if setup == "windows":

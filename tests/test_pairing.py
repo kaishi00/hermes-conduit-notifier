@@ -103,11 +103,13 @@ def test_a_relay_named_url_with_extras_is_not_stored(tmp_path):
     {"pairing_code": CODE, "relay_url": "https://user:pw@relay"},
     {"pairing_code": CODE, "relay_url": "https://relay?x=1"},
     {"pairing_code": CODE, "relay_url": 5},
+    {"pairing_code": CODE, "relay_url": "https://relay.example/a\r\nb"},
 ])
 def test_malformed_requests_are_refused_without_claiming(tmp_path, body):
     calls = []
     with pytest.raises(api.TokenError) as raised:
-        api.pair_profile(body, path=tmp_path / "s.json", claim=_recording_claim(calls))
+        api.pair_profile(body, path=tmp_path / "s.json", claim=_recording_claim(calls),
+                         limit=lambda: calls.append("limited"))
     assert raised.value.status == 400
     assert calls == []
     assert not (tmp_path / "s.json").exists()

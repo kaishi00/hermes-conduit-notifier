@@ -1266,8 +1266,9 @@ profile's current relay, else push.milim.dev) and must be a bare http(s) URL;
 the claim carries only the code and the gateway name, never follows redirects,
 and the answer never includes the credential:
 `{ok, paired, installation_id, gateway_id, gateway_name, relay_url}`. A
-re-pair keeps the profile's redaction choice and drops the old encryption key
-(Conduit provisions a new one). 400 for a malformed code or URL, 410 when the
+re-pair keeps the profile's redaction choice; it keeps the encryption key when
+the same phone and gateway pair again, and otherwise drops it (Conduit
+provisions a new one). 400 for a malformed code or URL, 410 when the
 code expired or was used, 429 past 10 requests a minute, 502 when the relay
 can't be reached.
 
