@@ -3591,7 +3591,7 @@ def _pair_gateway_name(raw: Any, profile: Optional[str]) -> str:
 
     name = f"{socket.gethostname()} Hermes"
     scoped = (profile or "").strip()
-    return name if _limiter_key(scoped) in ("", "default") else f"{name} ({scoped})"
+    return (name if _limiter_key(scoped) in ("", "default") else f"{name} ({scoped})")[:80]
 
 
 def _claim_pairing(relay_url: str, code: str, gateway_name: str) -> Dict[str, Any]:
@@ -3615,8 +3615,10 @@ def _claim_pairing(relay_url: str, code: str, gateway_name: str) -> Dict[str, An
         raise TokenError(410, "This pairing code expired or was already used. Create a new one.")
     if status == 429:
         raise TokenError(429, "The push relay is rate limiting pairing; try again shortly")
-    if status != 200 or not isinstance(body, dict):
-        raise TokenError(502, f"The push relay refused the pairing (HTTP {status})")
+    if not 200 <= status < 300 or not isinstance(body, dict):
+        # The relay's own status stays in the log: the answer doesn't probe hosts.
+        logger.warning("Conduit plugin: the push relay answered the pairing claim with HTTP %s", status)
+        raise TokenError(502, "The push relay refused the pairing")
     credential, installation_id = body.get("credential"), body.get("installation_id")
     if not isinstance(credential, str) or not credential or not isinstance(installation_id, str) or not installation_id:
         raise TokenError(502, "The push relay sent an unexpected pairing answer")
@@ -3641,8 +3643,12 @@ def pair_profile(body: Any, profile: Optional[str] = None, path: Any = None,
         "gateway_id": claimed.get("gateway_id"),
         "gateway_name": gateway_name,
         "installation_id": claimed["installation_id"],
-        "relay_url": str(claimed.get("relay_url") or relay_url).rstrip("/"),
+        "relay_url": relay_url,
     }
+    # The relay may name its canonical URL; it gets the same check as the phone's.
+    with contextlib.suppress(TokenError):
+        if claimed.get("relay_url"):
+            state["relay_url"] = _pair_relay_url(claimed["relay_url"], None)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with _e2e_lock, _pairing_state_lock(path):
         # Same carry-over as client.claim_pairing: the privacy choice stays.
@@ -3651,6 +3657,10 @@ def pair_profile(body: Any, profile: Optional[str] = None, path: Any = None,
             state["redact_content"] = True
         if previous.get("redact_key"):
             state["redact_key"] = previous["redact_key"]
+        # Re-pairing the same phone and gateway keeps its encryption key.
+        if previous.get("e2e") is not None and previous.get("installation_id") == state["installation_id"] \
+                and previous.get("gateway_id") == state["gateway_id"]:
+            state["e2e"] = previous["e2e"]
         _save_pairing_state(path, state)
     return {"paired": True, "installation_id": state["installation_id"], "gateway_id": state["gateway_id"],
             "gateway_name": gateway_name, "relay_url": state["relay_url"]}
@@ -8325,6 +8335,7 @@ async def get_capabilities(response: Response) -> Dict[str, Any]:
 # where exec spawns a new process instead of replacing this one.
 
 SELF_RESTART_DELAY_S = 1.0
+SELF_RESTART_RECHECK_S = 2.0
 _self_restart_lock = threading.Lock()
 _self_restart_scheduled = False
 
@@ -8394,6 +8405,21 @@ def _reexec() -> None:
     os.execv(sys.executable, [sys.executable, *sys.orig_argv[1:]])
 
 
+def _restart_when_idle(schedule: Callable[[float, Callable[[], None]], Any],
+                       homes: Callable[[], List[Path]]) -> None:
+    """Re-execs once no chat turn runs here: one may have started since the request."""
+    global _self_restart_scheduled
+    try:
+        if _running_turns(os.getpid(), homes()):
+            schedule(SELF_RESTART_RECHECK_S, lambda: _restart_when_idle(schedule, homes))
+            return
+        _reexec()
+    except Exception:
+        logger.exception("Conduit plugin: the dashboard restart failed; it can be asked again")
+        with _self_restart_lock:
+            _self_restart_scheduled = False
+
+
 def self_restart(schedule: Callable[[float, Callable[[], None]], Any],
                  homes: Optional[Callable[[], List[Path]]] = None) -> Dict[str, Any]:
     global _self_restart_scheduled
@@ -8406,7 +8432,7 @@ def self_restart(schedule: Callable[[float, Callable[[], None]], Any],
     with _self_restart_lock:
         if not _self_restart_scheduled:
             _self_restart_scheduled = True
-            schedule(SELF_RESTART_DELAY_S, _reexec)
+            schedule(SELF_RESTART_DELAY_S, lambda: _restart_when_idle(schedule, homes or _hermes_homes))
     return {"restarting": True, "boot_id": BOOT_ID, "loaded_version": LOADED_VERSION,
             "version": _plugin_version()}
 
@@ -8420,4 +8446,8 @@ async def post_self_restart(response: Response) -> Dict[str, Any]:
         return {"ok": True, **self_restart(loop.call_later)}
     except TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _unexpected("restart", exc, feature="Restart")
 

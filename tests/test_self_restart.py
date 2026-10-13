@@ -39,8 +39,33 @@ def test_an_idle_dashboard_schedules_one_re_exec(tmp_path):
     scheduled = []
     result = api.self_restart(lambda delay, fn: scheduled.append((delay, fn)), homes=lambda: [tmp_path])
     assert result["restarting"] is True and result["boot_id"] == api.BOOT_ID
-    assert scheduled == [(api.SELF_RESTART_DELAY_S, api._reexec)]
+    assert [delay for delay, _ in scheduled] == [api.SELF_RESTART_DELAY_S]
     api.self_restart(lambda delay, fn: scheduled.append((delay, fn)), homes=lambda: [tmp_path])
+    assert len(scheduled) == 1
+
+
+def test_a_turn_started_before_the_exec_postpones_it(monkeypatch, tmp_path):
+    execs, scheduled = [], []
+    monkeypatch.setattr(api, "_reexec", lambda: execs.append(True))
+    api.self_restart(lambda delay, fn: scheduled.append((delay, fn)), homes=lambda: [tmp_path])
+    _markers(tmp_path, {"s1": {"writer_pid": api.os.getpid()}})
+    scheduled.pop(0)[1]()
+    assert execs == [] and [delay for delay, _ in scheduled] == [api.SELF_RESTART_RECHECK_S]
+    _markers(tmp_path, {})
+    scheduled.pop(0)[1]()
+    assert execs == [True]
+
+
+def test_a_failed_exec_can_be_asked_again(monkeypatch, tmp_path):
+    def fail():
+        raise OSError("exec format error")
+
+    monkeypatch.setattr(api, "_reexec", fail)
+    scheduled = []
+    api.self_restart(lambda delay, fn: scheduled.append(fn), homes=lambda: [tmp_path])
+    scheduled.pop()()
+    assert api._self_restart_scheduled is False
+    api.self_restart(lambda delay, fn: scheduled.append(fn), homes=lambda: [tmp_path])
     assert len(scheduled) == 1
 
 

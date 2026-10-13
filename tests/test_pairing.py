@@ -82,6 +82,21 @@ def test_re_pairing_keeps_the_privacy_choice_and_drops_the_old_key(tmp_path):
     assert "e2e" not in state and state["credential"] == "inst-1.gw-1.secret"
 
 
+def test_re_pairing_the_same_phone_and_gateway_keeps_the_key(tmp_path):
+    path = tmp_path / "s.json"
+    key = {"kid": "x", "secret": "y"}
+    path.write_text(json.dumps({"credential": "old", "installation_id": "inst-1", "gateway_id": "gw-1", "e2e": key}))
+    api.pair_profile({"pairing_code": CODE}, path=path, claim=_recording_claim([]))
+    assert json.loads(path.read_text())["e2e"] == key
+
+
+def test_a_relay_named_url_with_extras_is_not_stored(tmp_path):
+    path = tmp_path / "s.json"
+    api.pair_profile({"pairing_code": CODE, "relay_url": "https://relay.example"}, path=path,
+                     claim=_recording_claim([], _claimed(relay_url="https://u:p@evil?x=1")))
+    assert json.loads(path.read_text())["relay_url"] == "https://relay.example"
+
+
 @pytest.mark.parametrize("body", [
     {}, {"pairing_code": "ABCDE"}, {"pairing_code": "ABCDE-FGHI1"}, {"pairing_code": 12},
     {"pairing_code": CODE, "relay_url": "ftp://relay"},
@@ -123,6 +138,18 @@ def test_the_claim_posts_only_the_code_and_name(monkeypatch):
     assert api._claim_pairing("https://relay.example", CODE, "box Hermes")["installation_id"] == "inst-1"
     assert seen == {"url": "https://relay.example/v1/pairings/claim",
                     "body": {"pairing_code": CODE, "gateway_name": "box Hermes"}, "auth": None}
+
+
+def test_any_2xx_claim_answer_is_accepted(monkeypatch):
+    monkeypatch.setattr(api._relay_opener, "open", lambda request, timeout: _Response(201, _claimed()))
+    assert api._claim_pairing("https://relay.example", CODE, "n")["gateway_id"] == "gw-1"
+
+
+def test_a_refused_claim_does_not_echo_the_relay_status(monkeypatch):
+    monkeypatch.setattr(api._relay_opener, "open", lambda request, timeout: _Response(302, {}))
+    with pytest.raises(api.TokenError) as raised:
+        api._claim_pairing("https://relay.example", CODE, "n")
+    assert raised.value.status == 502 and "302" not in str(raised.value)
 
 
 def test_an_expired_code_reads_as_gone(monkeypatch):
