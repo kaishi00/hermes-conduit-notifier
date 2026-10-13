@@ -2480,7 +2480,8 @@ def save_voice_turns(body: Dict[str, Any],
     requested = body.get("session_id")
     session_id = _voice_id(requested, "session_id") if requested else None
     # A call that already has a row keeps appending to it; chat_id only
-    # decides where a call without one goes.
+    # decides where a call without one goes. A chat call has no title (one is
+    # only set when a row is created).
     if body.get("chat_id") is not None and not session_id:
         return _save_chat_call_turns(_voice_id(body.get("chat_id"), "chat_id"), call_id, engine, turns, on_end)
     with _voice_lock():
@@ -2656,9 +2657,9 @@ def _save_chat_call_turns(chat_id: str, call_id: str, engine: str, turns: list,
 
 
 def voice_chat_calls(chat_id: Any, only: Any = None) -> Dict[str, Any]:
-    """An attached chat's saved calls, oldest first, with their turns (just
-    *only*'s when given); none once the chat is gone (its calls are cleared on
-    the next save to it)."""
+    """An attached chat's saved calls, oldest first; none once the chat is gone
+    (its calls are cleared on the next save to it). Turns come only with
+    *only*, one call, so a response holds at most one call's turns."""
     chat_id = _voice_id(chat_id, "chat_id")
     only = _voice_id(only, "call_id") if only is not None else None
     db = _open_voice_db(("get_meta", "get_session"))
@@ -2670,9 +2671,11 @@ def voice_chat_calls(chat_id: Any, only: Any = None) -> Dict[str, Any]:
             call = _chat_call(db, call_id)
             if call is None or call["chat_id"] != chat_id:
                 continue
-            calls.append({"call_id": call_id, "engine": call.get("engine"), "turns": [
-                {"role": t.get("role"), "text": t.get("content"), "at": t.get("timestamp")}
-                for t in call["turns"] if isinstance(t, dict)]})
+            entry = {"call_id": call_id, "engine": call.get("engine")}
+            if only is not None:
+                entry["turns"] = [{"role": t.get("role"), "text": t.get("content"), "at": t.get("timestamp")}
+                                  for t in call["turns"] if isinstance(t, dict)]
+            calls.append(entry)
     finally:
         db.close()
     return {"chat_id": chat_id, "calls": calls}

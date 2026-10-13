@@ -586,7 +586,9 @@ def test_an_attached_call_makes_no_session_and_leaves_the_chat_alone(client, her
     assert set(store.sessions) == {"chat-1"}
     assert store.messages["chat-1"] == [{"role": "user", "content": "daily brief"}]
     assert api.VOICE_TAGS_KEY not in store.meta
-    calls = client.get(f"{BASE}/voice/chat-calls", params={"chat_id": "chat-1"}).json()["calls"]
+    listed = client.get(f"{BASE}/voice/chat-calls", params={"chat_id": "chat-1"}).json()["calls"]
+    assert listed == [{"call_id": "call-1", "engine": "gemini-live"}], "a listing carries no turns"
+    calls = client.get(f"{BASE}/voice/chat-calls", params={"chat_id": "chat-1", "call_id": "call-1"}).json()["calls"]
     assert calls == [{"call_id": "call-1", "engine": "gemini-live", "turns": [
         {"role": "user", "text": "hi", "at": 1_780_000_000},
         {"role": "assistant", "text": "hello", "at": 1_780_000_001}]}]
@@ -599,8 +601,11 @@ def test_an_attached_call_continues_and_skips_replays(client, hermes):
     assert body["written"] == 3 and body["appended"] == 1 and body["skipped"] == 1
     assert save(client, chat_id="chat-1", turns=turns(("user", "gap"), start=5)).status_code == 400
     save(client, chat_id="chat-1", call_id="call-2", turns=turns(("user", "again")))
-    calls = client.get(f"{BASE}/voice/chat-calls", params={"chat_id": "chat-1"}).json()["calls"]
-    assert [[t["text"] for t in c["turns"]] for c in calls] == [["a", "b", "c"], ["again"]]
+    def said(call_id):
+        calls = client.get(f"{BASE}/voice/chat-calls", params={"chat_id": "chat-1", "call_id": call_id}).json()["calls"]
+        return [t["text"] for t in calls[0]["turns"]]
+    assert said("call-1") == ["a", "b", "c"]
+    assert said("call-2") == ["again"]
 
 
 def test_an_attached_call_ends_only_into_memory_under_the_chat(client, hermes):
