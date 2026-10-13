@@ -273,7 +273,9 @@ def _flat_data(value: Any, field: str) -> dict[str, Any]:
         if not isinstance(key, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,39}", key):
             raise HealthError("malformed", f"{field} keys must be short snake_case names")
         if isinstance(item, str):
-            clean[key] = _text(item, f"{field}.{key}")
+            text = _text(item, f"{field}.{key}")
+            if text is not None:
+                clean[key] = text
         elif item is None:
             continue
         else:
@@ -654,6 +656,14 @@ def _migrate(db: sqlite3.Connection, now: float) -> None:
 _EVENT_FIELDS = frozenset({"id", "start", "end", "metric", "value", "unit", "source"})
 
 
+def _real_date(value: str) -> bool:
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
+
+
 def _list_or_empty(container: dict[str, Any], field: str) -> Any:
     """The field, or an empty list when it's missing or null. Anything else
     goes to the caller's list check as it is (0 and "" are not lists)."""
@@ -673,7 +683,11 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: i
     if total > MAX_ITEMS:
         raise HealthError("too_large", f"At most {MAX_ITEMS} items per batch", status=413)
     computed_at = _epoch(_parse_time(batch.get("computed_at"), "computed_at"))
-    device = batch.get("device") if isinstance(batch.get("device"), dict) else {}
+    device = batch.get("device")
+    if device is None:
+        device = {}
+    elif not isinstance(device, dict):
+        raise HealthError("malformed", "device must be an object")
     tz = device.get("time_zone")
     if tz is not None and (not isinstance(tz, str) or not _TZ.match(tz)):
         raise HealthError("malformed", "device.time_zone is malformed")
@@ -782,7 +796,7 @@ def _parse_window(window: Any, index: int) -> dict[str, Any]:
         day = bucket.get("date")
         if grain != "night":
             day = bucket_start.date().isoformat()
-        elif not isinstance(day, str) or not _DATE.match(day):
+        elif not isinstance(day, str) or not _DATE.match(day) or not _real_date(day):
             raise HealthError("malformed", f"{where}.date is the night's wake-up date, YYYY-MM-DD")
         entry: dict[str, Any] = {"start_utc": _epoch(bucket_start), "end_utc": _epoch(bucket_end),
                                  "start_local": bucket_start.isoformat(), "date": day,

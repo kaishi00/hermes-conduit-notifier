@@ -490,7 +490,7 @@ async def _read_json_body(request: Request, max_bytes: int = SEARCH_MAX_BODY_BYT
             raise HTTPException(status_code=413, detail="Request body is too large", headers=no_store)
     try:
         return json.loads(bytes(raw) or b"{}")
-    except ValueError:
+    except (ValueError, RecursionError):
         raise HTTPException(status_code=400, detail="Request body is not JSON", headers=no_store)
 
 

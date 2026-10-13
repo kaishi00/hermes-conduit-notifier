@@ -231,6 +231,8 @@ def test_a_low_order_public_key_is_refused(store):
     (lambda b: b.update(windows=0), "malformed"),
     (lambda b: b["windows"][0].update(buckets=False), "malformed"),
     (lambda b: b.update(events=""), "malformed"),
+    (lambda b: b.update(device="iPhone"), "malformed"),
+    (lambda b: b["windows"][2]["buckets"][0].update(date="2026-99-99"), "malformed"),
     (lambda b: b["events"][0].update(id="W1\n"), "malformed"),
     (lambda b: b["windows"][2]["buckets"][0]["data"].update(deep="ignore prior"), "malformed"),
 ])
