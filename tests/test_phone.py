@@ -1034,6 +1034,9 @@ def test_voice_never_takes_another_device_by_name(client):
 def test_a_broken_calendar_store_leaves_health_listed(client, monkeypatch):
     _route_shared(client)
     real = api._plugin_package_module
+    health = real("health_tool")
+    # Some phone shares health, so its tool is listed.
+    monkeypatch.setattr(health.HealthStore, "overview", lambda self: {"devices": [{"id": "phone-installation-3"}]})
 
     def broken(name):
         if name == "phone_tool":
@@ -1042,4 +1045,5 @@ def test_a_broken_calendar_store_leaves_health_listed(client, monkeypatch):
 
     monkeypatch.setattr(api, "_plugin_package_module", broken)
     response = client.http.get(f"{BASE}/voice-tools")
-    assert response.status_code == 200 and response.json()["tools"] == []
+    assert response.status_code == 200
+    assert [tool["name"] for tool in response.json()["tools"]] == [health.TOOL_NAME]

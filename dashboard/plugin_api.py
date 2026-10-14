@@ -4167,7 +4167,7 @@ def _voice_tool_entries() -> Dict[str, Dict[str, Any]]:
         phone = _plugin_package_module("phone_tool")
         offered = phone.voice_tools(phone.PhoneStore(_calls_home()))
     except Exception:  # noqa: BLE001
-        logger.warning("Conduit voice tools: the calendar couldn't be listed", exc_info=True)
+        logger.warning("Conduit voice tools: the calendar and phone tools couldn't be listed", exc_info=True)
         offered = {}
     for name, entry in offered.items():
         entries[name] = {"key": "phone", **entry}
@@ -4179,6 +4179,8 @@ def voice_tools_list() -> Dict[str, Any]:
 
 
 def voice_tools_call(envelope: Any) -> Dict[str, Any]:
+    # Routed on the unsealed op: each branch opens its own seal, whose AAD
+    # binds the op, so a misrouted envelope fails there.
     if isinstance(envelope, dict) and envelope.get("op") == "voice":
         return _phone_voice_call(envelope)
     tool = _plugin_package_module("health_tool")
