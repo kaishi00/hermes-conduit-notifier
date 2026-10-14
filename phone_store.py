@@ -69,9 +69,9 @@ KID_TAG = b"conduit-phone-kid\n"
 NONCE_BYTES = 12
 KEY_BYTES = 32
 
-# Exchange operations this host answers. "voice" joins once /voice-tools has
-# landed (contract section 5).
-EXCHANGE_OPS = ("changes",)
+# Exchange operations this host answers: "changes" at /phone/exchange,
+# "voice" (a live voice call's read) at /voice-tools/call (contract section 5).
+EXCHANGE_OPS = ("changes", "voice")
 
 CALENDAR_SHARING = ("full", "write_only", "off")
 CALENDAR_KINDS = ("event", "reminder")
@@ -568,9 +568,19 @@ class PhoneStore:
     def exchange(self, envelope: Any) -> dict[str, Any]:
         """The ``/phone/exchange`` route: open, run the operation, seal."""
         device_id, op, request, seal_answer = self.open_exchange(envelope)
-        # op is "changes", the only one EXCHANGE_OPS lets through.
+        if op != "changes":
+            raise PhoneError("unknown_op", "Voice reads go to /voice-tools/call")
         changes = self.exchange_changes(device_id, request.get("results"))
         return {"v": 1, **seal_answer({"changes": changes})}
+
+    def open_voice_request(self, envelope: Any) -> tuple[str, dict[str, Any], Callable[[dict[str, Any]], dict[str, str]]]:
+        """A live voice call's sealed read (``op: "voice"``): the device it
+        covers, the opened request ``{call_id, tool, args, provider}``, and the
+        sealer for its answer. Only the device can ask, and only about itself."""
+        device_id, op, request, seal_answer = self.open_exchange(envelope)
+        if op != "voice":
+            raise PhoneError("unknown_op", "A voice read is op voice")
+        return device_id, request, seal_answer
 
     def exchange_changes(self, device_id: str, results: Any) -> list[dict[str, Any]]:
         """Records the phone's outcomes for its changes, then answers every

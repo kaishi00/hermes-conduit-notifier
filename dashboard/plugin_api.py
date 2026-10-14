@@ -4161,6 +4161,10 @@ def _voice_tool_entries() -> Dict[str, Dict[str, Any]]:
             "description": f"{tool.SCHEMA['description']} {tool.VOICE_NOTE}",
             "parameters": tool.voice_parameters(),
         }
+    # The calendar and phone status, sealed with the phone feature's own key.
+    phone = _plugin_package_module("phone_tool")
+    for name, entry in phone.voice_tools(phone.PhoneStore(_calls_home())).items():
+        entries[name] = {"key": "phone", **entry}
     return entries
 
 
@@ -4169,6 +4173,8 @@ def voice_tools_list() -> Dict[str, Any]:
 
 
 def voice_tools_call(envelope: Any) -> Dict[str, Any]:
+    if isinstance(envelope, dict) and envelope.get("op") == "voice":
+        return _phone_voice_call(envelope)
     tool = _plugin_package_module("health_tool")
     if not isinstance(envelope, dict) or envelope.get("tool") != tool.TOOL_NAME:
         raise TokenError(404, "This host has no voice tool by that name")
@@ -4184,6 +4190,27 @@ def voice_tools_call(envelope: Any) -> Dict[str, Any]:
                 action if isinstance(action, str) and action in tool.VOICE_ACTIONS else "other",
                 provider if isinstance(provider, str) and _VOICE_PROVIDER.fullmatch(provider) else "voice")
     return {"v": 1, **seal_answer(tool.voice_handle(args, device_id=device_id, store=store))}
+
+
+def _phone_voice_call(envelope: Dict[str, Any]) -> Dict[str, Any]:
+    """A calendar or phone status read, sealed with the device's phone
+    exchange keys (op "voice"); the tool's name is inside the seal."""
+    phone = _plugin_package_module("phone_tool")
+    store = phone.PhoneStore(_calls_home())
+    try:
+        device_id, request, seal_answer = store.open_voice_request(envelope)
+    except phone.PhoneError as exc:
+        raise TokenError(exc.status, str(exc)) from exc
+    name = request.get("tool")
+    if name not in (phone.CALENDAR_TOOL, phone.PHONE_TOOL):
+        raise TokenError(404, "This host has no voice tool by that name")
+    provider = request.get("provider")
+    args = request.get("args")
+    action = args.get("action") if isinstance(args, dict) else None
+    logger.info("Conduit voice read: %s %s for %s", name,
+                action if isinstance(action, str) and action in phone.VOICE_CALENDAR_ACTIONS + ("status",) else "other",
+                provider if isinstance(provider, str) and _VOICE_PROVIDER.fullmatch(provider) else "voice")
+    return {"v": 1, **seal_answer({"result": phone.voice_handle(name, args, device_id=device_id, store=store)})}
 
 
 async def _voice_tools_route(response: Response, profile: Optional[str], fn: Callable[[], Dict[str, Any]],

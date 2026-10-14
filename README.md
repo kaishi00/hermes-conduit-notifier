@@ -1143,6 +1143,17 @@ host's boundary is the seal:
   minute per profile. Conduit keeps the log of what each call read.
   Shared vector: `tests/health_vector.json` (`voice`).
 
+Calendar and phone status (plugin 0.28+): once a phone shares them,
+`conduit_calendar` (read actions only: overview, calendars, events, free_busy,
+next, reminders) and `conduit_phone` (status) join the list with `key:
+"phone"`. Their call is the phone feature's sealed exchange with `op:
+"voice"` (`{v: 1, device_id, kid, call_id, op: "voice", nonce, ct}`, the
+tool's name inside the seal: `{call_id, tool, args, provider}` in, `{call_id,
+result}` out), answered for the asking phone only. Conduit asks for this per
+voice mode in Settings > Calendar & phone. Adding an event or reminder in a
+call is the phone's own tool, with spoken confirmation, so no write is offered
+here.
+
 ## Location from Conduit (plugin 0.26+)
 
 Conduit can tell a Hermes profile where the user is. It's a building block
