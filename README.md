@@ -1144,7 +1144,8 @@ marked private is reported only as "at a private place".
   most once a day, never for an event over 15 minutes old, and never while
   sharing is paused.
 - **No calls at places.** Calls settings `avoid_places` (place ids) and
-  `avoid_unknown_place`: a call that would ring while the user is at an
+  `avoid_unknown_place` (only with places listed: also hold calls when
+  there's no recent location): a call that would ring while the user is at an
   avoided place goes out as a notification (status `limited`, reason
   `place`). The latest fix counts for 24 hours with background sharing on,
   otherwise 1 hour.

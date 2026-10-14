@@ -107,7 +107,7 @@ _HOURS = re.compile(r"^(\d{2}):(\d{2})-(\d{2}):(\d{2})\Z")
 # Line breaks, other control characters and invisible format characters
 # (bidi overrides, zero-width), which could make a place name read like
 # instructions in the agent's tool result.
-_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f​-‏ -‮⁠-⁯﻿]+")
+_CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]+")
 
 _thread_lock = threading.Lock()
 
@@ -447,7 +447,7 @@ class LocationStore:
                 row = db.execute("SELECT kid, last_seen, sharing FROM devices WHERE id=?", (device_id,)).fetchone()
                 if row is not None:
                     answer["device"] = {"kid": row[0], "last_sync": iso_utc(row[1]) if row[1] else None,
-                                        "sharing": json.loads(row[2] or "null")}
+                                        "sharing": _decode(row[2], None)}
             return answer
 
     def reads(self, limit: int = 50) -> list[dict[str, Any]]:
@@ -533,10 +533,10 @@ class LocationStore:
             if fix is not None:
                 latest = {"id": fix[0], "at": fix[1], "at_local": fix[2], "source": fix[3], "precision": fix[4],
                           "lat": fix[5], "lon": fix[6], "accuracy_m": fix[7], "place_id": fix[8],
-                          "area": json.loads(fix[9] or "null"), "distances_m": json.loads(fix[10] or "{}"),
+                          "area": _decode(fix[9], None), "distances_m": _decode(fix[10], {}),
                           "speed_mps": fix[11], "locate_id": fix[12]}
             return {"device_id": device_id, "device_name": row[1], "last_sync": row[2],
-                    "sharing": json.loads(row[3] or "null") or {}, "places": places, "fix": latest}
+                    "sharing": _decode(row[3], None) or {}, "places": places, "fix": latest}
 
     def history(self, device_id: str, start: float, end: float, limit: int) -> tuple[list[dict[str, Any]], bool]:
         with self._read() as db:
@@ -841,9 +841,6 @@ def _parse_fix(value: Any, sharing: dict[str, Any], places: dict[str, dict[str, 
         speed = None
     else:
         distances = {key: round(metres / 10) * 10 for key, metres in distances.items()}
-    locate_id = value.get("locate_id")
-    if locate_id is not None and (not isinstance(locate_id, str) or not _LOCATE_ID.match(locate_id)):
-        raise LocationError("malformed", f"{field}.locate_id is malformed")
     return {"id": fix_id, "at": at.timestamp(), "at_local": at.isoformat(), "source": source,
             "precision": "places" if private else precision, "lat": lat, "lon": lon, "accuracy": accuracy,
             "place_id": place_id, "area": area, "distances": distances, "speed": speed}
@@ -867,6 +864,16 @@ def _parse_event(value: Any, index: int, places: dict[str, dict[str, Any]], shar
         value.get("area"), f"{field}.area")
     return {"id": event_id, "kind": value["kind"], "place_id": place_id, "at": at.timestamp(), "local": at,
             "private": private, "area": area}
+
+
+def _decode(text: str | None, default: Any) -> Any:
+    """Stored JSON, or ``default`` when it's missing or damaged."""
+    if not text:
+        return default
+    try:
+        return json.loads(text)
+    except ValueError:
+        return default
 
 
 def _area_text(area: dict[str, str] | None) -> str | None:
@@ -932,15 +939,16 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: f
     added = 0
     for event in events:
         place = current[event["place_id"]]
-        if not event["private"] and sharing["retention_days"] > 0:
+        if not paused and not event["private"] and sharing["retention_days"] > 0:
             cursor = db.execute(
                 "INSERT OR IGNORE INTO visits VALUES(?,?,?,?,?,?,?,?,?)",
                 (device_id, event["id"], event["kind"], place["id"], place["name"], _area_text(event["area"]),
                  event["at"], event["local"].isoformat(), now))
             is_new = bool(cursor.rowcount)
         else:
-            # Kept nowhere, but a replayed batch still mustn't run a rule
-            # twice: rules fire at most once a day anyway.
+            # Kept nowhere (paused, private or no history), but a replayed
+            # batch still mustn't run a rule twice: rules fire at most once a
+            # day anyway.
             is_new = True
         added += 1 if is_new else 0
         if is_new and not paused and now - event["at"] <= RULE_EVENT_MAX_AGE_S:

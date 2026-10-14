@@ -2,6 +2,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import sqlite3
 import stat
 import sys
 import tempfile
@@ -248,6 +249,18 @@ def test_a_paused_phone_runs_no_rules(store, phone):
     leave = {"id": "e1", "kind": "leave", "place_id": "p_home", "at": "2026-10-13T06:55:00+01:00"}
     batch = phone.batch(sharing=sharing(paused_until="2026-10-13T12:00:00+01:00"), events=[leave])
     assert store.ingest(phone.seal(batch))["rules_fired"] == []
+    # Nor keeps the move in history.
+    assert store.history(store.snapshot()["device_id"], 0, NOW + 3600, 50)[0] == []
+
+
+def test_damaged_stored_json_reads_as_missing(store, phone):
+    store.ingest(phone.seal(phone.batch(fix=fix())))
+    with sqlite3.connect(store.path) as db:
+        db.execute("UPDATE devices SET sharing='{'")
+        db.execute("UPDATE fixes SET area='[', distances='{'")
+    view = store.snapshot()
+    assert view["sharing"] == {} and view["fix"]["area"] is None and view["fix"]["distances_m"] == {}
+    assert store.status(view["device_id"])["device"]["sharing"] is None
 
 
 def test_a_private_place_rule_never_names_the_place(store, phone):
@@ -274,7 +287,7 @@ def test_locate_keeps_to_its_budget(store, phone):
     assert error.value.code == "too_soon"
     store.cancel_locate(first)
     second = store.start_locate()  # a request the relay couldn't send doesn't count
-    answer = fix("locate", id="f_locate", locate_id=second)
+    answer = fix("locate", id="f_locate")
     store.ingest(phone.seal(phone.batch(fix=answer, locate_id=second)))
     assert store.locate_answered(second)
     for _ in range(location.LOCATE_PER_DAY - 1):
@@ -468,8 +481,8 @@ def test_locate_asks_the_phone_and_returns_its_answer(home, monkeypatch):
 
     def answer(event):
         locate_id = event["locate"]["id"]
-        store.ingest(phone.seal(phone.batch(fix=fix("locate", id="f_fresh", at="2026-10-13T07:00:00+01:00",
-                                                    locate_id=locate_id), locate_id=locate_id)))
+        store.ingest(phone.seal(phone.batch(fix=fix("locate", id="f_fresh", at="2026-10-13T07:00:00+01:00"),
+                                                    locate_id=locate_id)))
 
     fake = FakeClient({"accepted": True, "delivered": True}, on_send=answer)
     monkeypatch.setattr(tool, "client", fake)
