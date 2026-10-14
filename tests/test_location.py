@@ -806,6 +806,7 @@ def test_a_voice_read_answers_sealed_and_is_logged_as_a_call(voice):
     phone = _voice_phone(store, fix=fix())
     answer = _voice_call(client, phone, {"action": "now"})
     assert answer["ok"] and answer["area"] == "Shoreditch, London, United Kingdom"
+    assert "coordinates" not in answer and "51.53" not in json.dumps(answer)
     assert _voice_call(client, phone, {"action": "distance_to", "place": "Home"})["distance"] == "1.2 km"
     assert _voice_call(client, phone, {"action": "distance_to", "place": "Clinic"})["error"] == "private"
     assert store.reads()[0] == {"at": store.reads()[0]["at"], "action": "distance_to",

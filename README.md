@@ -1185,7 +1185,8 @@ marked private is reported only as "at a private place".
   with only `now`, `places`, `history` and `distance_to` (key `location`),
   sealed as health's voice reads are but with the device's location key
   (`conduit-location-v1 voice device-to-host` / `host-to-device`). It reads
-  only the asking device's fix, places and history, matched by id, and each
+  only the asking device's fix (never its coordinates: area, saved place
+  and distances only), places and history, matched by id, and each
   read is logged as "Gemini Live call" (or Grok Live, GPT-Live). Shared
   vector: `tests/location_vector.json` (`voice`).
 - **On-demand locate.** `locate` asks the phone for a fresh fix through the

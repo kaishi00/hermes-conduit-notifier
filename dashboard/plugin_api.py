@@ -4154,7 +4154,10 @@ _VOICE_PROVIDER = re.compile(r"[a-z0-9-]{1,40}")
 
 def _voice_tool_modules() -> Dict[str, Tuple[Any, Any, Any, str]]:
     """Voice-readable tools by name: (tool module, store class, its error,
-    sealed key)."""
+    sealed key). These modules are package imports, so their store module is
+    a second copy beside the path-loaded one the location and health routes
+    use, with its own thread lock; writes from both stay safe through
+    SQLite's own locking (WAL, BEGIN IMMEDIATE, the busy timeout)."""
     modules: Dict[str, Tuple[Any, Any, Any, str]] = {}
     for name, store, error, key in (("health_tool", "HealthStore", "HealthError", "health"),
                                     ("location_tool", "LocationStore", "LocationError", "location")):
@@ -4175,7 +4178,7 @@ def _voice_tool_entries() -> Dict[str, Dict[str, Any]]:
         # A store that can't be read (damaged file) hides that tool alone.
         try:
             store = store_class(_calls_home())
-            shared = store.overview()["devices"] if key == "health" else store.snapshot() is not None
+            shared = tool.voice_shared(store)
         except Exception:
             logger.warning("Conduit voice tools: %s store unreadable", name, exc_info=True)
             continue

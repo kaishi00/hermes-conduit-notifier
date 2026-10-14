@@ -140,6 +140,11 @@ def voice_parameters() -> dict[str, Any]:
     return parameters
 
 
+def voice_shared(store: HealthStore) -> bool:
+    """Whether any device has shared health here (the voice list offers the tool)."""
+    return bool(store.overview()["devices"])
+
+
 VOICE_ACTIONS = frozenset(SCHEMA["parameters"]["properties"]["action"].get("enum", ()))
 
 

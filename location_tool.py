@@ -199,6 +199,11 @@ _VOICE_ACTION_ORDER = ["now", "places", "history", "distance_to"]
 VOICE_ACTIONS = frozenset(_VOICE_ACTION_ORDER)
 
 
+def voice_shared(store: LocationStore) -> bool:
+    """Whether any device has shared location here (the voice list offers the tool)."""
+    return store.snapshot() is not None
+
+
 def voice_parameters() -> dict[str, Any]:
     """SCHEMA's parameters for the read actions alone: a voice call can't
     ask the phone for a fresh fix or change place rules."""
@@ -238,7 +243,10 @@ def voice_handle(args: Any, *, device_id: str, store: LocationStore, provider: s
 
 
 def _spoken(answer: dict[str, Any]) -> dict[str, Any]:
-    """A voice answer's notes without the Conduit settings link."""
+    """A voice answer: no coordinates (the voice provider gets the area,
+    saved place and distances, never a point on the map) and notes without
+    the Conduit settings link."""
+    answer.pop("coordinates", None)
     if isinstance(answer.get("note"), str):
         answer["note"] = answer["note"].replace(f"Conduit's {SETTINGS_LINK}", "Conduit's Location settings") \
             .replace(" (leave the link out of anything spoken)", "")
