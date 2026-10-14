@@ -774,20 +774,22 @@ class PhoneStore:
             return found
 
     @contextlib.contextmanager
-    def reader(self, need: str, device: Any = None) -> Iterator[tuple[sqlite3.Connection, dict[str, Any]] | None]:
+    def reader(self, need: str, device: Any = None,
+               exact: bool = False) -> Iterator[tuple[sqlite3.Connection, dict[str, Any]] | None]:
         """A read connection and the device to read: the one named, else the
         one that synced last sharing ``need`` ("events", "reminders",
         "status", "focus", "calendars" or "any"). None when nothing is shared.
         Raises PhoneError ``not_shared`` when the named device doesn't share
-        it."""
+        it. ``exact``: ``device`` is an id and only that device is read (a
+        voice read), never another device by name."""
         with self._read() as db:
             if db is None:
                 yield None
                 return
             try:
-                device_id, name, sharing = _pick_device(db, device, need)
+                device_id, name, sharing = _pick_device(db, device, need, exact=exact)
             except PhoneError as error:
-                if error.code == "nothing_shared":
+                if error.code == "nothing_shared" and not exact:
                     yield None
                     return
                 raise
@@ -1090,9 +1092,18 @@ _NEED_WORDS = {"events": "their calendar", "events_write": "adding to their cale
                "phone": "phone status or Focus", "any": "anything"}
 
 
-def _pick_device(db: sqlite3.Connection, wanted: Any, need: str) -> tuple[str, str, dict[str, Any]]:
+def _pick_device(db: sqlite3.Connection, wanted: Any, need: str,
+                 exact: bool = False) -> tuple[str, str, dict[str, Any]]:
     rows = [(row[0], row[1], _decode(row[2], {})) for row in db.execute(
         "SELECT id, name, sharing FROM devices WHERE last_seen IS NOT NULL ORDER BY last_seen DESC")]
+    if exact:
+        # Another device's name must never stand in for this one.
+        named = [row for row in rows if row[0] == wanted]
+        if not named:
+            raise PhoneError("nothing_shared", "This iPhone hasn't shared anything yet")
+        if not shares(named[0][2], need):
+            raise PhoneError("not_shared", f"{named[0][1]} doesn't share {_NEED_WORDS.get(need, need)} with Hermes")
+        return named[0]
     if isinstance(wanted, str) and wanted.strip():
         wanted = wanted.strip()
         named = [row for row in rows if row[0] == wanted] or [

@@ -4162,8 +4162,14 @@ def _voice_tool_entries() -> Dict[str, Dict[str, Any]]:
             "parameters": tool.voice_parameters(),
         }
     # The calendar and phone status, sealed with the phone feature's own key.
-    phone = _plugin_package_module("phone_tool")
-    for name, entry in phone.voice_tools(phone.PhoneStore(_calls_home())).items():
+    # A problem there never takes health off the list.
+    try:
+        phone = _plugin_package_module("phone_tool")
+        offered = phone.voice_tools(phone.PhoneStore(_calls_home()))
+    except Exception:  # noqa: BLE001
+        logger.warning("Conduit voice tools: the calendar couldn't be listed", exc_info=True)
+        offered = {}
+    for name, entry in offered.items():
         entries[name] = {"key": "phone", **entry}
     return entries
 

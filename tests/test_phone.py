@@ -1009,3 +1009,29 @@ def test_voice_follows_what_the_phone_shares(client):
     assert [tool["name"] for tool in client.http.get(f"{BASE}/voice-tools").json()["tools"]] == ["conduit_calendar"]
     found = _voice_read(client, handset, "conduit_calendar", {"action": "events"})
     assert found["ok"] is False and found["error"] in ("write_only", "not_shared")
+
+
+def test_voice_never_takes_another_device_by_name(client):
+    # A device that registered but never uploaded asks with an id that is
+    # another device's name: it reads nothing of that device.
+    _route_shared(client, Phone("phone-installation-2", name="phone-installation-9"))
+    asker = Phone("phone-installation-9")
+    asker.accept(client.http.post(f"{BASE}/phone/key", json=asker.key_request()).json())
+    found = _voice_read(client, asker, "conduit_calendar", {"action": "events", "from": "2026-10-16", "to": "2026-10-16"})
+    assert found["ok"] is False and "events" not in found
+    status = _voice_read(client, asker, "conduit_phone", {"action": "status"}, call_id="voice-00000002")
+    assert status["ok"] is False and "status" not in status
+
+
+def test_a_broken_calendar_store_leaves_health_listed(client, monkeypatch):
+    _route_shared(client)
+    real = api._plugin_package_module
+
+    def broken(name):
+        if name == "phone_tool":
+            raise RuntimeError("boom")
+        return real(name)
+
+    monkeypatch.setattr(api, "_plugin_package_module", broken)
+    response = client.http.get(f"{BASE}/voice-tools")
+    assert response.status_code == 200 and response.json()["tools"] == []

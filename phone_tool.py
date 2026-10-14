@@ -250,7 +250,8 @@ def _error_note(error: PhoneError) -> str:
 
 
 def _calendar(args: dict[str, Any], session_id: Any, profile: str,
-              now: Callable[[], float] | None, store: PhoneStore | None = None) -> dict[str, Any]:
+              now: Callable[[], float] | None, store: PhoneStore | None = None,
+              exact: bool = False) -> dict[str, Any]:
     action = args.get("action")
     store = store or _store()
     if now is not None:
@@ -268,7 +269,7 @@ def _calendar(args: dict[str, Any], session_id: Any, profile: str,
     if action not in READ_ACTIONS:
         return {"ok": False, "error": "invalid", "note": f"action is one of {', '.join(READ_ACTIONS + WRITE_ACTIONS)}."}
     need = "reminders" if action == "reminders" else "calendars" if action == "calendars" else "events"
-    with store.reader(need, args.get("device")) as opened:
+    with store.reader(need, args.get("device"), exact=exact) as opened:
         if opened is None:
             raise PhoneError("nothing_shared", "No device shares " + {
                 "reminders": "reminders", "calendars": "calendars or reminders"}.get(need, "its calendar")
@@ -432,11 +433,11 @@ def _nudge(change: dict[str, Any], profile: str) -> None:
 # --- conduit_phone -------------------------------------------------------------------
 
 
-def _phone(args: dict[str, Any], store: PhoneStore | None = None) -> dict[str, Any]:
+def _phone(args: dict[str, Any], store: PhoneStore | None = None, exact: bool = False) -> dict[str, Any]:
     if args.get("action") != "status":
         return {"ok": False, "error": "invalid", "note": "action is status."}
     store = store or _store()
-    with store.reader("phone", args.get("device")) as opened:
+    with store.reader("phone", args.get("device"), exact=exact) as opened:
         if opened is None:
             raise PhoneError("nothing_shared", "No device shares its status or Focus with Hermes.")
         db, device = opened
@@ -527,9 +528,9 @@ def voice_handle(tool: str, args: Any, *, device_id: str, store: PhoneStore,
                 store.clock = now
             if action == "overview":
                 return _overview(store, only=device_id)
-            return _calendar({**wanted, "device": device_id}, None, "default", None, store=store)
+            return _calendar({**wanted, "device": device_id}, None, "default", None, store=store, exact=True)
         if tool == PHONE_TOOL:
-            return _phone({"action": given.get("action"), "device": device_id}, store=store)
+            return _phone({"action": given.get("action"), "device": device_id}, store=store, exact=True)
         return {"ok": False, "error": "invalid", "note": "No voice tool by that name."}
     except PhoneError as error:
         return {"ok": False, "error": error.code, "note": str(error)}
