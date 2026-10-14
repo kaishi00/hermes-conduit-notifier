@@ -26,6 +26,7 @@ _CGNAT = ipaddress.ip_network("100.64.0.0/10")  # Tailscale addresses
 # Cloud instance metadata services live in those ranges; a claim never goes there.
 _METADATA = {ipaddress.ip_address(a) for a in ("169.254.169.254", "169.254.170.2", "100.100.100.200", "fd00:ec2::254")}
 _PRIVATE_SUFFIXES = (".ts.net", ".local", ".localhost", ".internal", ".lan", ".home.arpa")
+_METADATA_NAMES = {"metadata.google.internal", "metadata", "instance-data", "instance-data.ec2.internal"}
 
 
 class RelayURLError(ValueError):
@@ -71,6 +72,8 @@ def is_private(host: str) -> bool:
         if ip in _METADATA:
             return False
         return ip.is_loopback or ip.is_private or ip.is_link_local or ip in _CGNAT
+    if host in _METADATA_NAMES:
+        return False
     return host == "localhost" or host.endswith(_PRIVATE_SUFFIXES)
 
 

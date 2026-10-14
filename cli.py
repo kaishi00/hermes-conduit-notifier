@@ -60,12 +60,12 @@ def dispatch(args: argparse.Namespace) -> int:
             print("This Hermes profile is not paired with Conduit.")
             return 1
         print(f"Paired: {state.get('gateway_name') or socket.gethostname()}")
-        relay_url = state.get('relay_url') or DEFAULT_RELAY_URL
-        print(f"Relay: {relay_url}")
+        relay_url = str(state.get('relay_url') or DEFAULT_RELAY_URL)
+        print(f"Relay: {''.join(c for c in relay_url if c.isprintable())}")
         try:
-            check_request_url(f"{str(relay_url).rstrip('/')}/v1/events")
+            check_request_url(f"{relay_url.rstrip('/')}/v1/events")
         except ValueError:
-            print("Warning: this relay URL is not https://, so notifications can't be sent. "
+            print("Warning: this is not a usable https:// relay URL, so notifications can't be sent. "
                   "Pair again from Conduit, or run `hermes conduit-push unpair`.")
         print(f"Redact content: {'on' if state.get('redact_content') else 'off'}")
         encryption = e2e_status(state)

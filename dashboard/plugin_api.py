@@ -3654,7 +3654,7 @@ def _claim_pairing(relay_url: str, code: str, gateway_name: str) -> Dict[str, An
         "User-Agent": f"Hermes-Conduit-Notifier/{_plugin_version() or 'unknown'}"})
     try:
         # A plain-HTTP claim (LAN or Tailscale) skips any proxy, which would see the code in clear.
-        opener = _relay_opener if relay_url[:6].lower() == "https:" else _direct_relay_opener
+        opener = _relay_opener if _relay_urls().is_https(relay_url) else _direct_relay_opener
         with opener.open(request, timeout=PAIR_TIMEOUT_S) as response:
             raw, status = response.read(64 * 1024), response.status
     except urllib.error.HTTPError as error:
