@@ -44,6 +44,7 @@ import contextvars
 import functools
 import hashlib
 import http.client
+import importlib
 import importlib.util
 import inspect
 import itertools
@@ -60,6 +61,7 @@ import tempfile
 import threading
 import time
 import traceback
+import types
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -3987,8 +3989,9 @@ async def put_conduit_settings(request: Request, response: Response, profile: Op
 # the wire) and then posts sealed batches of HealthKit totals and events
 # (/health/ingest) straight here, never through the push relay. The store
 # (health_store.py) keeps them in the profile's conduit-health.sqlite3 for the
-# conduit_health tool. No route returns health data: status reports counts
-# and dates only, and wipe deletes.
+# conduit_health tool. Status reports counts and dates only and wipe
+# deletes; the one route that returns health data is the sealed voice read
+# below, which answers only the device that shared it.
 
 HEALTH_KEY_LIMIT = 10
 HEALTH_KEY_WINDOW_S = 60.0
@@ -4010,19 +4013,33 @@ _health_wipe_limiter = _MintLimiter(HEALTH_WIPE_LIMIT, HEALTH_WIPE_WINDOW_S,
 _health_store_module: Any = None
 
 
+# health_store.py and health_tool.py beside this folder, imported as one
+# private package (its __init__ never runs, so nothing registers with Hermes
+# here) so the tool's relative import finds the same store module.
+DASHBOARD_PACKAGE = "conduit_push_dashboard_pkg"
+
+
+def _plugin_package_module(name: str) -> Any:
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with _calls_store_lock:
+        if DASHBOARD_PACKAGE not in sys.modules:
+            package = types.ModuleType(DASHBOARD_PACKAGE)
+            package.__path__ = [root]
+            sys.modules[DASHBOARD_PACKAGE] = package
+    try:
+        return importlib.import_module(f"{DASHBOARD_PACKAGE}.{name}")
+    except ModuleNotFoundError as exc:
+        if exc.name != f"{DASHBOARD_PACKAGE}.{name}":
+            raise
+        raise TokenError(501, f"This plugin install is missing {name}.py; update the plugin") from None
+
+
 def _health_store() -> Any:
     """health_store.py beside this folder, loaded once."""
     global _health_store_module
-    with _calls_store_lock:
-        if _health_store_module is None:
-            path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "health_store.py")
-            spec = importlib.util.spec_from_file_location("conduit_push_dashboard_health_store", path)
-            if spec is None or spec.loader is None:
-                raise TokenError(501, "This plugin install is missing health_store.py; update the plugin")
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            _health_store_module = module
-        return _health_store_module
+    if _health_store_module is None:
+        _health_store_module = _plugin_package_module("health_store")
+    return _health_store_module
 
 
 def _health_call(fn: Callable[[Any], Dict[str, Any]]) -> Dict[str, Any]:
@@ -4096,6 +4113,117 @@ async def post_health_wipe(request: Request, response: Response, profile: Option
     return await _health_route(response, profile, lambda: _health_call(lambda store: store.wipe(device_id)), "delete")
 
 
+# --- Voice tools (a live voice call reads the user's shared data) ------------
+#
+# Gemini Live, Grok Live and GPT-Live run at Google, xAI and OpenAI, driven by
+# Conduit on the phone, so they can't call Hermes' own tools. With the user's
+# say-so (a switch per voice mode in Conduit's Settings > Health, off by
+# default, naming the voice provider), Conduit offers them read-only versions of
+# conduit_health here: GET /voice-tools lists what this profile can answer,
+# with the description and parameters Hermes' own tool has, and
+# POST /voice-tools/call runs the same handler.
+#
+# This is the one route that returns health data, so it answers only the
+# device that shared it: the request and the answer are sealed with that
+# device's own health key (its own HKDF directions, separate from ingest), so
+# dashboard access alone opens nothing, and the read covers only the data that
+# device uploaded, matched by id. Read actions only; Conduit keeps the log of
+# what each call read. That switch is Conduit's: the host can't see it, and
+# the seal is the host's boundary (only the device can ask, and only about
+# itself). (hermes-conduit designs/voice-health-location.md)
+
+VOICE_TOOLS_LIMIT = 60
+VOICE_TOOLS_WINDOW_S = 60.0
+VOICE_TOOLS_MAX_BODY_BYTES = 8 * 1024
+VOICE_TOOLS_TIMEOUT_S = 10.0
+# A read is a few indexed SQLite queries; a timed-out one keeps its worker
+# until it finishes (threads can't be cancelled), which the 60/min cap and
+# SQLite's 15 s busy timeout bound.
+VOICE_TOOLS_WORKERS = 2
+
+_voice_tools_limiter = _MintLimiter(VOICE_TOOLS_LIMIT, VOICE_TOOLS_WINDOW_S,
+                                    message="Too many voice reads; try again shortly")
+_voice_tools_executor = ThreadPoolExecutor(max_workers=VOICE_TOOLS_WORKERS, thread_name_prefix="conduit-voice-tools")
+
+
+_VOICE_PROVIDER = re.compile(r"[a-z0-9-]{1,40}")
+
+
+def _voice_tool_entries() -> Dict[str, Dict[str, Any]]:
+    """Voice-readable tools by name: their schema, and which sealed key they use."""
+    tool = _plugin_package_module("health_tool")
+    store = tool.HealthStore(_calls_home())
+    entries: Dict[str, Dict[str, Any]] = {}
+    if store.overview()["devices"]:
+        entries[tool.TOOL_NAME] = {
+            "key": "health",
+            "description": f"{tool.SCHEMA['description']} {tool.VOICE_NOTE}",
+            "parameters": tool.voice_parameters(),
+        }
+    return entries
+
+
+def voice_tools_list() -> Dict[str, Any]:
+    return {"tools": [{"name": name, **entry} for name, entry in _voice_tool_entries().items()]}
+
+
+def voice_tools_call(envelope: Any) -> Dict[str, Any]:
+    tool = _plugin_package_module("health_tool")
+    if not isinstance(envelope, dict) or envelope.get("tool") != tool.TOOL_NAME:
+        raise TokenError(404, "This host has no voice tool by that name")
+    store = tool.HealthStore(_calls_home())
+    try:
+        device_id, request, seal_answer = store.open_voice_request(envelope)
+    except tool.HealthError as exc:
+        raise TokenError(exc.status, str(exc)) from exc
+    provider = request.get("provider")
+    args = request.get("args")
+    action = args.get("action") if isinstance(args, dict) else None
+    logger.info("Conduit voice read: %s %s for %s", tool.TOOL_NAME,
+                action if isinstance(action, str) and action in tool.VOICE_ACTIONS else "other",
+                provider if isinstance(provider, str) and _VOICE_PROVIDER.fullmatch(provider) else "voice")
+    return {"v": 1, **seal_answer(tool.voice_handle(args, device_id=device_id, store=store))}
+
+
+async def _voice_tools_route(response: Response, profile: Optional[str], fn: Callable[[], Dict[str, Any]],
+                             name: str) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return {"ok": True, **(await asyncio.wait_for(_run_scoped(profile, fn, _voice_tools_executor),
+                                                       timeout=VOICE_TOOLS_TIMEOUT_S))}
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail=f"Voice tools {name} timed out",
+                            headers={"Cache-Control": "no-store"})
+    except TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
+        raise
+    except Exception as exc:
+        raise _unexpected(name, exc, feature="Voice tools")
+
+
+@router.get("/voice-tools")
+async def get_voice_tools(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        _voice_tools_limiter.acquire(_limiter_key(profile))
+    except TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+    return await _voice_tools_route(response, profile, voice_tools_list, "list")
+
+
+@router.post("/voice-tools/call")
+async def post_voice_tools_call(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        _voice_tools_limiter.acquire(_limiter_key(profile))
+    except TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+    body = await _read_json_body(request, VOICE_TOOLS_MAX_BODY_BYTES)
+    return await _voice_tools_route(response, profile, lambda: voice_tools_call(body), "call")
+
+
 # --- Calendar, Reminders, Focus and phone status (shared from Conduit) ------
 #
 # The user turns on each kind in Conduit. The phone agrees a key with this
@@ -4135,18 +4263,12 @@ _phone_store_module: Any = None
 
 
 def _phone_store() -> Any:
-    """phone_store.py beside this folder, loaded once."""
+    """phone_store.py beside this folder, loaded once (as part of the
+    private package, like health_store, so a voice read can share it)."""
     global _phone_store_module
-    with _calls_store_lock:
-        if _phone_store_module is None:
-            path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "phone_store.py")
-            spec = importlib.util.spec_from_file_location("conduit_push_dashboard_phone_store", path)
-            if spec is None or spec.loader is None or not os.path.exists(path):
-                raise TokenError(501, "This plugin install is missing phone_store.py; update the plugin")
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            _phone_store_module = module
-        return _phone_store_module
+    if _phone_store_module is None:
+        _phone_store_module = _plugin_package_module("phone_store")
+    return _phone_store_module
 
 
 def _phone_call(fn: Callable[[Any], Dict[str, Any]]) -> Dict[str, Any]:
@@ -8461,6 +8583,7 @@ ROUTE_CAPABILITIES = (
     "hermes-call-outcomes",
     "conduit-settings",
     "health-sync",
+    "voice-tools",
     "phone-sync",
     "pairing",
     "self-restart",
