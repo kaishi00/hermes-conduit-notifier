@@ -35,6 +35,7 @@ from hermes_constants import get_hermes_home
 
 from . import client
 from .calls_store import CallStore
+from .location_store import LocationStore
 from .events import push_event
 
 logger = logging.getLogger("hermes.plugins.conduit_push")
@@ -70,7 +71,17 @@ def _clock() -> float:
 
 
 def _store(home: Any) -> CallStore:
-    return CallStore(home, clock=lambda: _clock())
+    return CallStore(home, clock=lambda: _clock(), place_blocked=lambda settings: _place_blocked(home, settings))
+
+
+def _place_blocked(home: Any, settings: dict[str, Any]) -> bool:
+    """Whether the user is at a saved place they don't want calls at (or
+    Conduit can't say where they are and they asked to count that too)."""
+    place = LocationStore(home, clock=lambda: _clock()).latest_place()
+    known = place is not None and place["trusted"] and not place["paused"]
+    if not known:
+        return bool(settings["avoid_unknown_place"])
+    return place["place_id"] in settings["avoid_places"]
 
 
 def turn_ended(session_id: str, outcome: str, *, profile: str, fallback: dict[str, Any] | None) -> bool:

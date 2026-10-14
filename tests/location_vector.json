@@ -1,0 +1,14 @@
+{
+  "host_private": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+  "host_public": "j0DFrbaPJWJK5bIU6nZ6bslNgp09e14a0bpvPiE4KF8",
+  "device_private": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8",
+  "device_public": "NYBy1jZYgNGu6jKa35EhODhR7SGijjt16WXQ0s0WYlQ",
+  "device_id": "device-vector-1",
+  "batch_id": "batch-vector-1",
+  "kid": "4186c0bc93b7b264b5991464ab3e4c1f",
+  "key": "e97fd9902f44b9a9c5ffacd40612f58a471a56b5ab28c6e66f87efc04840fa6e",
+  "aad": "conduit-location/1\ningest\nkid=4186c0bc93b7b264b5991464ab3e4c1f\ndev=device-vector-1\nbatch=batch-vector-1",
+  "nonce": "AAAAAAAAAAAAAAAA",
+  "plaintext": "{\"batch_id\":\"batch-vector-1\"}",
+  "ct": "upKO2AMUfh95gixFbp-_E9hsTT76TlUyHHlwzdREWwCk0Gf-Nr6Oz98FPEP_"
+}

@@ -73,8 +73,16 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # ("only if production is down"): Hermes reads them before such a call
     # (call_tool). Empty: the skill's rule alone.
     "rules": "",
+    # Saved places (Conduit's ids, location sharing) where the phone must
+    # not ring: a call then sends the usual notification.
+    # avoid_unknown_place: also hold calls while Conduit can't say where the
+    # user is (no recent location, or sharing paused or off).
+    "avoid_places": [],
+    "avoid_unknown_place": False,
 }
-BOOL_SETTINGS = ("enabled", "when_asked", "decides", "alerts")
+BOOL_SETTINGS = ("enabled", "when_asked", "decides", "alerts", "avoid_unknown_place")
+MAX_AVOID_PLACES = 20
+_PLACE_ID = re.compile(r"^[A-Za-z0-9_-]{1,40}\Z")
 MAX_RULES_CHARS = 500
 # Inclusive bounds. per_day stops at the relay's own daily ceiling.
 INT_BOUNDS: dict[str, tuple[int, int]] = {
@@ -130,9 +138,14 @@ _thread_lock = threading.Lock()
 
 
 class CallStore:
-    def __init__(self, home: Path, clock: Callable[[], float] = time.time) -> None:
+    def __init__(self, home: Path, clock: Callable[[], float] = time.time,
+                 place_blocked: Callable[[dict[str, Any]], bool] | None = None) -> None:
         self.path = Path(home) / FILE_NAME
         self.clock = clock
+        # Whether the user is at a place they don't want calls at, given the
+        # settings (calls.py asks the location store; the dashboard never
+        # decides calls, so it passes nothing).
+        self.place_blocked = place_blocked
 
     # --- Settings ---------------------------------------------------------
 
@@ -156,6 +169,11 @@ class CallStore:
                 if rules is None:
                     raise ValueError(f"rules must be text of up to {MAX_RULES_CHARS} characters")
                 kept[key] = rules
+            elif key == "avoid_places":
+                places = _place_ids(value)
+                if places is None:
+                    raise ValueError(f"avoid_places must be a list of up to {MAX_AVOID_PLACES} place ids")
+                kept[key] = places
             else:
                 raise ValueError(f"unknown setting {key}")
         with self._locked() as state:
@@ -284,14 +302,14 @@ class CallStore:
             now = self.clock()
             watch = _new_watch(ids, now, origin="alert", reason=_reason(reason))
             if not seed:
-                return _decide(state, watch, kind, now)
+                return _decide(state, watch, kind, now, self.place_blocked)
             watch["id"] = hashlib.sha256("\0".join([kind, *ids, seed]).encode()).hexdigest()[:24]
             earlier = next((entry for entry in state["seeded"] if entry["id"] == watch["id"]), None)
             if earlier is not None:
                 # Not held back by the gap the first call opened: that would
                 # send the failure notification beside its ring.
                 return {"watch": watch, "outcome": kind, "status": earlier["status"]}
-            result = _decide(state, watch, kind, now)
+            result = _decide(state, watch, kind, now, self.place_blocked)
             state["seeded"] = [*state["seeded"], {"id": watch["id"], "status": result["status"], "at": now}][-MAX_SEEDED:]
             return result
 
@@ -440,7 +458,7 @@ class CallStore:
                 return {"watch": dict(watch), "outcome": pending["outcome"] if pending else None, "status": "held",
                         "until": watch["hold_until"]}
             state["watches"].pop(index)
-            return _decide(state, watch, outcome, now)
+            return _decide(state, watch, outcome, now, self.place_blocked)
 
     def fire_due(self) -> list[dict[str, Any]]:
         """Watches whose job ended while held and whose hold has run out
@@ -456,7 +474,7 @@ class CallStore:
                 return []
             due_ids = {watch["id"] for watch in due}
             state["watches"] = [watch for watch in state["watches"] if watch["id"] not in due_ids]
-            return [{**_decide(state, watch, watch["pending"]["outcome"], now),
+            return [{**_decide(state, watch, watch["pending"]["outcome"], now, self.place_blocked),
                      "session_id": watch["pending"]["session_id"]} for watch in due]
 
     def next_due(self) -> float | None:
@@ -529,7 +547,8 @@ def _allowed(settings: dict[str, Any], watch: dict[str, Any]) -> bool:
     return True
 
 
-def _decide(state: dict[str, Any], watch: dict[str, Any], outcome: str, now: float) -> dict[str, Any]:
+def _decide(state: dict[str, Any], watch: dict[str, Any], outcome: str, now: float,
+            place_blocked: Callable[[dict[str, Any]], bool] | None = None) -> dict[str, Any]:
     """Whether a consumed watch calls, within the user's settings and limits.
     A call counts against them once decided, even if its delivery later fails
     (the usual push goes out then): erring towards fewer calls, never more."""
@@ -540,6 +559,14 @@ def _decide(state: dict[str, Any], watch: dict[str, Any], outcome: str, now: flo
     if state["presence_until"] > now or (watch["origin"] != "conduit" and _in_call(state, now)):
         # The user is talking to Hermes right now: no ringing over it.
         return {**result, "status": "busy"}
+    if place_blocked is not None and (settings["avoid_places"] or settings["avoid_unknown_place"]):
+        try:
+            blocked = place_blocked(settings)
+        except Exception:  # noqa: BLE001 — a broken location store never stops a call
+            blocked = False
+        if blocked:
+            # Not counted against the limits: nothing rang.
+            return {**result, "status": "limited", "reason": "place"}
     history = state["history"]
     if history and now - max(history) < settings["min_gap_s"]:
         return {**result, "status": "limited", "reason": "gap"}
@@ -574,6 +601,7 @@ def _normalized(raw: Any, now: float) -> dict[str, Any]:
         if isinstance(value, int) and not isinstance(value, bool) and low <= value <= high:
             settings[key] = value
     settings["rules"] = _rules(stored.get("rules")) or ""
+    settings["avoid_places"] = _place_ids(stored.get("avoid_places")) or []
     watches = []
     for watch in raw.get("watches") if isinstance(raw.get("watches"), list) else []:
         try:
@@ -684,6 +712,15 @@ def _rules(value: Any) -> str | None:
     lines = ("".join(char for char in line if char.isprintable()).strip() for line in value.splitlines())
     text = "\n".join(line for line in lines if line)
     return text if len(text) <= MAX_RULES_CHARS else None
+
+
+def _place_ids(value: Any) -> list[str] | None:
+    """Saved place ids, deduplicated in order. None when malformed."""
+    if not isinstance(value, list) or len(value) > MAX_AVOID_PLACES:
+        return None
+    if any(not isinstance(item, str) or not _PLACE_ID.match(item) for item in value):
+        return None
+    return list(dict.fromkeys(value))
 
 
 @contextmanager

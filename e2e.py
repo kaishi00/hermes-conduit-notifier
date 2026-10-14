@@ -32,6 +32,9 @@ import zlib
 from dataclasses import dataclass
 from typing import Any
 
+# Same shape events.py checks; repeated so e2e stays import-free of events.
+_LOCATE_ID = re.compile(r"^l_[A-Za-z0-9_-]{16,64}\Z")
+
 VERSION = 1
 SALT = b"conduit-e2e-v1"
 INFO_PUSH = b"conduit-e2e-v1 push gateway-to-device"
@@ -46,7 +49,8 @@ SECRET_BYTES = 32
 MAX_CT_CHARS = 2600
 # Fields that carry content. Everything else on an event stays visible to the
 # relay because it routes on it.
-INNER_FIELDS = ("title", "body", "session_id", "profile", "gateway", "stored_session_id", "decision", "call")
+INNER_FIELDS = ("title", "body", "session_id", "profile", "gateway", "stored_session_id", "decision", "call",
+                "locate")
 
 KID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 _B64URL_PATTERN = re.compile(r"^[A-Za-z0-9_-]*$")
@@ -236,7 +240,8 @@ def seal_event(
         envelope = attempt(inner)
     if envelope is None:
         # Only routing survives; the phone shows the generic banner.
-        inner = {key: value for key, value in inner.items() if key in ("session_id", "profile", "stored_session_id", "call")}
+        inner = {key: value for key, value in inner.items() if key in ("session_id", "profile", "stored_session_id", "call",
+                                                                     "locate")}
         envelope = attempt(inner)
     if envelope is None:
         raise E2EError("the event does not fit an encrypted push")
@@ -258,6 +263,11 @@ def content_free(event: dict[str, Any], keys: Keys | None = None) -> dict[str, A
         "type": event.get("type"),
     }
     _copy_routing(event, outgoing)
+    if event.get("type") == "location.requested" and isinstance(event.get("locate"), dict):
+        # Only the request id the phone answers with: routing, not content.
+        locate_id = event["locate"].get("id")
+        if isinstance(locate_id, str) and _LOCATE_ID.match(locate_id):
+            outgoing["locate"] = {"id": locate_id}
     return outgoing
 
 
