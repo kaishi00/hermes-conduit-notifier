@@ -1092,7 +1092,10 @@ workouts, body, vitals, fitness), with how far back to start.
   for every other dashboard route; push pairing isn't needed. A signed-in
   client could register a new key under a phone's device id and send data
   in its name (the phone notices on its next sync and sets up a new key),
-  so treat dashboard access as access to your health data.
+  so treat dashboard access as access to your health data. A new device key
+  for a device id drops what the earlier key sent (the phone sends it all
+  again), so a re-key can't be used to read a phone's data back; the same
+  device key again keeps it, since only that phone can use it.
 - **Summaries first.** Conduit sends the hourly and daily totals Apple
   Health computes on the phone (iPhone and Watch already merged), a summary
   per night of sleep, sleep stage segments and workouts. Raw readings go
@@ -1102,7 +1105,7 @@ workouts, body, vitals, fitness), with how far back to start.
   or reading stays deleted. `GET /health/status` reports counts and dates,
   never values; `POST /health/wipe` deletes one device's data and key (or
   everything with `{"all": true}`), and Conduit's "Delete health data on
-  this host" calls it. No route returns health data.
+  this host" calls it. Only the voice read below returns health data.
 - **Read-only tool.** `conduit_health` (actions `overview`, `daily`,
   `hourly`, `sleep`, `workouts`, `samples`; at most 92 days per call) with
   its skill `conduit_push:reading-health-data`. It shows only once a phone
@@ -1113,7 +1116,33 @@ workouts, body, vitals, fitness), with how far back to start.
 Limits: 4 devices per profile, 6,000 items and 4 MiB per batch, 120 uploads
 a minute per profile.
 
-## Location from Conduit (plugin 0.25+)
+### Voice reads (plugin 0.25+)
+
+Gemini Live, Grok Live and GPT-Live run at Google, xAI and OpenAI, driven by
+Conduit, so they can't call Hermes' tools. When the user lets a voice mode read
+their health data in Conduit's Settings > Health (off by default and asked per
+mode, naming the voice provider, since that company may not be the one Hermes
+uses), Conduit offers the voice model `conduit_health` with Hermes' own
+description and parameters (minus `device`: a voice read covers only the
+asking phone), and runs each call here. That switch lives in Conduit; the
+host's boundary is the seal:
+
+| Method | Route | Returns |
+| --- | --- | --- |
+| GET | `/api/plugins/conduit_push/voice-tools` | Tools this profile can answer for voice (name, description, parameters, which key seals them); empty until a phone has synced |
+| POST | `/api/plugins/conduit_push/voice-tools/call` | One sealed read: `{v: 1, tool, device_id, kid, call_id, nonce, ct}` in, `{v: 1, nonce, ct}` out |
+
+- **Sealed both ways with the device's own health key**, with its own HKDF
+  directions (`conduit-health-v1 voice device-to-host` / `host-to-device`)
+  and associated data binding the tool, key, device and call id. Dashboard access
+  alone opens nothing.
+- **Only the asking device's data**, matched by id (never by name), so
+  another device or a newly registered key reads nothing.
+- Read actions only (the same handler as `conduit_health`), 60 reads a
+  minute per profile. Conduit keeps the log of what each call read.
+  Shared vector: `tests/health_vector.json` (`voice`).
+
+## Location from Conduit (plugin 0.26+)
 
 Conduit can tell a Hermes profile where the user is. It's a building block
 rather than one feature: the agent can answer "how far am I from work?",
