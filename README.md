@@ -1179,7 +1179,7 @@ marked private is reported only as "at a private place".
   `history`, `distance_to`, `rules`, `set_rule`, `remove_rule`) with its
   skill `conduit_push:using-location`. It answers "paused" or "off" when the
   user has paused sharing, logs every read, and subagents can't use it.
-- **Voice reads** (plugin 0.27): when the user lets a voice mode read their
+- **Voice reads** (plugin 0.28): when the user lets a voice mode read their
   location in Conduit's Settings > Location (off by default, per mode,
   naming the voice provider), `/voice-tools` also offers `conduit_location`
   with only `now`, `places`, `history` and `distance_to` (key `location`),
