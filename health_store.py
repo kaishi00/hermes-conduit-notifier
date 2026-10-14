@@ -402,7 +402,10 @@ class HealthStore:
                 " ON CONFLICT(id) DO UPDATE SET name=excluded.name, device_public=excluded.device_public,"
                 " host_private=excluded.host_private, host_public=excluded.host_public, kid=excluded.kid,"
                 " created_at=excluded.created_at,"
-                " last_seen=CASE WHEN devices.device_public=excluded.device_public THEN devices.last_seen END",
+                " last_seen=CASE WHEN devices.device_public=excluded.device_public THEN devices.last_seen END,"
+                " tz=CASE WHEN devices.device_public=excluded.device_public THEN devices.tz END,"
+                " categories=CASE WHEN devices.device_public=excluded.device_public THEN devices.categories END,"
+                " detailed=CASE WHEN devices.device_public=excluded.device_public THEN devices.detailed END",
                 (device_id, name, device_public, host_private, host_public, kid, now),
             )
             generation = _meta(db, "generation")

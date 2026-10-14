@@ -4177,7 +4177,7 @@ def voice_tools_call(envelope: Any) -> Dict[str, Any]:
     args = request.get("args")
     action = args.get("action") if isinstance(args, dict) else None
     logger.info("Conduit voice read: conduit_health %s for %s",
-                action if action in tool.VOICE_ACTIONS else "other",
+                action if isinstance(action, str) and action in tool.VOICE_ACTIONS else "other",
                 provider if isinstance(provider, str) and _VOICE_PROVIDER.fullmatch(provider) else "voice")
     return {"v": 1, **seal_answer(tool.voice_handle(args, device_id=device_id, store=store))}
 

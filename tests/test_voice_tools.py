@@ -170,7 +170,9 @@ def test_a_new_key_for_the_same_device_id_reads_none_of_the_old_data(client):
     intruder = VoicePhone(device_id=DEVICE)
     _share(client, intruder)
     assert _call(client, intruder, {"action": "daily", "metrics": ["steps"]})["error"] == "nothing_shared"
-    assert client.get(f"{BASE}/health/status", params={"device_id": DEVICE}).json()["device"]["rows"] == {}
+    status = client.get(f"{BASE}/health/status", params={"device_id": DEVICE}).json()["device"]
+    assert status["rows"] == {}
+    assert not status.get("categories"), "what the old key said it shared goes with its data"
     # The real phone gets 409 on its next sync, sets up a key and sends it all again.
     assert client.post(f"{BASE}/health/ingest", json=owner.seal(_batch("batch-0002"))).status_code == 409
 
@@ -213,11 +215,12 @@ def test_the_tool_list_shares_the_voice_rate_limit(client, monkeypatch):
     assert client.get(f"{BASE}/voice-tools").status_code == 429
 
 
-def test_the_log_line_carries_only_known_words(client, caplog):
+@pytest.mark.parametrize("action", ["x\nforged", ["overview"], {"a": 1}])
+def test_the_log_line_carries_only_known_words(client, caplog, action):
     phone = VoicePhone()
     _share(client, phone, _batch())
     call_id = "call-log-0001"
-    body = json.dumps({"call_id": call_id, "args": {"action": "x\nforged"}, "provider": "Evil\nline"}).encode()
+    body = json.dumps({"call_id": call_id, "args": {"action": action}, "provider": "Evil\nline"}).encode()
     nonce, ct = health.seal(phone.request_key, body,
                             health.voice_aad("request", "conduit_health", phone.kid, phone.device_id, call_id))
     envelope = {"v": 1, "tool": "conduit_health", "device_id": phone.device_id, "kid": phone.kid,
