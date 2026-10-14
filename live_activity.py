@@ -190,7 +190,7 @@ class LiveActivityReporter:
         try:
             used = float(prompt_tokens)
             limit = float(context_length)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return
         if not (math.isfinite(used) and math.isfinite(limit)) or limit <= 0 or used < 0:
             return
@@ -307,7 +307,7 @@ class LiveActivityReporter:
                 del self._turns[session_id]
                 self._ended[session_id] = self._clock()
 
-    def _update(self, session_id: str, *, phase: str | None = None, tool: str | None = _UNSET,
+    def _update(self, session_id: str, *, phase: str | None = None, tool: str | None | object = _UNSET,
                 context: int | None = None, count_tool: bool = False) -> None:
         if not session_id:
             return
@@ -319,7 +319,7 @@ class LiveActivityReporter:
             if phase is not None:
                 turn.phase = phase
             if tool is not _UNSET:
-                turn.tool = tool
+                turn.tool = tool  # type: ignore[assignment]
             if count_tool:
                 turn.tools += 1
             if context is not None:
