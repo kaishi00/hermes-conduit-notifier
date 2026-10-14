@@ -162,7 +162,10 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
     action = args.get("action")
     store = _store()
     if action == "rules":
-        _log(store, action, session)
+        # Nothing stored (never shared, or wiped): nothing read, and a log
+        # row would bring the wiped file back.
+        if store.exists():
+            _log(store, action, session)
         return {"ok": True, "rules": [_rule_view(rule) for rule in store.rules()],
                 "note": f"Up to {MAX_RULES} rules. They run only while the user shares location in the background."}
     if action == "remove_rule":

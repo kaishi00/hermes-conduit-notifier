@@ -410,6 +410,13 @@ def test_the_tool_hides_until_location_arrives(home):
     assert tool.available() is True
 
 
+def test_listing_rules_after_a_wipe_doesnt_bring_the_file_back(home):
+    store, _ = _shared(home, fix=fix())
+    store.wipe()
+    assert _call({"action": "rules"}, session_id="session-1")["rules"] == []
+    assert not store.path.exists()
+
+
 def test_now_says_where_how_old_and_never_a_private_distance(home):
     store, _ = _shared(home, fix=fix())
     answer = _call({"action": "now"}, session_id="session-1")
@@ -693,3 +700,10 @@ def test_a_redacted_profile_still_sends_the_locate_id():
                               locate={"id": "l_" + "a" * 20})
     assert events.redact_event(event)["locate"] == {"id": "l_" + "a" * 20}
     assert "locate" not in events.redact_event({**event, "locate": {"id": "bad\n"}})
+
+
+def test_a_content_free_locate_carries_only_a_valid_id():
+    from conduit_push import e2e
+    event = {"type": "location.requested", "event_id": "e1", "locate": {"id": "l_" + "a" * 20}}
+    assert e2e.content_free(event)["locate"] == {"id": "l_" + "a" * 20}
+    assert "locate" not in e2e.content_free({**event, "locate": {"id": "bad\n"}})

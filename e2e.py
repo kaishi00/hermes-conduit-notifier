@@ -32,6 +32,9 @@ import zlib
 from dataclasses import dataclass
 from typing import Any
 
+# Same shape events.py checks; repeated so e2e stays import-free of events.
+_LOCATE_ID = re.compile(r"^l_[A-Za-z0-9_-]{16,64}\Z")
+
 VERSION = 1
 SALT = b"conduit-e2e-v1"
 INFO_PUSH = b"conduit-e2e-v1 push gateway-to-device"
@@ -266,7 +269,9 @@ def content_free(event: dict[str, Any], keys: Keys | None = None) -> dict[str, A
             outgoing[field] = event[field]
     if event.get("type") == "location.requested" and isinstance(event.get("locate"), dict):
         # Only the request id the phone answers with: routing, not content.
-        outgoing["locate"] = {"id": event["locate"].get("id")}
+        locate_id = event["locate"].get("id")
+        if isinstance(locate_id, str) and _LOCATE_ID.match(locate_id):
+            outgoing["locate"] = {"id": locate_id}
     return outgoing
 
 
