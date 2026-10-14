@@ -1,6 +1,6 @@
 ---
 name: using-calendar
-description: How to use the calendar, reminders, Focus and phone status Conduit shares (conduit_calendar, conduit_phone): reading as of the last sync, asking the phone to add or change things, standing preferences, and keeping other people's details private.
+description: How to use the calendar, reminders, Focus, phone status, alarms and contacts Conduit shares (conduit_calendar, conduit_phone, conduit_contacts): reading as of the last sync, asking the phone to add or change things, standing preferences, and keeping other people's details private.
 ---
 
 # Using the user's calendar, reminders and phone
@@ -14,7 +14,14 @@ kind, which calendars and lists, and how far back and ahead.
 - `conduit_calendar` reads events and reminders and asks the phone to add
   or change them.
 - `conduit_phone` (`action: "status"`) says how the phone is doing and
-  which Focus is on.
+  which Focus is on. When the user lets Hermes set alarms and timers, it
+  also lists them (`alarms`) and sets or cancels them (`set_alarm`,
+  `set_timer`, `cancel_alarm`): they ring on the phone through Silent and
+  Focus, so set one only when the user asks or set it up.
+- `conduit_contacts` (`action: "people"`) lists the people the user picked
+  for you to know (name, nickname, relation such as "wife", numbers,
+  emails, birthday). Use it to know who "my wife" or "Sam" is; never send
+  their details anywhere or into memory unless the user asks.
 
 ## What it's for
 
@@ -60,6 +67,8 @@ the calendar and list names, and how fresh the copy is.
 | "What reminders are due this week?" | `reminders` with `due_before` |
 | "Which calendars do you see?" | `calendars` or `overview` |
 | "Is my phone charged? Am I in a Focus?" | `conduit_phone` `status` |
+| "Wake me at 6:30" / "Timer for 10 minutes" | `conduit_phone` `set_alarm` (`time` or `at`) / `set_timer` |
+| "When's Sam's birthday? What's my boss's number?" | `conduit_contacts` `people` with `query` |
 
 Dates are the user's local dates; `to` is inclusive. Times come back with
 the user's offset. Recurring events show one row per occurrence, each with

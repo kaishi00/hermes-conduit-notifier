@@ -284,7 +284,7 @@ def test_a_new_device_key_drops_the_device_data_and_the_same_key_keeps_it(store,
     fresh = Phone(DEVICE)
     fresh.accept(store.register_key(fresh.key_request()))
     status = store.status(DEVICE)["device"]
-    assert status["counts"] == {"events": 0, "reminders": 0, "calendars": 0} and status["pending"] == 0
+    assert status["counts"] == {"events": 0, "reminders": 0, "calendars": 0, "contacts": 0, "alarms": 0} and status["pending"] == 0
     assert status["last_sync"] is None
     assert store.ingest(fresh.seal(_batch("batch-0003")))["events"] == 5
 
@@ -368,7 +368,7 @@ def test_calendar_off_and_reminders_off_forget_them(store, iphone):
     store.ingest(iphone.seal(_batch()))
     store.ingest(iphone.seal(_batch("batch-0002", sent_at="2026-10-14T08:05:00+01:00",
                                     sharing=_sharing(calendar="off", reminders=False))))
-    assert store.status(DEVICE)["device"]["counts"] == {"events": 0, "reminders": 0, "calendars": 0}
+    assert store.status(DEVICE)["device"]["counts"] == {"events": 0, "reminders": 0, "calendars": 0, "contacts": 0, "alarms": 0}
     with pytest.raises(phone.PhoneError) as error:
         store.add_change("add_reminder", {"title": "Milk"})
     assert error.value.code == "nothing_shared"
@@ -483,7 +483,7 @@ def test_bad_batches_are_refused_whole(store, iphone, change, code):
     with pytest.raises(phone.PhoneError) as error:
         store.ingest(iphone.seal(batch))
     assert error.value.code == code
-    assert store.status(DEVICE)["device"]["counts"] == {"events": 0, "reminders": 0, "calendars": 0}
+    assert store.status(DEVICE)["device"]["counts"] == {"events": 0, "reminders": 0, "calendars": 0, "contacts": 0, "alarms": 0}
 
 
 def test_unshared_sections_are_dropped_unread(store, iphone):
@@ -492,13 +492,13 @@ def test_unshared_sections_are_dropped_unread(store, iphone):
     batch = _batch(sharing=_sharing(calendar="off", reminders=False, status=False, focus=False))
     batch["events"]["upsert"][0]["start"] = "garbage"
     store.ingest(iphone.seal(batch))
-    assert store.status(DEVICE)["device"]["counts"] == {"events": 0, "reminders": 0, "calendars": 0}
+    assert store.status(DEVICE)["device"]["counts"] == {"events": 0, "reminders": 0, "calendars": 0, "contacts": 0, "alarms": 0}
 
 
 def test_status_carries_counts_never_content(store, iphone):
     store.ingest(iphone.seal(_batch()))
     status = store.status(DEVICE)
-    assert status["device"]["counts"] == {"events": 5, "reminders": 3, "calendars": 5}
+    assert status["device"]["counts"] == {"events": 5, "reminders": 3, "calendars": 5, "contacts": 0, "alarms": 0}
     assert status["device"]["sharing"]["calendar"] == "full"
     assert "Dentist" not in json.dumps(status) and "Personal" not in json.dumps(status)
 
@@ -1063,3 +1063,213 @@ def test_a_broken_health_store_leaves_the_calendar_listed(client, monkeypatch):
     response = client.http.get(f"{BASE}/voice-tools")
     assert response.status_code == 200
     assert "conduit_calendar" in [tool["name"] for tool in response.json()["tools"]]
+
+
+# --- Alarms and contacts (plugin 0.30.0) -----------------------------------------------
+
+ALARMS = [
+    {"id": "a_wake", "kind": "alarm", "label": "Wake up", "fires_at": "2026-10-15T06:30:00+01:00",
+     "repeats": ["fri", "mon", "tue", "wed", "thu"]},
+    {"id": "a_pasta", "kind": "timer", "label": "Pasta", "fires_at": "2026-10-14T08:10:00+01:00",
+     "state": "countdown"},
+]
+CONTACTS = [
+    {"id": "p_sam", "name": "Sam Taylor", "nickname": "Sammy", "relation": "wife",
+     "phones": [{"label": "mobile", "number": "+44 7700 900123"}],
+     "emails": [{"label": "home", "address": "sam@example.com"}], "birthday": "--03-04", "organization": "Acme"},
+    {"id": "p_alex", "name": "Alex Kim", "relation": "boss", "birthday": "1980-02-29"},
+]
+
+
+def _phone_batch(batch_id="batch-0001", sent_at="2026-10-14T08:00:00+01:00", **sharing):
+    return _batch(batch_id, sent_at=sent_at, sharing=_sharing(**{"alarms": True, "contacts": True, **sharing}),
+                  alarms=ALARMS, contacts=CONTACTS)
+
+
+def test_a_version_1_store_upgrades_on_its_first_read_and_keeps_its_data(store, iphone):
+    import sqlite3
+    store.ingest(iphone.seal(_batch()))
+    db = sqlite3.connect(store.path)
+    db.execute("ALTER TABLE devices DROP COLUMN alarms")
+    db.execute("ALTER TABLE devices DROP COLUMN alarms_at")
+    db.execute("DROP TABLE contacts")
+    db.execute("UPDATE meta SET value='1' WHERE key='schema'")
+    db.commit()
+    db.close()
+    assert [device["id"] for device in store.devices()] == [DEVICE]
+    assert len(_events(store)) == 5
+    store.ingest(iphone.seal(_phone_batch("batch-0002", sent_at="2026-10-14T08:01:00+01:00")))
+    assert store.status(DEVICE)["device"]["counts"]["contacts"] == 2
+
+
+def test_alarms_and_contacts_land_and_are_forgotten_when_turned_off(store, iphone):
+    result = store.ingest(iphone.seal(_phone_batch()))
+    assert result["contacts"] == 2
+    with store.reader("alarms") as (db, device):
+        listed, listed_at = store.alarms(db, device["id"])
+        people = store.contacts(db, device["id"])
+        assert store.contacts(db, device["id"], query="WIFE")[0]["id"] == "p_sam"
+        assert store.contacts(db, device["id"], query="acme")[0]["id"] == "p_sam"
+    assert listed[0]["repeats"] == ["mon", "tue", "wed", "thu", "fri"] and listed[0]["state"] == "scheduled"
+    assert listed[1] == {"id": "a_pasta", "kind": "timer", "label": "Pasta", "fires_at": "2026-10-14T08:10:00+01:00",
+                         "state": "countdown"}
+    assert listed_at == NOW
+    assert people[0]["phones"] == [{"number": "+44 7700 900123", "label": "mobile"}]
+    assert people[1] == {"id": "p_alex", "name": "Alex Kim", "relation": "boss", "birthday": "1980-02-29"}
+    assert store.status(DEVICE)["device"]["counts"]["alarms"] == 2
+    # A batch without the sections keeps them; turning a switch off forgets.
+    store.ingest(iphone.seal(_batch("batch-0002", sent_at="2026-10-14T08:01:00+01:00",
+                                    sharing=_sharing(alarms=True, contacts=True))))
+    assert store.status(DEVICE)["device"]["counts"]["contacts"] == 2
+    store.ingest(iphone.seal(_batch("batch-0003", sent_at="2026-10-14T08:02:00+01:00", sharing=_sharing(),
+                                    alarms=ALARMS, contacts=CONTACTS)))
+    counts = store.status(DEVICE)["device"]["counts"]
+    assert counts["contacts"] == 0 and counts["alarms"] == 0
+
+
+@pytest.mark.parametrize("change, code", [
+    (lambda b: b.update(alarms=[{"id": "a_1", "kind": "nap"}]), "malformed"),
+    (lambda b: b.update(alarms=[{"id": "a_1", "kind": "alarm", "repeats": ["someday"]}]), "malformed"),
+    (lambda b: b.update(alarms=[{"id": "a b", "kind": "alarm"}]), "malformed"),
+    (lambda b: b.update(alarms=[{"id": f"a_{n}", "kind": "timer"} for n in range(51)]), "too_large"),
+    (lambda b: b.update(contacts=[{"id": "p_1"}]), "malformed"),
+    (lambda b: b.update(contacts=[{"id": "p_1", "name": "X", "phones": [{"number": "call me"}]}]), "malformed"),
+    (lambda b: b.update(contacts=[{"id": "p_1", "name": "X", "emails": [{"address": "nope"}]}]), "malformed"),
+    (lambda b: b.update(contacts=[{"id": "p_1", "name": "X", "birthday": "--02-30"}]), "malformed"),
+    (lambda b: b.update(contacts=[{"id": "p_1", "name": "X", "birthday": "1981-02-29"}]), "malformed"),
+    (lambda b: b.update(contacts=[{"id": f"p_{n}", "name": "X"} for n in range(201)]), "too_large"),
+])
+def test_bad_alarms_and_contacts_are_refused_whole(store, iphone, change, code):
+    batch = _phone_batch()
+    change(batch)
+    with pytest.raises(phone.PhoneError) as error:
+        store.ingest(iphone.seal(batch))
+    assert error.value.code == code
+    assert store.status(DEVICE)["device"]["counts"]["events"] == 0
+
+
+def test_alarm_changes_follow_the_contract(store, iphone):
+    store.ingest(iphone.seal(_batch()))
+    with pytest.raises(phone.PhoneError) as error:
+        store.add_change("set_timer", {"seconds": 600})
+    assert error.value.code == "nothing_shared"
+    store.ingest(iphone.seal(_phone_batch("batch-0002", sent_at="2026-10-14T08:01:00+01:00")))
+    once = store.add_change("set_alarm", {"label": "Flight", "at": "2026-10-16T05:15:00+01:00"})
+    assert once["fields"] == {"label": "Flight", "at": "2026-10-16T05:15:00+01:00"} and once["auto"] is False
+    assert once["summary"] == "Alarm Fri 16 Oct 05:15 · Flight" and once["calendar"] is None
+    weekdays = store.add_change("set_alarm", {"time": "06:30", "repeats": ["fri", "mon", "tue", "wed", "thu"]})
+    assert weekdays["fields"] == {"time": "06:30", "repeats": ["mon", "tue", "wed", "thu", "fri"]}
+    assert weekdays["summary"] == "Alarm 06:30 weekdays"
+    timer = store.add_change("set_timer", {"label": "Pasta", "seconds": 5400})
+    assert timer["fields"] == {"label": "Pasta", "seconds": 5400} and timer["summary"] == "Timer 1 h 30 min · Pasta"
+    cancel = store.add_change("cancel_alarm", {}, {"alarm_id": "a_wake"})
+    assert cancel["target"] == {"alarm_id": "a_wake"} and cancel["fields"] == {}
+    assert cancel["summary"] == "Cancel Alarm Thu 15 Oct 06:30 (repeats weekdays) · Wake up"
+    [first, *_] = iphone.changes(store)
+    assert first["kind"] == "set_alarm" and first["fields"]["at"] == "2026-10-16T05:15:00+01:00"
+    view = store.changes(mark_reported=False)
+    assert view[0]["kind"] == "cancel_alarm" and view[-1]["label"] == "Flight"
+    # Adds without asking cover alarms and timers; cancelling always asks.
+    store.ingest(iphone.seal(_phone_batch("batch-0003", sent_at="2026-10-14T08:02:00+01:00", auto_add=True)))
+    assert store.add_change("set_timer", {"seconds": 60})["auto"] is True
+    assert store.add_change("cancel_alarm", None, {"alarm_id": "a_pasta"})["auto"] is False
+
+
+@pytest.mark.parametrize("kind, fields, target, code", [
+    ("set_alarm", {"at": "2026-10-14T06:00:00+01:00"}, None, "in_past"),
+    ("set_alarm", {"at": "2026-10-16T05:15:00+01:00", "time": "05:15"}, None, "malformed"),
+    ("set_alarm", {}, None, "malformed"),
+    ("set_alarm", {"at": "2026-10-16T05:15:00+01:00", "repeats": ["mon"]}, None, "malformed"),
+    ("set_alarm", {"time": "25:00"}, None, "malformed"),
+    ("set_alarm", {"time": "6:30"}, None, "malformed"),
+    ("set_alarm", {"time": "06:30", "snooze": True}, None, "malformed"),
+    ("set_alarm", {"time": "06:30"}, {"alarm_id": "a_wake"}, "malformed"),
+    ("set_timer", {"seconds": 2}, None, "malformed"),
+    ("set_timer", {"seconds": 90000}, None, "malformed"),
+    ("set_timer", {"label": "Tea"}, None, "malformed"),
+    ("cancel_alarm", {}, {"alarm_id": "a_nope"}, "unknown_alarm"),
+    ("cancel_alarm", {"label": "x"}, {"alarm_id": "a_wake"}, "malformed"),
+])
+def test_bad_alarm_changes_are_refused(store, iphone, kind, fields, target, code):
+    store.ingest(iphone.seal(_phone_batch()))
+    with pytest.raises(phone.PhoneError) as error:
+        store.add_change(kind, fields, target)
+    assert error.value.code == code
+    assert store.changes() == []
+
+
+def _phone_tool(args, **kw):
+    return json.loads(tool.handle_phone(args, profile="work", **kw))
+
+
+def test_the_phone_tool_sets_alarms_and_timers(home):
+    store = phone.PhoneStore(home.path, clock=lambda: NOW)
+    handset = Phone()
+    handset.accept(store.register_key(handset.key_request()))
+    store.ingest(handset.seal(_batch(sharing=_sharing(calendar="off", reminders=False, status=False, focus=False,
+                                                      alarms=True), alarms=ALARMS)))
+    assert tool.phone_available() is True and tool.calendar_available() is False
+    assert _phone_tool({"action": "status"})["error"] == "nothing_shared"
+    listed = _phone_tool({"action": "alarms"})
+    assert [alarm["summary"] for alarm in listed["alarms"]] == [
+        "Alarm Thu 15 Oct 06:30 (repeats weekdays) · Wake up", "Timer · Pasta"]
+    timer = _phone_tool({"action": "set_timer", "seconds": 600, "label": "Pasta", "reason": "You asked"},
+                        session_id="s-1")
+    assert timer["status"] == "waiting_for_approval" and "starts when the phone applies it" in timer["note"]
+    assert home.sent[-1]["title"] == "Hermes wants to start a timer" and home.sent[-1]["body"] == "Timer 10 min · Pasta"
+    assert home.sent[-1]["profile"] == "work" and home.sent[-1]["mode"] == "alert"
+    [change] = handset.changes(store)
+    assert change["kind"] == "set_timer" and change["session_title"] == "Morning chat"
+    cancel = _phone_tool({"action": "cancel_alarm", "alarm_id": "a_wake"})
+    assert "always needs" in cancel["note"] and home.sent[-1]["title"] == "Hermes wants to cancel an alarm"
+    assert [item["kind"] for item in _phone_tool({"action": "pending"})["changes"]] == ["cancel_alarm", "set_timer"]
+    assert _phone_tool({"action": "set_alarm", "time": "7am"})["error"] == "malformed"
+    assert _phone_tool({"action": "add_event"})["error"] == "invalid"
+
+
+def test_an_alarm_without_asking_goes_as_a_background_wake(home):
+    _shared(home, alarms=True, auto_add=True)
+    added = _phone_tool({"action": "set_alarm", "time": "06:30"})
+    assert added["status"] == "queued"
+    assert home.sent[-1]["mode"] == "background" and home.sent[-1]["title"] == "Hermes is setting an alarm"
+
+
+def test_the_contacts_tool_reads_only_the_people_picked(home):
+    assert tool.contacts_available() is False
+    store = phone.PhoneStore(home.path, clock=lambda: NOW)
+    handset = Phone()
+    handset.accept(store.register_key(handset.key_request()))
+    store.ingest(handset.seal(_batch(sharing=_sharing(contacts=True), contacts=CONTACTS)))
+    assert tool.contacts_available() is True
+    people = json.loads(tool.handle_contacts({"action": "people"}))
+    assert [person["name"] for person in people["people"]] == ["Sam Taylor", "Alex Kim"]
+    assert json.loads(tool.handle_contacts({"action": "people", "query": "sammy"}))["people"][0]["id"] == "p_sam"
+    nobody = json.loads(tool.handle_contacts({"action": "people", "query": "Bob"}))
+    assert nobody["people"] == [] and "conduit://settings/phone" in nobody["note"]
+    assert json.loads(tool.handle_contacts({"action": "all"}))["error"] == "invalid"
+    child = {"session_id": "child", "is_child": lambda sid: sid == "child"}
+    assert json.loads(tool.handle_contacts({"action": "people"}, **child))["error"] == "subagent"
+    assert json.loads(tool.handle_phone({"action": "alarms"}, **child))["error"] == "subagent"
+
+
+def test_voice_lists_alarms_and_contacts_reads_once_shared(client):
+    handset = _route_shared(client, status=False, focus=False, alarms=True, contacts=True)
+    batch = _batch("batch-0002", sent_at=datetime.now(timezone.utc).isoformat(),
+                   sharing=_sharing(status=False, focus=False, alarms=True, contacts=True),
+                   alarms=ALARMS, contacts=CONTACTS)
+    assert client.http.post(f"{BASE}/phone/ingest", json=handset.seal(batch)).status_code == 200
+    tools = {item["name"]: item for item in client.http.get(f"{BASE}/voice-tools").json()["tools"]}
+    assert tools["conduit_phone"]["parameters"]["properties"]["action"]["enum"] == ["alarms"]
+    assert set(tools["conduit_contacts"]["parameters"]["properties"]) == {"action", "query"}
+    assert tools["conduit_contacts"]["key"] == "phone"
+    alarms = _voice_read(client, handset, "conduit_phone", {"action": "alarms"})
+    assert [alarm["id"] for alarm in alarms["alarms"]] == ["a_wake", "a_pasta"]
+    people = _voice_read(client, handset, "conduit_contacts", {"action": "people", "query": "boss"},
+                         call_id="voice-00000002")
+    assert [person["id"] for person in people["people"]] == ["p_alex"]
+    refused = _voice_read(client, handset, "conduit_phone", {"action": "set_timer", "seconds": 60},
+                          call_id="voice-00000003")
+    assert refused["error"] == "invalid"
+    status = _voice_read(client, handset, "conduit_phone", {"action": "status"}, call_id="voice-00000004")
+    assert status["error"] == "not_shared"
+    assert phone.PhoneStore(client.home).changes(20) == []

@@ -4229,8 +4229,9 @@ def voice_tools_call(envelope: Any) -> Dict[str, Any]:
 
 
 def _phone_voice_call(envelope: Dict[str, Any]) -> Dict[str, Any]:
-    """A calendar or phone status read, sealed with the device's phone
-    exchange keys (op "voice"); the tool's name is inside the seal."""
+    """A calendar, phone status, alarms or contacts read, sealed with the
+    device's phone exchange keys (op "voice"); the tool's name is inside the
+    seal."""
     phone = _plugin_package_module("phone_tool")
     store = phone.PhoneStore(_calls_home())
     try:
@@ -4238,13 +4239,14 @@ def _phone_voice_call(envelope: Dict[str, Any]) -> Dict[str, Any]:
     except phone.PhoneError as exc:
         raise TokenError(exc.status, str(exc)) from exc
     name = request.get("tool")
-    if name not in (phone.CALENDAR_TOOL, phone.PHONE_TOOL):
+    if name not in phone.VOICE_TOOLS:
         raise TokenError(404, "This host has no voice tool by that name")
     provider = request.get("provider")
     args = request.get("args")
     action = args.get("action") if isinstance(args, dict) else None
     logger.info("Conduit voice read: %s %s for %s", name,
-                action if isinstance(action, str) and action in phone.VOICE_CALENDAR_ACTIONS + ("status",) else "other",
+                action if isinstance(action, str)
+                and action in phone.VOICE_CALENDAR_ACTIONS + phone.VOICE_PHONE_ACTIONS + ("people",) else "other",
                 provider if isinstance(provider, str) and _VOICE_PROVIDER.fullmatch(provider) else "voice")
     return {"v": 1, **seal_answer({"result": phone.voice_handle(name, args, device_id=device_id, store=store)})}
 
@@ -8843,6 +8845,8 @@ ROUTE_CAPABILITIES = (
     "health-sync",
     "voice-tools",
     "phone-sync",
+    "phone-alarms",
+    "phone-contacts",
     "location-sync",
     "pairing",
     "self-restart",

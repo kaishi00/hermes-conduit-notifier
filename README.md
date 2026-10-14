@@ -1152,7 +1152,10 @@ tool's name inside the seal: `{call_id, tool, args, provider}` in, `{call_id,
 result}` out), answered for the asking phone only. Conduit asks for this per
 voice mode in Settings > Calendar & phone. Adding an event or reminder in a
 call is the phone's own tool, with spoken confirmation, so no write is offered
-here.
+here. With plugin 0.30, `conduit_phone` also offers `alarms` (the alarms and
+timers Hermes set) and `conduit_contacts` (`people`) joins the list, each once
+a phone shares it; setting an alarm or timer in a call is the phone's own tool
+too.
 
 ## Location from Conduit (plugin 0.26+)
 
@@ -1274,8 +1277,22 @@ whether notes and attendees are included (off by default).
   ("as of" the last sync). What they return goes to your agent's model like
   any tool result, which Conduit tells the user before they turn sharing on.
 
-Limits: 4 devices per profile, 5,000 items and 4 MiB per batch, 120 uploads
-and 60 exchanges a minute per profile, 64 KiB per exchange.
+- **Alarms and timers (plugin 0.30+).** When the user lets Hermes set them
+  (AlarmKit, iOS 26), `conduit_phone` gains `alarms` (the alarms and timers
+  Hermes set that are still on: iOS shows an app only its own), `set_alarm`
+  (one-off `at`, or `time` HH:MM with `repeats` days), `set_timer`
+  (`seconds`) and `cancel_alarm`, as pending changes like calendar writes.
+  They ring through Silent and Focus. Setting one goes without asking when
+  the user lets Hermes add without asking; cancelling always asks.
+- **Contacts (plugin 0.30+).** Only the people the user picks in Conduit
+  (no address book permission): name, nickname, a relation the user types
+  ("wife"), phone numbers, emails, birthday and organization, read with
+  `conduit_contacts` (`people`, with an optional `query`). Turned off, they
+  are deleted here.
+
+Limits: 4 devices per profile, 5,000 items and 4 MiB per batch, 50 alarms and
+200 contacts per device, 120 uploads and 60 exchanges a minute per profile,
+64 KiB per exchange.
 
 ## Apple Watch lookups and jobs (plugin 0.6+, jobs 0.7+, Gemini tokens 0.8+)
 

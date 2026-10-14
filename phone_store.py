@@ -1,5 +1,6 @@
-"""Calendar, Reminders, Focus and phone status from Conduit: the store, its
-encryption, its queries and the changes Hermes asks the phone to make.
+"""Calendar, Reminders, Focus, phone status, alarms and contacts from
+Conduit: the store, its encryption, its queries and the changes Hermes asks
+the phone to make.
 
 Conduit can share the user's calendars, reminders, which Focus is on and a
 snapshot of the phone's state (battery, CarPlay, audio route, motion) with
@@ -15,6 +16,10 @@ What arrives (designs/phone-v1-contract.md, section 2):
   days), as a diff or, with ``full``, the whole window.
 * reminders: open ones and those completed in the last 14 days, the same way.
 * status and focus: the latest value only, never a history.
+* alarms (0.30.0): the alarms and timers Conduit set for Hermes that are
+  still on the phone, replaced whole when sent.
+* contacts (0.30.0): the people the user picked in Conduit, replaced whole
+  when sent, deleted when the user stops sharing them.
 
 The sharing the phone reports in every batch is enforced here again, so a
 phone bug can't store more than the user chose: no notes, attendees or URLs
@@ -58,7 +63,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 FILE_NAME = "conduit-phone.sqlite3"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # 2: alarms and contacts (plugin 0.30.0)
 
 SALT = b"conduit-phone-v1"
 INFO_INGEST = b"conduit-phone-v1 ingest device-to-host"
@@ -86,14 +91,21 @@ CONFIDENCE = ("low", "medium", "high")
 PROXIMITY = ("arrive", "leave")
 SPANS = ("this", "future")
 
-CHANGE_KINDS = ("add_event", "update_event", "delete_event", "add_reminder", "update_reminder",
-                "complete_reminder")
+CALENDAR_CHANGE_KINDS = ("add_event", "update_event", "delete_event", "add_reminder", "update_reminder",
+                         "complete_reminder")
+ALARM_CHANGE_KINDS = ("set_alarm", "set_timer", "cancel_alarm")
+CHANGE_KINDS = CALENDAR_CHANGE_KINDS + ALARM_CHANGE_KINDS
 OUTCOMES = ("applied", "edited", "dismissed", "failed", "expired")
 EVENT_FIELDS = ("title", "start", "end", "all_day", "calendar_id", "location", "notes", "url", "alarms_min")
 REMINDER_FIELDS = ("title", "list_id", "due", "due_all_day", "priority", "notes", "url", "location_alarm")
+ALARM_FIELDS = ("label", "at", "time", "repeats")
+TIMER_FIELDS = ("label", "seconds")
+ALARM_KINDS = ("alarm", "timer")
+ALARM_STATES = ("scheduled", "countdown", "paused", "alerting")
+WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 MAX_DEVICES = 4
-MAX_ITEMS = 5000  # calendars + event and reminder upserts and deletions in one batch
+MAX_ITEMS = 5000  # calendars + event and reminder upserts and deletions + alarms + contacts in one batch
 MAX_CALENDARS = 100
 MAX_TITLE_CHARS = 200
 MAX_LOCATION_CHARS = 300
@@ -117,6 +129,15 @@ MAX_REASON_CHARS = 200
 MAX_SESSION_TITLE_CHARS = 80
 MAX_NOTE_CHARS = 200
 CHANGE_TTL_S = 7 * 24 * 3600
+MAX_ALARMS_LISTED = 50
+MAX_LABEL_CHARS = 80
+MIN_TIMER_S = 5
+MAX_TIMER_S = 24 * 3600
+MAX_CONTACTS = 200
+MAX_CONTACT_VALUES = 10
+MAX_RELATION_CHARS = 40
+MAX_PHONE_CHARS = 40
+MAX_VALUE_LABEL_CHARS = 30
 # Finished changes stay this long so the agent can see how they went.
 FINISHED_KEPT_S = 30 * 24 * 3600
 MAX_WINDOW_DAYS = 400
@@ -130,6 +151,10 @@ _CHANGE_ID = re.compile(r"^ch_[A-Za-z0-9_-]{8,64}\Z")
 _KID = re.compile(r"^[0-9a-f]{32}\Z")
 _B64URL = re.compile(r"^[A-Za-z0-9_-]*\Z")
 _DATE = re.compile(r"^\d{4}-\d{2}-\d{2}\Z")
+_CLOCK = re.compile(r"^([01]\d|2[0-3]):[0-5]\d\Z")
+# A birthday: YYYY-MM-DD, or --MM-DD when the year isn't known.
+_BIRTHDAY = re.compile(r"^(\d{4}|-)-(\d{2})-(\d{2})\Z")
+_PHONE_NUMBER = re.compile(r"^[0-9+()*#.,;/ \-]{1,40}\Z")
 _TZ = re.compile(r"^[A-Za-z0-9_+\-/]{1,64}\Z")
 _COLOR = re.compile(r"^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?\Z")
 
@@ -413,11 +438,30 @@ class PhoneStore:
             finally:
                 connection.close()
 
+    def _older_schema(self) -> bool:
+        """True when the file was written by an older plugin, so a read
+        upgrades it first instead of reading as nothing."""
+        try:
+            connection = sqlite3.connect(f"{self.path.as_uri()}?mode=ro", uri=True, timeout=15)
+        except sqlite3.DatabaseError:
+            return False
+        try:
+            version = _meta(connection, "schema")
+        except sqlite3.DatabaseError:
+            return False
+        finally:
+            connection.close()
+        return version is not None and version.isdigit() and int(version) < SCHEMA_VERSION
+
     @contextlib.contextmanager
     def _read(self) -> Iterator[sqlite3.Connection | None]:
         if not self.path.exists():
             yield None
             return
+        if self._older_schema():
+            with contextlib.suppress(PhoneError, sqlite3.DatabaseError, OSError):
+                with self._write():
+                    pass
         try:
             connection = sqlite3.connect(f"{self.path.as_uri()}?mode=ro", uri=True, timeout=15)
         except sqlite3.DatabaseError:
@@ -630,7 +674,7 @@ class PhoneStore:
             raise PhoneError("malformed", "target must be an object")
         reason_text = clean_text(reason, "reason", MAX_REASON_CHARS, cap=True)
         title_text = clean_text(session_title, "session_title", MAX_SESSION_TITLE_CHARS, cap=True)
-        need = "events_write" if kind == "add_event" else "events" if kind.endswith("_event") else "reminders"
+        need = change_need(kind)
         now = int(self.clock())
         with self._write() as db:
             _expire(db, now)
@@ -639,11 +683,18 @@ class PhoneStore:
                 raise PhoneError("too_many_pending",
                                  f"{MAX_PENDING} changes are already waiting for the phone; wait for the user to "
                                  "answer some, or check them with action pending", status=409)
-            clean_target, clean_fields, summary, collection = _check_change(db, device_id, kind, fields, target)
+            if kind in ALARM_CHANGE_KINDS:
+                clean_target, clean_fields, summary = _check_alarm_change(db, device_id, kind, fields, target, now)
+                collection = None
+            else:
+                clean_target, clean_fields, summary, collection = _check_change(db, device_id, kind, fields, target)
             auto = False
             if kind in ("add_event", "add_reminder") and sharing.get("auto_add") is True:
                 calendar = _calendar_row(db, device_id, "event" if kind == "add_event" else "reminder", collection)
                 auto = calendar is not None and not calendar["shared"]
+            elif kind in ("set_alarm", "set_timer") and sharing.get("auto_add") is True:
+                # Only the user's own phone rings: nobody else sees it.
+                auto = True
             change_id = "ch_" + secrets.token_urlsafe(16)
             db.execute(
                 "INSERT INTO changes(id, device, kind, target, fields, auto, reason, session_title, created_at,"
@@ -652,7 +703,10 @@ class PhoneStore:
                  json.dumps(clean_fields), 1 if auto else 0, reason_text, title_text, now, now + CHANGE_TTL_S))
             row = db.execute(f"SELECT {_CHANGE_COLUMNS} FROM changes WHERE id=?", (change_id,)).fetchone()
             shared = None
-            calendar = _calendar_row(db, device_id, "event" if kind.endswith("_event") else "reminder", collection)
+            calendar = None
+            if kind in CALENDAR_CHANGE_KINDS:
+                calendar = _calendar_row(db, device_id, "event" if kind.endswith("_event") else "reminder",
+                                         collection)
             if calendar is not None:
                 shared = calendar["shared"]
         return {**_change_wire(row), "device_id": device_id, "device_name": device_name, "summary": summary,
@@ -709,11 +763,13 @@ class PhoneStore:
                         f"SELECT COUNT(*) FROM {table} WHERE device=?", (device_id,)).fetchone()[0]
                     pending = db.execute("SELECT COUNT(*) FROM changes WHERE device=? AND state='pending'"
                                          " AND expires_at>?", (device_id, int(self.clock()))).fetchone()[0]
+                    alarms = db.execute("SELECT alarms FROM devices WHERE id=?", (device_id,)).fetchone()[0]
                     answer["device"] = {
                         "kid": row[0], "last_sync": iso_utc(row[1]) if row[1] else None,
                         "sharing": _decode(row[2], None),
                         "counts": {"events": count("events"), "reminders": count("reminders"),
-                                   "calendars": count("calendars")},
+                                   "calendars": count("calendars"), "contacts": count("contacts"),
+                                   "alarms": len(_decode(alarms, []))},
                         "pending": pending,
                     }
             return answer
@@ -728,7 +784,7 @@ class PhoneStore:
             return {"deleted": True, "remaining_devices": 0}
         with self._write() as db:
             if device_id is None:
-                for table in ("events", "reminders", "calendars", "changes", "devices"):
+                for table in ("events", "reminders", "calendars", "changes", "contacts", "devices"):
                     db.execute(f"DELETE FROM {table}")
             else:
                 _drop_device_data(db, device_id)
@@ -903,6 +959,30 @@ class PhoneStore:
         return {"status": _decode(row[0], None), "status_at": row[1], "focus": _decode(row[2], None),
                 "focus_at": row[3]}
 
+    def alarms(self, db: sqlite3.Connection, device: str) -> tuple[list[dict[str, Any]], int | None]:
+        """The alarms and timers Conduit set that are still on the phone, and
+        when the phone said so."""
+        row = db.execute("SELECT alarms, alarms_at FROM devices WHERE id=?", (device,)).fetchone()
+        return (_decode(row[0], []) if row else []), (row[1] if row else None)
+
+    def contacts(self, db: sqlite3.Connection, device: str, *, query: str | None = None,
+                 limit: int = MAX_CONTACTS) -> list[dict[str, Any]]:
+        """The people the user picked, in their order; ``query`` matches a
+        name, nickname, relation or organization (case-insensitive)."""
+        found = []
+        needle = query.casefold() if query else None
+        for row in db.execute("SELECT id, name, nickname, relation, phones, emails, birthday, organization"
+                              " FROM contacts WHERE device=? ORDER BY position", (device,)):
+            if needle and not any(needle in (text or "").casefold() for text in (row[1], row[2], row[3], row[7])):
+                continue
+            entry = {"id": row[0], "name": row[1], "nickname": row[2], "relation": row[3],
+                     "phones": _decode(row[4], None), "emails": _decode(row[5], None), "birthday": row[6],
+                     "organization": row[7]}
+            found.append({key: value for key, value in entry.items() if value})
+            if len(found) >= limit:
+                break
+        return found
+
 
 # --- Rows and views -------------------------------------------------------------------
 
@@ -985,6 +1065,9 @@ def _change_view(row: tuple[Any, ...]) -> dict[str, Any]:
                              "state": {"pending": "waiting"}.get(row[9], row[9])}
     if fields.get("title"):
         entry["title"] = fields["title"]
+    for key in ("label", "at", "time", "repeats", "seconds"):
+        if fields.get(key):
+            entry[key] = fields[key]
     if target:
         entry["target"] = target
     if row[4]:
@@ -1020,6 +1103,13 @@ def _migrate(db: sqlite3.Connection, now: float) -> None:
     version = _meta(db, "schema")
     if version == str(SCHEMA_VERSION):
         return
+    if version == "1":
+        # 0.30.0: the alarms Conduit set and the people the user picked.
+        db.execute("ALTER TABLE devices ADD COLUMN alarms TEXT")
+        db.execute("ALTER TABLE devices ADD COLUMN alarms_at INTEGER")
+        db.execute(_CONTACTS_TABLE)
+        db.execute("UPDATE meta SET value=? WHERE key='schema'", (str(SCHEMA_VERSION),))
+        return
     if version is not None:
         raise PhoneError("schema", "This calendar store was written by a newer plugin; update the plugin", status=409)
     # One statement at a time: executescript would commit the open transaction.
@@ -1029,7 +1119,8 @@ def _migrate(db: sqlite3.Connection, now: float) -> None:
             id TEXT PRIMARY KEY, name TEXT NOT NULL,
             device_public BLOB NOT NULL, host_private BLOB NOT NULL, host_public BLOB NOT NULL, kid TEXT NOT NULL,
             created_at INTEGER NOT NULL, last_seen INTEGER, last_sent INTEGER, tz TEXT, sharing TEXT,
-            window_from TEXT, window_to TEXT, status TEXT, status_at INTEGER, focus TEXT, focus_at INTEGER);
+            window_from TEXT, window_to TEXT, status TEXT, status_at INTEGER, focus TEXT, focus_at INTEGER,
+            alarms TEXT, alarms_at INTEGER);
         CREATE TABLE IF NOT EXISTS calendars(
             device TEXT NOT NULL, id TEXT NOT NULL, title TEXT, kind TEXT NOT NULL, color TEXT, source TEXT,
             writable INTEGER NOT NULL, shared INTEGER NOT NULL, is_default INTEGER NOT NULL, position INTEGER NOT NULL,
@@ -1053,7 +1144,7 @@ def _migrate(db: sqlite3.Connection, now: float) -> None:
             expires_at INTEGER NOT NULL, state TEXT NOT NULL, finished_at INTEGER, item_id TEXT, note TEXT,
             delivered_at INTEGER, reported_at INTEGER);
         CREATE INDEX IF NOT EXISTS changes_by_device ON changes(device, state, created_at);
-    """.split(";"):
+    """.split(";") + [_CONTACTS_TABLE]:
         if statement.strip():
             db.execute(statement)
     db.execute("INSERT OR REPLACE INTO meta VALUES('schema', ?)", (str(SCHEMA_VERSION),))
@@ -1061,10 +1152,18 @@ def _migrate(db: sqlite3.Connection, now: float) -> None:
     db.execute("INSERT OR IGNORE INTO meta VALUES('created_at', ?)", (str(int(now)),))
 
 
+_CONTACTS_TABLE = """
+    CREATE TABLE IF NOT EXISTS contacts(
+        device TEXT NOT NULL, id TEXT NOT NULL, name TEXT NOT NULL, nickname TEXT, relation TEXT, phones TEXT,
+        emails TEXT, birthday TEXT, organization TEXT, position INTEGER NOT NULL, received_at INTEGER NOT NULL,
+        PRIMARY KEY(device, id))"""
+
+
 def _drop_device_data(db: sqlite3.Connection, device_id: str) -> None:
-    for table in ("events", "reminders", "calendars", "changes"):
+    for table in ("events", "reminders", "calendars", "changes", "contacts"):
         db.execute(f"DELETE FROM {table} WHERE device=?", (device_id,))
-    db.execute("UPDATE devices SET status=NULL, status_at=NULL, focus=NULL, focus_at=NULL WHERE id=?", (device_id,))
+    db.execute("UPDATE devices SET status=NULL, status_at=NULL, focus=NULL, focus_at=NULL, alarms=NULL,"
+               " alarms_at=NULL WHERE id=?", (device_id,))
 
 
 def _expire(db: sqlite3.Connection, now: int) -> None:
@@ -1084,16 +1183,20 @@ def shares(sharing: dict[str, Any], need: str) -> bool:
         return sharing.get("reminders") is True
     if need == "calendars":
         return calendar in ("full", "write_only") or sharing.get("reminders") is True
-    if need in ("status", "focus"):
+    if need in ("status", "focus", "alarms", "contacts"):
         return sharing.get(need) is True
     if need == "phone":
         return sharing.get("status") is True or sharing.get("focus") is True
+    if need == "phone_tool":
+        # conduit_phone: status, Focus, or the alarms Hermes can set.
+        return any(sharing.get(kind) is True for kind in ("status", "focus", "alarms"))
     return True
 
 
 _NEED_WORDS = {"events": "their calendar", "events_write": "adding to their calendar", "reminders": "reminders",
                "calendars": "calendars or reminders", "status": "phone status", "focus": "Focus",
-               "phone": "phone status or Focus", "any": "anything"}
+               "phone": "phone status or Focus", "alarms": "alarms and timers", "contacts": "contacts",
+               "phone_tool": "phone status, Focus or alarms", "any": "anything"}
 
 
 def _pick_device(db: sqlite3.Connection, wanted: Any, need: str,
@@ -1147,7 +1250,7 @@ def _parse_sharing(value: Any) -> dict[str, Any]:
     if calendar not in CALENDAR_SHARING:
         raise PhoneError("malformed", f"sharing.calendar must be one of {', '.join(CALENDAR_SHARING)}")
     sharing: dict[str, Any] = {"calendar": calendar}
-    for field in ("reminders", "details", "attendee_emails", "status", "focus", "auto_add"):
+    for field in ("reminders", "details", "attendee_emails", "status", "focus", "auto_add", "alarms", "contacts"):
         sharing[field] = bool(_bool(value.get(field), f"sharing.{field}", False))
     # Emails are part of the details.
     sharing["attendee_emails"] = sharing["attendee_emails"] and sharing["details"]
@@ -1173,8 +1276,10 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: i
     event_upserts, event_deletes = _list(events.get("upsert"), "events.upsert"), _list(events.get("delete"), "events.delete")
     reminder_upserts = _list(reminders.get("upsert"), "reminders.upsert")
     reminder_deletes = _list(reminders.get("delete"), "reminders.delete")
+    alarms, contacts = batch.get("alarms"), batch.get("contacts")
     total = (len(calendars or []) + len(event_upserts) + len(event_deletes) + len(reminder_upserts)
-             + len(reminder_deletes))
+             + len(reminder_deletes) + (len(alarms) if isinstance(alarms, list) else 0)
+             + (len(contacts) if isinstance(contacts, list) else 0))
     if total > MAX_ITEMS:
         raise PhoneError("too_large", f"At most {MAX_ITEMS} items per batch", status=413)
 
@@ -1214,6 +1319,8 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: i
             _item_id(reminder_id, f"reminders.delete[{index}]")
     status = _parse_status(batch.get("status"), now) if sharing["status"] and batch.get("status") is not None else None
     focus = _parse_focus(batch.get("focus"), now) if sharing["focus"] and batch.get("focus") is not None else None
+    parsed_alarms = _parse_alarms(alarms) if sharing["alarms"] and alarms is not None else None
+    parsed_contacts = _parse_contacts(contacts) if sharing["contacts"] and contacts is not None else None
 
     stored = db.execute("SELECT last_sent, status_at, focus_at FROM devices WHERE id=?", (device_id,)).fetchone()
     sent_epoch = int(sent_at.timestamp())
@@ -1244,6 +1351,10 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: i
         db.execute("UPDATE devices SET status=NULL, status_at=NULL WHERE id=?", (device_id,))
     if not sharing["focus"]:
         db.execute("UPDATE devices SET focus=NULL, focus_at=NULL WHERE id=?", (device_id,))
+    if not sharing["alarms"]:
+        db.execute("UPDATE devices SET alarms=NULL, alarms_at=NULL WHERE id=?", (device_id,))
+    if not sharing["contacts"]:
+        db.execute("DELETE FROM contacts WHERE device=?", (device_id,))
 
     counts = {"events": 0, "reminders": 0, "deleted": 0}
     if stale:
@@ -1297,6 +1408,20 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: i
                         item["completed_at"], json.dumps(item["location_alarm"]) if item["location_alarm"] else None,
                         int(item["recurring"]), item["url"], item["notes"], now))
             counts["reminders"] += 1
+
+    # The alarms Conduit set and the people the user picked: replaced whole.
+    if parsed_alarms is not None:
+        db.execute("UPDATE devices SET alarms=?, alarms_at=? WHERE id=?",
+                   (json.dumps(parsed_alarms), sent_epoch, device_id))
+    if parsed_contacts is not None:
+        db.execute("DELETE FROM contacts WHERE device=?", (device_id,))
+        for position, person in enumerate(parsed_contacts):
+            db.execute("INSERT OR REPLACE INTO contacts VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                       (device_id, person["id"], person["name"], person.get("nickname"), person.get("relation"),
+                        json.dumps(person["phones"]) if person.get("phones") else None,
+                        json.dumps(person["emails"]) if person.get("emails") else None,
+                        person.get("birthday"), person.get("organization"), position, now))
+        counts["contacts"] = len(parsed_contacts)
 
     # Latest only: an older reading never replaces a newer one.
     if status is not None and (stored[1] is None or status["at"] >= stored[1]):
@@ -1469,6 +1594,108 @@ def _parse_focus(value: Any, now: int) -> dict[str, Any]:
     return {"at": int(at.timestamp()), "value": {key: item for key, item in clean.items() if item is not None}}
 
 
+def _parse_alarms(value: Any) -> list[dict[str, Any]]:
+    """The alarms and timers Conduit set for Hermes that are still on the
+    phone (not the user's own: AlarmKit shows an app only its own)."""
+    alarms = _list(value, "alarms")
+    if len(alarms) > MAX_ALARMS_LISTED:
+        raise PhoneError("too_large", f"At most {MAX_ALARMS_LISTED} alarms", status=413)
+    parsed = []
+    for index, alarm in enumerate(alarms):
+        field = f"alarms[{index}]"
+        if not isinstance(alarm, dict):
+            raise PhoneError("malformed", f"{field} must be an object")
+        kind = _enum(alarm.get("kind"), f"{field}.kind", ALARM_KINDS)
+        if kind is None:
+            raise PhoneError("malformed", f"{field}.kind is required")
+        fires_at = alarm.get("fires_at")
+        entry = {
+            "id": _item_id(alarm.get("id"), f"{field}.id"),
+            "kind": kind,
+            "label": clean_text(alarm.get("label"), f"{field}.label", MAX_LABEL_CHARS, cap=True),
+            "fires_at": None if fires_at is None else parse_time(fires_at, f"{field}.fires_at").isoformat(),
+            "repeats": _weekdays(alarm.get("repeats"), f"{field}.repeats") or None,
+            "state": _enum(alarm.get("state"), f"{field}.state", ALARM_STATES) or "scheduled",
+            "remaining_s": _whole(alarm.get("remaining_s"), f"{field}.remaining_s", 0, MAX_TIMER_S),
+        }
+        parsed.append({key: item for key, item in entry.items() if item is not None})
+    return parsed
+
+
+def _weekdays(value: Any, field: str) -> list[str]:
+    days = _list(value, field)
+    if any(day not in WEEKDAYS for day in days):
+        raise PhoneError("malformed", f"{field} is a list of {', '.join(WEEKDAYS)}")
+    return [day for day in WEEKDAYS if day in days]
+
+
+def _parse_contacts(value: Any) -> list[dict[str, Any]]:
+    """The people the user picked in Conduit for Hermes to know."""
+    contacts = _list(value, "contacts")
+    if len(contacts) > MAX_CONTACTS:
+        raise PhoneError("too_large", f"At most {MAX_CONTACTS} contacts", status=413)
+    parsed, seen = [], set()
+    for index, person in enumerate(contacts):
+        field = f"contacts[{index}]"
+        if not isinstance(person, dict):
+            raise PhoneError("malformed", f"{field} must be an object")
+        contact_id = _item_id(person.get("id"), f"{field}.id")
+        name = clean_text(person.get("name"), f"{field}.name", MAX_NAME_CHARS, cap=True)
+        if not name:
+            raise PhoneError("malformed", f"{field}.name is required")
+        if contact_id in seen:
+            continue
+        seen.add(contact_id)
+        entry = {
+            "id": contact_id, "name": name,
+            "nickname": clean_text(person.get("nickname"), f"{field}.nickname", MAX_NAME_CHARS, cap=True),
+            "relation": clean_text(person.get("relation"), f"{field}.relation", MAX_RELATION_CHARS, cap=True),
+            "organization": clean_text(person.get("organization"), f"{field}.organization", MAX_NAME_CHARS, cap=True),
+            "phones": _contact_values(person.get("phones"), f"{field}.phones", "number"),
+            "emails": _contact_values(person.get("emails"), f"{field}.emails", "address"),
+            "birthday": _birthday(person.get("birthday"), f"{field}.birthday"),
+        }
+        parsed.append({key: item for key, item in entry.items() if item})
+    return parsed
+
+
+def _contact_values(value: Any, field: str, key: str) -> list[dict[str, str]]:
+    values = []
+    for position, item in enumerate(_list(value, field)[:MAX_CONTACT_VALUES]):
+        where = f"{field}[{position}]"
+        if not isinstance(item, dict):
+            raise PhoneError("malformed", f"{where} must be an object")
+        raw = item.get(key)
+        if key == "number":
+            text = raw.strip() if isinstance(raw, str) else None
+            if not text or not _PHONE_NUMBER.match(text):
+                raise PhoneError("malformed", f"{where}.number must be a phone number")
+        else:
+            text = clean_text(raw, f"{where}.address", MAX_EMAIL_CHARS)
+            if not text or "@" not in text or " " in text:
+                raise PhoneError("malformed", f"{where}.address must be an email address")
+        entry = {key: text}
+        label = clean_text(item.get("label"), f"{where}.label", MAX_VALUE_LABEL_CHARS, cap=True)
+        if label:
+            entry["label"] = label
+        values.append(entry)
+    return values
+
+
+def _birthday(value: Any, field: str) -> str | None:
+    if value is None:
+        return None
+    match = _BIRTHDAY.match(value) if isinstance(value, str) else None
+    if match is None:
+        raise PhoneError("malformed", f"{field} is YYYY-MM-DD, or --MM-DD without the year")
+    year = int(match.group(1)) if match.group(1) != "-" else 2000  # a leap year, so 29 Feb is valid
+    try:
+        date(year, int(match.group(2)), int(match.group(3)))
+    except ValueError:
+        raise PhoneError("malformed", f"{field} isn't a real date") from None
+    return value
+
+
 def _parse_results(value: Any) -> list[dict[str, Any]]:
     results = _list(value, "results")
     if len(results) > MAX_RESULTS:
@@ -1638,6 +1865,104 @@ def _check_change(db: sqlite3.Connection, device_id: str, kind: str, fields: dic
             raise PhoneError("read_only", f"The {word} {calendar['title'] or collection!r} is read-only on the phone")
     merged = {**(existing or {}), **{key: value for key, value in clean_fields.items() if value is not None}}
     return clean_target, clean_fields, _summary(kind, merged), collection
+
+
+def change_need(kind: str) -> str:
+    """The sharing a change kind needs on its device."""
+    if kind == "add_event":
+        return "events_write"
+    if kind.endswith("_event"):
+        return "events"
+    if kind in ALARM_CHANGE_KINDS:
+        return "alarms"
+    return "reminders"
+
+
+def _check_alarm_change(db: sqlite3.Connection, device_id: str, kind: str, fields: dict[str, Any],
+                        target: dict[str, Any], now: int) -> tuple[dict[str, Any] | None, dict[str, Any], str]:
+    """(target, fields, summary) for an alarm or timer change, or PhoneError."""
+    if kind == "cancel_alarm":
+        if fields:
+            raise PhoneError("malformed", "cancel_alarm takes no fields")
+        if sorted(set(target) - {"alarm_id"}):
+            raise PhoneError("malformed", "target is {alarm_id}")
+        alarm_id = _item_id(target.get("alarm_id"), "alarm_id")
+        listed = _decode(db.execute("SELECT alarms FROM devices WHERE id=?", (device_id,)).fetchone()[0], [])
+        alarm = next((item for item in listed if item.get("id") == alarm_id), None)
+        if alarm is None:
+            raise PhoneError("unknown_alarm", "No alarm or timer Hermes set has that id; see action alarms")
+        return {"alarm_id": alarm_id}, {}, "Cancel " + alarm_summary(alarm)
+    if target:
+        raise PhoneError("malformed", f"{kind} takes no target")
+    allowed = ALARM_FIELDS if kind == "set_alarm" else TIMER_FIELDS
+    unknown = sorted(set(fields) - set(allowed))
+    if unknown:
+        names = [_CONTROL.sub(" ", str(name))[:40] for name in unknown[:10]]
+        raise PhoneError("malformed", f"Unknown fields for {kind}: {', '.join(names)}. Known: {', '.join(allowed)}")
+    clean: dict[str, Any] = {"label": clean_text(fields.get("label"), "label", MAX_LABEL_CHARS)}
+    if kind == "set_timer":
+        seconds = _whole(fields.get("seconds"), "seconds", MIN_TIMER_S, MAX_TIMER_S)
+        if seconds is None:
+            raise PhoneError("malformed", "seconds is required")
+        clean["seconds"] = seconds
+    else:
+        at, clock = fields.get("at"), fields.get("time")
+        if (at is None) == (clock is None):
+            raise PhoneError("malformed", "Give at (a one-off ISO time with offset) or time (HH:MM, with repeats "
+                                          "for a repeating alarm), not both")
+        repeats = _weekdays(fields.get("repeats"), "repeats")
+        if at is not None:
+            if repeats:
+                raise PhoneError("malformed", "repeats goes with time, not with at")
+            moment = parse_time(at, "at")
+            if moment.timestamp() <= now:
+                raise PhoneError("in_past", "at is in the past")
+            clean["at"] = moment.isoformat()
+        else:
+            if not isinstance(clock, str) or not _CLOCK.match(clock):
+                raise PhoneError("malformed", "time is HH:MM, 24-hour, in the phone's local time")
+            clean["time"] = clock
+            clean["repeats"] = repeats or None
+    clean = {key: value for key, value in clean.items() if value is not None}
+    return None, clean, alarm_summary({"kind": "timer" if kind == "set_timer" else "alarm", **clean})
+
+
+def alarm_summary(item: dict[str, Any]) -> str:
+    """One line: "Alarm Thu 16 Oct 06:30 · Wake up", "Timer 10 min · Pasta"."""
+    label = item.get("label")
+    if item.get("kind") == "timer":
+        seconds = item.get("seconds") if item.get("seconds") is not None else item.get("remaining_s")
+        head = f"Timer {format_duration(seconds)}" if isinstance(seconds, int) else "Timer"
+    elif item.get("time"):
+        head = f"Alarm {item['time']}" + (f" {format_days(item['repeats'])}" if item.get("repeats") else "")
+    else:
+        when = item.get("at") or item.get("fires_at")
+        head = f"Alarm {format_when(when)}" if when else "Alarm"
+        if item.get("repeats"):
+            head += f" (repeats {format_days(item['repeats'])})"
+    return f"{head} · {label}" if label else head
+
+
+def format_duration(seconds: int) -> str:
+    hours, rest = divmod(seconds, 3600)
+    minutes, secs = divmod(rest, 60)
+    parts = [f"{hours} h"] if hours else []
+    if minutes:
+        parts.append(f"{minutes} min")
+    if secs or not parts:
+        parts.append(f"{secs} s")
+    return " ".join(parts)
+
+
+def format_days(days: list[str]) -> str:
+    chosen = [day for day in WEEKDAYS if day in days]
+    if len(chosen) == 7:
+        return "every day"
+    if chosen == list(WEEKDAYS[:5]):
+        return "weekdays"
+    if chosen == list(WEEKDAYS[5:]):
+        return "weekends"
+    return ", ".join(day.capitalize() for day in chosen)
 
 
 def _summary(kind: str, item: dict[str, Any]) -> str:
