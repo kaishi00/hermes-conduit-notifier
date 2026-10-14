@@ -457,6 +457,7 @@ class FakeScheduler:
     def __init__(self):
         self.jobs = {}
         self.calls = []
+        self.list_fails = False
 
     def __call__(self, **kwargs):
         self.calls.append(kwargs)
@@ -469,6 +470,8 @@ class FakeScheduler:
             self.jobs[kwargs["job_id"]].update(kwargs)
             return json.dumps({"success": True})
         if action == "list":
+            if self.list_fails:
+                return json.dumps({"success": False, "error": "busy"})
             return json.dumps({"success": True, "jobs": list(self.jobs.values())})
         if action == "remove":
             self.jobs.pop(kwargs["job_id"], None)
@@ -519,6 +522,14 @@ def test_a_rule_that_cant_be_saved_leaves_no_job(home, scheduler, monkeypatch):
     monkeypatch.setattr(location.LocationStore, "put_rule", fail)
     assert _call({"action": "set_rule", "rule": RULE})["error"] == "too_many_rules"
     assert scheduler.jobs == {}
+
+
+def test_editing_a_rule_while_jobs_cant_be_listed_makes_no_second_job(home, scheduler):
+    _shared(home, fix=fix())
+    _call({"action": "set_rule", "rule": RULE})
+    scheduler.list_fails = True
+    assert _call({"action": "set_rule", "rule": {**RULE, "call": False}})["error"] == "scheduler"
+    assert list(scheduler.jobs) == ["job-1"]
 
 
 def test_set_rule_takes_any_place_either_move_and_every_time(home, scheduler):

@@ -400,7 +400,12 @@ def _set_rule_locked(store: LocationStore, view: dict[str, Any], raw: Any) -> di
     fields: dict[str, Any] = {"name": RULE_PREFIX + what, "prompt": run_prompt(rule), "schedule": RULE_SCHEDULE}
     job = None
     if existing and existing.get("job_id"):
-        job = next((item for item in _jobs(cronjob) if str(item.get("job_id")) == existing["job_id"]), None)
+        jobs = _jobs(cronjob)
+        if jobs is None:
+            # Not knowing whether the job exists, a new one could leave the
+            # old one live with no rule pointing at it.
+            return {"ok": False, "error": "scheduler", "note": "The scheduled jobs couldn't be listed; try again."}
+        job = next((item for item in jobs if str(item.get("job_id")) == existing["job_id"]), None)
     toolsets = call_watches._toolsets_with_conduit(job)
     if toolsets is not None:
         fields["enabled_toolsets"] = toolsets
@@ -461,10 +466,11 @@ def run_prompt(rule: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _jobs(cronjob: Callable[..., str]) -> list[dict[str, Any]]:
+def _jobs(cronjob: Callable[..., str]) -> list[dict[str, Any]] | None:
+    """The scheduler's jobs, or None when it couldn't list them."""
     answer = call_watches._call(cronjob, action="list", include_disabled=True)
     jobs = answer.get("jobs") if answer.get("success") else None
-    return [job for job in jobs if isinstance(job, dict)] if isinstance(jobs, list) else []
+    return [job for job in jobs if isinstance(job, dict)] if isinstance(jobs, list) else None
 
 
 def _rule_view(rule: dict[str, Any]) -> dict[str, Any]:
