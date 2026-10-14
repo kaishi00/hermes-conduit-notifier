@@ -4185,7 +4185,7 @@ def _voice_tool_entries() -> Dict[str, Dict[str, Any]]:
         if shared:
             entries[name] = {
                 "key": key,
-                "description": f"{tool.SCHEMA['description']} {tool.VOICE_NOTE}",
+                "description": tool.voice_description(),
                 "parameters": tool.voice_parameters(),
             }
     return entries

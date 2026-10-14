@@ -798,6 +798,7 @@ def test_voice_list_offers_location_reads_once_it_arrived(voice):
     assert entry["key"] == "location"
     assert entry["parameters"]["properties"]["action"]["enum"] == ["now", "places", "history", "distance_to"]
     assert "rule" not in entry["parameters"]["properties"]
+    assert "set_rule" not in entry["description"] and "locate (" not in entry["description"]
     assert "voice call" in entry["description"]
 
 
@@ -905,9 +906,12 @@ def test_a_broken_location_module_leaves_health_voice_reads(tmp_path, monkeypatc
     assert list(_ORIGINAL_MODULES()) == ["conduit_health"]
 
 
-def test_a_damaged_location_store_hides_only_location_from_the_voice_list(voice):
+def test_a_damaged_location_store_hides_only_location_from_the_voice_list(voice, monkeypatch):
     client, store = voice
     _voice_phone(store, fix=fix())
+    # Health has something shared here, so it stays listed beside the damage.
+    monkeypatch.setattr(api._plugin_package_module("health_tool"), "voice_shared", lambda _store: True)
     store.path.write_bytes(b"not a database" * 100)
     response = client.get(f"{BASE}/voice-tools")
-    assert response.status_code == 200 and response.json()["tools"] == []
+    assert response.status_code == 200
+    assert [item["name"] for item in response.json()["tools"]] == ["conduit_health"]
