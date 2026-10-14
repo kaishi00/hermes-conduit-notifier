@@ -73,7 +73,7 @@ The plugin currently emits notifications for:
 
 An exact `[Silent]` assistant response does not emit a completion notification.
 
-Beside notifications, the plugin keeps a Live Activity up to date while a turn you sent from Conduit runs (see [Lock Screen progress](#lock-screen-progress-plugin-031)).
+Beside notifications, the plugin keeps a Live Activity up to date while a turn you sent from Conduit runs (see [Lock Screen progress](#lock-screen-progress-plugin-032)).
 
 Each notification is titled with the session's title when it has one (for example a Telegram topic name), so you can tell which chat it came from: a reply shows the session title, and the others prefix it (`Approval needed · Infra`). Untitled sessions keep the generic copy. With previews off the title is not shown; `redact on` or end-to-end encryption keeps it from reaching the relay.
 
@@ -298,6 +298,7 @@ integer stops the relay at boot.
 | Live Activities held in memory, relay-wide / per phone (the oldest is forgotten past either) | 50,000 / 8 | `RELAY_MAX_LIVE_ACTIVITIES` / `RELAY_MAX_LIVE_ACTIVITIES_PER_INSTALLATION` |
 | Live Activity registrations per minute, relay-wide | 3,000 | `RELAY_LIVE_ACTIVITY_REGISTRATIONS_PER_MINUTE` |
 | Live Activity reports for a watched turn per minute, relay-wide | 30,000 | `RELAY_LIVE_ACTIVITY_UPDATES_PER_MINUTE` |
+| Live Activity registrations and removals per phone / per IP address, per minute (fixed) | 60 / 120 | |
 
 Event IDs only prevent a repeated delivery of the same event within 24 hours,
 so the relay keeps them in memory and never writes them to the data file. A
