@@ -195,8 +195,8 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
 # SCHEMA's description, which it gets word for word.
 VOICE_NOTE = ("On a voice call: only now, places, history and distance_to work here. Answer by ear in a sentence "
               "or two, say how old the location is when it matters, and leave links, ids and coordinates out.")
-VOICE_ACTIONS = frozenset(("now", "places", "history", "distance_to"))
 _VOICE_ACTION_ORDER = ["now", "places", "history", "distance_to"]
+VOICE_ACTIONS = frozenset(_VOICE_ACTION_ORDER)
 
 
 def voice_parameters() -> dict[str, Any]:

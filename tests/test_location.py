@@ -902,3 +902,11 @@ def test_a_broken_location_module_leaves_health_voice_reads(tmp_path, monkeypatc
 
     monkeypatch.setattr(api, "_plugin_package_module", broken)
     assert list(_ORIGINAL_MODULES()) == ["conduit_health"]
+
+
+def test_a_damaged_location_store_hides_only_location_from_the_voice_list(voice):
+    client, store = voice
+    _voice_phone(store, fix=fix())
+    store.path.write_bytes(b"not a database" * 100)
+    response = client.get(f"{BASE}/voice-tools")
+    assert response.status_code == 200 and response.json()["tools"] == []

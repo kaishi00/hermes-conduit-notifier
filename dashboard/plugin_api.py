@@ -4172,8 +4172,13 @@ def _voice_tool_entries() -> Dict[str, Dict[str, Any]]:
     """Voice-readable tools by name: their schema, and which sealed key they use."""
     entries: Dict[str, Dict[str, Any]] = {}
     for name, (tool, store_class, _, key) in _voice_tool_modules().items():
-        store = store_class(_calls_home())
-        shared = store.overview()["devices"] if key == "health" else store.snapshot() is not None
+        # A store that can't be read (damaged file) hides that tool alone.
+        try:
+            store = store_class(_calls_home())
+            shared = store.overview()["devices"] if key == "health" else store.snapshot() is not None
+        except Exception:
+            logger.warning("Conduit voice tools: %s store unreadable", name, exc_info=True)
+            continue
         if shared:
             entries[name] = {
                 "key": key,
@@ -4192,7 +4197,7 @@ def voice_tools_call(envelope: Any) -> Dict[str, Any]:
     name = envelope.get("tool") if isinstance(envelope, dict) else None
     if not isinstance(name, str) or name not in modules:
         raise TokenError(404, "This host has no voice tool by that name")
-    tool, store_class, error_class, key = modules[name]
+    tool, store_class, error_class, _ = modules[name]
     store = store_class(_calls_home())
     try:
         device_id, request, seal_answer = store.open_voice_request(envelope)
