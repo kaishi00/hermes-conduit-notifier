@@ -465,6 +465,23 @@ def test_set_rule_writes_one_job_and_changes_it_in_place(home, scheduler):
     assert scheduler.jobs == {} and _call({"action": "rules"})["rules"] == []
 
 
+def test_set_rule_scrubs_the_task_but_keeps_its_lines(home, scheduler):
+    _shared(home, fix=fix())
+    answer = _call({"action": "set_rule", "rule": {**RULE, "task": "Brief me\u202e.\nThen\x07 stop."}})
+    assert answer["rule"]["task"] == "Brief me .\nThen  stop."
+
+
+def test_a_rule_that_cant_be_saved_leaves_no_job(home, scheduler, monkeypatch):
+    _shared(home, fix=fix())
+
+    def fail(self, rule):
+        raise location.LocationError("too_many_rules", "full", status=409)
+
+    monkeypatch.setattr(location.LocationStore, "put_rule", fail)
+    assert _call({"action": "set_rule", "rule": RULE})["error"] == "too_many_rules"
+    assert scheduler.jobs == {}
+
+
 def test_set_rule_takes_any_place_either_move_and_every_time(home, scheduler):
     _shared(home, fix=fix())
     rule = {"what": "log my day", "place": "any", "event": "either", "repeat": "every",
@@ -554,6 +571,7 @@ def test_no_call_rings_at_a_place_the_user_avoids(tmp_path):
 def test_an_unknown_place_counts_only_when_asked(tmp_path):
     assert _blocked(tmp_path, {"avoid_places": ["p_home"]}) is False
     assert _blocked(tmp_path, {"avoid_places": ["p_home"], "avoid_unknown_place": True}) is True
+    assert _blocked(tmp_path, {"avoid_unknown_place": True}) is True  # on its own too
     _shared(tmp_path, sharing=sharing(paused_until="2099-01-01T00:00:00+00:00"))
     assert _blocked(tmp_path, {"avoid_places": ["p_home"], "avoid_unknown_place": True}) is True
 
@@ -624,3 +642,11 @@ def test_ingest_refuses_an_oversized_body(client):
     response = client.post(f"{BASE}/location/ingest", content=b"x" * (api.LOCATION_MAX_INGEST_BODY_BYTES + 1),
                            headers={"content-type": "application/json"})
     assert response.status_code == 413
+
+
+def test_a_redacted_profile_still_sends_the_locate_id():
+    from conduit_push import events
+    event = events.push_event("location.requested", identifier="locate:x", profile="default",
+                              locate={"id": "l_" + "a" * 20})
+    assert events.redact_event(event)["locate"] == {"id": "l_" + "a" * 20}
+    assert "locate" not in events.redact_event({**event, "locate": {"id": "bad\n"}})

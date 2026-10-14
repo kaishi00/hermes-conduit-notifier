@@ -74,14 +74,15 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # (call_tool). Empty: the skill's rule alone.
     "rules": "",
     # Saved places (Conduit's ids, location sharing) where the phone must
-    # not ring: a call then sends the usual notification. With
-    # avoid_unknown_place, also while Conduit can't say where the user is.
+    # not ring: a call then sends the usual notification.
+    # avoid_unknown_place: also hold calls while Conduit can't say where the
+    # user is (no recent location, or sharing paused or off).
     "avoid_places": [],
     "avoid_unknown_place": False,
 }
 BOOL_SETTINGS = ("enabled", "when_asked", "decides", "alerts", "avoid_unknown_place")
 MAX_AVOID_PLACES = 20
-_PLACE_ID = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
+_PLACE_ID = re.compile(r"^[A-Za-z0-9_-]{1,40}\Z")
 MAX_RULES_CHARS = 500
 # Inclusive bounds. per_day stops at the relay's own daily ceiling.
 INT_BOUNDS: dict[str, tuple[int, int]] = {

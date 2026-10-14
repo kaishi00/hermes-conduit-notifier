@@ -80,7 +80,7 @@ def _place_blocked(home: Any, settings: dict[str, Any]) -> bool:
     place = LocationStore(home, clock=lambda: _clock()).latest_place()
     known = place is not None and place["trusted"] and not place["paused"]
     if not known:
-        return bool(settings["avoid_unknown_place"] and settings["avoid_places"])
+        return bool(settings["avoid_unknown_place"])
     return place["place_id"] in settings["avoid_places"]
 
 

@@ -252,6 +252,14 @@ def _number(value: Any, field: str, low: float, high: float) -> float | None:
     return float(value)
 
 
+def clean_task(value: Any, limit: int) -> str | None:
+    """A rule's task: like clean_text, but line breaks stay."""
+    if not isinstance(value, str) or len(value) > limit:
+        return None
+    lines = (_CONTROL.sub(" ", line).strip() for line in value.replace("\r\n", "\n").split("\n"))
+    return "\n".join(lines).strip() or None
+
+
 def clean_text(value: Any, field: str, limit: int) -> str | None:
     if value is None:
         return None

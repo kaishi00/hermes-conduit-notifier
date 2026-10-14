@@ -97,7 +97,7 @@ def push_event(
     return event
 
 
-_LOCATE_ID = re.compile(r"^l_[A-Za-z0-9_-]{16,64}$")
+_LOCATE_ID = re.compile(r"^l_[A-Za-z0-9_-]{16,64}\Z")
 
 
 # How a watched job ended, or (an alert call) what Hermes waits on.
@@ -193,6 +193,11 @@ def redact_event(event: dict[str, Any]) -> dict[str, Any]:
         # The job's title and the reason are chat content; its id, outcome
         # and sessions route.
         redacted["call"] = {key: call[key] for key in ("id", "kind", "session_ids")}
+    locate = event.get("locate") if event.get("type") == "location.requested" else None
+    locate_id = locate.get("id") if isinstance(locate, dict) else None
+    if isinstance(locate_id, str) and _LOCATE_ID.match(locate_id):
+        # Only the request id the phone answers with: routing, not content.
+        redacted["locate"] = {"id": locate_id}
     return redacted
 
 

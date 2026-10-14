@@ -31,7 +31,7 @@ from . import call_watches, client, session_titles
 from .events import push_event
 from .location_store import (
     ANY_PLACE, MAX_RULES, MAX_TASK_CHARS, MAX_WHAT_CHARS, RULE_EVENTS, RULE_REPEATS, WEEKDAYS, LocationError,
-    LocationStore, clean_text, parse_hours, sharing_paused,
+    LocationStore, clean_task, clean_text, parse_hours, sharing_paused,
 )
 
 logger = logging.getLogger("hermes.plugins.conduit_push")
@@ -370,11 +370,11 @@ def _set_rule(store: LocationStore, view: dict[str, Any], raw: Any) -> dict[str,
     hours = raw.get("hours") or ""
     if hours and parse_hours(hours) is None:
         return {"ok": False, "error": "invalid", "note": "hours is local time as HH:MM-HH:MM, or leave it out."}
-    task = raw.get("task")
-    if not isinstance(task, str) or not task.strip() or len(task) > MAX_TASK_CHARS:
+    task = clean_task(raw.get("task"), MAX_TASK_CHARS)
+    if task is None:
         return {"ok": False, "error": "invalid", "note": f"Give task: what the run does, up to {MAX_TASK_CHARS} characters."}
     rule = {"what": what, "place_id": place["id"], "place_name": place["name"], "event": raw["event"],
-            "days": [day for day in WEEKDAYS if day in days], "hours": hours.strip(), "task": task.strip(),
+            "days": [day for day in WEEKDAYS if day in days], "hours": hours.strip(), "task": task,
             "call": raw.get("call") is True, "repeat": repeat}
     existing = next((item for item in store.rules() if item["what"].casefold() == what.casefold()), None)
     cronjob = call_watches._cronjob()
@@ -398,8 +398,14 @@ def _set_rule(store: LocationStore, view: dict[str, Any], raw: Any) -> dict[str,
         job_id = str(answer.get("job_id") or "")
     if not answer.get("success") or not job_id:
         return {"ok": False, "error": "scheduler", "note": f"The job couldn't be saved: {answer.get('error') or 'unknown error'}."}
-    saved = store.put_rule({**rule, "id": existing["id"] if existing else "r_" + secrets.token_urlsafe(9),
-                            "job_id": job_id})
+    try:
+        saved = store.put_rule({**rule, "id": existing["id"] if existing else "r_" + secrets.token_urlsafe(9),
+                                "job_id": job_id})
+    except Exception:
+        if job is None:
+            # A job no rule points at could never be removed with remove_rule.
+            call_watches._call(cronjob, action="remove", job_id=job_id)
+        raise
     return {"ok": True, "result": "changed" if existing else "created", "rule": _rule_view(saved),
             "note": ("Tell the user what it does in a sentence. It runs only while they share location in the "
                      "background in Conduit, " + ("at most once a day" if repeat == "daily" else
