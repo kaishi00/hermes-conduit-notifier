@@ -55,7 +55,12 @@ class HostUnavailable(Exception):
 # The token cache and the usage counter have their own locks, so a slow
 # token exchange doesn't hold up counting.
 # A token is a header value: printable ASCII only.
-_TOKEN = re.compile(r"^[\x21-\x7e]{1,4096}$")
+_TOKEN = re.compile(r"[\x21-\x7e]{1,4096}")
+
+
+def _lifetime(value: Any) -> bool:
+    """A token lifetime worth caching: a finite number of seconds over a minute."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 60
 _lock = threading.Lock()
 _usage_lock = threading.Lock()
 _token: dict[str, Any] = {}
@@ -92,7 +97,7 @@ def _access_token(refresh: bool = False) -> str:
         except Exception:  # noqa: BLE001 — network
             raise HostUnavailable("unavailable", "Apple Maps couldn't be reached just now.") from None
         value, lifetime = answer.get("access_token"), answer.get("expires_in")
-        if not isinstance(value, str) or not _TOKEN.match(value) or not isinstance(lifetime, (int, float)):
+        if not isinstance(value, str) or not _TOKEN.fullmatch(value) or not _lifetime(lifetime):
             raise HostUnavailable("unavailable", "Apple Maps couldn't be reached just now.")
         _token.update(value=value, expires_at=now + float(lifetime))
         return value
@@ -107,26 +112,36 @@ def _spend(home: Path) -> None:
     """
     path = Path(home) / USAGE_FILE
     flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
-    with _usage_lock, os.fdopen(os.open(path, flags, 0o600), "r+b") as handle, client._exclusive(handle):
-        if hasattr(os, "fchmod"):
-            os.fchmod(handle.fileno(), 0o600)
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        handle.seek(0)
-        try:
-            usage = json.loads(handle.read() or b"{}")
-        except ValueError:
-            usage = {}
-        if not isinstance(usage, dict):
-            usage = {}
-        count = usage.get("count", 0) if usage.get("day") == today else 0
-        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
-            count = 0
-        if count >= DAILY_CALLS:
-            raise HostUnavailable("daily_limit", "Today's Apple Maps lookups from this host are used up.")
-        handle.seek(0)
-        handle.truncate()
-        handle.write(json.dumps({"day": today, "count": count + 1}).encode())
-        handle.flush()
+    try:
+        with _usage_lock, os.fdopen(os.open(path, flags, 0o600), "r+b") as handle, client._exclusive(handle):
+            _count_one(handle)
+    except OSError:
+        raise HostUnavailable("unavailable", "This Hermes host can't keep count of its Apple Maps lookups.") from None
+
+
+def _count_one(handle: Any) -> None:
+    # A crash mid-write leaves a partial record, read back as a fresh day:
+    # at worst one day's count restarts.
+    if hasattr(os, "fchmod"):
+        os.fchmod(handle.fileno(), 0o600)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    handle.seek(0)
+    try:
+        usage = json.loads(handle.read(4096) or b"{}")
+    except ValueError:
+        usage = {}
+    if not isinstance(usage, dict):
+        usage = {}
+    count = usage.get("count", 0) if usage.get("day") == today else 0
+    if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+        count = 0
+    if count >= DAILY_CALLS:
+        raise HostUnavailable("daily_limit", "Today's Apple Maps lookups from this host are used up.")
+    handle.seek(0)
+    handle.truncate()
+    handle.write(json.dumps({"day": today, "count": count + 1}).encode())
+    handle.flush()
+    os.fsync(handle.fileno())
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):

@@ -522,9 +522,20 @@ def test_a_relay_token_that_isnt_a_header_value_is_refused(monkeypatch):
     monkeypatch.setattr(maps_host, "_token", {})
     monkeypatch.setattr(maps_host.client, "load_state", lambda: {"relay_url": "https://r", "credential": "c"})
     monkeypatch.setattr(maps_host.client, "request_json",
-                        lambda *a, **k: {"access_token": "abc\r\nX-Evil: 1", "expires_in": 1800})
+                        lambda *a, **k: answer)
+    for answer in ({"access_token": "abc\r\nX-Evil: 1", "expires_in": 1800},
+                   {"access_token": "abc\n", "expires_in": 1800},
+                   {"access_token": "abc", "expires_in": float("inf")},
+                   {"access_token": "abc", "expires_in": True}):
+        with pytest.raises(maps_host.HostUnavailable):
+            maps_host._access_token()
+    assert maps_host._token == {}
+
+
+def test_a_usage_file_that_cant_be_opened_lets_the_phone_answer(tmp_path):
+    (tmp_path / maps_host.USAGE_FILE).mkdir()
     with pytest.raises(maps_host.HostUnavailable):
-        maps_host._access_token()
+        maps_host._spend(tmp_path)
 
 
 def test_the_phones_result_cant_replace_the_envelope():
