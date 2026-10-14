@@ -393,6 +393,12 @@ def _url(value: Any, field: str) -> str | None:
     return text
 
 
+def _stored_list(value: Any) -> list[Any] | None:
+    """A stored JSON list, or None when it's missing or corrupt."""
+    decoded = _decode(value, None)
+    return decoded if isinstance(decoded, list) else None
+
+
 def _decode(value: Any, fallback: Any) -> Any:
     if not value:
         return fallback
@@ -764,13 +770,13 @@ class PhoneStore:
                         f"SELECT COUNT(*) FROM {table} WHERE device=?", (device_id,)).fetchone()[0]
                     pending = db.execute("SELECT COUNT(*) FROM changes WHERE device=? AND state='pending'"
                                          " AND expires_at>?", (device_id, int(self.clock()))).fetchone()[0]
-                    alarms = db.execute("SELECT alarms FROM devices WHERE id=?", (device_id,)).fetchone()[0]
+                    alarms = _decode(db.execute("SELECT alarms FROM devices WHERE id=?", (device_id,)).fetchone()[0], [])
                     answer["device"] = {
                         "kid": row[0], "last_sync": iso_utc(row[1]) if row[1] else None,
                         "sharing": _decode(row[2], None),
                         "counts": {"events": count("events"), "reminders": count("reminders"),
                                    "calendars": count("calendars"), "contacts": count("contacts"),
-                                   "alarms": len(_decode(alarms, []) or [])},
+                                   "alarms": len(alarms) if isinstance(alarms, list) else 0},
                         "pending": pending,
                     }
             return answer
@@ -979,7 +985,7 @@ class PhoneStore:
             if needle and not any(needle in (text or "").casefold() for text in (row[1], row[2], row[3], row[7])):
                 continue
             entry = {"id": row[0], "name": row[1], "nickname": row[2], "relation": row[3],
-                     "phones": _decode(row[4], None), "emails": _decode(row[5], None), "birthday": row[6],
+                     "phones": _stored_list(row[4]), "emails": _stored_list(row[5]), "birthday": row[6],
                      "organization": row[7]}
             found.append({key: value for key, value in entry.items() if value})
             if len(found) >= limit:
@@ -1618,7 +1624,8 @@ def _parse_alarms(value: Any) -> list[dict[str, Any]]:
             "kind": kind,
             "label": clean_text(alarm.get("label"), f"{field}.label", MAX_LABEL_CHARS, cap=True),
             "fires_at": None if fires_at is None else parse_time(fires_at, f"{field}.fires_at").isoformat(),
-            "repeats": _weekdays(alarm.get("repeats"), f"{field}.repeats") or None,
+            # A countdown has no weekly schedule.
+            "repeats": None if kind == "timer" else _weekdays(alarm.get("repeats"), f"{field}.repeats") or None,
             "state": _enum(alarm.get("state"), f"{field}.state", ALARM_STATES) or "scheduled",
             "remaining_s": _whole(alarm.get("remaining_s"), f"{field}.remaining_s", 0, MAX_TIMER_S),
         }

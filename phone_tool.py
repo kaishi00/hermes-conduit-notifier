@@ -32,7 +32,7 @@ from hermes_constants import get_hermes_home
 from . import client, session_titles
 from .events import push_event
 from .phone_store import (ALARM_CHANGE_KINDS, CALENDAR_CHANGE_KINDS, WEEKDAYS, PhoneError, PhoneStore, alarm_summary,
-                          parse_day, parse_time, shares)
+                          clean_text, parse_day, parse_time, shares)
 
 logger = logging.getLogger("hermes.plugins.conduit_push")
 
@@ -568,7 +568,7 @@ def _alarms(store: PhoneStore, args: dict[str, Any], exact: bool) -> dict[str, A
         db, device = opened
         listed, listed_at = store.alarms(db, device["id"])
     return {"ok": True, "device": device["name"], "as_of": _ago(listed_at or device["last_seen"], store.clock()),
-            "alarms": [{**alarm, "summary": alarm_summary(alarm)} for alarm in listed],
+            "alarms": [{**alarm, "summary": alarm_summary(alarm)} for alarm in listed if isinstance(alarm, dict)],
             "note": "Only the alarms and timers Hermes set (iOS shows Conduit only its own, never the Clock app's), "
                     "as of the phone's last sync: one that rang or was stopped since may still be listed."}
 
@@ -577,9 +577,11 @@ def _alarm_write(store: PhoneStore, kind: str, args: dict[str, Any], session_id:
     keys = ("label", "at", "time", "repeats") if kind == "set_alarm" else ("label", "seconds") \
         if kind == "set_timer" else ()
     fields = {key: args[key] for key in keys if args.get(key) is not None}
-    # Another kind's fields mean the model mixed them up: say so, don't drop them.
-    stray = sorted(key for key in ("label", "at", "time", "repeats", "seconds", "alarm_id")
-                   if args.get(key) is not None and key not in keys and not (kind == "cancel_alarm" and key == "alarm_id"))
+    # Another kind's fields, or another tool's (a title for the label), mean
+    # the model mixed them up: say so, don't drop them. Empty values are a
+    # model filling every parameter, not a field.
+    allowed = {*keys, "action", "device", "reason"} | ({"alarm_id"} if kind == "cancel_alarm" else set())
+    stray = sorted(key for key, value in args.items() if key not in allowed and value not in (None, "", [], {}))
     if stray:
         return {"ok": False, "error": "invalid", "note": f"{kind} doesn't take {', '.join(stray)}."}
     target = {"alarm_id": args.get("alarm_id")} if kind == "cancel_alarm" else None
@@ -624,8 +626,10 @@ def _contacts(args: dict[str, Any], store: PhoneStore | None = None, exact: bool
     note = ("Only the people the user picked in Conduit, as of the phone's last sync. Other people's details: keep "
             "them to what the user asked for.")
     if query and not people:
-        note = (f"Nobody matches {query!r}. The user shares only the people they picked in Conduit's "
-                f"{SETTINGS_LINK}; ask them who they mean.")
+        # Voice reads the note aloud, so no link there.
+        where = "settings" if exact else SETTINGS_LINK
+        note = (f"Nobody matches {clean_text(query, 'query', MAX_CONTACT_QUERY_CHARS)!r}. The user shares only "
+                f"the people they picked in Conduit's {where}; ask them who they mean.")
     return {"ok": True, "device": device["name"], "as_of": _ago(device["last_seen"], store.clock()),
             "people": people, "note": note}
 

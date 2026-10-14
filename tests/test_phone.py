@@ -1152,6 +1152,21 @@ def test_bad_alarms_and_contacts_are_refused_whole(store, iphone, change, code):
     assert store.status(DEVICE)["device"]["counts"]["events"] == 0
 
 
+def test_corrupt_stored_alarms_and_contacts_read_as_empty(store, iphone):
+    import sqlite3
+    batch = _phone_batch()
+    batch["alarms"] = [{"id": "a_tea", "kind": "timer", "repeats": ["mon"]}]
+    store.ingest(iphone.seal(batch))
+    with store.reader("alarms") as (db, device):
+        assert store.alarms(db, device["id"])[0] == [{"id": "a_tea", "kind": "timer", "state": "scheduled"}]
+    with sqlite3.connect(store.path) as db:
+        db.execute("UPDATE devices SET alarms=?", (json.dumps({"a": 1, "b": 2}),))
+        db.execute("UPDATE contacts SET phones=?, emails=?", (json.dumps({"number": "1"}), json.dumps("x")))
+    with store.reader("alarms") as (db, device):
+        assert all("phones" not in person and "emails" not in person for person in store.contacts(db, device["id"]))
+    assert store.status(DEVICE)["device"]["counts"]["alarms"] == 0
+
+
 def test_an_unknown_need_is_never_shared():
     sharing = {"calendar": "full", "reminders": True, "status": True, "focus": True, "alarms": True, "contacts": True}
     assert phone.shares(sharing, "any") is True
@@ -1236,6 +1251,9 @@ def test_the_phone_tool_sets_alarms_and_timers(home):
     assert _phone_tool({"action": "set_alarm", "time": "7am"})["error"] == "malformed"
     mixed = _phone_tool({"action": "set_alarm", "seconds": 90})
     assert mixed["error"] == "invalid" and "seconds" in mixed["note"], "Not dropped into a timeless alarm"
+    misnamed = _phone_tool({"action": "set_alarm", "time": "06:30", "title": "Wake up"})
+    assert misnamed["error"] == "invalid" and "title" in misnamed["note"], "Not dropped into an unlabelled alarm"
+    assert _phone_tool({"action": "set_alarm", "time": "06:45", "title": "", "seconds": None})["ok"] is True
     assert _phone_tool({"action": "add_event"})["error"] == "invalid"
 
 
@@ -1258,6 +1276,8 @@ def test_the_contacts_tool_reads_only_the_people_picked(home):
     assert json.loads(tool.handle_contacts({"action": "people", "query": "sammy"}))["people"][0]["id"] == "p_sam"
     nobody = json.loads(tool.handle_contacts({"action": "people", "query": "Bob"}))
     assert nobody["people"] == [] and "conduit://settings/phone" in nobody["note"]
+    bell = json.loads(tool.handle_contacts({"action": "people", "query": "Bo\x07b"}))
+    assert "\x07" not in bell["note"] and "\\x07" not in bell["note"]
     assert json.loads(tool.handle_contacts({"action": "all"}))["error"] == "invalid"
     assert json.loads(tool.handle_contacts({"action": "people", "query": "x" * 101}))["error"] == "invalid"
     child = {"session_id": "child", "is_child": lambda sid: sid == "child"}
@@ -1280,6 +1300,9 @@ def test_voice_lists_alarms_and_contacts_reads_once_shared(client):
     people = _voice_read(client, handset, "conduit_contacts", {"action": "people", "query": "boss"},
                          call_id="voice-00000002")
     assert [person["id"] for person in people["people"]] == ["p_alex"]
+    nobody = _voice_read(client, handset, "conduit_contacts", {"action": "people", "query": "Bob"},
+                         call_id="voice-00000005")
+    assert nobody["people"] == [] and "conduit://" not in nobody["note"], "Voice reads the note aloud"
     refused = _voice_read(client, handset, "conduit_phone", {"action": "set_timer", "seconds": 60},
                           call_id="voice-00000003")
     assert refused["error"] == "invalid"
