@@ -83,7 +83,7 @@ def _origin(parts: urllib.parse.SplitResult) -> tuple[str, str, int]:
 
 def is_https(url: str) -> bool:
     """Whether a URL that passed these checks uses HTTPS (any letter case)."""
-    return url[:6].lower() == "https:"
+    return isinstance(url, str) and url[:6].lower() == "https:"
 
 
 def check_request_url(url: object) -> str:

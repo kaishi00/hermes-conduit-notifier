@@ -35,7 +35,7 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
 
 
 # What a relay request or a bad saved pairing can raise: printed as one line.
-_RELAY_ERRORS = (RuntimeError, OSError, ValueError, LookupError, TypeError, AttributeError, http.client.HTTPException)
+_RELAY_ERRORS = (RuntimeError, OSError, ValueError, LookupError, http.client.HTTPException)
 
 
 def dispatch(args: argparse.Namespace) -> int:
