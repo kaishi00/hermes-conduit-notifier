@@ -546,6 +546,9 @@ class LocationStore:
             if not isinstance(batch, dict) or batch.get("batch_id") != batch_id:
                 raise LocationError("malformed", "The sealed batch doesn't match its envelope")
             result = _apply(db, device_id, batch, now)
+            # Every upload also forgets old lookups, so they don't outlive
+            # their window when no new lookup comes.
+            _prune_maps(db, now)
             generation = _meta(db, "generation")
         return {**result, "generation": generation}
 
@@ -816,11 +819,7 @@ class LocationStore:
             raise LocationError("malformed", "That lookup is too long")
         now = self.clock()
         with self._write() as db:
-            db.execute("DELETE FROM maps WHERE requested_at<?", (now - MAPS_KEPT_S,))
-            # Rows stay a day for the budget; what was asked and found goes
-            # once no one can use it.
-            db.execute("UPDATE maps SET cache='', request='', answer=NULL WHERE requested_at<? AND request!=''",
-                       (now - MAPS_TTL_S - MAPS_CACHE_S,))
+            _prune_maps(db, now)
             row = db.execute(
                 "SELECT answer FROM maps WHERE device=? AND cache=? AND answered_at>? AND answer IS NOT NULL"
                 " ORDER BY answered_at DESC LIMIT 1", (device_id, cache, now - MAPS_CACHE_S)).fetchone()
@@ -886,8 +885,10 @@ class LocationStore:
                                 status=501)
         now = self.clock()
         with self._write() as db:
-            row = db.execute("SELECT 1 FROM maps WHERE id=? AND device=? AND answered_at IS NULL",
-                             (request_id, device_id)).fetchone()
+            # After expiry the tool has long stopped waiting; a late answer
+            # would only reach the repeat cache.
+            row = db.execute("SELECT 1 FROM maps WHERE id=? AND device=? AND answered_at IS NULL AND expires_at>?",
+                             (request_id, device_id, now)).fetchone()
             if row is None:
                 raise LocationError("unknown", "No waiting lookup has that id", status=404)
             key = self._device_key(db, device_id, kid, INFO_MAPS_ANSWER)
@@ -964,6 +965,14 @@ _MAPS_TABLE = """
         id TEXT PRIMARY KEY, device TEXT NOT NULL, requested_at REAL NOT NULL, expires_at REAL NOT NULL,
         cache TEXT NOT NULL, request TEXT NOT NULL, fetched_at REAL, answered_at REAL, answer TEXT)
 """
+
+
+def _prune_maps(db: sqlite3.Connection, now: float) -> None:
+    """Rows stay a day for the budget; what was asked and found goes once no
+    one can use it."""
+    db.execute("DELETE FROM maps WHERE requested_at<?", (now - MAPS_KEPT_S,))
+    db.execute("UPDATE maps SET cache='', request='', answer=NULL WHERE requested_at<? AND request!=''",
+               (now - MAPS_TTL_S - MAPS_CACHE_S,))
 
 
 def _migrate(db: sqlite3.Connection, now: float) -> None:

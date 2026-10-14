@@ -386,8 +386,10 @@ def _shaped(answer: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
     """The phone's answer, cleaned (it carries Apple Maps text: names,
     addresses, step instructions) with readable durations added."""
     if not answer.get("ok"):
-        error = _clean(answer.get("error"), 40) or "failed"
-        note = _clean(answer.get("note"), MAX_STRING)
+        error = answer.get("error")
+        error = _clean(error, 40) if isinstance(error, str) and error.strip() else "failed"
+        note = answer.get("note")
+        note = _clean(note, MAX_STRING) if isinstance(note, str) else None
         return {"ok": False, "error": error, "note": note or _ERROR_NOTES.get(error, "The lookup failed.")}
     result = _clean(answer.get("result"), MAX_STRING)
     if not isinstance(result, dict):
@@ -490,7 +492,8 @@ def _fallback(view: dict[str, Any] | None, request: dict[str, Any], error: str, 
                         "road_distance_guess": location_tool._metres(road)})
     if guesses:
         answer["rough_estimate"] = guesses
-        answer["as_of"] = f"{fix.get('at_local')}"
+        if fix.get("at_local"):
+            answer["as_of"] = fix["at_local"]
         answer["note"] = (note + " This is a rough guess from the straight-line distance at a typical "
                                  f"{mode} speed, not a route: say so.")
     return answer

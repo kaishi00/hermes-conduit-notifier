@@ -498,3 +498,23 @@ def test_impossible_times_are_refused_before_a_wake(home, monkeypatch):
 def test_the_phones_result_cant_replace_the_envelope():
     answer = maps._shaped({"ok": True, "result": {"ok": False, "action": "x", "places": []}}, {"action": "search"})
     assert answer["ok"] is True and answer["action"] == "search"
+
+
+def test_a_late_answer_is_refused_and_old_lookups_go_on_upload(store):
+    clock = [NOW]
+    store.clock = lambda: clock[0]
+    phone = _phone(store)
+    request_id = store.start_maps(DEVICE, {"action": "lookup", "query": "the dentist"})["id"]
+    clock[0] += location.MAPS_TTL_S + 1
+    with pytest.raises(location.LocationError) as error:
+        store.answer_maps(request_id, phone.seal_answer(store, request_id, {"id": request_id, "ok": True, "result": {}}))
+    assert error.value.status == 404
+    clock[0] += location.MAPS_CACHE_S
+    store.ingest(phone.seal(phone.batch(sharing=maps_sharing())))
+    with sqlite3.connect(store.path) as db:
+        assert db.execute("SELECT request FROM maps WHERE id=?", (request_id,)).fetchone()[0] == ""
+
+
+def test_a_phone_error_that_isnt_text_reads_as_failed():
+    answer = maps._shaped({"ok": False, "error": {"x": 1}, "note": ["y"]}, {"action": "search"})
+    assert answer == {"ok": False, "error": "failed", "note": "The lookup failed."}
