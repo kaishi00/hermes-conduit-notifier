@@ -180,7 +180,7 @@ gateway-bound inactive records still require separately reviewed maintenance.
 |--------|------|---------|
 | GET | `/healthz` | Health check |
 | POST | `/v1/installations` | Register a device |
-| PUT | `/v1/installations/:id` | Update device token, PushKit token (`voip_token`, `null` clears it), the paired Apple Watch's PushKit token (`watch_voip_token`, 0.10+) / preferences |
+| PUT | `/v1/installations/:id` | Update device token, PushKit token (`voip_token`, `null` clears it), the paired Apple Watch's PushKit token (`watch_voip_token`, 0.10+), location push token (`location_token`, 0.12+) / preferences |
 | DELETE | `/v1/installations/:id` | Deactivate a device |
 | POST | `/v1/installations/:id/pairings` | Create a pairing code |
 | POST | `/v1/pairings/claim` | Claim a pairing code (gateway side) |
@@ -1098,6 +1098,58 @@ workouts, body, vitals, fitness), with how far back to start.
 
 Limits: 4 devices per profile, 6,000 items and 4 MiB per batch, 120 uploads
 a minute per profile.
+
+## Location from Conduit (plugin 0.24+)
+
+Conduit can tell a Hermes profile where the user is so the agent can answer
+"how far am I from work?", follow place rules ("call me with my brief when
+I leave home on weekdays") and skip calls at places the user picked. Two
+separate opt-ins in Conduit:
+
+- **While talking** (When In Use): one fix when the user sends a message or
+  starts a voice call, and again when they've moved over 200 m during a call.
+  Precise by default.
+- **In the background** (Always): arriving at and leaving saved places
+  (up to 20), visits and significant moves. Area by default.
+
+Each layer has its own precision: `places` (saved place names only), `area`
+(about 1 km: neighbourhood and town, coordinates rounded to 2 decimals) or
+`precise`. The phone applies it before sending and the host applies it again.
+Saved places live on the phone: this host gets their names and kinds, never
+their coordinates, and each fix carries distances to them instead. A place
+marked private is reported only as "at a private place".
+
+- **Straight to this host, sealed.** Same scheme as health with its own key
+  and labels (`POST /location/key`, `POST /location/ingest`): X25519, then
+  ChaCha20-Poly1305 under an HKDF-SHA256 key. Location never passes through
+  the push relay; the relay only carries the on-demand request (below).
+- **Stored here only.** The profile's `conduit-location.sqlite3`, mode
+  `0600`. History is kept as long as the user picks in Conduit (latest only,
+  1, 7 by default, 30 or 365 days). `GET /location/status` reports counts,
+  never locations; `GET /location/reads` lists when the agent read location
+  (kept 30 days, without the locations); `POST /location/wipe` deletes one
+  device's data and key, or everything with `{"all": true}`.
+- **Tool.** `conduit_location` (actions `now`, `locate`, `places`,
+  `history`, `distance_to`, `rules`, `set_rule`, `remove_rule`) with its
+  skill `conduit_push:using-location`. It answers "paused" or "off" when the
+  user has paused sharing, logs every read, and subagents can't use it.
+- **On-demand locate.** `locate` asks the phone for a fresh fix through the
+  relay as a silent location push (Apple's Location Push Service Extension),
+  which the phone answers only while background sharing is on and not
+  paused. At most one every 5 minutes and 30 a day per profile.
+- **Place rules.** `set_rule` keeps a Hermes cron job named
+  `Place rule: <what>` that never runs on its own schedule; an arrive or
+  leave event that matches the rule's place, days and hours triggers it
+  (`GET /location/rules`, `DELETE /location/rules/<id>`). A rule fires at
+  most once a day, never for an event over 15 minutes old, and never while
+  sharing is paused.
+- **No calls at places.** Calls settings `avoid_places` (place ids) and
+  `avoid_unknown_place`: a call that would ring while the user is at an
+  avoided place goes out as a notification (status `limited`, reason
+  `place`). The latest fix counts for 24 hours with background sharing on,
+  otherwise 1 hour.
+
+Limits: 4 devices per profile, 20 places, 256 KiB per batch.
 
 ## Apple Watch lookups and jobs (plugin 0.6+, jobs 0.7+, Gemini tokens 0.8+)
 

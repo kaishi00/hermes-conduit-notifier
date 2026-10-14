@@ -19,7 +19,7 @@
   <main class="document">
     <div class="eyebrow">Hermes Conduit</div>
     <h1>Privacy Policy</h1>
-    <p class="meta">Effective October 13, 2026</p>
+    <p class="meta">Effective October 14, 2026</p>
     <p>This policy explains how Hermes Conduit handles information in the iOS app, the optional Hermes Conduit Notifier plugin, and the optional notification relay used to deliver Apple Push Notification service (APNs) alerts.</p>
 
     <h2>Summary</h2>
@@ -27,6 +27,7 @@
       <li>Conduit has no advertising SDKs, third-party analytics SDKs, or cross-app tracking.</li>
       <li>Your conversations, attachments, model settings, and gateway credentials are sent to the Hermes dashboard or gateway that you configure, not to a hosted Hermes service operated by Conduit.</li>
       <li>The optional notification relay processes only the information needed to pair a gateway and deliver the notification categories you enable.</li>
+      <li>Optional Apple Health and location sharing go from your device directly to your own gateway, encrypted end to end, and never through a server operated by Conduit.</li>
       <li>Personal information is not sold.</li>
     </ul>
 
@@ -60,6 +61,17 @@
       <li>Your agent can read this data when it answers you, which means it is sent to the AI model provider your Hermes agent uses (and, for a hosted agent, to its host). Their privacy terms apply to what they receive.</li>
       <li>Health data is not used for advertising, marketing or data mining, is not sold, and is not stored in iCloud. Conduit keeps only sync progress on your device, excluded from backups.</li>
       <li>You can turn sharing off at any time and delete the copy on your gateway from Conduit's Health settings.</li>
+    </ul>
+
+    <h2>Optional location sharing</h2>
+    <p>Conduit can share your location with your Hermes gateway so your agent can use it, for example to tell how far you are from an appointment, follow rules you set for places such as home or work, or not call you at places you choose. It is off until you turn it on, with two separate settings: sharing while you talk to your agent (a location when you send a message or start a voice call) and sharing in the background (arriving at and leaving places you save, and significant moves). For each you choose the precision: place names only, approximate area, or precise.</p>
+    <ul>
+      <li>Location goes from your device directly to the Hermes gateway you configured, over your dashboard connection, encrypted end to end with a key that your device and your gateway agree on. It never passes through the Conduit notification relay or any server operated by Conduit, and Conduit's developer never receives it.</li>
+      <li>When your agent asks for your current location, the relay sends your device a silent request through Apple's push service. The request contains no location; your device answers your gateway directly, and only while background sharing is on and not paused.</li>
+      <li>Your saved places stay on your device. Your gateway receives their names and how far you are from them, not their coordinates. Places you mark private are reported only as "a private place".</li>
+      <li>Your agent can read your location when it answers you, which means it is sent to the AI model provider your Hermes agent uses (and, for a hosted agent, to its host). Their privacy terms apply to what they receive. Conduit shows you when your agent read your location.</li>
+      <li>Your gateway keeps location history for the period you choose (7 days by default). Location is not used for advertising, marketing or data mining, is not sold, and is not stored in iCloud.</li>
+      <li>You can pause or turn off sharing at any time and delete the copy on your gateway from Conduit's Location settings.</li>
     </ul>
 
     <h2>Retention and deletion</h2>

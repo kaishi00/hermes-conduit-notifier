@@ -16,9 +16,9 @@ import { WATCH_TOOLS_CAPABILITY, WatchToolGrants, watchToolRoutes } from './watc
 const RELAY_INFO = (() => {
   try {
     const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-    return { version: String(pkg.version || 'unknown'), capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls', 'voip-calls', 'watch-calls', 'ring-sessions'] };
+    return { version: String(pkg.version || 'unknown'), capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls', 'voip-calls', 'watch-calls', 'ring-sessions', 'location-push'] };
   } catch {
-    return { version: 'unknown', capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls', 'voip-calls', 'watch-calls', 'ring-sessions'] };
+    return { version: 'unknown', capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls', 'voip-calls', 'watch-calls', 'ring-sessions', 'location-push'] };
   }
 })();
 
@@ -72,6 +72,10 @@ const WATCH_VOIP_TOKEN_GONE = new Set(['BadDeviceToken', 'Unregistered']);
 // "Stop ringing, it was answered or declined on the other device" is only
 // worth delivering while that device could still be ringing.
 const RING_SETTLE_TTL_S = 60;
+// A location request is only worth answering right away.
+const LOCATION_PUSH_TTL_S = 60;
+const LOCATION_PUSH_PER_HOUR = 20;
+const LOCATION_TOKEN_GONE = new Set(['BadDeviceToken', 'Unregistered', 'DeviceTokenNotForTopic']);
 
 // Conduit dashboard UUIDs (opaque app-generated identity, #148) are
 // canonicalized and validated in the store (normalizeDashboardId); the route
@@ -255,11 +259,12 @@ async function route(request, response) {
     const deviceToken = validateDeviceToken(body.device_token);
     const voipToken = validateVoipToken(body.voip_token) ?? undefined;
     const watchVoipToken = validateWatchVoipToken(body.watch_voip_token) ?? undefined;
+    const locationToken = validateLocationToken(body.location_token) ?? undefined;
     if (body.bundle_id !== config.topic) return sendJson(response, 400, { error: 'invalid_topic' });
     if (body.environment !== 'production') return sendJson(response, 400, { error: 'production_only' });
     store.assertInstallationCapacity();
     enforceRegistrationBudget();
-    const created = store.createInstallation({ bundleId: body.bundle_id, deviceToken, voipToken, watchVoipToken, environment: body.environment, preferences: body.preferences });
+    const created = store.createInstallation({ bundleId: body.bundle_id, deviceToken, voipToken, watchVoipToken, locationToken, environment: body.environment, preferences: body.preferences });
     return sendJson(response, 201, {
       installation: created.installation,
       credential: `${created.installation.id}.${created.deviceSecret}`,
@@ -278,6 +283,7 @@ async function route(request, response) {
       deviceToken,
       voipToken: validateVoipToken(body.voip_token),
       watchVoipToken: validateWatchVoipToken(body.watch_voip_token),
+      locationToken: validateLocationToken(body.location_token),
       preferences: body.preferences,
     };
     if (store.wouldUpdateInstallation(installation.id, changes)) enforceDeviceChangeBudget();
@@ -526,6 +532,11 @@ async function route(request, response) {
       }
       return sendJson(response, 202, { accepted: true, delivered: true });
     }
+    // A fresh location for Hermes: a silent location push the phone's
+    // extension answers straight to its host. Never a visible notification,
+    // and never paused by notification preferences (the user controls it in
+    // Conduit's location settings).
+    if (event.type === 'location.requested') return sendLocationRequest(response, installation, event, gateway);
     if (!shouldDeliver(installation.preferences, event.type)) return sendJson(response, 202, { accepted: true, delivered: false });
     // A phone that can ring gets the call as a VoIP push; anything that stops
     // it ringing sends the usual notification below instead.
@@ -925,6 +936,49 @@ async function sendVoip(installation, push, device) {
   return false;
 }
 
+// A location request as a location push (Apple's Location Push Service
+// Extension): the sealed envelope (or, unsealed, the request id and profile)
+// and the routing the phone needs to pick the host. No alert, short-lived.
+function locationPushFor(event, gateway, { topic, nowSeconds = Math.floor(Date.now() / 1000) }) {
+  const routing = {
+    type: event.type,
+    ...(event.e2e ? { e2e: 1 } : { profile: event.profile, ...(event.locate ? { locate: event.locate } : {}) }),
+    ...(gateway?.id ? { gateway_id: gateway.id } : {}),
+    ...(gateway?.dashboardId ? { dashboard_id: gateway.dashboardId } : {}),
+  };
+  const payload = { aps: {}, ...(event.e2e ? { conduit_e2e: event.e2e } : {}), conduit: routing };
+  if (!event.e2e && !event.locate) return null;
+  if (Buffer.byteLength(JSON.stringify(payload)) > MAX_NOTIFICATION_BYTES) return null;
+  return { payload, pushType: 'location', topic: `${topic}.location-query`, expiration: nowSeconds + LOCATION_PUSH_TTL_S };
+}
+
+async function sendLocationRequest(response, installation, event, gateway) {
+  const token = installation.locationToken;
+  if (!token) return sendJson(response, 202, { accepted: true, delivered: false, reason: 'no_location_token' });
+  // The plugin keeps its own budget; this is the relay's ceiling per phone.
+  enforceRateLimit(`location:${installation.id}`, LOCATION_PUSH_PER_HOUR, 60 * 60_000);
+  const push = locationPushFor(event, gateway, { topic: config.topic });
+  if (!push) return sendJson(response, 400, { error: 'invalid_location_request' });
+  let result;
+  try {
+    result = await apnsSend(token, push);
+  } catch (error) {
+    console.error(JSON.stringify({ level: 'error', message: 'apns location send threw', error: error instanceof Error ? error.message : String(error) }));
+    return sendJson(response, 502, { error: 'apns_unreachable' });
+  }
+  if (result.ok) return sendJson(response, 202, { accepted: true, delivered: true });
+  console.warn(JSON.stringify({ level: 'warn', message: 'apns location send refused', status: result.status, reason: result.reason }));
+  if (result.status === 410 || LOCATION_TOKEN_GONE.has(result.reason)) {
+    try {
+      store.clearLocationToken(installation.id, token);
+    } catch (error) {
+      console.error(JSON.stringify({ level: 'error', message: 'location token clear failed', error: error instanceof Error ? error.message : String(error) }));
+    }
+    return sendJson(response, 202, { accepted: true, delivered: false, reason: 'no_location_token' });
+  }
+  return sendJson(response, 502, { error: 'apns_rejected', reason: result.reason, status: result.status });
+}
+
 // An end-to-end encrypted event: the relay can't read the content, so the
 // alert is the generic copy for the type (no profile or session context),
 // `mutable-content` lets Conduit's Notification Service Extension decrypt
@@ -991,7 +1045,7 @@ function shouldDeliver(preferences, type) {
 }
 
 function validateEvent(body) {
-  const types = new Set(['approval.needed', 'input.needed', 'response.ready', 'turn.failed', 'background_task.finished', 'call.requested', 'plugin.hello']);
+  const types = new Set(['approval.needed', 'input.needed', 'response.ready', 'turn.failed', 'background_task.finished', 'call.requested', 'location.requested', 'plugin.hello']);
   if (!types.has(body.type)) throw httpError(400, 'invalid_event_type');
   const eventId = String(body.event_id ?? '');
   if (!/^[A-Za-z0-9:_-]{8,128}$/.test(eventId)) throw httpError(400, 'invalid_event_id');
@@ -1024,7 +1078,14 @@ function validateEvent(body) {
     pluginCapabilities: validCapabilities(body.plugin_capabilities),
     decision: validateDecision(body.decision, body.type),
     call: body.type === 'call.requested' ? validateCall(body.call) : undefined,
+    locate: body.type === 'location.requested' ? validateLocate(body.locate) : undefined,
   };
+}
+
+// A location request's id, mirroring the plugin's events.push_event.
+function validateLocate(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  return typeof value.id === 'string' && /^l_[A-Za-z0-9_-]{16,64}$/.test(value.id) ? { id: value.id } : undefined;
 }
 
 // The job a call request is about (#449), mirroring the plugin's
@@ -1159,6 +1220,12 @@ function validateDeviceToken(value) {
 function validateVoipToken(value) {
   if (value === undefined || value === null) return value;
   return validatedToken(value, 'invalid_voip_token');
+}
+
+// The phone's location push token (startMonitoringLocationPushes), the same way.
+function validateLocationToken(value) {
+  if (value === undefined || value === null) return value;
+  return validatedToken(value, 'invalid_location_token');
 }
 
 // The paired Watch's PushKit token, the same way.

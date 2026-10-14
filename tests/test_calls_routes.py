@@ -56,7 +56,8 @@ def test_status_reports_the_defaults_and_their_bounds(paired):
         "ok": True,
         "paired": True,
         "settings": {"enabled": False, "when_asked": True, "decides": False, "alerts": False,
-                     "min_gap_s": 120, "per_hour": 6, "per_day": 20, "rules": ""},
+                     "min_gap_s": 120, "per_hour": 6, "per_day": 20, "rules": "",
+                     "avoid_places": [], "avoid_unknown_place": False},
         "bounds": {
             "min_gap_s": {"min": 30, "max": 3600},
             "per_hour": {"min": 1, "max": 30},

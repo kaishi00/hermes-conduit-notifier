@@ -188,7 +188,7 @@ export class RelayStore {
     if (this.dirty) this.save();
   }
 
-  createInstallation({ bundleId, deviceToken, voipToken, watchVoipToken, environment, preferences }) {
+  createInstallation({ bundleId, deviceToken, voipToken, watchVoipToken, locationToken, environment, preferences }) {
     this.assertInstallationCapacity();
     const id = randomUUID();
     const deviceSecret = randomBytes(32).toString('base64url');
@@ -203,6 +203,9 @@ export class RelayStore {
       // The paired Apple Watch's own PushKit token: a call rings there too
       // (rings.mjs). Absent without a Watch app that rings.
       ...(watchVoipToken ? { watchVoipToken } : {}),
+      // The phone's location push token: Hermes can ask it for a fresh
+      // location (the phone answers its own host, never through here).
+      ...(locationToken ? { locationToken } : {}),
       environment,
       deviceSecretHash: hashSecret(deviceSecret),
       gateways: {},
@@ -248,33 +251,37 @@ export class RelayStore {
     // null clears it (the phone can no longer ring); undefined keeps it.
     const voipToken = changes.voipToken === undefined ? (installation.voipToken ?? null) : changes.voipToken;
     const watchVoipToken = changes.watchVoipToken === undefined ? (installation.watchVoipToken ?? null) : changes.watchVoipToken;
+    const locationToken = changes.locationToken === undefined ? (installation.locationToken ?? null) : changes.locationToken;
     const preferences = changes.preferences
       ? normalizePreferences({ ...installation.preferences, ...changes.preferences })
       : installation.preferences;
     const active = changes.active ?? installation.active;
-    return { installation, deviceToken, voipToken, watchVoipToken, preferences, active };
+    return { installation, deviceToken, voipToken, watchVoipToken, locationToken, preferences, active };
   }
 
   wouldUpdateInstallation(id, changes) {
     const normalized = this.normalizedInstallationChanges(id, changes);
     if (!normalized) return false;
-    const { installation, deviceToken, voipToken, watchVoipToken, preferences, active } = normalized;
+    const { installation, deviceToken, voipToken, watchVoipToken, locationToken, preferences, active } = normalized;
     const preferencesChanged = !preferencesEqual(preferences, installation.preferences);
     return deviceToken !== installation.deviceToken || voipToken !== (installation.voipToken ?? null)
       || watchVoipToken !== (installation.watchVoipToken ?? null)
+      || locationToken !== (installation.locationToken ?? null)
       || preferencesChanged || active !== installation.active;
   }
 
   updateInstallation(id, changes) {
     const normalized = this.normalizedInstallationChanges(id, changes);
     if (!normalized) return null;
-    const { installation, deviceToken, voipToken, watchVoipToken, preferences, active } = normalized;
+    const { installation, deviceToken, voipToken, watchVoipToken, locationToken, preferences, active } = normalized;
     if (!this.wouldUpdateInstallation(id, changes)) return publicInstallation(installation);
     installation.deviceToken = deviceToken;
     if (voipToken) installation.voipToken = voipToken;
     else delete installation.voipToken;
     if (watchVoipToken) installation.watchVoipToken = watchVoipToken;
     else delete installation.watchVoipToken;
+    if (locationToken) installation.locationToken = locationToken;
+    else delete installation.locationToken;
     installation.preferences = preferences;
     installation.active = active;
     installation.updatedAt = new Date().toISOString();
@@ -292,6 +299,13 @@ export class RelayStore {
   clearVoipToken(id, token) {
     if (this.data.installations[id]?.voipToken !== token) return null;
     return this.updateInstallation(id, { voipToken: null });
+  }
+
+  // APNs refused the location push token: lookups say so until the phone
+  // registers a new one.
+  clearLocationToken(id, token) {
+    if (this.data.installations[id]?.locationToken !== token) return null;
+    return this.updateInstallation(id, { locationToken: null });
   }
 
   // The same for the Watch's PushKit token: the phone still rings.
@@ -779,6 +793,7 @@ function publicInstallation(installation) {
     preferences: installation.preferences,
     voip: Boolean(installation.voipToken),
     watch_voip: Boolean(installation.watchVoipToken),
+    location: Boolean(installation.locationToken),
     updated_at: installation.updatedAt,
   };
 }

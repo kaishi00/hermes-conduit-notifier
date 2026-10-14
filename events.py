@@ -10,7 +10,7 @@ from typing import Any
 
 # Keep in sync with plugin.yaml. Reported on every event so the relay can
 # expose per-gateway compatibility state to the app (Settings > Notifications).
-PLUGIN_VERSION = "0.23.0"
+PLUGIN_VERSION = "0.24.0"
 PLUGIN_CAPABILITIES = [
     "approval-decisions",
     "clarify-loop",
@@ -18,6 +18,7 @@ PLUGIN_CAPABILITIES = [
     "version-reporting",
     "e2e-v1",
     "hermes-calls",
+    "location-locate",
 ]
 
 # PROTOCOL/STORE bounds for batch clarify decisions (8 questions x 8
@@ -54,6 +55,7 @@ def push_event(
     body: str = "",
     decision: dict[str, Any] | None = None,
     call: dict[str, Any] | None = None,
+    locate: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     event: dict[str, Any] = {
         "event_id": identifier,
@@ -86,7 +88,16 @@ def push_event(
         sanitized_call = sanitize_call(call)
         if sanitized_call:
             event["call"] = sanitized_call
+    # `locate` asks the phone for a fresh location (conduit_location): the
+    # request id the phone answers with, and nothing else.
+    if locate is not None and kind == "location.requested":
+        locate_id = locate.get("id") if isinstance(locate, dict) else None
+        if isinstance(locate_id, str) and _LOCATE_ID.match(locate_id):
+            event["locate"] = {"id": locate_id}
     return event
+
+
+_LOCATE_ID = re.compile(r"^l_[A-Za-z0-9_-]{16,64}$")
 
 
 # How a watched job ended, or (an alert call) what Hermes waits on.

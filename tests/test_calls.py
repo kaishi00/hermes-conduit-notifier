@@ -602,12 +602,13 @@ def test_register_adds_the_tool_and_its_skill():
                                 register_skill=lambda name, path: skills.append((name, path)))
     plugin.register(ctx)
     assert [tool["name"] for tool in tools] == ["conduit_call_user", "conduit_call_watch", "conduit_watch_report",
-                                                  "conduit_settings", "conduit_health"]
+                                                  "conduit_settings", "conduit_health", "conduit_location"]
     tool = tools[0]
     assert (tool["toolset"], tool["schema"]["name"]) == ("conduit", "conduit_call_user")
     assert tool["schema"]["parameters"]["required"] == ["reason", "asked_by_user"]
     assert all(other["toolset"] == "conduit" and other["schema"]["name"] == other["name"] for other in tools)
-    [(name, path), (health_name, health_path)] = skills
+    [(name, path), (health_name, health_path), (location_name, location_path)] = skills
+    assert location_name == "using-location" and location_path.is_file()
     assert name == "calling-the-user" and path.is_file()
     assert health_name == "reading-health-data" and health_path.read_text().startswith("---\nname: reading-health-data\n")
     assert "conduit_push:calling-the-user" in tool["schema"]["description"]
@@ -630,7 +631,7 @@ def test_a_hermes_without_the_display_fields_still_gets_the_tool(home, paired):
                                 register_cli_command=lambda **kwargs: None, register_tool=register_tool)
     plugin.register(ctx)
     assert [name for name, _ in tools] == ["conduit_call_user", "conduit_call_watch", "conduit_watch_report", "conduit_settings",
-                                           "conduit_health"]
+                                           "conduit_health", "conduit_location"]
     handler = tools[0][1]
     _settings(home)
     # Hermes passes the agent itself as parent_agent; only a child session is refused.

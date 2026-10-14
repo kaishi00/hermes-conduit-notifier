@@ -59,6 +59,7 @@ def test_every_capability_names_a_served_route_family():
         "hermes-call-outcomes": "/calls/outcomes",
         "conduit-settings": "/conduit-settings",
         "health-sync": "/health/",
+        "location-sync": "/location/",
     }
     assert set(prefixes) == set(api.ROUTE_CAPABILITIES)
     for capability, prefix in prefixes.items():

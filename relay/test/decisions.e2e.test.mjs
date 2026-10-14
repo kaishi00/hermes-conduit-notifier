@@ -2248,3 +2248,58 @@ test('encrypted clarify: question ids parked, card flag drives deliverability, s
   const meta = await api(baseUrl, '/v1/meta', { credential: deviceCredential });
   assert.ok(meta.json.capabilities.includes('e2e-v1'));
 });
+
+test('a location request is a silent location push to the phone, never a notification', async () => {
+  const aPort = await closedPort();
+  const isolatedPath = join(dir, 'relay-data-locate.json');
+  const capturePath = join(dir, `capture-locate-${Date.now()}.jsonl`);
+  const fixture = new RelayStore(isolatedPath);
+  const created = fixture.createInstallation({ bundleId: 'com.milim.relay', deviceToken: 'd'.repeat(64), environment: 'production' });
+  const pairing = fixture.createPairing(created.installation.id);
+  const claim = fixture.claimPairing(pairing.code, 'locate target');
+  const child = await startRelay(aPort, 'accept', isolatedPath, { APNS_CAPTURE_PATH: capturePath });
+  children.push(child);
+  const base = `http://127.0.0.1:${aPort}`;
+  const device = `${created.installation.id}.${created.deviceSecret}`;
+  const register = (token) => api(base, `/v1/installations/${created.installation.id}`, { method: 'PUT', credential: device, body: { location_token: token } });
+  const send = (eventId, body = {}) => api(base, '/v1/events', {
+    method: 'POST',
+    credential: `${created.installation.id}.${claim.gatewayId}.${claim.gatewaySecret}`,
+    body: { type: 'location.requested', event_id: eventId, profile: 'work', locate: { id: 'l_0123456789abcdefXYZ' }, ...body },
+  });
+  const captured = () => {
+    try {
+      return readFileSync(capturePath, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
+    } catch {
+      return [];
+    }
+  };
+  try {
+    const meta = await api(base, '/v1/meta', { credential: device });
+    assert.ok(meta.json.capabilities.includes('location-push'));
+    assert.deepEqual(await send('locate:000000000000000000000001'),
+      { status: 202, json: { accepted: true, delivered: false, reason: 'no_location_token' } },
+      'a phone without a location token says so');
+    assert.equal(captured().length, 0, 'and gets no notification instead');
+
+    assert.deepEqual(await register('nope'), { status: 400, json: { error: 'invalid_location_token' } });
+    assert.equal((await register('5'.repeat(64))).json.installation.location, true);
+    assert.deepEqual(await send('locate:000000000000000000000002'), { status: 202, json: { accepted: true, delivered: true } });
+    const [push] = captured();
+    assert.equal(push.deviceToken, '5'.repeat(64));
+    assert.equal(push.notification.pushType, 'location');
+    assert.equal(push.notification.topic, 'com.milim.relay.location-query');
+    assert.ok(push.notification.expiration > Date.now() / 1000);
+    assert.deepEqual(push.notification.payload.aps, {}, 'nothing for iOS to show');
+    assert.equal(push.notification.payload.conduit.type, 'location.requested');
+    assert.equal(push.notification.payload.conduit.profile, 'work');
+    assert.deepEqual(push.notification.payload.conduit.locate, { id: 'l_0123456789abcdefXYZ' });
+    assert.equal(push.notification.payload.conduit.gateway_id, claim.gatewayId);
+
+    assert.deepEqual(await send('locate:000000000000000000000003', { locate: { id: 'bad' } }),
+      { status: 400, json: { error: 'invalid_location_request' } }, 'an unsealed request needs its id');
+    assert.equal((await register(null)).json.installation.location, false, 'null forgets the token');
+  } finally {
+    await stopRelay(child);
+  }
+});

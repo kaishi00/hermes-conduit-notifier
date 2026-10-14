@@ -47,6 +47,8 @@ def test_calls_start_off_with_the_agreed_defaults(tmp_path):
         "per_hour": 6,
         "per_day": 20,
         "rules": "",
+        "avoid_places": [],
+        "avoid_unknown_place": False,
     }
 
 

@@ -3919,6 +3919,197 @@ async def post_health_wipe(request: Request, response: Response, profile: Option
     return await _health_route(response, profile, lambda: _health_call(lambda store: store.wipe(device_id)), "delete")
 
 
+# --- Location (shared from Conduit) ---------------------------------------
+#
+# The user turns on location sharing in Conduit: while they talk to Hermes,
+# and, separately, in the background. Like health, the phone agrees a key
+# with this profile once (/location/key) and then posts sealed batches
+# (/location/ingest) straight here, never through the push relay. The store
+# (location_store.py) keeps the latest fix, arrivals and departures for the
+# user's chosen history, place rules and the agent's read log. No route
+# returns a location: status and the read log say when and how much, rules
+# are the user's own, and wipe deletes. An arrival or departure that matches
+# a place rule starts that rule's scheduled job (Hermes's cron.jobs, which
+# runs it on the gateway's next tick).
+
+LOCATION_KEY_LIMIT = 10
+LOCATION_KEY_WINDOW_S = 60.0
+LOCATION_INGEST_LIMIT = 60
+LOCATION_INGEST_WINDOW_S = 60.0
+LOCATION_WIPE_LIMIT = 5
+LOCATION_WIPE_WINDOW_S = 60.0
+LOCATION_MAX_KEY_BODY_BYTES = 4 * 1024
+LOCATION_MAX_INGEST_BODY_BYTES = 256 * 1024
+
+_location_key_limiter = _MintLimiter(LOCATION_KEY_LIMIT, LOCATION_KEY_WINDOW_S,
+                                     message="Too many location key requests; try again shortly")
+_location_ingest_limiter = _MintLimiter(LOCATION_INGEST_LIMIT, LOCATION_INGEST_WINDOW_S,
+                                        message="Too many location uploads; try again shortly")
+_location_wipe_limiter = _MintLimiter(LOCATION_WIPE_LIMIT, LOCATION_WIPE_WINDOW_S,
+                                      message="Too many location delete requests; try again shortly")
+_location_store_module: Any = None
+
+
+def _location_store() -> Any:
+    """location_store.py beside this folder, loaded once."""
+    global _location_store_module
+    with _calls_store_lock:
+        if _location_store_module is None:
+            path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "location_store.py")
+            spec = importlib.util.spec_from_file_location("conduit_push_dashboard_location_store", path)
+            if spec is None or spec.loader is None:
+                raise TokenError(501, "This plugin install is missing location_store.py; update the plugin")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _location_store_module = module
+        return _location_store_module
+
+
+def _location_call(fn: Callable[[Any], Dict[str, Any]]) -> Dict[str, Any]:
+    module = _location_store()
+    try:
+        return fn(module.LocationStore(_calls_home()))
+    except module.LocationError as exc:
+        raise TokenError(exc.status, str(exc))
+
+
+async def _location_route(response: Response, profile: Optional[str], fn: Callable[[], Dict[str, Any]],
+                          name: str) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return {"ok": True, **(await _run_scoped(profile, fn))}
+    except TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
+        raise
+    except Exception as exc:
+        raise _unexpected(name, exc, feature="Location sharing")
+
+
+def _location_limit(limiter: Any, profile: Optional[str]) -> None:
+    try:
+        limiter.acquire(_limiter_key(profile))
+    except TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+
+
+def _start_rule_jobs(fired: Any) -> list:
+    """Starts the scheduled job of each place rule an ingest set off; runs
+    inside the profile's scope. The rule already counts as run today, so a
+    job that can't start is logged, not retried."""
+    started = []
+    for rule in fired if isinstance(fired, list) else []:
+        job_id = rule.get("job_id") if isinstance(rule, dict) else None
+        if not job_id:
+            continue
+        try:
+            from cron.jobs import trigger_job
+
+            if trigger_job(job_id, extra_prompt=rule.get("prompt")):
+                started.append(rule.get("rule_id"))
+            else:
+                logger.warning("conduit_push: place rule %s has no job %s", rule.get("rule_id"), job_id)
+        except Exception:  # noqa: BLE001 — the upload itself succeeded
+            logger.warning("conduit_push: could not start place rule %s", rule.get("rule_id"), exc_info=True)
+    return started
+
+
+def _remove_rule_jobs(job_ids: Any) -> None:
+    for job_id in job_ids if isinstance(job_ids, list) else []:
+        if not job_id:
+            continue
+        try:
+            from cron.jobs import remove_job
+
+            remove_job(job_id)
+        except Exception:  # noqa: BLE001 — the rule is gone; its job's prompt does nothing without an event
+            logger.warning("conduit_push: could not remove place rule job %s", job_id, exc_info=True)
+
+
+def _location_ingest(body: Any) -> Dict[str, Any]:
+    result = _location_call(lambda store: store.ingest(body))
+    fired = result.pop("rules_fired", [])
+    result["rules_fired"] = len(_start_rule_jobs(fired))
+    return result
+
+
+def _location_wipe(device_id: Any) -> Dict[str, Any]:
+    result = _location_call(lambda store: store.wipe(device_id))
+    _remove_rule_jobs(result.pop("rule_jobs", []))
+    return result
+
+
+def _location_remove_rule(rule_id: str) -> Dict[str, Any]:
+    job_id = _location_call(lambda store: {"job": store.remove_rule(rule_id)})["job"]
+    if job_id is None:
+        raise TokenError(404, "No place rule has that id")
+    _remove_rule_jobs([job_id])
+    return {"removed": True}
+
+
+@router.get("/location/status")
+async def get_location_status(response: Response, profile: Optional[str] = None,
+                              device_id: Optional[str] = None) -> Dict[str, Any]:
+    return await _location_route(response, profile, lambda: _location_call(lambda store: {
+        **store.status(device_id), "crypto": _location_store().crypto_available()}), "status")
+
+
+@router.post("/location/key")
+async def post_location_key(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    _location_limit(_location_key_limiter, profile)
+    body = await _read_json_body(request, LOCATION_MAX_KEY_BODY_BYTES)
+    return await _location_route(response, profile,
+                                 lambda: _location_call(lambda store: store.register_key(body)), "key")
+
+
+@router.post("/location/ingest")
+async def post_location_ingest(request: Request, response: Response,
+                               profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    _location_limit(_location_ingest_limiter, profile)
+    body = await _read_json_body(request, LOCATION_MAX_INGEST_BODY_BYTES)
+    return await _location_route(response, profile, lambda: _location_ingest(body), "upload")
+
+
+@router.get("/location/reads")
+async def get_location_reads(response: Response, profile: Optional[str] = None, limit: int = 50) -> Dict[str, Any]:
+    return await _location_route(response, profile,
+                                 lambda: _location_call(lambda store: {"reads": store.reads(limit)}), "reads")
+
+
+@router.get("/location/rules")
+async def get_location_rules(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    def rules(store: Any) -> Dict[str, Any]:
+        keys = ("id", "what", "place_id", "place_name", "event", "days", "hours", "call", "task", "last_fired")
+        return {"rules": [{key: rule[key] for key in keys} for rule in store.rules()]}
+
+    return await _location_route(response, profile, lambda: _location_call(rules), "rules")
+
+
+@router.delete("/location/rules/{rule_id}")
+async def delete_location_rule(rule_id: str, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    _location_limit(_location_wipe_limiter, profile)
+    return await _location_route(response, profile, lambda: _location_remove_rule(rule_id), "rule delete")
+
+
+@router.post("/location/wipe")
+async def post_location_wipe(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    _location_limit(_location_wipe_limiter, profile)
+    body = await _read_json_body(request, LOCATION_MAX_KEY_BODY_BYTES)
+    no_store = {"Cache-Control": "no-store"}
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Expected a JSON object", headers=no_store)
+    # Everything only when asked for by name; a device id alone deletes that device's data.
+    if body.get("all") is True and body.get("device_id") is not None:
+        raise HTTPException(status_code=400, detail="Name a device_id or all: true, not both", headers=no_store)
+    device_id = None if body.get("all") is True else body.get("device_id")
+    if device_id is None and body.get("all") is not True:
+        raise HTTPException(status_code=400, detail="Name a device_id, or all: true", headers=no_store)
+    return await _location_route(response, profile, lambda: _location_wipe(device_id), "delete")
+
+
 # --- Watch tools (wrist-down lookups for a Conduit Watch call) ---------------
 #
 # With the wrist down, a Conduit Watch call can't reach Conduit on the iPhone,
@@ -8154,6 +8345,7 @@ ROUTE_CAPABILITIES = (
     "hermes-call-outcomes",
     "conduit-settings",
     "health-sync",
+    "location-sync",
 )
 
 
