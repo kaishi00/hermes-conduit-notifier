@@ -134,3 +134,14 @@ test('a relay without a Maps key says so', async () => {
     relay.stop();
   }
 });
+
+test('a maps lookup id rides a plaintext location push like a locate id', async () => {
+  const { locationPushFor, validateEvent } = await import('../src/server.mjs');
+  const id = `m_${'a'.repeat(20)}`;
+  const event = validateEvent({ event_id: 'maps:12345678', type: 'location.requested', profile: 'work', maps: { id } });
+  assert.deepEqual(event.maps, { id });
+  const push = locationPushFor(event, { id: 'gw' }, { topic: 'com.milim.relay', nowSeconds: 100 });
+  assert.deepEqual(push.payload.conduit.maps, { id });
+  assert.equal(push.pushType, 'location');
+  assert.equal(validateEvent({ event_id: 'maps:87654321', type: 'location.requested', maps: { id: 'nope' } }).maps, undefined);
+});

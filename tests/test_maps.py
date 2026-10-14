@@ -480,3 +480,21 @@ def test_the_hosts_daily_share_of_apple_maps_holds(home, apple, monkeypatch):
     assert _call({"action": "lookup", "query": "Boots"})["ok"]
     assert _call({"action": "lookup", "query": "Boots"})["ok"]
     assert _call({"action": "lookup", "query": "Boots"})["error"] == "daily_limit"
+
+
+def test_a_content_free_push_keeps_the_lookup_id():
+    event = events.push_event("location.requested", identifier="maps:m_x", maps={"id": "m_" + "b" * 20})
+    assert e2e.content_free(event, None)["maps"] == {"id": "m_" + "b" * 20}
+
+
+def test_impossible_times_are_refused_before_a_wake(home, monkeypatch):
+    _shared(home, fix=fix("significant"))
+    fake = FakeClient({"delivered": True})
+    monkeypatch.setattr(maps, "client", fake)
+    assert _call({"action": "directions", "to": "Home", "depart_at": "2026-10-15T99:99+99:99"})["error"] == "invalid"
+    assert fake.sent == []
+
+
+def test_the_phones_result_cant_replace_the_envelope():
+    answer = maps._shaped({"ok": True, "result": {"ok": False, "action": "x", "places": []}}, {"action": "search"})
+    assert answer["ok"] is True and answer["action"] == "search"

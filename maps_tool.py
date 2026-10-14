@@ -51,8 +51,9 @@ GUESS_KMH = {"driving": 40.0, "walking": 4.5, "cycling": 15.0, "transit": 25.0}
 ME_WORDS = frozenset({"me", "here", "my location", "current location", "where i am"})
 _LAT_LON = re.compile(r"^\s*(-?\d{1,2}(?:\.\d+)?)\s*,\s*(-?\d{1,3}(?:\.\d+)?)\s*\Z")
 _PLACE_ID = re.compile(r"^[A-Za-z0-9._:-]{4,200}\Z")
-_TIME = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})?\Z")
-_CONTROL = re.compile("[\x00-\x1f\x7f-\x9f​-‏ -‮⁠-⁯﻿]+")
+_TIME = re.compile(r"^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d+)?)?"
+                   r"(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)?\Z")
+_CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]+")
 
 _PLACE_ARG = ("Where: \"me\" (the user's current position), one of their saved place names (from conduit_location "
               "places), an address or a name (\"Heathrow Terminal 5\", \"nearest Boots\"), \"place_id:<id>\" from "
@@ -395,7 +396,8 @@ def _shaped(answer: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
         _durations(route)
     for item in result.get("results") or []:
         _durations(item)
-    return {"ok": True, "action": request["action"], **result, "source": "Apple Maps, from the user's iPhone"}
+    # The envelope comes last: nothing in the phone's result can replace it.
+    return {**result, "ok": True, "action": request["action"], "source": "Apple Maps, from the user's iPhone"}
 
 
 _ERROR_NOTES = {

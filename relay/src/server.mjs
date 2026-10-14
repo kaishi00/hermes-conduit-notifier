@@ -981,12 +981,12 @@ async function sendVoip(installation, push, device) {
 function locationPushFor(event, gateway, { topic, nowSeconds = Math.floor(Date.now() / 1000) }) {
   const routing = {
     type: event.type,
-    ...(event.e2e ? { e2e: 1 } : { profile: event.profile, ...(event.locate ? { locate: event.locate } : {}) }),
+    ...(event.e2e ? { e2e: 1 } : { profile: event.profile, ...(event.locate ? { locate: event.locate } : {}), ...(event.maps ? { maps: event.maps } : {}) }),
     ...(gateway?.id ? { gateway_id: gateway.id } : {}),
     ...(gateway?.dashboardId ? { dashboard_id: gateway.dashboardId } : {}),
   };
   const payload = { aps: {}, ...(event.e2e ? { conduit_e2e: event.e2e } : {}), conduit: routing };
-  if (!event.e2e && !event.locate) return null;
+  if (!event.e2e && !event.locate && !event.maps) return null;
   if (Buffer.byteLength(JSON.stringify(payload)) > MAX_NOTIFICATION_BYTES) return null;
   return { payload, pushType: 'location', topic: `${topic}.location-query`, expiration: nowSeconds + LOCATION_PUSH_TTL_S };
 }
@@ -1158,6 +1158,7 @@ function validateEvent(body) {
     decision: validateDecision(body.decision, body.type),
     call: body.type === 'call.requested' ? validateCall(body.call) : undefined,
     locate: body.type === 'location.requested' ? validateLocate(body.locate) : undefined,
+    maps: body.type === 'location.requested' ? validateMaps(body.maps) : undefined,
     ...(mode ? { mode } : {}),
   };
 }
@@ -1172,6 +1173,13 @@ function validatePhoneMode(value) {
 function validateLocate(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
   return typeof value.id === 'string' && /^l_[A-Za-z0-9_-]{16,64}$/.test(value.id) ? { id: value.id } : undefined;
+}
+
+// A maps lookup's id (conduit_maps): the phone fetches the lookup from its
+// host with it. Routing only, like a locate id.
+function validateMaps(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  return typeof value.id === 'string' && /^m_[A-Za-z0-9_-]{16,64}$/.test(value.id) ? { id: value.id } : undefined;
 }
 
 // The job a call request is about (#449), mirroring the plugin's
@@ -1489,4 +1497,4 @@ function optionalMilliseconds(name, key) {
   return { [key]: value };
 }
 
-export { callPushFor, notificationFor, phoneBackgroundPushFor, settlePushFor, validateEvent, validateDecision };
+export { callPushFor, locationPushFor, notificationFor, phoneBackgroundPushFor, settlePushFor, validateEvent, validateDecision };

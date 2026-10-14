@@ -955,6 +955,10 @@ def _meta(db: sqlite3.Connection, key: str) -> str | None:
 
 # Maps requests (schema 2): the sealed-for-one-device question, its answer,
 # and `cache` (the question without its id) to answer a repeat from here.
+# Sealing covers the trip to and from the phone; here, in this owner-only
+# file, the question and answer stay readable while they're useful (the
+# request's minute plus the repeat window, about 3 minutes), then are
+# blanked. The row (id, device, times) stays a day for the budget.
 _MAPS_TABLE = """
     CREATE TABLE IF NOT EXISTS maps(
         id TEXT PRIMARY KEY, device TEXT NOT NULL, requested_at REAL NOT NULL, expires_at REAL NOT NULL,
