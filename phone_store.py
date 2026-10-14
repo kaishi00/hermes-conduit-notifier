@@ -227,7 +227,7 @@ def seal(key: bytes, plaintext: bytes, aad: bytes, nonce: bytes | None = None) -
     side in tests."""
     from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
-    nonce = nonce or secrets.token_bytes(NONCE_BYTES)
+    nonce = nonce if nonce is not None else secrets.token_bytes(NONCE_BYTES)
     return b64u(nonce), b64u(ChaCha20Poly1305(key).encrypt(nonce, plaintext, aad))
 
 
@@ -657,8 +657,12 @@ class PhoneStore:
                 f"SELECT {_CHANGE_COLUMNS}, devices.name FROM changes LEFT JOIN devices ON devices.id=changes.device"
                 " ORDER BY changes.created_at DESC, changes.rowid DESC LIMIT ?", (max(1, min(int(limit), 50)),)).fetchall()
             found = [_change_view(row) for row in rows]
-            if mark_reported:
-                db.execute("UPDATE changes SET reported_at=? WHERE state!='pending' AND reported_at IS NULL", (now,))
+            # Only the outcomes shown here count as seen; older ones past the
+            # window stay new for the next call.
+            shown = [row[0] for row in rows if row[9] != "pending" and row[14] is None]
+            if mark_reported and shown:
+                db.execute("UPDATE changes SET reported_at=? WHERE reported_at IS NULL AND id IN (%s)"
+                           % ",".join("?" * len(shown)), (now, *shown))
         return found
 
     def unreported_outcomes(self) -> list[dict[str, Any]]:
@@ -1470,7 +1474,9 @@ def _check_fields(kind: str, fields: dict[str, Any], *, partial: bool) -> dict[s
     allowed = EVENT_FIELDS if kind.endswith("_event") else REMINDER_FIELDS
     unknown = sorted(set(fields) - set(allowed))
     if unknown:
-        raise PhoneError("malformed", f"Unknown fields for {kind}: {', '.join(map(str, unknown))}. "
+        names = [_CONTROL.sub(" ", str(name))[:40] for name in unknown[:10]]
+        more = f" (and {len(unknown) - 10} more)" if len(unknown) > 10 else ""
+        raise PhoneError("malformed", f"Unknown fields for {kind}: {', '.join(names)}{more}. "
                                       f"Known: {', '.join(allowed)}")
     present = {key: value for key, value in fields.items() if key in allowed}
     if partial and not present:

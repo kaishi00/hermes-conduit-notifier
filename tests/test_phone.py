@@ -548,6 +548,14 @@ def test_a_change_reaches_the_phone_and_its_outcome_comes_back(store, iphone):
     assert store.changes()[0]["state"] == "applied"
 
 
+def test_pending_marks_seen_only_the_outcomes_it_shows(store, iphone):
+    store.ingest(iphone.seal(_batch()))
+    ids = [store.add_change("add_reminder", {"title": f"Thing {index}"})["id"] for index in range(3)]
+    iphone.changes(store, [{"id": change_id, "outcome": "dismissed"} for change_id in ids])
+    assert len(store.changes(limit=1)) == 1
+    assert len(store.unreported_outcomes()) == 2, "outcomes past the window stay new"
+
+
 def test_a_device_only_answers_its_own_changes(store, iphone):
     store.ingest(iphone.seal(_batch()))
     other = Phone("ipad-installation-2", name="iPad")
@@ -776,6 +784,16 @@ def test_a_write_queues_a_change_and_nudges_the_phone(home):
     assert home.sent[-1]["title"] == "Hermes has a calendar change"
     pending = _cal({"action": "pending"})["changes"]
     assert [item["state"] for item in pending] == ["waiting", "edited"]
+
+
+def test_a_refused_write_leaves_earlier_outcomes_for_later(home):
+    store, handset = _shared(home)
+    added = _cal({"action": "add_reminder", "title": "Milk"})
+    handset.changes(store, [{"id": added["change_id"], "outcome": "applied", "item_id": "r_milk"}])
+    refused = _cal({"action": "update_event", "event_id": "e_nope", "title": "Nope"})
+    assert "error" in refused and "earlier_changes" not in refused
+    later = _cal({"action": "add_reminder", "title": "Eggs"})
+    assert [item["state"] for item in later["earlier_changes"]] == ["applied"]
 
 
 def test_an_auto_add_goes_as_a_background_wake(home):

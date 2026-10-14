@@ -390,10 +390,11 @@ def _write(store: PhoneStore, kind: str, args: dict[str, Any], session_id: Any, 
         if kind == "complete_reminder":
             fields = {} if args.get("completed") is None else {"completed": args.get("completed")}
     session = session_id.strip() if isinstance(session_id, str) else ""
-    earlier = store.unreported_outcomes()
     change = store.add_change(kind, fields, target or None, reason=args.get("reason"),
                               session_title=session_titles.title(session) if session else None,
                               device=device["id"])
+    # Only once the change is queued, so a refused write leaves them for later.
+    earlier = store.unreported_outcomes()
     _nudge(change, profile)
     if change["auto"]:
         status = "queued"
