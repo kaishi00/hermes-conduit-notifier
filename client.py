@@ -30,6 +30,7 @@ from hermes_constants import get_hermes_home
 
 from . import e2e
 from .events import PLUGIN_VERSION, redact_event
+from .relay_urls import check_claim_base, check_request_url, paired_relay_url
 
 
 DEFAULT_RELAY_URL = "https://push.milim.dev"
@@ -153,18 +154,24 @@ def remove_state() -> None:
 
 
 def claim_pairing(code: str, relay_url: str = DEFAULT_RELAY_URL, gateway_name: str = "") -> dict[str, Any]:
+    """Claim a pairing code and save the pairing (rules in relay_urls.py).
+
+    A bad relay URL raises RelayURLError (a ValueError) before the code is sent.
+    """
+    base = check_claim_base(relay_url)
     name = gateway_name.strip() or f"{socket.gethostname()} Hermes"
-    body = request_json(
-        f"{relay_url.rstrip('/')}/v1/pairings/claim",
+    body = _request(
+        f"{base}/v1/pairings/claim",
         method="POST",
         payload={"pairing_code": code, "gateway_name": name},
+        timeout=15.0,
     )
     state = {
         "credential": body["credential"],
         "gateway_id": body.get("gateway_id"),
         "gateway_name": name,
         "installation_id": body["installation_id"],
-        "relay_url": body.get("relay_url") or relay_url.rstrip("/"),
+        "relay_url": paired_relay_url(body.get("relay_url"), base),
     }
     # Re-pairing over an existing pairing must not silently drop the
     # profile's privacy choice.
@@ -429,8 +436,9 @@ def cancel_decision(request_id: str) -> bool:
 
 
 class RelayRejected(RuntimeError):
-    """The relay answered with an HTTP error. ``status`` tells a refusal (4xx)
-    from the relay failing to handle the request (5xx)."""
+    """The relay answered with an HTTP error or a redirect (never followed).
+    ``status`` tells a redirect (3xx) or refusal (4xx) from the relay failing
+    to handle the request (5xx)."""
 
     def __init__(self, status: int, detail: str) -> None:
         # Safe to log verbatim: one printable line of 200 characters at most,
@@ -452,7 +460,32 @@ def request_json(
 ) -> dict[str, Any]:
     """One relay request. ``timeout`` bounds connect and read, but urllib
     cannot bound a pathological DNS resolution — accepted technical debt;
-    bounding it would mean a resolver redesign for no realistic gain."""
+    bounding it would mean a resolver redesign for no realistic gain.
+
+    The URL must be HTTPS (plain HTTP only to this machine), and redirects
+    are refused: urllib would resend the Authorization header to wherever
+    one points. A refused redirect raises RelayRejected with its 3xx status.
+    """
+    check_request_url(url)
+    return _request(url, method=method, payload=payload, credential=credential, timeout=timeout)
+
+
+class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+
+_opener = urllib.request.build_opener(_RefuseRedirects)
+
+
+def _request(
+    url: str,
+    *,
+    method: str,
+    payload: dict[str, Any] | None = None,
+    credential: str = "",
+    timeout: float,
+) -> dict[str, Any]:
     data = None if payload is None else json.dumps(payload, separators=(",", ":")).encode("utf-8")
     headers = {
         "Accept": "application/json",
@@ -464,7 +497,7 @@ def request_json(
         headers["Authorization"] = f"Bearer {credential}"
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with _opener.open(request, timeout=timeout) as response:
             raw = response.read()
             return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as error:

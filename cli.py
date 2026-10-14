@@ -35,7 +35,11 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
 def dispatch(args: argparse.Namespace) -> int:
     action = getattr(args, "conduit_push_action", None)
     if action == "pair":
-        state = claim_pairing(args.code, args.relay_url, args.name)
+        try:
+            state = claim_pairing(args.code, args.relay_url, args.name)
+        except (RuntimeError, OSError, ValueError) as error:
+            print(f"Pairing failed: {error}")
+            return 1
         print(f"Paired {state['gateway_name']} with Conduit.")
         try:
             send_now(plugin_hello(), timeout=4.0)
@@ -104,7 +108,12 @@ def dispatch(args: argparse.Namespace) -> int:
         )
         return 0
     if action == "unpair":
-        print("Conduit pairing revoked." if unpair() else "This Hermes profile was not paired.")
+        try:
+            revoked = unpair()
+        except (RuntimeError, OSError, ValueError) as error:
+            print(f"Unpairing failed: {error}")
+            return 1
+        print("Conduit pairing revoked." if revoked else "This Hermes profile was not paired.")
         return 0
     print("Usage: hermes conduit-push {pair|status|test|redact|unpair}")
     return 2

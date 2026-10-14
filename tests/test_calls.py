@@ -223,32 +223,32 @@ def test_relay_errors_carry_their_status_and_a_bounded_detail(monkeypatch):
     real = sys.modules["conduit_push.client"]
 
     def refuse(body):
-        def urlopen(request, timeout):
+        def open_request(request, timeout):
             raise urllib.error.HTTPError(request.full_url, 502, "Bad Gateway", {}, io.BytesIO(body))
-        return urlopen
+        return open_request
 
-    monkeypatch.setattr(real.urllib.request, "urlopen", refuse(b'{"error": "apns_unreachable"}'))
+    monkeypatch.setattr(real._opener, "open", refuse(b'{"error": "apns_unreachable"}'))
     with pytest.raises(real.RelayRejected) as caught:
         real.request_json("https://relay.example/v1/events", method="POST", payload={})
     assert (caught.value.status, caught.value.detail) == (502, "apns_unreachable")
 
-    monkeypatch.setattr(real.urllib.request, "urlopen", refuse(b'{"error": {"nested": "' + b"x" * 500 + b'"}}'))
+    monkeypatch.setattr(real._opener, "open", refuse(b'{"error": {"nested": "' + b"x" * 500 + b'"}}'))
     with pytest.raises(real.RelayRejected) as caught:
         real.request_json("https://relay.example/v1/events", method="POST", payload={})
     assert isinstance(caught.value.detail, str) and len(caught.value.detail) == 200
 
     # A relay can't split or forge log lines through it.
-    monkeypatch.setattr(real.urllib.request, "urlopen", refuse(b'{"error": "bad\\nWARNING forged\\r\\u001b[31m"}'))
+    monkeypatch.setattr(real._opener, "open", refuse(b'{"error": "bad\\nWARNING forged\\r\\u001b[31m"}'))
     with pytest.raises(real.RelayRejected) as caught:
         real.request_json("https://relay.example/v1/events", method="POST", payload={})
     assert caught.value.detail == "bad WARNING forged [31m"
 
-    monkeypatch.setattr(real.urllib.request, "urlopen", refuse(b'{"error": null}'))
+    monkeypatch.setattr(real._opener, "open", refuse(b'{"error": null}'))
     with pytest.raises(real.RelayRejected) as caught:
         real.request_json("https://relay.example/v1/events", method="POST", payload={})
     assert caught.value.detail == "request_rejected"
 
-    monkeypatch.setattr(real.urllib.request, "urlopen", refuse(b"<html>proxy</html>"))
+    monkeypatch.setattr(real._opener, "open", refuse(b"<html>proxy</html>"))
     with pytest.raises(real.RelayRejected) as caught:
         real.request_json("https://relay.example/v1/events", method="POST", payload={})
     assert caught.value.detail == "request_rejected"

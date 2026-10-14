@@ -723,7 +723,7 @@ def test_user_agent_derives_from_the_plugin_version():
     # One source of truth: bumping PLUGIN_VERSION updates the relay UA
     # automatically instead of leaving a stale hand-written constant.
     assert loop.client.USER_AGENT == f"Hermes-Conduit-Notifier/{loop.client.PLUGIN_VERSION}"
-    assert loop.client.PLUGIN_VERSION == "0.32.0"
+    assert loop.client.PLUGIN_VERSION == "0.32.1"
 
 
 def test_send_now_redacts_only_when_the_profile_opts_in(monkeypatch):
@@ -788,7 +788,7 @@ def test_set_redact_content_and_repairing_keep_the_flag(monkeypatch, tmp_path):
 
     assert client.set_redact_content(True) is False  # unpaired: nothing to configure
 
-    monkeypatch.setattr(client, "request_json", lambda url, **kwargs: {"credential": "c", "installation_id": "i"})
+    monkeypatch.setattr(client, "_request", lambda url, **kwargs: {"credential": "c", "installation_id": "i"})
     client.claim_pairing("CODE")
     assert client.set_redact_content(True) is True
     assert client.load_state()["redact_content"] is True

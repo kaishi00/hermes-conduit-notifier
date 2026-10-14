@@ -3616,6 +3616,25 @@ def _pair_relay_url(raw: Any, state: Optional[Dict[str, Any]]) -> str:
     return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", "")).rstrip("/")
 
 
+_relay_urls_module: Any = None
+_relay_urls_lock = threading.Lock()
+
+
+def _relay_urls() -> Any:
+    """relay_urls.py beside this folder, loaded once: the URL rules both pairing paths share."""
+    global _relay_urls_module
+    with _relay_urls_lock:
+        if _relay_urls_module is None:
+            path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "relay_urls.py")
+            spec = importlib.util.spec_from_file_location("conduit_push_dashboard_relay_urls", path)
+            if spec is None or spec.loader is None:
+                raise TokenError(501, "This plugin install is missing relay_urls.py; update the plugin")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _relay_urls_module = module
+        return _relay_urls_module
+
+
 def _pair_gateway_name(raw: Any, profile: Optional[str]) -> str:
     cleaned = "".join(c for c in raw if c.isprintable()).strip() if isinstance(raw, str) else ""
     if cleaned:
@@ -3678,6 +3697,12 @@ def pair_profile(body: Any, profile: Optional[str] = None, path: Any = None,
         raise TokenError(400, "pairing_code must look like ABCDE-FGHJK")
     path = path if path is not None else _pairing_state_path()
     relay_url = _pair_relay_url(body.get("relay_url"), _load_pairing_state(path))
+    relay_urls = _relay_urls()
+    try:
+        # Plain http:// only to a LAN or Tailscale address, before the code is spent.
+        relay_urls.check_claim_base(relay_url)
+    except relay_urls.RelayURLError as exc:
+        raise TokenError(400, str(exc))
     gateway_name = _pair_gateway_name(body.get("gateway_name"), profile)
     if limit is not None:
         limit()
@@ -3689,10 +3714,12 @@ def pair_profile(body: Any, profile: Optional[str] = None, path: Any = None,
         "installation_id": claimed["installation_id"],
         "relay_url": relay_url,
     }
-    # The relay may name its canonical URL; it gets the same check as the phone's.
-    with contextlib.suppress(TokenError):
-        if claimed.get("relay_url"):
-            state["relay_url"] = _pair_relay_url(claimed["relay_url"], None)
+    # The relay may name its canonical URL: kept when it is HTTPS on the same
+    # origin, or on any origin after a claim over a LAN or Tailscale address.
+    try:
+        state["relay_url"] = relay_urls.paired_relay_url(claimed.get("relay_url"), relay_url)
+    except relay_urls.RelayURLError as exc:
+        raise TokenError(502, str(exc))
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with _e2e_lock, _pairing_state_lock(path):
         # Same carry-over as client.claim_pairing: the privacy choice stays.

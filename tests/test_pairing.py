@@ -223,3 +223,44 @@ def test_the_route_answers_without_the_credential(monkeypatch, tmp_path):
     assert response.json()["ok"] is True and "credential" not in response.json()
     bad = TestClient(app).post(f"{BASE}/pair", json={"pairing_code": "nope"})
     assert bad.status_code == 400
+
+
+def test_a_plain_http_relay_on_a_public_address_is_refused_before_claiming(tmp_path):
+    calls = []
+    with pytest.raises(api.TokenError) as raised:
+        api.pair_profile({"pairing_code": CODE, "relay_url": "http://relay.example"}, path=tmp_path / "s.json",
+                         claim=_recording_claim(calls))
+    assert raised.value.status == 400 and "https://" in str(raised.value)
+    assert calls == []
+
+
+@pytest.mark.parametrize("claim_at", ["http://100.101.102.103:8787", "http://192.168.1.10:8787",
+                                      "http://relay.tail1234.ts.net:8787", "https://relay.tail1234.ts.net"])
+def test_a_self_hosted_relay_is_claimed_over_the_lan_and_saved_at_its_https_url(tmp_path, claim_at):
+    path = tmp_path / "s.json"
+    calls = []
+    api.pair_profile({"pairing_code": CODE, "relay_url": claim_at}, path=path,
+                     claim=_recording_claim(calls, _claimed(relay_url="https://push.home.example")))
+    assert calls[0][0] == claim_at
+    assert json.loads(path.read_text())["relay_url"] == "https://push.home.example"
+
+
+def test_a_public_relay_naming_another_origin_keeps_the_claimed_url(tmp_path):
+    path = tmp_path / "s.json"
+    api.pair_profile({"pairing_code": CODE, "relay_url": "https://relay.example"}, path=path,
+                     claim=_recording_claim([], _claimed(relay_url="https://elsewhere.example")))
+    assert json.loads(path.read_text())["relay_url"] == "https://relay.example"
+
+
+def test_a_relay_naming_plain_http_is_not_saved(tmp_path):
+    path = tmp_path / "s.json"
+    api.pair_profile({"pairing_code": CODE, "relay_url": "https://relay.example"}, path=path,
+                     claim=_recording_claim([], _claimed(relay_url="http://relay.example")))
+    assert json.loads(path.read_text())["relay_url"] == "https://relay.example"
+    # Claimed over the LAN with no HTTPS address to fall back on: nothing is saved.
+    path2 = tmp_path / "s2.json"
+    with pytest.raises(api.TokenError) as raised:
+        api.pair_profile({"pairing_code": CODE, "relay_url": "http://192.168.1.10:8787"}, path=path2,
+                         claim=_recording_claim([], _claimed(relay_url="http://192.168.1.10:8787")))
+    assert raised.value.status == 502 and "PUBLIC_URL" in str(raised.value)
+    assert not path2.exists()
