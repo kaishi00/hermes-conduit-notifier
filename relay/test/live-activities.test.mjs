@@ -138,6 +138,7 @@ test('reports carry only known phases, categories and bounded numbers', () => {
   assert.equal(validateReport({ session_id: 's-1', state: { phase: 'thinking' }, end: 'exploded' }), null);
   assert.equal(validateReport({ session_id: 'has spaces', state: { phase: 'thinking' } }), null);
   assert.equal(validateReport({ state: { phase: 'thinking' } }), null);
+  assert.equal(validateReport({ session_id: 's-1', state: { phase: 'thinking', tools: 1.5 } }), null);
 });
 
 test('registrations need an activity token and one to six chat ids', () => {
@@ -147,4 +148,56 @@ test('registrations need an activity token and one to six chat ids', () => {
   assert.equal(validateRegistration({ push_token: TOKEN_A, session_ids: [] }), null);
   assert.equal(validateRegistration({ push_token: TOKEN_A, session_ids: ['a', 'b c'] }), null);
   assert.equal(validateRegistration({ push_token: TOKEN_A, session_ids: Array.from({ length: 7 }, (_, i) => `s${i}`) }), null);
+  assert.deepEqual(validateRegistration({ push_token: TOKEN_A, session_ids: Array(7).fill('a') }),
+    { token: TOKEN_A, sessionIds: ['a'] }, 'repeats count once');
+});
+
+test('an end waits for the update in flight, so it never lands first', async () => {
+  let release;
+  const sent = [];
+  const activities = new LiveActivities({
+    maxActivities: 10,
+    maxPerInstallation: 4,
+    send: (token, push) => {
+      sent.push(push.payload.aps.event);
+      if (sent.length === 1) return new Promise((resolve) => { release = () => resolve({ ok: true }); });
+      return { ok: true };
+    },
+  });
+  activities.register('install-1', TOKEN_A, ['session-1']);
+  activities.report('install-1', 'session-1', { phase: 'tool', tool: 'web', tools: 1 });
+  await settle();
+  activities.report('install-1', 'session-1', { phase: 'thinking', tools: 1 }, 'done');
+  activities.report('install-1', 'session-1', { phase: 'thinking', tools: 1 });
+  await settle();
+  assert.deepEqual(sent, ['update']);
+  release();
+  await settle();
+  await settle();
+  assert.deepEqual(sent, ['update', 'end'], 'nothing after the end overtakes it');
+  assert.equal(activities.size, 0);
+});
+
+test('an end APNs did not take is tried again before the activity is dropped', async () => {
+  const { activities, sent, results } = harness({ minIntervalMs: 10 });
+  activities.register('install-1', TOKEN_A, ['session-1']);
+  results.push({ ok: false, status: 500, reason: 'InternalServerError' });
+  activities.report('install-1', 'session-1', { phase: 'thinking', tools: 0 }, 'failed');
+  await settle();
+  assert.equal(sent.length, 1);
+  assert.equal(activities.size, 1, 'kept until the end is delivered');
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  await settle();
+  assert.equal(sent.length, 2);
+  assert.equal(sent[1].push.payload.aps.event, 'end');
+  assert.equal(activities.size, 0);
+});
+
+test('a removed installation takes its activities with it', () => {
+  const { activities } = harness();
+  activities.register('install-1', TOKEN_A, ['session-1']);
+  activities.register('install-2', TOKEN_B, ['session-1']);
+  activities.removeInstallation('install-1');
+  assert.equal(activities.find('install-1', 'session-1'), undefined);
+  assert.ok(activities.find('install-2', 'session-1'));
 });

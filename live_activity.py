@@ -24,6 +24,7 @@ the whole thing off for a while.
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from typing import Any, Callable
@@ -40,8 +41,12 @@ UNTRACKED_RETRY_S = 15.0
 # The first update of a turn waits this long, so the activity Conduit starts
 # as it sends the turn is registered by the time the relay is asked.
 FIRST_DELAY_S = 2.0
-# The relay refused (rate limit, outage): wait this long before the next try.
+# The relay refused one turn's update (rate limit, outage): that turn waits
+# this long before it is tried again. Other turns carry on.
 BACKOFF_S = 60.0
+# An end that still hasn't gone out after this long is given up on: the
+# activity's stale date has taken over by then.
+END_GIVE_UP_S = 15 * 60.0
 # The relay has no Live Activity route: try again after this long.
 UNSUPPORTED_S = 30 * 60.0
 # How long a sent end keeps a second end of the same turn from going out.
@@ -52,6 +57,8 @@ MAX_SESSIONS = 64
 IDLE_FORGET_S = 2 * 60 * 60.0
 
 PHASES = {"thinking", "tool", "approval", "input"}
+# "Leave this field as it is" for ``_update``.
+_UNSET: Any = object()
 ENDS = {"done", "failed", "stopped"}
 
 # Tool name -> category Conduit names on the Lock Screen. Exact names first,
@@ -103,7 +110,7 @@ def tool_category(name: Any) -> str:
 
 class _Turn:
     __slots__ = ("phase", "tool", "tools", "context", "end", "dirty", "sent_at",
-                 "tracked", "touched_at", "started_at")
+                 "tracked", "touched_at", "started_at", "retry_at", "ended_at")
 
     def __init__(self, now: float) -> None:
         self.phase = "thinking"
@@ -117,6 +124,10 @@ class _Turn:
         self.tracked: bool | None = None
         self.touched_at = now
         self.started_at = now
+        # After a failed send, this turn waits until then.
+        self.retry_at = 0.0
+        # When the end was asked for.
+        self.ended_at = 0.0
 
 
 class LiveActivityReporter:
@@ -142,6 +153,7 @@ class LiveActivityReporter:
         self._ended: dict[str, float] = {}
         self._lock = threading.Lock()
         self._wake = threading.Condition(self._lock)
+        # The relay has no Live Activity route: nothing is sent until then.
         self._paused_until = 0.0
         self._thread: threading.Thread | None = None
 
@@ -178,7 +190,7 @@ class LiveActivityReporter:
             limit = float(context_length)
         except (TypeError, ValueError):
             return
-        if limit <= 0 or used < 0:
+        if not (math.isfinite(used) and math.isfinite(limit)) or limit <= 0 or used < 0:
             return
         self._update(session_id, context=max(0, min(100, round(used * 100 / limit))))
 
@@ -194,32 +206,38 @@ class LiveActivityReporter:
             # A turn this plugin never saw start (a restart mid-turn) still
             # ends: the phone may be showing it.
             if turn is None:
-                turn = _Turn(self._clock())
+                turn = _Turn(now)
                 self._turns[session_id] = turn
             if turn.end is not None:
                 return
             turn.end = outcome
             turn.dirty = True
-            turn.touched_at = self._clock()
+            turn.touched_at = turn.ended_at = now
             self._changed()
 
     # --- delivery --------------------------------------------------------
 
     def flush(self) -> float | None:
         """Send every update that is due; returns seconds until the next one."""
-        due: list[tuple[str, dict[str, Any]]] = []
+        due: list[tuple[str, _Turn, dict[str, Any]]] = []
         with self._lock:
             now = self._clock()
             next_in: float | None = None
+
+            def later(at: float) -> None:
+                nonlocal next_in
+                next_in = at - now if next_in is None else min(next_in, at - now)
+
             for session_id, turn in list(self._turns.items()):
-                if now - turn.touched_at > IDLE_FORGET_S:
+                if now - turn.touched_at > IDLE_FORGET_S or (
+                    turn.end is not None and now - turn.ended_at > END_GIVE_UP_S
+                ):
                     del self._turns[session_id]
                     continue
                 if not turn.dirty:
                     continue
                 if now < self._paused_until:
-                    wait = self._paused_until - now
-                    next_in = wait if next_in is None else min(next_in, wait)
+                    later(self._paused_until)
                     continue
                 interval = UNTRACKED_RETRY_S if turn.tracked is False else MIN_INTERVAL_S
                 # An end goes out at once.
@@ -229,42 +247,50 @@ class LiveActivityReporter:
                     ready_at = turn.sent_at + interval
                 else:
                     ready_at = turn.started_at + FIRST_DELAY_S
+                ready_at = max(ready_at, turn.retry_at)
                 if ready_at > now:
-                    next_in = ready_at - now if next_in is None else min(next_in, ready_at - now)
+                    later(ready_at)
                     continue
+                # Marked sent now so the next hook's change waits its turn;
+                # a failed send marks it dirty again.
                 turn.dirty = False
                 turn.sent_at = now
-                due.append((session_id, _payload(session_id, turn)))
-                if turn.end is not None:
-                    del self._turns[session_id]
-                    self._ended[session_id] = now
+                due.append((session_id, turn, _payload(session_id, turn)))
             for session_id, ended_at in list(self._ended.items()):
                 if now - ended_at >= ENDED_MEMORY_S:
                     del self._ended[session_id]
-        for session_id, payload in due:
-            self._deliver(session_id, payload)
+        for session_id, turn, payload in due:
+            self._deliver(session_id, turn, payload)
         return next_in
 
-    def _deliver(self, session_id: str, payload: dict[str, Any]) -> None:
+    def _deliver(self, session_id: str, turn: _Turn, payload: dict[str, Any]) -> None:
         try:
             answer = self._post(payload)
-        except client.RelayRejected as error:
-            with self._lock:
-                self._paused_until = self._clock() + (UNSUPPORTED_S if error.status == 404 else BACKOFF_S)
-            logger.info("Conduit Live Activity update not taken: %s", error)
-            return
         except Exception as error:  # noqa: BLE001 — never into the turn
+            unsupported = isinstance(error, client.RelayRejected) and error.status == 404
             with self._lock:
-                self._paused_until = self._clock() + BACKOFF_S
-            logger.info("Conduit Live Activity update failed: %s", error)
+                now = self._clock()
+                if unsupported:
+                    # The relay has no route at all: every turn waits.
+                    self._paused_until = now + UNSUPPORTED_S
+                else:
+                    turn.retry_at = now + BACKOFF_S
+                # The state (an end included) goes out on the next try,
+                # unless a newer turn of the session replaced this one.
+                if self._turns.get(session_id) is turn:
+                    turn.dirty = True
+                    self._changed()
+            logger.info("Conduit Live Activity update not delivered: %s", error)
             return
         tracked = bool(isinstance(answer, dict) and answer.get("tracked"))
         with self._lock:
-            turn = self._turns.get(session_id)
-            if turn is not None:
-                turn.tracked = tracked
+            turn.tracked = tracked
+            turn.retry_at = 0.0
+            if payload.get("end") is not None and self._turns.get(session_id) is turn:
+                del self._turns[session_id]
+                self._ended[session_id] = self._clock()
 
-    def _update(self, session_id: str, *, phase: str | None = None, tool: str | None | type = ...,
+    def _update(self, session_id: str, *, phase: str | None = None, tool: str | None = _UNSET,
                 context: int | None = None, count_tool: bool = False) -> None:
         if not session_id:
             return
@@ -275,8 +301,8 @@ class LiveActivityReporter:
             before = (turn.phase, turn.tool, turn.tools, turn.context)
             if phase is not None:
                 turn.phase = phase
-            if tool is not ...:
-                turn.tool = tool  # type: ignore[assignment]
+            if tool is not _UNSET:
+                turn.tool = tool
             if count_tool:
                 turn.tools += 1
             if context is not None:

@@ -156,13 +156,79 @@ def test_a_relay_without_the_route_turns_reporting_off_for_a_while(reporter, rel
     clock[0] += live.FIRST_DELAY_S
     reporter.flush()
     relay.failure = None
-    reporter.turn_ended("s-1", "done")
+    reporter.turn_started("s-2")
     clock[0] += 60
     reporter.flush()
     assert len(relay.posts) == 1
     clock[0] += live.UNSUPPORTED_S
+    reporter.thinking("s-2")
+    reporter.flush()
+    assert relay.posts[-1]["session_id"] == "s-2"
+
+
+def test_an_end_the_relay_did_not_take_is_sent_again(reporter, relay, clock):
+    reporter.turn_started("s-1")
+    clock[0] += live.FIRST_DELAY_S
+    reporter.flush()
+    relay.failure = client.RelayRejected(503, "unavailable")
+    reporter.turn_ended("s-1", "done")
     reporter.flush()
     assert relay.posts[-1]["end"] == "done"
+    # on_session_end's second end doesn't count as delivered either.
+    reporter.turn_ended("s-1", "done")
+    relay.failure = None
+    assert reporter.flush() == pytest.approx(live.BACKOFF_S)
+    clock[0] += live.BACKOFF_S
+    reporter.flush()
+    assert [post.get("end") for post in relay.posts] == [None, "done", "done"]
+    clock[0] += live.BACKOFF_S
+    reporter.flush()
+    assert len(relay.posts) == 3, "delivered once, then forgotten"
+
+
+def test_a_failed_update_is_retried_and_holds_up_only_its_own_turn(reporter, relay, clock):
+    reporter.turn_started("s-1")
+    reporter.tool_started("s-1", "terminal")
+    relay.failure = OSError("connection reset")
+    clock[0] += live.FIRST_DELAY_S
+    reporter.flush()
+    assert len(relay.posts) == 1
+    relay.failure = None
+    reporter.turn_started("s-2")
+    reporter.waiting("s-2", "approval")
+    reporter.turn_ended("s-2", "done")
+    reporter.flush()
+    assert relay.posts[-1] == {"session_id": "s-2", "state": {"phase": "approval", "tools": 0}, "end": "done"}, \
+        "the other turn's backoff never holds up this one"
+    posts = len(relay.posts)
+    clock[0] += live.BACKOFF_S
+    reporter.flush()
+    assert len(relay.posts) == posts + 1
+    assert relay.posts[-1]["session_id"] == "s-1"
+    assert relay.posts[-1]["state"]["tool"] == "terminal", "the lost update's state is sent again"
+
+
+def test_an_end_that_never_gets_through_is_given_up(reporter, relay, clock):
+    reporter.turn_started("s-1")
+    relay.failure = OSError("down")
+    reporter.turn_ended("s-1", "done")
+    reporter.flush()
+    clock[0] += live.END_GIVE_UP_S + 1
+    reporter.flush()
+    assert len(relay.posts) <= 2 + int(live.END_GIVE_UP_S // live.BACKOFF_S)
+    relay.posts.clear()
+    clock[0] += live.BACKOFF_S
+    assert reporter.flush() is None
+    assert relay.posts == []
+
+
+def test_context_ignores_numbers_that_are_not_numbers(reporter, relay, clock):
+    reporter.turn_started("s-1")
+    reporter.context_used("s-1", float("nan"), 100_000)
+    reporter.context_used("s-1", 10, float("inf"))
+    clock[0] += live.FIRST_DELAY_S
+    reporter.flush()
+    assert "context" not in relay.posts[-1]["state"]
 
 
 def test_redaction_leaves_out_the_tool_category(monkeypatch):

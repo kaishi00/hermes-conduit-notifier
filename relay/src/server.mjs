@@ -313,6 +313,7 @@ async function route(request, response) {
     if (!installation) return sendJson(response, 401, { error: 'unauthorized' });
     enforceRevocationBudget();
     store.deactivateInstallation(installation.id);
+    liveActivities.removeInstallation(installation.id);
     response.writeHead(204).end();
     return;
   }
@@ -322,6 +323,7 @@ async function route(request, response) {
   // it when the activity ends on the phone.
   const activityMatch = url.pathname.match(/^\/v1\/installations\/([0-9a-f-]+)\/live-activities$/i);
   if (activityMatch && (request.method === 'PUT' || request.method === 'DELETE')) {
+    enforceRateLimit(`live-activity-ip:${client}`, 120, 60_000);
     const installation = authorize(request, activityMatch[1], 'device');
     if (!installation) return sendJson(response, 401, { error: 'unauthorized' });
     enforceRateLimit(`live-activity-device:${installation.id}`, 60, 60_000);
@@ -580,7 +582,7 @@ async function route(request, response) {
         console.error(JSON.stringify({ level: 'error', message: 'apns send threw', error: error instanceof Error ? error.message : String(error) }));
         return sendJson(response, 502, { error: 'apns_unreachable' });
       }
-      if (result.status === 410 || result.reason === 'BadDeviceToken' || result.reason === 'Unregistered') store.deactivateInstallation(installation.id);
+      if (result.status === 410 || result.reason === 'BadDeviceToken' || result.reason === 'Unregistered') { store.deactivateInstallation(installation.id); liveActivities.removeInstallation(installation.id); }
       if (!result.ok) {
         // The answerable card never reached the device: flip the parked
         // decision to undeliverable so the plugin's next poll falls back to
@@ -615,7 +617,7 @@ async function route(request, response) {
       console.error(JSON.stringify({ level: 'error', message: 'apns send threw', error: error instanceof Error ? error.message : String(error) }));
       return sendJson(response, 502, { error: 'apns_unreachable' });
     }
-    if (result.status === 410 || result.reason === 'BadDeviceToken' || result.reason === 'Unregistered') store.deactivateInstallation(installation.id);
+    if (result.status === 410 || result.reason === 'BadDeviceToken' || result.reason === 'Unregistered') { store.deactivateInstallation(installation.id); liveActivities.removeInstallation(installation.id); }
     if (!result.ok) return sendJson(response, 502, { error: 'apns_rejected', reason: result.reason, status: result.status });
     return sendJson(response, 202, { accepted: true, delivered: true });
   }
@@ -1070,7 +1072,7 @@ async function sendPhoneBackground(response, installation, event, gateway) {
     console.error(JSON.stringify({ level: 'error', message: 'apns background send threw', error: error instanceof Error ? error.message : String(error) }));
     return sendJson(response, 502, { error: 'apns_unreachable' });
   }
-  if (result.status === 410 || result.reason === 'BadDeviceToken' || result.reason === 'Unregistered') store.deactivateInstallation(installation.id);
+  if (result.status === 410 || result.reason === 'BadDeviceToken' || result.reason === 'Unregistered') { store.deactivateInstallation(installation.id); liveActivities.removeInstallation(installation.id); }
   if (!result.ok) return sendJson(response, 502, { error: 'apns_rejected', reason: result.reason, status: result.status });
   return sendJson(response, 202, { accepted: true, delivered: true, background: true });
 }
