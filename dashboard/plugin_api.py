@@ -3123,8 +3123,9 @@ def _enqueue_voice_call_end(profile: Optional[str], session_id: str, engine: str
 # it is the same exposure as the known limit that the owner isn't told.
 #
 # Only Desktop and TUI turns write a turn marker. A live claim from any other
-# surface (a CLI or kanban worker, a gateway) has no marker to read, so it
-# could look idle mid-turn: it is never dropped and answers "busy" (#97).
+# surface (a CLI or kanban worker, a gateway, or a blank one) has no marker
+# to read, so it could look idle mid-turn: it is never dropped and answers
+# "busy" (#97).
 #
 # A timed-out request is abandoned: the worker thread can't be cancelled, but
 # it checks the abandon flag once it holds the lock and again right before it
@@ -3275,7 +3276,8 @@ def take_over_session(session_ids: list, *, registry: Any, turn_marker: Any, hom
     them makes the whole request busy. Statuses:
 
     ``free``: nobody else holds it (send again); ``taken_over``: the claims
-    were dropped (send again); ``busy``: an owner is mid-turn (ask again
+    were dropped (send again); ``busy``: an owner is mid-turn, or a live
+    claim whose surface writes no turn marker holds the chat (ask again
     shortly); ``same_host``: this dashboard process still holds one of the
     ids, which this route never touches (other processes' claims may have
     been dropped). Marker reads happen under the registry lock on purpose:

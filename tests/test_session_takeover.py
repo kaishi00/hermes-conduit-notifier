@@ -450,9 +450,9 @@ def test_an_overflowing_pid_is_treated_as_unknown(tmp_path):
 
 def test_a_live_worker_claim_without_turn_markers_is_never_dropped(tmp_path):
     # CLI/kanban workers and gateways write no turn marker, so idle can't be told apart from mid-turn.
-    for surface in ("cli", "kanban", "gateway", ""):
+    for surface in ("cli", "kanban", "gateway", "", None):
         _seed(tmp_path, [_entry("chat", surface=surface)])
-        assert _take(tmp_path, ["chat"]) == {"status": "busy", "surface": surface}
+        assert _take(tmp_path, ["chat"]) == {"status": "busy", "surface": surface or ""}
         assert _entries(tmp_path) == [_entry("chat", surface=surface)]
 
 

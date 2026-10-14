@@ -775,7 +775,8 @@ lock, and Conduit's next send claims the chat.
 | POST | `/api/plugins/conduit_push/sessions/takeover` with `{session_ids: [..]}` | `{ok, status, surface?}` |
 
 - `status` is `taken_over` (send again), `free` (nobody else holds it),
-  `busy` (the other app is running a turn on it; ask again shortly, nothing
+  `busy` (the other app is running a turn on it, or it's a live worker or
+  gateway whose turns can't be seen; ask again shortly, nothing
   is interrupted; a marker that can't be read counts as running, and only a marker whose writer is provably dead, or a gone owner's marker that names no writer, is ignored) or
   `same_host` (this dashboard process still holds it, for example Conduit on
   another device; that claim is left alone).
@@ -784,7 +785,7 @@ lock, and Conduit's next send claims the chat.
   its claim. That turn keeps running there; nothing is interrupted.
 - Only Desktop and TUI claims are dropped while their owner is alive: they are
   the surfaces that write turn markers. A live claim from a CLI or kanban
-  worker or a gateway answers `busy`, since a running turn there can't be
+  worker, a gateway, or with no surface answers `busy`, since a running turn there can't be
   seen. A claim whose owner process is gone is dropped whatever its surface,
   as long as no live claim of that kind also holds the chat.
 - Only another process's claim is dropped; a claim without a valid pid is
