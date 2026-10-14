@@ -32,6 +32,8 @@ SETTINGS_LINK = "[Health settings](conduit://settings/health)"
 
 _BUCKET_METRICS = sorted(metric for metric, (_, _, aggregation) in METRICS.items() if aggregation in ("sum", "stats"))
 
+# The use policy here and in skills/reading-health-data/SKILL.md says the
+# same thing: keep them in sync.
 SCHEMA: dict[str, Any] = {
     "name": TOOL_NAME,
     "description": (
