@@ -264,6 +264,9 @@ def content_free(event: dict[str, Any], keys: Keys | None = None) -> dict[str, A
     for field in ("plugin_version", "plugin_capabilities"):
         if field in event:
             outgoing[field] = event[field]
+    if event.get("type") == "location.requested" and isinstance(event.get("locate"), dict):
+        # Only the request id the phone answers with: routing, not content.
+        outgoing["locate"] = {"id": event["locate"].get("id")}
     return outgoing
 
 

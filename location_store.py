@@ -229,7 +229,7 @@ def parse_time(value: Any, field: str) -> datetime:
     if not isinstance(value, str) or len(value) > 40:
         raise LocationError("malformed", f"{field} must be an ISO 8601 time")
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
     except ValueError:
         raise LocationError("malformed", f"{field} must be an ISO 8601 time") from None
     if parsed.tzinfo is None:
@@ -266,7 +266,9 @@ def clean_text(value: Any, field: str, limit: int) -> str | None:
         return None
     if not isinstance(value, str) or len(value) > limit:
         raise LocationError("malformed", f"{field} must be text of at most {limit} characters")
-    return _CONTROL.sub(" ", value).strip() or None
+    # Double quotes become single ones: names are quoted in rule prompts,
+    # and one mustn't be able to close that quote.
+    return _CONTROL.sub(" ", value).replace('"', "'").strip() or None
 
 
 def _bool(value: Any, field: str) -> bool:
@@ -403,6 +405,9 @@ class LocationStore:
                 " created_at=excluded.created_at",
                 (device_id, name, device_public, host_private, host_public, kid, now),
             )
+            # A new key means a reinstall or sharing turned off and on: what
+            # this device said before is no longer where the user is.
+            db.execute("DELETE FROM fixes WHERE device=?", (device_id,))
             generation = _meta(db, "generation")
         return {"kid": kid, "host_public_key": b64u(host_public), "generation": generation}
 
@@ -858,7 +863,9 @@ def _parse_fix(value: Any, sharing: dict[str, Any], places: dict[str, dict[str, 
         for key, metres in raw_distances.items():
             if key not in places:
                 raise LocationError("malformed", f"{field}.distances_m names an unknown place")
-            distances[key] = _number(metres, f"{field}.distances_m.{key}", 0, 50_000_000) or 0.0
+            metres = _number(metres, f"{field}.distances_m.{key}", 0, 50_000_000)
+            if metres is not None:  # null: the phone couldn't say, not "here"
+                distances[key] = metres
     area = _parse_area(value.get("area"), f"{field}.area")
     # The user's chosen detail, enforced here as well as on the phone.
     precision = sharing[f"{layer}_precision"]
@@ -945,6 +952,7 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: f
         # A phone clock running ahead: don't let a fix from "the future"
         # hide every real one after it.
         fix["at"] = now
+        fix["at_local"] = datetime.fromtimestamp(now, datetime.fromisoformat(fix["at_local"]).tzinfo).isoformat()
     locate_id = batch.get("locate_id")
     if locate_id is not None and (not isinstance(locate_id, str) or not _LOCATE_ID.match(locate_id)):
         raise LocationError("malformed", "locate_id is malformed")
@@ -976,6 +984,8 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: f
     fired: list[dict[str, Any]] = []
     added = 0
     for event in events:
+        if event["at"] > now + RULE_EVENT_SKEW_S:
+            continue  # stamped ahead of this host's clock: not history yet
         place = current[event["place_id"]]
         if not paused and not event["private"] and sharing["retention_days"] > 0:
             cursor = db.execute(
