@@ -90,6 +90,7 @@ MAX_READS = 2000
 # An arrival or departure that reaches the host later than this doesn't run
 # rules: a brief for leaving home an hour ago is no use.
 RULE_EVENT_MAX_AGE_S = 15 * 60
+RULE_EVENT_SKEW_S = 2 * 60
 # On-demand lookups: well under the phone's own allowance (about 360 a day).
 LOCATE_MIN_GAP_S = 5 * 60
 LOCATE_PER_DAY = 30
@@ -529,15 +530,28 @@ class LocationStore:
     # The agent's view -------------------------------------------------------------------
 
     def snapshot(self) -> dict[str, Any] | None:
-        """The device that synced last: its sharing, places and latest fix,
-        or None when nothing is shared."""
+        """Where the user is: the device with the newest fix, with its sharing
+        and places, or None when nothing is shared. The device that synced
+        last decides when it says sharing is paused or off (the user's
+        latest word), and when no device has a fix."""
         with self._read() as db:
             if db is None:
                 return None
-            row = db.execute("SELECT id, name, last_seen, sharing FROM devices WHERE last_seen IS NOT NULL"
-                             " ORDER BY last_seen DESC LIMIT 1").fetchone()
-            if row is None:
+            rows = db.execute("SELECT id, name, last_seen, sharing FROM devices WHERE last_seen IS NOT NULL"
+                              " ORDER BY last_seen DESC").fetchall()
+            if not rows:
                 return None
+            row = rows[0]
+            latest = _decode(row[3], None) or {}
+            if not sharing_paused(latest, self.clock()) and (latest.get("talking") or latest.get("background")):
+                newest = db.execute(
+                    "SELECT device FROM fixes WHERE device IN (%s) ORDER BY at DESC LIMIT 1"
+                    % ",".join("?" * len(rows)), [item[0] for item in rows]).fetchone()
+                if newest is not None:
+                    candidate = next(item for item in rows if item[0] == newest[0])
+                    sharing = _decode(candidate[3], None) or {}
+                    if not sharing_paused(sharing, self.clock()):
+                        row = candidate
             device_id = row[0]
             places = {place_id: {"id": place_id, "name": name, "kind": kind, "private": bool(private)}
                       for place_id, name, kind, private in db.execute(
@@ -965,13 +979,15 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: f
                 (device_id, event["id"], event["kind"], place["id"], place["name"], _area_text(event["area"]),
                  event["at"], event["local"].isoformat(), now))
             is_new = bool(cursor.rowcount)
+            added += 1 if is_new else 0
         else:
             # Kept nowhere (paused, private or no history), but a replayed
             # batch still mustn't run a rule twice: rules fire at most once a
             # day anyway.
             is_new = True
-        added += 1 if is_new else 0
-        if is_new and not paused and now - event["at"] <= RULE_EVENT_MAX_AGE_S:
+        # Not for an old move, nor one stamped in the future (beyond clock
+        # skew): it would run now and use up the day it names.
+        if is_new and not paused and -RULE_EVENT_SKEW_S <= now - event["at"] <= RULE_EVENT_MAX_AGE_S:
             fired.extend(_fire_rules(db, event, place, now))
     _prune(db, device_id, sharing["retention_days"], now)
     return {"accepted": True, "fix": stored_fix, "events": added, "rules_fired": fired}

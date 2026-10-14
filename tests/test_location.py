@@ -179,6 +179,28 @@ def test_pausing_forgets_the_latest_fix(store, phone):
     assert location.sharing_paused(view["sharing"], NOW)
 
 
+def test_a_second_device_without_a_fix_doesnt_hide_the_first_ones(store, phone):
+    clock = [NOW]
+    store.clock = lambda: clock[0]
+    store.ingest(phone.seal(phone.batch(fix=fix(place_id="p_work"))))
+    clock[0] += 60
+    ipad = Phone("ipad-device-02")
+    ipad.accept(store.register_key(ipad.key_request()))
+    store.ingest(ipad.seal(ipad.batch()))  # synced later, nothing to say
+    assert store.snapshot()["fix"]["place_id"] == "p_work"
+    clock[0] += 60
+    # But pausing on the device used last is the user's latest word.
+    store.ingest(ipad.seal(ipad.batch(sharing=sharing(paused_until="2099-01-01T00:00:00+00:00"))))
+    assert store.latest_place()["paused"] is True
+
+
+def test_a_move_stamped_in_the_future_runs_no_rule(store, phone):
+    _rule(store, days=[], hours="")
+    leave = {"id": "e1", "kind": "leave", "place_id": "p_home", "at": "2026-10-13T18:00:00+01:00"}
+    assert store.ingest(phone.seal(phone.batch(events=[leave])))["rules_fired"] == []
+    assert store.rules()[0]["last_fired"] is None
+
+
 def test_a_tampered_or_foreign_body_is_refused(store, phone):
     sealed = phone.seal(phone.batch(fix=fix()))
     with pytest.raises(location.LocationError) as error:

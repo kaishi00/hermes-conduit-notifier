@@ -239,7 +239,8 @@ def seal_event(
         envelope = attempt(inner)
     if envelope is None:
         # Only routing survives; the phone shows the generic banner.
-        inner = {key: value for key, value in inner.items() if key in ("session_id", "profile", "stored_session_id", "call")}
+        inner = {key: value for key, value in inner.items() if key in ("session_id", "profile", "stored_session_id", "call",
+                                                                     "locate")}
         envelope = attempt(inner)
     if envelope is None:
         raise E2EError("the event does not fit an encrypted push")

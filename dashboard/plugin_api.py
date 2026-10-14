@@ -53,6 +53,7 @@ import os
 import queue
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -3971,6 +3972,9 @@ def _location_call(fn: Callable[[Any], Dict[str, Any]]) -> Dict[str, Any]:
         return fn(module.LocationStore(_calls_home()))
     except module.LocationError as exc:
         raise TokenError(exc.status, str(exc))
+    except sqlite3.DatabaseError:
+        logger.warning("conduit_push: location store unreadable", exc_info=True)
+        raise TokenError(503, "The location store on this host can't be read")
 
 
 async def _location_route(response: Response, profile: Optional[str], fn: Callable[[], Dict[str, Any]],
