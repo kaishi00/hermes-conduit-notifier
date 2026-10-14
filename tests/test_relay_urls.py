@@ -236,3 +236,12 @@ def test_unpair_with_a_legacy_http_url_removes_the_local_pairing_and_says_so(mon
         client.unpair()
     assert "Remove this gateway in Conduit" in str(raised.value)
     assert client.load_state() is None
+
+
+@pytest.mark.parametrize("answer", [{}, [], {"credential": "", "installation_id": "i"}, {"credential": "c"}])
+def test_cli_claim_refuses_a_malformed_answer_without_saving(monkeypatch, tmp_path, answer):
+    _paired_client(monkeypatch, tmp_path)
+    monkeypatch.setattr(client, "_request", lambda *a, **k: answer)
+    with pytest.raises(ValueError):
+        client.claim_pairing("CODE", "https://relay.example", "box")
+    assert client.load_state() is None

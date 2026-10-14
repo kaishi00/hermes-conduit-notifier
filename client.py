@@ -166,6 +166,9 @@ def claim_pairing(code: str, relay_url: str = DEFAULT_RELAY_URL, gateway_name: s
         payload={"pairing_code": code, "gateway_name": name},
         timeout=15.0,
     )
+    if not isinstance(body, dict) or not all(isinstance(body.get(key), str) and body[key]
+                                             for key in ("credential", "installation_id")):
+        raise ValueError("The relay sent an unexpected pairing answer.")
     state = {
         "credential": body["credential"],
         "gateway_id": body.get("gateway_id"),

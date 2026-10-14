@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import http.client
 import socket
 
 from . import e2e
@@ -37,7 +38,7 @@ def dispatch(args: argparse.Namespace) -> int:
     if action == "pair":
         try:
             state = claim_pairing(args.code, args.relay_url, args.name)
-        except (RuntimeError, OSError, ValueError, LookupError) as error:
+        except (RuntimeError, OSError, ValueError, LookupError, http.client.HTTPException) as error:
             print(f"Pairing failed: {error}")
             return 1
         print(f"Paired {state['gateway_name']} with Conduit.")
@@ -113,7 +114,7 @@ def dispatch(args: argparse.Namespace) -> int:
         except UnpairedLocally as error:
             print(error)
             return 0
-        except (RuntimeError, OSError, ValueError, LookupError) as error:
+        except (RuntimeError, OSError, ValueError, LookupError, http.client.HTTPException) as error:
             print(f"Unpairing failed: {error}")
             return 1
         print("Conduit pairing revoked." if revoked else "This Hermes profile was not paired.")
