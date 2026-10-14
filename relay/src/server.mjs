@@ -7,6 +7,7 @@ import { ApnsClient } from './apns.mjs';
 import { SWEEP_INTERVAL_MS } from './event-ledger.mjs';
 import { limitsFromEnv } from './limits.mjs';
 import { LIVE_ACTIVITIES_CAPABILITY, LiveActivities, validateRegistration, validateReport, validateToken } from './live-activities.mjs';
+import { MAPS_TOKEN_ROUTE, MAPS_TOKENS_CAPABILITY, mapsTokensFromEnv } from './maps-tokens.mjs';
 import { RING_ROUTE, RING_SESSION_MAX_CHARS, RING_SESSION_ROUTE, RING_SESSION_WAIT_MAX_MS, Rings, ringBearer, validSessionStore, validSettle } from './rings.mjs';
 import { normalizeDashboardId, RelayStore, sanitizeBatchQuestions } from './store.mjs';
 import { CLOSE_GRANT_CLOSED, WATCH_AUDIO_CAPABILITY, WatchAudioBridges, watchAudioUpgrade } from './watch-audio.mjs';
@@ -17,9 +18,9 @@ import { WATCH_TOOLS_CAPABILITY, WatchToolGrants, watchToolRoutes } from './watc
 const RELAY_INFO = (() => {
   try {
     const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-    return { version: String(pkg.version || 'unknown'), capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls', 'voip-calls', 'watch-calls', 'ring-sessions', 'location-push', 'phone-changes', LIVE_ACTIVITIES_CAPABILITY] };
+    return { version: String(pkg.version || 'unknown'), capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls', 'voip-calls', 'watch-calls', 'ring-sessions', 'location-push', 'phone-changes', MAPS_TOKENS_CAPABILITY, LIVE_ACTIVITIES_CAPABILITY] };
   } catch {
-    return { version: 'unknown', capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls', 'voip-calls', 'watch-calls', 'ring-sessions', 'location-push', 'phone-changes', LIVE_ACTIVITIES_CAPABILITY] };
+    return { version: 'unknown', capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls', 'voip-calls', 'watch-calls', 'ring-sessions', 'location-push', 'phone-changes', MAPS_TOKENS_CAPABILITY, LIVE_ACTIVITIES_CAPABILITY] };
   }
 })();
 
@@ -31,6 +32,9 @@ let apnsSend;
 let watchTools;
 let rings;
 let liveActivities;
+let mapsTokens;
+// Maps tokens a gateway may fetch an hour (each lasts about 30 minutes).
+const MAPS_TOKENS_PER_HOUR = 12;
 
 // APNs hard-caps a notification payload at 4096 bytes; stay under it with
 // headroom for JSON escaping and delivery headers, dropping decision content
@@ -85,7 +89,8 @@ const PHONE_BACKGROUND_PER_HOUR = 30;
 const PHONE_BACKGROUND_TTL_S = 24 * 60 * 60;
 // A location request is only worth answering right away.
 const LOCATION_PUSH_TTL_S = 60;
-const LOCATION_PUSH_PER_HOUR = 20;
+// Locate and maps lookups (conduit_maps) share it; the plugin keeps tighter budgets per kind.
+const LOCATION_PUSH_PER_HOUR = 60;
 const LOCATION_TOKEN_GONE = new Set(['BadDeviceToken', 'Unregistered', 'DeviceTokenNotForTopic']);
 
 // Conduit dashboard UUIDs (opaque app-generated identity, #148) are
@@ -99,6 +104,10 @@ function main() {
   // Sweeps throttle themselves, so the timer runs just past that interval.
   setInterval(() => store.events.sweep(), SWEEP_INTERVAL_MS + 1_000).unref();
   apns = new ApnsClient(config);
+  mapsTokens = mapsTokensFromEnv(process.env, {
+    readFile: readFileSync,
+    warn: (message, fields) => console.warn(JSON.stringify({ ...fields, level: 'warn', message })),
+  });
   limits = new Map();
   rings = new Rings();
   const watchGrants = new WatchToolGrants({
@@ -724,6 +733,23 @@ async function route(request, response) {
     return sendJson(response, 200, { status: 'cancelled' });
   }
 
+  // An Apple Maps access token for a paired host (conduit_maps' host
+  // engine): the host calls Apple Maps itself, so no lookup passes here.
+  if (request.method === 'POST' && url.pathname === MAPS_TOKEN_ROUTE) {
+    const credential = gatewayCredential(request);
+    if (!credential || !store.authenticateGateway(credential.installationId, credential.gatewayId, credential.secret)) return sendJson(response, 401, { error: 'unauthorized' });
+    if (!mapsTokens) return sendJson(response, 404, { error: 'maps_unavailable' });
+    enforceRateLimit(`maps-token:${credential.gatewayId}`, MAPS_TOKENS_PER_HOUR, 60 * 60_000);
+    let issued;
+    try {
+      issued = await mapsTokens.accessToken();
+    } catch (error) {
+      console.error(JSON.stringify({ level: 'error', message: 'maps token exchange failed', error: error instanceof Error ? error.message : String(error) }));
+      return sendJson(response, error?.status === 429 ? 429 : 502, { error: 'maps_token_failed' });
+    }
+    return sendJson(response, 200, { access_token: issued.token, expires_in: issued.expiresIn });
+  }
+
   if (request.method === 'DELETE' && url.pathname === '/v1/gateways/current') {
     const credential = gatewayCredential(request);
     if (!credential || !store.authenticateGateway(credential.installationId, credential.gatewayId, credential.secret)) return sendJson(response, 401, { error: 'unauthorized' });
@@ -1006,12 +1032,12 @@ async function sendVoip(installation, push, device) {
 function locationPushFor(event, gateway, { topic, nowSeconds = Math.floor(Date.now() / 1000) }) {
   const routing = {
     type: event.type,
-    ...(event.e2e ? { e2e: 1 } : { profile: event.profile, ...(event.locate ? { locate: event.locate } : {}) }),
+    ...(event.e2e ? { e2e: 1 } : { profile: event.profile, ...(event.locate ? { locate: event.locate } : {}), ...(event.maps ? { maps: event.maps } : {}) }),
     ...(gateway?.id ? { gateway_id: gateway.id } : {}),
     ...(gateway?.dashboardId ? { dashboard_id: gateway.dashboardId } : {}),
   };
   const payload = { aps: {}, ...(event.e2e ? { conduit_e2e: event.e2e } : {}), conduit: routing };
-  if (!event.e2e && !event.locate) return null;
+  if (!event.e2e && !event.locate && !event.maps) return null;
   if (Buffer.byteLength(JSON.stringify(payload)) > MAX_NOTIFICATION_BYTES) return null;
   return { payload, pushType: 'location', topic: `${topic}.location-query`, expiration: nowSeconds + LOCATION_PUSH_TTL_S };
 }
@@ -1183,6 +1209,7 @@ function validateEvent(body) {
     decision: validateDecision(body.decision, body.type),
     call: body.type === 'call.requested' ? validateCall(body.call) : undefined,
     locate: body.type === 'location.requested' ? validateLocate(body.locate) : undefined,
+    maps: body.type === 'location.requested' ? validateMaps(body.maps) : undefined,
     ...(mode ? { mode } : {}),
   };
 }
@@ -1197,6 +1224,13 @@ function validatePhoneMode(value) {
 function validateLocate(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
   return typeof value.id === 'string' && /^l_[A-Za-z0-9_-]{16,64}$/.test(value.id) ? { id: value.id } : undefined;
+}
+
+// A maps lookup's id (conduit_maps): the phone fetches the lookup from its
+// host with it. Routing only, like a locate id.
+function validateMaps(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  return typeof value.id === 'string' && /^m_[A-Za-z0-9_-]{16,64}$/.test(value.id) ? { id: value.id } : undefined;
 }
 
 // The job a call request is about (#449), mirroring the plugin's
@@ -1514,4 +1548,4 @@ function optionalMilliseconds(name, key) {
   return { [key]: value };
 }
 
-export { callPushFor, notificationFor, phoneBackgroundPushFor, settlePushFor, validateEvent, validateDecision };
+export { callPushFor, locationPushFor, notificationFor, phoneBackgroundPushFor, settlePushFor, validateEvent, validateDecision };

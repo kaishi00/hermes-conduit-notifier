@@ -34,6 +34,7 @@ from typing import Any
 
 # Same shape events.py checks; repeated so e2e stays import-free of events.
 _LOCATE_ID = re.compile(r"^l_[A-Za-z0-9_-]{16,64}\Z")
+_MAPS_ID = re.compile(r"^m_[A-Za-z0-9_-]{16,64}\Z")
 
 VERSION = 1
 SALT = b"conduit-e2e-v1"
@@ -50,7 +51,7 @@ MAX_CT_CHARS = 2600
 # Fields that carry content. Everything else on an event stays visible to the
 # relay because it routes on it.
 INNER_FIELDS = ("title", "body", "session_id", "profile", "gateway", "stored_session_id", "decision", "call",
-                "locate")
+                "locate", "maps")
 
 KID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 _B64URL_PATTERN = re.compile(r"^[A-Za-z0-9_-]*$")
@@ -268,6 +269,11 @@ def content_free(event: dict[str, Any], keys: Keys | None = None) -> dict[str, A
         locate_id = event["locate"].get("id")
         if isinstance(locate_id, str) and _LOCATE_ID.match(locate_id):
             outgoing["locate"] = {"id": locate_id}
+    if event.get("type") == "location.requested" and isinstance(event.get("maps"), dict):
+        # A maps lookup's id, the same way: the phone fetches the lookup.
+        maps_id = event["maps"].get("id")
+        if isinstance(maps_id, str) and _MAPS_ID.match(maps_id):
+            outgoing["maps"] = {"id": maps_id}
     return outgoing
 
 

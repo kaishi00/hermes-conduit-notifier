@@ -47,7 +47,9 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 FILE_NAME = "conduit-location.sqlite3"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+# Versions _migrate brings up to SCHEMA_VERSION.
+OLDER_SCHEMAS = ("1",)
 
 SALT = b"conduit-location-v1"
 INFO_INGEST = b"conduit-location-v1 ingest device-to-host"
@@ -55,6 +57,10 @@ INFO_INGEST = b"conduit-location-v1 ingest device-to-host"
 # each direction has its own key from the same agreement, apart from ingest.
 INFO_VOICE_REQUEST = b"conduit-location-v1 voice device-to-host"
 INFO_VOICE_ANSWER = b"conduit-location-v1 voice host-to-device"
+# Maps lookups the phone answers with Apple Maps (conduit_maps): the host
+# seals each request for one device, the device seals its answer back.
+INFO_MAPS_REQUEST = b"conduit-location-v1 maps host-to-device"
+INFO_MAPS_ANSWER = b"conduit-location-v1 maps device-to-host"
 AAD_TAG = "conduit-location/1"
 KID_TAG = b"conduit-location-kid\n"
 NONCE_BYTES = 12
@@ -104,6 +110,19 @@ LOCATES_KEPT_S = 24 * 3600
 # message says little after an hour.
 TRUSTED_BACKGROUND_S = 24 * 3600
 TRUSTED_TALKING_S = 3600
+# What a phone says it can do, in its sealed sharing settings.
+FEATURES = ("maps",)
+# Maps lookups wake the phone the same way locate does (a location push),
+# out of the same allowance: well under it, apart from locate's own budget.
+MAPS_PER_HOUR = 30
+MAPS_PER_DAY = 120
+# A request the phone hasn't fetched by then is no use to the waiting tool.
+MAPS_TTL_S = 60
+# The same question within this long gets the last answer, no wake.
+MAPS_CACHE_S = 120
+MAPS_KEPT_S = 24 * 3600
+MAX_MAPS_ANSWER_BYTES = 64 * 1024
+MAX_MAPS_REQUEST_BYTES = 8 * 1024
 EARLIEST = datetime(2020, 1, 1, tzinfo=timezone.utc)
 
 _DEVICE_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}\Z")
@@ -111,6 +130,7 @@ _ITEM_ID = re.compile(r"^[A-Za-z0-9_-]{1,40}\Z")
 _RECORD_ID = re.compile(r"^[A-Za-z0-9:_-]{1,80}\Z")
 _BATCH_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}\Z")
 _LOCATE_ID = re.compile(r"^l_[A-Za-z0-9_-]{16,64}\Z")
+_MAPS_ID = re.compile(r"^m_[A-Za-z0-9_-]{16,64}\Z")
 _RULE_ID = re.compile(r"^r_[A-Za-z0-9_-]{8,40}\Z")
 _KID = re.compile(r"^[0-9a-f]{32}\Z")
 # A voice tool's name, bound into the sealed request and answer.
@@ -200,6 +220,11 @@ def new_host_keypair() -> tuple[bytes, bytes]:
 
 def ingest_aad(kid: str, device_id: str, batch_id: str) -> bytes:
     return "\n".join([AAD_TAG, "ingest", f"kid={kid}", f"dev={device_id}", f"batch={batch_id}"]).encode("utf-8")
+
+
+def maps_aad(direction: str, kid: str, device_id: str, request_id: str) -> bytes:
+    """``direction`` is ``request`` (host to phone) or ``answer``."""
+    return f"{AAD_TAG}\nmaps-{direction}\nkid={kid}\ndev={device_id}\nid={request_id}".encode("utf-8")
 
 
 def voice_aad(direction: str, tool: str, kid: str, device_id: str, call_id: str) -> bytes:
@@ -365,6 +390,7 @@ class LocationStore:
         if not self.path.exists():
             yield None
             return
+        self._upgrade()
         try:
             connection = sqlite3.connect(f"{self.path.as_uri()}?mode=ro", uri=True, timeout=15)
         except sqlite3.DatabaseError:
@@ -380,6 +406,19 @@ class LocationStore:
             yield connection if readable else None
         finally:
             connection.close()
+
+    def _upgrade(self) -> None:
+        """A store an older plugin wrote is brought up to date before it's
+        read, so updating the plugin doesn't hide what's shared until the
+        phone's next upload."""
+        try:
+            with contextlib.closing(sqlite3.connect(f"{self.path.as_uri()}?mode=ro", uri=True, timeout=15)) as db:
+                if _meta(db, "schema") not in OLDER_SCHEMAS:
+                    return
+        except sqlite3.DatabaseError:
+            return
+        with self._write():
+            pass
 
     # Keys ------------------------------------------------------------------------
 
@@ -507,6 +546,9 @@ class LocationStore:
             if not isinstance(batch, dict) or batch.get("batch_id") != batch_id:
                 raise LocationError("malformed", "The sealed batch doesn't match its envelope")
             result = _apply(db, device_id, batch, now)
+            # Every upload also forgets old lookups, so they don't outlive
+            # their window when no new lookup comes.
+            _prune_maps(db, now)
             generation = _meta(db, "generation")
         return {**result, "generation": generation}
 
@@ -559,7 +601,7 @@ class LocationStore:
             return {"deleted": True, "remaining_devices": 0, "rule_jobs": []}
         with self._write() as db:
             jobs: list[str] = []
-            for table in ("fixes", "visits", "places", "devices"):
+            for table in ("fixes", "visits", "places", "maps", "devices"):
                 column = "id" if table == "devices" else "device"
                 if device_id is None:
                     db.execute(f"DELETE FROM {table}")
@@ -741,6 +783,139 @@ class LocationStore:
             return bool(row and row[0])
 
 
+    # Maps lookups on the phone ---------------------------------------------------------
+
+    def maps_device(self) -> dict[str, Any] | None:
+        """The device that answers maps lookups: background sharing on, not
+        paused, and a Conduit that says it can (``features``), newest sync
+        first. None when no device can."""
+        now = self.clock()
+        with self._read() as db:
+            if db is None:
+                return None
+            for device_id, kid, sharing_text in db.execute(
+                    "SELECT id, kid, sharing FROM devices WHERE last_seen IS NOT NULL ORDER BY last_seen DESC"):
+                sharing = _decode(sharing_text, None) or {}
+                if (sharing.get("background") and "maps" in (sharing.get("features") or [])
+                        and not sharing_paused(sharing, now)):
+                    return {"device_id": device_id, "kid": kid, "sharing": sharing}
+        return None
+
+    def maps_host_allowed(self) -> bool:
+        """False while any device asks to keep maps lookups on the phone."""
+        with self._read() as db:
+            if db is None:
+                return True
+            return all((_decode(text, None) or {}).get("maps_host", True) is not False
+                       for (text,) in db.execute("SELECT sharing FROM devices WHERE sharing IS NOT NULL"))
+
+    def start_maps(self, device_id: str, request: dict[str, Any]) -> dict[str, Any]:
+        """Stores a lookup for one device. Returns ``{"cached": answer}``
+        when the same question was answered moments ago, else ``{"id": …}``
+        (the caller wakes the phone). Raises LocationError ``too_soon`` /
+        ``daily_limit`` past the budget."""
+        cache = json.dumps(request, sort_keys=True, separators=(",", ":"))
+        if len(cache) > MAX_MAPS_REQUEST_BYTES:
+            raise LocationError("malformed", "That lookup is too long")
+        now = self.clock()
+        with self._write() as db:
+            _prune_maps(db, now)
+            row = db.execute(
+                "SELECT answer FROM maps WHERE device=? AND cache=? AND answered_at>? AND answer IS NOT NULL"
+                " ORDER BY answered_at DESC LIMIT 1", (device_id, cache, now - MAPS_CACHE_S)).fetchone()
+            if row is not None:
+                answer = _decode(row[0], None)
+                if isinstance(answer, dict) and answer.get("ok"):
+                    return {"cached": answer}
+            hour = db.execute("SELECT COUNT(*) FROM maps WHERE requested_at>?", (now - 3600,)).fetchone()[0]
+            day = db.execute("SELECT COUNT(*) FROM maps WHERE requested_at>?", (now - 86400,)).fetchone()[0]
+            if day >= MAPS_PER_DAY:
+                raise LocationError("daily_limit", "The day's maps lookups on the phone are used up", status=429)
+            if hour >= MAPS_PER_HOUR:
+                raise LocationError("too_soon", "Too many maps lookups this hour; try again later", status=429)
+            request_id = "m_" + secrets.token_urlsafe(18)
+            body = json.dumps({**request, "id": request_id,
+                               "expires_at": iso_utc(now + MAPS_TTL_S)}, ensure_ascii=False)
+            db.execute("INSERT INTO maps(id, device, requested_at, expires_at, cache, request) VALUES(?,?,?,?,?,?)",
+                       (request_id, device_id, now, now + MAPS_TTL_S, cache, body))
+        return {"id": request_id}
+
+    def cancel_maps(self, request_id: str) -> None:
+        """A lookup the relay couldn't deliver doesn't count against the
+        budget, and the phone can't fetch it any more."""
+        with self._write() as db:
+            db.execute("DELETE FROM maps WHERE id=? AND answered_at IS NULL", (request_id,))
+
+    def maps_request(self, request_id: Any, device_id: Any, kid: Any) -> dict[str, Any]:
+        """The sealed lookup for the device it was made for (GET
+        /location/maps/{id}): only while it's waiting and unexpired."""
+        if not isinstance(request_id, str) or not _MAPS_ID.match(request_id):
+            raise LocationError("malformed", "The lookup id is malformed")
+        if not isinstance(device_id, str) or not _DEVICE_ID.match(device_id):
+            raise LocationError("malformed", "device_id is malformed")
+        if not isinstance(kid, str) or not _KID.match(kid):
+            raise LocationError("malformed", "kid is malformed")
+        if not crypto_available():
+            raise LocationError("no_crypto", "Location sharing needs the cryptography package on this host",
+                                status=501)
+        now = self.clock()
+        with self._write() as db:
+            row = db.execute("SELECT request FROM maps WHERE id=? AND device=? AND answered_at IS NULL"
+                             " AND expires_at>?", (request_id, device_id, now)).fetchone()
+            if row is None:
+                raise LocationError("unknown", "No waiting lookup has that id", status=404)
+            key = self._device_key(db, device_id, kid, INFO_MAPS_REQUEST)
+            nonce, ct = seal(key, row[0].encode("utf-8"), maps_aad("request", kid, device_id, request_id))
+            db.execute("UPDATE maps SET fetched_at=? WHERE id=?", (now, request_id))
+        return {"v": 1, "nonce": nonce, "ct": ct}
+
+    def answer_maps(self, request_id: Any, envelope: Any) -> dict[str, Any]:
+        """The phone's sealed answer (POST /location/maps/{id})."""
+        if not isinstance(request_id, str) or not _MAPS_ID.match(request_id):
+            raise LocationError("malformed", "The lookup id is malformed")
+        if not isinstance(envelope, dict) or type(envelope.get("v")) is not int or envelope.get("v") != 1:
+            raise LocationError("malformed", "Expected a version 1 sealed answer")
+        device_id, kid = envelope.get("device_id"), envelope.get("kid")
+        if not isinstance(device_id, str) or not _DEVICE_ID.match(device_id):
+            raise LocationError("malformed", "device_id is malformed")
+        if not isinstance(kid, str) or not _KID.match(kid):
+            raise LocationError("malformed", "kid is malformed")
+        if not crypto_available():
+            raise LocationError("no_crypto", "Location sharing needs the cryptography package on this host",
+                                status=501)
+        now = self.clock()
+        with self._write() as db:
+            # After expiry the tool has long stopped waiting; a late answer
+            # would only reach the repeat cache.
+            row = db.execute("SELECT 1 FROM maps WHERE id=? AND device=? AND answered_at IS NULL AND expires_at>?",
+                             (request_id, device_id, now)).fetchone()
+            if row is None:
+                raise LocationError("unknown", "No waiting lookup has that id", status=404)
+            key = self._device_key(db, device_id, kid, INFO_MAPS_ANSWER)
+            plaintext = open_sealed(key, envelope.get("nonce"), envelope.get("ct"),
+                                    maps_aad("answer", kid, device_id, request_id))
+            if len(plaintext) > MAX_MAPS_ANSWER_BYTES:
+                raise LocationError("malformed", "The answer is too long")
+            try:
+                answer = json.loads(plaintext)
+            except (ValueError, RecursionError):
+                raise LocationError("malformed", "The sealed answer isn't JSON") from None
+            if not isinstance(answer, dict) or answer.get("id") != request_id or not isinstance(answer.get("ok"), bool):
+                raise LocationError("malformed", "The sealed answer doesn't match its request")
+            db.execute("UPDATE maps SET answered_at=?, answer=? WHERE id=?",
+                       (now, json.dumps(answer, ensure_ascii=False), request_id))
+        return {}
+
+    def maps_answer(self, request_id: str) -> dict[str, Any] | None:
+        with self._read() as db:
+            if db is None:
+                return None
+            row = db.execute("SELECT answer FROM maps WHERE id=? AND answered_at IS NOT NULL",
+                             (request_id,)).fetchone()
+            answer = _decode(row[0], None) if row else None
+            return answer if isinstance(answer, dict) else None
+
+
 def sharing_paused(sharing: dict[str, Any], now: float) -> bool:
     """True while the user paused sharing, or has both layers off."""
     if not sharing.get("talking") and not sharing.get("background"):
@@ -779,9 +954,34 @@ def _meta(db: sqlite3.Connection, key: str) -> str | None:
     return row[0] if row else None
 
 
+# Maps requests (schema 2): the sealed-for-one-device question, its answer,
+# and `cache` (the question without its id) to answer a repeat from here.
+# Sealing covers the trip to and from the phone; here, in this owner-only
+# file, the question and answer stay readable while they're useful (the
+# request's minute plus the repeat window, about 3 minutes), then are
+# blanked. The row (id, device, times) stays a day for the budget.
+_MAPS_TABLE = """
+    CREATE TABLE IF NOT EXISTS maps(
+        id TEXT PRIMARY KEY, device TEXT NOT NULL, requested_at REAL NOT NULL, expires_at REAL NOT NULL,
+        cache TEXT NOT NULL, request TEXT NOT NULL, fetched_at REAL, answered_at REAL, answer TEXT)
+"""
+
+
+def _prune_maps(db: sqlite3.Connection, now: float) -> None:
+    """Rows stay a day for the budget; what was asked and found goes once no
+    one can use it."""
+    db.execute("DELETE FROM maps WHERE requested_at<?", (now - MAPS_KEPT_S,))
+    db.execute("UPDATE maps SET cache='', request='', answer=NULL WHERE requested_at<? AND request!=''",
+               (now - MAPS_TTL_S - MAPS_CACHE_S,))
+
+
 def _migrate(db: sqlite3.Connection, now: float) -> None:
     version = _meta(db, "schema")
     if version == str(SCHEMA_VERSION):
+        return
+    if version == "1":
+        db.execute(_MAPS_TABLE)
+        db.execute("UPDATE meta SET value=? WHERE key='schema'", (str(SCHEMA_VERSION),))
         return
     if version is not None:
         raise LocationError("schema", "This location store was written by a newer plugin; update the plugin",
@@ -816,6 +1016,7 @@ def _migrate(db: sqlite3.Connection, now: float) -> None:
     """.split(";"):
         if statement.strip():
             db.execute(statement)
+    db.execute(_MAPS_TABLE)
     db.execute("INSERT OR REPLACE INTO meta VALUES('schema', ?)", (str(SCHEMA_VERSION),))
     db.execute("INSERT OR IGNORE INTO meta VALUES('generation', ?)", (secrets.token_hex(8),))
     db.execute("INSERT OR IGNORE INTO meta VALUES('created_at', ?)", (str(int(now)),))
@@ -853,6 +1054,18 @@ def _parse_sharing(value: Any) -> dict[str, Any]:
     if zone is not None and (not isinstance(zone, str) or not _TZ.match(zone)):
         raise LocationError("malformed", "sharing.time_zone is malformed")
     sharing["time_zone"] = zone
+    # What this Conduit can do (newer phones only): unknown entries are
+    # ignored, so a later phone doesn't break an older plugin.
+    features = value.get("features")
+    if features is not None and not isinstance(features, list):
+        raise LocationError("malformed", "sharing.features must be a list")
+    sharing["features"] = sorted({item for item in features or [] if item in FEATURES})
+    # "Keep maps lookups on this iPhone": false keeps conduit_maps off this
+    # host's Apple Maps engine.
+    maps_host = value.get("maps_host", True)
+    if not isinstance(maps_host, bool):
+        raise LocationError("malformed", "sharing.maps_host must be true or false")
+    sharing["maps_host"] = maps_host
     return sharing
 
 
