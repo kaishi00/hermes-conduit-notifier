@@ -465,7 +465,7 @@ def test_a_dead_worker_claim_is_still_dropped(tmp_path):
 
 
 def test_a_worker_claim_blocks_alongside_a_desktop_claim(tmp_path):
-    entries = [_entry("chat"), _entry("runtime-id", surface="cli", lease="lease-2")]
+    entries = [_entry("chat"), _entry("runtime-id", pid=3000, surface="cli", lease="lease-2")]
     _seed(tmp_path, entries)
     assert _take(tmp_path, ["runtime-id", "chat"]) == {"status": "busy", "surface": "cli"}
     assert _entries(tmp_path) == entries
@@ -474,3 +474,11 @@ def test_a_worker_claim_blocks_alongside_a_desktop_claim(tmp_path):
 def test_surface_names_match_regardless_of_case(tmp_path):
     _seed(tmp_path, [_entry("chat", surface=" Desktop ")])
     assert _take(tmp_path, ["chat"])["status"] == "taken_over"
+
+
+def test_this_dashboards_own_claim_beside_a_live_worker_claim_reports_same_host(tmp_path):
+    entries = [_entry("runtime-id", pid=OWN_PID, surface="tui", lease="lease-own"),
+               _entry("chat", pid=3000, surface="cli")]
+    _seed(tmp_path, entries)
+    assert _take(tmp_path, ["runtime-id", "chat"]) == {"status": "same_host", "surface": "tui"}
+    assert _entries(tmp_path) == entries

@@ -3326,6 +3326,10 @@ def take_over_session(session_ids: list, *, registry: Any, turn_marker: Any, hom
         unmarked = [entry for entry in live
                     if str(entry.get("surface") or "").strip().lower() not in TURN_MARKER_SURFACES]
         if unmarked:
+            # This dashboard's own claim would refuse the send anyway, so say
+            # that rather than have Conduit wait on a worker it can't outlast.
+            if own:
+                return {"status": "same_host", "surface": str(own[0].get("surface") or "")}
             return {"status": "busy", "surface": str(unmarked[0].get("surface") or "")}
         if any(_owner_turn_running(turn_marker, home, entry, session_ids, owner_dead=id(entry) in dead)
                for entry in foreign):
