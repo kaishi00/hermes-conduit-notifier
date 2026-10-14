@@ -38,6 +38,10 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
 _RELAY_ERRORS = (RuntimeError, OSError, ValueError, LookupError, http.client.HTTPException)
 
 
+def _printable(value: object) -> str:
+    return "".join(c for c in str(value) if c.isprintable())
+
+
 def dispatch(args: argparse.Namespace) -> int:
     action = getattr(args, "conduit_push_action", None)
     if action == "pair":
@@ -59,9 +63,9 @@ def dispatch(args: argparse.Namespace) -> int:
         if not state:
             print("This Hermes profile is not paired with Conduit.")
             return 1
-        print(f"Paired: {state.get('gateway_name') or socket.gethostname()}")
+        print(f"Paired: {_printable(state.get('gateway_name') or socket.gethostname())}")
         relay_url = str(state.get('relay_url') or DEFAULT_RELAY_URL)
-        print(f"Relay: {''.join(c for c in relay_url if c.isprintable())}")
+        print(f"Relay: {_printable(relay_url)}")
         try:
             check_request_url(f"{relay_url.rstrip('/')}/v1/events")
         except ValueError:

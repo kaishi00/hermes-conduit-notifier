@@ -23,10 +23,13 @@ import ipaddress
 import urllib.parse
 
 _CGNAT = ipaddress.ip_network("100.64.0.0/10")  # Tailscale addresses
-# Cloud instance metadata services live in those ranges; a claim never goes there.
-_METADATA = {ipaddress.ip_address(a) for a in ("169.254.169.254", "169.254.170.2", "100.100.100.200", "fd00:ec2::254")}
 _PRIVATE_SUFFIXES = (".ts.net", ".local", ".localhost", ".internal", ".lan", ".home.arpa")
-_METADATA_NAMES = {"metadata.google.internal", "metadata", "instance-data", "instance-data.ec2.internal"}
+# Cloud instance metadata services: no relay lives there, so no URL may name
+# one, over any scheme. This checks the name as written, not what it resolves
+# to; a LAN that spoofs DNS for a local name is already trusted by a plain-HTTP
+# claim (see the module doc).
+_METADATA = {ipaddress.ip_address(a) for a in ("169.254.169.254", "169.254.170.2", "100.100.100.200", "fd00:ec2::254")}
+_METADATA_NAMES = ("metadata.google.internal", "metadata", "instance-data", "instance-data.ec2.internal")
 
 
 class RelayURLError(ValueError):
@@ -46,7 +49,19 @@ def _split(url: object) -> urllib.parse.SplitResult:
         raise RelayURLError("The relay URL must be an http(s) address.")
     if parts.username is not None or parts.password is not None or parts.fragment or "#" in url:
         raise RelayURLError("The relay URL must not contain credentials or a fragment.")
+    if _is_metadata(host):
+        raise RelayURLError("The relay URL can't be a cloud metadata address.")
     return parts
+
+
+def _is_metadata(host: str) -> bool:
+    host = host.lower().rstrip(".")
+    ip = _ip(host)
+    if ip is not None:
+        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+            ip = ip.ipv4_mapped
+        return ip in _METADATA
+    return any(host == name or host.endswith("." + name) for name in _METADATA_NAMES)
 
 
 def _ip(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
@@ -69,11 +84,7 @@ def is_private(host: str) -> bool:
     if ip is not None:
         if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
             ip = ip.ipv4_mapped
-        if ip in _METADATA:
-            return False
         return ip.is_loopback or ip.is_private or ip.is_link_local or ip in _CGNAT
-    if host in _METADATA_NAMES:
-        return False
     return host == "localhost" or host.endswith(_PRIVATE_SUFFIXES)
 
 

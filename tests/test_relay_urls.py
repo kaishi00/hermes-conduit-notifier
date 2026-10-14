@@ -268,3 +268,24 @@ def test_test_prints_one_line_for_a_broken_saved_pairing(monkeypatch, capsys):
     monkeypatch.setattr(cli, "send_now", broken)
     assert cli.dispatch(types.SimpleNamespace(conduit_push_action="test", corrupt=False)) == 1
     assert "did not accept" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("url", ["https://metadata.google.internal", "https://169.254.169.254",
+                                 "https://sub.metadata.google.internal", "http://metadata.google.internal"])
+def test_metadata_addresses_are_refused_over_any_scheme(url):
+    for check in (urls.check_claim_base, urls.check_request_url):
+        with pytest.raises(urls.RelayURLError):
+            check(url)
+
+
+def test_metadata_addresses_still_count_as_private():
+    assert urls.is_private("169.254.169.254") and urls.is_private("metadata.google.internal")
+
+
+def test_status_strips_control_characters(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "load_state", lambda: {"credential": "c", "relay_url": "https://relay.example",
+                                                    "gateway_name": "box\x1b[31m"})
+    monkeypatch.setattr(cli, "e2e_status", lambda state: {"enabled": False, "crypto": True})
+    assert cli.dispatch(types.SimpleNamespace(conduit_push_action="status")) == 0
+    out = capsys.readouterr().out
+    assert "\x1b" not in out and "Paired: box[31m" in out and "Warning" not in out
