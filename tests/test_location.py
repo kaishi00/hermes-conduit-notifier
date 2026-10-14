@@ -752,6 +752,9 @@ class VoicePhone(Phone):
         return opened["result"]
 
 
+_ORIGINAL_MODULES = api._voice_tool_modules
+
+
 @pytest.fixture()
 def voice(tmp_path, monkeypatch):
     """The voice routes on a profile whose location store runs at NOW."""
@@ -878,3 +881,24 @@ def test_shared_location_voice_vector_matches_conduit():
                          nonce=bytes(12))[1] == voice_vector["request_ct"]
     assert location.seal(answer_key, voice_vector["answer"].encode(), answer_aad,
                          nonce=bytes(12))[1] == voice_vector["answer_ct"]
+
+
+@pytest.mark.parametrize("field", ["nonce", "ct"])
+@pytest.mark.parametrize("value", [None, 7, ["x"]])
+def test_a_voice_envelope_with_a_bad_nonce_or_body_is_a_400(voice, field, value):
+    client, store = voice
+    phone = _voice_phone(store, fix=fix())
+    response = client.post(f"{BASE}/voice-tools/call", json={**phone.ask({"action": "now"}), field: value})
+    assert response.status_code == 400
+
+
+def test_a_broken_location_module_leaves_health_voice_reads(tmp_path, monkeypatch):
+    real = api._plugin_package_module
+
+    def broken(name):
+        if name == "location_tool":
+            raise ImportError("half installed")
+        return real(name)
+
+    monkeypatch.setattr(api, "_plugin_package_module", broken)
+    assert list(_ORIGINAL_MODULES()) == ["conduit_health"]

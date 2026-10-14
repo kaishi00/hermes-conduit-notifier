@@ -4158,12 +4158,13 @@ def _voice_tool_modules() -> Dict[str, Tuple[Any, Any, Any, str]]:
     modules: Dict[str, Tuple[Any, Any, Any, str]] = {}
     for name, store, error, key in (("health_tool", "HealthStore", "HealthError", "health"),
                                     ("location_tool", "LocationStore", "LocationError", "location")):
-        # One tool missing from a partial install doesn't take the other down.
+        # One tool missing or broken in a partial install doesn't take the
+        # other down.
         try:
             tool = _plugin_package_module(name)
-        except TokenError:
-            continue
-        modules[tool.TOOL_NAME] = (tool, getattr(tool, store), getattr(tool, error), key)
+            modules[tool.TOOL_NAME] = (tool, getattr(tool, store), getattr(tool, error), key)
+        except Exception:
+            logger.warning("Conduit voice tools: %s unavailable", name, exc_info=True)
     return modules
 
 
@@ -4203,11 +4204,7 @@ def voice_tools_call(envelope: Any) -> Dict[str, Any]:
     action = args.get("action") if isinstance(args, dict) else None
     logger.info("Conduit voice read: %s %s for %s", tool.TOOL_NAME,
                 action if isinstance(action, str) and action in tool.VOICE_ACTIONS else "other", provider)
-    if key == "location":
-        answer = tool.voice_handle(args, device_id=device_id, store=store, provider=provider)
-    else:
-        answer = tool.voice_handle(args, device_id=device_id, store=store)
-    return {"v": 1, **seal_answer(answer)}
+    return {"v": 1, **seal_answer(tool.voice_handle(args, device_id=device_id, store=store, provider=provider))}
 
 
 async def _voice_tools_route(response: Response, profile: Optional[str], fn: Callable[[], Dict[str, Any]],
