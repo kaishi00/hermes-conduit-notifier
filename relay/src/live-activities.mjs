@@ -140,7 +140,8 @@ export class LiveActivities {
   }
 
   flush(activity) {
-    if (!activity.pending || !this.activities.has(activity.token)) return;
+    // A registration that replaced this one (same token) isn't ours to send.
+    if (!activity.pending || this.activities.get(activity.token) !== activity) return;
     // The send in flight reschedules the rest when it settles.
     if (activity.sending) return;
     const { state, end } = activity.pending;
@@ -164,6 +165,9 @@ export class LiveActivities {
       .catch((error) => this.warn('live activity push failed', { error: error instanceof Error ? error.message : String(error) }))
       .finally(() => {
         activity.sending = false;
+        // Re-registered under the same token meanwhile: the new
+        // registration is left alone.
+        if (this.activities.get(activity.token) !== activity) return;
         if (gone) {
           this.remove(activity.token);
           return;
@@ -184,7 +188,7 @@ export class LiveActivities {
           activity.timer.unref?.();
           return;
         }
-        if (activity.pending && this.activities.has(activity.token)) this.schedule(activity);
+        if (activity.pending) this.schedule(activity);
       });
   }
 

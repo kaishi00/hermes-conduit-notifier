@@ -44,6 +44,9 @@ FIRST_DELAY_S = 2.0
 # The relay refused one turn's update (rate limit, outage): that turn waits
 # this long before it is tried again. Other turns carry on.
 BACKOFF_S = 60.0
+# An end the relay didn't take is tried again this soon: the Lock Screen
+# should stop saying "running" quickly.
+END_RETRY_S = 10.0
 # An end that still hasn't gone out after this long is given up on: the
 # activity's stale date has taken over by then.
 END_GIVE_UP_S = 15 * 60.0
@@ -168,7 +171,9 @@ class LiveActivityReporter:
             self._ended.pop(session_id, None)
             self._turns[session_id] = _Turn(now)
             while len(self._turns) > MAX_SESSIONS:
-                self._turns.pop(next(iter(self._turns)))
+                # The oldest turn goes, unless it still owes the phone its end.
+                victim = next((key for key, old in self._turns.items() if old.end is None), None)
+                self._turns.pop(victim if victim is not None else next(iter(self._turns)))
             self._changed()
 
     def thinking(self, session_id: str) -> None:
@@ -212,6 +217,8 @@ class LiveActivityReporter:
                 return
             turn.end = outcome
             turn.dirty = True
+            # An earlier update's backoff doesn't hold the end up.
+            turn.retry_at = 0.0
             turn.touched_at = turn.ended_at = now
             self._changed()
 
@@ -274,7 +281,7 @@ class LiveActivityReporter:
                     # The relay has no route at all: every turn waits.
                     self._paused_until = now + UNSUPPORTED_S
                 else:
-                    turn.retry_at = now + BACKOFF_S
+                    turn.retry_at = now + (END_RETRY_S if payload.get("end") is not None else BACKOFF_S)
                 # The state (an end included) goes out on the next try,
                 # unless a newer turn of the session replaced this one.
                 if self._turns.get(session_id) is turn:

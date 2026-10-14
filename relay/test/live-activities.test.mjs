@@ -201,3 +201,27 @@ test('a removed installation takes its activities with it', () => {
   assert.equal(activities.find('install-1', 'session-1'), undefined);
   assert.ok(activities.find('install-2', 'session-1'));
 });
+
+test('a send that settles after its token was registered again leaves the new registration alone', async () => {
+  let release;
+  const sent = [];
+  const activities = new LiveActivities({
+    maxActivities: 10,
+    maxPerInstallation: 4,
+    minIntervalMs: 10,
+    send: (token, push) => {
+      sent.push(push.payload.aps.event);
+      if (sent.length === 1) return new Promise((resolve) => { release = () => resolve({ ok: false, status: 500, reason: 'InternalServerError' }); });
+      return { ok: true };
+    },
+  });
+  activities.register('install-1', TOKEN_A, ['session-1']);
+  activities.report('install-1', 'session-1', { phase: 'thinking', tools: 0 }, 'done');
+  await settle();
+  activities.register('install-1', TOKEN_A, ['session-2']);
+  release();
+  await settle();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.deepEqual(sent, ['end'], 'the old end is not sent again to the new registration');
+  assert.ok(activities.find('install-1', 'session-2'));
+});

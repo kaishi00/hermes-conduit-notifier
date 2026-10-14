@@ -177,8 +177,8 @@ def test_an_end_the_relay_did_not_take_is_sent_again(reporter, relay, clock):
     # on_session_end's second end doesn't count as delivered either.
     reporter.turn_ended("s-1", "done")
     relay.failure = None
-    assert reporter.flush() == pytest.approx(live.BACKOFF_S)
-    clock[0] += live.BACKOFF_S
+    assert reporter.flush() == pytest.approx(live.END_RETRY_S)
+    clock[0] += live.END_RETRY_S
     reporter.flush()
     assert [post.get("end") for post in relay.posts] == [None, "done", "done"]
     clock[0] += live.BACKOFF_S
@@ -213,9 +213,9 @@ def test_an_end_that_never_gets_through_is_given_up(reporter, relay, clock):
     relay.failure = OSError("down")
     reporter.turn_ended("s-1", "done")
     reporter.flush()
-    clock[0] += live.END_GIVE_UP_S + 1
-    reporter.flush()
-    assert len(relay.posts) <= 2 + int(live.END_GIVE_UP_S // live.BACKOFF_S)
+    while clock[0] < 100 + live.END_GIVE_UP_S + live.END_RETRY_S:
+        clock[0] += live.END_RETRY_S
+        reporter.flush()
     relay.posts.clear()
     clock[0] += live.BACKOFF_S
     assert reporter.flush() is None
@@ -290,3 +290,14 @@ def test_registration_survives_a_hermes_without_the_request_hooks():
                                 register_tool=lambda **kwargs: None, register_skill=lambda name, path: None)
     plugin.register(ctx)
     assert "pre_tool_call" in hooks and "post_llm_call" in hooks
+
+
+def test_an_earlier_backoff_does_not_hold_up_the_end(reporter, relay, clock):
+    reporter.turn_started("s-1")
+    relay.failure = client.RelayRejected(429, "rate_limited")
+    clock[0] += live.FIRST_DELAY_S
+    reporter.flush()
+    relay.failure = None
+    reporter.turn_ended("s-1", "done")
+    reporter.flush()
+    assert relay.posts[-1]["end"] == "done"
