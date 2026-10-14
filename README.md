@@ -785,7 +785,8 @@ lock, and Conduit's next send claims the chat.
 - Only Desktop and TUI claims are dropped while their owner is alive: they are
   the surfaces that write turn markers. A live claim from a CLI or kanban
   worker or a gateway answers `busy`, since a running turn there can't be
-  seen. A claim whose owner process is gone is dropped whatever its surface.
+  seen. A claim whose owner process is gone is dropped whatever its surface,
+  as long as no live claim of that kind also holds the chat.
 - Only another process's claim is dropped; a claim without a valid pid is
   kept, since it can't be attributed. The other app isn't told: if you
   go back and send from Hermes Desktop, it still believes it owns the chat

@@ -3321,7 +3321,8 @@ def take_over_session(session_ids: list, *, registry: Any, turn_marker: Any, hom
         dead = {id(entry) for entry in foreign if _owner_alive(registry, entry) is False}
         live = [entry for entry in foreign if id(entry) not in dead]
         surface = str((live or foreign)[0].get("surface") or "")
-        unmarked = [entry for entry in live if str(entry.get("surface") or "") not in TURN_MARKER_SURFACES]
+        unmarked = [entry for entry in live
+                    if str(entry.get("surface") or "").strip().lower() not in TURN_MARKER_SURFACES]
         if unmarked:
             return {"status": "busy", "surface": str(unmarked[0].get("surface") or "")}
         if any(_owner_turn_running(turn_marker, home, entry, session_ids, owner_dead=id(entry) in dead)
@@ -3330,9 +3331,8 @@ def take_over_session(session_ids: list, *, registry: Any, turn_marker: Any, hom
         dropped = {id(entry) for entry in foreign}  # by identity: never let a blank lease id match others
         check_abandoned()
         registry._write_entries(state_path, [entry for entry in entries if id(entry) not in dropped])
-    logger.info("Chat takeover: Conduit took chat %s over (%d claim(s) dropped, surfaces %s)",
-                ",".join(session_ids), len(foreign),
-                ",".join(sorted({str(entry.get("surface") or "?") for entry in foreign})))
+    logger.info("Chat takeover: Conduit took chat %r over (%d claim(s) dropped, surfaces %r)",
+                session_ids, len(foreign), sorted({str(entry.get("surface") or "") for entry in foreign}))
     if own:
         # This dashboard still holds one of the ids, so a send can still be refused.
         return {"status": "same_host", "surface": str(own[0].get("surface") or "")}

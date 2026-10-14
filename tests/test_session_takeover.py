@@ -457,13 +457,20 @@ def test_a_live_worker_claim_without_turn_markers_is_never_dropped(tmp_path):
 
 
 def test_a_dead_worker_claim_is_still_dropped(tmp_path):
-    _seed(tmp_path, [_entry("chat", surface="kanban")])
-    registry = FakeRegistry(tmp_path, dead_pids={DESKTOP_PID})
+    worker_pid = 3000
+    _seed(tmp_path, [_entry("chat", pid=worker_pid, surface="kanban")])
+    registry = FakeRegistry(tmp_path, dead_pids={worker_pid})
     assert _take(tmp_path, ["chat"], registry=registry)["status"] == "taken_over"
     assert _entries(tmp_path) == []
 
 
 def test_a_worker_claim_blocks_alongside_a_desktop_claim(tmp_path):
-    _seed(tmp_path, [_entry("chat"), _entry("runtime-id", surface="cli", lease="lease-2")])
-    assert _take(tmp_path, ["runtime-id", "chat"])["status"] == "busy"
-    assert len(_entries(tmp_path)) == 2
+    entries = [_entry("chat"), _entry("runtime-id", surface="cli", lease="lease-2")]
+    _seed(tmp_path, entries)
+    assert _take(tmp_path, ["runtime-id", "chat"]) == {"status": "busy", "surface": "cli"}
+    assert _entries(tmp_path) == entries
+
+
+def test_surface_names_match_regardless_of_case(tmp_path):
+    _seed(tmp_path, [_entry("chat", surface=" Desktop ")])
+    assert _take(tmp_path, ["chat"])["status"] == "taken_over"
