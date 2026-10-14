@@ -16,6 +16,10 @@ services:
       APNS_TEAM_ID: ${APNS_TEAM_ID}
       APNS_TOPIC: ${APNS_TOPIC}
       APNS_WATCH_TOPIC: ${APNS_WATCH_TOPIC:-}
+      # Apple Maps for Hermes hosts (optional): set MAPS_KEY_ID and put the
+      # Maps key at secrets/maps/maps.p8.
+      MAPS_KEY_ID: ${MAPS_KEY_ID:-}
+      MAPS_KEY_PATH: ${MAPS_KEY_ID:+/run/secrets/maps/maps.p8}
       TRUST_PROXY: 1
       RELAY_MAX_INSTALLATIONS: ${RELAY_MAX_INSTALLATIONS:-}
       RELAY_MAX_GATEWAYS_PER_INSTALLATION: ${RELAY_MAX_GATEWAYS_PER_INSTALLATION:-}
@@ -37,6 +41,7 @@ services:
     volumes:
       - ./data:/var/lib/conduit-push
       - ./secrets/apns-production.p8:/run/secrets/apns-production.p8:ro
+      - ./secrets/maps:/run/secrets/maps:ro
     networks:
       - pangolin
     security_opt:

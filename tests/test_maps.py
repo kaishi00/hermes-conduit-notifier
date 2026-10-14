@@ -19,6 +19,7 @@ _spec.loader.exec_module(helpers)
 
 location, api, Phone, NOW, BASE = helpers.location, helpers.api, helpers.Phone, helpers.NOW, helpers.BASE
 sharing, fix, FakeClient = helpers.sharing, helpers.fix, helpers.FakeClient
+maps_host = helpers._load("conduit_push.maps_host", ROOT / "maps_host.py")
 maps = helpers._load("conduit_push.maps_tool", ROOT / "maps_tool.py")
 events = helpers._load("conduit_push.events", ROOT / "events.py")
 e2e = helpers._load("conduit_push.e2e", ROOT / "e2e.py")
@@ -199,6 +200,8 @@ def home(tmp_path, monkeypatch):
     monkeypatch.setattr(maps.location_tool.session_titles, "title", lambda key: "Trip planning")
     original = location.LocationStore
     monkeypatch.setattr(maps, "LocationStore", lambda path: original(path, clock=lambda: NOW))
+    # The host engine is off unless a test turns it on (HostApple).
+    monkeypatch.setattr(maps.maps_host, "configured", lambda: False)
     return tmp_path
 
 
@@ -358,3 +361,122 @@ def test_routes_fetch_and_answer_a_lookup(http, tmp_path):
     assert again.status_code == 404
     bad = http.get(f"{BASE}/location/maps/nope", params={"device_id": DEVICE, "kid": phone.kid})
     assert bad.status_code == 400
+
+
+# --- The host engine ------------------------------------------------------------
+
+
+class HostApple:
+    """Apple Maps Server API as the host sees it: answers by path."""
+
+    def __init__(self, answers):
+        self.answers = answers
+        self.urls = []
+
+    def __call__(self, url, token):
+        assert token == "maps-token"
+        self.urls.append(url)
+        path = url.split("/v1/", 1)[1].split("?", 1)[0]
+        answer = self.answers[path]
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+
+@pytest.fixture()
+def apple(home, monkeypatch):
+    fake = HostApple({})
+    monkeypatch.setattr(maps.maps_host, "configured", lambda: True)
+    monkeypatch.setattr(maps.maps_host, "_access_token", lambda refresh=False: "maps-token")
+    original = maps.maps_host.Engine.__init__
+
+    def engine(self, home_path, fetch=None, zone=None, clock=None):
+        original(self, home_path, fetch=fake, zone=zone, clock=lambda: NOW)
+
+    monkeypatch.setattr(maps.maps_host.Engine, "__init__", engine)
+    return fake
+
+
+BOOTS = {"name": "Boots", "formattedAddressLines": ["123 Oxford St", "London W1D 2HG"], "poiCategory": "Pharmacy",
+         "coordinate": {"latitude": 51.5153, "longitude": -0.1418}, "id": "I1234ABCD"}
+
+
+def test_a_lookup_not_about_the_user_is_answered_here_without_waking_the_phone(home, apple, monkeypatch):
+    _shared(home, fix=fix("significant"))
+    fake = FakeClient({"delivered": True})
+    monkeypatch.setattr(maps, "client", fake)
+    apple.answers["search"] = {"results": [BOOTS]}
+    answer = _call({"action": "search", "query": "pharmacy", "near": "51.52,-0.14"})
+    assert answer["ok"] and answer["source"] == "Apple Maps, from this Hermes host"
+    assert answer["places"][0]["name"] == "Boots" and answer["places"][0]["place_id"] == "I1234ABCD"
+    assert answer["places"][0]["distance_m"] == 537
+    assert fake.sent == [], "the phone wasn't woken"
+    assert "searchLocation=51.520000%2C-0.140000" in apple.urls[0]
+
+
+def test_without_a_phone_me_is_the_hosts_last_fix_at_its_detail(tmp_path, home, apple):
+    store = location.LocationStore(home, clock=lambda: NOW)
+    phone = MapsPhone()
+    phone.accept(store.register_key(phone.key_request()))
+    store.ingest(phone.seal(phone.batch(sharing=sharing(), fix=fix("significant"))))  # an older Conduit: no maps
+    apple.answers["etas"] = {"etas": [{"expectedTravelTimeSeconds": 1500, "staticTravelTimeSeconds": 1200,
+                                       "distanceMeters": 9000}]}
+    apple.answers["search"] = {"results": [BOOTS]}
+    answer = _call({"action": "travel_times", "to": "Boots Oxford St", "arrive_by": "2026-10-13T08:00"})
+    assert answer["ok"] and answer["from_position"].startswith("around Shoreditch, London")
+    result = answer["results"][0]
+    assert result["duration"] == "about 25 min" and result["traffic_delay"] == "about 5 min"
+    assert result["leave_by"] == "2026-10-13T07:35+01:00"
+    assert "origin=51.530000%2C-0.080000" in apple.urls[-1], "area detail: the rounded fix"
+    assert "arrivalDate=2026-10-13T07%3A00%3A00Z" in apple.urls[-1]
+
+
+def test_saved_places_and_transit_routes_need_the_phone(home, apple):
+    store = location.LocationStore(home, clock=lambda: NOW)
+    phone = MapsPhone()
+    phone.accept(store.register_key(phone.key_request()))
+    store.ingest(phone.seal(phone.batch(sharing=sharing(), fix=fix("significant"))))
+    assert _call({"action": "directions", "to": "Home"})["error"] == "unavailable"
+    assert _call({"action": "directions", "to": "Heathrow", "mode": "transit"})["error"] == "unavailable"
+    assert apple.urls == []
+
+
+def test_the_phone_answers_me_first_and_the_host_steps_in_when_it_cant(home, apple, monkeypatch):
+    _shared(home, fix=fix("significant"))
+    monkeypatch.setattr(maps, "client", FakeClient({"accepted": True, "delivered": False}))
+    apple.answers["search"] = {"results": [BOOTS]}
+    answer = _call({"action": "search", "query": "pharmacy"})
+    assert answer["ok"] and answer["source"] == "Apple Maps, from this Hermes host"
+    assert answer["places"][0]["distance_m"] % 100 == 0, "area detail rounds distances from me"
+
+
+def test_directions_from_me_at_area_detail_leave_out_the_first_turns(home, apple, monkeypatch):
+    store = location.LocationStore(home, clock=lambda: NOW)
+    phone = MapsPhone()
+    phone.accept(store.register_key(phone.key_request()))
+    store.ingest(phone.seal(phone.batch(sharing=sharing(), fix=fix("significant"))))
+    apple.answers["search"] = {"results": [BOOTS]}
+    apple.answers["directions"] = {"routes": [{"name": "A10", "durationSeconds": 900, "distanceMeters": 5000,
+                                               "hasTolls": False, "stepIndexes": [0]}],
+                                   "steps": [{"instructions": "Turn left onto Old St", "distanceMeters": 200}]}
+    answer = _call({"action": "directions", "to": "Boots Oxford St"})
+    assert answer["ok"] and "steps" not in answer["routes"][0]
+    assert answer["from"] == {"name": "around Shoreditch, London"}
+    answer = _call({"action": "directions", "from": "51.5,-0.12", "to": "Boots Oxford St"})
+    assert answer["routes"][0]["steps"] == [{"text": "Turn left onto Old St", "distance_m": 200}]
+
+
+def test_keep_maps_on_the_phone_turns_the_host_engine_off(home, apple, monkeypatch):
+    _shared(home, sharing=maps_sharing(maps_host=False), fix=fix("significant"))
+    monkeypatch.setattr(maps, "client", FakeClient({"accepted": True, "delivered": False}))
+    assert _call({"action": "lookup", "query": "Heathrow"})["error"] == "not_set_up"
+    assert apple.urls == []
+
+
+def test_the_hosts_daily_share_of_apple_maps_holds(home, apple, monkeypatch):
+    monkeypatch.setattr(maps_host, "DAILY_CALLS", 2)
+    _shared(home, sharing=maps_sharing(background=False), fix=fix())
+    apple.answers["search"] = {"results": [BOOTS]}
+    assert _call({"action": "lookup", "query": "Boots"})["ok"]
+    assert _call({"action": "lookup", "query": "Boots"})["ok"]
+    assert _call({"action": "lookup", "query": "Boots"})["error"] == "daily_limit"

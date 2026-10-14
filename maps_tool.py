@@ -26,9 +26,9 @@ from typing import Any, Callable
 
 from hermes_constants import get_hermes_home
 
-from . import client, location_tool
+from . import client, location_tool, maps_host
 from .events import push_event
-from .location_store import LocationError, LocationStore, sharing_paused
+from .location_store import TRUSTED_BACKGROUND_S, TRUSTED_TALKING_S, LocationError, LocationStore, sharing_paused
 
 logger = logging.getLogger("hermes.plugins.conduit_push")
 
@@ -124,9 +124,12 @@ def _store() -> LocationStore:
 
 
 def available() -> bool:
-    """Shown once a Conduit that answers maps lookups shares here."""
+    """Shown once a Conduit that answers maps lookups shares here, or this
+    host can use Apple Maps itself (paired with the relay, and no phone
+    asked to keep maps on the phone)."""
     try:
-        return _store().maps_device() is not None
+        store = _store()
+        return store.maps_device() is not None or (maps_host.configured() and store.maps_host_allowed())
     except Exception:  # noqa: BLE001
         return False
 
@@ -162,15 +165,60 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
         return {"ok": False, "error": "invalid", "note": f"action is one of {', '.join(ACTIONS)}."}
     store = _store()
     view = store.snapshot()
-    device = store.maps_device()
-    if device is None:
+    phone = store.maps_device()
+    host = maps_host.configured() and store.maps_host_allowed()
+    if phone is None and not host:
         return _unavailable(view, args, action)
     try:
-        request = _request(action, args, view or {"places": {}, "sharing": {}}, device["sharing"], store.clock())
+        request = _request(action, args, view or {"places": {}, "sharing": {}}, store.clock())
     except _Refused as refused:
         return refused.answer
     location_tool._log(store, f"maps {action}", session)
-    started = store.start_maps(device["device_id"], request)
+    uses_me = _uses_me(request)
+    # Saved places' coordinates live on the phone, and only the phone gives
+    # transit routes. Lookups about the user ask the phone first (its own
+    # position, fresh); the rest ask Apple from here first (no phone wake).
+    if _uses_saved(request) or (action == "directions" and request.get("mode") == "transit"):
+        engines = ("phone",)
+    elif uses_me:
+        engines = ("phone", "host")
+    else:
+        engines = ("host", "phone")
+    misses: list[dict[str, Any]] = []
+    for engine in engines:
+        if engine == "phone" and phone is not None:
+            answer = _ask_phone(store, phone, request, uses_me, profile, sleep)
+        elif engine == "host" and host:
+            answer = _ask_host(store, view, request, uses_me)
+        else:
+            continue
+        if answer.get("ok") or answer.get("error") not in _TRY_NEXT:
+            return answer
+        misses.append(answer)
+    if not misses:
+        return _unavailable(view, args, action, needs_phone=True)
+    last = misses[-1]
+    return _fallback(view, request, last["error"], " ".join(dict.fromkeys(miss["note"] for miss in misses)))
+
+
+# A miss another engine (or the guess) may make up for; anything else (not
+# found, no route, private) is the answer.
+_TRY_NEXT = frozenset({"unreachable", "not_set_up", "timeout", "too_soon", "daily_limit", "unavailable", "throttled",
+                       "failed", "detail", "stale"})
+
+
+def _ask_phone(store: LocationStore, phone: dict[str, Any], request: dict[str, Any], uses_me: bool, profile: str,
+               sleep: Callable[[float], None]) -> dict[str, Any]:
+    detail = phone["sharing"].get("background_precision")
+    if uses_me and detail not in ("area", "precise"):
+        return {"ok": False, "error": "detail",
+                "note": "The user shares only which saved place they're at, so lookups from their position aren't "
+                        "allowed. Ask where they are, or use a place."}
+    request = {**request, "detail": detail if uses_me else "area"}
+    try:
+        started = store.start_maps(phone["device_id"], request)
+    except LocationError as error:
+        return {"ok": False, "error": error.code, "note": str(error)}
     if "cached" in started:
         return _shaped(started["cached"], request)
     request_id = started["id"]
@@ -181,12 +229,12 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
     except Exception as error:  # noqa: BLE001
         logger.warning("Conduit maps request failed: %s", error)
         store.cancel_maps(request_id)
-        return _fallback(view, request, "unreachable", "The phone couldn't be asked just now.")
+        return {"ok": False, "error": "unreachable", "note": "The phone couldn't be asked just now."}
     if isinstance(sent, dict) and sent.get("delivered") is False:
         store.cancel_maps(request_id)
-        return _fallback(view, request, "not_set_up",
-                         "The phone can't answer maps lookups yet (Conduit or the notification relay needs "
-                         "updating, or background sharing was just turned on).")
+        return {"ok": False, "error": "not_set_up",
+                "note": "The phone can't answer maps lookups yet (Conduit or the notification relay needs updating, "
+                        "or background sharing was just turned on)."}
     waited = 0.0
     while waited < MAPS_WAIT_S:
         sleep(MAPS_POLL_S)
@@ -194,15 +242,55 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
         answer = store.maps_answer(request_id)
         if answer is not None:
             return _shaped(answer, request)
-    return _fallback(view, request, "timeout",
-                     "The phone didn't answer in time (it may be off, offline or out of its daily allowance).")
+    return {"ok": False, "error": "timeout",
+            "note": "The phone didn't answer in time (it may be off, offline or out of its daily allowance)."}
+
+
+def _ask_host(store: LocationStore, view: dict[str, Any] | None, request: dict[str, Any],
+              uses_me: bool) -> dict[str, Any]:
+    me = None
+    if uses_me:
+        me = _host_me(view, store.clock())
+        if me is None:
+            return {"ok": False, "error": "stale",
+                    "note": "This host has no recent enough position for the user to look up from."}
+    zone = location_tool._zone(((view or {}).get("sharing") or {}).get("time_zone"))
+    try:
+        result = maps_host.Engine(get_hermes_home(), zone=zone).answer(request, me)
+    except maps_host.NeedsPhone:
+        return {"ok": False, "error": "unavailable", "note": "Only the user's iPhone can answer that."}
+    except maps_host.HostUnavailable as error:
+        return {"ok": False, "error": error.error, "note": str(error)}
+    answer = _shaped({"ok": True, "result": result}, request)
+    answer["source"] = "Apple Maps, from this Hermes host"
+    if me is not None:
+        answer["from_position"] = f"{me['label']}, as of {me['as_of']}"
+    return answer
+
+
+def _host_me(view: dict[str, Any] | None, now: float) -> dict[str, Any] | None:
+    """The user's position as this host last heard it, if it's recent enough
+    to look up from: background sharing reports moves, so a day-old fix still
+    holds; a fix from a message holds for an hour."""
+    if not view or sharing_paused(view.get("sharing") or {}, now):
+        return None
+    fix = view.get("fix")
+    if not fix or fix.get("lat") is None or fix.get("lon") is None:
+        return None
+    trusted = TRUSTED_BACKGROUND_S if (view.get("sharing") or {}).get("background") else TRUSTED_TALKING_S
+    if now - fix["at"] > trusted:
+        return None
+    area = fix.get("area") or {}
+    label = ", ".join(dict.fromkeys(area[key] for key in ("name", "locality") if area.get(key)))
+    return {"lat": fix["lat"], "lon": fix["lon"], "detail": fix.get("precision") or "area",
+            "label": f"around {label}" if label else "the user's last known position",
+            "as_of": location_tool._ago(now - fix["at"])}
 
 
 # --- The request ---------------------------------------------------------------------
 
 
-def _request(action: str, args: dict[str, Any], view: dict[str, Any], sharing: dict[str, Any],
-             now: float) -> dict[str, Any]:
+def _request(action: str, args: dict[str, Any], view: dict[str, Any], now: float) -> dict[str, Any]:
     request: dict[str, Any] = {"action": action}
     if action in ("search", "lookup"):
         query = _text(args.get("query"))
@@ -243,17 +331,9 @@ def _request(action: str, args: dict[str, Any], view: dict[str, Any], sharing: d
         if action == "directions":
             request["alternatives"] = args.get("alternatives") is not False
             request["steps"] = args.get("steps") is not False
-    if _uses_me(request):
-        if sharing_paused(view.get("sharing") or {}, now):
-            raise _Refused("paused", "The user has paused location sharing (or turned it off) in Conduit, so "
-                                     "\"me\" can't be used. Ask where they are, or use a place.")
-        detail = sharing.get("background_precision")
-        if detail not in ("area", "precise"):
-            raise _Refused("detail", "The user shares only which saved place they're at, so lookups from their "
-                                     "position aren't allowed. Ask where they are, or use a place.")
-        request["detail"] = detail
-    else:
-        request["detail"] = "area"
+    if _uses_me(request) and (not view.get("sharing") or sharing_paused(view["sharing"], now)):
+        raise _Refused("paused", "The user hasn't shared their location (or paused it) in Conduit, so \"me\" "
+                                 "can't be used. Ask where they are, or use a place.")
     return request
 
 
@@ -286,6 +366,11 @@ def _ref(value: Any, view: dict[str, Any], *, default_me: bool) -> dict[str, Any
     if len(text) > MAX_TEXT:
         raise _Refused("invalid", f"Keep a place under {MAX_TEXT} characters.")
     return {"text": text}
+
+
+def _uses_saved(request: dict[str, Any]) -> bool:
+    refs = [request.get("near"), request.get("from"), *(request.get("to") or [])]
+    return any(isinstance(ref, dict) and "saved" in ref for ref in refs)
 
 
 def _uses_me(request: dict[str, Any]) -> bool:
@@ -364,12 +449,15 @@ def _clean(value: Any, limit: int, depth: int = 0) -> Any:
 # --- When the phone can't answer --------------------------------------------------------
 
 
-def _unavailable(view: dict[str, Any] | None, args: dict[str, Any], action: str) -> dict[str, Any]:
-    note = ("Maps lookups are answered by the user's iPhone, which needs Conduit's background location sharing on "
-            f"(Conduit's {location_tool.SETTINGS_LINK}; leave the link out of anything spoken).")
+def _unavailable(view: dict[str, Any] | None, args: dict[str, Any], action: str,
+                 needs_phone: bool = False) -> dict[str, Any]:
+    note = ("That lookup needs the user's iPhone (saved places and transit routes live there), which needs "
+            if needs_phone else "Maps lookups need the user's iPhone, which needs ")
+    note += ("Conduit's background location sharing on (Conduit's "
+             f"{location_tool.SETTINGS_LINK}; leave the link out of anything spoken).")
     if view is not None and action in ("directions", "travel_times"):
         try:
-            request = _request(action, args, view, view.get("sharing") or {}, time.time())
+            request = _request(action, args, view, time.time())
         except _Refused:
             return {"ok": False, "error": "unavailable", "note": note}
         return _fallback(view, request, "unavailable", note)

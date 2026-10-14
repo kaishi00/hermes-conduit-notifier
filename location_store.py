@@ -798,6 +798,14 @@ class LocationStore:
                     return {"device_id": device_id, "kid": kid, "sharing": sharing}
         return None
 
+    def maps_host_allowed(self) -> bool:
+        """False while any device asks to keep maps lookups on the phone."""
+        with self._read() as db:
+            if db is None:
+                return True
+            return all((_decode(text, None) or {}).get("maps_host", True) is not False
+                       for (text,) in db.execute("SELECT sharing FROM devices WHERE sharing IS NOT NULL"))
+
     def start_maps(self, device_id: str, request: dict[str, Any]) -> dict[str, Any]:
         """Stores a lookup for one device. Returns ``{"cached": answer}``
         when the same question was answered moments ago, else ``{"id": …}``
@@ -1039,6 +1047,12 @@ def _parse_sharing(value: Any) -> dict[str, Any]:
     if features is not None and not isinstance(features, list):
         raise LocationError("malformed", "sharing.features must be a list")
     sharing["features"] = sorted({item for item in features or [] if item in FEATURES})
+    # "Keep maps lookups on this iPhone": false keeps conduit_maps off this
+    # host's Apple Maps engine.
+    maps_host = value.get("maps_host", True)
+    if not isinstance(maps_host, bool):
+        raise LocationError("malformed", "sharing.maps_host must be true or false")
+    sharing["maps_host"] = maps_host
     return sharing
 
 

@@ -6,6 +6,7 @@ import { pathToFileURL } from 'node:url';
 import { ApnsClient } from './apns.mjs';
 import { SWEEP_INTERVAL_MS } from './event-ledger.mjs';
 import { limitsFromEnv } from './limits.mjs';
+import { MAPS_TOKEN_ROUTE, MAPS_TOKENS_CAPABILITY, mapsTokensFromEnv } from './maps-tokens.mjs';
 import { RING_ROUTE, RING_SESSION_MAX_CHARS, RING_SESSION_ROUTE, RING_SESSION_WAIT_MAX_MS, Rings, ringBearer, validSessionStore, validSettle } from './rings.mjs';
 import { normalizeDashboardId, RelayStore, sanitizeBatchQuestions } from './store.mjs';
 import { CLOSE_GRANT_CLOSED, WATCH_AUDIO_CAPABILITY, WatchAudioBridges, watchAudioUpgrade } from './watch-audio.mjs';
@@ -16,9 +17,9 @@ import { WATCH_TOOLS_CAPABILITY, WatchToolGrants, watchToolRoutes } from './watc
 const RELAY_INFO = (() => {
   try {
     const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-    return { version: String(pkg.version || 'unknown'), capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls', 'voip-calls', 'watch-calls', 'ring-sessions', 'location-push', 'phone-changes'] };
+    return { version: String(pkg.version || 'unknown'), capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls', 'voip-calls', 'watch-calls', 'ring-sessions', 'location-push', 'phone-changes', MAPS_TOKENS_CAPABILITY] };
   } catch {
-    return { version: 'unknown', capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls', 'voip-calls', 'watch-calls', 'ring-sessions', 'location-push', 'phone-changes'] };
+    return { version: 'unknown', capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls', 'voip-calls', 'watch-calls', 'ring-sessions', 'location-push', 'phone-changes', MAPS_TOKENS_CAPABILITY] };
   }
 })();
 
@@ -29,6 +30,9 @@ let limits;
 let apnsSend;
 let watchTools;
 let rings;
+let mapsTokens;
+// Maps tokens a gateway may fetch an hour (each lasts about 30 minutes).
+const MAPS_TOKENS_PER_HOUR = 12;
 
 // APNs hard-caps a notification payload at 4096 bytes; stay under it with
 // headroom for JSON escaping and delivery headers, dropping decision content
@@ -98,6 +102,10 @@ function main() {
   // Sweeps throttle themselves, so the timer runs just past that interval.
   setInterval(() => store.events.sweep(), SWEEP_INTERVAL_MS + 1_000).unref();
   apns = new ApnsClient(config);
+  mapsTokens = mapsTokensFromEnv(process.env, {
+    readFile: readFileSync,
+    warn: (message, fields) => console.warn(JSON.stringify({ ...fields, level: 'warn', message })),
+  });
   limits = new Map();
   rings = new Rings();
   const watchGrants = new WatchToolGrants({
@@ -672,6 +680,23 @@ async function route(request, response) {
     // tell that apart from a live release.
     if (outcome === 'answered') return sendJson(response, 200, { status: 'already_completed' });
     return sendJson(response, 200, { status: 'cancelled' });
+  }
+
+  // An Apple Maps access token for a paired host (conduit_maps' host
+  // engine): the host calls Apple Maps itself, so no lookup passes here.
+  if (request.method === 'POST' && url.pathname === MAPS_TOKEN_ROUTE) {
+    const credential = gatewayCredential(request);
+    if (!credential || !store.authenticateGateway(credential.installationId, credential.gatewayId, credential.secret)) return sendJson(response, 401, { error: 'unauthorized' });
+    if (!mapsTokens) return sendJson(response, 404, { error: 'maps_unavailable' });
+    enforceRateLimit(`maps-token:${credential.gatewayId}`, MAPS_TOKENS_PER_HOUR, 60 * 60_000);
+    let issued;
+    try {
+      issued = await mapsTokens.accessToken();
+    } catch (error) {
+      console.error(JSON.stringify({ level: 'error', message: 'maps token exchange failed', error: error instanceof Error ? error.message : String(error) }));
+      return sendJson(response, error?.status === 429 ? 429 : 502, { error: 'maps_token_failed' });
+    }
+    return sendJson(response, 200, { access_token: issued.token, expires_in: issued.expiresIn });
   }
 
   if (request.method === 'DELETE' && url.pathname === '/v1/gateways/current') {

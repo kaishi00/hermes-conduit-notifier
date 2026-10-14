@@ -1251,6 +1251,20 @@ day, a repeat within 2 minutes is answered from the last answer, and when
 the phone doesn't answer, a trip from "me" to a saved place gets a labelled
 straight-line guess. Contract: `designs/maps-v1-contract.md` in the project.
 
+Lookups that don't involve the user (or when the phone can't answer) go to
+Apple Maps from this host instead, without waking the phone: the relay hands
+paired hosts a short-lived Apple Maps Server API token (`POST
+/v1/maps/token`; one cached token for every host, so it doesn't identify
+one) and the plugin calls `maps-api.apple.com` itself, so the relay never
+sees a lookup. Each host uses at most 200 Apple calls a day. Saved places
+(their coordinates live on the phone) and transit routes need the phone;
+"me" on the host is the last shared fix at its detail. A user who turns on
+"Keep maps lookups on this iPhone" in Conduit turns the host engine off for
+that profile. A relay without a Maps key answers 404 and the host stops
+asking for an hour. Self-hosted relays enable it with a key that has "Maps"
+enabled for a Maps ID: put it at `deploy/secrets/maps/maps.p8` and set
+`MAPS_KEY_ID` in `.env`.
+
 ## Calendar, Reminders, Focus and phone status from Conduit (plugin 0.27+)
 
 Conduit can share the user's iPhone calendars (every account on the phone),
