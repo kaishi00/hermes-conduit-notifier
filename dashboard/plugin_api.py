@@ -3122,6 +3122,11 @@ def _enqueue_voice_call_end(profile: Optional[str], session_id: str, engine: str
 # its claim. That turn keeps running in the owner (nothing is interrupted);
 # it is the same exposure as the known limit that the owner isn't told.
 #
+# Only Desktop and TUI turns write a turn marker. A live claim from any other
+# surface (a CLI or kanban worker, a gateway, or a blank one) has no marker
+# to read, so it could look idle mid-turn: it is never dropped and answers
+# "busy" (#97).
+#
 # A timed-out request is abandoned: the worker thread can't be cancelled, but
 # it checks the abandon flag once it holds the lock and again right before it
 # writes, so a 504 almost never drops a claim after the fact (only a write
@@ -3134,6 +3139,7 @@ TAKEOVER_MAX_ID_CHARS = 200
 TAKEOVER_LIMIT = 60
 TAKEOVER_WINDOW_S = 60.0
 TAKEOVER_TIMEOUT_S = 20.0
+TURN_MARKER_SURFACES = frozenset({"desktop", "tui"})
 _takeover_limiter = _MintLimiter(TAKEOVER_LIMIT, TAKEOVER_WINDOW_S,
                                  message="Too many takeover requests; try again shortly")
 _takeover_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="conduit-takeover")
@@ -3270,7 +3276,8 @@ def take_over_session(session_ids: list, *, registry: Any, turn_marker: Any, hom
     them makes the whole request busy. Statuses:
 
     ``free``: nobody else holds it (send again); ``taken_over``: the claims
-    were dropped (send again); ``busy``: an owner is mid-turn (ask again
+    were dropped (send again); ``busy``: an owner is mid-turn, or a live
+    claim whose surface writes no turn marker holds the chat (ask again
     shortly); ``same_host``: this dashboard process still holds one of the
     ids, which this route never touches (other processes' claims may have
     been dropped). Marker reads happen under the registry lock on purpose:
@@ -3316,13 +3323,22 @@ def take_over_session(session_ids: list, *, registry: Any, turn_marker: Any, hom
         dead = {id(entry) for entry in foreign if _owner_alive(registry, entry) is False}
         live = [entry for entry in foreign if id(entry) not in dead]
         surface = str((live or foreign)[0].get("surface") or "")
+        unmarked = [entry for entry in live
+                    if str(entry.get("surface") or "").strip().lower() not in TURN_MARKER_SURFACES]
+        if unmarked:
+            # This dashboard's own claim would refuse the send anyway, so say
+            # that rather than have Conduit wait on a worker it can't outlast.
+            if own:
+                return {"status": "same_host", "surface": str(own[0].get("surface") or "")}
+            return {"status": "busy", "surface": str(unmarked[0].get("surface") or "")}
         if any(_owner_turn_running(turn_marker, home, entry, session_ids, owner_dead=id(entry) in dead)
                for entry in foreign):
             return {"status": "busy", "surface": surface}
         dropped = {id(entry) for entry in foreign}  # by identity: never let a blank lease id match others
         check_abandoned()
         registry._write_entries(state_path, [entry for entry in entries if id(entry) not in dropped])
-    logger.info("Chat takeover: Conduit took a chat over (%d claim(s) dropped)", len(foreign))
+    logger.info("Chat takeover: Conduit took chat %r over (%d claim(s) dropped, surfaces %r)",
+                session_ids, len(foreign), sorted({str(entry.get("surface") or "") for entry in foreign}))
     if own:
         # This dashboard still holds one of the ids, so a send can still be refused.
         return {"status": "same_host", "surface": str(own[0].get("surface") or "")}
