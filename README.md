@@ -121,7 +121,7 @@ docker compose up -d
 
 The relay listens on port 9120. Put it behind an HTTPS reverse proxy (the relay validates that `PUBLIC_URL` uses HTTPS). If the proxy sends `X-Forwarded-For`, set `TRUST_PROXY=1`.
 
-The plugin sends relay credentials only over HTTPS with a trusted certificate (plain HTTP only to the same machine), and never follows a redirect. You can pair over plain HTTP against a LAN or Tailscale address, for example `hermes conduit-push pair XXXXX-XXXXX --relay-url http://100.x.y.z:9120`: the relay answers with its HTTPS `PUBLIC_URL`, and the plugin saves and uses that from then on.
+The plugin sends relay credentials only over HTTPS with a trusted certificate (plain HTTP only to the same machine), and never follows a redirect. You can pair over plain HTTP against a LAN or Tailscale address, for example `hermes conduit-push pair XXXXX-XXXXX --relay-url http://100.x.y.z:9120`: the relay answers with its HTTPS `PUBLIC_URL`, and the plugin saves and uses that from then on. Pair that way only on a network you trust: whatever answers on that address chooses the HTTPS relay this host uses from then on.
 
 **What stays secret:**
 

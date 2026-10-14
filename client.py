@@ -30,7 +30,7 @@ from hermes_constants import get_hermes_home
 
 from . import e2e
 from .events import PLUGIN_VERSION, redact_event
-from .relay_urls import check_claim_base, check_request_url, paired_relay_url
+from .relay_urls import check_claim_base, check_request_url, is_https, paired_relay_url
 
 
 DEFAULT_RELAY_URL = "https://push.milim.dev"
@@ -514,7 +514,7 @@ def _request(
         headers["Authorization"] = f"Bearer {credential}"
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        opener = _opener if url.startswith("https:") else _direct_opener
+        opener = _opener if is_https(url) else _direct_opener
         with opener.open(request, timeout=timeout) as response:
             raw = response.read(MAX_RESPONSE_BYTES + 1)
             if len(raw) > MAX_RESPONSE_BYTES:

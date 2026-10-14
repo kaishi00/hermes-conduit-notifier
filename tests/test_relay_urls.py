@@ -60,6 +60,7 @@ def test_claim_bases(url):
 
 
 @pytest.mark.parametrize("url", ["http://relay.example", "http://8.8.8.8", "http://100.128.0.1",
+                                 "http://169.254.169.254", "http://100.100.100.200", "http://[fd00:ec2::254]",
                                  "https://relay.example?x=1", "https://relay.example/?", "https://u@relay.example"])
 def test_claim_bases_refused(url):
     with pytest.raises(urls.RelayURLError):
@@ -245,3 +246,23 @@ def test_cli_claim_refuses_a_malformed_answer_without_saving(monkeypatch, tmp_pa
     with pytest.raises(ValueError):
         client.claim_pairing("CODE", "https://relay.example", "box")
     assert client.load_state() is None
+
+
+def test_https_is_recognised_in_any_case():
+    assert urls.is_https("HTTPS://relay.example") and urls.is_https("https://relay.example")
+    assert not urls.is_https("http://127.0.0.1:8787")
+
+
+def test_status_warns_about_a_saved_plain_http_relay(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(cli, "load_state", lambda: {"credential": "c", "relay_url": "http://192.168.1.10:8787"})
+    monkeypatch.setattr(cli, "e2e_status", lambda state: {"enabled": False, "crypto": True})
+    assert cli.dispatch(types.SimpleNamespace(conduit_push_action="status")) == 0
+    assert "not https://" in capsys.readouterr().out
+
+
+def test_test_prints_one_line_for_a_broken_saved_pairing(monkeypatch, capsys):
+    def broken(event):
+        raise KeyError("relay_url")
+    monkeypatch.setattr(cli, "send_now", broken)
+    assert cli.dispatch(types.SimpleNamespace(conduit_push_action="test", corrupt=False)) == 1
+    assert "did not accept" in capsys.readouterr().out

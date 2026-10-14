@@ -23,6 +23,8 @@ import ipaddress
 import urllib.parse
 
 _CGNAT = ipaddress.ip_network("100.64.0.0/10")  # Tailscale addresses
+# Cloud instance metadata services live in those ranges; a claim never goes there.
+_METADATA = {ipaddress.ip_address(a) for a in ("169.254.169.254", "169.254.170.2", "100.100.100.200", "fd00:ec2::254")}
 _PRIVATE_SUFFIXES = (".ts.net", ".local", ".localhost", ".internal", ".lan", ".home.arpa")
 
 
@@ -66,12 +68,19 @@ def is_private(host: str) -> bool:
     if ip is not None:
         if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
             ip = ip.ipv4_mapped
+        if ip in _METADATA:
+            return False
         return ip.is_loopback or ip.is_private or ip.is_link_local or ip in _CGNAT
     return host == "localhost" or host.endswith(_PRIVATE_SUFFIXES)
 
 
 def _origin(parts: urllib.parse.SplitResult) -> tuple[str, str, int]:
     return parts.scheme, (parts.hostname or "").lower(), parts.port or (443 if parts.scheme == "https" else 80)
+
+
+def is_https(url: str) -> bool:
+    """Whether a URL that passed these checks uses HTTPS (any letter case)."""
+    return url[:6].lower() == "https:"
 
 
 def check_request_url(url: object) -> str:

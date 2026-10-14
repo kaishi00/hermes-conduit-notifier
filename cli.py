@@ -8,6 +8,7 @@ import socket
 
 from . import e2e
 from .client import DEFAULT_RELAY_URL, UnpairedLocally, build_outgoing, claim_pairing, e2e_status, load_state, post_event, send_now, set_redact_content, state_path, unpair
+from .relay_urls import check_request_url
 from .events import event_id, plugin_hello, push_event
 
 
@@ -33,12 +34,16 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     parser.set_defaults(func=dispatch)
 
 
+# What a relay request or a bad saved pairing can raise: printed as one line.
+_RELAY_ERRORS = (RuntimeError, OSError, ValueError, LookupError, TypeError, AttributeError, http.client.HTTPException)
+
+
 def dispatch(args: argparse.Namespace) -> int:
     action = getattr(args, "conduit_push_action", None)
     if action == "pair":
         try:
             state = claim_pairing(args.code, args.relay_url, args.name)
-        except (RuntimeError, OSError, ValueError, LookupError, http.client.HTTPException) as error:
+        except _RELAY_ERRORS as error:
             print(f"Pairing failed: {error}")
             return 1
         print(f"Paired {state['gateway_name']} with Conduit.")
@@ -55,7 +60,13 @@ def dispatch(args: argparse.Namespace) -> int:
             print("This Hermes profile is not paired with Conduit.")
             return 1
         print(f"Paired: {state.get('gateway_name') or socket.gethostname()}")
-        print(f"Relay: {state.get('relay_url') or DEFAULT_RELAY_URL}")
+        relay_url = state.get('relay_url') or DEFAULT_RELAY_URL
+        print(f"Relay: {relay_url}")
+        try:
+            check_request_url(f"{str(relay_url).rstrip('/')}/v1/events")
+        except ValueError:
+            print("Warning: this relay URL is not https://, so notifications can't be sent. "
+                  "Pair again from Conduit, or run `hermes conduit-push unpair`.")
         print(f"Redact content: {'on' if state.get('redact_content') else 'off'}")
         encryption = e2e_status(state)
         if encryption["enabled"]:
@@ -86,14 +97,14 @@ def dispatch(args: argparse.Namespace) -> int:
             outgoing["e2e"]["ct"] = _flipped(outgoing["e2e"]["ct"])
             try:
                 post_event(outgoing)
-            except (RuntimeError, OSError, ValueError) as error:
+            except _RELAY_ERRORS as error:
                 print(f"The Conduit relay did not accept the test notification: {error}")
                 return 1
             print("Broken encrypted test notification accepted by the Conduit relay. The phone should show only generic text.")
             return 0
         try:
             send_now(event)
-        except (RuntimeError, OSError, ValueError) as error:
+        except _RELAY_ERRORS as error:
             print(f"The Conduit relay did not accept the test notification: {error}")
             return 1
         print("Test notification accepted by the Conduit relay.")
@@ -114,7 +125,7 @@ def dispatch(args: argparse.Namespace) -> int:
         except UnpairedLocally as error:
             print(error)
             return 0
-        except (RuntimeError, OSError, ValueError, LookupError, http.client.HTTPException) as error:
+        except _RELAY_ERRORS as error:
             print(f"Unpairing failed: {error}")
             return 1
         print("Conduit pairing revoked." if revoked else "This Hermes profile was not paired.")
