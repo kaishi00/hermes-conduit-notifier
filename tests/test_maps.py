@@ -506,9 +506,25 @@ def test_a_usage_file_that_isnt_a_count_starts_the_day_over(home, apple, tmp_pat
     assert usage.stat().st_mode & 0o777 == 0o600
 
 
-def test_a_host_fix_without_a_time_isnt_used():
-    view = {"sharing": {"background": True}, "fix": {"lat": 51.5, "lon": -0.1}}
-    assert maps._host_me(view, 1_800_000_000) is None
+def test_a_host_fix_without_a_real_time_or_place_isnt_used():
+    now = 1_800_000_000
+    def view(**fix):
+        return {"sharing": {"background": True}, "fix": {"lat": 51.5, "lon": -0.1, "at": now - 60, **fix}}
+    assert maps._host_me(view(), now) is not None
+    assert maps._host_me(view(at=None), now) is None
+    assert maps._host_me(view(at=float("nan")), now) is None
+    assert maps._host_me(view(at=now + 3600), now) is None
+    assert maps._host_me(view(lat=float("inf")), now) is None
+    assert maps._host_me(view(lon=200), now) is None
+
+
+def test_a_relay_token_that_isnt_a_header_value_is_refused(monkeypatch):
+    monkeypatch.setattr(maps_host, "_token", {})
+    monkeypatch.setattr(maps_host.client, "load_state", lambda: {"relay_url": "https://r", "credential": "c"})
+    monkeypatch.setattr(maps_host.client, "request_json",
+                        lambda *a, **k: {"access_token": "abc\r\nX-Evil: 1", "expires_in": 1800})
+    with pytest.raises(maps_host.HostUnavailable):
+        maps_host._access_token()
 
 
 def test_the_phones_result_cant_replace_the_envelope():

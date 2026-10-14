@@ -270,6 +270,12 @@ def _ask_host(store: LocationStore, view: dict[str, Any] | None, request: dict[s
     return answer
 
 
+def _number(value: Any, low: float, high: float) -> bool:
+    """A real, finite number between low and high."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and \
+        low <= value <= high
+
+
 def _host_me(view: dict[str, Any] | None, now: float) -> dict[str, Any] | None:
     """The user's position as this host last heard it, if it's recent enough
     to look up from: background sharing reports moves, so a day-old fix still
@@ -277,11 +283,12 @@ def _host_me(view: dict[str, Any] | None, now: float) -> dict[str, Any] | None:
     if not view or sharing_paused(view.get("sharing") or {}, now):
         return None
     fix = view.get("fix")
-    if not fix or fix.get("lat") is None or fix.get("lon") is None:
+    if not fix or not _number(fix.get("lat"), -90, 90) or not _number(fix.get("lon"), -180, 180):
         return None
     trusted = TRUSTED_BACKGROUND_S if (view.get("sharing") or {}).get("background") else TRUSTED_TALKING_S
     at = fix.get("at")
-    if not isinstance(at, (int, float)) or isinstance(at, bool) or now - at > trusted:
+    # A fix from the future (beyond a little clock skew) isn't trusted either.
+    if not _number(at, now - trusted, now + 300):
         return None
     area = fix.get("area") or {}
     label = ", ".join(dict.fromkeys(area[key] for key in ("name", "locality") if area.get(key)))

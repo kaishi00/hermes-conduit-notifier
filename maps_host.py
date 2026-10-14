@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import threading
 import time
 import urllib.error
@@ -53,6 +54,8 @@ class HostUnavailable(Exception):
 
 # The token cache and the usage counter have their own locks, so a slow
 # token exchange doesn't hold up counting.
+# A token is a header value: printable ASCII only.
+_TOKEN = re.compile(r"^[\x21-\x7e]{1,4096}$")
 _lock = threading.Lock()
 _usage_lock = threading.Lock()
 _token: dict[str, Any] = {}
@@ -89,20 +92,29 @@ def _access_token(refresh: bool = False) -> str:
         except Exception:  # noqa: BLE001 — network
             raise HostUnavailable("unavailable", "Apple Maps couldn't be reached just now.") from None
         value, lifetime = answer.get("access_token"), answer.get("expires_in")
-        if not isinstance(value, str) or not value or not isinstance(lifetime, (int, float)):
+        if not isinstance(value, str) or not _TOKEN.match(value) or not isinstance(lifetime, (int, float)):
             raise HostUnavailable("unavailable", "Apple Maps couldn't be reached just now.")
         _token.update(value=value, expires_at=now + float(lifetime))
         return value
 
 
 def _spend(home: Path) -> None:
-    """One Apple call against this host's daily share of Conduit's quota."""
+    """One Apple call against this host's daily share of Conduit's quota.
+
+    The count is read and rewritten in place under a file lock, so gateway
+    and dashboard processes sharing a home count together. The file is
+    owner-only from the first byte and never followed through a symlink.
+    """
     path = Path(home) / USAGE_FILE
-    with _usage_lock:
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    with _usage_lock, os.fdopen(os.open(path, flags, 0o600), "r+b") as handle, client._exclusive(handle):
+        if hasattr(os, "fchmod"):
+            os.fchmod(handle.fileno(), 0o600)
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        handle.seek(0)
         try:
-            usage = json.loads(path.read_text())
-        except (OSError, ValueError):
+            usage = json.loads(handle.read() or b"{}")
+        except ValueError:
             usage = {}
         if not isinstance(usage, dict):
             usage = {}
@@ -111,12 +123,10 @@ def _spend(home: Path) -> None:
             count = 0
         if count >= DAILY_CALLS:
             raise HostUnavailable("daily_limit", "Today's Apple Maps lookups from this host are used up.")
-        # Owner-only from the first byte, then swapped in whole.
-        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(descriptor, "w") as handle:
-            handle.write(json.dumps({"day": today, "count": count + 1}))
-        os.replace(temporary, path)
+        handle.seek(0)
+        handle.truncate()
+        handle.write(json.dumps({"day": today, "count": count + 1}).encode())
+        handle.flush()
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
