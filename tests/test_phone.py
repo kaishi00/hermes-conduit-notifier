@@ -1014,9 +1014,12 @@ def test_a_voice_read_needs_the_voice_seal(client):
 
 def test_voice_follows_what_the_phone_shares(client):
     handset = _route_shared(client, calendar="write_only", reminders=False, status=False, focus=False)
-    assert [tool["name"] for tool in client.http.get(f"{BASE}/voice-tools").json()["tools"]] == ["conduit_calendar"]
+    listed = client.http.get(f"{BASE}/voice-tools").json()["tools"]
+    assert [tool["name"] for tool in listed] == ["conduit_calendar"]
+    # Add-only: no event or reminder reads offered, and asking anyway says why.
+    assert listed[0]["parameters"]["properties"]["action"]["enum"] == ["overview", "calendars"]
     found = _voice_read(client, handset, "conduit_calendar", {"action": "events"})
-    assert found["ok"] is False and found["error"] in ("write_only", "not_shared")
+    assert found["ok"] is False and found["error"] == "write_only"
 
 
 def test_voice_never_takes_another_device_by_name(client):
@@ -1047,3 +1050,16 @@ def test_a_broken_calendar_store_leaves_health_listed(client, monkeypatch):
     response = client.http.get(f"{BASE}/voice-tools")
     assert response.status_code == 200
     assert [tool["name"] for tool in response.json()["tools"]] == [health.TOOL_NAME]
+
+
+def test_a_broken_health_store_leaves_the_calendar_listed(client, monkeypatch):
+    _route_shared(client)
+    health = api._plugin_package_module("health_tool")
+
+    def broken(self):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(health.HealthStore, "overview", broken)
+    response = client.http.get(f"{BASE}/voice-tools")
+    assert response.status_code == 200
+    assert "conduit_calendar" in [tool["name"] for tool in response.json()["tools"]]

@@ -1105,6 +1105,8 @@ def _pick_device(db: sqlite3.Connection, wanted: Any, need: str,
         named = [row for row in rows if row[0] == wanted]
         if not named:
             raise PhoneError("nothing_shared", "This iPhone hasn't shared anything yet")
+        if need == "events" and named[0][2].get("calendar") == "write_only":
+            raise PhoneError("write_only", "The user lets Hermes add events but not read their calendar")
         if not shares(named[0][2], need):
             raise PhoneError("not_shared", f"{named[0][1]} doesn't share {_NEED_WORDS.get(need, need)} with Hermes")
         return named[0]

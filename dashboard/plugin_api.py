@@ -4152,10 +4152,15 @@ _VOICE_PROVIDER = re.compile(r"[a-z0-9-]{1,40}")
 
 def _voice_tool_entries() -> Dict[str, Dict[str, Any]]:
     """Voice-readable tools by name: their schema, and which sealed key they use."""
-    tool = _plugin_package_module("health_tool")
-    store = tool.HealthStore(_calls_home())
     entries: Dict[str, Dict[str, Any]] = {}
-    if store.overview()["devices"]:
+    # Each feature's problem takes only its own tools off the list.
+    try:
+        tool = _plugin_package_module("health_tool")
+        health_shared = bool(tool.HealthStore(_calls_home()).overview()["devices"])
+    except Exception:  # noqa: BLE001
+        logger.warning("Conduit voice tools: the health tool couldn't be listed", exc_info=True)
+        health_shared = False
+    if health_shared:
         entries[tool.TOOL_NAME] = {
             "key": "health",
             "description": f"{tool.SCHEMA['description']} {tool.VOICE_NOTE}",

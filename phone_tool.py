@@ -500,7 +500,14 @@ def voice_tools(store: PhoneStore | None = None) -> dict[str, dict[str, Any]]:
     if any(shares(device["sharing"], "calendars") for device in devices):
         properties = CALENDAR_SCHEMA["parameters"]["properties"]
         parameters = copy.deepcopy({name: properties[name] for name in _VOICE_CALENDAR_ARGS})
-        parameters["action"]["enum"] = list(VOICE_CALENDAR_ACTIONS)
+        # Only the reads some device allows: no event reads when the
+        # calendar is add-only, no reminder reads when reminders aren't shared.
+        readable = {"events": any(shares(device["sharing"], "events") for device in devices),
+                    "reminders": any(shares(device["sharing"], "reminders") for device in devices)}
+        parameters["action"]["enum"] = [
+            action for action in VOICE_CALENDAR_ACTIONS
+            if action in ("overview", "calendars")
+            or readable["reminders" if action == "reminders" else "events"]]
         # The write uses of a shared parameter aren't offered here.
         parameters["calendar"]["description"] = "events: only this calendar. Name or id."
         parameters["list"]["description"] = "reminders: only this list. Name or id."
