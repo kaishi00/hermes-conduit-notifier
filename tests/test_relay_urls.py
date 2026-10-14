@@ -43,6 +43,7 @@ def test_request_urls_fit_for_a_credential(url):
 
 
 @pytest.mark.parametrize("url", ["http://relay.example", "http://192.168.1.10:8787", "http://100.64.0.1",
+                                 "https://relay.example/v1/events?x=1", "https://relay.example/?",
                                  "https://u:p@relay.example", "https://relay.example/#x", "ftp://relay.example",
                                  "https://relay.example/a b", "https://relay.example\\@evil", "https://", None,
                                  "https://relay.example:99999"])
@@ -206,3 +207,32 @@ def test_pair_prints_one_line_instead_of_a_traceback(monkeypatch, capsys):
     assert cli.dispatch(args) == 1
     out = capsys.readouterr().out
     assert out.startswith("Pairing failed: ") and "https://" in out and "Traceback" not in out
+
+
+def test_plain_http_skips_any_proxy_and_answers_are_capped(servers, monkeypatch):
+    # A proxy that would see the bearer in clear: never used for plain HTTP.
+    proxy = servers(lambda h: _json(h, 200, {"via": "proxy"}))
+    monkeypatch.setenv("http_proxy", proxy.url)
+    monkeypatch.setenv("HTTP_PROXY", proxy.url)
+    monkeypatch.delenv("no_proxy", raising=False)
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    fresh = _private_copy("conduit_push._client_proxy_under_test", ROOT / "client.py")
+    relay = servers(lambda h: _json(h, 200, {"ok": True}))
+    assert fresh.request_json(f"{relay.url}/v1/events", method="POST", credential="c", payload={}) == {"ok": True}
+    assert proxy.requests == []
+
+    huge = servers(lambda h: _json(h, 200, {"pad": "x" * 64}))
+    monkeypatch.setattr(fresh, "MAX_RESPONSE_BYTES", 16)
+    with pytest.raises(fresh.RelayRejected) as raised:
+        fresh.request_json(f"{huge.url}/v1/events", method="POST", credential="c", payload={})
+    assert raised.value.detail == "response_too_large"
+
+
+def test_unpair_with_a_legacy_http_url_removes_the_local_pairing_and_says_so(monkeypatch, tmp_path, capsys):
+    _paired_client(monkeypatch, tmp_path)
+    monkeypatch.setattr(client, "request_json", lambda *a, **k: pytest.fail("sent over plain http"))
+    client.save_state({"credential": "c", "relay_url": "http://192.168.1.10:8787"})
+    with pytest.raises(client.UnpairedLocally) as raised:
+        client.unpair()
+    assert "Remove this gateway in Conduit" in str(raised.value)
+    assert client.load_state() is None

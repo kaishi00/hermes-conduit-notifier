@@ -77,6 +77,8 @@ def _origin(parts: urllib.parse.SplitResult) -> tuple[str, str, int]:
 def check_request_url(url: object) -> str:
     """A URL fit to carry a relay credential: HTTPS, or HTTP to this machine."""
     parts = _split(url)
+    if parts.query or "?" in url:  # type: ignore[operator]
+        raise RelayURLError("The relay URL must not contain a query.")
     if parts.scheme != "https" and not is_loopback(parts.hostname or ""):
         raise RelayURLError("The relay URL must use https://.")
     return url  # type: ignore[return-value]
@@ -102,8 +104,7 @@ def paired_relay_url(returned: object, claimed: str) -> str:
         try:
             check_request_url(returned)
             parts = _split(returned)
-            if not parts.query and "?" not in returned \
-                    and (is_private(claimed_parts.hostname or "") or _origin(parts) == _origin(claimed_parts)):
+            if is_private(claimed_parts.hostname or "") or _origin(parts) == _origin(claimed_parts):
                 return returned.rstrip("/")  # type: ignore[union-attr]
         except RelayURLError:
             pass

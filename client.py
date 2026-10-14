@@ -184,16 +184,26 @@ def claim_pairing(code: str, relay_url: str = DEFAULT_RELAY_URL, gateway_name: s
     return state
 
 
+class UnpairedLocally(RuntimeError):
+    """The pairing was removed here, but its relay URL can't carry the
+    credential any more (a pairing saved before HTTPS was required), so the
+    relay still holds it until the phone removes this gateway."""
+
+
 def unpair() -> bool:
     state = load_state()
     if not state:
         remove_state()
         return False
-    request_json(
-        f"{state['relay_url'].rstrip('/')}/v1/gateways/current",
-        method="DELETE",
-        credential=state["credential"],
-    )
+    try:
+        url = check_request_url(f"{str(state.get('relay_url') or '').rstrip('/')}/v1/gateways/current")
+    except ValueError:
+        remove_state()
+        raise UnpairedLocally(
+            "Removed this profile's pairing, but its saved relay URL is not https://, so the relay was not told. "
+            "Remove this gateway in Conduit to revoke it there."
+        ) from None
+    request_json(url, method="DELETE", credential=state["credential"])
     remove_state()
     return True
 
@@ -476,6 +486,10 @@ class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
 
 
 _opener = urllib.request.build_opener(_RefuseRedirects)
+# Plain HTTP (loopback, or a LAN/Tailscale pairing claim) never goes through
+# an HTTP(S)_PROXY, which would see the credential or pairing code in clear.
+_direct_opener = urllib.request.build_opener(_RefuseRedirects, urllib.request.ProxyHandler({}))
+MAX_RESPONSE_BYTES = 1024 * 1024
 
 
 def _request(
@@ -497,8 +511,11 @@ def _request(
         headers["Authorization"] = f"Bearer {credential}"
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with _opener.open(request, timeout=timeout) as response:
-            raw = response.read()
+        opener = _opener if url.startswith("https:") else _direct_opener
+        with opener.open(request, timeout=timeout) as response:
+            raw = response.read(MAX_RESPONSE_BYTES + 1)
+            if len(raw) > MAX_RESPONSE_BYTES:
+                raise RelayRejected(response.status, "response_too_large")
             return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as error:
         try:

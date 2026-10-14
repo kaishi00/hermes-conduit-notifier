@@ -6,7 +6,7 @@ import argparse
 import socket
 
 from . import e2e
-from .client import DEFAULT_RELAY_URL, build_outgoing, claim_pairing, e2e_status, load_state, post_event, send_now, set_redact_content, state_path, unpair
+from .client import DEFAULT_RELAY_URL, UnpairedLocally, build_outgoing, claim_pairing, e2e_status, load_state, post_event, send_now, set_redact_content, state_path, unpair
 from .events import event_id, plugin_hello, push_event
 
 
@@ -37,7 +37,7 @@ def dispatch(args: argparse.Namespace) -> int:
     if action == "pair":
         try:
             state = claim_pairing(args.code, args.relay_url, args.name)
-        except (RuntimeError, OSError, ValueError) as error:
+        except (RuntimeError, OSError, ValueError, LookupError) as error:
             print(f"Pairing failed: {error}")
             return 1
         print(f"Paired {state['gateway_name']} with Conduit.")
@@ -110,7 +110,10 @@ def dispatch(args: argparse.Namespace) -> int:
     if action == "unpair":
         try:
             revoked = unpair()
-        except (RuntimeError, OSError, ValueError) as error:
+        except UnpairedLocally as error:
+            print(error)
+            return 0
+        except (RuntimeError, OSError, ValueError, LookupError) as error:
             print(f"Unpairing failed: {error}")
             return 1
         print("Conduit pairing revoked." if revoked else "This Hermes profile was not paired.")

@@ -3653,7 +3653,9 @@ def _claim_pairing(relay_url: str, code: str, gateway_name: str) -> Dict[str, An
         "Accept": "application/json", "Content-Type": "application/json",
         "User-Agent": f"Hermes-Conduit-Notifier/{_plugin_version() or 'unknown'}"})
     try:
-        with _relay_opener.open(request, timeout=PAIR_TIMEOUT_S) as response:
+        # A plain-HTTP claim (LAN or Tailscale) skips any proxy, which would see the code in clear.
+        opener = _relay_opener if relay_url.startswith("https:") else _direct_relay_opener
+        with opener.open(request, timeout=PAIR_TIMEOUT_S) as response:
             raw, status = response.read(64 * 1024), response.status
     except urllib.error.HTTPError as error:
         status = error.code
@@ -4810,6 +4812,7 @@ class _NoRedirectRelay(urllib.request.HTTPRedirectHandler):
 
 
 _relay_opener = urllib.request.build_opener(_NoRedirectRelay)
+_direct_relay_opener = urllib.request.build_opener(_NoRedirectRelay, urllib.request.ProxyHandler({}))
 
 
 def _relay_request(url: str, method: str, credential: str, payload: Optional[Dict[str, Any]],
