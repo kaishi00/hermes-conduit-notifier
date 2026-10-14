@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 
-import { callPushFor, notificationFor, settlePushFor, validateEvent, validateDecision } from '../src/server.mjs';
+import { callPushFor, notificationFor, phoneBackgroundPushFor, settlePushFor, validateEvent, validateDecision } from '../src/server.mjs';
 import { normalizePreferences } from '../src/store.mjs';
 
 const preferences = { show_previews: true, completion_sound: false };
@@ -687,4 +687,65 @@ test('a call that would ring with no chat to open goes as the notification inste
   assert.equal(callPushFor(sealed, {}, { id: 'gw-1' }, { topic: 'com.milim.relay' }), null, 'an envelope too big for APNs');
   const { call: _call, ...noCall } = validateEvent(callBody);
   assert.equal(callPushFor(noCall, { show_previews: true }, { id: 'gw-1' }, { topic: 'com.milim.relay' }), null);
+});
+
+// ── Calendar changes for the phone (phone.changes) ────────────────────
+
+const phoneBody = {
+  type: 'phone.changes',
+  event_id: 'phone:ch_0123456789abcdef',
+  profile: 'work',
+  title: 'Hermes wants to add an event',
+  body: 'Dentist · Fri 16 Oct 15:00',
+};
+
+test('a phone change is an alert unless it says background; any other mode is refused', () => {
+  assert.equal(validateEvent(phoneBody).mode, 'alert');
+  assert.equal(validateEvent({ ...phoneBody, mode: null }).mode, 'alert');
+  assert.equal(validateEvent({ ...phoneBody, mode: 'background' }).mode, 'background');
+  assert.throws(() => validateEvent({ ...phoneBody, mode: 'loud' }), (error) => error.status === 400 && error.message === 'invalid_mode');
+  assert.equal(validateEvent({ ...callBody, mode: 'background' }).mode, undefined, 'mode belongs to phone changes only');
+  const sealed = validateEvent({ ...phoneBody, mode: 'background', event_id: envelope.msg, e2e: { ...envelope, req: '' } });
+  assert.equal(sealed.mode, 'background', 'mode stays readable beside the envelope');
+  assert.equal(sealed.title, undefined);
+});
+
+test('a phone change that asks is a notification in its category, generic until previews are on', () => {
+  const { payload } = notificationFor(validateEvent(phoneBody), {}, { id: 'gw-1' });
+  assert.equal(payload.aps.category, 'PHONE_CHANGE');
+  assert.equal(payload.aps.alert.title, 'Hermes has a change for you');
+  assert.match(payload.aps.alert.body, /^Tap to review it in Conduit\./);
+  assert.equal(payload.aps.sound, 'default', 'it waits on the user, so it chimes');
+  assert.ok(!JSON.stringify(payload).includes('Dentist'));
+  const shown = notificationFor(validateEvent(phoneBody), { show_previews: true }, { id: 'gw-1' }).payload;
+  assert.deepEqual(shown.aps.alert, { title: 'Hermes wants to add an event', body: 'Dentist · Fri 16 Oct 15:00' });
+});
+
+test('a sealed phone change shows the fallback copy and keeps its category', () => {
+  const event = validateEvent({ ...phoneBody, event_id: envelope.msg, e2e: { ...envelope, req: '' } });
+  const { payload } = notificationFor(event, {}, { id: 'gw-1' });
+  assert.deepEqual(payload.aps.alert, { title: 'Hermes has a change for you', body: 'Tap to review it in Conduit.' });
+  assert.equal(payload.aps.category, 'PHONE_CHANGE');
+  assert.equal(payload.aps['mutable-content'], 1);
+  assert.deepEqual(payload.conduit_e2e, event.e2e);
+});
+
+test('a background phone change is a silent low-priority push with only routing', () => {
+  const plain = phoneBackgroundPushFor(validateEvent({ ...phoneBody, mode: 'background' }), { id: 'gw-1', dashboardId: 'dash-1' }, { topic: 'com.milim.relay', nowSeconds: 1_800_000_000 });
+  assert.equal(plain.pushType, 'background');
+  assert.equal(plain.priority, 5);
+  assert.equal(plain.topic, 'com.milim.relay');
+  assert.equal(plain.expiration, 1_800_000_000 + 24 * 60 * 60);
+  assert.deepEqual(plain.payload, { aps: { 'content-available': 1 }, conduit: { type: 'phone.changes', gateway_id: 'gw-1', dashboard_id: 'dash-1', profile: 'work' } });
+  assert.ok(!JSON.stringify(plain.payload).includes('Dentist'), 'the change itself never rides the push');
+  const event = validateEvent({ ...phoneBody, mode: 'background', event_id: envelope.msg, e2e: { ...envelope, req: '' } });
+  const sealed = phoneBackgroundPushFor(event, { id: 'gw-1' }, { topic: 'com.milim.relay' });
+  assert.deepEqual(sealed.payload.conduit, { type: 'phone.changes', gateway_id: 'gw-1' }, 'no profile beside an envelope');
+  assert.deepEqual(sealed.payload.conduit_e2e, event.e2e);
+  assert.equal(sealed.payload.aps.alert, undefined);
+});
+
+test('phone changes have their own preference, on by default', () => {
+  assert.equal(normalizePreferences({}).phone_changes, true);
+  assert.equal(normalizePreferences({ phone_changes: false }).phone_changes, false);
 });

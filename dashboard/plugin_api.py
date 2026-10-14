@@ -4096,6 +4096,136 @@ async def post_health_wipe(request: Request, response: Response, profile: Option
     return await _health_route(response, profile, lambda: _health_call(lambda store: store.wipe(device_id)), "delete")
 
 
+# --- Calendar, Reminders, Focus and phone status (shared from Conduit) ------
+#
+# The user turns on each kind in Conduit. The phone agrees a key with this
+# profile (/phone/key, X25519, its own key: wiping this never touches health
+# or location), posts sealed batches of events, reminders, its calendars,
+# Focus and status (/phone/ingest) straight here, never through the push
+# relay, and runs a sealed exchange (/phone/exchange) to report how the
+# changes Hermes asked for went and to pick up the ones still waiting. The
+# store (phone_store.py) keeps it all in the profile's conduit-phone.sqlite3
+# for the conduit_calendar and conduit_phone tools. Status reports counts and
+# dates only, wipe deletes, and the exchange answers only the device that
+# asks, sealed with that device's own key. (hermes-conduit
+# designs/phone-v1-contract.md)
+
+PHONE_KEY_LIMIT = 10
+PHONE_KEY_WINDOW_S = 60.0
+PHONE_WIPE_LIMIT = 5
+PHONE_WIPE_WINDOW_S = 60.0
+# A first sync or a window change sends many batches in a row.
+PHONE_INGEST_LIMIT = 120
+PHONE_INGEST_WINDOW_S = 60.0
+PHONE_EXCHANGE_LIMIT = 60
+PHONE_EXCHANGE_WINDOW_S = 60.0
+PHONE_MAX_KEY_BODY_BYTES = 4 * 1024
+PHONE_MAX_INGEST_BODY_BYTES = 4 * 1024 * 1024
+PHONE_MAX_EXCHANGE_BODY_BYTES = 64 * 1024
+
+_phone_key_limiter = _MintLimiter(PHONE_KEY_LIMIT, PHONE_KEY_WINDOW_S,
+                                  message="Too many calendar key requests; try again shortly")
+_phone_ingest_limiter = _MintLimiter(PHONE_INGEST_LIMIT, PHONE_INGEST_WINDOW_S,
+                                     message="Too many calendar uploads; try again shortly")
+_phone_exchange_limiter = _MintLimiter(PHONE_EXCHANGE_LIMIT, PHONE_EXCHANGE_WINDOW_S,
+                                       message="Too many calendar change checks; try again shortly")
+_phone_wipe_limiter = _MintLimiter(PHONE_WIPE_LIMIT, PHONE_WIPE_WINDOW_S,
+                                   message="Too many calendar delete requests; try again shortly")
+_phone_store_module: Any = None
+
+
+def _phone_store() -> Any:
+    """phone_store.py beside this folder, loaded once."""
+    global _phone_store_module
+    with _calls_store_lock:
+        if _phone_store_module is None:
+            path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "phone_store.py")
+            spec = importlib.util.spec_from_file_location("conduit_push_dashboard_phone_store", path)
+            if spec is None or spec.loader is None or not os.path.exists(path):
+                raise TokenError(501, "This plugin install is missing phone_store.py; update the plugin")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _phone_store_module = module
+        return _phone_store_module
+
+
+def _phone_call(fn: Callable[[Any], Dict[str, Any]]) -> Dict[str, Any]:
+    module = _phone_store()
+    try:
+        return fn(module.PhoneStore(_calls_home()))
+    except module.PhoneError as exc:
+        raise TokenError(exc.status, str(exc))
+
+
+async def _phone_route(response: Response, profile: Optional[str], fn: Callable[[], Dict[str, Any]],
+                       name: str) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return {"ok": True, **(await _run_scoped(profile, fn))}
+    except TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
+        raise
+    except Exception as exc:
+        raise _unexpected(name, exc, feature="Calendar sharing")
+
+
+def _phone_limit(limiter: Any, profile: Optional[str]) -> None:
+    try:
+        limiter.acquire(_limiter_key(profile))
+    except TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+
+
+@router.get("/phone/status")
+async def get_phone_status(response: Response, profile: Optional[str] = None,
+                           device_id: Optional[str] = None) -> Dict[str, Any]:
+    return await _phone_route(response, profile, lambda: _phone_call(lambda store: {
+        **store.status(device_id), "crypto": _phone_store().crypto_available()}), "status")
+
+
+@router.post("/phone/key")
+async def post_phone_key(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    _phone_limit(_phone_key_limiter, profile)
+    body = await _read_json_body(request, PHONE_MAX_KEY_BODY_BYTES)
+    return await _phone_route(response, profile, lambda: _phone_call(lambda store: store.register_key(body)), "key")
+
+
+@router.post("/phone/ingest")
+async def post_phone_ingest(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    _phone_limit(_phone_ingest_limiter, profile)
+    body = await _read_json_body(request, PHONE_MAX_INGEST_BODY_BYTES)
+    return await _phone_route(response, profile, lambda: _phone_call(lambda store: store.ingest(body)), "upload")
+
+
+@router.post("/phone/exchange")
+async def post_phone_exchange(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    _phone_limit(_phone_exchange_limiter, profile)
+    body = await _read_json_body(request, PHONE_MAX_EXCHANGE_BODY_BYTES)
+    return await _phone_route(response, profile, lambda: _phone_call(lambda store: store.exchange(body)), "exchange")
+
+
+@router.post("/phone/wipe")
+async def post_phone_wipe(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    _phone_limit(_phone_wipe_limiter, profile)
+    body = await _read_json_body(request, PHONE_MAX_KEY_BODY_BYTES)
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Expected a JSON object", headers={"Cache-Control": "no-store"})
+    # Everything only when asked for by name; a device id alone deletes that device's data.
+    if body.get("all") is True and body.get("device_id") is not None:
+        raise HTTPException(status_code=400, detail="Name a device_id or all: true, not both",
+                            headers={"Cache-Control": "no-store"})
+    device_id = None if body.get("all") is True else body.get("device_id")
+    if device_id is None and body.get("all") is not True:
+        raise HTTPException(status_code=400, detail="Name a device_id, or all: true",
+                            headers={"Cache-Control": "no-store"})
+    return await _phone_route(response, profile, lambda: _phone_call(lambda store: store.wipe(device_id)), "delete")
+
+
 # --- Watch tools (wrist-down lookups for a Conduit Watch call) ---------------
 #
 # With the wrist down, a Conduit Watch call can't reach Conduit on the iPhone,
@@ -8331,6 +8461,7 @@ ROUTE_CAPABILITIES = (
     "hermes-call-outcomes",
     "conduit-settings",
     "health-sync",
+    "phone-sync",
     "pairing",
     "self-restart",
 )

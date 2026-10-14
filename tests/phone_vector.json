@@ -1,0 +1,35 @@
+{
+  "host_private": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+  "host_public": "j0DFrbaPJWJK5bIU6nZ6bslNgp09e14a0bpvPiE4KF8",
+  "device_private": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8",
+  "device_public": "NYBy1jZYgNGu6jKa35EhODhR7SGijjt16WXQ0s0WYlQ",
+  "device_id": "device-vector-1",
+  "kid": "623ffc0d912da4f291e9b21f5e9525a4",
+  "shared": "9663aa1da97e848a914a436d04163dfbb89178f107f1b5b77ed3854203382854",
+  "ingest": {
+    "batch_id": "batch-vector-1",
+    "key": "630785d4c722fbb7302ec37755e28687dc6ad95908044f75d23c2a68c5bda771",
+    "aad": "conduit-phone/1\ningest\nkid=623ffc0d912da4f291e9b21f5e9525a4\ndev=device-vector-1\nbatch=batch-vector-1",
+    "nonce": "AAAAAAAAAAAAAAAA",
+    "plaintext": "{\"batch_id\":\"batch-vector-1\",\"sent_at\":\"2026-10-14T08:02:11+01:00\",\"sharing\":{\"calendar\":\"full\",\"reminders\":true}}",
+    "ct": "urNzwshgjVt59WJvei1cvkp4Wc5TcyVM23WAjA5ZYzKt5-yCuj5nf1wcGId5cRo_-gZWSlB6HzCH9-5eRkplX2HfKXWd5MclQSsgzZiR4gfhuMHlK48hL1dZy83OiMzIJ-ooKCr3oyJQ9rEZSdMt5y0D0q468B-Q1dLBKdoYvePegQ"
+  },
+  "exchange_request": {
+    "op": "changes",
+    "call_id": "call-vector-1",
+    "key": "897af24a563a0c8828564d83559f2c47a9f154ddc247ef3dc7517cb00a4d44e2",
+    "aad": "conduit-phone/1\nexchange-request\nop=changes\nkid=623ffc0d912da4f291e9b21f5e9525a4\ndev=device-vector-1\ncall=call-vector-1",
+    "nonce": "AQEBAQEBAQEBAQEB",
+    "plaintext": "{\"call_id\":\"call-vector-1\",\"results\":[{\"id\":\"ch_vector000001\",\"outcome\":\"applied\",\"item_id\":\"e_1\"}]}",
+    "ct": "gELNGLE22UzmOD9jFhmSx2vvTH46EwCS3bOLvdBDvzUNVtuX4BUIafEHjmztpE2ePKpnfSirlccBF3ofBO7oFtA52hidOys7o54b_F_ExfXTtk3va2EBeRBbjFbj1ozUSOkGbc1cLenEB2JgsArgdPbgyEs"
+  },
+  "exchange_answer": {
+    "op": "changes",
+    "call_id": "call-vector-1",
+    "key": "0e3aa3a1b6e61220b05cf2bc928c09be5b6dc7aee322e9e79b13d6472da199ec",
+    "aad": "conduit-phone/1\nexchange-answer\nop=changes\nkid=623ffc0d912da4f291e9b21f5e9525a4\ndev=device-vector-1\ncall=call-vector-1",
+    "nonce": "AgICAgICAgICAgIC",
+    "plaintext": "{\"call_id\":\"call-vector-1\",\"changes\":[]}",
+    "ct": "jzmv7wQbA5r8CkriEVswbKhirSLiYHJJQdLAWdBti6KmGBraXGxE4B3wTTRFUMAGFVB3D6Vcyos"
+  }
+}

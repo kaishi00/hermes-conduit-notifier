@@ -54,6 +54,7 @@ def push_event(
     body: str = "",
     decision: dict[str, Any] | None = None,
     call: dict[str, Any] | None = None,
+    mode: str | None = None,
 ) -> dict[str, Any]:
     event: dict[str, Any] = {
         "event_id": identifier,
@@ -86,7 +87,17 @@ def push_event(
         sanitized_call = sanitize_call(call)
         if sanitized_call:
             event["call"] = sanitized_call
+    # `mode` (phone.changes only) tells the relay how to wake the phone for a
+    # change Hermes queued: "alert" shows a notification the user taps to
+    # review, "background" wakes Conduit silently to apply a change the user
+    # lets Hermes make without asking. Routing, not content: it stays visible
+    # to the relay when the rest is sealed.
+    if kind == "phone.changes":
+        event["mode"] = mode if mode in PHONE_CHANGE_MODES else "alert"
     return event
+
+
+PHONE_CHANGE_MODES = ("alert", "background")
 
 
 # How a watched job ended, or (an alert call) what Hermes waits on.
@@ -149,6 +160,9 @@ def redact_event(event: dict[str, Any]) -> dict[str, Any]:
     # (qid charset/reserved names, bounds), so a raw send_now caller gets the
     # same guarantees as the in-repo builders.
     redacted = {key: event[key] for key in _REDACTED_EVENT_KEYS if key in event}
+    if event.get("type") == "phone.changes" and event.get("mode") in PHONE_CHANGE_MODES:
+        # How the relay wakes the phone: routing, not content.
+        redacted["mode"] = event["mode"]
     decision = sanitize_decision(event.get("decision")) if event.get("decision") is not None else {}
     if decision.get("kind") == "approval":
         # Unknown labels never transit; fall back to the always-valid subset

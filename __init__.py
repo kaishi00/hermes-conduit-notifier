@@ -12,7 +12,8 @@ from typing import Any
 
 from hermes_constants import get_hermes_home
 
-from . import call_tool, call_watches, calls, clarify_loop, desktop_selected, health_tool, settings_tool
+from . import (call_tool, call_watches, calls, clarify_loop, desktop_selected, health_tool, phone_tool,
+               settings_tool)
 from .session_titles import title as _session_title, titled as _titled
 from .client import enqueue
 from .events import approval_decision, clarification_text, event_id, is_silent_response, push_event
@@ -54,6 +55,10 @@ def register(ctx: Any) -> None:
     # Health data Conduit shares from Apple Health, read-only, with its skill.
     health_tool.register(ctx, is_child=_is_child,
                          skill_path=Path(__file__).resolve().parent / "skills" / health_tool.SKILL_NAME / "SKILL.md")
+    # Calendar, Reminders, Focus and phone status Conduit shares, with
+    # changes the phone applies (the user approves them there), and the skill.
+    phone_tool.register(ctx, is_child=_is_child, profile=lambda: _profile,
+                        skill_path=Path(__file__).resolve().parent / "skills" / phone_tool.SKILL_NAME / "SKILL.md")
     try:
         ctx.register_hook("post_approval_response", _post_approval_response)
     except Exception:  # noqa: BLE001

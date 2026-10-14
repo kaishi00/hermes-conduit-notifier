@@ -68,6 +68,7 @@ The plugin currently emits notifications for:
 - response ready
 - failed turns
 - completed delegated tasks
+- calendar and reminder changes Hermes asks your phone to make (see [Calendar, Reminders, Focus and phone status](#calendar-reminders-focus-and-phone-status-from-conduit-plugin-027)): a notification to approve, or a silent wake for adds you let Hermes make without asking
 - call requests: a job you asked to be called about has ended, Hermes asked to call you, or (alert calls) Hermes has waited a minute on your approval or answer, or a turn failed (see [Hermes calls you](#hermes-calls-you-plugin-013))
 
 An exact `[Silent]` assistant response does not emit a completion notification.
@@ -1112,6 +1113,62 @@ workouts, body, vitals, fitness), with how far back to start.
 
 Limits: 4 devices per profile, 6,000 items and 4 MiB per batch, 120 uploads
 a minute per profile.
+
+## Calendar, Reminders, Focus and phone status from Conduit (plugin 0.27+)
+
+Conduit can share the user's iPhone calendars (every account on the phone),
+Reminders, which Focus is on and a snapshot of the phone (battery, charging,
+Low Power Mode, CarPlay, audio route, network, motion) with a Hermes profile,
+so the agent can answer "what's on today?", find a free slot, add the
+dentist on Thursday, remind them to call mum when they get home, or keep it
+short when the battery is low. Each kind is off until the user turns it on
+in Conduit, with which calendars and lists, how far back and ahead, and
+whether notes and attendees are included (off by default).
+
+- **Straight to this host, sealed end to end.** The phone posts to
+  `POST /api/plugins/conduit_push/phone/ingest` over your dashboard
+  connection, never through the push relay. It agrees its own key with the
+  profile (`POST /phone/key`, X25519, separate from health and location, so
+  each can be on alone and wiping one never touches another), and every
+  body is sealed with ChaCha20-Poly1305 under HKDF-SHA256 keys from it, on
+  top of any TLS. The same caveats as health apply: use HTTPS or a private
+  tunnel when you can, and treat dashboard access as access to this data.
+- **What the user chose, enforced here too.** The phone says what it
+  shares in every batch and the store holds it to that: no notes,
+  attendees or links without "Include notes and attendees", no attendee
+  emails without that switch, no events at all when the calendar is
+  "add only" (write-only) or off, and status or Focus forgotten as soon as
+  either is turned off. Only the shared window is kept (past days to
+  future days), status and Focus are the latest value only.
+- **Writes are changes the phone applies.** Hermes can't touch the phone's
+  calendar, so `conduit_calendar`'s write actions queue a pending change.
+  The plugin nudges the phone with a `phone.changes` relay event (sealed
+  like any notification when the pairing has end-to-end encryption): a
+  visible notification for a change the user approves on the phone
+  (`mode: "alert"`), or a silent background push for an add the user lets
+  Hermes make without asking (`mode: "background"`); updates, deletes and
+  completions always ask, and adds to shared calendars or lists always ask.
+  The phone picks the queue up and reports outcomes (applied, edited,
+  dismissed, failed, expired) with one sealed `POST /phone/exchange`. The
+  notification carries no calendar data beyond the sealed title and body:
+  the change itself comes from this host. Pending changes expire after 7
+  days, at most 50 per profile. A relay without `phone.changes` refuses
+  the nudge; the phone still finds the change on its next exchange.
+- **Stored here only.** The profile's `conduit-phone.sqlite3`, mode `0600`.
+  `GET /phone/status` reports counts and dates, never content;
+  `POST /phone/wipe` deletes one device's data, key and pending changes (or
+  everything with `{"all": true}`).
+- **Tools.** `conduit_calendar` (reads `overview`, `calendars`, `events`,
+  `free_busy`, `next`, `reminders`; writes `add_event`, `update_event`,
+  `delete_event`, `add_reminder`, `update_reminder`, `complete_reminder`;
+  `pending` for how changes went) and `conduit_phone` (`status`), with the
+  skill `conduit_push:using-calendar`. Each shows only once a phone shares
+  what it reads; subagents can't use them. Reads say how fresh the copy is
+  ("as of" the last sync). What they return goes to your agent's model like
+  any tool result, which Conduit tells the user before they turn sharing on.
+
+Limits: 4 devices per profile, 5,000 items and 4 MiB per batch, 120 uploads
+and 60 exchanges a minute per profile, 64 KiB per exchange.
 
 ## Apple Watch lookups and jobs (plugin 0.6+, jobs 0.7+, Gemini tokens 0.8+)
 

@@ -63,7 +63,9 @@ export class ApnsClient {
           // app's `.voip` topic and an expiration.
           'apns-topic': notification.topic || this.topic,
           'apns-push-type': notification.pushType || 'alert',
-          'apns-priority': '10',
+          // A background push (a calendar change applied without asking)
+          // must go at priority 5.
+          'apns-priority': String(notification.priority ?? 10),
           ...(notification.expiration !== undefined ? { 'apns-expiration': String(notification.expiration) } : {}),
           ...(notification.collapseId ? { 'apns-collapse-id': notification.collapseId.slice(0, 64) } : {}),
         });
