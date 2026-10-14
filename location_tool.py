@@ -186,10 +186,57 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
                 "note": "The user has paused location sharing (or turned it off) in Conduit. Don't guess where they "
                         "are; ask them if it matters."}
     _log(store, action, session)
-    if action == "now":
-        return {"ok": True, **_fix_view(view, now)}
     if action == "locate":
         return _locate(store, view, profile, sleep)
+    return _read(store, view, action, args, now)
+
+
+# What a live voice model (Gemini Live, Grok Live, GPT-Live) is told on top of
+# SCHEMA's description, which it gets word for word.
+VOICE_NOTE = ("On a voice call: only now, places, history and distance_to work here. Answer by ear in a sentence "
+              "or two, say how old the location is when it matters, and leave links, ids and coordinates out.")
+VOICE_ACTIONS = ("now", "places", "history", "distance_to")
+
+
+def voice_parameters() -> dict[str, Any]:
+    """SCHEMA's parameters for the read actions alone: a voice call can't
+    ask the phone for a fresh fix or change place rules."""
+    properties = SCHEMA["parameters"]["properties"]
+    return {"type": "object",
+            "properties": {"action": {**properties["action"], "enum": list(VOICE_ACTIONS)},
+                           **{name: properties[name] for name in ("place", "from", "to")}},
+            "required": ["action"]}
+
+
+def voice_handle(args: Any, *, device_id: str, store: LocationStore, provider: str = "") -> dict[str, Any]:
+    """The same read for a live voice call on one device, which sees only
+    the location that device shared (its id, never another device). Logged
+    like any read, as a voice call."""
+    try:
+        wanted = args if isinstance(args, dict) else {}
+        action = wanted.get("action")
+        if action not in VOICE_ACTIONS:
+            return {"ok": False, "error": "invalid", "note": "action is now, places, history or distance_to."}
+        view = store.snapshot(device_id)
+        if view is None:
+            return _nothing_shared()
+        _log_voice(store, action, provider)
+        now = store.clock()
+        if sharing_paused(view["sharing"], now):
+            return {"ok": False, "error": "paused",
+                    "note": "The user has paused location sharing (or turned it off) in Conduit. Don't guess where "
+                            "they are; ask them if it matters."}
+        return _read(store, view, action, wanted, now)
+    except LocationError as error:
+        return {"ok": False, "error": error.code, "note": str(error)}
+    except Exception:  # noqa: BLE001 — the answer is sealed even when the read fails
+        logger.warning("conduit_location voice read failed", exc_info=True)
+        return {"ok": False, "error": "unavailable", "note": "The location couldn't be read. Tell the user."}
+
+
+def _read(store: LocationStore, view: dict[str, Any], action: str, args: dict[str, Any], now: float) -> dict[str, Any]:
+    if action == "now":
+        return {"ok": True, **_fix_view(view, now)}
     if action == "places":
         return {"ok": True, "places": [_place_view(place) for place in view["places"].values()],
                 "note": "Saved places live on the user's phone; they add and change them in Conduit's "
@@ -501,6 +548,16 @@ def _place_view(place: dict[str, Any]) -> dict[str, Any]:
 def _log(store: LocationStore, action: str, session: str) -> None:
     try:
         store.log_read(action, session, session_titles.title(session) if session else "")
+    except Exception:  # noqa: BLE001 — the read still answers
+        logger.warning("conduit_push: could not log a location read", exc_info=True)
+
+
+_VOICE_TITLES = {"gemini-live": "Gemini Live call", "grok-live": "Grok Live call", "gpt-live": "GPT-Live call"}
+
+
+def _log_voice(store: LocationStore, action: str, provider: str) -> None:
+    try:
+        store.log_read(action, "", _VOICE_TITLES.get(provider, "Voice call"))
     except Exception:  # noqa: BLE001 — the read still answers
         logger.warning("conduit_push: could not log a location read", exc_info=True)
 
