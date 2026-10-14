@@ -506,7 +506,7 @@ def test_set_rule_scrubs_the_task_but_keeps_its_lines(home, scheduler):
 def test_a_rule_that_cant_be_saved_leaves_no_job(home, scheduler, monkeypatch):
     _shared(home, fix=fix())
 
-    def fail(self, rule):
+    def fail(self, rule, **kwargs):
         raise location.LocationError("too_many_rules", "full", status=409)
 
     monkeypatch.setattr(location.LocationStore, "put_rule", fail)
@@ -675,6 +675,16 @@ def test_ingest_refuses_an_oversized_body(client):
     response = client.post(f"{BASE}/location/ingest", content=b"x" * (api.LOCATION_MAX_INGEST_BODY_BYTES + 1),
                            headers={"content-type": "application/json"})
     assert response.status_code == 413
+
+
+def test_a_rule_deleted_meanwhile_isnt_brought_back(store):
+    _rule(store)
+    store.remove_rule("r_brief0001")
+    with pytest.raises(location.LocationError) as error:
+        store.put_rule({"id": "r_brief0001", "job_id": "job-1", "what": "morning brief", "place_id": "p_home",
+                        "place_name": "Home", "event": "leave", "days": [], "hours": "", "task": "Brief me.",
+                        "call": True}, replacing=True)
+    assert error.value.code == "rule_gone" and store.rules() == []
 
 
 def test_a_redacted_profile_still_sends_the_locate_id():

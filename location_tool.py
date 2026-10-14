@@ -162,6 +162,7 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
     action = args.get("action")
     store = _store()
     if action == "rules":
+        _log(store, action, session)
         return {"ok": True, "rules": [_rule_view(rule) for rule in store.rules()],
                 "note": f"Up to {MAX_RULES} rules. They run only while the user shares location in the background."}
     if action == "remove_rule":
@@ -173,6 +174,7 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
     if view is None:
         return _nothing_shared()
     if action == "set_rule":
+        _log(store, action, session)
         return _set_rule(store, view, args.get("rule"))
     now = store.clock()
     if sharing_paused(view["sharing"], now):
@@ -318,14 +320,13 @@ def _locate(store: LocationStore, view: dict[str, Any], profile: str, sleep: Cal
     except Exception as error:  # noqa: BLE001
         logger.warning("Conduit location request failed: %s", error)
         store.cancel_locate(locate_id)
-        return {"ok": False, "error": "unreachable", "note": "The phone couldn't be asked just now. Use action now.",
-                **_fix_view(view, store.clock())}
+        return {**_fix_view(view, store.clock()), "ok": False, "error": "unreachable",
+                "note": "The phone couldn't be asked just now. Use action now."}
     if isinstance(answer, dict) and answer.get("delivered") is False:
         store.cancel_locate(locate_id)
-        return {"ok": False, "error": "not_set_up",
+        return {**_fix_view(view, store.clock()), "ok": False, "error": "not_set_up",
                 "note": "The phone can't answer fresh lookups yet (Conduit or the notification relay needs updating, "
-                        "or background sharing was just turned on). Use action now.",
-                **_fix_view(view, store.clock())}
+                        "or background sharing was just turned on). Use action now."}
     waited = 0.0
     while waited < LOCATE_WAIT_S:
         sleep(LOCATE_POLL_S)
@@ -412,7 +413,7 @@ def _set_rule_locked(store: LocationStore, view: dict[str, Any], raw: Any) -> di
         return {"ok": False, "error": "scheduler", "note": f"The job couldn't be saved: {answer.get('error') or 'unknown error'}."}
     try:
         saved = store.put_rule({**rule, "id": existing["id"] if existing else "r_" + secrets.token_urlsafe(9),
-                                "job_id": job_id})
+                                "job_id": job_id}, replacing=existing is not None)
     except Exception:
         if job is None:
             # A job no rule points at could never be removed with remove_rule.

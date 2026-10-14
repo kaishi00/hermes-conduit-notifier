@@ -609,11 +609,15 @@ class LocationStore:
                 return []
             return [_rule_row(row) for row in db.execute(f"SELECT {_RULE_COLUMNS} FROM rules ORDER BY created_at")]
 
-    def put_rule(self, rule: dict[str, Any]) -> dict[str, Any]:
-        """Adds or replaces a rule (by id). The caller made its job first."""
+    def put_rule(self, rule: dict[str, Any], *, replacing: bool = False) -> dict[str, Any]:
+        """Adds or replaces a rule (by id). The caller made its job first.
+        ``replacing``: the caller is changing a rule it found, which must
+        still be there (the user may have just deleted it in Conduit)."""
         now = self.clock()
         with self._write() as db:
             exists = db.execute("SELECT 1 FROM rules WHERE id=?", (rule["id"],)).fetchone()
+            if replacing and not exists:
+                raise LocationError("rule_gone", "That place rule was just deleted", status=409)
             if not exists and db.execute("SELECT COUNT(*) FROM rules").fetchone()[0] >= MAX_RULES:
                 raise LocationError("too_many_rules", f"There are already {MAX_RULES} place rules", status=409)
             db.execute(
@@ -773,7 +777,7 @@ def _parse_sharing(value: Any) -> dict[str, Any]:
         if not isinstance(paused, str) or len(paused) > 40:
             raise LocationError("malformed", "sharing.paused_until must be an ISO 8601 time or null")
         try:
-            parsed = datetime.fromisoformat(paused.replace("Z", "+00:00"))
+            parsed = datetime.fromisoformat(paused[:-1] + "+00:00" if paused.endswith("Z") else paused)
         except ValueError:
             raise LocationError("malformed", "sharing.paused_until must be an ISO 8601 time or null") from None
         if parsed.tzinfo is None:
