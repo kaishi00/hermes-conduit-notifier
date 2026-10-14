@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import secrets
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
@@ -342,10 +343,21 @@ def _locate(store: LocationStore, view: dict[str, Any], profile: str, sleep: Cal
 # --- Rules ---------------------------------------------------------------------------
 
 
+# One set_rule at a time: two parallel calls with the same `what` would
+# otherwise both find no rule and both make a job.
+_rule_lock = threading.Lock()
+
+
 def _set_rule(store: LocationStore, view: dict[str, Any], raw: Any) -> dict[str, Any]:
+    with _rule_lock:
+        return _set_rule_locked(store, view, raw)
+
+
+def _set_rule_locked(store: LocationStore, view: dict[str, Any], raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         return {"ok": False, "error": "invalid", "note": "Pass rule with what, place, event and task."}
-    what = clean_text(raw.get("what"), "what", MAX_WHAT_CHARS) if isinstance(raw.get("what"), str) else None
+    what = raw.get("what")
+    what = clean_text(what, "what", MAX_WHAT_CHARS) if isinstance(what, str) and len(what) <= MAX_WHAT_CHARS else None
     if what and what.casefold().startswith(RULE_PREFIX.casefold()):
         what = what[len(RULE_PREFIX):].strip()
     if not what:

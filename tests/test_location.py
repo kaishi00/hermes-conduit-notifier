@@ -519,6 +519,7 @@ def test_set_rule_takes_any_place_either_move_and_every_time(home, scheduler):
     ({"event": "stay"}, "invalid"),
     ({"days": ["someday"]}, "invalid"),
     ({"repeat": "hourly"}, "invalid"),
+    ({"what": "x" * 200}, "invalid"),
     ({"hours": "morning"}, "invalid"),
     ({"task": ""}, "invalid"),
 ])
