@@ -1,0 +1,226 @@
+import importlib.util
+import pathlib
+import sys
+import tempfile
+import types
+
+import pytest
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+if "hermes_constants" not in sys.modules:
+    _hermes_constants = types.ModuleType("hermes_constants")
+    _hermes_constants.get_hermes_home = lambda: pathlib.Path(tempfile.gettempdir())
+    sys.modules["hermes_constants"] = _hermes_constants
+if "tools" not in sys.modules:
+    _tools = types.ModuleType("tools")
+    _tools.__path__ = []
+    sys.modules["tools"] = _tools
+if "conduit_push" not in sys.modules:
+    _pkg = types.ModuleType("conduit_push")
+    _pkg.__path__ = [str(ROOT)]
+    sys.modules["conduit_push"] = _pkg
+
+
+def _load(name, path):
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+live = _load("conduit_push.live_activity", ROOT / "live_activity.py")
+plugin = _load("conduit_push.__init__", ROOT / "__init__.py")
+client = sys.modules["conduit_push.client"]
+
+
+class Relay:
+    def __init__(self, tracked=True):
+        self.tracked = tracked
+        self.posts = []
+        self.failure = None
+
+    def __call__(self, payload):
+        self.posts.append(payload)
+        if self.failure is not None:
+            raise self.failure
+        return {"tracked": self.tracked}
+
+
+@pytest.fixture
+def clock():
+    return [100.0]
+
+
+@pytest.fixture
+def relay():
+    return Relay()
+
+
+@pytest.fixture
+def reporter(clock, relay):
+    return live.LiveActivityReporter(post=relay, clock=lambda: clock[0], start_thread=False)
+
+
+def test_tool_names_become_coarse_categories():
+    assert live.tool_category("terminal") == "terminal"
+    assert live.tool_category("browser_click") == "browser"
+    assert live.tool_category("mcp_github_create_issue") == "connector"
+    assert live.tool_category("web_search") == "web"
+    assert live.tool_category("my_secret_project_tool") == "tool"
+    assert live.tool_category(None) == "tool"
+
+
+def test_the_first_report_waits_a_moment_then_carries_the_turn(reporter, relay, clock):
+    reporter.turn_started("s-1")
+    reporter.tool_started("s-1", "terminal")
+    reporter.context_used("s-1", 41_000, 100_000)
+    assert reporter.flush() == pytest.approx(live.FIRST_DELAY_S)
+    assert relay.posts == []
+    clock[0] += live.FIRST_DELAY_S
+    reporter.flush()
+    assert relay.posts == [{"session_id": "s-1", "state": {"phase": "tool", "tools": 1, "tool": "terminal", "context": 41}}]
+
+
+def test_a_watched_turn_reports_at_most_every_interval(reporter, relay, clock):
+    reporter.turn_started("s-1")
+    clock[0] += live.FIRST_DELAY_S
+    reporter.flush()
+    reporter.tool_started("s-1", "read_file")
+    reporter.tool_started("s-1", "web_search")
+    assert reporter.flush() == pytest.approx(live.MIN_INTERVAL_S)
+    assert len(relay.posts) == 1
+    clock[0] += live.MIN_INTERVAL_S
+    reporter.flush()
+    assert relay.posts[-1]["state"] == {"phase": "tool", "tools": 2, "tool": "web"}
+
+
+def test_a_turn_nobody_watches_is_asked_about_rarely(reporter, relay, clock):
+    relay.tracked = False
+    reporter.turn_started("s-1")
+    clock[0] += live.FIRST_DELAY_S
+    reporter.flush()
+    reporter.thinking("s-1")
+    reporter.tool_started("s-1", "terminal")
+    clock[0] += live.MIN_INTERVAL_S
+    reporter.flush()
+    assert len(relay.posts) == 1
+    clock[0] += live.UNTRACKED_RETRY_S
+    reporter.flush()
+    assert len(relay.posts) == 2
+
+
+def test_the_end_goes_out_at_once_and_only_once(reporter, relay, clock):
+    reporter.turn_started("s-1")
+    clock[0] += live.FIRST_DELAY_S
+    reporter.flush()
+    reporter.tool_started("s-1", "terminal")
+    reporter.turn_ended("s-1", "done")
+    reporter.flush()
+    assert relay.posts[-1] == {"session_id": "s-1", "state": {"phase": "tool", "tools": 1, "tool": "terminal"}, "end": "done"}
+    # Hermes also fires on_session_end after post_llm_call.
+    reporter.turn_ended("s-1", "done")
+    reporter.flush()
+    assert len(relay.posts) == 2
+    # Updates after the end are dropped; a new turn starts fresh.
+    reporter.thinking("s-1")
+    reporter.flush()
+    assert len(relay.posts) == 2
+    reporter.turn_started("s-1")
+    clock[0] += live.FIRST_DELAY_S
+    reporter.flush()
+    assert relay.posts[-1] == {"session_id": "s-1", "state": {"phase": "thinking", "tools": 0}}
+
+
+def test_waiting_on_the_user_and_failures(reporter, relay, clock):
+    reporter.turn_started("s-1")
+    reporter.waiting("s-1", "approval")
+    clock[0] += live.FIRST_DELAY_S
+    reporter.flush()
+    assert relay.posts[-1]["state"]["phase"] == "approval"
+    reporter.tool_started("s-1", "clarify")
+    clock[0] += live.MIN_INTERVAL_S
+    reporter.flush()
+    assert relay.posts[-1]["state"]["phase"] == "input"
+    reporter.turn_ended("s-1", "failed")
+    reporter.flush()
+    assert relay.posts[-1]["end"] == "failed"
+
+
+def test_a_relay_without_the_route_turns_reporting_off_for_a_while(reporter, relay, clock):
+    relay.failure = client.RelayRejected(404, "not_found")
+    reporter.turn_started("s-1")
+    clock[0] += live.FIRST_DELAY_S
+    reporter.flush()
+    relay.failure = None
+    reporter.turn_ended("s-1", "done")
+    clock[0] += 60
+    reporter.flush()
+    assert len(relay.posts) == 1
+    clock[0] += live.UNSUPPORTED_S
+    reporter.flush()
+    assert relay.posts[-1]["end"] == "done"
+
+
+def test_redaction_leaves_out_the_tool_category(monkeypatch):
+    sent = []
+    monkeypatch.setattr(client, "load_state", lambda: {"relay_url": "https://relay.example", "credential": "c", "redact_content": True})
+    monkeypatch.setattr(client, "request_json", lambda url, **kwargs: sent.append((url, kwargs["payload"])) or {"tracked": True})
+    assert live._post_to_relay({"session_id": "s", "state": {"phase": "tool", "tool": "terminal", "tools": 1}}) == {"tracked": True}
+    assert sent == [("https://relay.example/v1/live-activity", {"session_id": "s", "state": {"phase": "tool", "tools": 1}})]
+
+
+class Recorder:
+    def __init__(self):
+        self.calls = []
+
+    def __getattr__(self, name):
+        return lambda *args: self.calls.append((name, *args))
+
+
+def test_the_hooks_feed_the_reporter(monkeypatch):
+    recorder = Recorder()
+    monkeypatch.setattr(live, "reporter", recorder)
+    monkeypatch.setattr(plugin, "enqueue", lambda event: True)
+    monkeypatch.setattr(plugin.calls, "outcome_note", lambda session_id: None)
+    monkeypatch.setattr(plugin.calls, "turn_ended", lambda *args, **kwargs: True)
+    plugin._pre_llm_call(session_id="s-1", turn_id="t-1", conversation_history=[])
+    plugin._pre_api_request(session_id="s-1")
+    plugin._pre_tool_call(session_id="s-1", tool_name="terminal")
+    plugin._post_api_request(session_id="s-1", usage={"prompt_tokens": 500}, context_length=1000)
+    plugin._on_session_end(session_id="s-1", interrupted=True)
+    assert recorder.calls == [
+        ("turn_started", "s-1"),
+        ("thinking", "s-1"),
+        ("tool_started", "s-1", "terminal"),
+        ("context_used", "s-1", 500, 1000),
+        ("turn_ended", "s-1", "stopped"),
+    ]
+
+
+def test_a_broken_reporter_never_breaks_a_hook(monkeypatch):
+    class Broken:
+        def __getattr__(self, name):
+            def fail(*args):
+                raise RuntimeError("boom")
+            return fail
+    monkeypatch.setattr(live, "reporter", Broken())
+    plugin._pre_api_request(session_id="s-1")
+    plugin._post_api_request(session_id="s-1", usage={"prompt_tokens": 1}, context_length=2)
+
+
+def test_registration_survives_a_hermes_without_the_request_hooks():
+    hooks = []
+
+    def register_hook(name, fn):
+        if name in ("pre_api_request", "post_api_request"):
+            raise ValueError("unknown hook")
+        hooks.append(name)
+    ctx = types.SimpleNamespace(profile_name="default", register_hook=register_hook,
+                                register_cli_command=lambda **kwargs: None,
+                                register_tool=lambda **kwargs: None, register_skill=lambda name, path: None)
+    plugin.register(ctx)
+    assert "pre_tool_call" in hooks and "post_llm_call" in hooks

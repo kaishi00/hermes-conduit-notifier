@@ -73,6 +73,8 @@ The plugin currently emits notifications for:
 
 An exact `[Silent]` assistant response does not emit a completion notification.
 
+Beside notifications, the plugin keeps a Live Activity up to date while a turn you sent from Conduit runs (see [Lock Screen progress](#lock-screen-progress-plugin-031)).
+
 Each notification is titled with the session's title when it has one (for example a Telegram topic name), so you can tell which chat it came from: a reply shows the session title, and the others prefix it (`Approval needed · Infra`). Untitled sessions keep the generic copy. With previews off the title is not shown; `redact on` or end-to-end encryption keeps it from reaching the relay.
 
 The iOS app controls which categories are enabled, whether notification previews are shown, whether completion sounds play, and whether approval and input-needed notifications play a sound (on by default).
@@ -195,6 +197,8 @@ gateway-bound inactive records still require separately reviewed maintenance.
 | POST | `/v1/pairings/claim` | Claim a pairing code (gateway side) |
 | POST | `/v1/events` | Deliver a notification event |
 | DELETE | `/v1/gateways/current` | Revoke a gateway credential |
+| PUT / DELETE | `/v1/installations/:id/live-activities` | Register (`push_token`, `session_ids`) or remove (`push_token`) the Live Activity the phone started for a chat (0.14+) |
+| POST | `/v1/live-activity` | Report a running turn's progress (`session_id`, `state`, optional `end`); answers `tracked` (gateway side, 0.14+) |
 | POST | `/v1/watch-tools/grants` | Open a Watch tool grant for one call (gateway side) |
 | GET | `/v1/watch-tools/grants/:id/calls` | Long-poll for the grant's Watch tool calls (gateway side) |
 | POST | `/v1/watch-tools/grants/:id/results/:rid` | Answer one Watch tool call (gateway side) |
@@ -291,6 +295,9 @@ integer stops the relay at boot.
 | Live Watch audio bridges per gateway | 2 | `RELAY_MAX_WATCH_AUDIO_BRIDGES_PER_GATEWAY` |
 | Watch tool calls per minute | 1,200 | `RELAY_WATCH_CALLS_PER_MINUTE` |
 | Hermes call requests per installation per day (each new request counts, even one that rings no device) | 60 | `RELAY_CALLS_PER_INSTALLATION_PER_DAY` |
+| Live Activities held in memory, relay-wide / per phone (the oldest is forgotten past either) | 50,000 / 8 | `RELAY_MAX_LIVE_ACTIVITIES` / `RELAY_MAX_LIVE_ACTIVITIES_PER_INSTALLATION` |
+| Live Activity registrations per minute, relay-wide | 3,000 | `RELAY_LIVE_ACTIVITY_REGISTRATIONS_PER_MINUTE` |
+| Live Activity updates delivered per minute, relay-wide | 30,000 | `RELAY_LIVE_ACTIVITY_UPDATES_PER_MINUTE` |
 
 Event IDs only prevent a repeated delivery of the same event within 24 hours,
 so the relay keeps them in memory and never writes them to the data file. A
@@ -328,6 +335,35 @@ replacement does not coordinate multiple writers, and sharing the file
 between processes can lose updates. The budgets are per process. A hostile
 flood can still saturate a budget or a bound, and installation IDs alone
 cannot establish fairness between actors.
+
+## Lock Screen progress (plugin 0.31+)
+
+When you send a message from Conduit, it starts a Live Activity on the Lock
+Screen and in the Dynamic Island: what Hermes is doing (thinking, running a
+kind of tool, waiting for your approval or answer), how long the turn has run,
+how many tools it used and how full its context is. Conduit updates it itself
+while it is open; once you leave it, the plugin keeps it current through the
+relay (relay 0.14+), and the end of the turn ends it.
+
+- The phone registers the activity's push token with the relay under the
+  chat's session ids. The plugin reports each turn it runs: phase changes,
+  tool starts, approvals and clarify questions, and each model request's
+  context use (`pre_api_request` / `post_api_request`, which older Hermes
+  versions may not have; the rest still works without them).
+- Reports are coalesced: at most one every 5 seconds per watched turn, the end
+  at once. The relay answers whether the phone is watching; a turn nobody
+  watches is asked about again only every 15 seconds, and a relay without the
+  route turns reporting off for half an hour.
+- Live Activity payloads are rendered by iOS itself, so they can't be sealed
+  end to end like notifications. What reaches the relay and APNs is coarse on
+  purpose: the session id, a phase, a tool category from a fixed list
+  (`terminal`, `files`, `web`, `browser`, `connector`…, never a tool's name,
+  arguments or output), a tool count and a context percentage. The chat's
+  title stays on the phone. With `redact on` the tool category is left out
+  too.
+- The relay keeps registrations in memory only (at most 8 hours, the longest
+  iOS runs an activity). A relay restart stops updates; the activity then
+  shows as out of date on the phone and Conduit ends it when you open it.
 
 ## Batch clarify decisions (plugin 0.3+)
 

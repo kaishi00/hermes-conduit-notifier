@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 
-import { DEFAULT_BUDGETS, DEFAULT_CALL_LIMITS, DEFAULT_STORE_LIMITS, DEFAULT_WATCH_LIMITS, limitsFromEnv } from '../src/limits.mjs';
+import { DEFAULT_BUDGETS, DEFAULT_CALL_LIMITS, DEFAULT_LIVE_ACTIVITY_LIMITS, DEFAULT_STORE_LIMITS, DEFAULT_WATCH_LIMITS, limitsFromEnv } from '../src/limits.mjs';
 
 test('relay limits default when unset or empty and accept positive integer overrides', () => {
   assert.deepEqual(limitsFromEnv({}), {
@@ -9,6 +9,7 @@ test('relay limits default when unset or empty and accept positive integer overr
     watchLimits: { ...DEFAULT_WATCH_LIMITS },
     budgets: { ...DEFAULT_BUDGETS },
     callLimits: { ...DEFAULT_CALL_LIMITS },
+    liveActivityLimits: { ...DEFAULT_LIVE_ACTIVITY_LIMITS },
   });
   assert.deepEqual(limitsFromEnv({ RELAY_MAX_INSTALLATIONS: '', RELAY_EVENTS_PER_MINUTE: '  ' }).storeLimits, { ...DEFAULT_STORE_LIMITS },
     'Compose passes unset optional variables as empty strings');
@@ -31,7 +32,12 @@ test('relay limits default when unset or empty and accept positive integer overr
     RELAY_MAX_WATCH_AUDIO_BRIDGES: '50',
     RELAY_MAX_WATCH_AUDIO_BRIDGES_PER_GATEWAY: '1',
     RELAY_CALLS_PER_INSTALLATION_PER_DAY: '30',
+    RELAY_MAX_LIVE_ACTIVITIES: '100000',
+    RELAY_MAX_LIVE_ACTIVITIES_PER_INSTALLATION: '4',
+    RELAY_LIVE_ACTIVITY_REGISTRATIONS_PER_MINUTE: '6000',
+    RELAY_LIVE_ACTIVITY_UPDATES_PER_MINUTE: '60000',
   });
+  assert.deepEqual(configured.liveActivityLimits, { maxActivities: 100_000, maxPerInstallation: 4 });
   assert.deepEqual(configured.callLimits, { callsPerInstallationPerDay: 30 });
   assert.deepEqual(configured.storeLimits, {
     ...DEFAULT_STORE_LIMITS,
@@ -49,6 +55,8 @@ test('relay limits default when unset or empty and accept positive integer overr
     decisionActionsPerMinute: 1_200,
     revocationsPerMinute: 48,
     watchCallsPerMinute: 2_400,
+    liveActivityRegistrationsPerMinute: 6_000,
+    liveActivityUpdatesPerMinute: 60_000,
   });
   assert.deepEqual(configured.watchLimits, {
     maxGrants: 4_096,

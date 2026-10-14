@@ -12,8 +12,8 @@ from typing import Any
 
 from hermes_constants import get_hermes_home
 
-from . import (call_tool, call_watches, calls, clarify_loop, desktop_selected, health_tool, location_tool,
-               phone_tool, settings_tool)
+from . import (call_tool, call_watches, calls, clarify_loop, desktop_selected, health_tool, live_activity,
+               location_tool, phone_tool, settings_tool)
 from .session_titles import title as _session_title, titled as _titled
 from .client import enqueue
 from .events import approval_decision, clarification_text, event_id, is_silent_response, push_event
@@ -74,6 +74,14 @@ def register(ctx: Any) -> None:
     except Exception:  # noqa: BLE001
         logger.warning("conduit_push: pre_llm_call hook unavailable; voice replies get no persona hint and "
                        "Hermes doesn't hear about declined calls", exc_info=True)
+    # Lock Screen progress (#605): each model request and its token use.
+    # Optional like the hooks above: an older Hermes without them still
+    # reports tools, approvals and the end of the turn.
+    for name, hook in (("pre_api_request", _pre_api_request), ("post_api_request", _post_api_request)):
+        try:
+            ctx.register_hook(name, hook)
+        except Exception:  # noqa: BLE001
+            logger.warning("conduit_push: %s hook unavailable; the Lock Screen shows less detail", name, exc_info=True)
     # Wrap clarify execution so a backgrounded device gets an answerable card
     # (plugin-minted id, answered through the relay). Older gateways without
     # middleware support simply keep the original clarify path.
@@ -96,7 +104,10 @@ def register(ctx: Any) -> None:
 
 
 def _pre_tool_call(**kwargs: Any) -> None:
-    if kwargs.get("tool_name") != "clarify" or _is_child(kwargs.get("session_id")):
+    if _is_child(kwargs.get("session_id")):
+        return
+    _quietly(live_activity.reporter.tool_started, _text(kwargs.get("session_id")), kwargs.get("tool_name"))
+    if kwargs.get("tool_name") != "clarify":
         return
     if _clarify_loop_active:
         # The middleware wraps the execution and pushes a richer, answerable
@@ -117,6 +128,7 @@ def _post_llm_call(**kwargs: Any) -> None:
     response = kwargs.get("assistant_response")
     if _is_child(session_id):
         return
+    _quietly(live_activity.reporter.turn_ended, session_id, "done")
     started = _take_turn_start(kwargs.get("turn_id"))
     ready = None if is_silent_response(response) else push_event(
         "response.ready",
@@ -160,6 +172,8 @@ def _on_session_end(**kwargs: Any) -> None:
     session_id = _text(kwargs.get("session_id"))
     if _is_child(session_id):
         return
+    _quietly(live_activity.reporter.turn_ended, session_id,
+             "done" if kwargs.get("completed") else "stopped" if kwargs.get("interrupted") else "failed")
     if kwargs.get("completed"):
         calls.turn_ended(session_id, "done", profile=_profile, fallback=None)
         return
@@ -186,6 +200,7 @@ def _pre_approval_request(**kwargs: Any) -> None:
         return
     session_id = _text(kwargs.get("session_key"))
     description = _text(kwargs.get("description"))
+    _quietly(live_activity.reporter.waiting, session_id, "approval")
     # The event id deliberately excludes `id(kwargs)`: CPython recycles ids, so
     # a later, distinct approval with the same session/pattern/command could
     # collide and be silently deduped by the relay for 24h. `turn_id` (forwarded
@@ -222,6 +237,31 @@ def _pre_approval_request(**kwargs: Any) -> None:
 
 def _post_approval_response(**kwargs: Any) -> None:
     calls.cancel_alerts(_text(kwargs.get("session_key")), "approval")
+    _quietly(live_activity.reporter.thinking, _text(kwargs.get("session_key")))
+
+
+def _pre_api_request(**kwargs: Any) -> None:
+    session_id = _text(kwargs.get("session_id"))
+    if not _is_child(session_id):
+        _quietly(live_activity.reporter.thinking, session_id)
+
+
+def _post_api_request(**kwargs: Any) -> None:
+    session_id = _text(kwargs.get("session_id"))
+    if _is_child(session_id):
+        return
+    usage = kwargs.get("usage")
+    if isinstance(usage, dict):
+        _quietly(live_activity.reporter.context_used, session_id, usage.get("prompt_tokens"),
+                 kwargs.get("context_length"))
+
+
+def _quietly(function: Any, *args: Any) -> None:
+    """Lock Screen progress is an extra: it must never break a hook."""
+    try:
+        function(*args)
+    except Exception:  # noqa: BLE001
+        logger.debug("conduit_push: Live Activity update failed", exc_info=True)
 
 
 def _subagent_start(**kwargs: Any) -> None:
@@ -288,6 +328,7 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
     session_id = _text(kwargs.get("session_id"))
     if not _is_child(session_id):
         _note_turn_start(kwargs.get("turn_id"))
+        _quietly(live_activity.reporter.turn_started, session_id)
     notes = [
         None if _is_child(session_id) else calls.outcome_note(session_id),
         _voice_persona_note(kwargs.get("conversation_history")),

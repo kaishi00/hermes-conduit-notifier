@@ -32,6 +32,14 @@ export const DEFAULT_WATCH_LIMITS = Object.freeze({
   maxAudioBridgesPerGateway: 2,
 });
 
+// Live Activities (live-activities.mjs) live in memory only: one per chat a
+// phone is watching a turn in, a few hundred bytes each. Past either bound
+// the oldest registration is forgotten.
+export const DEFAULT_LIVE_ACTIVITY_LIMITS = Object.freeze({
+  maxActivities: 50_000,
+  maxPerInstallation: 8,
+});
+
 // Process-wide admissions per minute, per class of action.
 export const DEFAULT_BUDGETS = Object.freeze({
   registrationsPerMinute: 24,
@@ -44,6 +52,10 @@ export const DEFAULT_BUDGETS = Object.freeze({
   revocationsPerMinute: 24,
   // Watch tool calls (each one runs a lookup on its host).
   watchCallsPerMinute: 1_200,
+  // Live Activity tokens phones register (one per turn they watch) and the
+  // updates hosts send to them (at most one per watched turn per 5 s).
+  liveActivityRegistrationsPerMinute: 3_000,
+  liveActivityUpdatesPerMinute: 30_000,
 });
 
 // Hermes calls you (#449): call requests per installation in 24 hours.
@@ -69,6 +81,11 @@ const WATCH_LIMIT_VARIABLES = Object.freeze({
   maxAudioBridgesPerGateway: 'RELAY_MAX_WATCH_AUDIO_BRIDGES_PER_GATEWAY',
 });
 
+const LIVE_ACTIVITY_LIMIT_VARIABLES = Object.freeze({
+  maxActivities: 'RELAY_MAX_LIVE_ACTIVITIES',
+  maxPerInstallation: 'RELAY_MAX_LIVE_ACTIVITIES_PER_INSTALLATION',
+});
+
 const CALL_LIMIT_VARIABLES = Object.freeze({
   callsPerInstallationPerDay: 'RELAY_CALLS_PER_INSTALLATION_PER_DAY',
 });
@@ -80,6 +97,8 @@ const BUDGET_VARIABLES = Object.freeze({
   decisionActionsPerMinute: 'RELAY_DECISION_ACTIONS_PER_MINUTE',
   revocationsPerMinute: 'RELAY_REVOCATIONS_PER_MINUTE',
   watchCallsPerMinute: 'RELAY_WATCH_CALLS_PER_MINUTE',
+  liveActivityRegistrationsPerMinute: 'RELAY_LIVE_ACTIVITY_REGISTRATIONS_PER_MINUTE',
+  liveActivityUpdatesPerMinute: 'RELAY_LIVE_ACTIVITY_UPDATES_PER_MINUTE',
 });
 
 // Unset or empty variables keep the default (Compose passes `${VAR:-}` as an
@@ -91,6 +110,7 @@ export function limitsFromEnv(env = process.env) {
     watchLimits: readIntegers(DEFAULT_WATCH_LIMITS, WATCH_LIMIT_VARIABLES, env),
     budgets: readIntegers(DEFAULT_BUDGETS, BUDGET_VARIABLES, env),
     callLimits: readIntegers(DEFAULT_CALL_LIMITS, CALL_LIMIT_VARIABLES, env),
+    liveActivityLimits: readIntegers(DEFAULT_LIVE_ACTIVITY_LIMITS, LIVE_ACTIVITY_LIMIT_VARIABLES, env),
   };
 }
 
