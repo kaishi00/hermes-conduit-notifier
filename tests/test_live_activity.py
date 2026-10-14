@@ -301,3 +301,23 @@ def test_an_earlier_backoff_does_not_hold_up_the_end(reporter, relay, clock):
     reporter.turn_ended("s-1", "done")
     reporter.flush()
     assert relay.posts[-1]["end"] == "done"
+
+
+def test_a_report_the_relay_calls_malformed_is_not_retried(reporter, relay, clock):
+    reporter.turn_started("s-1")
+    relay.failure = client.RelayRejected(400, "invalid_live_activity_report")
+    clock[0] += live.FIRST_DELAY_S
+    reporter.flush()
+    relay.failure = None
+    clock[0] += live.BACKOFF_S
+    assert reporter.flush() is None
+    assert len(relay.posts) == 1
+
+
+def test_the_tool_count_stays_within_what_the_relay_takes(reporter, relay, clock):
+    reporter.turn_started("s-1")
+    for _ in range(10_005):
+        reporter.tool_started("s-1", "terminal")
+    clock[0] += live.FIRST_DELAY_S
+    reporter.flush()
+    assert relay.posts[-1]["state"]["tools"] == 10_000

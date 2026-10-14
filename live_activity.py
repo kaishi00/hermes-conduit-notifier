@@ -274,10 +274,17 @@ class LiveActivityReporter:
         try:
             answer = self._post(payload)
         except Exception as error:  # noqa: BLE001 — never into the turn
-            unsupported = isinstance(error, client.RelayRejected) and error.status == 404
+            status = error.status if isinstance(error, client.RelayRejected) else None
             with self._lock:
                 now = self._clock()
-                if unsupported:
+                if status == 400:
+                    # The relay will never take this report: retrying can't
+                    # help, so the turn is dropped.
+                    if self._turns.get(session_id) is turn:
+                        del self._turns[session_id]
+                    logger.info("Conduit Live Activity report refused: %s", error)
+                    return
+                if status == 404:
                     # The relay has no route at all: every turn waits.
                     self._paused_until = now + UNSUPPORTED_S
                 else:
@@ -343,7 +350,8 @@ class LiveActivityReporter:
 
 
 def _payload(session_id: str, turn: _Turn) -> dict[str, Any]:
-    state: dict[str, Any] = {"phase": turn.phase, "tools": turn.tools}
+    # The relay takes at most 10,000.
+    state: dict[str, Any] = {"phase": turn.phase, "tools": min(turn.tools, 10_000)}
     if turn.tool and turn.phase == "tool":
         state["tool"] = turn.tool
     if turn.context is not None:
