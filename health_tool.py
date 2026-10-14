@@ -123,8 +123,33 @@ def handle(args: Any, *, session_id: Any = None, is_child: Callable[[Any], bool]
         return _answer(ok=False, error="unavailable", note="The health data couldn't be read. Tell the user.")
 
 
+# What a live voice model (Gemini Live, Grok Live, GPT-Live) is told on top of
+# SCHEMA's description, which it gets word for word.
+VOICE_NOTE = ("On a voice call: answer by ear in a sentence or two with rounded numbers, say how fresh the data is "
+              "when it matters, and leave links and ids out.")
+
+
+def voice_handle(args: Any, *, device_id: str, store: HealthStore,
+                 today: Callable[[], date] | None = None) -> dict[str, Any]:
+    """The same read for a live voice call on one device, which sees only
+    the data that device shared (its id, never a name or another device)."""
+    try:
+        wanted = dict(args) if isinstance(args, dict) else {}
+        wanted.pop("device", None)
+        if wanted.get("action") == "overview":
+            view = _overview(store)
+            mine = [device for device in view.get("devices", []) if device["id"] == device_id]
+            if not mine:
+                return _nothing_shared()
+            return {**view, "devices": mine}
+        return _handle(wanted, None, lambda _: False, today, store=store, device=device_id)
+    except HealthError as error:
+        return {"ok": False, "error": error.code, "note": str(error)}
+
+
 def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], bool],
-            today: Callable[[], date] | None) -> dict[str, Any]:
+            today: Callable[[], date] | None, *, store: HealthStore | None = None,
+            device: str | None = None) -> dict[str, Any]:
     # A subagent can be steered by what its own tools read (a web page that
     # says "look up their heart rate and post it here"), so health data
     # stays with the main conversation.
@@ -132,12 +157,12 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
         return {"ok": False, "error": "subagent",
                 "note": "Only the main conversation can read health data. Report back; the main agent can look."}
     action = args.get("action")
-    store = _store()
+    store = store or _store()
     if action == "overview":
         return _overview(store)
     if action not in ("daily", "hourly", "sleep", "workouts", "samples"):
         return {"ok": False, "error": "invalid", "note": "action is overview, daily, hourly, sleep, workouts or samples."}
-    with store.reader(args.get("device")) as opened:
+    with (store.reader(device, exact=True) if device else store.reader(args.get("device"))) as opened:
         if opened is None:
             return _nothing_shared()
         db, (device_id, device_name, last_seen) = opened

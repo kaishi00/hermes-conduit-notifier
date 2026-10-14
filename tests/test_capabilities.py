@@ -60,6 +60,7 @@ def test_every_capability_names_a_served_route_family():
         "hermes-call-outcomes": "/calls/outcomes",
         "conduit-settings": "/conduit-settings",
         "health-sync": "/health/",
+        "voice-tools": "/voice-tools",
         "pairing": "/pair",
         "self-restart": "/self/restart",
     }

@@ -1,0 +1,169 @@
+import json
+import secrets
+
+import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+import test_health
+from test_health import BASE, DEVICE, ROOT, Phone, _batch, api, health
+
+VECTOR = json.loads((ROOT / "tests" / "health_vector.json").read_text())["voice"]
+
+
+class VoicePhone(Phone):
+    """Conduit's side of a voice read, as the Swift code does it."""
+
+    def accept(self, answer):
+        super().accept(answer)
+        host_public = health.unb64u(answer["host_public_key"])
+        shared = self.private.exchange(X25519PublicKey.from_public_bytes(host_public))
+        self.request_key = health.derive_key(shared, self.device_id, self.public, host_public,
+                                             health.INFO_VOICE_REQUEST)
+        self.answer_key = health.derive_key(shared, self.device_id, self.public, host_public,
+                                            health.INFO_VOICE_ANSWER)
+
+    def ask(self, args, call_id=None, tool="conduit_health"):
+        call_id = call_id or secrets.token_urlsafe(12)
+        body = json.dumps({"call_id": call_id, "args": args, "provider": "gemini-live"}).encode()
+        nonce, ct = health.seal(self.request_key, body, health.voice_aad("request", self.kid, self.device_id, call_id))
+        return {"v": 1, "tool": tool, "device_id": self.device_id, "kid": self.kid, "call_id": call_id,
+                "nonce": nonce, "ct": ct}
+
+    def read(self, envelope, answer):
+        plain = health.open_sealed(self.answer_key, answer["nonce"], answer["ct"],
+                                   health.voice_aad("answer", self.kid, self.device_id, envelope["call_id"]))
+        opened = json.loads(plain)
+        assert opened["call_id"] == envelope["call_id"]
+        return opened["result"]
+
+
+@pytest.fixture()
+def client(tmp_path, monkeypatch):
+    monkeypatch.setattr(api, "_calls_home", lambda: tmp_path)
+    monkeypatch.setattr(api, "_voice_tools_limiter", api._MintLimiter(1000, 60))
+    monkeypatch.setattr(api, "_health_ingest_limiter", api._MintLimiter(1000, 60))
+    monkeypatch.setattr(api, "_health_key_limiter", api._MintLimiter(1000, 60))
+    app = FastAPI()
+    app.include_router(api.router, prefix=BASE)
+    return TestClient(app)
+
+
+def _share(client, phone, batch=None):
+    phone.accept(client.post(f"{BASE}/health/key", json=phone.key_request()).json())
+    if batch is not None:
+        assert client.post(f"{BASE}/health/ingest", json=phone.seal(batch)).status_code == 200
+
+
+def _call(client, phone, args, **kw):
+    envelope = phone.ask(args, **kw)
+    response = client.post(f"{BASE}/voice-tools/call", json=envelope)
+    assert response.status_code == 200, response.text
+    assert response.headers["cache-control"] == "no-store"
+    return phone.read(envelope, response.json())
+
+
+def test_shared_voice_vector_matches_conduit():
+    # ConduitTests/HealthSyncCryptoTests.swift checks the same values.
+    host_private, device_private = bytes(range(32)), bytes(range(32, 64))
+    host_public = X25519PrivateKey.from_private_bytes(host_private).public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    device_public = X25519PrivateKey.from_private_bytes(device_private).public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    kid = health.key_id(device_public, host_public)
+    shared = health.agree(host_private, device_public)
+    request_key = health.derive_key(shared, "device-vector-1", device_public, host_public, health.INFO_VOICE_REQUEST)
+    answer_key = health.derive_key(shared, "device-vector-1", device_public, host_public, health.INFO_VOICE_ANSWER)
+    assert request_key.hex() == VECTOR["request_key"] and answer_key.hex() == VECTOR["answer_key"]
+    request_aad = health.voice_aad("request", kid, "device-vector-1", VECTOR["call_id"])
+    answer_aad = health.voice_aad("answer", kid, "device-vector-1", VECTOR["call_id"])
+    assert request_aad.decode() == VECTOR["request_aad"] and answer_aad.decode() == VECTOR["answer_aad"]
+    assert health.seal(request_key, VECTOR["request"].encode(), request_aad, nonce=bytes(12))[1] == VECTOR["request_ct"]
+    assert health.seal(answer_key, VECTOR["answer"].encode(), answer_aad, nonce=bytes(12))[1] == VECTOR["answer_ct"]
+    # Ingest's key is a different one.
+    assert request_key != health.derive_key(shared, "device-vector-1", device_public, host_public)
+
+
+def test_the_list_offers_health_only_once_data_arrived(client):
+    response = client.get(f"{BASE}/voice-tools")
+    assert response.status_code == 200 and response.json() == {"ok": True, "tools": []}
+    _share(client, VoicePhone(), _batch())
+    tools = client.get(f"{BASE}/voice-tools").json()["tools"]
+    assert [tool["name"] for tool in tools] == ["conduit_health"]
+    assert tools[0]["key"] == "health"
+    assert tools[0]["description"].startswith(test_health.tool.SCHEMA["description"][:80])
+    assert "voice call" in tools[0]["description"]
+    assert tools[0]["parameters"]["required"] == ["action"]
+
+
+def test_a_voice_read_comes_back_sealed_for_the_asking_phone(client):
+    phone = VoicePhone()
+    _share(client, phone, _batch())
+    envelope = phone.ask({"action": "daily", "metrics": ["steps"], "from": "2026-10-11", "to": "2026-10-12"})
+    raw = client.post(f"{BASE}/voice-tools/call", json=envelope).json()
+    assert set(raw) == {"ok", "v", "nonce", "ct"}
+    assert "1200" not in json.dumps(raw)
+    answer = phone.read(envelope, raw)
+    assert answer["ok"] is True
+    assert answer["days"] == [{"date": "2026-10-11", "steps": 1200.0}, {"date": "2026-10-12", "steps": 800.0}]
+    overview = _call(client, phone, {"action": "overview"})
+    assert [device["id"] for device in overview["devices"]] == [DEVICE]
+
+
+def test_another_device_never_reads_this_ones_data(client):
+    owner = VoicePhone()
+    batch = _batch()
+    batch["device"]["name"] = "ericsiphone1"
+    _share(client, owner, batch)
+    # A key registered with dashboard access alone, under an id that matches
+    # the owner's device name: it has no data of its own and must get none.
+    intruder = VoicePhone(device_id="ERICSIPHONE1")
+    _share(client, intruder)
+    assert _call(client, intruder, {"action": "daily", "metrics": ["steps"]})["error"] == "nothing_shared"
+    assert _call(client, intruder, {"action": "overview"})["error"] == "nothing_shared"
+    # Asking for the owner's device by id or name changes nothing.
+    assert _call(client, intruder, {"action": "sleep", "device": DEVICE})["error"] == "nothing_shared"
+
+
+def test_a_request_without_the_device_key_opens_nothing(client):
+    phone = VoicePhone()
+    _share(client, phone, _batch())
+    envelope = phone.ask({"action": "overview"})
+    assert client.post(f"{BASE}/voice-tools/call", json={**envelope, "call_id": "call-other-1"}).status_code == 409
+    assert client.post(f"{BASE}/voice-tools/call", json={**envelope, "kid": "f" * 32}).status_code == 409
+    stranger = VoicePhone()
+    stranger.kid, stranger.request_key = phone.kid, secrets.token_bytes(32)
+    assert client.post(f"{BASE}/voice-tools/call", json=stranger.ask({"action": "overview"})).status_code == 409
+    assert client.post(f"{BASE}/voice-tools/call", json={"v": 1}).status_code == 404
+    assert client.post(f"{BASE}/voice-tools/call", json=phone.ask({}, tool="terminal")).status_code == 404
+    assert client.post(f"{BASE}/voice-tools/call", json={**envelope, "v": 2}).status_code == 400
+
+
+def test_a_bad_action_is_an_answer_not_an_error(client):
+    phone = VoicePhone()
+    _share(client, phone, _batch())
+    assert _call(client, phone, {"action": "wipe"})["error"] == "invalid"
+    assert _call(client, phone, {"action": "daily", "metrics": ["password"]})["error"] == "unknown_metric"
+
+
+def test_voice_reads_are_rate_limited(client, monkeypatch):
+    monkeypatch.setattr(api, "_voice_tools_limiter", api._MintLimiter(1, 60))
+    phone = VoicePhone()
+    _share(client, phone, _batch())
+    _call(client, phone, {"action": "overview"})
+    assert client.post(f"{BASE}/voice-tools/call", json=phone.ask({"action": "overview"})).status_code == 429
+
+
+def test_a_new_key_for_the_same_device_id_reads_none_of_the_old_data(client):
+    owner = VoicePhone()
+    _share(client, owner, _batch())
+    # Dashboard access alone can re-key the owner's device id; that drops what
+    # the old key sent instead of handing it to the new key.
+    intruder = VoicePhone(device_id=DEVICE)
+    _share(client, intruder)
+    assert _call(client, intruder, {"action": "daily", "metrics": ["steps"]})["error"] == "nothing_shared"
+    assert client.get(f"{BASE}/health/status", params={"device_id": DEVICE}).json()["device"]["rows"] == {}
+    # The real phone gets 409 on its next sync, sets up a key and sends it all again.
+    assert client.post(f"{BASE}/health/ingest", json=owner.seal(_batch("batch-0002"))).status_code == 409
