@@ -65,6 +65,14 @@ TALKING_SOURCES = ("message", "call")
 BACKGROUND_SOURCES = ("visit", "place", "significant", "app", "locate")
 SOURCES = TALKING_SOURCES + BACKGROUND_SOURCES
 EVENT_KINDS = ("arrive", "leave")
+# What a place rule waits for: one of EVENT_KINDS, or either.
+RULE_EVENTS = EVENT_KINDS + ("either",)
+# A rule's place can be one saved place or any of them.
+ANY_PLACE = "*"
+# How often a rule may run: once a day, or every time (with a gap, so a
+# phone hovering at a geofence's edge doesn't start a run per wobble).
+RULE_REPEATS = ("daily", "every")
+RULE_EVERY_MIN_GAP_S = 30 * 60
 WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 MAX_DEVICES = 4
@@ -582,13 +590,14 @@ class LocationStore:
             if not exists and db.execute("SELECT COUNT(*) FROM rules").fetchone()[0] >= MAX_RULES:
                 raise LocationError("too_many_rules", f"There are already {MAX_RULES} place rules", status=409)
             db.execute(
-                "INSERT INTO rules(id, job_id, what, place_id, place_name, event, days, hours, task, call, created_at)"
-                " VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET job_id=excluded.job_id,"
+                "INSERT INTO rules(id, job_id, what, place_id, place_name, event, days, hours, task, call, repeat,"
+                " created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET job_id=excluded.job_id,"
                 " what=excluded.what, place_id=excluded.place_id, place_name=excluded.place_name,"
                 " event=excluded.event, days=excluded.days, hours=excluded.hours, task=excluded.task,"
-                " call=excluded.call",
+                " call=excluded.call, repeat=excluded.repeat",
                 (rule["id"], rule["job_id"], rule["what"], rule["place_id"], rule["place_name"], rule["event"],
-                 ",".join(rule["days"]), rule["hours"] or None, rule["task"], 1 if rule["call"] else 0, now))
+                 ",".join(rule["days"]), rule["hours"] or None, rule["task"], 1 if rule["call"] else 0,
+                 rule.get("repeat") if rule.get("repeat") in RULE_REPEATS else "daily", now))
             row = db.execute(f"SELECT {_RULE_COLUMNS} FROM rules WHERE id=?", (rule["id"],)).fetchone()
         return _rule_row(row)
 
@@ -653,14 +662,16 @@ def sharing_paused(sharing: dict[str, Any], now: float) -> bool:
     return False
 
 
-_RULE_COLUMNS = "id, job_id, what, place_id, place_name, event, days, hours, task, call, last_fired_day, last_fired_at"
+_RULE_COLUMNS = ("id, job_id, what, place_id, place_name, event, days, hours, task, call, last_fired_day, last_fired_at,"
+                 " repeat")
 
 
 def _rule_row(row: tuple[Any, ...]) -> dict[str, Any]:
     return {"id": row[0], "job_id": row[1], "what": row[2], "place_id": row[3], "place_name": row[4],
             "event": row[5], "days": [day for day in (row[6] or "").split(",") if day], "hours": row[7] or "",
             "task": row[8], "call": bool(row[9]), "last_fired": row[10] or None,
-            "last_fired_at": iso_utc(row[11]) if row[11] else None}
+            "last_fired_at": iso_utc(row[11]) if row[11] else None, "last_fired_ts": row[11],
+            "repeat": row[12] if row[12] in RULE_REPEATS else "daily"}
 
 
 # --- Schema and batch apply -----------------------------------------------------------
@@ -705,7 +716,8 @@ def _migrate(db: sqlite3.Connection, now: float) -> None:
         CREATE TABLE IF NOT EXISTS rules(
             id TEXT PRIMARY KEY, job_id TEXT, what TEXT NOT NULL, place_id TEXT NOT NULL, place_name TEXT NOT NULL,
             event TEXT NOT NULL, days TEXT NOT NULL, hours TEXT, task TEXT NOT NULL, call INTEGER NOT NULL,
-            created_at REAL NOT NULL, last_fired_day TEXT, last_fired_at REAL);
+            repeat TEXT NOT NULL DEFAULT 'daily', created_at REAL NOT NULL, last_fired_day TEXT,
+            last_fired_at REAL);
         CREATE TABLE IF NOT EXISTS locates(id TEXT PRIMARY KEY, requested_at REAL NOT NULL, answered_at REAL)
     """.split(";"):
         if statement.strip():
@@ -963,14 +975,16 @@ def _fire_rules(db: sqlite3.Connection, event: dict[str, Any], place: dict[str, 
     weekday = WEEKDAYS[local.weekday()]
     minutes = local.hour * 60 + local.minute
     fired = []
-    for row in db.execute(f"SELECT {_RULE_COLUMNS} FROM rules WHERE place_id=? AND event=?",
-                          (place["id"], event["kind"])).fetchall():
+    for row in db.execute(f"SELECT {_RULE_COLUMNS} FROM rules WHERE place_id IN (?, ?) AND event IN (?, 'either')",
+                          (place["id"], ANY_PLACE, event["kind"])).fetchall():
         rule = _rule_row(row)
         if rule["days"] and weekday not in rule["days"]:
             continue
         if not in_hours(minutes, parse_hours(rule["hours"]) if rule["hours"] else None):
             continue
-        if rule["last_fired"] == day:
+        if rule["repeat"] == "daily" and rule["last_fired"] == day:
+            continue
+        if rule["repeat"] == "every" and rule["last_fired_ts"] and now - rule["last_fired_ts"] < RULE_EVERY_MIN_GAP_S:
             continue
         db.execute("UPDATE rules SET last_fired_day=?, last_fired_at=? WHERE id=?", (day, now, rule["id"]))
         verb = "arrived at" if event["kind"] == "arrive" else "left"

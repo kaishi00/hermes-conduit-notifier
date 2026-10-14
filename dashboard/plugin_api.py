@@ -4082,7 +4082,7 @@ async def get_location_reads(response: Response, profile: Optional[str] = None, 
 @router.get("/location/rules")
 async def get_location_rules(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     def rules(store: Any) -> Dict[str, Any]:
-        keys = ("id", "what", "place_id", "place_name", "event", "days", "hours", "call", "task", "last_fired")
+        keys = ("id", "what", "place_id", "place_name", "event", "days", "hours", "call", "task", "repeat", "last_fired")
         return {"rules": [{key: rule[key] for key in keys} for rule in store.rules()]}
 
     return await _location_route(response, profile, lambda: _location_call(rules), "rules")

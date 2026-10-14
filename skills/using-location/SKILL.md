@@ -1,6 +1,6 @@
 ---
 name: using-location
-description: How to use the location Conduit shares (conduit_location): which action answers what, freshness and detail, place rules, call limits by place, and keeping it private.
+description: How to use the location Conduit shares (conduit_location) as a building block - which action answers what, freshness and detail, place rules, scheduled jobs and skills that use location, and keeping it private.
 ---
 
 # Using the user's location
@@ -17,6 +17,30 @@ And how much detail each one shares: **places only** (a saved place's name
 or "not at a saved place"), **area** (a neighbourhood and a coordinate
 rounded to about 1 km) or **precise**. Respect the detail they chose; never
 try to work out more (from distances, say).
+
+## A building block, not a feature
+
+Location is something the user can build on, the way they build on
+scheduled jobs and skills. Some will only ask "how far am I from home?";
+others will teach you habits: "when I get to the gym, log the visit", "if I'm still at the office after 7, remind me to eat",
+"keep a log of the places I go", "check before each appointment that I'm on
+my way". When the user describes something like that, build it with the
+pieces below rather than saying it isn't a feature. Pick by what starts it:
+
+- **A move starts it** (arriving or leaving a place): a place rule
+  (`set_rule`). It can watch one saved place or any of them, arrivals,
+  departures or either, once a day or every time.
+- **A time starts it** (before an appointment, every evening, every hour
+  while travelling): a scheduled job whose task calls `conduit_location`
+  (`now`, `distance_to`, or `locate` when it must be fresh) and decides
+  what to do. The job needs the `conduit` toolset; Hermes jobs have it unless
+  they were limited to other toolsets.
+- **A standing preference** ("keep replies short when I'm driving", "at
+  work, don't bring up personal stuff"): remember it as the user asked
+  (memory or a skill of their own), and check `now` when it applies.
+
+Say in a sentence what you set up and how to undo it. Ask before anything
+that would run often or wake the phone often (`locate` in an hourly job).
 
 ## Which action answers what
 
@@ -51,10 +75,14 @@ name, distance or coordinates. Don't speculate about what it is.
 
 ## Place rules
 
-A place rule runs a task when the user arrives at or leaves a saved place,
-optionally only on some days and within a time window, at most once a day.
-It's a scheduled job named "Place rule: …" that Conduit starts; set it up
-with `set_rule`:
+A place rule runs a task when the user arrives at or leaves a saved place
+(or any saved place: `"place": "any"`; arrivals, departures or `"either"`),
+optionally only on some days and within a time window. It runs at most once
+a day, or with `"repeat": "every"` each time, at least 30 minutes apart.
+The task can be anything a scheduled job can do: a message, a note, a
+check, a call. It's a scheduled job named "Place rule: …" that Conduit
+starts, and its run is told which place and which move; set it up with
+`set_rule`:
 
 ```json
 {"action": "set_rule", "rule": {
@@ -73,6 +101,15 @@ with `set_rule`:
   if the phone reports the move within 15 minutes.
 - Confirm in one sentence what you set up. `rules` lists them,
   `remove_rule` stops one (only after the user says so).
+
+## Appointment check, as an example of a job
+
+"Make sure I'm on my way to my appointments": a scheduled job a while
+before each one (or one that looks at the calendar every morning and plans
+the checks) whose task reads `now` or, if that's old, `locate`, compares
+`distance_to` or the area with where the appointment is and the travel
+time, and calls or messages the user only when they look late. Nothing
+needed from Conduit beyond sharing in the background.
 
 ## Calls and places
 

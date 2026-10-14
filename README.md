@@ -1101,10 +1101,12 @@ a minute per profile.
 
 ## Location from Conduit (plugin 0.24+)
 
-Conduit can tell a Hermes profile where the user is so the agent can answer
-"how far am I from work?", follow place rules ("call me with my brief when
-I leave home on weekdays") and skip calls at places the user picked. Two
-separate opt-ins in Conduit:
+Conduit can tell a Hermes profile where the user is. It's a building block
+rather than one feature: the agent can answer "how far am I from work?",
+follow place rules ("call me with my brief when I leave home on weekdays"),
+use it from any scheduled job or skill the user teaches it ("check I'm on my
+way before each appointment"), and Calls can skip places the user picked.
+Two separate opt-ins in Conduit:
 
 - **While talking** (When In Use): one fix when the user sends a message or
   starts a voice call, and again when they've moved over 200 m during a call.
@@ -1139,10 +1141,12 @@ marked private is reported only as "at a private place".
   paused. At most one every 5 minutes and 30 a day per profile.
 - **Place rules.** `set_rule` keeps a Hermes cron job named
   `Place rule: <what>` that never runs on its own schedule; an arrive or
-  leave event that matches the rule's place, days and hours triggers it
-  (`GET /location/rules`, `DELETE /location/rules/<id>`). A rule fires at
-  most once a day, never for an event over 15 minutes old, and never while
-  sharing is paused.
+  leave event that matches the rule's place (one saved place or any), move
+  (arrive, leave or either), days and hours triggers it with a line naming
+  the place and move (`GET /location/rules`, `DELETE /location/rules/<id>`).
+  The task is anything a cron run can do. A rule fires once a day, or every
+  time at least 30 minutes apart (`repeat: "every"`), never for an event
+  over 15 minutes old, and never while sharing is paused.
 - **No calls at places.** Calls settings `avoid_places` (place ids) and
   `avoid_unknown_place` (only with places listed: also hold calls when
   there's no recent location): a call that would ring while the user is at an

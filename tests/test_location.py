@@ -236,6 +236,24 @@ def test_a_rule_runs_only_for_its_own_move(store, phone, event):
     assert store.ingest(phone.seal(phone.batch(events=[leave])))["rules_fired"] == []
 
 
+def test_a_rule_for_any_place_and_either_move_runs_every_time_with_a_gap(store, phone):
+    clock = [NOW]
+    store.clock = lambda: clock[0]
+    _rule(store, place_id=location.ANY_PLACE, place_name="any saved place", event="either", days=[], hours="",
+          repeat="every")
+    arrive = {"id": "e1", "kind": "arrive", "place_id": "p_work", "at": "2026-10-13T06:55:00+01:00"}
+    fired = store.ingest(phone.seal(phone.batch(events=[arrive])))["rules_fired"]
+    assert len(fired) == 1 and "arrived at Work" in fired[0]["prompt"]
+    leave = {"id": "e2", "kind": "leave", "place_id": "p_work", "at": "2026-10-13T06:58:00+01:00"}
+    clock[0] += 180
+    assert store.ingest(phone.seal(phone.batch(events=[leave])))["rules_fired"] == []  # within 30 minutes
+    clock[0] += location.RULE_EVERY_MIN_GAP_S
+    later = {**leave, "id": "e3", "at": datetime.fromtimestamp(clock[0], timezone.utc).isoformat()}
+    fired = store.ingest(phone.seal(phone.batch(events=[later])))["rules_fired"]
+    assert len(fired) == 1 and "left Work" in fired[0]["prompt"]
+    assert store.rules()[0]["repeat"] == "every"
+
+
 def test_a_rule_outside_its_hours_or_days_waits(store, phone):
     _rule(store, hours="08:00-10:00")
     leave = {"id": "e1", "kind": "leave", "place_id": "p_home", "at": "2026-10-13T06:55:00+01:00"}
@@ -447,10 +465,21 @@ def test_set_rule_writes_one_job_and_changes_it_in_place(home, scheduler):
     assert scheduler.jobs == {} and _call({"action": "rules"})["rules"] == []
 
 
+def test_set_rule_takes_any_place_either_move_and_every_time(home, scheduler):
+    _shared(home, fix=fix())
+    rule = {"what": "log my day", "place": "any", "event": "either", "repeat": "every",
+            "task": "Note where the user went in today's journal."}
+    answer = _call({"action": "set_rule", "rule": rule})
+    assert answer["rule"]["place"] == "any saved place" and answer["rule"]["repeat"] == "every"
+    assert "arrives at or leaves any saved place" in scheduler.jobs["job-1"]["prompt"]
+    assert "every 30 minutes" in answer["note"]
+
+
 @pytest.mark.parametrize("change, error", [
     ({"place": "Gym"}, "unknown_place"),
     ({"event": "stay"}, "invalid"),
     ({"days": ["someday"]}, "invalid"),
+    ({"repeat": "hourly"}, "invalid"),
     ({"hours": "morning"}, "invalid"),
     ({"task": ""}, "invalid"),
 ])
