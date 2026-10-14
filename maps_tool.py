@@ -22,6 +22,7 @@ import logging
 import math
 import re
 import time
+from datetime import datetime
 from typing import Any, Callable
 
 from hermes_constants import get_hermes_home
@@ -269,6 +270,12 @@ def _ask_host(store: LocationStore, view: dict[str, Any] | None, request: dict[s
     return answer
 
 
+def _number(value: Any, low: float, high: float) -> bool:
+    """A real, finite number between low and high."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and \
+        low <= value <= high
+
+
 def _host_me(view: dict[str, Any] | None, now: float) -> dict[str, Any] | None:
     """The user's position as this host last heard it, if it's recent enough
     to look up from: background sharing reports moves, so a day-old fix still
@@ -276,19 +283,30 @@ def _host_me(view: dict[str, Any] | None, now: float) -> dict[str, Any] | None:
     if not view or sharing_paused(view.get("sharing") or {}, now):
         return None
     fix = view.get("fix")
-    if not fix or fix.get("lat") is None or fix.get("lon") is None:
+    if not fix or not _number(fix.get("lat"), -90, 90) or not _number(fix.get("lon"), -180, 180):
         return None
     trusted = TRUSTED_BACKGROUND_S if (view.get("sharing") or {}).get("background") else TRUSTED_TALKING_S
-    if now - fix["at"] > trusted:
+    at = fix.get("at")
+    # A fix from the future (beyond a little clock skew) isn't trusted either.
+    if not _number(at, now - trusted, now + 300):
         return None
     area = fix.get("area") or {}
     label = ", ".join(dict.fromkeys(area[key] for key in ("name", "locality") if area.get(key)))
     return {"lat": fix["lat"], "lon": fix["lon"], "detail": fix.get("precision") or "area",
             "label": f"around {label}" if label else "the user's last known position",
-            "as_of": location_tool._ago(now - fix["at"])}
+            "as_of": location_tool._ago(now - at)}
 
 
 # --- The request ---------------------------------------------------------------------
+
+
+def _real_time(value: str) -> bool:
+    """Whether a time _TIME accepts is on the calendar (no 31 February)."""
+    try:
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return True
 
 
 def _request(action: str, args: dict[str, Any], view: dict[str, Any], now: float) -> dict[str, Any]:
@@ -326,7 +344,7 @@ def _request(action: str, args: dict[str, Any], view: dict[str, Any], now: float
             raise _Refused("invalid", "Give depart_at or arrive_by, not both.")
         for field, value in (("depart_at", depart), ("arrive_by", arrive)):
             if value:
-                if not isinstance(value, str) or not _TIME.match(value.strip()):
+                if not isinstance(value, str) or not _TIME.match(value.strip()) or not _real_time(value.strip()):
                     raise _Refused("invalid", f"{field} must be an ISO 8601 time like 2026-10-15T08:00.")
                 request[field] = value.strip()
         if action == "directions":

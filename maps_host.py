@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import re
 import threading
 import time
 import urllib.error
@@ -50,7 +52,17 @@ class HostUnavailable(Exception):
         self.error = error
 
 
+# The token cache and the usage counter have their own locks, so a slow
+# token exchange doesn't hold up counting.
+# A token is a header value: printable ASCII only.
+_TOKEN = re.compile(r"[\x21-\x7e]{1,4096}")
+
+
+def _lifetime(value: Any) -> bool:
+    """A token lifetime worth caching: a finite number of seconds over a minute."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 60
 _lock = threading.Lock()
+_usage_lock = threading.Lock()
 _token: dict[str, Any] = {}
 _unavailable_until = 0.0
 
@@ -85,26 +97,60 @@ def _access_token(refresh: bool = False) -> str:
         except Exception:  # noqa: BLE001 — network
             raise HostUnavailable("unavailable", "Apple Maps couldn't be reached just now.") from None
         value, lifetime = answer.get("access_token"), answer.get("expires_in")
-        if not isinstance(value, str) or not value or not isinstance(lifetime, (int, float)):
+        if not isinstance(value, str) or not _TOKEN.fullmatch(value) or not _lifetime(lifetime):
             raise HostUnavailable("unavailable", "Apple Maps couldn't be reached just now.")
         _token.update(value=value, expires_at=now + float(lifetime))
         return value
 
 
 def _spend(home: Path) -> None:
-    """One Apple call against this host's daily share of Conduit's quota."""
+    """One Apple call against this host's daily share of Conduit's quota.
+
+    The count is read and rewritten in place under a file lock, so gateway
+    and dashboard processes sharing a home count together. The file is
+    owner-only from the first byte and never followed through a symlink.
+    """
     path = Path(home) / USAGE_FILE
-    with _lock:
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        try:
-            usage = json.loads(path.read_text())
-        except (OSError, ValueError):
-            usage = {}
-        count = usage.get("count", 0) if usage.get("day") == today else 0
-        if count >= DAILY_CALLS:
-            raise HostUnavailable("daily_limit", "Today's Apple Maps lookups from this host are used up.")
-        path.write_text(json.dumps({"day": today, "count": count + 1}))
-        path.chmod(0o600)
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        with _usage_lock, os.fdopen(os.open(path, flags, 0o600), "r+b") as handle, client._exclusive(handle):
+            _count_one(handle)
+    except OSError:
+        raise HostUnavailable("unavailable", "This Hermes host can't keep count of its Apple Maps lookups.") from None
+
+
+def _count_one(handle: Any) -> None:
+    # A crash mid-write leaves a partial record, read back as a fresh day:
+    # at worst one day's count restarts.
+    if hasattr(os, "fchmod"):
+        os.fchmod(handle.fileno(), 0o600)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    handle.seek(0)
+    try:
+        usage = json.loads(handle.read(4096) or b"{}")
+    except ValueError:
+        usage = {}
+    if not isinstance(usage, dict):
+        usage = {}
+    count = usage.get("count", 0) if usage.get("day") == today else 0
+    if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+        count = 0
+    if count >= DAILY_CALLS:
+        raise HostUnavailable("daily_limit", "Today's Apple Maps lookups from this host are used up.")
+    handle.seek(0)
+    handle.truncate()
+    handle.write(json.dumps({"day": today, "count": count + 1}).encode())
+    handle.flush()
+    os.fsync(handle.fileno())
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+MAX_ANSWER_BYTES = 512 * 1024
 
 
 class Engine:
@@ -120,8 +166,12 @@ class Engine:
     def _fetch(self, url: str, token: str) -> Any:
         request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}",
                                                        "Accept": "application/json"})
-        with urllib.request.urlopen(request, timeout=TIMEOUT_S) as response:
-            return json.loads(response.read() or b"{}")
+        # No redirects (the token stays with Apple) and a capped body.
+        with _OPENER.open(request, timeout=TIMEOUT_S) as response:
+            body = response.read(MAX_ANSWER_BYTES + 1)
+        if len(body) > MAX_ANSWER_BYTES:
+            raise HostUnavailable("failed", "Apple Maps sent more than this host reads.")
+        return json.loads(body or b"{}")
 
     def _get(self, path: str, params: dict[str, Any]) -> Any:
         _spend(self.home)
@@ -136,7 +186,7 @@ class Engine:
                     continue
                 if error.code == 429:
                     raise HostUnavailable("throttled", "Apple Maps is busy; try again shortly.") from None
-                if error.code in (400, 404):
+                if error.code == 404:
                     raise HostUnavailable("not_found", "Apple Maps found nothing for that.") from None
                 raise HostUnavailable("failed", "Apple Maps couldn't answer just now.") from None
             except HostUnavailable:

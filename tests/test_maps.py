@@ -492,7 +492,50 @@ def test_impossible_times_are_refused_before_a_wake(home, monkeypatch):
     fake = FakeClient({"delivered": True})
     monkeypatch.setattr(maps, "client", fake)
     assert _call({"action": "directions", "to": "Home", "depart_at": "2026-10-15T99:99+99:99"})["error"] == "invalid"
+    assert _call({"action": "directions", "to": "Home", "arrive_by": "2026-02-31T08:00"})["error"] == "invalid"
     assert fake.sent == []
+
+
+def test_a_usage_file_that_isnt_a_count_starts_the_day_over(home, apple, tmp_path):
+    _shared(home, sharing=maps_sharing(background=False), fix=fix())
+    apple.answers["search"] = {"results": [BOOTS]}
+    usage = home / maps_host.USAGE_FILE
+    usage.write_text("[]")
+    assert _call({"action": "lookup", "query": "Boots"})["ok"]
+    assert json.loads(usage.read_text())["count"] == 1
+    assert usage.stat().st_mode & 0o777 == 0o600
+
+
+def test_a_host_fix_without_a_real_time_or_place_isnt_used():
+    now = 1_800_000_000
+    def view(**fix):
+        return {"sharing": {"background": True}, "fix": {"lat": 51.5, "lon": -0.1, "at": now - 60, **fix}}
+    assert maps._host_me(view(), now) is not None
+    assert maps._host_me(view(at=None), now) is None
+    assert maps._host_me(view(at=float("nan")), now) is None
+    assert maps._host_me(view(at=now + 3600), now) is None
+    assert maps._host_me(view(lat=float("inf")), now) is None
+    assert maps._host_me(view(lon=200), now) is None
+
+
+def test_a_relay_token_that_isnt_a_header_value_is_refused(monkeypatch):
+    monkeypatch.setattr(maps_host, "_token", {})
+    monkeypatch.setattr(maps_host.client, "load_state", lambda: {"relay_url": "https://r", "credential": "c"})
+    monkeypatch.setattr(maps_host.client, "request_json",
+                        lambda *a, **k: answer)
+    for answer in ({"access_token": "abc\r\nX-Evil: 1", "expires_in": 1800},
+                   {"access_token": "abc\n", "expires_in": 1800},
+                   {"access_token": "abc", "expires_in": float("inf")},
+                   {"access_token": "abc", "expires_in": True}):
+        with pytest.raises(maps_host.HostUnavailable):
+            maps_host._access_token()
+    assert maps_host._token == {}
+
+
+def test_a_usage_file_that_cant_be_opened_lets_the_phone_answer(tmp_path):
+    (tmp_path / maps_host.USAGE_FILE).mkdir()
+    with pytest.raises(maps_host.HostUnavailable):
+        maps_host._spend(tmp_path)
 
 
 def test_the_phones_result_cant_replace_the_envelope():

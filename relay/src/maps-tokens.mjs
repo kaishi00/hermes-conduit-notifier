@@ -82,6 +82,7 @@ export class MapsTokens {
 // a fixed token without calling Apple.
 export function mapsTokensFromEnv(env, { readFile, warn }) {
   if (env.MAPS_MODE === 'fake') {
+    warn('MAPS_MODE=fake: hosts get a test token that Apple refuses; unset it for real maps');
     return { accessToken: async () => ({ token: 'fake-maps-token', expiresIn: 1800 }) };
   }
   if (!env.MAPS_KEY_PATH || !env.MAPS_KEY_ID) return null;
