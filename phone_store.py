@@ -526,10 +526,12 @@ class PhoneStore:
 
     # Exchange --------------------------------------------------------------------
 
-    def open_exchange(self, envelope: Any) -> tuple[str, str, dict[str, Any], Callable[[dict[str, Any]], dict[str, str]]]:
+    def open_exchange(self, envelope: Any, ops: tuple[str, ...] = EXCHANGE_OPS
+                      ) -> tuple[str, str, dict[str, Any], Callable[[dict[str, Any]], dict[str, str]]]:
         """A device's sealed exchange request: its device id, the operation,
         the opened request, and a function that seals the answer for that
-        device alone (``{"call_id", **fields}`` under the host-to-device key)."""
+        device alone (``{"call_id", **fields}`` under the host-to-device key).
+        An op outside ``ops`` is refused before anything is opened."""
         if not isinstance(envelope, dict) or type(envelope.get("v")) is not int or envelope.get("v") != 1:
             raise PhoneError("malformed", "Expected a version 1 sealed request")
         device_id, kid, call_id, op = (envelope.get(field) for field in ("device_id", "kid", "call_id", "op"))
@@ -541,6 +543,9 @@ class PhoneStore:
             raise PhoneError("malformed", "call_id is malformed")
         if op not in EXCHANGE_OPS:
             raise PhoneError("unknown_op", f"op must be one of {', '.join(EXCHANGE_OPS)}")
+        if op not in ops:
+            raise PhoneError("unknown_op", "Voice reads go to /voice-tools/call" if op == "voice"
+                             else f"This route takes op {', '.join(ops)}")
         if not crypto_available():
             raise PhoneError("no_crypto", "Calendar sharing needs the cryptography package on this host", status=501)
         with self._read() as db:
@@ -567,19 +572,18 @@ class PhoneStore:
 
     def exchange(self, envelope: Any) -> dict[str, Any]:
         """The ``/phone/exchange`` route: open, run the operation, seal."""
-        device_id, op, request, seal_answer = self.open_exchange(envelope)
-        if op != "changes":
-            raise PhoneError("unknown_op", "Voice reads go to /voice-tools/call")
+        device_id, _, request, seal_answer = self.open_exchange(envelope, ops=("changes",))
         changes = self.exchange_changes(device_id, request.get("results"))
         return {"v": 1, **seal_answer({"changes": changes})}
 
     def open_voice_request(self, envelope: Any) -> tuple[str, dict[str, Any], Callable[[dict[str, Any]], dict[str, str]]]:
         """A live voice call's sealed read (``op: "voice"``): the device it
         covers, the opened request ``{call_id, tool, args, provider}``, and the
-        sealer for its answer. Only the device can ask, and only about itself."""
-        device_id, op, request, seal_answer = self.open_exchange(envelope)
-        if op != "voice":
-            raise PhoneError("unknown_op", "A voice read is op voice")
+        sealer for its answer. Only the device can ask, and only about itself.
+        A replayed request isn't refused (like health voice reads): it only
+        re-runs a read whose answer is sealed to the device, so whoever replays
+        it learns nothing, and the route's rate limit caps the load."""
+        device_id, _, request, seal_answer = self.open_exchange(envelope, ops=("voice",))
         return device_id, request, seal_answer
 
     def exchange_changes(self, device_id: str, results: Any) -> list[dict[str, Any]]:

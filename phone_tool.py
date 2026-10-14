@@ -19,6 +19,7 @@ tells the user before they turn sharing on.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -498,7 +499,7 @@ def voice_tools(store: PhoneStore | None = None) -> dict[str, dict[str, Any]]:
     tools: dict[str, dict[str, Any]] = {}
     if any(shares(device["sharing"], "calendars") for device in devices):
         properties = CALENDAR_SCHEMA["parameters"]["properties"]
-        parameters = {name: dict(properties[name]) for name in _VOICE_CALENDAR_ARGS}
+        parameters = copy.deepcopy({name: properties[name] for name in _VOICE_CALENDAR_ARGS})
         parameters["action"]["enum"] = list(VOICE_CALENDAR_ACTIONS)
         # The write uses of a shared parameter aren't offered here.
         parameters["calendar"]["description"] = "events: only this calendar. Name or id."
@@ -512,8 +513,7 @@ def voice_tools(store: PhoneStore | None = None) -> dict[str, dict[str, Any]]:
     return tools
 
 
-def voice_handle(tool: str, args: Any, *, device_id: str, store: PhoneStore,
-                 now: Callable[[], float] | None = None) -> dict[str, Any]:
+def voice_handle(tool: str, args: Any, *, device_id: str, store: PhoneStore) -> dict[str, Any]:
     """A read for a live voice call on one device, which sees only what that
     device shared (its id, never a name or another device)."""
     try:
@@ -524,8 +524,6 @@ def voice_handle(tool: str, args: Any, *, device_id: str, store: PhoneStore,
             if action not in VOICE_CALENDAR_ACTIONS:
                 return {"ok": False, "error": "invalid",
                         "note": f"action is one of {', '.join(VOICE_CALENDAR_ACTIONS)}."}
-            if now is not None:
-                store.clock = now
             if action == "overview":
                 return _overview(store, only=device_id)
             return _calendar({**wanted, "device": device_id}, None, "default", None, store=store, exact=True)
