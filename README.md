@@ -1143,7 +1143,7 @@ host's boundary is the seal:
   minute per profile. Conduit keeps the log of what each call read.
   Shared vector: `tests/health_vector.json` (`voice`).
 
-Calendar and phone status (plugin 0.28+): once a phone shares them,
+Calendar and phone status (plugin 0.29+): once a phone shares them,
 `conduit_calendar` (read actions only: overview, calendars, events, free_busy,
 next, reminders) and `conduit_phone` (status) join the list with `key:
 "phone"`. Their call is the phone feature's sealed exchange with `op:
