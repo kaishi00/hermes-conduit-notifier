@@ -172,7 +172,8 @@ class LiveActivityReporter:
             self._turns[session_id] = _Turn(now)
             while len(self._turns) > MAX_SESSIONS:
                 # The oldest turn goes, unless it still owes the phone its end.
-                victim = next((key for key, old in self._turns.items() if old.end is None), None)
+                victim = next((key for key, old in self._turns.items()
+                               if old.end is None and key != session_id), None)
                 self._turns.pop(victim if victim is not None else next(iter(self._turns)))
             self._changed()
 

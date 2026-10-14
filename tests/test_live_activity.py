@@ -321,3 +321,16 @@ def test_the_tool_count_stays_within_what_the_relay_takes(reporter, relay, clock
     clock[0] += live.FIRST_DELAY_S
     reporter.flush()
     assert relay.posts[-1]["state"]["tools"] == 10_000
+
+
+def test_a_full_table_never_evicts_the_turn_just_started(reporter, relay, clock):
+    relay.failure = OSError("down")
+    for index in range(live.MAX_SESSIONS):
+        reporter.turn_started(f"old-{index}")
+        reporter.turn_ended(f"old-{index}", "done")
+    reporter.turn_started("new")
+    relay.failure = None
+    reporter.thinking("new")
+    clock[0] += live.FIRST_DELAY_S
+    reporter.flush()
+    assert any(post["session_id"] == "new" for post in relay.posts)
