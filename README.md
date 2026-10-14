@@ -1134,7 +1134,7 @@ host's boundary is the seal:
 
 - **Sealed both ways with the device's own health key**, with its own HKDF
   directions (`conduit-health-v1 voice device-to-host` / `host-to-device`)
-  and associated data binding the key, device and call id. Dashboard access
+  and associated data binding the tool, key, device and call id. Dashboard access
   alone opens nothing.
 - **Only the asking device's data**, matched by id (never by name), so
   another device or a newly registered key reads nothing.

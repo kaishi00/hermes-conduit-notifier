@@ -28,13 +28,14 @@ class VoicePhone(Phone):
     def ask(self, args, call_id=None, tool="conduit_health"):
         call_id = call_id or secrets.token_urlsafe(12)
         body = json.dumps({"call_id": call_id, "args": args, "provider": "gemini-live"}).encode()
-        nonce, ct = health.seal(self.request_key, body, health.voice_aad("request", self.kid, self.device_id, call_id))
+        nonce, ct = health.seal(self.request_key, body, health.voice_aad("request", tool, self.kid, self.device_id, call_id))
         return {"v": 1, "tool": tool, "device_id": self.device_id, "kid": self.kid, "call_id": call_id,
                 "nonce": nonce, "ct": ct}
 
     def read(self, envelope, answer):
         plain = health.open_sealed(self.answer_key, answer["nonce"], answer["ct"],
-                                   health.voice_aad("answer", self.kid, self.device_id, envelope["call_id"]))
+                                   health.voice_aad("answer", envelope["tool"], self.kid, self.device_id,
+                                                   envelope["call_id"]))
         opened = json.loads(plain)
         assert opened["call_id"] == envelope["call_id"]
         return opened["result"]
@@ -77,8 +78,8 @@ def test_shared_voice_vector_matches_conduit():
     request_key = health.derive_key(shared, "device-vector-1", device_public, host_public, health.INFO_VOICE_REQUEST)
     answer_key = health.derive_key(shared, "device-vector-1", device_public, host_public, health.INFO_VOICE_ANSWER)
     assert request_key.hex() == VECTOR["request_key"] and answer_key.hex() == VECTOR["answer_key"]
-    request_aad = health.voice_aad("request", kid, "device-vector-1", VECTOR["call_id"])
-    answer_aad = health.voice_aad("answer", kid, "device-vector-1", VECTOR["call_id"])
+    request_aad = health.voice_aad("request", "conduit_health", kid, "device-vector-1", VECTOR["call_id"])
+    answer_aad = health.voice_aad("answer", "conduit_health", kid, "device-vector-1", VECTOR["call_id"])
     assert request_aad.decode() == VECTOR["request_aad"] and answer_aad.decode() == VECTOR["answer_aad"]
     assert health.seal(request_key, VECTOR["request"].encode(), request_aad, nonce=bytes(12))[1] == VECTOR["request_ct"]
     assert health.seal(answer_key, VECTOR["answer"].encode(), answer_aad, nonce=bytes(12))[1] == VECTOR["answer_ct"]
@@ -192,3 +193,15 @@ def test_a_failed_read_still_comes_back_sealed(client, monkeypatch):
 
     monkeypatch.setattr(api._plugin_package_module("health_tool"), "_handle", broken)
     assert _call(client, phone, {"action": "daily", "metrics": ["steps"]})["error"] == "unavailable"
+
+
+def test_the_tool_name_is_sealed_into_the_request(client):
+    phone = VoicePhone()
+    _share(client, phone, _batch())
+    envelope = phone.ask({"action": "overview"})
+    store = health.HealthStore(api._calls_home())
+    with pytest.raises(health.HealthError) as error:
+        store.open_voice_request({**envelope, "tool": "conduit_location"})
+    assert error.value.code == "bad_seal"
+    with pytest.raises(health.HealthError):
+        store.open_voice_request({**envelope, "tool": "Conduit Health\n"})

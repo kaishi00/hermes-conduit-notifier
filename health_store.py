@@ -111,6 +111,8 @@ _DEVICE_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}\Z")
 _EVENT_ID = re.compile(r"^[A-Za-z0-9:_-]{1,80}\Z")
 _BATCH_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}\Z")
 _KID = re.compile(r"^[0-9a-f]{32}\Z")
+# A voice tool's name, bound into the sealed request and answer.
+_VOICE_TOOL = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 _B64URL = re.compile(r"^[A-Za-z0-9_-]*\Z")
 _DATE = re.compile(r"^\d{4}-\d{2}-\d{2}\Z")
 _TZ = re.compile(r"^[A-Za-z0-9_+\-/]{1,64}\Z")
@@ -198,9 +200,10 @@ def ingest_aad(kid: str, device_id: str, batch_id: str) -> bytes:
     return "\n".join([AAD_TAG, "ingest", f"kid={kid}", f"dev={device_id}", f"batch={batch_id}"]).encode("utf-8")
 
 
-def voice_aad(direction: str, kid: str, device_id: str, call_id: str) -> bytes:
-    """``direction`` is "request" or "answer"."""
-    return "\n".join([AAD_TAG, f"voice-{direction}", f"kid={kid}", f"dev={device_id}", f"call={call_id}"]).encode("utf-8")
+def voice_aad(direction: str, tool: str, kid: str, device_id: str, call_id: str) -> bytes:
+    """``direction`` is "request" or "answer"; ``tool`` is the voice tool asked."""
+    return "\n".join([AAD_TAG, f"voice-{direction}", f"tool={tool}", f"kid={kid}", f"dev={device_id}",
+                      f"call={call_id}"]).encode("utf-8")
 
 
 def seal(key: bytes, plaintext: bytes, aad: bytes, nonce: bytes | None = None) -> tuple[str, str]:
@@ -360,8 +363,9 @@ class HealthStore:
     def register_key(self, body: Any) -> dict[str, Any]:
         """A device's X25519 public key in, this profile's for that device
         out. Replaces the device's earlier key (the phone re-keys after a
-        reinstall or when the user turns sync off and on) and drops what the
-        earlier key sent, which the phone then sends again."""
+        reinstall or when the user turns sync off and on). A new device key
+        drops what the earlier key sent, which the phone then sends again;
+        the same device key again keeps it and only refreshes the host key."""
         if not isinstance(body, dict):
             raise HealthError("malformed", "Expected a JSON object")
         device_id = body.get("device_id")
@@ -423,6 +427,9 @@ class HealthStore:
         if not isinstance(envelope, dict) or type(envelope.get("v")) is not int or envelope.get("v") != 1:
             raise HealthError("malformed", "Expected a version 1 sealed request")
         device_id, kid, call_id = envelope.get("device_id"), envelope.get("kid"), envelope.get("call_id")
+        tool = envelope.get("tool")
+        if not isinstance(tool, str) or not _VOICE_TOOL.match(tool):
+            raise HealthError("malformed", "tool is malformed")
         if not isinstance(device_id, str) or not _DEVICE_ID.match(device_id):
             raise HealthError("malformed", "device_id is malformed")
         if not isinstance(kid, str) or not _KID.match(kid):
@@ -438,7 +445,7 @@ class HealthStore:
             request_key = self._device_key(db, device_id, kid, INFO_VOICE_REQUEST)
             answer_key = self._device_key(db, device_id, kid, INFO_VOICE_ANSWER)
         plaintext = open_sealed(request_key, envelope.get("nonce"), envelope.get("ct"),
-                                voice_aad("request", kid, device_id, call_id))
+                                voice_aad("request", tool, kid, device_id, call_id))
         try:
             request = json.loads(plaintext)
         except (ValueError, RecursionError):
@@ -448,7 +455,7 @@ class HealthStore:
 
         def seal_answer(answer: Any) -> dict[str, str]:
             body = json.dumps({"call_id": call_id, "result": answer}, ensure_ascii=False).encode("utf-8")
-            nonce, ct = seal(answer_key, body, voice_aad("answer", kid, device_id, call_id))
+            nonce, ct = seal(answer_key, body, voice_aad("answer", tool, kid, device_id, call_id))
             return {"nonce": nonce, "ct": ct}
 
         return device_id, request, seal_answer
