@@ -334,3 +334,18 @@ def test_a_full_table_never_evicts_the_turn_just_started(reporter, relay, clock)
     clock[0] += live.FIRST_DELAY_S
     reporter.flush()
     assert any(post["session_id"] == "new" for post in relay.posts)
+
+
+def test_ends_of_unknown_turns_stay_within_the_session_cap(reporter, relay, clock):
+    relay.failure = OSError("down")
+    for index in range(live.MAX_SESSIONS + 10):
+        reporter.turn_ended(f"s-{index}", "done")
+    assert len(reporter._turns) == live.MAX_SESSIONS
+
+
+def test_huge_context_numbers_never_raise(reporter, relay, clock):
+    reporter.turn_started("s-1")
+    reporter.context_used("s-1", 1e308, 1e-300)
+    clock[0] += live.FIRST_DELAY_S
+    reporter.flush()
+    assert relay.posts[-1]["state"]["context"] == 100

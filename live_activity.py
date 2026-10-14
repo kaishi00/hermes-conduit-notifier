@@ -170,11 +170,7 @@ class LiveActivityReporter:
             self._turns.pop(session_id, None)
             self._ended.pop(session_id, None)
             self._turns[session_id] = _Turn(now)
-            while len(self._turns) > MAX_SESSIONS:
-                # The oldest turn goes, unless it still owes the phone its end.
-                victim = next((key for key, old in self._turns.items()
-                               if old.end is None and key != session_id), None)
-                self._turns.pop(victim if victim is not None else next(iter(self._turns)))
+            self._evict(keep=session_id)
             self._changed()
 
     def thinking(self, session_id: str) -> None:
@@ -198,7 +194,9 @@ class LiveActivityReporter:
             return
         if not (math.isfinite(used) and math.isfinite(limit)) or limit <= 0 or used < 0:
             return
-        self._update(session_id, context=max(0, min(100, round(used * 100 / limit))))
+        # Clamped before rounding: a huge ratio overflows to inf.
+        ratio = min(used * 100 / limit, 100.0)
+        self._update(session_id, context=max(0, round(ratio)))
 
     def turn_ended(self, session_id: str, outcome: str) -> None:
         if not session_id or outcome not in ENDS:
@@ -214,6 +212,7 @@ class LiveActivityReporter:
             if turn is None:
                 turn = _Turn(now)
                 self._turns[session_id] = turn
+                self._evict(keep=session_id)
             if turn.end is not None:
                 return
             turn.end = outcome
@@ -280,9 +279,12 @@ class LiveActivityReporter:
                 now = self._clock()
                 if status == 400:
                     # The relay will never take this report: retrying can't
-                    # help, so the turn is dropped.
+                    # help, so the turn is dropped (and a second end of it
+                    # isn't sent either).
                     if self._turns.get(session_id) is turn:
                         del self._turns[session_id]
+                    if payload.get("end") is not None:
+                        self._ended[session_id] = now
                     logger.info("Conduit Live Activity report refused: %s", error)
                     return
                 if status == 404:
@@ -326,6 +328,16 @@ class LiveActivityReporter:
             if (turn.phase, turn.tool, turn.tools, turn.context) != before:
                 turn.dirty = True
                 self._changed()
+
+    def _evict(self, keep: str) -> None:
+        # Called with the lock held. The oldest turn goes, unless it still
+        # owes the phone its end; `keep` (just added) never goes.
+        while len(self._turns) > MAX_SESSIONS:
+            victim = next((key for key, old in self._turns.items()
+                           if old.end is None and key != keep), None)
+            if victim is None:
+                victim = next(key for key in self._turns if key != keep)
+            self._turns.pop(victim)
 
     def _changed(self) -> None:
         # Called with the lock held.
