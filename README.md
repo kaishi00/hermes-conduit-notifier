@@ -1092,9 +1092,10 @@ workouts, body, vitals, fitness), with how far back to start.
   for every other dashboard route; push pairing isn't needed. A signed-in
   client could register a new key under a phone's device id and send data
   in its name (the phone notices on its next sync and sets up a new key),
-  so treat dashboard access as access to your health data. A new key for a
-  device id drops what the earlier key sent (the phone sends it all again),
-  so a re-key can't be used to read a phone's data back.
+  so treat dashboard access as access to your health data. A new device key
+  for a device id drops what the earlier key sent (the phone sends it all
+  again), so a re-key can't be used to read a phone's data back; the same
+  device key again keeps it, since only that phone can use it.
 - **Summaries first.** Conduit sends the hourly and daily totals Apple
   Health computes on the phone (iPhone and Watch already merged), a summary
   per night of sleep, sleep stage segments and workouts. Raw readings go
@@ -1118,11 +1119,13 @@ a minute per profile.
 ### Voice reads (plugin 0.25+)
 
 Gemini Live, Grok Live and GPT-Live run at Google, xAI and OpenAI, driven by
-Conduit, so they can't call Hermes' tools. When the user turns on "Voice can
-read my health data" in Conduit's Voice settings (off by default; it names the
-voice provider, since that company may not be the one Hermes uses), Conduit
-offers the voice model `conduit_health` with Hermes' own description and
-parameters, and runs each call here:
+Conduit, so they can't call Hermes' tools. When the user lets a voice mode read
+their health data in Conduit's Settings > Health (off by default and asked per
+mode, naming the voice provider, since that company may not be the one Hermes
+uses), Conduit offers the voice model `conduit_health` with Hermes' own
+description and parameters (minus `device`: a voice read covers only the
+asking phone), and runs each call here. That switch lives in Conduit; the
+host's boundary is the seal:
 
 | Method | Route | Returns |
 | --- | --- | --- |

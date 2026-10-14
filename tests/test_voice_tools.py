@@ -96,6 +96,8 @@ def test_the_list_offers_health_only_once_data_arrived(client):
     assert tools[0]["description"].startswith(test_health.tool.SCHEMA["description"][:80])
     assert "voice call" in tools[0]["description"]
     assert tools[0]["parameters"]["required"] == ["action"]
+    assert "device" not in tools[0]["parameters"]["properties"], "a voice read always covers the asking phone"
+    assert "action" in tools[0]["parameters"]["properties"]
 
 
 def test_a_voice_read_comes_back_sealed_for_the_asking_phone(client):
@@ -114,12 +116,15 @@ def test_a_voice_read_comes_back_sealed_for_the_asking_phone(client):
 
 def test_another_device_never_reads_this_ones_data(client):
     owner = VoicePhone()
-    batch = _batch()
-    batch["device"]["name"] = "ericsiphone1"
-    _share(client, owner, batch)
+    owner.key_request = lambda: {**VoicePhone.key_request(owner), "device_name": "ericsiphone1"}
+    _share(client, owner, _batch())
     # A key registered with dashboard access alone, under an id that matches
     # the owner's device name: it has no data of its own and must get none.
     intruder = VoicePhone(device_id="ERICSIPHONE1")
+    store = health.HealthStore(api._calls_home())
+    with store._read() as db:
+        assert store.latest_device(db, "ERICSIPHONE1")[0] == DEVICE, "a name lookup would pick the owner"
+        assert store.latest_device(db, "ERICSIPHONE1", exact=True) is None
     _share(client, intruder)
     assert _call(client, intruder, {"action": "daily", "metrics": ["steps"]})["error"] == "nothing_shared"
     assert _call(client, intruder, {"action": "overview"})["error"] == "nothing_shared"
@@ -167,3 +172,23 @@ def test_a_new_key_for_the_same_device_id_reads_none_of_the_old_data(client):
     assert client.get(f"{BASE}/health/status", params={"device_id": DEVICE}).json()["device"]["rows"] == {}
     # The real phone gets 409 on its next sync, sets up a key and sends it all again.
     assert client.post(f"{BASE}/health/ingest", json=owner.seal(_batch("batch-0002"))).status_code == 409
+
+
+def test_the_same_device_key_again_keeps_the_data(client):
+    phone = VoicePhone()
+    _share(client, phone, _batch())
+    # Re-registering the same device key (only that phone can use what it
+    # agrees) refreshes the host key and keeps what was sent.
+    _share(client, phone)
+    assert _call(client, phone, {"action": "daily", "metrics": ["steps"]})["ok"] is True
+
+
+def test_a_failed_read_still_comes_back_sealed(client, monkeypatch):
+    phone = VoicePhone()
+    _share(client, phone, _batch())
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("disk")
+
+    monkeypatch.setattr(api._plugin_package_module("health_tool"), "_handle", broken)
+    assert _call(client, phone, {"action": "daily", "metrics": ["steps"]})["error"] == "unavailable"

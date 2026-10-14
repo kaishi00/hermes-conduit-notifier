@@ -3989,8 +3989,9 @@ async def put_conduit_settings(request: Request, response: Response, profile: Op
 # the wire) and then posts sealed batches of HealthKit totals and events
 # (/health/ingest) straight here, never through the push relay. The store
 # (health_store.py) keeps them in the profile's conduit-health.sqlite3 for the
-# conduit_health tool. No route returns health data: status reports counts
-# and dates only, and wipe deletes.
+# conduit_health tool. Status reports counts and dates only and wipe
+# deletes; the one route that returns health data is the sealed voice read
+# below, which answers only the device that shared it.
 
 HEALTH_KEY_LIMIT = 10
 HEALTH_KEY_WINDOW_S = 60.0
@@ -4116,8 +4117,8 @@ async def post_health_wipe(request: Request, response: Response, profile: Option
 #
 # Gemini Live, Grok Live and GPT-Live run at Google, xAI and OpenAI, driven by
 # Conduit on the phone, so they can't call Hermes' own tools. With the user's
-# say-so (a per-data-type switch in Conduit's Voice settings, off by default,
-# naming the voice provider), Conduit offers them read-only versions of
+# say-so (a switch per voice mode in Conduit's Settings > Health, off by
+# default, naming the voice provider), Conduit offers them read-only versions of
 # conduit_health here: GET /voice-tools lists what this profile can answer,
 # with the description and parameters Hermes' own tool has, and
 # POST /voice-tools/call runs the same handler.
@@ -4127,7 +4128,9 @@ async def post_health_wipe(request: Request, response: Response, profile: Option
 # device's own health key (its own HKDF directions, separate from ingest), so
 # dashboard access alone opens nothing, and the read covers only the data that
 # device uploaded, matched by id. Read actions only; Conduit keeps the log of
-# what each call read. (hermes-conduit designs/voice-health-location.md)
+# what each call read. That switch is Conduit's: the host can't see it, and
+# the seal is the host's boundary (only the device can ask, and only about
+# itself). (hermes-conduit designs/voice-health-location.md)
 
 VOICE_TOOLS_LIMIT = 60
 VOICE_TOOLS_WINDOW_S = 60.0
@@ -4140,6 +4143,9 @@ _voice_tools_limiter = _MintLimiter(VOICE_TOOLS_LIMIT, VOICE_TOOLS_WINDOW_S,
 _voice_tools_executor = ThreadPoolExecutor(max_workers=VOICE_TOOLS_WORKERS, thread_name_prefix="conduit-voice-tools")
 
 
+_VOICE_PROVIDER = re.compile(r"[a-z0-9-]{1,40}")
+
+
 def _voice_tool_entries() -> Dict[str, Dict[str, Any]]:
     """Voice-readable tools by name: their schema, and which sealed key they use."""
     tool = _plugin_package_module("health_tool")
@@ -4149,7 +4155,7 @@ def _voice_tool_entries() -> Dict[str, Dict[str, Any]]:
         entries[tool.TOOL_NAME] = {
             "key": "health",
             "description": f"{tool.SCHEMA['description']} {tool.VOICE_NOTE}",
-            "parameters": tool.SCHEMA["parameters"],
+            "parameters": tool.voice_parameters(),
         }
     return entries
 
@@ -4169,9 +4175,10 @@ def voice_tools_call(envelope: Any) -> Dict[str, Any]:
         raise TokenError(exc.status, str(exc))
     provider = request.get("provider")
     args = request.get("args")
+    action = args.get("action") if isinstance(args, dict) else None
     logger.info("Conduit voice read: conduit_health %s for %s",
-                args.get("action") if isinstance(args, dict) else None,
-                provider if isinstance(provider, str) and len(provider) <= 40 else "voice")
+                action if action in tool.VOICE_ACTIONS else "other",
+                provider if isinstance(provider, str) and _VOICE_PROVIDER.fullmatch(provider) else "voice")
     return {"v": 1, **seal_answer(tool.voice_handle(args, device_id=device_id, store=store))}
 
 
@@ -4195,6 +4202,11 @@ async def _voice_tools_route(response: Response, profile: Optional[str], fn: Cal
 
 @router.get("/voice-tools")
 async def get_voice_tools(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        _voice_tools_limiter.acquire(_limiter_key(profile))
+    except TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
     return await _voice_tools_route(response, profile, voice_tools_list, "list")
 
 

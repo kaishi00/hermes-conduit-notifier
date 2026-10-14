@@ -129,6 +129,20 @@ VOICE_NOTE = ("On a voice call: answer by ear in a sentence or two with rounded 
               "when it matters, and leave links and ids out.")
 
 
+def voice_parameters() -> dict[str, Any]:
+    """SCHEMA's parameters without ``device``: a voice read always covers the
+    asking device."""
+    parameters = dict(SCHEMA["parameters"])
+    parameters["properties"] = {name: value for name, value in parameters.get("properties", {}).items()
+                                if name != "device"}
+    if "required" in parameters:
+        parameters["required"] = [name for name in parameters["required"] if name != "device"]
+    return parameters
+
+
+VOICE_ACTIONS = frozenset(SCHEMA["parameters"]["properties"]["action"].get("enum", ()))
+
+
 def voice_handle(args: Any, *, device_id: str, store: HealthStore,
                  today: Callable[[], date] | None = None) -> dict[str, Any]:
     """The same read for a live voice call on one device, which sees only
@@ -145,6 +159,9 @@ def voice_handle(args: Any, *, device_id: str, store: HealthStore,
         return _handle(wanted, None, lambda _: False, today, store=store, device=device_id)
     except HealthError as error:
         return {"ok": False, "error": error.code, "note": str(error)}
+    except Exception:  # noqa: BLE001 — the answer is sealed even when the read fails
+        logger.warning("conduit_health voice read failed", exc_info=True)
+        return {"ok": False, "error": "unavailable", "note": "The health data couldn't be read. Tell the user."}
 
 
 def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], bool],

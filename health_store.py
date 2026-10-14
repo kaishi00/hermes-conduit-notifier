@@ -24,9 +24,10 @@ ChaCha20-Poly1305 as in e2e.py; the associated data binds a body to its key
 and batch.
 
 State lives in the profile's ``conduit-health.sqlite3`` (owner-only). The
-dashboard route (dashboard process) writes it and the ``conduit_health`` tool
-(agent process) reads it: the dashboard loads this file by path, so it
-imports nothing from the plugin package.
+dashboard routes (dashboard process) write it and answer sealed voice reads
+from it; the ``conduit_health`` tool (agent process) reads it. The dashboard
+loads this file and health_tool.py as a private package
+(``conduit_push_dashboard_pkg``), so it imports nothing else from the plugin.
 """
 
 from __future__ import annotations
@@ -377,16 +378,18 @@ class HealthStore:
         kid = key_id(device_public, host_public)
         now = int(self.clock())
         with self._write() as db:
-            known = db.execute("SELECT 1 FROM devices WHERE id=?", (device_id,)).fetchone()
+            known = db.execute("SELECT device_public FROM devices WHERE id=?", (device_id,)).fetchone()
             count = db.execute("SELECT COUNT(*) FROM devices").fetchone()[0]
             if not known and count >= MAX_DEVICES:
                 raise HealthError("too_many_devices",
                                   f"This profile already keeps health data from {MAX_DEVICES} devices; delete one "
                                   "from Conduit first", status=409)
-            if known:
-                # A new key starts the device over: what the old key sent
-                # can't be read back with the new one (a voice read), and the
-                # phone re-sends everything after a new key anyway.
+            if known and bytes(known[0]) != device_public:
+                # A new device key starts the device over: what the old key
+                # sent can't be read back with the new one (a voice read), and
+                # the phone re-sends everything after a new key anyway. The
+                # same device key again keeps the data: only that device's
+                # private key can use what this exchange agrees.
                 for table in ("buckets", "events", "tombstones", "windows"):
                     db.execute(f"DELETE FROM {table} WHERE device=?", (device_id,))
             db.execute(
@@ -394,7 +397,8 @@ class HealthStore:
                 " VALUES(?,?,?,?,?,?,?,NULL)"
                 " ON CONFLICT(id) DO UPDATE SET name=excluded.name, device_public=excluded.device_public,"
                 " host_private=excluded.host_private, host_public=excluded.host_public, kid=excluded.kid,"
-                " created_at=excluded.created_at, last_seen=NULL",
+                " created_at=excluded.created_at,"
+                " last_seen=CASE WHEN devices.device_public=excluded.device_public THEN devices.last_seen END",
                 (device_id, name, device_public, host_private, host_public, kid, now),
             )
             generation = _meta(db, "generation")
