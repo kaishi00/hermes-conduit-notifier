@@ -4165,9 +4165,9 @@ def voice_tools_list() -> Dict[str, Any]:
 
 
 def voice_tools_call(envelope: Any) -> Dict[str, Any]:
-    if not isinstance(envelope, dict) or envelope.get("tool") != "conduit_health":
-        raise TokenError(404, "This host has no voice tool by that name")
     tool = _plugin_package_module("health_tool")
+    if not isinstance(envelope, dict) or envelope.get("tool") != tool.TOOL_NAME:
+        raise TokenError(404, "This host has no voice tool by that name")
     store = tool.HealthStore(_calls_home())
     try:
         device_id, request, seal_answer = store.open_voice_request(envelope)

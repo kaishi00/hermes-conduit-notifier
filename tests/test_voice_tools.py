@@ -205,3 +205,24 @@ def test_the_tool_name_is_sealed_into_the_request(client):
     assert error.value.code == "bad_seal"
     with pytest.raises(health.HealthError):
         store.open_voice_request({**envelope, "tool": "Conduit Health\n"})
+
+
+def test_the_tool_list_shares_the_voice_rate_limit(client, monkeypatch):
+    monkeypatch.setattr(api, "_voice_tools_limiter", api._MintLimiter(1, 60))
+    assert client.get(f"{BASE}/voice-tools").status_code == 200
+    assert client.get(f"{BASE}/voice-tools").status_code == 429
+
+
+def test_the_log_line_carries_only_known_words(client, caplog):
+    phone = VoicePhone()
+    _share(client, phone, _batch())
+    call_id = "call-log-0001"
+    body = json.dumps({"call_id": call_id, "args": {"action": "x\nforged"}, "provider": "Evil\nline"}).encode()
+    nonce, ct = health.seal(phone.request_key, body,
+                            health.voice_aad("request", "conduit_health", phone.kid, phone.device_id, call_id))
+    envelope = {"v": 1, "tool": "conduit_health", "device_id": phone.device_id, "kid": phone.kid,
+                "call_id": call_id, "nonce": nonce, "ct": ct}
+    with caplog.at_level("INFO"):
+        assert client.post(f"{BASE}/voice-tools/call", json=envelope).status_code == 200
+    lines = [record.getMessage() for record in caplog.records if "voice read" in record.getMessage()]
+    assert lines == ["Conduit voice read: conduit_health other for voice"]

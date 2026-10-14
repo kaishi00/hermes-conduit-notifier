@@ -151,11 +151,7 @@ def voice_handle(args: Any, *, device_id: str, store: HealthStore,
         wanted = dict(args) if isinstance(args, dict) else {}
         wanted.pop("device", None)
         if wanted.get("action") == "overview":
-            view = _overview(store)
-            mine = [device for device in view.get("devices", []) if device["id"] == device_id]
-            if not mine:
-                return _nothing_shared()
-            return {**view, "devices": mine}
+            return _overview(store, only=device_id)
         return _handle(wanted, None, lambda _: False, today, store=store, device=device_id)
     except HealthError as error:
         return {"ok": False, "error": error.code, "note": str(error)}
@@ -219,12 +215,14 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
         return answer
 
 
-def _overview(store: HealthStore) -> dict[str, Any]:
+def _overview(store: HealthStore, only: str | None = None) -> dict[str, Any]:
+    """``only``: one device id (a voice read), so no other device's row is read."""
     view = store.overview()
-    if not view["devices"]:
+    rows = [device for device in view["devices"] if only is None or device["id"] == only]
+    if not rows:
         return _nothing_shared()
     devices = []
-    for device in view["devices"]:
+    for device in rows:
         last = datetime.strptime(device["last_sync"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
         devices.append({
             "id": device["id"], "name": device["name"], "time_zone": device["time_zone"],
