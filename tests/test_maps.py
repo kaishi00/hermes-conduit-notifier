@@ -492,7 +492,23 @@ def test_impossible_times_are_refused_before_a_wake(home, monkeypatch):
     fake = FakeClient({"delivered": True})
     monkeypatch.setattr(maps, "client", fake)
     assert _call({"action": "directions", "to": "Home", "depart_at": "2026-10-15T99:99+99:99"})["error"] == "invalid"
+    assert _call({"action": "directions", "to": "Home", "arrive_by": "2026-02-31T08:00"})["error"] == "invalid"
     assert fake.sent == []
+
+
+def test_a_usage_file_that_isnt_a_count_starts_the_day_over(home, apple, tmp_path):
+    _shared(home, sharing=maps_sharing(background=False), fix=fix())
+    apple.answers["search"] = {"results": [BOOTS]}
+    usage = home / maps_host.USAGE_FILE
+    usage.write_text("[]")
+    assert _call({"action": "lookup", "query": "Boots"})["ok"]
+    assert json.loads(usage.read_text())["count"] == 1
+    assert usage.stat().st_mode & 0o777 == 0o600
+
+
+def test_a_host_fix_without_a_time_isnt_used():
+    view = {"sharing": {"background": True}, "fix": {"lat": 51.5, "lon": -0.1}}
+    assert maps._host_me(view, 1_800_000_000) is None
 
 
 def test_the_phones_result_cant_replace_the_envelope():

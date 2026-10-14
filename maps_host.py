@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import threading
 import time
 import urllib.error
@@ -50,7 +51,10 @@ class HostUnavailable(Exception):
         self.error = error
 
 
+# The token cache and the usage counter have their own locks, so a slow
+# token exchange doesn't hold up counting.
 _lock = threading.Lock()
+_usage_lock = threading.Lock()
 _token: dict[str, Any] = {}
 _unavailable_until = 0.0
 
@@ -94,17 +98,34 @@ def _access_token(refresh: bool = False) -> str:
 def _spend(home: Path) -> None:
     """One Apple call against this host's daily share of Conduit's quota."""
     path = Path(home) / USAGE_FILE
-    with _lock:
+    with _usage_lock:
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         try:
             usage = json.loads(path.read_text())
         except (OSError, ValueError):
             usage = {}
+        if not isinstance(usage, dict):
+            usage = {}
         count = usage.get("count", 0) if usage.get("day") == today else 0
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            count = 0
         if count >= DAILY_CALLS:
             raise HostUnavailable("daily_limit", "Today's Apple Maps lookups from this host are used up.")
-        path.write_text(json.dumps({"day": today, "count": count + 1}))
-        path.chmod(0o600)
+        # Owner-only from the first byte, then swapped in whole.
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(descriptor, "w") as handle:
+            handle.write(json.dumps({"day": today, "count": count + 1}))
+        os.replace(temporary, path)
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+MAX_ANSWER_BYTES = 512 * 1024
 
 
 class Engine:
@@ -120,8 +141,12 @@ class Engine:
     def _fetch(self, url: str, token: str) -> Any:
         request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}",
                                                        "Accept": "application/json"})
-        with urllib.request.urlopen(request, timeout=TIMEOUT_S) as response:
-            return json.loads(response.read() or b"{}")
+        # No redirects (the token stays with Apple) and a capped body.
+        with _OPENER.open(request, timeout=TIMEOUT_S) as response:
+            body = response.read(MAX_ANSWER_BYTES + 1)
+        if len(body) > MAX_ANSWER_BYTES:
+            raise HostUnavailable("failed", "Apple Maps sent more than this host reads.")
+        return json.loads(body or b"{}")
 
     def _get(self, path: str, params: dict[str, Any]) -> Any:
         _spend(self.home)
@@ -136,7 +161,7 @@ class Engine:
                     continue
                 if error.code == 429:
                     raise HostUnavailable("throttled", "Apple Maps is busy; try again shortly.") from None
-                if error.code in (400, 404):
+                if error.code == 404:
                     raise HostUnavailable("not_found", "Apple Maps found nothing for that.") from None
                 raise HostUnavailable("failed", "Apple Maps couldn't answer just now.") from None
             except HostUnavailable:
