@@ -548,14 +548,16 @@ class HealthStore:
 
     # Queries (the agent's tool) ------------------------------------------------------
 
-    def overview(self) -> dict[str, Any]:
+    def overview(self, only: str | None = None) -> dict[str, Any]:
+        """``only``: one device id (a voice read); no other device is read."""
         with self._read() as db:
             if db is None:
                 return {"devices": []}
             devices = []
             for device_id, name, last_seen, categories, tz, detailed in db.execute(
                     "SELECT id, name, last_seen, categories, tz, detailed FROM devices"
-                    " WHERE last_seen IS NOT NULL ORDER BY last_seen DESC"):
+                    " WHERE last_seen IS NOT NULL AND (? IS NULL OR id=?) ORDER BY last_seen DESC",
+                    (only, only)).fetchall():
                 metrics = {}
                 for metric, grain, first, last in db.execute(
                         "SELECT metric, grain, MIN(date), MAX(date) FROM buckets WHERE device=?"

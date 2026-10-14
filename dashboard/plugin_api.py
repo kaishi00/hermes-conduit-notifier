@@ -4136,6 +4136,9 @@ VOICE_TOOLS_LIMIT = 60
 VOICE_TOOLS_WINDOW_S = 60.0
 VOICE_TOOLS_MAX_BODY_BYTES = 8 * 1024
 VOICE_TOOLS_TIMEOUT_S = 10.0
+# A read is a few indexed SQLite queries; a timed-out one keeps its worker
+# until it finishes (threads can't be cancelled), which the 60/min cap and
+# SQLite's 15 s busy timeout bound.
 VOICE_TOOLS_WORKERS = 2
 
 _voice_tools_limiter = _MintLimiter(VOICE_TOOLS_LIMIT, VOICE_TOOLS_WINDOW_S,
@@ -4172,11 +4175,11 @@ def voice_tools_call(envelope: Any) -> Dict[str, Any]:
     try:
         device_id, request, seal_answer = store.open_voice_request(envelope)
     except tool.HealthError as exc:
-        raise TokenError(exc.status, str(exc))
+        raise TokenError(exc.status, str(exc)) from exc
     provider = request.get("provider")
     args = request.get("args")
     action = args.get("action") if isinstance(args, dict) else None
-    logger.info("Conduit voice read: conduit_health %s for %s",
+    logger.info("Conduit voice read: %s %s for %s", tool.TOOL_NAME,
                 action if isinstance(action, str) and action in tool.VOICE_ACTIONS else "other",
                 provider if isinstance(provider, str) and _VOICE_PROVIDER.fullmatch(provider) else "voice")
     return {"v": 1, **seal_answer(tool.voice_handle(args, device_id=device_id, store=store))}

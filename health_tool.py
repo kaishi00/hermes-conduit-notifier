@@ -217,8 +217,7 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
 
 def _overview(store: HealthStore, only: str | None = None) -> dict[str, Any]:
     """``only``: one device id (a voice read), so no other device's row is read."""
-    view = store.overview()
-    rows = [device for device in view["devices"] if only is None or device["id"] == only]
+    rows = store.overview(only=only)["devices"]
     if not rows:
         return _nothing_shared()
     devices = []
