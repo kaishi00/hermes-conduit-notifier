@@ -446,3 +446,24 @@ def test_an_overflowing_pid_is_treated_as_unknown(tmp_path):
     entry = _entry("chat", pid=float("inf"))
     _seed(tmp_path, [entry])
     assert _take(tmp_path, ["chat"])["status"] == "same_host"
+
+
+def test_a_live_worker_claim_without_turn_markers_is_never_dropped(tmp_path):
+    # CLI/kanban workers and gateways write no turn marker, so idle can't be told apart from mid-turn.
+    for surface in ("cli", "kanban", "gateway", ""):
+        _seed(tmp_path, [_entry("chat", surface=surface)])
+        assert _take(tmp_path, ["chat"]) == {"status": "busy", "surface": surface}
+        assert _entries(tmp_path) == [_entry("chat", surface=surface)]
+
+
+def test_a_dead_worker_claim_is_still_dropped(tmp_path):
+    _seed(tmp_path, [_entry("chat", surface="kanban")])
+    registry = FakeRegistry(tmp_path, dead_pids={DESKTOP_PID})
+    assert _take(tmp_path, ["chat"], registry=registry)["status"] == "taken_over"
+    assert _entries(tmp_path) == []
+
+
+def test_a_worker_claim_blocks_alongside_a_desktop_claim(tmp_path):
+    _seed(tmp_path, [_entry("chat"), _entry("runtime-id", surface="cli", lease="lease-2")])
+    assert _take(tmp_path, ["runtime-id", "chat"])["status"] == "busy"
+    assert len(_entries(tmp_path)) == 2
