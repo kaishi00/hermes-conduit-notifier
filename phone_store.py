@@ -801,8 +801,12 @@ class PhoneStore:
             args.extend(ids)
         if query:
             # Filtered before the limit, so a busy range still finds them.
-            sql += (" AND (instr(lower(coalesce(title,'')), ?) OR instr(lower(coalesce(location,'')), ?)"
-                    " OR instr(lower(coalesce(notes,'')), ?))")
+            # SQLite's lower() folds ASCII only; fold in Python so "Événement"
+            # finds "événement".
+            db.create_function("conduit_fold", 1, lambda text: text.casefold() if isinstance(text, str) else "",
+                               deterministic=True)
+            sql += (" AND (instr(conduit_fold(title), ?) OR instr(conduit_fold(location), ?)"
+                    " OR instr(conduit_fold(notes), ?))")
             needle = query.casefold()
             args.extend([needle, needle, needle])
         sql += " ORDER BY start_utc, end_utc LIMIT ?"

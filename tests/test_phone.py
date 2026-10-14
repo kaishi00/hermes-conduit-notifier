@@ -424,6 +424,16 @@ def test_only_the_window_is_kept(store, iphone):
     assert list(_events(store)) == ["e_dentist"]
 
 
+def test_event_search_folds_non_ascii(store, iphone):
+    store.ingest(iphone.seal(_batch(events={"full": True, "from": "2026-10-07T00:00:00+01:00",
+                                            "to": "2026-12-14T00:00:00+01:00",
+                                            "upsert": [_event("e_fete", title="Événement à Zürich")],
+                                            "delete": []})))
+    with store.reader("events") as (db, device):
+        found, _ = store.events(db, device["id"], 0, 2**40, query="événement à zürich")
+    assert [event["id"] for event in found] == ["e_fete"]
+
+
 def test_a_late_older_batch_never_undoes_a_newer_one(store, iphone):
     older = iphone.seal(_batch("batch-0001", sent_at="2026-10-14T07:00:00+01:00"))
     store.ingest(iphone.seal(_batch("batch-0002", sent_at="2026-10-14T08:00:00+01:00", events={
