@@ -2303,3 +2303,57 @@ test('a location request is a silent location push to the phone, never a notific
     await stopRelay(child);
   }
 });
+
+test('phone changes: an alert notifies, a background change wakes silently, and the preference stops both', async () => {
+  const aPort = await closedPort();
+  const isolatedPath = join(dir, 'relay-data-phone.json');
+  const capturePath = join(dir, `capture-phone-${Date.now()}.jsonl`);
+  const fixture = new RelayStore(isolatedPath);
+  const created = fixture.createInstallation({ bundleId: 'com.milim.relay', deviceToken: 'd'.repeat(64), environment: 'production' });
+  const pairing = fixture.createPairing(created.installation.id);
+  const claim = fixture.claimPairing(pairing.code, 'phone target');
+  const child = await startRelay(aPort, 'accept', isolatedPath, { APNS_CAPTURE_PATH: capturePath });
+  children.push(child);
+  const base = `http://127.0.0.1:${aPort}`;
+  const device = `${created.installation.id}.${created.deviceSecret}`;
+  const send = (eventId, body = {}) => api(base, '/v1/events', {
+    method: 'POST',
+    credential: `${created.installation.id}.${claim.gatewayId}.${claim.gatewaySecret}`,
+    body: { type: 'phone.changes', event_id: eventId, profile: 'work', title: 'Hermes wants to add an event', body: 'Dentist · Fri 16 Oct 15:00', ...body },
+  });
+  const captured = () => {
+    try {
+      return readFileSync(capturePath, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
+    } catch {
+      return [];
+    }
+  };
+  try {
+    const meta = await api(base, '/v1/meta', { credential: device });
+    assert.ok(meta.json.capabilities.includes('phone-changes'));
+    assert.deepEqual(await send('phone:ch_000000000000000001'), { status: 202, json: { accepted: true, delivered: true } });
+    const [alert] = captured();
+    assert.equal(alert.notification.payload.aps.category, 'PHONE_CHANGE');
+    assert.equal(alert.notification.payload.aps.alert.title, 'Hermes has a change for you');
+    assert.equal(alert.notification.pushType, undefined, 'an ordinary alert');
+
+    assert.deepEqual(await send('phone:ch_000000000000000002', { mode: 'background' }),
+      { status: 202, json: { accepted: true, delivered: true, background: true } });
+    const background = captured()[1];
+    assert.equal(background.deviceToken, 'd'.repeat(64));
+    assert.equal(background.notification.pushType, 'background');
+    assert.equal(background.notification.priority, 5);
+    assert.deepEqual(background.notification.payload.aps, { 'content-available': 1 }, 'nothing for iOS to show');
+    assert.equal(background.notification.payload.conduit.gateway_id, claim.gatewayId);
+    assert.ok(!JSON.stringify(background.notification.payload).includes('Dentist'));
+
+    assert.deepEqual(await send('phone:ch_000000000000000003', { mode: 'loud' }), { status: 400, json: { error: 'invalid_mode' } });
+    const off = await api(base, `/v1/installations/${created.installation.id}`, { method: 'PUT', credential: device, body: { preferences: { phone_changes: false } } });
+    assert.equal(off.json.installation.preferences.phone_changes, false);
+    assert.deepEqual(await send('phone:ch_000000000000000004'), { status: 202, json: { accepted: true, delivered: false } });
+    assert.deepEqual(await send('phone:ch_000000000000000005', { mode: 'background' }), { status: 202, json: { accepted: true, delivered: false } });
+    assert.equal(captured().length, 2);
+  } finally {
+    await stopRelay(child);
+  }
+});

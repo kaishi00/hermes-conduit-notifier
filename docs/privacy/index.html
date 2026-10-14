@@ -76,6 +76,17 @@
       <li>You can pause or turn off sharing at any time and delete the copy on your gateway from Conduit's Location settings.</li>
     </ul>
 
+    <h2>Optional Calendar, Reminders, Focus and phone status sharing</h2>
+    <p>Conduit can share your calendars, reminders, which Focus is on and a snapshot of your phone (battery, charging, Low Power Mode, CarPlay, audio route, network type and motion activity such as walking or driving) with your Hermes gateway so your agent can use them. Each is off until you turn it on, and you choose which calendars and lists, how far back and ahead, and whether event notes and attendees are included. Conduit reads calendars, reminders and motion only with your permission in the system prompts.</p>
+    <ul>
+      <li>This data goes from your device directly to the Hermes gateway you configured, over your dashboard connection, encrypted end to end with a key your device and your gateway agree on. It never passes through the Conduit notification relay or any server operated by Conduit, and Conduit's developer never receives it.</li>
+      <li>Event notes, attendee names and links are shared only when you turn on "Include notes and attendees", and attendee email addresses only when you also turn that on. Your gateway discards them otherwise. Only the latest phone status and Focus are kept, never a history.</li>
+      <li>Your agent can ask Conduit to add or change events and reminders. Conduit asks you before each change unless you let it add new items without asking; changes, deletions and anything on a shared calendar or list always ask. To tell your phone that a change is waiting, your gateway sends a notification through the relay, encrypted like other notifications when end-to-end encryption is on; the change itself comes from your gateway.</li>
+      <li>Your agent can read this data when it answers you, which means it is sent to the AI model provider your Hermes agent uses (and, for a hosted agent, to its host). Their privacy terms apply to what they receive.</li>
+      <li>This data is not used for advertising, marketing or data mining and is not sold.</li>
+      <li>You can turn sharing off at any time and delete the copy on your gateway from Conduit's Calendar &amp; phone settings.</li>
+    </ul>
+
     <h2>Retention and deletion</h2>
     <p>On-device information remains until you remove it, sign out, disable the related feature, or uninstall the app. Notification registrations remain active until notifications are disabled, the registration is invalidated, or deletion is requested. Disabling notifications prevents further delivery and revokes the app's local notification credential. Short-lived pairing codes expire after ten minutes, and event identifiers used to prevent duplicate delivery expire after approximately 24 hours. Clarify decision records, including questions, choices, and submitted answers, expire after approximately two hours. When the relay processes state, it removes expired records from its in-memory state; an expired record may remain in the saved file until a later state update rewrites that file.</p>
     <p>To request deletion of notification relay information, contact <a href="mailto:support@milim.dev?subject=Hermes%20Conduit%20deletion%20request">support@milim.dev</a>. We may ask for limited installation information to locate the registration. Information stored by your Hermes gateway must be deleted through that gateway's operator.</p>

@@ -13,6 +13,9 @@ const defaultPreferences = Object.freeze({
   background_task_finished: true,
   // "Hermes wants to talk" (#449); the host's own setting decides first.
   call_requested: true,
+  // Calendar and reminder changes Hermes asks the phone to make
+  // (phone.changes), both the notification and the silent wake.
+  phone_changes: true,
   completion_sound: true,
   // Sound for the notifications that wait on the user (approval.needed,
   // input.needed, call.requested). Approvals time out and fail closed, so a silent banner

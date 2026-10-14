@@ -194,8 +194,8 @@ def seal_event(
     """The outgoing event with its content sealed into an `e2e` envelope.
 
     Visible to the relay: type, re-keyed event id, plugin version and
-    capabilities, and for clarify decisions the request id, question ids and
-    whether the card fit. Everything in INNER_FIELDS is encrypted.
+    capabilities, a phone change's wake mode, and for clarify decisions the
+    request id, question ids and whether the card fit. Everything in INNER_FIELDS is encrypted.
     """
     kind = str(event.get("type") or "")
     msg = keyed_event_id(keys, str(event.get("event_id") or ""))
@@ -204,9 +204,7 @@ def seal_event(
     inner = {field: event[field] for field in INNER_FIELDS if event.get(field) not in (None, "")}
 
     outgoing: dict[str, Any] = {"event_id": msg, "type": kind}
-    for field in ("plugin_version", "plugin_capabilities"):
-        if field in event:
-            outgoing[field] = event[field]
+    _copy_routing(event, outgoing)
 
     decision = inner.get("decision") if isinstance(inner.get("decision"), dict) else None
     request_id = ""
@@ -264,15 +262,24 @@ def content_free(event: dict[str, Any], keys: Keys | None = None) -> dict[str, A
         "event_id": keyed_event_id(keys, event_id) if keys else event_id,
         "type": event.get("type"),
     }
-    for field in ("plugin_version", "plugin_capabilities"):
-        if field in event:
-            outgoing[field] = event[field]
+    _copy_routing(event, outgoing)
     if event.get("type") == "location.requested" and isinstance(event.get("locate"), dict):
         # Only the request id the phone answers with: routing, not content.
         locate_id = event["locate"].get("id")
         if isinstance(locate_id, str) and _LOCATE_ID.match(locate_id):
             outgoing["locate"] = {"id": locate_id}
     return outgoing
+
+
+def _copy_routing(event: dict[str, Any], outgoing: dict[str, Any]) -> None:
+    """The fields the relay routes on, which stay outside the envelope: the
+    plugin's version and capabilities, and for phone.changes how to wake the
+    phone (``mode``: alert or background)."""
+    for field in ("plugin_version", "plugin_capabilities"):
+        if field in event:
+            outgoing[field] = event[field]
+    if event.get("type") == "phone.changes" and event.get("mode") in ("alert", "background"):
+        outgoing["mode"] = event["mode"]
 
 
 def open_event(outgoing: dict[str, Any], keys: Keys, *, installation_id: str, gateway_id: str) -> dict[str, Any]:

@@ -62,6 +62,7 @@ def test_every_capability_names_a_served_route_family():
         "health-sync": "/health/",
         "voice-tools": "/voice-tools",
         "location-sync": "/location/",
+        "phone-sync": "/phone/",
         "pairing": "/pair",
         "self-restart": "/self/restart",
     }

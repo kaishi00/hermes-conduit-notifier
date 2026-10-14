@@ -140,6 +140,10 @@ test('a call goes out as a VoIP push on the voip topic with its expiration; othe
     assert.equal(seen[1]['apns-push-type'], 'alert');
     assert.equal(seen[1]['apns-topic'], 'com.milim.relay');
     assert.equal(seen[1]['apns-expiration'], undefined);
+    assert.equal(seen[1]['apns-priority'], '10');
+    await client(origin).send('e'.repeat(64), { payload: { aps: { 'content-available': 1 } }, pushType: 'background', priority: 5 });
+    assert.equal(seen[2]['apns-push-type'], 'background');
+    assert.equal(seen[2]['apns-priority'], '5', 'a background push must go at priority 5');
   } finally {
     server.close();
     server.closeAllConnections?.();

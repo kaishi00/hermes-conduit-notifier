@@ -16,9 +16,9 @@ import { WATCH_TOOLS_CAPABILITY, WatchToolGrants, watchToolRoutes } from './watc
 const RELAY_INFO = (() => {
   try {
     const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-    return { version: String(pkg.version || 'unknown'), capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls', 'voip-calls', 'watch-calls', 'ring-sessions', 'location-push'] };
+    return { version: String(pkg.version || 'unknown'), capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls', 'voip-calls', 'watch-calls', 'ring-sessions', 'location-push', 'phone-changes'] };
   } catch {
-    return { version: 'unknown', capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls', 'voip-calls', 'watch-calls', 'ring-sessions', 'location-push'] };
+    return { version: 'unknown', capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls', 'voip-calls', 'watch-calls', 'ring-sessions', 'location-push', 'phone-changes'] };
   }
 })();
 
@@ -72,6 +72,15 @@ const WATCH_VOIP_TOKEN_GONE = new Set(['BadDeviceToken', 'Unregistered']);
 // "Stop ringing, it was answered or declined on the other device" is only
 // worth delivering while that device could still be ringing.
 const RING_SETTLE_TTL_S = 60;
+// Calendar and reminder changes Hermes queued for the phone (phone.changes):
+// one that asks is a notification in this category (Conduit opens the change
+// card); one the user lets Hermes make without asking is a background push
+// that wakes Conduit to apply it. Background pushes are low priority, and
+// APNs throttles them anyway; this is the relay's ceiling per phone.
+const PHONE_CHANGE_CATEGORY = 'PHONE_CHANGE';
+const PHONE_CHANGE_MODES = new Set(['alert', 'background']);
+const PHONE_BACKGROUND_PER_HOUR = 30;
+const PHONE_BACKGROUND_TTL_S = 24 * 60 * 60;
 // A location request is only worth answering right away.
 const LOCATION_PUSH_TTL_S = 60;
 const LOCATION_PUSH_PER_HOUR = 20;
@@ -538,6 +547,9 @@ async function route(request, response) {
     // Conduit's location settings).
     if (event.type === 'location.requested') return sendLocationRequest(response, installation, event, gateway);
     if (!shouldDeliver(installation.preferences, event.type)) return sendJson(response, 202, { accepted: true, delivered: false });
+    // A change Hermes may make without asking: wake Conduit silently, never
+    // a visible notification.
+    if (event.type === 'phone.changes' && event.mode === 'background') return sendPhoneBackground(response, installation, event, gateway);
     // A phone that can ring gets the call as a VoIP push; anything that stops
     // it ringing sends the usual notification below instead.
     if (event.type === 'call.requested' && installation.voipToken && await ring(installation, event, gateway)) {
@@ -795,6 +807,7 @@ function notificationFor(event, preferences, gateway = undefined) {
     alert: { title, body },
     ...(sound ? { sound: 'default' } : {}),
     ...(event.type === 'call.requested' ? { category: CALL_CATEGORY } : {}),
+    ...(event.type === 'phone.changes' ? { category: PHONE_CHANGE_CATEGORY } : {}),
     // Thread grouping is gateway-scoped: two dashboards both using session
     // "default" must never share a Notification Center thread. Gateway-less
     // callers (direct/test use) keep the legacy raw-session shape.
@@ -979,6 +992,40 @@ async function sendLocationRequest(response, installation, event, gateway) {
   return sendJson(response, 502, { error: 'apns_rejected', reason: result.reason, status: result.status });
 }
 
+// A calendar change Hermes may make without asking, as a background push:
+// Conduit wakes, runs its sealed exchange with its host and applies it, then
+// posts its own notification with Undo. Nothing for iOS to show; the sealed
+// envelope (or, unsealed, the profile) and the routing the phone needs to
+// pick the host. Low priority, as APNs requires for background pushes.
+function phoneBackgroundPushFor(event, gateway, { topic, nowSeconds = Math.floor(Date.now() / 1000) }) {
+  const routing = {
+    type: event.type,
+    ...(gateway?.id ? { gateway_id: gateway.id } : {}),
+    ...(gateway?.dashboardId ? { dashboard_id: gateway.dashboardId } : {}),
+    ...(!event.e2e && event.profile ? { profile: event.profile } : {}),
+  };
+  let payload = { aps: { 'content-available': 1 }, conduit: routing, ...(event.e2e ? { conduit_e2e: event.e2e } : {}) };
+  // The phone pulls the change from its host either way: an envelope that
+  // won't fit is dropped, never truncated.
+  if (Buffer.byteLength(JSON.stringify(payload)) > MAX_NOTIFICATION_BYTES) payload = { aps: { 'content-available': 1 }, conduit: routing };
+  return { payload, pushType: 'background', priority: 5, topic, expiration: nowSeconds + PHONE_BACKGROUND_TTL_S };
+}
+
+async function sendPhoneBackground(response, installation, event, gateway) {
+  enforceRateLimit(`phone-background:${installation.id}`, PHONE_BACKGROUND_PER_HOUR, 60 * 60_000);
+  const push = phoneBackgroundPushFor(event, gateway, { topic: config.topic });
+  let result;
+  try {
+    result = await apnsSend(installation.deviceToken, push);
+  } catch (error) {
+    console.error(JSON.stringify({ level: 'error', message: 'apns background send threw', error: error instanceof Error ? error.message : String(error) }));
+    return sendJson(response, 502, { error: 'apns_unreachable' });
+  }
+  if (result.status === 410 || result.reason === 'BadDeviceToken' || result.reason === 'Unregistered') store.deactivateInstallation(installation.id);
+  if (!result.ok) return sendJson(response, 502, { error: 'apns_rejected', reason: result.reason, status: result.status });
+  return sendJson(response, 202, { accepted: true, delivered: true, background: true });
+}
+
 // An end-to-end encrypted event: the relay can't read the content, so the
 // alert is the generic copy for the type (no profile or session context),
 // `mutable-content` lets Conduit's Notification Service Extension decrypt
@@ -1001,6 +1048,7 @@ function encryptedNotificationFor(event, preferences, { gatewayId, dashboardId, 
     alert: { title: generic.title, body: generic.body },
     ...(sound ? { sound: 'default' } : {}),
     ...(event.type === 'call.requested' ? { category: CALL_CATEGORY } : {}),
+    ...(event.type === 'phone.changes' ? { category: PHONE_CHANGE_CATEGORY } : {}),
     'mutable-content': 1,
     'thread-id': threadId,
   };
@@ -1027,11 +1075,12 @@ function shortSessionId(sessionId) {
 }
 
 function waitsOnUser(type) {
-  return type === 'approval.needed' || type === 'input.needed' || type === 'call.requested';
+  return type === 'approval.needed' || type === 'input.needed' || type === 'call.requested' || type === 'phone.changes';
 }
 
 function genericCopy(type) {
   if (type === 'call.requested') return { title: 'Hermes wants to talk', body: 'Tap to talk to Hermes.' };
+  if (type === 'phone.changes') return { title: 'Hermes has a change for you', body: 'Tap to review it in Conduit.' };
   if (type === 'approval.needed') return { title: 'Approval needed', body: 'Hermes is waiting for your approval.' };
   if (type === 'input.needed') return { title: 'Input needed', body: 'Hermes needs your response before it can continue.' };
   if (type === 'turn.failed') return { title: 'Turn failed', body: 'A Hermes turn could not be completed.' };
@@ -1045,10 +1094,13 @@ function shouldDeliver(preferences, type) {
 }
 
 function validateEvent(body) {
-  const types = new Set(['approval.needed', 'input.needed', 'response.ready', 'turn.failed', 'background_task.finished', 'call.requested', 'location.requested', 'plugin.hello']);
+  const types = new Set(['approval.needed', 'input.needed', 'response.ready', 'turn.failed', 'background_task.finished', 'call.requested', 'location.requested', 'phone.changes', 'plugin.hello']);
   if (!types.has(body.type)) throw httpError(400, 'invalid_event_type');
   const eventId = String(body.event_id ?? '');
   if (!/^[A-Za-z0-9:_-]{8,128}$/.test(eventId)) throw httpError(400, 'invalid_event_id');
+  // How to wake the phone for a calendar change: plaintext routing beside
+  // any envelope, alert unless said otherwise.
+  const mode = body.type === 'phone.changes' ? validatePhoneMode(body.mode) : undefined;
   if (body.e2e !== undefined && body.e2e !== null) {
     // An encrypted event carries no readable content: any plaintext content
     // fields beside the envelope are ignored, never forwarded.
@@ -1059,6 +1111,7 @@ function validateEvent(body) {
       pluginVersion: cleanIdentifier(body.plugin_version, 40),
       pluginCapabilities: validCapabilities(body.plugin_capabilities),
       e2e,
+      ...(mode ? { mode } : {}),
       // The clarify request id the relay parks must be the one the
       // ciphertext is bound to (the envelope's `req`).
       clarify: body.type === 'input.needed' && e2e.req
@@ -1079,7 +1132,14 @@ function validateEvent(body) {
     decision: validateDecision(body.decision, body.type),
     call: body.type === 'call.requested' ? validateCall(body.call) : undefined,
     locate: body.type === 'location.requested' ? validateLocate(body.locate) : undefined,
+    ...(mode ? { mode } : {}),
   };
+}
+
+function validatePhoneMode(value) {
+  if (value === undefined || value === null) return 'alert';
+  if (!PHONE_CHANGE_MODES.has(value)) throw httpError(400, 'invalid_mode');
+  return value;
 }
 
 // A location request's id, mirroring the plugin's events.push_event.
@@ -1403,4 +1463,4 @@ function optionalMilliseconds(name, key) {
   return { [key]: value };
 }
 
-export { callPushFor, notificationFor, settlePushFor, validateEvent, validateDecision };
+export { callPushFor, notificationFor, phoneBackgroundPushFor, settlePushFor, validateEvent, validateDecision };
