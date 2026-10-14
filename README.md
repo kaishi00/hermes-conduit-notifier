@@ -1224,6 +1224,33 @@ marked private is reported only as "at a private place".
 
 Limits: 4 devices per profile, 20 places, 256 KiB per batch.
 
+## Maps from the user's iPhone (plugin 0.31+)
+
+`conduit_maps` gives Hermes Apple Maps: `search` (places or categories near
+the user, a place or an address), `lookup` (one place or address),
+`reverse_geocode`, `directions` (routes with traffic, tolls, steps, by car,
+on foot, by transit or bike, and `leave_by` for `arrive_by`) and
+`travel_times` (up to 10 destinations at once). Places can be `"me"`, a saved
+place's name, an address or a name, `place_id:<id>` from an earlier answer,
+or `lat,lon`. It's a building block like location: crons, place rules and
+skills can use it.
+
+The host has no map, so the user's iPhone answers. The tool stores the
+lookup sealed for that one phone (location's key, its own HKDF labels) and
+wakes it with the same location push as `locate`; the relay sees only a
+request id inside the sealed push envelope. Conduit's Location Push
+extension fetches the lookup (`GET /location/maps/{id}`), answers it with
+MapKit and posts the sealed answer (`POST /location/maps/{id}`). The user's
+own position stays on the phone: "from me" answers carry durations,
+distances and places at the detail they chose for background sharing
+("places only" refuses "me"). It needs background location sharing and a
+Conduit that says it answers maps lookups (`sharing.features`), and the
+tool is hidden until then. Lookups are logged in the location read log
+(action and chat, never the query); budgets are 30 wakes an hour and 120 a
+day, a repeat within 2 minutes is answered from the last answer, and when
+the phone doesn't answer, a trip from "me" to a saved place gets a labelled
+straight-line guess. Contract: `designs/maps-v1-contract.md` in the project.
+
 ## Calendar, Reminders, Focus and phone status from Conduit (plugin 0.27+)
 
 Conduit can share the user's iPhone calendars (every account on the phone),

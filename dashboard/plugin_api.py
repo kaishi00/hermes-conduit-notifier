@@ -4447,6 +4447,34 @@ async def post_location_ingest(request: Request, response: Response,
     return await _location_route(response, profile, lambda: _location_ingest(body), "upload")
 
 
+# A maps lookup the agent asked the phone for (conduit_maps): the phone,
+# woken by a location push, fetches the lookup sealed for it alone and posts
+# its Apple Maps answer sealed back. Neither passes through the relay.
+LOCATION_MAPS_LIMIT = 120
+LOCATION_MAPS_WINDOW_S = 60.0
+LOCATION_MAX_MAPS_BODY_BYTES = 96 * 1024
+_location_maps_limiter = _MintLimiter(LOCATION_MAPS_LIMIT, LOCATION_MAPS_WINDOW_S,
+                                      message="Too many maps answers; try again shortly")
+
+
+@router.get("/location/maps/{request_id}")
+async def get_location_maps(request_id: str, response: Response, profile: Optional[str] = None,
+                            device_id: Optional[str] = None, kid: Optional[str] = None) -> Dict[str, Any]:
+    _location_limit(_location_maps_limiter, profile)
+    return await _location_route(response, profile, lambda: _location_call(
+        lambda store: store.maps_request(request_id, device_id, kid)), "maps request")
+
+
+@router.post("/location/maps/{request_id}")
+async def post_location_maps(request_id: str, request: Request, response: Response,
+                             profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    _location_limit(_location_maps_limiter, profile)
+    body = await _read_json_body(request, LOCATION_MAX_MAPS_BODY_BYTES)
+    return await _location_route(response, profile, lambda: _location_call(
+        lambda store: store.answer_maps(request_id, body)), "maps answer")
+
+
 @router.get("/location/reads")
 async def get_location_reads(response: Response, profile: Optional[str] = None, limit: int = 50) -> Dict[str, Any]:
     return await _location_route(response, profile,

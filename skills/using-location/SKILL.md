@@ -102,14 +102,33 @@ starts, and its run is told which place and which move; set it up with
 - Confirm in one sentence what you set up. `rules` lists them,
   `remove_rule` stops one (only after the user says so).
 
+## Maps: travel time, directions, places
+
+`distance_to` is a straight line. For anything about time ("how long to
+get home", "when should I leave", "will I make it") or finding a place
+("pharmacy near me"), use `conduit_maps` when it's offered: Apple Maps,
+looked up on the user's iPhone, with real routes and traffic.
+
+- `directions` with `to` (and `arrive_by` when there's a time to make):
+  duration, traffic delay, `leave_by`, steps. `from` defaults to `"me"`.
+- `travel_times` for "which is quickest" (up to 10 destinations).
+- `search` / `lookup` for places, `reverse_geocode` for "what's here".
+- Places can be `"me"`, a saved place's name, an address or a name,
+  `place_id:<id>` from an earlier answer, or `lat,lon`.
+- Say "about" and the mode, mention traffic when it adds a delay, and
+  say when an answer is a rough guess (the tool labels it).
+- Each lookup wakes the phone (30 an hour, 120 a day; repeats within 2
+  minutes are free): one lookup per question, not a loop.
+
 ## Appointment check, as an example of a job
 
 "Make sure I'm on my way to my appointments": a scheduled job a while
 before each one (or one that looks at the calendar every morning and plans
-the checks) whose task reads `now` or, if that's old, `locate`, compares
-`distance_to` or the area with where the appointment is and the travel
-time, and calls or messages the user only when they look late. Nothing
-needed from Conduit beyond sharing in the background.
+the checks) whose task asks `conduit_maps` `directions` from `"me"` to the
+appointment's address with `arrive_by`, and calls or messages the user only
+when `leave_by` has passed and they haven't moved (or they look late).
+Without `conduit_maps`, read `now` or `locate` and compare `distance_to`.
+Nothing needed from Conduit beyond sharing in the background.
 
 ## Calls and places
 

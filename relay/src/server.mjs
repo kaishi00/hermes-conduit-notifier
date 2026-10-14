@@ -83,7 +83,8 @@ const PHONE_BACKGROUND_PER_HOUR = 30;
 const PHONE_BACKGROUND_TTL_S = 24 * 60 * 60;
 // A location request is only worth answering right away.
 const LOCATION_PUSH_TTL_S = 60;
-const LOCATION_PUSH_PER_HOUR = 20;
+// Locate and maps lookups (conduit_maps) share it; the plugin keeps tighter budgets per kind.
+const LOCATION_PUSH_PER_HOUR = 60;
 const LOCATION_TOKEN_GONE = new Set(['BadDeviceToken', 'Unregistered', 'DeviceTokenNotForTopic']);
 
 // Conduit dashboard UUIDs (opaque app-generated identity, #148) are

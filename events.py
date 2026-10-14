@@ -10,7 +10,7 @@ from typing import Any
 
 # Keep in sync with plugin.yaml. Reported on every event so the relay can
 # expose per-gateway compatibility state to the app (Settings > Notifications).
-PLUGIN_VERSION = "0.30.0"
+PLUGIN_VERSION = "0.31.0"
 PLUGIN_CAPABILITIES = [
     "approval-decisions",
     "clarify-loop",
@@ -19,6 +19,7 @@ PLUGIN_CAPABILITIES = [
     "e2e-v1",
     "hermes-calls",
     "location-locate",
+    "maps-v1",
 ]
 
 # PROTOCOL/STORE bounds for batch clarify decisions (8 questions x 8
@@ -57,6 +58,7 @@ def push_event(
     call: dict[str, Any] | None = None,
     mode: str | None = None,
     locate: dict[str, Any] | None = None,
+    maps: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     event: dict[str, Any] = {
         "event_id": identifier,
@@ -95,6 +97,13 @@ def push_event(
         locate_id = locate.get("id") if isinstance(locate, dict) else None
         if isinstance(locate_id, str) and _LOCATE_ID.match(locate_id):
             event["locate"] = {"id": locate_id}
+    # `maps` asks the phone to answer a maps lookup (conduit_maps) through the
+    # same location push: the id it fetches the sealed lookup with, nothing
+    # else.
+    if maps is not None and kind == "location.requested":
+        maps_id = maps.get("id") if isinstance(maps, dict) else None
+        if isinstance(maps_id, str) and _MAPS_ID.match(maps_id):
+            event["maps"] = {"id": maps_id}
     # `mode` (phone.changes only) tells the relay how to wake the phone for a
     # change Hermes queued: "alert" shows a notification the user taps to
     # review, "background" wakes Conduit silently to apply a change the user
@@ -107,6 +116,7 @@ def push_event(
 
 PHONE_CHANGE_MODES = ("alert", "background")
 _LOCATE_ID = re.compile(r"^l_[A-Za-z0-9_-]{16,64}\Z")
+_MAPS_ID = re.compile(r"^m_[A-Za-z0-9_-]{16,64}\Z")
 
 
 # How a watched job ended, or (an alert call) what Hermes waits on.
@@ -210,6 +220,10 @@ def redact_event(event: dict[str, Any]) -> dict[str, Any]:
     if isinstance(locate_id, str) and _LOCATE_ID.match(locate_id):
         # Only the request id the phone answers with: routing, not content.
         redacted["locate"] = {"id": locate_id}
+    maps = event.get("maps") if event.get("type") == "location.requested" else None
+    maps_id = maps.get("id") if isinstance(maps, dict) else None
+    if isinstance(maps_id, str) and _MAPS_ID.match(maps_id):
+        redacted["maps"] = {"id": maps_id}
     return redacted
 
 

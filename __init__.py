@@ -13,7 +13,7 @@ from typing import Any
 from hermes_constants import get_hermes_home
 
 from . import (call_tool, call_watches, calls, clarify_loop, desktop_selected, health_tool, location_tool,
-               phone_tool, settings_tool)
+               maps_tool, phone_tool, settings_tool)
 from .session_titles import title as _session_title, titled as _titled
 from .client import enqueue
 from .events import approval_decision, clarification_text, event_id, is_silent_response, push_event
@@ -58,6 +58,9 @@ def register(ctx: Any) -> None:
     # Where the user is, as Conduit shares it, with place rules and its skill.
     location_tool.register(ctx, is_child=_is_child, profile=lambda: _profile,
                            skill_path=Path(__file__).resolve().parent / "skills" / location_tool.SKILL_NAME / "SKILL.md")
+    # Apple Maps lookups the user's iPhone answers (search, directions,
+    # travel times), on top of location sharing.
+    maps_tool.register(ctx, is_child=_is_child, profile=lambda: _profile)
     # Calendar, Reminders, Focus and phone status Conduit shares, with
     # changes the phone applies (the user approves them there), and the skill.
     phone_tool.register(ctx, is_child=_is_child, profile=lambda: _profile,
