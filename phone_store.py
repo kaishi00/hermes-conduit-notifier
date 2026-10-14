@@ -1895,7 +1895,8 @@ def _check_alarm_change(db: sqlite3.Connection, device_id: str, kind: str, field
             raise PhoneError("malformed", "target is {alarm_id}")
         alarm_id = _item_id(target.get("alarm_id"), "alarm_id")
         listed = _decode(db.execute("SELECT alarms FROM devices WHERE id=?", (device_id,)).fetchone()[0], [])
-        alarm = next((item for item in listed if item.get("id") == alarm_id), None)
+        listed = listed if isinstance(listed, list) else []
+        alarm = next((item for item in listed if isinstance(item, dict) and item.get("id") == alarm_id), None)
         if alarm is None:
             raise PhoneError("unknown_alarm", "No alarm or timer Hermes set has that id; see action alarms")
         return {"alarm_id": alarm_id}, {}, "Cancel " + alarm_summary(alarm)

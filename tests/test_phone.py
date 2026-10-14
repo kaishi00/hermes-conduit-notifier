@@ -1234,6 +1234,8 @@ def test_the_phone_tool_sets_alarms_and_timers(home):
     assert "always needs" in cancel["note"] and home.sent[-1]["title"] == "Hermes wants to cancel an alarm"
     assert [item["kind"] for item in _phone_tool({"action": "pending"})["changes"]] == ["cancel_alarm", "set_timer"]
     assert _phone_tool({"action": "set_alarm", "time": "7am"})["error"] == "malformed"
+    mixed = _phone_tool({"action": "set_alarm", "seconds": 90})
+    assert mixed["error"] == "invalid" and "seconds" in mixed["note"], "Not dropped into a timeless alarm"
     assert _phone_tool({"action": "add_event"})["error"] == "invalid"
 
 

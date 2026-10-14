@@ -577,6 +577,11 @@ def _alarm_write(store: PhoneStore, kind: str, args: dict[str, Any], session_id:
     keys = ("label", "at", "time", "repeats") if kind == "set_alarm" else ("label", "seconds") \
         if kind == "set_timer" else ()
     fields = {key: args[key] for key in keys if args.get(key) is not None}
+    # Another kind's fields mean the model mixed them up: say so, don't drop them.
+    stray = sorted(key for key in ("label", "at", "time", "repeats", "seconds", "alarm_id")
+                   if args.get(key) is not None and key not in keys and not (kind == "cancel_alarm" and key == "alarm_id"))
+    if stray:
+        return {"ok": False, "error": "invalid", "note": f"{kind} doesn't take {', '.join(stray)}."}
     target = {"alarm_id": args.get("alarm_id")} if kind == "cancel_alarm" else None
     with store.reader("alarms", args.get("device")) as opened:
         if opened is None:
