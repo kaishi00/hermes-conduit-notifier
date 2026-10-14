@@ -601,11 +601,16 @@ def _alarm_write(store: PhoneStore, kind: str, args: dict[str, Any], session_id:
 # --- conduit_contacts ----------------------------------------------------------------
 
 
+MAX_CONTACT_QUERY_CHARS = 100
+
+
 def _contacts(args: dict[str, Any], store: PhoneStore | None = None, exact: bool = False) -> dict[str, Any]:
     if args.get("action") != "people":
         return {"ok": False, "error": "invalid", "note": "action is people."}
     store = store or _store()
     query = _text(args.get("query"))
+    if query and len(query) > MAX_CONTACT_QUERY_CHARS:
+        return {"ok": False, "error": "invalid", "note": f"query is at most {MAX_CONTACT_QUERY_CHARS} characters."}
     with store.reader("contacts", args.get("device"), exact=exact) as opened:
         if opened is None:
             raise PhoneError("nothing_shared", "No device shares contacts with Hermes.")

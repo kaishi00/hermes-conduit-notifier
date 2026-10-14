@@ -1138,6 +1138,10 @@ def test_alarms_and_contacts_land_and_are_forgotten_when_turned_off(store, iphon
     (lambda b: b.update(contacts=[{"id": "p_1", "name": "X", "birthday": "--02-30"}]), "malformed"),
     (lambda b: b.update(contacts=[{"id": "p_1", "name": "X", "birthday": "1981-02-29"}]), "malformed"),
     (lambda b: b.update(contacts=[{"id": f"p_{n}", "name": "X"} for n in range(201)]), "too_large"),
+    (lambda b: b.update(contacts=[{"id": "p_1", "name": "X", "phones": [{"number": "--- ..."}]}]), "malformed"),
+    (lambda b: b.update(contacts=[{"id": "p_1", "name": "X",
+                                   "phones": [{"number": f"+1 555 01{n:02d}"} for n in range(11)]}]), "too_large"),
+    (lambda b: b.update(contacts=[{"id": "p_1", "name": "X"}, {"id": "p_1", "name": "Y"}]), "malformed"),
 ])
 def test_bad_alarms_and_contacts_are_refused_whole(store, iphone, change, code):
     batch = _phone_batch()
@@ -1146,6 +1150,12 @@ def test_bad_alarms_and_contacts_are_refused_whole(store, iphone, change, code):
         store.ingest(iphone.seal(batch))
     assert error.value.code == code
     assert store.status(DEVICE)["device"]["counts"]["events"] == 0
+
+
+def test_an_unknown_need_is_never_shared():
+    sharing = {"calendar": "full", "reminders": True, "status": True, "focus": True, "alarms": True, "contacts": True}
+    assert phone.shares(sharing, "any") is True
+    assert phone.shares(sharing, "evnets") is False
 
 
 def test_alarm_changes_follow_the_contract(store, iphone):
@@ -1247,6 +1257,7 @@ def test_the_contacts_tool_reads_only_the_people_picked(home):
     nobody = json.loads(tool.handle_contacts({"action": "people", "query": "Bob"}))
     assert nobody["people"] == [] and "conduit://settings/phone" in nobody["note"]
     assert json.loads(tool.handle_contacts({"action": "all"}))["error"] == "invalid"
+    assert json.loads(tool.handle_contacts({"action": "people", "query": "x" * 101}))["error"] == "invalid"
     child = {"session_id": "child", "is_child": lambda sid: sid == "child"}
     assert json.loads(tool.handle_contacts({"action": "people"}, **child))["error"] == "subagent"
     assert json.loads(tool.handle_phone({"action": "alarms"}, **child))["error"] == "subagent"

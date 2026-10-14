@@ -154,7 +154,8 @@ _DATE = re.compile(r"^\d{4}-\d{2}-\d{2}\Z")
 _CLOCK = re.compile(r"^([01]\d|2[0-3]):[0-5]\d\Z")
 # A birthday: YYYY-MM-DD, or --MM-DD when the year isn't known.
 _BIRTHDAY = re.compile(r"^(\d{4}|-)-(\d{2})-(\d{2})\Z")
-_PHONE_NUMBER = re.compile(r"^[0-9+()*#.,;/ \-]{1,40}\Z")
+# A dialable number: those characters, at least one digit.
+_PHONE_NUMBER = re.compile(r"^(?=.*\d)[0-9+()*#.,;/ \-]{1,%d}\Z" % MAX_PHONE_CHARS)
 _TZ = re.compile(r"^[A-Za-z0-9_+\-/]{1,64}\Z")
 _COLOR = re.compile(r"^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?\Z")
 
@@ -769,7 +770,7 @@ class PhoneStore:
                         "sharing": _decode(row[2], None),
                         "counts": {"events": count("events"), "reminders": count("reminders"),
                                    "calendars": count("calendars"), "contacts": count("contacts"),
-                                   "alarms": len(_decode(alarms, []))},
+                                   "alarms": len(_decode(alarms, []) or [])},
                         "pending": pending,
                     }
             return answer
@@ -837,8 +838,9 @@ class PhoneStore:
     def reader(self, need: str, device: Any = None,
                exact: bool = False) -> Iterator[tuple[sqlite3.Connection, dict[str, Any]] | None]:
         """A read connection and the device to read: the one named, else the
-        one that synced last sharing ``need`` ("events", "reminders",
-        "status", "focus", "calendars" or "any"). None when nothing is shared.
+        one that synced last sharing ``need`` (see ``shares``: "events",
+        "reminders", "status", "focus", "calendars", "phone", "phone_tool",
+        "alarms", "contacts" or "any"). None when nothing is shared.
         Raises PhoneError ``not_shared`` when the named device doesn't share
         it. ``exact``: ``device`` is an id and only that device is read (a
         voice read), never another device by name."""
@@ -963,7 +965,8 @@ class PhoneStore:
         """The alarms and timers Conduit set that are still on the phone, and
         when the phone said so."""
         row = db.execute("SELECT alarms, alarms_at FROM devices WHERE id=?", (device,)).fetchone()
-        return (_decode(row[0], []) if row else []), (row[1] if row else None)
+        listed = _decode(row[0], []) if row else []
+        return (listed if isinstance(listed, list) else []), (row[1] if row else None)
 
     def contacts(self, db: sqlite3.Connection, device: str, *, query: str | None = None,
                  limit: int = MAX_CONTACTS) -> list[dict[str, Any]]:
@@ -1190,7 +1193,8 @@ def shares(sharing: dict[str, Any], need: str) -> bool:
     if need == "phone_tool":
         # conduit_phone: status, Focus, or the alarms Hermes can set.
         return any(sharing.get(kind) is True for kind in ("status", "focus", "alarms"))
-    return True
+    # An unknown need is a caller's mistake: deny it rather than share.
+    return need == "any"
 
 
 _NEED_WORDS = {"events": "their calendar", "events_write": "adding to their calendar", "reminders": "reminders",
@@ -1644,7 +1648,7 @@ def _parse_contacts(value: Any) -> list[dict[str, Any]]:
         if not name:
             raise PhoneError("malformed", f"{field}.name is required")
         if contact_id in seen:
-            continue
+            raise PhoneError("malformed", f"{field}.id repeats an earlier contact's")
         seen.add(contact_id)
         entry = {
             "id": contact_id, "name": name,
@@ -1661,7 +1665,10 @@ def _parse_contacts(value: Any) -> list[dict[str, Any]]:
 
 def _contact_values(value: Any, field: str, key: str) -> list[dict[str, str]]:
     values = []
-    for position, item in enumerate(_list(value, field)[:MAX_CONTACT_VALUES]):
+    items = _list(value, field)
+    if len(items) > MAX_CONTACT_VALUES:
+        raise PhoneError("too_large", f"{field}: at most {MAX_CONTACT_VALUES}", status=413)
+    for position, item in enumerate(items):
         where = f"{field}[{position}]"
         if not isinstance(item, dict):
             raise PhoneError("malformed", f"{where} must be an object")
