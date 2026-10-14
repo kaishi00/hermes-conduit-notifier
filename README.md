@@ -1190,6 +1190,16 @@ marked private is reported only as "at a private place".
   `history`, `distance_to`, `rules`, `set_rule`, `remove_rule`) with its
   skill `conduit_push:using-location`. It answers "paused" or "off" when the
   user has paused sharing, logs every read, and subagents can't use it.
+- **Voice reads** (plugin 0.28): when the user lets a voice mode read their
+  location in Conduit's Settings > Location (off by default, per mode,
+  naming the voice provider), `/voice-tools` also offers `conduit_location`
+  with only `now`, `places`, `history` and `distance_to` (key `location`),
+  sealed as health's voice reads are but with the device's location key
+  (`conduit-location-v1 voice device-to-host` / `host-to-device`). It reads
+  only the asking device's fix (never its coordinates: area, saved place
+  and distances only), places and history, matched by id, and each
+  read is logged as "Gemini Live call" (or Grok Live, GPT-Live). Shared
+  vector: `tests/location_vector.json` (`voice`).
 - **On-demand locate.** `locate` asks the phone for a fresh fix through the
   relay as a silent location push (Apple's Location Push Service Extension),
   which the phone answers only while background sharing is on and not

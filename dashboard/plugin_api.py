@@ -4118,20 +4118,22 @@ async def post_health_wipe(request: Request, response: Response, profile: Option
 #
 # Gemini Live, Grok Live and GPT-Live run at Google, xAI and OpenAI, driven by
 # Conduit on the phone, so they can't call Hermes' own tools. With the user's
-# say-so (a switch per voice mode in Conduit's Settings > Health, off by
-# default, naming the voice provider), Conduit offers them read-only versions of
-# conduit_health here: GET /voice-tools lists what this profile can answer,
-# with the description and parameters Hermes' own tool has, and
-# POST /voice-tools/call runs the same handler.
+# say-so (a switch per voice mode in Conduit's Settings > Health or Settings >
+# Location, off by default, naming the voice provider), Conduit offers them
+# read-only versions of conduit_health and conduit_location here:
+# GET /voice-tools lists what this profile can answer, with the description
+# and parameters Hermes' own tool has, and POST /voice-tools/call runs the
+# same handler.
 #
-# This is the one route that returns health data, so it answers only the
-# device that shared it: the request and the answer are sealed with that
-# device's own health key (its own HKDF directions, separate from ingest), so
-# dashboard access alone opens nothing, and the read covers only the data that
-# device uploaded, matched by id. Read actions only; Conduit keeps the log of
-# what each call read. That switch is Conduit's: the host can't see it, and
-# the seal is the host's boundary (only the device can ask, and only about
-# itself). (hermes-conduit designs/voice-health-location.md)
+# This is the one route that returns health or location data, so it answers
+# only the device that shared it: the request and the answer are sealed with
+# that device's own health or location key (its own HKDF directions, separate
+# from ingest), so dashboard access alone opens nothing, and the read covers
+# only the data that device uploaded, matched by id. Read actions only;
+# Conduit keeps the log of what each call read (the host also logs location
+# reads, as every location read is). That switch is Conduit's: the host can't
+# see it, and the seal is the host's boundary (only the device can ask, and
+# only about itself). (hermes-conduit designs/voice-health-location.md)
 
 VOICE_TOOLS_LIMIT = 60
 VOICE_TOOLS_WINDOW_S = 60.0
@@ -4150,24 +4152,43 @@ _voice_tools_executor = ThreadPoolExecutor(max_workers=VOICE_TOOLS_WORKERS, thre
 _VOICE_PROVIDER = re.compile(r"[a-z0-9-]{1,40}")
 
 
+def _voice_tool_modules() -> Dict[str, Tuple[Any, Any, Any, str]]:
+    """Voice-readable tools by name: (tool module, store class, its error,
+    sealed key). These modules are package imports, so their store module is
+    a second copy beside the path-loaded one the location and health routes
+    use, with its own thread lock; writes from both stay safe through
+    SQLite's own locking (WAL, BEGIN IMMEDIATE, the busy timeout)."""
+    modules: Dict[str, Tuple[Any, Any, Any, str]] = {}
+    for name, store, error, key in (("health_tool", "HealthStore", "HealthError", "health"),
+                                    ("location_tool", "LocationStore", "LocationError", "location")):
+        # One tool missing or broken in a partial install doesn't take the
+        # other down.
+        try:
+            tool = _plugin_package_module(name)
+            modules[tool.TOOL_NAME] = (tool, getattr(tool, store), getattr(tool, error), key)
+        except Exception:
+            logger.warning("Conduit voice tools: %s unavailable", name, exc_info=True)
+    return modules
+
+
 def _voice_tool_entries() -> Dict[str, Dict[str, Any]]:
     """Voice-readable tools by name: their schema, and which sealed key they use."""
     entries: Dict[str, Dict[str, Any]] = {}
-    # Each feature's problem takes only its own tools off the list.
-    try:
-        tool = _plugin_package_module("health_tool")
-        health_shared = bool(tool.HealthStore(_calls_home()).overview()["devices"])
-    except Exception:  # noqa: BLE001
-        logger.warning("Conduit voice tools: the health tool couldn't be listed", exc_info=True)
-        health_shared = False
-    if health_shared:
-        entries[tool.TOOL_NAME] = {
-            "key": "health",
-            "description": f"{tool.SCHEMA['description']} {tool.VOICE_NOTE}",
-            "parameters": tool.voice_parameters(),
-        }
+    for name, (tool, store_class, _, key) in _voice_tool_modules().items():
+        # A store that can't be read (damaged file) hides that tool alone.
+        try:
+            store = store_class(_calls_home())
+            if not tool.voice_shared(store):
+                continue
+            entries[name] = {
+                "key": key,
+                "description": tool.voice_description(),
+                "parameters": tool.voice_parameters(),
+            }
+        except Exception:
+            logger.warning("Conduit voice tools: %s store unreadable", name, exc_info=True)
     # The calendar and phone status, sealed with the phone feature's own key.
-    # A problem there never takes health off the list.
+    # A problem there takes only those tools off the list.
     try:
         phone = _plugin_package_module("phone_tool")
         offered = phone.voice_tools(phone.PhoneStore(_calls_home()))
@@ -4188,21 +4209,23 @@ def voice_tools_call(envelope: Any) -> Dict[str, Any]:
     # binds the op, so a misrouted envelope fails there.
     if isinstance(envelope, dict) and envelope.get("op") == "voice":
         return _phone_voice_call(envelope)
-    tool = _plugin_package_module("health_tool")
-    if not isinstance(envelope, dict) or envelope.get("tool") != tool.TOOL_NAME:
+    modules = _voice_tool_modules()
+    name = envelope.get("tool") if isinstance(envelope, dict) else None
+    if not isinstance(name, str) or name not in modules:
         raise TokenError(404, "This host has no voice tool by that name")
-    store = tool.HealthStore(_calls_home())
+    tool, store_class, error_class, _ = modules[name]
+    store = store_class(_calls_home())
     try:
         device_id, request, seal_answer = store.open_voice_request(envelope)
-    except tool.HealthError as exc:
+    except error_class as exc:
         raise TokenError(exc.status, str(exc)) from exc
     provider = request.get("provider")
+    provider = provider if isinstance(provider, str) and _VOICE_PROVIDER.fullmatch(provider) else "voice"
     args = request.get("args")
     action = args.get("action") if isinstance(args, dict) else None
     logger.info("Conduit voice read: %s %s for %s", tool.TOOL_NAME,
-                action if isinstance(action, str) and action in tool.VOICE_ACTIONS else "other",
-                provider if isinstance(provider, str) and _VOICE_PROVIDER.fullmatch(provider) else "voice")
-    return {"v": 1, **seal_answer(tool.voice_handle(args, device_id=device_id, store=store))}
+                action if isinstance(action, str) and action in tool.VOICE_ACTIONS else "other", provider)
+    return {"v": 1, **seal_answer(tool.voice_handle(args, device_id=device_id, store=store, provider=provider))}
 
 
 def _phone_voice_call(envelope: Dict[str, Any]) -> Dict[str, Any]:

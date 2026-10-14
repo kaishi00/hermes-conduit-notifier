@@ -10,5 +10,17 @@
   "aad": "conduit-location/1\ningest\nkid=4186c0bc93b7b264b5991464ab3e4c1f\ndev=device-vector-1\nbatch=batch-vector-1",
   "nonce": "AAAAAAAAAAAAAAAA",
   "plaintext": "{\"batch_id\":\"batch-vector-1\"}",
-  "ct": "upKO2AMUfh95gixFbp-_E9hsTT76TlUyHHlwzdREWwCk0Gf-Nr6Oz98FPEP_"
+  "ct": "upKO2AMUfh95gixFbp-_E9hsTT76TlUyHHlwzdREWwCk0Gf-Nr6Oz98FPEP_",
+  "voice": {
+    "call_id": "call-vector-1",
+    "request_key": "55cf19b6e1118491dc136b9c94af8af83891b19673744e64c44200411ea93424",
+    "answer_key": "d0c6c9aa90c735b1bcf78368794430d41599835b930730a7ad288fc4a010d53d",
+    "request_aad": "conduit-location/1\nvoice-request\ntool=conduit_location\nkid=4186c0bc93b7b264b5991464ab3e4c1f\ndev=device-vector-1\ncall=call-vector-1",
+    "answer_aad": "conduit-location/1\nvoice-answer\ntool=conduit_location\nkid=4186c0bc93b7b264b5991464ab3e4c1f\ndev=device-vector-1\ncall=call-vector-1",
+    "nonce": "AAAAAAAAAAAAAAAA",
+    "request": "{\"call_id\":\"call-vector-1\",\"args\":{\"action\":\"now\"},\"provider\":\"gemini-live\"}",
+    "request_ct": "Pz9gGtPpraVru4dOPXv0TcJEUmj6vNdCFECj8qkccvaUZOZDCGdFpfh-OY-1QHSBAVebQ0JZuQjZ0WpA5M5eiv7WJvwXkjdfpT0FJQHgX7j13RSFFKcJR1KMReU",
+    "answer": "{\"call_id\":\"call-vector-1\",\"result\":{\"ok\":true}}",
+    "answer_ct": "4L3Edq2Pqul5L7IkSFV1mcpEe62ksOCr_58lP-hpj0EifhOgs7WlfcyZHScBjna8zBbtma66vY4xJQ6FNc_YzA"
+  }
 }

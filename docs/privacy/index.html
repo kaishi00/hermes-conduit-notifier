@@ -71,6 +71,7 @@
       <li>When your agent asks for your current location, the relay sends your device a silent request through Apple's push service. The request contains no location; your device answers your gateway directly, and only while background sharing is on and not paused.</li>
       <li>Your saved places stay on your device. Your gateway receives their names and how far you are from them, not their coordinates. Places you mark private are reported only as "a private place".</li>
       <li>Your agent can read your location when it answers you, which means it is sent to the AI model provider your Hermes agent uses (and, for a hosted agent, to its host). Their privacy terms apply to what they receive. Conduit shows you when your agent read your location.</li>
+      <li>If you also let a voice mode read your location in Conduit's Settings &gt; Location, a live voice call in that mode (Gemini Live, Grok Live or GPT-Live) can read it too: your device fetches it from your gateway, encrypted end to end, and passes what the voice model asked for to that voice provider (Google, xAI or OpenAI). Their privacy terms apply. This is off by default and separate from sharing with your agent.</li>
       <li>Your gateway keeps location history for the period you choose (7 days by default). Location is not used for advertising, marketing or data mining, is not sold, and is not stored in iCloud.</li>
       <li>You can pause or turn off sharing at any time and delete the copy on your gateway from Conduit's Location settings.</li>
     </ul>

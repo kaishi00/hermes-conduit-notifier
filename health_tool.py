@@ -140,13 +140,23 @@ def voice_parameters() -> dict[str, Any]:
     return parameters
 
 
+def voice_description() -> str:
+    return f"{SCHEMA['description']} {VOICE_NOTE}"
+
+
+def voice_shared(store: HealthStore) -> bool:
+    """Whether any device has shared health here (the voice list offers the tool)."""
+    return bool(store.overview()["devices"])
+
+
 VOICE_ACTIONS = frozenset(SCHEMA["parameters"]["properties"]["action"].get("enum", ()))
 
 
-def voice_handle(args: Any, *, device_id: str, store: HealthStore,
+def voice_handle(args: Any, *, device_id: str, store: HealthStore, provider: str = "",
                  today: Callable[[], date] | None = None) -> dict[str, Any]:
     """The same read for a live voice call on one device, which sees only
-    the data that device shared (its id, never a name or another device)."""
+    the data that device shared (its id, never a name or another device).
+    ``provider`` isn't used: Conduit keeps health's read log."""
     try:
         wanted = dict(args) if isinstance(args, dict) else {}
         wanted.pop("device", None)

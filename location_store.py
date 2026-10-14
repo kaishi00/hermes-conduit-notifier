@@ -51,6 +51,10 @@ SCHEMA_VERSION = 1
 
 SALT = b"conduit-location-v1"
 INFO_INGEST = b"conduit-location-v1 ingest device-to-host"
+# A live voice call reads the user's own location back (POST /voice-tools/call):
+# each direction has its own key from the same agreement, apart from ingest.
+INFO_VOICE_REQUEST = b"conduit-location-v1 voice device-to-host"
+INFO_VOICE_ANSWER = b"conduit-location-v1 voice host-to-device"
 AAD_TAG = "conduit-location/1"
 KID_TAG = b"conduit-location-kid\n"
 NONCE_BYTES = 12
@@ -109,6 +113,8 @@ _BATCH_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}\Z")
 _LOCATE_ID = re.compile(r"^l_[A-Za-z0-9_-]{16,64}\Z")
 _RULE_ID = re.compile(r"^r_[A-Za-z0-9_-]{8,40}\Z")
 _KID = re.compile(r"^[0-9a-f]{32}\Z")
+# A voice tool's name, bound into the sealed request and answer.
+_VOICE_TOOL = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 _B64URL = re.compile(r"^[A-Za-z0-9_-]*\Z")
 _TZ = re.compile(r"^[A-Za-z0-9_+\-/]{1,64}\Z")
 _COUNTRY = re.compile(r"^[A-Z]{2}\Z")
@@ -158,11 +164,12 @@ def key_id(device_public: bytes, host_public: bytes) -> str:
     return hashlib.sha256(KID_TAG + device_public + host_public).hexdigest()[:32]
 
 
-def derive_key(shared: bytes, device_id: str, device_public: bytes, host_public: bytes) -> bytes:
+def derive_key(shared: bytes, device_id: str, device_public: bytes, host_public: bytes,
+               purpose: bytes = INFO_INGEST) -> bytes:
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-    info = INFO_INGEST + b"\n" + device_id.encode("ascii") + b"\n" + device_public + host_public
+    info = purpose + b"\n" + device_id.encode("ascii") + b"\n" + device_public + host_public
     return HKDF(algorithm=hashes.SHA256(), length=KEY_BYTES, salt=SALT, info=info).derive(shared)
 
 
@@ -193,6 +200,12 @@ def new_host_keypair() -> tuple[bytes, bytes]:
 
 def ingest_aad(kid: str, device_id: str, batch_id: str) -> bytes:
     return "\n".join([AAD_TAG, "ingest", f"kid={kid}", f"dev={device_id}", f"batch={batch_id}"]).encode("utf-8")
+
+
+def voice_aad(direction: str, tool: str, kid: str, device_id: str, call_id: str) -> bytes:
+    """``direction`` is "request" or "answer"; ``tool`` is the voice tool asked."""
+    return "\n".join([AAD_TAG, f"voice-{direction}", f"tool={tool}", f"kid={kid}", f"dev={device_id}",
+                      f"call={call_id}"]).encode("utf-8")
 
 
 def seal(key: bytes, plaintext: bytes, aad: bytes, nonce: bytes | None = None) -> tuple[str, str]:
@@ -411,14 +424,58 @@ class LocationStore:
             generation = _meta(db, "generation")
         return {"kid": kid, "host_public_key": b64u(host_public), "generation": generation}
 
-    def _device_key(self, db: sqlite3.Connection, device_id: str, kid: str) -> bytes:
+    def _device_key(self, db: sqlite3.Connection, device_id: str, kid: str, purpose: bytes = INFO_INGEST) -> bytes:
         row = db.execute("SELECT device_public, host_private, host_public, kid FROM devices WHERE id=?",
                          (device_id,)).fetchone()
         if row is None or row[3] != kid:
             raise LocationError("unknown_key", "This device's location key isn't on this profile; set it up again",
                                 status=409)
         device_public, host_private, host_public = bytes(row[0]), bytes(row[1]), bytes(row[2])
-        return derive_key(agree(host_private, device_public), device_id, device_public, host_public)
+        return derive_key(agree(host_private, device_public), device_id, device_public, host_public, purpose)
+
+    # Voice reads ---------------------------------------------------------------------
+
+    def open_voice_request(self, envelope: Any) -> tuple[str, dict[str, Any], Callable[[Any], dict[str, str]]]:
+        """A live voice call's sealed read from one device: its device id, the
+        opened request, and a function that seals the answer for that device
+        alone. Only a device holding its own key can ask, and the caller reads
+        only that device's location (``snapshot(device_id)``)."""
+        if not isinstance(envelope, dict) or type(envelope.get("v")) is not int or envelope.get("v") != 1:
+            raise LocationError("malformed", "Expected a version 1 sealed request")
+        device_id, kid, call_id = envelope.get("device_id"), envelope.get("kid"), envelope.get("call_id")
+        tool = envelope.get("tool")
+        if not isinstance(tool, str) or not _VOICE_TOOL.match(tool):
+            raise LocationError("malformed", "tool is malformed")
+        if not isinstance(device_id, str) or not _DEVICE_ID.match(device_id):
+            raise LocationError("malformed", "device_id is malformed")
+        if not isinstance(kid, str) or not _KID.match(kid):
+            raise LocationError("malformed", "kid is malformed")
+        if not isinstance(call_id, str) or not _BATCH_ID.match(call_id):
+            raise LocationError("malformed", "call_id is malformed")
+        if not crypto_available():
+            raise LocationError("no_crypto", "Location sharing needs the cryptography package on this host",
+                                status=501)
+        with self._read() as db:
+            if db is None:
+                raise LocationError("unknown_key",
+                                    "This device's location key isn't on this profile; set it up again", status=409)
+            request_key = self._device_key(db, device_id, kid, INFO_VOICE_REQUEST)
+            answer_key = self._device_key(db, device_id, kid, INFO_VOICE_ANSWER)
+        plaintext = open_sealed(request_key, envelope.get("nonce"), envelope.get("ct"),
+                                voice_aad("request", tool, kid, device_id, call_id))
+        try:
+            request = json.loads(plaintext)
+        except (ValueError, RecursionError):
+            raise LocationError("malformed", "The sealed request isn't JSON") from None
+        if not isinstance(request, dict) or request.get("call_id") != call_id:
+            raise LocationError("malformed", "The sealed request doesn't match its envelope")
+
+        def seal_answer(answer: Any) -> dict[str, str]:
+            body = json.dumps({"call_id": call_id, "result": answer}, ensure_ascii=False).encode("utf-8")
+            nonce, ct = seal(answer_key, body, voice_aad("answer", tool, kid, device_id, call_id))
+            return {"nonce": nonce, "ct": ct}
+
+        return device_id, request, seal_answer
 
     # Ingest --------------------------------------------------------------------
 
@@ -534,21 +591,27 @@ class LocationStore:
 
     # The agent's view -------------------------------------------------------------------
 
-    def snapshot(self) -> dict[str, Any] | None:
+    def snapshot(self, device_id: str | None = None) -> dict[str, Any] | None:
         """Where the user is: the device with the newest fix, with its sharing
         and places, or None when nothing is shared. The device that synced
         last decides when it says sharing is paused or off (the user's
-        latest word), and when no device has a fix."""
+        latest word), and when no device has a fix. ``device_id`` (a voice
+        read) reads that device alone, matched as an id."""
         with self._read() as db:
             if db is None:
                 return None
-            rows = db.execute("SELECT id, name, last_seen, sharing FROM devices WHERE last_seen IS NOT NULL"
-                              " ORDER BY last_seen DESC").fetchall()
+            if device_id is not None:
+                rows = db.execute("SELECT id, name, last_seen, sharing FROM devices WHERE id=? AND last_seen IS NOT"
+                                  " NULL", (device_id,)).fetchall()
+            else:
+                rows = db.execute("SELECT id, name, last_seen, sharing FROM devices WHERE last_seen IS NOT NULL"
+                                  " ORDER BY last_seen DESC").fetchall()
             if not rows:
                 return None
             row = rows[0]
             latest = _decode(row[3], None) or {}
-            if not sharing_paused(latest, self.clock()) and (latest.get("talking") or latest.get("background")):
+            if device_id is None and not sharing_paused(latest, self.clock()) and (
+                    latest.get("talking") or latest.get("background")):
                 newest = db.execute(
                     "SELECT device FROM fixes WHERE device IN (%s) ORDER BY at DESC LIMIT 1"
                     % ",".join("?" * len(rows)), [item[0] for item in rows]).fetchone()
