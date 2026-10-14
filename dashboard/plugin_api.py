@@ -4155,12 +4155,16 @@ _VOICE_PROVIDER = re.compile(r"[a-z0-9-]{1,40}")
 def _voice_tool_modules() -> Dict[str, Tuple[Any, Any, Any, str]]:
     """Voice-readable tools by name: (tool module, store class, its error,
     sealed key)."""
-    health = _plugin_package_module("health_tool")
-    location = _plugin_package_module("location_tool")
-    return {
-        health.TOOL_NAME: (health, health.HealthStore, health.HealthError, "health"),
-        location.TOOL_NAME: (location, location.LocationStore, location.LocationError, "location"),
-    }
+    modules: Dict[str, Tuple[Any, Any, Any, str]] = {}
+    for name, store, error, key in (("health_tool", "HealthStore", "HealthError", "health"),
+                                    ("location_tool", "LocationStore", "LocationError", "location")):
+        # One tool missing from a partial install doesn't take the other down.
+        try:
+            tool = _plugin_package_module(name)
+        except TokenError:
+            continue
+        modules[tool.TOOL_NAME] = (tool, getattr(tool, store), getattr(tool, error), key)
+    return modules
 
 
 def _voice_tool_entries() -> Dict[str, Dict[str, Any]]:

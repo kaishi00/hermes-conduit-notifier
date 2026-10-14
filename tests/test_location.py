@@ -807,9 +807,10 @@ def test_a_voice_read_answers_sealed_and_is_logged_as_a_call(voice):
     assert _voice_call(client, phone, {"action": "distance_to", "place": "Clinic"})["error"] == "private"
     assert store.reads()[0] == {"at": store.reads()[0]["at"], "action": "distance_to",
                                 "session_title": "Gemini Live call"}
+    assert "conduit://" not in json.dumps(_voice_call(client, phone, {"action": "places"}))
 
 
-@pytest.mark.parametrize("action", ["locate", "set_rule", "remove_rule", "rules", None])
+@pytest.mark.parametrize("action", ["locate", "set_rule", "remove_rule", "rules", None, ["now"], {"a": 1}])
 def test_a_voice_call_can_only_read(voice, action):
     client, store = voice
     phone = _voice_phone(store, fix=fix())
@@ -823,7 +824,8 @@ def test_a_voice_read_covers_only_the_asking_phone(voice):
     _voice_phone(store, fix=fix())
     other = _voice_phone(store, "ipad-installation-2")
     # The iPad has a key but shared nothing: it hears nothing about the phone.
-    assert _voice_call(client, other, {"action": "now"})["error"] == "nothing_shared"
+    answer = _voice_call(client, other, {"action": "now"})
+    assert answer["error"] == "nothing_shared" and "conduit://" not in answer["note"]
 
 
 def test_a_paused_phone_isnt_read_by_voice(voice):
@@ -837,7 +839,12 @@ def test_a_location_voice_request_needs_the_device_key_and_its_tool(voice):
     client, store = voice
     phone = _voice_phone(store, fix=fix())
     envelope = phone.ask({"action": "now"})
-    assert client.post(f"{BASE}/voice-tools/call", json={**envelope, "tool": "conduit_health"}).status_code != 200
+    # Relabelled for health, it opens with neither key: the tool is sealed in.
+    relabelled = client.post(f"{BASE}/voice-tools/call", json={**envelope, "tool": "conduit_health"})
+    assert relabelled.status_code in (404, 409) and "1.2 km" not in relabelled.text
+    with pytest.raises(location.LocationError) as error:
+        store.open_voice_request({**envelope, "tool": "conduit_health"})
+    assert error.value.code == "bad_seal"
     forged = VoicePhone()
     forged.kid, forged.request_key = phone.kid, secrets.token_bytes(32)
     response = client.post(f"{BASE}/voice-tools/call", json=forged.ask({"action": "now"}))
