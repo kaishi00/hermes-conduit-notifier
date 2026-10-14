@@ -194,6 +194,16 @@ def test_a_second_device_without_a_fix_doesnt_hide_the_first_ones(store, phone):
     assert store.latest_place()["paused"] is True
 
 
+def test_a_fix_stamped_in_the_future_doesnt_hide_later_ones(store, phone):
+    clock = [NOW]
+    store.clock = lambda: clock[0]
+    store.ingest(phone.seal(phone.batch(fix=fix(id="f_ahead", at="2026-10-13T20:00:00+01:00"))))
+    assert store.snapshot()["fix"]["at"] == NOW
+    clock[0] += 60
+    store.ingest(phone.seal(phone.batch(fix=fix(id="f_real", at="2026-10-13T07:00:30+01:00"))))
+    assert store.snapshot()["fix"]["id"] == "f_real"
+
+
 def test_a_move_stamped_in_the_future_runs_no_rule(store, phone):
     _rule(store, days=[], hours="")
     leave = {"id": "e1", "kind": "leave", "place_id": "p_home", "at": "2026-10-13T18:00:00+01:00"}
@@ -241,7 +251,7 @@ def test_leaving_home_on_a_weekday_morning_runs_the_rule_once(store, phone):
     leave = {"id": "e1", "kind": "leave", "place_id": "p_home", "at": "2026-10-13T06:55:00+01:00"}
     fired = store.ingest(phone.seal(phone.batch(events=[leave])))["rules_fired"]
     assert [rule["job_id"] for rule in fired] == ["job-1"]
-    assert "left Home at 06:55" in fired[0]["prompt"]
+    assert "left Home at 06:55 (Tue 13 Oct" in fired[0]["prompt"]
     again = {**leave, "id": "e2", "at": "2026-10-13T06:57:00+01:00"}
     assert store.ingest(phone.seal(phone.batch(events=[again])))["rules_fired"] == []
     assert store.rules()[0]["last_fired"] == "2026-10-13"

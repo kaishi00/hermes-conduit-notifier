@@ -941,6 +941,10 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: f
     if events and not sharing["background"]:
         raise LocationError("layer_off", "Arrivals and departures need background sharing on", status=409)
     fix = None if batch.get("fix") is None or paused else _parse_fix(batch.get("fix"), sharing, current)
+    if fix is not None and fix["at"] > now + RULE_EVENT_SKEW_S:
+        # A phone clock running ahead: don't let a fix from "the future"
+        # hide every real one after it.
+        fix["at"] = now
     locate_id = batch.get("locate_id")
     if locate_id is not None and (not isinstance(locate_id, str) or not _LOCATE_ID.match(locate_id)):
         raise LocationError("malformed", "locate_id is malformed")
@@ -1015,8 +1019,14 @@ def _fire_rules(db: sqlite3.Connection, event: dict[str, Any], place: dict[str, 
         where = "a private place" if place["private"] else place["name"]
         fired.append({"rule_id": rule["id"], "job_id": rule["job_id"], "what": rule["what"],
                       "prompt": f"[Conduit place event: the user {verb} {where} at "
-                                f"{local.strftime('%H:%M')} ({local.strftime('%a %d %b')}, their local time).]"})
+                                f"{local.hour:02d}:{local.minute:02d} ({_DAY_NAMES[local.weekday()]} {local.day:02d} "
+                                f"{_MONTH_NAMES[local.month - 1]}, their local time).]"})
     return fired
+
+
+# Spelled out so the event line reads the same whatever the host's locale.
+_DAY_NAMES = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+_MONTH_NAMES = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
 
 def _prune(db: sqlite3.Connection, device_id: str, retention_days: int, now: float) -> None:
