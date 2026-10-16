@@ -9127,6 +9127,9 @@ def _room_files_root() -> str:
 
 
 _room_file_last_sweep: Dict[str, float] = {}
+# Uploads wait on one another (the lock below), so they get their own
+# threads rather than the default pool other routes share.
+_room_file_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="conduit-room-files")
 # Sweeps, the free-space check and the write run one at a time, so two
 # uploads can't both pass the check and then fill the disk together.
 _room_file_lock = threading.Lock()
@@ -9220,7 +9223,9 @@ def store_room_file(root: str, body: Any, now: Optional[float] = None) -> Dict[s
             with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as handle:
                 handle.write(data)
         except OSError as exc:
-            shutil.rmtree(folder, ignore_errors=True)
+            # A folder that was already there is another upload's: keep it.
+            if exc.errno != errno.EEXIST:
+                shutil.rmtree(folder, ignore_errors=True)
             if exc.errno in (errno.ENOSPC, errno.EDQUOT):
                 raise HTTPException(status_code=507, detail="The host is low on disk space",
                                     headers={"Cache-Control": "no-store"})
@@ -9249,7 +9254,7 @@ async def post_room_file(request: Request, response: Response, profile: Optional
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
     try:
         body = await _read_json_body(request, ROOM_FILE_MAX_BODY_BYTES)
-        stored = await _run_scoped(profile, lambda: store_room_file(_room_files_root(), body))
+        stored = await _run_scoped(profile, lambda: store_room_file(_room_files_root(), body), _room_file_executor)
     except TokenError as exc:
         # The profile couldn't be scoped; nothing was stored.
         _room_file_limiter.release(key, mint)
