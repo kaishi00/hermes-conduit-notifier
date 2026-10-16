@@ -9103,7 +9103,9 @@ def _room_file_name(raw: Any) -> str:
     """The upload's own name, made safe to use as one path component."""
     # Only the first part of an absurd name is worth looking at.
     raw = raw if isinstance(raw, str) else ""
-    name = _ROOM_FILE_UNSAFE.sub("_", raw[:1024].strip()).strip(" .")
+    # Lone surrogates (valid JSON escapes) can't be encoded: drop them.
+    raw = raw[:1024].encode("utf-8", "ignore").decode("utf-8")
+    name = _ROOM_FILE_UNSAFE.sub("_", raw.strip()).strip(" .")
     if not name:
         return "file"
     if len(name.encode("utf-8")) <= ROOM_FILE_NAME_MAX_BYTES:
@@ -9158,7 +9160,8 @@ def _sweep_room_files(root: str, now: float, incoming: int = 0) -> None:
         if total <= ROOM_FILE_TOTAL_BYTES:
             break
         shutil.rmtree(path, ignore_errors=True)
-        total -= size
+        if not os.path.lexists(path):
+            total -= size
     _room_file_last_sweep[root] = now
 
 

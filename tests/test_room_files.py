@@ -165,3 +165,7 @@ def test_a_stored_file_is_private_to_the_host_user(tmp_path):
 def test_a_name_that_is_not_text_falls_back_to_file():
     assert api._room_file_name(["a" * 10_000]) == "file"
     assert api._room_file_name({"x": 1}) == "file"
+
+
+def test_a_lone_surrogate_in_a_name_is_dropped():
+    assert api._room_file_name("\ud800photo.jpg") == "photo.jpg"
