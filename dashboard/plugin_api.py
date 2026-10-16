@@ -57,6 +57,7 @@ import os
 import queue
 import re
 import shutil
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -2223,6 +2224,9 @@ SPEECH_SERVER_CONNECT_TIMEOUT_S = 5.0
 SPEECH_SERVER_SETUP_TIMEOUT_S = 10.0
 # The test waits this long for the server's first event (session.created).
 SPEECH_SERVER_TEST_FIRST_EVENT_S = 5.0
+# Conduit streams audio for the whole utterance, so a quiet client is gone;
+# closing it frees its open-relay slot.
+SPEECH_SERVER_IDLE_S = 60.0
 SPEECH_SERVER_LIMIT = 30
 SPEECH_SERVER_WINDOW_S = 60.0
 SPEECH_SERVER_MAX_OPEN_PER_PROFILE = 3
@@ -2273,7 +2277,11 @@ def _speech_server_host_is_private(host: str) -> bool:
     try:
         address = ipaddress.ip_address(name)
     except ValueError:
-        return name == "localhost" or "." not in name or name.endswith(_SPEECH_SERVER_LAN_SUFFIXES)
+        try:
+            # Shorthand IPv4 the resolver still dials, such as 134744072 or 0x08080808.
+            address = ipaddress.IPv4Address(socket.inet_aton(name))
+        except (OSError, ValueError):
+            return name == "localhost" or "." not in name or name.endswith(_SPEECH_SERVER_LAN_SUFFIXES)
     if address.version == 4 and address in _CGNAT:
         return True
     return address.is_loopback or address.is_private or address.is_link_local
@@ -2309,9 +2317,10 @@ def speech_server_url(raw: Any) -> str:
     return urllib.parse.urlunsplit((scheme, netloc, path, parts.query, ""))
 
 
-def speech_server_target() -> Tuple[str, str]:
+def speech_server_target(settings: Optional[Dict[str, Any]] = None) -> Tuple[str, str]:
     """(url, api_key) for this profile's speech server; TokenError(503) when unset or invalid."""
-    settings = _speech_server_settings()
+    if settings is None:
+        settings = _speech_server_settings()
     url = speech_server_url(settings.get("url"))
     key = str(settings.get("api_key") or "").strip()
     if any(ord(c) < 0x20 or ord(c) == 0x7F for c in key):
@@ -2328,7 +2337,7 @@ def speech_server_status() -> Dict[str, Any]:
     configured = bool(str(settings.get("url") or "").strip())
     has_key = bool(str(settings.get("api_key") or "").strip())
     try:
-        url, _ = speech_server_target()
+        url, _ = speech_server_target(settings)
     except TokenError as exc:
         return {"configured": configured, "available": False, "url": None, "has_key": has_key, "reason": str(exc)}
     return {"configured": True, "available": True, "url": url, "has_key": has_key, "reason": None}
@@ -2501,7 +2510,7 @@ async def _speech_server_relay(ws: WebSocket, refuse: Callable[[int, str], Any],
 
     async def client_to_server() -> None:
         while True:
-            message = await ws.receive()
+            message = await asyncio.wait_for(ws.receive(), timeout=SPEECH_SERVER_IDLE_S)
             if message.get("type") == "websocket.disconnect":
                 return
             text, data = message.get("text"), message.get("bytes")
@@ -2540,6 +2549,8 @@ async def _speech_server_relay(ws: WebSocket, refuse: Callable[[int, str], Any],
     if outbound in done and not isinstance(outbound_failure, ConnectionClosed):
         if isinstance(outbound_failure, ValueError):
             await refuse(1009, "Frame too large")
+        elif isinstance(outbound_failure, asyncio.TimeoutError):
+            await refuse(1000, "Idle for too long")
         return
     if inbound_failure is not None and not isinstance(inbound_failure, ConnectionClosed):
         logger.warning("Speech server relay failed: %s", type(inbound_failure).__name__)

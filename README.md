@@ -763,7 +763,8 @@ speech-to-speech has no authentication of its own, so keep it on your network.
 The socket takes the dashboard's WebSocket credential (`?ticket=`) and an
 optional `?profile=`. Close codes: 4503 not configured or invalid URL, 4401
 dashboard sign-in required, 4429 rate limited, 4400 the server refused, 4502
-unreachable or dropped (retryable).
+unreachable or dropped (retryable), 4500 the relay failed on the host, 1009 a
+frame over 256 KB. A socket that sends nothing for 60 seconds is closed.
 
 ## Voice call transcripts
 

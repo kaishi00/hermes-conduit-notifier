@@ -140,6 +140,8 @@ def test_url_policy_accepts(raw, expected):
     ("", "No speech server is set"),
     ("ws://voice.example.com:8765", "needs wss://"),
     ("ws://8.8.8.8:8765", "needs wss://"),
+    ("ws://134744072:8765", "needs wss://"),
+    ("ws://0x08080808:8765", "needs wss://"),
     ("ftp://10.0.0.5", "must look like"),
     ("ws://user:pw@10.0.0.5:8765", "must look like"),
     ("ws://10.0.0.5:99999", "not valid"),
@@ -309,6 +311,40 @@ def test_socket_keeps_the_servers_own_close_reason(client, server):
         close = _wait_close(ws)
     assert close.code == api.SPEECH_SERVER_CLOSE_REFUSED
     assert close.reason == "The speech server closed the connection (4000: model not loaded)"
+
+
+def test_socket_sends_the_key_as_a_bearer(client, hermes, server):
+    _settings(hermes, url="ws://10.0.0.5:8765", api_key="secret")
+    server.upstream.release.set()
+    with client.websocket_connect(f"{BASE}/speech-server/socket") as ws:
+        _wait_close(ws)
+    assert server.connects == [("ws://10.0.0.5:8765/v1/realtime", {"Authorization": "Bearer secret"})]
+
+
+def test_socket_closes_an_idle_client(client, server, monkeypatch):
+    monkeypatch.setattr(api, "SPEECH_SERVER_IDLE_S", 0.05)
+    with client.websocket_connect(f"{BASE}/speech-server/socket") as ws:
+        close = _wait_close(ws)
+    assert close.code == 1000 and close.reason == "Idle for too long"
+    assert server.upstream.closed
+
+
+def test_socket_caps_open_relays_on_the_host(client, server, monkeypatch):
+    monkeypatch.setattr(api, "_speech_server_open", {"a": 3, "b": 3, "c": 2})
+    with client.websocket_connect(f"{BASE}/speech-server/socket?profile=work") as ws:
+        close = _wait_close(ws)
+    assert close.code == api.SPEECH_SERVER_CLOSE_RATE_LIMITED
+    assert server.connects == []
+
+
+def test_socket_rate_limit_closes_with_4429(client, server, monkeypatch):
+    monkeypatch.setattr(api, "_speech_server_limiter", api._MintLimiter(1, api.SPEECH_SERVER_WINDOW_S))
+    server.upstream.release.set()
+    with client.websocket_connect(f"{BASE}/speech-server/socket") as ws:
+        _wait_close(ws)
+    with client.websocket_connect(f"{BASE}/speech-server/socket") as ws:
+        close = _wait_close(ws)
+    assert close.code == api.SPEECH_SERVER_CLOSE_RATE_LIMITED
 
 
 def test_socket_refuses_oversized_frames(client, server):
