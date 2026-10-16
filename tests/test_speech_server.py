@@ -144,6 +144,9 @@ def test_url_policy_accepts(raw, expected):
     ("ws://user:pw@10.0.0.5:8765", "must look like"),
     ("ws://10.0.0.5:99999", "not valid"),
     ("ws://10.0.0.5/a b", "must look like"),
+    ("ws://10.0.0.5/a\tb", "must look like"),
+    ("ws://10.0.0.5/a\x00b", "must look like"),
+    ("ws://10.0.0.5/a\x7fb", "must look like"),
 ])
 def test_url_policy_refuses(raw, fragment):
     with pytest.raises(api.TokenError) as caught:
@@ -176,6 +179,22 @@ def test_status_explains_an_invalid_url(client, hermes):
     assert "needs wss://" in body["reason"]
 
 
+def test_status_says_when_the_config_cannot_be_read(client, hermes):
+    def broken():
+        raise PermissionError("config.yaml")
+    sys.modules["hermes_cli.config"].load_config = broken
+    body = client.get(f"{BASE}/speech-server/status").json()
+    assert body["available"] is False
+    assert "could not read its config (PermissionError)" in body["reason"]
+
+
+def test_key_with_a_control_character_is_refused(hermes):
+    _settings(hermes, url="ws://10.0.0.5:8765", api_key="sec\x00ret")
+    with pytest.raises(api.TokenError) as caught:
+        api.speech_server_target()
+    assert "control character" in str(caught.value)
+
+
 # --- test ---------------------------------------------------------------------
 
 def test_test_reports_the_first_event_and_latency(client, server):
@@ -201,6 +220,16 @@ def test_test_without_a_server_says_why(client, hermes, server):
     assert server.connects == []
 
 
+def test_an_invalid_url_does_not_spend_a_rate_limit_slot(client, hermes, monkeypatch):
+    monkeypatch.setattr(api, "_speech_server_limiter", api._MintLimiter(1, api.SPEECH_SERVER_WINDOW_S))
+    _settings(hermes, url="ws://voice.example.com")
+    for _ in range(3):
+        assert "needs wss://" in client.post(f"{BASE}/speech-server/test").json()["reason"]
+    _settings(hermes, url="ws://10.0.0.5:8765")
+    assert client.post(f"{BASE}/speech-server/test").status_code == 200
+    assert client.post(f"{BASE}/speech-server/test").status_code == 429
+
+
 def test_test_reports_an_unreachable_server_without_echoing_the_error(client, server):
     server.error = OSError("connect to 127.0.0.1 secret detail")
     body = client.post(f"{BASE}/speech-server/test").json()
@@ -209,7 +238,7 @@ def test_test_reports_an_unreachable_server_without_echoing_the_error(client, se
 
 
 def test_test_reports_a_refused_key(client, server):
-    server.error = api.GrokUpstreamRefused(401)
+    server.error = api.RealtimeUpstreamRefused(401)
     body = client.post(f"{BASE}/speech-server/test").json()
     assert body["connected"] is False and "refused the key" in body["reason"]
 
@@ -271,6 +300,15 @@ def test_socket_maps_a_dropped_server_to_retryable(client, server):
     with client.websocket_connect(f"{BASE}/speech-server/socket") as ws:
         close = _wait_close(ws)
     assert close.code == api.SPEECH_SERVER_CLOSE_UNREACHABLE
+
+
+def test_socket_keeps_the_servers_own_close_reason(client, server):
+    server.upstream = FakeUpstream(close_code=4000, close_reason="model not loaded")
+    server.upstream.release.set()
+    with client.websocket_connect(f"{BASE}/speech-server/socket") as ws:
+        close = _wait_close(ws)
+    assert close.code == api.SPEECH_SERVER_CLOSE_REFUSED
+    assert close.reason == "The speech server closed the connection (4000: model not loaded)"
 
 
 def test_socket_refuses_oversized_frames(client, server):

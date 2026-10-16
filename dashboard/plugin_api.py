@@ -45,6 +45,7 @@ import errno
 import functools
 import hashlib
 import http.client
+import ipaddress
 import importlib
 import importlib.util
 import inspect
@@ -1974,16 +1975,26 @@ async def _ws_authorized(ws: WebSocket) -> bool:
         return False
 
 
-class GrokUpstreamRefused(Exception):
-    """xAI refused the WebSocket upgrade; ``status`` is its HTTP status."""
+class RealtimeUpstreamRefused(Exception):
+    """A realtime upstream (xAI, the user's speech server) refused the WebSocket
+    upgrade; ``status`` is its HTTP status."""
 
     def __init__(self, status: int) -> None:
         super().__init__(f"HTTP {status}")
         self.status = status
 
 
+GrokUpstreamRefused = RealtimeUpstreamRefused
+
+
 async def _connect_xai(url: str, headers: Dict[str, str]) -> Any:
-    """Opens the realtime socket to xAI (the `websockets` package Hermes ships)."""
+    """Opens the realtime socket to xAI."""
+    return await _connect_realtime(url, headers, GROK_LIVE_MAX_SERVER_FRAME_BYTES, GROK_LIVE_CONNECT_TIMEOUT_S)
+
+
+async def _connect_realtime(url: str, headers: Dict[str, str], max_size: int, open_timeout: float) -> Any:
+    """Opens a realtime WebSocket with the `websockets` package Hermes ships;
+    RealtimeUpstreamRefused when the server answers the upgrade with an HTTP error."""
     try:
         from websockets.asyncio.client import connect
         kwargs: Dict[str, Any] = {"additional_headers": headers}
@@ -1999,13 +2010,12 @@ async def _connect_xai(url: str, headers: Dict[str, str]) -> Any:
     except ImportError:
         InvalidStatusCode = None  # type: ignore[assignment]
     try:
-        return await connect(url, max_size=GROK_LIVE_MAX_SERVER_FRAME_BYTES,
-                             open_timeout=GROK_LIVE_CONNECT_TIMEOUT_S, **kwargs)
+        return await connect(url, max_size=max_size, open_timeout=open_timeout, **kwargs)
     except Exception as exc:
         if InvalidStatus is not None and isinstance(exc, InvalidStatus):
-            raise GrokUpstreamRefused(int(getattr(exc.response, "status_code", 0) or 0))
+            raise RealtimeUpstreamRefused(int(getattr(exc.response, "status_code", 0) or 0))
         if InvalidStatusCode is not None and isinstance(exc, InvalidStatusCode):
-            raise GrokUpstreamRefused(int(getattr(exc, "status_code", 0) or 0))
+            raise RealtimeUpstreamRefused(int(getattr(exc, "status_code", 0) or 0))
         raise
 
 
@@ -2121,7 +2131,7 @@ async def _grok_live_relay(ws: WebSocket, refuse: Callable[[int, str], Any], tok
     url = f"{GROK_LIVE_URL}?{urllib.parse.urlencode({'model': model})}"
     try:
         upstream = await _connect_xai(url, {"Authorization": f"Bearer {token}"})
-    except GrokUpstreamRefused as exc:
+    except RealtimeUpstreamRefused as exc:
         logger.warning("xAI refused the Grok Live socket: HTTP %s", exc.status)
         await refuse(*_grok_refusal(exc.status, auth))
         return
@@ -2228,7 +2238,7 @@ SPEECH_SERVER_CLOSE_UNREACHABLE = 4502
 SPEECH_SERVER_CLOSE_FAILED = 4500
 SPEECH_SERVER_NOT_CONFIGURED = "No speech server is set for this profile (voice.speech_server.url)."
 _SPEECH_SERVER_LAN_SUFFIXES = (".local", ".lan", ".home", ".internal", ".home.arpa", ".localdomain", ".ts.net")
-_CGNAT = None  # ipaddress.ip_network("100.64.0.0/10"), built lazily
+_CGNAT = ipaddress.ip_network("100.64.0.0/10")  # Tailscale addresses
 
 _speech_server_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="conduit-speech-server")
 _speech_server_limiter = _MintLimiter(SPEECH_SERVER_LIMIT, SPEECH_SERVER_WINDOW_S,
@@ -2247,23 +2257,23 @@ def _speech_server_settings() -> Dict[str, Any]:
         return {}
     except Exception as exc:
         logger.warning("Speech server could not read the Hermes config: %s", type(exc).__name__)
-        return {}
+        raise TokenError(503, f"The Hermes host could not read its config ({type(exc).__name__}).")
     voice = config.get("voice") if isinstance(config, dict) else None
     server = voice.get("speech_server") if isinstance(voice, dict) else None
     return server if isinstance(server, dict) else {}
 
 
 def _speech_server_host_is_private(host: str) -> bool:
-    """Loopback, private, link-local or Tailscale (CGNAT) address, or a LAN-style name."""
-    import ipaddress
-    global _CGNAT
+    """Loopback, private, link-local or Tailscale (CGNAT) address, or a LAN-style name.
+
+    Names are judged by their shape, never resolved: this only decides whether
+    plain ws:// is allowed, and the user picks the server anyway.
+    """
     name = host.strip("[]").lower().rstrip(".")
     try:
         address = ipaddress.ip_address(name)
     except ValueError:
         return name == "localhost" or "." not in name or name.endswith(_SPEECH_SERVER_LAN_SUFFIXES)
-    if _CGNAT is None:
-        _CGNAT = ipaddress.ip_network("100.64.0.0/10")
     if address.version == 4 and address in _CGNAT:
         return True
     return address.is_loopback or address.is_private or address.is_link_local
@@ -2288,7 +2298,7 @@ def speech_server_url(raw: Any) -> str:
     scheme = {"http": "ws", "https": "wss"}.get(parts.scheme.lower(), parts.scheme.lower())
     host = parts.hostname or ""
     if scheme not in ("ws", "wss") or not host or parts.username or parts.password or parts.fragment \
-            or any(c in text for c in "\r\n "):
+            or any(ord(c) <= 0x20 or ord(c) == 0x7F for c in text):
         raise TokenError(503, "The speech server URL must look like ws://host:8765/v1/realtime.")
     if scheme == "ws" and not _speech_server_host_is_private(host):
         raise TokenError(503, f"{host} is a public address, so the speech server needs wss://.")
@@ -2304,14 +2314,17 @@ def speech_server_target() -> Tuple[str, str]:
     settings = _speech_server_settings()
     url = speech_server_url(settings.get("url"))
     key = str(settings.get("api_key") or "").strip()
-    if any(c in key for c in "\r\n"):
-        raise TokenError(503, "The speech server key contains a line break.")
+    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in key):
+        raise TokenError(503, "The speech server key contains a control character.")
     return url, key
 
 
 def speech_server_status() -> Dict[str, Any]:
     """What's configured; whether the server answers is the test's job."""
-    settings = _speech_server_settings()
+    try:
+        settings = _speech_server_settings()
+    except TokenError as exc:
+        return {"configured": False, "available": False, "url": None, "has_key": False, "reason": str(exc)}
     configured = bool(str(settings.get("url") or "").strip())
     has_key = bool(str(settings.get("api_key") or "").strip())
     try:
@@ -2323,29 +2336,7 @@ def speech_server_status() -> Dict[str, Any]:
 
 async def _connect_speech_server(url: str, headers: Dict[str, str]) -> Any:
     """Opens the realtime socket to the user's speech server."""
-    try:
-        from websockets.asyncio.client import connect
-        kwargs: Dict[str, Any] = {"additional_headers": headers}
-    except ImportError:  # websockets < 13
-        from websockets import connect  # type: ignore[no-redef]
-        kwargs = {"extra_headers": headers}
-    try:
-        from websockets.exceptions import InvalidStatus
-    except ImportError:
-        InvalidStatus = None  # type: ignore[assignment]
-    try:
-        from websockets.exceptions import InvalidStatusCode
-    except ImportError:
-        InvalidStatusCode = None  # type: ignore[assignment]
-    try:
-        return await connect(url, max_size=SPEECH_SERVER_MAX_SERVER_FRAME_BYTES,
-                             open_timeout=SPEECH_SERVER_CONNECT_TIMEOUT_S, **kwargs)
-    except Exception as exc:
-        if InvalidStatus is not None and isinstance(exc, InvalidStatus):
-            raise GrokUpstreamRefused(int(getattr(exc.response, "status_code", 0) or 0))
-        if InvalidStatusCode is not None and isinstance(exc, InvalidStatusCode):
-            raise GrokUpstreamRefused(int(getattr(exc, "status_code", 0) or 0))
-        raise
+    return await _connect_realtime(url, headers, SPEECH_SERVER_MAX_SERVER_FRAME_BYTES, SPEECH_SERVER_CONNECT_TIMEOUT_S)
 
 
 def _speech_server_headers(key: str) -> Dict[str, str]:
@@ -2376,9 +2367,11 @@ async def get_speech_server_status(response: Response, profile: Optional[str] = 
         raise _unexpected("status", exc, feature="Speech server")
 
 
-def _speech_server_test_setup(profile: Optional[str]) -> Tuple[str, str]:
+def _speech_server_setup(profile: Optional[str]) -> Tuple[str, str]:
+    """The target to dial, checked before a rate-limit slot is spent on it."""
+    target = speech_server_target()
     _speech_server_limiter.acquire(_limiter_key(profile))
-    return speech_server_target()
+    return target
 
 
 @router.post("/speech-server/test")
@@ -2391,7 +2384,7 @@ async def post_speech_server_test(response: Response, profile: Optional[str] = N
     response.headers["Cache-Control"] = "no-store"
     try:
         url, key = await asyncio.wait_for(
-            _run_scoped(profile, lambda: _speech_server_test_setup(profile), _speech_server_executor),
+            _run_scoped(profile, lambda: _speech_server_setup(profile), _speech_server_executor),
             timeout=SPEECH_SERVER_SETUP_TIMEOUT_S)
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="Speech server test timed out", headers={"Cache-Control": "no-store"})
@@ -2411,7 +2404,7 @@ async def post_speech_server_test(response: Response, profile: Optional[str] = N
     started = time.monotonic()
     try:
         upstream = await _connect_speech_server(url, _speech_server_headers(key))
-    except GrokUpstreamRefused as exc:
+    except RealtimeUpstreamRefused as exc:
         return failed(_speech_server_refusal(exc.status)[1])
     except Exception as exc:
         logger.warning("Speech server test could not connect: %s", type(exc).__name__)
@@ -2439,11 +2432,6 @@ async def post_speech_server_test(response: Response, profile: Optional[str] = N
             await upstream.close()
 
 
-def _speech_server_socket_setup(profile: Optional[str]) -> Tuple[str, str]:
-    _speech_server_limiter.acquire(_limiter_key(profile))
-    return speech_server_target()
-
-
 @router.websocket("/speech-server/socket")
 async def speech_server_socket(ws: WebSocket) -> None:
     authorized = await _ws_authorized(ws)
@@ -2465,7 +2453,7 @@ async def speech_server_socket(ws: WebSocket) -> None:
         return
     try:
         url, key = await asyncio.wait_for(
-            _run_scoped(profile, lambda: _speech_server_socket_setup(profile), _speech_server_executor),
+            _run_scoped(profile, lambda: _speech_server_setup(profile), _speech_server_executor),
             timeout=SPEECH_SERVER_SETUP_TIMEOUT_S)
     except asyncio.TimeoutError:
         await refuse(SPEECH_SERVER_CLOSE_UNREACHABLE, "The Hermes host timed out reading the speech server settings")
@@ -2502,7 +2490,7 @@ async def _speech_server_relay(ws: WebSocket, refuse: Callable[[int, str], Any],
     """One utterance's relay, from dialing the speech server to forwarding its close."""
     try:
         upstream = await _connect_speech_server(url, _speech_server_headers(key))
-    except GrokUpstreamRefused as exc:
+    except RealtimeUpstreamRefused as exc:
         logger.warning("The speech server refused the relay: HTTP %s", exc.status)
         await refuse(*_speech_server_refusal(exc.status))
         return
@@ -2558,7 +2546,8 @@ async def _speech_server_relay(ws: WebSocket, refuse: Callable[[int, str], Any],
     code = getattr(upstream, "close_code", None)
     reason = str(getattr(upstream, "close_reason", "") or "")
     if code is not None and 3000 <= code <= 4999:
-        await refuse(SPEECH_SERVER_CLOSE_REFUSED, f"The speech server closed the connection ({code})")
+        detail = f"{code}: {reason}" if reason else str(code)
+        await refuse(SPEECH_SERVER_CLOSE_REFUSED, f"The speech server closed the connection ({detail})")
     elif code is None or code in (1005, 1006, 1015) or not 1000 <= code <= 1014:
         await refuse(SPEECH_SERVER_CLOSE_UNREACHABLE, "The connection to the speech server was lost")
     else:
@@ -8456,7 +8445,7 @@ class _GrokWatchSession(_WatchAudioSession):
         url = f"{GROK_LIVE_URL}?{urllib.parse.urlencode({'model': model})}"
         try:
             upstream = await _connect_xai(url, {"Authorization": f"Bearer {token}"})
-        except GrokUpstreamRefused as exc:
+        except RealtimeUpstreamRefused as exc:
             code, message = _grok_refusal(exc.status, auth)
             raise WatchAudioFailure("rate_limited" if code == GROK_CLOSE_RATE_LIMITED else
                                     "unreachable" if code == GROK_CLOSE_UNREACHABLE else "refused", message)

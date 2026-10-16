@@ -749,7 +749,9 @@ voice:
 
 Plain `ws://` is only allowed for loopback, private, link-local and Tailscale
 addresses or LAN-style names (`localhost`, single-label names, `.local`, `.lan`,
-`.internal`, `.home.arpa`, `.ts.net`). A public host needs `wss://`.
+`.internal`, `.home.arpa`, `.ts.net`). A public host needs `wss://`. Names are
+judged by their shape and not resolved, so this is a guard against mistakes,
+not a security boundary.
 speech-to-speech has no authentication of its own, so keep it on your network.
 
 | Method | Path | Returns |
