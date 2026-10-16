@@ -160,3 +160,8 @@ def test_line_separators_never_reach_a_name():
 def test_a_stored_file_is_private_to_the_host_user(tmp_path):
     stored = api.store_room_file(str(tmp_path), _body(b"hello"), now=1_760_000_000)
     assert os.stat(stored["path"]).st_mode & 0o777 == 0o600
+
+
+def test_a_name_that_is_not_text_falls_back_to_file():
+    assert api._room_file_name(["a" * 10_000]) == "file"
+    assert api._room_file_name({"x": 1}) == "file"

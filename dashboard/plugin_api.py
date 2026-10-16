@@ -9099,7 +9099,8 @@ ROOM_FILE_NAME_MAX_BYTES = 180
 def _room_file_name(raw: Any) -> str:
     """The upload's own name, made safe to use as one path component."""
     # Only the first part of an absurd name is worth looking at.
-    name = _ROOM_FILE_UNSAFE.sub("_", str(raw or "")[:1024].strip()).strip(" .")
+    raw = raw if isinstance(raw, str) else ""
+    name = _ROOM_FILE_UNSAFE.sub("_", raw[:1024].strip()).strip(" .")
     if not name:
         return "file"
     if len(name.encode("utf-8")) <= ROOM_FILE_NAME_MAX_BYTES:
@@ -9192,15 +9193,17 @@ def store_room_file(root: str, body: Any, now: Optional[float] = None) -> Dict[s
         except OSError:
             pass
         if _room_file_free(root) - len(data) < ROOM_FILE_FREE_FLOOR_BYTES:
-            # The cap may be what's full: make room once more before refusing.
-            _sweep_room_files(root, now, len(data))
+            # The cap may be what's full: make room once more before
+            # refusing, unless the hourly sweep just did.
+            if _room_file_last_sweep.get(root) != now:
+                _sweep_room_files(root, now, len(data))
             if _room_file_free(root) - len(data) < ROOM_FILE_FREE_FLOOR_BYTES:
                 raise HTTPException(status_code=507, detail="The host is low on disk space",
                                     headers={"Cache-Control": "no-store"})
         folder = os.path.join(root, time.strftime("%Y%m%d", time.gmtime(now)) + "-" + uuid.uuid4().hex)
-        os.makedirs(folder, mode=0o700, exist_ok=False)
         path = os.path.join(folder, name)
         try:
+            os.makedirs(folder, mode=0o700, exist_ok=False)
             # Readable by the host's own user only, whatever the umask.
             with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as handle:
                 handle.write(data)
