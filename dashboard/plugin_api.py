@@ -61,6 +61,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 import traceback
 import types
 import urllib.error
@@ -9067,6 +9068,110 @@ async def get_desktop_views(response: Response, profile: Optional[str] = None,
     return {"ok": True, "observing": observing, "reason": reason, "views": views}
 
 
+# --- Room files ----------------------------------------------------------------
+#
+# A group chat room isn't a session, so Hermes' attach RPCs (file.attach and
+# friends), which stage into a session's workspace, can't take a file for it.
+# Conduit uploads the file here instead and puts an `@file:` reference to the
+# stored path in the room message; the room's members run on this host and read
+# it from there. Files live under <hermes home>/conduit/room-files/<id>/ and are
+# swept a month after their upload.
+
+ROOM_FILE_MAX_BYTES = 50 * 1024 * 1024
+# base64 grows a file by a third; the rest is the JSON around it.
+ROOM_FILE_MAX_BODY_BYTES = ROOM_FILE_MAX_BYTES * 4 // 3 + 64 * 1024
+ROOM_FILE_RETENTION_S = 30 * 24 * 3600
+ROOM_FILE_LIMIT = 60
+ROOM_FILE_WINDOW_S = 600.0
+_room_file_limiter = _MintLimiter(ROOM_FILE_LIMIT, ROOM_FILE_WINDOW_S,
+                                  message="Too many file uploads; try again shortly")
+_ROOM_FILE_UNSAFE = re.compile(r"[\\/\x00-\x1f:*?\"<>|]+")
+
+
+def _room_file_name(raw: Any) -> str:
+    """The upload's own name, made safe to use as one path component."""
+    name = _ROOM_FILE_UNSAFE.sub("_", str(raw or "").strip()).strip(" .")
+    if not name:
+        return "file"
+    if len(name) > 120:
+        stem, dot, ext = name.rpartition(".")
+        name = (stem[: 120 - len(ext) - 1] + "." + ext) if dot and 0 < len(ext) <= 16 else name[:120]
+    return name
+
+
+def _room_files_root() -> str:
+    from hermes_constants import get_hermes_home
+
+    return os.path.join(str(get_hermes_home()), "conduit", "room-files")
+
+
+def _sweep_room_files(root: str, now: float) -> None:
+    try:
+        entries = list(os.scandir(root))
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            if entry.is_dir(follow_symlinks=False) and now - entry.stat(follow_symlinks=False).st_mtime > ROOM_FILE_RETENTION_S:
+                shutil.rmtree(entry.path, ignore_errors=True)
+        except OSError:
+            continue
+
+
+def store_room_file(root: str, body: Any, now: Optional[float] = None) -> Dict[str, Any]:
+    """Writes one uploaded file under ``root``; returns where it went and the
+    `@file:` reference Hermes reads."""
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Expected a JSON object", headers={"Cache-Control": "no-store"})
+    encoded = body.get("data_base64")
+    if not isinstance(encoded, str) or not encoded:
+        raise HTTPException(status_code=400, detail="data_base64 is required", headers={"Cache-Control": "no-store"})
+    try:
+        data = base64.b64decode(encoded, validate=True)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="data_base64 is not base64", headers={"Cache-Control": "no-store"})
+    if len(data) > ROOM_FILE_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="The file is too large", headers={"Cache-Control": "no-store"})
+    now = time.time() if now is None else now
+    _sweep_room_files(root, now)
+    name = _room_file_name(body.get("name"))
+    folder = os.path.join(root, time.strftime("%Y%m%d", time.gmtime(now)) + "-" + uuid.uuid4().hex[:12])
+    os.makedirs(folder, mode=0o700, exist_ok=False)
+    path = os.path.join(folder, name)
+    with open(path, "wb") as handle:
+        handle.write(data)
+    return {"path": path, "name": name, "size": len(data), "ref_text": "@file:" + _room_file_reference(path)}
+
+
+def _room_file_reference(path: str) -> str:
+    """Quotes a path holding whitespace, brackets or quotes, as Hermes'
+    format_reference_value does, so the reference reads back whole."""
+    if not re.search(r"[\s\[\](){}'\"`]", path):
+        return path
+    for quote in ("`", '"', "'"):
+        if quote not in path:
+            return quote + path + quote
+    return path
+
+
+@router.post("/room-files")
+async def post_room_file(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        _room_file_limiter.acquire(_limiter_key(profile))
+    except TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+    body = await _read_json_body(request, ROOM_FILE_MAX_BODY_BYTES)
+    try:
+        stored = await _run_scoped(profile, lambda: store_room_file(_room_files_root(), body))
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
+        raise
+    except Exception as exc:
+        raise _unexpected("upload", exc, feature="Room files")
+    return {"ok": True, **stored}
+
+
 # --- Capabilities ------------------------------------------------------------
 #
 # Conduit reads this once per connection to tell which of its features this
@@ -9109,6 +9214,7 @@ ROUTE_CAPABILITIES = (
     "self-restart",
     "cron-notifications",
     "reply-sources",
+    "room-files",
 )
 
 

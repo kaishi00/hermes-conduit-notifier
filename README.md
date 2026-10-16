@@ -935,6 +935,18 @@ have their own switch) and calls don't follow this.
   `PUT` with `{"source": "desktop", "notify": false}` changes one.
   Capability `reply-sources`.
 
+## Files in group chats (plugin 0.38+)
+
+A group chat room isn't a session, so Hermes' attach RPCs can't take a file
+for it. Conduit uploads photos and files picked in a room's composer with
+`POST /api/plugins/conduit_push/room-files` (`{"name": "photo.jpg",
+"data_base64": "…"}`, up to 50 MB) and puts the `@file:` reference it gets
+back (`{"ok": true, "path": "…", "ref_text": "@file:…"}`) on its own line
+above the message, as Hermes Desktop does for a chat. The room's members run
+on this host and read the file from there. Uploads go to
+`<hermes home>/conduit/room-files/<id>/` and are deleted a month later.
+Capability `room-files`.
+
 ## Hermes calls you (plugin 0.13+)
 
 In a Live Voice call you can hand Hermes a long job and say "call me when
