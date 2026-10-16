@@ -2207,10 +2207,12 @@ async def _grok_live_relay(ws: WebSocket, refuse: Callable[[int, str], Any], tok
 # LAN-style names; anything public needs wss://.
 
 SPEECH_SERVER_DEFAULT_PATH = "/v1/realtime"
-SPEECH_SERVER_CONNECT_TIMEOUT_S = 10.0
+# The server is on the user's own network, so a slow connect means it's
+# down. Connect plus the test's wait stays under Conduit's 12 s request cap.
+SPEECH_SERVER_CONNECT_TIMEOUT_S = 5.0
 SPEECH_SERVER_SETUP_TIMEOUT_S = 10.0
 # The test waits this long for the server's first event (session.created).
-SPEECH_SERVER_TEST_FIRST_EVENT_S = 10.0
+SPEECH_SERVER_TEST_FIRST_EVENT_S = 5.0
 SPEECH_SERVER_LIMIT = 30
 SPEECH_SERVER_WINDOW_S = 60.0
 SPEECH_SERVER_MAX_OPEN_PER_PROFILE = 3
