@@ -50,7 +50,15 @@ def test_names_cannot_leave_the_folder(tmp_path):
     assert api._room_file_name("") == "file"
     assert api._room_file_name(" .. ") == "file"
     long = api._room_file_name("a" * 300 + ".pdf")
-    assert len(long) == 120 and long.endswith(".pdf")
+    assert len(long.encode()) == api.ROOM_FILE_NAME_MAX_BYTES and long.endswith(".pdf")
+    wide = api._room_file_name("漢" * 120 + ".jpg")
+    assert len(wide.encode()) <= api.ROOM_FILE_NAME_MAX_BYTES and wide.endswith(".jpg")
+    assert api._room_file_name("a`b'c.txt") == "a_b_c.txt"
+
+
+def test_a_cjk_name_is_stored(tmp_path):
+    stored = api.store_room_file(str(tmp_path), _body(b"x", "写真" * 80 + ".jpg"))
+    assert pathlib.Path(stored["path"]).read_bytes() == b"x"
 
 
 def test_a_path_with_spaces_is_quoted_in_the_reference(tmp_path):
@@ -88,3 +96,14 @@ def test_the_route_stores_under_the_hermes_home(tmp_path, monkeypatch):
     assert body["ok"] is True
     assert pathlib.Path(body["path"]).read_bytes() == b"hi"
     assert body["ref_text"].startswith("@file:")
+
+
+def test_a_refused_upload_gives_its_slot_back(tmp_path, monkeypatch):
+    monkeypatch.setattr(api, "_room_files_root", lambda: str(tmp_path))
+    monkeypatch.setattr(api, "_room_file_limiter", api._MintLimiter(1, 600.0))
+    app = FastAPI()
+    app.include_router(api.router, prefix=BASE)
+    client = TestClient(app)
+    assert client.post(f"{BASE}/room-files", json={"data_base64": "!"}).status_code == 400
+    assert client.post(f"{BASE}/room-files", json=_body(b"ok")).status_code == 200
+    assert client.post(f"{BASE}/room-files", json=_body(b"ok")).status_code == 429

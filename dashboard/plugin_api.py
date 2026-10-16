@@ -9085,7 +9085,9 @@ ROOM_FILE_LIMIT = 60
 ROOM_FILE_WINDOW_S = 600.0
 _room_file_limiter = _MintLimiter(ROOM_FILE_LIMIT, ROOM_FILE_WINDOW_S,
                                   message="Too many file uploads; try again shortly")
-_ROOM_FILE_UNSAFE = re.compile(r"[\\/\x00-\x1f:*?\"<>|]+")
+_ROOM_FILE_UNSAFE = re.compile(r"[\\/\x00-\x1f\x7f:*?\"'`<>|]+")
+# Filesystems cap one path component at 255 bytes; leave room for UTF-8.
+ROOM_FILE_NAME_MAX_BYTES = 180
 
 
 def _room_file_name(raw: Any) -> str:
@@ -9093,10 +9095,16 @@ def _room_file_name(raw: Any) -> str:
     name = _ROOM_FILE_UNSAFE.sub("_", str(raw or "").strip()).strip(" .")
     if not name:
         return "file"
-    if len(name) > 120:
-        stem, dot, ext = name.rpartition(".")
-        name = (stem[: 120 - len(ext) - 1] + "." + ext) if dot and 0 < len(ext) <= 16 else name[:120]
-    return name
+    if len(name.encode("utf-8")) <= ROOM_FILE_NAME_MAX_BYTES:
+        return name
+    stem, dot, ext = name.rpartition(".")
+    if not (dot and stem and 0 < len(ext.encode("utf-8")) <= 16):
+        stem, ext = name, ""
+    suffix = "." + ext if ext else ""
+    budget = ROOM_FILE_NAME_MAX_BYTES - len(suffix.encode("utf-8"))
+    # Cut whole characters, never a UTF-8 sequence in half.
+    stem = stem.encode("utf-8")[:budget].decode("utf-8", errors="ignore")
+    return stem + suffix
 
 
 def _room_files_root() -> str:
@@ -9157,14 +9165,18 @@ def _room_file_reference(path: str) -> str:
 @router.post("/room-files")
 async def post_room_file(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
+    key = _limiter_key(profile)
     try:
-        _room_file_limiter.acquire(_limiter_key(profile))
+        mint = _room_file_limiter.acquire(key)
     except TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
-    body = await _read_json_body(request, ROOM_FILE_MAX_BODY_BYTES)
     try:
+        body = await _read_json_body(request, ROOM_FILE_MAX_BODY_BYTES)
         stored = await _run_scoped(profile, lambda: store_room_file(_room_files_root(), body))
     except HTTPException as exc:
+        # Refused before anything was stored: the upload costs no slot.
+        if exc.status_code < 500:
+            _room_file_limiter.release(key, mint)
         exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
         raise
     except Exception as exc:
