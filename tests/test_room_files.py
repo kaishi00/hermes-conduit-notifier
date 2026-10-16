@@ -134,19 +134,19 @@ def test_a_refused_upload_gives_its_slot_back(tmp_path, monkeypatch):
 
 
 def test_a_full_disk_during_the_write_is_a_507_and_leaves_no_folder(tmp_path, monkeypatch):
-    import builtins
     import errno
 
     import pytest
 
-    real_open = builtins.open
 
-    def full_disk(path, mode="r", *args, **kwargs):
-        if "wb" in mode and str(path).startswith(str(tmp_path)):
+    real_os_open = os.open
+
+    def full_disk(path, flags, *args, **kwargs):
+        if flags & os.O_CREAT and str(path).startswith(str(tmp_path)):
             raise OSError(errno.ENOSPC, "No space left on device")
-        return real_open(path, mode, *args, **kwargs)
+        return real_os_open(path, flags, *args, **kwargs)
 
-    monkeypatch.setattr(builtins, "open", full_disk)
+    monkeypatch.setattr(api.os, "open", full_disk)
     with pytest.raises(api.HTTPException) as refused:
         api.store_room_file(str(tmp_path), _body(b"hello"), now=1_760_000_000)
     assert refused.value.status_code == 507
@@ -155,3 +155,8 @@ def test_a_full_disk_during_the_write_is_a_507_and_leaves_no_folder(tmp_path, mo
 
 def test_line_separators_never_reach_a_name():
     assert api._room_file_name("a b c\x85d.txt") == "a_b_c_d.txt"
+
+
+def test_a_stored_file_is_private_to_the_host_user(tmp_path):
+    stored = api.store_room_file(str(tmp_path), _body(b"hello"), now=1_760_000_000)
+    assert os.stat(stored["path"]).st_mode & 0o777 == 0o600

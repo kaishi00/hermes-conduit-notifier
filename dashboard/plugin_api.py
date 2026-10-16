@@ -9158,6 +9158,14 @@ def _sweep_room_files(root: str, now: float, incoming: int = 0) -> None:
     _room_file_last_sweep[root] = now
 
 
+def _room_file_free(root: str) -> int:
+    """Free bytes on the room-files disk; an unreadable disk counts as full."""
+    try:
+        return shutil.disk_usage(root).free
+    except OSError:
+        return 0
+
+
 def store_room_file(root: str, body: Any, now: Optional[float] = None) -> Dict[str, Any]:
     """Writes one uploaded file under ``root``; returns where it went and the
     `@file:` reference Hermes reads."""
@@ -9183,17 +9191,18 @@ def store_room_file(root: str, body: Any, now: Optional[float] = None) -> Dict[s
             os.chmod(root, 0o700)
         except OSError:
             pass
-        if shutil.disk_usage(root).free - len(data) < ROOM_FILE_FREE_FLOOR_BYTES:
+        if _room_file_free(root) - len(data) < ROOM_FILE_FREE_FLOOR_BYTES:
             # The cap may be what's full: make room once more before refusing.
             _sweep_room_files(root, now, len(data))
-            if shutil.disk_usage(root).free - len(data) < ROOM_FILE_FREE_FLOOR_BYTES:
+            if _room_file_free(root) - len(data) < ROOM_FILE_FREE_FLOOR_BYTES:
                 raise HTTPException(status_code=507, detail="The host is low on disk space",
                                     headers={"Cache-Control": "no-store"})
         folder = os.path.join(root, time.strftime("%Y%m%d", time.gmtime(now)) + "-" + uuid.uuid4().hex)
         os.makedirs(folder, mode=0o700, exist_ok=False)
         path = os.path.join(folder, name)
         try:
-            with open(path, "wb") as handle:
+            # Readable by the host's own user only, whatever the umask.
+            with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as handle:
                 handle.write(data)
         except OSError as exc:
             shutil.rmtree(folder, ignore_errors=True)
