@@ -9081,6 +9081,11 @@ ROOM_FILE_MAX_BYTES = 50 * 1024 * 1024
 # base64 grows a file by a third; the rest is the JSON around it.
 ROOM_FILE_MAX_BODY_BYTES = ROOM_FILE_MAX_BYTES * 4 // 3 + 64 * 1024
 ROOM_FILE_RETENTION_S = 30 * 24 * 3600
+# All uploads together; the oldest go first past it.
+ROOM_FILE_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
+# Never fill the disk: an upload leaves at least this much free.
+ROOM_FILE_FREE_FLOOR_BYTES = 1024 * 1024 * 1024
+ROOM_FILE_SWEEP_INTERVAL_S = 3600.0
 ROOM_FILE_LIMIT = 60
 ROOM_FILE_WINDOW_S = 600.0
 _room_file_limiter = _MintLimiter(ROOM_FILE_LIMIT, ROOM_FILE_WINDOW_S,
@@ -9092,7 +9097,8 @@ ROOM_FILE_NAME_MAX_BYTES = 180
 
 def _room_file_name(raw: Any) -> str:
     """The upload's own name, made safe to use as one path component."""
-    name = _ROOM_FILE_UNSAFE.sub("_", str(raw or "").strip()).strip(" .")
+    # Only the first part of an absurd name is worth looking at.
+    name = _ROOM_FILE_UNSAFE.sub("_", str(raw or "")[:1024].strip()).strip(" .")
     if not name:
         return "file"
     if len(name.encode("utf-8")) <= ROOM_FILE_NAME_MAX_BYTES:
@@ -9113,17 +9119,36 @@ def _room_files_root() -> str:
     return os.path.join(str(get_hermes_home()), "conduit", "room-files")
 
 
-def _sweep_room_files(root: str, now: float) -> None:
+_room_file_last_sweep: Dict[str, float] = {}
+
+
+def _sweep_room_files(root: str, now: float, incoming: int = 0) -> None:
+    """Deletes uploads past retention, then the oldest until the rest and
+    ``incoming`` fit the total cap. Runs at most hourly per root, and
+    whenever the cap would otherwise be passed."""
     try:
-        entries = list(os.scandir(root))
+        entries = [entry for entry in os.scandir(root) if entry.is_dir(follow_symlinks=False)]
     except OSError:
         return
+    folders = []
     for entry in entries:
         try:
-            if entry.is_dir(follow_symlinks=False) and now - entry.stat(follow_symlinks=False).st_mtime > ROOM_FILE_RETENTION_S:
+            mtime = entry.stat(follow_symlinks=False).st_mtime
+            if now - mtime > ROOM_FILE_RETENTION_S:
                 shutil.rmtree(entry.path, ignore_errors=True)
+                continue
+            size = sum(f.stat(follow_symlinks=False).st_size for f in os.scandir(entry.path)
+                       if f.is_file(follow_symlinks=False))
+            folders.append((mtime, size, entry.path))
         except OSError:
             continue
+    total = sum(size for _, size, _ in folders) + incoming
+    for _, size, path in sorted(folders):
+        if total <= ROOM_FILE_TOTAL_BYTES:
+            break
+        shutil.rmtree(path, ignore_errors=True)
+        total -= size
+    _room_file_last_sweep[root] = now
 
 
 def store_room_file(root: str, body: Any, now: Optional[float] = None) -> Dict[str, Any]:
@@ -9141,9 +9166,17 @@ def store_room_file(root: str, body: Any, now: Optional[float] = None) -> Dict[s
     if len(data) > ROOM_FILE_MAX_BYTES:
         raise HTTPException(status_code=413, detail="The file is too large", headers={"Cache-Control": "no-store"})
     now = time.time() if now is None else now
-    _sweep_room_files(root, now)
+    if now - _room_file_last_sweep.get(root, float("-inf")) >= ROOM_FILE_SWEEP_INTERVAL_S:
+        _sweep_room_files(root, now, len(data))
+    os.makedirs(root, mode=0o700, exist_ok=True)
+    if shutil.disk_usage(root).free - len(data) < ROOM_FILE_FREE_FLOOR_BYTES:
+        # The cap may be what's full: make room once more before refusing.
+        _sweep_room_files(root, now, len(data))
+        if shutil.disk_usage(root).free - len(data) < ROOM_FILE_FREE_FLOOR_BYTES:
+            raise HTTPException(status_code=507, detail="The host is low on disk space",
+                                headers={"Cache-Control": "no-store"})
     name = _room_file_name(body.get("name"))
-    folder = os.path.join(root, time.strftime("%Y%m%d", time.gmtime(now)) + "-" + uuid.uuid4().hex[:12])
+    folder = os.path.join(root, time.strftime("%Y%m%d", time.gmtime(now)) + "-" + uuid.uuid4().hex)
     os.makedirs(folder, mode=0o700, exist_ok=False)
     path = os.path.join(folder, name)
     with open(path, "wb") as handle:

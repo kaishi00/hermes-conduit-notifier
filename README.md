@@ -944,7 +944,9 @@ for it. Conduit uploads photos and files picked in a room's composer with
 back (`{"ok": true, "path": "…", "ref_text": "@file:…"}`) on its own line
 above the message, as Hermes Desktop does for a chat. The room's members run
 on this host and read the file from there. Uploads go to
-`<hermes home>/conduit/room-files/<id>/` and are deleted a month later.
+`<hermes home>/conduit/room-files/<id>/` and are deleted a month later, or
+sooner, oldest first, once they pass 2 GB together. An upload that would
+leave under 1 GB free on the host is refused (507).
 Capability `room-files`.
 
 ## Hermes calls you (plugin 0.13+)

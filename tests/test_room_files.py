@@ -71,8 +71,31 @@ def test_old_uploads_are_swept_on_the_next_one(tmp_path):
     folder = pathlib.Path(old["path"]).parent
     stale = 1_000_000.0
     os.utime(folder, (stale, stale))
+    api._room_file_last_sweep.clear()
     api.store_room_file(str(tmp_path), _body(b"new"), now=stale + api.ROOM_FILE_RETENTION_S + 1)
     assert not folder.exists()
+
+
+def test_the_oldest_uploads_go_once_the_total_cap_is_passed(tmp_path, monkeypatch):
+    monkeypatch.setattr(api, "ROOM_FILE_TOTAL_BYTES", 10)
+    first = api.store_room_file(str(tmp_path), _body(b"aaaa"), now=1_000.0)
+    os.utime(pathlib.Path(first["path"]).parent, (1_000.0, 1_000.0))
+    second = api.store_room_file(str(tmp_path), _body(b"bbbb"), now=2_000.0)
+    os.utime(pathlib.Path(second["path"]).parent, (2_000.0, 2_000.0))
+    api._room_file_last_sweep.clear()
+    api.store_room_file(str(tmp_path), _body(b"cccc"), now=3_000.0)
+    assert not pathlib.Path(first["path"]).exists()
+    assert pathlib.Path(second["path"]).exists()
+
+
+def test_a_full_disk_refuses_the_upload(tmp_path, monkeypatch):
+    import pytest
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(api.shutil, "disk_usage", lambda _: types.SimpleNamespace(free=10))
+    with pytest.raises(HTTPException) as caught:
+        api.store_room_file(str(tmp_path), _body(b"x"))
+    assert caught.value.status_code == 507
 
 
 def test_bad_input_is_refused(tmp_path):
