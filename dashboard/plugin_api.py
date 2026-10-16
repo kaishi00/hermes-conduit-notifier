@@ -9120,6 +9120,9 @@ def _room_files_root() -> str:
 
 
 _room_file_last_sweep: Dict[str, float] = {}
+# Sweeps, the free-space check and the write run one at a time, so two
+# uploads can't both pass the check and then fill the disk together.
+_room_file_lock = threading.Lock()
 
 
 def _sweep_room_files(root: str, now: float, incoming: int = 0) -> None:
@@ -9127,7 +9130,8 @@ def _sweep_room_files(root: str, now: float, incoming: int = 0) -> None:
     ``incoming`` fit the total cap. Runs at most hourly per root, and
     whenever the cap would otherwise be passed."""
     try:
-        entries = [entry for entry in os.scandir(root) if entry.is_dir(follow_symlinks=False)]
+        with os.scandir(root) as it:
+            entries = [entry for entry in it if entry.is_dir(follow_symlinks=False)]
     except OSError:
         return
     folders = []
@@ -9137,8 +9141,9 @@ def _sweep_room_files(root: str, now: float, incoming: int = 0) -> None:
             if now - mtime > ROOM_FILE_RETENTION_S:
                 shutil.rmtree(entry.path, ignore_errors=True)
                 continue
-            size = sum(f.stat(follow_symlinks=False).st_size for f in os.scandir(entry.path)
-                       if f.is_file(follow_symlinks=False))
+            with os.scandir(entry.path) as files:
+                size = sum(f.stat(follow_symlinks=False).st_size for f in files
+                           if f.is_file(follow_symlinks=False))
             folders.append((mtime, size, entry.path))
         except OSError:
             continue
@@ -9166,25 +9171,31 @@ def store_room_file(root: str, body: Any, now: Optional[float] = None) -> Dict[s
     if len(data) > ROOM_FILE_MAX_BYTES:
         raise HTTPException(status_code=413, detail="The file is too large", headers={"Cache-Control": "no-store"})
     now = time.time() if now is None else now
-    if now - _room_file_last_sweep.get(root, float("-inf")) >= ROOM_FILE_SWEEP_INTERVAL_S:
-        _sweep_room_files(root, now, len(data))
-    os.makedirs(root, mode=0o700, exist_ok=True)
-    if shutil.disk_usage(root).free - len(data) < ROOM_FILE_FREE_FLOOR_BYTES:
-        # The cap may be what's full: make room once more before refusing.
-        _sweep_room_files(root, now, len(data))
-        if shutil.disk_usage(root).free - len(data) < ROOM_FILE_FREE_FLOOR_BYTES:
-            raise HTTPException(status_code=507, detail="The host is low on disk space",
-                                headers={"Cache-Control": "no-store"})
     name = _room_file_name(body.get("name"))
-    folder = os.path.join(root, time.strftime("%Y%m%d", time.gmtime(now)) + "-" + uuid.uuid4().hex)
-    os.makedirs(folder, mode=0o700, exist_ok=False)
-    path = os.path.join(folder, name)
-    try:
-        with open(path, "wb") as handle:
-            handle.write(data)
-    except OSError:
-        shutil.rmtree(folder, ignore_errors=True)
-        raise
+    with _room_file_lock:
+        if now - _room_file_last_sweep.get(root, float("-inf")) >= ROOM_FILE_SWEEP_INTERVAL_S:
+            _sweep_room_files(root, now, len(data))
+        os.makedirs(root, mode=0o700, exist_ok=True)
+        try:
+            # makedirs leaves an existing folder's mode alone.
+            os.chmod(root, 0o700)
+        except OSError:
+            pass
+        if shutil.disk_usage(root).free - len(data) < ROOM_FILE_FREE_FLOOR_BYTES:
+            # The cap may be what's full: make room once more before refusing.
+            _sweep_room_files(root, now, len(data))
+            if shutil.disk_usage(root).free - len(data) < ROOM_FILE_FREE_FLOOR_BYTES:
+                raise HTTPException(status_code=507, detail="The host is low on disk space",
+                                    headers={"Cache-Control": "no-store"})
+        folder = os.path.join(root, time.strftime("%Y%m%d", time.gmtime(now)) + "-" + uuid.uuid4().hex)
+        os.makedirs(folder, mode=0o700, exist_ok=False)
+        path = os.path.join(folder, name)
+        try:
+            with open(path, "wb") as handle:
+                handle.write(data)
+        except OSError:
+            shutil.rmtree(folder, ignore_errors=True)
+            raise
     return {"path": path, "name": name, "size": len(data), "ref_text": "@file:" + _room_file_reference(path)}
 
 
@@ -9215,8 +9226,8 @@ async def post_room_file(request: Request, response: Response, profile: Optional
         _room_file_limiter.release(key, mint)
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
     except HTTPException as exc:
-        # Refused before anything was stored: the upload costs no slot.
-        if exc.status_code < 500:
+        # Refused before anything was stored (507 included): no slot spent.
+        if exc.status_code < 500 or exc.status_code == 507:
             _room_file_limiter.release(key, mint)
         exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
         raise
