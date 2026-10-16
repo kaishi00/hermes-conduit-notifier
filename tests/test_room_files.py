@@ -54,6 +54,7 @@ def test_names_cannot_leave_the_folder(tmp_path):
     wide = api._room_file_name("漢" * 120 + ".jpg")
     assert len(wide.encode()) <= api.ROOM_FILE_NAME_MAX_BYTES and wide.endswith(".jpg")
     assert api._room_file_name("a`b'c.txt") == "a_b_c.txt"
+    assert api._room_file_name("invoice\u202egpj.exe") == "invoice_gpj.exe"
 
 
 def test_a_cjk_name_is_stored(tmp_path):

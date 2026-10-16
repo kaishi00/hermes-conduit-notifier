@@ -9090,7 +9090,7 @@ ROOM_FILE_LIMIT = 60
 ROOM_FILE_WINDOW_S = 600.0
 _room_file_limiter = _MintLimiter(ROOM_FILE_LIMIT, ROOM_FILE_WINDOW_S,
                                   message="Too many file uploads; try again shortly")
-_ROOM_FILE_UNSAFE = re.compile(r"[\\/\x00-\x1f\x7f:*?\"'`<>|]+")
+_ROOM_FILE_UNSAFE = re.compile(r"[\\/\x00-\x1f\x7f:*?\"'`<>|\u200b-\u200f\u202a-\u202e\u2066-\u2069]+")
 # Filesystems cap one path component at 255 bytes; leave room for UTF-8.
 ROOM_FILE_NAME_MAX_BYTES = 180
 
@@ -9179,8 +9179,12 @@ def store_room_file(root: str, body: Any, now: Optional[float] = None) -> Dict[s
     folder = os.path.join(root, time.strftime("%Y%m%d", time.gmtime(now)) + "-" + uuid.uuid4().hex)
     os.makedirs(folder, mode=0o700, exist_ok=False)
     path = os.path.join(folder, name)
-    with open(path, "wb") as handle:
-        handle.write(data)
+    try:
+        with open(path, "wb") as handle:
+            handle.write(data)
+    except OSError:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise
     return {"path": path, "name": name, "size": len(data), "ref_text": "@file:" + _room_file_reference(path)}
 
 
@@ -9206,6 +9210,10 @@ async def post_room_file(request: Request, response: Response, profile: Optional
     try:
         body = await _read_json_body(request, ROOM_FILE_MAX_BODY_BYTES)
         stored = await _run_scoped(profile, lambda: store_room_file(_room_files_root(), body))
+    except TokenError as exc:
+        # The profile couldn't be scoped; nothing was stored.
+        _room_file_limiter.release(key, mint)
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
     except HTTPException as exc:
         # Refused before anything was stored: the upload costs no slot.
         if exc.status_code < 500:
