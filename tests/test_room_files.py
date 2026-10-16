@@ -131,3 +131,27 @@ def test_a_refused_upload_gives_its_slot_back(tmp_path, monkeypatch):
     assert client.post(f"{BASE}/room-files", json={"data_base64": "!"}).status_code == 400
     assert client.post(f"{BASE}/room-files", json=_body(b"ok")).status_code == 200
     assert client.post(f"{BASE}/room-files", json=_body(b"ok")).status_code == 429
+
+
+def test_a_full_disk_during_the_write_is_a_507_and_leaves_no_folder(tmp_path, monkeypatch):
+    import builtins
+    import errno
+
+    import pytest
+
+    real_open = builtins.open
+
+    def full_disk(path, mode="r", *args, **kwargs):
+        if "wb" in mode and str(path).startswith(str(tmp_path)):
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", full_disk)
+    with pytest.raises(api.HTTPException) as refused:
+        api.store_room_file(str(tmp_path), _body(b"hello"), now=1_760_000_000)
+    assert refused.value.status_code == 507
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_line_separators_never_reach_a_name():
+    assert api._room_file_name("a b c\x85d.txt") == "a_b_c_d.txt"

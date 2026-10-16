@@ -41,6 +41,7 @@ import asyncio
 import atexit
 import base64
 import contextvars
+import errno
 import functools
 import hashlib
 import http.client
@@ -9090,7 +9091,7 @@ ROOM_FILE_LIMIT = 60
 ROOM_FILE_WINDOW_S = 600.0
 _room_file_limiter = _MintLimiter(ROOM_FILE_LIMIT, ROOM_FILE_WINDOW_S,
                                   message="Too many file uploads; try again shortly")
-_ROOM_FILE_UNSAFE = re.compile(r"[\\/\x00-\x1f\x7f:*?\"'`<>|\u200b-\u200f\u202a-\u202e\u2066-\u2069]+")
+_ROOM_FILE_UNSAFE = re.compile(r"[\\/\x00-\x1f\x7f\x85\u2028\u2029:*?\"'`<>|\u200b-\u200f\u202a-\u202e\u2066-\u2069]+")
 # Filesystems cap one path component at 255 bytes; leave room for UTF-8.
 ROOM_FILE_NAME_MAX_BYTES = 180
 
@@ -9127,8 +9128,9 @@ _room_file_lock = threading.Lock()
 
 def _sweep_room_files(root: str, now: float, incoming: int = 0) -> None:
     """Deletes uploads past retention, then the oldest until the rest and
-    ``incoming`` fit the total cap. Runs at most hourly per root, and
-    whenever the cap would otherwise be passed."""
+    ``incoming`` fit the total cap. Runs at most hourly per root, and again
+    whenever the free-disk floor would be passed, so the cap can be overrun
+    for up to an hour; the floor guards the disk at all times."""
     try:
         with os.scandir(root) as it:
             entries = [entry for entry in it if entry.is_dir(follow_symlinks=False)]
@@ -9193,8 +9195,11 @@ def store_room_file(root: str, body: Any, now: Optional[float] = None) -> Dict[s
         try:
             with open(path, "wb") as handle:
                 handle.write(data)
-        except OSError:
+        except OSError as exc:
             shutil.rmtree(folder, ignore_errors=True)
+            if exc.errno in (errno.ENOSPC, errno.EDQUOT):
+                raise HTTPException(status_code=507, detail="The host is low on disk space",
+                                    headers={"Cache-Control": "no-store"})
             raise
     return {"path": path, "name": name, "size": len(data), "ref_text": "@file:" + _room_file_reference(path)}
 
