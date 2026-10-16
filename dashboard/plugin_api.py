@@ -9189,7 +9189,13 @@ def store_room_file(root: str, body: Any, now: Optional[float] = None) -> Dict[s
     with _room_file_lock:
         if now - _room_file_last_sweep.get(root, float("-inf")) >= ROOM_FILE_SWEEP_INTERVAL_S:
             _sweep_room_files(root, now, len(data))
-        os.makedirs(root, mode=0o700, exist_ok=True)
+        try:
+            os.makedirs(root, mode=0o700, exist_ok=True)
+        except OSError as exc:
+            if exc.errno in (errno.ENOSPC, errno.EDQUOT):
+                raise HTTPException(status_code=507, detail="The host is low on disk space",
+                                    headers={"Cache-Control": "no-store"})
+            raise
         try:
             # makedirs leaves an existing folder's mode alone.
             os.chmod(root, 0o700)
@@ -9252,6 +9258,8 @@ async def post_room_file(request: Request, response: Response, profile: Optional
         exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
         raise
     except Exception as exc:
+        # Nothing was stored: a failed upload costs no slot.
+        _room_file_limiter.release(key, mint)
         raise _unexpected("upload", exc, feature="Room files")
     return {"ok": True, **stored}
 
