@@ -71,6 +71,7 @@ def test_every_capability_names_a_served_route_family():
         "cron-notifications": "/cron/notifications",
         "reply-sources": "/notifications/reply-sources",
         "room-files": "/room-files",
+        "speech-server": "/speech-server/",
     }
     assert set(prefixes) == set(api.ROUTE_CAPABILITIES)
     for capability, prefix in prefixes.items():

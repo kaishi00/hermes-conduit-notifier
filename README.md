@@ -724,6 +724,45 @@ voice:
     voice: eve
 ```
 
+## Your own speech server (plugin 0.39+)
+
+Conduit's Classic voice can listen through a speech server you run yourself,
+so your voice is recognized on your own machines. Any server that speaks the
+OpenAI Realtime WebSocket protocol works, for example Hugging Face
+[speech-to-speech](https://github.com/huggingface/speech-to-speech)
+(`speech-to-speech serve`) or the one Hermes Live Voice's local mode starts.
+It can run on another machine (an LXC, a GPU box, a Mac on your network).
+
+Conduit never connects to it directly. This plugin relays Conduit's realtime
+events to the server and back, adding only `Authorization: Bearer <api_key>`
+when a key is set. The phone and Watch keep talking to Hermes alone, so the
+speech server never needs to be exposed outside your network.
+
+Set it per profile in `config.yaml` (Conduit's Voice settings write the same keys):
+
+```yaml
+voice:
+  speech_server:
+    url: ws://192.168.1.20:8765/v1/realtime   # http(s) works too; a bare host gets /v1/realtime
+    api_key: ""                               # optional, for a server behind an auth proxy
+```
+
+Plain `ws://` is only allowed for loopback, private, link-local and Tailscale
+addresses or LAN-style names (`localhost`, single-label names, `.local`, `.lan`,
+`.internal`, `.home.arpa`, `.ts.net`). A public host needs `wss://`.
+speech-to-speech has no authentication of its own, so keep it on your network.
+
+| Method | Path | Returns |
+|--------|------|---------|
+| GET | `/api/plugins/conduit_push/speech-server/status` | `{ok, configured, available, url, has_key, reason}` |
+| POST | `/api/plugins/conduit_push/speech-server/test` | `{ok, connected, url, latency_ms, event, reason}`: dials the server from the host and waits for its first event |
+| WebSocket | `/api/plugins/conduit_push/speech-server/socket` | OpenAI Realtime events, relayed |
+
+The socket takes the dashboard's WebSocket credential (`?ticket=`) and an
+optional `?profile=`. Close codes: 4503 not configured or invalid URL, 4401
+dashboard sign-in required, 4429 rate limited, 4400 the server refused, 4502
+unreachable or dropped (retryable).
+
 ## Voice call transcripts
 
 Gemini Live, GPT-Live and Grok Live calls never run a Hermes turn, so nothing records

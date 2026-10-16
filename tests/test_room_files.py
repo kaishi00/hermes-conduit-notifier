@@ -154,7 +154,7 @@ def test_a_full_disk_during_the_write_is_a_507_and_leaves_no_folder(tmp_path, mo
 
 
 def test_line_separators_never_reach_a_name():
-    assert api._room_file_name("a b c\x85d.txt") == "a_b_c_d.txt"
+    assert api._room_file_name("a\u2028b\u2029c\x85d.txt") == "a_b_c_d.txt"
 
 
 def test_a_stored_file_is_private_to_the_host_user(tmp_path):
