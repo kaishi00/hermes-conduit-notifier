@@ -426,3 +426,14 @@ def test_turn_text_is_the_newest_user_message():
 
 def test_capability_is_advertised():
     assert "local-live" in api.ROUTE_CAPABILITIES
+
+
+def test_a_speak_socket_has_its_text_read_back_unchanged(client, hermes, server):
+    headers = {"Authorization": f"Bearer {_key(hermes)}"}
+    with client.websocket_connect(f"{BASE}/local-live/socket?mode=speak") as ws:
+        streamed = client.post(f"{BASE}/local-live/v1/chat/completions",
+                               json=_completion("It's sunny, 21 degrees.", stream=True), headers=headers)
+        ws.send_text("finish")
+    assert _sse_text(streamed.text) == "It's sunny, 21 degrees."
+    # Nothing went to the phone: there's no turn to run.
+    assert server.upstream.sent == ["finish"]

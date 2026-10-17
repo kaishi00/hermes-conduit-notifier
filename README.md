@@ -819,6 +819,13 @@ Turn frames on the socket, beside the relayed realtime events:
   "turn_id", "text"}`, then `conduit.turn.done` or `conduit.turn.error`.
   A turn with no frame for 90 seconds ends.
 
+`/local-live/socket?mode=speak` is Classic voice's reply voice: Conduit sends
+each reply sentence as a user `conversation.item.create` plus
+`response.create`, and the model route reads that text back unchanged, so
+the server speaks Classic's replies in its own voice. Classic then uses one
+server for listening and speaking. While the reply plays, Classic may open
+its listening socket too, so start the server with `--num_pipelines 2`.
+
 ## Voice call transcripts
 
 Gemini Live, GPT-Live and Grok Live calls never run a Hermes turn, so nothing records

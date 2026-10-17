@@ -2612,6 +2612,11 @@ async def _speech_server_relay(ws: WebSocket, refuse: Callable[[int, str], Any],
 #
 # One live call per profile at a time: a speech-to-speech server runs one
 # pipeline by default, and a turn goes to the profile's newest call.
+#
+# The same socket with ?mode=speak is Classic voice's reply voice: Conduit
+# sends each reply sentence as a user item plus response.create, and the
+# model route reads that text back unchanged, so the server speaks it in its
+# own voice. Classic then needs one address for listening and speaking.
 
 LOCAL_LIVE_MOUNT = "/api/plugins/conduit_push"
 LOCAL_LIVE_MODEL_PATH = "/local-live/v1"
@@ -2811,9 +2816,12 @@ class _LocalLiveTurn:
 class _LocalLiveCall:
     """A live call's relay socket: the phone end, where turns are sent."""
 
-    def __init__(self, ws: WebSocket, profile: str) -> None:
+    def __init__(self, ws: WebSocket, profile: str, speaks: bool = False) -> None:
         self.ws = ws
         self.profile = profile
+        # Classic voice's reply voice (?mode=speak): Conduit already has the
+        # words, sends them as the user item, and the server reads them back.
+        self.speaks = speaks
         self.send_lock = asyncio.Lock()
         self.turns: Dict[str, _LocalLiveTurn] = {}
         self.numbers = itertools.count(1)
@@ -2941,7 +2949,7 @@ async def local_live_socket(ws: WebSocket) -> None:
     """A Local Live call: relayed to the speech server like Classic voice, plus its turns."""
 
     async def relay(refuse: Callable[[int, str], Any], url: str, key: str, profile: Optional[str]) -> None:
-        call = _LocalLiveCall(ws, _limiter_key(profile))
+        call = _LocalLiveCall(ws, _limiter_key(profile), speaks=ws.query_params.get("mode") == "speak")
         calls = _local_live_calls.setdefault(call.profile, [])
         calls.append(call)
         try:
@@ -3006,10 +3014,16 @@ async def post_local_live_chat_completions(request: Request) -> Any:
     completion_id = f"chatcmpl-conduit-{uuid.uuid4().hex[:24]}"
     created = int(time.time())
     call = _local_live_active_call(profile)
-    turn = await call.start_turn(text) if call is not None and text else None
+    speaks = call is not None and call.speaks
+    turn = await call.start_turn(text) if call is not None and text and not speaks else None
 
     async def words() -> Any:
         """The reply's text as the phone streams it; a fixed line with no call."""
+        if speaks:
+            # Read back word for word: the words are the reply already.
+            if text:
+                yield text
+            return
         if turn is None:
             yield LOCAL_LIVE_NO_CALL_REPLY
             return
