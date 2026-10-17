@@ -63,6 +63,30 @@ def test_fallback_markdown_reads_as_a_list_of_places():
            "&daddr=Orpheum%20Theatre&dirflg=w)" in text
 
 
+def test_fallback_markdown_escapes_titles_and_names_no_mode_it_cant_open():
+    [card] = card_schema.normalize_cards([{
+        "type": "map", "title": "[x](https://evil.test) **bold**", "places": [{"name": "A"}, {"name": "B"}],
+        "route": {"from": 0, "to": 1, "mode": "cycling"}}])
+    text = card_schema.fallback_markdown([card])
+    assert text.startswith("### \\[x\\](https://evil.test) \\*\\*bold\\*\\*")
+    assert "[Directions to B](https://maps.apple.com/?saddr=A&daddr=B)" in text, "Apple Maps links can't cycle"
+
+
+def test_a_url_that_could_end_a_link_is_invalid():
+    for url in ("https://a.test/x)[y](javascript:alert(1))", "https://a.test/a b", "https://a.test/<x>",
+                'https://a.test/"x"', "https://a.test/[x]"):
+        [card] = card_schema.normalize_cards([{"type": "place", "places": [
+            {"name": "A", "hours": {"text": "9–5", "source": "Yelp", "url": url}}]}])
+        assert card["places"][0]["hours"] == {"text": "9–5", "source": "Yelp"}, url
+
+
+def test_long_lists_stop_once_full():
+    places = [{"name": f"P{i}"} for i in range(10_000)]
+    cards = card_schema.normalize_cards([{"type": "places", "places": places}] * 1_000)
+    assert len(cards) == card_schema.MAX_CARDS
+    assert all(len(card["places"]) == 10 for card in cards)
+
+
 def test_the_tool_parameter_wraps_the_card():
     parameter = card_schema.tool_parameter("Cards.")
     assert parameter == {"type": "array", "maxItems": card_schema.MAX_CARDS, "description": "Cards.",

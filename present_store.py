@@ -253,7 +253,8 @@ class PresentStore:
             raise PresentError("no_markdown", "Give what to show, as Markdown.")
         if len(body) > MAX_CARD_MARKDOWN_CHARS:
             raise PresentError("too_long", f"markdown is at most {MAX_CARD_MARKDOWN_CHARS} characters.")
-        rich = _card_schema().normalize_cards(cards)
+        schema = _card_schema()
+        rich = schema.normalize_cards(cards) if schema else []
         with self._locked() as state:
             now = self.clock()
             if not _shows_cards(state, now):
@@ -598,7 +599,8 @@ def _card(raw: Any, now: float) -> dict[str, Any] | None:
         return None
     card = {"id": card_id, "title": title, "markdown": markdown, "session_id": _line(raw.get("session_id"), 180),
             "created_at": created, "expires_at": expires}
-    rich = _card_schema().normalize_cards(raw.get("cards"))
+    schema = _card_schema()
+    rich = schema.normalize_cards(raw.get("cards")) if schema else []
     if rich:
         card["cards"] = rich
     return card
@@ -608,20 +610,28 @@ _card_schema_module: Any = None
 _card_schema_lock = threading.Lock()
 
 
+_CARD_SCHEMA_MISSING = object()
+
+
 def _card_schema() -> Any:
     """card_schema.py beside this file, loaded by path once: the dashboard
-    loads this module by path too, so it can't import the package."""
+    loads this module by path too, so it can't import the package. None in
+    an install that lost it or its schema, where cards are left out and
+    everything else here still works."""
     global _card_schema_module
     with _card_schema_lock:
         if _card_schema_module is None:
             path = Path(__file__).resolve().parent / "card_schema.py"
             spec = importlib.util.spec_from_file_location("conduit_push_present_card_schema", path)
-            if spec is None or spec.loader is None:
-                raise ImportError("card_schema.py is missing")
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
+            try:
+                if spec is None or spec.loader is None:
+                    raise ImportError("card_schema.py is missing")
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+            except (ImportError, OSError, ValueError, KeyError):
+                module = _CARD_SCHEMA_MISSING
             _card_schema_module = module
-        return _card_schema_module
+        return None if _card_schema_module is _CARD_SCHEMA_MISSING else _card_schema_module
 
 
 @contextmanager

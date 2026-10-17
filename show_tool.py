@@ -65,8 +65,8 @@ SCHEMA: dict[str, Any] = {
 
 SHOWN_NOTE = ("On the user's screen. Say in a sentence that it's there and give the gist; don't read it out or "
               "repeat it in your reply.")
-IN_CHAT_NOTE = ("Shown in the chat. Give the gist in a sentence or two; don't repeat the card's details in your "
-                "reply.")
+IN_CHAT_NOTE = ("The cards are shown in the chat; Markdown isn't, so put anything else in your reply. Give the "
+                "gist in a sentence or two; don't repeat the cards' details.")
 
 
 def register(ctx: Any, *, is_child: Callable[[Any], bool] = lambda _: False) -> None:
@@ -166,5 +166,5 @@ def _fallback(cards: list[dict[str, Any]]) -> str:
 def _turn_source() -> str | None:
     try:
         return reply_sources.turn_source(None, reply_sources.current_transport())
-    except Exception:  # noqa: BLE001 — unknown: let it through
-        return None
+    except Exception:  # noqa: BLE001 — a lookup that failed draws no cards
+        return "unknown"

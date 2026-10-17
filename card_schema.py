@@ -13,7 +13,8 @@ Normalizing follows the schema and is the same in Conduit's Swift
 test suites run, so the two can't drift:
 - unknown keys are dropped;
 - text has control characters turned into spaces, is trimmed, and is cut to
-  ``maxLength`` code points (a URL that's too long is invalid instead);
+  ``maxLength`` code points (a URL that's too long, or holds a space, quote,
+  bracket or parenthesis, is invalid instead);
 - an invalid optional value is dropped, an invalid list item is dropped
   (then the list is cut to ``maxItems``), and an invalid required value
   makes its object invalid;
@@ -40,7 +41,9 @@ from urllib.parse import quote
 SCHEMA_PATH = Path(__file__).resolve().parent / "cards" / "card-schema.json"
 
 _INVALID = object()
-_URI = re.compile(r"^https?://\S+$", re.IGNORECASE)
+# No spaces, quotes, brackets or parentheses: a URL also lands inside a
+# Markdown link, where any of them could end it early.
+_URI = re.compile(r"^https?://[^\s()<>\[\]{}\"'`\\]+$", re.IGNORECASE)
 
 
 def _load() -> dict[str, Any]:
@@ -65,10 +68,12 @@ def normalize_cards(value: Any) -> list[dict[str, Any]]:
         return []
     cards = []
     for raw in value:
+        if len(cards) == MAX_CARDS:
+            break
         card = normalize_card(raw)
         if card is not None:
             cards.append(card)
-    return cards[:MAX_CARDS]
+    return cards
 
 
 def normalize_card(raw: Any) -> dict[str, Any] | None:
@@ -100,9 +105,14 @@ def _normalize(schema: dict[str, Any], value: Any) -> Any:
     if kind == "array":
         if not isinstance(value, list):
             return _INVALID
-        items = [item for item in (_normalize(schema["items"], raw) for raw in value) if item is not _INVALID]
-        if "maxItems" in schema:
-            items = items[:schema["maxItems"]]
+        limit = schema.get("maxItems")
+        items = []
+        for raw in value:
+            if limit is not None and len(items) == limit:
+                break
+            item = _normalize(schema["items"], raw)
+            if item is not _INVALID:
+                items.append(item)
         if len(items) < schema.get("minItems", 0):
             return _INVALID
         return items
@@ -179,7 +189,7 @@ def fallback_markdown(cards: list[dict[str, Any]]) -> str:
 def _card_markdown(card: dict[str, Any]) -> str:
     lines = []
     if card.get("title"):
-        lines.append(f"### {card['title']}")
+        lines.append(f"### {_escape(card['title'])}")
     for place in card["places"]:
         lines.append(_place_markdown(place))
     route = card.get("route")
@@ -190,10 +200,14 @@ def _card_markdown(card: dict[str, Any]) -> str:
         query = [("daddr", _maps_query(to))]
         if "from" in route:
             query.insert(0, ("saddr", _maps_query(places[route["from"]])))
+        label = f"Directions to {_escape(to['name'])}"
         if mode in _MODE_FLAGS:
+            # Apple Maps links have no cycling directions, so a cycling
+            # route's link names no mode rather than the wrong one.
             query.append(("dirflg", _MODE_FLAGS[mode]))
+            label += f" ({mode})"
         link = "https://maps.apple.com/?" + "&".join(f"{key}={quote(value, safe=',')}" for key, value in query)
-        lines.append(f"[Directions to {_escape(to['name'])} ({mode})]({link})")
+        lines.append(f"[{label}]({link})")
     return "\n\n".join(lines)
 
 

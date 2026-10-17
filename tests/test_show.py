@@ -262,3 +262,22 @@ def test_a_card_on_disk_keeps_only_valid_rich_cards(store):
     store.path.write_text(json.dumps(state))
     [card] = _exchange(store)["cards"]
     assert card["cards"] == [CLEAN_MAP]
+
+
+def test_a_turn_source_lookup_that_fails_draws_no_cards(tool_home, monkeypatch):
+    _exchange(PresentStore(tool_home), features=("chat-cards",))
+
+    def broken(*args):
+        raise RuntimeError("no gateway")
+
+    monkeypatch.setattr(tool.reply_sources, "turn_source", broken)
+    assert _call({"title": "Dinner", "cards": [MAP]})["error"] == "not_conduit"
+
+
+def test_cards_are_left_out_when_the_schema_is_missing(store, monkeypatch):
+    monkeypatch.setattr(store_module, "_card_schema_module", store_module._CARD_SCHEMA_MISSING)
+    _exchange(store)
+    card = store.show("Dinner", TABLE, cards=[CLEAN_MAP])
+    assert "cards" not in card
+    [shown] = _exchange(store)["cards"]
+    assert shown["markdown"] == TABLE, "everything else still works"

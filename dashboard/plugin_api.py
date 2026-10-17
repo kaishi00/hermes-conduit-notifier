@@ -3497,12 +3497,13 @@ def _voice_turns(raw: Any) -> list:
 
 
 _card_schema_module: Any = None
+_card_schema_lock = threading.Lock()
 
 
 def _card_schema() -> Any:
     """card_schema.py beside this folder, loaded once."""
     global _card_schema_module
-    with _calls_store_lock:
+    with _card_schema_lock:
         if _card_schema_module is None:
             path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "card_schema.py")
             spec = importlib.util.spec_from_file_location("conduit_push_dashboard_card_schema", path)
