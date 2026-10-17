@@ -628,7 +628,7 @@ def _card_schema() -> Any:
                     raise ImportError("card_schema.py is missing")
                 module = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(module)
-            except (ImportError, OSError, ValueError, KeyError):
+            except Exception:  # noqa: BLE001 — a broken install draws no cards
                 module = _CARD_SCHEMA_MISSING
             _card_schema_module = module
         return None if _card_schema_module is _CARD_SCHEMA_MISSING else _card_schema_module

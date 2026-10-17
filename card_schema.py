@@ -193,8 +193,12 @@ def _card_markdown(card: dict[str, Any]) -> str:
     for place in card["places"]:
         lines.append(_place_markdown(place))
     route = card.get("route")
+    places = card["places"]
+    # Normalized cards always name places in the list; a card from anywhere
+    # else just loses its directions link.
+    if route and not all(0 <= index < len(places) for index in (route.get("to", -1), route.get("from", 0))):
+        route = None
     if route:
-        places = card["places"]
         to = places[route["to"]]
         mode = route.get("mode", "driving")
         query = [("daddr", _maps_query(to))]
