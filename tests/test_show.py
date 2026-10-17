@@ -74,6 +74,25 @@ def test_a_card_reaches_the_phone_until_it_expires(store, clock):
     assert json.loads(store.path.read_text())["cards"] == [], "an expired card isn't kept"
 
 
+def test_a_card_reaches_only_a_phone_that_shows_cards(store):
+    _exchange(store)
+    store.show("Forecast", TABLE)
+    other = store.exchange({"installation_id": "ipad-installation-2", "results": [], "features": ["maps-navigate"]})
+    assert "cards" not in other
+    assert len(_exchange(store)["cards"]) == 1
+
+
+def test_a_phone_not_seen_for_hours_doesnt_count(store, clock):
+    _exchange(store)
+    clock.now += store_module.SHOW_DEVICE_RECENT_S
+    assert store.can_show() is False
+    with pytest.raises(PresentError) as error:
+        store.show("Forecast", TABLE)
+    assert error.value.code == "no_device"
+    _exchange(store)
+    assert store.can_show() is True
+
+
 def test_only_a_phone_that_shows_cards_gets_them(store):
     with pytest.raises(PresentError) as error:
         store.show("Forecast", TABLE)

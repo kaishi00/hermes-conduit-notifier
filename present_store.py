@@ -78,8 +78,11 @@ MAX_CARDS = 20
 CARDS_PER_HOUR = 60
 MAX_CARD_TITLE_CHARS = 80
 MAX_CARD_MARKDOWN_CHARS = 8000
-# What a phone that shows cards says it can do.
+# What a phone that shows cards says it can do, and how recently it must have
+# exchanged for Hermes to count on it (a phone in a voice conversation
+# exchanges at least every reply).
 SHOW_FEATURE = "show-cards"
+SHOW_DEVICE_RECENT_S = 6 * 3600
 # How often an unchanged phone's last-seen time is refreshed.
 SEEN_REFRESH_S = 60
 DEFAULT_TTL_MINUTES = 30
@@ -154,7 +157,9 @@ class PresentStore:
                 _take_result(state, installation, result, now)
             # The newest, within a cap only a hand-edited store can exceed.
             waiting = [_public(prompt) for prompt in state["prompts"] if prompt["status"] == "waiting"][-MAX_WAITING:]
-            cards = [dict(card) for card in state["cards"] if now < card["expires_at"]]
+            # Only for a phone that shows them.
+            cards = [dict(card) for card in state["cards"] if now < card["expires_at"]] \
+                if SHOW_FEATURE in device["features"] else []
         # Only a host with cards to show says so.
         return {"prompts": waiting, **({"cards": cards} if cards else {})}
 
@@ -164,6 +169,11 @@ class PresentStore:
         """Whether a Conduit that shows prompts has exchanged with this
         profile."""
         return bool(self._load()["devices"])
+
+    def can_show(self) -> bool:
+        """Whether a Conduit that shows cards exchanged with this profile
+        recently."""
+        return _shows_cards(self._load(), self.clock())
 
     def has_feature(self, feature: str) -> bool:
         """Whether a Conduit that exchanged with this profile says it can
@@ -240,7 +250,7 @@ class PresentStore:
             raise PresentError("too_long", f"markdown is at most {MAX_CARD_MARKDOWN_CHARS} characters.")
         with self._locked() as state:
             now = self.clock()
-            if not any(SHOW_FEATURE in device["features"] for device in state["devices"].values()):
+            if not _shows_cards(state, now):
                 raise PresentError("no_device", "No Conduit that shows cards has connected to this Hermes profile "
                                                 "yet.")
             recent = [at for at in state["shown"] if now - at < HOUR_S]
@@ -556,6 +566,11 @@ def _normalized(raw: Any, now: float) -> dict[str, Any]:
         state["shown"] = [at for at in shown if isinstance(at, (int, float)) and not isinstance(at, bool)
                           and now - at < HOUR_S][-CARDS_PER_HOUR:]
     return state
+
+
+def _shows_cards(state: dict[str, Any], now: float) -> bool:
+    return any(SHOW_FEATURE in device["features"] and now - device["seen_at"] < SHOW_DEVICE_RECENT_S
+               for device in state["devices"].values())
 
 
 def _card(raw: Any, now: float) -> dict[str, Any] | None:

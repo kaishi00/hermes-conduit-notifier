@@ -19,8 +19,7 @@ from typing import Any, Callable
 from hermes_constants import get_hermes_home
 
 from . import client
-from .present_store import (MAX_CARD_MARKDOWN_CHARS, MAX_CARD_TITLE_CHARS, SHOW_FEATURE, PresentError,
-                            PresentStore)
+from .present_store import MAX_CARD_MARKDOWN_CHARS, MAX_CARD_TITLE_CHARS, PresentError, PresentStore
 
 logger = logging.getLogger("hermes.plugins.conduit_push")
 
@@ -77,10 +76,10 @@ def _store() -> PresentStore:
 
 
 def available() -> bool:
-    """Shown to the model only once a Conduit that shows cards has exchanged
-    with this profile."""
+    """Shown to the model only while a Conduit that shows cards has
+    exchanged with this profile recently."""
     try:
-        return client.load_state() is not None and _store().has_feature(SHOW_FEATURE)
+        return client.load_state() is not None and _store().can_show()
     except Exception:  # noqa: BLE001
         return False
 

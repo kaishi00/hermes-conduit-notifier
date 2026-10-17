@@ -1344,8 +1344,9 @@ shows cards is connected.
 - **Short-lived.** A card is dropped after ten minutes: it belongs to the
   conversation it was shown in.
 
-The tool shows only once a Conduit that says `show-cards` in its exchange's
-`features` has exchanged with the profile; subagents can't use it. Limits:
+The tool shows only while a Conduit that says `show-cards` in its exchange's
+`features` has exchanged with the profile in the last six hours, and only
+that phone gets the cards; subagents can't use it. Limits:
 60 cards an hour, the newest 20 kept.
 
 ## Health data from Conduit (plugin 0.23+)
