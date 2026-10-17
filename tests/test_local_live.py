@@ -462,6 +462,9 @@ def test_speak_and_live_sockets_on_one_profile_each_get_their_own_requests(clien
             _wait_for(lambda: any("Read  me." in sent for sent in server.upstream.sent))
             read = client.post(f"{BASE}/local-live/v1/chat/completions", json=_completion("Read me."), headers=headers)
             assert read.json()["choices"][0]["message"]["content"] == "Read me."
+            # A retry (the server lost the answer) still reads back.
+            again = client.post(f"{BASE}/local-live/v1/chat/completions", json=_completion("Read me."), headers=headers)
+            assert again.json()["choices"][0]["message"]["content"] == "Read me."
             # The newer speak socket doesn't take the live call's turn.
             thread, result = _ask_in_background(client, headers, _completion("What's the time?"))
             turn = json.loads(live.receive_text())
@@ -500,3 +503,17 @@ def test_a_runaway_voice_server_is_rate_limited(client, hermes, monkeypatch):
     codes = [client.post(f"{BASE}/local-live/v1/chat/completions", json=_completion(), headers=headers).status_code
              for _ in range(3)]
     assert codes == [200, 200, 429]
+
+
+def test_models_route_counts_against_the_rate_limit(client, hermes, monkeypatch):
+    monkeypatch.setattr(api, "_local_live_limiter", api._MintLimiter(1, 60.0, message="Too many"))
+    headers = {"Authorization": f"Bearer {_key(hermes)}"}
+    codes = [client.get(f"{BASE}/local-live/v1/models", headers=headers).status_code for _ in range(2)]
+    assert codes == [200, 429]
+
+
+def test_non_text_message_content_is_no_turn():
+    body = {"messages": [{"role": "user", "content": {"text": "hi"}}]}
+    assert api._local_live_user_text(body) == ""
+    parts = {"messages": [{"role": "user", "content": [{"type": "text", "text": 5}, {"type": "text", "text": "hi"}]}]}
+    assert api._local_live_user_text(parts) == "hi"

@@ -2889,6 +2889,9 @@ class _LocalLiveCall:
         # asked to have read back yet: how its requests are told from a
         # live call's on the same profile.
         self.to_read: "collections.deque[str]" = collections.deque(maxlen=64)
+        # Words read back lately, with when: a server retrying a request whose
+        # answer it lost still gets the read-back, not a live turn.
+        self.read_lately: "collections.deque[Tuple[str, float]]" = collections.deque(maxlen=16)
         self.send_lock = asyncio.Lock()
         # Held across cancel-old, make-new and send, so turns never overlap.
         self.turn_lock = asyncio.Lock()
@@ -2968,10 +2971,12 @@ class _LocalLiveCall:
         """Whether ``text`` is words this speak socket sent (now read back)."""
         # Spaced the way _local_live_user_text gives the request's words.
         wanted = " ".join(text.split())
+        now = time.monotonic()
         if wanted in self.to_read:
             self.to_read.remove(wanted)
+            self.read_lately.append((wanted, now))
             return True
-        return False
+        return any(words == wanted and now - at < LOCAL_LIVE_RETRY_WINDOW_S for words, at in self.read_lately)
 
     def close(self) -> None:
         self.closed = True
@@ -2981,6 +2986,8 @@ class _LocalLiveCall:
 
 
 _local_live_calls: Dict[str, List[_LocalLiveCall]] = {}
+# How long a read-back sentence can be asked for again (a server's retry).
+LOCAL_LIVE_RETRY_WINDOW_S = 30.0
 # Requests per profile a minute: a speak socket asks once a sentence, a
 # call once a turn, so this only stops a runaway client.
 LOCAL_LIVE_REQUEST_LIMIT = 120
@@ -3090,7 +3097,8 @@ async def get_local_live_status(response: Response, profile: Optional[str] = Non
 
 @router.post("/local-live/key")
 async def post_local_live_key(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
-    """A new key for the voice server; the old one stops working at once."""
+    """A new key for the voice server. This process drops the old one at once;
+    other dashboard processes accept it for up to 30 s (their verified cache)."""
     response.headers["Cache-Control"] = "no-store"
     _local_live_start_auth()
     if not _local_live_auth_state.get("ready"):
@@ -3135,6 +3143,14 @@ def _local_live_request_profile(request: Request) -> str:
     return name[len("local-live:"):]
 
 
+def _local_live_acquire(profile: str) -> None:
+    """Spends one of the profile's requests this minute, or answers 429."""
+    try:
+        _local_live_limiter.acquire(_local_live_profile_key(profile))
+    except TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+
+
 def _local_live_user_text(body: Any) -> str:
     """The newest user message's text: the turn. Hermes keeps the history."""
     messages = body.get("messages") if isinstance(body, dict) else None
@@ -3146,9 +3162,12 @@ def _local_live_user_text(body: Any) -> str:
             continue
         content = message.get("content")
         if isinstance(content, list):
-            content = " ".join(str(part.get("text") or "") for part in content
-                               if isinstance(part, dict) and part.get("type") in ("text", "input_text"))
-        return " ".join(str(content or "").split())[:LOCAL_LIVE_MAX_TURN_CHARS]
+            content = " ".join(part["text"] for part in content
+                               if isinstance(part, dict) and part.get("type") in ("text", "input_text")
+                               and isinstance(part.get("text"), str))
+        if not isinstance(content, str):
+            return ""
+        return " ".join(content.split())[:LOCAL_LIVE_MAX_TURN_CHARS]
     return ""
 
 
@@ -3162,7 +3181,8 @@ def _local_live_chunk(completion_id: str, created: int, delta: Dict[str, Any], f
 async def get_local_live_models(request: Request, response: Response) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     _local_live_start_auth()
-    _local_live_request_profile(request)
+    profile = _local_live_request_profile(request)
+    _local_live_acquire(profile)
     return {"object": "list", "data": [{"id": LOCAL_LIVE_MODEL_ID, "object": "model", "owned_by": "conduit"}]}
 
 
@@ -3176,10 +3196,7 @@ async def post_local_live_chat_completions(request: Request) -> Any:
     body = await _read_json_body(request, LOCAL_LIVE_MAX_BODY_BYTES)
     text = _local_live_user_text(body)
     # After validation, so a malformed request doesn't spend the budget.
-    try:
-        _local_live_limiter.acquire(_local_live_profile_key(profile))
-    except TokenError as exc:
-        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+    _local_live_acquire(profile)
     _local_live_last_request[_local_live_profile_key(profile)] = time.time()
     stream = isinstance(body, dict) and body.get("stream") is True
     completion_id = f"chatcmpl-conduit-{uuid.uuid4().hex[:24]}"
