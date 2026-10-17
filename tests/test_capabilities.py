@@ -73,6 +73,7 @@ def test_every_capability_names_a_served_route_family():
         "room-files": "/room-files",
         "room-images": "/room-images",
         "speech-server": "/speech-server/",
+        "local-live": "/local-live/",
         "artifacts": "/artifacts",
     }
     assert set(prefixes) == set(api.ROUTE_CAPABILITIES)

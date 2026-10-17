@@ -766,6 +766,59 @@ dashboard sign-in required, 4429 rate limited, 4400 the server refused, 4502
 unreachable or dropped (retryable), 4500 the relay failed on the host, 1009 a
 frame over 256 KB. A socket that sends nothing for 60 seconds is closed.
 
+## Local Live: live calls through your own voice server (plugin 0.42+)
+
+The same speech server can run whole live calls. speech-to-speech listens,
+decides when you've finished, and speaks the reply, asking an
+OpenAI-compatible "model address" for the words. Point that model address at
+this plugin and Hermes answers each turn in the chat the call belongs to, with
+that chat's profile, tools and memory. The call's audio goes through the
+relay above.
+
+1. Set the speech server above (Conduit's Voice settings do it).
+2. In Conduit's Local Live settings, copy the model address and key, or read
+   them from `GET /local-live/status`. The model address is your dashboard's
+   address plus `/api/plugins/conduit_push/local-live/v1`, so the voice
+   server has to reach the dashboard the way your phone does (LAN, Tailscale
+   or a public domain).
+3. Start speech-to-speech with the chat-completions backend:
+
+```bash
+speech-to-speech serve --llm_backend chat-completions \
+  --responses_api_base_url https://<your dashboard>/api/plugins/conduit_push/local-live/v1 \
+  --responses_api_api_key <key from Conduit> \
+  --model_name conduit --stream_batch_sentences 1
+```
+
+The model routes take that key as a bearer token instead of the dashboard
+sign-in, through Hermes' token-route seam
+(`hermes_cli.dashboard_auth.token_auth`). The key works on those two routes
+only. A Hermes without the seam reports Local Live unavailable, and so does a
+public dashboard with no other sign-in provider. A key is per profile and
+names its profile. Rotating it stops the old one at once.
+
+The model name is ignored, and only the newest user message is used, since
+Hermes keeps the history. One live call per profile at a time: a turn goes to
+the profile's newest Local Live socket. With no call open, the routes answer a
+fixed line, so the server's warmup request succeeds.
+
+| Method | Path | Returns |
+|--------|------|---------|
+| GET | `/api/plugins/conduit_push/local-live/status` | `{ok, available, reason, model_path, model_name, api_key, speech_server, in_call, last_request_at}` |
+| POST | `/api/plugins/conduit_push/local-live/key` | `{ok, api_key}`: a new key |
+| WebSocket | `/api/plugins/conduit_push/local-live/socket` | the speech server relay, plus turn frames |
+| POST | `/api/plugins/conduit_push/local-live/v1/chat/completions` | OpenAI chat completions (streaming or not), key auth |
+| GET | `/api/plugins/conduit_push/local-live/v1/models` | `{object: "list", data: [{id: "conduit"}]}`, key auth |
+
+Turn frames on the socket, beside the relayed realtime events:
+
+- plugin to Conduit: `{"type": "conduit.turn", "turn_id", "text"}`, and
+  `{"type": "conduit.turn.cancel", "turn_id"}` when the server stops listening
+  (you talked over the reply) or a newer turn starts.
+- Conduit to plugin, never forwarded: `{"type": "conduit.turn.delta",
+  "turn_id", "text"}`, then `conduit.turn.done` or `conduit.turn.error`.
+  A turn with no frame for 90 seconds ends.
+
 ## Voice call transcripts
 
 Gemini Live, GPT-Live and Grok Live calls never run a Hermes turn, so nothing records
