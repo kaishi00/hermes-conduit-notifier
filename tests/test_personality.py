@@ -216,6 +216,16 @@ def test_hook_fires_on_a_voice_live_turn_with_string_content():
     assert "*sets down the gavel*" in plugin.PERSONA_VOICE_NOTE
 
 
+def test_a_phone_that_shows_cards_adds_the_screen_to_the_voice_note(monkeypatch):
+    content = f"{VOICE_NOTE}\n\nshow me the forecast"
+    monkeypatch.setattr(plugin.show_tool, "available", lambda: True)
+    note = plugin._pre_llm_call(conversation_history=_history(content))["context"]
+    assert note == plugin.PERSONA_VOICE_NOTE + "\n" + plugin.SHOW_VOICE_NOTE
+    assert "conduit_show" in note
+    monkeypatch.setattr(plugin.show_tool, "available", lambda: False)
+    assert plugin._pre_llm_call(conversation_history=_history(content)) == {"context": plugin.PERSONA_VOICE_NOTE}
+
+
 def test_hook_fires_on_a_voice_live_turn_with_list_content():
     content = [{"type": "text", "text": VOICE_NOTE}, {"type": "image_url", "image_url": {"url": "data:"}},
                {"type": "text", "text": "what is this?"}]

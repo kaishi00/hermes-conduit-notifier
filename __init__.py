@@ -13,7 +13,8 @@ from typing import Any
 from hermes_constants import get_hermes_home
 
 from . import (call_tool, call_watches, calls, clarify_loop, conduit_first, cron_runs, desktop_selected, health_tool,
-               live_activity, location_tool, maps_tool, phone_tool, present_tool, reply_sources, settings_tool)
+               live_activity, location_tool, maps_tool, phone_tool, present_tool, reply_sources, settings_tool,
+               show_tool)
 from .session_titles import title as _session_title, titled as _titled
 from .client import enqueue
 from .events import approval_decision, clarification_text, event_id, is_silent_response, plain_text, push_event
@@ -68,6 +69,9 @@ def register(ctx: Any) -> None:
     # Hermes asks the user to OK an action on their phone (tap, or voice in
     # a call) before it does it.
     present_tool.register(ctx, is_child=_is_child, profile=lambda: _profile)
+    # Hermes puts a table, steps or links on the screen of the user's voice
+    # call instead of reading them out.
+    show_tool.register(ctx, is_child=_is_child)
     # Health data Conduit shares from Apple Health, read-only, with its skill.
     health_tool.register(ctx, is_child=_is_child,
                          skill_path=Path(__file__).resolve().parent / "skills" / health_tool.SKILL_NAME / "SKILL.md")
@@ -406,6 +410,12 @@ PERSONA_VOICE_NOTE = (
     "write will be read aloud, so write only words meant to be spoken. No stage directions or "
     "narrated actions (for example *sets down the gavel*), no sound effects, no emoji, no markdown.]"
 )
+# Added while a Conduit that shows cards is connected: what isn't spoken
+# can still be seen.
+SHOW_VOICE_NOTE = (
+    "[The user's phone shows a screen during this call: put anything better seen than heard (a table, steps, "
+    "a chart, code, images, links) on it with conduit_show, then say in a sentence that it's there.]"
+)
 
 
 def _voice_note_prefix() -> str:
@@ -508,7 +518,7 @@ def _voice_persona_note(history: Any) -> str | None:
             if isinstance(message, dict) and message.get("role") == "user":
                 prefix = _voice_note_prefix()
                 if any(text.lstrip().startswith(prefix) for text in _text_parts(message.get("content"))):
-                    return PERSONA_VOICE_NOTE
+                    return PERSONA_VOICE_NOTE + ("\n" + SHOW_VOICE_NOTE if show_tool.available() else "")
                 return None
     except Exception:  # noqa: BLE001 — a hook must never break the turn
         return None

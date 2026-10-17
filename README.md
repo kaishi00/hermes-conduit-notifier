@@ -1328,6 +1328,26 @@ profile; subagents can't use it. Prompts live in the profile's
 `conduit-present.json` (answers are kept a week). Limits: 20 prompts an
 hour, 20 waiting at once, 60 exchanges a minute per profile.
 
+## Hermes shows things during a voice call (plugin 0.44+)
+
+In a Conduit voice conversation (Local Live, Classic voice, or a live call
+that hands work to Hermes), a table, steps, a chart or links are better seen
+than heard. Hermes puts them on the call's screen with `conduit_show`
+(`title` up to 80 characters, `markdown` up to 8,000) and says in a sentence
+that they're there. Voice turns get a note saying so while a Conduit that
+shows cards is connected.
+
+- **No push.** The card is kept in `conduit-present.json` and listed in the
+  same `present/exchange` answer as `"cards": [{"id", "title", "markdown", "session_id", "created_at", "expires_at"}]`
+  (only when there are any). Conduit exchanges as soon as it sees the tool
+  in the turn and again when the reply ends, and shows each card once.
+- **Short-lived.** A card is dropped after ten minutes: it belongs to the
+  conversation it was shown in.
+
+The tool shows only once a Conduit that says `show-cards` in its exchange's
+`features` has exchanged with the profile; subagents can't use it. Limits:
+60 cards an hour, the newest 20 kept.
+
 ## Health data from Conduit (plugin 0.23+)
 
 Conduit can share Apple Health data with a Hermes profile so the agent can

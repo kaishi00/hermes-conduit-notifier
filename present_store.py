@@ -13,6 +13,10 @@ answer. The agent reads it with the tool and does (or doesn't do) the action
 itself. An answer the agent hasn't seen yet stays unreported until the tool
 returns it once.
 
+The same exchange carries the cards ``conduit_show`` puts on the screen of
+a voice call (a table, steps, a chart): short-lived, shown once by a phone
+that says it can (feature ``show-cards``), never answered.
+
 State lives in the profile's ``conduit-present.json`` beside the pairing
 state. The tool (agent process) and the dashboard route (dashboard process)
 both use this module: the dashboard loads it by path, so it imports nothing
@@ -67,6 +71,15 @@ MAX_DEVICES = 8
 MAX_WAITING = 20
 MAX_PROMPTS = 50
 MAX_RESULTS = 40
+# Cards conduit_show puts on a call's screen: how long a phone may still pick
+# one up, how many are kept, and how many Hermes may show an hour.
+CARD_TTL_S = 10 * 60
+MAX_CARDS = 20
+CARDS_PER_HOUR = 60
+MAX_CARD_TITLE_CHARS = 80
+MAX_CARD_MARKDOWN_CHARS = 8000
+# What a phone that shows cards says it can do.
+SHOW_FEATURE = "show-cards"
 # How often an unchanged phone's last-seen time is refreshed.
 SEEN_REFRESH_S = 60
 DEFAULT_TTL_MINUTES = 30
@@ -141,7 +154,9 @@ class PresentStore:
                 _take_result(state, installation, result, now)
             # The newest, within a cap only a hand-edited store can exceed.
             waiting = [_public(prompt) for prompt in state["prompts"] if prompt["status"] == "waiting"][-MAX_WAITING:]
-        return {"prompts": waiting}
+            cards = [dict(card) for card in state["cards"] if now < card["expires_at"]]
+        # Only a host with cards to show says so.
+        return {"prompts": waiting, **({"cards": cards} if cards else {})}
 
     # --- Hermes' side --------------------------------------------------------
 
@@ -209,6 +224,34 @@ class PresentStore:
             _trim_prompts(state)
             state["asked"] = (recent + [now])[-PER_HOUR:]
             return _shown(prompt)
+
+    def show(self, title: Any, markdown: Any, *, session_id: Any = None) -> dict[str, Any]:
+        """Keeps a card for the screen of the user's voice call. Raises
+        PresentError when it won't."""
+        clean_title = _line(title, MAX_CARD_TITLE_CHARS + 1)
+        if not clean_title:
+            raise PresentError("no_title", "Give a short title, a few words.")
+        if len(clean_title) > MAX_CARD_TITLE_CHARS:
+            raise PresentError("too_long", f"title is at most {MAX_CARD_TITLE_CHARS} characters.")
+        body = _text(markdown, MAX_CARD_MARKDOWN_CHARS + 1)
+        if not body:
+            raise PresentError("no_markdown", "Give what to show, as Markdown.")
+        if len(body) > MAX_CARD_MARKDOWN_CHARS:
+            raise PresentError("too_long", f"markdown is at most {MAX_CARD_MARKDOWN_CHARS} characters.")
+        with self._locked() as state:
+            now = self.clock()
+            if not any(SHOW_FEATURE in device["features"] for device in state["devices"].values()):
+                raise PresentError("no_device", "No Conduit that shows cards has connected to this Hermes profile "
+                                                "yet.")
+            recent = [at for at in state["shown"] if now - at < HOUR_S]
+            if len(recent) >= CARDS_PER_HOUR:
+                raise PresentError("rate_limited", "Too many cards this hour. Say it instead.")
+            created = int(now)
+            card = {"id": secrets.token_urlsafe(12), "title": clean_title, "markdown": body,
+                    "session_id": _line(session_id, 180), "created_at": created, "expires_at": created + CARD_TTL_S}
+            state["cards"] = (state["cards"] + [card])[-MAX_CARDS:]
+            state["shown"] = (recent + [now])[-CARDS_PER_HOUR:]
+            return dict(card)
 
     def get(self, prompt_id: Any) -> dict[str, Any] | None:
         """One prompt as it stands, without marking it reported (for polling)."""
@@ -473,7 +516,8 @@ def _prompt(raw: Any, now: float) -> dict[str, Any] | None:
 def _normalized(raw: Any, now: float) -> dict[str, Any]:
     """A well-formed state from whatever is on disk, with waiting prompts past
     their time expired and old entries dropped."""
-    state: dict[str, Any] = {"version": VERSION, "devices": {}, "prompts": [], "asked": []}
+    state: dict[str, Any] = {"version": VERSION, "devices": {}, "prompts": [], "asked": [], "cards": [],
+                             "shown": []}
     if not isinstance(raw, dict):
         return state
     devices = raw.get("devices")
@@ -499,7 +543,37 @@ def _normalized(raw: Any, now: float) -> dict[str, Any]:
     if isinstance(asked, list):
         state["asked"] = [at for at in asked if isinstance(at, (int, float)) and not isinstance(at, bool)
                           and now - at < HOUR_S][-PER_HOUR:]
+    cards = raw.get("cards")
+    card_ids: set[str] = set()
+    for item in cards if isinstance(cards, list) else []:
+        card = _card(item, now)
+        if card is not None and card["id"] not in card_ids:
+            card_ids.add(card["id"])
+            state["cards"].append(card)
+    state["cards"] = state["cards"][-MAX_CARDS:]
+    shown = raw.get("shown")
+    if isinstance(shown, list):
+        state["shown"] = [at for at in shown if isinstance(at, (int, float)) and not isinstance(at, bool)
+                          and now - at < HOUR_S][-CARDS_PER_HOUR:]
     return state
+
+
+def _card(raw: Any, now: float) -> dict[str, Any] | None:
+    """A well-formed card from disk, cleaned again, or None when it's
+    malformed or past its time."""
+    if not isinstance(raw, dict):
+        return None
+    card_id, created, expires = raw.get("id"), raw.get("created_at"), raw.get("expires_at")
+    if (not isinstance(card_id, str) or not _PROMPT_ID.match(card_id)
+            or not all(isinstance(value, int) and not isinstance(value, bool) for value in (created, expires))
+            or now >= expires):
+        return None
+    title = _line(raw.get("title"), MAX_CARD_TITLE_CHARS)
+    markdown = _text(raw.get("markdown"), MAX_CARD_MARKDOWN_CHARS)
+    if not title or not markdown:
+        return None
+    return {"id": card_id, "title": title, "markdown": markdown, "session_id": _line(raw.get("session_id"), 180),
+            "created_at": created, "expires_at": expires}
 
 
 @contextmanager
