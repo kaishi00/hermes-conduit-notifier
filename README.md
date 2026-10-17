@@ -795,7 +795,7 @@ sign-in, through Hermes' token-route seam
 (`hermes_cli.dashboard_auth.token_auth`). The key works on those two routes
 only. A Hermes without the seam reports Local Live unavailable, and so does a
 public dashboard with no other sign-in provider. A key is per profile and
-names its profile. Rotating it stops the old one at once.
+names its profile. Rotating it stops the old one at once in the dashboard's process (other processes accept it for up to 30 seconds, until their cache expires).
 
 The model name is ignored, and only the newest user message is used, since
 Hermes keeps the history. One live call per profile at a time: a turn goes to

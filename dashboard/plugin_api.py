@@ -2790,10 +2790,15 @@ def _local_live_register_auth() -> None:
         _local_live_auth_state.update(ready=False, reason=LOCAL_LIVE_UNAVAILABLE)
         return
     web_server = sys.modules.get("hermes_cli.web_server")
+    if web_server is None:
+        # Gone since the starter looked (a failed import): no gate to wait for.
+        _local_live_auth_state.update(ready=False, reason="Local Live runs in the Hermes dashboard")
+        _local_live_retry_auth()
+        return
     app = getattr(web_server, "app", None)
     deadline = time.monotonic() + LOCAL_LIVE_AUTH_WAIT_S
     # Mid-import the dashboard may not have its app yet: wait for that too.
-    while web_server is not None and (app is None or getattr(app.state, "auth_required", None) is None):
+    while app is None or getattr(app.state, "auth_required", None) is None:
         if time.monotonic() > deadline:
             _local_live_auth_state.update(ready=False, reason="The dashboard hasn't started serving")
             _local_live_retry_auth()
@@ -2820,9 +2825,19 @@ def _local_live_register_auth() -> None:
 
 def _local_live_retry_auth() -> None:
     """After a failure that may pass (a slow start, a refused registration),
-    the next status or socket call tries again."""
-    with _local_live_auth_lock:
-        _local_live_auth_state["started"] = False
+    the next status or socket call tries again, once this attempt's thread
+    has returned."""
+    _local_live_auth_state["retry"] = True
+
+
+def _local_live_register_auth_thread() -> None:
+    _local_live_auth_state["retry"] = False
+    try:
+        _local_live_register_auth()
+    finally:
+        if _local_live_auth_state.get("retry"):
+            with _local_live_auth_lock:
+                _local_live_auth_state["started"] = False
 
 
 def _local_live_start_auth() -> None:
@@ -2835,7 +2850,7 @@ def _local_live_start_auth() -> None:
             _local_live_auth_state.update(ready=False, reason="Local Live runs in the Hermes dashboard")
             return
         _local_live_auth_state["started"] = True
-    threading.Thread(target=_local_live_register_auth, name="conduit-local-live-auth", daemon=True).start()
+    threading.Thread(target=_local_live_register_auth_thread, name="conduit-local-live-auth", daemon=True).start()
 
 
 # The voice server's warmup asks for a turn as soon as it starts, maybe
@@ -2957,6 +2972,15 @@ _local_live_calls: Dict[str, List[_LocalLiveCall]] = {}
 _local_live_last_request: Dict[str, float] = {}
 
 
+_local_live_tasks: set = set()
+
+
+def _local_live_spawn(coroutine: Any) -> None:
+    task = asyncio.ensure_future(coroutine)
+    _local_live_tasks.add(task)
+    task.add_done_callback(_local_live_tasks.discard)
+
+
 def _local_live_open_calls(profile: str) -> List[_LocalLiveCall]:
     return [call for call in _local_live_calls.get(_limiter_key(profile), []) if not call.closed]
 
@@ -2982,6 +3006,15 @@ def _local_live_route(profile: str, text: str) -> Tuple[Optional[_LocalLiveCall]
     return (speaking[-1], True) if speaking else (None, False)
 
 
+LOCAL_LIVE_PROFILE_NAME_REASON = "Local Live needs a profile name of letters, digits, dots, dashes or underscores"
+
+
+def _local_live_profile_can_carry_key(profile: Optional[str]) -> bool:
+    """Whether a key can name this profile: letters, digits, . _ - only, up to 64."""
+    name = (profile or "").strip()
+    return name.lower() in ("", "current") or bool(_LOCAL_LIVE_PROFILE_NAME.fullmatch(name))
+
+
 def local_live_status(
     profile: Optional[str], in_call: Optional[bool] = None, last_request_at: Optional[float] = None,
 ) -> Dict[str, Any]:
@@ -2992,11 +3025,9 @@ def local_live_status(
     server = speech_server_status()
     auth_ready = bool(_local_live_auth_state.get("ready"))
     reason = None if auth_ready else str(_local_live_auth_state.get("reason") or LOCAL_LIVE_UNAVAILABLE)
-    name = (profile or "").strip()
-    if auth_ready and name.lower() not in ("", "current") and not _LOCAL_LIVE_PROFILE_NAME.fullmatch(name):
-        # Its key couldn't name it: letters, digits, . _ - only, up to 64.
+    if auth_ready and not _local_live_profile_can_carry_key(profile):
         auth_ready = False
-        reason = "Local Live needs a profile name of letters, digits, dots, dashes or underscores"
+        reason = LOCAL_LIVE_PROFILE_NAME_REASON
     if reason is None and not server.get("available"):
         reason = server.get("reason")
     return {
@@ -3038,6 +3069,8 @@ async def post_local_live_key(response: Response, profile: Optional[str] = None)
     if not _local_live_auth_state.get("ready"):
         raise HTTPException(status_code=503, detail=str(_local_live_auth_state.get("reason") or LOCAL_LIVE_UNAVAILABLE),
                             headers={"Cache-Control": "no-store"})
+    if not _local_live_profile_can_carry_key(profile):
+        raise HTTPException(status_code=400, detail=LOCAL_LIVE_PROFILE_NAME_REASON, headers={"Cache-Control": "no-store"})
     try:
         key = await _run_scoped(profile, lambda: local_live_key(profile, rotate=True), _speech_server_executor)
     except Exception as exc:
@@ -3149,8 +3182,9 @@ async def post_local_live_chat_completions(request: Request) -> Any:
         finally:
             # The server stopped listening (the user talked over the reply)
             # or the reply ended: either way the phone hears it's over.
+            # Never awaited here: a closing generator can't suspend.
             if call is not None and turn is not None:
-                await call.cancel_turn(turn)
+                _local_live_spawn(call.cancel_turn(turn))
 
     if not stream:
         reply = "".join([delta async for delta in words()])
