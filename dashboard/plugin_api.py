@@ -3153,6 +3153,7 @@ def _local_live_chunk(completion_id: str, created: int, delta: Dict[str, Any], f
 @router.get("/local-live/v1/models")
 async def get_local_live_models(request: Request, response: Response) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
+    _local_live_start_auth()
     _local_live_request_profile(request)
     return {"object": "list", "data": [{"id": LOCAL_LIVE_MODEL_ID, "object": "model", "owned_by": "conduit"}]}
 
@@ -3162,13 +3163,15 @@ async def post_local_live_chat_completions(request: Request) -> Any:
     """One turn of a Local Live call, asked by the user's voice server."""
     from fastapi.responses import JSONResponse, StreamingResponse
 
+    _local_live_start_auth()
     profile = _local_live_request_profile(request)
+    body = await _read_json_body(request, LOCAL_LIVE_MAX_BODY_BYTES)
+    text = _local_live_user_text(body)
+    # After validation, so a malformed request doesn't spend the budget.
     try:
         _local_live_limiter.acquire(_local_live_profile_key(profile))
     except TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
-    body = await _read_json_body(request, LOCAL_LIVE_MAX_BODY_BYTES)
-    text = _local_live_user_text(body)
     _local_live_last_request[_local_live_profile_key(profile)] = time.time()
     stream = isinstance(body, dict) and body.get("stream") is True
     completion_id = f"chatcmpl-conduit-{uuid.uuid4().hex[:24]}"
