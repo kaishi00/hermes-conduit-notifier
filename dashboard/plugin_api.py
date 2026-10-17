@@ -2854,7 +2854,13 @@ def _local_live_start_auth() -> None:
             _local_live_auth_state.update(ready=False, reason="Local Live runs in the Hermes dashboard")
             return
         _local_live_auth_state["started"] = True
-    threading.Thread(target=_local_live_register_auth_thread, name="conduit-local-live-auth", daemon=True).start()
+    try:
+        threading.Thread(target=_local_live_register_auth_thread, name="conduit-local-live-auth", daemon=True).start()
+    except RuntimeError as exc:  # no thread to spare: try again on the next call
+        logger.warning("Local Live could not start its key registration: %s", exc)
+        _local_live_auth_state.update(ready=False, reason="Local Live couldn't start; it will try again")
+        with _local_live_auth_lock:
+            _local_live_auth_state["started"] = False
 
 
 # The voice server's warmup asks for a turn as soon as it starts, maybe
@@ -2951,11 +2957,12 @@ class _LocalLiveCall:
             return
         item = frame.get("item") if isinstance(frame, dict) and frame.get("type") == "conversation.item.create" else None
         content = item.get("content") if isinstance(item, dict) else None
-        for part in content if isinstance(content, list) else []:
-            words = part.get("text") if isinstance(part, dict) else None
-            words = " ".join(words.split())[:LOCAL_LIVE_MAX_TURN_CHARS] if isinstance(words, str) else ""
-            if words:
-                self.to_read.append(words)
+        # Joined the way _local_live_user_text joins a request's parts.
+        parts = [str(part.get("text") or "") for part in content if isinstance(part, dict)
+                 and part.get("type") in ("text", "input_text")] if isinstance(content, list) else []
+        words = " ".join(" ".join(parts).split())[:LOCAL_LIVE_MAX_TURN_CHARS]
+        if words:
+            self.to_read.append(words)
 
     def take_words(self, text: str) -> bool:
         """Whether ``text`` is words this speak socket sent (now read back)."""
@@ -3085,6 +3092,7 @@ async def get_local_live_status(response: Response, profile: Optional[str] = Non
 async def post_local_live_key(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     """A new key for the voice server; the old one stops working at once."""
     response.headers["Cache-Control"] = "no-store"
+    _local_live_start_auth()
     if not _local_live_auth_state.get("ready"):
         raise HTTPException(status_code=503, detail=str(_local_live_auth_state.get("reason") or LOCAL_LIVE_UNAVAILABLE),
                             headers={"Cache-Control": "no-store"})
@@ -3220,11 +3228,17 @@ async def post_local_live_chat_completions(request: Request) -> Any:
         }, headers={"Cache-Control": "no-store"})
 
     async def events() -> Any:
-        yield _local_live_chunk(completion_id, created, {"role": "assistant"})
-        async for delta in words():
-            yield _local_live_chunk(completion_id, created, {"content": delta})
-        yield _local_live_chunk(completion_id, created, {}, finish="stop")
-        yield "data: [DONE]\n\n"
+        try:
+            yield _local_live_chunk(completion_id, created, {"role": "assistant"})
+            async for delta in words():
+                yield _local_live_chunk(completion_id, created, {"content": delta})
+            yield _local_live_chunk(completion_id, created, {}, finish="stop")
+            yield "data: [DONE]\n\n"
+        finally:
+            # A dropped stream ends the phone's turn now, not when words() is
+            # finalized. Cancelling a finished turn does nothing.
+            if call is not None and turn is not None:
+                _local_live_spawn(call.cancel_turn(turn))
 
     return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-store"})
 
