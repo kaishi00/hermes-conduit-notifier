@@ -131,6 +131,7 @@ def test_a_hand_edited_card_is_cleaned_or_dropped(store, clock):
          "expires_at": 1_000_600},
         {"id": "x", "title": "Bad id", "markdown": "m", "created_at": 1, "expires_at": 1_000_600},
         {"id": "no-text-01", "title": "", "markdown": "m", "created_at": 1, "expires_at": 1_000_600},
+        {"id": "year-long-1", "title": "Long", "markdown": "m", "created_at": 1_000_000, "expires_at": 40_000_000},
         "not a card",
     ]
     store.path.write_text(json.dumps(state))

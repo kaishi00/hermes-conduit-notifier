@@ -157,9 +157,10 @@ class PresentStore:
                 _take_result(state, installation, result, now)
             # The newest, within a cap only a hand-edited store can exceed.
             waiting = [_public(prompt) for prompt in state["prompts"] if prompt["status"] == "waiting"][-MAX_WAITING:]
-            # Only for a phone that shows them.
-            cards = [dict(card) for card in state["cards"] if now < card["expires_at"]] \
-                if SHOW_FEATURE in device["features"] else []
+            # Expired cards leave the file; the rest go only to a phone that
+            # shows them.
+            state["cards"] = [card for card in state["cards"] if now < card["expires_at"]]
+            cards = [dict(card) for card in state["cards"]] if SHOW_FEATURE in device["features"] else []
         # Only a host with cards to show says so.
         return {"prompts": waiting, **({"cards": cards} if cards else {})}
 
@@ -581,7 +582,8 @@ def _card(raw: Any, now: float) -> dict[str, Any] | None:
     card_id, created, expires = raw.get("id"), raw.get("created_at"), raw.get("expires_at")
     if (not isinstance(card_id, str) or not _PROMPT_ID.match(card_id)
             or not all(isinstance(value, int) and not isinstance(value, bool) for value in (created, expires))
-            or now >= expires):
+            # No longer-lived card than the tool makes, even hand-edited.
+            or not 0 < expires - created <= CARD_TTL_S or now >= expires):
         return None
     title = _line(raw.get("title"), MAX_CARD_TITLE_CHARS)
     markdown = _text(raw.get("markdown"), MAX_CARD_MARKDOWN_CHARS)
