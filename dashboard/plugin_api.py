@@ -2796,6 +2796,7 @@ def _local_live_register_auth() -> None:
     while web_server is not None and (app is None or getattr(app.state, "auth_required", None) is None):
         if time.monotonic() > deadline:
             _local_live_auth_state.update(ready=False, reason="The dashboard hasn't started serving")
+            _local_live_retry_auth()
             return
         time.sleep(0.5)
         app = getattr(web_server, "app", None)
@@ -2812,8 +2813,16 @@ def _local_live_register_auth() -> None:
     except Exception as exc:  # noqa: BLE001 — Local Live off, never the dashboard
         logger.warning("Local Live could not register its key: %s", exc)
         _local_live_auth_state.update(ready=False, reason=f"Hermes refused Local Live's key ({type(exc).__name__})")
+        _local_live_retry_auth()
         return
     _local_live_auth_state.update(ready=True, reason=None)
+
+
+def _local_live_retry_auth() -> None:
+    """After a failure that may pass (a slow start, a refused registration),
+    the next status or socket call tries again."""
+    with _local_live_auth_lock:
+        _local_live_auth_state["started"] = False
 
 
 def _local_live_start_auth() -> None:
@@ -2922,7 +2931,7 @@ class _LocalLiveCall:
         content = item.get("content") if isinstance(item, dict) else None
         for part in content if isinstance(content, list) else []:
             words = part.get("text") if isinstance(part, dict) else None
-            words = " ".join(words.split()) if isinstance(words, str) else ""
+            words = " ".join(words.split())[:LOCAL_LIVE_MAX_TURN_CHARS] if isinstance(words, str) else ""
             if words:
                 self.to_read.append(words)
 
@@ -2983,6 +2992,11 @@ def local_live_status(
     server = speech_server_status()
     auth_ready = bool(_local_live_auth_state.get("ready"))
     reason = None if auth_ready else str(_local_live_auth_state.get("reason") or LOCAL_LIVE_UNAVAILABLE)
+    name = (profile or "").strip()
+    if auth_ready and name.lower() not in ("", "current") and not _LOCAL_LIVE_PROFILE_NAME.fullmatch(name):
+        # Its key couldn't name it: letters, digits, . _ - only, up to 64.
+        auth_ready = False
+        reason = "Local Live needs a profile name of letters, digits, dots, dashes or underscores"
     if reason is None and not server.get("available"):
         reason = server.get("reason")
     return {
@@ -3056,7 +3070,8 @@ def _local_live_request_profile(request: Request) -> str:
     principal = getattr(request.state, "token_principal", None)
     name = str(getattr(principal, "principal", "") or "")
     if getattr(principal, "provider", None) != LOCAL_LIVE_PROVIDER_NAME or not name.startswith("local-live:"):
-        raise HTTPException(status_code=401, detail="The voice server's Local Live key is required")
+        raise HTTPException(status_code=401, detail="The voice server's Local Live key is required",
+                            headers={"Cache-Control": "no-store"})
     return name[len("local-live:"):]
 
 
@@ -3064,7 +3079,8 @@ def _local_live_user_text(body: Any) -> str:
     """The newest user message's text: the turn. Hermes keeps the history."""
     messages = body.get("messages") if isinstance(body, dict) else None
     if not isinstance(messages, list):
-        raise HTTPException(status_code=400, detail="Missing or invalid 'messages' field")
+        raise HTTPException(status_code=400, detail="Missing or invalid 'messages' field",
+                            headers={"Cache-Control": "no-store"})
     for message in reversed(messages):
         if not isinstance(message, dict) or message.get("role") != "user":
             continue
@@ -3112,7 +3128,10 @@ async def post_local_live_chat_completions(request: Request) -> Any:
                 yield text
             return
         if turn is None:
-            yield LOCAL_LIVE_NO_CALL_REPLY
+            # With a call open, an empty request (a warmup mid-call) gets
+            # nothing to say, not the no-call line.
+            if call is None:
+                yield LOCAL_LIVE_NO_CALL_REPLY
             return
         deadline = time.monotonic() + LOCAL_LIVE_TURN_MAX_S
         try:
