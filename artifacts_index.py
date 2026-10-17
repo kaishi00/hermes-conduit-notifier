@@ -423,8 +423,11 @@ def list_artifacts(conn: sqlite3.Connection, *, before: Optional[int] = None,
                    stat: Callable[[str], Optional[int]] = _file_size,
                    window_rows: int = WINDOW_ROWS, max_scan_rows: int = MAX_SCAN_ROWS) -> dict:
     """One page of artifacts, newest first, and where the next page starts
-    (``next_before``, None once the history is read to its start)."""
+    (``next_before``, None once the history is read to its start). One chat
+    (``session_id``/``session_ids``) reads only its own rows, up to
+    ``max_scan_rows`` of them, and ignores ``window_rows``."""
     limit = max(1, min(int(limit), MAX_LIMIT))
+    max_scan_rows = max(1, int(max_scan_rows))
     kinds = GROUPS.get(group) if group else None
     query = " ".join(str(query or "").lower().split())[:MAX_QUERY_CHARS]
     message_columns = _columns(conn, "messages")
@@ -435,18 +438,11 @@ def list_artifacts(conn: sqlite3.Connection, *, before: Optional[int] = None,
     tool_name = "m.tool_name" if "tool_name" in message_columns else "NULL"
     title = "s.title" if "title" in session_columns else "NULL"
     hidden = " AND COALESCE(s.hidden, 0) = 0" if "hidden" in session_columns else ""
-    sql = (f"SELECT m.id, m.session_id, m.role, m.content, {tool_calls} AS tool_calls, "
-           f"{tool_name} AS tool_name, m.timestamp, {title} AS title "
-           "FROM messages m LEFT JOIN sessions s ON s.id = m.session_id "
-           f"WHERE m.id >= ? AND m.id < ?{hidden} AND {_candidate_sql(message_columns)}")
-    params_tail: list = []
-    wanted = [*([session_id] if session_id else []), *session_ids]
-    if wanted:
-        chat = lineage(conn, wanted)
-        sql += f" AND m.session_id IN ({','.join('?' * len(chat))})"
-        params_tail.extend(chat)
+    select = (f"SELECT m.id, m.session_id, m.role, m.content, {tool_calls} AS tool_calls, "
+              f"{tool_name} AS tool_name, m.timestamp, {title} AS title "
+              "FROM messages m LEFT JOIN sessions s ON s.id = m.session_id ")
+    candidate = f"{hidden} AND {_candidate_sql(message_columns)}"
     title_for = _titles(conn, "parent_session_id" in session_columns and "title" in session_columns)
-    sql += " ORDER BY m.id DESC"
 
     bounds = conn.execute("SELECT MIN(id), MAX(id) FROM messages").fetchone()
     lowest, highest = bounds[0], bounds[1]
@@ -455,25 +451,51 @@ def list_artifacts(conn: sqlite3.Connection, *, before: Optional[int] = None,
     if highest is None:
         return {"items": items, "next_before": None}
     top = min(int(before), highest + 1) if before is not None else highest + 1
+
+    def take(row: sqlite3.Row) -> bool:
+        """Lists the row's artifacts; True once the page is full."""
+        for source, kind, target, label in row_items(row["role"], row["content"], row["tool_calls"],
+                                                     row["tool_name"]):
+            key = target.rstrip("/") if source != "link" else target
+            if key in seen:
+                continue
+            item = _describe(source, kind, target, label, row,
+                             title_for(str(row["session_id"]), row["title"]), stat)
+            # Seen once listed: a newer mention the filter leaves out
+            # doesn't hide an older one it keeps.
+            if item is not None and _matches(item, kinds, query):
+                seen.add(key)
+                items.append(item)
+        return len(items) >= limit
+
+    wanted = [*([session_id] if session_id else []), *session_ids]
+    if wanted:
+        # One chat reads its own rows through Hermes' session index, not
+        # the profile's history window by window: on a profile full of cron
+        # runs, an older chat sat behind thousands of other rows and its
+        # sheet paged through all of them before showing anything.
+        chat = lineage(conn, wanted)
+        if not chat:
+            return {"items": items, "next_before": None}
+        sql = (select + f"WHERE m.session_id IN ({','.join('?' * len(chat))}) AND m.id < ?{candidate} "
+               "ORDER BY m.id DESC LIMIT ?")
+        scanned = 0
+        for row in conn.execute(sql, [*chat, top, max_scan_rows]):
+            scanned += 1
+            if take(row):
+                return {"items": items, "next_before": int(row["id"]) if row["id"] > lowest else None}
+            if scanned >= max_scan_rows:
+                return {"items": items, "next_before": int(row["id"]) if row["id"] > lowest else None}
+        return {"items": items, "next_before": None}
+
+    sql = select + f"WHERE m.id >= ? AND m.id < ?{candidate} ORDER BY m.id DESC"
     scanned = 0
     next_before: Optional[int] = None
     while top > lowest:
         bottom = max(top - window_rows, lowest)
         stopped_at: Optional[int] = None
-        for row in conn.execute(sql, [bottom, top, *params_tail]):
-            for source, kind, target, label in row_items(row["role"], row["content"], row["tool_calls"],
-                                                         row["tool_name"]):
-                key = target.rstrip("/") if source != "link" else target
-                if key in seen:
-                    continue
-                item = _describe(source, kind, target, label, row,
-                                 title_for(str(row["session_id"]), row["title"]), stat)
-                # Seen once listed: a newer mention the filter leaves out
-                # doesn't hide an older one it keeps.
-                if item is not None and _matches(item, kinds, query):
-                    seen.add(key)
-                    items.append(item)
-            if len(items) >= limit:
+        for row in conn.execute(sql, [bottom, top]):
+            if take(row):
                 stopped_at = int(row["id"])
                 break
         scanned += top - bottom

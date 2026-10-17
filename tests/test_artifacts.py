@@ -160,6 +160,31 @@ def test_one_chat_includes_the_sessions_it_continues_and_spawned(tmp_path, monke
     assert titles["elsewhere.png"] == "Other"
 
 
+def test_one_chat_is_read_in_one_call_under_a_busy_history(tmp_path, monkeypatch):
+    # A chat under thousands of newer rows from other chats (cron runs, say)
+    # lists its own artifacts at once instead of paging the whole history.
+    _no_gateway(monkeypatch)
+    rows = [("s1", "assistant", "MEDIA:/root/old.png"), ("s1", "assistant", "MEDIA:/root/new.png")]
+    rows += [("cron", "assistant", f"run {n} MEDIA:/root/run{n}.png") for n in range(300)]
+    conn = _db(tmp_path, rows, sessions=[("s1", "Trip"), ("cron", "Cron")])
+    page = _list(conn, session_ids=["s1"], window_rows=10, max_scan_rows=50)
+    assert [i["name"] for i in page["items"]] == ["new.png", "old.png"] and page["next_before"] is None
+    first = _list(conn, session_ids=["s1"], limit=1, window_rows=10, max_scan_rows=50)
+    assert [i["name"] for i in first["items"]] == ["new.png"] and first["next_before"] is not None
+    rest = _list(conn, session_ids=["s1"], before=first["next_before"], window_rows=10, max_scan_rows=50)
+    assert [i["name"] for i in rest["items"]] == ["old.png"] and rest["next_before"] is None
+    capped = _list(conn, session_ids=["s1"], window_rows=10, max_scan_rows=1)
+    assert [i["name"] for i in capped["items"]] == ["new.png"] and capped["next_before"] is not None
+    tail = _list(conn, session_ids=["s1"], before=capped["next_before"], window_rows=10, max_scan_rows=1)
+    assert [i["name"] for i in tail["items"]] == ["old.png"]
+
+
+def test_a_chat_with_no_usable_id_lists_nothing(tmp_path, monkeypatch):
+    _no_gateway(monkeypatch)
+    conn = _db(tmp_path, [("s1", "assistant", "MEDIA:/root/a.png")])
+    assert _list(conn, session_ids=[""]) == {"items": [], "next_before": None}
+
+
 def test_a_parent_loop_ends(tmp_path, monkeypatch):
     _no_gateway(monkeypatch)
     conn = _db(tmp_path, [("a", "assistant", "MEDIA:/root/a.png")],

@@ -1082,7 +1082,9 @@ known by, and the sessions it continues from or spawned are read too), `kind` (`
 `links`), `q` (words in the name, chat title, path or URL), `limit` (up to
 200) and `before` (the previous page's `next_before`; `null` once the history
 is read to its start). A request reads a bounded window of rows, so a page can
-come back short with a `next_before` to keep going. Capability `artifacts`.
+come back short with a `next_before` to keep going. With `session_id` (plugin
+0.43.2+) only that chat's own rows are read, so a chat under a long history
+of other chats, cron runs say, lists in one request. Capability `artifacts`.
 
 ## Hermes calls you (plugin 0.13+)
 
