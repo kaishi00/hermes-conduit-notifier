@@ -492,3 +492,11 @@ def test_auth_start_retries_once_the_dashboard_is_imported(monkeypatch):
     monkeypatch.delitem(sys.modules, "hermes_cli.web_server", raising=False)
     api._local_live_start_auth()
     assert api._local_live_auth_state["started"] is False
+
+
+def test_a_runaway_voice_server_is_rate_limited(client, hermes, monkeypatch):
+    monkeypatch.setattr(api, "_local_live_limiter", api._MintLimiter(2, 60.0, message="Too many"))
+    headers = {"Authorization": f"Bearer {_key(hermes)}"}
+    codes = [client.post(f"{BASE}/local-live/v1/chat/completions", json=_completion(), headers=headers).status_code
+             for _ in range(3)]
+    assert codes == [200, 200, 429]

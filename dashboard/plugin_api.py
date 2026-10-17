@@ -2656,8 +2656,7 @@ def _local_live_key_path() -> Path:
 def _local_live_profile_part(profile: Optional[str]) -> str:
     # Unfolded: the key is verified in this exact profile's scope, which is
     # case-sensitive.
-    name = (profile or "").strip()
-    name = "" if name.lower() in ("", "current") else name
+    name = _local_live_profile_key(profile)
     return base64.urlsafe_b64encode(name.encode("utf-8")).decode("ascii").rstrip("=") or "-"
 
 
@@ -2714,12 +2713,17 @@ LOCAL_LIVE_VERIFIED_TTL_S = 30.0
 
 def local_live_profile_for_key(token: str) -> Optional[str]:
     """The profile whose key ``token`` is ("" for the dashboard's own), else None."""
-    cached = _local_live_verified.get(token)
-    if cached is not None and time.monotonic() < cached[1]:
+    now = time.monotonic()
+    with _local_live_key_lock:
+        cached = _local_live_verified.get(token)
+    if cached is not None and now < cached[1]:
         return cached[0]
     profile = _local_live_check_key(token)
     if profile is not None:
-        _local_live_verified[token] = (profile, time.monotonic() + LOCAL_LIVE_VERIFIED_TTL_S)
+        with _local_live_key_lock:
+            for stale in [k for k, (_, expiry) in _local_live_verified.items() if expiry <= now]:
+                del _local_live_verified[stale]
+            _local_live_verified[token] = (profile, now + LOCAL_LIVE_VERIFIED_TTL_S)
     return profile
 
 
@@ -2880,6 +2884,8 @@ class _LocalLiveCall:
         # live call's on the same profile.
         self.to_read: "collections.deque[str]" = collections.deque(maxlen=64)
         self.send_lock = asyncio.Lock()
+        # Held across cancel-old, make-new and send, so turns never overlap.
+        self.turn_lock = asyncio.Lock()
         self.turns: Dict[str, _LocalLiveTurn] = {}
         self.numbers = itertools.count(1)
         self.closed = False
@@ -2896,14 +2902,15 @@ class _LocalLiveCall:
 
     async def start_turn(self, text: str) -> Optional[_LocalLiveTurn]:
         # One turn at a time: the server has moved on from any earlier one.
-        for old in list(self.turns.values()):
-            await self.cancel_turn(old)
-        turn = _LocalLiveTurn(f"t{next(self.numbers)}")
-        self.turns[turn.turn_id] = turn
-        if not await self.send({"type": "conduit.turn", "turn_id": turn.turn_id, "text": text}):
-            self.turns.pop(turn.turn_id, None)
-            return None
-        return turn
+        async with self.turn_lock:
+            for old in list(self.turns.values()):
+                await self.cancel_turn(old)
+            turn = _LocalLiveTurn(f"t{next(self.numbers)}")
+            self.turns[turn.turn_id] = turn
+            if not await self.send({"type": "conduit.turn", "turn_id": turn.turn_id, "text": text}):
+                self.turns.pop(turn.turn_id, None)
+                return None
+            return turn
 
     async def cancel_turn(self, turn: _LocalLiveTurn) -> None:
         if self.turns.pop(turn.turn_id, None) is not None:
@@ -2967,6 +2974,11 @@ class _LocalLiveCall:
 
 
 _local_live_calls: Dict[str, List[_LocalLiveCall]] = {}
+# Requests per profile a minute: a speak socket asks once a sentence, a
+# call once a turn, so this only stops a runaway client.
+LOCAL_LIVE_REQUEST_LIMIT = 120
+_local_live_limiter = _MintLimiter(LOCAL_LIVE_REQUEST_LIMIT, 60.0,
+                                   message="Too many Local Live requests; try again shortly")
 # When each profile's voice server last asked for a turn: Conduit's setup
 # shows whether the server is pointed at this plugin.
 _local_live_last_request: Dict[str, float] = {}
@@ -2981,8 +2993,15 @@ def _local_live_spawn(coroutine: Any) -> None:
     task.add_done_callback(_local_live_tasks.discard)
 
 
+def _local_live_profile_key(profile: Optional[str]) -> str:
+    """The call registry's key: the profile as its Local Live key names it
+    (unfolded, so Work and work are two profiles)."""
+    name = (profile or "").strip()
+    return "" if name.lower() in ("", "current") else name
+
+
 def _local_live_open_calls(profile: str) -> List[_LocalLiveCall]:
-    return [call for call in _local_live_calls.get(_limiter_key(profile), []) if not call.closed]
+    return [call for call in _local_live_calls.get(_local_live_profile_key(profile), []) if not call.closed]
 
 
 def _local_live_active_call(profile: str) -> Optional[_LocalLiveCall]:
@@ -3038,7 +3057,7 @@ def local_live_status(
         "api_key": local_live_key(profile) if auth_ready else None,
         "speech_server": server,
         "in_call": (_local_live_active_call(profile or "") is not None) if in_call is None else in_call,
-        "last_request_at": (_local_live_last_request.get(_limiter_key(profile))
+        "last_request_at": (_local_live_last_request.get(_local_live_profile_key(profile))
                             if last_request_at is None else last_request_at),
     }
 
@@ -3048,7 +3067,7 @@ async def get_local_live_status(response: Response, profile: Optional[str] = Non
     response.headers["Cache-Control"] = "no-store"
     _local_live_start_auth()
     in_call = _local_live_active_call(profile or "") is not None
-    last_request_at = _local_live_last_request.get(_limiter_key(profile))
+    last_request_at = _local_live_last_request.get(_local_live_profile_key(profile))
     try:
         return {"ok": True, **(await asyncio.wait_for(
             _run_scoped(profile, lambda: local_live_status(profile, in_call, last_request_at), _speech_server_executor),
@@ -3083,7 +3102,7 @@ async def local_live_socket(ws: WebSocket) -> None:
     """A Local Live call: relayed to the speech server like Classic voice, plus its turns."""
 
     async def relay(refuse: Callable[[int, str], Any], url: str, key: str, profile: Optional[str]) -> None:
-        call = _LocalLiveCall(ws, _limiter_key(profile), speaks=ws.query_params.get("mode") == "speak")
+        call = _LocalLiveCall(ws, _local_live_profile_key(profile), speaks=ws.query_params.get("mode") == "speak")
         calls = _local_live_calls.setdefault(call.profile, [])
         calls.append(call)
         try:
@@ -3144,9 +3163,13 @@ async def post_local_live_chat_completions(request: Request) -> Any:
     from fastapi.responses import JSONResponse, StreamingResponse
 
     profile = _local_live_request_profile(request)
-    _local_live_last_request[_limiter_key(profile)] = time.time()
+    try:
+        _local_live_limiter.acquire(_local_live_profile_key(profile))
+    except TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
     body = await _read_json_body(request, LOCAL_LIVE_MAX_BODY_BYTES)
     text = _local_live_user_text(body)
+    _local_live_last_request[_local_live_profile_key(profile)] = time.time()
     stream = isinstance(body, dict) and body.get("stream") is True
     completion_id = f"chatcmpl-conduit-{uuid.uuid4().hex[:24]}"
     created = int(time.time())
