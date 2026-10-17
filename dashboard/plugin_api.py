@@ -2687,7 +2687,6 @@ def local_live_key(profile: Optional[str], rotate: bool = False) -> str:
         key = "" if rotate else _local_live_read_key()
         if key:
             return key
-        _local_live_verified.clear()
         key = ".".join((LOCAL_LIVE_KEY_PREFIX, _local_live_profile_part(profile), secrets.token_urlsafe(32)))
         path = _local_live_key_path()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -2701,14 +2700,27 @@ def local_live_key(profile: Optional[str], rotate: bool = False) -> str:
             with contextlib.suppress(OSError):
                 os.unlink(tmp)
             raise
+        # After the replace, so a verify that read the old file can't cache it
+        # again (the generation it started under is gone).
+        global _local_live_key_generation
+        _local_live_key_generation += 1
+        named = _local_live_profile_key(profile)
+        for token in [t for t, (p, _) in _local_live_verified.items() if _local_live_profile_key(p) == named]:
+            del _local_live_verified[token]
         return key
 
 
 # Keys verified lately, so a call's turns don't each reread the key file
 # and the profile's config on the event loop (verify_token is synchronous).
-# Cleared whenever a key is made or rotated.
+# A profile's entries go whenever its key is made or rotated.
 _local_live_verified: Dict[str, Tuple[str, float]] = {}
+_local_live_key_generation = 0
 LOCAL_LIVE_VERIFIED_TTL_S = 30.0
+# Keys checked against the files a minute (wrong ones included): past this,
+# an unknown key is refused without reading anything, so a flood of wrong
+# keys can't keep the event loop reading files. Keys verified lately still work.
+LOCAL_LIVE_KEY_CHECK_LIMIT = 60
+_local_live_key_check_limiter = _MintLimiter(LOCAL_LIVE_KEY_CHECK_LIMIT, 60.0, message="Too many Local Live key checks")
 
 
 def local_live_profile_for_key(token: str) -> Optional[str]:
@@ -2718,12 +2730,21 @@ def local_live_profile_for_key(token: str) -> Optional[str]:
         cached = _local_live_verified.get(token)
     if cached is not None and now < cached[1]:
         return cached[0]
+    try:
+        mint = _local_live_key_check_limiter.acquire("")
+    except TokenError:
+        return None
+    with _local_live_key_lock:
+        generation = _local_live_key_generation
     profile = _local_live_check_key(token)
     if profile is not None:
+        # A right key doesn't spend the budget wrong ones share.
+        _local_live_key_check_limiter.release("", mint)
         with _local_live_key_lock:
-            for stale in [k for k, (_, expiry) in _local_live_verified.items() if expiry <= now]:
-                del _local_live_verified[stale]
-            _local_live_verified[token] = (profile, now + LOCAL_LIVE_VERIFIED_TTL_S)
+            if generation == _local_live_key_generation:
+                for stale in [k for k, (_, expiry) in _local_live_verified.items() if expiry <= now]:
+                    del _local_live_verified[stale]
+                _local_live_verified[token] = (profile, now + LOCAL_LIVE_VERIFIED_TTL_S)
     return profile
 
 
@@ -2961,8 +2982,9 @@ class _LocalLiveCall:
         item = frame.get("item") if isinstance(frame, dict) and frame.get("type") == "conversation.item.create" else None
         content = item.get("content") if isinstance(item, dict) else None
         # Joined the way _local_live_user_text joins a request's parts.
-        parts = [str(part.get("text") or "") for part in content if isinstance(part, dict)
-                 and part.get("type") in ("text", "input_text")] if isinstance(content, list) else []
+        parts = [part["text"] for part in content if isinstance(part, dict)
+                 and part.get("type") in ("text", "input_text")
+                 and isinstance(part.get("text"), str)] if isinstance(content, list) else []
         words = " ".join(" ".join(parts).split())[:LOCAL_LIVE_MAX_TURN_CHARS]
         if words:
             self.to_read.append(words)

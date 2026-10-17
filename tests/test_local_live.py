@@ -517,3 +517,24 @@ def test_non_text_message_content_is_no_turn():
     assert api._local_live_user_text(body) == ""
     parts = {"messages": [{"role": "user", "content": [{"type": "text", "text": 5}, {"type": "text", "text": "hi"}]}]}
     assert api._local_live_user_text(parts) == "hi"
+
+
+def test_a_flood_of_wrong_keys_stops_reading_files(monkeypatch):
+    monkeypatch.setattr(api, "_local_live_key_check_limiter", api._MintLimiter(2, 60.0, message="Too many"))
+    checked = []
+    monkeypatch.setattr(api, "_local_live_check_key", lambda token: checked.append(token))
+    for n in range(4):
+        assert api.local_live_profile_for_key(f"cll1.-.wrong{n}") is None
+    assert len(checked) == 2
+
+
+def test_a_verify_racing_a_rotation_does_not_cache_the_old_key(monkeypatch):
+    monkeypatch.setattr(api, "_local_live_verified", {})
+
+    def check_during_rotation(token):
+        monkeypatch.setattr(api, "_local_live_key_generation", api._local_live_key_generation + 1)
+        return "work"
+
+    monkeypatch.setattr(api, "_local_live_check_key", check_during_rotation)
+    assert api.local_live_profile_for_key("cll1.d29yaw.old") == "work"
+    assert "cll1.d29yaw.old" not in api._local_live_verified
