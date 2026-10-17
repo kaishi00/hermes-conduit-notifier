@@ -414,7 +414,8 @@ PERSONA_VOICE_NOTE = (
 # can still be seen.
 SHOW_VOICE_NOTE = (
     "[The user's phone shows a screen during this call: put anything better seen than heard (a table, steps, "
-    "a chart, code, images, links) on it with conduit_show, then say in a sentence that it's there.]"
+    "a chart, code, images, links, and places as map cards) on it with conduit_show, then say in a sentence "
+    "that it's there.]"
 )
 
 

@@ -1351,6 +1351,36 @@ The tool shows only while a Conduit that says `show-cards` in its exchange's
 that phone gets the cards; subagents can't use it. Limits:
 60 cards an hour, the newest 20 kept.
 
+### Map and place cards (plugin 0.45+)
+
+`conduit_show` also takes `cards`: up to four maps and places Conduit draws
+natively, in a typed chat as well as on a call. `markdown` is optional with
+cards; without it, the cards' own Markdown (each place with an Apple Maps
+link) is what a phone that doesn't draw cards, or another client, shows.
+
+- **One schema.** [`cards/card-schema.json`](cards/card-schema.json) is the
+  only definition. The tool's `cards` parameter is built from it and
+  `card_schema.py` normalizes against it. Conduit ships a byte-identical copy
+  for the live models' `show_on_screen` and fails its CI when the copy
+  differs from main; [`cards/card-vectors.json`](cards/card-vectors.json)
+  holds examples both test suites run. Change both files together and merge
+  here first.
+- **Sourced facts only.** The phone adds address, category, phone, website,
+  travel time and Look Around from Apple Maps when it draws a card; the
+  schema has no fields for them. A rating, hours, price or photo needs a
+  `source`, or it's dropped.
+- **Kept in history.** The tool's answer carries the normalized cards
+  (`{"ok": true, "cards": [...]}`), so the chat's history keeps them and
+  Conduit draws them whenever the chat is opened. With no call screen, a
+  Conduit that says `chat-cards` in its exchange's `features` still gets
+  the tool, and the card shows in the chat only. A turn that isn't from
+  Conduit (Desktop, a messaging app, the terminal) is refused with
+  `not_conduit`.
+- **Live calls.** A saved call's assistant turn can carry `cards`
+  (`POST /voice/sessions`): kept with a chat's call and returned by
+  `GET /voice/chat-calls`; in a call saved as its own row, written as their
+  Markdown after the turn's text.
+
 ## Health data from Conduit (plugin 0.23+)
 
 Conduit can share Apple Health data with a Hermes profile so the agent can

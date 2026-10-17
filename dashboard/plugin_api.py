@@ -3478,15 +3478,50 @@ def _voice_turns(raw: Any) -> list:
         if not text:
             raise TokenError(400, "Each turn needs text; send a turn only once it's final")
         at = item.get("at")
-        turns.append({
+        turn = {
             "index": index,
             "role": role,
             "content": text[:VOICE_MAX_TURN_CHARS],
             "timestamp": at if isinstance(at, (int, float)) and not isinstance(at, bool)
             and math.isfinite(at) and 0 < at < VOICE_MAX_TIMESTAMP else None,
-        })
+        }
+        # Cards the live model showed (show_on_screen): kept with the turn so
+        # the call's transcript draws them again. Only valid ones.
+        if role == "assistant" and item.get("cards") is not None:
+            cards = _card_schema().normalize_cards(item.get("cards"))
+            if cards:
+                turn["cards"] = cards
+        turns.append(turn)
     turns.sort(key=lambda turn: turn["index"])
     return turns
+
+
+_card_schema_module: Any = None
+
+
+def _card_schema() -> Any:
+    """card_schema.py beside this folder, loaded once."""
+    global _card_schema_module
+    with _calls_store_lock:
+        if _card_schema_module is None:
+            path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "card_schema.py")
+            spec = importlib.util.spec_from_file_location("conduit_push_dashboard_card_schema", path)
+            if spec is None or spec.loader is None or not os.path.exists(path):
+                raise TokenError(501, "This plugin install is missing card_schema.py; update the plugin")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _card_schema_module = module
+        return _card_schema_module
+
+
+def _row_message(turn: Dict[str, Any]) -> Dict[str, Any]:
+    """A turn as a row's message: a session row holds text only, so a turn's
+    cards become their Markdown after its text."""
+    message = {k: v for k, v in turn.items() if k not in ("index", "cards") and v is not None}
+    if turn.get("cards"):
+        markdown = _card_schema().fallback_markdown(turn["cards"])
+        message["content"] = f"{message['content']}\n\n{markdown}"[:VOICE_MAX_TURN_CHARS]
+    return message
 
 
 def _new_voice_session_id() -> str:
@@ -3675,7 +3710,7 @@ def save_voice_turns(body: Dict[str, Any],
                 skipped = len(turns) - len(fresh)
                 if skipped:
                     logger.debug("Conduit voice save for %s skipped %d already-written turn(s)", session_id, skipped)
-                messages = [{k: v for k, v in turn.items() if k != "index" and v is not None} for turn in fresh]
+                messages = [_row_message(turn) for turn in fresh]
                 if messages:
                     _append_voice_messages(db, session_id, messages)
                 if fresh:
@@ -3818,12 +3853,21 @@ def voice_chat_calls(chat_id: Any, only: Any = None) -> Dict[str, Any]:
                 continue
             entry = {"call_id": call_id, "engine": call.get("engine")}
             if only is not None:
-                entry["turns"] = [{"role": t.get("role"), "text": t.get("content"), "at": t.get("timestamp")}
-                                  for t in call["turns"] if isinstance(t, dict)]
+                entry["turns"] = [_chat_call_turn(t) for t in call["turns"] if isinstance(t, dict)]
             calls.append(entry)
     finally:
         db.close()
     return {"chat_id": chat_id, "calls": calls}
+
+
+def _chat_call_turn(turn: Dict[str, Any]) -> Dict[str, Any]:
+    entry = {"role": turn.get("role"), "text": turn.get("content"), "at": turn.get("timestamp")}
+    if turn.get("cards"):
+        # Checked again: the stored list is only as good as the file.
+        cards = _card_schema().normalize_cards(turn["cards"])
+        if cards:
+            entry["cards"] = cards
+    return entry
 
 
 def set_voice_tag(body: Dict[str, Any]) -> Dict[str, Any]:

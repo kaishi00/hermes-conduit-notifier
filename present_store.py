@@ -15,7 +15,9 @@ returns it once.
 
 The same exchange carries the cards ``conduit_show`` puts on the screen of
 a voice call (a table, steps, a chart): short-lived, shown once by a phone
-that says it can (feature ``show-cards``), never answered.
+that says it can (feature ``show-cards``), never answered. A card can carry
+rich cards (maps and places, ``card_schema``) beside its Markdown; a phone
+that doesn't draw them shows the Markdown.
 
 State lives in the profile's ``conduit-present.json`` beside the pairing
 state. The tool (agent process) and the dashboard route (dashboard process)
@@ -25,6 +27,7 @@ from the plugin package.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import re
@@ -236,9 +239,10 @@ class PresentStore:
             state["asked"] = (recent + [now])[-PER_HOUR:]
             return _shown(prompt)
 
-    def show(self, title: Any, markdown: Any, *, session_id: Any = None) -> dict[str, Any]:
-        """Keeps a card for the screen of the user's voice call. Raises
-        PresentError when it won't."""
+    def show(self, title: Any, markdown: Any, *, session_id: Any = None, cards: Any = None) -> dict[str, Any]:
+        """Keeps a card for the screen of the user's voice call. ``cards``
+        are rich cards, already normalized; ``markdown`` is what shows where
+        they can't be drawn. Raises PresentError when it won't."""
         clean_title = _line(title, MAX_CARD_TITLE_CHARS + 1)
         if not clean_title:
             raise PresentError("no_title", "Give a short title, a few words.")
@@ -249,6 +253,7 @@ class PresentStore:
             raise PresentError("no_markdown", "Give what to show, as Markdown.")
         if len(body) > MAX_CARD_MARKDOWN_CHARS:
             raise PresentError("too_long", f"markdown is at most {MAX_CARD_MARKDOWN_CHARS} characters.")
+        rich = _card_schema().normalize_cards(cards)
         with self._locked() as state:
             now = self.clock()
             if not _shows_cards(state, now):
@@ -260,6 +265,8 @@ class PresentStore:
             created = int(now)
             card = {"id": secrets.token_urlsafe(12), "title": clean_title, "markdown": body,
                     "session_id": _line(session_id, 180), "created_at": created, "expires_at": created + CARD_TTL_S}
+            if rich:
+                card["cards"] = rich
             state["cards"] = (state["cards"] + [card])[-MAX_CARDS:]
             state["shown"] = (recent + [now])[-CARDS_PER_HOUR:]
             return dict(card)
@@ -589,8 +596,32 @@ def _card(raw: Any, now: float) -> dict[str, Any] | None:
     markdown = _text(raw.get("markdown"), MAX_CARD_MARKDOWN_CHARS)
     if not title or not markdown:
         return None
-    return {"id": card_id, "title": title, "markdown": markdown, "session_id": _line(raw.get("session_id"), 180),
+    card = {"id": card_id, "title": title, "markdown": markdown, "session_id": _line(raw.get("session_id"), 180),
             "created_at": created, "expires_at": expires}
+    rich = _card_schema().normalize_cards(raw.get("cards"))
+    if rich:
+        card["cards"] = rich
+    return card
+
+
+_card_schema_module: Any = None
+_card_schema_lock = threading.Lock()
+
+
+def _card_schema() -> Any:
+    """card_schema.py beside this file, loaded by path once: the dashboard
+    loads this module by path too, so it can't import the package."""
+    global _card_schema_module
+    with _card_schema_lock:
+        if _card_schema_module is None:
+            path = Path(__file__).resolve().parent / "card_schema.py"
+            spec = importlib.util.spec_from_file_location("conduit_push_present_card_schema", path)
+            if spec is None or spec.loader is None:
+                raise ImportError("card_schema.py is missing")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _card_schema_module = module
+        return _card_schema_module
 
 
 @contextmanager

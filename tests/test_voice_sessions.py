@@ -1057,3 +1057,38 @@ def test_the_end_runs_after_the_store_is_closed_under_the_save_lock(hermes, monk
                          on_end=lambda *args: seen.append((all(db.closed for db in opened),
                                                            api._voice_lock().locked())))
     assert seen == [(True, True)]
+
+
+# --- Cards a live model showed --------------------------------------------------
+
+CARD = {"type": "place", "places": [{"name": "Tartine", "lat": 37.76, "lon": -122.42, "rating": {"value": 4.6}}]}
+CLEAN_CARD = {"type": "place", "places": [{"name": "Tartine", "lat": 37.76, "lon": -122.42}]}
+
+
+def test_a_chat_calls_cards_are_kept_with_its_turns(client, hermes):
+    chat(hermes)
+    shown = turns(("user", "where's good"), ("assistant", "On screen: Tartine"))
+    shown[1]["cards"] = [CARD, {"type": "weather"}]
+    assert save(client, chat_id="chat-1", turns=shown).json()["written"] == 2
+    [call] = client.get(f"{BASE}/voice/chat-calls", params={"chat_id": "chat-1", "call_id": "call-1"}).json()["calls"]
+    assert "cards" not in call["turns"][0]
+    assert call["turns"][1]["cards"] == [CLEAN_CARD], "only valid cards, normalized"
+
+
+def test_a_saved_rows_cards_become_markdown(client, hermes):
+    shown = turns(("assistant", "On screen: Tartine"))
+    shown[0]["cards"] = [CARD]
+    session_id = save(client, turns=shown).json()["session_id"]
+    [message] = hermes.stores["default"].messages[session_id]
+    assert "cards" not in message, "a session row holds text only"
+    assert message["content"].startswith("On screen: Tartine\n\n**Tartine**")
+    assert "maps.apple.com" in message["content"] and "4.6" not in message["content"]
+
+
+def test_only_assistant_turns_carry_cards(client, hermes):
+    chat(hermes)
+    shown = turns(("user", "show me"))
+    shown[0]["cards"] = [CARD]
+    save(client, chat_id="chat-1", turns=shown)
+    [call] = client.get(f"{BASE}/voice/chat-calls", params={"chat_id": "chat-1", "call_id": "call-1"}).json()["calls"]
+    assert "cards" not in call["turns"][0]

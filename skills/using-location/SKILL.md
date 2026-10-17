@@ -123,6 +123,13 @@ looked up on the user's iPhone, with real routes and traffic.
   say when an answer is a rough guess (the tool labels it).
 - Each lookup wakes the phone (30 an hour, 120 a day; repeats within 2
   minutes are free): one lookup per question, not a loop.
+- To show places rather than list them ("where should we eat", "show me
+  the route"), use `conduit_show` with `cards` when it's offered, in a
+  typed chat or on a call: a `map` (pins, and a route from the user or
+  between two pins), a `place` in detail, or `places` to swipe through.
+  Pass the coordinates or `place_id` your lookup returned. Conduit adds
+  address, phone, website and travel time from Apple Maps itself; add a
+  rating, hours, price or photo only when you found it, with its source.
 
 ## Appointment check, as an example of a job
 

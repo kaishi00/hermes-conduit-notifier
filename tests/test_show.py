@@ -194,5 +194,71 @@ def test_the_schema_matches_the_store():
     properties = tool.SCHEMA["parameters"]["properties"]
     assert properties["title"]["maxLength"] == store_module.MAX_CARD_TITLE_CHARS
     assert properties["markdown"]["maxLength"] == store_module.MAX_CARD_MARKDOWN_CHARS
-    assert tool.SCHEMA["parameters"]["required"] == ["title", "markdown"]
+    assert tool.SCHEMA["parameters"]["required"] == ["title"]
     assert "voice call" in tool.SCHEMA["description"]
+    assert properties["cards"]["items"] == tool.card_schema.CARD_SCHEMA, "the card schema comes from the one file"
+
+
+MAP = {"type": "map", "places": [{"name": "Kin Khao", "lat": 37.7853, "lon": -122.4089,
+                                  "rating": {"value": 4.4}}], "theme": "dark"}
+CLEAN_MAP = {"type": "map", "places": [{"name": "Kin Khao", "lat": 37.7853, "lon": -122.4089}]}
+
+
+def test_cards_go_to_the_call_screen_and_come_back_normalized(tool_home):
+    _exchange(PresentStore(tool_home))
+    answer = _call({"title": "Dinner", "cards": [MAP]})
+    assert answer["ok"] is True and answer["cards"] == [CLEAN_MAP], "the answer keeps them in the chat's history"
+    [card] = _exchange(PresentStore(tool_home))["cards"]
+    assert card["cards"] == [CLEAN_MAP]
+    assert "**Kin Khao**" in card["markdown"] and "maps.apple.com" in card["markdown"], \
+        "a screen that doesn't draw cards shows their Markdown"
+    assert "4.4" not in card["markdown"], "an unsourced rating is shown nowhere"
+
+
+def test_given_markdown_is_kept_beside_cards(tool_home):
+    _exchange(PresentStore(tool_home))
+    _call({"title": "Dinner", "markdown": TABLE, "cards": [MAP]})
+    [card] = _exchange(PresentStore(tool_home))["cards"]
+    assert card["markdown"] == TABLE and card["cards"] == [CLEAN_MAP]
+
+
+def test_cards_show_in_a_chat_without_a_call_screen(tool_home):
+    assert tool.available() is False
+    _exchange(PresentStore(tool_home), features=("maps-navigate", "chat-cards"))
+    assert tool.available() is True, "a Conduit that draws chat cards gets the tool"
+    answer = _call({"title": "Dinner", "cards": [MAP]})
+    assert answer == {"ok": True, "cards": [CLEAN_MAP], "note": tool.IN_CHAT_NOTE}
+    assert _call({"title": "Forecast", "markdown": TABLE})["error"] == "no_device", \
+        "Markdown alone still needs a call screen"
+
+
+def test_cards_that_are_all_invalid_are_refused(tool_home):
+    _exchange(PresentStore(tool_home))
+    answer = _call({"title": "Dinner", "cards": [{"type": "weather", "places": [{"name": "x"}]}]})
+    assert answer["ok"] is False and answer["error"] == "invalid_cards"
+    assert "cards" not in _exchange(PresentStore(tool_home))
+
+
+def test_cards_are_refused_where_conduit_isnt_drawing_them(tool_home, monkeypatch):
+    _exchange(PresentStore(tool_home), features=("chat-cards",))
+    monkeypatch.setattr(tool, "_turn_source", lambda: "messaging")
+    answer = _call({"title": "Dinner", "cards": [MAP]})
+    assert answer["ok"] is False and answer["error"] == "not_conduit"
+    monkeypatch.setattr(tool, "_turn_source", lambda: "conduit")
+    assert _call({"title": "Dinner", "cards": [MAP]})["ok"] is True
+
+
+def test_long_fallback_markdown_is_cut_at_a_line(tool_home, monkeypatch):
+    monkeypatch.setattr(tool.card_schema, "fallback_markdown", lambda cards: ("line\n" * 3000))
+    text = tool._fallback([CLEAN_MAP])
+    assert len(text) <= store_module.MAX_CARD_MARKDOWN_CHARS and text.endswith("line")
+
+
+def test_a_card_on_disk_keeps_only_valid_rich_cards(store):
+    _exchange(store)
+    store.show("Dinner", TABLE, cards=[CLEAN_MAP])
+    state = json.loads(store.path.read_text())
+    state["cards"][0]["cards"].append({"type": "weather"})
+    store.path.write_text(json.dumps(state))
+    [card] = _exchange(store)["cards"]
+    assert card["cards"] == [CLEAN_MAP]
