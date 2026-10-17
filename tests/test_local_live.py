@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import threading
+import time
 import types
 from pathlib import Path
 
@@ -218,6 +219,11 @@ def test_key_is_made_once_kept_private_and_names_its_profile(hermes):
     assert json.loads(stored.read_text())["api_key"] == key
     assert stat_mode(stored) == 0o600
     assert api.local_live_profile_for_key(key) == "work"
+
+
+def test_a_mixed_case_profiles_key_verifies_in_that_profile(hermes):
+    key = _key(hermes, "Work")
+    assert api.local_live_profile_for_key(key) == "Work"
 
 
 def stat_mode(path):
@@ -437,3 +443,52 @@ def test_a_speak_socket_has_its_text_read_back_unchanged(client, hermes, server)
     assert _sse_text(streamed.text) == "It's sunny, 21 degrees."
     # Nothing went to the phone: there's no turn to run.
     assert server.upstream.sent == ["finish"]
+
+
+def _wait_for(condition):
+    deadline = time.monotonic() + 10
+    while not condition():
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+
+
+def test_speak_and_live_sockets_on_one_profile_each_get_their_own_requests(client, hermes, server):
+    headers = {"Authorization": f"Bearer {_key(hermes)}"}
+    item = {"type": "conversation.item.create",
+            "item": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Read  me."}]}}
+    with client.websocket_connect(f"{BASE}/local-live/socket") as live:
+        with client.websocket_connect(f"{BASE}/local-live/socket?mode=speak") as speak:
+            speak.send_text(json.dumps(item))
+            _wait_for(lambda: any("Read  me." in sent for sent in server.upstream.sent))
+            read = client.post(f"{BASE}/local-live/v1/chat/completions", json=_completion("Read me."), headers=headers)
+            assert read.json()["choices"][0]["message"]["content"] == "Read me."
+            # The newer speak socket doesn't take the live call's turn.
+            thread, result = _ask_in_background(client, headers, _completion("What's the time?"))
+            turn = json.loads(live.receive_text())
+            assert turn["text"] == "What's the time?"
+            live.send_text(json.dumps({"type": "conduit.turn.done", "turn_id": turn["turn_id"]}))
+            thread.join(10)
+            speak.send_text("finish")
+        live.send_text("finish")
+    assert result["response"].status_code == 200
+
+
+def test_a_turns_reply_is_capped(client, hermes, monkeypatch):
+    monkeypatch.setattr(api, "LOCAL_LIVE_MAX_REPLY_CHARS", 10)
+    headers = {"Authorization": f"Bearer {_key(hermes)}"}
+    with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
+        thread, result = _ask_in_background(client, headers, _completion())
+        ws.receive_text()
+        for _ in range(3):
+            ws.send_text(json.dumps({"type": "conduit.turn.delta", "turn_id": "t1", "text": "abcdefg"}))
+        ws.send_text(json.dumps({"type": "conduit.turn.done", "turn_id": "t1"}))
+        thread.join(10)
+        ws.send_text("finish")
+    assert result["response"].json()["choices"][0]["message"]["content"] == "abcdefgabc"
+
+
+def test_auth_start_retries_once_the_dashboard_is_imported(monkeypatch):
+    monkeypatch.setitem(api._local_live_auth_state, "started", False)
+    monkeypatch.delitem(sys.modules, "hermes_cli.web_server", raising=False)
+    api._local_live_start_auth()
+    assert api._local_live_auth_state["started"] is False

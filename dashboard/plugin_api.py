@@ -40,6 +40,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import base64
+import collections
 import contextvars
 import errno
 import functools
@@ -2633,6 +2634,8 @@ LOCAL_LIVE_TURN_MAX_S = 600.0
 LOCAL_LIVE_MAX_BODY_BYTES = 512 * 1024
 LOCAL_LIVE_MAX_TURN_CHARS = 4_000
 LOCAL_LIVE_MAX_DELTA_CHARS = 8_000
+# A turn's whole reply: the phone's deltas past this are dropped.
+LOCAL_LIVE_MAX_REPLY_CHARS = 32_000
 # How long the auth seam waits for the dashboard to start serving.
 LOCAL_LIVE_AUTH_WAIT_S = 600.0
 LOCAL_LIVE_NO_CALL_REPLY = "Conduit isn't in a Local Live call right now."
@@ -2651,7 +2654,10 @@ def _local_live_key_path() -> Path:
 
 
 def _local_live_profile_part(profile: Optional[str]) -> str:
-    name = _limiter_key(profile)
+    # Unfolded: the key is verified in this exact profile's scope, which is
+    # case-sensitive.
+    name = (profile or "").strip()
+    name = "" if name.lower() in ("", "current") else name
     return base64.urlsafe_b64encode(name.encode("utf-8")).decode("ascii").rstrip("=") or "-"
 
 
@@ -2660,7 +2666,7 @@ def _local_live_profile_from_part(part: str) -> Optional[str]:
     if part == "-":
         return ""
     try:
-        name = base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)).decode("utf-8")
+        name = base64.b64decode(part + "=" * (-len(part) % 4), altchars=b"-_", validate=True).decode("utf-8")
     except (ValueError, UnicodeDecodeError):
         return None
     return name if _LOCAL_LIVE_PROFILE_NAME.fullmatch(name) else None
@@ -2682,6 +2688,7 @@ def local_live_key(profile: Optional[str], rotate: bool = False) -> str:
         key = "" if rotate else _local_live_read_key()
         if key:
             return key
+        _local_live_verified.clear()
         key = ".".join((LOCAL_LIVE_KEY_PREFIX, _local_live_profile_part(profile), secrets.token_urlsafe(32)))
         path = _local_live_key_path()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -2698,8 +2705,25 @@ def local_live_key(profile: Optional[str], rotate: bool = False) -> str:
         return key
 
 
+# Keys verified lately, so a call's turns don't each reread the key file
+# and the profile's config on the event loop (verify_token is synchronous).
+# Cleared whenever a key is made or rotated.
+_local_live_verified: Dict[str, Tuple[str, float]] = {}
+LOCAL_LIVE_VERIFIED_TTL_S = 30.0
+
+
 def local_live_profile_for_key(token: str) -> Optional[str]:
     """The profile whose key ``token`` is ("" for the dashboard's own), else None."""
+    cached = _local_live_verified.get(token)
+    if cached is not None and time.monotonic() < cached[1]:
+        return cached[0]
+    profile = _local_live_check_key(token)
+    if profile is not None:
+        _local_live_verified[token] = (profile, time.monotonic() + LOCAL_LIVE_VERIFIED_TTL_S)
+    return profile
+
+
+def _local_live_check_key(token: str) -> Optional[str]:
     parts = token.split(".")
     if len(parts) != 3 or parts[0] != LOCAL_LIVE_KEY_PREFIX or not parts[2]:
         return None
@@ -2768,11 +2792,13 @@ def _local_live_register_auth() -> None:
     web_server = sys.modules.get("hermes_cli.web_server")
     app = getattr(web_server, "app", None)
     deadline = time.monotonic() + LOCAL_LIVE_AUTH_WAIT_S
-    while app is not None and getattr(app.state, "auth_required", None) is None:
+    # Mid-import the dashboard may not have its app yet: wait for that too.
+    while web_server is not None and (app is None or getattr(app.state, "auth_required", None) is None):
         if time.monotonic() > deadline:
             _local_live_auth_state.update(ready=False, reason="The dashboard hasn't started serving")
             return
         time.sleep(0.5)
+        app = getattr(web_server, "app", None)
     if app is not None and getattr(app.state, "auth_required", False):
         others = [p for p in registry.list_providers() if p.name != LOCAL_LIVE_PROVIDER_NAME]
         if not others:
@@ -2794,11 +2820,12 @@ def _local_live_start_auth() -> None:
     with _local_live_auth_lock:
         if _local_live_auth_state["started"]:
             return
+        if "hermes_cli.web_server" not in sys.modules:
+            # Not the dashboard yet (tests, a plugin host process, or imported
+            # before it): a later status or socket call tries again.
+            _local_live_auth_state.update(ready=False, reason="Local Live runs in the Hermes dashboard")
+            return
         _local_live_auth_state["started"] = True
-    if "hermes_cli.web_server" not in sys.modules:
-        # Not the dashboard (tests, a plugin host process): nothing to guard.
-        _local_live_auth_state.update(ready=False, reason="Local Live runs in the Hermes dashboard")
-        return
     threading.Thread(target=_local_live_register_auth, name="conduit-local-live-auth", daemon=True).start()
 
 
@@ -2811,6 +2838,8 @@ class _LocalLiveTurn:
     def __init__(self, turn_id: str) -> None:
         self.turn_id = turn_id
         self.frames: "asyncio.Queue[Tuple[str, str]]" = asyncio.Queue()
+        # Characters queued so far; bounds the queue with the reply.
+        self.chars = 0
 
 
 class _LocalLiveCall:
@@ -2822,6 +2851,10 @@ class _LocalLiveCall:
         # Classic voice's reply voice (?mode=speak): Conduit already has the
         # words, sends them as the user item, and the server reads them back.
         self.speaks = speaks
+        # On a speak socket, the words Conduit sent that the server hasn't
+        # asked to have read back yet: how its requests are told from a
+        # live call's on the same profile.
+        self.to_read: "collections.deque[str]" = collections.deque(maxlen=64)
         self.send_lock = asyncio.Lock()
         self.turns: Dict[str, _LocalLiveTurn] = {}
         self.numbers = itertools.count(1)
@@ -2855,7 +2888,9 @@ class _LocalLiveCall:
 
     async def intercept(self, text: str) -> bool:
         """A frame from the phone: True for turn frames, which stay here."""
-        if '"conduit.' not in text[:200]:
+        if self.speaks and '"conversation.item.create"' in text:
+            self._note_words(text)
+        if '"conduit.' not in text:
             return False
         try:
             frame = json.loads(text)
@@ -2869,12 +2904,36 @@ class _LocalLiveCall:
             return True
         if kind == "conduit.turn.delta":
             delta = frame.get("text")
-            if isinstance(delta, str) and delta:
-                turn.frames.put_nowait(("delta", delta[:LOCAL_LIVE_MAX_DELTA_CHARS]))
+            if isinstance(delta, str) and delta and turn.chars < LOCAL_LIVE_MAX_REPLY_CHARS:
+                delta = delta[:min(LOCAL_LIVE_MAX_DELTA_CHARS, LOCAL_LIVE_MAX_REPLY_CHARS - turn.chars)]
+                turn.chars += len(delta)
+                turn.frames.put_nowait(("delta", delta))
         elif kind in ("conduit.turn.done", "conduit.turn.error"):
             self.turns.pop(turn.turn_id, None)
             turn.frames.put_nowait(("done", ""))
         return True
+
+    def _note_words(self, text: str) -> None:
+        try:
+            frame = json.loads(text)
+        except ValueError:
+            return
+        item = frame.get("item") if isinstance(frame, dict) and frame.get("type") == "conversation.item.create" else None
+        content = item.get("content") if isinstance(item, dict) else None
+        for part in content if isinstance(content, list) else []:
+            words = part.get("text") if isinstance(part, dict) else None
+            words = " ".join(words.split()) if isinstance(words, str) else ""
+            if words:
+                self.to_read.append(words)
+
+    def take_words(self, text: str) -> bool:
+        """Whether ``text`` is words this speak socket sent (now read back)."""
+        # Spaced the way _local_live_user_text gives the request's words.
+        wanted = " ".join(text.split())
+        if wanted in self.to_read:
+            self.to_read.remove(wanted)
+            return True
+        return False
 
     def close(self) -> None:
         self.closed = True
@@ -2889,13 +2948,38 @@ _local_live_calls: Dict[str, List[_LocalLiveCall]] = {}
 _local_live_last_request: Dict[str, float] = {}
 
 
+def _local_live_open_calls(profile: str) -> List[_LocalLiveCall]:
+    return [call for call in _local_live_calls.get(_limiter_key(profile), []) if not call.closed]
+
+
 def _local_live_active_call(profile: str) -> Optional[_LocalLiveCall]:
-    calls = [call for call in _local_live_calls.get(_limiter_key(profile), []) if not call.closed]
+    """The newest live call (not a speak socket), where turns go."""
+    calls = [call for call in _local_live_open_calls(profile) if not call.speaks]
     return calls[-1] if calls else None
 
 
-def local_live_status(profile: Optional[str]) -> Dict[str, Any]:
-    """Inside the profile's scope: what Conduit shows in Local Live's settings."""
+def _local_live_route(profile: str, text: str) -> Tuple[Optional[_LocalLiveCall], bool]:
+    """Who answers a request: (call, read back). Words a speak socket sent are
+    read back; anything else is a live call's turn. With no live call but a
+    speak socket open, the request is read back too."""
+    calls = _local_live_open_calls(profile)
+    for call in reversed(calls):
+        if call.speaks and text and call.take_words(text):
+            return call, True
+    live = _local_live_active_call(profile)
+    if live is not None:
+        return live, False
+    speaking = [call for call in calls if call.speaks]
+    return (speaking[-1], True) if speaking else (None, False)
+
+
+def local_live_status(
+    profile: Optional[str], in_call: Optional[bool] = None, last_request_at: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Inside the profile's scope: what Conduit shows in Local Live's settings.
+
+    The route reads ``in_call`` and ``last_request_at`` on the event loop,
+    which owns the call registry, and passes them in."""
     server = speech_server_status()
     auth_ready = bool(_local_live_auth_state.get("ready"))
     reason = None if auth_ready else str(_local_live_auth_state.get("reason") or LOCAL_LIVE_UNAVAILABLE)
@@ -2908,8 +2992,9 @@ def local_live_status(profile: Optional[str]) -> Dict[str, Any]:
         "model_name": LOCAL_LIVE_MODEL_ID,
         "api_key": local_live_key(profile) if auth_ready else None,
         "speech_server": server,
-        "in_call": _local_live_active_call(profile or "") is not None,
-        "last_request_at": _local_live_last_request.get(_limiter_key(profile)),
+        "in_call": (_local_live_active_call(profile or "") is not None) if in_call is None else in_call,
+        "last_request_at": (_local_live_last_request.get(_limiter_key(profile))
+                            if last_request_at is None else last_request_at),
     }
 
 
@@ -2917,9 +3002,11 @@ def local_live_status(profile: Optional[str]) -> Dict[str, Any]:
 async def get_local_live_status(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     _local_live_start_auth()
+    in_call = _local_live_active_call(profile or "") is not None
+    last_request_at = _local_live_last_request.get(_limiter_key(profile))
     try:
         return {"ok": True, **(await asyncio.wait_for(
-            _run_scoped(profile, lambda: local_live_status(profile), _speech_server_executor),
+            _run_scoped(profile, lambda: local_live_status(profile, in_call, last_request_at), _speech_server_executor),
             timeout=SPEECH_SERVER_SETUP_TIMEOUT_S))}
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="Local Live status timed out", headers={"Cache-Control": "no-store"})
@@ -2996,7 +3083,8 @@ def _local_live_chunk(completion_id: str, created: int, delta: Dict[str, Any], f
 
 
 @router.get("/local-live/v1/models")
-async def get_local_live_models(request: Request) -> Dict[str, Any]:
+async def get_local_live_models(request: Request, response: Response) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
     _local_live_request_profile(request)
     return {"object": "list", "data": [{"id": LOCAL_LIVE_MODEL_ID, "object": "model", "owned_by": "conduit"}]}
 
@@ -3010,11 +3098,10 @@ async def post_local_live_chat_completions(request: Request) -> Any:
     _local_live_last_request[_limiter_key(profile)] = time.time()
     body = await _read_json_body(request, LOCAL_LIVE_MAX_BODY_BYTES)
     text = _local_live_user_text(body)
-    stream = bool(body.get("stream")) if isinstance(body, dict) else False
+    stream = isinstance(body, dict) and body.get("stream") is True
     completion_id = f"chatcmpl-conduit-{uuid.uuid4().hex[:24]}"
     created = int(time.time())
-    call = _local_live_active_call(profile)
-    speaks = call is not None and call.speaks
+    call, speaks = _local_live_route(profile, text)
     turn = await call.start_turn(text) if call is not None and text and not speaks else None
 
     async def words() -> Any:
