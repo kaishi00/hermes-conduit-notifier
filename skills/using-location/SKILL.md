@@ -130,6 +130,9 @@ looked up on the user's iPhone, with real routes and traffic.
   Pass the coordinates or `place_id` your lookup returned. Conduit adds
   address, phone, website and travel time from Apple Maps itself; add a
   rating, hours, price or photo only when you found it, with its source.
+  Don't build a map of your own as an HTML page (Leaflet and the like):
+  free web map tiles need keys and show blank or watermarked in Conduit.
+  Without `conduit_show`, give the place and an Apple Maps link.
 
 ## Appointment check, as an example of a job
 

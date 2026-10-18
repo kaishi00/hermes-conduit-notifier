@@ -1353,7 +1353,7 @@ that phone gets the cards; subagents can't use it. Limits:
 
 ### Map and place cards (plugin 0.45+)
 
-`conduit_show` also takes `cards`: up to four maps and places Conduit draws
+`conduit_show` also takes `cards`: up to four maps, places and other cards Conduit draws
 natively, in a typed chat as well as on a call. `markdown` is optional with
 cards; without it, the cards' own Markdown (each place with an Apple Maps
 link) is what a phone that doesn't draw cards, or another client, shows.
@@ -1382,6 +1382,23 @@ in the exchange (0.45.1+), so a phone that draws the cards leaves it out.
   (`POST /voice/sessions`): kept with a chat's call and returned by
   `GET /voice/chat-calls`; in a call saved as its own row, written as their
   Markdown after the turn's text.
+
+### Information cards (plugin 0.46+)
+
+Cards can also be `stats` (big numbers with a change and a small line),
+`chart` (line, area, bar or pie, drawn with Swift Charts), `weather` (now,
+the next hours and days), `comparison` (two to four options, one
+recommended at most) and `steps` (what you need, then steps the user can
+tick off, with timers). Each type has its own field, and the schema's rules
+keep only that field.
+
+- **Where it's from.** These cards take a card-level `source` (`name`, and
+  a `url` if any), shown on the card. A forecast needs one or it's dropped;
+  without one, the other cards read as Hermes' own.
+- **Only where they're drawn.** A Conduit says `info-cards` in its
+  exchange's `features` when it draws them. Without it, the tool leaves
+  them out (`unsupported_cards` when nothing else is left), so an older
+  build never gets a card it would show as nothing.
 
 ## Health data from Conduit (plugin 0.23+)
 

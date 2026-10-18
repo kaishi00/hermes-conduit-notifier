@@ -72,6 +72,41 @@ def test_fallback_markdown_escapes_titles_and_names_no_mode_it_cant_open():
     assert "[Directions to B](https://maps.apple.com/?saddr=A&daddr=B)" in text, "Apple Maps links can't cycle"
 
 
+def test_fallback_markdown_shows_information_cards_and_their_sources():
+    cards = card_schema.normalize_cards([
+        {"type": "stats", "title": "This *week*", "source": {"name": "Health", "url": "https://h.test/s"},
+         "stats": [{"label": "Steps", "value": "58,204", "change": "+12%", "detail": "daily 8,315"}]},
+        {"type": "chart", "chart": {"kind": "bar", "unit": "USD", "labels": ["Mon", "Tue"],
+                                    "series": [{"name": "Sales", "values": [120, 95.5]}, {"values": [1, 2]}]}},
+        {"type": "weather", "source": {"name": "Open-Meteo"},
+         "weather": {"place": "Berlin", "unit": "C", "now": {"temp": 18.5, "condition": "partly_cloudy"},
+                     "days": [{"day": "Tue", "low": 12, "high": 21, "condition": "rain", "precip": 60}]}},
+        {"type": "steps", "needs": ["2 eggs"], "steps": [{"text": "Boil water."}, {"text": "Simmer.", "timer": 390}]},
+    ])
+    text = card_schema.fallback_markdown(cards)
+    assert "### This \\*week\\*" in text
+    assert "- **Steps:** 58,204 (+12%), daily 8,315" in text and "_From [Health](https://h.test/s)_" in text
+    assert "| | Sales (USD) | Value (USD) |" in text and "| Tue | 95.5 | 2 |" in text
+    assert "Berlin: **18.5°C**, Partly cloudy" in text and "- **Tue:** 12–21°C, Rain (60% chance of rain)" in text
+    assert "_From Open-Meteo_" in text
+    assert "- 2 eggs" in text and "2. Simmer. (6 min 30 s)" in text
+    comparison = card_schema.normalize_cards([{"type": "comparison", "options": [
+        {"name": "A", "recommended": True, "facts": [{"label": "Price", "value": "$1"}], "pros": ["Cheap"]},
+        {"name": "B", "cons": ["Slow"]}]}])
+    text = card_schema.fallback_markdown(comparison)
+    assert "**A** (recommended)  \nPrice: $1  \n+ Cheap" in text and "**B**  \n− Slow" in text
+
+
+def test_every_type_has_its_field_and_markdown():
+    fields = {"map": "places", "place": "places", "places": "places", "stats": "stats", "chart": "chart",
+              "weather": "weather", "comparison": "options", "steps": "steps"}
+    assert set(card_schema.CARD_SCHEMA["properties"]["type"]["enum"]) == set(fields)
+    for kind, field in fields.items():
+        assert card_schema._TYPE_FIELDS[kind][0] == field
+        assert field in card_schema.CARD_SCHEMA["properties"]
+    assert set(card_schema.INFO_TYPES) == set(card_schema._INFO_MARKDOWN)
+
+
 def test_a_url_that_could_end_a_link_is_invalid():
     for url in ("https://a.test/x)[y](javascript:alert(1))", "https://a.test/a b", "https://a.test/<x>",
                 'https://a.test/"x"', "https://a.test/[x]"):

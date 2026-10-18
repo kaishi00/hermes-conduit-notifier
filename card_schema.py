@@ -1,12 +1,15 @@
-"""Conduit's rich cards: maps and places Conduit draws natively, checked
-against the one schema both sides read (``cards/card-schema.json``).
+"""Conduit's rich cards: maps, places, stats, charts, forecasts, comparisons
+and steps Conduit draws natively, checked against the one schema both sides
+read (``cards/card-schema.json``).
 
 Hermes fills in a card's facts (a place's name, where it is, a rating it
-found and where from); Conduit owns the look, and the phone adds what Apple
-Maps knows itself at draw time (address, category, phone, website, travel
-time, Look Around). So the schema has no fields for those, and a rating,
-hours, price or photo without a named source is left out rather than shown
-as fact.
+found and where from; numbers, a forecast, the steps of a recipe); Conduit
+owns the look, and the phone adds what Apple Maps knows itself at draw time
+(address, category, phone, website, travel time, Look Around). So the schema
+has no fields for those, and a rating, hours, price or photo without a named
+source is left out rather than shown as fact. The other cards say where
+their information is from when Hermes names a source (a forecast must), and
+otherwise read as Hermes' own.
 
 Normalizing follows the schema and is the same in Conduit's Swift
 (``RichCardSchema``); ``cards/card-vectors.json`` holds the examples both
@@ -19,9 +22,13 @@ test suites run, so the two can't drift:
   (then the list is cut to ``maxItems``), and an invalid required value
   makes its object invalid;
 - enums match without regard to case and come out as written in the schema;
-- then the schema's ``rules``: a route only on a map whose places all
-  survived, naming places in the list, from one to another; a place card
-  keeps its first place.
+- then the schema's ``rules``: a card keeps only its type's fields and
+  needs its type's own; a route only on a map whose places all survived,
+  naming places in the list, from one to another; a place card keeps its
+  first place; a chart keeps the series that fit its labels (one, never
+  negative, for a pie); a forecast needs a source and something to show,
+  and drops a day whose low is above its high; a comparison recommends one
+  option at most.
 
 The tool (agent process) and the dashboard (dashboard process, voice call
 turns) both use this module: the dashboard loads it by path, so it imports
@@ -160,18 +167,73 @@ def clean_text(text: str) -> str:
     return "".join(" " if unicodedata.category(char) == "Cc" else char for char in text).strip()
 
 
-def _apply_rules(card: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any]:
+# Each type's own field; a card keeps it and the shared fields, and nothing else.
+_TYPE_FIELDS = {"map": ("places", "route"), "place": ("places",), "places": ("places",), "stats": ("stats",),
+                "chart": ("chart",), "weather": ("weather",), "comparison": ("options",), "steps": ("steps", "needs")}
+# The information cards (plugin 0.46+): they name a source, and a Conduit
+# draws them only when its exchange says "info-cards".
+INFO_TYPES = ("stats", "chart", "weather", "comparison", "steps")
+
+
+def _apply_rules(card: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any] | None:
+    kind = card["type"]
+    keep = {"type", "title", *_TYPE_FIELDS[kind]}
+    if kind in INFO_TYPES:
+        keep.add("source")
+    card = {key: value for key, value in card.items() if key in keep}
+    field = _TYPE_FIELDS[kind][0]
+    if field not in card:
+        return None
+    if kind in ("map", "place", "places"):
+        return _place_rules(card, raw)
+    if kind == "chart":
+        chart = _chart_rules(card["chart"])
+        if chart is None:
+            return None
+        card["chart"] = chart
+    elif kind == "weather":
+        weather = card["weather"]
+        if "days" in weather:
+            weather["days"] = [day for day in weather["days"] if day["low"] <= day["high"]]
+            if not weather["days"]:
+                del weather["days"]
+        if "source" not in card or not any(key in weather for key in ("now", "hours", "days")):
+            return None
+    elif kind == "comparison":
+        seen = False
+        for option in card["options"]:
+            if option.get("recommended"):
+                if seen:
+                    del option["recommended"]
+                seen = True
+    return card
+
+
+def _place_rules(card: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any]:
     places = card["places"]
     if card["type"] == "place":
         card["places"] = places[:1]
     route = card.pop("route", None)
-    if route is not None and card["type"] == "map":
+    if route is not None:
         given = raw.get("places")
         survived = isinstance(given, list) and len(given) == len(places)
         to, start = route["to"], route.get("from")
         if survived and to < len(places) and (start is None or (start < len(places) and start != to)):
             card["route"] = route
     return card
+
+
+def _chart_rules(chart: dict[str, Any]) -> dict[str, Any] | None:
+    count = len(chart["labels"])
+    series = [line for line in chart["series"] if len(line["values"]) == count]
+    if chart["kind"] == "pie":
+        series = series[:1]
+        if series and any(value < 0 for value in series[0]["values"]):
+            series = []
+    if not series:
+        return None
+    chart["series"] = series
+    return chart
 
 
 # --- Markdown, for a screen or client that doesn't draw cards -----------------
@@ -190,6 +252,12 @@ def _card_markdown(card: dict[str, Any]) -> str:
     lines = []
     if card.get("title"):
         lines.append(f"### {_escape(card['title'])}")
+    kind = card.get("type")
+    if kind in _INFO_MARKDOWN:
+        lines.extend(_INFO_MARKDOWN[kind](card))
+        if card.get("source"):
+            lines.append(f"_From {_sourced_name(card['source'])}_")
+        return "\n\n".join(line for line in lines if line)
     for place in card["places"]:
         lines.append(_place_markdown(place))
     route = card.get("route")
@@ -237,6 +305,116 @@ def _place_markdown(place: dict[str, Any]) -> str:
         lines.append(f"_{_escape(place['note'])}_")
     lines.append(f"[Open in Apple Maps](https://maps.apple.com/?{_maps_params(place)})")
     return "  \n".join(lines)
+
+
+def _stats_markdown(card: dict[str, Any]) -> list[str]:
+    rows = []
+    for stat in card["stats"]:
+        row = f"- **{_escape(stat['label'])}:** {_escape(stat['value'])}"
+        if stat.get("change"):
+            row += f" ({_escape(stat['change'])})"
+        if stat.get("detail"):
+            row += f", {_escape(stat['detail'])}"
+        rows.append(row)
+    return ["\n".join(rows)]
+
+
+def _chart_markdown(card: dict[str, Any]) -> list[str]:
+    chart = card["chart"]
+    unit = f" ({_escape(chart['unit'])})" if chart.get("unit") else ""
+    names = [_escape(line.get("name", "Value")) + unit for line in chart["series"]]
+    rows = ["| | " + " | ".join(names) + " |", "|---|" + "---|" * len(names)]
+    for index, label in enumerate(chart["labels"]):
+        values = " | ".join(_number(line["values"][index]) for line in chart["series"])
+        rows.append(f"| {_escape(label)} | {values} |")
+    return ["\n".join(rows)]
+
+
+_CONDITIONS = {"clear": "Clear", "partly_cloudy": "Partly cloudy", "cloudy": "Cloudy", "fog": "Fog",
+               "drizzle": "Drizzle", "rain": "Rain", "heavy_rain": "Heavy rain", "thunderstorm": "Thunderstorms",
+               "snow": "Snow", "sleet": "Sleet", "wind": "Windy"}
+
+
+def _weather_markdown(card: dict[str, Any]) -> list[str]:
+    weather = card["weather"]
+    degree = "°" + weather["unit"]
+    lines = []
+    now = weather.get("now")
+    if now:
+        line = f"**{_number(now['temp'])}{degree}**, {_CONDITIONS[now['condition']]}"
+        if weather.get("place"):
+            line = f"{_escape(weather['place'])}: {line}"
+        if now.get("text"):
+            line += f". {_escape(now['text'])}"
+        lines.append(line)
+    elif weather.get("place"):
+        lines.append(f"**{_escape(weather['place'])}**")
+    if weather.get("hours"):
+        lines.append(" · ".join(f"{_escape(hour['time'])} {_number(hour['temp'])}°{_precip(hour)}"
+                                for hour in weather["hours"]))
+    if weather.get("days"):
+        rows = []
+        for day in weather["days"]:
+            row = f"- **{_escape(day['day'])}:** {_number(day['low'])}–{_number(day['high'])}{degree}"
+            if day.get("condition"):
+                row += f", {_CONDITIONS[day['condition']]}"
+            rows.append(row + _precip(day))
+        lines.append("\n".join(rows))
+    return lines
+
+
+def _precip(entry: dict[str, Any]) -> str:
+    return f" ({entry['precip']}% chance of rain)" if entry.get("precip") else ""
+
+
+def _comparison_markdown(card: dict[str, Any]) -> list[str]:
+    parts = []
+    for option in card["options"]:
+        head = f"**{_escape(option['name'])}**"
+        if option.get("recommended"):
+            head += " (recommended)"
+        lines = [head]
+        if option.get("summary"):
+            lines.append(_escape(option["summary"]))
+        lines.extend(f"{_escape(fact['label'])}: {_escape(fact['value'])}" for fact in option.get("facts", []))
+        lines.extend(f"+ {_escape(pro)}" for pro in option.get("pros", []))
+        lines.extend(f"− {_escape(con)}" for con in option.get("cons", []))
+        parts.append("  \n".join(lines))
+    return parts
+
+
+def _steps_markdown(card: dict[str, Any]) -> list[str]:
+    parts = []
+    if card.get("needs"):
+        parts.append("\n".join(f"- {_escape(need)}" for need in card["needs"]))
+    rows = []
+    for number, step in enumerate(card["steps"], start=1):
+        row = f"{number}. {_escape(step['text'])}"
+        if step.get("timer"):
+            row += f" ({_duration(step['timer'])})"
+        rows.append(row)
+    parts.append("\n".join(rows))
+    return parts
+
+
+def _duration(seconds: int) -> str:
+    hours, rest = divmod(seconds, 3600)
+    minutes, seconds = divmod(rest, 60)
+    parts = [f"{hours} h" if hours else "", f"{minutes} min" if minutes else "", f"{seconds} s" if seconds else ""]
+    return " ".join(part for part in parts if part)
+
+
+def _number(value: float) -> str:
+    return f"{value:,g}" if abs(value) < 1e6 else f"{value:,.0f}"
+
+
+_INFO_MARKDOWN = {"stats": _stats_markdown, "chart": _chart_markdown, "weather": _weather_markdown,
+                  "comparison": _comparison_markdown, "steps": _steps_markdown}
+
+
+def _sourced_name(source: dict[str, Any]) -> str:
+    name = _escape(source["name"])
+    return f"[{name}]({source['url']})" if source.get("url") else name
 
 
 def _sourced(fact: dict[str, Any]) -> str:

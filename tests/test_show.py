@@ -241,6 +241,20 @@ def test_cards_that_are_all_invalid_are_refused(tool_home):
     assert "cards" not in _exchange(PresentStore(tool_home))
 
 
+STATS = {"type": "stats", "stats": [{"label": "Steps", "value": "8,412"}], "source": {"name": "Health"}}
+
+
+def test_information_cards_go_only_to_a_conduit_that_draws_them(tool_home):
+    _exchange(PresentStore(tool_home), features=("chat-cards",))
+    answer = _call({"title": "Today", "cards": [STATS]})
+    assert answer["ok"] is False and answer["error"] == "unsupported_cards", "an older Conduit would draw nothing"
+    answer = _call({"title": "Today", "cards": [STATS, MAP]})
+    assert answer["ok"] is True and answer["cards"] == [CLEAN_MAP], "the cards it can draw still go"
+    _exchange(PresentStore(tool_home), features=("chat-cards", "info-cards"))
+    answer = _call({"title": "Today", "cards": [STATS]})
+    assert answer == {"ok": True, "cards": [STATS], "note": tool.IN_CHAT_NOTE}
+
+
 def test_cards_are_refused_where_conduit_isnt_drawing_them(tool_home, monkeypatch):
     _exchange(PresentStore(tool_home), features=("chat-cards",))
     monkeypatch.setattr(tool, "_turn_source", lambda: "messaging")
