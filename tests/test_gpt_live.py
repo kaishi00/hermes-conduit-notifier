@@ -25,6 +25,8 @@ def _load_plugin_api():
 
 
 api = _load_plugin_api()
+# The real transport, before the openai fixture stubs it.
+REAL_POST_SDP = api._post_sdp
 
 
 def _jwt(claims):
@@ -790,6 +792,60 @@ def test_an_invalid_answer_after_a_2xx_keeps_its_daily_slot(client, api_key, ope
     openai.reply.update(answer=json.dumps(API_ANSWER))
     # OpenAI may have started (and billed) that session: the day's one call is used.
     assert client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "billing": "api"}).status_code == 429
+
+
+class _Answered200:
+    status = 200
+    headers = {}
+
+    def __init__(self, read):
+        self.read = read
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _oversized(size=-1):
+    return b"{" + b"x" * size
+
+
+def _read_times_out(size=-1):
+    raise TimeoutError("read timed out")
+
+
+@pytest.mark.parametrize("read", [_oversized, _read_times_out])
+def test_an_unreadable_answer_after_a_2xx_keeps_its_daily_slot(client, api_key, openai, monkeypatch, read):
+    api_key.config["voice"]["gpt_live"]["conduit_api_daily_calls"] = 1
+
+    class Opener:
+        def open(self, request, timeout=None):
+            return _Answered200(read)
+
+    monkeypatch.setattr(api, "_opener", Opener())
+    monkeypatch.setattr(api, "_post_sdp", REAL_POST_SDP)
+    first = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "billing": "api"})
+    assert first.status_code == 502
+    assert "subscription was not used" in first.json()["detail"]
+    monkeypatch.setattr(api, "_post_sdp", lambda url, headers, body: (200, json.dumps(API_ANSWER), ""))
+    # OpenAI answered 2xx before the body failed, so it may have started (and billed) that session.
+    assert client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "billing": "api"}).status_code == 429
+
+
+def test_a_connection_that_never_answers_gives_its_daily_slot_back(client, api_key, openai, monkeypatch):
+    api_key.config["voice"]["gpt_live"]["conduit_api_daily_calls"] = 1
+
+    class Opener:
+        def open(self, request, timeout=None):
+            raise api.urllib.error.URLError("refused")
+
+    monkeypatch.setattr(api, "_opener", Opener())
+    monkeypatch.setattr(api, "_post_sdp", REAL_POST_SDP)
+    assert client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "billing": "api"}).status_code == 502
+    monkeypatch.setattr(api, "_post_sdp", lambda url, headers, body: (200, json.dumps(API_ANSWER), ""))
+    assert client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "billing": "api"}).status_code == 200
 
 
 def test_the_shared_key_never_goes_to_a_non_standard_port(client, api_key, openai):

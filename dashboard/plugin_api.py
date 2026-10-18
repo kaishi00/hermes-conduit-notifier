@@ -1391,16 +1391,23 @@ def gpt_live_session_config(history: Optional[list], live: Dict[str, Any]) -> Di
     return config
 
 
+class _GPTLiveAnsweredError(TokenError):
+    """OpenAI answered 2xx but its answer couldn't be read: a session may have started."""
+
+
 def _post_sdp(url: str, headers: Dict[str, str], body: Dict[str, Any]) -> tuple:
     """POST the offer; returns (status, answer text, Location). No redirects: the bearer must not follow one."""
     request = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), method="POST",
                                      headers={**headers, "Content-Type": "application/json"})
+    answered = False
     try:
         with _opener.open(request, timeout=GPT_LIVE_TIMEOUT_S) as response:
+            answered = 200 <= response.status < 300
             # An SDP answer is a few KB; one byte over the cap is refused, not buffered.
             answer = response.read(GPT_LIVE_MAX_ANSWER_BYTES + 1)
             if len(answer) > GPT_LIVE_MAX_ANSWER_BYTES:
-                raise TokenError(502, "GPT-Live returned an invalid WebRTC answer. " + GPT_LIVE_NO_FALLBACK)
+                raise (_GPTLiveAnsweredError if answered else TokenError)(
+                    502, "GPT-Live returned an invalid WebRTC answer. " + GPT_LIVE_NO_FALLBACK)
             return response.status, answer.decode("utf-8", "replace"), response.headers.get("Location", "")
     except urllib.error.HTTPError as exc:
         # The body can echo account details; only the status goes back to Conduit.
@@ -1409,7 +1416,9 @@ def _post_sdp(url: str, headers: Dict[str, str], body: Dict[str, Any]) -> tuple:
         return status, "", ""
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         logger.warning("GPT-Live session request could not reach OpenAI: %s", getattr(exc, "reason", exc))
-        raise TokenError(502, "GPT-Live connection failed. " + GPT_LIVE_NO_FALLBACK)
+        # A read that fails after a 2xx is not a call that never started.
+        raise (_GPTLiveAnsweredError if answered else TokenError)(
+            502, "GPT-Live connection failed. " + GPT_LIVE_NO_FALLBACK)
     except ValueError as exc:
         # A header value the request can't carry (a non-Latin-1 token, say): the type only, never the value.
         logger.warning("GPT-Live could not build its session request: %s", type(exc).__name__)
@@ -1499,9 +1508,11 @@ def _api_gpt_live_exchange(sdp: str, history: Optional[list], live: Dict[str, An
         status, text, _location = post(f"{base_url}/live/sessions", {"Authorization": f"Bearer {key}"},
                                        {"session": config, "transport": {"type": "webrtc", "sdp": sdp}})
     except TokenError as exc:
-        # Said for this path, whatever the shared transport's own wording.
-        raise TokenError(exc.status, "GPT-Live on the API key could not connect, or its answer was invalid. "
-                                     + GPT_LIVE_NO_SUBSCRIPTION)
+        # Said for this path, whatever the shared transport's own wording. An answer
+        # that failed after a 2xx keeps its daily slot, like an invalid one below.
+        raise (_GPTLiveAPIAnsweredError if isinstance(exc, _GPTLiveAnsweredError) else TokenError)(
+            exc.status, "GPT-Live on the API key could not connect, or its answer was invalid. "
+                        + GPT_LIVE_NO_SUBSCRIPTION)
     if not 200 <= status < 300:
         logger.warning("GPT-Live API session was rejected: HTTP %s", status)
         if status == 401:

@@ -675,7 +675,7 @@ choose:
   API-billed calls per day (default 20; `0` turns API calls off, a 403). A
   call OpenAI refuses or never answers (a rejected key, an outage) gives its
   slot back; once OpenAI has said yes, the slot stays counted even if its
-  answer turns out unusable, since a billed session may have started.
+  answer turns out unusable or is cut off mid-read, since a billed session may have started.
   The count is kept in memory, per dashboard process: a restart starts it
   again, and a dashboard run with several worker processes allows the cap in
   each.
