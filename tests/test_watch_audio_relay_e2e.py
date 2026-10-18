@@ -699,3 +699,87 @@ def test_the_stand_in_reads_any_pcm16_wav(tmp_path):
     pcm = probe.read_wav(path, 16_000)
     assert len(pcm) == 16_000 * 2
     assert set(struct.unpack(f"<{len(pcm) // 2}h", pcm)) == {2000}
+
+
+class _ReadBackHermes:
+    """Hermes' session API, answering each spoken turn with two sentences."""
+
+    def __init__(self):
+        self.transport = None
+        self.prompts = []
+
+    def dispatch(self, request, transport=None):
+        self.transport = transport
+        if request["method"] == "session.create":
+            return {"id": request["id"], "result": {"session_id": "s1", "stored_session_id": "stored-1"}}
+        if request["method"] == "prompt.submit":
+            self.prompts.append(request["params"]["text"])
+            threading.Timer(0.05, self._answer).start()
+        return {"id": request["id"], "result": {}}
+
+    def _answer(self):
+        for text in ("It is sunny. ", "It is twenty degrees in Montréal, with a light wind.\n"):
+            self.transport.write({"method": "event", "params": {"type": "message.delta", "session_id": "s1",
+                                                                "payload": {"text": text}}})
+        self.transport.write({"method": "event", "params": {"type": "message.complete", "session_id": "s1",
+                                                            "payload": {"text": "", "status": "complete"}}})
+
+
+def test_hermes_voice_crosses_the_real_relay_to_a_speech_server_and_back(paired, monkeypatch):
+    """speech_server: the Watch's audio reaches a (stand-in) read-back speech
+    server through the real relay and the real bridge, a transcript becomes a
+    Hermes turn, and the reply comes back as speech, sealed."""
+    from websockets.asyncio.server import serve
+
+    hermes = _ReadBackHermes()
+    heard = []
+
+    async def speech_server(socket):
+        appended = 0
+        async for message in socket:
+            event = json.loads(message)
+            if event["type"] == "session.update":
+                await socket.send(json.dumps({"type": "session.updated", "session": event["session"]}))
+            elif event["type"] == "input_audio_buffer.append":
+                appended += len(base64.b64decode(event["audio"]))
+                if appended >= 16_000 and not heard:  # half a second at 16 kHz
+                    heard.append(appended)
+                    await socket.send(json.dumps({"type": "conversation.item.input_audio_transcription.completed",
+                                                  "transcript": "What's the weather?"}))
+            elif event["type"] == "response.create":
+                text = event["response"]["input"][0]["content"][0]["text"]
+                await socket.send(json.dumps({"type": "response.output_audio.delta",
+                                              "delta": base64.b64encode(b"\x10\x27" * 2400).decode()}))
+                await socket.send(json.dumps({"type": "response.output_audio_transcript.done", "transcript": text}))
+                await socket.send(json.dumps({"type": "response.done", "response": {"status": "completed"}}))
+
+    async def call():
+        async with serve(speech_server, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            monkeypatch.setattr(api, "speech_server_target",
+                                lambda settings=None: (f"ws://127.0.0.1:{port}/v1/realtime", ""))
+            monkeypatch.setattr(api, "_watch_voice_session_api", lambda: hermes)
+            monkeypatch.setattr(api, "speech_watch_status", lambda: {"runtime": "ready", "source": "speech_server",
+                                                                     "reason": None})
+            grant = await asyncio.get_running_loop().run_in_executor(None, lambda: api.open_watch_grant(
+                {"tools": ["web_search"], "audio": True}, profile=None, path=paired))
+            assert "speech_server" in grant["audio"]["engines"]
+            watch = Watch(grant)
+            await watch.connect()
+            await watch.control({"type": "start", "engine": "speech_server"})
+            seen = await watch.until(lambda m: m[0] == 3 and m[1].get("type") == "started")
+            assert seen[-1][1]["session_id"] == "stored-1"
+            for _ in range(10):  # a second of microphone in 100 ms pieces
+                await watch.send(1, b"\x00\x01" * 1600)
+            seen = await watch.until(lambda m: m[0] == 2 and m[1].get("type") == "conduit.state"
+                                     and m[1].get("state") == "listening" and len(hermes.prompts) == 1)
+            audio = b"".join(plain for kind, plain in seen if kind == 1)
+            assert len(audio) == 2 * 4800
+            events = [value for kind, value in seen if kind == 2]
+            assert {"type": "turn.done", "turn": {"role": "user", "transcript": "What's the weather?"}} in events
+            assert {"type": "conduit.speech", "on": True} in events
+            assert hermes.prompts[0].endswith("What's the weather?")
+            await watch.control({"type": "end"})
+            await watch.until(lambda m: m[0] == 3 and m[1].get("type") == "ended")
+
+    asyncio.run(call())

@@ -54,6 +54,7 @@ def test_every_capability_names_a_served_route_family():
         "watch-live-token": "/watch-tools/",
         "watch-chats": "/watch-tools/",
         "watch-audio": "/watch-audio/",
+        "watch-speech-server": "/watch-audio/",
         "desktop-views": "/sessions/desktop-views",
         "hermes-calls": "/calls",
         "hermes-call-presence": "/calls/presence",

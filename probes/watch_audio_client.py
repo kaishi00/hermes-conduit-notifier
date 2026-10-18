@@ -1,4 +1,4 @@
-"""A command-line stand-in for the Watch: a GPT-Live (or Grok) Watch call
+"""A command-line stand-in for the Watch: a GPT-Live (or Grok, or Hermes Voice) Watch call
 through the real push relay, from this Hermes host, with no Watch.
 
 It does what Conduit's Watch app will do (hermes-conduit
@@ -28,7 +28,14 @@ Run it with the Python Hermes itself runs on (the one that can
 Conduit notifications whose relay has Watch audio (relay 0.7.0 or later):
 
     <hermes python> probes/watch_audio_client.py --prepare
-    <hermes python> probes/watch_audio_client.py --wav question.wav [--engine gpt_live|grok] [--profile NAME]
+    <hermes python> probes/watch_audio_client.py --wav question.wav [--engine gpt_live|grok|speech_server] [--profile NAME]
+
+Hermes Voice (--engine speech_server) needs the profile's voice.speech_server
+and Hermes' session API. In the dashboard that's the dashboard's own; here,
+outside it, the stand-in loads Hermes' session API into its own process, so
+each turn runs a real Hermes agent on the profile (the call's chat lands in
+its history as "Watch call"). There is no greeting: the question goes after a
+second.
 
 The WAV is any PCM16 WAV (mono or stereo, any rate). The printed log carries
 event types, timings and transcripts only; never keys, tokens or SDP.
@@ -384,6 +391,9 @@ async def call(api, grant: dict, engine: str, speech: Dict[int, bytes], seconds:
             run.transcripts.append(f"input: {message.get('transcript') or ''}")
         elif name in ("response.output_audio_transcript.done", "response.audio_transcript.done"):
             run.transcripts.append(f"output: {message.get('transcript') or ''}")
+        elif name in ("conduit.state", "conduit.speech"):
+            value = message.get("state") if name == "conduit.state" else ("on" if message.get("on") else "off")
+            run.note(f"{name}: {value}")
         elif name == "error":
             error = message.get("error") if isinstance(message.get("error"), dict) else {}
             print(f"  error event: {error.get('code')} {str(error.get('message') or '')[:200]}")
@@ -435,7 +445,7 @@ async def call(api, grant: dict, engine: str, speech: Dict[int, bytes], seconds:
         # open while a lookup is out.
         clock = time.monotonic()
         offset = 0
-        speak_at = time.monotonic() + (8.0 if question else seconds)
+        speak_at = time.monotonic() + ((1.0 if engine == "speech_server" else 8.0) if question else seconds)
         while (time.monotonic() < state["deadline"] or state["lookups"]) and not ended.is_set():
             chunk = b""
             if question and time.monotonic() >= speak_at and offset < len(question):
@@ -466,7 +476,7 @@ async def call(api, grant: dict, engine: str, speech: Dict[int, bytes], seconds:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--engine", choices=("gpt_live", "grok"), default="gpt_live")
+    parser.add_argument("--engine", choices=("gpt_live", "grok", "speech_server"), default="gpt_live")
     parser.add_argument("--wav", type=Path, help="a short spoken question (16-bit PCM WAV), played after the greeting")
     parser.add_argument("--seconds", type=float, default=25.0, help="how long the call stays open")
     parser.add_argument("--profile", help="Hermes profile whose relay pairing and sign-ins to use")
@@ -491,7 +501,15 @@ def main() -> int:
             return 3
         if not args.wav:
             return 0
-    print(f"Watch audio status: {json.dumps(api.watch_audio_status())}")
+    if args.engine == "speech_server" and api._watch_voice_session_api() is None:
+        try:
+            import tui_gateway.server  # noqa: F401 — this process's own chats, outside the dashboard
+        except Exception as exc:
+            print(f"Hermes' session API couldn't be loaded here ({exc.__class__.__name__}); run this with Hermes' Python")
+            return 3
+        api._watch_voice_session_api = api._hermes_session_api
+    with api._profile_scope(args.profile):
+        print(f"Watch audio status: {json.dumps(api.watch_audio_status())}")
 
     speech: Dict[int, bytes] = {}
     if args.wav:

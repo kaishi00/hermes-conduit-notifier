@@ -42,6 +42,7 @@ import atexit
 import base64
 import collections
 import contextvars
+import difflib
 import errno
 import functools
 import hashlib
@@ -2489,19 +2490,13 @@ async def _speech_server_socket(ws: WebSocket, relay: Callable[..., Any]) -> Non
         return
 
     open_key = _limiter_key(profile)
-    if _speech_server_open.get(open_key, 0) >= SPEECH_SERVER_MAX_OPEN_PER_PROFILE or \
-            sum(_speech_server_open.values()) >= SPEECH_SERVER_MAX_OPEN:
+    if not _speech_server_take_open(open_key):
         await refuse(SPEECH_SERVER_CLOSE_RATE_LIMITED, "Too many speech server connections are open on this host")
         return
-    _speech_server_open[open_key] = _speech_server_open.get(open_key, 0) + 1
     try:
         await relay(refuse, url, key, profile)
     finally:
-        remaining = _speech_server_open.get(open_key, 1) - 1
-        if remaining > 0:
-            _speech_server_open[open_key] = remaining
-        else:
-            _speech_server_open.pop(open_key, None)
+        _speech_server_give_open(open_key)
 
 
 async def _speech_server_relay(ws: WebSocket, refuse: Callable[[int, str], Any], url: str, key: str,
@@ -8492,7 +8487,7 @@ def run_watch_job_call(grant: "_WatchGrant", tool: str, args: Dict[str, Any]) ->
 # or Hermes' own Python when it already has aiortc.
 
 WATCH_AUDIO_VERSION = 1
-WATCH_AUDIO_ENGINES = ("gpt_live", "grok")
+WATCH_AUDIO_ENGINES = ("gpt_live", "grok", "speech_server")
 WATCH_AUDIO_UP = "watch-to-host"
 WATCH_AUDIO_DOWN = "host-to-watch"
 WATCH_AUDIO_AUDIO = 1
@@ -9349,7 +9344,958 @@ class _GrokWatchSession(_WatchAudioSession):
             await upstream.send(text)
 
 
-_WATCH_AUDIO_SESSIONS = {"gpt_live": _GptLiveWatchSession, "grok": _GrokWatchSession}
+# --- Hermes Voice: a Watch call on the user's own speech server ----------------
+#
+# The speech_server engine needs no cloud model. The Watch streams its
+# microphone here; this host relays it to the profile's speech server
+# (voice.speech_server, the same server Classic voice listens through), runs
+# each transcript as a turn of a Hermes chat of the call's own, with the
+# profile's model, tools and memory, and has the server speak the reply
+# sentence by sentence. The reply's audio goes back to the Watch at real time
+# (_WatchAudioPacer).
+#
+#   Watch  --PCM 16 kHz-->  host  --input_audio_buffer.append-->  speech server
+#   server --input_audio_transcription.completed-->  host  --prompt.submit-->  Hermes
+#   Hermes --message.delta-->  host  --response.create (one sentence)-->  server
+#   server --response.output_audio.delta (24 kHz)-->  host  --PCM-->  Watch
+#
+# The server listens with its own voice-activity detection and is never asked
+# for replies of its own (turn_detection.create_response false): each
+# response.create carries the sentence to say, and a server that speaks
+# something else (one running its own language model) ends the call rather
+# than talk for Hermes. The fleet's voice adapter and Hermes Live Voice style
+# read-back servers fit.
+#
+# Each call is a new Hermes chat. A Watch that rejoins (a new stream on the
+# same grant) names it in its start (resume_session_id) and carries on in it;
+# the grant's end closes the call's chats, which stay in Hermes' history. The
+# server's session is dialed again when it ends under the call (its lifetime,
+# an idle close).
+#
+# To the Watch it speaks GPT-Live's event names (session.input_transcript.delta,
+# session.output_transcript.delta, turn.done), so Conduit reads it as a
+# GPT-Live call through the bridge, plus two of its own: conduit.speech {on}
+# around each spoken reply (the audio between is all speech), and
+# conduit.state {state: listening | thinking | speaking}.
+
+SPEECH_WATCH_ENGINE = "speech_server"
+SPEECH_WATCH_INPUT_RATE = 16_000
+SPEECH_WATCH_OUTPUT_RATE = 24_000
+# The server's end-of-speech silence: a little longer than the phone's
+# speech-server default, for a wrist held away from the mouth.
+SPEECH_WATCH_SILENCE_MS = 600
+SPEECH_WATCH_PREFIX_MS = 300
+# Spoken per reply; the rest stays in the chat.
+SPEECH_WATCH_MAX_SPOKEN_S = 90.0
+# Reply audio the server may be ahead of the Watch: the next sentence waits
+# while more than this is still to play (the pacer drops past 60 s).
+SPEECH_WATCH_AHEAD_S = 12.0
+SPEECH_WATCH_REST_IN_CHAT = "The rest is in the chat."
+SPEECH_WATCH_CODE_NOTE = "I've put the code in the chat."
+SPEECH_WATCH_ERROR_REPLY = "Sorry, Hermes ran into a problem with that."
+# A sentence goes to the server once this long (the first of a reply at any
+# length, so the reply starts sooner); shorter ones join the next.
+SPEECH_WATCH_SENTENCE_CHARS = 40
+SPEECH_WATCH_FIRST_SENTENCE_CHARS = 2
+SPEECH_WATCH_MAX_SENTENCE_CHARS = 400
+# Text that waits this long with no sentence end goes anyway.
+SPEECH_WATCH_FLUSH_S = 1.2
+SPEECH_WATCH_TICK_S = 0.25
+# The server's session ends under the call: dialed again this many times in
+# a row (a session that lived SPEECH_WATCH_STABLE_S resets the count).
+SPEECH_WATCH_REDIALS = 3
+SPEECH_WATCH_STABLE_S = 30.0
+SPEECH_WATCH_CHAT_TIMEOUT_S = 25.0
+SPEECH_WATCH_MAX_TURN_CHARS = 4_000
+SPEECH_WATCH_TRANSCRIPT_CHARS = 8_000
+SPEECH_WATCH_TITLE = "Watch call"
+# Chats one grant may open: a call, and calls after it on the same grant.
+SPEECH_WATCH_CHATS_PER_GRANT = 8
+# As Conduit's spoken turns (AppState.spokenPromptSurface): Hermes asks for a
+# reply meant to be read aloud, and uses its voice model when one is set.
+SPEECH_WATCH_SURFACE = "voice-live"
+# The first turn says where the replies go, for a Hermes that doesn't know
+# the voice surface.
+SPEECH_WATCH_FIRST_TURN_NOTE = ("[Conduit Watch call: your replies are read aloud on the user's Apple Watch. Keep "
+                                "them short and conversational, in plain sentences without Markdown, lists, tables, "
+                                "links or code.]\n\n")
+# A spoken sentence whose transcript matches the text this little was said by
+# a server with its own model.
+SPEECH_WATCH_MIN_READBACK = 0.6
+# Sentences shorter than this don't count, and it takes this many misses to
+# end the call.
+SPEECH_WATCH_READBACK_WORDS = 5
+SPEECH_WATCH_READBACK_MISSES = 2
+# A response the server neither starts nor ends in this long is given up on.
+SPEECH_WATCH_RESPONSE_TIMEOUT_S = 30.0
+SPEECH_WATCH_CANCEL_TIMEOUT_S = 5.0
+# Errors with which a server refuses a response.create outright.
+_SPEECH_WATCH_REFUSED_RESPONSES = ("response_has_no_text", "unsupported_item", "invalid_request_error",
+                                   "response_create_failed")
+# What's said when Hermes asks something the call can't answer (P3 answers
+# approvals on the Watch).
+SPEECH_WATCH_NEEDS_CHAT = "Hermes is asking you something in the chat. Open Conduit to answer it."
+_SPEECH_WATCH_QUESTIONS = ("approval.request", "clarify.request", "sudo.request", "secret.request")
+SPEECH_WATCH_NO_SESSIONS = ("Hermes Voice on the Watch needs this dashboard to serve Hermes' chats "
+                            "(update Hermes, or open a chat in Conduit once)")
+SPEECH_WATCH_NOT_READBACK = ("The speech server answered with words of its own; Hermes Voice on the Watch needs "
+                             "a server that speaks the text it's given")
+_SPEECH_WATCH_BOUNDARY = re.compile(r"(?<!\d)[.!?…]+[\"')\]]*(?=\s)|\n")
+_SPEECH_WATCH_LINK = re.compile(r"(!?)\[([^\]\n]*)\]\([^)\n]*\)")
+_SPEECH_WATCH_URL = re.compile(r"(?:https?://|www\.)[^\s]*[^\s.,;:!?)\]'\"]")
+_SPEECH_WATCH_SPACE_BEFORE_MARK = re.compile(r"\s+([.,;:!?])")
+_SPEECH_WATCH_HTML = re.compile(r"</?[A-Za-z][^>\n]{0,100}>")
+_SPEECH_WATCH_MARKS = re.compile(r"\*\*|__|~~|`|(?<![\w*])\*(?=\S)|(?<=\S)\*(?![\w*])")
+_SPEECH_WATCH_LINE_START = re.compile(r"^(?:#{1,6}\s+|>\s?|[-*+•]\s+|\d{1,3}[.)]\s+)+")
+_SPEECH_WATCH_RULE = re.compile(r"[-=*_|:\s]{3,}")
+_SPEECH_WATCH_WORD = re.compile(r"\w+")
+
+_speech_watch_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="conduit-watch-voice")
+
+
+def _watch_voice_can_load_sessions() -> bool:
+    """Whether this is a dashboard that serves Hermes' chats, its session API
+    not imported yet (no chat socket since it started)."""
+    web_server = sys.modules.get("hermes_cli.web_server")
+    if web_server is None or not getattr(web_server, "_DASHBOARD_EMBEDDED_CHAT_ENABLED", True):
+        return False
+    try:
+        return importlib.util.find_spec("tui_gateway.server") is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _watch_voice_session_api() -> Any:
+    """Hermes' session API for a Watch call's chat.
+
+    As _hermes_session_api, but a dashboard that hasn't had a chat socket yet
+    imports the API now: it's the module the dashboard's /api/ws imports into
+    this same process, so there is still one registry of chats. Never call it
+    inside a profile's scope: the import reads Hermes' home and .env for the
+    whole process.
+    """
+    server = _hermes_session_api()
+    if server is not None or not _watch_voice_can_load_sessions():
+        return server
+    try:
+        importlib.import_module("tui_gateway.server")
+    except Exception as exc:  # noqa: BLE001 — reported as unavailable
+        logger.info("Hermes' session API couldn't be loaded for a Watch call: %s", type(exc).__name__)
+        return None
+    return _hermes_session_api()
+
+
+def speech_watch_status() -> Dict[str, Any]:
+    """Whether a Watch call can run on this profile's speech server (call in
+    the profile's scope; it never imports Hermes' session API)."""
+    server = speech_server_status()
+    if not server.get("available"):
+        return {"runtime": "missing", "source": None, "reason": server.get("reason") or SPEECH_SERVER_NOT_CONFIGURED}
+    if _hermes_session_api() is None and not _watch_voice_can_load_sessions():
+        return {"runtime": "missing", "source": None, "reason": SPEECH_WATCH_NO_SESSIONS}
+    return {"runtime": "ready", "source": "speech_server", "reason": None}
+
+
+_speech_server_open_lock = threading.Lock()
+
+
+def _speech_server_take_open(key: str) -> bool:
+    """A slot among the speech server connections open on this host, the
+    phone's relays and Watch calls together (they run on several threads)."""
+    with _speech_server_open_lock:
+        if _speech_server_open.get(key, 0) >= SPEECH_SERVER_MAX_OPEN_PER_PROFILE or \
+                sum(_speech_server_open.values()) >= SPEECH_SERVER_MAX_OPEN:
+            return False
+        _speech_server_open[key] = _speech_server_open.get(key, 0) + 1
+        return True
+
+
+def _speech_server_give_open(key: str) -> None:
+    with _speech_server_open_lock:
+        remaining = _speech_server_open.get(key, 1) - 1
+        if remaining > 0:
+            _speech_server_open[key] = remaining
+        else:
+            _speech_server_open.pop(key, None)
+
+
+class _SpeechSplitter:
+    """A reply's text, as it streams, cut into sentences fit to speak.
+
+    Markdown goes (headings, bullets, emphasis, links keep their words); code
+    blocks and tables stay in the chat, said once; URLs aren't read out.
+    """
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        self.clock = clock
+        self.raw = ""
+        self.held = ""
+        self.fed_at: Optional[float] = None
+        self.in_code = False
+        self.code_told = False
+        # The text so far ended inside a line that isn't spoken (a table row).
+        self.skipping_line = False
+        self.emitted = 0
+
+    def feed(self, text: str) -> List[str]:
+        self.fed_at = self.clock()
+        self.raw += text
+        out: List[str] = []
+        while True:
+            match = _SPEECH_WATCH_BOUNDARY.search(self.raw)
+            if match is None:
+                break
+            chunk, self.raw = self.raw[:match.end()], self.raw[match.end():]
+            self._take(chunk, out)
+        while len(self.raw) > SPEECH_WATCH_MAX_SENTENCE_CHARS:
+            cut = self.raw.rfind(" ", 0, SPEECH_WATCH_MAX_SENTENCE_CHARS)
+            cut = cut if cut > 0 else SPEECH_WATCH_MAX_SENTENCE_CHARS
+            chunk, self.raw = self.raw[:cut], self.raw[cut:]
+            self._take(chunk, out, whole=True)
+        return out
+
+    def tick(self) -> List[str]:
+        """Text that's waited SPEECH_WATCH_FLUSH_S since the last delta with
+        no sentence end (the caller asks only while nothing else is to say)."""
+        out: List[str] = []
+        if self.fed_at is None or self.clock() - self.fed_at < SPEECH_WATCH_FLUSH_S:
+            return out
+        line = self.raw.rsplit("\n", 1)[-1].lstrip()
+        cut = self.raw.rfind(" ")
+        unspoken_line = self.in_code or self.skipping_line or line.startswith(("|", "```", "~~~"))
+        if cut > 0 and not unspoken_line:
+            chunk, self.raw = self.raw[:cut], self.raw[cut:]
+            self._take(chunk, out, whole=True)
+        if self.held:
+            out.append(self.held)
+            self.held = ""
+            self.emitted += 1
+        self.fed_at = None
+        return out
+
+    def flush(self) -> List[str]:
+        out: List[str] = []
+        if self.raw:
+            chunk, self.raw = self.raw, ""
+            self._take(chunk + "\n", out)
+        if self.held:
+            out.append(self.held)
+            self.held = ""
+            self.emitted += 1
+        self.fed_at = None
+        return out
+
+    def _take(self, chunk: str, out: List[str], whole: bool = False) -> None:
+        text = self._clean(chunk)
+        if not text:
+            return
+        self.held = f"{self.held} {text}" if self.held else text
+        wanted = SPEECH_WATCH_FIRST_SENTENCE_CHARS if self.emitted == 0 else SPEECH_WATCH_SENTENCE_CHARS
+        if len(self.held) >= wanted and (whole or self.held[-1] in ".!?…:;\"')]"):
+            out.append(self.held)
+            self.held = ""
+            self.emitted += 1
+
+    def _code(self, entering: bool, parts: List[str]) -> None:
+        self.in_code = entering
+        if entering and not self.code_told:
+            self.code_told = True
+            parts.append(SPEECH_WATCH_CODE_NOTE)
+
+    def _clean(self, chunk: str) -> str:
+        lines = chunk.split("\n")
+        parts: List[str] = []
+        for index, line in enumerate(lines):
+            complete = index < len(lines) - 1
+            continuing = index == 0 and self.skipping_line
+            if index == 0:
+                self.skipping_line = False
+            stripped = line.strip()
+            if stripped.startswith("~~~") and not continuing:
+                self._code(not self.in_code, parts)
+                continue
+            # Fences, at the start of a line or after text on it.
+            pieces = stripped.split("```")
+            spoken: List[str] = []
+            for number, piece in enumerate(pieces):
+                if number > 0:
+                    self._code(not self.in_code, parts if not spoken else spoken)
+                    if self.in_code:
+                        continue
+                if not self.in_code:
+                    spoken.append(piece)
+            stripped = " ".join(piece for piece in spoken if piece.strip()).strip()
+            if continuing or not stripped:
+                if continuing and not complete:
+                    self.skipping_line = True
+                continue
+            if stripped.startswith("|") or _SPEECH_WATCH_RULE.fullmatch(stripped):
+                if not complete:
+                    self.skipping_line = True
+                continue
+            text = _SPEECH_WATCH_LINE_START.sub("", stripped)
+            text = _SPEECH_WATCH_LINK.sub(lambda match: "" if match.group(1) else match.group(2), text)
+            text = _SPEECH_WATCH_URL.sub("", text)
+            text = _SPEECH_WATCH_HTML.sub("", text)
+            text = _SPEECH_WATCH_MARKS.sub("", text)
+            text = _SPEECH_WATCH_SPACE_BEFORE_MARK.sub(r"\1", " ".join(text.split())).lstrip(".,;:!? ")
+            if not text:
+                continue
+            if complete and text[-1] not in ".!?…:;,\"')]":
+                # A heading or a bullet ends where its line does.
+                text += "."
+            parts.append(text)
+        return " ".join(parts)
+
+
+def _speech_watch_readback(said: str, asked: str) -> Optional[bool]:
+    """Whether the server's transcript of a response is the sentence it was
+    given; None when the sentence can't tell (short, or with numbers a
+    server may say in words)."""
+    said_words = _SPEECH_WATCH_WORD.findall(said.lower())
+    asked_words = _SPEECH_WATCH_WORD.findall(asked.lower())
+    if len(asked_words) < SPEECH_WATCH_READBACK_WORDS or not said_words or any(ch.isdigit() for ch in asked):
+        return None
+    return difflib.SequenceMatcher(None, said_words, asked_words).ratio() >= SPEECH_WATCH_MIN_READBACK
+
+
+class _WatchVoiceChatTransport:
+    """Where Hermes writes a Watch call chat's responses and events, as it
+    would to the app's WebSocket; ``_closed`` is what Hermes' reaper reads."""
+
+    conduit_client = "conduit"
+
+    def __init__(self, chat: "_WatchVoiceChat") -> None:
+        self._chat = chat
+        self._closed = False
+
+    def write(self, obj: dict) -> bool:
+        if self._closed:
+            return False
+        try:
+            self._chat.frame(obj)
+        except Exception as exc:  # noqa: BLE001 — Hermes' writer must never see our failure
+            _log_watch_failure("A Watch call chat's event couldn't be read", exc)
+        return True
+
+    def close(self) -> None:
+        self._closed = True
+
+
+class _WatchVoiceChat:
+    """A Watch call's Hermes chat, through Hermes' session API.
+
+    The calls block (as _WatchJobs.rpc): run them off the event loop. Hermes
+    writes the chat's events from its own threads; ``listener`` gets them.
+    """
+
+    def __init__(self, server: Any, profile: Optional[str]) -> None:
+        self.server = server
+        self.profile = profile
+        self.session_id = ""
+        self.stored_session_id = ""
+        self.transport = _WatchVoiceChatTransport(self)
+        self.lock = threading.Lock()
+        self._waiters: Dict[str, _RpcWaiter] = {}
+        self._rpc_ids = 0
+        self.rid_tag = secrets.token_hex(4)
+        self.listener: Optional[Callable[[str, Dict[str, Any]], None]] = None
+        self.turns = 0
+        self.voice_turn = True
+        self.closed = False
+
+    @property
+    def public_id(self) -> str:
+        return (self.stored_session_id or self.session_id)[:128]
+
+    def rpc(self, method: str, params: Dict[str, Any], timeout: float = WATCH_JOB_RPC_TIMEOUT_S) -> Dict[str, Any]:
+        with self.lock:
+            self._rpc_ids += 1
+            rid = f"conduit-watch-voice-{self.rid_tag}-{self._rpc_ids}"
+            waiter = self._waiters[rid] = _RpcWaiter()
+        try:
+            response = self.server.dispatch({"jsonrpc": "2.0", "id": rid, "method": method, "params": params},
+                                            self.transport)
+            if response is None:
+                if not waiter.done.wait(timeout):
+                    raise WatchJobError(f"{method} timed out")
+                response = waiter.response
+        finally:
+            with self.lock:
+                self._waiters.pop(rid, None)
+        if not isinstance(response, dict):
+            raise WatchJobError(f"{method} gave no answer")
+        error = response.get("error")
+        if error:
+            message = error.get("message") if isinstance(error, dict) else str(error)
+            code = error.get("code") if isinstance(error, dict) else None
+            raise WatchJobError(str(message or f"{method} failed")[:300], code=code)
+        result = response.get("result")
+        return result if isinstance(result, dict) else {}
+
+    def frame(self, obj: Any) -> None:
+        if not isinstance(obj, dict):
+            return
+        method = obj.get("method")
+        if method is None:
+            with self.lock:
+                waiter = self._waiters.get(obj.get("id")) if isinstance(obj.get("id"), str) else None
+            if waiter is not None:
+                waiter.response = obj
+                waiter.done.set()
+            return
+        params = obj.get("params") if isinstance(obj.get("params"), dict) else {}
+        sid = params.get("session_id") if isinstance(params.get("session_id"), str) else ""
+        if not sid or sid not in (self.session_id, self.stored_session_id):
+            return
+        if method != "event":
+            return
+        payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
+        listener = self.listener
+        if listener is not None:
+            listener(str(params.get("type") or ""), payload)
+
+    def open(self) -> None:
+        params: Dict[str, Any] = {"cols": 96, "source": "desktop", "title": SPEECH_WATCH_TITLE}
+        if self.profile:
+            params["profile"] = self.profile
+        created = self.rpc("session.create", params)
+        sid = created.get("session_id")
+        if not isinstance(sid, str) or not sid:
+            raise WatchJobError("session.create gave no session")
+        stored = created.get("stored_session_id")
+        self.session_id = sid
+        self.stored_session_id = stored if isinstance(stored, str) else ""
+
+    def submit(self, text: str) -> None:
+        params: Dict[str, Any] = {"session_id": self.session_id, "text": text, "surface": SPEECH_WATCH_SURFACE}
+        if self.voice_turn:
+            params["voice_turn"] = True
+        try:
+            self.rpc("prompt.submit", params)
+        except WatchJobError as exc:
+            # A Hermes that refuses the marker (Conduit's HermesClient does the same).
+            if "voice_turn" not in params or "voice_turn" not in str(exc):
+                raise
+            self.voice_turn = False
+            params.pop("voice_turn")
+            self.rpc("prompt.submit", params)
+        self.turns += 1
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        self.listener = None
+        if self.session_id:
+            try:
+                self.rpc("session.close", {"session_id": self.session_id})
+            except Exception as exc:  # noqa: BLE001 — Hermes' reaper closes it anyway
+                logger.info("Closing a Watch call's chat failed: %s", type(exc).__name__)
+        self.transport.close()
+
+
+def _speech_watch_update() -> Dict[str, Any]:
+    return {"type": "session.update", "session": {"type": "realtime", "audio": {
+        "input": {"format": {"type": "audio/pcm", "rate": SPEECH_WATCH_INPUT_RATE},
+                  "turn_detection": {"type": "server_vad", "silence_duration_ms": SPEECH_WATCH_SILENCE_MS,
+                                     "prefix_padding_ms": SPEECH_WATCH_PREFIX_MS, "create_response": False,
+                                     "interrupt_response": False}},
+        "output": {"format": {"type": "audio/pcm", "rate": SPEECH_WATCH_OUTPUT_RATE}},
+    }}}
+
+
+def _speech_watch_say(text: str) -> Dict[str, Any]:
+    return {"type": "response.create", "response": {"input": [
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}]}}
+
+
+class _SpeechServerWatchSession(_WatchAudioSession):
+    """A Watch call on the profile's speech server, with Hermes answering."""
+
+    engine = SPEECH_WATCH_ENGINE
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.upstream: Any = None
+        self.pacer: Optional[_WatchAudioPacer] = None
+        self.chat: Optional[_WatchVoiceChat] = None
+        self.resumed = False
+        self.events: asyncio.Queue = asyncio.Queue()
+        self.sentences: deque = deque()
+        # A response.create out: its sentence, when it went, and whether the
+        # server started it (response.created) or a cancel is on its way.
+        self.responding = False
+        self.current: Optional[str] = None
+        self.responding_since = 0.0
+        self.response_started = False
+        self.muting = False
+        self.readback_misses = 0
+        # Hermes' reply: still coming, its text, and whether the events now
+        # coming belong to a turn the user's new words cut off.
+        self.reply_open = False
+        self.reply_text = ""
+        self.superseding = False
+        self.asked = False
+        self.speech_on = False
+        self.spoken_s = 0.0
+        self.capped = False
+        self.state = ""
+        self.splitter = _SpeechSplitter()
+        self.submitting = 0
+        self.side_tasks: set = set()
+
+    # The call
+
+    async def run(self) -> None:
+        profile = self.profile
+        loop = asyncio.get_running_loop()
+        try:
+            url, key = await asyncio.wait_for(
+                _run_scoped(profile, lambda: _speech_server_setup(profile), _speech_server_executor),
+                timeout=SPEECH_SERVER_SETUP_TIMEOUT_S)
+            # Outside any profile's scope: importing it reads Hermes' home.
+            server = await asyncio.wait_for(loop.run_in_executor(_speech_watch_executor, _watch_voice_session_api),
+                                            timeout=SPEECH_SERVER_SETUP_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            raise WatchAudioFailure("unreachable", "The Hermes host timed out reading the speech server settings")
+        except TokenError as exc:
+            raise _watch_audio_failure(exc)
+        if server is None:
+            raise WatchAudioFailure("unavailable", SPEECH_WATCH_NO_SESSIONS)
+        open_key = _limiter_key(profile)
+        if not _speech_server_take_open(open_key):
+            raise WatchAudioFailure("busy", "Too many speech server connections are open on this host")
+        tasks: list = []
+        listener: Optional[Callable[[str, Dict[str, Any]], None]] = None
+        try:
+            chat = self.chat = await self._chat(server)
+            self.upstream = await self._dial(url, key)
+            self.pacer = _WatchAudioPacer(self.send, SPEECH_WATCH_OUTPUT_RATE)
+
+            def listener(kind: str, payload: Dict[str, Any]) -> None:
+                with contextlib.suppress(RuntimeError):  # the call's loop already closed
+                    loop.call_soon_threadsafe(self.events.put_nowait, (kind, payload))
+
+            chat.listener = listener
+            await self.bridge.control(self.stream, {
+                "type": "started", "engine": self.engine, "voice": None,
+                "input_rate": SPEECH_WATCH_INPUT_RATE, "output_rate": SPEECH_WATCH_OUTPUT_RATE,
+                "session_id": chat.public_id, "resumed": self.resumed,
+                "briefing_applied": False, "greeting_applied": False,
+            })
+            await self._set_state("listening")
+            tasks = [asyncio.ensure_future(self._upstream_loop()), asyncio.ensure_future(self._hermes_loop()),
+                     asyncio.ensure_future(self._ticks()), asyncio.ensure_future(self.pacer.run())]
+            await _first_done(None, self.stopping.wait(), *tasks)
+            for task in tasks:
+                if task.done() and not task.cancelled() and task.exception() is not None:
+                    raise task.exception()
+        finally:
+            if self.chat is not None and listener is not None and self.chat.listener is listener:
+                self.chat.listener = None
+            for task in tasks + list(self.side_tasks):
+                task.cancel()
+            await asyncio.gather(*tasks, *self.side_tasks, return_exceptions=True)
+            upstream, self.upstream = self.upstream, None
+            if upstream is not None:
+                with contextlib.suppress(Exception):
+                    await upstream.close()
+            _speech_server_give_open(open_key)
+
+    def _spawn(self, coroutine: Any) -> None:
+        task = asyncio.ensure_future(coroutine)
+        self.side_tasks.add(task)
+        task.add_done_callback(self.side_tasks.discard)
+
+    async def _chat(self, server: Any) -> _WatchVoiceChat:
+        """The call's chat: the one a rejoining Watch names, else a new one."""
+        chats = self.bridge.voice_chats
+        wanted = self.request.get("resume_session_id")
+        if isinstance(wanted, str) and wanted:
+            chat = chats.get(wanted)
+            if chat is not None and not chat.closed:
+                self.resumed = True
+                return chat
+        if len(chats) >= SPEECH_WATCH_CHATS_PER_GRANT:
+            raise WatchAudioFailure("busy", "This call has started as many chats as it may")
+        chat = _WatchVoiceChat(server, self.profile)
+        opening = asyncio.get_running_loop().run_in_executor(_speech_watch_executor, chat.open)
+        try:
+            await asyncio.wait_for(asyncio.shield(opening), SPEECH_WATCH_CHAT_TIMEOUT_S)
+        except WatchJobError as exc:
+            raise WatchAudioFailure("failed", f"Hermes couldn't open the call's chat: {exc}")
+        except BaseException as exc:
+            # Timed out or cancelled while Hermes opens it: closed once it
+            # has, so no chat is left without a call.
+            opening.add_done_callback(lambda _: _speech_watch_executor.submit(chat.close))
+            if isinstance(exc, asyncio.TimeoutError):
+                raise WatchAudioFailure("unreachable", "Hermes took too long to open the call's chat")
+            raise
+        chats[chat.public_id] = chat
+        return chat
+
+    async def _dial(self, url: str, key: str) -> Any:
+        try:
+            upstream = await _connect_speech_server(url, _speech_server_headers(key))
+        except RealtimeUpstreamRefused as exc:
+            code, message = _speech_server_refusal(exc.status)
+            raise WatchAudioFailure("refused" if code == SPEECH_SERVER_CLOSE_REFUSED else "unreachable", message)
+        except Exception as exc:
+            logger.warning("A Watch call couldn't reach the speech server: %s", type(exc).__name__)
+            raise WatchAudioFailure("unreachable", "Could not reach the speech server from the Hermes host")
+        try:
+            await upstream.send(json.dumps(_speech_watch_update()))
+        except Exception:
+            with contextlib.suppress(Exception):
+                await upstream.close()
+            raise WatchAudioFailure("unreachable", "The connection to the speech server was lost")
+        return upstream
+
+    async def _redial(self) -> Any:
+        profile = self.profile
+        try:
+            url, key = await asyncio.wait_for(_run_scoped(profile, speech_server_target, _speech_server_executor),
+                                              timeout=SPEECH_SERVER_SETUP_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            raise WatchAudioFailure("unreachable", "The Hermes host timed out reading the speech server settings")
+        except TokenError as exc:
+            raise _watch_audio_failure(exc)
+        return await self._dial(url, key)
+
+    # The speech server
+
+    async def _upstream_loop(self) -> None:
+        failures = 0
+        while not self.stopping.is_set():
+            upstream = self.upstream
+            if upstream is None:
+                try:
+                    upstream = await self._redial()
+                except WatchAudioFailure as exc:
+                    # Refusals too: a server that refuses while busy (the
+                    # fleet's adapter answers 403 to all) may take the next.
+                    failures += 1
+                    if exc.code == "bad_request" or failures > SPEECH_WATCH_REDIALS:
+                        raise
+                    await asyncio.sleep(min(2.0 ** failures, 8.0))
+                    continue
+                self.upstream = upstream
+                logger.info("A Watch call dialed its speech server again")
+                self._speak_next()
+            opened = time.monotonic()
+            await self._read(upstream)
+            if self.stopping.is_set():
+                return
+            self.upstream = None
+            with contextlib.suppress(Exception):
+                await upstream.close()
+            if time.monotonic() - opened >= SPEECH_WATCH_STABLE_S:
+                failures = 0
+            failures += 1
+            if failures > SPEECH_WATCH_REDIALS:
+                raise WatchAudioFailure("unreachable", "The connection to the speech server was lost")
+            if self.responding:
+                # Cut off mid-sentence: said again, from its start, on the
+                # next session, rather than after what already played.
+                if self.current is not None and not self.muting:
+                    self.sentences.appendleft(self.current)
+                    if self.pacer is not None:
+                        self.pacer.interrupt()
+                    self._speech_off()
+                self._response_over()
+
+    async def _read(self, upstream: Any) -> None:
+        try:
+            from websockets.exceptions import ConnectionClosed
+        except ImportError:  # pragma: no cover — Hermes ships websockets
+            ConnectionClosed = OSError  # type: ignore[assignment,misc]
+        try:
+            async for message in upstream:
+                if not isinstance(message, str):
+                    continue
+                try:
+                    event = json.loads(message)
+                except ValueError:
+                    continue
+                if isinstance(event, dict):
+                    await self._upstream_event(event)
+        except (ConnectionClosed, OSError, EOFError, asyncio.TimeoutError) as exc:
+            logger.info("A Watch call's speech server socket ended: %s", type(exc).__name__)
+
+    async def _upstream_event(self, event: Dict[str, Any]) -> None:
+        kind = event.get("type")
+        if kind == "conversation.item.input_audio_transcription.delta":
+            delta = event.get("delta")
+            if isinstance(delta, str) and delta:
+                await self.send(WATCH_AUDIO_EVENT, _speech_watch_event({"type": "session.input_transcript.delta",
+                                                                       "delta": delta}))
+        elif kind == "conversation.item.input_audio_transcription.completed":
+            text = " ".join(str(event.get("transcript") or "").split())
+            if text:
+                await self._user_turn(text)
+        elif kind == "conversation.item.input_audio_transcription.failed":
+            await self.send(WATCH_AUDIO_EVENT, _speech_watch_event({
+                "type": "error", "error": {"code": "transcription_failed",
+                                           "message": "The speech server couldn't make out what was said"}}))
+        elif kind == "response.created":
+            if self.responding:
+                self.response_started = True
+        elif kind in _GROK_AUDIO_DELTAS:
+            # Only a response this asked for, and not one being cancelled.
+            if not self.responding or self.muting or self.pacer is None:
+                return
+            try:
+                pcm = base64.b64decode(str(event.get("delta") or ""), validate=True)
+            except (ValueError, TypeError):
+                return
+            if not pcm:
+                return
+            self.response_started = True
+            self.responding_since = time.monotonic()
+            if not self.speech_on:
+                self.speech_on = True
+                self.pacer.event(json.dumps({"type": "conduit.speech", "on": True}))
+                await self._set_state("speaking")
+            self.pacer.audio(pcm)
+            self.spoken_s += len(pcm) / 2 / SPEECH_WATCH_OUTPUT_RATE
+        elif kind in ("response.output_audio_transcript.done", "response.audio_transcript.done"):
+            said = event.get("transcript")
+            if isinstance(said, str) and self.current and self.responding and not self.muting:
+                verdict = _speech_watch_readback(said, self.current)
+                if verdict is False:
+                    self.readback_misses += 1
+                    logger.info("A Watch call's speech server said other words than it was given (%s)",
+                                self.readback_misses)
+                    if self.readback_misses >= SPEECH_WATCH_READBACK_MISSES:
+                        raise WatchAudioFailure("unavailable", SPEECH_WATCH_NOT_READBACK)
+                elif verdict is True:
+                    self.readback_misses = 0
+        elif kind == "response.done":
+            if self.responding:
+                self._response_over()
+            self._speak_next()
+        elif kind == "error":
+            error = event.get("error") if isinstance(event.get("error"), dict) else {}
+            code = str(error.get("code") or "")[:64]
+            logger.info("A Watch call's speech server sent an error: %s", code)
+            if not self.responding or self.response_started or self.muting:
+                return
+            if code == "conversation_already_has_active_response":
+                # One it was cancelling is still going: this sentence goes
+                # again once that one's response.done comes.
+                if self.current is not None:
+                    self.sentences.appendleft(self.current)
+                self.current, self.muting = None, True
+                self.responding_since = time.monotonic()
+            elif code in _SPEECH_WATCH_REFUSED_RESPONSES:
+                # A response.create it refused: no response.done follows it.
+                self._response_over()
+                self._speak_next()
+
+    def _response_over(self) -> None:
+        self.responding, self.current, self.muting, self.response_started = False, None, False, False
+
+    async def _send_upstream(self, payload: Dict[str, Any]) -> None:
+        upstream = self.upstream
+        if upstream is None:
+            return
+        with contextlib.suppress(Exception):  # a dropped socket: the reader dials again
+            await upstream.send(json.dumps(payload))
+
+    # Hermes
+
+    async def _user_turn(self, text: str) -> None:
+        text = text[:SPEECH_WATCH_MAX_TURN_CHARS]
+        await self.send(WATCH_AUDIO_EVENT, _speech_watch_event({"type": "turn.done",
+                                                               "turn": {"role": "user", "transcript": text}}))
+        # Words while the reply still plays (the Watch let the user in): they
+        # win. Hermes cuts off a turn still running and runs this one next:
+        # until this one starts, what comes is the old turn's.
+        await self._stop_speaking()
+        self.superseding = self.reply_open
+        self._open_reply()
+        await self._set_state("thinking")
+        note = SPEECH_WATCH_FIRST_TURN_NOTE if self.chat.turns == 0 and not self.submitting else ""
+        # Off the reader: Hermes may take a while to take the turn.
+        self.submitting += 1
+        self._spawn(self._submit(note + text))
+
+    def _open_reply(self) -> None:
+        self.reply_open = True
+        self.reply_text = ""
+        self.spoken_s = 0.0
+        self.capped = False
+        self.asked = False
+        self.splitter = _SpeechSplitter()
+
+    async def _submit(self, text: str) -> None:
+        try:
+            await asyncio.get_running_loop().run_in_executor(_speech_watch_executor, self.chat.submit, text)
+        except Exception as exc:  # noqa: BLE001 — said on the call, then back to listening
+            logger.warning("A Watch call's turn didn't reach Hermes: %s",
+                           exc if isinstance(exc, WatchJobError) else type(exc).__name__)
+            self.reply_open = False
+            self.superseding = False
+            self._queue_sentence(SPEECH_WATCH_ERROR_REPLY)
+        finally:
+            self.submitting -= 1
+
+    async def _hermes_loop(self) -> None:
+        while True:
+            kind, payload = await self.events.get()
+            if self.superseding:
+                # The turn the user's words cut off: its last deltas and its
+                # end aren't this reply's. (Hermes' default busy mode cuts
+                # the old turn off and starts the new one; a Hermes set to
+                # steer instead folds the words into the running turn, sends
+                # no new message.start, and this drops that reply until the
+                # user speaks again. P3 steers on purpose.)
+                if kind == "message.start":
+                    self.superseding = False
+                elif kind in ("message.complete", "error"):
+                    self.superseding = False
+                    continue
+                else:
+                    continue
+            if kind == "message.start":
+                if not self.reply_open:
+                    # A turn still running when the Watch rejoined.
+                    self._open_reply()
+                    await self._set_state("thinking")
+            elif kind == "message.delta":
+                text = payload.get("text")
+                if not isinstance(text, str) or not text:
+                    continue
+                if not self.reply_open:
+                    self._open_reply()
+                    await self._set_state("thinking")
+                if len(self.reply_text) < SPEECH_WATCH_TRANSCRIPT_CHARS:
+                    self.reply_text += text
+                    self.pacer.event(json.dumps({"type": "session.output_transcript.delta", "delta": text}))
+                for sentence in self.splitter.feed(text):
+                    self._queue_sentence(sentence)
+            elif kind in _SPEECH_WATCH_QUESTIONS:
+                # Answered in Conduit; the Watch only says so, once a reply.
+                if self.reply_open and not self.asked:
+                    self.asked = True
+                    for sentence in self.splitter.flush():
+                        self._queue_sentence(sentence)
+                    self._queue_sentence(SPEECH_WATCH_NEEDS_CHAT)
+            elif kind in ("message.complete", "error"):
+                if not self.reply_open:
+                    continue
+                text = payload.get("text") if kind == "message.complete" else None
+                status = payload.get("status") if kind == "message.complete" else "error"
+                for sentence in self.splitter.flush():
+                    self._queue_sentence(sentence)
+                if status == "error":
+                    if not self.reply_text.strip():
+                        self._queue_sentence(SPEECH_WATCH_ERROR_REPLY)
+                    transcript = self.reply_text
+                else:
+                    if not self.reply_text.strip() and isinstance(text, str) and text.strip() \
+                            and status != "interrupted":
+                        # A reply that came whole, with no deltas.
+                        for sentence in self.splitter.feed(text) + self.splitter.flush():
+                            self._queue_sentence(sentence)
+                    transcript = text if isinstance(text, str) and text.strip() else self.reply_text
+                self.pacer.event(json.dumps({"type": "turn.done", "turn": {
+                    "role": "assistant", "transcript": str(transcript or "")[:SPEECH_WATCH_TRANSCRIPT_CHARS]}}))
+                self.reply_open = False
+                self._speak_next()
+
+    # Speaking
+
+    def _queue_sentence(self, sentence: str) -> None:
+        if self.capped or not sentence:
+            return
+        self.sentences.append(sentence)
+        self._speak_next()
+
+    def _speak_next(self) -> None:
+        if self.responding or self.upstream is None or self.pacer is None:
+            return
+        if self.pacer.queued_s > SPEECH_WATCH_AHEAD_S:
+            return  # the ticks try again as the Watch catches up
+        if not self.capped and self.spoken_s >= SPEECH_WATCH_MAX_SPOKEN_S and self.sentences:
+            self.capped = True
+            self.sentences.clear()
+            self.sentences.append(SPEECH_WATCH_REST_IN_CHAT)
+        if not self.sentences:
+            if not self.reply_open:
+                self._speech_off()
+                if self.state != "listening":
+                    self.state = "listening"
+                    self.pacer.event(json.dumps({"type": "conduit.state", "state": "listening"}))
+            return
+        sentence = self.sentences.popleft()
+        self.responding, self.current = True, sentence
+        self.responding_since = time.monotonic()
+        self.response_started = False
+        self._spawn(self._send_upstream(_speech_watch_say(sentence)))
+
+    def _speech_off(self) -> None:
+        if self.speech_on and self.pacer is not None:
+            self.speech_on = False
+            self.pacer.event(json.dumps({"type": "conduit.speech", "on": False}))
+
+    async def _stop_speaking(self) -> None:
+        self.sentences.clear()
+        if self.pacer is not None:
+            self.pacer.interrupt()
+        if self.responding and not self.muting:
+            self.muting = True
+            await self._send_upstream({"type": "response.cancel"})
+        self._speech_off()
+
+    async def _set_state(self, state: str) -> None:
+        if state == self.state:
+            return
+        self.state = state
+        message = json.dumps({"type": "conduit.state", "state": state})
+        if state == "thinking" or self.pacer is None:
+            # Now, not behind the last reply's audio.
+            await self.send(WATCH_AUDIO_EVENT, message.encode("utf-8"))
+        else:
+            self.pacer.event(message)
+
+    async def _ticks(self) -> None:
+        while True:
+            await asyncio.sleep(SPEECH_WATCH_TICK_S)
+            waited = time.monotonic() - self.responding_since
+            if self.responding and not self.muting and waited > SPEECH_WATCH_RESPONSE_TIMEOUT_S:
+                # No audio for this long: cancelled, and over once the server
+                # says so (or, failing that, after a short wait).
+                logger.info("A Watch call's speech server left a response unanswered")
+                self.muting = True
+                self.responding_since = time.monotonic()
+                await self._send_upstream({"type": "response.cancel"})
+            elif self.responding and self.muting and waited > SPEECH_WATCH_CANCEL_TIMEOUT_S:
+                self._response_over()
+            if self.reply_open and not self.sentences and not self.responding:
+                for sentence in self.splitter.tick():
+                    self._queue_sentence(sentence)
+            self._speak_next()
+
+    # From the Watch
+
+    async def audio(self, pcm: bytes) -> None:
+        if pcm:
+            await self._send_upstream({"type": "input_audio_buffer.append",
+                                       "audio": base64.b64encode(pcm).decode("ascii")})
+
+    async def event(self, data: bytes) -> None:
+        # The conversation is the host's: the Watch's own engine events aren't taken.
+        return
+
+
+def _speech_watch_event(payload: Dict[str, Any]) -> bytes:
+    return json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+_WATCH_AUDIO_SESSIONS = {"gpt_live": _GptLiveWatchSession, "grok": _GrokWatchSession,
+                         SPEECH_WATCH_ENGINE: _SpeechServerWatchSession}
 
 
 # --- The bridge -----------------------------------------------------------------
@@ -9431,6 +10377,9 @@ class _WatchAudioBridge:
         self.session_task: Optional[asyncio.Task] = None
         self.sids: set = set()
         self.rejected = 0
+        # Hermes Voice's chats, by the id the Watch resumes them with: they
+        # outlive a stream, and end with the grant.
+        self.voice_chats: Dict[str, "_WatchVoiceChat"] = {}
 
     def watch_url(self) -> str:
         return _watch_audio_ws_url(self.grant.relay_url, self.grant.grant_id, "watch")
@@ -9454,6 +10403,9 @@ class _WatchAudioBridge:
         except Exception as exc:  # noqa: BLE001 — the grant's lookups go on without audio
             logger.warning("The Watch audio bridge stopped: %s", type(exc).__name__)
         finally:
+            for chat in list(self.voice_chats.values()):
+                chat.close()
+            self.voice_chats.clear()
             self.finished.set()
 
     async def _main(self) -> None:
@@ -9660,22 +10612,36 @@ class _WatchAudioBridge:
         return True
 
 
-def watch_audio_status(runtime: Optional[_WatchAudioRuntime] = None) -> Dict[str, Any]:
+def watch_audio_status(runtime: Optional[_WatchAudioRuntime] = None,
+                       speech: Optional[Callable[[], Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """Each engine's readiness; speech_server's is the profile's (call in its scope)."""
     runtime = runtime or _watch_audio_runtime
     return {"version": WATCH_AUDIO_VERSION,
-            "engines": {"gpt_live": runtime.status(), "grok": {"runtime": "ready", "source": "hermes", "reason": None}}}
+            "engines": {"gpt_live": runtime.status(), "grok": {"runtime": "ready", "source": "hermes", "reason": None},
+                        SPEECH_WATCH_ENGINE: (speech or speech_watch_status)()}}
 
 
-def _watch_audio_grant_engines(runtime: Optional[_WatchAudioRuntime] = None) -> list:
+def _watch_audio_grant_engines(runtime: Optional[_WatchAudioRuntime] = None,
+                               speech: Optional[Callable[[], Dict[str, Any]]] = None) -> list:
     runtime = runtime or _watch_audio_runtime
-    return [engine for engine in WATCH_AUDIO_ENGINES if engine != "gpt_live" or runtime.python() is not None]
+    engines = []
+    for engine in WATCH_AUDIO_ENGINES:
+        if engine == "gpt_live" and runtime.python() is None:
+            continue
+        if engine == SPEECH_WATCH_ENGINE and (speech or speech_watch_status)().get("runtime") != "ready":
+            continue
+        engines.append(engine)
+    return engines
 
 
 @router.get("/watch-audio/status")
-async def get_watch_audio_status(response: Response) -> Dict[str, Any]:
+async def get_watch_audio_status(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     try:
-        return {"ok": True, **(await asyncio.get_running_loop().run_in_executor(None, watch_audio_status))}
+        return {"ok": True, **(await asyncio.wait_for(_run_scoped(profile, watch_audio_status),
+                                                      timeout=SPEECH_SERVER_SETUP_TIMEOUT_S))}
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Watch audio status timed out", headers={"Cache-Control": "no-store"})
     except Exception as exc:
         raise _unexpected("status", exc, feature="Watch audio")
 
@@ -10902,6 +11868,7 @@ ROUTE_CAPABILITIES = (
     "watch-live-token",
     "watch-chats",
     "watch-audio",
+    "watch-speech-server",
     "desktop-views",
     "hermes-calls",
     "hermes-call-presence",

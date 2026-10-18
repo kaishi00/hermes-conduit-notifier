@@ -1838,7 +1838,7 @@ relay key. The host still opens no inbound route.
 
 | Method | Route | Returns |
 | --- | --- | --- |
-| GET | `/api/plugins/conduit_push/watch-audio/status` | `{ok, version, engines: {gpt_live: {runtime, source, reason}, grok: {...}}}` |
+| GET | `/api/plugins/conduit_push/watch-audio/status?profile=` | `{ok, version, engines: {gpt_live: {runtime, source, reason}, grok: {...}, speech_server: {...}}}` |
 | POST | `/api/plugins/conduit_push/watch-audio/prepare` | `{ok, version, engines: {gpt_live: {runtime, source, reason}}}` |
 
 - **Messages** are sealed per Watch connection with a key from the grant's
@@ -1866,6 +1866,26 @@ relay key. The host still opens no inbound route.
 - A host holds at most 4 Watch calls at once, one per grant. 501 when the
   relay predates Watch audio (the grant is closed again) or this Python has
   no `websockets`.
+- **Hermes Voice** (`speech_server`, plugin 0.48) needs no cloud model: the
+  profile's own speech server (`voice.speech_server`, above) listens and
+  speaks, and Hermes answers. The Watch's microphone (PCM 16 kHz) goes to the
+  server, which detects the end of each utterance and transcribes it
+  (`turn_detection.create_response` false: the server is never asked for a
+  reply of its own). Each transcript is a turn of the call's own Hermes chat
+  ("Watch call", with the profile's model, tools, memory and approval
+  settings), and the reply is read back by the server a sentence at a time
+  (`response.create` with the sentence), Markdown, code and tables left in
+  the chat, at most about 90 s of it spoken. The audio (PCM 24 kHz) goes back
+  paced to real time. A server that answers with words of its own ends the
+  call, so it needs one that speaks the text it's given, such as a read-back
+  OpenAI Realtime subset. Each call is a new chat; a Watch that rejoins names
+  its chat (`resume_session_id` in its start) and carries on in it, until the
+  grant ends. A server session that ends under the call is dialed again. To
+  the Watch it speaks GPT-Live's event names (`session.input_transcript.delta`,
+  `session.output_transcript.delta`, `turn.done`), plus `conduit.speech {on}`
+  around each spoken reply and `conduit.state {state}` (listening, thinking,
+  speaking). `engines` lists it once the profile has a usable speech server
+  and the dashboard serves Hermes' chats. Capability `watch-speech-server`.
 - `probes/watch_audio_client.py` is a command-line stand-in for the Watch:
   it opens a grant with audio, calls through the real relay, plays a WAV
   question and records the answer. `--prepare` makes the GPT-Live runtime
