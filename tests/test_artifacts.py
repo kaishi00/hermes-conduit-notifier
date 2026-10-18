@@ -321,3 +321,21 @@ def test_tool_results_under_every_producer_key_are_read(tmp_path, monkeypatch):
         ("s1", "tool", json.dumps({"output_file": "/root/c.pdf"}), None, "export_report"),
     ])
     assert sorted(i["name"] for i in _list(conn)["items"]) == ["a.png", "b.wav", "c.pdf"]
+
+
+def test_one_message_cannot_overflow_the_page(tmp_path, monkeypatch):
+    _no_gateway(monkeypatch)
+    links = " ".join(f"https://example.com/{n}" for n in range(5000))
+    conn = _db(tmp_path, [("s1", "assistant", links)])
+    page = index.list_artifacts(conn, limit=10)
+    assert len(page["items"]) <= index.MAX_LIMIT, len(page["items"])
+
+
+def test_one_message_cannot_make_a_page_stat_thousands_of_files(tmp_path, monkeypatch):
+    _no_gateway(monkeypatch)
+    tags = "\n".join(f"MEDIA:/root/out/{n}.png" for n in range(5000))
+    conn = _db(tmp_path, [("s1", "assistant", tags)])
+    statted = []
+    page = index.list_artifacts(conn, limit=10, stat=lambda path: statted.append(path) or 1)
+    assert len(page["items"]) <= index.MAX_LIMIT
+    assert len(statted) <= index.MAX_LIMIT, len(statted)

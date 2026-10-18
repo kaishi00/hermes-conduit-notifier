@@ -45,6 +45,10 @@ MAX_URL_CHARS = 2_048
 MAX_TITLE_CHARS = 200
 # A message longer than this is clipped before it is scanned.
 MAX_SCAN_CHARS = 200_000
+# The most artifacts one message adds to a page (the rest of a message
+# naming thousands of links or files isn't listed), so a page and its
+# file checks stay bounded.
+MAX_ITEMS_PER_ROW = MAX_LIMIT
 
 KINDS = ("image", "video", "audio", "page", "document", "file", "link")
 # The chips Conduit shows, as filters on kind.
@@ -454,8 +458,8 @@ def list_artifacts(conn: sqlite3.Connection, *, before: Optional[int] = None,
 
     def take(row: sqlite3.Row) -> bool:
         """Lists the row's artifacts; True once the page is full."""
-        for source, kind, target, label in row_items(row["role"], row["content"], row["tool_calls"],
-                                                     row["tool_name"]):
+        found = row_items(row["role"], row["content"], row["tool_calls"], row["tool_name"])
+        for source, kind, target, label in found[:MAX_ITEMS_PER_ROW]:
             key = target.rstrip("/") if source != "link" else target
             if key in seen:
                 continue
