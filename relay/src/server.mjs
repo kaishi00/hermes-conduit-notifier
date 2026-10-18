@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
-import { appendFileSync, chmodSync, readFileSync, realpathSync } from 'node:fs';
+import { appendFileSync, chmodSync, mkdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { isIP } from 'node:net';
 import { pathToFileURL } from 'node:url';
 import { ApnsClient } from './apns.mjs';
@@ -107,6 +108,7 @@ const DEVICE_TOKEN_REFUSED = new Set(['BadDeviceToken', 'Unregistered', 'DeviceT
 
 function main() {
   config = readConfig();
+  assertDataDirectoryWritable(config.dataPath);
   store = new RelayStore(config.dataPath, config.storeLimits);
   // Accepting an event sweeps expired IDs; this frees them on a quiet relay.
   // Sweeps throttle themselves, so the timer runs just past that interval.
@@ -1674,6 +1676,23 @@ function readConfig() {
     tokenProof: tokenProofModeFromEnv(process.env),
     ...limitsFromEnv(process.env),
   };
+}
+
+// Loading the store only reads, so a data directory the relay can't write
+// would pass /healthz and fail the first registration instead. A Compose bind
+// mount Docker created itself is root's, while the image runs as node.
+function assertDataDirectoryWritable(dataPath) {
+  const directory = dirname(dataPath);
+  const probe = `${dataPath}.${process.pid}.probe`;
+  try {
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    writeFileSync(probe, '', { flag: 'wx', mode: 0o600 });
+    unlinkSync(probe);
+  } catch (error) {
+    const uid = process.getuid?.();
+    throw new Error(`DATA_PATH directory ${directory} is not writable${uid === undefined ? '' : ` by uid ${uid}`} (${error?.code ?? error}). `
+      + 'With the Compose file, create it owned by the image\'s node user first: mkdir -p data && sudo chown 1000:1000 data');
+  }
 }
 
 function optionalMilliseconds(name, key) {

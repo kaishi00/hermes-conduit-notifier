@@ -45,6 +45,9 @@ services:
       RELAY_LIVE_ACTIVITY_REGISTRATIONS_PER_MINUTE: ${RELAY_LIVE_ACTIVITY_REGISTRATIONS_PER_MINUTE:-}
       RELAY_LIVE_ACTIVITY_UPDATES_PER_MINUTE: ${RELAY_LIVE_ACTIVITY_UPDATES_PER_MINUTE:-}
     volumes:
+      # Create ./data owned by the image's node user (uid 1000) before the
+      # first start: a directory Docker creates for the mount is root's, and
+      # the relay exits when it can't write there.
       - ./data:/var/lib/conduit-push
       - ./secrets/apns-production.p8:/run/secrets/apns-production.p8:ro
       - ./secrets/maps:/run/secrets/maps:ro

@@ -124,9 +124,15 @@ cp .env.example .env
 mkdir -p secrets
 cp /path/to/AuthKey_XXXXXX.p8 secrets/apns-production.p8
 
-# 3. Build and run
+# 3. Create the data directory, owned by the image's node user (uid 1000)
+mkdir -p data
+sudo chown 1000:1000 data
+
+# 4. Build and run
 docker compose up -d
 ```
+
+Skip step 3 and Docker creates `data/` owned by root on a Linux host. The relay runs as `node`, can't write there, and exits at startup naming the directory. Docker Desktop on macOS maps ownership through its file sharing, which hides this.
 
 The relay listens on port 9120. Put it behind an HTTPS reverse proxy (the relay validates that `PUBLIC_URL` uses HTTPS). If the proxy sends `X-Forwarded-For`, set `TRUST_PROXY` to the number of proxies in front of the relay (`1` for one): the relay rate-limits by the address the outermost trusted proxy appended, never by an entry the client sent itself. That holds only when every request comes through the proxy, so don't publish port 9120 or share its network with anything else. `APNS_MODE`, `APNS_CAPTURE_PATH` and `APNS_VOIP_FAILURE` are test settings; a relay refuses to start with them.
 

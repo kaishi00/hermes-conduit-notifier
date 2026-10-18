@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { createHash, generateKeyPairSync } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer as createNetServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -878,7 +878,10 @@ async function bootFailure(name, extraEnv) {
   });
   let stderr = '';
   child.stderr.on('data', (chunk) => { stderr += chunk; });
+  // A relay that starts anyway fails the test instead of hanging it.
+  const guard = setTimeout(() => child.kill('SIGKILL'), 10_000);
   const code = await new Promise((resolve) => child.once('exit', resolve));
+  clearTimeout(guard);
   return { code, stderr };
 }
 
@@ -894,6 +897,21 @@ test('an invalid TRUST_PROXY stops the relay at boot', async () => {
   const { code, stderr } = await bootFailure('proxy-hops', { TRUST_PROXY: 'yes' });
   assert.notEqual(code, 0);
   assert.match(stderr, /TRUST_PROXY must be the number of reverse proxies/);
+});
+
+// A Compose bind mount Docker created is root's, and the relay runs as node:
+// it would otherwise answer /healthz and fail its first save.
+test('a data directory the relay cannot write stops it at boot', { skip: process.getuid?.() === 0 && 'root can write anywhere' }, async () => {
+  const locked = join(dir, 'locked-data');
+  mkdirSync(locked);
+  chmodSync(locked, 0o555);
+  try {
+    const { code, stderr } = await bootFailure('locked-data', { DATA_PATH: join(locked, 'relay.json') });
+    assert.equal(code, 1);
+    assert.match(stderr, /DATA_PATH directory .*locked-data is not writable/);
+  } finally {
+    chmodSync(locked, 0o755);
+  }
 });
 
 test('a client-sent X-Forwarded-For entry cannot pick its own rate-limit bucket', async () => {
