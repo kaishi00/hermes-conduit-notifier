@@ -4657,7 +4657,12 @@ def _pairing_state_lock(path: Any):
 def _save_pairing_state(path: Any, value: Dict[str, Any]) -> None:
     # Same atomic, owner-only write as client.save_state.
     temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-    temporary.write_text(json.dumps(value, separators=(",", ":")) + "\n", encoding="utf-8")
+    # Owner-only from creation: the file holds the relay credential and the
+    # pairing secret, so it's never readable by others, even for a moment
+    # or if the process dies before the rename.
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(value, separators=(",", ":")) + "\n")
     temporary.chmod(0o600)
     temporary.replace(path)
     path.chmod(0o600)

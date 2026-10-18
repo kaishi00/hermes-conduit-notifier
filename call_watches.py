@@ -163,11 +163,15 @@ REPORT_SCHEMA: dict[str, Any] = {
 # --- Registration --------------------------------------------------------------
 
 
-def register(ctx: Any) -> None:
+def register(ctx: Any, *, is_child: Callable[[Any], bool] = lambda _: False) -> None:
     """Registers both tools, if this Hermes supports plugin tools. A Hermes
     that refuses them keeps everything else working."""
     if not hasattr(ctx, "register_tool"):
         return
+
+    def _setup_handler(args: Any, session_id: Any = None, **_: Any) -> str:
+        return setup(args, session_id=session_id, is_child=is_child)
+
     for name, schema, handler, check, emoji in (
         (SETUP_TOOL, SETUP_SCHEMA, _setup_handler, setup_available, "⏰"),
         (REPORT_TOOL, REPORT_SCHEMA, _report_handler, report_available, "📋"),
@@ -180,10 +184,6 @@ def register(ctx: Any) -> None:
                 ctx.register_tool(**tool)
         except Exception:  # noqa: BLE001
             logger.warning("conduit_push: could not register %s", name, exc_info=True)
-
-
-def _setup_handler(args: Any, session_id: Any = None, **_: Any) -> str:
-    return setup(args, session_id=session_id)
 
 
 def _report_handler(args: Any, session_id: Any = None, **_: Any) -> str:
@@ -244,9 +244,9 @@ class JobsUnavailable(Exception):
     """Hermes couldn't list its scheduled jobs."""
 
 
-def setup(args: Any, *, session_id: Any = None) -> str:
+def setup(args: Any, *, session_id: Any = None, is_child: Callable[[Any], bool] = lambda _: False) -> str:
     try:
-        return _answer(**_setup(args if isinstance(args, dict) else {}, session_id))
+        return _answer(**_setup(args if isinstance(args, dict) else {}, session_id, is_child))
     except JobsUnavailable as error:
         return _answer(ok=False, error="unavailable",
                        note=f"The scheduled jobs couldn't be read ({error}), so nothing was changed. Tell the user.")
@@ -256,10 +256,17 @@ def setup(args: Any, *, session_id: Any = None) -> str:
                        note="The call watches couldn't be changed. Tell the user in your reply.")
 
 
-def _setup(args: dict[str, Any], session_id: Any) -> dict[str, Any]:
+def _setup(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], bool] = lambda _: False) -> dict[str, Any]:
     if _cron_job_of(session_id) is not None:
         return {"ok": False, "error": "in_a_run",
                 "note": f"A scheduled run can't set up call watches. In a call watch's run, report with {REPORT_TOOL}."}
+    action = str(args.get("action") or "").strip().lower()
+    # A subagent can be steered by what its tools read, and a watch is a
+    # scheduled job that may call the user, so changes come only from the
+    # main conversation, as calls and settings do.
+    if action != "list" and is_child(session_id.strip() if isinstance(session_id, str) else ""):
+        return {"ok": False, "error": "subagent",
+                "note": "Only the main conversation can change call watches. Report back; the main agent can ask."}
     if client.load_state() is None:
         return {"ok": False, "error": "not_paired",
                 "note": "This Hermes profile isn't paired with the Conduit app, so it can't call. Say so in your reply."}
@@ -267,7 +274,6 @@ def _setup(args: dict[str, Any], session_id: Any) -> dict[str, Any]:
     if cronjob is None:
         return {"ok": False, "error": "unavailable",
                 "note": "This Hermes can't schedule jobs, so it can't keep a call watch. Say so in your reply."}
-    action = str(args.get("action") or "").strip().lower()
     if action == "list":
         return _list(cronjob)
     if action == "set":

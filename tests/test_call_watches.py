@@ -122,6 +122,27 @@ HOMELAB = {"what": "homelab down", "how": "ping 192.168.1.10 three times; down w
 # --- Setting watches up ------------------------------------------------------
 
 
+def test_a_subagent_can_list_watches_but_not_change_them(home, hermes):
+    assert _setup({"action": "set", "watch": HOMELAB})["result"] == "created"
+    [job_id] = hermes.jobs
+    child = lambda session: session == "child-1"  # noqa: E731
+    for args in ({"action": "set", "watch": {**HOMELAB, "what": "nas down"}}, {"action": "remove", "id": job_id},
+                 {"action": "sync", "watches": []}):
+        answer = json.loads(watches.setup(args, session_id="child-1", is_child=child))
+        assert answer["ok"] is False and answer["error"] == "subagent"
+    assert list(hermes.jobs) == [job_id], "nothing changed"
+    listed = json.loads(watches.setup({"action": "list"}, session_id="child-1", is_child=child))
+    assert listed["ok"] is True and len(listed["watches"]) == 1
+
+
+def test_the_registered_tool_refuses_subagents(home, hermes):
+    tools = {}
+    watches.register(types.SimpleNamespace(register_tool=lambda **tool: tools.setdefault(tool["name"], tool)),
+                     is_child=lambda session: session == "child-1")
+    answer = json.loads(tools[watches.SETUP_TOOL]["handler"]({"action": "set", "watch": HOMELAB}, session_id="child-1"))
+    assert answer["error"] == "subagent" and not hermes.jobs
+
+
 def test_set_writes_the_job_so_the_model_only_describes_the_watch(home, hermes):
     answer = _setup({"action": "set", "watch": HOMELAB})
     assert answer["ok"] is True and answer["result"] == "created"

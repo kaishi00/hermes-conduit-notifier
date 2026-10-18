@@ -62,7 +62,7 @@ def register(ctx: Any) -> None:
                        skill_path=Path(__file__).resolve().parent / "skills" / call_tool.SKILL_NAME / "SKILL.md")
     # Scheduled checks that call when something happens: the plugin keeps
     # the jobs and each one's incident, so the model only describes them.
-    call_watches.register(ctx)
+    call_watches.register(ctx, is_child=_is_child)
     # Hermes configures Conduit: the settings Conduit shares, changed only
     # through requests Conduit checks and the user approves.
     settings_tool.register(ctx, is_child=_is_child)
