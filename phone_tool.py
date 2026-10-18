@@ -111,7 +111,7 @@ CALENDAR_SCHEMA: dict[str, Any] = {
             "all_day": {"type": "boolean"},
             "location": {"type": "string"},
             "notes": {"type": "string"},
-            "url": {"type": "string"},
+            "url": {"type": "string", "description": "An http or https link."},
             "alarms_min": {"type": "array", "maxItems": 3, "items": {"type": "integer", "minimum": 0,
                                                                       "maximum": 10080},
                            "description": "Event alerts, minutes before the start."},

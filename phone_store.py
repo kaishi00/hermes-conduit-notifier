@@ -61,6 +61,7 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
+from urllib.parse import urlsplit
 
 FILE_NAME = "conduit-phone.sqlite3"
 SCHEMA_VERSION = 2  # 2: alarms and contacts (plugin 0.30.0)
@@ -392,6 +393,21 @@ def _url(value: Any, field: str) -> str | None:
     text = clean_text(value, field, MAX_URL_CHARS)
     if text is not None and " " in text:
         raise PhoneError("malformed", f"{field} must be a URL")
+    return text
+
+
+def _write_url(value: Any, field: str) -> str | None:
+    """A change's link: Conduit keeps only an http or https one and applies
+    the rest of the change without anything else, so it's refused here."""
+    text = _url(value, field)
+    if text is None:
+        return None
+    try:
+        parts = urlsplit(text)
+    except ValueError:
+        parts = None
+    if parts is None or parts.scheme.lower() not in ("http", "https") or not parts.netloc:
+        raise PhoneError("malformed", f"{field} must be an http or https URL")
     return text
 
 
@@ -1770,7 +1786,7 @@ def _check_fields(kind: str, fields: dict[str, Any], *, partial: bool) -> dict[s
             raise PhoneError("malformed", f"notes must be text of at most {MAX_NOTES_CHARS} characters")
         clean["notes"] = clean_notes(notes, "notes")
     if "url" in present or not partial:
-        clean["url"] = _url(present.get("url"), "url")
+        clean["url"] = _write_url(present.get("url"), "url")
     if kind.endswith("_event"):
         all_day = _bool(present.get("all_day"), "all_day", None if partial else False)
         if all_day is not None:

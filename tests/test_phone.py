@@ -558,6 +558,28 @@ def test_a_change_reaches_the_phone_and_its_outcome_comes_back(store, iphone):
     assert store.changes()[0]["state"] == "applied"
 
 
+# Conduit keeps a change's URL only when it's http or https and applies the
+# rest without it, so anything else is refused here rather than lost there.
+@pytest.mark.parametrize("url", ["javascript:alert(1)", "ftp://files.example.com/a", "example.com/booking",
+                                 "/booking", "mailto:a@example.com", "https://"])
+@pytest.mark.parametrize("kind, fields", [
+    ("add_event", {"title": "Dentist", "start": "2026-10-16T15:00:00+01:00", "end": "2026-10-16T16:00:00+01:00"}),
+    ("add_reminder", {"title": "Milk"}),
+])
+def test_a_write_url_the_phone_would_drop_is_refused(store, iphone, kind, fields, url):
+    store.ingest(iphone.seal(_batch()))
+    with pytest.raises(phone.PhoneError) as error:
+        store.add_change(kind, {**fields, "url": url})
+    assert error.value.code == "malformed"
+
+
+@pytest.mark.parametrize("url", ["https://example.com/booking", "HTTP://example.com"])
+def test_a_write_url_over_http_or_https_is_kept(store, iphone, url):
+    store.ingest(iphone.seal(_batch()))
+    store.add_change("add_reminder", {"title": "Milk", "url": url})
+    assert iphone.changes(store)[0]["fields"]["url"] == url
+
+
 def test_pending_marks_seen_only_the_outcomes_it_shows(store, iphone):
     store.ingest(iphone.seal(_batch()))
     ids = [store.add_change("add_reminder", {"title": f"Thing {index}"})["id"] for index in range(3)]
