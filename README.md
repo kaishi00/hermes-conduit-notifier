@@ -1678,7 +1678,9 @@ Apple Maps from this host instead, without waking the phone: the relay hands
 paired hosts a short-lived Apple Maps Server API token (`POST
 /v1/maps/token`; one cached token for every host, so it doesn't identify
 one) and the plugin calls `maps-api.apple.com` itself, so the relay never
-sees a lookup. Each host uses at most 200 Apple calls a day. Saved places
+sees a lookup. Each host uses at most 200 Apple calls a day (a call counts
+once the relay has given a token, and a retry after Apple refuses the token
+doesn't count again). Saved places
 (their coordinates live on the phone) and transit routes need the phone;
 "me" on the host is the last shared fix at its detail. A user who turns on
 "Keep maps lookups on this iPhone" in Conduit turns the host engine off for

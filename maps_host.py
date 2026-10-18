@@ -174,11 +174,15 @@ class Engine:
         return json.loads(body or b"{}")
 
     def _get(self, path: str, params: dict[str, Any]) -> Any:
-        _spend(self.home)
         query = urllib.parse.urlencode({key: value for key, value in params.items() if value is not None})
         url = f"{APPLE}/{path}" + (f"?{query}" if query else "")
         for attempt in (0, 1):
             token = _access_token(refresh=attempt == 1)
+            if attempt == 0:
+                # Counted once Apple will be asked, not when the relay can't
+                # give a token. A retry with a fresh token after a 401 isn't
+                # counted again: Apple refused the first one's token.
+                _spend(self.home)
             try:
                 return self.fetch(url, token)
             except urllib.error.HTTPError as error:

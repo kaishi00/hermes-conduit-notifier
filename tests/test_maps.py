@@ -532,6 +532,49 @@ def test_a_relay_token_that_isnt_a_header_value_is_refused(monkeypatch):
     assert maps_host._token == {}
 
 
+def _apple_calls_counted(home):
+    usage = home / maps_host.USAGE_FILE
+    return json.loads(usage.read_text())["count"] if usage.exists() else 0
+
+
+@pytest.mark.parametrize("relay", [OSError("relay unreachable"), {"access_token": "abc\n", "expires_in": 1800}])
+def test_a_token_that_cant_be_had_spends_nothing(tmp_path, monkeypatch, relay):
+    monkeypatch.setattr(maps_host, "_token", {})
+    monkeypatch.setattr(maps_host, "_unavailable_until", 0.0)
+    monkeypatch.setattr(maps_host.client, "load_state", lambda: {"relay_url": "https://r", "credential": "c"})
+
+    def request_json(*args, **kwargs):
+        if isinstance(relay, Exception):
+            raise relay
+        return relay
+
+    monkeypatch.setattr(maps_host.client, "request_json", request_json)
+    fetched = []
+    engine = maps_host.Engine(tmp_path, fetch=lambda url, token: fetched.append(url) or {})
+    for _ in range(3):
+        with pytest.raises(maps_host.HostUnavailable):
+            engine._get("search", {"q": "Boots"})
+    assert fetched == [] and _apple_calls_counted(tmp_path) == 0
+
+
+def test_a_lookup_counts_once_even_when_its_token_is_refused_and_renewed(tmp_path, monkeypatch):
+    import urllib.error
+    monkeypatch.setattr(maps_host, "_token", {})
+    monkeypatch.setattr(maps_host, "_unavailable_until", 0.0)
+    monkeypatch.setattr(maps_host.client, "load_state", lambda: {"relay_url": "https://r", "credential": "c"})
+    monkeypatch.setattr(maps_host.client, "request_json", lambda *a, **k: {"access_token": "t", "expires_in": 1800})
+    tokens = []
+
+    def fetch(url, token):
+        tokens.append(token)
+        if len(tokens) == 1:
+            raise urllib.error.HTTPError(url, 401, "Unauthorized", {}, None)
+        return {"results": []}
+
+    assert maps_host.Engine(tmp_path, fetch=fetch)._get("search", {"q": "Boots"}) == {"results": []}
+    assert len(tokens) == 2 and _apple_calls_counted(tmp_path) == 1
+
+
 def test_a_usage_file_that_cant_be_opened_lets_the_phone_answer(tmp_path):
     (tmp_path / maps_host.USAGE_FILE).mkdir()
     with pytest.raises(maps_host.HostUnavailable):
