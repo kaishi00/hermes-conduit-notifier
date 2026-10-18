@@ -1882,7 +1882,9 @@ relay key. The host still opens no inbound route.
   Python; if that Python already has `aiortc`, it's used as it is.
   `runtime` reads `ready`, `preparing`, `failed` (with the reason) or
   `missing`, and `engines` in a grant lists `gpt_live` only once it's
-  ready.
+  ready. The helper writes to the plugin from its own thread, so a slow
+  Watch connection never stalls the WebRTC side: past 2 s of model audio
+  waiting, the oldest is dropped, and events are never dropped.
 - **Grok** connects to xAI the way the phone's Grok relay does. Grok sends
   a reply's audio faster than it plays, so the plugin paces it to the Watch
   at real time with a little lead, and drops what's left when the user

@@ -23,8 +23,10 @@ Errors go to stderr as one short line, never with audio or SDP.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import fractions
 import json
+import os
 import struct
 import sys
 import threading
@@ -40,13 +42,104 @@ FRAME_SAMPLES = 960  # 20 ms at 48 kHz, what aiortc's Opus encoder takes
 # Mic audio waiting to be sent, at 48 kHz: past this, the oldest is dropped
 # so a stall never turns into lasting delay.
 MAX_MIC_BACKLOG_BYTES = WEBRTC_RATE * 2 * 2  # 2 s
+# Model audio waiting for the plugin to read it, in seconds at the output
+# rate: past this, the oldest is dropped, the same policy as the mic.
+MAX_PLAY_BACKLOG_S = 2
+# Every other frame waiting for the plugin is kept; this much means the
+# plugin stopped reading, and the call ends.
+MAX_PENDING_OTHER_BYTES = 4 * 1024 * 1024
+# How long the ended frame gets to reach the plugin when the helper quits.
+DRAIN_TIMEOUT_S = 2.0
 DATA_CHANNEL = "oai-events"
 
 
-def write_frame(stream: Any, lock: threading.Lock, kind: str, payload: bytes) -> None:
-    with lock:
-        stream.write(kind.encode("ascii") + struct.pack(">I", len(payload)) + payload)
-        stream.flush()
+def write_frame(stream: Any, kind: str, payload: bytes) -> None:
+    stream.write(kind.encode("ascii") + struct.pack(">I", len(payload)) + payload)
+    stream.flush()
+
+
+class FrameWriter:
+    """Writes frames to stdout from its own thread.
+
+    The plugin forwards each frame to the relay before it reads the next, so
+    a slow Watch connection stops it reading. A write from the WebRTC loop
+    would then block the loop: ICE, the data channel and the mic would all
+    stall. ``send`` only queues. Model audio over ``max_audio_bytes`` is
+    dropped oldest first; every other frame is kept, and ``on_broken`` is
+    called once when the pipe breaks or they pile up past
+    MAX_PENDING_OTHER_BYTES.
+    """
+
+    def __init__(self, stream: Any, max_audio_bytes: int, on_broken: Any) -> None:
+        self.stream = stream
+        self.max_audio_bytes = max_audio_bytes
+        self.on_broken = on_broken
+        self.frames: deque = deque()
+        self.audio_bytes = 0
+        self.other_bytes = 0
+        self.closed = False
+        self.broken = False
+        self.condition = threading.Condition()
+        self.thread = threading.Thread(target=self._run, name="watch-audio-stdout", daemon=True)
+        self.thread.start()
+
+    def send(self, kind: str, payload: bytes = b"") -> None:
+        with self.condition:
+            if self.closed or self.broken:
+                return
+            self.frames.append((kind, payload))
+            if kind == "p":
+                self.audio_bytes += len(payload)
+                if self.audio_bytes > self.max_audio_bytes:
+                    kept: deque = deque()
+                    for queued in self.frames:
+                        if queued[0] == "p" and self.audio_bytes > self.max_audio_bytes:
+                            self.audio_bytes -= len(queued[1])
+                        else:
+                            kept.append(queued)
+                    self.frames = kept
+            else:
+                self.other_bytes += len(payload)
+                if self.other_bytes > MAX_PENDING_OTHER_BYTES:
+                    self._break()
+                    return
+            self.condition.notify()
+
+    def close(self, timeout: float) -> bool:
+        """Takes no more frames; True once the queued ones went out within ``timeout``."""
+        with self.condition:
+            self.closed = True
+            self.condition.notify()
+        self.thread.join(timeout)
+        return not self.thread.is_alive()
+
+    def _break(self) -> None:
+        # Called holding the condition.
+        if self.broken:
+            return
+        self.broken = True
+        self.frames.clear()
+        self.condition.notify()
+        self.on_broken()
+
+    def _run(self) -> None:
+        while True:
+            with self.condition:
+                while not self.frames and not (self.closed or self.broken):
+                    self.condition.wait()
+                if not self.frames:
+                    return
+                kind, payload = self.frames.popleft()
+                if kind == "p":
+                    self.audio_bytes -= len(payload)
+                else:
+                    self.other_bytes -= len(payload)
+            try:
+                write_frame(self.stream, kind, payload)
+            except (BrokenPipeError, ValueError, OSError):
+                with self.condition:
+                    self._break()
+                return
 
 
 def read_frame(stream: Any) -> Optional[tuple]:
@@ -72,14 +165,7 @@ async def run(stdin: Any, stdout: Any) -> int:
         return 3
 
     loop = asyncio.get_running_loop()
-    out_lock = threading.Lock()
     inbox: asyncio.Queue = asyncio.Queue()
-
-    def send(kind: str, payload: bytes = b"") -> None:
-        try:
-            write_frame(stdout, out_lock, kind, payload)
-        except (BrokenPipeError, ValueError, OSError):
-            loop.call_soon_threadsafe(inbox.put_nowait, ("Q", b""))
 
     def reader() -> None:
         try:
@@ -109,6 +195,13 @@ async def run(stdin: Any, stdout: Any) -> int:
         print("config isn't usable", file=sys.stderr)
         return 2
     ice = [RTCIceServer(urls=[url]) for url in stun if isinstance(url, str)]
+
+    def broken() -> None:
+        with contextlib.suppress(RuntimeError):  # the loop is already closed
+            loop.call_soon_threadsafe(inbox.put_nowait, ("Q", b""))
+
+    writer = FrameWriter(stdout, output_rate * 2 * MAX_PLAY_BACKLOG_S, broken)
+    send = writer.send
 
     class Microphone(AudioStreamTrack):
         """The Watch's audio as a WebRTC track, paced at 20 ms."""
@@ -232,6 +325,11 @@ async def run(stdin: Any, stdout: Any) -> int:
         except Exception:  # noqa: BLE001
             pass
         send("X", json.dumps({"reason": reason["value"]}).encode("utf-8"))
+        if not writer.close(DRAIN_TIMEOUT_S):
+            # The plugin stopped reading, and a write still holds stdout: the
+            # interpreter's own flush at exit would wait on it for good.
+            sys.stderr.flush()
+            os._exit(0)
     return 0
 
 

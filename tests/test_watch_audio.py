@@ -758,6 +758,161 @@ def test_the_helper_refuses_an_unusable_config_in_one_line(config):
     assert done.stderr.decode().strip() == "config isn't usable"
 
 
+def _load_helper():
+    spec = importlib.util.spec_from_file_location("conduit_watch_audio_helper", ROOT / "dashboard" / "watch_audio_helper.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+helper = _load_helper()
+
+
+class _StalledStdout:
+    """A pipe the plugin isn't reading: writes block until ``release``."""
+
+    def __init__(self):
+        import threading
+        self.open = threading.Event()
+        self.written = bytearray()
+
+    def write(self, data):
+        self.open.wait()
+        self.written += data
+
+    def flush(self):
+        pass
+
+    def frames(self):
+        import struct
+        data, frames = bytes(self.written), []
+        while data:
+            length = struct.unpack(">I", data[1:5])[0]
+            frames.append((data[:1].decode(), data[5:5 + length]))
+            data = data[5 + length:]
+        return frames
+
+
+def test_the_helpers_writer_drops_old_model_audio_but_never_other_frames():
+    stdout = _StalledStdout()
+    broken = []
+    writer = helper.FrameWriter(stdout, max_audio_bytes=3 * 100, on_broken=lambda: broken.append(True))
+    started = time.monotonic()
+    writer.send("O", b"offer")
+    writer.send("R")
+    for index in range(10):
+        writer.send("p", bytes([index]) * 100)
+        if index == 4:
+            writer.send("e", b'{"type":"response.done"}')
+    # Queued, never written from the caller's thread: a stalled plugin can't block it.
+    assert time.monotonic() - started < 1
+    writer.send("X", b'{"reason":"closed"}')
+    stdout.open.set()
+    assert writer.close(5)
+    frames = stdout.frames()
+    # The first frame may already have been taken by the writer thread when the pipe stalled.
+    assert [kind for kind, _ in frames if kind != "p"] == ["O", "R", "e", "X"]
+    audio = [payload[0] for kind, payload in frames if kind == "p"]
+    assert audio == [7, 8, 9]
+    assert broken == []
+
+
+def test_the_helpers_writer_gives_up_on_a_broken_pipe_or_a_plugin_that_stopped_reading(monkeypatch):
+    class Closed:
+        def write(self, data):
+            raise BrokenPipeError
+
+        def flush(self):
+            pass
+
+    broken = []
+    writer = helper.FrameWriter(Closed(), max_audio_bytes=100, on_broken=lambda: broken.append(True))
+    writer.send("O", b"offer")
+    assert writer.close(5)
+    writer.send("e", b"later")
+    assert broken == [True]
+
+    monkeypatch.setattr(helper, "MAX_PENDING_OTHER_BYTES", 1000)
+    stdout = _StalledStdout()
+    broken = []
+    writer = helper.FrameWriter(stdout, max_audio_bytes=100, on_broken=lambda: broken.append(True))
+    for _ in range(20):
+        writer.send("e", b"x" * 100)
+    assert broken == [True]
+    stdout.open.set()
+    assert writer.close(5)
+    assert len(stdout.frames()) <= 1
+
+
+@pytest.mark.parametrize("drained", [True, False], ids=["read", "stalled"])
+def test_the_helpers_webrtc_loop_keeps_running_while_the_plugin_stops_reading(drained):
+    pytest.importorskip("aiortc")
+    import struct
+    import subprocess
+    import sys
+    from aiortc import RTCPeerConnection, RTCSessionDescription
+    from aiortc.mediastreams import AudioStreamTrack
+
+    def frame(kind, payload=b""):
+        return kind.encode() + struct.pack(">I", len(payload)) + payload
+
+    async def call():
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, str(ROOT / "dashboard" / "watch_audio_helper.py"),
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            # A small read buffer, so this side stops taking from the pipe almost at once.
+            limit=4096)
+        try:
+            process.stdin.write(frame("C", b'{"input_rate": 16000, "output_rate": 24000, "stun": []}'))
+            header = await asyncio.wait_for(process.stdout.readexactly(5), 30)
+            assert header[:1] == b"O"
+            offer = (await process.stdout.readexactly(struct.unpack(">I", header[1:])[0])).decode()
+            # Stands in for GPT-Live: its audio keeps the helper writing model audio.
+            remote = RTCPeerConnection()
+            received = asyncio.Event()
+
+            @remote.on("datachannel")
+            def _channel(channel):
+                @channel.on("message")
+                def _message(text):
+                    if text == "after the stall":
+                        received.set()
+
+            remote.addTrack(AudioStreamTrack())
+            await remote.setRemoteDescription(RTCSessionDescription(sdp=offer, type="offer"))
+            await remote.setLocalDescription(await remote.createAnswer())
+            process.stdin.write(frame("A", remote.localDescription.sdp.encode()))
+            if drained:
+                async def sink():
+                    while await process.stdout.read(65536):
+                        pass
+                asyncio.ensure_future(sink())
+            # Unread, the pipe fills with about 1.3 s of model audio.
+            await asyncio.sleep(4)
+            process.stdin.write(frame("E", b"after the stall"))
+            await asyncio.wait_for(received.wait(), 8)
+            # And a quit still ends the helper while nothing reads its stdout
+            # (wait() would also wait for the unread pipe to close).
+            process.stdin.write(frame("Q"))
+            deadline = time.monotonic() + 15
+            while process.returncode is None:
+                assert time.monotonic() < deadline, "the helper didn't quit"
+                await asyncio.sleep(0.1)
+            while await process.stdout.read(65536):
+                pass
+            await process.wait()
+            await remote.close()
+        finally:
+            if process.returncode is None:
+                process.kill()
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(call())
+    finally:
+        loop.close()
+
+
 def test_a_current_environment_missing_its_python_is_not_called_out_of_date(tmp_path):
     runtime = _runtime(tmp_path)
     runtime.prepare(start=lambda target: target())
