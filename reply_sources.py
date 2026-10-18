@@ -158,6 +158,17 @@ def current_transport() -> Any:
         return None
 
 
+def current_platform() -> str | None:
+    """The platform Hermes' messaging gateway bound to this turn (telegram,
+    discord…), if its session context is loaded in this process. Tools get no
+    platform of their own; never imports it, as above."""
+    getter = getattr(sys.modules.get("gateway.session_context"), "get_session_env", None)
+    try:
+        return getter("HERMES_SESSION_PLATFORM", "") if callable(getter) else None
+    except Exception:  # noqa: BLE001 — unknown
+        return None
+
+
 def _is_messaging(name: str) -> bool:
     if name in _NOT_MESSAGING:
         return False

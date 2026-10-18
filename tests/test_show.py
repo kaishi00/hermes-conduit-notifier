@@ -333,6 +333,33 @@ def test_a_turn_source_lookup_that_fails_draws_no_cards(tool_home, monkeypatch):
     assert _call({"title": "Dinner", "cards": [MAP]})["error"] == "not_conduit"
 
 
+def _bound_platform(monkeypatch, platform, transport=None):
+    """The turn's platform as Hermes' gateway binds it, and its app connection."""
+    context = types.ModuleType("gateway.session_context")
+    context.get_session_env = lambda name, default="": platform if name == "HERMES_SESSION_PLATFORM" else default
+    monkeypatch.setitem(sys.modules, "gateway", types.ModuleType("gateway"))
+    monkeypatch.setitem(sys.modules, "gateway.session_context", context)
+    connection = types.ModuleType("tui_gateway.transport")
+    connection.current_transport = lambda: transport
+    monkeypatch.setitem(sys.modules, "tui_gateway.transport", connection)
+
+
+def test_a_messaging_turn_draws_no_cards(tool_home, monkeypatch):
+    _exchange(PresentStore(tool_home), features=("chat-cards",))
+    _bound_platform(monkeypatch, "telegram")
+    answer = _call({"title": "Dinner", "cards": [MAP]})
+    assert answer["ok"] is False and answer["error"] == "not_conduit", answer
+
+
+@pytest.mark.parametrize("platform", ["", "tui", "desktop"])
+def test_conduit_app_and_cron_turns_still_draw_cards(tool_home, monkeypatch, platform):
+    _exchange(PresentStore(tool_home), features=("chat-cards",))
+    _bound_platform(monkeypatch, platform)
+    assert _call({"title": "Dinner", "cards": [MAP]})["ok"] is True
+    _bound_platform(monkeypatch, platform, transport=types.SimpleNamespace(conduit_client="conduit"))
+    assert _call({"title": "Dinner", "cards": [MAP]})["ok"] is True
+
+
 def test_cards_are_left_out_when_the_schema_is_missing(store, monkeypatch):
     monkeypatch.setattr(store_module, "_card_schema_module", store_module._CARD_SCHEMA_MISSING)
     _exchange(store)

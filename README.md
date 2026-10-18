@@ -1437,8 +1437,9 @@ in the exchange (0.45.1+), so a phone that draws the cards leaves it out.
   Conduit draws them whenever the chat is opened. With no call screen, a
   Conduit that says `chat-cards` in its exchange's `features` still gets
   the tool, and the card shows in the chat only. A turn that isn't from
-  Conduit (Desktop, a messaging app, the terminal) is refused with
-  `not_conduit`.
+  Conduit (Desktop, or a messaging app through Hermes' gateway) is refused
+  with `not_conduit`. A classic `hermes` terminal turn can't be told apart
+  yet (Hermes doesn't bind its platform for tools), so it isn't refused.
 - **Live calls.** A saved call's assistant turn can carry `cards`
   (`POST /voice/sessions`): kept with a chat's call and returned by
   `GET /voice/chat-calls`; in a call saved as its own row, written as their

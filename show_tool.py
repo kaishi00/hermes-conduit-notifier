@@ -199,6 +199,6 @@ def _fallback(cards: list[dict[str, Any]]) -> str:
 
 def _turn_source() -> str | None:
     try:
-        return reply_sources.turn_source(None, reply_sources.current_transport())
+        return reply_sources.turn_source(reply_sources.current_platform(), reply_sources.current_transport())
     except Exception:  # noqa: BLE001 — a lookup that failed draws no cards
         return "unknown"
