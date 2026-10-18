@@ -15,7 +15,7 @@ import urllib.error
 import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 try:
     import fcntl
@@ -108,21 +108,40 @@ def _exclusive(handle: Any) -> Iterator[None]:
 
 def save_state(value: dict[str, Any]) -> None:
     path = state_path()
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with state_file_lock(path):
-        _keep_provisioned_key(value, path)
-        temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-        # Owner-only from creation: the file holds the relay credential and the
-        # pairing secret, so it's never readable by others, even for a moment
-        # or if the process dies before the rename.
-        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(json.dumps(value, separators=(",", ":")) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        temporary.chmod(0o600)
-        temporary.replace(path)
-        path.chmod(0o600)
+        _write_state(value, path)
+
+
+def update_state(change: Callable[[dict[str, Any]], bool | None]) -> bool:
+    """Change the saved pairing in place: read, ``change`` and write it back
+    under the state lock, so a pairing another process replaced or removed
+    meanwhile is never written over. False when the profile isn't paired or
+    ``change`` returned False (nothing written)."""
+    path = state_path()
+    with state_file_lock(path):
+        state = load_state()
+        if not state or change(state) is False:
+            return False
+        _write_state(state, path)
+    return True
+
+
+def _write_state(value: dict[str, Any], path: Path) -> None:
+    # Callers hold state_file_lock (a second flock of it from the same
+    # process would wait on itself).
+    _keep_provisioned_key(value, path)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    # Owner-only from creation: the file holds the relay credential and the
+    # pairing secret, so it's never readable by others, even for a moment
+    # or if the process dies before the rename.
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(value, separators=(",", ":")) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    temporary.chmod(0o600)
+    temporary.replace(path)
+    path.chmod(0o600)
 
 
 def _keep_provisioned_key(value: dict[str, Any], path: Path) -> None:
@@ -184,13 +203,15 @@ def claim_pairing(code: str, relay_url: str = DEFAULT_RELAY_URL, gateway_name: s
         "relay_url": paired_relay_url(body.get("relay_url"), base),
     }
     # Re-pairing over an existing pairing must not silently drop the
-    # profile's privacy choice.
-    previous = load_state() or {}
-    if previous.get("redact_content"):
-        state["redact_content"] = True
-    if previous.get("redact_key"):
-        state["redact_key"] = previous["redact_key"]
-    save_state(state)
+    # profile's privacy choice, even one switched on meanwhile.
+    path = state_path()
+    with state_file_lock(path):
+        previous = load_state() or {}
+        if previous.get("redact_content"):
+            state["redact_content"] = True
+        if previous.get("redact_key"):
+            state["redact_key"] = previous["redact_key"]
+        _write_state(state, path)
     return state
 
 
@@ -257,15 +278,13 @@ def set_redact_content(enabled: bool) -> bool:
 
     Returns False when the profile is not paired (nothing to configure).
     """
-    state = load_state()
-    if not state:
-        return False
-    state["redact_content"] = bool(enabled)
-    if enabled and not state.get("redact_key"):
-        # Local-only key for re-keying event ids; never sent to the relay.
-        state["redact_key"] = secrets.token_hex(32)
-    save_state(state)
-    return True
+    def switch(state: dict[str, Any]) -> None:
+        state["redact_content"] = bool(enabled)
+        if enabled and not state.get("redact_key"):
+            # Local-only key for re-keying event ids; never sent to the relay.
+            state["redact_key"] = secrets.token_hex(32)
+
+    return update_state(switch)
 
 
 def build_outgoing(event: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
@@ -338,8 +357,21 @@ def _redact_key(state: dict[str, Any]) -> str:
     key = state.get("redact_key")
     if not key:
         key = secrets.token_hex(32)
+
+        def keep(current: dict[str, Any]) -> bool:
+            nonlocal key
+            # Only into the pairing this send read: one replaced or removed
+            # since keeps the key for this send alone.
+            if any(current.get(name) != state.get(name) for name in ("credential", "installation_id", "gateway_id")):
+                return False
+            if current.get("redact_key"):  # another process minted one first
+                key = current["redact_key"]
+                return False
+            current["redact_key"] = key
+            return True
+
+        update_state(keep)
         state["redact_key"] = key
-        save_state(state)
     return str(key)
 
 

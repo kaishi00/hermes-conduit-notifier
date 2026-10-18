@@ -815,3 +815,59 @@ def test_missing_redact_key_is_minted_once_and_reused(monkeypatch, tmp_path):
     client.send_now(event)
     assert sent[0]["event_id"] == sent[1]["event_id"] != event["event_id"]
     assert client.load_state()["redact_key"]
+
+
+def _client_racing(monkeypatch, tmp_path, name, meanwhile):
+    """A fresh client whose first key minting lets another process (``meanwhile``,
+    on a thread) change the pairing; returns the client and that thread."""
+    spec = importlib.util.spec_from_file_location(name, ROOT / "client.py")
+    client = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(client)
+    monkeypatch.setattr(client, "state_path", lambda: tmp_path / "conduit-push.json")
+    other = threading.Thread(target=meanwhile, args=(client,))
+    real_token_hex = client.secrets.token_hex
+
+    def token_hex(size):
+        if not other.ident:
+            other.start()
+            other.join(0.5)  # done at once, unless the pairing is locked
+        return real_token_hex(size)
+
+    monkeypatch.setattr(client, "secrets", types.SimpleNamespace(token_hex=token_hex))
+    return client, other
+
+
+def _repair(client):
+    client.save_state({"relay_url": "https://relay", "credential": "new", "installation_id": "phone-B"})
+
+
+def test_the_redaction_switch_keeps_a_pairing_replaced_meanwhile(monkeypatch, tmp_path):
+    client, other = _client_racing(monkeypatch, tmp_path, "conduit_push._client_switch_repaired", _repair)
+    client.save_state({"relay_url": "https://relay", "credential": "old", "installation_id": "phone-A"})
+    assert client.set_redact_content(True) is True
+    other.join(5)
+    saved = client.load_state()
+    assert (saved["credential"], saved["installation_id"]) == ("new", "phone-B")
+
+
+def test_the_redaction_switch_doesnt_restore_a_pairing_removed_meanwhile(monkeypatch, tmp_path):
+    client, other = _client_racing(monkeypatch, tmp_path, "conduit_push._client_switch_unpaired",
+                                   lambda client: client.remove_state())
+    client.save_state({"relay_url": "https://relay", "credential": "revoked", "installation_id": "phone-A"})
+    client.set_redact_content(True)
+    other.join(5)
+    assert client.load_state() is None
+
+
+def test_a_minted_redact_key_doesnt_restore_a_pairing_replaced_meanwhile(monkeypatch, tmp_path):
+    client, other = _client_racing(monkeypatch, tmp_path, "conduit_push._client_key_repaired", _repair)
+    client.save_state({"relay_url": "https://relay", "credential": "old", "installation_id": "phone-A",
+                       "redact_content": True})
+    sent = []
+    monkeypatch.setattr(client, "request_json", lambda url, **kwargs: sent.append(kwargs["payload"]) or {})
+    event = {"event_id": "approval:0123456789abcdef", "type": "approval.needed"}
+    client.send_now(event)
+    other.join(5)
+    saved = client.load_state()
+    assert (saved["credential"], saved["installation_id"]) == ("new", "phone-B")
+    assert sent[0]["event_id"] != event["event_id"], "this send is still re-keyed"

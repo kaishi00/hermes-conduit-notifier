@@ -223,21 +223,23 @@ def test_redaction_still_applies_before_encryption(monkeypatch):
     assert inner["decision"]["question"] != "Deploy to prod?"
 
 
-def test_a_broken_key_never_falls_back_to_plaintext(monkeypatch):
+def test_a_broken_key_never_falls_back_to_plaintext(monkeypatch, tmp_path):
     sent = _capture(monkeypatch, _state(e2e={"kid": KID, "secret": "not-base64!"}))
     saved = []
-    monkeypatch.setattr(client, "save_state", saved.append)
+    monkeypatch.setattr(client, "state_path", lambda: tmp_path / "conduit-push.json")
+    monkeypatch.setattr(client, "_write_state", lambda value, path: saved.append(value))
     client.send_now(_clarify_event())
     assert len(saved) == 1  # the local re-keying key, minted once
     assert set(sent[0]) == {"event_id", "type", "plugin_version", "plugin_capabilities"}
     assert "Deploy" not in json.dumps(sent[0])
 
 
-def test_missing_crypto_never_falls_back_to_plaintext(monkeypatch):
+def test_missing_crypto_never_falls_back_to_plaintext(monkeypatch, tmp_path):
     state = _state()
     sent = _capture(monkeypatch, state)
     saved = []
-    monkeypatch.setattr(client, "save_state", saved.append)
+    monkeypatch.setattr(client, "state_path", lambda: tmp_path / "conduit-push.json")
+    monkeypatch.setattr(client, "_write_state", lambda value, path: saved.append(value))
 
     def unavailable(*args, **kwargs):
         raise e2e.E2EError("the cryptography package is not available")
