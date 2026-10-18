@@ -454,6 +454,28 @@ def test_history_reads_local_days(home):
     assert _call({"action": "history", "from": "2026-08-01"})["error"] == "malformed"
 
 
+# Europe/London's 25-hour day (clocks back) and 23-hour day (clocks forward).
+@pytest.mark.parametrize("now, day, inside, after", [
+    (datetime(2025, 10, 27, 12, 0, tzinfo=timezone.utc), "2025-10-26",
+     "2025-10-26T23:30:00+00:00", "2025-10-27T00:30:00+00:00"),
+    (datetime(2026, 3, 30, 12, 0, tzinfo=timezone.utc), "2026-03-29",
+     "2026-03-29T23:30:00+01:00", "2026-03-30T00:30:00+01:00"),
+])
+def test_history_days_follow_dst(tmp_path, monkeypatch, now, day, inside, after):
+    monkeypatch.setattr(tool, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(tool.session_titles, "title", lambda key: "Trip planning")
+    original = tool.LocationStore
+    monkeypatch.setattr(tool, "LocationStore", lambda path: original(path, clock=now.timestamp))
+    store = location.LocationStore(tmp_path, clock=now.timestamp)
+    phone = Phone()
+    phone.accept(store.register_key(phone.key_request()))
+    events = [{"id": "e_in", "kind": "arrive", "place_id": "p_home", "at": inside},
+              {"id": "e_next", "kind": "leave", "place_id": "p_home", "at": after}]
+    store.ingest(phone.seal(phone.batch(sent_at=now.isoformat(), events=events)))
+    answer = _call({"action": "history", "from": day, "to": day})
+    assert [entry["at"] for entry in answer["history"]] == [inside]
+
+
 class FakeScheduler:
     def __init__(self):
         self.jobs = {}
