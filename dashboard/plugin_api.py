@@ -2746,19 +2746,26 @@ def local_live_key(profile: Optional[str], rotate: bool = False) -> str:
         key = "" if rotate else _local_live_read_key()
         if key:
             return key
-        key = ".".join((LOCAL_LIVE_KEY_PREFIX, _local_live_profile_part(profile), secrets.token_urlsafe(32)))
         path = _local_live_key_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".conduit-local-live-")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump({"version": 1, "api_key": key, "created_at": int(time.time())}, handle)
-            os.chmod(tmp, 0o600)
-            os.replace(tmp, path)
-        except BaseException:
-            with contextlib.suppress(OSError):
-                os.unlink(tmp)
-            raise
+        # Another dashboard process on this home (`hermes dashboard` beside the
+        # desktop's `hermes serve`) may be making the first key too: only the
+        # last one written verifies, so the second takes the first's.
+        with _pairing_state_lock(path):
+            key = "" if rotate else _local_live_read_key()
+            if key:
+                return key
+            key = ".".join((LOCAL_LIVE_KEY_PREFIX, _local_live_profile_part(profile), secrets.token_urlsafe(32)))
+            fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".conduit-local-live-")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    json.dump({"version": 1, "api_key": key, "created_at": int(time.time())}, handle)
+                os.chmod(tmp, 0o600)
+                os.replace(tmp, path)
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp)
+                raise
         # After the replace, so a verify that read the old file can't cache it
         # again (the generation it started under is gone).
         global _local_live_key_generation

@@ -6,7 +6,9 @@ import dataclasses
 import importlib.util
 import json
 import os
+import subprocess
 import sys
+import textwrap
 import threading
 import time
 import types
@@ -239,6 +241,44 @@ def test_default_profile_key_and_rotation(hermes):
     assert rotated != key
     assert api.local_live_profile_for_key(key) is None
     assert api.local_live_profile_for_key(rotated) == ""
+
+
+# Two dashboard processes on one HERMES_HOME (`hermes dashboard` and the
+# desktop's `hermes serve`, say): the key is made slowly, so both read "no key
+# yet" before either writes unless the file lock keeps them apart.
+_FIRST_KEY_WORKER = textwrap.dedent("""
+    import importlib.util, pathlib, secrets, sys, time, types
+    home = pathlib.Path(sys.argv[1])
+    constants = types.ModuleType("hermes_constants")
+    constants.get_hermes_home = lambda: home
+    sys.modules["hermes_constants"] = constants
+    spec = importlib.util.spec_from_file_location("plugin_api", sys.argv[2])
+    api = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(api)
+    token_urlsafe = secrets.token_urlsafe
+    def slow(n):
+        time.sleep(0.5)
+        return token_urlsafe(n)
+    api.secrets = types.SimpleNamespace(token_urlsafe=slow)
+    print(api.local_live_key(None))
+""")
+
+
+def test_two_processes_making_the_first_key_at_once_hand_out_the_same_one(tmp_path):
+    worker = tmp_path / "worker.py"
+    worker.write_text(_FIRST_KEY_WORKER)
+    home = tmp_path / "home"
+    home.mkdir()
+    processes = [subprocess.Popen([sys.executable, str(worker), str(home), str(ROOT / "dashboard" / "plugin_api.py")],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(2)]
+    keys = []
+    for process in processes:
+        out, err = process.communicate(timeout=60)
+        assert process.returncode == 0, err
+        keys.append(out.strip().splitlines()[-1])
+    stored = json.loads((home / api.LOCAL_LIVE_FILE).read_text())["api_key"]
+    # Only the key on disk verifies, so both must have handed out that one.
+    assert keys == [stored, stored]
 
 
 @pytest.mark.parametrize("token", ["", "cll1", "cll1.-.", "cll2.-.abc", "cll1.!!!.abc", "Bearer x", "cll1.d29yaw.abc"])
