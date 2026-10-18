@@ -1886,6 +1886,24 @@ relay key. The host still opens no inbound route.
   around each spoken reply and `conduit.state {state}` (listening, thinking,
   speaking). `engines` lists it once the profile has a usable speech server
   and the dashboard serves Hermes' chats. Capability `watch-speech-server`.
+  The Watch's controls (plugin 0.49): `{"type":"interrupt"}` stops the reply
+  (the rest stays in the chat), `{"type":"cancel_turn"}` also stops Hermes'
+  turn. Words while Hermes is still working start its next turn, or go into
+  the running one (`session.steer`) while one of its tools runs. A turn with nothing to say
+  after 6 s says "One moment." A Watch whose start says `approvals: true`
+  gets Hermes' approval requests, one at a time and oldest first (the one
+  Hermes answers), as `{"type":"approval", id, command, description, choices,
+  pending}` and answers it with `{"type":"approval_answer", id, choice}`,
+  `once` or `deny` only (`approval_done {id, resolved}` back; `approval_gone
+  {id}` when it's no longer pending: the turn ended, or Hermes' approval
+  timeout, `approvals.timeout`, passed); a rejoining Watch is shown the one
+  still pending. While more than one is pending, the card offers `deny`
+  only: Hermes approves its oldest, and it can drop one this plugin never
+  hears of (answered in Conduit, say). Any
+  other Watch is told to answer in the chat. Words steer the running turn
+  only while one of its tools runs (they reach Hermes with the tool's
+  result). What the server hears while the reply plays, or
+  just after, is dropped as the speaker's echo.
 - `probes/watch_audio_client.py` is a command-line stand-in for the Watch:
   it opens a grant with audio, calls through the real relay, plays a WAV
   question and records the answer. `--prepare` makes the GPT-Live runtime

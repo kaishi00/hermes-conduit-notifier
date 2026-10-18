@@ -8947,6 +8947,10 @@ class _WatchAudioSession:
     async def event(self, data: bytes) -> None:
         raise NotImplementedError
 
+    async def control(self, request: Dict[str, Any]) -> None:
+        """A control from the Watch other than start and end; engines that take none ignore it."""
+        return
+
 
 class _GptLiveHelper:
     """One run of watch_audio_helper.py."""
@@ -9436,6 +9440,28 @@ _SPEECH_WATCH_REFUSED_RESPONSES = ("response_has_no_text", "unsupported_item", "
 # approvals on the Watch).
 SPEECH_WATCH_NEEDS_CHAT = "Hermes is asking you something in the chat. Open Conduit to answer it."
 _SPEECH_WATCH_QUESTIONS = ("approval.request", "clarify.request", "sudo.request", "secret.request")
+# Said when Hermes has said nothing this long into a turn (the Watch taps
+# the wrist before that).
+SPEECH_WATCH_ONE_MOMENT_S = 6.0
+SPEECH_WATCH_ONE_MOMENT = "One moment."
+SPEECH_WATCH_APPROVAL_ASK = "Hermes needs your approval. It's on your Watch."
+SPEECH_WATCH_APPROVAL_CHOICES = ("once", "deny")
+# A segment that starts while the reply plays, or this soon after it, is the
+# speaker's echo, not the user (the Watch closes its microphone then too).
+SPEECH_WATCH_ECHO_TAIL_S = 0.5
+# Hermes denies an approval nobody answers after its own timeout (60 s by
+# default) without saying so: the Watch's card goes then.
+SPEECH_WATCH_APPROVAL_TIMEOUT_S = 60.0
+
+
+def _hermes_approval_timeout() -> float:
+    """Hermes' own approval timeout (approvals.timeout), else its default."""
+    try:
+        from tools.approval import _get_approval_timeout
+        value = float(_get_approval_timeout())
+    except Exception:  # noqa: BLE001 — an older or different Hermes
+        return SPEECH_WATCH_APPROVAL_TIMEOUT_S
+    return value if value > 0 else SPEECH_WATCH_APPROVAL_TIMEOUT_S
 SPEECH_WATCH_NO_SESSIONS = ("Hermes Voice on the Watch needs this dashboard to serve Hermes' chats "
                             "(update Hermes, or open a chat in Conduit once)")
 SPEECH_WATCH_NOT_READBACK = ("The speech server answered with words of its own; Hermes Voice on the Watch needs "
@@ -9703,6 +9729,12 @@ class _WatchVoiceChat:
         self.turns = 0
         self.voice_turn = True
         self.closed = False
+        # Approval requests still pending, oldest first: Hermes answers the
+        # oldest, so the Watch is only ever shown that one. They outlive a
+        # stream, as the chat does.
+        self.approvals: deque = deque()
+        # Tools running in the turn: only then do words steer it.
+        self.tools_running = 0
 
     @property
     def public_id(self) -> str:
@@ -9751,9 +9783,30 @@ class _WatchVoiceChat:
         if method != "event":
             return
         payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
+        kind = str(params.get("type") or "")
+        # Kept here, not by a stream's session, so a request Hermes makes
+        # between two streams of the call still counts.
+        if kind == "approval.request":
+            def text(key: str, limit: int) -> str:
+                value = payload.get(key)
+                return value.strip()[:limit] if isinstance(value, str) else ""
+
+            self.approvals.append({
+                "id": secrets.token_hex(8), "request_id": text("request_id", 128), "at": time.monotonic(),
+                "timeout": None, "command": text("command", 2_000),
+                "description": text("description", 500) or "Approval required",
+            })
+        elif kind in ("approval.cancelled", "request.cancel", "message.complete", "error"):
+            self.approvals.clear()
+            if kind in ("message.complete", "error"):
+                self.tools_running = 0
+        elif kind in ("tool.start", "tool_call"):
+            self.tools_running += 1
+        elif kind in ("tool.complete", "tool_result"):
+            self.tools_running = max(0, self.tools_running - 1)
         listener = self.listener
         if listener is not None:
-            listener(str(params.get("type") or ""), payload)
+            listener(kind, payload)
 
     def open(self) -> None:
         params: Dict[str, Any] = {"cols": 96, "source": "desktop", "title": SPEECH_WATCH_TITLE}
@@ -9781,6 +9834,33 @@ class _WatchVoiceChat:
             params.pop("voice_turn")
             self.rpc("prompt.submit", params)
         self.turns += 1
+
+    def steer(self, text: str) -> bool:
+        """The words into the turn Hermes is running (as the phone's voice
+        steers); False when Hermes isn't running one or can't."""
+        try:
+            status = self.rpc("session.steer", {"session_id": self.session_id, "text": text}).get("status")
+        except WatchJobError as exc:
+            logger.info("A Watch call's words couldn't steer Hermes' turn: %s", exc)
+            return False
+        return status == "queued"
+
+    def interrupt(self) -> None:
+        try:
+            self.rpc("session.interrupt", {"session_id": self.session_id})
+        except WatchJobError as exc:
+            logger.info("Stopping a Watch call's turn failed: %s", exc)
+
+    def respond(self, choice: str, request_id: str) -> Optional[bool]:
+        """Whether Hermes resolved it; None when the answer didn't get there."""
+        params: Dict[str, Any] = {"session_id": self.session_id, "choice": choice}
+        if request_id:
+            params["request_id"] = request_id
+        try:
+            return bool(self.rpc("approval.respond", params).get("resolved"))
+        except WatchJobError as exc:
+            logger.info("Answering a Watch call's approval failed: %s", exc)
+            return None
 
     def close(self) -> None:
         if self.closed:
@@ -9844,6 +9924,17 @@ class _SpeechServerWatchSession(_WatchAudioSession):
         self.splitter = _SpeechSplitter()
         self.submitting = 0
         self.side_tasks: set = set()
+        # The turn's start, and whether anything (filler aside) was said yet.
+        self.turn_started_at = 0.0
+        self.said_something = False
+        self.moment_said = False
+        # Segments the server heard while the reply played: echo.
+        self.echo_items: deque = deque(maxlen=32)
+        # The Watch answers approvals itself (a start with approvals: true);
+        # the one it's showing (the chat's oldest pending).
+        self.watch_approvals = self.request.get("approvals") is True
+        self.shown_approval: Optional[str] = None
+        self.shown_choices: Tuple[str, ...] = ()
 
     # The call
 
@@ -9885,6 +9976,9 @@ class _SpeechServerWatchSession(_WatchAudioSession):
                 "briefing_applied": False, "greeting_applied": False,
             })
             await self._set_state("listening")
+            # A rejoin while Hermes waits on an approval: shown again.
+            await self._approval_timeouts()
+            await self._show_approval()
             tasks = [asyncio.ensure_future(self._upstream_loop()), asyncio.ensure_future(self._hermes_loop()),
                      asyncio.ensure_future(self._ticks()), asyncio.ensure_future(self.pacer.run())]
             await _first_done(None, self.stopping.wait(), *tasks)
@@ -10025,6 +10119,16 @@ class _SpeechServerWatchSession(_WatchAudioSession):
 
     async def _upstream_event(self, event: Dict[str, Any]) -> None:
         kind = event.get("type")
+        item = event.get("item_id") if isinstance(event.get("item_id"), str) else ""
+        if kind == "input_audio_buffer.speech_started":
+            if item and self._playing(SPEECH_WATCH_ECHO_TAIL_S):
+                self.echo_items.append(item)
+            return
+        if item and item in self.echo_items and kind and kind.startswith("conversation.item.input_audio_transcription."):
+            if not kind.endswith(".delta"):
+                self.echo_items.remove(item)
+                logger.info("A Watch call dropped a segment heard while its reply played")
+            return
         if kind == "conversation.item.input_audio_transcription.delta":
             delta = event.get("delta")
             if isinstance(delta, str) and delta:
@@ -10113,6 +10217,28 @@ class _SpeechServerWatchSession(_WatchAudioSession):
         # win. Hermes cuts off a turn still running and runs this one next:
         # until this one starts, what comes is the old turn's.
         await self._stop_speaking()
+        if self.reply_open and self.chat.tools_running > 0 and not self.submitting:
+            # Hermes is running a tool in this turn: the words reach it with
+            # the tool's result (session.steer). Anywhere else a steer would
+            # wait for some later turn's tool, so the words start the next
+            # turn instead.
+            self._spawn(self._steer_or_submit(text))
+            return
+        await self._submit_new(text)
+
+    async def _steer_or_submit(self, text: str) -> None:
+        steered = await asyncio.get_running_loop().run_in_executor(_speech_watch_executor, self.chat.steer, text)
+        if steered:
+            # Taken, whether or not the turn ended meanwhile: never sent
+            # twice. What the reply says next is spoken, a tapped-away
+            # reply included, since it now answers these words too.
+            self.capped = False
+            if self.reply_open:
+                await self._set_state("thinking")
+            return
+        await self._submit_new(text)
+
+    async def _submit_new(self, text: str) -> None:
         self.superseding = self.reply_open
         self._open_reply()
         await self._set_state("thinking")
@@ -10128,6 +10254,9 @@ class _SpeechServerWatchSession(_WatchAudioSession):
         self.capped = False
         self.asked = False
         self.splitter = _SpeechSplitter()
+        self.turn_started_at = time.monotonic()
+        self.said_something = False
+        self.moment_said = False
 
     async def _submit(self, text: str) -> None:
         try:
@@ -10155,6 +10284,7 @@ class _SpeechServerWatchSession(_WatchAudioSession):
                     self.superseding = False
                 elif kind in ("message.complete", "error"):
                     self.superseding = False
+                    await self._approvals_over()
                     continue
                 else:
                     continue
@@ -10175,6 +10305,10 @@ class _SpeechServerWatchSession(_WatchAudioSession):
                     self.pacer.event(json.dumps({"type": "session.output_transcript.delta", "delta": text}))
                 for sentence in self.splitter.feed(text):
                     self._queue_sentence(sentence)
+            elif kind == "approval.request" and self.watch_approvals:
+                await self._approval_requested(payload)
+            elif kind in ("approval.cancelled", "request.cancel"):
+                await self._approvals_over()
             elif kind in _SPEECH_WATCH_QUESTIONS:
                 # Answered in Conduit; the Watch only says so, once a reply.
                 if self.reply_open and not self.asked:
@@ -10203,6 +10337,7 @@ class _SpeechServerWatchSession(_WatchAudioSession):
                 self.pacer.event(json.dumps({"type": "turn.done", "turn": {
                     "role": "assistant", "transcript": str(transcript or "")[:SPEECH_WATCH_TRANSCRIPT_CHARS]}}))
                 self.reply_open = False
+                await self._approvals_over()
                 self._speak_next()
 
     # Speaking
@@ -10210,8 +10345,22 @@ class _SpeechServerWatchSession(_WatchAudioSession):
     def _queue_sentence(self, sentence: str) -> None:
         if self.capped or not sentence:
             return
+        if sentence != SPEECH_WATCH_ONE_MOMENT:
+            self.said_something = True
         self.sentences.append(sentence)
         self._speak_next()
+
+    def _playing(self, tail: float) -> bool:
+        """Whether the Watch is playing reply audio, or did up to ``tail`` ago:
+        audio still to send, or sent audio whose playout (which the pacer
+        runs up to its lead ahead of the Watch) isn't over. Not the open
+        reply as such: a tool run between its sentences is quiet."""
+        pacer = self.pacer
+        if pacer is None:
+            return False
+        if pacer.queued_s > 0:
+            return True
+        return pacer.playout is not None and time.monotonic() < pacer.playout + pacer.lead_s + tail
 
     def _speak_next(self) -> None:
         if self.responding or self.upstream is None or self.pacer is None:
@@ -10276,6 +10425,12 @@ class _SpeechServerWatchSession(_WatchAudioSession):
             if self.reply_open and not self.sentences and not self.responding:
                 for sentence in self.splitter.tick():
                     self._queue_sentence(sentence)
+            await self._expire_approvals()
+            if self.reply_open and not self.said_something and not self.moment_said and not self.chat.approvals \
+                    and time.monotonic() - self.turn_started_at >= SPEECH_WATCH_ONE_MOMENT_S:
+                # Hermes is slow to say anything: the user hears it's coming.
+                self.moment_said = True
+                self._queue_sentence(SPEECH_WATCH_ONE_MOMENT)
             self._speak_next()
 
     # From the Watch
@@ -10288,6 +10443,113 @@ class _SpeechServerWatchSession(_WatchAudioSession):
     async def event(self, data: bytes) -> None:
         # The conversation is the host's: the Watch's own engine events aren't taken.
         return
+
+    async def control(self, request: Dict[str, Any]) -> None:
+        kind = request.get("type")
+        if kind == "interrupt":
+            # A tap on the Watch: the rest of this reply stays in the chat.
+            await self._stop_speaking()
+            if self.reply_open:
+                self.capped = True
+            await self._set_state("listening")
+        elif kind == "cancel_turn":
+            await self._stop_speaking()
+            if self.reply_open:
+                self.capped = True
+                self._spawn(asyncio.get_running_loop().run_in_executor(_speech_watch_executor, self.chat.interrupt))
+            await self._set_state("listening")
+        elif kind == "approval_answer":
+            await self._answer_approval(request)
+
+    # Approvals
+
+    async def _approval_requested(self, payload: Dict[str, Any]) -> None:
+        """The chat has queued it (_WatchVoiceChat.frame): its timeout, the card, a word."""
+        await self._approval_timeouts()
+        await self._show_approval()
+        if not self.asked:
+            self.asked = True
+            for sentence in self.splitter.flush():
+                self._queue_sentence(sentence)
+            self._queue_sentence(SPEECH_WATCH_APPROVAL_ASK)
+
+    async def _approval_timeouts(self) -> None:
+        if not any(approval["timeout"] is None for approval in self.chat.approvals):
+            return
+        try:
+            timeout = await _run_scoped(self.profile, _hermes_approval_timeout, _speech_watch_executor)
+        except Exception:  # noqa: BLE001 — Hermes' default, rather than end the call
+            timeout = SPEECH_WATCH_APPROVAL_TIMEOUT_S
+        for approval in list(self.chat.approvals):
+            if approval["timeout"] is None:
+                approval["timeout"] = timeout
+
+    async def _show_approval(self) -> None:
+        """The chat's oldest pending approval on the Watch, unless it's showing it."""
+        if not self.watch_approvals:
+            return
+        oldest = self.chat.approvals[0] if self.chat.approvals else None
+        if oldest is None:
+            return
+        choices = self._approval_choices()
+        if oldest["id"] == self.shown_approval and choices == self.shown_choices:
+            return
+        self.shown_approval, self.shown_choices = oldest["id"], choices
+        await self.bridge.control(self.stream, {
+            "type": "approval", "id": oldest["id"], "command": oldest["command"],
+            "description": oldest["description"], "choices": list(choices),
+            "pending": len(self.chat.approvals),
+        })
+
+    def _approval_choices(self) -> Tuple[str, ...]:
+        """Once only while exactly one is pending: Hermes approves its oldest,
+        and its queue can drop one the plugin never hears of (answered in
+        Conduit, timed out), so with more the Watch's card might not be it."""
+        return SPEECH_WATCH_APPROVAL_CHOICES if len(self.chat.approvals) == 1 else ("deny",)
+
+    async def _drop_shown(self) -> None:
+        if self.shown_approval is not None:
+            gone, self.shown_approval, self.shown_choices = self.shown_approval, None, ()
+            await self.bridge.control(self.stream, {"type": "approval_gone", "id": gone})
+
+    async def _approvals_over(self) -> None:
+        """The turn ended, or Hermes withdrew them (the chat cleared its queue)."""
+        self.chat.approvals.clear()
+        await self._drop_shown()
+
+    async def _expire_approvals(self) -> None:
+        approvals = self.chat.approvals if self.chat is not None else None
+        if not approvals:
+            return
+        now = time.monotonic()
+        expired = False
+        while approvals and now - approvals[0]["at"] > (approvals[0]["timeout"] or SPEECH_WATCH_APPROVAL_TIMEOUT_S):
+            approvals.popleft()
+            expired = True
+        if expired:
+            await self._drop_shown()
+            await self._show_approval()
+
+    async def _answer_approval(self, request: Dict[str, Any]) -> None:
+        approvals = self.chat.approvals
+        oldest = approvals[0] if approvals else None
+        choice = request.get("choice")
+        if oldest is None or request.get("id") != oldest["id"] or choice not in self._approval_choices():
+            # Only the request the Watch showed (the oldest, the one Hermes
+            # answers), and only once or deny, once only while it's the one.
+            await self.bridge.control(self.stream, {"type": "approval_done", "id": request.get("id"),
+                                                    "resolved": False})
+            return
+        resolved = await asyncio.get_running_loop().run_in_executor(
+            _speech_watch_executor, self.chat.respond, choice, oldest["request_id"])
+        if resolved is not None and approvals and approvals[0] is oldest:
+            # Answered, or gone in Hermes (timed out): either way not pending.
+            approvals.popleft()
+        # Shown again (the next, or this one when the answer didn't get there).
+        self.shown_approval = None
+        await self.bridge.control(self.stream, {"type": "approval_done", "id": oldest["id"],
+                                                "resolved": bool(resolved)})
+        await self._show_approval()
 
 
 def _speech_watch_event(payload: Dict[str, Any]) -> bytes:
@@ -10536,6 +10798,8 @@ class _WatchAudioBridge:
             await self._end_session("ended")
         elif kind == "start":
             await self._start(stream, request)
+        elif self.session is not None and self.session.stream is stream:
+            await self.session.control(request)
 
     async def _start(self, stream: _WatchAudioStream, request: Dict[str, Any]) -> None:
         await self._end_session("restarted")

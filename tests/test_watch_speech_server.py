@@ -295,6 +295,7 @@ class Hermes:
         self.transport = None
         self.sessions = 0
         self.refuse_voice_turn = refuse_voice_turn
+        self.steers = False
 
     def dispatch(self, request, transport=None):
         self.transport = transport
@@ -306,6 +307,10 @@ class Hermes:
                                                     "stored_session_id": f"stored{self.sessions}"}}
         if method == "prompt.submit" and self.refuse_voice_turn and "voice_turn" in params:
             return {"id": request["id"], "error": {"code": -32602, "message": "unknown param voice_turn"}}
+        if method == "session.steer":
+            return {"id": request["id"], "result": {"status": "queued" if self.steers else "rejected"}}
+        if method == "approval.respond":
+            return {"id": request["id"], "result": {"resolved": True}}
         return {"id": request["id"], "result": {}}
 
     def emit(self, kind, payload, sid="s1"):
@@ -739,6 +744,270 @@ def test_a_response_still_going_holds_the_sentence_for_after_it(call):
         call.hermes.emit("message.delta", {"text": "First sentence here.\n"})
         call.hermes.emit("message.complete", {"text": "First sentence here.", "status": "complete"})
         await _until(lambda: upstream.said().count("First sentence here.") == 2)
+        await bridge._end_session("test")
+
+    _run(scenario())
+
+
+# --- Turn control (the Watch's taps, follow-ups, waits, approvals) ------------------
+
+
+def _calls(hermes, method):
+    return [params for name, params in hermes.calls if name == method]
+
+
+def test_a_tap_stops_the_reply_and_leaves_the_rest_in_the_chat(call):
+    async def scenario():
+        bridge = _bridge()
+        socket = await _attach(bridge)
+        watch = Watch()
+        await _start(bridge, socket, watch)
+        upstream = call.speech.sockets[0]
+        _transcript(upstream, "Tell me about Montréal")
+        await _until(lambda: call.hermes.prompts())
+        call.hermes.emit("message.delta", {"text": "Montréal is a city in Québec, on an island.\n"})
+        await _until(lambda: upstream.said())
+        await bridge._handle(watch.control({"type": "interrupt"}))
+        await _until(lambda: {"type": "conduit.state", "state": "listening"} in watch.events(socket)[-3:])
+        call.hermes.emit("message.delta", {"text": "It has a mountain in the middle of it, called Mount Royal.\n"})
+        call.hermes.emit("message.complete", {"text": "…", "status": "complete"})
+        await _until(lambda: watch.events(socket, "turn.done")[-1]["turn"]["role"] == "assistant")
+        await asyncio.sleep(0.1)
+        assert upstream.said() == ["Montréal is a city in Québec, on an island."]
+        await bridge._end_session("test")
+
+    _run(scenario())
+
+
+def test_cancelling_the_turn_interrupts_hermes(call):
+    async def scenario():
+        bridge = _bridge()
+        socket = await _attach(bridge)
+        watch = Watch()
+        await _start(bridge, socket, watch)
+        _transcript(call.speech.sockets[0], "Write me a novel")
+        await _until(lambda: call.hermes.prompts())
+        call.hermes.emit("message.start", {})
+        await bridge._handle(watch.control({"type": "cancel_turn"}))
+        await _until(lambda: _calls(call.hermes, "session.interrupt"))
+        await bridge._end_session("test")
+
+    _run(scenario())
+
+
+def test_words_while_hermes_works_go_into_its_turn(call):
+    call.hermes.steers = True
+
+    async def scenario():
+        bridge = _bridge()
+        socket = await _attach(bridge)
+        watch = Watch()
+        await _start(bridge, socket, watch)
+        upstream = call.speech.sockets[0]
+        _transcript(upstream, "Find me a restaurant")
+        await _until(lambda: call.hermes.prompts())
+        call.hermes.emit("message.start", {})
+        call.hermes.emit("tool.start", {"name": "web_search"})
+        await asyncio.sleep(0.05)
+        _transcript(upstream, "Actually, make it Italian")
+        await _until(lambda: _calls(call.hermes, "session.steer"))
+        assert _calls(call.hermes, "session.steer")[0]["text"] == "Actually, make it Italian"
+        call.hermes.emit("tool.complete", {"name": "web_search"})
+        call.hermes.emit("message.delta", {"text": "Try Bottega, an Italian place on Saint-Zotique.\n"})
+        call.hermes.emit("message.complete", {"text": "…", "status": "complete"})
+        await _until(lambda: upstream.said())
+        assert len(call.hermes.prompts()) == 1, "no second turn"
+        assert upstream.said() == ["Try Bottega, an Italian place on Saint-Zotique."]
+        await bridge._end_session("test")
+
+    _run(scenario())
+
+
+def test_a_slow_turn_says_one_moment_once(call, monkeypatch):
+    monkeypatch.setattr(api, "SPEECH_WATCH_ONE_MOMENT_S", 0.3)
+
+    async def scenario():
+        bridge = _bridge()
+        socket = await _attach(bridge)
+        watch = Watch()
+        await _start(bridge, socket, watch)
+        upstream = call.speech.sockets[0]
+        _transcript(upstream, "Plan my week")
+        await _until(lambda: upstream.said() == [api.SPEECH_WATCH_ONE_MOMENT], timeout=3)
+        await asyncio.sleep(0.6)
+        assert upstream.said() == [api.SPEECH_WATCH_ONE_MOMENT]
+        call.hermes.emit("message.delta", {"text": "Here is your week.\n"})
+        await _until(lambda: len(upstream.said()) == 2)
+        await bridge._end_session("test")
+
+    _run(scenario())
+
+
+def test_a_watch_that_answers_approvals_gets_them_and_answers_once(call):
+    async def scenario():
+        bridge = _bridge()
+        socket = await _attach(bridge)
+        watch = Watch()
+        await _start(bridge, socket, watch, approvals=True)
+        upstream = call.speech.sockets[0]
+        _transcript(upstream, "Clean up the logs")
+        await _until(lambda: call.hermes.prompts())
+        call.hermes.emit("approval.request", {"command": "rm -rf ./logs", "description": "Delete logs",
+                                              "choices": ["once", "session", "always", "deny"]})
+        await _until(lambda: watch.events(socket, "approval"))
+        [approval] = watch.events(socket, "approval")
+        assert approval["command"] == "rm -rf ./logs" and approval["choices"] == ["once", "deny"]
+        await _until(lambda: api.SPEECH_WATCH_APPROVAL_ASK in upstream.said())
+        # Only once or deny, and only the request shown.
+        await bridge._handle(watch.control({"type": "approval_answer", "id": approval["id"], "choice": "always"}))
+        await bridge._handle(watch.control({"type": "approval_answer", "id": "other", "choice": "once"}))
+        await _until(lambda: len(watch.events(socket, "approval_done")) == 2)
+        assert not _calls(call.hermes, "approval.respond")
+        await bridge._handle(watch.control({"type": "approval_answer", "id": approval["id"], "choice": "once"}))
+        await _until(lambda: _calls(call.hermes, "approval.respond"))
+        assert _calls(call.hermes, "approval.respond")[0]["choice"] == "once"
+        await _until(lambda: watch.events(socket, "approval_done")[-1] == {"type": "approval_done",
+                                                                           "id": approval["id"], "resolved": True})
+        await bridge._end_session("test")
+
+    _run(scenario())
+
+
+def test_what_the_server_hears_while_the_reply_plays_is_dropped_as_echo(call):
+    async def scenario():
+        bridge = _bridge()
+        socket = await _attach(bridge)
+        watch = Watch()
+        await _start(bridge, socket, watch)
+        upstream = call.speech.sockets[0]
+        _transcript(upstream, "Hello")
+        await _until(lambda: call.hermes.prompts())
+        call.hermes.emit("message.delta", {"text": "Hello there, nice to hear from you today.\n"})
+        await _until(lambda: {"type": "conduit.speech", "on": True} in watch.events(socket))
+        upstream.push({"type": "input_audio_buffer.speech_started", "item_id": "echo1"})
+        upstream.push({"type": "conversation.item.input_audio_transcription.completed", "item_id": "echo1",
+                       "transcript": "Hello there"})
+        await asyncio.sleep(0.2)
+        assert len(call.hermes.prompts()) == 1
+        await bridge._end_session("test")
+
+    _run(scenario())
+
+
+def test_words_while_hermes_runs_no_tool_start_the_next_turn(call):
+    call.hermes.steers = True  # this Hermes would take a steer, and sit on it
+
+    async def scenario():
+        bridge = _bridge()
+        socket = await _attach(bridge)
+        watch = Watch()
+        await _start(bridge, socket, watch)
+        upstream = call.speech.sockets[0]
+        _transcript(upstream, "Tell me a joke")
+        await _until(lambda: call.hermes.prompts())
+        call.hermes.emit("message.start", {})
+        _transcript(upstream, "A short one")
+        await _until(lambda: len(call.hermes.prompts()) == 2)
+        assert not _calls(call.hermes, "session.steer")
+        await bridge._end_session("test")
+
+    _run(scenario())
+
+
+def test_two_pending_approvals_show_one_at_a_time_oldest_first(call):
+    async def scenario():
+        bridge = _bridge()
+        socket = await _attach(bridge)
+        watch = Watch()
+        await _start(bridge, socket, watch, approvals=True)
+        _transcript(call.speech.sockets[0], "Tidy up")
+        await _until(lambda: call.hermes.prompts())
+        call.hermes.emit("approval.request", {"command": "rm a", "description": "first"})
+        call.hermes.emit("approval.request", {"command": "rm b", "description": "second"})
+        await _until(lambda: watch.events(socket, "approval"))
+        await asyncio.sleep(0.1)
+        shown = watch.events(socket, "approval")
+        assert {card["command"] for card in shown} == {"rm a"}, "only the oldest, the one Hermes answers"
+        # With two pending, Hermes' oldest might not be the card: deny only.
+        assert shown[-1]["choices"] == ["deny"] and shown[-1]["pending"] == 2
+        await bridge._handle(watch.control({"type": "approval_answer", "id": shown[-1]["id"], "choice": "once"}))
+        await _until(lambda: watch.events(socket, "approval_done"))
+        assert not _calls(call.hermes, "approval.respond")
+        await bridge._handle(watch.control({"type": "approval_answer", "id": shown[-1]["id"], "choice": "deny"}))
+        await _until(lambda: watch.events(socket, "approval")[-1]["command"] == "rm b")
+        assert watch.events(socket, "approval")[-1]["choices"] == ["once", "deny"]
+        assert _calls(call.hermes, "approval.respond")[0]["choice"] == "deny"
+        await bridge._end_session("test")
+
+    _run(scenario())
+
+
+def test_a_rejoin_shows_an_approval_still_pending_and_words_over_a_reply_clear_it(call):
+    async def scenario():
+        bridge = _bridge()
+        socket = await _attach(bridge)
+        first = Watch()
+        await _start(bridge, socket, first, approvals=True)
+        upstream = call.speech.sockets[0]
+        _transcript(upstream, "Tidy up")
+        await _until(lambda: call.hermes.prompts())
+        call.hermes.emit("message.start", {})
+        call.hermes.emit("approval.request", {"command": "rm a", "description": "first"})
+        await _until(lambda: first.events(socket, "approval"))
+        await bridge._handle(bytes([0, 2]))  # the Watch's socket went
+        again = Watch()
+        await _start(bridge, socket, again, approvals=True, resume_session_id="stored1")
+        await _until(lambda: again.events(socket, "approval"))
+        assert again.events(socket, "approval")[0]["command"] == "rm a"
+        # The user talks over it: Hermes cuts the turn off, and the card goes.
+        upstream = call.speech.sockets[-1]
+        _transcript(upstream, "Never mind, leave it")
+        await _until(lambda: len(call.hermes.prompts()) == 2)
+        call.hermes.emit("message.complete", {"text": "", "status": "interrupted"})
+        await _until(lambda: again.events(socket, "approval_gone"))
+        await bridge._end_session("test")
+
+    _run(scenario())
+
+
+def test_speech_in_a_quiet_moment_of_an_open_reply_is_the_user(call, monkeypatch):
+    monkeypatch.setattr(api, "WATCH_AUDIO_LEAD_S", 0.05)
+    monkeypatch.setattr(api, "SPEECH_WATCH_ECHO_TAIL_S", 0.05)
+
+    async def scenario():
+        bridge = _bridge()
+        socket = await _attach(bridge)
+        watch = Watch()
+        await _start(bridge, socket, watch)
+        upstream = call.speech.sockets[0]
+        _transcript(upstream, "Check the weather")
+        await _until(lambda: call.hermes.prompts())
+        call.hermes.emit("message.delta", {"text": "Let me check.\n"})
+        await _until(lambda: upstream.said())
+        await asyncio.sleep(0.4)  # the sentence has played; Hermes runs a tool
+        upstream.push({"type": "input_audio_buffer.speech_started", "item_id": "user1"})
+        upstream.push({"type": "conversation.item.input_audio_transcription.completed", "item_id": "user1",
+                       "transcript": "Also tomorrow"})
+        await _until(lambda: len(call.hermes.prompts()) == 2)
+        await bridge._end_session("test")
+
+    _run(scenario())
+
+
+def test_an_approval_hermes_asks_for_between_streams_is_shown_on_the_rejoin(call):
+    async def scenario():
+        bridge = _bridge()
+        socket = await _attach(bridge)
+        first = Watch()
+        await _start(bridge, socket, first, approvals=True)
+        _transcript(call.speech.sockets[0], "Tidy up")
+        await _until(lambda: call.hermes.prompts())
+        await bridge._handle(bytes([0, 2]))  # the Watch's socket went
+        call.hermes.emit("approval.request", {"command": "rm a", "description": "first"})
+        again = Watch()
+        await _start(bridge, socket, again, approvals=True, resume_session_id="stored1")
+        await _until(lambda: again.events(socket, "approval"))
+        assert again.events(socket, "approval")[0]["command"] == "rm a"
         await bridge._end_session("test")
 
     _run(scenario())
