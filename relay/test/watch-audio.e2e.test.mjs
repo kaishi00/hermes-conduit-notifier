@@ -50,6 +50,7 @@ before(async () => {
       APNS_TEAM_ID: 'BBBBBBBBBB',
       APNS_TOPIC: 'com.milim.relay',
       APNS_MODE: 'accept',
+      RELAY_TEST_SEAMS: '1',
       WATCH_AUDIO_IDLE_MS: String(IDLE_MS),
       RELAY_MAX_WATCH_AUDIO_BRIDGES_PER_GATEWAY: '2',
     },

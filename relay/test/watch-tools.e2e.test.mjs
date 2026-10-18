@@ -51,6 +51,7 @@ before(async () => {
       APNS_TEAM_ID: 'BBBBBBBBBB',
       APNS_TOPIC: 'com.milim.relay',
       APNS_MODE: 'accept',
+      RELAY_TEST_SEAMS: '1',
       WATCH_CALL_WAIT_MS: String(CALL_WAIT_MS),
       WATCH_HOST_POLL_WAIT_MS: '400',
       WATCH_HOST_GONE_MS: String(HOST_GONE_MS),

@@ -87,7 +87,7 @@ async function startRelay(extraEnv) {
     env: {
       ...process.env, HOST: '127.0.0.1', PORT: String(port), PUBLIC_URL: `https://relay-${port}.example`,
       DATA_PATH: join(dir, 'relay.json'), APNS_KEY_PATH: keyPath, APNS_KEY_ID: 'AAAAAAAAAA', APNS_TEAM_ID: 'BBBBBBBBBB',
-      APNS_TOPIC: 'com.milim.relay', APNS_MODE: 'accept', ...extraEnv,
+      APNS_TOPIC: 'com.milim.relay', APNS_MODE: 'accept', RELAY_TEST_SEAMS: '1', ...extraEnv,
     },
     stdio: 'ignore',
   });

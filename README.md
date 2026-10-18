@@ -128,7 +128,7 @@ cp /path/to/AuthKey_XXXXXX.p8 secrets/apns-production.p8
 docker compose up -d
 ```
 
-The relay listens on port 9120. Put it behind an HTTPS reverse proxy (the relay validates that `PUBLIC_URL` uses HTTPS). If the proxy sends `X-Forwarded-For`, set `TRUST_PROXY=1`.
+The relay listens on port 9120. Put it behind an HTTPS reverse proxy (the relay validates that `PUBLIC_URL` uses HTTPS). If the proxy sends `X-Forwarded-For`, set `TRUST_PROXY` to the number of proxies in front of the relay (`1` for one): the relay rate-limits by the address the outermost trusted proxy appended, never by an entry the client sent itself. `APNS_MODE`, `APNS_CAPTURE_PATH` and `APNS_VOIP_FAILURE` are test settings; a relay refuses to start with them.
 
 The plugin sends relay credentials only over HTTPS with a trusted certificate (plain HTTP only to the same machine), and never follows a redirect. You can pair over plain HTTP against a LAN or Tailscale address, for example `hermes conduit-push pair XXXXX-XXXXX --relay-url http://100.x.y.z:9120`: the relay answers with its HTTPS `PUBLIC_URL`, and the plugin saves and uses that from then on. Pair that way only on a network you trust: whatever answers on that address chooses the HTTPS relay this host uses from then on.
 

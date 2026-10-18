@@ -87,6 +87,7 @@ before(async () => {
       APNS_TEAM_ID: 'BBBBBBBBBB',
       APNS_TOPIC: 'com.milim.relay',
       APNS_MODE: 'accept',
+      RELAY_TEST_SEAMS: '1',
       APNS_CAPTURE_PATH: capturePath,
     },
     stdio: 'ignore',

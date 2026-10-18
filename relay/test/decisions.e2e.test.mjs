@@ -128,6 +128,7 @@ async function startRelay(aPort, apnsMode, dataFile, extraEnv = {}, { logs = fal
       APNS_TEAM_ID: 'BBBBBBBBBB',
       APNS_TOPIC: 'com.milim.relay',
       APNS_MODE: apnsMode,
+      RELAY_TEST_SEAMS: '1',
       ...extraEnv,
     },
     stdio: logs ? ['ignore', 'pipe', 'pipe'] : 'ignore',
@@ -844,6 +845,7 @@ test('an invalid capacity setting stops the relay at boot', async () => {
       APNS_TEAM_ID: 'BBBBBBBBBB',
       APNS_TOPIC: 'com.milim.relay',
       APNS_MODE: 'accept',
+      RELAY_TEST_SEAMS: '1',
       RELAY_MAX_INSTALLATIONS: '10k',
     },
     stdio: ['ignore', 'ignore', 'pipe'],
@@ -853,6 +855,64 @@ test('an invalid capacity setting stops the relay at boot', async () => {
   const code = await new Promise((resolve) => child.once('exit', resolve));
   assert.notEqual(code, 0);
   assert.match(stderr, /RELAY_MAX_INSTALLATIONS must be a positive integer\./);
+});
+
+async function bootFailure(name, extraEnv) {
+  const child = spawn(process.execPath, ['src/server.mjs'], {
+    cwd: fileURLToPath(new URL('..', import.meta.url)),
+    env: {
+      ...process.env,
+      HOST: '127.0.0.1',
+      PORT: String(await closedPort()),
+      PUBLIC_URL: `https://relay-${name}.example`,
+      DATA_PATH: join(dir, `relay-data-${name}.json`),
+      APNS_KEY_PATH: keyPath,
+      APNS_KEY_ID: 'AAAAAAAAAA',
+      APNS_TEAM_ID: 'BBBBBBBBBB',
+      APNS_TOPIC: 'com.milim.relay',
+      ...extraEnv,
+    },
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  let stderr = '';
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  const code = await new Promise((resolve) => child.once('exit', resolve));
+  return { code, stderr };
+}
+
+test('the APNs test seams stop a relay that is not a test at boot', async () => {
+  for (const env of [{ APNS_MODE: 'accept' }, { APNS_MODE: 'accept', APNS_CAPTURE_PATH: join(dir, 'never.jsonl') }, { APNS_VOIP_FAILURE: 'throw' }]) {
+    const { code, stderr } = await bootFailure('seams', { ...env, RELAY_TEST_SEAMS: '' });
+    assert.notEqual(code, 0);
+    assert.match(stderr, /test settings?; unset it for a real relay\./);
+  }
+});
+
+test('an invalid TRUST_PROXY stops the relay at boot', async () => {
+  const { code, stderr } = await bootFailure('proxy-hops', { TRUST_PROXY: 'yes' });
+  assert.notEqual(code, 0);
+  assert.match(stderr, /TRUST_PROXY must be the number of reverse proxies/);
+});
+
+test('a client-sent X-Forwarded-For entry cannot pick its own rate-limit bucket', async () => {
+  const aPort = await closedPort();
+  const child = await startRelay(aPort, 'accept', join(dir, 'relay-data-xff.json'), { TRUST_PROXY: '1' });
+  children.push(child);
+  try {
+    let response;
+    // The proxy appends the address it saw (10.20.0.1); everything before
+    // it is the client's own header, rotated on every request.
+    for (let index = 0; index < 13; index += 1) {
+      response = await fetch(`http://127.0.0.1:${aPort}/v1/installations`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-forwarded-for': `203.0.113.${index + 1}, 10.20.0.1` },
+        body: JSON.stringify({ bundle_id: 'com.milim.relay', device_token: 'invalid', environment: 'production' }),
+      });
+    }
+    assert.equal(response.status, 429, 'all 13 share the proxy-seen bucket of 12 a minute');
+  } finally {
+    await stopRelay(child);
+  }
 });
 
 after(async () => {

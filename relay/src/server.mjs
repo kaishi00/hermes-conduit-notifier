@@ -1428,20 +1428,25 @@ function sendJson(response, status, body) {
 }
 
 let lastLimitsSweepAt = 0;
+// Past this many buckets, a key without one is refused until a sweep frees
+// room, so a flood of rotating keys can't grow the map without bound.
+const MAX_LIMIT_BUCKETS = 100_000;
 
 function enforceRateLimit(key, maximum, windowMs) {
   const now = Date.now();
   // The map never evicts on its own and some keys (per-IP buckets) are
   // attacker-rotatable. Sweep expired entries once it grows large, but at
-  // most once per 30s so a sustained flood cannot turn every request into a
-  // full-map scan.
-  if (limits.size > 10_000 && now - lastLimitsSweepAt > 30_000) {
+  // most once per 30s (5s when full) so a sustained flood cannot turn every
+  // request into a full-map scan.
+  const sweepEveryMs = limits.size >= MAX_LIMIT_BUCKETS ? 5_000 : 30_000;
+  if (limits.size > 10_000 && now - lastLimitsSweepAt > sweepEveryMs) {
     lastLimitsSweepAt = now;
     for (const [limitKey, limit] of limits) {
       if (limit.resetAt <= now) limits.delete(limitKey);
     }
   }
   const value = limits.get(key);
+  if (!value && limits.size >= MAX_LIMIT_BUCKETS) throw httpError(429, 'rate_limited');
   if (!value || value.resetAt <= now) { limits.set(key, { count: 1, resetAt: now + windowMs }); return; }
   value.count += 1;
   if (value.count > maximum) throw httpError(429, 'rate_limited');
@@ -1481,9 +1486,13 @@ function enforceRevocationBudget() {
 }
 
 function clientAddress(request) {
-  if (config.trustProxy) {
-    const forwarded = String(request.headers['x-forwarded-for'] ?? '').split(',')[0].trim();
-    if (isIP(forwarded)) return forwarded;
+  // Only the entries the trusted proxies appended count: earlier ones are
+  // whatever the client sent, so taking the first would let anyone pick
+  // their own rate-limit bucket.
+  if (config.proxyHops > 0) {
+    const forwarded = String(request.headers['x-forwarded-for'] ?? '').split(',').map((entry) => entry.trim());
+    const address = forwarded.length >= config.proxyHops ? forwarded[forwarded.length - config.proxyHops] : '';
+    if (isIP(address)) return address;
   }
   return request.socket.remoteAddress ?? 'unknown';
 }
@@ -1503,6 +1512,17 @@ function readConfig() {
   for (const name of required) if (!process.env[name]) throw new Error(`${name} is required.`);
   const publicUrl = new URL(process.env.PUBLIC_URL);
   if (publicUrl.protocol !== 'https:') throw new Error('PUBLIC_URL must use HTTPS.');
+  // The APNs test seams fake delivery (and the capture writes every payload
+  // to disk), so a relay refuses to start with them unless the test suite
+  // says it's a test.
+  const seams = ['APNS_MODE', 'APNS_CAPTURE_PATH', 'APNS_VOIP_FAILURE'].filter((name) => process.env[name]);
+  if (seams.length && process.env.RELAY_TEST_SEAMS !== '1') {
+    throw new Error(`${seams.join(', ')} ${seams.length > 1 ? 'are test settings' : 'is a test setting'}; unset it for a real relay.`);
+  }
+  const proxyHops = process.env.TRUST_PROXY ? Number(process.env.TRUST_PROXY) : 0;
+  if (!Number.isInteger(proxyHops) || proxyHops < 0 || proxyHops > 10) {
+    throw new Error('TRUST_PROXY must be the number of reverse proxies in front of the relay (0 to 10).');
+  }
   let apnsOrigin;
   if (process.env.APNS_ORIGIN !== undefined) {
     // Fail at boot, not on the first real send: a mistyped origin would
@@ -1526,7 +1546,9 @@ function readConfig() {
     // ClientHttp2Session failure path end to end, which the APNS_MODE seams
     // (they bypass ApnsClient entirely) cannot.
     origin: apnsOrigin,
-    trustProxy: process.env.TRUST_PROXY === '1',
+    // How many reverse proxies sit in front of the relay; each appends the
+    // address it saw to X-Forwarded-For.
+    proxyHops,
     // Test seams: shorter Watch tool waits, so the e2e suite can run the
     // timeouts. Unset in production.
     watchWaits: {
