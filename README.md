@@ -1431,7 +1431,8 @@ in the exchange (0.45.1+), so a phone that draws the cards leaves it out.
 - **Sourced facts only.** The phone adds address, category, phone, website,
   travel time and Look Around from Apple Maps when it draws a card; the
   schema has no fields for them. A rating, hours, price or photo needs a
-  `source`, or it's dropped.
+  `source`, or it's dropped; a place's or person's photo also needs an https
+  `url`.
 - **Kept in history.** The tool's answer carries the normalized cards
   (`{"ok": true, "cards": [...]}`), so the chat's history keeps them and
   Conduit draws them whenever the chat is opened. With no call screen, a
