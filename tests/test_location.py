@@ -180,6 +180,46 @@ def test_pausing_forgets_the_latest_fix(store, phone):
     assert location.sharing_paused(view["sharing"], NOW)
 
 
+def test_a_late_older_batch_never_undoes_a_pause(store, phone):
+    # Sent before the pause but arriving after it (a retry, or a replay).
+    older = phone.seal(phone.batch(sent_at="2026-10-13T06:58:30+01:00", fix=fix()))
+    store.ingest(phone.seal(phone.batch(sent_at="2026-10-13T06:59:30+01:00",
+                                        sharing=sharing(paused_until="2099-01-01T00:00:00+00:00"))))
+    result = store.ingest(older)
+    view = store.snapshot()
+    assert location.sharing_paused(view["sharing"], NOW)
+    assert view["fix"] is None
+    assert result["stale"] is True and result["fix"] is False
+
+
+def test_a_batch_stamped_in_the_future_doesnt_make_the_next_one_stale(store, phone):
+    clock = [NOW]
+    store.clock = lambda: clock[0]
+    store.ingest(phone.seal(phone.batch(sent_at="2026-10-13T20:00:00+01:00", fix=fix())))
+    clock[0] += 60
+    store.ingest(phone.seal(phone.batch(sent_at="2026-10-13T07:00:30+01:00",
+                                        sharing=sharing(paused_until="2099-01-01T00:00:00+00:00"))))
+    assert store.latest_place()["paused"] is True
+
+
+@pytest.mark.parametrize("version", ["1", "2"])
+def test_an_older_store_upgrades_and_still_takes_batches(store, phone, version):
+    import sqlite3
+    store.ingest(phone.seal(phone.batch(fix=fix())))
+    db = sqlite3.connect(store.path)
+    db.execute("ALTER TABLE devices DROP COLUMN last_sent")
+    if version == "1":
+        db.execute("DROP TABLE maps")
+    db.execute("UPDATE meta SET value=? WHERE key='schema'", (version,))
+    db.commit()
+    db.close()
+    assert store.snapshot()["fix"]["id"] == "f_message"
+    store.ingest(phone.seal(phone.batch(sent_at="2026-10-13T06:59:30+01:00",
+                                        sharing=sharing(paused_until="2099-01-01T00:00:00+00:00"))))
+    assert store.ingest(phone.seal(phone.batch(sent_at="2026-10-13T06:58:30+01:00", fix=fix())))["stale"] is True
+    assert store.snapshot()["fix"] is None
+
+
 def test_a_second_device_without_a_fix_doesnt_hide_the_first_ones(store, phone):
     clock = [NOW]
     store.clock = lambda: clock[0]

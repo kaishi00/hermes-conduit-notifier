@@ -47,9 +47,9 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 FILE_NAME = "conduit-location.sqlite3"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 # Versions _migrate brings up to SCHEMA_VERSION.
-OLDER_SCHEMAS = ("1",)
+OLDER_SCHEMAS = ("1", "2")
 
 SALT = b"conduit-location-v1"
 INFO_INGEST = b"conduit-location-v1 ingest device-to-host"
@@ -454,7 +454,7 @@ class LocationStore:
                 " VALUES(?,?,?,?,?,?,?)"
                 " ON CONFLICT(id) DO UPDATE SET name=excluded.name, device_public=excluded.device_public,"
                 " host_private=excluded.host_private, host_public=excluded.host_public, kid=excluded.kid,"
-                " created_at=excluded.created_at",
+                " created_at=excluded.created_at, last_sent=NULL",
                 (device_id, name, device_public, host_private, host_public, kid, now),
             )
             # A new key means a reinstall or sharing turned off and on: what
@@ -979,8 +979,11 @@ def _migrate(db: sqlite3.Connection, now: float) -> None:
     version = _meta(db, "schema")
     if version == str(SCHEMA_VERSION):
         return
-    if version == "1":
-        db.execute(_MAPS_TABLE)
+    if version in OLDER_SCHEMAS:
+        if version == "1":
+            db.execute(_MAPS_TABLE)
+        # 3: when the newest batch was sent, so a late older one changes nothing.
+        db.execute("ALTER TABLE devices ADD COLUMN last_sent REAL")
         db.execute("UPDATE meta SET value=? WHERE key='schema'", (str(SCHEMA_VERSION),))
         return
     if version is not None:
@@ -992,7 +995,7 @@ def _migrate(db: sqlite3.Connection, now: float) -> None:
         CREATE TABLE IF NOT EXISTS devices(
             id TEXT PRIMARY KEY, name TEXT NOT NULL,
             device_public BLOB NOT NULL, host_private BLOB NOT NULL, host_public BLOB NOT NULL, kid TEXT NOT NULL,
-            created_at INTEGER NOT NULL, last_seen REAL, sharing TEXT);
+            created_at INTEGER NOT NULL, last_seen REAL, sharing TEXT, last_sent REAL);
         CREATE TABLE IF NOT EXISTS places(
             device TEXT NOT NULL, id TEXT NOT NULL, position INTEGER NOT NULL, name TEXT NOT NULL,
             kind TEXT NOT NULL, private INTEGER NOT NULL, PRIMARY KEY(device, id));
@@ -1209,7 +1212,8 @@ def _area_text(area: dict[str, str] | None) -> str | None:
 
 
 def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: float) -> dict[str, Any]:
-    parse_time(batch.get("sent_at"), "sent_at")
+    # A phone clock running ahead mustn't make the batches after it look old.
+    sent = min(parse_time(batch.get("sent_at"), "sent_at").timestamp(), now)
     sharing = _parse_sharing(batch.get("sharing"))
     if batch.get("places") is not None:
         places_list = _parse_places(batch.get("places"))
@@ -1237,7 +1241,14 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: f
     if locate_id is not None and (not isinstance(locate_id, str) or not _LOCATE_ID.match(locate_id)):
         raise LocationError("malformed", "locate_id is malformed")
 
-    db.execute("UPDATE devices SET last_seen=?, sharing=? WHERE id=?", (now, json.dumps(sharing), device_id))
+    last_sent = db.execute("SELECT last_sent FROM devices WHERE id=?", (device_id,)).fetchone()[0]
+    if last_sent is not None and sent < last_sent:
+        # An older batch (a retry that arrived late, or a replay) never
+        # undoes a newer one: not its sharing or pause, places, fix or moves.
+        db.execute("UPDATE devices SET last_seen=? WHERE id=?", (now, device_id))
+        return {"accepted": True, "stale": True, "fix": False, "events": 0, "rules_fired": []}
+    db.execute("UPDATE devices SET last_seen=?, last_sent=?, sharing=? WHERE id=?",
+               (now, sent, json.dumps(sharing), device_id))
     if places_list is not None:
         db.execute("DELETE FROM places WHERE device=?", (device_id,))
         for position, place in enumerate(places_list):

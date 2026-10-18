@@ -1338,7 +1338,16 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: i
     sent_epoch = int(sent_at.timestamp())
     stale = stored[0] is not None and sent_epoch < stored[0]
 
-    # Sharing turned off: forget what was kept, whatever the batch's age.
+    counts = {"events": 0, "reminders": 0, "deleted": 0}
+    if stale:
+        # An older batch (a retry that arrived late) never undoes a newer
+        # one: it neither widens nor narrows what the newer one said is
+        # shared. The phone resends only what changed, so nothing would put
+        # back what a stale batch took away.
+        db.execute("UPDATE devices SET last_seen=? WHERE id=?", (now, device_id))
+        return {**counts, "stale": True}
+
+    # Sharing turned off: forget what was kept.
     if sharing["calendar"] != "full":
         db.execute("DELETE FROM events WHERE device=?", (device_id,))
     if sharing["calendar"] == "off":
@@ -1367,14 +1376,6 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: i
         db.execute("UPDATE devices SET alarms=NULL, alarms_at=NULL WHERE id=?", (device_id,))
     if not sharing["contacts"]:
         db.execute("DELETE FROM contacts WHERE device=?", (device_id,))
-
-    counts = {"events": 0, "reminders": 0, "deleted": 0}
-    if stale:
-        # An older batch (a retry that arrived late) never undoes a newer
-        # one, and never widens what the newer one said is shared; it can
-        # only have narrowed it above, which the next batch restores.
-        db.execute("UPDATE devices SET last_seen=? WHERE id=?", (now, device_id))
-        return {**counts, "stale": True}
 
     if parsed_calendars is not None:
         db.execute("DELETE FROM calendars WHERE device=?", (device_id,))

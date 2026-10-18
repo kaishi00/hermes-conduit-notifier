@@ -172,11 +172,12 @@ def test_a_schema_1_store_gains_the_maps_table(tmp_path):
     _phone(store)
     with sqlite3.connect(store.path) as db:
         db.execute("DROP TABLE maps")
+        db.execute("ALTER TABLE devices DROP COLUMN last_sent")  # schema 1 had neither
         db.execute("UPDATE meta SET value='1' WHERE key='schema'")
     assert store.maps_device() is not None
     store.start_maps(DEVICE, {"action": "lookup", "query": "x"})
     with sqlite3.connect(store.path) as db:
-        assert db.execute("SELECT value FROM meta WHERE key='schema'").fetchone()[0] == "2"
+        assert db.execute("SELECT value FROM meta WHERE key='schema'").fetchone()[0] == str(location.SCHEMA_VERSION)
 
 
 # --- The push ---------------------------------------------------------------
