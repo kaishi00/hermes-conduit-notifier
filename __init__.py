@@ -151,7 +151,8 @@ def _post_llm_call(**kwargs: Any) -> None:
     response = kwargs.get("assistant_response")
     if _is_child(session_id):
         return
-    _quietly(live_activity.reporter.turn_ended, session_id, "done")
+    # The Lock Screen's end waits for on_session_end too: this hook also runs
+    # for a failed turn, and the first end the phone gets is the one it keeps.
     started = _take_turn_start(kwargs.get("turn_id"))
     # A cron run says nothing when the user muted its job or it answered
     # [SILENT] by Hermes' cron rule ("[SILENT] No changes" too).
@@ -176,8 +177,9 @@ def _post_llm_call(**kwargs: Any) -> None:
         _finish_ready(session_id, ready, send)
         return
     key = (session_id, turn_id)
-    # A Hermes that never reports the turn's end still gets its reply out.
-    timer = _later(READY_GRACE_S, lambda: _settle_ready(session_id, turn_id, "done"))
+    # A Hermes that never reports the turn's end still gets its reply out,
+    # and its Live Activity ended.
+    timer = _later(READY_GRACE_S, lambda: _turn_end_missed(session_id, turn_id))
     with _pending_lock:
         earlier = _pending_ready.pop(key, None)
         _pending_ready[key] = (ready, send, timer)
@@ -191,6 +193,11 @@ def _post_llm_call(**kwargs: Any) -> None:
     for old_session, (old_ready, old_send, old_timer) in overflow:
         _cancel(old_timer)
         _finish_ready(old_session, old_ready, old_send)
+
+
+def _turn_end_missed(session_id: str, turn_id: str) -> None:
+    if _settle_ready(session_id, turn_id, "done"):
+        _quietly(live_activity.reporter.turn_ended, session_id, "done")
 
 
 def _settle_ready(session_id: str, turn_id: Any, outcome: str) -> bool:

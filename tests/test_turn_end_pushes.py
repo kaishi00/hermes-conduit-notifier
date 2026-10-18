@@ -225,3 +225,53 @@ def test_a_nested_subagent_sends_nothing(pushed):
 ])
 def test_plain_text(markdown, plain):
     assert events.plain_text(markdown) == plain
+
+
+@pytest.fixture
+def lock_screen(monkeypatch):
+    """A real Live Activity reporter whose posts are kept; returns the ends sent."""
+    live = sys.modules["conduit_push.live_activity"]
+    posts = []
+    reporter = live.LiveActivityReporter(post=lambda payload: posts.append(payload) or {"tracked": True},
+                                         clock=lambda: 100.0, start_thread=False)
+    monkeypatch.setattr(live, "reporter", reporter)
+    reporter.turn_started("s")
+    return reporter, posts
+
+
+def _ends(posts):
+    return [payload["end"] for payload in posts if payload.get("end")]
+
+
+@pytest.mark.parametrize("sent_before_the_end", [False, True])
+def test_a_failed_turn_ends_its_live_activity_failed(pushed, lock_screen, sent_before_the_end):
+    reporter, posts = lock_screen
+    plugin._post_llm_call(session_id="s", turn_id="t", assistant_response="The provider returned an error.")
+    if sent_before_the_end:
+        reporter.flush()  # the reporter's thread runs before Hermes reports the turn's end
+    plugin._on_session_end(session_id="s", turn_id="t", completed=False, interrupted=False)
+    reporter.flush()
+    assert _types(pushed) == ["turn.failed"]
+    assert _ends(posts) == ["failed"]
+
+
+def test_a_finished_turn_ends_its_live_activity_done_once(pushed, lock_screen):
+    reporter, posts = lock_screen
+    plugin._post_llm_call(session_id="s", turn_id="t", assistant_response="Done.")
+    plugin._on_session_end(session_id="s", turn_id="t", completed=True, failed=False, interrupted=False)
+    reporter.flush()
+    reporter.flush()
+    assert _ends(posts) == ["done"]
+
+
+def test_a_live_activity_whose_turn_end_never_comes_ends_done_after_the_grace(pushed, lock_screen, monkeypatch):
+    reporter, posts = lock_screen
+    later = []
+    monkeypatch.setattr(plugin, "_later", lambda delay, work: later.append(work))
+    plugin._post_llm_call(session_id="s", turn_id="t", assistant_response="Done.")
+    reporter.flush()
+    assert _ends(posts) == [], "the end waits for on_session_end"
+    [work] = later
+    work()
+    reporter.flush()
+    assert _ends(posts) == ["done"]
