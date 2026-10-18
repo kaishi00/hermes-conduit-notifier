@@ -82,20 +82,28 @@ const gateways = {};
 let device;
 
 async function pairGateways() {
+  const registered = await registerWithGateways(['a', 'b', 'c', 'd', 'e']);
+  device = registered.device;
+  Object.assign(gateways, registered.gateways);
+}
+
+async function registerWithGateways(names) {
   const registered = await api('/v1/installations', {
     method: 'POST',
     body: { device_token: randomBytes(32).toString('hex'), bundle_id: 'com.milim.relay', environment: 'production' },
   });
   assert.equal(registered.status, 201);
-  device = registered.json.credential;
+  const device = registered.json.credential;
   const installationId = registered.json.installation.id;
-  for (const name of ['a', 'b', 'c', 'd', 'e']) {
+  const gateways = {};
+  for (const name of names) {
     const pairing = await api(`/v1/installations/${installationId}/pairings`, { method: 'POST', body: {}, credential: device });
     assert.equal(pairing.status, 201);
     const claimed = await api('/v1/pairings/claim', { method: 'POST', body: { pairing_code: pairing.json.pairing_code, gateway_name: `Test Hermes ${name}` } });
     assert.equal(claimed.status, 200);
     gateways[name] = claimed.json.credential;
   }
+  return { device, installationId, gateways };
 }
 
 function newWatchKey() {
@@ -296,4 +304,36 @@ test('grant requests are checked', async () => {
     const response = await api('/v1/watch-tools/grants', { method: 'POST', credential: gateway, body: { ...valid, ...change } });
     assert.equal(response.status, 400, JSON.stringify(change));
   }
+});
+
+// Revocation ends what the credential already holds open, not just its next
+// request. These use their own installation: revoking it would break the
+// shared one.
+test('removing a gateway closes its grants: the Watch is refused and its open poll gets no call', async () => {
+  const { gateways: own } = await registerWithGateways(['revoked', 'kept']);
+  const grant = await openGrant(own.revoked);
+  const kept = await openGrant(own.kept);
+  const polled = hostPoll(own.revoked, grant, 5_000);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal((await api('/v1/gateways/current', { method: 'DELETE', credential: own.revoked })).status, 204);
+  const poll = await polled;
+  assert.equal(poll.status, 410);
+  assert.equal(poll.json.reason, 'revoked');
+  assert.equal((await watchCall(grant, { rid: rid(), ...sealed() })).status, 401);
+  // The installation's other gateway keeps its grant.
+  assert.equal((await hostPoll(own.kept, kept, 50)).status, 200);
+});
+
+test('deactivating an installation closes the grants of all its gateways', async () => {
+  const { device: ownDevice, installationId, gateways: own } = await registerWithGateways(['first', 'second']);
+  const first = await openGrant(own.first);
+  const second = await openGrant(own.second);
+  const polled = hostPoll(own.second, second, 5_000);
+  const waiting = watchCall(second, { rid: rid(), ...sealed() });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal((await polled).status, 200, 'the call reached the host before the revocation');
+  assert.equal((await api(`/v1/installations/${installationId}`, { method: 'DELETE', credential: ownDevice })).status, 204);
+  assert.equal((await waiting).status, 410, 'the waiting call ends now, not at its timeout');
+  assert.equal((await watchCall(first, { rid: rid(), ...sealed() })).status, 401);
+  assert.equal((await watchCall(second, { rid: rid(), ...sealed() })).status, 401);
 });

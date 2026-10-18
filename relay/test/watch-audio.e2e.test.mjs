@@ -84,7 +84,7 @@ async function pairGateways() {
   assert.equal(registered.status, 201);
   device = registered.json.credential;
   const installationId = registered.json.installation.id;
-  for (const name of ['a', 'b', 'c', 'd']) {
+  for (const name of ['a', 'b', 'c', 'd', 'e']) {
     const pairing = await api(`/v1/installations/${installationId}/pairings`, { method: 'POST', body: {}, credential: device });
     assert.equal(pairing.status, 201);
     const claimed = await api('/v1/pairings/claim', { method: 'POST', body: { pairing_code: pairing.json.pairing_code, gateway_name: `Test Hermes ${name}` } });
@@ -287,4 +287,11 @@ test('a gateway holds at most two bridges at once', async () => {
   const host = connect(hostPath(third), gateways.d);
   await host.opened;
   host.socket.close(1000);
+});
+
+test('removing the gateway ends its bridges on both sides', async () => {
+  const { host, watch } = await openBridge(gateways.e);
+  assert.equal((await api('/v1/gateways/current', { method: 'DELETE', credential: gateways.e })).status, 204);
+  assert.equal((await watch.closing).code, 4010);
+  assert.equal((await host.closing).code, 4010);
 });

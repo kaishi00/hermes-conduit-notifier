@@ -231,7 +231,9 @@ reach Conduit on the iPhone. Calls and answers are sealed with a per-call key
 the relay never sees (ChaCha20-Poly1305, bound to the grant, call id and
 direction), so the relay only forwards ciphertext. Grants live in memory,
 last at most 30 minutes and 120 calls, and a restart drops them; the Watch
-then falls back to the iPhone. A relay holding its maximum of grants answers a
+then falls back to the iPhone. Revoking a gateway, or deactivating its
+installation, closes its grants at once, with their waiting calls, host polls
+and audio bridges. A relay holding its maximum of grants answers a
 new one with 503 `watch_grant_capacity`, and that call's lookups go through
 the iPhone.
 

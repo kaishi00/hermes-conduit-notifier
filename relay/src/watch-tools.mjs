@@ -150,6 +150,17 @@ export class WatchToolGrants {
     }
   }
 
+  // A revoked installation (no gatewayId) or gateway loses its grants at
+  // once: a Watch bearer, a host poll that authenticated before the
+  // revocation and an audio bridge would otherwise outlive the credential
+  // until the grant expires.
+  closeOwned(installationId, gatewayId, reason) {
+    for (const grant of [...this.grants.values()]) {
+      if (grant.installationId !== installationId) continue;
+      if (gatewayId === undefined || grant.gatewayId === gatewayId) this.close(grant, reason);
+    }
+  }
+
   sweep() {
     const now = this.now();
     for (const grant of [...this.grants.values()]) {

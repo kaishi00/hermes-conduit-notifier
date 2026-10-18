@@ -31,6 +31,7 @@ let apns;
 let limits;
 let apnsSend;
 let watchTools;
+let watchGrants;
 let rings;
 let liveActivities;
 let mapsTokens;
@@ -121,11 +122,11 @@ function main() {
   tokenChallenges = new TokenChallenges({ ttlMs: TOKEN_CHALLENGE_TTL_S * 1000 });
   // A reclaimed slot's installation leaves nothing behind in memory either.
   store.onReclaim = (id) => {
-    liveActivities?.removeInstallation(id);
+    releaseInstallation(id);
     console.warn(JSON.stringify({ level: 'warn', message: 'relay full: reclaimed the longest-inactive installation', installation_id: id }));
   };
   setInterval(() => tokenChallenges.sweep(), 60_000).unref();
-  const watchGrants = new WatchToolGrants({
+  watchGrants = new WatchToolGrants({
     maxGrants: config.watchLimits.maxGrants,
     maxPerGateway: config.watchLimits.maxGrantsPerGateway,
     ...config.watchWaits,
@@ -397,8 +398,7 @@ async function route(request, response) {
     const installation = authorize(request, installationMatch[1], 'device');
     if (!installation) return sendJson(response, 401, { error: 'unauthorized' });
     enforceRevocationBudget();
-    store.deactivateInstallation(installation.id);
-    liveActivities.removeInstallation(installation.id);
+    deactivateInstallation(installation.id);
     response.writeHead(204).end();
     return;
   }
@@ -667,7 +667,7 @@ async function route(request, response) {
         console.error(JSON.stringify({ level: 'error', message: 'apns send threw', error: error instanceof Error ? error.message : String(error) }));
         return sendJson(response, 502, { error: 'apns_unreachable' });
       }
-      if (result.status === 410 || result.reason === 'BadDeviceToken' || result.reason === 'Unregistered') { store.deactivateInstallation(installation.id); liveActivities.removeInstallation(installation.id); }
+      if (result.status === 410 || result.reason === 'BadDeviceToken' || result.reason === 'Unregistered') deactivateInstallation(installation.id);
       if (!result.ok) {
         // The answerable card never reached the device: flip the parked
         // decision to undeliverable so the plugin's next poll falls back to
@@ -702,7 +702,7 @@ async function route(request, response) {
       console.error(JSON.stringify({ level: 'error', message: 'apns send threw', error: error instanceof Error ? error.message : String(error) }));
       return sendJson(response, 502, { error: 'apns_unreachable' });
     }
-    if (result.status === 410 || result.reason === 'BadDeviceToken' || result.reason === 'Unregistered') { store.deactivateInstallation(installation.id); liveActivities.removeInstallation(installation.id); }
+    if (result.status === 410 || result.reason === 'BadDeviceToken' || result.reason === 'Unregistered') deactivateInstallation(installation.id);
     if (!result.ok) return sendJson(response, 502, { error: 'apns_rejected', reason: result.reason, status: result.status });
     return sendJson(response, 202, { accepted: true, delivered: true });
   }
@@ -831,6 +831,7 @@ async function route(request, response) {
     if (!credential || !store.authenticateGateway(credential.installationId, credential.gatewayId, credential.secret)) return sendJson(response, 401, { error: 'unauthorized' });
     enforceRevocationBudget();
     store.removeGateway(credential.installationId, credential.gatewayId);
+    watchGrants.closeOwned(credential.installationId, credential.gatewayId, 'revoked');
     response.writeHead(204).end();
     return;
   }
@@ -884,7 +885,21 @@ function proveDeviceToken(deviceToken, proof) {
 // The same phone's earlier installations for a token it just proved, with
 // their Live Activities.
 function retireOtherInstallations(deviceToken, exceptId) {
-  for (const id of store.retireOtherInstallationsWithDeviceToken(deviceToken, exceptId)) liveActivities.removeInstallation(id);
+  for (const id of store.retireOtherInstallationsWithDeviceToken(deviceToken, exceptId)) releaseInstallation(id);
+}
+
+// A deactivated installation's credentials stop authenticating, and what
+// they already hold open ends with them.
+function deactivateInstallation(id) {
+  store.deactivateInstallation(id);
+  releaseInstallation(id);
+}
+
+// Its Live Activities, and its Watch grants with their waiting calls, host
+// polls and audio bridges.
+function releaseInstallation(id) {
+  liveActivities?.removeInstallation(id);
+  watchGrants?.closeOwned(id, undefined, 'revoked');
 }
 
 // A PushKit or location token another active installation registered is
@@ -1205,7 +1220,7 @@ async function sendPhoneBackground(response, installation, event, gateway) {
     console.error(JSON.stringify({ level: 'error', message: 'apns background send threw', error: error instanceof Error ? error.message : String(error) }));
     return sendJson(response, 502, { error: 'apns_unreachable' });
   }
-  if (result.status === 410 || result.reason === 'BadDeviceToken' || result.reason === 'Unregistered') { store.deactivateInstallation(installation.id); liveActivities.removeInstallation(installation.id); }
+  if (result.status === 410 || result.reason === 'BadDeviceToken' || result.reason === 'Unregistered') deactivateInstallation(installation.id);
   if (!result.ok) return sendJson(response, 502, { error: 'apns_rejected', reason: result.reason, status: result.status });
   return sendJson(response, 202, { accepted: true, delivered: true, background: true });
 }

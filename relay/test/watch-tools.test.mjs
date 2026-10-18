@@ -90,6 +90,32 @@ test('the relay-wide bound refuses a new grant once full', () => {
   assert.throws(() => newGrant(grants, { gatewayId: 'gateway-3' }), (error) => error.status === 503 && error.message === 'watch_grant_capacity');
 });
 
+test('revoking an installation or one gateway closes only the grants it owns', () => {
+  const clock = { now: 1_000_000 };
+  const grants = grantsAt(clock, { hostPollWaitMs: 600_000, callWaitMs: 600_000 });
+  const { grant: first } = newGrant(grants, { gatewayId: 'gateway-1' });
+  const { grant: second } = newGrant(grants, { gatewayId: 'gateway-2' });
+  const { grant: elsewhere } = newGrant(grants, { installationId: 'install-2', gatewayId: 'gateway-1' });
+  const closed = [];
+  grants.onClose = (grant, reason) => closed.push([grant.id, reason]);
+  const poll = new FakeResponse();
+  grants.poll(first, poll, 600_000);
+  const waiting = new FakeResponse();
+  grants.call(second, waiting, { rid: 'r'.repeat(22), n: 'n'.repeat(16), ct: 'c'.repeat(40) });
+
+  grants.closeOwned('install-1', 'gateway-1', 'revoked');
+  assert.deepEqual(closed, [[first.id, 'revoked']]);
+  assert.equal(poll.status, 410);
+  assert.equal(poll.body.reason, 'revoked');
+  assert.equal(grants.live(second.id), second);
+
+  grants.closeOwned('install-1', undefined, 'revoked');
+  assert.deepEqual(closed, [[first.id, 'revoked'], [second.id, 'revoked']]);
+  assert.equal(waiting.status, 410);
+  assert.equal(grants.live(elsewhere.id), elsewhere);
+  assert.equal(grants.size, 1);
+});
+
 test('a newer host poll takes over from the one before', () => {
   const clock = { now: 1_000_000 };
   const grants = grantsAt(clock, { hostPollWaitMs: 600_000 });
