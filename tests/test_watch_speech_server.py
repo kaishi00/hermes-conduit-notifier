@@ -1011,3 +1011,25 @@ def test_an_approval_hermes_asks_for_between_streams_is_shown_on_the_rejoin(call
         await bridge._end_session("test")
 
     _run(scenario())
+
+
+def test_a_command_too_long_for_the_card_can_only_be_denied(call):
+    async def scenario():
+        bridge = _bridge()
+        socket = await _attach(bridge)
+        watch = Watch()
+        await _start(bridge, socket, watch, approvals=True)
+        _transcript(call.speech.sockets[0], "Run the script")
+        await _until(lambda: call.hermes.prompts())
+        command = "echo " + "x" * api.SPEECH_WATCH_APPROVAL_COMMAND_CHARS
+        call.hermes.emit("approval.request", {"command": command, "description": "Long"})
+        await _until(lambda: watch.events(socket, "approval"))
+        [card] = watch.events(socket, "approval")
+        assert card["choices"] == ["deny"] and card["cut"] is True
+        assert len(card["command"]) == api.SPEECH_WATCH_APPROVAL_COMMAND_CHARS
+        await bridge._handle(watch.control({"type": "approval_answer", "id": card["id"], "choice": "once"}))
+        await _until(lambda: watch.events(socket, "approval_done"))
+        assert not _calls(call.hermes, "approval.respond")
+        await bridge._end_session("test")
+
+    _run(scenario())

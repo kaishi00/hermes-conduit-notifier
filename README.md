@@ -1897,8 +1897,9 @@ relay key. The host still opens no inbound route.
   `once` or `deny` only (`approval_done {id, resolved}` back; `approval_gone
   {id}` when it's no longer pending: the turn ended, or Hermes' approval
   timeout, `approvals.timeout`, passed); a rejoining Watch is shown the one
-  still pending. While more than one is pending, the card offers `deny`
-  only: Hermes approves its oldest, and it can drop one this plugin never
+  still pending. A command longer than the card shows (2,000 characters)
+  can only be denied (`cut: true`). While more than one is pending, the card
+  offers `deny` only: Hermes approves its oldest, and it can drop one this plugin never
   hears of (answered in Conduit, say). Any
   other Watch is told to answer in the chat. Words steer the running turn
   only while one of its tools runs (they reach Hermes with the tool's

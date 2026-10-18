@@ -9446,6 +9446,8 @@ SPEECH_WATCH_ONE_MOMENT_S = 6.0
 SPEECH_WATCH_ONE_MOMENT = "One moment."
 SPEECH_WATCH_APPROVAL_ASK = "Hermes needs your approval. It's on your Watch."
 SPEECH_WATCH_APPROVAL_CHOICES = ("once", "deny")
+# The command an approval card shows; a longer one is offered deny only.
+SPEECH_WATCH_APPROVAL_COMMAND_CHARS = 2_000
 # A segment that starts while the reply plays, or this soon after it, is the
 # speaker's echo, not the user (the Watch closes its microphone then too).
 SPEECH_WATCH_ECHO_TAIL_S = 0.5
@@ -9793,7 +9795,10 @@ class _WatchVoiceChat:
 
             self.approvals.append({
                 "id": secrets.token_hex(8), "request_id": text("request_id", 128), "at": time.monotonic(),
-                "timeout": None, "command": text("command", 2_000),
+                "timeout": None, "command": text("command", SPEECH_WATCH_APPROVAL_COMMAND_CHARS),
+                # Shown in part: approving it would approve what the card
+                # didn't show.
+                "cut": len(str(payload.get("command") or "").strip()) > SPEECH_WATCH_APPROVAL_COMMAND_CHARS,
                 "description": text("description", 500) or "Approval required",
             })
         elif kind in ("approval.cancelled", "request.cancel", "message.complete", "error"):
@@ -10498,14 +10503,17 @@ class _SpeechServerWatchSession(_WatchAudioSession):
         await self.bridge.control(self.stream, {
             "type": "approval", "id": oldest["id"], "command": oldest["command"],
             "description": oldest["description"], "choices": list(choices),
-            "pending": len(self.chat.approvals),
+            "pending": len(self.chat.approvals), "cut": bool(oldest.get("cut")),
         })
 
     def _approval_choices(self) -> Tuple[str, ...]:
         """Once only while exactly one is pending: Hermes approves its oldest,
         and its queue can drop one the plugin never hears of (answered in
         Conduit, timed out), so with more the Watch's card might not be it."""
-        return SPEECH_WATCH_APPROVAL_CHOICES if len(self.chat.approvals) == 1 else ("deny",)
+        approvals = self.chat.approvals
+        if len(approvals) == 1 and not approvals[0].get("cut"):
+            return SPEECH_WATCH_APPROVAL_CHOICES
+        return ("deny",)
 
     async def _drop_shown(self) -> None:
         if self.shown_approval is not None:
