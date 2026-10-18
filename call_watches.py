@@ -68,6 +68,7 @@ _HOURS = re.compile(r"^\s*(\d{1,2}):(\d{2})\s*(?:-|–|—|to)\s*(\d{1,2}):(\d{2
 # A cron run's session: cron_<job id>_<YYYYmmdd>_<HHMMSS> (cron/scheduler.py).
 _CRON_SESSION = re.compile(r"^cron_(?P<job>[A-Za-z0-9-]+)_\d{8}_\d{6}$")
 _thread_lock = threading.Lock()
+_setup_thread_lock = threading.Lock()
 # What the store keeps of a watch.
 CONFIG_KEYS = ("what", "how", "for_minutes", "every_minutes", "hours", "unless")
 
@@ -274,15 +275,28 @@ def _setup(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], bool
     if cronjob is None:
         return {"ok": False, "error": "unavailable",
                 "note": "This Hermes can't schedule jobs, so it can't keep a call watch. Say so in your reply."}
-    if action == "list":
-        return _list(cronjob)
-    if action == "set":
-        return _set(cronjob, args.get("watch"))
-    if action == "sync":
-        return _sync(cronjob, args.get("watches"))
-    if action == "remove":
-        return _remove(cronjob, args.get("id"))
+    with _one_setup_at_a_time():
+        if action == "list":
+            return _list(cronjob)
+        if action == "set":
+            return _set(cronjob, args.get("watch"))
+        if action == "sync":
+            return _sync(cronjob, args.get("watches"))
+        if action == "remove":
+            return _remove(cronjob, args.get("id"))
     return {"ok": False, "error": "invalid", "note": "Use action list, set, sync or remove."}
+
+
+@contextmanager
+def _one_setup_at_a_time() -> Iterator[None]:
+    # Two chats of the profile (or the gateway and the CLI) each list the
+    # jobs, then create or change them: without this, both would create the
+    # same watch, or a list would drop the config of a watch created
+    # meanwhile. Its own lock file: each config write takes the store's.
+    path = _store().path
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with _setup_thread_lock, open(path.with_name(f".{path.name}.setup.lock"), "a+b") as handle, _exclusive(handle):
+        yield
 
 
 def _list(cronjob: Callable[..., str]) -> dict[str, Any]:

@@ -3,6 +3,7 @@ import json
 import pathlib
 import sys
 import tempfile
+import threading
 import types
 from datetime import datetime, timezone
 
@@ -170,6 +171,75 @@ def test_setting_the_same_watch_again_never_adds_a_second_job(home, hermes):
     [job] = hermes.jobs.values()
     assert job["schedule"] == "every 15m"
     assert len(hermes.jobs) == 1
+
+
+class _Racing:
+    """Hermes's cronjob for two chats at once: ``pause`` runs right after an
+    action answers, while that chat is between listing and changing."""
+
+    def __init__(self, hermes, pause):
+        self.hermes, self.pause = hermes, pause
+
+    def __call__(self, action, **kwargs):
+        answer = self.hermes(action, **kwargs)
+        self.pause(action)
+        return answer
+
+
+def _at_once(*runs):
+    results = [None] * len(runs)
+
+    def run(index):
+        results[index] = runs[index]()
+
+    threads = [threading.Thread(target=run, args=(index,)) for index in range(len(runs))]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+    return results
+
+
+def test_two_chats_setting_up_the_same_watch_make_one_job(home, hermes, clock, monkeypatch):
+    both_listed = threading.Barrier(2, timeout=0.5)
+
+    def pause(action):
+        if action == "list":
+            try:
+                both_listed.wait()  # neither creates before the other has listed
+            except threading.BrokenBarrierError:
+                pass  # one setup at a time: the other chat lists after this one is done
+
+    monkeypatch.setattr(watches, "_cronjob", lambda: _Racing(hermes, pause))
+    first, second = _at_once(lambda: _setup({"action": "set", "watch": HOMELAB}, session_id="chat-1"),
+                             lambda: _setup({"action": "set", "watch": HOMELAB}, session_id="chat-2"))
+    assert [job["name"] for job in hermes.jobs.values()] == ["Call watch: homelab down"]
+    assert sorted([first["result"], second["result"]]) == ["created", "unchanged"]
+
+
+def test_listing_while_another_chat_sets_up_a_watch_keeps_it(home, hermes, clock, monkeypatch):
+    listed, created = threading.Event(), threading.Event()
+    real_put = watches.WatchStore.put
+
+    def put(self, *args, **kwargs):
+        try:
+            return real_put(self, *args, **kwargs)
+        finally:
+            created.set()
+
+    def pause(action):
+        if action == "list" and not listed.is_set():
+            listed.set()
+            created.wait(0.5)  # the other chat creates its watch meanwhile
+        elif action == "create":
+            listed.wait(0.5)
+
+    monkeypatch.setattr(watches.WatchStore, "put", put)
+    monkeypatch.setattr(watches, "_cronjob", lambda: _Racing(hermes, pause))
+    _at_once(lambda: _setup({"action": "list"}, session_id="chat-1"),
+             lambda: _setup({"action": "set", "watch": HOMELAB}, session_id="chat-2"))
+    [view] = _setup({"action": "list"})["watches"]
+    assert view["what"] == "homelab down" and not view.get("older"), view
 
 
 def test_an_older_watch_is_taken_over_by_name(home, hermes):
