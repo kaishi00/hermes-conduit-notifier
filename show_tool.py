@@ -73,8 +73,10 @@ SCHEMA: dict[str, Any] = {
 INVALID_CARDS_NOTE = ("None of the cards could be shown: each needs a type and that type's field (places with "
                       "names for map, place and places; stats, chart, weather, options or steps for the others), "
                       "and a forecast needs its source.")
-UNSUPPORTED_CARDS_NOTE = ("This version of Conduit draws only map and place cards. On a call, show it as Markdown "
-                          "instead; in a typed chat, write it in your reply.")
+UNSUPPORTED_CARDS_NOTE = ("This version of Conduit draws only map, place and places cards. On a call, show it as "
+                          "Markdown instead; in a typed chat, write it in your reply.")
+LEFT_OUT_NOTE = ("This version of Conduit draws only map, place and places cards, so the {kinds} card(s) weren't "
+                 "shown: give what they held in your reply.")
 SHOWN_NOTE = ("On the user's screen. Say in a sentence that it's there and give the gist; don't read it out or "
               "repeat it in your reply.")
 IN_CHAT_NOTE = ("The cards are shown in the chat; Markdown isn't, so put anything else in your reply. Give the "
@@ -136,21 +138,25 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
     cards = card_schema.normalize_cards(given)
     if given not in (None, []) and not cards:
         return {"ok": False, "error": "invalid_cards", "note": INVALID_CARDS_NOTE}
-    store = _store()
-    if any(card["type"] in card_schema.INFO_TYPES for card in cards) and not store.has_feature(INFO_CARDS_FEATURE):
-        # An older Conduit would draw nothing for them.
-        cards = [card for card in cards if card["type"] not in card_schema.INFO_TYPES]
-        if not cards:
-            return {"ok": False, "error": "unsupported_cards", "note": UNSUPPORTED_CARDS_NOTE}
-    markdown = args.get("markdown")
-    fallback = bool(cards) and (not isinstance(markdown, str) or not markdown.strip())
-    if fallback:
-        markdown = _fallback(cards)
     if cards and _turn_source() not in (None, "conduit"):
         # Desktop, a messaging app or the terminal draws no cards.
         return {"ok": False, "error": "not_conduit",
                 "note": "This conversation isn't open in Conduit, so cards can't be drawn. Write it in your "
                         "reply instead."}
+    store = _store()
+    markdown = args.get("markdown")
+    given_markdown = isinstance(markdown, str) and bool(markdown.strip())
+    left_out: list[str] = []
+    if any(card["type"] in card_schema.INFO_TYPES for card in cards) and not store.has_feature(INFO_CARDS_FEATURE):
+        # An older Conduit would draw nothing for them; Hermes hears which
+        # ones so it can say what they held.
+        left_out = list(dict.fromkeys(card["type"] for card in cards if card["type"] in card_schema.INFO_TYPES))
+        cards = [card for card in cards if card["type"] not in card_schema.INFO_TYPES]
+        if not cards and not given_markdown:
+            return {"ok": False, "error": "unsupported_cards", "note": UNSUPPORTED_CARDS_NOTE}
+    fallback = bool(cards) and not given_markdown
+    if fallback:
+        markdown = _fallback(cards)
     try:
         card = store.show(args.get("title"), markdown, session_id=session, cards=cards,
                           markdown_is_fallback=fallback)
@@ -158,7 +164,7 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
         if error.code == "no_device" and cards and store.has_feature(CHAT_CARDS_FEATURE):
             # No call screen to put it on, but the chat draws it from this
             # answer.
-            return {"ok": True, "cards": cards, "note": IN_CHAT_NOTE}
+            return {"ok": True, "cards": cards, "note": _with_left_out(IN_CHAT_NOTE, left_out)}
         note = str(error)
         if error.code in ("no_device", "rate_limited"):
             note += " Tell the user the gist instead."
@@ -167,8 +173,12 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
     if cards:
         # The chat's history keeps the cards from here.
         answer["cards"] = cards
-    answer["note"] = SHOWN_NOTE
+    answer["note"] = _with_left_out(SHOWN_NOTE, left_out)
     return answer
+
+
+def _with_left_out(note: str, left_out: list[str]) -> str:
+    return f"{note} {LEFT_OUT_NOTE.format(kinds=', '.join(left_out))}" if left_out else note
 
 
 def _fallback(cards: list[dict[str, Any]]) -> str:

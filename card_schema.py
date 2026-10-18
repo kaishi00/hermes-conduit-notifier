@@ -177,6 +177,8 @@ INFO_TYPES = ("stats", "chart", "weather", "comparison", "steps")
 
 def _apply_rules(card: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any] | None:
     kind = card["type"]
+    if kind not in _TYPE_FIELDS:
+        return None
     keep = {"type", "title", *_TYPE_FIELDS[kind]}
     if kind in INFO_TYPES:
         keep.add("source")
@@ -195,8 +197,9 @@ def _apply_rules(card: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any] | 
         weather = card["weather"]
         if "days" in weather:
             weather["days"] = [day for day in weather["days"] if day["low"] <= day["high"]]
-            if not weather["days"]:
-                del weather["days"]
+        for key in ("hours", "days"):
+            if key in weather and not weather[key]:
+                del weather[key]
         if "source" not in card or not any(key in weather for key in ("now", "hours", "days")):
             return None
     elif kind == "comparison":
@@ -214,6 +217,7 @@ def _place_rules(card: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any]:
     if card["type"] == "place":
         card["places"] = places[:1]
     route = card.pop("route", None)
+    # Only a map carries a route (_TYPE_FIELDS), so this is for maps alone.
     if route is not None:
         given = raw.get("places")
         survived = isinstance(given, list) and len(given) == len(places)
@@ -341,7 +345,7 @@ def _weather_markdown(card: dict[str, Any]) -> list[str]:
     lines = []
     now = weather.get("now")
     if now:
-        line = f"**{_number(now['temp'])}{degree}**, {_CONDITIONS[now['condition']]}"
+        line = f"**{_number(now['temp'])}{degree}**, {_CONDITIONS.get(now['condition'], now['condition'])}"
         if weather.get("place"):
             line = f"{_escape(weather['place'])}: {line}"
         if now.get("text"):
@@ -350,17 +354,22 @@ def _weather_markdown(card: dict[str, Any]) -> list[str]:
     elif weather.get("place"):
         lines.append(f"**{_escape(weather['place'])}**")
     if weather.get("hours"):
-        lines.append(" · ".join(f"{_escape(hour['time'])} {_number(hour['temp'])}°{_precip(hour)}"
+        lines.append(" · ".join(f"{_escape(hour['time'])} {_number(hour['temp'])}°{_condition(hour)}{_precip(hour)}"
                                 for hour in weather["hours"]))
     if weather.get("days"):
         rows = []
         for day in weather["days"]:
             row = f"- **{_escape(day['day'])}:** {_number(day['low'])}–{_number(day['high'])}{degree}"
             if day.get("condition"):
-                row += f", {_CONDITIONS[day['condition']]}"
+                row += f", {_CONDITIONS.get(day['condition'], day['condition'])}"
             rows.append(row + _precip(day))
         lines.append("\n".join(rows))
     return lines
+
+
+def _condition(entry: dict[str, Any]) -> str:
+    condition = entry.get("condition")
+    return f" {_CONDITIONS.get(condition, condition).lower()}" if condition else ""
 
 
 def _precip(entry: dict[str, Any]) -> str:
@@ -405,7 +414,9 @@ def _duration(seconds: int) -> str:
 
 
 def _number(value: float) -> str:
-    return f"{value:,g}" if abs(value) < 1e6 else f"{value:,.0f}"
+    """Plain digits, never an exponent: up to four decimals, trailing zeros dropped."""
+    text = f"{value:,.4f}".rstrip("0").rstrip(".")
+    return "0" if text in ("-0", "") else text
 
 
 _INFO_MARKDOWN = {"stats": _stats_markdown, "chart": _chart_markdown, "weather": _weather_markdown,

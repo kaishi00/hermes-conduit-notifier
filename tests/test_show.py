@@ -250,6 +250,9 @@ def test_information_cards_go_only_to_a_conduit_that_draws_them(tool_home):
     assert answer["ok"] is False and answer["error"] == "unsupported_cards", "an older Conduit would draw nothing"
     answer = _call({"title": "Today", "cards": [STATS, MAP]})
     assert answer["ok"] is True and answer["cards"] == [CLEAN_MAP], "the cards it can draw still go"
+    assert "stats card(s) weren't shown" in answer["note"], "Hermes hears what was left out"
+    answer = _call({"title": "Today", "markdown": "**Steps** 8,000", "cards": [STATS]})
+    assert answer["error"] == "no_device", "Markdown Hermes wrote still goes to a call screen, without the cards"
     _exchange(PresentStore(tool_home), features=("chat-cards", "info-cards"))
     answer = _call({"title": "Today", "cards": [STATS]})
     assert answer == {"ok": True, "cards": [STATS], "note": tool.IN_CHAT_NOTE}
