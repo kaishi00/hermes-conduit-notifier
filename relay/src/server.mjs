@@ -1446,7 +1446,11 @@ function enforceRateLimit(key, maximum, windowMs) {
     }
   }
   const value = limits.get(key);
-  if (!value && limits.size >= MAX_LIMIT_BUCKETS) throw httpError(429, 'rate_limited');
+  if (!value && limits.size >= MAX_LIMIT_BUCKETS) {
+    const full = httpError(429, 'rate_limited');
+    full.limitsFull = true;
+    throw full;
+  }
   if (!value || value.resetAt <= now) { limits.set(key, { count: 1, resetAt: now + windowMs }); return; }
   value.count += 1;
   if (value.count > maximum) throw httpError(429, 'rate_limited');
@@ -1476,7 +1480,7 @@ function enforceCallCeiling(installationId) {
   try {
     enforceRateLimit(`call:${installationId}`, config.callLimits.callsPerInstallationPerDay, CALL_WINDOW_MS);
   } catch (error) {
-    if (error?.status === 429) throw httpError(429, 'call_limit');
+    if (error?.status === 429 && !error.limitsFull) throw httpError(429, 'call_limit');
     throw error;
   }
 }
@@ -1519,8 +1523,8 @@ function readConfig() {
   if (seams.length && process.env.RELAY_TEST_SEAMS !== '1') {
     throw new Error(`${seams.join(', ')} ${seams.length > 1 ? 'are test settings' : 'is a test setting'}; unset it for a real relay.`);
   }
-  const proxyHops = process.env.TRUST_PROXY ? Number(process.env.TRUST_PROXY) : 0;
-  if (!Number.isInteger(proxyHops) || proxyHops < 0 || proxyHops > 10) {
+  const proxyHops = process.env.TRUST_PROXY && /^\d{1,2}$/.test(process.env.TRUST_PROXY) ? Number(process.env.TRUST_PROXY) : process.env.TRUST_PROXY ? NaN : 0;
+  if (!Number.isInteger(proxyHops) || proxyHops > 10) {
     throw new Error('TRUST_PROXY must be the number of reverse proxies in front of the relay (0 to 10).');
   }
   let apnsOrigin;
