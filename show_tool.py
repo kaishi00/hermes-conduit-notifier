@@ -166,7 +166,7 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
         note = str(error)
         if error.code in ("no_device", "rate_limited"):
             note += " Tell the user the gist instead."
-        return {"ok": False, "error": error.code, "note": note}
+        return {"ok": False, "error": error.code, "note": _with_left_out(note, left_out)}
     answer: dict[str, Any] = {"ok": True, "id": card["id"]}
     if cards:
         # The chat's history keeps the cards from here.

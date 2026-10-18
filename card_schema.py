@@ -354,7 +354,7 @@ def _weather_markdown(card: dict[str, Any]) -> list[str]:
     elif weather.get("place"):
         lines.append(f"**{_escape(weather['place'])}**")
     if weather.get("hours"):
-        lines.append(" · ".join(f"{_escape(hour['time'])} {_number(hour['temp'])}°{_condition(hour)}{_precip(hour)}"
+        lines.append(" · ".join(f"{_escape(hour['time'])} {_number(hour['temp'])}{degree}{_condition(hour)}{_precip(hour)}"
                                 for hour in weather["hours"]))
     if weather.get("days"):
         rows = []
