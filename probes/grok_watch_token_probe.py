@@ -173,6 +173,7 @@ class Call:
         self.socket = socket
         self.t0 = t0
         self.events: List[Dict[str, Any]] = []
+        self.arrivals: List[float] = []  # time.monotonic() as each event came in
         self.arrived = asyncio.Event()
         self.closed: Optional[str] = None
         self.reader = asyncio.ensure_future(self._read())
@@ -188,6 +189,7 @@ class Call:
                     continue
                 if isinstance(event, dict):
                     self.events.append(event)
+                    self.arrivals.append(time.monotonic())
                     self.arrived.set()
         except Exception as exc:
             self.closed = exc.__class__.__name__
@@ -229,13 +231,13 @@ class Call:
         first_audio: Optional[float] = None
         transcript: List[str] = []
         errors: List[str] = []
-        for event in self.events[start:]:
+        for event, arrived in zip(self.events[start:], self.arrivals[start:]):
             kind = event.get("type")
             if kind in ("response.output_audio.delta", "response.audio.delta"):
                 size = len(base64.b64decode(str(event.get("delta") or ""), validate=False))
                 audio += size
                 if size and first_audio is None:
-                    first_audio = round(time.monotonic() - asked, 2)
+                    first_audio = round(arrived - asked, 2)
             elif kind in ("response.output_audio_transcript.delta", "response.audio_transcript.delta"):
                 transcript.append(str(event.get("delta") or ""))
             elif kind == "error":
@@ -295,7 +297,9 @@ async def run(args, api) -> Dict[str, Any]:
     if socket is None:
         mark(t0, "the token did not open a call")
         return summary
-    mark(t0, f"call open ({'header' if summary['connect_header'] == 'ok' else 'subprotocol'})")
+    # The reuse checks below use the same method, so they test the token, not the method.
+    how = "header" if summary["connect_header"] == "ok" else "subprotocol"
+    mark(t0, f"call open ({how})")
     call = Call(socket, t0)
     try:
         await call.send({"type": "session.update", "session": {
@@ -319,7 +323,7 @@ async def run(args, api) -> Dict[str, Any]:
         mark(t0, f"first turn: {summary['first_turn']['transcript']!r}")
 
         # 4a. The same token again while the call is open.
-        second, refused = await open_socket(url, token, "header")
+        second, refused = await open_socket(url, token, how)
         summary["reuse_while_open"] = "accepted" if second else refused
         if second is not None:
             await second.close()
@@ -343,7 +347,7 @@ async def run(args, api) -> Dict[str, Any]:
             mark(t0, f"after expiry: {summary['turn_after_expiry']['transcript']!r}")
 
         # 4b. The expired token, for a new call.
-        late, refused = await open_socket(url, token, "header")
+        late, refused = await open_socket(url, token, how)
         summary["reconnect_after_expiry"] = "accepted" if late else refused
         if late is not None:
             await late.close()
@@ -351,6 +355,19 @@ async def run(args, api) -> Dict[str, Any]:
     finally:
         await call.close()
     return summary
+
+
+def local_test_server(api_base: str) -> bool:
+    """http://127.0.0.1:<port>[/v1] and nothing else (no user info, which
+    would make the part after "@" the host)."""
+    parts = urllib.parse.urlsplit(api_base)
+    try:
+        port = parts.port
+    except ValueError:
+        return False
+    return (parts.scheme == "http" and parts.hostname == "127.0.0.1" and port is not None
+            and not (parts.username or parts.password or parts.query or parts.fragment)
+            and parts.path in ("", "/v1"))
 
 
 def main() -> int:
@@ -362,7 +379,7 @@ def main() -> int:
     if not 10 <= args.expires <= 3600:
         parser.error("--expires must be between 10 and 3600 seconds")
     # The sign-in goes to xAI over HTTPS, or to a local stand-in for tests.
-    if not (args.api_base == API_BASE or args.api_base.startswith("http://127.0.0.1:")):
+    if not (args.api_base == API_BASE or local_test_server(args.api_base)):
         parser.error("--api-base must be xAI's or a local test server")
     api = load_plugin_api()
     summary = asyncio.run(run(args, api))
