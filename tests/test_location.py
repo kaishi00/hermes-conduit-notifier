@@ -156,6 +156,25 @@ def test_a_private_place_hides_everything_but_itself(store, phone):
     assert stored["lat"] is None and stored["area"] is None and stored["precision"] == "places"
 
 
+def test_making_a_place_private_forgets_what_it_revealed(store, phone):
+    arrive = {"id": "e_home", "kind": "arrive", "place_id": "p_home", "at": "2026-10-13T06:50:00+01:00"}
+    store.ingest(phone.seal(phone.batch(fix=fix(place_id="p_home"), events=[arrive])))
+    # The user marks Home private: Conduit sends just the settings.
+    store.ingest(phone.seal(phone.batch(places=[{**PLACES[0], "private": True}, *PLACES[1:]])))
+    stored = store.snapshot()["fix"]
+    assert stored["place_id"] == "p_home" and stored["precision"] == "places"
+    assert (stored["lat"], stored["lon"], stored["accuracy_m"], stored["area"]) == (None, None, None, None)
+    assert stored["distances_m"] == {} and stored["speed_mps"] is None
+    assert store.history(DEVICE, 0, NOW + 1, 10)[0] == []
+
+
+def test_a_fix_elsewhere_keeps_its_detail_when_a_place_turns_private(store, phone):
+    store.ingest(phone.seal(phone.batch(fix=fix(place_id="p_work"))))
+    store.ingest(phone.seal(phone.batch(places=[{**PLACES[0], "private": True}, *PLACES[1:]])))
+    stored = store.snapshot()["fix"]
+    assert stored["lat"] == 51.532141 and stored["area"]["name"] == "Shoreditch" and stored["precision"] == "precise"
+
+
 def test_saved_places_never_carry_coordinates(store, phone):
     places = [{**PLACES[0], "lat": 51.5, "lon": -0.1}]
     with pytest.raises(location.LocationError) as error:

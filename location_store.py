@@ -1208,6 +1208,19 @@ def _area_text(area: dict[str, str] | None) -> str | None:
     return ", ".join(seen) or None
 
 
+def _forget_newly_private(db: sqlite3.Connection, device_id: str, places_list: list[dict[str, Any]]) -> None:
+    """A place the user just made private: what was kept while it wasn't (a
+    fix there with its coordinates, arrivals and departures naming it) goes,
+    as if it had been private all along."""
+    was_public = {place_id for place_id, private in db.execute(
+        "SELECT id, private FROM places WHERE device=?", (device_id,)) if not private}
+    for place in places_list:
+        if place["private"] and place["id"] in was_public:
+            db.execute("DELETE FROM visits WHERE device=? AND place_id=?", (device_id, place["id"]))
+            db.execute("UPDATE fixes SET precision='places', lat=NULL, lon=NULL, accuracy=NULL, area=NULL,"
+                       " distances=NULL, speed=NULL WHERE device=? AND place_id=?", (device_id, place["id"]))
+
+
 def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: float) -> dict[str, Any]:
     parse_time(batch.get("sent_at"), "sent_at")
     sharing = _parse_sharing(batch.get("sharing"))
@@ -1239,6 +1252,7 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: f
 
     db.execute("UPDATE devices SET last_seen=?, sharing=? WHERE id=?", (now, json.dumps(sharing), device_id))
     if places_list is not None:
+        _forget_newly_private(db, device_id, places_list)
         db.execute("DELETE FROM places WHERE device=?", (device_id,))
         for position, place in enumerate(places_list):
             db.execute("INSERT INTO places VALUES(?,?,?,?,?,?)",
