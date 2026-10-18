@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import importlib.util
+import os
 import sys
 import types
 from pathlib import Path
@@ -195,6 +196,72 @@ def test_key_with_a_control_character_is_refused(hermes):
     with pytest.raises(api.TokenError) as caught:
         api.speech_server_target()
     assert "control character" in str(caught.value)
+
+
+def test_key_file_is_read_on_every_connection(hermes, tmp_path):
+    key = tmp_path / "token"
+    key.write_text("first\n")
+    _settings(hermes, url="ws://10.0.0.5:8765", api_key_file=str(key))
+    assert api.speech_server_target() == ("ws://10.0.0.5:8765/v1/realtime", "first")
+    key.write_text("rotated")  # a projected token the kubelet just refreshed
+    assert api.speech_server_target()[1] == "rotated"
+    assert api.speech_server_status()["has_key"] is True
+
+
+def test_an_inline_key_wins_over_the_key_file(hermes, tmp_path):
+    key = tmp_path / "token"
+    key.write_text("from-file")
+    _settings(hermes, url="ws://10.0.0.5:8765", api_key="inline", api_key_file=str(key))
+    assert api.speech_server_target()[1] == "inline"
+
+
+def test_an_unreadable_key_file_is_an_error_not_no_key(hermes, tmp_path):
+    _settings(hermes, url="ws://10.0.0.5:8765", api_key_file=str(tmp_path / "missing"))
+    with pytest.raises(api.TokenError) as caught:
+        api.speech_server_target()
+    assert caught.value.status == 503 and "key file" in str(caught.value)
+
+
+@pytest.mark.parametrize("content", [b"", b"  \n", b"x" * (16 * 1024 + 1), b"\xff\xfe\x00bad"])
+def test_an_empty_oversized_or_binary_key_file_is_refused(hermes, tmp_path, content):
+    key = tmp_path / "token"
+    key.write_bytes(content)
+    _settings(hermes, url="ws://10.0.0.5:8765", api_key_file=str(key))
+    with pytest.raises(api.TokenError) as caught:
+        api.speech_server_target()
+    assert caught.value.status == 503
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no FIFOs here")
+def test_a_fifo_key_file_is_refused_without_blocking(hermes, tmp_path):
+    fifo = tmp_path / "fifo"
+    os.mkfifo(fifo)
+    _settings(hermes, url="ws://10.0.0.5:8765", api_key_file=str(fifo))
+    with pytest.raises(api.TokenError):
+        api.speech_server_target()
+
+
+def test_a_key_file_with_a_bom_and_a_home_relative_path_is_read(hermes, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "token").write_bytes("\ufefftok\n".encode("utf-8"))
+    _settings(hermes, url="ws://10.0.0.5:8765", api_key_file="~/token")
+    assert api.speech_server_target()[1] == "tok"
+
+
+def test_the_status_names_no_detail_of_an_unusable_key_file(hermes, tmp_path):
+    _settings(hermes, url="ws://10.0.0.5:8765", api_key_file=str(tmp_path / "missing"))
+    status = api.speech_server_status()
+    assert status["available"] is False and status["has_key"] is True
+    assert "missing" not in status["reason"] and "FileNotFound" not in status["reason"]
+
+
+def test_test_sends_the_key_files_contents_as_a_bearer(client, hermes, server, tmp_path):
+    key = tmp_path / "token"
+    key.write_text("projected-token")
+    _settings(hermes, url="ws://10.0.0.5:8765", api_key_file=str(key))
+    server.upstream = FakeUpstream(frames=['{"type":"session.created"}'])
+    client.post(f"{BASE}/speech-server/test")
+    assert server.connects[0][1] == {"Authorization": "Bearer projected-token"}
 
 
 # --- test ---------------------------------------------------------------------

@@ -782,7 +782,15 @@ voice:
   speech_server:
     url: ws://192.168.1.20:8765/v1/realtime   # http(s) works too; a bare host gets /v1/realtime
     api_key: ""                               # optional, for a server behind an auth proxy
+    api_key_file: ""                          # optional: read the key from this file instead
 ```
+
+`api_key_file` names a file holding the key (an absolute path, or one starting
+with `~`; at most 16 KiB of UTF-8 text), read again on every connection, so a
+key that rotates on disk (a Kubernetes projected service-account token, a
+secret a sidecar refreshes) is always current. `api_key` wins when both are
+set. A file that's set but can't be used (missing, empty, not a regular file)
+is an error, never "no key"; the reason goes to the Hermes log.
 
 Plain `ws://` is only allowed for loopback, private, link-local and Tailscale
 addresses or LAN-style names (`localhost`, single-label names, `.local`, `.lan`,

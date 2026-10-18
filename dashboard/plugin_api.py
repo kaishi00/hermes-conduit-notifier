@@ -2321,12 +2321,55 @@ def speech_server_url(raw: Any) -> str:
     return urllib.parse.urlunsplit((scheme, netloc, path, parts.query, ""))
 
 
+SPEECH_SERVER_MAX_KEY_FILE_BYTES = 16 * 1024
+
+
+def _speech_server_key(settings: Dict[str, Any]) -> str:
+    """The key: ``api_key``, else the contents of ``api_key_file``.
+
+    The file is read on every connection, so a key that rotates on disk (a
+    Kubernetes projected service-account token, a sidecar-refreshed secret)
+    is always current. A set file that can't be used (missing, not a regular
+    file, empty, too large, not text) is an error, never "no key"; the reason
+    stays in the log, so the status can't be used to probe the host's files.
+    """
+    key = str(settings.get("api_key") or "").strip()
+    path = str(settings.get("api_key_file") or "").strip()
+    if key or not path:
+        return key
+    try:
+        key = _read_speech_server_key_file(os.path.expanduser(path))
+    except (OSError, ValueError) as exc:
+        logger.warning("The speech server key file can't be used: %s", exc if isinstance(exc, ValueError)
+                       else type(exc).__name__)
+        raise TokenError(503, "The speech server key file (voice.speech_server.api_key_file) can't be used.")
+    return key
+
+
+def _read_speech_server_key_file(path: str) -> str:
+    # Non-blocking, so a FIFO or a device never holds an executor thread.
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    with os.fdopen(descriptor, "rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            raise ValueError("not a regular file")
+        data = handle.read(SPEECH_SERVER_MAX_KEY_FILE_BYTES + 1)
+    if len(data) > SPEECH_SERVER_MAX_KEY_FILE_BYTES:
+        raise ValueError("larger than 16 KiB")
+    try:
+        key = data.decode("utf-8-sig").strip()
+    except UnicodeDecodeError:
+        raise ValueError("not UTF-8 text") from None
+    if not key:
+        raise ValueError("empty")
+    return key
+
+
 def speech_server_target(settings: Optional[Dict[str, Any]] = None) -> Tuple[str, str]:
     """(url, api_key) for this profile's speech server; TokenError(503) when unset or invalid."""
     if settings is None:
         settings = _speech_server_settings()
     url = speech_server_url(settings.get("url"))
-    key = str(settings.get("api_key") or "").strip()
+    key = _speech_server_key(settings)
     if any(ord(c) < 0x20 or ord(c) == 0x7F for c in key):
         raise TokenError(503, "The speech server key contains a control character.")
     return url, key
@@ -2339,7 +2382,7 @@ def speech_server_status() -> Dict[str, Any]:
     except TokenError as exc:
         return {"configured": False, "available": False, "url": None, "has_key": False, "reason": str(exc)}
     configured = bool(str(settings.get("url") or "").strip())
-    has_key = bool(str(settings.get("api_key") or "").strip())
+    has_key = bool(str(settings.get("api_key") or "").strip() or str(settings.get("api_key_file") or "").strip())
     try:
         url, _ = speech_server_target(settings)
     except TokenError as exc:
