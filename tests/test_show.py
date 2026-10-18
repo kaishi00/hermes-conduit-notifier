@@ -260,12 +260,13 @@ def test_information_cards_go_only_to_a_conduit_that_draws_them(tool_home):
 
 def test_a_phone_without_information_cards_gets_only_what_it_draws(store):
     _exchange(store, features=("show-cards", "info-cards"))
-    store.show("Today", TABLE, cards=[STATS, CLEAN_MAP])
+    store.show("Today", TABLE, cards=[STATS, CLEAN_MAP], markdown_is_fallback=True)
     store.show("Steps", TABLE, cards=[STATS], markdown_is_fallback=True)
     old = {"installation_id": "older-phone", "device": "iPhone", "app_version": "1.9", "results": [],
            "features": ["show-cards"]}
     mixed, info_only = store.exchange(old)["cards"]
     assert mixed["cards"] == [CLEAN_MAP], "an older build gets the cards it draws"
+    assert "fallback" not in mixed, "and the Markdown, which covers what was left out"
     assert "cards" not in info_only and "fallback" not in info_only, "and the Markdown when nothing else is left"
     assert [card["cards"] for card in _exchange(store, features=("show-cards", "info-cards"))["cards"]] == \
         [[STATS, CLEAN_MAP], [STATS]]

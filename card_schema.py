@@ -345,7 +345,7 @@ def _weather_markdown(card: dict[str, Any]) -> list[str]:
     lines = []
     now = weather.get("now")
     if now:
-        line = f"**{_number(now['temp'])}{degree}**, {_CONDITIONS.get(now['condition'], now['condition'])}"
+        line = f"**{_number(now['temp'])}{degree}**, {_condition_name(now['condition'])}"
         if weather.get("place"):
             line = f"{_escape(weather['place'])}: {line}"
         if now.get("text"):
@@ -361,7 +361,7 @@ def _weather_markdown(card: dict[str, Any]) -> list[str]:
         for day in weather["days"]:
             row = f"- **{_escape(day['day'])}:** {_number(day['low'])}–{_number(day['high'])}{degree}"
             if day.get("condition"):
-                row += f", {_CONDITIONS.get(day['condition'], day['condition'])}"
+                row += f", {_condition_name(day['condition'])}"
             rows.append(row + _precip(day))
         lines.append("\n".join(rows))
     return lines
@@ -369,7 +369,11 @@ def _weather_markdown(card: dict[str, Any]) -> list[str]:
 
 def _condition(entry: dict[str, Any]) -> str:
     condition = entry.get("condition")
-    return f" {_CONDITIONS.get(condition, condition).lower()}" if condition else ""
+    return f" {_condition_name(condition).lower()}" if condition else ""
+
+
+def _condition_name(condition: str) -> str:
+    return _CONDITIONS.get(condition) or _escape(condition)
 
 
 def _precip(entry: dict[str, Any]) -> str:
@@ -416,6 +420,9 @@ def _duration(seconds: int) -> str:
 def _number(value: float) -> str:
     """Plain digits, never an exponent: up to four decimals, trailing zeros dropped."""
     text = f"{value:,.4f}".rstrip("0").rstrip(".")
+    if text in ("0", "-0") and value:
+        # Too small for four decimals: as many as it takes.
+        text = f"{value:.12f}".rstrip("0")
     return "0" if text in ("-0", "") else text
 
 

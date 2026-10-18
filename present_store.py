@@ -587,17 +587,20 @@ def _normalized(raw: Any, now: float) -> dict[str, Any]:
 
 def _for_device(card: dict[str, Any], features: list[str]) -> dict[str, Any]:
     """A copy of the card for one phone: one that doesn't draw information
-    cards gets the rest, or just the Markdown when nothing else is left."""
+    cards gets the rest, with the Markdown shown (it covers what was left
+    out), or just the Markdown when nothing else is left."""
     card = dict(card)
     schema = _card_schema()
     if INFO_CARDS_FEATURE in features or not card.get("cards") or schema is None:
         return card
     kept = [rich for rich in card["cards"] if rich.get("type") not in schema.INFO_TYPES]
+    if len(kept) == len(card["cards"]):
+        return card
     if kept:
         card["cards"] = kept
     else:
         card.pop("cards")
-        card.pop("fallback", None)
+    card.pop("fallback", None)
     return card
 
 
