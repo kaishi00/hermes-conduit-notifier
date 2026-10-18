@@ -258,6 +258,19 @@ def test_information_cards_go_only_to_a_conduit_that_draws_them(tool_home):
     assert answer == {"ok": True, "cards": [STATS], "note": tool.IN_CHAT_NOTE}
 
 
+def test_a_phone_without_information_cards_gets_only_what_it_draws(store):
+    _exchange(store, features=("show-cards", "info-cards"))
+    store.show("Today", TABLE, cards=[STATS, CLEAN_MAP])
+    store.show("Steps", TABLE, cards=[STATS], markdown_is_fallback=True)
+    old = {"installation_id": "older-phone", "device": "iPhone", "app_version": "1.9", "results": [],
+           "features": ["show-cards"]}
+    mixed, info_only = store.exchange(old)["cards"]
+    assert mixed["cards"] == [CLEAN_MAP], "an older build gets the cards it draws"
+    assert "cards" not in info_only and "fallback" not in info_only, "and the Markdown when nothing else is left"
+    assert [card["cards"] for card in _exchange(store, features=("show-cards", "info-cards"))["cards"]] == \
+        [[STATS, CLEAN_MAP], [STATS]]
+
+
 def test_cards_are_refused_where_conduit_isnt_drawing_them(tool_home, monkeypatch):
     _exchange(PresentStore(tool_home), features=("chat-cards",))
     monkeypatch.setattr(tool, "_turn_source", lambda: "messaging")

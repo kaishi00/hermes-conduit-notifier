@@ -27,7 +27,7 @@ from typing import Any, Callable
 from hermes_constants import get_hermes_home
 
 from . import card_schema, client, reply_sources
-from .present_store import MAX_CARD_MARKDOWN_CHARS, MAX_CARD_TITLE_CHARS, PresentError, PresentStore
+from .present_store import INFO_CARDS_FEATURE, MAX_CARD_MARKDOWN_CHARS, MAX_CARD_TITLE_CHARS, PresentError, PresentStore
 
 logger = logging.getLogger("hermes.plugins.conduit_push")
 
@@ -35,8 +35,6 @@ TOOL_NAME = "conduit_show"
 TOOLSET = "conduit"
 
 CHAT_CARDS_FEATURE = "chat-cards"
-# A Conduit that draws stats, charts, forecasts, comparisons and steps.
-INFO_CARDS_FEATURE = "info-cards"
 
 SCHEMA: dict[str, Any] = {
     "name": TOOL_NAME,

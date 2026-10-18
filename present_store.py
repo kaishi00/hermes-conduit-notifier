@@ -86,6 +86,8 @@ MAX_CARD_MARKDOWN_CHARS = 8000
 # exchanged for Hermes to count on it (a phone in a voice conversation
 # exchanges at least every reply).
 SHOW_FEATURE = "show-cards"
+# A phone that draws stats, charts, forecasts, comparisons and steps.
+INFO_CARDS_FEATURE = "info-cards"
 SHOW_DEVICE_RECENT_S = 6 * 3600
 # How often an unchanged phone's last-seen time is refreshed.
 SEEN_REFRESH_S = 60
@@ -164,7 +166,8 @@ class PresentStore:
             # Expired cards leave the file; the rest go only to a phone that
             # shows them.
             state["cards"] = [card for card in state["cards"] if now < card["expires_at"]]
-            cards = [dict(card) for card in state["cards"]] if SHOW_FEATURE in device["features"] else []
+            cards = ([_for_device(card, device["features"]) for card in state["cards"]]
+                     if SHOW_FEATURE in device["features"] else [])
         # Only a host with cards to show says so.
         return {"prompts": waiting, **({"cards": cards} if cards else {})}
 
@@ -580,6 +583,22 @@ def _normalized(raw: Any, now: float) -> dict[str, Any]:
         state["shown"] = [at for at in shown if isinstance(at, (int, float)) and not isinstance(at, bool)
                           and now - at < HOUR_S][-CARDS_PER_HOUR:]
     return state
+
+
+def _for_device(card: dict[str, Any], features: list[str]) -> dict[str, Any]:
+    """A copy of the card for one phone: one that doesn't draw information
+    cards gets the rest, or just the Markdown when nothing else is left."""
+    card = dict(card)
+    schema = _card_schema()
+    if INFO_CARDS_FEATURE in features or not card.get("cards") or schema is None:
+        return card
+    kept = [rich for rich in card["cards"] if rich.get("type") not in schema.INFO_TYPES]
+    if kept:
+        card["cards"] = kept
+    else:
+        card.pop("cards")
+        card.pop("fallback", None)
+    return card
 
 
 def _shows_cards(state: dict[str, Any], now: float) -> bool:
