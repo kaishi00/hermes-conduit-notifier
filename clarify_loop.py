@@ -236,6 +236,11 @@ def _first_answer_wins(
             # the same grace as unknowns: a persistently unreachable relay
             # must not disable the never-parked stop and poll the full budget.
             status = {"status": "__error__"}
+        if not isinstance(status, dict):
+            # A 200 whose body isn't an object (a misbehaving relay or
+            # proxy): unproductive like a transport failure, not a crash
+            # that leaves the decision parked.
+            status = {"status": "__error__"}
         state = str(status.get("status") or "")
         if state == "answered":
             if batch_protocol and "answers" in status:

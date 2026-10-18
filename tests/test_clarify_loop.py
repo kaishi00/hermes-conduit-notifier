@@ -457,6 +457,45 @@ def test_consecutive_unknown_polls_stop_after_grace_window():
     assert len(fake.poll_ids) == 3, "polling must stop at the grace boundary"
 
 
+def test_a_poll_answer_that_is_not_an_object_is_tolerated_until_answered():
+    # A misbehaving relay or proxy answers 200 with a list, null or a string:
+    # an unproductive poll, like a transport error, not a crash.
+    fake = _FakeState([[], None, "ok", {"status": "answered", "answer": "Blue"}])
+    _install(fake)
+    original, release = _blocking_original("original result")
+    try:
+        result = loop.middleware(**_kwargs(original, {"question": "Q?"}))
+    finally:
+        release.set()
+    assert json.loads(result)["user_response"] == "Blue"
+    assert len(fake.poll_ids) == 4
+
+
+def test_poll_answers_that_are_never_objects_fall_back_after_grace_window():
+    fake = _FakeState([[], None, "ok", 7, ["answered"]])
+    _install(fake)
+
+    def original(args):
+        # Hermes' own prompt is answered once the relay has been given up on.
+        deadline = time.monotonic() + 5
+        while len(fake.poll_ids) < 3 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        return "original result"
+
+    old_grace = loop.UNKNOWN_POLL_GRACE
+    loop.UNKNOWN_POLL_GRACE = 3
+    try:
+        result = loop.middleware(**_kwargs(original, {"question": "Q?"}))
+    finally:
+        loop.UNKNOWN_POLL_GRACE = old_grace
+    assert result == "original result"
+    assert len(fake.poll_ids) == 3, "polling stops at the grace boundary"
+    deadline = time.monotonic() + 5
+    while not fake.cancelled_ids and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert len(fake.cancelled_ids) == 1, "the parked decision is released"
+
+
 def test_persistent_transport_errors_stop_after_grace_window():
     # A persistently unreachable relay must not poll the full budget: errors
     # count against the same grace as unknowns.
