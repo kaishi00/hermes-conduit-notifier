@@ -94,6 +94,7 @@ def relay():
             "APNS_TEAM_ID": "BBBBBBBBBB",
             "APNS_TOPIC": "com.milim.relay",
             "APNS_MODE": "accept",
+            "RELAY_TEST_SEAMS": "1",
         },
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,

@@ -134,6 +134,7 @@ def relay():
         # the answer (a rejected/thrown send would flip it undeliverable and
         # the middleware would fall back to the native path instead).
         "APNS_MODE": "accept",
+        "RELAY_TEST_SEAMS": "1",
         # Every "delivered" APNs payload, for the end-to-end encryption test.
         "APNS_CAPTURE_PATH": str(tmpdir / "apns-capture.jsonl"),
     }
