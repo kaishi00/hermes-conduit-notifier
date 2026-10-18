@@ -73,3 +73,22 @@ def test_routes_read_and_change_a_jobs_notifications(client):
 def test_a_bad_body_is_a_400(client):
     assert client.put(f"{BASE}/cron/notifications", json={"job_id": "x", "notify": 1}).status_code == 400
     assert client.put(f"{BASE}/cron/notifications", json=["x"]).status_code == 400
+
+
+def test_an_unreadable_file_is_not_overwritten(tmp_path, monkeypatch):
+    store = CronStore(tmp_path)
+    store.set_notify("a", False)
+    store.set_notify("b", False)
+    saved = store.path.read_text(encoding="utf-8")
+    real = type(store.path).read_text
+
+    def unreadable(path, *args, **kwargs):
+        if path == store.path:
+            raise PermissionError("busy")
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(store.path), "read_text", unreadable)
+    with pytest.raises(OSError):
+        store.set_notify("c", False)
+    monkeypatch.undo()
+    assert store.path.read_text(encoding="utf-8") == saved

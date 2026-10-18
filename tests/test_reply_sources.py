@@ -251,3 +251,22 @@ def test_a_bad_body_is_a_400(client):
 
 def test_watch_jobs_count_as_conduit():
     assert sources.turn_source("desktop", api._WatchJobTransport(None)) == "conduit"
+
+
+def test_an_unreadable_file_is_not_overwritten(tmp_path, monkeypatch):
+    store = Store(tmp_path)
+    store.set_notify("messaging", False)
+    store.set_notify("desktop", False)
+    saved = store.path.read_text(encoding="utf-8")
+    real = type(store.path).read_text
+
+    def unreadable(path, *args, **kwargs):
+        if path == store.path:
+            raise PermissionError("busy")
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(store.path), "read_text", unreadable)
+    with pytest.raises(OSError):
+        store.set_notify("terminal", False)
+    monkeypatch.undo()
+    assert store.path.read_text(encoding="utf-8") == saved

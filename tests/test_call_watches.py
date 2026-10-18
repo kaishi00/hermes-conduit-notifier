@@ -474,3 +474,21 @@ def test_a_scheduler_crash_stays_out_of_the_note(home, hermes, monkeypatch):
     monkeypatch.setattr(watches, "_cronjob", lambda: crash)
     answer = _setup({"action": "set", "watch": HOMELAB})
     assert answer["ok"] is False and "/home/eric" not in answer["note"] and "scheduler failed" in answer["note"]
+
+
+def test_an_unreadable_store_is_not_overwritten(home, hermes, clock, monkeypatch):
+    _homelab(hermes)
+    store = watches._store()
+    saved = store.path.read_text(encoding="utf-8")
+    real = type(store.path).read_text
+
+    def unreadable(path, *args, **kwargs):
+        if path == store.path:
+            raise PermissionError("busy")
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(store.path), "read_text", unreadable)
+    with pytest.raises(OSError):
+        store.put("another-job", {"what": "Is the NAS up?"})
+    monkeypatch.undo()
+    assert store.path.read_text(encoding="utf-8") == saved

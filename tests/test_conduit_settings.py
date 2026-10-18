@@ -401,3 +401,21 @@ def test_the_route_needs_a_paired_profile(route_home):
 
 def test_the_route_is_a_reported_capability():
     assert "conduit-settings" in api.ROUTE_CAPABILITIES
+
+
+def test_an_unreadable_store_is_not_overwritten(store, monkeypatch):
+    _sync(store, installation=IPAD)
+    _sync(store)
+    saved = store.path.read_text(encoding="utf-8")
+    real = type(store.path).read_text
+
+    def unreadable(path, *args, **kwargs):
+        if path == store.path:
+            raise PermissionError("busy")
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(store.path), "read_text", unreadable)
+    with pytest.raises(OSError):
+        _sync(store)
+    monkeypatch.undo()
+    assert store.path.read_text(encoding="utf-8") == saved

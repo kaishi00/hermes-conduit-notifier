@@ -701,3 +701,20 @@ def test_malformed_outcomes_on_disk_are_dropped(tmp_path):
                           "not an entry"]
     store.path.write_text(json.dumps(state))
     assert [entry["id"] for entry in store.take_outcomes("rt-1")] == [CALL_ID]
+
+
+def test_an_unreadable_store_is_not_overwritten(tmp_path, monkeypatch):
+    store = _store(tmp_path, enabled=True, rules="Only outages.")
+    saved = store.path.read_text(encoding="utf-8")
+    real = type(store.path).read_text
+
+    def unreadable(path, *args, **kwargs):
+        if path == store.path:
+            raise PermissionError("busy")
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(store.path), "read_text", unreadable)
+    with pytest.raises(OSError):
+        store.update_settings({"when_asked": False})
+    monkeypatch.undo()
+    assert store.path.read_text(encoding="utf-8") == saved

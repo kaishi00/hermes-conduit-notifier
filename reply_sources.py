@@ -76,7 +76,7 @@ class ReplySourcesStore:
         # Only the dashboard writes, so a process-wide lock is enough; a
         # reader sees the old file or the new one.
         with _thread_lock:
-            muted = self._load()
+            muted = self._load(for_write=True)
             muted.pop(source, None)
             if not notify:
                 muted[source] = self.clock()
@@ -84,10 +84,16 @@ class ReplySourcesStore:
                 self._save({"version": VERSION, "muted_reply_sources": muted})
         return self.settings()
 
-    def _load(self) -> dict[str, float]:
+    def _load(self, *, for_write: bool = False) -> dict[str, float]:
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, RecursionError):
+        except (FileNotFoundError, ValueError, RecursionError):
+            return {}
+        except OSError:
+            # Unreadable for now (not missing, not corrupt): a write would
+            # replace the choices it couldn't read, so it fails instead.
+            if for_write:
+                raise
             return {}
         entries = raw.get("muted_reply_sources") if isinstance(raw, dict) else None
         if not isinstance(entries, dict):
