@@ -1457,9 +1457,11 @@ keep only that field.
   a `url` if any), shown on the card. A forecast needs one or it's dropped;
   without one, the other cards read as Hermes' own.
 - **Only where they're drawn.** A Conduit says `info-cards` in its
-  exchange's `features` when it draws them. Without it, the tool leaves
-  them out (`unsupported_cards` when nothing else is left), so an older
-  build never gets a card it would show as nothing. Each phone's exchange
+  exchange's `features` when it draws them. Unless every Conduit that
+  draws cards (`show-cards` or `chat-cards`) and exchanged with the profile
+  in the last 30 days says it, the tool leaves them out (`unsupported_cards`
+  when nothing else is left): the chat keeps the cards, and an older build
+  opening it would show them as nothing. Each phone's exchange
   also leaves out the cards it can't draw and shows the Markdown instead.
 
 ### Media, contact and live cards (plugin 0.47+)

@@ -87,6 +87,12 @@ MAX_CARD_MARKDOWN_CHARS = 8000
 # exchanges at least every reply).
 SHOW_FEATURE = "show-cards"
 SHOW_DEVICE_RECENT_S = 6 * 3600
+# What a Conduit that draws cards in chats says. Cards a feature names
+# (info-cards…) stay in a chat's history, which any of the user's Conduits may
+# open, so they need every Conduit that draws cards and exchanged within this
+# long to say it draws them.
+CHAT_CARDS_FEATURE = "chat-cards"
+CARD_DEVICE_RECENT_S = 30 * 24 * 3600
 # How often an unchanged phone's last-seen time is refreshed.
 SEEN_REFRESH_S = 60
 DEFAULT_TTL_MINUTES = 30
@@ -185,6 +191,16 @@ class PresentStore:
         """Whether a Conduit that exchanged with this profile says it can
         do ``feature`` (like "maps-navigate")."""
         return any(feature in device.get("features", []) for device in self._load()["devices"].values())
+
+    def has_feature_everywhere(self, feature: str) -> bool:
+        """Whether every Conduit that draws cards (on a call or in chats) and
+        exchanged with this profile recently says it can do ``feature``;
+        False when there's none."""
+        now = self.clock()
+        drawing = [device["features"] for device in self._load()["devices"].values()
+                   if {SHOW_FEATURE, CHAT_CARDS_FEATURE} & set(device["features"])
+                   and now - device["seen_at"] < CARD_DEVICE_RECENT_S]
+        return bool(drawing) and all(feature in features for features in drawing)
 
     def confirm(self, title: Any, preview: Any, action_label: Any = None, *, spoken_yes: Any = None,
                 session_id: Any = None, ttl_minutes: Any = None, maps: Any = None) -> dict[str, Any]:

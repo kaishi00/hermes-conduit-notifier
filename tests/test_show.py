@@ -3,6 +3,7 @@ import json
 import pathlib
 import sys
 import tempfile
+import time
 import types
 
 import pytest
@@ -340,3 +341,27 @@ def test_cards_are_left_out_when_the_schema_is_missing(store, monkeypatch):
     assert "cards" not in card
     [shown] = _exchange(store)["cards"]
     assert shown["markdown"] == TABLE, "everything else still works"
+
+
+def test_feature_cards_go_only_where_every_recent_conduit_draws_them(tool_home):
+    store = PresentStore(tool_home)
+    # A newer iPad draws stats; the iPhone also in use draws chat cards only,
+    # and either may open the chat that keeps the cards.
+    store.exchange({"installation_id": "ipad-installation-2", "results": [],
+                    "features": ["chat-cards", "info-cards"]})
+    store.exchange({"installation_id": PHONE, "results": [], "features": ["chat-cards"]})
+    answer = _call({"title": "Steps", "cards": [STATS]})
+    assert answer["ok"] is False and answer["error"] == "unsupported_cards", answer
+    answer = _call({"title": "Steps", "cards": [STATS, MAP]})
+    assert answer["cards"] == [CLEAN_MAP] and "can't draw stats cards" in answer["note"]
+
+
+def test_a_conduit_not_seen_for_weeks_no_longer_holds_cards_back(tool_home):
+    # Seen last weeks ago, a day before it would be forgotten altogether.
+    weeks_ago = time.time() - store_module.DEVICE_TTL_S + 24 * 3600
+    PresentStore(tool_home, clock=lambda: weeks_ago).exchange(
+        {"installation_id": PHONE, "results": [], "features": ["chat-cards"]})
+    store = PresentStore(tool_home)
+    store.exchange({"installation_id": "ipad-installation-2", "results": [],
+                    "features": ["chat-cards", "info-cards"]})
+    assert _call({"title": "Steps", "cards": [STATS]}) == {"ok": True, "cards": [STATS], "note": tool.IN_CHAT_NOTE}
