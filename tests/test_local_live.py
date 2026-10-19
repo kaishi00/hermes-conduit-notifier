@@ -802,8 +802,9 @@ def test_the_readiness_check_is_still_the_phones_turn(client, hermes, front):
     assert front.requests == []
 
 
-def test_a_fast_model_that_is_down_hands_the_utterance_to_hermes(client, hermes, front):
-    front.answers = [500]
+@pytest.mark.parametrize("answer", [500, []], ids=["refused", "empty"])
+def test_a_fast_model_that_is_down_hands_the_utterance_to_hermes(client, hermes, front, answer):
+    front.answers = [answer]
     headers = {"Authorization": f"Bearer {_key(hermes)}"}
     with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
         _agent(ws)

@@ -12,6 +12,7 @@ import pathlib
 import sys
 import tempfile
 import threading
+import time
 import types
 
 import pytest
@@ -123,8 +124,12 @@ def test_the_live_activity_thread_posts_with_its_profile(profiles):
     reporter = live_activity.LiveActivityReporter()
     _as_coder(profiles, lambda: reporter.turn_started("s1"))
 
-    assert profiles.done.wait(5), "the Live Activity thread never posted"
-    assert profiles.posted[0] == ("POST", "cred-coder")
+    # Another test's reporter thread can still be winding down and post with
+    # the launch profile, so look for this reporter's post rather than the first.
+    deadline = time.monotonic() + 5
+    while ("POST", "cred-coder") not in profiles.posted and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert ("POST", "cred-coder") in profiles.posted, "the Live Activity thread never posted with its profile"
 
 
 def test_a_released_decision_is_cancelled_with_its_profile(profiles):

@@ -3747,7 +3747,7 @@ class _LocalLiveAgent:
         self._append({"role": "user", "content": text})
         said_anything = False
         budget = LOCAL_LIVE_MAX_REPLY_CHARS
-        for _ in range(LOCAL_LIVE_AGENT_MAX_ROUNDS):
+        for round_number in range(LOCAL_LIVE_AGENT_MAX_ROUNDS):
             spoken: List[str] = []
             tool_calls: Dict[int, Dict[str, Any]] = {}
             completed = False
@@ -3795,6 +3795,12 @@ class _LocalLiveAgent:
                     self._append(message)
             calls = [slot for _, slot in sorted(tool_calls.items()) if slot["name"]]
             if not calls:
+                if round_number == 0 and not said_anything:
+                    # An empty answer (a wrong address that answers with a
+                    # web page, say) is a failure too: Hermes takes it.
+                    if self.history and self.history[-1] == {"role": "user", "content": text}:
+                        self.history.pop()
+                    raise _LocalLiveFrontUnavailable("The fast model gave no answer")
                 return
             for slot in calls:
                 if generation != self.generation:
