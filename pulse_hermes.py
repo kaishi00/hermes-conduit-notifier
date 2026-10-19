@@ -93,7 +93,7 @@ def find_home_chat(home: Path, title: str) -> list[HomeChat]:
 def chat_for_key(home: Path, session_key: str) -> Optional[HomeChat]:
     rows = _run(home, (
         "SELECT id, session_key, title, pinned FROM sessions WHERE session_key = ? "
-        "ORDER BY COALESCE(last_activity_at, started_at) DESC LIMIT 1"
+        "AND archived = 0 AND hidden = 0 ORDER BY COALESCE(last_activity_at, started_at) DESC LIMIT 1"
     ), (session_key,))
     if not rows:
         return None

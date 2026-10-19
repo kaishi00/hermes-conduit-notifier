@@ -105,7 +105,10 @@ class PulseStore:
         with _lock, self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute("SELECT value_json FROM settings WHERE key='probe_requested'").fetchone()
-            asked = bool(row and json.loads(row["value_json"]))
+            try:
+                asked = bool(row and json.loads(row["value_json"]))
+            except ValueError:
+                asked = False
             if asked:
                 conn.execute("UPDATE settings SET value_json='false' WHERE key='probe_requested'")
             conn.execute("COMMIT")

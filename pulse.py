@@ -51,9 +51,9 @@ def register(ctx: Any) -> None:
     hosts the gateway, and only while Pulse is on."""
     global _ctx, _thread, _stop, _started_at
     _ctx = ctx
-    _started_at = time.time()
     if _thread is not None and _thread.is_alive() and not _stop.is_set():
         return  # loaded again without an unload: the running loop serves the new context
+    _started_at = time.time()
     # Each loop has its own stop, so one still winding down never resumes.
     _stop = threading.Event()
     _thread = threading.Thread(target=_run, args=(_stop,), name="conduit-pulse", daemon=True)
@@ -160,6 +160,8 @@ def tick(now: Optional[float] = None) -> None:
     if not asked and not _probe_due(pulse_store, now):
         return
     if any(row["kind"] == PROBE for row in pulse_store.in_flight()):
+        if asked:
+            logger.info("conduit_push: Pulse: a delivery check is already in flight; not sending another")
         return
     chat, problem = home_chat(pulse_store, home)
     if problem:
