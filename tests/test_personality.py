@@ -268,14 +268,36 @@ def test_hook_never_raises():
     assert plugin._pre_llm_call(conversation_history=[{"role": "user", "content": [None, 3, {"type": "text"}]}]) is None
 
 
-def test_manifest_declares_every_registered_hook():
-    hooks = []
+def _manifest_list(manifest, key):
+    """A top-level list in plugin.yaml, or None when the key is missing."""
+    lines = manifest.splitlines()
+    if f"{key}:" not in lines:
+        return None
+    items = []
+    for line in lines[lines.index(f"{key}:") + 1:]:
+        if not line.startswith("  - "):
+            break
+        items.append(line[4:].strip())
+    return items
+
+
+def test_manifest_declares_what_register_registers(monkeypatch):
+    # Hermes' plugin validator compares these canonical keys with what
+    # register() registers, so each must list exactly that.
+    monkeypatch.setattr(plugin, "_clarify_loop_active", plugin._clarify_loop_active)
+    monkeypatch.setattr(plugin.clarify_loop, "profile", plugin.clarify_loop.profile)
+    hooks, tools, middleware = [], [], []
     ctx = types.SimpleNamespace(profile_name="default", register_hook=lambda name, fn: hooks.append(name),
+                                register_tool=lambda name, **kwargs: tools.append(name),
+                                register_skill=lambda name, path: None,
+                                register_middleware=lambda kind, fn: middleware.append(kind),
                                 register_cli_command=lambda **kwargs: None)
     plugin.register(ctx)
     manifest = (ROOT / "plugin.yaml").read_text()
-    declared = {line.strip()[2:] for line in manifest.split("hooks:", 1)[1].splitlines() if line.strip().startswith("- ")}
-    assert set(hooks) <= declared
+    assert sorted(_manifest_list(manifest, "provides_hooks") or []) == sorted(hooks)
+    assert sorted(_manifest_list(manifest, "provides_tools") or []) == sorted(tools) and tools
+    assert _manifest_list(manifest, "provides_middleware") == middleware
+    assert _manifest_list(manifest, "hooks") is None, "provides_hooks is the canonical key"
 
 
 def test_a_hermes_that_refuses_the_hook_keeps_the_other_hooks():

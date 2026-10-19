@@ -8,7 +8,7 @@ platforms:
   - linux
   - macos
   - windows
-hooks:
+provides_hooks:
   - pre_tool_call
   - post_llm_call
   - on_session_end
@@ -19,3 +19,18 @@ hooks:
   - post_approval_response
   - pre_api_request
   - post_api_request
+provides_tools:
+  - conduit_call_user
+  - conduit_call_watch
+  - conduit_watch_report
+  - conduit_settings
+  - conduit_present
+  - conduit_show
+  - conduit_health
+  - conduit_location
+  - conduit_maps
+  - conduit_calendar
+  - conduit_phone
+  - conduit_contacts
+provides_middleware:
+  - tool_execution
