@@ -1400,29 +1400,35 @@ def _post_sdp(url: str, headers: Dict[str, str], body: Dict[str, Any]) -> tuple:
     request = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), method="POST",
                                      headers={**headers, "Content-Type": "application/json"})
     answered = False
+
+    def failed(message: str) -> TokenError:
+        # Once OpenAI answered 2xx, a session may have started: every later failure says so.
+        return (_GPTLiveAnsweredError if answered else TokenError)(502, message + GPT_LIVE_NO_FALLBACK)
+
     try:
         with _opener.open(request, timeout=GPT_LIVE_TIMEOUT_S) as response:
             answered = 200 <= response.status < 300
             # An SDP answer is a few KB; one byte over the cap is refused, not buffered.
             answer = response.read(GPT_LIVE_MAX_ANSWER_BYTES + 1)
             if len(answer) > GPT_LIVE_MAX_ANSWER_BYTES:
-                raise (_GPTLiveAnsweredError if answered else TokenError)(
-                    502, "GPT-Live returned an invalid WebRTC answer. " + GPT_LIVE_NO_FALLBACK)
+                raise failed("GPT-Live returned an invalid WebRTC answer. ")
             return response.status, answer.decode("utf-8", "replace"), response.headers.get("Location", "")
     except urllib.error.HTTPError as exc:
         # The body can echo account details; only the status goes back to Conduit.
         status = exc.code
         exc.close()
         return status, "", ""
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        logger.warning("GPT-Live session request could not reach OpenAI: %s", getattr(exc, "reason", exc))
-        # A read that fails after a 2xx is not a call that never started.
-        raise (_GPTLiveAnsweredError if answered else TokenError)(
-            502, "GPT-Live connection failed. " + GPT_LIVE_NO_FALLBACK)
+    except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
+        # http.client.HTTPException covers a chunked body cut off mid-read (IncompleteRead).
+        if answered:
+            logger.warning("GPT-Live could not read OpenAI's answer after a 2xx: %s", type(exc).__name__)
+        else:
+            logger.warning("GPT-Live session request could not reach OpenAI: %s", getattr(exc, "reason", exc))
+        raise failed("GPT-Live connection failed. ")
     except ValueError as exc:
         # A header value the request can't carry (a non-Latin-1 token, say): the type only, never the value.
         logger.warning("GPT-Live could not build its session request: %s", type(exc).__name__)
-        raise TokenError(502, "GPT-Live connection failed. " + GPT_LIVE_NO_FALLBACK)
+        raise failed("GPT-Live connection failed. ")
 
 
 def _valid_answer(sdp: Any, call_id: Any) -> bool:

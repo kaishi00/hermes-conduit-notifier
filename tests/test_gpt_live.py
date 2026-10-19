@@ -816,7 +816,11 @@ def _read_times_out(size=-1):
     raise TimeoutError("read timed out")
 
 
-@pytest.mark.parametrize("read", [_oversized, _read_times_out])
+def _chunked_body_cut_off(size=-1):
+    raise api.http.client.IncompleteRead(b"", 10)
+
+
+@pytest.mark.parametrize("read", [_oversized, _read_times_out, _chunked_body_cut_off])
 def test_an_unreadable_answer_after_a_2xx_keeps_its_daily_slot(client, api_key, openai, monkeypatch, read):
     api_key.config["voice"]["gpt_live"]["conduit_api_daily_calls"] = 1
 
