@@ -1608,7 +1608,8 @@ marked private is reported only as "at a private place".
 - **Stored here only.** The profile's `conduit-location.sqlite3`, mode
   `0600`. History is kept as long as the user picks in Conduit (latest only,
   1, 7 by default, 30 or 365 days). `GET /location/status` reports counts,
-  never locations; `GET /location/reads` lists when the agent read location
+  never locations, and `locate.available` (whether `locate` can reach the
+  phone: this profile is paired for notifications); `GET /location/reads` lists when the agent read location
   (kept 30 days, without the locations); `POST /location/wipe` deletes one
   device's data and key, or everything with `{"all": true}`.
 - **Tool.** `conduit_location` (actions `now`, `locate`, `places`,

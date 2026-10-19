@@ -5939,8 +5939,11 @@ def _location_remove_rule(rule_id: str) -> Dict[str, Any]:
 @router.get("/location/status")
 async def get_location_status(response: Response, profile: Optional[str] = None,
                               device_id: Optional[str] = None) -> Dict[str, Any]:
+    # `locate` tells Conduit whether conduit_location can ask the phone for a
+    # fresh fix: the same pairing gate as the tool's own (not_paired).
     return await _location_route(response, profile, lambda: _location_call(lambda store: {
-        **store.status(device_id), "crypto": _location_store().crypto_available()}), "status")
+        **store.status(device_id), "crypto": _location_store().crypto_available(),
+        "locate": {"available": _load_pairing_state(_pairing_state_path()) is not None}}), "status")
 
 
 @router.post("/location/key")
@@ -11940,6 +11943,7 @@ ROUTE_CAPABILITIES = (
     "phone-alarms",
     "phone-contacts",
     "location-sync",
+    "location-locate",
     "pairing",
     "self-restart",
     "cron-notifications",
