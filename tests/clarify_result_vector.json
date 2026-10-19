@@ -1,0 +1,163 @@
+{
+  "source": "NousResearch/hermes-agent tools/clarify_tool.py _result at 20acba03",
+  "cases": [
+    {
+      "name": "every question answered",
+      "normalized": [
+        {
+          "qid": "q0",
+          "question": "Pick colours",
+          "choices_offered": [
+            "red",
+            "blue",
+            "green"
+          ],
+          "multi_select": true
+        },
+        {
+          "qid": "q1",
+          "question": "Which environment?",
+          "choices_offered": [
+            "staging",
+            "prod"
+          ],
+          "multi_select": false
+        },
+        {
+          "qid": "q2",
+          "question": "Name for the branch?",
+          "choices_offered": null,
+          "multi_select": false
+        }
+      ],
+      "reply": {
+        "answers": {
+          "q0": "[\"red\", \"blue\"]",
+          "q1": "staging",
+          "q2": "fix-login"
+        },
+        "outcome": "submitted"
+      },
+      "result": "{\"responses\": [{\"question\": \"Pick colours\", \"choices_offered\": [\"red\", \"blue\", \"green\"], \"status\": \"answered\", \"user_response\": [\"red\", \"blue\"]}, {\"question\": \"Which environment?\", \"choices_offered\": [\"staging\", \"prod\"], \"status\": \"answered\", \"user_response\": \"staging\"}, {\"question\": \"Name for the branch?\", \"choices_offered\": null, \"status\": \"answered\", \"user_response\": \"fix-login\"}], \"outcome\": \"submitted\"}"
+    },
+    {
+      "name": "a typed multi-select answer is one item",
+      "normalized": [
+        {
+          "qid": "q0",
+          "question": "Pick colours",
+          "choices_offered": [
+            "red",
+            "blue",
+            "green"
+          ],
+          "multi_select": true
+        }
+      ],
+      "reply": {
+        "answers": {
+          "q0": "red, blue"
+        },
+        "outcome": "submitted"
+      },
+      "result": "{\"responses\": [{\"question\": \"Pick colours\", \"choices_offered\": [\"red\", \"blue\", \"green\"], \"status\": \"answered\", \"user_response\": [\"red, blue\"]}], \"outcome\": \"submitted\"}"
+    },
+    {
+      "name": "only the first question answered",
+      "normalized": [
+        {
+          "qid": "q1",
+          "question": "Which environment?",
+          "choices_offered": [
+            "staging",
+            "prod"
+          ],
+          "multi_select": false
+        },
+        {
+          "qid": "q0",
+          "question": "Pick colours",
+          "choices_offered": [
+            "red",
+            "blue",
+            "green"
+          ],
+          "multi_select": true
+        },
+        {
+          "qid": "q2",
+          "question": "Name for the branch?",
+          "choices_offered": null,
+          "multi_select": false
+        }
+      ],
+      "reply": {
+        "answers": {
+          "q1": "prod"
+        },
+        "outcome": "submitted"
+      },
+      "result": "{\"responses\": [{\"question\": \"Which environment?\", \"choices_offered\": [\"staging\", \"prod\"], \"status\": \"answered\", \"user_response\": \"prod\"}, {\"question\": \"Pick colours\", \"choices_offered\": [\"red\", \"blue\", \"green\"], \"status\": \"unanswered\", \"user_response\": null}, {\"question\": \"Name for the branch?\", \"choices_offered\": null, \"status\": \"unanswered\", \"user_response\": null}], \"outcome\": \"submitted\"}"
+    },
+    {
+      "name": "an empty answer is skipped",
+      "normalized": [
+        {
+          "qid": "q1",
+          "question": "Which environment?",
+          "choices_offered": [
+            "staging",
+            "prod"
+          ],
+          "multi_select": false
+        },
+        {
+          "qid": "q2",
+          "question": "Name for the branch?",
+          "choices_offered": null,
+          "multi_select": false
+        }
+      ],
+      "reply": {
+        "answers": {
+          "q1": "staging",
+          "q2": ""
+        },
+        "outcome": "submitted"
+      },
+      "result": "{\"responses\": [{\"question\": \"Which environment?\", \"choices_offered\": [\"staging\", \"prod\"], \"status\": \"answered\", \"user_response\": \"staging\"}, {\"question\": \"Name for the branch?\", \"choices_offered\": null, \"status\": \"skipped\", \"user_response\": null}], \"outcome\": \"submitted\"}"
+    },
+    {
+      "name": "the recommendation label is stripped",
+      "normalized": [
+        {
+          "qid": "q1",
+          "question": "Which environment?",
+          "choices_offered": [
+            "staging",
+            "prod"
+          ],
+          "multi_select": false
+        },
+        {
+          "qid": "q0",
+          "question": "Pick colours",
+          "choices_offered": [
+            "red",
+            "blue",
+            "green"
+          ],
+          "multi_select": true
+        }
+      ],
+      "reply": {
+        "answers": {
+          "q1": "staging (Recommended)",
+          "q0": "[\"red (Recommended)\", \" \", \"green\"]"
+        },
+        "outcome": "submitted"
+      },
+      "result": "{\"responses\": [{\"question\": \"Which environment?\", \"choices_offered\": [\"staging\", \"prod\"], \"status\": \"answered\", \"user_response\": \"staging\"}, {\"question\": \"Pick colours\", \"choices_offered\": [\"red\", \"blue\", \"green\"], \"status\": \"answered\", \"user_response\": [\"red\", \"green\"]}], \"outcome\": \"submitted\"}"
+    }
+  ]
+}

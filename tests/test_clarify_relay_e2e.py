@@ -364,8 +364,10 @@ def test_one_entry_questions_invocation_round_trips_batch_through_the_real_relay
         assert "error" not in holder, holder.get("error")
         assert json.loads(holder["result"]) == {
             "responses": [
-                {"question": "Which environment?", "choices_offered": ["staging", "prod"], "user_response": "staging"},
-            ]
+                {"question": "Which environment?", "choices_offered": ["staging", "prod"], "status": "answered",
+                 "user_response": "staging"},
+            ],
+            "outcome": "submitted",
         }
 
         # The gateway's poll sees the per-qid answers map, never a scalar answer.

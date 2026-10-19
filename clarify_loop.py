@@ -11,8 +11,9 @@ wraps clarify execution with ``tool_execution`` middleware:
 * poll the relay for the device's answer while both wait,
 * first answer wins; the loser resolves into a discarded result.
 
-The tool result is formatted exactly like the built-in ``clarify_tool`` so
-the agent cannot tell the paths apart.
+The tool result is built by the built-in ``clarify_tool``'s own result helper
+when it is importable (a local mirror otherwise), so the agent cannot tell the
+paths apart.
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ from typing import Any, Callable
 from . import calls, client
 from .session_titles import titled
 from .events import (
+    card_choice_labels,
     clarify_decision,
     event_id,
     normalize_clarify_questions,
@@ -259,8 +261,8 @@ def _first_answer_wins(
                 )
             # Batch protocol, but the answer arrived in the legacy collapsed
             # shape (old relay or pre-batch device): only the first question's
-            # answer arrived. Format it as a batch result — the unanswered
-            # rows surface as empty user_response, the upstream absence
+            # answer arrived. Format it as a batch result — the other rows
+            # come back unanswered with a null response, the upstream absence
             # semantics — instead of pretending the whole batch was answered.
             relay_won = True
             return _format_batch_result(
@@ -369,9 +371,9 @@ def _format_result(*, question: str, offered: list[str], answer: str, multi_sele
     from tools.clarify_tool import strip_recommended
 
     if multi_select and offered:
-        user_response: Any = [strip_recommended(part) for part in _parse_multi_select(answer)]
+        user_response: Any = [strip_recommended(_full_choice(part, offered)) for part in _parse_multi_select(answer)]
     else:
-        user_response = strip_recommended(answer)
+        user_response = strip_recommended(_full_choice(answer, offered))
     return json.dumps(
         {
             "question": question,
@@ -383,40 +385,111 @@ def _format_result(*, question: str, offered: list[str], answer: str, multi_sele
 
 
 def _format_batch_result(batch: list[dict[str, Any]], answers: dict[str, Any]) -> str:
-    """Build the same JSON the built-in clarify_tool returns for a batch.
+    """Build the JSON the built-in clarify_tool returns for a batch.
 
-    Mirrors tools.clarify_tool._batch_result: one row per question in the
-    original order, each carrying the model-supplied id when present, the
-    offered choices, and the cleaned user response (multi-select answers
-    parse back into a list). A qid the relay never locked — only possible
-    through the legacy collapsed-answer path — yields an empty
-    user_response, which upstream defines as an absence rather than a skip.
+    Uses Hermes' own ``tools.clarify_tool._result`` when it is importable, so
+    the relay path can't drift from the native one: one row per question in
+    the original order with ``status`` (answered, skipped, unanswered) and a
+    ``user_response`` that is null unless answered, plus ``outcome``. A qid
+    the relay never locked (only through the legacy collapsed-answer path) is
+    left out of the answers, so it comes back unanswered. ``_local_result``
+    mirrors it for a Hermes without the helper.
+
+    A card shows each choice cut to its label length; an answer made from a
+    cut label is mapped back to the full choice first (``_full_choice``), so
+    ``user_response`` names a choice Hermes offered.
     """
+    normalized = [
+        {
+            "qid": entry["qid"],
+            "question": entry["question"],
+            "choices_offered": list(entry["choices"]) or None,
+            "multi_select": entry["multi_select"],
+        }
+        for entry in batch
+    ]
+    reply = {
+        "answers": {
+            entry["qid"]: _full_choice_answer(answers[entry["qid"]], entry["choices"], entry["multi_select"])
+            for entry in batch
+            if entry["qid"] in answers
+        },
+        "outcome": "submitted",
+    }
+    try:
+        from tools.clarify_tool import _result
+    except ImportError:
+        return _local_result(normalized, reply)
+    return _result(normalized, reply)
+
+
+def _local_result(normalized: list[dict[str, Any]], reply: dict[str, Any]) -> str:
+    """Local mirror of ``tools.clarify_tool._result`` (a private function
+    there) for a Hermes that doesn't have it."""
+    answers = reply.get("answers") or {}
+    responses = []
+    for entry in normalized:
+        raw = answers.get(entry["qid"])
+        value = _clean_answer(raw, entry["multi_select"]) if raw not in (None, "") else None
+        if value:
+            status = "answered"
+        else:
+            status, value = ("skipped" if entry["qid"] in answers else "unanswered"), None
+        responses.append({"question": entry["question"], "choices_offered": entry["choices_offered"],
+                          "status": status, "user_response": value})
+    result: dict[str, Any] = {"responses": responses, "outcome": reply["outcome"]}
+    if reply.get("notice"):
+        result["notice"] = str(reply["notice"])
+    return json.dumps(result, ensure_ascii=False)
+
+
+def _clean_answer(raw: Any, multi: bool) -> Any:
+    """Local mirror of ``tools.clarify_tool._clean_answer``: a multi-select
+    answer is a list, a JSON array string, or one typed ("Other") answer."""
     from tools.clarify_tool import strip_recommended
 
-    responses: list[dict[str, Any]] = []
-    for entry in batch:
-        row: dict[str, Any] = {}
-        if entry.get("id"):
-            row["id"] = entry["id"]
-        row["question"] = entry["question"]
-        row["choices_offered"] = list(entry["choices"])
-        raw = str(answers.get(entry["qid"]) or "")
-        if raw:
-            if entry["multi_select"] and entry["choices"]:
-                row["user_response"] = [strip_recommended(part) for part in _parse_multi_select(raw)]
-            else:
-                row["user_response"] = strip_recommended(raw)
-        else:
-            row["user_response"] = ""
-        responses.append(row)
-    return json.dumps({"responses": responses}, ensure_ascii=False)
+    if not multi:
+        return strip_recommended(raw)
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            parsed = None
+        raw = parsed if isinstance(parsed, list) else [raw]
+    return [strip_recommended(item) for item in raw if str(item).strip()]
+
+
+def _full_choice_answer(raw: Any, offered: list[str], multi: bool) -> Any:
+    """``raw`` with each answered card label mapped back to its full choice
+    (a multi-select JSON array item by item)."""
+    if not offered or not isinstance(raw, str):
+        return raw
+    if multi:
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, list):
+            return json.dumps([_full_choice(item, offered) if isinstance(item, str) else item for item in parsed],
+                              ensure_ascii=False)
+    return _full_choice(raw, offered)
+
+
+def _full_choice(answer: str, offered: list[str]) -> str:
+    """The offered choice a card label stands for. Cards show each choice cut
+    to 80 characters (``events.card_choice_labels``), so a tapped long choice
+    comes back cut. Only a label that names exactly one offered choice is
+    mapped; anything else is kept as typed."""
+    text = answer.strip()
+    if not text or text in offered:
+        return answer
+    matches = {choice for choice in offered if text in card_choice_labels(choice)}
+    return matches.pop() if len(matches) == 1 else answer
 
 
 def _parse_multi_select(raw: str) -> list[str]:
-    """Parse a multi-select answer: JSON array or comma-separated labels.
-
-    Local mirror of the built-in tool's parser (a private function there).
+    """Parse a legacy scalar multi-select answer: JSON array or
+    comma-separated labels, as the pre-batch built-in tool did.
     """
     text = str(raw).strip()
     if text.startswith("["):

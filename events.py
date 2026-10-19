@@ -573,6 +573,18 @@ def plain_text(value: Any) -> str:
     return "\n".join(lines).strip()
 
 
+def card_choice_labels(choice: Any) -> set[str]:
+    """The labels a clarify card can show for ``choice``: this plugin's cut
+    (``sanitize_decision``: whitespace collapsed, 80 code points) and the
+    relay's on a plaintext pairing (``cleanText``: 80 UTF-16 units), so an
+    answer made from a cut label can be mapped back to the full choice."""
+    label = _clean(choice, 80)
+    if not label:
+        return set()
+    units = label.encode("utf-16-le", "surrogatepass")[:160]
+    return {label, units.decode("utf-16-le", "surrogatepass").strip()}
+
+
 def _clean(value: str, maximum: int) -> str:
     # Non-strings (None, numbers, nested objects) must not be coerced —
     # str(None) would produce a truthy "None" that slips past emptiness
