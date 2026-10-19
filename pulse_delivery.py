@@ -32,8 +32,12 @@ logger = logging.getLogger(__name__)
 # How long an attempt may go without any trace in Hermes before it counts as
 # never admitted. The gateway commits an admission within moments of the call.
 ADMIT_GRACE_S = 120.0
-# A completed admission whose reply row isn't visible yet is checked once more.
+# A completed admission whose reply row isn't visible yet gets this long for it.
 AWAITING_REPLY = "completed; waiting for the reply row"
+REPLY_GRACE_S = 300.0
+# An attempt Hermes holds this long without ending it (queued behind a stuck
+# turn, lost track of it) counts as failed, so the next one can go.
+STUCK_S = 2 * 3600.0
 
 
 @dataclass(frozen=True)
@@ -48,7 +52,7 @@ def new_tag(item_id: str, attempt: int) -> str:
 
 
 def derive_state(seen: Seen, *, age_s: float, sent_by_earlier_process: bool,
-                 prior_detail: str = "") -> tuple[str, str]:
+                 prior_detail: str = "", unchanged_s: float = 0.0) -> tuple[str, str]:
     """The attempt's state and a short detail, from Hermes's rows alone."""
     admission, turn = seen.admission, seen.turn
     if admission is None:
@@ -58,16 +62,18 @@ def derive_state(seen: Seen, *, age_s: float, sent_by_earlier_process: bool,
         if sent_by_earlier_process or age_s >= ADMIT_GRACE_S:
             return store.NOT_ADMITTED, "Hermes has no record of it"
         return store.SUBMITTED, ""
-    if admission.status == "queued":
-        return store.QUEUED, ""
-    if admission.status in ("started", "unknown"):
+    if admission.status in ("queued", "started", "unknown"):
+        if age_s >= STUCK_S:
+            return store.FAILED, f"still {admission.status} in Hermes after {int(age_s // 60)} minutes"
+        if admission.status == "queued":
+            return store.QUEUED, ""
         return store.RUNNING, "" if admission.status == "started" else "Hermes lost track of it"
     outcome = admission.outcome or "unknown"
     if outcome != "completed":
         return store.FAILED, f"Hermes ended it: {outcome}"
     if turn is not None and (turn.reply or turn.failed):
         return _from_turn(turn, ended=True)
-    if prior_detail == AWAITING_REPLY:
+    if prior_detail == AWAITING_REPLY and unchanged_s >= REPLY_GRACE_S:
         return store.FAILED, "completed without a reply"
     return store.RUNNING, AWAITING_REPLY
 
@@ -117,7 +123,7 @@ def reconcile(pulse_store: store.PulseStore, home: Path, *, plugin_id: str, proc
             continue
         state, detail = derive_state(seen, age_s=now - row["created_at"],
                                      sent_by_earlier_process=row["created_at"] < process_started_at,
-                                     prior_detail=row["detail"])
+                                     prior_detail=row["detail"], unchanged_s=now - row["updated_at"])
         if state != row["state"] or detail != row["detail"]:
             pulse_store.update_attempt(row["attempt_id"], state=state, detail=detail)
             changed.append({**row, "state": state, "detail": detail})

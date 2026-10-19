@@ -85,7 +85,9 @@ def pre_llm_call(session_id: str, turn_id: Any, user_message: Any) -> Optional[s
         return None
     pulse_store = open_store(home)
     for row in pulse_store.in_flight():
-        if row["tag"] in user_message:
+        # The whole injected text, not just its tag: a user quoting a tag
+        # doesn't make their turn Pulse's (that would only take their tools).
+        if row["text"] in user_message:
             _mark_turn(session_id, turn_id, row["tag"])
             if row["state"] != store.RUNNING:
                 pulse_store.update_attempt(row["attempt_id"], state=store.RUNNING,
@@ -128,12 +130,13 @@ def _mark_turn(session_id: str, turn_id: Any, tag: str) -> None:
 
 def _run(stopped: threading.Event) -> None:
     while not stopped.is_set():
+        # Cleared before the tick, so a turn ending during it wakes the next.
+        _wake.clear()
         try:
             tick()
         except Exception:  # noqa: BLE001 — the loop must outlive a bad tick
             logger.warning("conduit_push: Pulse tick failed", exc_info=True)
         _wake.wait(TICK_S)
-        _wake.clear()
 
 
 def _gateway_ready() -> bool:
@@ -145,11 +148,13 @@ def tick(now: Optional[float] = None) -> None:
     """One pass: reconcile what's in flight, then probe if one is due."""
     if _ctx is None or not _gateway_ready():
         return
-    pulse_store = open_store()
+    home = get_hermes_home()
+    if not (Path(home) / store.DB_NAME).exists():
+        return  # never turned on: leave no file behind
+    pulse_store = open_store(home)
     if not pulse_store.get("enabled"):
         return
     now = time.time() if now is None else now
-    home = get_hermes_home()
     delivery.reconcile(pulse_store, home, plugin_id=_plugin_id(), process_started_at=_started_at, now=now)
     asked = pulse_store.take_probe_request()
     if not asked and not _probe_due(pulse_store, now):
@@ -157,6 +162,8 @@ def tick(now: Optional[float] = None) -> None:
     if any(row["kind"] == PROBE for row in pulse_store.in_flight()):
         return
     chat, problem = home_chat(pulse_store, home)
+    if problem:
+        logger.info("conduit_push: Pulse: %s", problem)
     if chat is None:
         return
     delivery.submit(pulse_store, _ctx.inject_message, kind=PROBE, session_key=chat.session_key,

@@ -256,6 +256,8 @@ TURN = hermes.TurnRows
     (delivery.Seen(None, None), 500, False, "", store.NOT_ADMITTED),
     (delivery.Seen(None, None), 5, True, "", store.NOT_ADMITTED),
     (delivery.Seen(ADM("r", SID, "queued", None), None), 900, True, "", store.QUEUED),
+    (delivery.Seen(ADM("r", SID, "queued", None), None), delivery.STUCK_S, False, "", store.FAILED),
+    (delivery.Seen(ADM("r", SID, "unknown", None), None), delivery.STUCK_S, True, "", store.FAILED),
     (delivery.Seen(ADM("r", SID, "started", None), None), 900, False, "", store.RUNNING),
     (delivery.Seen(ADM("r", SID, "unknown", None), None), 900, False, "", store.RUNNING),
     (delivery.Seen(ADM("r", SID, "terminal", "interrupted"), None), 9, False, "", store.FAILED),
@@ -265,7 +267,7 @@ TURN = hermes.TurnRows
      store.FAILED),
     (delivery.Seen(ADM("r", SID, "terminal", "completed"), None), 9, False, "", store.RUNNING),
     (delivery.Seen(ADM("r", SID, "terminal", "completed"), None), 9, False, delivery.AWAITING_REPLY,
-     store.FAILED),
+     store.RUNNING),
     (delivery.Seen(None, TURN(SID, "ok", False, False)), 500, False, "", store.DELIVERED),
     (delivery.Seen(None, TURN(SID, "", False, True)), 500, False, "", store.FAILED),
 ])
@@ -440,3 +442,37 @@ def test_the_loop_stops_on_unload(monkeypatch):
     assert pulse._thread is thread and thread.is_alive()
     pulse.stop(timeout=2.0)
     assert not thread.is_alive()
+
+
+def test_quoting_a_live_tag_is_not_a_pulse_turn(live, db):
+    db.session()
+    live.store.set("enabled", True)
+    pulse.tick()
+    tag = live.store.in_flight()[0]["tag"]
+    assert pulse.pre_llm_call(SID, "t1", f"Pulse sent me {tag}, what is it?") is None
+    assert not pulse.is_pulse_turn(SID, "t1")
+
+
+def test_a_completed_turn_gets_time_for_its_reply_row():
+    seen = delivery.Seen(ADM("r", SID, "terminal", "completed"), None)
+    assert delivery.derive_state(seen, age_s=60, sent_by_earlier_process=False, prior_detail=delivery.AWAITING_REPLY,
+                                 unchanged_s=30)[0] == store.RUNNING
+    assert delivery.derive_state(seen, age_s=600, sent_by_earlier_process=False, prior_detail=delivery.AWAITING_REPLY,
+                                 unchanged_s=delivery.REPLY_GRACE_S)[0] == store.FAILED
+
+
+def test_a_stuck_probe_makes_way_for_the_next(live, db):
+    db.session()
+    live.store.set("enabled", True)
+    pulse.tick()
+    row = live.store.in_flight()[0]
+    db.admission(row["text"], status="unknown")
+    pulse.tick(now=row["created_at"] + 6 * 3600 + 1)  # stuck, and the next one is due
+    assert live.store.attempt_by_tag(row["tag"])["state"] == store.FAILED
+    assert len(live.injected) == 2
+
+
+def test_the_loop_leaves_no_file_while_never_turned_on(live, tmp_path):
+    (tmp_path / store.DB_NAME).unlink()
+    pulse.tick()
+    assert not (tmp_path / store.DB_NAME).exists()

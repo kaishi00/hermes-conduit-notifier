@@ -54,7 +54,7 @@ class TurnRows:
 def _connect(home: Path) -> sqlite3.Connection:
     path = Path(home) / STATE_DB
     if not path.exists():
-        raise HermesUnreadable(f"{path} not found")
+        raise HermesUnreadable(f"no {STATE_DB} in the Hermes home")
     try:
         conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2.0)
     except sqlite3.Error as error:
