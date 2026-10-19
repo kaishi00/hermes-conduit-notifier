@@ -725,6 +725,24 @@ def test_agent_mode_answers_with_the_fast_model_not_a_hermes_turn(client, hermes
     assert server.upstream.sent == ["finish"]
 
 
+def test_a_fast_model_that_never_stops_is_cut_off(client, hermes, front, monkeypatch):
+    monkeypatch.setattr(api, "LOCAL_LIVE_MAX_REPLY_CHARS", 10)
+    front.answers = [[{"content": "abcdef"}, {"content": "ghijkl"}, {"content": "mnop"}]]
+    headers = {"Authorization": f"Bearer {_key(hermes)}"}
+    with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
+        _agent(ws)
+        streamed = client.post(f"{BASE}/local-live/v1/chat/completions", json=_completion("Talk", stream=True),
+                               headers=headers)
+        ws.send_text("finish")
+    assert _sse_text(streamed.text) == "abcdefghij"
+
+
+def test_plain_http_fast_models_skip_proxies():
+    # An empty ProxyHandler opens nothing, so the opener has no proxy route at all.
+    assert not any(isinstance(handler, api.urllib.request.ProxyHandler)
+                   for handler in api._local_live_front_direct_opener.handlers)
+
+
 def test_a_tool_call_runs_on_the_phone_and_the_model_goes_on(client, hermes, front):
     front.answers = [
         [{"content": "On it. "},

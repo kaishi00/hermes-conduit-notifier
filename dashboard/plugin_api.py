@@ -3520,6 +3520,9 @@ LOCAL_LIVE_AGENT_SPEECH_HINT = (
 _LOCAL_LIVE_TOOL_NAME = re.compile(r"[A-Za-z0-9_-]{1,64}")
 _local_live_front_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="conduit-local-live-front")
 _local_live_front_opener = urllib.request.build_opener(_NoRedirect)
+# Plain http only reaches private hosts; like the pairing claim, it skips any
+# proxy so the key never crosses one in cleartext.
+_local_live_front_direct_opener = urllib.request.build_opener(_NoRedirect, urllib.request.ProxyHandler({}))
 
 
 def _local_live_front_model_settings() -> Dict[str, Any]:
@@ -3743,6 +3746,7 @@ class _LocalLiveAgent:
         generation = self.generation
         self._append({"role": "user", "content": text})
         said_anything = False
+        budget = LOCAL_LIVE_MAX_REPLY_CHARS
         for _ in range(LOCAL_LIVE_AGENT_MAX_ROUNDS):
             spoken: List[str] = []
             tool_calls: Dict[int, Dict[str, Any]] = {}
@@ -3753,9 +3757,15 @@ class _LocalLiveAgent:
                         if generation != self.generation:
                             return
                         if kind == "text":
+                            # A model that never stops talking is cut off
+                            # like an over-long Hermes reply.
+                            value = value[:budget]
+                            budget -= len(value)
                             spoken.append(value)
                             said_anything = True
                             yield value
+                            if budget <= 0:
+                                return
                         elif kind == "tool_call":
                             slot = tool_calls.setdefault(value["index"], {"id": "", "name": "", "arguments": ""})
                             slot["id"] = value.get("id") or slot["id"]
@@ -3860,7 +3870,8 @@ async def _local_live_front_stream(target: Tuple[str, str, str], messages: List[
         request = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers,
                                          method="POST")
         try:
-            response = _local_live_front_opener.open(request, timeout=LOCAL_LIVE_FRONT_TIMEOUT_S)
+            opener = _local_live_front_direct_opener if url.startswith("http:") else _local_live_front_opener
+            response = opener.open(request, timeout=LOCAL_LIVE_FRONT_TIMEOUT_S)
         except urllib.error.HTTPError as exc:
             exc.close()
             return exc.code
