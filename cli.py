@@ -193,12 +193,12 @@ def _pulse(args: argparse.Namespace) -> int:
         print(f"Warning: {_printable(problem)}")
     print(f"Delivery check every {pulse_store.get('probe_interval_hours')} hours")
     if pulse_store.get("enabled"):
-        ticked = pulse_store.get("last_tick_at")
-        if not isinstance(ticked, (int, float)) or time.time() - ticked > 300:
-            print("Warning: the gateway hasn't run Pulse in the last 5 minutes. Check that it's running this "
-                  "build and was restarted after `plugins install`.")
+        ticked, now = pulse_store.get("last_tick_at"), time.time()
+        if isinstance(ticked, bool) or not isinstance(ticked, (int, float)) or now - ticked > pulse.STALE_TICK_S:
+            print(f"Warning: the gateway hasn't run Pulse in the last {int(pulse.STALE_TICK_S // 60)} minutes. "
+                  "Check that it's running this build and was restarted after `plugins install`.")
         else:
-            print(f"Gateway last checked: {int(time.time() - ticked)} s ago")
+            print(f"Gateway last checked: {max(0, int(now - ticked))} s ago")
     counts = pulse_store.counts(pulse.PROBE)
     if counts:
         print("Checks so far: " + ", ".join(f"{n} {state}" for state, n in sorted(counts.items())))
