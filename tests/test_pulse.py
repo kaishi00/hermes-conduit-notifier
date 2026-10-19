@@ -476,3 +476,11 @@ def test_the_loop_leaves_no_file_while_never_turned_on(live, tmp_path):
     (tmp_path / store.DB_NAME).unlink()
     pulse.tick()
     assert not (tmp_path / store.DB_NAME).exists()
+
+
+def test_reading_pulse_before_it_was_ever_on_leaves_no_file(live, tmp_path, monkeypatch):
+    (tmp_path / store.DB_NAME).unlink()
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", pulse.get_hermes_home)
+    for action in ("status", "off", "probe"):
+        cli.dispatch(types.SimpleNamespace(conduit_push_action="pulse", pulse_action=action, value=""))
+    assert not (tmp_path / store.DB_NAME).exists()

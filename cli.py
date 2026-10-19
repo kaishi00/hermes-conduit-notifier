@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import http.client
 import socket
+from pathlib import Path
 
 from . import e2e
 from .client import DEFAULT_RELAY_URL, UnpairedLocally, build_outgoing, claim_pairing, e2e_status, load_state, post_event, send_now, set_redact_content, state_path, unpair
@@ -153,8 +154,12 @@ def _pulse(args: argparse.Namespace) -> int:
 
     from . import pulse, pulse_delivery
     home = get_hermes_home()
-    pulse_store = pulse.open_store(home)
     action = args.pulse_action
+    if action in ("status", "probe", "off") and not (Path(home) / pulse_delivery.store.DB_NAME).exists():
+        # Never turned on: say so without leaving a file behind.
+        print("Pulse: off (never turned on). `hermes conduit-push pulse on` to start it.")
+        return 1 if action == "probe" else 0
+    pulse_store = pulse.open_store(home)
     if action in ("on", "off"):
         pulse_store.set("enabled", action == "on")
         if action == "on":
