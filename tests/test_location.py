@@ -777,6 +777,20 @@ def test_ingest_refuses_an_oversized_body(client):
     assert response.status_code == 413
 
 
+def test_a_lost_key_refusal_carries_the_stores_code(client):
+    # Conduit sets up a new key when the host lost its old one; until now it
+    # had only the message to go on, which never named the code.
+    phone = Phone()
+    phone.accept(client.post(f"{BASE}/location/key", json=phone.key_request()).json())
+    sealed = phone.seal(phone.batch(fix=fix()))
+    for envelope, code in (({**sealed, "kid": "f" * 32}, "unknown_key"),
+                           ({**sealed, "batch_id": "batch-999999"}, "bad_seal")):
+        response = client.post(f"{BASE}/location/ingest", json=envelope)
+        assert response.status_code == 409 and response.headers["cache-control"] == "no-store"
+        body = response.json()
+        assert body["code"] == code and body["detail"] and code not in body["detail"]
+
+
 def test_a_rule_deleted_meanwhile_isnt_brought_back(store):
     _rule(store)
     store.remove_rule("r_brief0001")

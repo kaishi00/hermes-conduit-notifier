@@ -415,7 +415,24 @@ def test_routes_round_trip(client):
     assert client.get(f"{BASE}/health/status").json()["stored"] is False
 
 
+def test_a_refusal_carries_the_stores_code_beside_its_message(client):
+    # Conduit clears its key only for a lost key (unknown_key, bad_seal),
+    # not for a full host or a newer schema: the code tells them apart.
+    phone = Phone()
+    phone.accept(client.post(f"{BASE}/health/key", json=phone.key_request()).json())
+    response = client.post(f"{BASE}/health/ingest", json={**phone.seal(_batch()), "kid": "f" * 32})
+    assert response.status_code == 409 and response.headers["cache-control"] == "no-store"
+    body = response.json()
+    assert body["code"] == "unknown_key" and body["detail"] and "unknown_key" not in body["detail"]
+    for n in range(1, health.MAX_DEVICES):
+        assert client.post(f"{BASE}/health/key", json=Phone(f"device-extra{n}").key_request()).status_code == 200
+    response = client.post(f"{BASE}/health/key", json=Phone("device-onetoomany").key_request())
+    assert response.status_code == 409
+    assert response.json() == {"detail": response.json()["detail"], "code": "too_many_devices"}
+
+
 def test_ingest_refuses_an_oversized_body(client):
     response = client.post(f"{BASE}/health/ingest", content=b"x" * (api.HEALTH_MAX_INGEST_BODY_BYTES + 1),
                            headers={"content-type": "application/json"})
     assert response.status_code == 413
+    assert "code" not in response.json()  # not a store refusal: the body is as before

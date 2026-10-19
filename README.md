@@ -1519,6 +1519,11 @@ workouts, body, vitals, fitness), with how far back to start.
   for a device id drops what the earlier key sent (the phone sends it all
   again), so a re-key can't be used to read a phone's data back; the same
   device key again keeps it, since only that phone can use it.
+- **Refusals.** A request the store refuses answers with its HTTP status
+  and `{"detail": "<message>", "code": "<word>"}`. `unknown_key` and
+  `bad_seal` (409) mean this host doesn't have the phone's key (the phone
+  sets up a new one); `too_many_devices` and `schema` (also 409) don't. The
+  location routes answer the same way. Other errors carry only `detail`.
 - **Summaries first.** Conduit sends the hourly and daily totals Apple
   Health computes on the phone (iPhone and Watch already merged), a summary
   per night of sleep, sleep stage segments and workouts. Raw readings go

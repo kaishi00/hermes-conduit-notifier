@@ -122,11 +122,13 @@ SEARCH_MAX_BODY_BYTES = 16 * 1024
 
 
 class TokenError(Exception):
-    """A token request failed. ``status`` is the HTTP status to return to Conduit."""
+    """A token request failed. ``status`` is the HTTP status to return to Conduit;
+    ``code``, when set, is the store's short machine word for the refusal."""
 
-    def __init__(self, status: int, message: str) -> None:
+    def __init__(self, status: int, message: str, code: Optional[str] = None) -> None:
         super().__init__(message)
         self.status = status
+        self.code = code
 
 
 def _env_value(key: str) -> Optional[str]:
@@ -5562,7 +5564,7 @@ def _health_call(fn: Callable[[Any], Dict[str, Any]]) -> Dict[str, Any]:
     try:
         return fn(module.HealthStore(_calls_home()))
     except module.HealthError as exc:
-        raise TokenError(exc.status, str(exc))
+        raise TokenError(exc.status, str(exc), exc.code)
 
 
 async def _health_route(response: Response, profile: Optional[str], fn: Callable[[], Dict[str, Any]],
@@ -5571,12 +5573,25 @@ async def _health_route(response: Response, profile: Optional[str], fn: Callable
     try:
         return {"ok": True, **(await _run_scoped(profile, fn))}
     except TokenError as exc:
-        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+        return _store_refusal(exc)
     except HTTPException as exc:
         exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
         raise
     except Exception as exc:
         raise _unexpected(name, exc, feature="Health sync")
+
+
+def _store_refusal(exc: TokenError) -> Any:
+    """A health or location store's refusal: ``detail`` is the message as
+    always, and ``code`` the store's word for it (``unknown_key``,
+    ``bad_seal``, ``too_many_devices``, ``schema``…), so Conduit can tell a
+    lost key from a full host without reading the message."""
+    if not exc.code:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+    from fastapi.responses import JSONResponse
+
+    return JSONResponse({"detail": str(exc), "code": exc.code}, status_code=exc.status,
+                        headers={"Cache-Control": "no-store"})
 
 
 @router.get("/health/status")
@@ -5855,7 +5870,7 @@ def _location_call(fn: Callable[[Any], Dict[str, Any]]) -> Dict[str, Any]:
     try:
         return fn(module.LocationStore(_calls_home()))
     except module.LocationError as exc:
-        raise TokenError(exc.status, str(exc))
+        raise TokenError(exc.status, str(exc), exc.code)
     except sqlite3.DatabaseError:
         logger.warning("conduit_push: location store unreadable", exc_info=True)
         raise TokenError(503, "The location store on this host can't be read")
@@ -5867,7 +5882,7 @@ async def _location_route(response: Response, profile: Optional[str], fn: Callab
     try:
         return {"ok": True, **(await _run_scoped(profile, fn))}
     except TokenError as exc:
-        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+        return _store_refusal(exc)
     except HTTPException as exc:
         exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
         raise
