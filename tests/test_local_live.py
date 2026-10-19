@@ -888,6 +888,22 @@ def test_history_stays_bounded_and_starts_with_the_user(monkeypatch):
     assert agent.history == [{"role": "user", "content": "2"}]
 
 
+def test_a_reconnect_mid_request_leaves_no_unanswered_user_message(monkeypatch):
+    agent = api._LocalLiveAgent("", [])
+
+    async def stream(target, messages, tools):
+        agent.close()  # the phone reconnected while the model was thinking
+        yield "text", "too late"
+
+    monkeypatch.setattr(api, "_local_live_front_stream", stream)
+
+    async def run():
+        return [piece async for piece in agent.reply(None, "Hello", ("http://box/v1", "m", ""))]
+
+    assert asyncio.run(run()) == []
+    assert agent.history == []
+
+
 def test_thinking_is_never_spoken():
     think = api._ThinkFilter()
     out = "".join(think.feed(piece) for piece in ["Hel", "lo <th", "ink>secret", " stuff</thi", "nk> there", "<"])

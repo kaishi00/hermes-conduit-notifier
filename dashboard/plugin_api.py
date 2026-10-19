@@ -3739,6 +3739,10 @@ class _LocalLiveAgent:
             self.waiters.pop(call_id, None)
             raise
 
+    def _drop_unanswered(self, text: str) -> None:
+        if self.history and self.history[-1] == {"role": "user", "content": text}:
+            self.history.pop()
+
     async def reply(self, call: Any, text: str, target: Tuple[str, str, str]) -> Any:
         """The front model's spoken answer to ``text``, as it streams. Raises
         _LocalLiveFrontUnavailable when the model failed before saying anything."""
@@ -3755,6 +3759,10 @@ class _LocalLiveAgent:
                 async with contextlib.aclosing(_local_live_front_stream(target, self.messages(), self.tools)) as stream:
                     async for kind, value in stream:
                         if generation != self.generation:
+                            # A reconnect took over: the new connection
+                            # starts with a conversation that alternates.
+                            if not said_anything and not tool_calls:
+                                self._drop_unanswered(text)
                             return
                         if kind == "text":
                             # A model that never stops talking is cut off
@@ -3777,8 +3785,7 @@ class _LocalLiveAgent:
             except _LocalLiveFrontUnavailable:
                 if said_anything:
                     return
-                if self.history and self.history[-1] == {"role": "user", "content": text}:
-                    self.history.pop()
+                self._drop_unanswered(text)
                 raise
             finally:
                 # What was said stays in the conversation, even when the user
@@ -3798,8 +3805,7 @@ class _LocalLiveAgent:
                 if round_number == 0 and not said_anything:
                     # An empty answer (a wrong address that answers with a
                     # web page, say) is a failure too: Hermes takes it.
-                    if self.history and self.history[-1] == {"role": "user", "content": text}:
-                        self.history.pop()
+                    self._drop_unanswered(text)
                     raise _LocalLiveFrontUnavailable("The fast model gave no answer")
                 return
             for slot in calls:
