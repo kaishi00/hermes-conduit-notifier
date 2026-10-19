@@ -1663,7 +1663,9 @@ carrying `maps: {to, mode}`: Conduit opens Maps at once when the user is in
 that chat with Conduit open, and otherwise shows a Go button and a
 notification, answered by tap or by saying "go" in a call. Conduit says it
 can do this with `features: ["maps-navigate"]` in its present exchange;
-without it the tool returns an Apple Maps link for a text chat.
+without one that said so in the last 30 days the tool returns an Apple Maps
+link for a text chat. Only a Conduit that says so gets the Go prompt, and
+only its answer counts.
 
 The host has no map, so the user's iPhone answers. The tool stores the
 lookup sealed for that one phone (location's key, its own HKDF labels) and

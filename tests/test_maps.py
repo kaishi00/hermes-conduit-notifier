@@ -688,7 +688,7 @@ def test_the_phone_reports_navigate_opened_by_itself(home):
     assert present.status(prompt["id"])[0]["status"] == "confirmed"
     assert present.status(prompt["id"])[0]["via"] == "auto"
     other = present.confirm("Directions to Rome?", "Opens Apple Maps.", "Go", maps={"to": "Rome"})
-    present.exchange({"installation_id": "phone-installation-1",
+    present.exchange({"installation_id": "phone-installation-1", "features": ["maps-navigate"],
                       "results": [{"id": other["id"], "outcome": "declined", "via": "auto"}]})
     assert present.status(other["id"])[0]["status"] == "waiting", "auto is only ever a yes"
     plain = present.confirm("Send to Mei?", "Hi", "Send")
@@ -701,7 +701,7 @@ def test_the_preview_shows_the_place_without_markdown_of_its_own(home, monkeypat
     present = _present(home)
     monkeypatch.setattr(maps, "client", Enqueued())
     _call({"action": "navigate", "to": "**Paris** [x](y)"})
-    prompt = present.exchange({"installation_id": "phone-installation-1"})["prompts"][0]
+    prompt = present.exchange({"installation_id": "phone-installation-1", "features": ["maps-navigate"]})["prompts"][0]
     assert prompt["preview"] == "Opens Apple Maps with driving directions to **Paris x(y)** from where you are."
     assert prompt["maps"]["to"] == "**Paris** [x](y)"
 

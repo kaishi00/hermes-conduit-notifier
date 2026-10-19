@@ -36,15 +36,13 @@ from hermes_constants import get_hermes_home
 from . import client, location_tool, maps_host
 from .events import push_event
 from .location_store import TRUSTED_BACKGROUND_S, TRUSTED_TALKING_S, LocationError, LocationStore, sharing_paused
-from .present_store import PresentError, PresentStore
+from .present_store import NAVIGATE_FEATURE, PresentError, PresentStore
 
 logger = logging.getLogger("hermes.plugins.conduit_push")
 
 TOOL_NAME = "conduit_maps"
 TOOLSET = "conduit"
 ACTIONS = ("search", "lookup", "reverse_geocode", "directions", "travel_times", "navigate")
-# What a Conduit that opens Apple Maps for navigate says it can do.
-NAVIGATE_FEATURE = "maps-navigate"
 NAVIGATE_TTL_MINUTES = 15
 NAVIGATE_SPOKEN_YES = ("go", "let's go", "go ahead", "open maps")
 # Apple Maps link travel flags; cycling has none, so Maps picks.

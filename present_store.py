@@ -61,6 +61,10 @@ VIAS = ("tap", "voice", "auto")
 # What a navigate prompt (conduit_maps navigate) carries: where to and how.
 # Conduit opens Apple Maps with these when the user says go.
 MAPS_MODES = ("driving", "walking", "transit", "cycling")
+# What a Conduit that opens Apple Maps for a navigate prompt says it can do.
+# Only such a Conduit gets one, and only its answer counts: another would show
+# it as a plain confirm, and its yes would never open Maps.
+NAVIGATE_FEATURE = "maps-navigate"
 MAX_MAPS_TO_CHARS = 200
 MAX_FEATURES = 16
 
@@ -164,9 +168,10 @@ class PresentStore:
             state["devices"][installation] = device
             _trim_devices(state)
             for result in results:
-                _take_result(state, installation, result, now)
+                _take_result(state, installation, device["features"], result, now)
             # The newest, within a cap only a hand-edited store can exceed.
-            waiting = [_public(prompt) for prompt in state["prompts"] if prompt["status"] == "waiting"][-MAX_WAITING:]
+            waiting = [_public(prompt) for prompt in state["prompts"] if prompt["status"] == "waiting"
+                       and (not prompt.get("maps") or NAVIGATE_FEATURE in device["features"])][-MAX_WAITING:]
             # Expired cards leave the file; the rest go only to a phone that
             # shows them.
             state["cards"] = [card for card in state["cards"] if now < card["expires_at"]]
@@ -188,9 +193,11 @@ class PresentStore:
         return _shows_cards(self._load(), self.clock())
 
     def has_feature(self, feature: str) -> bool:
-        """Whether a Conduit that exchanged with this profile says it can
-        do ``feature`` (like "maps-navigate")."""
-        return any(feature in device.get("features", []) for device in self._load()["devices"].values())
+        """Whether a Conduit that exchanged with this profile recently says
+        it can do ``feature`` (like "maps-navigate")."""
+        now = self.clock()
+        return any(feature in device.get("features", []) and now - device["seen_at"] < CARD_DEVICE_RECENT_S
+                   for device in self._load()["devices"].values())
 
     def has_feature_everywhere(self, feature: str) -> bool:
         """Whether every Conduit that draws cards (on a call or in chats) and
@@ -473,7 +480,7 @@ def _shown(prompt: dict[str, Any]) -> dict[str, Any]:
     return shown
 
 
-def _take_result(state: dict[str, Any], installation: str, result: Any, now: float) -> None:
+def _take_result(state: dict[str, Any], installation: str, features: list[str], result: Any, now: float) -> None:
     """A phone's answer to a waiting prompt; anything else is ignored."""
     if not isinstance(result, dict):
         return
@@ -485,6 +492,10 @@ def _take_result(state: dict[str, Any], installation: str, result: Any, now: flo
         return
     prompt = _find(state, prompt_id)
     if prompt is None or prompt["status"] != "waiting":
+        return
+    # A Go prompt is answered only by a Conduit that opens Maps (it's the only
+    # one that gets it).
+    if prompt.get("maps") and NAVIGATE_FEATURE not in features:
         return
     # Conduit opens Maps by itself, and only as a yes to a Go prompt.
     if via == "auto" and (outcome != "confirmed" or not prompt.get("maps")):

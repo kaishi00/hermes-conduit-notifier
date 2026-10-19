@@ -214,6 +214,30 @@ def test_no_prompt_without_a_capable_phone(store):
     assert store.has_device()
 
 
+def test_a_go_prompt_goes_only_to_a_conduit_that_can_open_maps(store, clock):
+    # Conduit without maps-navigate (an older build, or another device) would
+    # show a Go prompt as a plain confirm: a tap there never opens Maps.
+    def exchange(installation, features=(), results=()):
+        return store.exchange({"installation_id": installation, "features": list(features),
+                               "results": list(results)})["prompts"]
+
+    exchange(IPAD)
+    exchange(PHONE, ["maps-navigate"])
+    go = store.confirm("Directions to Paris?", "Opens Apple Maps.", "Go", maps={"to": "Paris", "mode": "walking"})
+    plain = _confirm(store)
+    assert [prompt["id"] for prompt in exchange(IPAD)] == [plain["id"]]
+    exchange(IPAD, results=[{"id": go["id"], "outcome": "confirmed", "via": "tap"}])
+    assert store.status(go["id"])[0]["status"] == "waiting", "a Conduit that can't open Maps doesn't answer Go"
+    assert [prompt["id"] for prompt in exchange(PHONE, ["maps-navigate"])] == [go["id"], plain["id"]]
+    exchange(PHONE, ["maps-navigate"], results=[{"id": go["id"], "outcome": "confirmed", "via": "tap"}])
+    [answered] = store.status(go["id"])
+    assert answered["status"] == "confirmed" and answered["device"] == PHONE
+    # A Conduit that said so long ago doesn't count any more.
+    assert store.has_feature("maps-navigate")
+    clock.now += store_module.CARD_DEVICE_RECENT_S
+    assert not store.has_feature("maps-navigate")
+
+
 def test_a_malformed_exchange_is_refused(store):
     for body in (None, {"installation_id": "x"}, {"installation_id": PHONE, "results": "no"},
                  {"installation_id": PHONE, "results": [{}] * (store_module.MAX_RESULTS + 1)}):
