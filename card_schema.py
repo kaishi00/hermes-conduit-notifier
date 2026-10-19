@@ -190,9 +190,9 @@ MEDIA_TYPES = ("media", "contact")
 LIVE_TYPES = ("status",)
 FEATURE_TYPES = {"info-cards": INFO_TYPES, "media-cards": MEDIA_TYPES, "live-cards": LIVE_TYPES}
 # A phone number's characters, and an address with nothing that could end a
-# link or a header early.
+# link or a header early, or add a header or recipient to its mailto: link.
 _PHONE = re.compile(r"^[0-9+\-(). ]+$")
-_EMAIL = re.compile(r"^[^@\s<>()\[\]\"'`,;:\\]+@[^@\s<>()\[\]\"'`,;:\\]+\.[^@\s<>()\[\]\"'`,;:\\.]+$")
+_EMAIL = re.compile(r"^[^@\s<>()\[\]\"'`,;:\\?#%&=]+@[^@\s<>()\[\]\"'`,;:\\?#%&=]+\.[^@\s<>()\[\]\"'`,;:\\?#%&=.]+$")
 
 
 def _apply_rules(card: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any] | None:
