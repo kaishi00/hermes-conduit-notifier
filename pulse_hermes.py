@@ -20,6 +20,9 @@ STATE_DB = "state.db"
 # Hermes writes this display kind on the assistant row of a turn that failed
 # (agent/turn_failure_copy.py): it ends the turn but delivers nothing.
 FAILED_TURN_KIND = "failed_turn"
+# Pulse's newest admissions in the home chat that a lookup reads: in-flight
+# attempts are always among the last few, and the history keeps growing.
+ADMISSION_SCAN = 200
 
 
 class HermesUnreadable(Exception):
@@ -56,7 +59,7 @@ def _connect(home: Path) -> sqlite3.Connection:
     if not path.exists():
         raise HermesUnreadable(f"no {STATE_DB} in the Hermes home")
     try:
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2.0)
+        conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=2.0)
     except sqlite3.Error as error:
         raise HermesUnreadable(str(error)) from error
     conn.row_factory = sqlite3.Row
@@ -110,8 +113,8 @@ def find_admission(home: Path, *, plugin_id: str, session_key: str, tag: str) ->
     prefix = json.dumps(["plugin", plugin_id, session_key], separators=(",", ":"))[:-1] + ","
     rows = _run(home, (
         "SELECT request_id, target_session_id, status, outcome, payload_json FROM session_admissions "
-        "WHERE principal_id = ? AND substr(request_id, 1, ?) = ? ORDER BY seq DESC"
-    ), ("automation:" + session_key, len(prefix), prefix))
+        "WHERE principal_id = ? AND substr(request_id, 1, ?) = ? ORDER BY seq DESC LIMIT ?"
+    ), ("automation:" + session_key, len(prefix), prefix, ADMISSION_SCAN))
     for row in rows:
         try:
             text = json.loads(row["payload_json"]).get("text")

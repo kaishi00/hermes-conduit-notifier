@@ -427,7 +427,11 @@ def test_pulse_command(live, db, capsys, monkeypatch):
     assert run("on") == 0 and live.store.get("enabled") is True
     assert run("probe") == 0 and live.store.get("probe_requested") is True
     assert run("status") == 0
-    assert f"Home chat: Pulse ({KEY})" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert f"Home chat: Pulse ({KEY})" in out
+    assert "hasn't run Pulse" in out  # no tick yet
+    pulse.tick()
+    assert run("status") == 0 and "Gateway last checked" in capsys.readouterr().out
     assert run("home", "agent:main:local:dm:x") == 0 and live.store.get("home_session_key") == "agent:main:local:dm:x"
     assert run("home", "auto") == 0 and live.store.get("home_session_key") == ""
     assert run("off") == 0 and live.store.get("enabled") is False

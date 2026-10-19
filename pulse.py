@@ -155,6 +155,8 @@ def tick(now: Optional[float] = None) -> None:
     if not pulse_store.get("enabled"):
         return
     now = time.time() if now is None else now
+    # The loop's heartbeat: `pulse status` warns when the gateway stops ticking.
+    pulse_store.set("last_tick_at", now)
     delivery.reconcile(pulse_store, home, plugin_id=_plugin_id(), process_started_at=_started_at, now=now)
     asked = pulse_store.take_probe_request()
     if not asked and not _probe_due(pulse_store, now):
@@ -167,6 +169,9 @@ def tick(now: Optional[float] = None) -> None:
     if problem:
         logger.info("conduit_push: Pulse: %s", problem)
     if chat is None:
+        if asked:
+            logger.info("conduit_push: Pulse: the requested delivery check wasn't sent; run `pulse probe` again "
+                        "once the home chat is there")
         return
     delivery.submit(pulse_store, _ctx.inject_message, kind=PROBE, session_key=chat.session_key,
                     text=lambda tag: PROBE_TEXT.format(tag=tag))

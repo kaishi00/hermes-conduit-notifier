@@ -41,6 +41,8 @@ DEFAULTS: dict[str, Any] = {
     "probe_requested": False,
     # A session key chosen with `pulse home`, over the chat found by title.
     "home_session_key": "",
+    # When the gateway's loop last ran with Pulse on (time.time()).
+    "last_tick_at": None,
 }
 
 _SCHEMA = """
