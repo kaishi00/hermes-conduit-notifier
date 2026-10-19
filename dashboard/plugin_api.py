@@ -3939,11 +3939,17 @@ async def _local_live_front_stream(target: Tuple[str, str, str], messages: List[
                     choice = json.loads(value)["choices"][0]["message"]
                 except (ValueError, KeyError, IndexError, TypeError):
                     raise _LocalLiveFrontUnavailable("unreadable answer")
-                words = think.feed(choice.get("content") or "") + think.flush()
+                if not isinstance(choice, dict):
+                    raise _LocalLiveFrontUnavailable("unreadable answer")
+                content = choice.get("content")
+                words = think.feed(content if isinstance(content, str) else "") + think.flush()
                 if words:
                     yield "text", words
-                for index, item in enumerate(choice.get("tool_calls") or []):
-                    function = item.get("function") or {}
+                items = choice.get("tool_calls")
+                for index, item in enumerate(items if isinstance(items, list) else []):
+                    if not isinstance(item, dict):
+                        continue
+                    function = item.get("function") if isinstance(item.get("function"), dict) else {}
                     yield "tool_call", {"index": index, "id": item.get("id"), "name": function.get("name"),
                                         "arguments": function.get("arguments") or ""}
                 continue
@@ -3952,12 +3958,15 @@ async def _local_live_front_stream(target: Tuple[str, str, str], messages: List[
                 delta = chunk["choices"][0].get("delta") or {}
             except (ValueError, KeyError, IndexError, TypeError, AttributeError):
                 continue
+            if not isinstance(delta, dict):
+                continue
             content = delta.get("content")
             if isinstance(content, str) and content:
                 words = think.feed(content)
                 if words:
                     yield "text", words
-            for item in delta.get("tool_calls") or []:
+            items = delta.get("tool_calls")
+            for item in items if isinstance(items, list) else []:
                 if not isinstance(item, dict):
                     continue
                 function = item.get("function") if isinstance(item.get("function"), dict) else {}

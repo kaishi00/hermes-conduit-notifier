@@ -802,7 +802,7 @@ def test_the_readiness_check_is_still_the_phones_turn(client, hermes, front):
     assert front.requests == []
 
 
-@pytest.mark.parametrize("answer", [500, []], ids=["refused", "empty"])
+@pytest.mark.parametrize("answer", [500, [], ["x", {"tool_calls": "x"}]], ids=["refused", "empty", "misshapen"])
 def test_a_fast_model_that_is_down_hands_the_utterance_to_hermes(client, hermes, front, answer):
     front.answers = [answer]
     headers = {"Authorization": f"Bearer {_key(hermes)}"}
