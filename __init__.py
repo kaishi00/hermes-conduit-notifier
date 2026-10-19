@@ -14,7 +14,7 @@ from typing import Any
 from hermes_constants import get_hermes_home
 
 from . import (call_tool, call_watches, calls, clarify_loop, client, conduit_first, cron_runs, desktop_selected,
-               health_tool, live_activity, location_tool, maps_tool, phone_tool, present_tool, reply_sources,
+               health_tool, live_activity, location_tool, maps_tool, phone_tool, present_tool, pulse, reply_sources,
                settings_tool, show_tool)
 from .session_titles import title as _session_title, titled as _titled
 from .client import enqueue
@@ -53,6 +53,9 @@ def register(ctx: Any) -> None:
     client.start()
     calls.start()
     live_activity.reporter.start()
+    # Pulse (designs/proactivity.md): off unless turned on, and then only
+    # the gateway process sends anything.
+    pulse.register(ctx)
     if hasattr(ctx, "on_unload"):
         ctx.on_unload(_unload)
     ctx.register_hook("pre_tool_call", _pre_tool_call)
@@ -134,9 +137,14 @@ def register(ctx: Any) -> None:
     )
 
 
-def _pre_tool_call(**kwargs: Any) -> None:
+def _pre_tool_call(**kwargs: Any) -> dict[str, str] | None:
     if _is_child(kwargs.get("session_id")):
-        return
+        return None
+    # A Pulse turn gets no tools. Fails closed: Hermes blocks the call when
+    # this hook raises, so the check is outside _quietly.
+    block = pulse.pre_tool_call(_text(kwargs.get("session_id")), kwargs.get("turn_id"))
+    if block is not None:
+        return block
     _quietly(live_activity.reporter.tool_started, _text(kwargs.get("session_id")), kwargs.get("tool_name"))
     if kwargs.get("tool_name") != "clarify":
         return
@@ -163,8 +171,10 @@ def _post_llm_call(**kwargs: Any) -> None:
     # for a failed turn, and the first end the phone gets is the one it keeps.
     started = _take_turn_start(kwargs.get("turn_id"))
     # A cron run says nothing when the user muted its job or it answered
-    # [SILENT] by Hermes' cron rule ("[SILENT] No changes" too).
-    quiet = is_silent_response(response) or cron_runs.quiet(session_id, kwargs.get("task_id"), response)
+    # [SILENT] by Hermes' cron rule ("[SILENT] No changes" too). A Pulse
+    # probe is Pulse checking on itself: nothing to tell the phone.
+    quiet = (is_silent_response(response) or cron_runs.quiet(session_id, kwargs.get("task_id"), response)
+             or pulse.is_pulse_turn(session_id, kwargs.get("turn_id")))
     ready = None if quiet else push_event(
         "response.ready",
         identifier=event_id("response", kwargs.get("turn_id"), session_id),
@@ -246,6 +256,7 @@ def _unload() -> None:
     for _ready, _send, timer in held:
         _cancel(timer)
     calls.stop()
+    pulse.stop()
     deadline = time.monotonic() + 1.0
     live_activity.reporter.stop(timeout=max(0.0, deadline - time.monotonic()))
     client.stop(timeout=max(0.0, deadline - time.monotonic()))
@@ -298,6 +309,7 @@ def _on_session_end(**kwargs: Any) -> None:
     if _is_child(session_id):
         return
     _end_parent_turn(session_id)
+    _quietly(pulse.turn_ended, session_id, kwargs.get("turn_id"))
     # A turn Hermes doesn't call failed but that didn't complete (it hit the
     # step limit) still answered: its reply goes out, not a failure. A Hermes
     # that doesn't say counts it failed, as before.
@@ -312,6 +324,9 @@ def _on_session_end(**kwargs: Any) -> None:
     _settle_ready(session_id, kwargs.get("turn_id"), "dropped")
     if kwargs.get("interrupted"):
         calls.turn_ended(session_id, "stopped", profile=_profile, fallback=None)
+        return
+    if pulse.is_pulse_turn(session_id, kwargs.get("turn_id")):
+        # Pulse records its own failures (``pulse status``).
         return
     if cron_runs.quiet(session_id, kwargs.get("task_id")):
         # A muted cron job's failed run: no push and no automatic alert call.
@@ -392,6 +407,14 @@ def _post_api_request(**kwargs: Any) -> None:
     if isinstance(usage, dict):
         _quietly(live_activity.reporter.context_used, session_id, usage.get("prompt_tokens"),
                  kwargs.get("context_length"))
+
+
+def _pulse_note(session_id: str, turn_id: Any, user_message: Any) -> str | None:
+    try:
+        return pulse.pre_llm_call(session_id, turn_id, user_message)
+    except Exception:  # noqa: BLE001 — a hook must never break the turn
+        logger.warning("conduit_push: Pulse couldn't check this turn", exc_info=True)
+        return None
 
 
 def _quietly(function: Any, *args: Any) -> None:
@@ -479,6 +502,11 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
     which of the user's data Conduit shares here, to use before other routes."""
     session_id = _text(kwargs.get("session_id"))
     child = _is_child(session_id)
+    pulse_note = None if child else _pulse_note(session_id, kwargs.get("turn_id"), kwargs.get("user_message"))
+    if pulse_note:
+        # Pulse's own turn: no Lock Screen progress, and only its note.
+        _note_turn_start(kwargs.get("turn_id"))
+        return {"context": pulse_note}
     if not child:
         _note_turn_start(kwargs.get("turn_id"))
         _start_parent_turn(session_id, kwargs.get("turn_id"))

@@ -31,6 +31,10 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
         help="Redact chat text from pushes; choice labels still transit so cards stay answerable",
     )
     redact.add_argument("mode", choices=["on", "off"])
+    pulse = commands.add_parser("pulse", help="Pulse, the proactivity experiment: on, off, status, probe, home")
+    pulse.add_argument("pulse_action", choices=["on", "off", "status", "probe", "home"])
+    pulse.add_argument("value", nargs="?", default="",
+                       help="for home: the session key of the chat to use, or 'auto' to find it by title")
     parser.set_defaults(func=dispatch)
 
 
@@ -138,8 +142,60 @@ def dispatch(args: argparse.Namespace) -> int:
             return 1
         print("Conduit pairing revoked." if revoked else "This Hermes profile was not paired.")
         return 0
-    print("Usage: hermes conduit-push {pair|status|test|redact|unpair}")
+    if action == "pulse":
+        return _pulse(args)
+    print("Usage: hermes conduit-push {pair|status|test|redact|unpair|pulse}")
     return 2
+
+
+def _pulse(args: argparse.Namespace) -> int:
+    from hermes_constants import get_hermes_home
+
+    from . import pulse, pulse_delivery
+    home = get_hermes_home()
+    pulse_store = pulse.open_store(home)
+    action = args.pulse_action
+    if action in ("on", "off"):
+        pulse_store.set("enabled", action == "on")
+        if action == "on":
+            print("Pulse is on. The gateway sends the first delivery check within a minute; "
+                  "see `hermes conduit-push pulse status`.")
+        else:
+            print("Pulse is off. Nothing more goes into the home chat.")
+        return 0
+    if action == "probe":
+        if not pulse_store.get("enabled"):
+            print("Pulse is off: `hermes conduit-push pulse on` first.")
+            return 1
+        pulse_store.set("probe_requested", True)
+        print("Asked the gateway for a delivery check; it goes out within a minute.")
+        return 0
+    if action == "home":
+        value = (args.value or "").strip()
+        if not value:
+            print("Usage: hermes conduit-push pulse home <session key>|auto")
+            return 2
+        pulse_store.set("home_session_key", "" if value == "auto" else value)
+        print("Pulse finds its chat by title again." if value == "auto" else f"Pulse speaks in {_printable(value)}.")
+        return 0
+    print(f"Pulse: {'on' if pulse_store.get('enabled') else 'off'}")
+    chat, problem = pulse.home_chat(pulse_store, home)
+    if chat is not None:
+        print(f"Home chat: {_printable(chat.title)} ({_printable(chat.session_key)})"
+              f"{'' if chat.pinned else ', not pinned'}")
+    if problem:
+        print(f"Warning: {_printable(problem)}")
+    print(f"Delivery check every {pulse_store.get('probe_interval_hours')} hours")
+    counts = pulse_store.counts(pulse.PROBE)
+    if counts:
+        print("Checks so far: " + ", ".join(f"{n} {state}" for state, n in sorted(counts.items())))
+    recent = pulse_store.recent(10)
+    if recent:
+        print("Latest:")
+        for row in recent:
+            print("  " + _printable(pulse_delivery.describe(row)))
+    print(f"State: {pulse_store.path}")
+    return 0
 
 
 def _flipped(ciphertext: str) -> str:
