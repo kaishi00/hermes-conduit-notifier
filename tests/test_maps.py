@@ -58,6 +58,33 @@ def store(tmp_path):
     return location.LocationStore(tmp_path, clock=lambda: NOW)
 
 
+def test_shared_maps_vector_matches_conduit():
+    # ConduitTests' testLocationMapsSealingMatchesTheVector checks the same
+    # keys, AAD and ciphertexts.
+    vector = helpers.VECTOR
+    maps_vector = vector["maps"]
+    host_private = location.unb64u(vector["host_private"])
+    host_public = location.unb64u(vector["host_public"])
+    device_public = location.unb64u(vector["device_public"])
+    shared = location.agree(host_private, device_public)
+    request_key = location.derive_key(shared, vector["device_id"], device_public, host_public, location.INFO_MAPS_REQUEST)
+    answer_key = location.derive_key(shared, vector["device_id"], device_public, host_public, location.INFO_MAPS_ANSWER)
+    assert (request_key.hex(), answer_key.hex()) == (maps_vector["request_key"], maps_vector["answer_key"])
+    request_aad = location.maps_aad("request", vector["kid"], vector["device_id"], maps_vector["id"])
+    answer_aad = location.maps_aad("answer", vector["kid"], vector["device_id"], maps_vector["id"])
+    assert (request_aad.decode(), answer_aad.decode()) == (maps_vector["request_aad"], maps_vector["answer_aad"])
+    assert location.seal(request_key, maps_vector["request"].encode(), request_aad, nonce=bytes(12)) == \
+        (maps_vector["nonce"], maps_vector["request_ct"])
+    assert location.seal(answer_key, maps_vector["answer"].encode(), answer_aad, nonce=bytes(12)) == \
+        (maps_vector["nonce"], maps_vector["answer_ct"])
+    # The host opens the phone's answer only under its own lookup's id.
+    assert location.open_sealed(answer_key, maps_vector["nonce"], maps_vector["answer_ct"], answer_aad) == \
+        maps_vector["answer"].encode()
+    with pytest.raises(location.LocationError):
+        location.open_sealed(answer_key, maps_vector["nonce"], maps_vector["answer_ct"],
+                             location.maps_aad("answer", vector["kid"], vector["device_id"], "m_another0123456789abc"))
+
+
 def _phone(store, **batch):
     phone = MapsPhone()
     phone.accept(store.register_key(phone.key_request()))
