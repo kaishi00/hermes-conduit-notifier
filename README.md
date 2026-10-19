@@ -441,6 +441,11 @@ the FULL batch to Conduit instead of collapsing it to the first question:
   whole clarify) tells Conduit to retire the entire pushed card. An
   unknown qid on a live decision is `400 invalid_question_id`, not a
   missing decision.
+- An answer is kept whole or refused, never cut: plaintext is trimmed and
+  may be up to 2,000 characters, a sealed answer (`e2e1.…`, encrypted
+  pairings) up to 11,000. A longer one is `413 answer_too_large` and the
+  question stays open; a sealed answer too short to hold its tag is
+  `400 invalid_answer`.
 - The structured decision and the notification are independent: when the
   card cannot be delivered (decision_cards disabled, or an oversized batch
   stripped by the APNs size guard, or APNs rejecting the send), the

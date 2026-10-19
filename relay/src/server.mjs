@@ -56,6 +56,12 @@ const E2E_MAX_CT_CHARS = 2600;
 export const E2E_ANSWER_PREFIX = 'e2e1.';
 const E2E_MAX_ANSWER_CHARS = 11_000;
 const E2E_ANSWER_PATTERN = new RegExp(`^${E2E_ANSWER_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[0-9a-f]{32}\\.[A-Za-z0-9_-]{16}\\.[A-Za-z0-9_-]{22,10900}$`);
+// The sealed answer's header with a ciphertext of any length: an answer of
+// this shape the pattern above refuses is a broken or oversized sealed
+// answer, never plaintext.
+const E2E_ANSWER_SHAPE = new RegExp(`^${E2E_ANSWER_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[0-9a-f]{32}\\.[A-Za-z0-9_-]{16}\\.[A-Za-z0-9_-]+$`);
+// Plaintext clarify answers, in characters (UTF-16 units) after trimming.
+const MAX_ANSWER_CHARS = 2000;
 // Stands in for question text the relay can't read, so a parked batch keeps
 // its qids (the store sanitizer drops questions without text).
 const E2E_QUESTION_PLACEHOLDER = '[encrypted]';
@@ -725,14 +731,7 @@ async function route(request, response) {
     if (!installation) return sendJson(response, 401, { error: 'unauthorized' });
     enforceRateLimit(`decision-respond:${installation.id}`, 30, 60_000);
     const body = await readJson(request);
-    // An encrypted answer is opaque base64url: kept whole (never trimmed or
-    // truncated, which would break it) and only for the strict wire shape.
-    // Anything else, including plaintext that merely starts like one, is an
-    // ordinary answer (the plugin of an encrypted pairing rejects it).
-    const answer = typeof body.answer === 'string' && E2E_ANSWER_PATTERN.test(body.answer) && body.answer.length <= E2E_MAX_ANSWER_CHARS
-      ? body.answer
-      : cleanText(body.answer, 2000);
-    if (!answer) return sendJson(response, 400, { error: 'invalid_answer' });
+    const answer = validAnswer(body.answer);
     // question_id scopes the answer to ONE question of a batch decision
     // (first-answer-wins per qid, other qids stay open); its absence keeps
     // the legacy whole-decision shape for single-question cards.
@@ -1505,6 +1504,30 @@ function validatedToken(value, error) {
   const token = String(value ?? '').replace(/[<>\s]/g, '').toLowerCase();
   if (!/^[0-9a-f]{64,200}$/.test(token)) throw httpError(400, error);
   return token;
+}
+
+// A clarify answer, kept whole or refused, never cut: a cut sealed answer
+// no longer opens, and a cut plaintext one isn't what the user wrote.
+// - An encrypted answer is opaque base64url, kept whole (never trimmed) and
+//   only for the strict wire shape. One with the sealed header that is too
+//   long is `413 answer_too_large`; one whose ciphertext is too short to
+//   hold its tag is `400 invalid_answer`.
+// - Anything else, including plaintext that merely starts like one, is an
+//   ordinary answer (the plugin of an encrypted pairing rejects it): control
+//   characters become spaces and it is trimmed; over MAX_ANSWER_CHARS it is
+//   `413 answer_too_large`.
+function validAnswer(value) {
+  if (typeof value !== 'string') throw httpError(400, 'invalid_answer');
+  if (E2E_ANSWER_SHAPE.test(value)) {
+    if (E2E_ANSWER_PATTERN.test(value) && value.length <= E2E_MAX_ANSWER_CHARS) return value;
+    // Only the ciphertext's length can fail the pattern here.
+    const tooShort = value.length - value.lastIndexOf('.') - 1 < 22;
+    throw tooShort ? httpError(400, 'invalid_answer') : httpError(413, 'answer_too_large');
+  }
+  const answer = value.replace(/[\u0000-\u001f]/g, ' ').trim();
+  if (!answer) throw httpError(400, 'invalid_answer');
+  if (answer.length > MAX_ANSWER_CHARS) throw httpError(413, 'answer_too_large');
+  return answer;
 }
 
 function cleanText(value, max) {

@@ -2306,6 +2306,35 @@ test('encrypted clarify: question ids parked, card flag drives deliverability, s
   const afterPlain = await api(baseUrl, '/v1/decisions/conduit-push-e2e000000001', { credential: gatewayCredential });
   assert.equal(afterPlain.json.answers.q1, lookalike);
 
+  // An answer the relay can't keep whole is refused, never cut: a cut sealed
+  // answer no longer opens (the plugin would drop the whole poll after the
+  // phone was told "answered"), and a cut plaintext answer isn't what the
+  // user wrote. The question stays open for another try or surface.
+  const parked = await api(baseUrl, '/v1/events', { method: 'POST', credential: gatewayCredential, body: encrypted('conduit-push-e2e000000003', true, 'input:e2e00000000000000000000000000003') });
+  assert.equal(parked.status, 202);
+  const respond = (answer, questionId) => api(baseUrl, '/v1/decisions/conduit-push-e2e000000003/respond', {
+    method: 'POST',
+    credential: deviceCredential,
+    body: { answer, question_id: questionId },
+  });
+  const oversizedSealed = await respond(`e2e1.${kid}.AAAAAAAAAAAAAAAA.${'D'.repeat(11_200)}`, 'q0');
+  assert.equal(oversizedSealed.status, 413);
+  assert.equal(oversizedSealed.json.error, 'answer_too_large');
+  const malformedSealed = await respond(`e2e1.${kid}.AAAAAAAAAAAAAAAA.short`, 'q0');
+  assert.equal(malformedSealed.status, 400);
+  assert.equal(malformedSealed.json.error, 'invalid_answer');
+  const oversizedPlain = await respond(`${'x'.repeat(2000)}y`, 'q1');
+  assert.equal(oversizedPlain.status, 413);
+  assert.equal(oversizedPlain.json.error, 'answer_too_large');
+  const stillOpen = await api(baseUrl, '/v1/decisions/conduit-push-e2e000000003', { credential: gatewayCredential });
+  assert.deepEqual(stillOpen.json.remaining, ['q0', 'q1']);
+  assert.equal(stillOpen.json.answers?.q0, undefined);
+  // At the bound, and with surrounding whitespace trimmed first, it fits.
+  const atBound = await respond(`  ${'x'.repeat(2000)}\n`, 'q1');
+  assert.equal(atBound.status, 200);
+  const afterBound = await api(baseUrl, '/v1/decisions/conduit-push-e2e000000003', { credential: gatewayCredential });
+  assert.equal(afterBound.json.answers.q1, 'x'.repeat(2000));
+
   // The relay advertises the envelope protocol.
   const meta = await api(baseUrl, '/v1/meta', { credential: deviceCredential });
   assert.ok(meta.json.capabilities.includes('e2e-v1'));
