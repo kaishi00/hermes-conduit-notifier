@@ -297,6 +297,20 @@ def test_a_live_card_replaces_the_conversations_earlier_one(store):
         [("s2", "Shipped"), ("s1", None), ("s1", "Delivered")]
 
 
+def test_a_live_card_leaves_the_earlier_cards_beside_it(store):
+    _exchange(store, features=("show-cards", "info-cards", "live-cards"))
+    packed = {"type": "status", "live": "order", "status": {"state": "Packed"}}
+    steps = {"type": "steps", "steps": [{"text": "Unbox it"}]}
+    store.show("Order", "x", session_id="s1", cards=[packed, steps], markdown_is_fallback=True)
+    store.show("Order", "Your order, as told", session_id="s1", cards=[packed, steps])
+    shipped = {**packed, "status": {"state": "Shipped"}}
+    store.show("Order", "x", session_id="s1", cards=[shipped], markdown_is_fallback=True)
+    shown = _exchange(store, features=("show-cards", "info-cards", "live-cards"))["cards"]
+    assert [card["cards"] for card in shown] == [[steps], [steps], [shipped]], "only the live card is replaced"
+    assert shown[0]["markdown"] == tool.card_schema.fallback_markdown([steps]), "its own Markdown is redone"
+    assert shown[1]["markdown"] == "Your order, as told", "Markdown that was given stays"
+
+
 def test_cards_are_refused_where_conduit_isnt_drawing_them(tool_home, monkeypatch):
     _exchange(PresentStore(tool_home), features=("chat-cards",))
     monkeypatch.setattr(tool, "_turn_source", lambda: "messaging")

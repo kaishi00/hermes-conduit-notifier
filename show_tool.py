@@ -30,7 +30,7 @@ from hermes_constants import get_hermes_home
 
 from . import card_schema, client, reply_sources
 from .present_store import (CHAT_CARDS_FEATURE, MAX_CARD_MARKDOWN_CHARS, MAX_CARD_TITLE_CHARS, PresentError,
-                            PresentStore)
+                            PresentStore, clip_markdown)
 
 logger = logging.getLogger("hermes.plugins.conduit_push")
 
@@ -191,11 +191,7 @@ def _with_left_out(note: str, left_out: list[str]) -> str:
 
 def _fallback(cards: list[dict[str, Any]]) -> str:
     """The cards' Markdown, cut at a line to fit a card."""
-    text = card_schema.fallback_markdown(cards)
-    if len(text) <= MAX_CARD_MARKDOWN_CHARS:
-        return text
-    cut = text[:MAX_CARD_MARKDOWN_CHARS]
-    return cut[:cut.rfind("\n")] if "\n" in cut else cut
+    return clip_markdown(card_schema.fallback_markdown(cards))
 
 
 def _turn_source() -> str | None:

@@ -524,7 +524,8 @@ def _status_markdown(card: dict[str, Any]) -> list[str]:
         head += f" ({phase})"
     facts = []
     if "progress" in status:
-        facts.append(f"{round(status['progress'] * 100)}%")
+        # Done is complete, as Conduit draws it, whatever was last reported.
+        facts.append(f"{100 if status.get('phase') == 'done' else round(status['progress'] * 100)}%")
     if status.get("eta"):
         facts.append(_escape(status["eta"]))
     if facts:

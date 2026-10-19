@@ -128,6 +128,12 @@ def test_fallback_markdown_shows_media_contacts_and_statuses():
     assert "**Out for delivery** · 75% · 14:20  \n✓ Shipped → Delivered" in text
 
 
+def test_a_done_status_reads_as_complete_whatever_progress_it_carries():
+    cards = card_schema.normalize_cards([{"type": "status", "status": {"state": "Delivered", "phase": "done",
+                                                                       "progress": 0.4}}])
+    assert "**Delivered** (Done) · 100%" in card_schema.fallback_markdown(cards), "as Conduit draws its bar full"
+
+
 def test_a_live_name_stays_on_the_first_card_that_has_it():
     status = {"type": "status", "live": "deploy", "status": {"state": "Building"}}
     first, second = card_schema.normalize_cards([status, status])

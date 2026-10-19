@@ -291,12 +291,11 @@ class PresentStore:
                 if markdown_is_fallback:
                     card["fallback"] = True
             # A card with a live name replaces the conversation's earlier
-            # card of that name.
+            # card of that name; the cards shown beside it stay.
             live = {item["live"] for item in rich if "live" in item}
             if live:
-                state["cards"] = [old for old in state["cards"]
-                                  if old.get("session_id") != card["session_id"]
-                                  or not any(item.get("live") in live for item in old.get("cards", []))]
+                state["cards"] = [kept for kept in (_without_live(old, live, card["session_id"], schema)
+                                                    for old in state["cards"]) if kept is not None]
             state["cards"] = (state["cards"] + [card])[-MAX_CARDS:]
             state["shown"] = (recent + [now])[-CARDS_PER_HOUR:]
             return dict(card)
@@ -625,6 +624,31 @@ def _for_device(card: dict[str, Any], features: list[str]) -> dict[str, Any]:
         card.pop("cards")
     card.pop("fallback", None)
     return card
+
+
+def clip_markdown(text: str) -> str:
+    """Markdown cut at a line to fit a card."""
+    if len(text) <= MAX_CARD_MARKDOWN_CHARS:
+        return text
+    cut = text[:MAX_CARD_MARKDOWN_CHARS]
+    return cut[:cut.rfind("\n")] if "\n" in cut else cut
+
+
+def _without_live(old: dict[str, Any], live: set[str], session: str, schema: Any) -> dict[str, Any] | None:
+    """``old`` without its rich cards of a name in ``live`` when it's from
+    ``session``, or None when it held only those. Markdown that was just
+    the cards' text is redone from the ones left; Markdown the agent gave
+    stays."""
+    cards = old.get("cards", [])
+    kept = [item for item in cards if item.get("live") not in live]
+    if old.get("session_id") != session or len(kept) == len(cards):
+        return old
+    if not kept:
+        return None
+    if not old.get("fallback"):
+        return {**old, "cards": kept}
+    markdown = clip_markdown(schema.fallback_markdown(kept))
+    return {**old, "cards": kept, "markdown": markdown} if markdown else None
 
 
 def _shows_cards(state: dict[str, Any], now: float) -> bool:

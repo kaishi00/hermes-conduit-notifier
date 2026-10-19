@@ -1489,6 +1489,7 @@ keep only that field.
   card with the same live name again in the conversation replaces the
   earlier one, on the call screen and in the chat, so Hermes keeps a
   delivery, a score or a job's progress up to date by showing it again.
+  Cards shown beside the earlier one stay.
 - A Conduit says `media-cards` and `live-cards` in its exchange when it
   draws them; the same gating as information cards applies.
 
