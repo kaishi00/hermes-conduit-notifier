@@ -617,3 +617,259 @@ def test_the_total_key_check_budget_backs_up_every_profile(monkeypatch):
         api.local_live_profile_for_key("cll1." + base64.urlsafe_b64encode(name).decode().rstrip("=") + ".wrong")
     assert len(checked) == 2
     assert api.local_live_profile_for_key(None) is None
+
+
+# --- Agent mode: a fast front model ------------------------------------------------
+
+class FrontModel:
+    """A stand-in OpenAI-compatible server: each request gets the next scripted
+    answer, a list of SSE chunk deltas (or an int HTTP status)."""
+
+    def __init__(self):
+        import http.server
+        self.answers = []
+        self.requests = []
+        model = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                model.requests.append({"path": self.path, "auth": self.headers.get("Authorization"), "body": body})
+                answer = model.answers.pop(0) if model.answers else [{"content": "ok"}]
+                if isinstance(answer, int):
+                    self.send_response(answer)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                for delta in answer:
+                    chunk = {"choices": [{"index": 0, "delta": delta}]}
+                    self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+                    self.wfile.flush()
+                self.wfile.write(b"data: [DONE]\n\n")
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.base_url = f"http://127.0.0.1:{self.server.server_address[1]}/v1"
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+@pytest.fixture
+def front(hermes):
+    model = FrontModel()
+    hermes.config["voice"]["local_live"] = {"front_model": {"base_url": model.base_url, "model": "fast-1",
+                                                            "api_key": "sk-front"}}
+    yield model
+    model.close()
+
+
+AGENT_TOOLS = [{"type": "function", "name": "start_job", "description": "Start a Hermes job.",
+                "parameters": {"type": "object", "properties": {"instructions": {"type": "string"}}}},
+               {"type": "function", "function": {"name": "list_jobs", "parameters": {"type": "object"}}},
+               {"type": "function", "name": "bad name!"}]
+
+
+def _agent(ws, instructions="You are Hermes' voice."):
+    ws.send_text(json.dumps({"type": "conduit.agent", "instructions": instructions, "tools": AGENT_TOOLS}))
+    assert json.loads(ws.receive_text()) == {"type": "conduit.agent.ready", "tools": 2}
+
+
+def test_status_reports_the_fast_model(client, hermes, front):
+    body = client.get(f"{BASE}/local-live/status").json()
+    assert body["front_model"] == {"configured": True, "available": True, "base_url": front.base_url,
+                                   "model": "fast-1", "has_key": True, "reason": None}
+    del hermes.config["voice"]["local_live"]
+    assert client.get(f"{BASE}/local-live/status").json()["front_model"]["configured"] is False
+
+
+def test_the_fast_models_address():
+    assert api.local_live_front_model_url("http://10.1.10.52:8080/v1") == "http://10.1.10.52:8080/v1/chat/completions"
+    assert api.local_live_front_model_url("https://api.example.com/v1/") == \
+        "https://api.example.com/v1/chat/completions"
+    assert api.local_live_front_model_url("box.lan:11434/v1/chat/completions") == \
+        "http://box.lan:11434/v1/chat/completions"
+    for bad in ("", "http://api.example.com/v1", "ftp://box/v1", "http://user:pw@box/v1"):
+        with pytest.raises(api.TokenError):
+            api.local_live_front_model_url(bad)
+    with pytest.raises(api.TokenError, match="model name"):
+        api.local_live_front_model_target({"base_url": "http://box.lan/v1"})
+
+
+def test_agent_mode_answers_with_the_fast_model_not_a_hermes_turn(client, hermes, server, front):
+    front.answers = [[{"role": "assistant"}, {"content": "<think>hmm</think>Hi! "}, {"content": "It's noon."}]]
+    headers = {"Authorization": f"Bearer {_key(hermes)}"}
+    with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
+        _agent(ws)
+        streamed = client.post(f"{BASE}/local-live/v1/chat/completions", json=_completion("What time is it?", stream=True),
+                               headers=headers)
+        ws.send_text("finish")
+    assert _sse_text(streamed.text) == "Hi! It's noon."
+    request = front.requests[0]
+    assert request["path"] == "/v1/chat/completions" and request["auth"] == "Bearer sk-front"
+    assert request["body"]["model"] == "fast-1" and request["body"]["stream"] is True
+    messages = request["body"]["messages"]
+    assert messages[0]["role"] == "system" and messages[0]["content"].startswith("You are Hermes' voice.")
+    # The speech server's own history and system prompt aren't used: the call keeps its own.
+    assert messages[1:] == [{"role": "user", "content": "What time is it?"}]
+    assert [tool["function"]["name"] for tool in request["body"]["tools"]] == ["start_job", "list_jobs"]
+    # Agent frames never reach the speech server.
+    assert server.upstream.sent == ["finish"]
+
+
+def test_a_tool_call_runs_on_the_phone_and_the_model_goes_on(client, hermes, front):
+    front.answers = [
+        [{"content": "On it. "},
+         {"tool_calls": [{"index": 0, "id": "call_a", "function": {"name": "start_job", "arguments": '{"instr'}}]},
+         {"tool_calls": [{"index": 0, "function": {"arguments": 'uctions": "check mail"}'}}]}],
+        [{"content": "Hermes is checking your mail."}],
+        [{"content": "You said thanks."}],
+    ]
+    headers = {"Authorization": f"Bearer {_key(hermes)}"}
+    with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
+        _agent(ws)
+        thread, result = _ask_in_background(client, headers, _completion("Check my mail", stream=True))
+        call = json.loads(ws.receive_text())
+        assert call == {"type": "conduit.tool.call", "call_id": "ll1", "name": "start_job",
+                        "arguments": '{"instructions": "check mail"}'}
+        ws.send_text(json.dumps({"type": "conduit.tool.result", "call_id": "ll1",
+                                 "output": '{"status":"started","job":"1"}'}))
+        thread.join(10)
+        client.post(f"{BASE}/local-live/v1/chat/completions", json=_completion("Thanks"), headers=headers)
+        ws.send_text("finish")
+    assert _sse_text(result["response"].text) == "On it. Hermes is checking your mail."
+    second = front.requests[1]["body"]["messages"][1:]
+    assert second == [
+        {"role": "user", "content": "Check my mail"},
+        {"role": "assistant", "content": "On it. ", "tool_calls": [
+            {"id": "call_a", "type": "function",
+             "function": {"name": "start_job", "arguments": '{"instructions": "check mail"}'}}]},
+        {"role": "tool", "tool_call_id": "call_a", "content": '{"status":"started","job":"1"}'},
+    ]
+    # The next utterance carries the whole exchange.
+    assert front.requests[2]["body"]["messages"][-2:] == [
+        {"role": "assistant", "content": "Hermes is checking your mail."}, {"role": "user", "content": "Thanks"}]
+
+
+def test_without_a_fast_model_hermes_answers_each_turn(client, hermes):
+    headers = {"Authorization": f"Bearer {_key(hermes)}"}
+    with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
+        _agent(ws)
+        thread, result = _ask_in_background(client, headers, _completion("Hello"))
+        assert json.loads(ws.receive_text())["type"] == "conduit.turn"
+        ws.send_text(json.dumps({"type": "conduit.turn.delta", "turn_id": "t1", "text": "Hi."}))
+        ws.send_text(json.dumps({"type": "conduit.turn.done", "turn_id": "t1"}))
+        thread.join(10)
+        ws.send_text("finish")
+    assert result["response"].json()["choices"][0]["message"]["content"] == "Hi."
+
+
+def test_the_readiness_check_is_still_the_phones_turn(client, hermes, front):
+    headers = {"Authorization": f"Bearer {_key(hermes)}"}
+    with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
+        _agent(ws)
+        thread, result = _ask_in_background(client, headers, _completion("conduit-ready-1234"))
+        assert json.loads(ws.receive_text())["text"] == "conduit-ready-1234"
+        ws.send_text(json.dumps({"type": "conduit.turn.done", "turn_id": "t1"}))
+        thread.join(10)
+        ws.send_text("finish")
+    assert front.requests == []
+
+
+def test_a_fast_model_that_is_down_hands_the_utterance_to_hermes(client, hermes, front):
+    front.answers = [500]
+    headers = {"Authorization": f"Bearer {_key(hermes)}"}
+    with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
+        _agent(ws)
+        thread, result = _ask_in_background(client, headers, _completion("Hello"))
+        assert json.loads(ws.receive_text())["text"] == "Hello"
+        ws.send_text(json.dumps({"type": "conduit.turn.delta", "turn_id": "t1", "text": "Hi from Hermes."}))
+        ws.send_text(json.dumps({"type": "conduit.turn.done", "turn_id": "t1"}))
+        thread.join(10)
+        ws.send_text("finish")
+    assert result["response"].json()["choices"][0]["message"]["content"] == \
+        api.LOCAL_LIVE_FRONT_UNREACHABLE_REPLY + " Hi from Hermes."
+
+
+def test_a_server_without_tool_support_is_asked_again_without_tools(client, hermes, front):
+    front.answers = [400, [{"content": "Hello."}]]
+    headers = {"Authorization": f"Bearer {_key(hermes)}"}
+    with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
+        _agent(ws)
+        body = client.post(f"{BASE}/local-live/v1/chat/completions", json=_completion("Hi"), headers=headers).json()
+        ws.send_text("finish")
+    assert body["choices"][0]["message"]["content"] == "Hello."
+    assert "tools" in front.requests[0]["body"] and "tools" not in front.requests[1]["body"]
+
+
+def test_an_engine_with_its_own_front_model_uses_the_calls_tools(client, hermes):
+    headers = {"Authorization": f"Bearer {_key(hermes)}"}
+    assert client.post(f"{BASE}/local-live/v1/tools/call", json={"name": "start_job"},
+                       headers=headers).status_code == 409
+    with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
+        _agent(ws)
+        listed = client.get(f"{BASE}/local-live/v1/tools", headers=headers).json()
+        assert listed["in_call"] is True
+        assert [tool["function"]["name"] for tool in listed["tools"]] == ["start_job", "list_jobs"]
+        assert client.post(f"{BASE}/local-live/v1/tools/call", json={"name": "nope"},
+                           headers=headers).status_code == 404
+        result = {}
+
+        def run():
+            result["response"] = client.post(f"{BASE}/local-live/v1/tools/call",
+                                             json={"name": "start_job", "arguments": {"instructions": "x"}},
+                                             headers=headers)
+
+        thread = threading.Thread(target=run)
+        thread.start()
+        call = json.loads(ws.receive_text())
+        assert call["name"] == "start_job" and json.loads(call["arguments"]) == {"instructions": "x"}
+        ws.send_text(json.dumps({"type": "conduit.tool.result", "call_id": call["call_id"], "output": "started"}))
+        thread.join(10)
+        ws.send_text("finish")
+    assert result["response"].json() == {"output": "started"}
+    assert client.get(f"{BASE}/local-live/v1/tools").status_code == 401
+
+
+def test_an_answer_nobody_waits_for_is_handed_back_as_late(client, hermes):
+    with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
+        _agent(ws)
+        ws.send_text(json.dumps({"type": "conduit.tool.result", "call_id": "ll9", "output": "x", "speak": True}))
+        assert json.loads(ws.receive_text()) == {"type": "conduit.tool.late", "call_id": "ll9"}
+        ws.send_text("finish")
+
+
+def test_tool_calls_the_user_talked_over_get_stand_in_results():
+    agent = api._LocalLiveAgent("Be brief.", [])
+    agent.history = [{"role": "user", "content": "a"},
+                     {"role": "assistant", "content": "", "tool_calls": [{"id": "c1"}, {"id": "c2"}]},
+                     {"role": "tool", "tool_call_id": "c1", "content": "done"},
+                     {"role": "user", "content": "b"},
+                     {"role": "tool", "tool_call_id": "c2", "content": "late"}]
+    messages = agent.messages()
+    assert [m["role"] for m in messages] == ["system", "user", "assistant", "tool", "tool", "user"]
+    assert messages[4]["tool_call_id"] == "c2" and "interrupted" in messages[4]["content"]
+
+
+def test_history_stays_bounded_and_starts_with_the_user(monkeypatch):
+    monkeypatch.setattr(api, "LOCAL_LIVE_AGENT_MAX_HISTORY", 3)
+    agent = api._LocalLiveAgent("", [])
+    agent._append({"role": "user", "content": "1"})
+    agent._append({"role": "assistant", "content": "", "tool_calls": [{"id": "c"}]})
+    agent._append({"role": "tool", "tool_call_id": "c", "content": "x"})
+    agent._append({"role": "user", "content": "2"})
+    assert agent.history == [{"role": "user", "content": "2"}]
+
+
+def test_thinking_is_never_spoken():
+    think = api._ThinkFilter()
+    out = "".join(think.feed(piece) for piece in ["Hel", "lo <th", "ink>secret", " stuff</thi", "nk> there", "<"])
+    assert out + think.flush() == "Hello  there<"

@@ -2683,7 +2683,9 @@ async def _speech_server_relay(ws: WebSocket, refuse: Callable[[int, str], Any],
 LOCAL_LIVE_MOUNT = "/api/plugins/conduit_push"
 LOCAL_LIVE_MODEL_PATH = "/local-live/v1"
 LOCAL_LIVE_TOKEN_PATHS = (LOCAL_LIVE_MOUNT + LOCAL_LIVE_MODEL_PATH + "/chat/completions",
-                          LOCAL_LIVE_MOUNT + LOCAL_LIVE_MODEL_PATH + "/models")
+                          LOCAL_LIVE_MOUNT + LOCAL_LIVE_MODEL_PATH + "/models",
+                          LOCAL_LIVE_MOUNT + LOCAL_LIVE_MODEL_PATH + "/tools",
+                          LOCAL_LIVE_MOUNT + LOCAL_LIVE_MODEL_PATH + "/tools/call")
 LOCAL_LIVE_FILE = "conduit-local-live.json"
 LOCAL_LIVE_KEY_PREFIX = "cll1"
 LOCAL_LIVE_PROVIDER_NAME = "conduit-local-live"
@@ -3016,6 +3018,10 @@ class _LocalLiveCall:
         self.turns: Dict[str, _LocalLiveTurn] = {}
         self.numbers = itertools.count(1)
         self.closed = False
+        # Agent mode (conduit.agent from the phone): a fast front model
+        # answers the call and hands the work to Hermes through the call's
+        # tools. None keeps one Hermes turn per utterance.
+        self.agent: Optional[_LocalLiveAgent] = None
 
     async def send(self, payload: Dict[str, Any]) -> bool:
         if self.closed:
@@ -3057,6 +3063,9 @@ class _LocalLiveCall:
         kind = frame.get("type") if isinstance(frame, dict) else None
         if not isinstance(kind, str) or not kind.startswith("conduit."):
             return False
+        if kind.startswith(("conduit.agent", "conduit.tool.")):
+            await self._agent_frame(kind, frame)
+            return True
         turn = self.turns.get(str(frame.get("turn_id") or ""))
         if turn is None:
             return True
@@ -3097,11 +3106,33 @@ class _LocalLiveCall:
             return True
         return any(words == wanted and now - at < LOCAL_LIVE_RETRY_WINDOW_S for words, at in self.read_lately)
 
+    async def _agent_frame(self, kind: str, frame: Dict[str, Any]) -> None:
+        if kind == "conduit.agent":
+            # A connection's setup, sent again on each reconnect: the
+            # conversation so far stays.
+            agent = _LocalLiveAgent.configured(frame, previous=self.agent)
+            self.agent = agent
+            await self.send({"type": "conduit.agent.ready", "tools": len(agent.tools)})
+        elif self.agent is None:
+            return
+        elif kind == "conduit.agent.note":
+            self.agent.note(frame.get("text"))
+        elif kind == "conduit.tool.result":
+            call_id = str(frame.get("call_id") or "")
+            output = frame.get("output")
+            output = output if isinstance(output, str) else json.dumps(output if output is not None else {})
+            if not self.agent.resolve(call_id, output) and frame.get("speak") is True and call_id:
+                # Nothing waits for it any more (the front model moved on or
+                # gave up): the phone says it as an update of its own.
+                await self.send({"type": "conduit.tool.late", "call_id": call_id})
+
     def close(self) -> None:
         self.closed = True
         for turn in list(self.turns.values()):
             turn.frames.put_nowait(("done", ""))
         self.turns.clear()
+        if self.agent is not None:
+            self.agent.close()
 
 
 _local_live_calls: Dict[str, List[Any]] = {}
@@ -3224,6 +3255,8 @@ def local_live_status(
         "model_name": LOCAL_LIVE_MODEL_ID,
         "api_key": local_live_key(profile) if auth_ready else None,
         "speech_server": server,
+        # Agent mode's fast model; without one, Hermes answers each turn.
+        "front_model": local_live_front_model_status(),
         "in_call": (_local_live_active_call(profile or "") is not None) if in_call is None else in_call,
         "last_request_at": (_local_live_last_request.get(_local_live_profile_key(profile))
                             if last_request_at is None else last_request_at),
@@ -3357,34 +3390,57 @@ async def post_local_live_chat_completions(request: Request) -> Any:
     completion_id = f"chatcmpl-conduit-{uuid.uuid4().hex[:24]}"
     created = int(time.time())
     call, speaks = _local_live_route(profile, text)
-    turn = await call.start_turn(text) if call is not None and text and not speaks else None
+    # Agent mode: the call's front model answers, unless it isn't set up
+    # (then Hermes answers each turn, as before). The readiness check is
+    # always the phone's own turn.
+    agent = getattr(call, "agent", None) if call is not None and not speaks else None
+    target = await _local_live_front_target(profile) \
+        if agent is not None and text and not text.startswith(LOCAL_LIVE_READY_PREFIX) else None
+    turn = await call.start_turn(text) if call is not None and text and not speaks and target is None else None
+
+    async def turn_words() -> Any:
+        """The phone's turn reply as it streams."""
+        deadline = time.monotonic() + LOCAL_LIVE_TURN_MAX_S
+        while True:
+            remaining = min(LOCAL_LIVE_TURN_IDLE_S, deadline - time.monotonic())
+            if remaining <= 0:
+                return
+            try:
+                kind, delta = await asyncio.wait_for(turn.frames.get(), timeout=remaining)
+            except asyncio.TimeoutError:
+                return
+            if kind == "done":
+                return
+            yield delta
 
     async def words() -> Any:
         """The reply's text as the phone streams it; a fixed line with no call."""
+        nonlocal turn
         if speaks:
             # Read back word for word: the words are the reply already.
             if text:
                 yield text
             return
-        if turn is None:
-            # With a call open, an empty request (a warmup mid-call) gets
-            # nothing to say, not the no-call line.
-            if call is None:
-                yield LOCAL_LIVE_NO_CALL_REPLY
-            return
-        deadline = time.monotonic() + LOCAL_LIVE_TURN_MAX_S
         try:
-            while True:
-                remaining = min(LOCAL_LIVE_TURN_IDLE_S, deadline - time.monotonic())
-                if remaining <= 0:
-                    return
+            if target is not None:
                 try:
-                    kind, delta = await asyncio.wait_for(turn.frames.get(), timeout=remaining)
-                except asyncio.TimeoutError:
+                    async with contextlib.aclosing(agent.reply(call, text, target)) as replies:
+                        async for delta in replies:
+                            yield delta
                     return
-                if kind == "done":
-                    return
-                yield delta
+                except _LocalLiveFrontUnavailable:
+                    # The fast model is down: this utterance goes to Hermes.
+                    yield LOCAL_LIVE_FRONT_UNREACHABLE_REPLY + " "
+                    turn = await call.start_turn(text)
+            if turn is None:
+                # With a call open, an empty request (a warmup mid-call) gets
+                # nothing to say, not the no-call line.
+                if call is None:
+                    yield LOCAL_LIVE_NO_CALL_REPLY
+                return
+            async with contextlib.aclosing(turn_words()) as deltas:
+                async for delta in deltas:
+                    yield delta
         finally:
             # The server stopped listening (the user talked over the reply)
             # or the reply ended: either way the phone hears it's over.
@@ -3402,8 +3458,9 @@ async def post_local_live_chat_completions(request: Request) -> Any:
     async def events() -> Any:
         try:
             yield _local_live_chunk(completion_id, created, {"role": "assistant"})
-            async for delta in words():
-                yield _local_live_chunk(completion_id, created, {"content": delta})
+            async with contextlib.aclosing(words()) as deltas:
+                async for delta in deltas:
+                    yield _local_live_chunk(completion_id, created, {"content": delta})
             yield _local_live_chunk(completion_id, created, {}, finish="stop")
             yield "data: [DONE]\n\n"
         finally:
@@ -3413,6 +3470,537 @@ async def post_local_live_chat_completions(request: Request) -> Any:
                 _local_live_spawn(call.cancel_turn(turn))
 
     return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-store"})
+
+
+# --- Local Live agent mode: a fast front model in front of Hermes ------------
+#
+# One Hermes turn per utterance is slow to start talking (a full agent turn,
+# often 8-15 s). In agent mode a quick model of the user's choosing holds the
+# conversation and hands real work to Hermes as background jobs, like
+# GPT-Live, Gemini and Grok do:
+#
+#   phone -> plugin: conduit.agent {instructions, tools}   (on connecting)
+#   speech server -> /local-live/v1/chat/completions       (each utterance)
+#   plugin -> front model (voice.local_live.front_model), streamed back
+#   front model calls a tool -> plugin -> phone: conduit.tool.call
+#   phone runs it (start_job, list_jobs, cancel_job, ...) -> conduit.tool.result
+#
+# The phone owns the tools and the jobs, exactly as for Grok Live: it starts
+# a job in the call's chat and answers at once, and a job's outcome comes
+# back later as a typed turn the phone sends while the call is quiet, which
+# the speech server asks this route about like any utterance. The speech
+# server never sees a tool (HF speech-to-speech errors on tool_choice).
+#
+# With no front model configured the call goes on as before: one Hermes turn
+# per utterance, through conduit.turn. An engine that runs its own front
+# model (Pipecat behind the relay, say) uses the same tools through
+# /local-live/v1/tools and /local-live/v1/tools/call with the Local Live key.
+
+LOCAL_LIVE_READY_PREFIX = "conduit-ready-"
+LOCAL_LIVE_AGENT_MAX_INSTRUCTIONS = 64_000
+LOCAL_LIVE_AGENT_MAX_TOOLS = 64
+LOCAL_LIVE_AGENT_MAX_NOTE_CHARS = 4_000
+# Messages kept for the front model: the call's recent conversation, tool
+# calls included. Older ones go first, a user message always leads.
+LOCAL_LIVE_AGENT_MAX_HISTORY = 60
+LOCAL_LIVE_AGENT_MAX_HISTORY_CHARS = 60_000
+LOCAL_LIVE_AGENT_MAX_TOOL_OUTPUT_CHARS = 16_000
+# Tool rounds in one reply: a model that keeps calling tools stops here.
+LOCAL_LIVE_AGENT_MAX_ROUNDS = 5
+# How long one tool call waits for the phone. start_job answers once the
+# job runs; a web lookup takes a few seconds.
+LOCAL_LIVE_AGENT_TOOL_TIMEOUT_S = 30.0
+# To connect, and between chunks of the front model's stream.
+LOCAL_LIVE_FRONT_TIMEOUT_S = 30.0
+LOCAL_LIVE_FRONT_MAX_LINE_BYTES = 1024 * 1024
+LOCAL_LIVE_FRONT_UNREACHABLE_REPLY = "I can't reach my quick model right now, so I'll pass that to Hermes."
+LOCAL_LIVE_AGENT_SPEECH_HINT = (
+    "\nEverything you write is spoken aloud by a speech server as it streams: plain spoken sentences only, "
+    "no markdown, lists, code, emoji or links. Keep replies short unless the user asks for more.")
+_LOCAL_LIVE_TOOL_NAME = re.compile(r"[A-Za-z0-9_-]{1,64}")
+_local_live_front_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="conduit-local-live-front")
+_local_live_front_opener = urllib.request.build_opener(_NoRedirect)
+
+
+def _local_live_front_model_settings() -> Dict[str, Any]:
+    """The profile's ``voice.local_live.front_model`` block (profile-scoped), or {}."""
+    try:
+        from hermes_cli.config import load_config
+        config = load_config()
+    except ImportError:
+        return {}
+    except Exception as exc:
+        logger.warning("Local Live could not read the Hermes config: %s", type(exc).__name__)
+        raise TokenError(503, f"The Hermes host could not read its config ({type(exc).__name__}).")
+    voice = config.get("voice") if isinstance(config, dict) else None
+    local = voice.get("local_live") if isinstance(voice, dict) else None
+    front = local.get("front_model") if isinstance(local, dict) else None
+    return front if isinstance(front, dict) else {}
+
+
+def local_live_front_model_url(raw: Any) -> str:
+    """The configured base URL as its chat-completions address.
+
+    Any OpenAI-compatible server: ``http://box:8080/v1`` asks
+    ``http://box:8080/v1/chat/completions``. Plain http only reaches private
+    hosts, since the key travels with every request.
+    """
+    text = str(raw or "").strip()
+    if not text:
+        raise TokenError(503, "No fast model is set for Local Live (voice.local_live.front_model.base_url).")
+    if "://" not in text:
+        text = "http://" + text
+    try:
+        parts = urllib.parse.urlsplit(text)
+        port = parts.port
+    except ValueError:
+        raise TokenError(503, "The fast model's address is not valid.")
+    scheme = parts.scheme.lower()
+    host = parts.hostname or ""
+    if scheme not in ("http", "https") or not host or parts.username or parts.password or parts.fragment \
+            or any(ord(c) <= 0x20 or ord(c) == 0x7F for c in text):
+        raise TokenError(503, "The fast model's address must look like http://host:8080/v1.")
+    if scheme == "http" and not _speech_server_host_is_private(host):
+        raise TokenError(503, f"{host} is a public address, so the fast model needs https://.")
+    netloc = f"[{host}]" if ":" in host else host
+    if port is not None:
+        netloc = f"{netloc}:{port}"
+    path = parts.path.rstrip("/")
+    if not path.endswith("/chat/completions"):
+        path += "/chat/completions"
+    return urllib.parse.urlunsplit((scheme, netloc, path, parts.query, ""))
+
+
+def local_live_front_model_target(settings: Optional[Dict[str, Any]] = None) -> Tuple[str, str, str]:
+    """(url, model, key) for this profile's front model; TokenError(503) when unset or invalid."""
+    if settings is None:
+        settings = _local_live_front_model_settings()
+    url = local_live_front_model_url(settings.get("base_url"))
+    model = str(settings.get("model") or "").strip()
+    if not model:
+        raise TokenError(503, "Local Live's fast model has no model name (voice.local_live.front_model.model).")
+    try:
+        key = _speech_server_key(settings)
+    except TokenError:
+        raise TokenError(503, "The fast model's key file (voice.local_live.front_model.api_key_file) can't be used.")
+    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in key + model):
+        raise TokenError(503, "The fast model's key or name contains a control character.")
+    return url, model, key
+
+
+def local_live_front_model_status() -> Dict[str, Any]:
+    """What Conduit's Local settings show about the front model."""
+    try:
+        settings = _local_live_front_model_settings()
+    except TokenError as exc:
+        return {"configured": False, "available": False, "base_url": None, "model": None, "has_key": False,
+                "reason": str(exc)}
+    base_url = str(settings.get("base_url") or "").strip() or None
+    model = str(settings.get("model") or "").strip() or None
+    has_key = bool(str(settings.get("api_key") or "").strip() or str(settings.get("api_key_file") or "").strip())
+    configured = base_url is not None or model is not None
+    try:
+        local_live_front_model_target(settings)
+    except TokenError as exc:
+        return {"configured": configured, "available": False, "base_url": base_url, "model": model,
+                "has_key": has_key, "reason": str(exc) if configured else None}
+    return {"configured": True, "available": True, "base_url": base_url, "model": model, "has_key": has_key,
+            "reason": None}
+
+
+def _local_live_agent_tool(raw: Any) -> Optional[Dict[str, Any]]:
+    """A tool as chat completions takes it, from either the Realtime shape
+    ({type, name, description, parameters}) or the chat one ({type, function})."""
+    if not isinstance(raw, dict):
+        return None
+    function = raw.get("function") if isinstance(raw.get("function"), dict) else raw
+    name = function.get("name")
+    if not isinstance(name, str) or not _LOCAL_LIVE_TOOL_NAME.fullmatch(name):
+        return None
+    parameters = function.get("parameters")
+    tool: Dict[str, Any] = {"name": name,
+                            "parameters": parameters if isinstance(parameters, dict) else {"type": "object",
+                                                                                           "properties": {}}}
+    if isinstance(function.get("description"), str):
+        tool["description"] = function["description"]
+    return {"type": "function", "function": tool}
+
+
+class _LocalLiveAgent:
+    """One call's front-model conversation and the tool calls it waits on."""
+
+    def __init__(self, instructions: str, tools: List[Dict[str, Any]]) -> None:
+        self.instructions = instructions
+        self.tools = tools
+        self.history: List[Dict[str, Any]] = []
+        self.waiters: Dict[str, "asyncio.Future[str]"] = {}
+        # Bumped by each new reply: an older one stops at its next step.
+        self.generation = 0
+        self.numbers = itertools.count(1)
+
+    @classmethod
+    def configured(cls, frame: Dict[str, Any], previous: Optional["_LocalLiveAgent"] = None) -> "_LocalLiveAgent":
+        instructions = frame.get("instructions")
+        instructions = instructions[:LOCAL_LIVE_AGENT_MAX_INSTRUCTIONS] if isinstance(instructions, str) else ""
+        raw_tools = frame.get("tools") if isinstance(frame.get("tools"), list) else []
+        tools, names = [], set()
+        for raw in raw_tools[:LOCAL_LIVE_AGENT_MAX_TOOLS]:
+            tool = _local_live_agent_tool(raw)
+            if tool is not None and tool["function"]["name"] not in names:
+                names.add(tool["function"]["name"])
+                tools.append(tool)
+        agent = cls(instructions, tools)
+        if previous is not None:
+            agent.history = previous.history
+            agent.numbers = previous.numbers
+            previous.close()
+        return agent
+
+    def note(self, text: Any) -> None:
+        """Context the front model keeps without answering it (a turn typed
+        in the attached chat)."""
+        if isinstance(text, str) and text.strip():
+            self._append({"role": "user", "content": text.strip()[:LOCAL_LIVE_AGENT_MAX_NOTE_CHARS]})
+
+    def messages(self) -> List[Dict[str, Any]]:
+        system = (self.instructions or "You are a helpful voice assistant.") + LOCAL_LIVE_AGENT_SPEECH_HINT
+        messages: List[Dict[str, Any]] = [{"role": "system", "content": system}]
+        # Every tool call needs its result next, or the server refuses the
+        # conversation: one the user talked over gets a stand-in.
+        owed: List[str] = []
+        for message in self.history:
+            if message.get("role") == "tool":
+                if message.get("tool_call_id") in owed:
+                    owed.remove(message["tool_call_id"])
+                    messages.append(message)
+                continue
+            messages.extend(self._stand_ins(owed))
+            owed = [item["id"] for item in message.get("tool_calls") or []]
+            messages.append(message)
+        messages.extend(self._stand_ins(owed))
+        return messages
+
+    @staticmethod
+    def _stand_ins(owed: List[str]) -> List[Dict[str, Any]]:
+        return [{"role": "tool", "tool_call_id": call_id,
+                 "content": json.dumps({"status": "interrupted", "note": "The user spoke before this answered."})}
+                for call_id in owed]
+
+    def _append(self, message: Dict[str, Any]) -> None:
+        self.history.append(message)
+        total = sum(len(json.dumps(m)) for m in self.history)
+        while self.history and (len(self.history) > LOCAL_LIVE_AGENT_MAX_HISTORY
+                                or total > LOCAL_LIVE_AGENT_MAX_HISTORY_CHARS):
+            total -= len(json.dumps(self.history.pop(0)))
+            # Never start on a tool result or an assistant's tool calls whose
+            # user message went: the server would refuse the conversation.
+            while self.history and self.history[0].get("role") != "user":
+                total -= len(json.dumps(self.history.pop(0)))
+
+    def resolve(self, call_id: str, output: str) -> bool:
+        waiter = self.waiters.pop(call_id, None)
+        if waiter is None or waiter.done():
+            return False
+        waiter.set_result(output[:LOCAL_LIVE_AGENT_MAX_TOOL_OUTPUT_CHARS])
+        return True
+
+    def close(self) -> None:
+        self.generation += 1
+        for waiter in self.waiters.values():
+            if not waiter.done():
+                waiter.cancel()
+        self.waiters.clear()
+
+    async def run_tool(self, call: Any, name: str, arguments: str, call_id: Optional[str] = None) -> str:
+        """Asks the phone to run one tool; its output, or an error the model reads."""
+        call_id = call_id or f"ll{next(self.numbers)}"
+        waiter: "asyncio.Future[str]" = asyncio.get_running_loop().create_future()
+        self.waiters[call_id] = waiter
+        sent = await call.send({"type": "conduit.tool.call", "call_id": call_id, "name": name,
+                                "arguments": arguments or "{}"})
+        if not sent:
+            self.waiters.pop(call_id, None)
+            return json.dumps({"error": "Conduit isn't connected, so the tool couldn't run."})
+        try:
+            return await asyncio.wait_for(asyncio.shield(waiter), timeout=LOCAL_LIVE_AGENT_TOOL_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            # Kept waiting: a late answer still reaches the phone as an update.
+            self.waiters.pop(call_id, None)
+            return json.dumps({"status": "still_running",
+                               "note": "No answer yet. If it comes, it arrives later as its own message."})
+        except asyncio.CancelledError:
+            if waiter.cancelled():
+                return json.dumps({"error": "The call ended."})
+            # The reply was dropped (the user talked over it): a later
+            # answer is the phone's to say.
+            self.waiters.pop(call_id, None)
+            raise
+
+    async def reply(self, call: Any, text: str, target: Tuple[str, str, str]) -> Any:
+        """The front model's spoken answer to ``text``, as it streams. Raises
+        _LocalLiveFrontUnavailable when the model failed before saying anything."""
+        self.generation += 1
+        generation = self.generation
+        self._append({"role": "user", "content": text})
+        said_anything = False
+        for _ in range(LOCAL_LIVE_AGENT_MAX_ROUNDS):
+            spoken: List[str] = []
+            tool_calls: Dict[int, Dict[str, Any]] = {}
+            completed = False
+            try:
+                async with contextlib.aclosing(_local_live_front_stream(target, self.messages(), self.tools)) as stream:
+                    async for kind, value in stream:
+                        if generation != self.generation:
+                            return
+                        if kind == "text":
+                            spoken.append(value)
+                            said_anything = True
+                            yield value
+                        elif kind == "tool_call":
+                            slot = tool_calls.setdefault(value["index"], {"id": "", "name": "", "arguments": ""})
+                            slot["id"] = value.get("id") or slot["id"]
+                            slot["name"] = value.get("name") or slot["name"]
+                            slot["arguments"] += value.get("arguments") or ""
+                completed = True
+                for index, slot in tool_calls.items():
+                    slot["id"] = slot["id"] or f"call_{generation}_{index}"
+            except _LocalLiveFrontUnavailable:
+                if said_anything:
+                    return
+                if self.history and self.history[-1] == {"role": "user", "content": text}:
+                    self.history.pop()
+                raise
+            finally:
+                # What was said stays in the conversation, even when the user
+                # talked over it and the stream was dropped.
+                if spoken or (completed and tool_calls):
+                    message: Dict[str, Any] = {"role": "assistant", "content": "".join(spoken)}
+                    if completed and tool_calls:
+                        message["tool_calls"] = [
+                            {"id": slot["id"], "type": "function",
+                             "function": {"name": slot["name"], "arguments": slot["arguments"] or "{}"}}
+                            for _, slot in sorted(tool_calls.items()) if slot["name"]]
+                        if not message["tool_calls"]:
+                            del message["tool_calls"]
+                    self._append(message)
+            calls = [slot for _, slot in sorted(tool_calls.items()) if slot["name"]]
+            if not calls:
+                return
+            for slot in calls:
+                if generation != self.generation:
+                    return
+                output = await self.run_tool(call, slot["name"], slot["arguments"])
+                self._append({"role": "tool", "tool_call_id": slot["id"], "content": output})
+            if generation != self.generation:
+                return
+
+
+class _LocalLiveFrontUnavailable(Exception):
+    """The front model couldn't be asked (unreachable, refused, broken stream)."""
+
+
+class _ThinkFilter:
+    """Drops <think>…</think> from a streamed reply: reasoning models put
+    their thinking there, and the speech server would read it out."""
+
+    OPEN, CLOSE = "<think>", "</think>"
+
+    def __init__(self) -> None:
+        self.thinking = False
+        self.pending = ""
+
+    def feed(self, text: str) -> str:
+        self.pending += text
+        out: List[str] = []
+        while self.pending:
+            tag = self.CLOSE if self.thinking else self.OPEN
+            at = self.pending.find(tag)
+            if at >= 0:
+                if not self.thinking:
+                    out.append(self.pending[:at])
+                self.pending = self.pending[at + len(tag):]
+                self.thinking = not self.thinking
+                continue
+            # Keep a tail that could be the start of the tag.
+            keep = next((n for n in range(len(tag) - 1, 0, -1) if self.pending.endswith(tag[:n])), 0)
+            if not self.thinking:
+                out.append(self.pending[:len(self.pending) - keep])
+            self.pending = self.pending[len(self.pending) - keep:]
+            break
+        return "".join(out)
+
+    def flush(self) -> str:
+        rest, self.pending = ("" if self.thinking else self.pending), ""
+        return rest
+
+
+async def _local_live_front_stream(target: Tuple[str, str, str], messages: List[Dict[str, Any]],
+                                   tools: List[Dict[str, Any]]) -> Any:
+    """("text", words) and ("tool_call", {index, id, name, arguments}) from
+    the front model as they arrive. The request runs on a worker thread
+    (urllib), which stops at its next line once this generator closes."""
+    url, model, key = target
+    body: Dict[str, Any] = {"model": model, "messages": messages, "stream": True}
+    if tools:
+        body["tools"] = tools
+        body["tool_choice"] = "auto"
+    loop = asyncio.get_running_loop()
+    queue: "asyncio.Queue[Tuple[str, Any]]" = asyncio.Queue()
+    stop = threading.Event()
+
+    def put(item: Tuple[str, Any]) -> None:
+        if not stop.is_set():
+            loop.call_soon_threadsafe(queue.put_nowait, item)
+
+    def ask(payload: Dict[str, Any]) -> Optional[int]:
+        """Streams one request into the queue; the HTTP status of a refusal."""
+        headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        request = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers,
+                                         method="POST")
+        try:
+            response = _local_live_front_opener.open(request, timeout=LOCAL_LIVE_FRONT_TIMEOUT_S)
+        except urllib.error.HTTPError as exc:
+            exc.close()
+            return exc.code
+        with response:
+            if "json" in (response.headers.get("Content-Type") or "") and \
+                    "event-stream" not in (response.headers.get("Content-Type") or ""):
+                # A server that ignored "stream": one whole answer.
+                put(("whole", response.read(LOCAL_LIVE_FRONT_MAX_LINE_BYTES * 4)))
+                return None
+            while not stop.is_set():
+                line = response.readline(LOCAL_LIVE_FRONT_MAX_LINE_BYTES)
+                if not line:
+                    break
+                text = line.decode("utf-8", "replace").strip()
+                if not text.startswith("data:"):
+                    continue
+                data = text[5:].strip()
+                if data == "[DONE]":
+                    break
+                put(("data", data))
+        return None
+
+    def run() -> None:
+        try:
+            status = ask(body)
+            if status == 400 and tools:
+                # A server without tool support refuses the request: talk
+                # without them rather than not at all.
+                logger.info("Local Live's fast model refused tools; answering without them")
+                status = ask({k: v for k, v in body.items() if k not in ("tools", "tool_choice")})
+            put(("status", status) if status is not None else ("end", None))
+        except Exception as exc:  # noqa: BLE001 — any failure ends the stream
+            put(("error", type(exc).__name__))
+
+    _local_live_front_executor.submit(run)
+    think = _ThinkFilter()
+    try:
+        while True:
+            kind, value = await queue.get()
+            if kind == "end":
+                rest = think.flush()
+                if rest:
+                    yield "text", rest
+                return
+            if kind == "status":
+                logger.warning("Local Live's fast model refused the request: HTTP %s", value)
+                raise _LocalLiveFrontUnavailable(f"HTTP {value}")
+            if kind == "error":
+                logger.warning("Local Live couldn't reach its fast model: %s", value)
+                raise _LocalLiveFrontUnavailable(value)
+            if kind == "whole":
+                try:
+                    choice = json.loads(value)["choices"][0]["message"]
+                except (ValueError, KeyError, IndexError, TypeError):
+                    raise _LocalLiveFrontUnavailable("unreadable answer")
+                words = think.feed(choice.get("content") or "") + think.flush()
+                if words:
+                    yield "text", words
+                for index, item in enumerate(choice.get("tool_calls") or []):
+                    function = item.get("function") or {}
+                    yield "tool_call", {"index": index, "id": item.get("id"), "name": function.get("name"),
+                                        "arguments": function.get("arguments") or ""}
+                continue
+            try:
+                chunk = json.loads(value)
+                delta = chunk["choices"][0].get("delta") or {}
+            except (ValueError, KeyError, IndexError, TypeError, AttributeError):
+                continue
+            content = delta.get("content")
+            if isinstance(content, str) and content:
+                words = think.feed(content)
+                if words:
+                    yield "text", words
+            for item in delta.get("tool_calls") or []:
+                if not isinstance(item, dict):
+                    continue
+                function = item.get("function") if isinstance(item.get("function"), dict) else {}
+                index = item.get("index") if isinstance(item.get("index"), int) else 0
+                arguments = function.get("arguments")
+                yield "tool_call", {"index": index, "id": item.get("id"), "name": function.get("name"),
+                                    "arguments": arguments if isinstance(arguments, str)
+                                    else (json.dumps(arguments) if arguments is not None else "")}
+    finally:
+        stop.set()
+
+
+async def _local_live_front_target(profile: str) -> Optional[Tuple[str, str, str]]:
+    """The front model to ask, or None (not set up: Hermes answers each turn)."""
+    try:
+        return await _run_scoped(profile, local_live_front_model_target, _speech_server_executor)
+    except TokenError:
+        return None
+    except Exception:  # noqa: BLE001 — a broken config falls back to Hermes turns
+        logger.warning("Local Live couldn't read its fast model's settings", exc_info=True)
+        return None
+
+
+@router.get("/local-live/v1/tools")
+async def get_local_live_tools(request: Request, response: Response) -> Dict[str, Any]:
+    """The tools the profile's live call offers, for an engine that runs its
+    own front model."""
+    response.headers["Cache-Control"] = "no-store"
+    _local_live_start_auth()
+    profile = _local_live_request_profile(request)
+    _local_live_acquire(profile)
+    call = _local_live_active_call(profile)
+    agent = getattr(call, "agent", None) if call is not None else None
+    return {"in_call": call is not None, "instructions": agent.instructions if agent else None,
+            "tools": agent.tools if agent else []}
+
+
+@router.post("/local-live/v1/tools/call")
+async def post_local_live_tool_call(request: Request, response: Response) -> Dict[str, Any]:
+    """Runs one of the call's tools on the phone: {name, arguments} ->
+    {output}. start_job answers once the job runs; its outcome reaches the
+    engine later as a conversation item and response.create on the relay."""
+    response.headers["Cache-Control"] = "no-store"
+    no_store = {"Cache-Control": "no-store"}
+    _local_live_start_auth()
+    profile = _local_live_request_profile(request)
+    body = await _read_json_body(request, LOCAL_LIVE_MAX_BODY_BYTES)
+    name = body.get("name") if isinstance(body, dict) else None
+    if not isinstance(name, str) or not _LOCAL_LIVE_TOOL_NAME.fullmatch(name):
+        raise HTTPException(status_code=400, detail="Missing or invalid 'name'", headers=no_store)
+    arguments = body.get("arguments")
+    if isinstance(arguments, dict):
+        arguments = json.dumps(arguments)
+    elif arguments is None:
+        arguments = "{}"
+    elif not isinstance(arguments, str):
+        raise HTTPException(status_code=400, detail="'arguments' must be an object or a JSON string", headers=no_store)
+    _local_live_acquire(profile)
+    call = _local_live_active_call(profile)
+    agent = getattr(call, "agent", None) if call is not None else None
+    if call is None or agent is None:
+        raise HTTPException(status_code=409, detail=LOCAL_LIVE_NO_CALL_REPLY, headers=no_store)
+    if not any(tool["function"]["name"] == name for tool in agent.tools):
+        raise HTTPException(status_code=404, detail=f"This call has no tool named {name}", headers=no_store)
+    return {"output": await agent.run_tool(call, name, arguments)}
+
 
 
 # --- Voice transcripts -------------------------------------------------------
@@ -11969,6 +12557,7 @@ ROUTE_CAPABILITIES = (
     "room-files",
     "room-images",
     "speech-server",
+    "local-live-agent",
     "artifacts",
     "local-live",
 )

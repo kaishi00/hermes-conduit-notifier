@@ -78,6 +78,8 @@ def test_every_capability_names_a_served_route_family():
         "room-images": "/room-images",
         "speech-server": "/speech-server/",
         "local-live": "/local-live/",
+        # Agent mode: the call's tools for an engine with its own front model.
+        "local-live-agent": "/local-live/v1/tools",
         "artifacts": "/artifacts",
     }
     assert set(prefixes) == set(api.ROUTE_CAPABILITIES)

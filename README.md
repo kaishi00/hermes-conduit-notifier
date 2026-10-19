@@ -887,6 +887,67 @@ the server speaks Classic's replies in its own voice. Classic then uses one
 server for listening and speaking. While the reply plays, Classic may open
 its listening socket too, so start the server with `--num_pipelines 2`.
 
+### Agent mode: a fast model in front of Hermes (plugin 0.49+)
+
+One Hermes turn per utterance is slow to start talking. In agent mode a fast
+model of your choosing holds the conversation and hands real work to Hermes
+as background jobs, the way GPT-Live, Gemini and Grok calls do. Conduit's
+Live > Local mode turns it on; Classic's "Hands-free on your speech server"
+keeps one Hermes turn per utterance.
+
+Set the fast model in the profile's config (Conduit's Local settings write
+it). Any OpenAI-compatible chat-completions server works, local (llama.cpp,
+vLLM, Ollama, LM Studio) or remote. Plain `http://` only reaches private,
+Tailscale and LAN addresses, since the key goes with every request.
+
+```yaml
+voice:
+  local_live:
+    front_model:
+      base_url: http://10.1.10.52:8080/v1   # /chat/completions is added
+      model: qwen3-4b-instruct
+      api_key: sk-...                        # optional; or api_key_file
+```
+
+How a call runs:
+
+- On connecting, Conduit sends `{"type": "conduit.agent", "instructions",
+  "tools"}` (the call's live-model instructions and its tools: start_job,
+  list_jobs, cancel_job and the rest). The plugin answers
+  `{"type": "conduit.agent.ready", "tools": n}`.
+- Each utterance the speech server asks about goes to the fast model with
+  the call's own conversation (the server's history and system prompt are
+  not used) and streams back as it arrives. `<think>` blocks are dropped.
+  The speech server never sees a tool.
+- A tool call goes to Conduit as `{"type": "conduit.tool.call", "call_id",
+  "name", "arguments"}`; Conduit runs it and answers `{"type":
+  "conduit.tool.result", "call_id", "output", "speak"}`. start_job answers
+  as soon as the job runs, in the call's chat with its job card. A call that
+  waits more than 30 seconds tells the model it is still running; a result
+  that comes after that, with `speak` true, is handed back as
+  `conduit.tool.late` and Conduit says it as an update.
+- A job's outcome comes back the way Grok Live's does: once the call is
+  quiet, Conduit sends it to the speech server as a user item plus
+  `response.create`, and the fast model tells you what Hermes found.
+- `{"type": "conduit.agent.note", "text"}` adds context the model keeps
+  without answering (a message typed in the call's chat).
+- The readiness check is still answered by Conduit. With no fast model set,
+  or with one that fails before saying anything, the utterance goes to
+  Hermes as a turn instead.
+
+An engine that runs its own fast model (Pipecat behind the relay, say) uses
+the same tools with the Local Live key:
+
+| Method | Path | Returns |
+|--------|------|---------|
+| GET | `/api/plugins/conduit_push/local-live/v1/tools` | `{in_call, instructions, tools}`: the call's tools, chat-completions shape |
+| POST | `/api/plugins/conduit_push/local-live/v1/tools/call` | `{name, arguments}` in, `{output}` out; 409 with no call |
+
+Job outcomes reach such an engine on the relay as a user
+`conversation.item.create` plus `response.create`. `GET /local-live/status`
+adds `front_model: {configured, available, base_url, model, has_key,
+reason}`, and the capability is `local-live-agent`.
+
 ### Local Live on the Apple Watch (plugin 0.48+)
 
 A Watch call on Local Live uses the same server, key and model address. The
