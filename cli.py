@@ -36,7 +36,7 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     pulse = commands.add_parser("pulse", help="Pulse, the proactivity experiment: on, off, status, probe, home")
     pulse.add_argument("pulse_action", choices=["on", "off", "status", "probe", "home"])
     pulse.add_argument("value", nargs="?", default="",
-                       help="for home: the session key of the chat to use, or 'auto' to find it by title")
+                       help="for home: the id of the chat to use, or 'auto' to find it by title")
     parser.set_defaults(func=dispatch)
 
 
@@ -164,7 +164,7 @@ def _pulse(args: argparse.Namespace) -> int:
     if action in ("on", "off"):
         pulse_store.set("enabled", action == "on")
         if action == "on":
-            print("Pulse is on. The gateway sends the first delivery check within a minute; "
+            print("Pulse is on. The dashboard sends the first delivery check within a minute; "
                   "see `hermes conduit-push pulse status`.")
         else:
             print("Pulse is off. Nothing more goes into the home chat.")
@@ -174,12 +174,12 @@ def _pulse(args: argparse.Namespace) -> int:
             print("Pulse is off: `hermes conduit-push pulse on` first.")
             return 1
         pulse_store.set("probe_requested", True)
-        print("Asked the gateway for a delivery check; it goes out within a minute.")
+        print("Asked the dashboard for a delivery check; it goes out within a minute.")
         return 0
     if action == "home":
         value = (args.value or "").strip()
         if not value:
-            print("Usage: hermes conduit-push pulse home <session key>|auto")
+            print("Usage: hermes conduit-push pulse home <chat id>|auto")
             return 2
         pulse_store.set("home_session_key", "" if value == "auto" else value)
         print("Pulse finds its chat by title again." if value == "auto" else f"Pulse speaks in {_printable(value)}.")
@@ -187,7 +187,7 @@ def _pulse(args: argparse.Namespace) -> int:
     print(f"Pulse: {'on' if pulse_store.get('enabled') else 'off'}")
     chat, problem = pulse.home_chat(pulse_store, home)
     if chat is not None:
-        print(f"Home chat: {_printable(chat.title)} ({_printable(chat.session_key)})"
+        print(f"Home chat: {_printable(chat.title)} ({_printable(chat.chat_id)})"
               f"{'' if chat.pinned else ', not pinned'}")
     if problem:
         print(f"Warning: {_printable(problem)}")
@@ -195,10 +195,10 @@ def _pulse(args: argparse.Namespace) -> int:
     if pulse_store.get("enabled"):
         ticked, now = pulse_store.get("last_tick_at"), time.time()
         if isinstance(ticked, bool) or not isinstance(ticked, (int, float)) or now - ticked > pulse.STALE_TICK_S:
-            print(f"Warning: the gateway hasn't run Pulse in the last {int(pulse.STALE_TICK_S // 60)} minutes. "
+            print(f"Warning: the dashboard hasn't run Pulse in the last {int(pulse.STALE_TICK_S // 60)} minutes. "
                   "Check that it's running this build and was restarted after `plugins install`.")
         else:
-            print(f"Gateway last checked: {max(0, int(now - ticked))} s ago")
+            print(f"Dashboard last checked: {max(0, int(now - ticked))} s ago")
     counts = pulse_store.counts(pulse.PROBE)
     if counts:
         print("Checks so far: " + ", ".join(f"{n} {state}" for state, n in sorted(counts.items())))

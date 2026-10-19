@@ -44,6 +44,8 @@ DEFAULTS: dict[str, Any] = {
     # When the gateway's loop last ran with Pulse on (time.time()).
     "last_tick_at": None,
 }
+# Which process runs the loop: {"owner": ..., "until": time.time()}.
+LEADER = "leader"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS settings (
@@ -66,6 +68,8 @@ CREATE TABLE IF NOT EXISTS attempts (
 );
 CREATE INDEX IF NOT EXISTS attempts_state ON attempts(state);
 """
+# ``attempts.session_key`` holds the home chat's stored session id (the
+# column kept its first name so a store from the first build still opens).
 
 _lock = threading.Lock()
 
@@ -115,6 +119,28 @@ class PulseStore:
                 conn.execute("UPDATE settings SET value_json='false' WHERE key='probe_requested'")
             conn.execute("COMMIT")
         return asked
+
+    def claim_leader(self, owner: str, ttl_s: float, now: float) -> bool:
+        """Whether ``owner`` runs the loop until ``now + ttl_s``: the lease is
+        its own, free, or expired. Two processes hosting sessions for the
+        same Hermes home never both send."""
+        with _lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT value_json FROM settings WHERE key=?", (LEADER,)).fetchone()
+            try:
+                lease = json.loads(row["value_json"]) if row else None
+            except ValueError:
+                lease = None
+            held = (isinstance(lease, dict) and lease.get("owner") != owner
+                    and isinstance(lease.get("until"), (int, float)) and lease["until"] > now)
+            if not held:
+                conn.execute(
+                    "INSERT INTO settings(key, value_json) VALUES(?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json",
+                    (LEADER, json.dumps({"owner": owner, "until": now + ttl_s})),
+                )
+            conn.execute("COMMIT")
+        return not held
 
     # Attempts ---------------------------------------------------------------
 

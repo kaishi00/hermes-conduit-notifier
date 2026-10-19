@@ -1,10 +1,11 @@
 """Pulse, slice 0: the home chat delivery probe (designs/proactivity.md 6.4-6.4.2, 7.6).
 
 Off unless turned on (``hermes conduit-push pulse on``). When on, the
-gateway process sends a short probe turn into the home chat every few hours
-(or when ``pulse probe`` asks), and records whether Hermes delivered it.
-That answers the hard gate: can the home chat take turns with nobody
-watching, after a quiet day, a gateway restart and a reboot.
+process that hosts Conduit's chats (the dashboard) sends a short hidden
+probe turn into the home chat every few hours (or when ``pulse probe``
+asks), and records whether Hermes delivered it. That answers the hard gate:
+can the home chat take turns with nobody watching, after a quiet day, a
+restart and a reboot.
 
 A Pulse turn is recognised by its tag in ``pre_llm_call``. On such a turn
 every tool is blocked in ``pre_tool_call`` (the probe needs none; later
@@ -14,6 +15,8 @@ slices allow named reads only), and no push or Live Activity goes out for it.
 from __future__ import annotations
 
 import logging
+import os
+import socket
 import threading
 import time
 from pathlib import Path
@@ -23,14 +26,17 @@ from hermes_constants import get_hermes_home
 
 from . import pulse_delivery as delivery
 from . import pulse_hermes as hermes
+from . import pulse_host as host
 from . import pulse_store as store
 
 logger = logging.getLogger(__name__)
 
 PROBE = "probe"
 TICK_S = 30.0
-# `pulse status` calls the gateway's loop stopped after this many missed ticks.
+# `pulse status` calls the loop stopped after this many missed ticks.
 STALE_TICK_S = 10 * TICK_S
+# One process runs the loop; its lease outlives a few missed ticks.
+LEADER_TTL_S = 4 * TICK_S
 MAX_TURNS = 256
 PROBE_TEXT = "Pulse delivery check {tag}. Nothing to do: reply with one short line."
 PROBE_NOTE = ("This turn was started by Pulse, the plugin that lets Hermes speak up on its own, to check that "
@@ -48,11 +54,12 @@ _turns: dict[tuple[str, str], str] = {}
 _turns_lock = threading.Lock()
 # The last problem logged, so a missing home chat isn't logged every tick.
 _last_problem = ""
+_owner = f"{socket.gethostname()}:{os.getpid()}"
 
 
 def register(ctx: Any) -> None:
-    """Starts the Pulse loop for this load. It only acts in the process that
-    hosts the gateway, and only while Pulse is on."""
+    """Starts the Pulse loop for this load. It only acts in a process that
+    hosts Conduit's chats, and only while Pulse is on."""
     global _ctx, _thread, _stop, _started_at
     _ctx = ctx
     if _thread is not None and _thread.is_alive() and not _stop.is_set():
@@ -115,9 +122,16 @@ def pre_tool_call(session_id: str, turn_id: Any) -> Optional[dict[str, str]]:
 
 
 def turn_ended(session_id: str, turn_id: Any) -> None:
-    """A turn ended: the loop reconciles now instead of at its next tick."""
-    if is_pulse_turn(session_id, turn_id):
-        _wake.set()
+    """A Pulse turn ended: noted on its attempt (a reply row should follow at
+    once), and the loop reconciles now instead of at its next tick."""
+    if not is_pulse_turn(session_id, turn_id):
+        return
+    with _turns_lock:
+        tag = _turns.get((session_id, turn_id))
+    row = open_store().attempt_by_tag(tag) if tag else None
+    if row is not None and row["state"] in store.IN_FLIGHT:
+        open_store().update_attempt(row["attempt_id"], detail=delivery.ENDED)
+    _wake.set()
 
 
 def _mark_turn(session_id: str, turn_id: Any, tag: str) -> None:
@@ -143,14 +157,17 @@ def _run(stopped: threading.Event) -> None:
         _wake.wait(TICK_S)
 
 
-def _gateway_ready() -> bool:
+def _hosts_chats() -> bool:
+    """Whether this process hosts Conduit's chats: the dashboard (or `hermes
+    serve`) publishes a session host to plugins, and its method table is
+    loaded. The messaging gateway and the CLI have neither."""
     manager = getattr(_ctx, "_manager", None)
-    return bool(getattr(manager, "has_gateway_message_injector", False))
+    return bool(getattr(manager, "has_tui_message_injector", False)) and host.available()
 
 
 def tick(now: Optional[float] = None) -> None:
     """One pass: reconcile what's in flight, then probe if one is due."""
-    if _ctx is None or not _gateway_ready():
+    if _ctx is None or not _hosts_chats():
         return
     home = get_hermes_home()
     if not (Path(home) / store.DB_NAME).exists():
@@ -159,9 +176,11 @@ def tick(now: Optional[float] = None) -> None:
     if not pulse_store.get("enabled"):
         return
     now = time.time() if now is None else now
-    # The loop's heartbeat: `pulse status` warns when the gateway stops ticking.
+    if not pulse_store.claim_leader(_owner, LEADER_TTL_S, now):
+        return  # another process on this Hermes home runs the loop
+    # The loop's heartbeat: `pulse status` warns when nothing runs the loop.
     pulse_store.set("last_tick_at", now)
-    delivery.reconcile(pulse_store, home, plugin_id=_plugin_id(), process_started_at=_started_at, now=now)
+    delivery.reconcile(pulse_store, home, process_started_at=_started_at, now=now)
     asked = pulse_store.take_probe_request()
     if not asked and not _probe_due(pulse_store, now):
         return
@@ -176,8 +195,9 @@ def tick(now: Optional[float] = None) -> None:
             logger.info("conduit_push: Pulse: the requested delivery check wasn't sent; run `pulse probe` again "
                         "once the home chat is there")
         return
-    delivery.submit(pulse_store, _ctx.inject_message, kind=PROBE, session_key=chat.session_key,
-                    text=lambda tag: PROBE_TEXT.format(tag=tag))
+    profile = str(getattr(_ctx, "profile_name", "") or "")
+    delivery.submit(pulse_store, lambda chat_id, text: host.send(chat_id, text, profile=profile), kind=PROBE,
+                    chat_id=chat.chat_id, text=lambda tag: PROBE_TEXT.format(tag=tag))
 
 
 def _log_problem(problem: str) -> None:
@@ -199,10 +219,10 @@ def _probe_due(pulse_store: store.PulseStore, now: float) -> bool:
 def home_chat(pulse_store: store.PulseStore, home: Path) -> tuple[Optional[hermes.HomeChat], str]:
     """The chat Pulse speaks in, and what's wrong when there's none."""
     try:
-        key = pulse_store.get("home_session_key")
-        if key:
-            chat = hermes.chat_for_key(home, key)
-            return (chat, "") if chat else (None, f"no chat has the session key {key}")
+        chat_id = pulse_store.get("home_session_key")
+        if chat_id:
+            chat = hermes.chat_by_id(home, chat_id)
+            return (chat, "") if chat else (None, f"no open chat has the id {chat_id}")
         title = pulse_store.get("home_title") or "Pulse"
         chats = hermes.find_home_chat(home, title)
     except hermes.HermesUnreadable as error:
@@ -216,6 +236,3 @@ def home_chat(pulse_store: store.PulseStore, home: Path) -> tuple[Optional[herme
         problem = f'pin the "{title}" chat so pruning never removes it'
     return chats[0], problem
 
-
-def _plugin_id() -> str:
-    return str(getattr(_ctx, "plugin_id", "") or "conduit_push")

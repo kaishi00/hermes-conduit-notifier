@@ -1,16 +1,15 @@
 """Read-only lookups in Hermes's own state.db for Pulse.
 
-What Hermes did with a Pulse turn is only ever read here, never assumed
-(designs/proactivity.md 6.4.1): the admission row the gateway committed for
-an injection, and the transcript rows the turn wrote. Each lookup opens its
-own short read-only connection, names its columns, and raises
-``HermesUnreadable`` when the database or a column it needs isn't there, so
-the caller can tell "Hermes has no row" from "can't tell".
+What happened to a Pulse turn is only ever read here, never assumed
+(designs/proactivity.md 6.4.1): the hidden user row the turn wrote, and the
+rows after it. Each lookup opens its own short read-only connection, names
+its columns, and raises ``HermesUnreadable`` when the database or a column
+it needs isn't there, so the caller can tell "Hermes has no row" from
+"can't tell".
 """
 
 from __future__ import annotations
 
-import json
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,9 +19,6 @@ STATE_DB = "state.db"
 # Hermes writes this display kind on the assistant row of a turn that failed
 # (agent/turn_failure_copy.py): it ends the turn but delivers nothing.
 FAILED_TURN_KIND = "failed_turn"
-# Pulse's newest admissions in the home chat that a lookup reads: in-flight
-# attempts are always among the last few, and the history keeps growing.
-ADMISSION_SCAN = 200
 
 
 class HermesUnreadable(Exception):
@@ -31,18 +27,9 @@ class HermesUnreadable(Exception):
 
 @dataclass(frozen=True)
 class HomeChat:
-    session_key: str
-    session_id: str
+    chat_id: str  # the stored session id Conduit opens the chat by
     title: str
     pinned: bool
-
-
-@dataclass(frozen=True)
-class Admission:
-    request_id: str
-    target_session_id: str
-    status: str  # queued, started, unknown, terminal
-    outcome: Optional[str]  # completed, failed, interrupted, rejected, cancelled
 
 
 @dataclass(frozen=True)
@@ -77,71 +64,34 @@ def _run(home: Path, sql: str, params: tuple) -> list[sqlite3.Row]:
 
 
 def find_home_chat(home: Path, title: str) -> list[HomeChat]:
-    """Local chats titled exactly ``title`` (the user names the chat, the way
-    Bot Mode finds "Bot Chat"), one per session key, pinned and most recently
-    active first. More than one means the user has to pick (``pulse home``)."""
+    """Chats titled exactly ``title`` (the user names the chat, the way Bot
+    Mode finds "Bot Chat"), pinned and most recently active first. Only
+    chats a person started count: a compression or branch child shares its
+    parent's title, and reopening the parent follows it there. More than one
+    means the user has to pick (``pulse home``)."""
     rows = _run(home, (
-        "SELECT id, session_key, title, pinned, COALESCE(last_activity_at, started_at) AS active_at "
-        "FROM sessions WHERE title = ? AND session_key LIKE '%:local:%' "
-        "AND archived = 0 AND hidden = 0 ORDER BY pinned DESC, active_at DESC"
+        "SELECT id, title, pinned FROM sessions WHERE title = ? AND archived = 0 AND hidden = 0 "
+        "AND parent_session_id IS NULL ORDER BY pinned DESC, COALESCE(last_activity_at, started_at) DESC"
     ), (title,))
-    chats: dict[str, HomeChat] = {}
-    for row in rows:
-        key = row["session_key"]
-        if key and key not in chats:
-            chats[key] = HomeChat(key, row["id"], row["title"], bool(row["pinned"]))
-    return list(chats.values())
+    return [HomeChat(row["id"], row["title"], bool(row["pinned"])) for row in rows]
 
 
-def chat_for_key(home: Path, session_key: str) -> Optional[HomeChat]:
-    rows = _run(home, (
-        "SELECT id, session_key, title, pinned FROM sessions WHERE session_key = ? "
-        "AND archived = 0 AND hidden = 0 ORDER BY COALESCE(last_activity_at, started_at) DESC LIMIT 1"
-    ), (session_key,))
-    if not rows:
-        return None
-    row = rows[0]
-    return HomeChat(row["session_key"], row["id"], row["title"] or "", bool(row["pinned"]))
+def chat_by_id(home: Path, chat_id: str) -> Optional[HomeChat]:
+    rows = _run(home, "SELECT id, title, pinned FROM sessions WHERE id = ? AND archived = 0 AND hidden = 0",
+                (chat_id,))
+    return HomeChat(rows[0]["id"], rows[0]["title"] or "", bool(rows[0]["pinned"])) if rows else None
 
 
-def find_admission(home: Path, *, plugin_id: str, session_key: str, tag: str) -> Optional[Admission]:
-    """The gateway's admission row for the injection carrying ``tag``.
-
-    The gateway names a plugin injection ``["plugin", <plugin id>, <session
-    key>, <random hex>]`` under the principal ``automation:<session key>``
-    (gateway/run_plugin_injection.py), and keeps the text in the payload."""
-    prefix = json.dumps(["plugin", plugin_id, session_key], separators=(",", ":"))[:-1] + ","
-    rows = _run(home, (
-        "SELECT request_id, target_session_id, status, outcome, payload_json FROM session_admissions "
-        "WHERE principal_id = ? AND substr(request_id, 1, ?) = ? ORDER BY seq DESC LIMIT ?"
-    ), ("automation:" + session_key, len(prefix), prefix, ADMISSION_SCAN))
-    for row in rows:
-        try:
-            text = json.loads(row["payload_json"]).get("text")
-        except (TypeError, ValueError, AttributeError):
-            continue
-        if isinstance(text, str) and tag in text:
-            return Admission(row["request_id"], row["target_session_id"], row["status"], row["outcome"])
-    return None
-
-
-def find_turn(home: Path, *, session_key: str, tag: str, request_id: str = "") -> Optional[TurnRows]:
-    """The user row the tagged turn wrote, and the rows after it in the same
-    session. Archived rows count too: compaction keeps them as inactive."""
-    if request_id:
-        users = _run(home, (
-            "SELECT m.id, m.session_id FROM messages m JOIN sessions s ON s.id = m.session_id "
-            "WHERE s.session_key = ? AND m.platform_message_id = ? AND m.role = 'user' ORDER BY m.id LIMIT 1"
-        ), (session_key, request_id))
-    else:
-        users = []
-    if not users:
-        # A turn that didn't go through an admission (a host injecting on its
-        # own path) is found by its tag.
-        users = _run(home, (
-            "SELECT m.id, m.session_id FROM messages m JOIN sessions s ON s.id = m.session_id "
-            "WHERE s.session_key = ? AND m.role = 'user' AND instr(m.content, ?) > 0 ORDER BY m.id LIMIT 1"
-        ), (session_key, tag))
+def find_turn(home: Path, *, chat_id: str, tag: str, since: float) -> Optional[TurnRows]:
+    """The user row carrying ``tag`` in the chat or the sessions it continued
+    into (compression, branches), written at or after ``since``, and the rows
+    after it. Archived rows count too: compaction keeps them as inactive."""
+    users = _run(home, (
+        "WITH RECURSIVE chain(id) AS (SELECT ? UNION SELECT s.id FROM sessions s JOIN chain c "
+        "ON s.parent_session_id = c.id) "
+        "SELECT m.id, m.session_id FROM messages m WHERE m.session_id IN (SELECT id FROM chain) "
+        "AND m.role = 'user' AND m.timestamp >= ? AND instr(m.content, ?) > 0 ORDER BY m.id LIMIT 1"
+    ), (chat_id, since, tag))
     if not users:
         return None
     user_id, session_id = users[0]["id"], users[0]["session_id"]
@@ -158,7 +108,7 @@ def find_turn(home: Path, *, session_key: str, tag: str, request_id: str = "") -
         if row["display_kind"] == FAILED_TURN_KIND:
             failed = True
             continue
-        text = (row["content"] or "").strip() if isinstance(row["content"], str) else ""
+        text = row["content"].strip() if isinstance(row["content"], str) else ""
         if text:
             reply = text
     return TurnRows(session_id, reply, failed, closed)

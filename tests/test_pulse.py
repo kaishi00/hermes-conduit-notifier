@@ -1,5 +1,8 @@
 """Pulse slice 0: the home chat delivery probe (designs/proactivity.md 6.4.1, 6.4.2, 7.6).
 
+The home chat is a Conduit (Desktop-source) chat, reached through the
+dashboard's session host; the host is faked here with its two methods.
+
 The Hermes reads run against two databases: a fixture with only the columns
 Pulse reads, and, when a Hermes checkout or install is available, one built
 from Hermes's own schema (set HERMES_AGENT_SRC to a checkout). The second is
@@ -61,28 +64,21 @@ hermes = _load("conduit_push.pulse_hermes", ROOT / "pulse_hermes.py")
 delivery = _load("conduit_push.pulse_delivery", ROOT / "pulse_delivery.py")
 pulse = _load("conduit_push.pulse", ROOT / "pulse.py")
 cli = _load("conduit_push.cli", ROOT / "cli.py")
+host = _load("conduit_push.pulse_host", ROOT / "pulse_host.py")
 
-PLUGIN = "conduit_push"
-KEY = "agent:main:local:dm:pulse-chat"
-SID = "local-abc"
+SID = "20261019_165824_560887"  # a Conduit chat's stored id, as Eric's host showed it
 
 # Only the columns Pulse reads, as Hermes names them (hermes_state_common.py).
 FIXTURE_SCHEMA = """
 CREATE TABLE sessions (
-    id TEXT PRIMARY KEY, source TEXT NOT NULL, session_key TEXT, started_at REAL NOT NULL,
-    last_activity_at REAL, title TEXT, archived INTEGER NOT NULL DEFAULT 0,
+    id TEXT PRIMARY KEY, source TEXT NOT NULL, session_key TEXT, parent_session_id TEXT,
+    started_at REAL NOT NULL, last_activity_at REAL, title TEXT, archived INTEGER NOT NULL DEFAULT 0,
     pinned INTEGER NOT NULL DEFAULT 0, hidden INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT,
-    timestamp REAL NOT NULL, platform_message_id TEXT, active INTEGER NOT NULL DEFAULT 1,
-    compacted INTEGER NOT NULL DEFAULT 0, display_kind TEXT
-);
-CREATE TABLE session_admissions (
-    seq INTEGER PRIMARY KEY AUTOINCREMENT, admission_id TEXT NOT NULL UNIQUE, request_id TEXT NOT NULL,
-    principal_id TEXT NOT NULL, target_session_id TEXT NOT NULL, lineage_json TEXT NOT NULL,
-    payload_json TEXT NOT NULL, payload_digest TEXT NOT NULL, intent TEXT NOT NULL, status TEXT NOT NULL,
-    outcome TEXT, owner_epoch INTEGER, generation INTEGER
+    timestamp REAL NOT NULL, active INTEGER NOT NULL DEFAULT 1, compacted INTEGER NOT NULL DEFAULT 0,
+    display_kind TEXT
 );
 """
 
@@ -99,7 +95,7 @@ def _hermes_schema():
                                 capture_output=True, text=True, env=env, timeout=60)
     except (OSError, subprocess.SubprocessError):
         return None
-    return result.stdout if result.returncode == 0 and "session_admissions" in result.stdout else None
+    return result.stdout if result.returncode == 0 and "CREATE TABLE IF NOT EXISTS messages" in result.stdout else None
 
 
 HERMES_SCHEMA = _hermes_schema()
@@ -114,7 +110,6 @@ class StateDB:
         conn.executescript(schema)
         conn.commit()
         conn.close()
-        self.seq = 0
 
     def _exec(self, sql, params=()):
         conn = sqlite3.connect(self.path)
@@ -125,31 +120,16 @@ class StateDB:
         finally:
             conn.close()
 
-    def session(self, sid=SID, key=KEY, title="Pulse", pinned=1, archived=0, started=1000.0):
-        self._exec("INSERT INTO sessions(id, source, session_key, started_at, last_activity_at, title, pinned, "
-                   "archived) VALUES(?,?,?,?,?,?,?,?)", (sid, "local", key, started, started, title, pinned, archived))
+    def session(self, sid=SID, title="Pulse", pinned=1, archived=0, started=1000.0, parent=None):
+        # Conduit's chats: source desktop, no gateway session key.
+        self._exec("INSERT INTO sessions(id, source, session_key, parent_session_id, started_at, last_activity_at, "
+                   "title, pinned, archived) VALUES(?,?,?,?,?,?,?,?,?)",
+                   (sid, "desktop", None, parent, started, started, title, pinned, archived))
 
-    def admission(self, text, *, status="queued", outcome=None, key=KEY, sid=SID, plugin_id=PLUGIN):
-        self.seq += 1
-        request_id = json.dumps(["plugin", plugin_id, key, f"{self.seq:032x}"], separators=(",", ":"))
-        started = status == "started"
-        self._exec(
-            "INSERT INTO session_admissions(admission_id, request_id, principal_id, target_session_id, lineage_json, "
-            "payload_json, payload_digest, intent, status, outcome, owner_epoch, generation) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-            (f"adm-{self.seq}", request_id, "automation:" + key, sid, "[]",
-             json.dumps({"text": text, "local_automation_v1": {}}), "d", "queue", status, outcome,
-             1 if started else None, 1 if started else None))
-        return request_id
-
-    def finish(self, request_id, outcome="completed"):
-        self._exec("UPDATE session_admissions SET status='terminal', outcome=? WHERE request_id=?",
-                   (outcome, request_id))
-
-    def message(self, role, content, *, sid=SID, platform_message_id=None, display_kind=None, active=1):
-        return self._exec("INSERT INTO messages(session_id, role, content, timestamp, platform_message_id, "
-                          "display_kind, active, compacted) VALUES(?,?,?,?,?,?,?,?)",
-                          (sid, role, content, time.time(), platform_message_id, display_kind, active,
+    def message(self, role, content, *, sid=SID, display_kind=None, active=1, at=None):
+        return self._exec("INSERT INTO messages(session_id, role, content, timestamp, display_kind, active, compacted) "
+                          "VALUES(?,?,?,?,?,?,?)",
+                          (sid, role, content, time.time() if at is None else at, display_kind, active,
                            0 if active else 1))
 
 
@@ -166,6 +146,10 @@ def db(request, tmp_path):
 @pytest.fixture
 def pulse_store(tmp_path):
     return store.open_store(tmp_path)
+
+
+def _sent(status="streaming"):
+    return lambda chat_id, text: host.Sent(True, status)
 
 
 # The store -------------------------------------------------------------------
@@ -186,7 +170,7 @@ def test_probe_request_is_taken_once(pulse_store):
 
 def test_attempts_in_flight_until_final(pulse_store):
     pulse_store.add_attempt(attempt_id="i:1", item_id="i", attempt=1, kind="probe", tag="pi-1", text="t",
-                            session_key=KEY)
+                            session_key=SID)
     assert [row["tag"] for row in pulse_store.in_flight()] == ["pi-1"]
     pulse_store.update_attempt("i:1", state=store.RUNNING, turn_id="turn")
     assert pulse_store.attempt_by_tag("pi-1")["turn_id"] == "turn"
@@ -195,48 +179,60 @@ def test_attempts_in_flight_until_final(pulse_store):
     assert pulse_store.counts("probe") == {store.DELIVERED: 1}
 
 
+def test_one_process_holds_the_loop(pulse_store):
+    assert pulse_store.claim_leader("a", 120, now=1000)
+    assert not pulse_store.claim_leader("b", 120, now=1060)
+    assert pulse_store.claim_leader("a", 120, now=1060)  # renewed
+    assert pulse_store.claim_leader("b", 120, now=1200)  # a's lease ran out
+
+
 # Hermes reads ----------------------------------------------------------------
 
-def test_home_chat_is_the_local_chat_with_the_title(db, tmp_path):
+def test_home_chat_is_a_started_chat_with_the_title(db, tmp_path):
     db.session()
-    db.session(sid="local-old", key="agent:main:local:dm:old", pinned=0, started=500.0)
-    db.session(sid="tg-1", key="agent:main:telegram:dm:1")  # not local
-    db.session(sid="local-arch", key="agent:main:local:dm:arch", archived=1)
-    db.session(sid="local-other", key="agent:main:local:dm:other", title="Pulse notes")
+    db.session(sid="old", pinned=0, started=500.0)
+    db.session(sid="tip", parent=SID)  # compression continues under the same title
+    db.session(sid="arch", archived=1)
+    db.session(sid="other", title="Pulse notes")
     chats = hermes.find_home_chat(tmp_path, "Pulse")
-    assert [chat.session_key for chat in chats] == [KEY, "agent:main:local:dm:old"]
+    assert [chat.chat_id for chat in chats] == [SID, "old"]
     assert chats[0].pinned
-
-
-def test_admission_is_found_by_tag_for_this_plugin_only(db, tmp_path):
-    db.session()
-    db.admission("Pulse delivery check pAAAA-1.", plugin_id="someone_else")
-    request_id = db.admission("Pulse delivery check pAAAA-1.", status="started")
-    db.admission("Pulse delivery check pBBBB-1.")
-    found = hermes.find_admission(tmp_path, plugin_id=PLUGIN, session_key=KEY, tag="pAAAA-1")
-    assert found == hermes.Admission(request_id, SID, "started", None)
-    assert hermes.find_admission(tmp_path, plugin_id=PLUGIN, session_key=KEY, tag="pCCCC-1") is None
+    assert hermes.chat_by_id(tmp_path, "old").title == "Pulse"
+    assert hermes.chat_by_id(tmp_path, "arch") is None
 
 
 def test_turn_rows_follow_the_tagged_user_row(db, tmp_path):
     db.session()
-    request_id = db.admission("Pulse delivery check pAAAA-1.")
     db.message("user", "earlier")
     db.message("assistant", "earlier reply")
-    db.message("user", "Pulse delivery check pAAAA-1.", platform_message_id=request_id, active=0)
+    db.message("user", "Pulse delivery check pAAAA-1.", display_kind="hidden", active=0)
     db.message("assistant", "")
     db.message("assistant", "Check arrived.", active=0)
-    turn = hermes.find_turn(tmp_path, session_key=KEY, tag="pAAAA-1", request_id=request_id)
+    turn = hermes.find_turn(tmp_path, chat_id=SID, tag="pAAAA-1", since=0)
     assert turn == hermes.TurnRows(SID, "Check arrived.", False, False)
     db.message("user", "next")
-    assert hermes.find_turn(tmp_path, session_key=KEY, tag="pAAAA-1").closed
+    assert hermes.find_turn(tmp_path, chat_id=SID, tag="pAAAA-1", since=0).closed
+
+
+def test_a_turn_after_compression_is_found_in_the_tip(db, tmp_path):
+    db.session()
+    db.session(sid="tip", parent=SID)
+    db.message("user", "Pulse delivery check pAAAA-1.", sid="tip")
+    db.message("assistant", "Check arrived.", sid="tip")
+    assert hermes.find_turn(tmp_path, chat_id=SID, tag="pAAAA-1", since=0).session_id == "tip"
+
+
+def test_rows_from_before_the_attempt_dont_count(db, tmp_path):
+    db.session()
+    db.message("user", "Pulse delivery check pAAAA-1.", at=100.0)
+    assert hermes.find_turn(tmp_path, chat_id=SID, tag="pAAAA-1", since=200.0) is None
 
 
 def test_a_failed_turn_is_seen(db, tmp_path):
     db.session()
     db.message("user", "Pulse delivery check pAAAA-1.")
     db.message("assistant", "Your request was not processed.", display_kind="failed_turn")
-    turn = hermes.find_turn(tmp_path, session_key=KEY, tag="pAAAA-1")
+    turn = hermes.find_turn(tmp_path, chat_id=SID, tag="pAAAA-1", since=0)
     assert turn.failed and turn.reply == ""
 
 
@@ -247,133 +243,187 @@ def test_missing_state_db_is_unreadable_not_empty(tmp_path):
 
 # Deriving an attempt's state ---------------------------------------------------
 
-ADM = hermes.Admission
 TURN = hermes.TurnRows
+S = store
 
 
-@pytest.mark.parametrize("seen, age, earlier, prior, expected", [
-    (delivery.Seen(None, None), 5, False, "", store.SUBMITTED),
-    (delivery.Seen(None, None), 500, False, "", store.NOT_ADMITTED),
-    (delivery.Seen(None, None), 5, True, "", store.NOT_ADMITTED),
-    (delivery.Seen(ADM("r", SID, "queued", None), None), 900, True, "", store.QUEUED),
-    (delivery.Seen(ADM("r", SID, "queued", None), None), delivery.STUCK_S, False, "", store.FAILED),
-    (delivery.Seen(ADM("r", SID, "unknown", None), None), delivery.STUCK_S, True, "", store.FAILED),
-    (delivery.Seen(ADM("r", SID, "started", None), None), 900, False, "", store.RUNNING),
-    (delivery.Seen(ADM("r", SID, "unknown", None), None), 900, False, "", store.RUNNING),
-    (delivery.Seen(ADM("r", SID, "terminal", "interrupted"), None), 9, False, "", store.FAILED),
-    (delivery.Seen(ADM("r", SID, "terminal", "completed"), TURN(SID, "ok", False, False)), 9, False, "",
-     store.DELIVERED),
-    (delivery.Seen(ADM("r", SID, "terminal", "completed"), TURN(SID, "sorry", True, False)), 9, False, "",
-     store.FAILED),
-    (delivery.Seen(ADM("r", SID, "terminal", "completed"), None), 9, False, "", store.RUNNING),
-    (delivery.Seen(ADM("r", SID, "terminal", "completed"), None), 9, False, delivery.AWAITING_REPLY,
-     store.RUNNING),
-    (delivery.Seen(None, TURN(SID, "ok", False, False)), 500, False, "", store.DELIVERED),
-    (delivery.Seen(None, TURN(SID, "", False, True)), 500, False, "", store.FAILED),
+@pytest.mark.parametrize("turn, state, age, earlier, prior, unchanged, expected", [
+    (None, S.SUBMITTED, 5, False, "", 0, S.SUBMITTED),
+    (None, S.RUNNING, 5, False, "", 0, S.RUNNING),
+    (None, S.SUBMITTED, 500, False, "", 0, S.NOT_ADMITTED),
+    (None, S.SUBMITTED, 5, True, "", 0, S.NOT_ADMITTED),
+    (None, S.QUEUED, 900, False, "", 0, S.QUEUED),
+    (None, S.QUEUED, delivery.STUCK_S, False, "", 0, S.FAILED),
+    (None, S.QUEUED, 5, True, "", 0, S.NOT_ADMITTED),
+    (TURN(SID, "ok", False, False), S.RUNNING, 9, False, "", 0, S.DELIVERED),
+    (TURN(SID, "ok", False, False), S.SUBMITTED, 9, True, "", 0, S.DELIVERED),
+    (TURN(SID, "sorry", True, False), S.RUNNING, 9, False, "", 0, S.FAILED),
+    (TURN(SID, "", False, True), S.RUNNING, 9, False, "", 0, S.FAILED),
+    (TURN(SID, "", False, False), S.RUNNING, 9, False, "", 0, S.RUNNING),
+    (TURN(SID, "", False, False), S.RUNNING, 9, False, delivery.ENDED, 10, S.RUNNING),
+    (TURN(SID, "", False, False), S.RUNNING, 90, False, delivery.ENDED, delivery.REPLY_GRACE_S, S.FAILED),
+    (TURN(SID, "", False, False), S.RUNNING, delivery.STUCK_S, False, "", 0, S.FAILED),
 ])
-def test_state_comes_from_hermes_rows_only(seen, age, earlier, prior, expected):
-    state, _detail = delivery.derive_state(seen, age_s=age, sent_by_earlier_process=earlier, prior_detail=prior)
-    assert state == expected
+def test_state_comes_from_hermes_rows(turn, state, age, earlier, prior, unchanged, expected):
+    got, _detail = delivery.derive_state(turn, state=state, age_s=age, sent_by_earlier_process=earlier,
+                                         prior_detail=prior, unchanged_s=unchanged)
+    assert got == expected
 
 
 # Submitting and reconciling ----------------------------------------------------
 
-def test_attempt_is_recorded_before_the_gateway_sees_it(pulse_store):
+def test_attempt_is_recorded_before_it_is_sent(pulse_store):
     seen_in_store = []
 
-    def inject(text, session_key):
+    def send(chat_id, text):
         seen_in_store.append(bool(pulse_store.in_flight()))
-        return True
+        return host.Sent(True, "streaming")
 
-    row = delivery.submit(pulse_store, inject, kind="probe", session_key=KEY, text=lambda tag: f"check {tag}")
+    row = delivery.submit(pulse_store, send, kind="probe", chat_id=SID, text=lambda tag: f"check {tag}")
     assert seen_in_store == [True]
-    assert row["state"] == store.SUBMITTED and row["tag"] in row["text"]
+    assert row["state"] == store.SUBMITTED and row["tag"] in row["text"] and row["session_key"] == SID
 
 
-@pytest.mark.parametrize("inject", [lambda text, session_key: False,
-                                    lambda text, session_key: (_ for _ in ()).throw(RuntimeError("down"))])
-def test_a_refused_injection_is_final(pulse_store, inject):
-    row = delivery.submit(pulse_store, inject, kind="probe", session_key=KEY, text=lambda tag: tag)
+def test_a_turn_behind_another_is_queued(pulse_store):
+    row = delivery.submit(pulse_store, _sent("queued"), kind="probe", chat_id=SID, text=lambda tag: tag)
+    assert row["state"] == store.QUEUED
+
+
+@pytest.mark.parametrize("send", [lambda chat_id, text: host.Sent(False, "", "couldn't open the chat: gone"),
+                                  lambda chat_id, text: (_ for _ in ()).throw(RuntimeError("down"))])
+def test_a_refused_send_is_final(pulse_store, send):
+    row = delivery.submit(pulse_store, send, kind="probe", chat_id=SID, text=lambda tag: tag)
     assert row["state"] == store.REFUSED
     assert pulse_store.in_flight() == []
 
 
 def test_reconcile_follows_one_attempt_to_delivered(db, tmp_path, pulse_store):
     db.session()
-    row = delivery.submit(pulse_store, lambda text, session_key: True, kind="probe", session_key=KEY,
+    row = delivery.submit(pulse_store, _sent(), kind="probe", chat_id=SID,
                           text=lambda tag: f"Pulse delivery check {tag}.")
-    started = row["created_at"] - 1
-    reconcile = lambda: delivery.reconcile(pulse_store, tmp_path, plugin_id=PLUGIN, process_started_at=started,
+    reconcile = lambda: delivery.reconcile(pulse_store, tmp_path, process_started_at=row["created_at"] - 1,
                                            now=row["created_at"] + 1)
     assert reconcile() == []
-    request_id = db.admission(row["text"])
-    assert [r["state"] for r in reconcile()] == [store.QUEUED]
-    db.message("user", row["text"], platform_message_id=request_id)
+    db.message("user", row["text"], display_kind="hidden")
+    assert [r["state"] for r in reconcile()] == [store.RUNNING]
     db.message("assistant", "Check arrived.")
-    db.finish(request_id)
     assert [r["state"] for r in reconcile()] == [store.DELIVERED]
     assert pulse_store.attempt_by_tag(row["tag"])["detail"] == "Check arrived."
 
 
 def test_an_attempt_from_before_a_restart_with_no_trace_was_not_admitted(db, tmp_path, pulse_store):
     db.session()
-    row = delivery.submit(pulse_store, lambda text, session_key: True, kind="probe", session_key=KEY,
-                          text=lambda tag: tag)
-    changed = delivery.reconcile(pulse_store, tmp_path, plugin_id=PLUGIN, process_started_at=row["created_at"] + 1,
+    row = delivery.submit(pulse_store, _sent(), kind="probe", chat_id=SID, text=lambda tag: tag)
+    changed = delivery.reconcile(pulse_store, tmp_path, process_started_at=row["created_at"] + 1,
                                  now=row["created_at"] + 2)
     assert [r["state"] for r in changed] == [store.NOT_ADMITTED]
 
 
 def test_unreadable_state_leaves_attempts_alone(tmp_path, pulse_store):
-    delivery.submit(pulse_store, lambda text, session_key: True, kind="probe", session_key=KEY, text=lambda tag: tag)
-    assert delivery.reconcile(pulse_store, tmp_path, plugin_id=PLUGIN, process_started_at=0, now=time.time() + 999) == []
+    delivery.submit(pulse_store, _sent(), kind="probe", chat_id=SID, text=lambda tag: tag)
+    assert delivery.reconcile(pulse_store, tmp_path, process_started_at=0, now=time.time() + 999) == []
     assert pulse_store.in_flight()[0]["state"] == store.SUBMITTED
+
+
+# Sending through the session host ------------------------------------------------
+
+class FakeHost:
+    """The two host methods, as tui_gateway.server's method table has them."""
+
+    def __init__(self, resume=None, submit=None):
+        self.calls = []
+        self.resume = resume or {"result": {"session_id": "ui-1"}}
+        self.submit = submit or {"result": {"status": "streaming"}}
+
+    def install(self, monkeypatch):
+        server = types.ModuleType("tui_gateway.server")
+        server._methods = {
+            host.RESUME: lambda rid, params: self.calls.append((host.RESUME, params)) or self.resume,
+            host.SUBMIT: lambda rid, params: self.calls.append((host.SUBMIT, params)) or self.submit,
+        }
+        monkeypatch.setitem(sys.modules, "tui_gateway.server", server)
+        return self
+
+
+def test_send_reopens_the_chat_and_submits_a_hidden_queued_turn(monkeypatch):
+    fake = FakeHost().install(monkeypatch)
+    assert host.send(SID, "Pulse delivery check p1-1.", profile="work") == host.Sent(True, "streaming", "streaming")
+    assert fake.calls == [
+        (host.RESUME, {"session_id": SID, "source": "desktop", "profile": "work"}),
+        (host.SUBMIT, {"session_id": "ui-1", "text": "Pulse delivery check p1-1.", "display_kind": "hidden",
+                       "queued": True}),
+    ]
+
+
+def test_send_reports_a_refusal(monkeypatch):
+    FakeHost(resume={"error": {"code": 4007, "message": "session not found"}}).install(monkeypatch)
+    sent = host.send(SID, "x")
+    assert not sent.ok and "session not found" in sent.detail
+
+
+def test_no_host_means_unavailable(monkeypatch):
+    monkeypatch.delitem(sys.modules, "tui_gateway.server", raising=False)
+    assert not host.available()
+    assert not host.send(SID, "x").ok
 
 
 # Hooks and the loop ------------------------------------------------------------
 
 @pytest.fixture
 def live(tmp_path, monkeypatch):
-    """Pulse as the gateway process runs it, with Hermes's home in tmp_path."""
-    injected = []
-    ctx = types.SimpleNamespace(plugin_id=PLUGIN, _manager=types.SimpleNamespace(has_gateway_message_injector=True),
-                                inject_message=lambda text, session_key=None: injected.append((text, session_key))
-                                or True)
+    """Pulse as the dashboard process runs it, with Hermes's home in tmp_path."""
+    fake = FakeHost().install(monkeypatch)
+    ctx = types.SimpleNamespace(plugin_id="conduit_push", profile_name="default",
+                                _manager=types.SimpleNamespace(has_tui_message_injector=True))
     monkeypatch.setattr(pulse, "get_hermes_home", lambda: tmp_path)
     monkeypatch.setattr(pulse, "_ctx", ctx)
     monkeypatch.setattr(pulse, "_started_at", time.time() - 10)
     monkeypatch.setattr(pulse, "_turns", {})
-    return types.SimpleNamespace(ctx=ctx, injected=injected, store=store.open_store(tmp_path))
+    monkeypatch.setattr(pulse, "_last_problem", "")
+    sent = lambda: [params["text"] for name, params in fake.calls if name == host.SUBMIT]
+    return types.SimpleNamespace(ctx=ctx, fake=fake, sent=sent, store=store.open_store(tmp_path))
 
 
 def test_nothing_is_sent_while_pulse_is_off(live, db):
     db.session()
     pulse.tick()
-    assert live.injected == []
+    assert live.sent() == []
 
 
-def test_nothing_is_sent_outside_the_gateway(live, db):
+def test_nothing_is_sent_outside_the_chat_host(live, db, monkeypatch):
     db.session()
     live.store.set("enabled", True)
-    live.ctx._manager.has_gateway_message_injector = False
+    live.ctx._manager.has_tui_message_injector = False  # the messaging gateway or the CLI
     pulse.tick()
-    assert live.injected == []
+    monkeypatch.delitem(sys.modules, "tui_gateway.server")
+    live.ctx._manager.has_tui_message_injector = True
+    pulse.tick()
+    assert live.sent() == []
 
 
 def test_a_probe_goes_to_the_home_chat_once_at_a_time(live, db):
     db.session()
     live.store.set("enabled", True)
     pulse.tick()
-    assert [key for _text, key in live.injected] == [KEY]
+    assert len(live.sent()) == 1
+    assert live.fake.calls[0][1]["session_id"] == SID
     live.store.set("probe_requested", True)
     pulse.tick()
-    assert len(live.injected) == 1  # the first one is still in flight
+    assert len(live.sent()) == 1  # the first one is still in flight
+
+
+def test_a_second_host_process_stays_quiet(live, db, monkeypatch):
+    db.session()
+    live.store.set("enabled", True)
+    live.store.claim_leader("other-host:1", pulse.LEADER_TTL_S, time.time())
+    pulse.tick()
+    assert live.sent() == []
 
 
 def test_no_home_chat_means_no_probe(live, db):
     live.store.set("enabled", True)
     pulse.tick()
-    assert live.injected == []
+    assert live.sent() == []
     chat, problem = pulse.home_chat(live.store, pulse.get_hermes_home())
     assert chat is None and "titled" in problem
 
@@ -382,7 +432,7 @@ def test_a_pulse_turn_gets_its_note_and_no_tools(live, db):
     db.session()
     live.store.set("enabled", True)
     pulse.tick()
-    text = live.injected[0][0]
+    text = live.sent()[0]
     result = plugin._pre_llm_call(session_id=SID, turn_id="t1", user_message=text, conversation_history=[])
     assert result == {"context": pulse.PROBE_NOTE}
     assert live.store.in_flight()[0]["state"] == store.RUNNING
@@ -399,6 +449,15 @@ def test_a_lookalike_tag_is_not_a_pulse_turn(live, db):
     assert not pulse.is_pulse_turn(SID, "t1")
 
 
+def test_quoting_a_live_tag_is_not_a_pulse_turn(live, db):
+    db.session()
+    live.store.set("enabled", True)
+    pulse.tick()
+    tag = live.store.in_flight()[0]["tag"]
+    assert pulse.pre_llm_call(SID, "t1", f"Pulse sent me {tag}, what is it?") is None
+    assert not pulse.is_pulse_turn(SID, "t1")
+
+
 def test_a_pulse_turn_sends_no_push(live, db, monkeypatch):
     db.session()
     live.store.set("enabled", True)
@@ -408,12 +467,49 @@ def test_a_pulse_turn_sends_no_push(live, db, monkeypatch):
     monkeypatch.setattr(plugin, "_later", lambda delay, work: None)
     monkeypatch.setattr(plugin, "_pending_ready", {})
     monkeypatch.setattr(plugin.calls, "turn_ended", lambda *args, **kwargs: False)
-    plugin._pre_llm_call(session_id=SID, turn_id="t1", user_message=live.injected[0][0], conversation_history=[])
+    plugin._pre_llm_call(session_id=SID, turn_id="t1", user_message=live.sent()[0], conversation_history=[])
     plugin._post_llm_call(session_id=SID, turn_id="t1", assistant_response="Check arrived.")
     plugin._on_session_end(session_id=SID, turn_id="t1", completed=True, failed=False, interrupted=False)
-    plugin._pre_llm_call(session_id=SID, turn_id="t2", user_message=live.injected[0][0], conversation_history=[])
+    plugin._pre_llm_call(session_id=SID, turn_id="t2", user_message=live.sent()[0], conversation_history=[])
     plugin._on_session_end(session_id=SID, turn_id="t2", completed=False, failed=True, interrupted=False)
     assert sent == []
+
+
+def test_the_end_of_a_pulse_turn_is_noted_on_its_attempt(live, db):
+    db.session()
+    live.store.set("enabled", True)
+    pulse.tick()
+    pulse.pre_llm_call(SID, "t1", live.sent()[0])
+    pulse.turn_ended(SID, "t1")
+    assert live.store.in_flight()[0]["detail"] == delivery.ENDED
+
+
+def test_a_stuck_probe_makes_way_for_the_next(live, db):
+    db.session()
+    live.store.set("enabled", True)
+    pulse.tick()
+    row = live.store.in_flight()[0]
+    db.message("user", row["text"], display_kind="hidden")
+    pulse.tick(now=row["created_at"] + 6 * 3600 + 1)  # stuck, and the next one is due
+    assert live.store.attempt_by_tag(row["tag"])["state"] == store.FAILED
+    assert len(live.sent()) == 2
+
+
+def test_the_loop_leaves_no_file_while_never_turned_on(live, tmp_path):
+    (tmp_path / store.DB_NAME).unlink()
+    pulse.tick()
+    assert not (tmp_path / store.DB_NAME).exists()
+
+
+def test_the_loop_stops_on_unload(monkeypatch):
+    monkeypatch.setattr(pulse, "_thread", None)
+    ctx = types.SimpleNamespace(plugin_id="conduit_push", _manager=types.SimpleNamespace())
+    pulse.register(ctx)
+    thread = pulse._thread
+    pulse.register(ctx)  # loaded again: still one loop
+    assert pulse._thread is thread and thread.is_alive()
+    pulse.stop(timeout=2.0)
+    assert not thread.is_alive()
 
 
 # The command ---------------------------------------------------------------------
@@ -428,58 +524,14 @@ def test_pulse_command(live, db, capsys, monkeypatch):
     assert run("probe") == 0 and live.store.get("probe_requested") is True
     assert run("status") == 0
     out = capsys.readouterr().out
-    assert f"Home chat: Pulse ({KEY})" in out
+    assert f"Home chat: Pulse ({SID})" in out
     assert "hasn't run Pulse" in out  # no tick yet
     pulse.tick()
-    assert run("status") == 0 and "Gateway last checked" in capsys.readouterr().out
-    assert run("home", "agent:main:local:dm:x") == 0 and live.store.get("home_session_key") == "agent:main:local:dm:x"
+    assert run("status") == 0 and "Dashboard last checked" in capsys.readouterr().out
+    assert run("home", "other-chat") == 0 and live.store.get("home_session_key") == "other-chat"
+    assert run("status") == 0 and "no open chat has the id other-chat" in capsys.readouterr().out
     assert run("home", "auto") == 0 and live.store.get("home_session_key") == ""
     assert run("off") == 0 and live.store.get("enabled") is False
-
-
-def test_the_loop_stops_on_unload(monkeypatch):
-    monkeypatch.setattr(pulse, "_thread", None)
-    ctx = types.SimpleNamespace(plugin_id=PLUGIN, _manager=types.SimpleNamespace(has_gateway_message_injector=False))
-    pulse.register(ctx)
-    thread = pulse._thread
-    pulse.register(ctx)  # loaded again: still one loop
-    assert pulse._thread is thread and thread.is_alive()
-    pulse.stop(timeout=2.0)
-    assert not thread.is_alive()
-
-
-def test_quoting_a_live_tag_is_not_a_pulse_turn(live, db):
-    db.session()
-    live.store.set("enabled", True)
-    pulse.tick()
-    tag = live.store.in_flight()[0]["tag"]
-    assert pulse.pre_llm_call(SID, "t1", f"Pulse sent me {tag}, what is it?") is None
-    assert not pulse.is_pulse_turn(SID, "t1")
-
-
-def test_a_completed_turn_gets_time_for_its_reply_row():
-    seen = delivery.Seen(ADM("r", SID, "terminal", "completed"), None)
-    assert delivery.derive_state(seen, age_s=60, sent_by_earlier_process=False, prior_detail=delivery.AWAITING_REPLY,
-                                 unchanged_s=30)[0] == store.RUNNING
-    assert delivery.derive_state(seen, age_s=600, sent_by_earlier_process=False, prior_detail=delivery.AWAITING_REPLY,
-                                 unchanged_s=delivery.REPLY_GRACE_S)[0] == store.FAILED
-
-
-def test_a_stuck_probe_makes_way_for_the_next(live, db):
-    db.session()
-    live.store.set("enabled", True)
-    pulse.tick()
-    row = live.store.in_flight()[0]
-    db.admission(row["text"], status="unknown")
-    pulse.tick(now=row["created_at"] + 6 * 3600 + 1)  # stuck, and the next one is due
-    assert live.store.attempt_by_tag(row["tag"])["state"] == store.FAILED
-    assert len(live.injected) == 2
-
-
-def test_the_loop_leaves_no_file_while_never_turned_on(live, tmp_path):
-    (tmp_path / store.DB_NAME).unlink()
-    pulse.tick()
-    assert not (tmp_path / store.DB_NAME).exists()
 
 
 def test_reading_pulse_before_it_was_ever_on_leaves_no_file(live, tmp_path, monkeypatch):
