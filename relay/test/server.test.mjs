@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 
-import { callPushFor, notificationFor, phoneBackgroundPushFor, settlePushFor, validateEvent, validateDecision } from '../src/server.mjs';
+import { SESSION_KEY_MAX_BYTES, callPushFor, notificationFor, phoneBackgroundPushFor, settlePushFor, validateEvent, validateDecision } from '../src/server.mjs';
 import { normalizePreferences } from '../src/store.mjs';
 
 const preferences = { show_previews: true, completion_sound: false };
@@ -174,6 +174,50 @@ test('validateEvent passes a bounded decision through', () => {
   assert.equal(event.decision.session_key, 'sess-1');
   assert.equal(event.decision.description.length, 500);
   assert.deepEqual(event.decision.choices, ['once', 'deny'], 'unknown choice strings are filtered');
+});
+
+// Gateway session keys built by Hermes' build_session_key carry whatever
+// the platform's ids hold: Matrix rooms and users (`!room:server`,
+// `@user:server`), WhatsApp group JIDs (`…@g.us`), a profile named `main`
+// (`agent:main~`). They travel whole; only a key with a control character or
+// over SESSION_KEY_MAX_BYTES is dropped, never cut.
+const gatewaySessionKeys = [
+  'agent:main:matrix:group:!AbCdEf:matrix.org:@bob:matrix.org',
+  'agent:main:whatsapp:group:120363012345678901@g.us:15551234567',
+  'agent:main~:telegram:dm:12345',
+  'agent:main:signal:dm:+15551234567',
+  `agent:main:api:dm:${'k'.repeat(400)}`,
+  'agent:main:matrix:dm:@zoë:matrix.org',
+];
+
+test('a plaintext approval keeps its gateway session key whole in the push', () => {
+  for (const key of gatewaySessionKeys) {
+    const event = validateEvent({
+      type: 'approval.needed',
+      event_id: 'approval:12345678',
+      session_id: key,
+      decision: { kind: 'approval', session_key: key, description: 'Run rm -rf build?', choices: ['once', 'deny'] },
+    });
+    const { payload } = notificationFor(event, preferences, { id: 'gw-1' });
+    assert.equal(payload.conduit.session_id, key, key);
+    assert.equal(payload.body.conduit.session_id, key, key);
+    assert.equal(payload.body.conduit.decision?.session_key, key, key);
+  }
+});
+
+test('a session key over the byte limit or with a control character is dropped, never cut', () => {
+  for (const key of ['k'.repeat(SESSION_KEY_MAX_BYTES + 1), 'é'.repeat(SESSION_KEY_MAX_BYTES / 2 + 1), 'agent:main\n:x', 'a\u0000b', 'a\u007fb', '\ud800', '']) {
+    const event = validateEvent({
+      type: 'approval.needed',
+      event_id: 'approval:12345678',
+      session_id: key,
+      decision: { kind: 'approval', session_key: key, description: 'Run rm -rf build?', choices: ['once', 'deny'] },
+    });
+    assert.equal(event.sessionId, undefined, JSON.stringify(key));
+    assert.equal(event.decision, undefined, JSON.stringify(key));
+  }
+  const atLimit = 'k'.repeat(SESSION_KEY_MAX_BYTES);
+  assert.equal(validateEvent({ type: 'response.ready', event_id: 'response:12345678', session_id: atLimit }).sessionId, atLimit);
 });
 
 test('notificationFor embeds every batch question in the rich body payload', () => {
@@ -578,11 +622,16 @@ test('validateEvent bounds the call and drops a malformed one', () => {
   const bounded = validateEvent({ ...callBody, call: { ...callBody.call, title: undefined, session_ids: ['a', 'a', 'b', 'c', 'd', 'e'] } });
   assert.deepEqual(bounded.call, { id: callBody.call.id, kind: 'done', session_ids: ['a', 'b', 'c', 'd'] });
   for (const call of [null, [], { ...callBody.call, kind: 'maybe' }, { ...callBody.call, id: 'short' }, { ...callBody.call, id: 'has space here' }, { ...callBody.call, session_ids: [] }, { ...callBody.call, session_ids: 'rt-1' },
-    { ...callBody.call, session_ids: ['bad id'] }, { ...callBody.call, session_ids: ['a', 'bad id'] }, { ...callBody.call, session_ids: ['a', 'x'.repeat(181)] }, { ...callBody.call, session_ids: ['a', 7] }]) {
+    { ...callBody.call, session_ids: ['bad\nid'] }, { ...callBody.call, session_ids: ['a', 'bad\nid'] }, { ...callBody.call, session_ids: ['a', 'x'.repeat(SESSION_KEY_MAX_BYTES + 1)] }, { ...callBody.call, session_ids: ['a', 7] }]) {
     assert.equal(validateEvent({ ...callBody, call }).call, undefined, JSON.stringify(call));
   }
   // Only a call request carries a call.
   assert.equal(validateEvent({ ...callBody, type: 'response.ready' }).call, undefined);
+});
+
+test('a call request keeps gateway session keys whole', () => {
+  const event = validateEvent({ ...callBody, call: { ...callBody.call, session_ids: gatewaySessionKeys.slice(0, 4) } });
+  assert.deepEqual(event.call.session_ids, gatewaySessionKeys.slice(0, 4));
 });
 
 test('a call request rings with the call category, its job and the generic copy when previews are off', () => {

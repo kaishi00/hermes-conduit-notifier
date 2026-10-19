@@ -458,7 +458,7 @@ def test_call_is_only_attached_to_call_requests():
     {**CALL, "id": "short"},
     {**CALL, "id": "has space in it here"},
     {**CALL, "kind": "maybe"},
-    {**CALL, "session_ids": ["bad id"]},
+    {**CALL, "session_ids": ["bad\nid"]},
     {**CALL, "session_ids": []},
     "not a dict",
 ])

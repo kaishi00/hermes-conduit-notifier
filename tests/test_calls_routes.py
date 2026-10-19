@@ -153,7 +153,7 @@ def test_holding_a_malformed_watch_id_is_refused(paired):
     assert _http().put(f"{BASE}/calls/watches/not-a-watch", json={"hold_s": 0}).status_code == 400
 
 
-@pytest.mark.parametrize("body", [{"session_ids": []}, {"session_ids": "rt-1"}, {"session_ids": ["bad id"]}, {},
+@pytest.mark.parametrize("body", [{"session_ids": []}, {"session_ids": "rt-1"}, {"session_ids": ["bad\nid"]}, {},
                                   {"session_ids": ["rt-1"], "hold_s": 601}, {"session_ids": ["rt-1"], "ended_within_s": -1}])
 def test_a_watch_needs_session_ids(paired, body):
     http = _http()

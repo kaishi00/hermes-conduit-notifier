@@ -82,6 +82,11 @@ DEVICE_TTL_S = 60 * 24 * 3600
 _KEY = re.compile(r"^[a-z][a-z0-9_.]{0,63}$")
 _INSTALLATION = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 _REQUEST_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+# A Hermes session key, kept whole: one with a control character or over this
+# many UTF-8 bytes is dropped, never cut. The same rule as the plugin's
+# events.session_key; this module imports nothing from the plugin package.
+SESSION_KEY_MAX_BYTES = 512
+_SESSION_KEY_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 
 _thread_lock = threading.Lock()
 
@@ -159,7 +164,7 @@ class SettingsStore:
             raise SettingsError("no_changes", "Give at least one change: a key and its new value.")
         if len(changes) > MAX_CHANGES:
             raise SettingsError("too_many", f"Ask for at most {MAX_CHANGES} changes at once.")
-        session = session_id.strip()[:180] if isinstance(session_id, str) else ""
+        session = _session_key(session_id.strip()) if isinstance(session_id, str) else ""
         with self._locked() as state:
             now = self.clock()
             installation = _pick_device(state, device)
@@ -256,6 +261,17 @@ class SettingsStore:
 
 def _encoded(state: dict[str, Any]) -> str:
     return json.dumps(state, separators=(",", ":"), ensure_ascii=False) + "\n"
+
+
+def _session_key(value: Any) -> str:
+    """``value`` unchanged when it is a session key, else "" (events.session_key)."""
+    if not isinstance(value, str) or not value or _SESSION_KEY_CONTROL.search(value):
+        return ""
+    try:
+        size = len(value.encode("utf-8"))
+    except UnicodeEncodeError:  # a lone surrogate
+        return ""
+    return value if size <= SESSION_KEY_MAX_BYTES else ""
 
 
 def _line(value: Any, limit: int) -> str:

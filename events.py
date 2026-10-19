@@ -48,6 +48,29 @@ def event_id(prefix: str, *parts: Any) -> str:
     return f"{prefix}:{uuid.uuid4()}"
 
 
+# Hermes session keys (gateway ``build_session_key``, custom API ids up to 256
+# characters) carry the platform's own ids: Matrix ``!room:server`` and
+# ``@user:server``, WhatsApp ``…@g.us``, a ``main`` profile's ``agent:main~``.
+# They are opaque routing strings, kept whole: one with a control character or
+# over this many UTF-8 bytes is dropped, never cut (a cut key names another
+# chat, or none). The relay applies the same rule (server.mjs
+# SESSION_KEY_MAX_BYTES), and so do the stores the dashboard loads by path
+# (calls_store, present_store, settings_store), which keep their own copy.
+SESSION_KEY_MAX_BYTES = 512
+_SESSION_KEY_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def session_key(value: Any) -> str:
+    """``value`` unchanged when it is a session key a push can carry, else ""."""
+    if not isinstance(value, str) or not value or _SESSION_KEY_CONTROL.search(value):
+        return ""
+    try:
+        size = len(value.encode("utf-8"))
+    except UnicodeEncodeError:  # a lone surrogate
+        return ""
+    return value if size <= SESSION_KEY_MAX_BYTES else ""
+
+
 def push_event(
     kind: str,
     *,
@@ -68,8 +91,8 @@ def push_event(
         "plugin_version": PLUGIN_VERSION,
         "plugin_capabilities": list(PLUGIN_CAPABILITIES),
     }
-    if session_id:
-        event["session_id"] = session_id[:180]
+    if session_key(session_id):
+        event["session_id"] = session_id
     if profile:
         event["profile"] = profile[:80]
     if title:
@@ -124,7 +147,6 @@ _MAPS_ID = re.compile(r"^m_[A-Za-z0-9_-]{16,64}\Z")
 # How a watched job ended, or (an alert call) what Hermes waits on.
 CALL_KINDS = ("done", "failed", "stopped", "approval", "question")
 _CALL_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
-_CALL_SESSION_ID = re.compile(r"^[A-Za-z0-9:_./-]{1,180}$")
 
 
 def sanitize_call(value: Any) -> dict[str, Any] | None:
@@ -142,7 +164,7 @@ def sanitize_call(value: Any) -> dict[str, Any] | None:
         return None
     session_ids: list[str] = []
     for item in raw_ids:
-        if not isinstance(item, str) or not _CALL_SESSION_ID.match(item):
+        if not session_key(item):
             return None
         if item not in session_ids:
             session_ids.append(item)
@@ -423,10 +445,14 @@ def sanitize_decision(decision: dict[str, Any]) -> dict[str, Any]:
     kind = _clean(decision.get("kind", ""), 40)
     if kind == "approval":
         sanitized: dict[str, Any] = {"kind": "approval"}
-        for key in ("session_key", "description"):
-            value = _clean(decision.get(key, ""), 500)
-            if value:
-                sanitized[key] = value
+        # The session key routes the answer back (approval.respond): kept
+        # whole, never whitespace-collapsed or cut.
+        key = session_key(decision.get("session_key"))
+        if key:
+            sanitized["session_key"] = key
+        description = _clean(decision.get("description", ""), 500)
+        if description:
+            sanitized["description"] = description
         choices = decision.get("choices")
         if isinstance(choices, list):
             # Clean first, then drop empties: filtering on the raw value would

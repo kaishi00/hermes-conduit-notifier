@@ -377,7 +377,7 @@ def test_a_watch_is_bounded_and_cleaned(tmp_path):
     assert len(watch["title"]) == 120
 
 
-@pytest.mark.parametrize("session_ids", [[], [""], ["bad id"], "rt-1", [3]])
+@pytest.mark.parametrize("session_ids", [[], [""], ["bad\nid"], "rt-1", [3]])
 def test_a_watch_needs_a_valid_session_id(tmp_path, session_ids):
     store = _store(tmp_path, enabled=True)
     with pytest.raises(ValueError):

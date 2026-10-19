@@ -131,7 +131,11 @@ MAX_OUTCOMES = 20
 # heard twice: kept as long as an outcome could still arrive.
 MAX_TOLD = 64
 
-_SESSION_ID = re.compile(r"^[A-Za-z0-9:_./-]{1,180}$")
+# A Hermes session key, kept whole: one with a control character or over this
+# many UTF-8 bytes is dropped, never cut. The same rule as the plugin's
+# events.session_key; this module imports nothing from the plugin package.
+SESSION_KEY_MAX_BYTES = 512
+_SESSION_KEY_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 # The shape the call event carries (events.sanitize_call).
 _WATCH_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 _thread_lock = threading.Lock()
@@ -685,13 +689,24 @@ def _session_ids(value: Any) -> list[str]:
         raise ValueError("session_ids must be a list")
     ids: list[str] = []
     for item in value:
-        if not isinstance(item, str) or not _SESSION_ID.match(item.strip()):
+        if not isinstance(item, str) or not _session_key(item.strip()):
             raise ValueError("session_ids must be session ids")
         if item.strip() not in ids:
             ids.append(item.strip())
     if not ids:
         raise ValueError("session_ids must name the job's session")
     return ids[:MAX_WATCH_SESSIONS]
+
+
+def _session_key(value: Any) -> str:
+    """``value`` unchanged when it is a session key, else "" (events.session_key)."""
+    if not isinstance(value, str) or not value or _SESSION_KEY_CONTROL.search(value):
+        return ""
+    try:
+        size = len(value.encode("utf-8"))
+    except UnicodeEncodeError:  # a lone surrogate
+        return ""
+    return value if size <= SESSION_KEY_MAX_BYTES else ""
 
 
 def _seconds(value: Any, name: str, maximum: int) -> int:

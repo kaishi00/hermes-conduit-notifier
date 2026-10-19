@@ -43,6 +43,15 @@ const MAPS_TOKENS_PER_HOUR = 12;
 // headroom for JSON escaping and delivery headers, dropping decision content
 // (not the notification) when a payload would exceed the bound.
 const MAX_NOTIFICATION_BYTES = 3800;
+// Hermes session keys (gateway `build_session_key`, custom API ids up to 256
+// characters) carry the platform's own ids: Matrix `!room:server` and
+// `@user:server`, WhatsApp `…@g.us`, a `main` profile's `agent:main~`. They
+// are opaque routing strings, kept whole: one with a control character or
+// over this many UTF-8 bytes is dropped, never cut (a cut key names another
+// chat, or none). Mirrors the plugin's events.SESSION_KEY_MAX_BYTES; twice
+// Hermes' 256-character cap, and small enough that a routing stub carrying
+// it twice stays under MAX_NOTIFICATION_BYTES.
+export const SESSION_KEY_MAX_BYTES = 512;
 
 // End-to-end encrypted events (#431): the plugin seals the content with a
 // key this relay never sees and sends an `e2e` envelope instead. The relay
@@ -1323,7 +1332,7 @@ function validateEvent(body) {
     type: body.type,
     title: cleanText(body.title, 120),
     body: cleanText(body.body, 500),
-    sessionId: cleanIdentifier(body.session_id, 180),
+    sessionId: cleanSessionKey(body.session_id),
     profile: cleanText(body.profile, 80),
     gateway: cleanIdentifier(body.gateway, 80),
     pluginVersion: cleanIdentifier(body.plugin_version, 40),
@@ -1365,7 +1374,7 @@ function validateCall(value) {
   const sessionIds = [];
   for (const item of value.session_ids) {
     // Like the plugin (events.sanitize_call): one malformed id drops the call.
-    const sessionId = typeof item === 'string' && item.length <= 180 ? cleanIdentifier(item, 180) : undefined;
+    const sessionId = cleanSessionKey(item);
     if (!sessionId) return undefined;
     if (!sessionIds.includes(sessionId)) sessionIds.push(sessionId);
   }
@@ -1440,7 +1449,7 @@ function validateDecision(value, eventType) {
   if (!value || typeof value !== 'object') return undefined;
   const kind = cleanText(value.kind, 40);
   if (kind === 'approval' && eventType === 'approval.needed') {
-    const sessionKey = cleanIdentifier(value.session_key, 180);
+    const sessionKey = cleanSessionKey(value.session_key);
     const description = cleanText(value.description, 500);
     if (!sessionKey || !description) return undefined;
     const allowed = new Set(['once', 'session', 'always', 'deny']);
@@ -1513,6 +1522,12 @@ function cleanText(value, max) {
 
 function cleanIdentifier(value, max) {
   return typeof value === 'string' && /^[A-Za-z0-9:_.\/-]+$/.test(value) ? value.slice(0, max) : undefined;
+}
+
+// A session key, whole, or undefined (see SESSION_KEY_MAX_BYTES).
+function cleanSessionKey(value) {
+  return typeof value === 'string' && value && value.isWellFormed() && !/[\u0000-\u001f\u007f]/.test(value)
+    && Buffer.byteLength(value) <= SESSION_KEY_MAX_BYTES ? value : undefined;
 }
 
 function readJson(request, maxChars = 32_768) {

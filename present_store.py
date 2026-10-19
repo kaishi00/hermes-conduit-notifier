@@ -109,6 +109,11 @@ DEVICE_TTL_S = 60 * 24 * 3600
 
 _INSTALLATION = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 _PROMPT_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+# A Hermes session key, kept whole: one with a control character or over this
+# many UTF-8 bytes is dropped, never cut. The same rule as the plugin's
+# events.session_key; this module imports nothing from the plugin package.
+SESSION_KEY_MAX_BYTES = 512
+_SESSION_KEY_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 # What the phone needs to show a prompt; the rest stays on this host.
 _PUBLIC = ("id", "title", "preview", "action_label", "spoken_yes", "session_id", "created_at", "expires_at")
 
@@ -227,7 +232,7 @@ class PresentStore:
         if isinstance(ttl_minutes, bool) or not isinstance(ttl_minutes, (int, float)) \
                 or not 1 <= ttl_minutes <= MAX_TTL_MINUTES:
             raise PresentError("invalid", f"ttl_minutes is 1 to {MAX_TTL_MINUTES}.")
-        session = _line(session_id, 180)
+        session = _session_key(session_id)
         navigate = None
         if maps is not None:
             navigate = _maps(maps)
@@ -285,7 +290,7 @@ class PresentStore:
                 raise PresentError("rate_limited", "Too many cards this hour. Say it instead.")
             created = int(now)
             card = {"id": secrets.token_urlsafe(12), "title": clean_title, "markdown": body,
-                    "session_id": _line(session_id, 180), "created_at": created, "expires_at": created + CARD_TTL_S}
+                    "session_id": _session_key(session_id), "created_at": created, "expires_at": created + CARD_TTL_S}
             if rich:
                 card["cards"] = rich
                 if markdown_is_fallback:
@@ -390,6 +395,17 @@ class PresentStore:
 
 def _encoded(state: dict[str, Any]) -> str:
     return json.dumps(state, separators=(",", ":"), ensure_ascii=False) + "\n"
+
+
+def _session_key(value: Any) -> str:
+    """``value`` unchanged when it is a session key, else "" (events.session_key)."""
+    if not isinstance(value, str) or not value or _SESSION_KEY_CONTROL.search(value):
+        return ""
+    try:
+        size = len(value.encode("utf-8"))
+    except UnicodeEncodeError:  # a lone surrogate
+        return ""
+    return value if size <= SESSION_KEY_MAX_BYTES else ""
 
 
 def _line(value: Any, limit: int) -> str:
@@ -535,7 +551,7 @@ def _prompt(raw: Any, now: float) -> dict[str, Any] | None:
         "action_label": _line(raw["action_label"], MAX_ACTION_LABEL_CHARS) or "Confirm",
         "spoken_yes": [phrase for phrase in (_line(item, MAX_SPOKEN_YES_CHARS) for item in spoken) if phrase][
             :MAX_SPOKEN_YES] if isinstance(spoken, list) else [],
-        "session_id": _line(raw.get("session_id"), 180),
+        "session_id": _session_key(raw.get("session_id")),
         "created_at": created, "expires_at": expires, "status": status, "reported": raw.get("reported") is True,
     }
     if raw.get("maps") is not None:
@@ -647,7 +663,7 @@ def _card(raw: Any, now: float) -> dict[str, Any] | None:
     markdown = _text(raw.get("markdown"), MAX_CARD_MARKDOWN_CHARS)
     if not title or not markdown:
         return None
-    card = {"id": card_id, "title": title, "markdown": markdown, "session_id": _line(raw.get("session_id"), 180),
+    card = {"id": card_id, "title": title, "markdown": markdown, "session_id": _session_key(raw.get("session_id")),
             "created_at": created, "expires_at": expires}
     schema = _card_schema()
     rich = schema.normalize_cards(raw.get("cards")) if schema else []
