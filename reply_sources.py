@@ -125,6 +125,8 @@ class ReplySourcesStore:
                 raise
             with handle:
                 handle.write(json.dumps(state, separators=(",", ":")) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
             temporary.replace(self.path)
         except BaseException:
             try:
@@ -132,6 +134,18 @@ class ReplySourcesStore:
             except OSError:
                 pass
             raise
+        if os.name == "posix":
+            # Best effort, as the other stores: the rename itself survives a crash.
+            try:
+                directory = os.open(self.path.parent, os.O_RDONLY)
+            except OSError:
+                return
+            try:
+                os.fsync(directory)
+            except OSError:
+                pass
+            finally:
+                os.close(directory)
 
 
 @contextmanager
