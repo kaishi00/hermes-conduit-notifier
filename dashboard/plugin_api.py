@@ -2797,8 +2797,16 @@ def local_live_key(profile: Optional[str], rotate: bool = False) -> str:
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as handle:
                     json.dump({"version": 1, "api_key": key, "created_at": int(time.time())}, handle)
+                    handle.flush()
+                    os.fsync(handle.fileno())
                 os.chmod(tmp, 0o600)
                 os.replace(tmp, path)
+                if os.name == "posix":
+                    directory = os.open(path.parent, os.O_RDONLY)
+                    try:
+                        os.fsync(directory)
+                    finally:
+                        os.close(directory)
             except BaseException:
                 with contextlib.suppress(OSError):
                     os.unlink(tmp)
