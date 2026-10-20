@@ -12671,11 +12671,15 @@ class _DesktopViewStore:
         return os.path.join(key, DESKTOP_VIEWS_FILE)
 
     @staticmethod
-    def _load(path: str) -> Dict[str, Dict[str, Any]]:
+    def _load(path: str, *, for_write: bool = False) -> Dict[str, Dict[str, Any]]:
         try:
             with open(path, encoding="utf-8") as handle:
                 value = json.load(handle)
-        except (OSError, ValueError, RecursionError):  # RecursionError: absurdly nested JSON
+        except (FileNotFoundError, ValueError, RecursionError):
+            return {}
+        except OSError:
+            if for_write:
+                raise
             return {}
         views = value.get("views") if isinstance(value, dict) else None
         if not isinstance(views, dict):
@@ -12709,7 +12713,7 @@ class _DesktopViewStore:
         path = self._path(key)
         # Path-generic: locks the sibling ".conduit-desktop-views.json.lock".
         with _pairing_state_lock(Path(path)):
-            merged = self._merged(self._load(path), views)
+            merged = self._merged(self._load(path, for_write=True), views)
             # A fresh, exclusively created 0600 name, so nothing planted in
             # the home can redirect the write.
             fd, temp = tempfile.mkstemp(dir=key, prefix=f".{DESKTOP_VIEWS_FILE}.", suffix=".tmp")
