@@ -3176,9 +3176,14 @@ _local_live_calls: Dict[str, List[Any]] = {}
 _local_live_calls_lock = threading.Lock()
 
 
-def _local_live_register(call: Any) -> None:
+def _local_live_register(call: Any) -> bool:
+    """Registers atomically; a profile may have only one live call."""
     with _local_live_calls_lock:
-        _local_live_calls.setdefault(call.profile, []).append(call)
+        calls = _local_live_calls.setdefault(call.profile, [])
+        if not call.speaks and any(not other.closed and not other.speaks for other in calls):
+            return False
+        calls.append(call)
+        return True
 
 
 def _local_live_unregister(call: Any) -> None:
@@ -3356,7 +3361,10 @@ async def local_live_socket(ws: WebSocket) -> None:
 
         # A live call's turns, should its server only read text back.
         read_back = None if call.speaks else _LocalLiveReadBack(call, to_phone, fail)
-        _local_live_register(call)
+        if not _local_live_register(call):
+            call.close()
+            await fail("A Local Live call is already running on this Hermes profile")
+            return
         try:
             await _speech_server_relay(ws, refuse, url, key, intercept=call.intercept, send_lock=call.send_lock,
                                        read_back=read_back)
@@ -11775,7 +11783,8 @@ class _LocalLiveWatchSession(_WatchAudioSession):
             # where its approvals go.
             chat.listener = runner.observe
             call = self.call = _LocalLiveWatchCall(self, _local_live_profile_key(profile))
-            _local_live_register(call)
+            if not _local_live_register(call):
+                raise WatchAudioFailure("busy", "A Local Live call is already running on this Hermes profile")
             pacer = self.pacer = _WatchAudioPacer(self.send, LOCAL_LIVE_WATCH_RATE)
             read_back = self.read_back = _LocalLiveReadBack(call, self._to_watch_event, self._fail)
             read_back.attach(upstream.send)
