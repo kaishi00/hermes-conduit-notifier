@@ -53,8 +53,8 @@ MAX_CT_CHARS = 2600
 INNER_FIELDS = ("title", "body", "session_id", "profile", "gateway", "stored_session_id", "decision", "call",
                 "locate", "maps")
 
-KID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
-_B64URL_PATTERN = re.compile(r"^[A-Za-z0-9_-]*$")
+KID_PATTERN = re.compile(r"^[0-9a-f]{32}\Z")
+_B64URL_PATTERN = re.compile(r"^[A-Za-z0-9_-]*\Z")
 
 
 class E2EError(Exception):
