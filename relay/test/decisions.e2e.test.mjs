@@ -923,7 +923,7 @@ async function bootFailure(name, extraEnv) {
 }
 
 test('the APNs test seams stop a relay that is not a test at boot', async () => {
-  for (const env of [{ APNS_MODE: 'accept' }, { APNS_MODE: 'accept', APNS_CAPTURE_PATH: join(dir, 'never.jsonl') }, { APNS_VOIP_FAILURE: 'throw' }]) {
+  for (const env of [{ APNS_MODE: 'accept' }, { APNS_MODE: 'accept', APNS_CAPTURE_PATH: join(dir, 'never.jsonl') }, { APNS_VOIP_FAILURE: 'throw' }, { APNS_FAIL_FIRST: '2' }]) {
     const { code, stderr } = await bootFailure('seams', { ...env, RELAY_TEST_SEAMS: '' });
     assert.notEqual(code, 0);
     assert.match(stderr, /test settings?; unset it for a real relay\./);

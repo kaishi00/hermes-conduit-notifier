@@ -192,13 +192,16 @@ function main() {
     // it to one topic (the Watch's, say).
     const voipFailure = process.env.APNS_VOIP_FAILURE;
     const voipFailureTopic = process.env.APNS_VOIP_FAILURE_TOPIC;
-    // Test seam: the first N sends that aren't VoIP fail (alternately
-    // refused and thrown) before sends start succeeding, like an APNs blip.
-    let failuresLeft = Number(process.env.APNS_FAIL_FIRST || 0);
+    // Test seam: the first N sends that aren't VoIP fail before sends start
+    // succeeding, like an APNs blip: the first throws (a dropped
+    // connection), the second is refused, and so on alternately.
+    const failFirst = process.env.APNS_FAIL_FIRST || '0';
+    if (!/^\d{1,3}$/.test(failFirst)) throw new Error('APNS_FAIL_FIRST must be a whole number of sends.');
+    let failed = 0;
     apnsSend = async (deviceToken, notification) => {
-      if (failuresLeft > 0 && notification.pushType !== 'voip') {
-        failuresLeft -= 1;
-        if (failuresLeft % 2) throw new Error('connection dropped');
+      if (failed < Number(failFirst) && notification.pushType !== 'voip') {
+        failed += 1;
+        if (failed % 2) throw new Error('connection dropped');
         return { ok: false, status: 503, reason: 'ServiceUnavailable' };
       }
       if (voipFailure && notification.pushType === 'voip' && (!voipFailureTopic || notification.topic === voipFailureTopic)) {
@@ -710,6 +713,11 @@ async function route(request, response) {
     // id, and that retry must send rather than be told it was a duplicate.
     // A clarify decision keeps its id, because a retry can't re-park it and
     // its undeliverable flag already sends the plugin to Hermes' own path.
+    // Two edges stay open by design: a copy that arrived while the send was
+    // in flight was already told duplicate (only the failed request's retry
+    // recovers), and a send APNs took whose answer was lost can show twice
+    // on the phone (alerts collapse per gateway and session). Delivering
+    // twice beats never.
     try {
       await deliverEvent(response, installation, event, gateway);
     } catch (error) {
