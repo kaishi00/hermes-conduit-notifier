@@ -9197,7 +9197,13 @@ class _WatchJobs:
         sid = params.get("session_id") if isinstance(params.get("session_id"), str) else ""
         if method == "event":
             payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
-            self._event(str(params.get("type") or ""), sid, payload)
+            kind = str(params.get("type") or "")
+            if kind == "approval.request":
+                # The event form: the same fields, in the payload, with no
+                # server request for a request.cancel to name.
+                self._approval_requested(sid, "", payload)
+            else:
+                self._event(kind, sid, payload)
         elif method == "approval":
             # A server request: its fields sit beside session_id.
             self._approval_requested(sid, _rpc_id(obj.get("id")), params)
