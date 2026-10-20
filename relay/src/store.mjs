@@ -1,8 +1,10 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, constants, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { EventLedger } from './event-ledger.mjs';
 import { DEFAULT_STORE_LIMITS } from './limits.mjs';
+
+const TEMPORARY_FLAGS = constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | (constants.O_NOFOLLOW ?? 0);
 
 const defaultPreferences = Object.freeze({
   enabled: true,
@@ -156,7 +158,8 @@ export class RelayStore {
     const temporary = `${this.path}.${process.pid}.tmp`;
     try {
       mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
-      const fd = openSync(temporary, 'w', 0o600);
+      // Never follow a symlink planted at the tmp name, as the Python writers.
+      const fd = openSync(temporary, TEMPORARY_FLAGS, 0o600);
       try {
         writeFileSync(fd, `${JSON.stringify(this.data)}\n`, { encoding: 'utf8' });
         fsyncSync(fd);

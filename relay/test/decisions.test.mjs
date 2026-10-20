@@ -1,5 +1,5 @@
 import { strict as assert } from 'node:assert';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
@@ -968,4 +968,15 @@ test('an installation keeps a PushKit token until it is cleared', () => {
   assert.equal(relay.data.installations[id].active, true);
   assert.equal(relay.wouldUpdateInstallation(id, { voipToken: null }), false);
   assert.equal(relay.createInstallation({ bundleId: 'app', deviceToken: 'd'.repeat(64), environment: 'production' }).installation.voip, false);
+});
+
+test('a save never writes through a symlink planted at the temporary name', { skip: process.platform === 'win32' }, () => {
+  const path = join(dir, `symlinked-${Math.random().toString(36).slice(2)}.json`);
+  const relay = new RelayStore(path);
+  const victim = join(dir, `victim-${Math.random().toString(36).slice(2)}.txt`);
+  writeFileSync(victim, 'untouched\n');
+  symlinkSync(victim, `${path}.${process.pid}.tmp`);
+  assert.throws(() => relay.save());
+  assert.equal(readFileSync(victim, 'utf8'), 'untouched\n');
+  clearTimeout(relay.saveTimer);
 });
