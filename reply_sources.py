@@ -37,8 +37,18 @@ import os
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None  # type: ignore[assignment]
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None  # type: ignore[assignment]
 
 FILE_NAME = "conduit-notifications.json"
 VERSION = 1
@@ -73,9 +83,10 @@ class ReplySourcesStore:
             raise ValueError(f"source must be one of {', '.join(SOURCES)}")
         if not isinstance(notify, bool):
             raise ValueError("notify must be true or false")
-        # Only the dashboard writes, so a process-wide lock is enough; a
-        # reader sees the old file or the new one.
-        with _thread_lock:
+        # Dashboard processes sharing a home serialize the whole update.
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        lock_path = self.path.with_name(f".{self.path.name}.lock")
+        with _thread_lock, open(lock_path, "a+b") as handle, _exclusive(handle):
             muted = self._load(for_write=True)
             muted.pop(source, None)
             if not notify:
@@ -121,6 +132,32 @@ class ReplySourcesStore:
             except OSError:
                 pass
             raise
+
+
+@contextmanager
+def _exclusive(handle: Any) -> Iterator[None]:
+    if fcntl is not None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    elif msvcrt is not None:
+        handle.seek(0)
+        for attempt in range(6):
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+                break
+            except OSError:
+                if attempt == 5:
+                    raise
+        try:
+            yield
+        finally:
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        yield
 
 
 def turn_source(platform: Any, transport: Any = None) -> str | None:
