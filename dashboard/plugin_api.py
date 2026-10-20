@@ -2769,10 +2769,12 @@ def _local_live_read_key() -> str:
     """This profile's key (inside its scope), or "" when none was made."""
     try:
         data = json.loads(_local_live_key_path().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except FileNotFoundError:
         return ""
     key = data.get("api_key") if isinstance(data, dict) else None
-    return key if isinstance(key, str) and key.startswith(LOCAL_LIVE_KEY_PREFIX + ".") else ""
+    if not isinstance(key, str) or not key.startswith(LOCAL_LIVE_KEY_PREFIX + "."):
+        raise ValueError("Invalid Local Live key store")
+    return key
 
 
 def local_live_key(profile: Optional[str], rotate: bool = False) -> str:
