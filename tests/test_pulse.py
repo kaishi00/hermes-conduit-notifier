@@ -1170,6 +1170,12 @@ def test_a_due_date_must_be_said_near_its_item():
                              "due_words": "Thursday"}
     items, _ = memory.extract(FakeModel({"items": [item("Book the vet"), item("my sister visits")]}), chunk, UTC)
     assert [i["due"] for i in items] == ["", "2026-10-22"]  # two lines away, then the line just after
+    wrong = lambda due: {"kind": "commitment", "text": "x", "evidence": "Thursday works", "due": due,
+                         "due_words": "Thursday"}
+    items, _ = memory.extract(FakeModel({"items": [wrong("2026-10-23"), wrong("2026-10-15"), wrong("26-10-22"),
+                                                   wrong("2026-10-29T09:30")]}), chunk, UTC)
+    # not a Thursday, before it was said, a short year; a later Thursday stays
+    assert [i["due"] for i in items] == ["", "", "", "2026-10-29T09:30"]
 
 
 def test_chat_reads_match_hermes(db, tmp_path):
@@ -1237,6 +1243,10 @@ def test_a_chunk_two_processes_read_is_kept_once(remembering, db):
     assert done["chunks"] == 0 and len(remembering.store.open_items()) == 1
     # A failure on a chunk someone else already read isn't counted against the chat.
     assert remembering.store.chunk_failed("", "work", retry_at=DAY, after_id=0) == 0
+    # Nor is a second reader's failure in the same round.
+    assert remembering.store.chunk_failed("", "fresh", retry_at=DAY + 100, now=DAY) == 1
+    assert remembering.store.chunk_failed("", "fresh", retry_at=DAY + 110, now=DAY + 10) == 1
+    assert remembering.store.chunk_failed("", "fresh", retry_at=DAY + 300, now=DAY + 200) == 2
     assert remembering.store.watermark("", "work")["failures"] == 0
 
 
@@ -1349,7 +1359,7 @@ def test_memory_command(remembering, db, capsys, monkeypatch):
     run = lambda value="", extra="": cli.dispatch(types.SimpleNamespace(
         conduit_push_action="pulse", pulse_action="memory", value=value, extra=extra))
     remembering.store.path.unlink()
-    assert run() == 0 and run("fact") == 0 and run("now") == 0 and run("forget", "1") == 0
+    assert run() == 0 and run("fact") == 0 and run("now") == 1 and run("forget", "1") == 0
     assert not remembering.store.path.exists()  # nothing but on/off leaves a file on a home that never ran Pulse
     assert run("on") == 0 and remembering.store.get("memory") is True
     capsys.readouterr()
@@ -1361,6 +1371,9 @@ def test_memory_command(remembering, db, capsys, monkeypatch):
     out = capsys.readouterr().out
     assert "Promise (1)\n  #1 Hermes will check the build. (due 2026-10-21)\n      \"I'll check the build\" (20 Oct)" in out
     assert run("fact") == 0 and "hasn't kept" in capsys.readouterr().out
+    monkeypatch.setattr(cli, "MEMORY_LIST", 0)
+    assert run() == 0 and "The 0 most recent of 1:" in capsys.readouterr().out
+    monkeypatch.setattr(cli, "MEMORY_LIST", 50)
     assert run("mood") == 2
     assert run("forget", "x") == 2 and run("forget", "#²") == 2 and run("forget", "#9") == 1
     assert run("forget", "#1") == 0 and remembering.store.open_items() == []

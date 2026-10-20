@@ -167,13 +167,16 @@ def _pulse(args: argparse.Namespace) -> int:
     if (action in ("status", "probe", "off", "outcomes") or listing) and not (Path(home) / pulse_delivery.store.DB_NAME).exists():
         # Never turned on: say so without leaving a file behind.
         print("Pulse: off (never turned on). `hermes conduit-push pulse on` to start it.")
-        return 1 if action == "probe" else 0
+        return 1 if action == "probe" or (action == "memory" and (args.value or "").strip() == "now") else 0
     pulse_store = pulse.open_store(home)
     if action in ("on", "off"):
         pulse_store.set("enabled", action == "on")
         if action == "on":
             print("Pulse is on. The dashboard sends the first delivery check within a minute; "
                   "see `hermes conduit-push pulse status`.")
+            if pulse_store.get("memory"):
+                print("It also reads chats once they've been quiet for 20 minutes and keeps what's worth remembering, "
+                      "using Hermes's \"Pulse memory\" auxiliary model. `hermes conduit-push pulse memory off` stops that.")
         else:
             print("Pulse is off. Nothing more goes into the home chat.")
         return 0
@@ -236,15 +239,13 @@ def _pulse(args: argparse.Namespace) -> int:
         others = [name for name, _ in pulse.report.profile_homes(home)]
         if others:
             print("The report and memory also read profiles: " + ", ".join(_printable(name) for name in others))
-    if pulse_store.get("memory"):
-        kinds = pulse_store.item_counts()
-        usage = pulse_store.get("memory_usage")
-        usage = usage if isinstance(usage, dict) else {}
-        print("Memory: " + (", ".join(f"{n} {kind}" for kind, n in sorted(kinds.items())) or "nothing kept yet")
-              + f" ({int(usage.get('chunks', 0) or 0)} chat chunks read, {int(usage.get('tokens', 0) or 0)} tokens"
-              + (f", {int(usage.get('failed', 0) or 0)} failed" if usage.get("failed") else "") + ")")
-    else:
-        print("Memory: off")
+    kinds = pulse_store.item_counts()
+    usage = pulse_store.get("memory_usage")
+    usage = usage if isinstance(usage, dict) else {}
+    print(("Memory: " if pulse_store.get("memory") else "Memory: off; kept ")
+          + (", ".join(f"{n} {kind}" for kind, n in sorted(kinds.items())) or "nothing kept yet")
+          + f" ({int(usage.get('chunks', 0) or 0)} chat chunks read, {int(usage.get('tokens', 0) or 0)} tokens"
+          + (f", {int(usage.get('failed', 0) or 0)} failed" if usage.get("failed") else "") + ")")
     ratings = pulse.rating_counts(pulse_store)
     if ratings:
         print("Ratings so far: " + ", ".join(f"{kind} {yes} yes / {no} no" for kind, (yes, no) in ratings.items()))
@@ -287,6 +288,9 @@ def _pulse_report(pulse_store: Any, value: str) -> int:
     return 2
 
 
+MEMORY_LIST = 50
+
+
 def _pulse_memory(pulse_store: Any, home: Any, value: str, extra: str) -> int:
     from . import pulse, pulse_memory
     if value == "now":
@@ -302,7 +306,7 @@ def _pulse_memory(pulse_store: Any, home: Any, value: str, extra: str) -> int:
               else "Pulse memory is off. What it kept stays until you forget it.")
         return 0
     if value == "forget":
-        if not extra.lstrip("#").isdecimal():
+        if not extra.lstrip("#").isdecimal() or len(extra) > 18:
             print("Usage: hermes conduit-push pulse memory forget <item number>")
             return 2
         if not pulse_store.close_item(int(extra.lstrip("#")), status="cancelled", closed_by="user"):
@@ -313,7 +317,10 @@ def _pulse_memory(pulse_store: Any, home: Any, value: str, extra: str) -> int:
     if value and value not in pulse_memory.KINDS:
         print("Usage: hermes conduit-push pulse memory [" + "|".join(pulse_memory.KINDS) + "|now|on|off|forget <n>]")
         return 2
-    items = pulse_store.open_items(value)
+    items = pulse_store.open_items(value, limit=MEMORY_LIST + 1)
+    if len(items) > MEMORY_LIST:
+        items = items[:MEMORY_LIST]
+        print(f"The {MEMORY_LIST} most recent of {sum(pulse_store.item_counts().get(k, 0) for k in ([value] if value else pulse_memory.KINDS))}:")
     if not items:
         print("Pulse hasn't kept anything yet." if pulse_store.get("memory") else "Pulse memory is off.")
         return 0

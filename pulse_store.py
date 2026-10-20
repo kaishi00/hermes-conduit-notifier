@@ -328,7 +328,8 @@ class PulseStore:
 
     def outcomes_between(self, session_id: str, start: float, end: float, limit: int = 50) -> list[dict]:
         with self._connect() as conn:
-            rows = conn.execute("SELECT * FROM outcomes WHERE session_id=? AND at >= ? AND at <= ? ORDER BY at "
+            # The latest win a cut: they sit nearest the rows they're shown with.
+            rows = conn.execute("SELECT * FROM outcomes WHERE session_id=? AND at >= ? AND at <= ? ORDER BY at DESC "
                                 "LIMIT ?", (session_id, start, end, limit)).fetchall()
         return [dict(row) for row in rows]
 
@@ -392,16 +393,22 @@ class PulseStore:
             conn.execute("COMMIT")
         return ids
 
-    def chunk_failed(self, profile: str, chat_id: str, *, retry_at: float, after_id: int = 0) -> int:
+    def chunk_failed(self, profile: str, chat_id: str, *, retry_at: float, after_id: int = 0,
+                     now: float = 0.0) -> int:
         """Counts a failed read of the chat's next chunk, unless another
-        reader moved the chat past ``after_id`` meanwhile; returns the count."""
+        reader moved the chat past ``after_id`` or already counted a failure
+        that is still waiting for its retry; returns the count (0 when
+        another reader moved it on)."""
         with _lock, self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute("SELECT message_id FROM watermarks WHERE profile=? AND chat_id=?",
+            row = conn.execute("SELECT message_id, failures, retry_at FROM watermarks WHERE profile=? AND chat_id=?",
                                (profile, chat_id)).fetchone()
             if (row["message_id"] if row else 0) != after_id:
                 conn.execute("ROLLBACK")
                 return 0
+            if row and row["failures"] and row["retry_at"] > now:
+                conn.execute("ROLLBACK")
+                return row["failures"]  # this round's failure is already counted
             conn.execute(
                 "INSERT INTO watermarks(profile, chat_id, message_id, at, failures, retry_at) VALUES(?,?,0,0,1,?) "
                 "ON CONFLICT(profile, chat_id) DO UPDATE SET failures=failures+1, retry_at=excluded.retry_at",
@@ -411,11 +418,11 @@ class PulseStore:
             conn.execute("COMMIT")
         return failures
 
-    def open_items(self, kind: str = "") -> list[dict]:
+    def open_items(self, kind: str = "", limit: int = -1) -> list[dict]:
         where, params = ("AND kind=? ", (kind,)) if kind else ("", ())
         with self._connect() as conn:
             rows = conn.execute(f"SELECT * FROM items WHERE status='open' AND superseded_at IS NULL {where}"
-                                f"ORDER BY mentioned_at DESC, id DESC", params).fetchall()
+                                f"ORDER BY mentioned_at DESC, id DESC LIMIT ?", (*params, limit)).fetchall()
         return [dict(row) for row in rows]
 
     def close_item(self, item_id: int, *, status: str, closed_by: str) -> bool:

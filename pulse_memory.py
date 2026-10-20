@@ -82,6 +82,8 @@ Llm = Callable[[str, str], tuple[Any, int]]
 
 _CODE = re.compile(r"```.*?(?:```|\Z)", re.DOTALL)
 _ELLIPSIS = re.compile(r"\s*(?:\.\.\.|…)\s*")
+_DUE = re.compile(r"\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2})?")
+_WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 _QUOTES = str.maketrans({"“": '"', "”": '"', "‘": "'", "’": "'"})
 
 
@@ -209,7 +211,9 @@ def _row_with(evidence: str, chunk: Sequence[Any], hint: Any) -> Optional[Any]:
 
 def _due(value: Any, words: Any, chunk: Sequence[Any], row: Any, zone: tzinfo) -> tuple[str, Optional[float]]:
     """The due date as said and its time, only when the words that gave it
-    are on the item's own line or the one either side ("Friday?" "Yes")."""
+    are on the item's own line or the one either side ("Friday?" "Yes"),
+    it isn't before the day they were said, and a weekday they name is the
+    date's."""
     if not isinstance(value, str) or not value.strip():
         return "", None
     said = _norm(words)
@@ -217,13 +221,23 @@ def _due(value: Any, words: Any, chunk: Sequence[Any], row: Any, zone: tzinfo) -
     if not said or not any(said in _norm(_text(other["content"])) for other in chunk[max(0, at - 1):at + 2]):
         return "", None
     value = value.strip().replace(" ", "T")
-    for form in ("%Y-%m-%dT%H:%M", "%Y-%m-%d"):
-        try:
-            when = datetime.strptime(value, form)
-        except ValueError:
-            continue
-        return when.strftime(form), when.replace(tzinfo=zone).timestamp()
-    return "", None
+    if not _DUE.fullmatch(value):
+        return "", None
+    form = "%Y-%m-%dT%H:%M" if "T" in value else "%Y-%m-%d"
+    try:
+        when = datetime.strptime(value, form)
+    except ValueError:
+        return "", None
+    if when.date() < _local(row["timestamp"], zone).date():
+        return "", None
+    named = [day for day in _WEEKDAYS if re.search(rf"\b{day[:3]}", said)]
+    if named and _weekday(when) not in named:
+        return "", None
+    return value, when.replace(tzinfo=zone).timestamp()
+
+
+def _weekday(when: datetime) -> str:
+    return _WEEKDAYS[when.weekday()]
 
 
 def _item(raw: Any, chunk: Sequence[Any], zone: tzinfo) -> Optional[dict[str, Any]]:
@@ -285,7 +299,7 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
                 if not still_leader():
                     return done
                 failures = pulse_store.chunk_failed(chat.profile, chat.chat_id, retry_at=now + RETRY_S,
-                                                    after_id=chat.after_id)
+                                                    after_id=chat.after_id, now=now)
                 if not failures:
                     break  # another process read this chunk meanwhile
                 done["failed"] += 1
