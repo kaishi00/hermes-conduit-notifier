@@ -675,3 +675,17 @@ def test_urls_lose_their_credentials(recording):
 def test_a_digest_line_has_no_control_characters():
     row = {"tool": "t", "action": "", "label": "a\x1b[31mred", "status": "error", "error": "x\x07", "ids_json": "{}"}
     assert ledger.line(row) == "t 'a[31mred' → error: x"
+
+
+@pytest.mark.parametrize("value, expected", [
+    ("example.com/x?api_key=k", "example.com/x"),
+    ("https://[::1]:8443/b?t=1", "https://[::1]:8443/b"),
+    ("plain words? fine", "plain words? fine"),
+])
+def test_url_like_values_are_cleaned(value, expected):
+    assert ledger._safe_url(value) == expected
+
+
+def test_a_float_duration_is_kept(recording):
+    plugin._post_tool_call(**_call(duration_ms=12.7))
+    assert recording.store.recent_outcomes()[0]["duration_ms"] == 12

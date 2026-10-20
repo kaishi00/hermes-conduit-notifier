@@ -97,12 +97,15 @@ def _printable(text: str) -> str:
 
 
 def _safe_url(text: str) -> str:
-    """A URL without its user info, query or fragment, where tokens ride."""
+    """A URL without its user info, query or fragment, where tokens ride.
+    A value with no scheme loses everything from its first ``?`` or ``#``."""
     if not _URL.match(text):
-        return text
+        return re.split(r"[?#]", text, maxsplit=1)[0] if "/" in text and re.search(r"[?#]", text) else text
     try:
         parts = urllib.parse.urlsplit(text)
         host = parts.hostname or ""
+        if ":" in host:
+            host = f"[{host}]"
         if parts.port:
             host = f"{host}:{parts.port}"
     except ValueError:
@@ -202,7 +205,7 @@ def record(home: Path, *, tool_name: Any, args: Any = None, result: Any = None, 
         "args_digest": digest, "status": status, "error_type": _short(error_type or "", 60),
         "error": _short(error_message or "", MAX_ERROR) if status == "error" else "",
         "ids_json": json.dumps(extract_ids(result), ensure_ascii=False),
-        "duration_ms": duration_ms if isinstance(duration_ms, int) and duration_ms >= 0 else 0,
+        "duration_ms": int(duration_ms) if isinstance(duration_ms, (int, float)) and duration_ms >= 0 else 0,
     })
     key = str(home)
     with _lock:

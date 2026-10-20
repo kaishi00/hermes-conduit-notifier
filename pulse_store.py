@@ -240,9 +240,11 @@ class PulseStore:
     def prune_outcomes(self, *, before: float, keep: int) -> int:
         """Drops outcomes older than ``before``, and the oldest past ``keep``."""
         with _lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             removed = conn.execute("DELETE FROM outcomes WHERE at < ?", (before,)).rowcount
             removed += conn.execute("DELETE FROM outcomes WHERE id <= (SELECT id FROM outcomes ORDER BY id DESC "
                                     "LIMIT 1 OFFSET ?)", (keep,)).rowcount
+            conn.execute("COMMIT")
         return removed
 
 
