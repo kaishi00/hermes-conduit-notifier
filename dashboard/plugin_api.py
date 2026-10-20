@@ -7476,7 +7476,7 @@ async def _phone_route(response: Response, profile: Optional[str], fn: Callable[
     try:
         return {"ok": True, **(await _run_scoped(profile, fn))}
     except TokenError as exc:
-        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+        return _store_refusal(exc)
     except HTTPException as exc:
         exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
         raise
