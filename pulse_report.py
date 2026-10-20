@@ -18,6 +18,7 @@ its own reader, the memory files as text.
 from __future__ import annotations
 
 import json
+import os
 import re
 import secrets
 import sqlite3
@@ -36,10 +37,15 @@ DEFAULT_TIMES = "08:00,13:00,18:00"
 MIN_WINDOW_S = 4 * 3600.0
 WINDOW_S = 86400.0
 # Budgets, in characters, so the report turn stays small for a cheap model.
-# The whole message stays under REPORT_BUDGET: a host may swap a longer user
-# message for a pointer to a file (seen 2026-10-20 at 22k characters), and a
-# Pulse turn can't use tools to open it. Chats get what the rest leaves.
+# The whole message stays under report_budget(): hermes-lcm's large output
+# externalization swaps a longer user message for a pointer to a file (seen
+# 2026-10-20 at 22k characters), and a Pulse turn can't use tools to open it.
+# Chats get what the rest leaves.
 REPORT_BUDGET = 15_000
+LCM_ENABLED = "LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED"
+LCM_THRESHOLD = "LCM_LARGE_OUTPUT_EXTERNALIZATION_THRESHOLD_CHARS"
+LCM_DEFAULT_THRESHOLD = 12_000  # hermes-lcm's own default
+LCM_MARGIN = 500
 CHATS_BUDGET = 12_000
 MIN_CHATS_BUDGET = 2_000
 PER_CHAT_BUDGET = 2_500
@@ -324,9 +330,10 @@ def build(home: Path, pulse_store: store.PulseStore, *, home_chat_id: str, now: 
     sections = [section for section in sections if section]
     title = f"## Chats since {start}\n"
     # Room the instructions and the other sections leave, so the whole
-    # message stays under REPORT_BUDGET. The 100 covers what report_text
+    # message stays under report_budget(). The 100 covers what report_text
     # fills into REPORT_TEXT: the tag, the start time, the kinds and the fence.
-    left = REPORT_BUDGET - len(REPORT_TEXT) - sum(len(section) + 2 for section in sections) - len(title) - 100
+    whole = report_budget()
+    left = whole - len(REPORT_TEXT) - sum(len(section) + 2 for section in sections) - len(title) - 100
     budget = min(CHATS_BUDGET, max(MIN_CHATS_BUDGET, left))
     try:
         chats = recent_chats(home, home_chat_id=home_chat_id, since=since, zone=zone, others=others, budget=budget)
@@ -334,10 +341,22 @@ def build(home: Path, pulse_store: store.PulseStore, *, home_chat_id: str, now: 
         chats = f"Couldn't read the chats ({type(error).__name__})."
     sections.append(title + (chats or "No chats since then."))
     context = "\n\n".join(sections)
-    room = REPORT_BUDGET - len(REPORT_TEXT) - 100
+    room = whole - len(REPORT_TEXT) - 100
     if len(context) > room:  # the other sections alone were too long: keep the start, which says what it is
         context = context[:room - 1] + "…"
     return context, start
+
+
+def report_budget() -> int:
+    """REPORT_BUDGET, or less when hermes-lcm would externalize a message
+    that long."""
+    if os.environ.get(LCM_ENABLED, "").strip().lower() not in ("1", "true", "yes", "on"):
+        return REPORT_BUDGET
+    try:
+        threshold = int(os.environ.get(LCM_THRESHOLD) or LCM_DEFAULT_THRESHOLD)
+    except ValueError:
+        threshold = LCM_DEFAULT_THRESHOLD
+    return max(4_000, min(REPORT_BUDGET, threshold - LCM_MARGIN))
 
 
 def report_text(tag: str, context: str, since: str) -> str:

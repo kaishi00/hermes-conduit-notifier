@@ -881,6 +881,27 @@ def test_the_whole_report_message_stays_under_its_budget(db, tmp_path, live):
     assert "### Chat 39" in context  # the chats still get their share
 
 
+def test_the_report_stays_under_lcms_externalization_threshold(db, tmp_path, live, monkeypatch):
+    now = time.time()
+    db.session()
+    for n in range(40):
+        db.session(f"c{n}", title=f"Chat {n}", pinned=0)
+        for m in range(20):
+            db.message("user", "x" * 1000, sid=f"c{n}", at=now - 3600 + n * 10 + m)
+    monkeypatch.setenv(report.LCM_ENABLED, "true")
+    monkeypatch.delenv(report.LCM_THRESHOLD, raising=False)
+    assert report.report_budget() == report.LCM_DEFAULT_THRESHOLD - report.LCM_MARGIN
+    context, since = report.build(tmp_path, live.store, home_chat_id=SID, now=now)
+    assert len(report.report_text("p12345678-1", context, since)) < report.LCM_DEFAULT_THRESHOLD
+    assert "### Chat 39" in context
+    monkeypatch.setenv(report.LCM_THRESHOLD, "50000")
+    assert report.report_budget() == report.REPORT_BUDGET
+    monkeypatch.setenv(report.LCM_THRESHOLD, "junk")
+    assert report.report_budget() == report.LCM_DEFAULT_THRESHOLD - report.LCM_MARGIN
+    monkeypatch.setenv(report.LCM_ENABLED, "false")
+    assert report.report_budget() == report.REPORT_BUDGET
+
+
 def test_items_and_ratings_are_read_from_the_text():
     items = report.report_items(REPLY)
     assert items == {1: "commitment", 2: "promise", 3: "other"}
