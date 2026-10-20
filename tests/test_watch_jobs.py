@@ -754,6 +754,17 @@ def test_a_start_that_breaks_unexpectedly_says_why(monkeypatch):
 
 # --- Approvals -------------------------------------------------------------------
 
+def test_an_event_form_approval_request_is_job_news():
+    grant = make_jobs()
+    start(grant)
+    grant.jobs.server.emit("rt-1", "approval.request",
+                           {"request_id": "appr-event", "command": "rm -rf build",
+                            "description": "Delete the build folder"})
+    [item] = news(grant)["news"]
+    assert item["status"] == "needs_approval"
+    assert item["approval"]["request_id"] == "appr-event"
+
+
 def test_an_approval_request_is_news_once_and_approving_it_answers_hermes():
     grant = make_jobs()
     server = grant.jobs.server
