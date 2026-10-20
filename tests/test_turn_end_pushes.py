@@ -230,6 +230,7 @@ def sessions(tmp_path, monkeypatch):
     yield add
     db.close()
     plugin._child_sessions.clear()
+    plugin._compacted_children.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -306,12 +307,14 @@ def _compacted_child(add):
     plugin._subagent_start(child_session_id="c")
 
 
-def test_a_child_whose_compaction_replaced_its_id_is_still_a_child(sessions):
+def test_a_child_whose_compaction_replaced_its_id_is_still_a_child(pushed, sessions):
     _compacted_child(sessions)
     health = sys.modules["conduit_push.health_tool"]
     assert plugin._is_child("c3") and plugin._is_child("c2")
     assert health._handle({"action": "overview"}, "c3", plugin._is_child, None)["error"] == "subagent"
-    assert "c3" in plugin._child_sessions, "learned, so later calls skip the store"
+    assert "c3" in plugin._compacted_children, "learned, so later calls skip the store"
+    plugin._subagent_stop(child_session_id="c", parent_session_id="p", parent_turn_id="t")
+    assert not plugin._compacted_children and not plugin._is_child("c3"), "the child ended: no more reads"
 
 
 def test_the_parent_and_its_own_compactions_are_not_children(sessions):

@@ -23,6 +23,8 @@ from .events import approval_decision, clarification_text, event_id, is_silent_r
 
 logger = logging.getLogger(__name__)
 _child_sessions: set[str] = set()
+# Ids a reported child moved to on compaction, kept while any child runs.
+_compacted_children: set[str] = set()
 _children_lock = threading.Lock()
 _profile = "default"
 _clarify_loop_active = False
@@ -416,6 +418,8 @@ def _subagent_stop(**kwargs: Any) -> None:
     if child:
         with _children_lock:
             _child_sessions.discard(child)
+            if not _child_sessions:
+                _compacted_children.clear()
     parent = _text(kwargs.get("parent_session_id"))
     # A subagent that ends inside the turn that started it (delegate_task
     # waits for it) is part of that turn's reply: only one that outlives it,
@@ -597,6 +601,7 @@ def _inside_delegated_child() -> bool:
 
             _delegated_child_check = is_delegated_child_context
         except ImportError:
+            logger.info("conduit_push: this Hermes has no delegation flag; subagents are found by session id")
             _delegated_child_check = False  # an older Hermes: ids and lineage answer
         except Exception:  # noqa: BLE001 — a broken module must not break every hook
             logger.warning("conduit_push: Hermes' delegation context failed to load", exc_info=True)
@@ -629,15 +634,16 @@ def _is_child_session(session_id: Any) -> bool:
     if not value:
         return False
     with _children_lock:
-        if value in _child_sessions:
+        if value in _child_sessions or value in _compacted_children:
             return True
         if not _child_sessions or value in _not_child_lineage:
-            return False
-        known = set(_child_sessions)
+            return False  # no child running: nothing to read the store for
+        known = _child_sessions | _compacted_children
     continues = _continues_a_child(value, known)
     if continues:
         with _children_lock:
-            _child_sessions.add(value)
+            if _child_sessions:
+                _compacted_children.add(value)
         return True
     if continues is None:
         return False  # unread, so not kept: the next call reads again
@@ -689,17 +695,19 @@ def _continues_a_child(session_id: str, children: set[str]) -> bool | None:
         db.close()
 
 
-_lineage_warned = False
+_lineage_unread_count = 0
 
 
 def _lineage_unread(message: str) -> None:
-    """Warn once: while a child runs every hook may ask again."""
-    global _lineage_warned
-    if _lineage_warned:
+    """Warn on the first failure and every 100th after: while a child runs
+    every hook may ask again, and an operator should see the gate degraded."""
+    global _lineage_unread_count
+    _lineage_unread_count += 1
+    if _lineage_unread_count % 100 == 1:
+        logger.warning("conduit_push: %s (%d times so far); a compacted subagent may not be recognised",
+                       message, _lineage_unread_count, exc_info=True)
+    else:
         logger.debug("conduit_push: %s", message, exc_info=True)
-        return
-    _lineage_warned = True
-    logger.warning("conduit_push: %s", message, exc_info=True)
 
 
 def _text(value: Any) -> str:
