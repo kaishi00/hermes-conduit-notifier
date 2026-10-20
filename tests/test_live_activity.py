@@ -267,6 +267,25 @@ def test_the_hooks_feed_the_reporter(monkeypatch):
     ]
 
 
+@pytest.mark.parametrize("approval_session_id", ["s-1", None])
+def test_approval_progress_uses_session_id_without_changing_routing(monkeypatch, approval_session_id):
+    recorder = Recorder()
+    sent = []
+    monkeypatch.setattr(live, "reporter", recorder)
+    monkeypatch.setattr(plugin, "enqueue", lambda event: sent.append(event) or True)
+    monkeypatch.setattr(plugin.calls, "alert", lambda *args, **kwargs: None)
+    monkeypatch.setattr(plugin.calls, "cancel_alerts", lambda *args, **kwargs: None)
+    monkeypatch.setattr(plugin, "_titled", lambda prefix, session_id: prefix)
+    payload = {"session_key": "gateway-key", "description": "Run command?"}
+    if approval_session_id is not None:
+        payload["session_id"] = approval_session_id
+    plugin._pre_approval_request(**payload)
+    plugin._post_approval_response(**payload)
+    expected = approval_session_id or "gateway-key"
+    assert recorder.calls == [("waiting", expected, "approval"), ("thinking", expected)]
+    assert sent[0]["decision"]["session_key"] == "gateway-key"
+
+
 def test_a_broken_reporter_never_breaks_a_hook(monkeypatch):
     class Broken:
         def __getattr__(self, name):

@@ -338,7 +338,8 @@ def _pre_approval_request(**kwargs: Any) -> None:
         return
     session_id = _text(kwargs.get("session_key"))
     description = _text(kwargs.get("description"))
-    _quietly(live_activity.reporter.waiting, session_id, "approval")
+    _quietly(live_activity.reporter.waiting,
+             _text(kwargs.get("session_id")) or session_id, "approval")
     # The event id deliberately excludes `id(kwargs)`: CPython recycles ids, so
     # a later, distinct approval with the same session/pattern/command could
     # collide and be silently deduped by the relay for 24h. `turn_id` (forwarded
