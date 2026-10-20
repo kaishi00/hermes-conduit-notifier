@@ -228,10 +228,10 @@ def test_a_turn_after_compression_is_found_in_the_tip(db, tmp_path):
 
 def test_a_turn_compressed_midway_is_followed_into_the_new_session(db, tmp_path):
     db.session()
-    db.message("user", "Pulse daily shadow report pBBBB-1.", display_kind="hidden")
+    db.message("user", "Pulse shadow report pBBBB-1.", display_kind="hidden")
     db.session(sid="tip", parent=SID)
     db.message("assistant", "an older reply carried over", sid="tip")
-    db.message("user", "Pulse daily shadow report pBBBB-1.", sid="tip", display_kind="hidden")  # carried
+    db.message("user", "Pulse shadow report pBBBB-1.", sid="tip", display_kind="hidden")  # carried
     db.message("assistant", "1. [date] Mum's birthday Friday", sid="tip")
     db.message("user", "1 yes", sid="tip")
     turn = hermes.find_turn(tmp_path, chat_id=SID, tag="pBBBB-1", since=0)
@@ -734,7 +734,7 @@ def _report_day(db, now):
     db.message("user", "home chat text", at=now - 60)
 
 
-def test_the_report_context_is_the_last_day_of_real_chats(live, db, tmp_path):
+def test_the_report_context_is_the_recent_real_chats(live, db, tmp_path):
     now = time.time()
     _report_day(db, now)
     (tmp_path / "memories").mkdir()
@@ -742,16 +742,34 @@ def test_the_report_context_is_the_last_day_of_real_chats(live, db, tmp_path):
     ledger.forget_cache()
     live.store.set("enabled", True)
     plugin._post_tool_call(**_call(tool_name="build", status="error", error_message="exit 1", args={}))
-    context = report.build(tmp_path, live.store, home_chat_id=SID, now=now)
-    assert "### Work" in context and "Eric: I'll send the deck to Mara before Friday" in context
+    context, since = report.build(tmp_path, live.store, home_chat_id=SID, now=now)
+    assert since == report._local(now - report.WINDOW_S, report.zone_for(None))  # no report yet: the last day
+    assert "Eric" not in report.REPORT_TEXT + report.REPORT_NOTE
+    assert "### Work" in context and "User: I'll send the deck to Mara before Friday" in context
     assert "Hermes: Noted." in context
     for absent in ("Ancient history", "nightly job text", "hidden chat text", "internal note", "home chat text"):
         assert absent not in context
     assert "Eric likes short answers." in context
     assert "build → error: exit 1" in context
-    text = report.report_text("pabc-1", context)
-    assert text.startswith("Pulse daily shadow report pabc-1.") and context in text
+    text = report.report_text("pabc-1", context, since)
+    assert f"covering {since} onward" in text and text.startswith("Pulse shadow report pabc-1.") and context in text
     ledger.forget_cache()
+
+
+def test_a_report_looks_back_to_the_last_delivered_one(pulse_store):
+    now = time.time()
+    assert report.window_start(pulse_store, now) == now - report.WINDOW_S
+    pulse_store.add_attempt(attempt_id="r:1", item_id="r", attempt=1, kind="report", tag="pr-1", text="x",
+                            session_key=SID)
+    pulse_store.update_attempt("r:1", state=store.DELIVERED)
+    assert report.window_start(pulse_store, now) == now - report.MIN_WINDOW_S  # just sent: at least 4 h back
+    with sqlite3.connect(pulse_store.path) as conn:
+        conn.execute("UPDATE attempts SET created_at=?", (now - 6 * 3600,))
+    assert report.window_start(pulse_store, now) == now - 6 * 3600
+    pulse_store.add_attempt(attempt_id="r2:1", item_id="r2", attempt=1, kind="report", tag="pr2-1", text="x",
+                            session_key=SID)
+    pulse_store.update_attempt("r2:1", state=store.NOT_ADMITTED)  # a failed one doesn't count
+    assert report.window_start(pulse_store, now) == now - 6 * 3600
 
 
 def test_the_report_context_stays_within_its_budget(db, tmp_path, pulse_store):
@@ -787,7 +805,7 @@ def _due_report(live):
     live.store.update_attempt("old:1", state=store.DELIVERED)  # no probe due
 
 
-def test_the_report_goes_out_once_a_day_after_its_time(live, db):
+def test_the_report_goes_out_once_after_its_time(live, db):
     db.session()
     _due_report(live)
     now = time.time()
@@ -798,7 +816,7 @@ def test_the_report_goes_out_once_a_day_after_its_time(live, db):
     live.store.set("report_time", today)
     pulse.tick(now=now)
     [text] = live.sent()
-    assert text.startswith("Pulse daily shadow report")
+    assert text.startswith("Pulse shadow report")
     row = live.store.in_flight()[0]
     assert row["kind"] == pulse.REPORT
     pulse.tick(now=now + 60)
@@ -826,7 +844,7 @@ def test_a_failed_report_is_tried_again_later_that_day(live, db):
     assert len(live.sent()) == pulse.REPORT_TRIES
 
 
-def test_a_report_long_past_its_time_waits_for_tomorrow(live, db):
+def test_a_report_long_past_its_time_waits_for_the_next_one(live, db):
     db.session()
     _due_report(live)
     evening = time.time() - time.time() % 86400 + 20 * 3600  # 20:00 UTC, 12 h after 08:00
@@ -855,7 +873,7 @@ def test_a_probe_and_a_report_due_together_go_on_separate_ticks(live, db):
     pulse.tick()
     assert len(live.sent()) == 1 and live.sent()[0].startswith("Pulse delivery check")
     pulse.tick()
-    assert len(live.sent()) == 2 and live.sent()[1].startswith("Pulse daily shadow report")
+    assert len(live.sent()) == 2 and live.sent()[1].startswith("Pulse shadow report")
 
 
 def test_ratings_are_read_back_and_counted(live, db):
@@ -891,18 +909,49 @@ def test_report_command(live, db, capsys, monkeypatch):
     assert run("on") == 0 and live.store.get("daily_report") is True
     capsys.readouterr()
     cli.dispatch(types.SimpleNamespace(conduit_push_action="pulse", pulse_action="status", value=""))
-    assert "Daily report at 07:30 (Europe/Paris); next " in capsys.readouterr().out
+    assert "Shadow reports at 07:30 (Europe/Paris); next " in capsys.readouterr().out
+    assert run("8:00, 17:00,12:30") == 0 and live.store.get("report_time") == "08:00,12:30,17:00"
+    assert run("8:00,24:00") == 2 and live.store.get("report_time") == "08:00,12:30,17:00"
     assert run("off") == 0 and live.store.get("daily_report") is False
 
 
-def test_the_next_report_time():
+def test_the_report_times():
     zone = report.zone_for("UTC")
-    morning = 1_760_000_000 - (1_760_000_000 % 86400) + 6 * 3600  # 06:00 UTC
-    assert report.due_today(morning, zone, "08:00") is None
-    assert report.next_time(morning, zone, "08:00") == morning + 2 * 3600
-    assert report.due_today(morning + 3 * 3600, zone, "08:00") == morning + 2 * 3600
-    assert report.next_time(morning + 3 * 3600, zone, "08:00") == morning + 2 * 3600 + 86400
-    assert report.clock_text("bad") == "08:00"
+    midnight = 1_760_000_000 - (1_760_000_000 % 86400)
+    hours = lambda h: midnight + h * 3600
+    assert report.report_times("18:00, 8:00,bad,08:00") == [(8, 0), (18, 0)]
+    assert report.clock_text("bad") == "08:00, 13:00, 18:00"
+    assert report.last_slot(hours(6), zone, "08:00") == (hours(8 - 24), hours(8 - 48))
+    assert report.next_time(hours(6), zone, "08:00") == hours(8)
+    assert report.last_slot(hours(9), zone, "08:00") == (hours(8), hours(8 - 24))
+    assert report.next_time(hours(9), zone, "08:00") == hours(8 + 24)
+    times = "08:00,13:00,18:00"
+    assert report.last_slot(hours(6), zone, times) == (hours(18 - 24), hours(13 - 24))
+    assert report.last_slot(hours(13), zone, times) == (hours(13), hours(8))
+    assert report.next_time(hours(13), zone, times) == hours(18)
+    assert report.next_time(hours(19), zone, times) == hours(8 + 24)
+
+
+def test_each_report_time_sends_once(live, db):
+    db.session()
+    _due_report(live)
+    midnight = time.time() - time.time() % 86400
+    live.store.set("report_time", "08:00,13:00,18:00")
+
+    def deliver_at(hour):
+        pulse.tick(now=midnight + hour * 3600)
+        rows = live.store.in_flight()
+        for row in rows:
+            live.store.update_attempt(row["attempt_id"], state=store.DELIVERED)
+            with sqlite3.connect(live.store.path) as conn:  # as if sent at the tick's time
+                conn.execute("UPDATE attempts SET created_at=? WHERE attempt_id=?",
+                             (midnight + hour * 3600, row["attempt_id"]))
+        return len(rows)
+
+    assert [deliver_at(h) for h in (7, 8.1, 9, 12.9, 13.1, 13.5, 16)] == [0, 1, 0, 0, 1, 0, 0]
+    live.store.set("report_requested", True)
+    assert deliver_at(17) == 1  # an early one, asked for
+    assert deliver_at(18.1) == 0  # stands in for 18:00
 
 
 def test_a_finished_report_keeps_only_its_first_line(live, db):
@@ -914,15 +963,13 @@ def test_a_finished_report_keeps_only_its_first_line(live, db):
     assert "\n" in row["text"]
     live.store.update_attempt(row["attempt_id"], state=store.DELIVERED)
     pulse.tick(now=time.time() + 1)
-    assert live.store.attempt_by_tag(row["tag"])["text"] == f"Pulse daily shadow report {row['tag']}."
+    assert live.store.attempt_by_tag(row["tag"])["text"] == f"Pulse shadow report {row['tag']}."
 
 
 def test_an_early_report_stands_in_for_the_scheduled_one(live, db):
     db.session()
     _due_report(live)
     now = time.time()
-    if time.gmtime(now - 120).tm_mday != time.gmtime(now).tm_mday:
-        pytest.skip("just after midnight UTC")
     live.store.set("report_requested", True)
     pulse.tick(now=now - 60)
     live.store.update_attempt(live.store.in_flight()[0]["attempt_id"], state=store.DELIVERED)

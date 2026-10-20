@@ -218,10 +218,10 @@ def _pulse(args: argparse.Namespace) -> int:
     if pulse_store.get("daily_report"):
         zone = pulse.report_zone(pulse_store, home)
         upcoming = pulse.report.next_time(time.time(), zone, pulse_store.get("report_time"))
-        print(f"Daily report at {pulse.report.clock_text(pulse_store.get('report_time'))} ({zone}); next "
+        print(f"Shadow reports at {pulse.report.clock_text(pulse_store.get('report_time'))} ({zone}); next "
               + datetime.fromtimestamp(upcoming, zone).strftime("%a %d %b %H:%M"))
     else:
-        print("Daily report: off")
+        print("Shadow reports: off")
     ratings = pulse.rating_counts(pulse_store)
     if ratings:
         print("Ratings so far: " + ", ".join(f"{kind} {yes} yes / {no} no" for kind, (yes, no) in ratings.items()))
@@ -245,19 +245,18 @@ def _pulse_report(pulse_store: Any, value: str) -> int:
         return 0
     if value in ("on", "off"):
         pulse_store.set("daily_report", value == "on")
-        print("The daily shadow report is on." if value == "on" else "The daily shadow report is off.")
+        print("The shadow report is on." if value == "on" else "The shadow report is off.")
         return 0
-    if re.fullmatch(r"\d{1,2}:\d{2}", value):
-        hour, minute = (int(part) for part in value.split(":"))
-        if hour < 24 and minute < 60:
-            pulse_store.set("report_time", f"{hour:02d}:{minute:02d}")
-            print(f"The daily shadow report goes out at {hour:02d}:{minute:02d}.")
+    if re.fullmatch(r"\d{1,2}:\d{2}(,\s*\d{1,2}:\d{2})*", value):
+        if all(pulse_report._clock(part) for part in value.split(",")):
+            pulse_store.set("report_time", pulse_report.clock_text(value).replace(" ", ""))
+            print(f"The shadow report goes out at {pulse_report.clock_text(value)}.")
             return 0
     if pulse_report.known_zone(value):
         pulse_store.set("time_zone", value)
         print(f"Report times are in {value}.")
         return 0
-    print("Usage: hermes conduit-push pulse report [now|on|off|HH:MM|<time zone>]")
+    print("Usage: hermes conduit-push pulse report [now|on|off|HH:MM[,HH:MM...]|<time zone>]")
     return 2
 
 

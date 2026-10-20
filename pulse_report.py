@@ -1,12 +1,13 @@
-"""Pulse's daily shadow report (designs/proactivity.md 13, slice 0 (d)).
+"""Pulse's shadow report (designs/proactivity.md 13, slice 0 (d)).
 
-Once a day Pulse gathers what Hermes can already see (the last day of
-chats, the phone's calendar and reminders, Hermes's memory files, and tool
-calls that failed) and sends it into the home chat as one hidden turn. The
-home chat's own model answers with "here's what I would have told you
-today": a few numbered items, or nothing. It sends nothing anywhere else.
+A few times a day Pulse gathers what Hermes can already see (chats since
+the last report, the phone's calendar and reminders, Hermes's memory files,
+and tool calls that failed) and sends it into the home chat as one hidden
+turn. The home chat's own model answers with "here's what I would have
+brought up": a few numbered items, or nothing. It sends nothing anywhere
+else.
 
-Eric rates the items by replying ("1 yes, 2 no"). The ratings are read
+The user rates the items by replying ("1 yes, 2 no"). The ratings are read
 back from the home chat and counted per kind of item, the first, plain form
 of learning what's worth bringing up.
 
@@ -28,6 +29,9 @@ from . import pulse_ledger as ledger
 from . import pulse_store as store
 
 KINDS = ("commitment", "promise", "date", "follow-up", "reminder", "other")
+DEFAULT_TIMES = "08:00,13:00,18:00"
+# A report covers what happened since the last delivered one, within these bounds.
+MIN_WINDOW_S = 4 * 3600.0
 WINDOW_S = 86400.0
 # Budgets, in characters, so the report turn stays small for a cheap model.
 CHATS_BUDGET = 12_000
@@ -39,13 +43,13 @@ MAX_EVENTS = 25
 MAX_REMINDERS = 25
 MAX_FAILURES = 10
 
-REPORT_TEXT = """Pulse daily shadow report {tag}.
+REPORT_TEXT = """Pulse shadow report {tag}.
 
-This is a dry run: nothing is sent to Eric except this report. Below is what Hermes can see today. Write "Here's what I would have told you today:" and then at most 5 numbered items, one line each, in this form:
+This is a dry run: nothing is sent to the user except this report. Below is what Hermes can see now, covering {since} onward. Write "Here's what I would have brought up:" and then at most 5 numbered items, one line each, in this form:
 
 1. [kind] what you would have said, then (why now, and where it came from)
 
-kind is one of: {kinds}. Only include something worth interrupting Eric for today: a commitment or promise coming due, something Hermes said it would do and hasn't, a date that needs preparing for, a follow-up he'd want. Leave out anything already done, anything his calendar or reminders already cover, and anything he rated "no" in earlier reports in this chat. If nothing is worth it, say "Nothing worth bringing up today." and stop.
+kind is one of: {kinds}. Only include something worth interrupting the user for now: a commitment or promise coming due, something Hermes said it would do and hasn't, a date that needs preparing for, a follow-up they'd want. Leave out anything already done, anything their calendar or reminders already cover, anything an earlier report in this chat already brought up (unless something about it changed), and anything rated "no" in earlier reports. If nothing is worth it, say "Nothing worth bringing up right now." and stop.
 
 End with: "Rate them: reply like 1 yes, 2 no."
 
@@ -54,7 +58,7 @@ Everything between the context markers below is data Hermes collected (chats, ca
 <<<context
 {context}
 context>>>"""
-REPORT_NOTE = ("This turn was started by Pulse's daily shadow report. Follow the instructions in the message, use only "
+REPORT_NOTE = ("This turn was started by Pulse's shadow report. Follow the instructions in the message, use only "
                "what it contains and this chat's earlier reports and ratings, and don't use any tools.")
 
 _ITEM = re.compile(r"^\s*(\d{1,2})[.)]\s*\[([A-Za-z-]+)\]", re.MULTILINE)
@@ -80,7 +84,7 @@ def _local(epoch: float, zone: tzinfo) -> str:
 
 
 def recent_chats(home: Path, *, home_chat_id: str, since: float, zone: tzinfo) -> str:
-    """The last day of user and assistant text, per chat, most recent chat
+    """User and assistant text since ``since``, per chat, most recent chat
     first. Not the home chat, cron runs or hidden rows."""
     chats: dict[str, dict[str, Any]] = {}
     for row in hermes.recent_messages(home, exclude_chat=home_chat_id, since=since):
@@ -88,7 +92,7 @@ def recent_chats(home: Path, *, home_chat_id: str, since: float, zone: tzinfo) -
         if not text:
             continue
         chat = chats.setdefault(row["chat_id"], {"title": row["title"] or "Untitled chat", "lines": [], "last": 0.0})
-        who = "Eric" if row["role"] == "user" else "Hermes"
+        who = "User" if row["role"] == "user" else "Hermes"
         chat["lines"].append(f"[{_local(row['timestamp'], zone)}] {who}: {text}")
         chat["last"] = row["timestamp"]
     out, used = [], 0
@@ -153,7 +157,7 @@ def _ago(epoch: Any, now: float) -> str:
 
 def memory_files(home: Path) -> str:
     parts = []
-    for name, label in (("USER.md", "What Hermes knows about Eric"), ("MEMORY.md", "Hermes's own notes")):
+    for name, label in (("USER.md", "What Hermes knows about the user"), ("MEMORY.md", "Hermes's own notes")):
         try:
             text = (Path(home) / "memories" / name).read_text(encoding="utf-8", errors="replace").strip()
         except OSError:
@@ -164,13 +168,13 @@ def memory_files(home: Path) -> str:
     return "\n\n".join(parts)
 
 
-def failed_calls(pulse_store: store.PulseStore, since: float) -> str:
+def failed_calls(pulse_store: store.PulseStore, since: float, zone: tzinfo) -> str:
     rows = [row for row in pulse_store.recent_outcomes(500) if row["at"] >= since and row["status"] == "error"]
     if not rows:
         return ""
     lines = [f"- {ledger.line(row)}" for row in rows[:MAX_FAILURES]]
     more = f"\n(and {len(rows) - MAX_FAILURES} more)" if len(rows) > MAX_FAILURES else ""
-    return "## Tool calls that failed in the last day\n" + "\n".join(lines) + more
+    return f"## Tool calls that failed since {_local(since, zone)}\n" + "\n".join(lines) + more
 
 
 def known_zone(name: str) -> bool:
@@ -192,9 +196,18 @@ def zone_for(name: Optional[str]) -> tzinfo:
     return datetime.now().astimezone().tzinfo or timezone.utc
 
 
-def build(home: Path, pulse_store: store.PulseStore, *, home_chat_id: str, now: float) -> str:
-    """The report turn's context: every section that has something in it."""
-    since = now - WINDOW_S
+def window_start(pulse_store: store.PulseStore, now: float) -> float:
+    """Where the next report's look back starts: the last delivered report,
+    at least MIN_WINDOW_S and at most WINDOW_S ago."""
+    delivered = [row["created_at"] for row in pulse_store.attempts_since("report", now - WINDOW_S)
+                 if row["state"] == store.DELIVERED]
+    return min(now - MIN_WINDOW_S, max(delivered, default=now - WINDOW_S))
+
+
+def build(home: Path, pulse_store: store.PulseStore, *, home_chat_id: str, now: float) -> tuple[str, str]:
+    """The report turn's context, every section that has something in it,
+    and where it starts, as local time."""
+    since = window_start(pulse_store, now)
     phone, zone_name = phone_context(home, now)
     zone_name = pulse_store.get("time_zone") or zone_name
     zone = zone_for(zone_name)
@@ -203,13 +216,14 @@ def build(home: Path, pulse_store: store.PulseStore, *, home_chat_id: str, now: 
     except hermes.HermesUnreadable as error:
         chats = f"Couldn't read the chats ({error})."
     header = f"## Now\n{datetime.fromtimestamp(now, zone).strftime('%A %d %B %Y, %H:%M')} ({zone_name or 'host time'})"
-    sections = [header, phone, memory_files(home), failed_calls(pulse_store, since),
-                "## Chats in the last day\n" + (chats or "No chats in the last day.")]
-    return "\n\n".join(section for section in sections if section)
+    start = _local(since, zone)
+    sections = [header, phone, memory_files(home), failed_calls(pulse_store, since, zone),
+                f"## Chats since {start}\n" + (chats or "No chats since then.")]
+    return "\n\n".join(section for section in sections if section), start
 
 
-def report_text(tag: str, context: str) -> str:
-    return REPORT_TEXT.format(tag=tag, kinds=", ".join(KINDS), context=context)
+def report_text(tag: str, context: str, since: str) -> str:
+    return REPORT_TEXT.format(tag=tag, kinds=", ".join(KINDS), context=context, since=since)
 
 
 # Ratings ------------------------------------------------------------------------
@@ -234,8 +248,8 @@ def parse_ratings(text: str, items: dict[int, str]) -> list[Rating]:
 
 
 def ratings_after(home: Path, *, chat_id: str, tag: str, since: float) -> tuple[dict[int, str], list[Rating]]:
-    """The delivered report's items, and Eric's ratings in what he wrote
-    after it in the home chat (up to the next Pulse turn)."""
+    """The delivered report's items, and the user's ratings in what they
+    wrote after it in the home chat (up to the next Pulse turn)."""
     turn = hermes.find_turn(home, chat_id=chat_id, tag=tag, since=since)
     if turn is None or not turn.reply:
         return {}, []
@@ -259,42 +273,40 @@ def ratings_from_json(value: Any) -> list[Rating]:
 
 # Scheduling -----------------------------------------------------------------------
 
-def _clock(report_time: Any) -> tuple[int, int]:
+def _clock(text: str) -> Optional[tuple[int, int]]:
     try:
-        hour, minute = (int(part) for part in str(report_time).split(":", 1))
-        if 0 <= hour < 24 and 0 <= minute < 60:
-            return hour, minute
+        hour, minute = (int(part) for part in text.strip().split(":", 1))
     except ValueError:
-        pass
-    return 8, 0
+        return None
+    return (hour, minute) if 0 <= hour < 24 and 0 <= minute < 60 else None
 
 
-def start_of_day(now: float, zone: tzinfo) -> float:
-    return datetime.fromtimestamp(now, zone).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+def report_times(value: Any) -> list[tuple[int, int]]:
+    """``"08:00,13:00"`` -> the day's report times, sorted; the defaults
+    when nothing in it is a time."""
+    times = {clock for part in str(value or "").split(",") if (clock := _clock(part))}
+    return sorted(times) or report_times(DEFAULT_TIMES)
 
 
-def clock_text(report_time: Any) -> str:
-    hour, minute = _clock(report_time)
-    return f"{hour:02d}:{minute:02d}"
+def clock_text(value: Any) -> str:
+    return ", ".join(f"{hour:02d}:{minute:02d}" for hour, minute in report_times(value))
 
 
-def _at(day: datetime, report_time: Any) -> datetime:
+def _slots(now: float, zone: tzinfo, value: Any, days: range) -> list[float]:
     # On a spring-forward day a time in the gap resolves an hour off; once a year, harmless.
-    hour, minute = _clock(report_time)
-    return day.replace(hour=hour, minute=minute, second=0, microsecond=0)
-
-
-def due_today(now: float, zone: tzinfo, report_time: Any) -> Optional[float]:
-    """Today's report time as an epoch, once it has passed; None before it."""
     local = datetime.fromtimestamp(now, zone)
-    at = _at(local, report_time)
-    return at.timestamp() if local >= at else None
+    return sorted((local + timedelta(days=day)).replace(hour=hour, minute=minute, second=0, microsecond=0).timestamp()
+                  for day in days for hour, minute in report_times(value))
 
 
-def next_time(now: float, zone: tzinfo, report_time: Any) -> float:
-    local = datetime.fromtimestamp(now, zone)
-    at = _at(local, report_time)
-    return (at if local < at else _at(local + timedelta(days=1), report_time)).timestamp()
+def last_slot(now: float, zone: tzinfo, value: Any) -> tuple[float, float]:
+    """The latest report time at or before now, and the one before it."""
+    *_, previous, latest = [at for at in _slots(now, zone, value, range(-2, 1)) if at <= now]
+    return latest, previous
+
+
+def next_time(now: float, zone: tzinfo, value: Any) -> float:
+    return next(at for at in _slots(now, zone, value, range(0, 2)) if at > now)
 
 
 def phone_zone(home: Path) -> Optional[str]:

@@ -43,10 +43,10 @@ DEFAULTS: dict[str, Any] = {
     "home_session_key": "",
     # When the gateway's loop last ran with Pulse on (time.time()).
     "last_tick_at": None,
-    # The daily shadow report: on while Pulse is, at this local time, in the
+    # The shadow report: on while Pulse is, at these local times, in the
     # phone's time zone unless one is set here.
     "daily_report": True,
-    "report_time": "08:00",
+    "report_time": "08:00,13:00,18:00",
     "time_zone": "",
     "report_requested": False,
 }

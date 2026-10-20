@@ -11,8 +11,8 @@ A Pulse turn is recognised by its tag in ``pre_llm_call``. On such a turn
 every tool is blocked in ``pre_tool_call`` (the probe needs none; later
 slices allow named reads only), and no push or Live Activity goes out for it.
 
-Once a day it also sends the shadow report (pulse_report): what Hermes would
-have told Eric today, for him to rate in the home chat.
+A few times a day it also sends the shadow report (pulse_report): what Hermes
+would have brought up since the last one, for the user to rate in the home chat.
 
 While Pulse is on, every tool call in the profile also gets a row in the
 outcome ledger (pulse_ledger), the record later slices check claims against.
@@ -195,7 +195,7 @@ def _hosts_chats() -> bool:
 
 def tick(now: Optional[float] = None) -> None:
     """One pass: reconcile what's in flight, read report ratings, then send
-    a probe or the daily report if one is due."""
+    a probe or the shadow report if one is due."""
     if _ctx is None or not _hosts_chats():
         return
     home = get_hermes_home()
@@ -245,7 +245,7 @@ def _maybe_probe(pulse_store: store.PulseStore, home: Path, now: float) -> bool:
 
 
 def _maybe_report(pulse_store: store.PulseStore, home: Path, now: float) -> bool:
-    """Sends the daily shadow report if asked for or due; True when it went."""
+    """Sends the shadow report if asked for or due; True when it went."""
     asked = pulse_store.take_request("report_requested")
     if not asked and not _report_due(pulse_store, home, now):
         return False
@@ -260,8 +260,8 @@ def _maybe_report(pulse_store: store.PulseStore, home: Path, now: float) -> bool
             logger.info("conduit_push: Pulse: the requested shadow report wasn't sent; run `pulse report` again "
                         "once the home chat is there")
         return False
-    context = report.build(home, pulse_store, home_chat_id=chat.chat_id, now=now)
-    _send(pulse_store, kind=REPORT, chat_id=chat.chat_id, text=lambda tag: report.report_text(tag, context))
+    context, since = report.build(home, pulse_store, home_chat_id=chat.chat_id, now=now)
+    _send(pulse_store, kind=REPORT, chat_id=chat.chat_id, text=lambda tag: report.report_text(tag, context, since))
     return True
 
 
@@ -285,20 +285,20 @@ def _report_due(pulse_store: store.PulseStore, home: Path, now: float) -> bool:
     if not pulse_store.get("daily_report"):
         return False
     zone = report_zone(pulse_store, home, now)
-    at = report.due_today(now, zone, pulse_store.get("report_time"))
-    if at is None or now - at > REPORT_WINDOW_S:
+    at, previous = report.last_slot(now, zone, pulse_store.get("report_time"))
+    if now - at > REPORT_WINDOW_S:
         return False
-    # Any report delivered or on its way today, an early `pulse report` too,
-    # stands in for the scheduled one.
+    # Any report delivered or on its way in the second half of the gap before
+    # this time, an early `pulse report` too, stands in for the scheduled one.
     if any(row["state"] not in (store.REFUSED, store.NOT_ADMITTED, store.FAILED)
-           for row in pulse_store.attempts_since(REPORT, report.start_of_day(now, zone))):
+           for row in pulse_store.attempts_since(REPORT, at - (at - previous) / 2)):
         return False
     tries = pulse_store.attempts_since(REPORT, at)
     return len(tries) < REPORT_TRIES and (not tries or now - tries[-1]["updated_at"] >= REPORT_RETRY_S)
 
 
 def _collect_ratings(pulse_store: store.PulseStore, home: Path, now: float) -> None:
-    """Reads Eric's ratings of recent reports back from the home chat."""
+    """Reads the user's ratings of recent reports back from the home chat."""
     global _last_ratings
     if now - _last_ratings < RATINGS_EVERY_S:
         return
