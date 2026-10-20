@@ -214,69 +214,86 @@ def test_a_nested_subagent_sends_nothing(pushed):
 
 
 @pytest.fixture
-def delegation_flag(monkeypatch):
-    """Hermes' delegation flag, set or clear as the test says."""
-    state = {"set": False}
-    monkeypatch.setattr(plugin, "_delegated_child_check", lambda: state["set"])
-    return state
+def sessions(tmp_path, monkeypatch):
+    """Hermes' session store, with a writer for its lineage columns."""
+    import sqlite3
+
+    monkeypatch.setattr(plugin, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(plugin, "_not_child_lineage", set())
+    db = sqlite3.connect(tmp_path / "state.db")
+    db.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT, end_reason TEXT)")
+
+    def add(session_id, parent=None, end_reason=None):
+        db.execute("INSERT INTO sessions VALUES (?, ?, ?)", (session_id, parent, end_reason))
+        db.commit()
+
+    yield add
+    db.close()
+    plugin._child_sessions.clear()
 
 
-def test_a_child_whose_compaction_rotated_its_id_is_still_a_child(delegation_flag):
+def _compacted_child(add):
+    """Parent "p" delegated "c", which compacted twice: c → c2 → c3."""
+    add("p")
+    add("c", parent="p", end_reason="compression")
+    add("c2", parent="c", end_reason="compression")
+    add("c3", parent="c2")
+    plugin._subagent_start(child_session_id="c")
+
+
+def test_a_child_whose_compaction_replaced_its_id_is_still_a_child(sessions):
+    _compacted_child(sessions)
     health = sys.modules["conduit_push.health_tool"]
-    delegation_flag["set"] = True
-    assert plugin._is_child("rotated-id-no-subagent_start-saw")
-    answer = health._handle({"action": "overview"}, "rotated-id-no-subagent_start-saw", plugin._is_child, None)
-    assert answer["error"] == "subagent"
-    delegation_flag["set"] = False
-    assert not plugin._is_child("rotated-id-no-subagent_start-saw")
+    assert plugin._is_child("c3") and plugin._is_child("c2")
+    assert health._handle({"action": "overview"}, "c3", plugin._is_child, None)["error"] == "subagent"
+    assert "c3" in plugin._child_sessions, "learned, so later calls skip the store"
 
 
-def test_a_reported_child_id_answers_without_the_flag(delegation_flag):
-    plugin._subagent_start(child_session_id="known-child")
-    try:
-        assert plugin._is_child("known-child")
-        assert not plugin._is_child("someone-else")
-    finally:
-        plugin._child_sessions.discard("known-child")
+def test_the_parent_and_its_own_compactions_are_not_children(sessions):
+    _compacted_child(sessions)
+    sessions("p2", parent="p")  # the parent's continuation, while "p" is still open
+    sessions("q", parent=None)
+    assert not plugin._is_child("p")
+    assert not plugin._is_child("q")
+    assert not plugin._is_child("unknown")
+    assert {"p", "q"} <= plugin._not_child_lineage
+    assert "unknown" not in plugin._not_child_lineage, "a session not stored yet is asked about again"
 
 
-def test_a_background_task_ending_on_the_childs_thread_still_notifies(pushed, delegation_flag):
-    plugin._pre_llm_call(session_id="p", turn_id="t")
-    plugin._on_session_end(session_id="p", turn_id="t", completed=True, failed=False, interrupted=False)
-    delegation_flag["set"] = True  # the stop hook runs inside the child's run
-    _subagent()
-    assert _types(pushed) == ["background_task.finished"]
+def test_a_parent_that_compacted_while_its_child_runs_is_not_a_child(sessions):
+    sessions("p", end_reason="compression")
+    sessions("p2", parent="p")
+    sessions("c", parent="p2")
+    plugin._subagent_start(child_session_id="c")
+    assert not plugin._is_child("p2") and not plugin._is_child("p")
 
 
-def test_the_delegation_flag_is_looked_up_once(monkeypatch):
-    calls = []
-    module = types.ModuleType("agent.delegation_context")
-    module.is_delegated_child_context = lambda: calls.append(1) or True
-    monkeypatch.setitem(sys.modules, "agent", types.ModuleType("agent"))
-    monkeypatch.setitem(sys.modules, "agent.delegation_context", module)
-    monkeypatch.setattr(plugin, "_delegated_child_check", None)
-    assert plugin._is_child("x") and plugin._is_child("y")
-    assert len(calls) == 2 and plugin._delegated_child_check is module.is_delegated_child_context
+def test_a_session_branched_from_a_child_is_not_its_continuation(sessions):
+    sessions("c", end_reason="branched")
+    sessions("b", parent="c")
+    plugin._subagent_start(child_session_id="c")
+    assert not plugin._is_child("b")
 
 
-def test_a_hermes_without_the_flag_uses_ids_only(monkeypatch):
-    monkeypatch.setitem(sys.modules, "agent.delegation_context", None)  # import fails
-    monkeypatch.setattr(plugin, "_delegated_child_check", None)
-    assert not plugin._is_child("x")
-    assert plugin._delegated_child_check is False
+def test_with_no_child_running_the_store_is_not_read(sessions, monkeypatch):
+    monkeypatch.setattr(plugin, "_continues_a_child", lambda *args: pytest.fail("read the store"))
+    assert not plugin._is_child("anyone")
 
 
-def test_a_flag_check_that_raises_falls_back_to_ids(monkeypatch):
-    def broken():
-        raise AttributeError("changed API")
+def test_a_missing_or_unreadable_store_answers_no(sessions, tmp_path):
+    plugin._subagent_start(child_session_id="c")
+    (tmp_path / "state.db").write_bytes(b"not a database")
+    assert not plugin._is_child("c3")
+    assert plugin._is_child("c")
+    assert "c3" not in plugin._not_child_lineage, "an unread answer isn't kept"
 
-    monkeypatch.setattr(plugin, "_delegated_child_check", broken)
-    plugin._subagent_start(child_session_id="known-child")
-    try:
-        assert plugin._is_child("known-child")
-        assert not plugin._is_child("x")
-    finally:
-        plugin._child_sessions.discard("known-child")
+
+def test_a_nested_subagent_under_a_compacted_child_sends_nothing(pushed, sessions):
+    _compacted_child(sessions)
+    plugin._subagent_start(child_session_id="grandchild")
+    plugin._subagent_stop(parent_session_id="c3", parent_turn_id="t", child_session_id="grandchild",
+                          child_summary="Done.", child_status="completed")
+    assert pushed == []
 
 
 @pytest.mark.parametrize("markdown, plain", [

@@ -420,9 +420,7 @@ def _subagent_stop(**kwargs: Any) -> None:
     # A subagent that ends inside the turn that started it (delegate_task
     # waits for it) is part of that turn's reply: only one that outlives it,
     # a background task, notifies. Nor does a nested one, or a muted cron job's.
-    # The parent is asked about by id: this hook can run on the child's own
-    # thread, where the delegation flag is set but describes the child.
-    if (_inside_parent_turn(parent, kwargs.get("parent_turn_id")) or _is_child_id(parent)
+    if (_inside_parent_turn(parent, kwargs.get("parent_turn_id")) or _is_child(parent)
             or cron_runs.quiet(parent, None)):
         return
     status = _text(kwargs.get("child_status")) or "finished"
@@ -574,43 +572,76 @@ def _voice_persona_note(history: Any) -> str | None:
     return None
 
 
-# Hermes' task-local "inside a delegated child" check, looked up once:
-# False means this Hermes has none (older, or tests), so ids alone answer.
-_delegated_child_check: Any = None
-
-
-def _inside_delegated_child() -> bool:
-    global _delegated_child_check
-    if _delegated_child_check is None:
-        try:
-            from agent.delegation_context import is_delegated_child_context
-
-            _delegated_child_check = is_delegated_child_context
-        except ImportError:
-            _delegated_child_check = False
-    if _delegated_child_check is False:
-        return False
-    try:
-        return bool(_delegated_child_check())
-    except Exception:  # noqa: BLE001 — the gate falls back to ids, but says so
-        logger.debug("conduit_push: delegation context check failed", exc_info=True)
-        return False
+# Ids checked against compaction lineage and found not to be a child. A
+# session's lineage never changes, so the answer can be kept.
+_not_child_lineage: set[str] = set()
+_LINEAGE_HOPS = 32
 
 
 def _is_child(session_id: Any) -> bool:
-    """A delegated child: Hermes' delegation flag first, then the ids
-    ``subagent_start`` reported. The flag marks the child's whole run, so it
-    survives a compaction that rotates the session id (a new id no
-    ``subagent_start`` ever reported)."""
-    return _inside_delegated_child() or _is_child_id(session_id)
-
-
-def _is_child_id(session_id: Any) -> bool:
-    """Whether ``subagent_start`` reported this id. For asking about a session
-    other than the one running: the delegation flag is the caller's, not the id's."""
+    """A delegated child: an id ``subagent_start`` reported, or one that
+    continues it. With ``compression.in_place: false`` a compaction gives the
+    agent a new session id without firing ``subagent_start`` again; Hermes
+    records the old id as the new session's parent and ends the old one with
+    ``compression``, so following those links back finds the child it was."""
     value = _text(session_id)
+    if not value:
+        return False
     with _children_lock:
-        return bool(value and value in _child_sessions)
+        if value in _child_sessions:
+            return True
+        if not _child_sessions or value in _not_child_lineage:
+            return False
+        known = set(_child_sessions)
+    continues = _continues_a_child(value, known)
+    if continues:
+        with _children_lock:
+            _child_sessions.add(value)
+        return True
+    if continues is None:
+        return False  # unread, so not kept: the next call reads again
+    with _children_lock:
+        if len(_not_child_lineage) > 4096:
+            _not_child_lineage.clear()
+        _not_child_lineage.add(value)
+    return False
+
+
+def _continues_a_child(session_id: str, children: set[str]) -> bool | None:
+    """Whether ``session_id`` follows a child through compactions, read from
+    Hermes' session store; None when the store couldn't be read."""
+    import sqlite3
+
+    path = Path(get_hermes_home()) / "state.db"
+    if not path.exists():
+        return None
+    try:
+        db = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=1.0)
+    except sqlite3.Error:
+        logger.warning("conduit_push: couldn't open the session store to check a subagent's lineage",
+                       exc_info=True)
+        return None
+    try:
+        current = session_id
+        for _ in range(_LINEAGE_HOPS):
+            row = db.execute("SELECT parent_session_id FROM sessions WHERE id = ?", (current,)).fetchone()
+            if row is None and current == session_id:
+                return None  # not stored yet, or another profile's store: ask again later
+            parent = row[0] if row else None
+            if not parent:
+                return False
+            ended = db.execute("SELECT end_reason FROM sessions WHERE id = ?", (parent,)).fetchone()
+            if not ended or ended[0] != "compression":
+                return False  # a delegated child's own parent, or a branch: not a continuation
+            if parent in children:
+                return True
+            current = parent
+        return False
+    except sqlite3.Error:
+        logger.warning("conduit_push: couldn't read a subagent's lineage from the session store", exc_info=True)
+        return None
+    finally:
+        db.close()
 
 
 def _text(value: Any) -> str:
