@@ -762,7 +762,7 @@ def test_an_approval_request_is_news_once_and_approving_it_answers_hermes():
     [item] = news(grant)["news"]
     assert item["status"] == "needs_approval"
     assert item["approval"] == {"request_id": "appr-1", "command": "rm -rf build",
-                                "description": "Delete the build folder"}
+                                "description": "Delete the build folder", "cut": False}
     # Told once, but listed as open on every answer until it settles.
     again = news(grant)
     assert again["news"] == [] and again["approvals"] == [{"job_id": "watch-1", "request_id": "appr-1"}]
@@ -775,6 +775,25 @@ def test_an_approval_request_is_news_once_and_approving_it_answers_hermes():
     # A second request is news again.
     server.ask_approval("rt-1", request_id="appr-2", server_id="srq-2")
     assert news(grant)["news"][0]["approval"]["request_id"] == "appr-2"
+
+
+@pytest.mark.parametrize("command", ["x" * 2_001, "😀" * 2_000])
+def test_a_command_not_shown_whole_can_only_be_denied(command):
+    grant = make_jobs()
+    start(grant)
+    server = grant.jobs.server
+    server.ask_approval("rt-1", command=command)
+    [item] = news(grant)["news"]
+    assert item["approval"]["cut"] is True
+    assert item["approval"]["command"] != command
+    assert api._json_bytes(item["approval"]["command"]) <= api.WATCH_JOB_COMMAND_BYTES
+    answer = api.run_watch_job_call(grant, "answer_approval",
+                                    {"job_id": "watch-1", "request_id": "appr-1", "choice": "once"})
+    assert (answer["ok"], answer["status"]) == (False, 400)
+    assert server.methods("approval.respond") == []
+    denied = api.run_watch_job_call(grant, "answer_approval",
+                                    {"job_id": "watch-1", "request_id": "appr-1", "choice": "deny"})
+    assert denied["status"] == "denied"
 
 
 @pytest.mark.parametrize("choice", ["session", "always", "", "yes"])

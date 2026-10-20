@@ -9040,7 +9040,7 @@ class _WatchJob:
         self.error = ""
         # The pending approval: Hermes' request id, its server request's id
         # (for request.cancel), the redacted command and its description.
-        self.approval: Optional[Dict[str, str]] = None
+        self.approval: Optional[Dict[str, Any]] = None
         # Told to the Watch: the outcome, and the approval request last told
         # (None before any, as a request's key can be empty).
         self.outcome_told = False
@@ -9081,7 +9081,8 @@ class _WatchJob:
         if self.approval and self.status == "needs_approval":
             item["approval"] = {
                 "request_id": self.approval["request_id"],
-                "command": _json_clip(self.approval["command"], WATCH_JOB_COMMAND_BYTES),
+                "command": self.approval["command"],
+                "cut": self.approval["cut"],
                 "description": _json_clip(self.approval["description"], WATCH_JOB_DETAIL_BYTES),
             }
         return item
@@ -9314,10 +9315,14 @@ class _WatchJobs:
             if job.held_completion is not None:
                 # Still at work, as any frame for the session says.
                 job.held_at = time.monotonic()
+            command = params.get("command")
+            command = command.strip() if isinstance(command, str) else ""
+            shown_command = _json_clip(command[:2_000], WATCH_JOB_COMMAND_BYTES)
             job.approval = {
                 "request_id": text("request_id", 128),
                 "server_request_id": server_request_id,
-                "command": text("command", 2_000),
+                "command": shown_command,
+                "cut": shown_command != command,
                 "description": text("description", 500) or "Approval required",
             }
             job.status = "needs_approval"
