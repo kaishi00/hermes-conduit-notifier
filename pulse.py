@@ -265,6 +265,7 @@ def _maybe_report(pulse_store: store.PulseStore, home: Path, now: float) -> bool
     return True
 
 
+# One Hermes home per process, like _ctx, so the cache needs no key.
 _zone_cache: tuple[float, Any] = (0.0, None)
 ZONE_TTL_S = 3600.0
 
@@ -310,7 +311,7 @@ def _collect_ratings(pulse_store: store.PulseStore, home: Path, now: float) -> N
             items, ratings = report.ratings_after(home, chat_id=row["session_key"], tag=row["tag"],
                                                   since=row["created_at"] - delivery.SINCE_SLACK_S)
         except hermes.HermesUnreadable:
-            return
+            continue
         if items:
             pulse_store.set_ratings(row["attempt_id"], json.dumps(items), report.ratings_json(ratings))
 
