@@ -187,7 +187,10 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
     phone = store.maps_device()
     host = maps_host.configured() and store.maps_host_allowed()
     if phone is None and not host:
-        return _unavailable(view, args, action)
+        answer = _unavailable(view, args, action)
+        if answer.get("rough_estimate"):
+            location_tool._log(store, f"maps {action}", session)
+        return answer
     try:
         request = _request(action, args, view or {"places": {}, "sharing": {}}, store.clock())
     except _Refused as refused:
