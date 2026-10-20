@@ -358,11 +358,11 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
                           still_leader=lambda: not stopped.is_set() and _leads(pulse_store), budget=cap - used)
         if done["tokens"]:
             pulse_store.set("memory_today", {"day": day, "tokens": used + done["tokens"]})
-        if done["chunks"] or done["failed"]:
+        if done["chunks"] or done["failed"] or done["tokens"]:
             usage = pulse_store.get("memory_usage")
             usage = usage if isinstance(usage, dict) else {}
             pulse_store.set("memory_usage", {key: int(usage.get(key, 0) or 0) + done[key]
-                                            for key in ("chunks", "tokens", "failed")})
+                                            for key in ("chunks", "tokens", "failed", "skipped")})
     except Exception:  # noqa: BLE001 — the next run tries again
         logger.warning("conduit_push: Pulse memory run failed", exc_info=True)
 
@@ -370,7 +370,8 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
 def _leads(pulse_store: store.PulseStore) -> bool:
     """Whether this process still runs the loop (a memory run stops when not)."""
     lease = pulse_store.get(store.LEADER)
-    return (isinstance(lease, dict) and lease.get("owner") == _owner and pulse_store.get("enabled")
+    return (isinstance(lease, dict) and lease.get("owner") == _owner
+            and isinstance(lease.get("until"), (int, float)) and lease["until"] > time.time() and pulse_store.get("enabled")
             and bool(pulse_store.get("memory")))
 
 

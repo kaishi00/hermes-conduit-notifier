@@ -399,8 +399,8 @@ class PulseStore:
                      now: float = 0.0) -> int:
         """Counts a failed read of the chat's next chunk, unless another
         reader moved the chat past ``after_id`` or already counted a failure
-        that is still waiting for its retry; returns the count (0 when
-        another reader moved it on)."""
+        that is still waiting for its retry; returns the count, or 0 when
+        it didn't count this one."""
         with _lock, self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute("SELECT message_id, failures, retry_at FROM watermarks WHERE profile=? AND chat_id=?",
@@ -410,7 +410,7 @@ class PulseStore:
                 return 0
             if row and row["failures"] and row["retry_at"] > now:
                 conn.execute("ROLLBACK")
-                return row["failures"]  # this round's failure is already counted
+                return 0  # another reader already counted this round's failure
             conn.execute(
                 "INSERT INTO watermarks(profile, chat_id, message_id, at, failures, retry_at) VALUES(?,?,0,0,1,?) "
                 "ON CONFLICT(profile, chat_id) DO UPDATE SET failures=failures+1, retry_at=excluded.retry_at",

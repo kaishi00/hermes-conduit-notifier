@@ -1249,7 +1249,7 @@ def test_a_chunk_two_processes_read_is_kept_once(remembering, db):
     assert remembering.store.chunk_failed("", "work", retry_at=DAY, after_id=0) == 0
     # Nor is a second reader's failure in the same round.
     assert remembering.store.chunk_failed("", "fresh", retry_at=DAY + 100, now=DAY) == 1
-    assert remembering.store.chunk_failed("", "fresh", retry_at=DAY + 110, now=DAY + 10) == 1
+    assert remembering.store.chunk_failed("", "fresh", retry_at=DAY + 110, now=DAY + 10) == 0
     assert remembering.store.chunk_failed("", "fresh", retry_at=DAY + 300, now=DAY + 200) == 2
     assert remembering.store.watermark("", "work")["failures"] == 0
 
@@ -1301,15 +1301,27 @@ def test_a_continued_chat_starts_where_its_parent_stopped(remembering, db):
 def test_a_failing_chunk_is_retried_then_skipped(remembering, db):
     db.message("user", "hello", sid="work", at=DAY + 60)
     db.message("assistant", "hi", sid="work", at=DAY + 70)
-    model = FakeModel(TimeoutError(), TimeoutError(), TimeoutError())
+    model = FakeModel(TimeoutError(), TimeoutError(), ["not", "items"])
     now = DAY + 70 + memory.IDLE_S
-    assert _remember(remembering, model, now)["failed"] == 1
+    first = _remember(remembering, model, now)
+    assert first["failed"] == 1 and first["tokens"] > memory.MAX_TOKENS  # a failed call still counts, estimated
     assert _remember(remembering, model, now + 60)["failed"] == 0  # waits for its retry
     _remember(remembering, model, now + memory.RETRY_S)
-    _remember(remembering, model, now + 2 * memory.RETRY_S)
+    last = _remember(remembering, model, now + 2 * memory.RETRY_S)
+    assert (last["skipped"], last["tokens"]) == (1, 100)  # a bad reply counts what the model reported
     assert len(model.shown) == 3 and _remember(remembering, model, now + 3 * memory.RETRY_S)["failed"] == 0
     assert len(model.shown) == 3  # skipped after the third failure, not tried forever
     assert remembering.store.watermark("", "work")["failures"] == 0
+
+
+def test_failed_calls_count_toward_a_runs_limit(remembering, db):
+    for n in range(memory.MAX_CHUNKS + 2):
+        db.session(f"c{n}", title=f"Chat {n}", pinned=0)
+        db.message("user", "hello", sid=f"c{n}", at=DAY + 60)
+        db.message("assistant", "hi", sid=f"c{n}", at=DAY + 70)
+    model = FakeModel(*[TimeoutError()] * 10)
+    _remember(remembering, model, DAY + 70 + memory.IDLE_S)
+    assert len(model.shown) == memory.MAX_CHUNKS
 
 
 def test_other_profiles_are_remembered_with_their_name(remembering, db, tmp_path, request):
@@ -1365,7 +1377,7 @@ def test_the_loop_runs_memory_on_its_own_thread(remembering, db, monkeypatch):
     pulse.tick(start + 120)
     pulse._memory_thread.join(5)
     assert [(c["task"], c["json_mode"]) for c in calls] == [(memory.TASK, True)]
-    assert remembering.store.get("memory_usage") == {"chunks": 1, "tokens": 7, "failed": 0}
+    assert remembering.store.get("memory_usage") == {"chunks": 1, "tokens": 7, "failed": 0, "skipped": 0}
     pulse._stop.set()  # an unloaded plugin's run makes no more calls
     db.message("user", "more", sid="work", at=start + 130)
     db.message("assistant", "ok", sid="work", at=start + 131)

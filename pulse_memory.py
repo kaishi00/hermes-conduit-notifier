@@ -90,7 +90,16 @@ _WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday",
 _QUOTES = str.maketrans({"“": '"', "”": '"', "‘": "'", "’": "'"})
 
 
-class BadReply(Exception):
+class ChunkFailed(Exception):
+    """A chunk's call failed; ``tokens`` is what it used (an estimate when
+    the model didn't say), so the daily budget sees every call."""
+
+    def __init__(self, message: str, tokens: int) -> None:
+        super().__init__(message)
+        self.tokens = tokens
+
+
+class BadReply(ChunkFailed):
     """The model's reply wasn't the JSON asked for."""
 
 
@@ -271,10 +280,16 @@ def _item(raw: Any, chunk: Sequence[Any], zone: tzinfo) -> Optional[dict[str, An
 def extract(llm: Llm, chunk: Sequence[Any], zone: tzinfo, outcomes: Sequence[dict] = ()) -> tuple[list[dict], int]:
     """The chunk's items, and the tokens the call used."""
     mark = secrets.token_hex(6)
-    parsed, tokens = llm(INSTRUCTIONS.replace("MARK", mark),
-                         f"<<<chat {mark}\n{render(chunk, zone, outcomes)}\nchat {mark}>>>")
+    instructions = INSTRUCTIONS.replace("MARK", mark)
+    text = f"<<<chat {mark}\n{render(chunk, zone, outcomes)}\nchat {mark}>>>"
+    estimate = (len(instructions) + len(text)) // 4 + MAX_TOKENS  # when the model doesn't report usage
+    try:
+        parsed, tokens = llm(instructions, text)
+    except Exception as error:  # noqa: BLE001 — a model or network failure
+        raise ChunkFailed(type(error).__name__, estimate) from error
+    tokens = tokens if isinstance(tokens, int) and tokens > 0 else estimate
     if not isinstance(parsed, dict) or not isinstance(parsed.get("items"), list):
-        raise BadReply("the reply wasn't {\"items\": [...]}")
+        raise BadReply("BadReply", tokens)
     if len(parsed["items"]) > MAX_ITEMS:
         logger.info("conduit_push: Pulse memory kept the first %d of %d items from a chunk", MAX_ITEMS,
                     len(parsed["items"]))
@@ -290,7 +305,8 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
     tokens are used, and keeps their items. A chunk's items and the chat's
     new watermark are written together; a failed chunk is tried again after
     ``RETRY_S``, and skipped after ``MAX_FAILURES`` tries."""
-    done = {"chunks": 0, "items": 0, "tokens": 0, "failed": 0}
+    done = {"chunks": 0, "items": 0, "tokens": 0, "failed": 0, "skipped": 0}
+    calls = 0
     for chat in due_chats(pulse_store, sources, now=now):
         try:
             rows = hermes.chat_messages(chat.home, chat_id=chat.chat_id, after_id=chat.after_id, since=chat.since,
@@ -301,7 +317,7 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
             continue
         read_to = chat.read_to
         for chunk in chunks(rows, zone, now):
-            if done["chunks"] >= MAX_CHUNKS or done["tokens"] >= budget or not still_leader():
+            if calls >= MAX_CHUNKS or done["tokens"] >= budget or not still_leader():
                 return done
             last = chunk[-1]
             # The ledger only has this profile's tool calls.
@@ -309,9 +325,11 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
             outcomes = [] if chat.profile else [o for o in pulse_store.outcomes_between(
                 chat.chat_id, max(chunk[0]["timestamp"] - IDLE_S, read_to), last["timestamp"], MAX_OUTCOMES)
                 if o["at"] > read_to]
+            calls += 1
             try:
                 items, tokens = extract(llm, chunk, zone, outcomes)
-            except Exception as error:  # noqa: BLE001 — a model or network failure waits for a retry
+            except ChunkFailed as error:  # waits for a retry
+                done["tokens"] += error.tokens
                 if not still_leader():
                     return done
                 failures = pulse_store.chunk_failed(chat.profile, chat.chat_id, retry_at=now + RETRY_S,
@@ -320,10 +338,11 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
                     break  # another process read this chunk meanwhile
                 done["failed"] += 1
                 logger.warning("conduit_push: Pulse memory couldn't read a chat (try %d of %d): %s",
-                               failures, MAX_FAILURES, type(error).__name__)
+                               failures, MAX_FAILURES, error)
                 if failures >= MAX_FAILURES:
                     logger.warning("conduit_push: Pulse memory skipped part of a chat after %d failed reads; "
                                    "nothing from it is remembered", failures)
+                    done["skipped"] += 1
                     pulse_store.advance(chat.profile, chat.chat_id, message_id=last["id"], at=last["timestamp"],
                                         after_id=chat.after_id)
                 break  # the rest of this chat waits for its next run

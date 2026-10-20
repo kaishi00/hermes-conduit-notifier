@@ -247,7 +247,8 @@ def _pulse(args: argparse.Namespace) -> int:
           + (kept if not kept or pulse_store.get("memory") else "kept " + kept)
           + ("" if kept else "nothing kept yet")
           + f" ({int(usage.get('chunks', 0) or 0)} chat chunks read, {int(usage.get('tokens', 0) or 0)} tokens"
-          + (f", {int(usage.get('failed', 0) or 0)} failed" if usage.get("failed") else "") + ")")
+          + (f", {int(usage.get('failed', 0) or 0)} failed" if usage.get("failed") else "")
+          + (f", {int(usage.get('skipped', 0) or 0)} skipped after failing" if usage.get("skipped") else "") + ")")
     today = pulse_store.get("memory_today")
     zone = pulse.report_zone(pulse_store, home)
     if (isinstance(today, dict) and today.get("day") == datetime.now(zone).strftime("%Y-%m-%d")
