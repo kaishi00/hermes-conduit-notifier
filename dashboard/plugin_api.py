@@ -7152,7 +7152,12 @@ def voice_tools_call(envelope: Any) -> Dict[str, Any]:
     action = args.get("action") if isinstance(args, dict) else None
     logger.info("Conduit voice read: %s %s for %s", tool.TOOL_NAME,
                 action if isinstance(action, str) and action in tool.VOICE_ACTIONS else "other", provider)
-    return {"v": 1, **seal_answer(tool.voice_handle(args, device_id=device_id, store=store, provider=provider))}
+    answer = tool.voice_handle(args, device_id=device_id, store=store, provider=provider)
+    try:
+        # Refused if the device registered a new key during the read.
+        return {"v": 1, **seal_answer(answer)}
+    except error_class as exc:
+        raise TokenError(exc.status, str(exc), exc.code) from exc
 
 
 def _phone_voice_call(envelope: Dict[str, Any]) -> Dict[str, Any]:
@@ -7175,7 +7180,12 @@ def _phone_voice_call(envelope: Dict[str, Any]) -> Dict[str, Any]:
                 action if isinstance(action, str)
                 and action in phone.VOICE_CALENDAR_ACTIONS + phone.VOICE_PHONE_ACTIONS + ("people",) else "other",
                 provider if isinstance(provider, str) and _VOICE_PROVIDER.fullmatch(provider) else "voice")
-    return {"v": 1, **seal_answer({"result": phone.voice_handle(name, args, device_id=device_id, store=store)})}
+    answer = phone.voice_handle(name, args, device_id=device_id, store=store)
+    try:
+        # Refused if the device registered a new key during the read.
+        return {"v": 1, **seal_answer({"result": answer})}
+    except phone.PhoneError as exc:
+        raise TokenError(exc.status, str(exc), exc.code) from exc
 
 
 async def _voice_tools_route(response: Response, profile: Optional[str], fn: Callable[[], Dict[str, Any]],

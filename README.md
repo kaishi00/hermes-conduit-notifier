@@ -1753,6 +1753,10 @@ host's boundary is the seal:
   alone opens nothing.
 - **Only the asking device's data**, matched by id (never by name), so
   another device or a newly registered key reads nothing.
+- **Never across keys.** If the device registers a new key while a read
+  runs, the answer is refused with `unknown_key` (409) instead of being
+  sealed to the old key. The calendar, phone and location reads, and the
+  phone's changes exchange, do the same (plugin 0.51.3+).
 - Read actions only (the same handler as `conduit_health`), 60 reads a
   minute per profile. Conduit keeps the log of what each call read.
   Shared vector: `tests/health_vector.json` (`voice`).

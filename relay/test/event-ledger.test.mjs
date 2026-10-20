@@ -72,3 +72,16 @@ test('event ID bounds must be positive integers', () => {
     assert.throws(() => new EventLedger({ perInstallation: 10, total: bound }), /Event ID bounds must be positive integers\./);
   }
 });
+
+test('a removed ID can be recorded again and frees its slot', () => {
+  const ledger = new EventLedger({ perInstallation: 2, total: 10 });
+  assert.equal(ledger.add('inst', 'gw', 'one'), true);
+  assert.equal(ledger.add('inst', 'gw', 'one'), false);
+  assert.equal(ledger.remove('inst', 'gw', 'one'), true);
+  assert.equal(ledger.has('inst', 'gw', 'one'), false);
+  assert.equal(ledger.size, 0);
+  assert.equal(ledger.countFor('inst'), 0, 'an emptied installation is dropped');
+  assert.equal(ledger.remove('inst', 'gw', 'one'), false, 'removing twice is a no-op');
+  assert.equal(ledger.remove('inst', 'other-gw', 'one'), false);
+  assert.equal(ledger.add('inst', 'gw', 'one'), true);
+});

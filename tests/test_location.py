@@ -921,6 +921,26 @@ def test_a_voice_read_answers_sealed_and_is_logged_as_a_call(voice):
     assert "conduit://" not in json.dumps(_voice_call(client, phone, {"action": "places"}))
 
 
+@pytest.mark.parametrize("action", ["now", "places", "history", "distance_to"])
+def test_a_new_key_during_the_read_seals_nothing_to_the_old_key(voice, monkeypatch, action):
+    client, store = voice
+    owner = _voice_phone(store, fix=fix())
+    tool = api._plugin_package_module("location_tool")
+    read = tool.voice_handle
+
+    def re_keyed_meanwhile(*args, **kwargs):
+        # The request opened with the owner's key; before its read, the same
+        # device id registers a new key and shares under it.
+        _voice_phone(store, fix=fix(id="f_other", area={"name": "Elsewhere", "locality": "Leeds",
+                                                        "country": "United Kingdom", "country_code": "GB"}))
+        return read(*args, **kwargs)
+
+    monkeypatch.setattr(tool, "voice_handle", re_keyed_meanwhile)
+    response = client.post(f"{BASE}/voice-tools/call", json=owner.ask({"action": action, "place": "Home"}))
+    assert response.status_code == 409 and response.json()["code"] == "unknown_key", response.text
+    assert "Elsewhere" not in response.text
+
+
 @pytest.mark.parametrize("action", ["locate", "set_rule", "remove_rule", "rules", None, ["now"], {"a": 1}])
 def test_a_voice_call_can_only_read(voice, action):
     client, store = voice

@@ -521,6 +521,12 @@ export class RelayStore {
     return true;
   }
 
+  // Forgets an accepted event whose push failed, so the plugin's retry with
+  // the same id is sent instead of answered as a duplicate.
+  releaseEvent(installationId, eventId, gatewayId) {
+    this.events.remove(installationId, gatewayId, eventId);
+  }
+
   hasAcceptedEvent(installationId, eventId, gatewayId) {
     return this.events.has(installationId, gatewayId, eventId);
   }

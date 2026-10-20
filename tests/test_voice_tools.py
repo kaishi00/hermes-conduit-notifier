@@ -179,6 +179,29 @@ def test_a_new_key_for_the_same_device_id_reads_none_of_the_old_data(client):
     assert client.post(f"{BASE}/health/ingest", json=owner.seal(_batch("batch-0002"))).status_code == 409
 
 
+@pytest.mark.parametrize("args", [{"action": "daily", "metrics": ["steps"], "from": "2026-10-11",
+                                   "to": "2026-10-12"}, {"action": "overview"}])
+def test_a_new_key_during_the_read_seals_nothing_to_the_old_key(client, monkeypatch, args):
+    owner = VoicePhone()
+    _share(client, owner, _batch())
+    tool = api._plugin_package_module("health_tool")
+    read = tool.voice_handle
+
+    def re_keyed_meanwhile(*args, **kwargs):
+        # The request opened with the owner's key; before its read, the same
+        # device id registers a new key and uploads under it.
+        store = health.HealthStore(api._calls_home())
+        replacement = VoicePhone(device_id=DEVICE)
+        replacement.accept(store.register_key(replacement.key_request()))
+        store.ingest(replacement.seal(_batch("batch-0002", steps=(4242, 4343))))
+        return read(*args, **kwargs)
+
+    monkeypatch.setattr(tool, "voice_handle", re_keyed_meanwhile)
+    response = client.post(f"{BASE}/voice-tools/call", json=owner.ask(args))
+    assert response.status_code == 409 and response.json()["code"] == "unknown_key", response.text
+    assert "4242" not in response.text
+
+
 def test_the_same_device_key_again_keeps_the_data(client):
     phone = VoicePhone()
     _share(client, phone, _batch())

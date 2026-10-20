@@ -584,6 +584,104 @@ test('event IDs stay out of the data file and a full event ledger keeps acceptin
     'deferred plugin metadata is written on shutdown');
 });
 
+test('a push that fails after intake gives its event ID back, so the retry is sent', async () => {
+  const aPort = await closedPort();
+  const isolatedPath = join(dir, 'relay-data-retry.json');
+  const capturePath = join(dir, `capture-retry-${Date.now()}.jsonl`);
+  const fixture = new RelayStore(isolatedPath);
+  const created = fixture.createInstallation({ bundleId: 'com.milim.relay', deviceToken: 'b'.repeat(64), environment: 'production' });
+  const pairing = fixture.createPairing(created.installation.id);
+  const claim = fixture.claimPairing(pairing.code, 'retry target');
+  // APNs drops the first send and refuses the second, then takes them.
+  const child = await startRelay(aPort, 'accept', isolatedPath, { APNS_CAPTURE_PATH: capturePath, APNS_FAIL_FIRST: '2' });
+  children.push(child);
+  const base = `http://127.0.0.1:${aPort}`;
+  // The plugin's retry: the same event, same id.
+  const send = () => api(base, '/v1/events', {
+    method: 'POST',
+    credential: `${created.installation.id}.${claim.gatewayId}.${claim.gatewaySecret}`,
+    body: { type: 'input.needed', event_id: 'input:retry0000001', session_id: 'sess-retry', profile: 'default' },
+  });
+  const captured = () => {
+    try {
+      return readFileSync(capturePath, 'utf8').trim().split('\n').filter(Boolean);
+    } catch {
+      return [];
+    }
+  };
+  try {
+    assert.deepEqual(await send(), { status: 502, json: { error: 'apns_unreachable' } });
+    assert.deepEqual(await send(), { status: 502, json: { error: 'apns_rejected', reason: 'ServiceUnavailable', status: 503 } },
+      'a retry after a failed send is sent again, not called a duplicate');
+    assert.deepEqual(await send(), { status: 202, json: { accepted: true, delivered: true } });
+    assert.deepEqual(await send(), { status: 200, json: { accepted: true, duplicate: true } }, 'a delivered event still dedupes');
+    assert.equal(captured().length, 1, 'the phone got the notification once');
+  } finally {
+    await stopRelay(child);
+  }
+});
+
+test('an hourly limit refusal gives the event id back', async () => {
+  const aPort = await closedPort();
+  const isolatedPath = join(dir, 'relay-data-hourly.json');
+  const fixture = new RelayStore(isolatedPath);
+  const created = fixture.createInstallation({ bundleId: 'com.milim.relay', deviceToken: 'f'.repeat(64), environment: 'production' });
+  fixture.updateInstallation(created.installation.id, { locationToken: '6'.repeat(64) });
+  const pairing = fixture.createPairing(created.installation.id);
+  const claim = fixture.claimPairing(pairing.code, 'hourly target');
+  const child = await startRelay(aPort, 'accept', isolatedPath, { RELAY_TEST_LOCATION_PUSHES_PER_HOUR: '1' });
+  children.push(child);
+  const base = `http://127.0.0.1:${aPort}`;
+  const send = (eventId) => api(base, '/v1/events', {
+    method: 'POST',
+    credential: `${created.installation.id}.${claim.gatewayId}.${claim.gatewaySecret}`,
+    body: { type: 'location.requested', event_id: eventId, profile: 'work', locate: { id: 'l_0123456789abcdefXYZ' } },
+  });
+  try {
+    assert.deepEqual(await send('locate:hourly00000000000000001'), { status: 202, json: { accepted: true, delivered: true } });
+    const refused = await send('locate:hourly00000000000000002');
+    assert.equal(refused.status, 429);
+    assert.deepEqual(await send('locate:hourly00000000000000002'), refused, 'the retry is refused again, not called a duplicate');
+  } finally {
+    await stopRelay(child);
+  }
+});
+
+test('a copy that arrives mid-send waits for it, and is told to retry when it fails', async () => {
+  const aPort = await closedPort();
+  const isolatedPath = join(dir, 'relay-data-in-flight.json');
+  const capturePath = join(dir, `capture-in-flight-${Date.now()}.jsonl`);
+  const fixture = new RelayStore(isolatedPath);
+  const created = fixture.createInstallation({ bundleId: 'com.milim.relay', deviceToken: 'c'.repeat(64), environment: 'production' });
+  const pairing = fixture.createPairing(created.installation.id);
+  const claim = fixture.claimPairing(pairing.code, 'in-flight target');
+  const child = await startRelay(aPort, 'accept', isolatedPath, { APNS_CAPTURE_PATH: capturePath, APNS_FAIL_FIRST: '1', APNS_SEND_DELAY_MS: '400' });
+  children.push(child);
+  const base = `http://127.0.0.1:${aPort}`;
+  const send = (eventId) => api(base, '/v1/events', {
+    method: 'POST',
+    credential: `${created.installation.id}.${claim.gatewayId}.${claim.gatewaySecret}`,
+    body: { type: 'input.needed', event_id: eventId, session_id: 'sess-in-flight', profile: 'default' },
+  });
+  try {
+    const first = send('input:inflight00001');
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const copy = await send('input:inflight00001');
+    assert.deepEqual(await first, { status: 502, json: { error: 'apns_unreachable' } });
+    assert.deepEqual(copy, { status: 503, json: { error: 'delivery_failed' } }, 'the copy is not told the failed send was a duplicate');
+    assert.deepEqual(await send('input:inflight00001'), { status: 202, json: { accepted: true, delivered: true } });
+
+    const second = send('input:inflight00002');
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.deepEqual(await send('input:inflight00002'), { status: 200, json: { accepted: true, duplicate: true } },
+      'a copy of a send that worked is a duplicate');
+    assert.equal((await second).status, 202);
+    assert.equal(readFileSync(capturePath, 'utf8').trim().split('\n').length, 2, 'one push per event');
+  } finally {
+    await stopRelay(child);
+  }
+});
+
 test('call requests reach APNs with the call category and stop at the per-installation ceiling', async () => {
   const aPort = await closedPort();
   const isolatedPath = join(dir, 'relay-data-calls.json');
@@ -886,7 +984,7 @@ async function bootFailure(name, extraEnv) {
 }
 
 test('the APNs test seams stop a relay that is not a test at boot', async () => {
-  for (const env of [{ APNS_MODE: 'accept' }, { APNS_MODE: 'accept', APNS_CAPTURE_PATH: join(dir, 'never.jsonl') }, { APNS_VOIP_FAILURE: 'throw' }]) {
+  for (const env of [{ APNS_MODE: 'accept' }, { APNS_MODE: 'accept', APNS_CAPTURE_PATH: join(dir, 'never.jsonl') }, { APNS_VOIP_FAILURE: 'throw' }, { APNS_FAIL_FIRST: '2' }, { APNS_SEND_DELAY_MS: '10' }]) {
     const { code, stderr } = await bootFailure('seams', { ...env, RELAY_TEST_SEAMS: '' });
     assert.notEqual(code, 0);
     assert.match(stderr, /test settings?; unset it for a real relay\./);
@@ -2407,6 +2505,8 @@ test('a location request is a silent location push to the phone, never a notific
 
     assert.deepEqual(await send('locate:000000000000000000000003', { locate: { id: 'bad' } }),
       { status: 400, json: { error: 'invalid_location_request' } }, 'an unsealed request needs its id');
+    assert.deepEqual(await send('locate:000000000000000000000003', { locate: { id: 'bad' } }),
+      { status: 200, json: { accepted: true, duplicate: true } }, 'a malformed request keeps its id: a retry would fail the same way');
     assert.equal((await register(null)).json.installation.location, false, 'null forgets the token');
   } finally {
     await stopRelay(child);

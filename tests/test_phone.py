@@ -1065,6 +1065,70 @@ def test_voice_reads_never_reach_another_device(client):
     assert [device["id"] for device in overview["devices"]] == [DEVICE]
 
 
+@pytest.mark.parametrize("name, args", [("conduit_calendar", {"action": "overview"}),
+                                        ("conduit_phone", {"action": "status"})])
+def test_a_new_key_during_the_read_seals_nothing_to_the_old_key(client, monkeypatch, name, args):
+    owner = _route_shared(client)
+    tool = api._plugin_package_module("phone_tool")
+    read = tool.voice_handle
+
+    def re_keyed_meanwhile(*args, **kwargs):
+        # The request opened with the owner's key; before its read, the same
+        # device id registers a new key and shares under it.
+        store = phone.PhoneStore(client.home)
+        replacement = Phone()
+        replacement.accept(store.register_key(replacement.key_request()))
+        store.ingest(replacement.seal(_batch(batch_id="batch-0002", sent_at=datetime.now(timezone.utc).isoformat())))
+        return read(*args, **kwargs)
+
+    monkeypatch.setattr(tool, "voice_handle", re_keyed_meanwhile)
+    response = client.http.post(f"{BASE}/voice-tools/call", json=_voice_request(owner, name, args))
+    assert response.status_code == 409 and response.json()["code"] == "unknown_key", response.text
+
+
+def _exchange_re_keyed_meanwhile(store, monkeypatch, replacement, then=lambda: None):
+    opened = store.open_exchange
+
+    def re_keyed(*args, **kwargs):
+        # Opened with the old kid; before it runs, the device registers again.
+        answer = opened(*args, **kwargs)
+        replacement.accept(store.register_key(replacement.key_request()))
+        then()
+        return answer
+
+    monkeypatch.setattr(store, "open_exchange", re_keyed)
+
+
+def test_an_exchange_that_outlives_its_key_hands_out_nothing(store, iphone, monkeypatch):
+    store.ingest(iphone.seal(_batch()))
+    envelope = iphone.exchange_request()
+    replacement = Phone()
+
+    def share_and_get_a_change():
+        store.ingest(replacement.seal(_batch("batch-0002")))
+        store.add_change("add_reminder", {"title": "Milk"})
+
+    _exchange_re_keyed_meanwhile(store, monkeypatch, replacement, share_and_get_a_change)
+    with pytest.raises(phone.PhoneError) as refused:
+        store.exchange(envelope)
+    assert refused.value.code == "unknown_key"
+    [kept] = store.changes(mark_reported=False)
+    assert kept["state"] == "waiting" and kept["seen_by_phone"] is False, "the new key's change isn't handed out"
+
+
+def test_an_exchange_that_outlives_its_kid_records_no_outcome(store, iphone, monkeypatch):
+    store.ingest(iphone.seal(_batch()))
+    change = store.add_change("add_reminder", {"title": "Milk"})
+    envelope = iphone.exchange_request([{"id": change["id"], "outcome": "applied", "item_id": "r_1"}])
+    # The same device key again keeps the change but gets a new kid.
+    _exchange_re_keyed_meanwhile(store, monkeypatch, Phone(private=iphone.private))
+    with pytest.raises(phone.PhoneError) as refused:
+        store.exchange(envelope)
+    assert refused.value.code == "unknown_key"
+    [kept] = store.changes(mark_reported=False)
+    assert kept["id"] == change["id"] and kept["state"] == "waiting"
+
+
 def test_a_voice_read_needs_the_voice_seal(client):
     handset = _route_shared(client)
     # Sealed for the changes exchange: it doesn't open as a voice read.

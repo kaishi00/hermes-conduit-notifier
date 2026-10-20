@@ -411,6 +411,19 @@ class HealthStore:
             generation = _meta(db, "generation")
         return {"kid": kid, "host_public_key": b64u(host_public), "generation": generation}
 
+    def _still_keyed(self, device_id: str, kid: str) -> None:
+        """Refuses once the device has registered again since ``kid`` was
+        checked. A sealed answer's read runs in its own connection after the
+        request is opened, so a re-registration (and the new key's upload) can
+        land in between; checking again after the read means an answer is
+        sealed to ``kid`` only if no newer key's data could have been read.
+        Every registration mints a new host key, so a kid never comes back."""
+        with self._read() as db:
+            row = None if db is None else db.execute("SELECT kid FROM devices WHERE id=?", (device_id,)).fetchone()
+        if row is None or row[0] != kid:
+            raise HealthError("unknown_key", "This device's health key isn't on this profile; set it up again",
+                              status=409)
+
     def _device_key(self, db: sqlite3.Connection, device_id: str, kid: str, purpose: bytes = INFO_INGEST) -> bytes:
         row = db.execute("SELECT device_public, host_private, host_public, kid FROM devices WHERE id=?",
                          (device_id,)).fetchone()
@@ -457,6 +470,7 @@ class HealthStore:
             raise HealthError("malformed", "The sealed request doesn't match its envelope")
 
         def seal_answer(answer: Any) -> dict[str, str]:
+            self._still_keyed(device_id, kid)
             body = json.dumps({"call_id": call_id, "result": answer}, ensure_ascii=False).encode("utf-8")
             nonce, ct = seal(answer_key, body, voice_aad("answer", tool, kid, device_id, call_id))
             return {"nonce": nonce, "ct": ct}

@@ -556,6 +556,19 @@ class PhoneStore:
             generation = _meta(db, "generation")
         return {"kid": kid, "host_public_key": b64u(host_public), "generation": generation}
 
+    def _still_keyed(self, device_id: str, kid: str) -> None:
+        """Refuses once the device has registered again since ``kid`` was
+        checked. A sealed answer's read runs in its own connection after the
+        request is opened, so a re-registration (and the new key's upload) can
+        land in between; checking again after the read means an answer is
+        sealed to ``kid`` only if no newer key's data could have been read.
+        Every registration mints a new host key, so a kid never comes back."""
+        with self._read() as db:
+            row = None if db is None else db.execute("SELECT kid FROM devices WHERE id=?", (device_id,)).fetchone()
+        if row is None or row[0] != kid:
+            raise PhoneError("unknown_key", "This device's calendar key isn't on this profile; set it up again",
+                             status=409)
+
     def _device_key(self, db: sqlite3.Connection, device_id: str, kid: str, purpose: bytes = INFO_INGEST) -> bytes:
         row = db.execute("SELECT device_public, host_private, host_public, kid FROM devices WHERE id=?",
                          (device_id,)).fetchone()
@@ -637,6 +650,7 @@ class PhoneStore:
             raise PhoneError("malformed", "The sealed request doesn't match its envelope")
 
         def seal_answer(fields: dict[str, Any]) -> dict[str, str]:
+            self._still_keyed(device_id, kid)
             body = json.dumps({"call_id": call_id, **fields}, ensure_ascii=False, separators=(",", ":"))
             nonce, ct = seal(answer_key, body.encode("utf-8"), exchange_aad("answer", op, kid, device_id, call_id))
             return {"nonce": nonce, "ct": ct}
@@ -646,7 +660,7 @@ class PhoneStore:
     def exchange(self, envelope: Any) -> dict[str, Any]:
         """The ``/phone/exchange`` route: open, run the operation, seal."""
         device_id, _, request, seal_answer = self.open_exchange(envelope, ops=("changes",))
-        changes = self.exchange_changes(device_id, request.get("results"))
+        changes = self.exchange_changes(device_id, request.get("results"), kid=envelope["kid"])
         return {"v": 1, **seal_answer({"changes": changes})}
 
     def open_voice_request(self, envelope: Any) -> tuple[str, dict[str, Any], Callable[[dict[str, Any]], dict[str, str]]]:
@@ -659,14 +673,18 @@ class PhoneStore:
         device_id, _, request, seal_answer = self.open_exchange(envelope, ops=("voice",))
         return device_id, request, seal_answer
 
-    def exchange_changes(self, device_id: str, results: Any) -> list[dict[str, Any]]:
+    def exchange_changes(self, device_id: str, results: Any, *, kid: str) -> list[dict[str, Any]]:
         """Records the phone's outcomes for its changes, then answers every
         change still pending for that device, oldest first (at most
-        MAX_CHANGES_PER_ANSWER). Changes older than a week expire first."""
+        MAX_CHANGES_PER_ANSWER). Changes older than a week expire first.
+        ``kid``: the key the request was opened with, checked again in this
+        transaction, so a request that outlived a re-registration records and
+        reads nothing."""
         parsed = _parse_results(results)
         now = int(self.clock())
         with self._write() as db:
-            if db.execute("SELECT 1 FROM devices WHERE id=?", (device_id,)).fetchone() is None:
+            row = db.execute("SELECT kid FROM devices WHERE id=?", (device_id,)).fetchone()
+            if row is None or row[0] != kid:
                 raise PhoneError("unknown_key", "This device's calendar key isn't on this profile; set it up again",
                                  status=409)
             _expire(db, now)

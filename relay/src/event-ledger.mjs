@@ -1,7 +1,8 @@
 // Accepted event IDs, kept only in memory. They exist to stop a repeated
 // delivery of the same event within 24 hours, which makes them unlike the
 // rest of the store: losing them on restart costs at most one duplicate push
-// (the plugin never retries a send), while persisting them made every event
+// (the plugin retries only a send the relay failed, and a failed send gives
+// its ID back), while persisting them made every event
 // rewrite the whole data file. Both bounds forget old IDs rather than reject
 // new events, so a busy relay never drops a notification to make room.
 export const EVENT_ID_TTL_MS = 24 * 60 * 60_000;
@@ -48,6 +49,15 @@ export class EventLedger {
     events.set(key, acceptedAt);
     this.size += 1;
     if (this.size > this.total) this.trimLargest();
+    return true;
+  }
+
+  // Forgets one ID; false when it wasn't recorded.
+  remove(installationId, gatewayId, eventId) {
+    const events = this.byInstallation.get(installationId);
+    if (!events?.delete(eventKey(gatewayId, eventId))) return false;
+    this.size -= 1;
+    if (!events.size) this.byInstallation.delete(installationId);
     return true;
   }
 
