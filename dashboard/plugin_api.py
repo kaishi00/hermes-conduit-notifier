@@ -8567,7 +8567,7 @@ def _watch_max_jobs(value: Any) -> int:
     return min(value, WATCH_JOBS_MAX)
 
 
-def open_watch_grant(body: Any, *, profile: Optional[str], path: Any = None,
+def open_watch_grant(body: Any, *, profile: Optional[str], ticket_home: Optional[str] = None, path: Any = None,
                      relay: Optional[Callable[..., Tuple[int, Dict[str, Any]]]] = None,
                      start: Optional[Callable[[_WatchGrant], None]] = None,
                      session_api: Optional[Callable[[], Any]] = None,
@@ -8586,7 +8586,12 @@ def open_watch_grant(body: Any, *, profile: Optional[str], path: Any = None,
     ``job_profiles`` names the user's other profiles the call's jobs may run
     on ("for Fam, …"), as the phone's own jobs may. Like every route here it
     sits behind the dashboard's own auth, whose holder can already start
-    chats on any profile; the list only narrows what the Watch may name.
+    chats on any profile; the list only narrows what the Watch may name. A
+    native-http ticket is not that holder: Hermes binds it to one home
+    (``ticket_home``, the principal's ``profile_id``): its grant opens only
+    when the request's own profile is that home (403 otherwise), its list keeps only
+    profiles on that home (_clean_job_profiles), and its renewal carries the
+    call's jobs only while they all stay on that home (_carry_watch_jobs).
     """
     relay = relay or _relay_request
     start_audio = start_audio or (lambda grant: grant.audio.start())
@@ -8612,10 +8617,15 @@ def open_watch_grant(body: Any, *, profile: Optional[str], path: Any = None,
     carry_from = body.get("carry_jobs_from")
     if carry_from is not None and (not isinstance(carry_from, str) or not _WATCH_ID.match(carry_from)):
         raise TokenError(400, "carry_jobs_from must be a grant id")
+    if ticket_home is not None:
+        # Every tool the grant carries (chats, memory, live tokens, jobs)
+        # runs on the request's profile: a ticket's only while that is its
+        # own home.
+        _check_ticket_home(ticket_home, profile, "grant")
     wants_jobs = any(tool in WATCH_JOB_TOOLS or tool == WATCH_JOB_FOLLOW_UP for tool in requested)
     server = session_api() if max_jobs > 0 and wants_jobs else None
     # Only a grant that runs jobs reads them, as job_options.
-    job_profiles = _clean_job_profiles(body.get("job_profiles"), own=profile) if server is not None else ()
+    job_profiles = _clean_job_profiles(body.get("job_profiles"), own=profile, ticket_home=ticket_home) if server is not None else ()
     tools = tuple(tool for tool in WATCH_TOOLS if tool in requested)
     if any(tool in WATCH_CHAT_TOOLS for tool in tools) and session_routes() is None:
         # A Hermes without the session search route: the Watch asks the
@@ -8690,7 +8700,8 @@ def open_watch_grant(body: Any, *, profile: Optional[str], path: Any = None,
                 carry_from, grant,
                 max_jobs=max_jobs if body.get("max_jobs") is not None else None,
                 options=options if body.get("job_options") is not None else None,
-                profiles=job_profiles if body.get("job_profiles") is not None else None)
+                profiles=job_profiles if body.get("job_profiles") is not None else None,
+                ticket_home=ticket_home)
         if carried_from is None:
             grant.jobs = _WatchJobs(grant, max_jobs=max_jobs, options=options, server=server, profiles=job_profiles)
     for old in _watch_grants.add(grant):
@@ -8737,7 +8748,8 @@ def open_watch_grant(body: Any, *, profile: Optional[str], path: Any = None,
 
 def _carry_watch_jobs(old_id: str, grant: _WatchGrant, *, max_jobs: Optional[int],
                       options: Optional[Dict[str, str]],
-                      profiles: Optional[Tuple[str, ...]] = None) -> Optional[_WatchGrant]:
+                      profiles: Optional[Tuple[str, ...]] = None,
+                      ticket_home: Optional[str] = None) -> Optional[_WatchGrant]:
     """Moves the jobs of a call's previous grant ``old_id`` to its renewal
     ``grant``: the Watch keeps hearing their news and can list, cancel and
     approve them through the new grant, and the job cap counts across the
@@ -8747,7 +8759,14 @@ def _carry_watch_jobs(old_id: str, grant: _WatchGrant, *, max_jobs: Optional[int
 
     The old grant keeps answering for the jobs until it closes: the Watch
     may have sent a call through it before it heard of the renewal, and it
-    closes the old grant once it has."""
+    closes the old grant once it has.
+
+    A native ticket's renewal (``ticket_home``) carries only jobs bound to
+    its home: the old grant may be the owner's, whose profiles and running
+    jobs reach other homes, and carrying would hand their news, cancels and
+    approvals to the ticket. Such a renewal, and any from a ticket whose
+    home isn't known, starts with jobs of its own. Finished jobs count too:
+    their untold results are news the carry would hand on."""
     old = _watch_grants.get(old_id)
     if old is None or old is grant or old.profile != grant.profile:
         return None
@@ -8760,6 +8779,8 @@ def _carry_watch_jobs(old_id: str, grant: _WatchGrant, *, max_jobs: Optional[int
         with jobs.changed:
             if jobs.ended:
                 return None
+            if ticket_home is not None and (not ticket_home or not _watch_jobs_on_home(jobs, ticket_home)):
+                return None
             jobs.grant = grant
             if max_jobs is not None:
                 jobs.max_jobs = max_jobs
@@ -8770,6 +8791,13 @@ def _carry_watch_jobs(old_id: str, grant: _WatchGrant, *, max_jobs: Optional[int
             jobs.changed.notify_all()
     grant.jobs = jobs
     return old
+
+
+def _watch_jobs_on_home(jobs: "_WatchJobs", ticket_home: str) -> bool:
+    """Whether every profile ``jobs`` may name, and every job it runs on
+    another profile, is on ``ticket_home``. Called with ``jobs.lock`` held."""
+    names = set(jobs.profiles) | {job.profile for job in jobs.jobs.values() if job.profile is not None}
+    return all(_job_profile_on_home(name, ticket_home) for name in names)
 
 
 def _hand_back_watch_jobs(grant: _WatchGrant, old: _WatchGrant) -> None:
@@ -8805,13 +8833,16 @@ def _close_watch_grant_on_relay_later(grant: _WatchGrant,
                        type(exc).__name__)
 
 
-def revoke_watch_grant(body: Any, *, profile: Optional[str],
+def revoke_watch_grant(body: Any, *, profile: Optional[str], ticket_home: Optional[str] = None,
                        relay: Optional[Callable[..., Tuple[int, Dict[str, Any]]]] = None,
                        tell_relay: Optional[Callable[..., None]] = None) -> Dict[str, Any]:
-    """Ends one of this profile's grants here at once; the relay hears after."""
+    """Ends one of this profile's grants here at once; the relay hears after.
+    A native ticket (``ticket_home``) may end only its own home's."""
     tell_relay = tell_relay or _close_watch_grant_on_relay_later
     if not isinstance(body, dict) or not isinstance(body.get("grant_id"), str):
         raise TokenError(400, "grant_id is required")
+    if ticket_home is not None:
+        _check_ticket_home(ticket_home, profile, "revoke")
     grant = _watch_grants.get(body["grant_id"])
     # Only this profile's own grants.
     if grant is None or grant.limiter_key != _limiter_key(profile):
@@ -8829,7 +8860,10 @@ async def post_watch_tool_grant(request: Request, response: Response, profile: O
     no_store = {"Cache-Control": "no-store"}
     body = await _read_json_body(request, WATCH_GRANT_MAX_BODY_BYTES)
     try:
-        return {"ok": True, **(await _run_scoped(profile, lambda: open_watch_grant(body, profile=profile)))}
+        # A native ticket is one profile's principal; its home bounds the
+        # grant (open_watch_grant). Read on the executor: it may ask Hermes.
+        return {"ok": True, **(await _run_scoped(
+            profile, lambda: open_watch_grant(body, profile=profile, ticket_home=_native_ticket_home(request))))}
     except TokenError as exc:
         logger.warning("Watch tool grant failed: %s", exc)
         raise HTTPException(status_code=exc.status, detail=str(exc), headers=no_store)
@@ -8846,7 +8880,8 @@ async def post_watch_tool_revoke(request: Request, response: Response, profile: 
     body = await _read_json_body(request, WATCH_GRANT_MAX_BODY_BYTES)
     try:
         # Closing here is quick; the relay is told on a thread of its own.
-        return {"ok": True, **revoke_watch_grant(body, profile=profile)}
+        return {"ok": True, **(await _run_scoped(
+            profile, lambda: revoke_watch_grant(body, profile=profile, ticket_home=_native_ticket_home(request))))}
     except TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
     except Exception as exc:
@@ -9044,9 +9079,101 @@ def _clean_job_options(value: Any) -> Dict[str, str]:
     return options
 
 
-def _clean_job_profiles(value: Any, *, own: Optional[str]) -> Tuple[str, ...]:
+_NO_PRINCIPAL = object()
+
+
+def _native_ticket_home(request: Any) -> Optional[str]:
+    """The home a native-http ticket binds this request to, or None without one.
+
+    Hermes redeems the gateway ticket on the request and stamps the grant
+    (dashboard_auth/native_http.py): one profile's principal, whose
+    ``profile_id`` is the home it was minted for. The dashboard's owner may
+    run jobs on any profile; a ticket may not, and the grant's jobs would
+    otherwise run after the request is gone, where no binding reaches. Empty
+    means a ticket whose home this Hermes didn't say: name nothing. A hosted
+    plugin host sees no principal and can't run jobs, so only this process's
+    request needs the binding.
+    """
+    if request is None:
+        return None
+    grant = getattr(request.state, "native_http_principal", _NO_PRINCIPAL)
+    if grant is _NO_PRINCIPAL:
+        return None
+    if not isinstance(grant, dict):
+        # A stamp this plugin can't read is still a ticket: name nothing.
+        return ""
+    home = grant.get("profile_id")
+    if not isinstance(home, str) or not home:
+        return ""
+    if Path(home).is_absolute():
+        return home
+    # A profile name rather than its home: Hermes' own resolution.
+    try:
+        return str(_profile_dir(home))
+    except Exception:  # noqa: BLE001 — a name this Hermes can't place names nothing
+        logger.warning("A native ticket names a profile this Hermes can't place")
+        return ""
+
+
+def _check_ticket_home(ticket_home: str, profile: Optional[str], what: str) -> None:
+    """Refuses (403) a native ticket's request for a profile other than its home."""
+    if not ticket_home:
+        logger.warning("Watch tool %s refused: the native ticket's home is unknown", what)
+        raise TokenError(403, "This ticket's profile isn't known here")
+    name = (profile or "").strip()
+    if name.lower() in ("", "current"):
+        # The launch profile, the home this request runs in.
+        try:
+            from hermes_constants import get_hermes_home
+            on_home = Path(get_hermes_home()).resolve() == Path(ticket_home).resolve()
+        except Exception:  # noqa: BLE001 — an unresolvable home is on no home
+            on_home = False
+    else:
+        on_home = _job_profile_on_home(name, ticket_home)
+    if not on_home:
+        logger.warning("Watch tool %s refused: the request's profile isn't the native ticket's", what)
+        raise TokenError(403, "This ticket can't reach another profile")
+
+
+def _job_profile_on_home(name: str, ticket_home: str) -> bool:
+    """Whether profile ``name``'s home is the native ticket's ``ticket_home``."""
+    if not ticket_home:
+        return False
+    try:
+        return _profile_dir(name).resolve() == Path(ticket_home).resolve()
+    except Exception:  # noqa: BLE001 — an unresolvable home is on no home
+        return False
+
+
+def _profile_dir(name: str) -> Path:
+    """Profile ``name``'s home as session.create binds it."""
+    try:
+        from hermes_cli.profiles import get_profile_dir
+    except (ImportError, AttributeError):
+        return _job_profile_home_guess(name)
+    return Path(get_profile_dir(name))
+
+
+def _job_profile_home_guess(name: str) -> Path:
+    """Profile ``name``'s home on a Hermes without hermes_cli.profiles: the
+    homes _hermes_homes() lists, "default" naming the root; names fold case
+    as Hermes' normalize_profile_name does."""
+    try:
+        from hermes_constants import get_default_hermes_root
+    except (ImportError, AttributeError):  # an older Hermes: one home
+        from hermes_constants import get_hermes_home
+        root = Path(get_hermes_home())
+    else:
+        root = Path(get_default_hermes_root())
+    canon = name.strip().lower()
+    return root if canon == "default" else root / "profiles" / canon
+
+
+def _clean_job_profiles(value: Any, *, own: Optional[str],
+                        ticket_home: Optional[str] = None) -> Tuple[str, ...]:
     """The user's other profiles a Watch call's jobs may run on, as the
-    phone names them; the grant's own profile needs no naming."""
+    phone names them; the grant's own profile needs no naming. With a native
+    ticket's ``ticket_home``, only the profiles on that very home stay."""
     if value is None:
         return ()
     if not isinstance(value, list) or len(value) > WATCH_JOB_MAX_PROFILES:
@@ -9061,7 +9188,12 @@ def _clean_job_profiles(value: Any, *, own: Optional[str]) -> Tuple[str, ...]:
         if key and key not in seen:
             seen.add(key)
             names.append(name)
-    return tuple(names)
+    if ticket_home is None:
+        return tuple(names)
+    if not ticket_home:
+        # A ticket whose home this Hermes didn't say: nothing may be named.
+        return ()
+    return tuple(name for name in names if _job_profile_on_home(name, ticket_home))
 
 
 class _WatchJob:

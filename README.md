@@ -2011,6 +2011,15 @@ seals the answers back. This host opens no inbound route of its own.
   answered `not_started` and never guessed at. A grant with jobs answers
   `job_profiles` (the listed names, possibly none); an older plugin's
   answer leaves it out, and the Watch then sends such jobs through the iPhone.
+- **Native tickets** (plugin 0.51.4): a request authorised by a Hermes
+  native-http ticket is bound to the ticket's profile home. Its grant opens,
+  and its revoke runs, only when the request's profile is that home (else
+  403), keeps only
+  `job_profiles` on that home (usually none), and carries a previous grant's
+  jobs only while every profile they may name, and every job they ran on
+  another profile, is on it too; otherwise `jobs_carried_from` is left out and
+  the renewal starts with jobs of its own. A ticket whose home the plugin
+  can't read is refused (403).
 - **Follow-ups** (plugin 0.10): a grant that can start or cancel jobs also
   carries `interrupt_job` (`{job_id, message}`), as does one that names it. It puts the
   user's words into a job Hermes is still working on, through Hermes'
