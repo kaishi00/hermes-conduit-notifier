@@ -23,7 +23,7 @@ import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 from . import pulse_hermes as hermes
 from . import pulse_ledger as ledger
@@ -99,12 +99,12 @@ def profile_homes(home: Path) -> list[tuple[str, Path]]:
     for name, path in [("default", root)] + [(path.name, path) for path in named]:
         if path.resolve() not in seen and (path / hermes.STATE_DB).exists():
             seen.add(path.resolve())
-            found.append((name, path))
+            found.append((_clip(name, 40), path))  # a folder name goes into the context
     return found
 
 
 def recent_chats(home: Path, *, home_chat_id: str, since: float, zone: tzinfo,
-                 others: list[tuple[str, Path]] = ()) -> str:
+                 others: Sequence[tuple[str, Path]] = ()) -> str:
     """User and assistant text since ``since``, per chat, most recent chat
     first. Not the home chat, cron runs or hidden rows. Chats from ``others``
     (other profiles) are labelled with the profile's name."""
@@ -187,12 +187,14 @@ def _ago(epoch: Any, now: float) -> str:
     return f"{minutes} min ago" if minutes < 120 else f"{minutes // 60} h ago"
 
 
-def memory_files(home: Path, others: list[tuple[str, Path]] = ()) -> str:
-    """This profile's memory files, then other profiles' within one shared budget."""
+def memory_files(home: Path, others: Sequence[tuple[str, Path]] = ()) -> str:
+    """This profile's memory files, each within MEMORY_BUDGET, then other
+    profiles' files sharing one more MEMORY_BUDGET between them."""
     sources = [("", home, MEMORY_BUDGET)]
     if others:
-        share = max(500, MEMORY_BUDGET // (2 * len(others)))
-        sources += [(profile, path, share) for profile, path in others]
+        share = MEMORY_BUDGET // (2 * len(others))
+        if share >= 200:  # too thin a slice says nothing; leave them out
+            sources += [(profile, path, share) for profile, path in others]
     parts = []
     for profile, path, budget in sources:
         for name, label in (("USER.md", "What Hermes knows about the user"), ("MEMORY.md", "Hermes's own notes")):
@@ -229,7 +231,7 @@ def _active_jobs(home: Path) -> list[dict]:
             and job.get("state") not in ("paused", "completed")]
 
 
-def cron_jobs(home: Path, others: list[tuple[str, Path]] = ()) -> str:
+def cron_jobs(home: Path, others: Sequence[tuple[str, Path]] = ()) -> str:
     """Hermes's active cron jobs: a promise with a job behind it is handled."""
     active = [("", job) for job in _active_jobs(home)]
     for profile, path in others:

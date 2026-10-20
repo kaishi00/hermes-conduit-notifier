@@ -40,7 +40,8 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     pulse.add_argument("value", nargs="?", default="",
                        help="for home: the id of the chat to use, or 'auto' to find it by title; "
                             "for outcomes: how many to show, or a chat id; "
-                            "for report: 'now', 'on', 'off', a time like 08:00, or a time zone like Europe/Paris")
+                            "for report: 'now', 'on', 'off', times like 08:00,13:00, a time zone like Europe/Paris, "
+                            "'all-profiles' or 'this-profile'")
     parser.set_defaults(func=dispatch)
 
 
@@ -255,8 +256,8 @@ def _pulse_report(pulse_store: Any, value: str) -> int:
         return 0
     if value in ("all-profiles", "this-profile"):
         pulse_store.set("report_profiles", value.split("-")[0])
-        print("The shadow report reads every profile's chats." if value == "all-profiles"
-              else "The shadow report reads only this profile's chats.")
+        print("The shadow report reads every profile's chats, memories and cron jobs." if value == "all-profiles"
+              else "The shadow report reads only this profile.")
         return 0
     times = pulse_report.parse_times(value)
     if times:
