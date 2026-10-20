@@ -571,6 +571,17 @@ def _voice_persona_note(history: Any) -> str | None:
 
 
 def _is_child(session_id: Any) -> bool:
+    """A delegated child: Hermes' task-local delegation flag first, then the
+    ids ``subagent_start`` reported. The flag marks the child's whole run, so
+    it survives a compaction that rotates the session id (one no
+    ``subagent_start`` ever re-reported); ids still answer for callers
+    outside a child's run, like ``subagent_stop`` on the parent's thread."""
+    try:
+        from agent.delegation_context import is_delegated_child_context
+        if is_delegated_child_context():
+            return True
+    except Exception:  # noqa: BLE001 — Hermes without the module: ids only
+        pass
     value = _text(session_id)
     with _children_lock:
         return bool(value and value in _child_sessions)
