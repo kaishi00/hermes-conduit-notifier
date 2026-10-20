@@ -375,8 +375,9 @@ def _pre_approval_request(**kwargs: Any) -> None:
 
 
 def _post_approval_response(**kwargs: Any) -> None:
-    calls.cancel_alerts(_text(kwargs.get("session_key")), "approval")
-    _quietly(live_activity.reporter.thinking, _text(kwargs.get("session_key")))
+    session_key = _text(kwargs.get("session_key"))
+    calls.cancel_alerts(session_key, "approval")
+    _quietly(live_activity.reporter.thinking, _text(kwargs.get("session_id")) or session_key)
 
 
 def _pre_api_request(**kwargs: Any) -> None:
