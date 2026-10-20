@@ -232,6 +232,71 @@ def sessions(tmp_path, monkeypatch):
     plugin._child_sessions.clear()
 
 
+@pytest.fixture(autouse=True)
+def no_delegation_flag(monkeypatch):
+    """This Hermes has no delegation flag unless a test sets one."""
+    monkeypatch.setattr(plugin, "_delegated_child_check", False)
+
+
+@pytest.fixture
+def delegation_flag(monkeypatch):
+    state = {"set": False}
+    monkeypatch.setattr(plugin, "_delegated_child_check", lambda: state["set"])
+    return state
+
+
+def test_the_delegation_flag_marks_the_running_session_a_child(delegation_flag):
+    health = sys.modules["conduit_push.health_tool"]
+    delegation_flag["set"] = True
+    assert health._handle({"action": "overview"}, "rotated", plugin._is_child, None)["error"] == "subagent"
+    delegation_flag["set"] = False
+    assert not plugin._is_child("rotated")
+
+
+def test_a_background_task_ending_inside_its_childs_run_still_notifies(pushed, delegation_flag):
+    plugin._pre_llm_call(session_id="p", turn_id="t")
+    plugin._on_session_end(session_id="p", turn_id="t", completed=True, failed=False, interrupted=False)
+    delegation_flag["set"] = True
+    _subagent()
+    assert _types(pushed) == ["background_task.finished"]
+
+
+def test_the_delegation_flag_is_resolved_once(monkeypatch):
+    module = types.ModuleType("agent.delegation_context")
+    module.is_delegated_child_context = lambda: True
+    monkeypatch.setitem(sys.modules, "agent", types.ModuleType("agent"))
+    monkeypatch.setitem(sys.modules, "agent.delegation_context", module)
+    monkeypatch.setattr(plugin, "_delegated_child_check", None)
+    assert plugin._is_child("x")
+    assert plugin._delegated_child_check is module.is_delegated_child_context
+
+
+@pytest.mark.parametrize("broken", [None, "raises"])
+def test_a_missing_or_broken_delegation_module_leaves_ids_to_answer(monkeypatch, broken):
+    if broken:
+        module = types.ModuleType("agent.delegation_context")
+        module.__getattr__ = lambda name: (_ for _ in ()).throw(RuntimeError("half initialised"))
+        monkeypatch.setitem(sys.modules, "agent", types.ModuleType("agent"))
+        monkeypatch.setitem(sys.modules, "agent.delegation_context", module)
+    else:
+        monkeypatch.setitem(sys.modules, "agent.delegation_context", None)
+    monkeypatch.setattr(plugin, "_delegated_child_check", None)
+    assert not plugin._is_child("x")
+    assert plugin._delegated_child_check is False
+
+
+def test_a_delegation_check_that_raises_falls_back_to_ids(monkeypatch):
+    def broken():
+        raise TypeError("changed signature")
+
+    monkeypatch.setattr(plugin, "_delegated_child_check", broken)
+    plugin._subagent_start(child_session_id="known")
+    try:
+        assert plugin._is_child("known") and not plugin._is_child("x")
+    finally:
+        plugin._child_sessions.discard("known")
+
+
 def _compacted_child(add):
     """Parent "p" delegated "c", which compacted twice: c → c2 → c3."""
     add("p")

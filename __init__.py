@@ -420,7 +420,9 @@ def _subagent_stop(**kwargs: Any) -> None:
     # A subagent that ends inside the turn that started it (delegate_task
     # waits for it) is part of that turn's reply: only one that outlives it,
     # a background task, notifies. Nor does a nested one, or a muted cron job's.
-    if (_inside_parent_turn(parent, kwargs.get("parent_turn_id")) or _is_child(parent)
+    # The parent is asked about by id: this hook can run in the child's own
+    # run, where Hermes' delegation flag describes the child.
+    if (_inside_parent_turn(parent, kwargs.get("parent_turn_id")) or _is_child_session(parent)
             or cron_runs.quiet(parent, None)):
         return
     status = _text(kwargs.get("child_status")) or "finished"
@@ -578,12 +580,51 @@ _not_child_lineage: set[str] = set()
 _LINEAGE_HOPS = 32
 
 
+# Hermes' "running inside a delegated child" check (agent.delegation_context,
+# Hermes 0.22+), looked up once: False when this Hermes has none.
+_delegated_child_check: Any = None
+_delegated_check_failed = False
+
+
+def _inside_delegated_child() -> bool:
+    """Whether the code running now is a delegated child's run. Hermes binds
+    the flag in the child's own thread, on a copy of the parent's context, so
+    the parent never sees it set."""
+    global _delegated_child_check, _delegated_check_failed
+    if _delegated_child_check is None:
+        try:
+            from agent.delegation_context import is_delegated_child_context
+
+            _delegated_child_check = is_delegated_child_context
+        except ImportError:
+            _delegated_child_check = False  # an older Hermes: ids and lineage answer
+        except Exception:  # noqa: BLE001 — a broken module must not break every hook
+            logger.warning("conduit_push: Hermes' delegation context failed to load", exc_info=True)
+            _delegated_child_check = False
+    if _delegated_child_check is False:
+        return False
+    try:
+        return bool(_delegated_child_check())
+    except Exception:  # noqa: BLE001
+        if not _delegated_check_failed:
+            _delegated_check_failed = True
+            logger.warning("conduit_push: Hermes' delegation check failed; using session ids", exc_info=True)
+        return False
+
+
 def _is_child(session_id: Any) -> bool:
-    """A delegated child: an id ``subagent_start`` reported, or one that
-    continues it. With ``compression.in_place: false`` a compaction gives the
-    agent a new session id without firing ``subagent_start`` again; Hermes
-    records the old id as the new session's parent and ends the old one with
-    ``compression``, so following those links back finds the child it was."""
+    """Whether the session running now is a delegated child: Hermes'
+    delegation flag, else :func:`_is_child_session`."""
+    return _inside_delegated_child() or _is_child_session(session_id)
+
+
+def _is_child_session(session_id: Any) -> bool:
+    """Whether this id is a delegated child, whichever session is running: an
+    id ``subagent_start`` reported, or one that continues it. With
+    ``compression.in_place: false`` a compaction gives the agent a new session
+    id without firing ``subagent_start`` again; Hermes records the old id as
+    the new session's parent and ends the old one with ``compression``, so
+    following those links back finds the child it was."""
     value = _text(session_id)
     if not value:
         return False
