@@ -163,7 +163,7 @@ def _pulse(args: argparse.Namespace) -> int:
     from . import pulse, pulse_delivery
     home = get_hermes_home()
     action = args.pulse_action
-    if action in ("status", "probe", "off", "outcomes", "memory") and not (Path(home) / pulse_delivery.store.DB_NAME).exists():
+    if action in ("status", "probe", "off", "outcomes") and not (Path(home) / pulse_delivery.store.DB_NAME).exists():
         # Never turned on: say so without leaving a file behind.
         print("Pulse: off (never turned on). `hermes conduit-push pulse on` to start it.")
         return 1 if action == "probe" else 0
@@ -301,7 +301,7 @@ def _pulse_memory(pulse_store: Any, home: Any, value: str, extra: str) -> int:
               else "Pulse memory is off. What it kept stays until you forget it.")
         return 0
     if value == "forget":
-        if not extra.lstrip("#").isdigit():
+        if not extra.lstrip("#").isdecimal():
             print("Usage: hermes conduit-push pulse memory forget <item number>")
             return 2
         if not pulse_store.close_item(int(extra.lstrip("#")), status="cancelled", closed_by="user"):

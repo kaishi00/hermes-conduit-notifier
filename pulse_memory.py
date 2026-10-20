@@ -96,6 +96,7 @@ class Chat:
     chat_id: str
     after_id: int  # read rows after this one...
     since: float  # ...written after this time
+    read_to: float  # when the last row already read was written (``since`` when none)
 
 
 def _text(content: Any) -> str:
@@ -143,11 +144,11 @@ def due_chats(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, 
             if mark and (mark["retry_at"] > now or mark["message_id"] >= row["last_id"]):
                 continue
             if mark and mark["message_id"] > 0:
-                yield Chat(profile, home, row["chat_id"], mark["message_id"], since)
+                yield Chat(profile, home, row["chat_id"], mark["message_id"], since, mark["at"])
                 continue
             parent = marks.get((profile, row["parent"])) if row["parent"] else None
             start = max(since, parent["at"]) if parent and parent["message_id"] > 0 else since
-            yield Chat(profile, home, row["chat_id"], 0, start)
+            yield Chat(profile, home, row["chat_id"], 0, start, start)
 
 
 def chunks(rows: Sequence[Any], zone: tzinfo, now: float) -> list[list[Any]]:
@@ -197,7 +198,7 @@ def _row_with(evidence: str, chunk: Sequence[Any], hint: Any) -> Optional[Any]:
         return None
     order = list(chunk)
     if isinstance(hint, int) and not isinstance(hint, bool) and 1 <= hint <= len(chunk):
-        order.insert(0, chunk[hint - 1])
+        order.insert(0, order.pop(hint - 1))
     for row in order:
         text = _norm(_text(row["content"]))
         if all(part in text for part in parts):
@@ -205,13 +206,14 @@ def _row_with(evidence: str, chunk: Sequence[Any], hint: Any) -> Optional[Any]:
     return None
 
 
-def _due(value: Any, words: Any, chunk: Sequence[Any], zone: tzinfo) -> tuple[str, Optional[float]]:
+def _due(value: Any, words: Any, chunk: Sequence[Any], row: Any, zone: tzinfo) -> tuple[str, Optional[float]]:
     """The due date as said and its time, only when the words that gave it
-    are in the chunk."""
+    are on the item's own line or the one either side ("Friday?" "Yes")."""
     if not isinstance(value, str) or not value.strip():
         return "", None
     said = _norm(words)
-    if not said or not any(said in _norm(_text(row["content"])) for row in chunk):
+    at = next(n for n, other in enumerate(chunk) if other is row)
+    if not said or not any(said in _norm(_text(other["content"])) for other in chunk[max(0, at - 1):at + 2]):
         return "", None
     value = value.strip().replace(" ", "T")
     for form in ("%Y-%m-%dT%H:%M", "%Y-%m-%d"):
@@ -228,13 +230,14 @@ def _item(raw: Any, chunk: Sequence[Any], zone: tzinfo) -> Optional[dict[str, An
         return None
     kind = str(raw.get("kind") or "").strip().lower()
     text = _clip(raw.get("text"), 300)
+    # The prompt asks for 200; the rest is room for quotes and ellipses.
     evidence = _clip(raw.get("evidence"), 300).strip(" \"'“”‘’")
     if kind not in KINDS or not text or not evidence:
         return None
     row = _row_with(evidence, chunk, raw.get("line"))
     if row is None:
         return None  # not something that was said
-    due, due_at = _due(raw.get("due"), raw.get("due_words"), chunk, zone)
+    due, due_at = _due(raw.get("due"), raw.get("due_words"), chunk, row, zone)
     return {"kind": kind, "text": text, "evidence": evidence, "explicit": int(raw.get("explicit") is True),
             "due": due, "due_at": due_at, "message_id": row["id"], "mentioned_at": row["timestamp"]}
 
@@ -265,13 +268,16 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
             if not chat.profile:
                 raise
             continue
+        read_to = chat.read_to
         for chunk in chunks(rows, zone, now):
             if done["chunks"] >= MAX_CHUNKS or not still_leader():
                 return done
             last = chunk[-1]
             # The ledger only has this profile's tool calls.
-            outcomes = [] if chat.profile else pulse_store.outcomes_between(
-                chat.chat_id, chunk[0]["timestamp"] - IDLE_S, last["timestamp"], MAX_OUTCOMES)
+            # Outcomes after the last row already read, so none is shown twice.
+            outcomes = [] if chat.profile else [o for o in pulse_store.outcomes_between(
+                chat.chat_id, max(chunk[0]["timestamp"] - IDLE_S, read_to), last["timestamp"], MAX_OUTCOMES)
+                if o["at"] > read_to]
             try:
                 items, tokens = extract(llm, chunk, zone, outcomes)
             except Exception as error:  # noqa: BLE001 — a model or network failure waits for a retry
@@ -280,10 +286,14 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
                 logger.warning("conduit_push: Pulse memory couldn't read a chat (try %d of %d): %s",
                                failures, MAX_FAILURES, type(error).__name__)
                 if failures >= MAX_FAILURES:
-                    pulse_store.advance(chat.profile, chat.chat_id, message_id=last["id"], at=last["timestamp"])
+                    pulse_store.advance(chat.profile, chat.chat_id, message_id=last["id"], at=last["timestamp"],
+                                        after_id=chat.after_id)
                 break  # the rest of this chat waits for its next run
-            pulse_store.advance(chat.profile, chat.chat_id, message_id=last["id"], at=last["timestamp"],
-                                items=items)
+            if pulse_store.advance(chat.profile, chat.chat_id, message_id=last["id"], at=last["timestamp"],
+                                   items=items, after_id=chat.after_id) is None:
+                break  # another process read this chunk meanwhile
+            chat = Chat(chat.profile, chat.home, chat.chat_id, last["id"], chat.since, last["timestamp"])
+            read_to = last["timestamp"]
             done["chunks"] += 1
             done["items"] += len(items)
             done["tokens"] += tokens

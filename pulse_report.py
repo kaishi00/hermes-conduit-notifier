@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import re
 import secrets
+import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
@@ -103,13 +104,31 @@ def profile_homes(home: Path) -> list[tuple[str, Path]]:
     return found
 
 
+def their_home_chat(home: Path) -> str:
+    """Another profile's own Pulse home chat, so its reports aren't read
+    as chats: the one its store names, else the one titled like Pulse's.
+    "" when it has none."""
+    try:
+        if (Path(home) / store.DB_NAME).exists():
+            theirs = store.open_store(home)
+            chosen, title = theirs.get("home_session_key"), theirs.get("home_title") or "Pulse"
+        else:
+            chosen, title = "", store.DEFAULTS["home_title"]
+        if chosen:
+            return chosen
+        chats = hermes.find_home_chat(home, title)
+    except (hermes.HermesUnreadable, sqlite3.Error):
+        return ""
+    return chats[0].chat_id if chats else ""
+
+
 def recent_chats(home: Path, *, home_chat_id: str, since: float, zone: tzinfo,
                  others: Sequence[tuple[str, Path]] = ()) -> str:
     """User and assistant text since ``since``, per chat, most recent chat
     first. Not the home chat, cron runs or hidden rows. Chats from ``others``
     (other profiles) are labelled with the profile's name."""
     chats: dict[tuple[str, str], dict[str, Any]] = {}
-    sources = [("", home, home_chat_id)] + [(name, path, "") for name, path in others]
+    sources = [("", home, home_chat_id)] + [(name, path, their_home_chat(path)) for name, path in others]
     for profile, path, exclude in sources:
         try:
             rows = hermes.recent_messages(path, exclude_chat=exclude, since=since)

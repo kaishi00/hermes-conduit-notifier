@@ -114,6 +114,7 @@ CREATE TABLE IF NOT EXISTS items (
     chat_id TEXT NOT NULL,
     message_id INTEGER NOT NULL,
     kind TEXT NOT NULL,
+    -- The model's own words: only ``evidence`` is checked against the chat.
     text TEXT NOT NULL,
     evidence TEXT NOT NULL,
     explicit INTEGER NOT NULL,
@@ -362,15 +363,22 @@ class PulseStore:
         return [dict(row) for row in rows]
 
     def advance(self, profile: str, chat_id: str, *, message_id: int, at: float,
-                items: Sequence[dict[str, Any]] = ()) -> list[int]:
+                items: Sequence[dict[str, Any]] = (), after_id: int = 0) -> Optional[list[int]]:
         """Records a read chunk: its items, and the chat read up to row
         ``message_id`` (written at ``at``), in one transaction, so a chunk is
-        never half kept or read twice. Returns the new items' ids."""
+        never half kept. Only if the chat was still read up to ``after_id``,
+        so a chunk two processes read is kept once. Returns the new items'
+        ids, or None when another reader got there first."""
         columns = ("profile", "chat_id", "message_id", "kind", "text", "evidence", "explicit", "due", "due_at",
                    "mentioned_at", "recorded_at", "valid_from")
         now, ids = time.time(), []
         with _lock, self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT message_id FROM watermarks WHERE profile=? AND chat_id=?",
+                               (profile, chat_id)).fetchone()
+            if (row["message_id"] if row else 0) != after_id:
+                conn.execute("ROLLBACK")
+                return None
             for item in items:
                 row = {"profile": profile, "chat_id": chat_id, "recorded_at": now,
                        "valid_from": item["mentioned_at"], **item}

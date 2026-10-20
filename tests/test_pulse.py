@@ -1161,6 +1161,15 @@ def test_only_items_said_in_the_chat_are_kept():
         memory.extract(FakeModel(["items"]), chunk, UTC)
 
 
+def test_a_due_date_must_be_said_near_its_item():
+    chunk = [_row(1, "user", "Book the vet", DAY + 60), _row(2, "assistant", "When?", DAY + 70),
+             _row(3, "user", "Thursday works", DAY + 80), _row(4, "user", "Also my sister visits", DAY + 90)]
+    item = lambda evidence: {"kind": "commitment", "text": "x", "evidence": evidence, "due": "2026-10-22",
+                             "due_words": "Thursday"}
+    items, _ = memory.extract(FakeModel({"items": [item("Book the vet"), item("my sister visits")]}), chunk, UTC)
+    assert [i["due"] for i in items] == ["", "2026-10-22"]  # two lines away, then the line just after
+
+
 def test_chat_reads_match_hermes(db, tmp_path):
     db.session()
     db.session("work", title="Work", pinned=0)
@@ -1211,6 +1220,35 @@ def test_a_quiet_chat_is_read_once_from_where_it_stopped(remembering, db):
     assert remembering.store.item_counts() == {"commitment": 1}
 
 
+def test_a_chunk_two_processes_read_is_kept_once(remembering, db):
+    db.message("user", "Remind me to renew my passport", sid="work", at=DAY + 60)
+    db.message("assistant", "Will do.", sid="work", at=DAY + 70)
+    reply = {"items": [{"kind": "commitment", "text": "x", "evidence": "renew my passport", "line": 1}]}
+
+    class Racing(FakeModel):
+        def __call__(self, instructions, text):
+            if not self.shown:  # the other process finishes the same chunk during this call
+                _remember(remembering, FakeModel(reply), DAY + 70 + memory.IDLE_S)
+            return super().__call__(instructions, text)
+
+    done = _remember(remembering, Racing(reply), DAY + 70 + memory.IDLE_S)
+    assert done["chunks"] == 0 and len(remembering.store.open_items()) == 1
+
+
+def test_tool_outcomes_show_once_across_chunks(remembering, db):
+    remembering.store.set("memory_since", DAY)
+    db.message("user", "add it", sid="work", at=DAY + 60)
+    db.message("assistant", "done", sid="work", at=DAY + 120)
+    db.message("user", "next one", sid="work", at=DAY + 120 + memory.GAP_S + 60)
+    db.message("assistant", "ok", sid="work", at=DAY + 120 + memory.GAP_S + 70)
+    remembering.store.add_outcome(dict(at=DAY + 100, session_id="work", turn_id="t", task_id="", tool_call_id="",
+                                       tool="conduit_phone", action="add_reminder", label="Vet", args_digest="",
+                                       status="ok", error_type="", error="", ids_json="{}", duration_ms=1))
+    model = FakeModel()
+    _remember(remembering, model, DAY + memory.GAP_S + memory.IDLE_S + 200)
+    assert ["add_reminder" in text for text in model.shown] == [True, False]
+
+
 def test_a_continued_chat_starts_where_its_parent_stopped(remembering, db):
     db.message("user", "first part", sid="work", at=DAY + 60)
     db.message("assistant", "ok", sid="work", at=DAY + 70)
@@ -1243,14 +1281,17 @@ def test_other_profiles_are_remembered_with_their_name(remembering, db, tmp_path
     bot_home.mkdir(parents=True)
     bot = StateDB(bot_home, request.node.callspec.params["db"])
     bot.session("b1", title="Bot Chat", pinned=0)
+    bot.session("bp", title="Pulse", pinned=1)  # that profile's own Pulse chat
+    bot.message("user", "Pulse shadow report text", sid="bp", at=DAY + 60)
     bot.message("user", "My mum's birthday is on 3 March", sid="b1", at=DAY + 60)
     bot.message("assistant", "Noted.", sid="b1", at=DAY + 70)
     model = FakeModel({"items": [{"kind": "fact", "text": "The user's mum's birthday is 3 March.",
                                   "evidence": "My mum's birthday is on 3 March", "line": 1, "explicit": True}]})
     _remember(remembering, model, DAY + 70 + memory.IDLE_S,
-              [("", tmp_path, SID), ("nahida", bot_home, ""), ("gone", tmp_path / "nowhere", "")])
+              [("", tmp_path, SID), ("nahida", bot_home, report.their_home_chat(bot_home)), ("gone", tmp_path / "nowhere", "")])
     [item] = remembering.store.open_items("fact")
     assert (item["profile"], item["chat_id"]) == ("nahida", "b1")
+    assert len(model.shown) == 1 and report.their_home_chat(bot_home) == "bp"
     assert memory.describe(item, UTC).startswith("#1 [nahida] The user's mum's birthday is 3 March.\n")
 
 
@@ -1300,7 +1341,7 @@ def test_memory_command(remembering, db, capsys, monkeypatch):
     assert "Promise (1)\n  #1 Hermes will check the build. (due 2026-10-21)\n      \"I'll check the build\" (20 Oct)" in out
     assert run("fact") == 0 and "hasn't kept" in capsys.readouterr().out
     assert run("mood") == 2
-    assert run("forget", "x") == 2 and run("forget", "#9") == 1
+    assert run("forget", "x") == 2 and run("forget", "#²") == 2 and run("forget", "#9") == 1
     assert run("forget", "#1") == 0 and remembering.store.open_items() == []
     assert run("now") == 1  # Pulse is off
     remembering.store.set("enabled", True)

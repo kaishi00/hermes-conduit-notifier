@@ -335,7 +335,7 @@ def _memory_run(home: Path, home_chat_id: str, now: float) -> None:
         pulse_store = open_store(home)
         sources = [("", Path(home), home_chat_id)]
         if pulse_store.get("report_profiles") == "all":
-            sources += [(name, path, "") for name, path in report.profile_homes(home)]
+            sources += [(name, path, report.their_home_chat(path)) for name, path in report.profile_homes(home)]
         done = memory.run(pulse_store, sources, _memory_llm, zone=report_zone(pulse_store, home), now=now,
                           still_leader=lambda: _leads(pulse_store))
         if done["chunks"] or done["failed"]:
