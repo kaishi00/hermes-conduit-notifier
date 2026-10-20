@@ -321,9 +321,13 @@ def _maybe_memory(pulse_store: store.PulseStore, home: Path, now: float) -> None
     since = pulse_store.get("memory_since")
     if not isinstance(since, (int, float)) or isinstance(since, bool):
         pulse_store.set("memory_since", now)
-    chat, _ = home_chat(pulse_store, home)
+    chat, problem = home_chat(pulse_store, home)
+    _log_problem(problem)
     if chat is None:
-        return  # without the home chat, Pulse's own reports would be read as chats
+        if asked:
+            logger.info("conduit_push: Pulse: memory didn't read chats; it needs the home chat first, so its own "
+                        "reports aren't read as chats")
+        return
     pulse_store.set("memory_run_at", now)
     _memory_thread = threading.Thread(target=_memory_run, args=(home, chat.chat_id, now, _stop), name="conduit-pulse-memory",
                                       daemon=True)
@@ -342,7 +346,6 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
             usage = pulse_store.get("memory_usage")
             usage = usage if isinstance(usage, dict) else {}
             pulse_store.set("memory_usage", {key: int(usage.get(key, 0) or 0) + done[key] for key in done})
-            pulse_store.set("memory_read_at", time.time())
     except Exception:  # noqa: BLE001 — the next run tries again
         logger.warning("conduit_push: Pulse memory run failed", exc_info=True)
 

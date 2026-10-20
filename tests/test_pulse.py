@@ -1349,7 +1349,8 @@ def test_memory_command(remembering, db, capsys, monkeypatch):
     run = lambda value="", extra="": cli.dispatch(types.SimpleNamespace(
         conduit_push_action="pulse", pulse_action="memory", value=value, extra=extra))
     remembering.store.path.unlink()
-    assert run() == 0 and run("fact") == 0 and not remembering.store.path.exists()  # listing leaves no file
+    assert run() == 0 and run("fact") == 0 and run("now") == 0 and run("forget", "1") == 0
+    assert not remembering.store.path.exists()  # nothing but on/off leaves a file on a home that never ran Pulse
     assert run("on") == 0 and remembering.store.get("memory") is True
     capsys.readouterr()
     assert run() == 0 and "hasn't kept anything" in capsys.readouterr().out
