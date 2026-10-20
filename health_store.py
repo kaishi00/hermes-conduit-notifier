@@ -304,6 +304,10 @@ class HealthStore:
     def __init__(self, home: Any, clock: Callable[[], float] = time.time) -> None:
         self.path = Path(home) / FILE_NAME
         self.clock = clock
+        # The kid the current voice request authenticated with: the data read
+        # re-checks it, so a re-registration between authentication and the
+        # read can't serve the replacement generation's data to the old key.
+        self.voice_kid: str | None = None
 
     # Connections ---------------------------------------------------------------
 
@@ -447,6 +451,8 @@ class HealthStore:
                                   status=409)
             request_key = self._device_key(db, device_id, kid, INFO_VOICE_REQUEST)
             answer_key = self._device_key(db, device_id, kid, INFO_VOICE_ANSWER)
+        # Pin the authenticated generation for the data read that follows.
+        self.voice_kid = kid
         plaintext = open_sealed(request_key, envelope.get("nonce"), envelope.get("ct"),
                                 voice_aad("request", tool, kid, device_id, call_id))
         try:
@@ -548,11 +554,19 @@ class HealthStore:
 
     # Queries (the agent's tool) ------------------------------------------------------
 
-    def overview(self, only: str | None = None) -> dict[str, Any]:
-        """``only``: one device id (a voice read); no other device is read."""
+    def overview(self, only: str | None = None, expected_kid: str | None = None) -> dict[str, Any]:
+        """``only``: one device id (a voice read); no other device is read.
+        ``expected_kid``: the key generation the request authenticated with —
+        a device re-registered meanwhile reads as nothing shared."""
         with self._read() as db:
             if db is None:
                 return {"devices": []}
+            if expected_kid and only is not None:
+                row = db.execute("SELECT kid FROM devices WHERE id=?", (only,)).fetchone()
+                if row is None or row[0] != expected_kid:
+                    raise HealthError("unknown_key",
+                                      "This device's health key isn't on this profile; set it up again",
+                                      status=409)
             devices = []
             for device_id, name, last_seen, categories, tz, detailed in db.execute(
                     "SELECT id, name, last_seen, categories, tz, detailed FROM devices"
@@ -596,12 +610,22 @@ class HealthStore:
 
     @contextlib.contextmanager
     def reader(self, device: Any = None,
-               exact: bool = False) -> Iterator[tuple[sqlite3.Connection, tuple[str, str, int]] | None]:
+               exact: bool = False,
+               expected_kid: str | None = None) -> Iterator[tuple[sqlite3.Connection, tuple[str, str, int]] | None]:
+        """``expected_kid``: re-checked inside this read transaction, so an
+        in-flight request that survives a re-registration reads nothing
+        rather than the replacement generation's data."""
         with self._read() as db:
             if db is None:
                 yield None
                 return
             chosen = self.latest_device(db, device, exact)
+            if chosen is not None and expected_kid is not None:
+                row = db.execute("SELECT kid FROM devices WHERE id=?", (chosen[0],)).fetchone()
+                if row is None or row[0] != expected_kid:
+                    raise HealthError("unknown_key",
+                                      "This device's health key isn't on this profile; set it up again",
+                                      status=409)
             yield (db, chosen) if chosen else None
 
     def daily(self, db: sqlite3.Connection, device: str, metrics: list[str], start: str, end: str) -> list[dict]:

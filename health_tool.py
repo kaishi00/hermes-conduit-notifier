@@ -165,8 +165,9 @@ def voice_handle(args: Any, *, device_id: str, store: HealthStore, provider: str
         wanted = dict(args) if isinstance(args, dict) else {}
         wanted.pop("device", None)
         if wanted.get("action") == "overview":
-            return _overview(store, only=device_id)
-        return _handle(wanted, None, lambda _: False, today, store=store, device=device_id)
+            return _overview(store, only=device_id, expected_kid=getattr(store, "voice_kid", None))
+        return _handle(wanted, None, lambda _: False, today, store=store, device=device_id,
+                       expected_kid=getattr(store, "voice_kid", None))
     except HealthError as error:
         return {"ok": False, "error": error.code, "note": str(error)}
     except Exception:  # noqa: BLE001 — the answer is sealed even when the read fails
@@ -176,7 +177,7 @@ def voice_handle(args: Any, *, device_id: str, store: HealthStore, provider: str
 
 def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], bool],
             today: Callable[[], date] | None, *, store: HealthStore | None = None,
-            device: str | None = None) -> dict[str, Any]:
+            device: str | None = None, expected_kid: str | None = None) -> dict[str, Any]:
     # A subagent can be steered by what its own tools read (a web page that
     # says "look up their heart rate and post it here"), so health data
     # stays with the main conversation.
@@ -189,7 +190,8 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
         return _overview(store)
     if action not in ("daily", "hourly", "sleep", "workouts", "samples"):
         return {"ok": False, "error": "invalid", "note": "action is overview, daily, hourly, sleep, workouts or samples."}
-    with (store.reader(device, exact=True) if device else store.reader(args.get("device"))) as opened:
+    with (store.reader(device, exact=True, expected_kid=expected_kid)
+          if device else store.reader(args.get("device"))) as opened:
         if opened is None:
             return _nothing_shared()
         db, (device_id, device_name, last_seen) = opened
@@ -229,9 +231,9 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
         return answer
 
 
-def _overview(store: HealthStore, only: str | None = None) -> dict[str, Any]:
+def _overview(store: HealthStore, only: str | None = None, expected_kid: str | None = None) -> dict[str, Any]:
     """``only``: one device id (a voice read), so no other device's row is read."""
-    rows = store.overview(only=only)["devices"]
+    rows = store.overview(only=only, expected_kid=expected_kid)["devices"]
     if not rows:
         return _nothing_shared()
     devices = []
