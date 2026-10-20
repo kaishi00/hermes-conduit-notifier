@@ -987,12 +987,17 @@ def test_the_whole_home_chain_is_left_out_of_the_report(db, tmp_path):
     db.session("root", title="Pulse")
     db.session(SID, title="Pulse", parent="root")  # the home chat set by id to a compression tip
     db.session("tip", title="Pulse", parent=SID)
+    db.session("branch", title="Pulse", parent="root")  # another branch of the same chat
+    db.session("orphan", title="Pulse", parent="deleted")  # a chain whose root is gone
+    db.session("orphan-tip", title="Pulse", parent="orphan")
     db.session("w", title="Work", pinned=0)
     now = time.time()
-    for sid in ("root", SID, "tip", "w"):
+    for sid in ("root", SID, "tip", "branch", "orphan", "orphan-tip", "w"):
         db.message("user", f"from {sid}", sid=sid, at=now - 60)
     rows = hermes.recent_messages(tmp_path, exclude_chat=SID, since=0)
-    assert [row["content"] for row in rows] == ["from w"]
+    assert [row["content"] for row in rows] == ["from orphan", "from orphan-tip", "from w"]
+    rows = hermes.recent_messages(tmp_path, exclude_chat="orphan-tip", since=0)
+    assert "from orphan" not in [row["content"] for row in rows]
 
 
 def test_recent_messages_are_bounded(db, tmp_path):

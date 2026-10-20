@@ -125,7 +125,7 @@ def recent_messages(home: Path, *, exclude_chat: str, since: float, max_chars: i
     return _run(home, (
         "WITH RECURSIVE up(id, parent) AS (SELECT id, parent_session_id FROM sessions WHERE id = ? "
         "UNION SELECT s.id, s.parent_session_id FROM sessions s JOIN up ON s.id = up.parent), "
-        "excluded(id) AS (SELECT ? UNION SELECT id FROM up WHERE parent IS NULL "
+        "excluded(id) AS (SELECT ? UNION SELECT id FROM up "
         "UNION SELECT s.id FROM sessions s JOIN excluded e ON s.parent_session_id = e.id) "
         "SELECT * FROM (SELECT s.id AS chat_id, s.title, m.role, substr(m.content, 1, ?) AS content, m.timestamp, "
         "m.id FROM messages m JOIN sessions s ON s.id = m.session_id "
