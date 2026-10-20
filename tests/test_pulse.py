@@ -145,6 +145,12 @@ SCHEMAS = [pytest.param(FIXTURE_SCHEMA, id="fixture"),
                         marks=pytest.mark.skipif(HERMES_SCHEMA is None, reason="no Hermes to read the schema from"))]
 
 
+@pytest.fixture(autouse=True)
+def _no_lcm_settings(monkeypatch):
+    """The report's budget reads hermes-lcm's threshold from the environment."""
+    monkeypatch.delenv(report.LCM_THRESHOLD, raising=False)
+
+
 @pytest.fixture(params=SCHEMAS)
 def db(request, tmp_path):
     return StateDB(tmp_path, request.param)
@@ -873,7 +879,7 @@ def test_the_report_context_stays_within_its_budget(db, tmp_path, pulse_store):
 
 def test_the_whole_report_message_stays_under_its_budget(db, tmp_path, live, monkeypatch):
     # A host swapped a 22k-character report for a file pointer the turn couldn't open.
-    monkeypatch.delenv(report.LCM_ENABLED, raising=False)
+    monkeypatch.setenv(report.LCM_THRESHOLD, "50000")  # LCM's cap above Pulse's own
     now = time.time()
     db.session()
     for n in range(40):
@@ -895,8 +901,7 @@ def test_the_report_stays_under_lcms_externalization_threshold(db, tmp_path, liv
         db.session(f"c{n}", title=f"Chat {n}", pinned=0)
         for m in range(20):
             db.message("user", "x" * 1000, sid=f"c{n}", at=now - 3600 + n * 10 + m)
-    monkeypatch.setenv(report.LCM_ENABLED, "true")
-    monkeypatch.delenv(report.LCM_THRESHOLD, raising=False)
+    # LCM's default threshold counts even when nothing here says it's on.
     assert report.report_budget() == report.LCM_DEFAULT_THRESHOLD - report.LCM_MARGIN
     context, since = report.build(tmp_path, live.store, home_chat_id=SID, now=now)
     assert len(report.report_text("p12345678-1", context, since)) < report.LCM_DEFAULT_THRESHOLD
@@ -905,8 +910,11 @@ def test_the_report_stays_under_lcms_externalization_threshold(db, tmp_path, liv
     assert report.report_budget() == report.REPORT_BUDGET
     monkeypatch.setenv(report.LCM_THRESHOLD, "junk")
     assert report.report_budget() == report.LCM_DEFAULT_THRESHOLD - report.LCM_MARGIN
-    monkeypatch.setenv(report.LCM_ENABLED, "false")
-    assert report.report_budget() == report.REPORT_BUDGET
+    monkeypatch.setenv(report.LCM_THRESHOLD, "1")
+    assert report.report_budget() == len(report.REPORT_TEXT) + 1_000
+    # The message itself never goes over, whatever the context.
+    text = report.report_text("p12345678-12", "y" * 50_000, "Tue 20 Oct 18:00")
+    assert len(text) <= report.report_budget() and text.endswith(">>>")
 
 
 def test_items_and_ratings_are_read_from_the_text():

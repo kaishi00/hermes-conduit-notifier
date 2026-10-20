@@ -38,11 +38,10 @@ MIN_WINDOW_S = 4 * 3600.0
 WINDOW_S = 86400.0
 # Budgets, in characters, so the report turn stays small for a cheap model.
 # The whole message stays under report_budget(): hermes-lcm's large output
-# externalization swaps a longer user message for a pointer to a file (seen
+# externalization (when on) swaps a longer user message for a pointer to a file (seen
 # 2026-10-20 at 22k characters), and a Pulse turn can't use tools to open it.
 # Chats get what the rest leaves.
 REPORT_BUDGET = 15_000
-LCM_ENABLED = "LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED"
 LCM_THRESHOLD = "LCM_LARGE_OUTPUT_EXTERNALIZATION_THRESHOLD_CHARS"
 LCM_DEFAULT_THRESHOLD = 12_000  # hermes-lcm's own default
 LCM_MARGIN = 500
@@ -170,7 +169,7 @@ def recent_chats(home: Path, *, home_chat_id: str, since: float, zone: tzinfo,
             lines.append(line)
             size += len(line) + 1
         if not lines:
-            break
+            continue  # this chat's newest line doesn't fit; an older chat's may
         block = title + "\n".join(reversed(lines))
         out.append(block)
         used += len(block) + 2  # with the blank line that joins it to the next
@@ -336,28 +335,24 @@ def build(home: Path, pulse_store: store.PulseStore, *, home_chat_id: str, now: 
     sections = [section for section in sections if section]
     title = f"## Chats since {start}\n"
     # Room the instructions and the other sections leave, so the whole
-    # message stays under report_budget(). The 100 covers what report_text
-    # fills into REPORT_TEXT: the tag, the start time, the kinds and the fence.
-    whole = report_budget()
-    left = whole - len(REPORT_TEXT) - sum(len(section) + 2 for section in sections) - len(title) - 100
+    # message stays under report_budget(). The 100 estimates what report_text
+    # fills into REPORT_TEXT (the tag, the start time, the kinds and the
+    # fence); report_text itself cuts anything still over.
+    left = report_budget() - len(REPORT_TEXT) - sum(len(section) + 2 for section in sections) - len(title) - 100
     budget = min(CHATS_BUDGET, max(MIN_CHATS_BUDGET, left))
     try:
         chats = recent_chats(home, home_chat_id=home_chat_id, since=since, zone=zone, others=others, budget=budget)
     except hermes.HermesUnreadable as error:
         chats = f"Couldn't read the chats ({type(error).__name__})."
     sections.append(title + (chats or "No chats since then."))
-    context = "\n\n".join(sections)
-    room = whole - len(REPORT_TEXT) - 100
-    if len(context) > room:  # the other sections alone were too long: keep the start, which says what it is
-        context = context[:room - 1] + "…"
-    return context, start
+    return "\n\n".join(sections), start
 
 
 def report_budget() -> int:
-    """REPORT_BUDGET, or less when hermes-lcm would externalize a message
-    that long."""
-    if os.environ.get(LCM_ENABLED, "").strip().lower() not in ("1", "true", "yes", "on"):
-        return REPORT_BUDGET
+    """REPORT_BUDGET, kept under hermes-lcm's externalization threshold.
+    The threshold counts whether or not LCM's externalization looks on from
+    here: a report a little shorter than it could be costs little, one LCM
+    swaps for a file pointer is lost."""
     try:
         threshold = int(os.environ.get(LCM_THRESHOLD) or LCM_DEFAULT_THRESHOLD)
     except ValueError:
@@ -368,11 +363,17 @@ def report_budget() -> int:
 
 
 def report_text(tag: str, context: str, since: str) -> str:
+    """The report turn's message, its context cut at the end if it would
+    take the message over report_budget()."""
+    kinds = ", ".join(KINDS)
     # A fresh marker per report, so text in the context can't close the fence.
     fence = secrets.token_hex(6)
     while fence in context:
         fence = secrets.token_hex(6)
-    return REPORT_TEXT.format(tag=tag, kinds=", ".join(KINDS), context=context, since=since, fence=fence)
+    room = report_budget() - len(REPORT_TEXT.format(tag=tag, kinds=kinds, context="", since=since, fence=fence))
+    if len(context) > room:
+        context = context[:max(0, room - 1)] + "…"
+    return REPORT_TEXT.format(tag=tag, kinds=kinds, context=context, since=since, fence=fence)
 
 
 # Ratings ------------------------------------------------------------------------
