@@ -913,6 +913,8 @@ def test_report_command(live, db, capsys, monkeypatch):
     assert run("8:00, 17:00,12:30") == 0 and live.store.get("report_time") == "08:00,12:30,17:00"
     assert run("8:00,24:00") == 2 and live.store.get("report_time") == "08:00,12:30,17:00"
     assert run("off") == 0 and live.store.get("daily_report") is False
+    (live.store.path).unlink()  # never turned on: report settings still stick
+    assert run("off") == 0 and store.open_store(live.store.path.parent).get("daily_report") is False
 
 
 def test_the_report_times():

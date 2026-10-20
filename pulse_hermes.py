@@ -128,7 +128,7 @@ def recent_messages(home: Path, *, exclude_chat: str, since: float, max_chars: i
         "SELECT * FROM (SELECT s.id AS chat_id, s.title, m.role, substr(m.content, 1, ?) AS content, m.timestamp, "
         "m.id FROM messages m JOIN sessions s ON s.id = m.session_id "
         "WHERE m.timestamp >= ? AND m.role IN ('user', 'assistant') AND m.active = 1 AND m.display_kind IS NULL "
-        "AND s.source != 'cron' AND s.hidden = 0 AND s.id NOT IN (SELECT id FROM excluded) "
+        "AND (s.source IS NULL OR s.source != 'cron') AND s.hidden = 0 AND s.id NOT IN (SELECT id FROM excluded) "
         "ORDER BY m.timestamp DESC, m.id DESC LIMIT ?) ORDER BY timestamp, id"
     ), (exclude_chat, max_chars, since, limit))
 
@@ -137,14 +137,12 @@ def user_text_after(home: Path, *, session_id: str, tag: str) -> list[str]:
     """What the user wrote after the user row carrying ``tag``, up to the
     next hidden (Pulse) row."""
     rows = _run(home, (
-        "SELECT role, content, display_kind FROM messages WHERE session_id = ? AND id > ("
+        "SELECT content, display_kind FROM messages WHERE session_id = ? AND role = 'user' AND id > ("
         "SELECT MAX(id) FROM messages WHERE session_id = ? AND role = 'user' AND instr(content, ?) > 0) "
         "ORDER BY id"
     ), (session_id, session_id, tag))
     text = []
     for row in rows:
-        if row["role"] != "user":
-            continue
         if row["display_kind"] is not None:
             break
         text.append(row["content"] if isinstance(row["content"], str) else "")
