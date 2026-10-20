@@ -1269,12 +1269,17 @@ def test_a_continued_chat_starts_where_its_parent_stopped(remembering, db):
     db.message("assistant", "ok", sid="work", at=DAY + 70)
     model = FakeModel()
     _remember(remembering, model, DAY + 70 + memory.IDLE_S)
+    db.message("user", "unread when compressed", sid="work", at=DAY + 3000)
+    db.message("assistant", "noted", sid="work", at=DAY + 3010)
     db.session("work2", title="Work", pinned=0, parent="work")
     db.message("user", "first part", sid="work2", at=DAY + 60)  # the tail compression carried over
+    db.message("user", "unread when compressed", sid="work2", at=DAY + 3000)
     db.message("user", "second part", sid="work2", at=DAY + 4000)
     db.message("assistant", "ok", sid="work2", at=DAY + 4010)
     _remember(remembering, model, DAY + 4010 + memory.IDLE_S)
-    assert "first part" not in model.shown[1] and "second part" in model.shown[1]
+    _remember(remembering, model, DAY + 4010 + memory.IDLE_S)  # the child waited for its parent
+    assert [text.count("unread when compressed") for text in model.shown] == [0, 1, 0]
+    assert "first part" not in model.shown[2] and "second part" in model.shown[2]
 
 
 def test_a_failing_chunk_is_retried_then_skipped(remembering, db):
@@ -1344,7 +1349,7 @@ def test_the_loop_runs_memory_on_its_own_thread(remembering, db, monkeypatch):
     pulse.tick(start + 120)
     pulse._memory_thread.join(5)
     assert [(c["task"], c["json_mode"]) for c in calls] == [(memory.TASK, True)]
-    assert remembering.store.get("memory_usage") == {"chunks": 1, "items": 0, "tokens": 7, "failed": 0}
+    assert remembering.store.get("memory_usage") == {"chunks": 1, "tokens": 7, "failed": 0}
     pulse._stop.set()  # an unloaded plugin's run makes no more calls
     db.message("user", "more", sid="work", at=start + 130)
     db.message("assistant", "ok", sid="work", at=start + 131)
@@ -1379,6 +1384,9 @@ def test_memory_command(remembering, db, capsys, monkeypatch):
     assert run("forget", "#1") == 0 and remembering.store.open_items() == []
     assert run("now") == 1  # Pulse is off
     remembering.store.set("enabled", True)
+    remembering.store.set("memory", False)
+    assert run("now") == 1
+    remembering.store.set("memory", True)
     assert run("now") == 0 and remembering.store.get("memory_requested") is True
     capsys.readouterr()
     cli.dispatch(types.SimpleNamespace(conduit_push_action="pulse", pulse_action="status", value=""))

@@ -127,7 +127,9 @@ def due_chats(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, 
               now: float) -> Iterator[Chat]:
     """Chats with rows not read yet that have been quiet for ``IDLE_S``, in
     each source (profile, home, home chat to leave out). A chat Hermes
-    continued from another (compression) starts where its parent stopped."""
+    continued from another (compression) starts where its parent stopped,
+    so it waits while its parent still has rows to read: compression copies
+    some of them into it."""
     since = pulse_store.get("memory_since")
     if not isinstance(since, (int, float)) or isinstance(since, bool):
         return
@@ -139,6 +141,8 @@ def due_chats(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, 
             if not profile:
                 raise
             continue  # another profile's chats are a bonus, not a reason to fail
+        behind = {row["chat_id"] for row in rows
+                  if (marks.get((profile, row["chat_id"])) or {"message_id": 0})["message_id"] < row["last_id"]}
         for row in rows:
             if row["last_at"] > now - IDLE_S:
                 continue
@@ -147,6 +151,8 @@ def due_chats(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, 
                 continue
             if mark and mark["message_id"] > 0:
                 yield Chat(profile, home, row["chat_id"], mark["message_id"], since, mark["at"])
+                continue
+            if row["parent"] in behind:
                 continue
             parent = marks.get((profile, row["parent"])) if row["parent"] else None
             start = max(since, parent["at"]) if parent and parent["message_id"] > 0 else since

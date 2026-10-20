@@ -297,6 +297,9 @@ def _pulse_memory(pulse_store: Any, home: Any, value: str, extra: str) -> int:
         if not pulse_store.get("enabled"):
             print("Pulse is off: `hermes conduit-push pulse on` first.")
             return 1
+        if not pulse_store.get("memory"):
+            print("Pulse memory is off: `hermes conduit-push pulse memory on` first.")
+            return 1
         pulse_store.set("memory_requested", True)
         print("Asked the dashboard to read quiet chats now; see `hermes conduit-push pulse memory` in a minute or two.")
         return 0
@@ -338,7 +341,7 @@ def _pulse_memory(pulse_store: Any, home: Any, value: str, extra: str) -> int:
 def _pulse_outcomes(pulse_store: Any, value: str) -> int:
     from . import pulse_ledger
     limit, session_id = 20, None
-    if value.isdigit():
+    if value.isdecimal() and len(value) < 6:
         limit = max(1, min(int(value), 500))
     elif value:
         session_id = value

@@ -312,9 +312,11 @@ def _maybe_memory(pulse_store: store.PulseStore, home: Path, now: float) -> None
     running. Memory starts from the first time it runs: older chats wait
     for a backfill."""
     global _memory_thread
-    if not pulse_store.get("memory") or (_memory_thread is not None and _memory_thread.is_alive()):
+    if _memory_thread is not None and _memory_thread.is_alive():
         return
     asked = pulse_store.take_request("memory_requested")
+    if not pulse_store.get("memory"):
+        return  # an ask made while memory was off doesn't fire when it's turned on
     last = pulse_store.get("memory_run_at")
     if not asked and isinstance(last, (int, float)) and now - last < MEMORY_EVERY_S:
         return
@@ -345,7 +347,8 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
         if done["chunks"] or done["failed"]:
             usage = pulse_store.get("memory_usage")
             usage = usage if isinstance(usage, dict) else {}
-            pulse_store.set("memory_usage", {key: int(usage.get(key, 0) or 0) + done[key] for key in done})
+            pulse_store.set("memory_usage", {key: int(usage.get(key, 0) or 0) + done[key]
+                                            for key in ("chunks", "tokens", "failed")})
     except Exception:  # noqa: BLE001 — the next run tries again
         logger.warning("conduit_push: Pulse memory run failed", exc_info=True)
 
