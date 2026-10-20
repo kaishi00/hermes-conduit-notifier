@@ -9793,6 +9793,11 @@ class _WatchJobs:
         if wanted != approval["request_id"]:
             # Only the request the Watch showed: a newer one needs its own answer.
             return {"ok": True, "status": "not_pending", "message": "That approval request has been replaced."}
+        if choice == "once" and approval.get("cut"):
+            # The Watch showed only part of the command: approving it would
+            # approve what the user never saw.
+            return {"ok": False, "status": 400,
+                    "detail": "The command was too long to show whole, so it can only be denied"}
         params: Dict[str, Any] = {"session_id": job.session_id, "choice": choice}
         if approval["request_id"]:
             params["request_id"] = approval["request_id"]
