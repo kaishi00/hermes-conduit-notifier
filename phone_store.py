@@ -463,45 +463,49 @@ class PhoneStore:
             finally:
                 connection.close()
 
-    def _older_schema(self) -> bool:
-        """True when the file was written by an older plugin, so a read
-        upgrades it first instead of reading as nothing."""
+    def _open_read(self) -> tuple[sqlite3.Connection, str | None] | None:
+        """A read-only connection and the schema it holds (None when it can't
+        be read), or None when there's no file (gone since a wipe)."""
+        if not self.path.exists():
+            return None
         try:
             connection = sqlite3.connect(f"{self.path.as_uri()}?mode=ro", uri=True, timeout=15)
         except sqlite3.DatabaseError:
-            return False
+            return None
         try:
+            connection.execute("PRAGMA query_only=ON")
             version = _meta(connection, "schema")
         except sqlite3.DatabaseError:
-            return False
-        finally:
-            connection.close()
-        return version is not None and version.isdigit() and int(version) < SCHEMA_VERSION
+            version = None
+        return connection, version
 
     @contextlib.contextmanager
     def _read(self) -> Iterator[sqlite3.Connection | None]:
-        if not self.path.exists():
+        opened = self._open_read()
+        if opened is None:
             yield None
             return
-        if self._older_schema():
-            with contextlib.suppress(PhoneError, sqlite3.DatabaseError, OSError):
-                with self._write():
-                    pass
+        connection, version = opened
         try:
-            connection = sqlite3.connect(f"{self.path.as_uri()}?mode=ro", uri=True, timeout=15)
-        except sqlite3.DatabaseError:
-            # Deleted since the check above (a wipe).
-            yield None
-            return
-        try:
+            if version is not None and version.isdigit() and int(version) < SCHEMA_VERSION:
+                # An older plugin's file: upgrade it first. One that can't be
+                # upgraded now (another process holds it, a disk error) still
+                # has its data, so it isn't read as nothing.
+                connection.close()
+                try:
+                    with self._write():
+                        pass
+                except (PhoneError, sqlite3.DatabaseError, OSError) as error:
+                    raise PhoneError("upgrade_pending", "The calendar store is being upgraded; try again in a moment",
+                                     status=503) from error
+                opened = self._open_read()
+                if opened is None:
+                    yield None
+                    return
+                connection, version = opened
             # Only opening counts as "unreadable"; an error in the caller's
             # own query goes up as it is.
-            try:
-                connection.execute("PRAGMA query_only=ON")
-                readable = _meta(connection, "schema") == str(SCHEMA_VERSION)
-            except sqlite3.DatabaseError:
-                readable = False
-            yield connection if readable else None
+            yield connection if version == str(SCHEMA_VERSION) else None
         finally:
             connection.close()
 

@@ -1148,9 +1148,8 @@ def _phone_batch(batch_id="batch-0001", sent_at="2026-10-14T08:00:00+01:00", **s
                   alarms=ALARMS, contacts=CONTACTS)
 
 
-def test_a_version_1_store_upgrades_on_its_first_read_and_keeps_its_data(store, iphone):
+def _make_version_1(store):
     import sqlite3
-    store.ingest(iphone.seal(_batch()))
     db = sqlite3.connect(store.path)
     db.execute("ALTER TABLE devices DROP COLUMN alarms")
     db.execute("ALTER TABLE devices DROP COLUMN alarms_at")
@@ -1158,11 +1157,45 @@ def test_a_version_1_store_upgrades_on_its_first_read_and_keeps_its_data(store, 
     db.execute("UPDATE meta SET value='1' WHERE key='schema'")
     db.commit()
     db.close()
+
+
+def test_a_version_1_store_upgrades_on_its_first_read_and_keeps_its_data(store, iphone):
+    store.ingest(iphone.seal(_batch()))
+    _make_version_1(store)
     assert [device["id"] for device in store.devices()] == [DEVICE]
     assert len(_events(store)) == 5
     store.ingest(iphone.seal(_phone_batch("batch-0002", sent_at="2026-10-14T08:01:00+01:00")))
     assert store.status(DEVICE)["device"]["counts"]["contacts"] == 2
 
+
+def test_a_version_1_store_that_cant_upgrade_yet_says_so_instead_of_reading_as_empty(store, iphone, monkeypatch):
+    import contextlib
+    import sqlite3
+    store.ingest(iphone.seal(_batch()))
+    _make_version_1(store)
+
+    @contextlib.contextmanager
+    def locked():
+        raise sqlite3.OperationalError("database is locked")
+        yield
+
+    monkeypatch.setattr(store, "_write", locked)
+    for read in (lambda: store.status(DEVICE), store.devices, lambda: _events(store)):
+        with pytest.raises(phone.PhoneError) as raised:
+            read()
+        assert raised.value.code == "upgrade_pending" and raised.value.status == 503
+    monkeypatch.undo()
+    assert [device["id"] for device in store.devices()] == [DEVICE]
+
+
+def test_a_read_opens_the_file_once(store, iphone, monkeypatch):
+    import sqlite3
+    store.ingest(iphone.seal(_batch()))
+    opened = []
+    connect = sqlite3.connect
+    monkeypatch.setattr(phone.sqlite3, "connect", lambda *a, **k: opened.append(a) or connect(*a, **k))
+    assert store.status(DEVICE)["stored"] is True
+    assert len(opened) == 1
 
 def test_alarms_and_contacts_land_and_are_forgotten_when_turned_off(store, iphone):
     result = store.ingest(iphone.seal(_phone_batch()))
