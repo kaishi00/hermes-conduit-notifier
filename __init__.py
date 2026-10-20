@@ -653,14 +653,13 @@ def _continues_a_child(session_id: str, children: set[str]) -> bool | None:
     Hermes' session store; None when the store couldn't be read."""
     import sqlite3
 
-    path = Path(get_hermes_home()) / "state.db"
-    if not path.exists():
-        return None
     try:
+        path = Path(get_hermes_home()) / "state.db"
+        if not path.exists():
+            return None
         db = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=1.0)
-    except sqlite3.Error:
-        logger.warning("conduit_push: couldn't open the session store to check a subagent's lineage",
-                       exc_info=True)
+    except Exception:  # noqa: BLE001 — a hook must never break the turn
+        _lineage_unread("couldn't open the session store to check a subagent's lineage")
         return None
     try:
         current = session_id
@@ -677,12 +676,25 @@ def _continues_a_child(session_id: str, children: set[str]) -> bool | None:
             if parent in children:
                 return True
             current = parent
-        return False
+        return None  # longer than we follow: not an answer to keep
     except sqlite3.Error:
-        logger.warning("conduit_push: couldn't read a subagent's lineage from the session store", exc_info=True)
+        _lineage_unread("couldn't read a subagent's lineage from the session store")
         return None
     finally:
         db.close()
+
+
+_lineage_warned = False
+
+
+def _lineage_unread(message: str) -> None:
+    """Warn once: while a child runs every hook may ask again."""
+    global _lineage_warned
+    if _lineage_warned:
+        logger.debug("conduit_push: %s", message, exc_info=True)
+        return
+    _lineage_warned = True
+    logger.warning("conduit_push: %s", message, exc_info=True)
 
 
 def _text(value: Any) -> str:

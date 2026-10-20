@@ -340,6 +340,20 @@ def test_a_session_branched_from_a_child_is_not_its_continuation(sessions):
     assert not plugin._is_child("b")
 
 
+def test_a_lineage_longer_than_followed_is_not_kept(sessions, monkeypatch):
+    _compacted_child(sessions)
+    monkeypatch.setattr(plugin, "_LINEAGE_HOPS", 1)
+    assert not plugin._is_child("c3")
+    assert "c3" not in plugin._not_child_lineage
+
+
+def test_a_hermes_home_that_raises_answers_no(sessions, monkeypatch):
+    plugin._subagent_start(child_session_id="c")
+    monkeypatch.setattr(plugin, "get_hermes_home", lambda: (_ for _ in ()).throw(RuntimeError("no home")))
+    assert not plugin._is_child("c3")
+    assert plugin._is_child("c")
+
+
 def test_with_no_child_running_the_store_is_not_read(sessions, monkeypatch):
     monkeypatch.setattr(plugin, "_continues_a_child", lambda *args: pytest.fail("read the store"))
     assert not plugin._is_child("anyone")
