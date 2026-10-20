@@ -15,7 +15,7 @@ from hermes_constants import get_hermes_home
 
 from . import (call_tool, call_watches, calls, clarify_loop, client, conduit_first, cron_runs, desktop_selected,
                health_tool, live_activity, location_tool, maps_tool, phone_tool, present_tool, reply_sources,
-               settings_tool, show_tool)
+               settings_tool, show_tool, turn_surface)
 from .session_titles import title as _session_title, titled as _titled
 from .client import enqueue
 from .events import approval_decision, clarification_text, event_id, is_silent_response, plain_text, push_event
@@ -475,8 +475,9 @@ def _text_parts(content: Any) -> list[str]:
 
 def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
     """Context for this turn: calls from Hermes the user declined or missed
-    since the last turn of this chat (#449), the voice persona hint, and
-    which of the user's data Conduit shares here, to use before other routes."""
+    since the last turn of this chat (#449), where in Conduit the message
+    was sent from, the voice persona hint, and which of the user's data
+    Conduit shares here, to use before other routes."""
     session_id = _text(kwargs.get("session_id"))
     child = _is_child(session_id)
     if not child:
@@ -485,12 +486,23 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
         _quietly(live_activity.reporter.turn_started, session_id)
     notes = [
         None if child else calls.outcome_note(session_id),
+        None if child else _turn_surface_note(kwargs.get("platform"), kwargs.get("user_message")),
         _voice_persona_note(kwargs.get("conversation_history")),
         # Subagents can't use the shared data (each tool refuses them).
         None if child else conduit_first.note(),
     ]
     context = "\n\n".join(note for note in notes if note)
     return {"context": context} if context else None
+
+
+def _turn_surface_note(platform: Any, message: Any) -> str | None:
+    """Which Conduit surface sent this turn's message (turn_surface.py)."""
+    transport = reply_sources.current_transport()
+    try:
+        from_conduit = reply_sources.turn_source(platform, transport) == "conduit"
+    except Exception:  # noqa: BLE001 — a hook must never break the turn
+        from_conduit = False
+    return turn_surface.note(from_conduit, message, transport)
 
 
 def _note_turn_start(turn_id: Any) -> None:

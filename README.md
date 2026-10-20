@@ -1257,6 +1257,34 @@ have their own switch) and calls don't follow this.
   `PUT` with `{"source": "desktop", "notify": false}` changes one.
   Capability `reply-sources`.
 
+## Where in Conduit a message was sent (plugin 0.51+)
+
+Hermes knows a turn came from Conduit, not whether you typed it on an iPad
+or said it to CarPlay while driving. Just before Conduit sends a message it
+tells the plugin the surface and how the message was entered, and that
+message's turn gets one line of context, for example
+`[Conduit: this message came from CarPlay in the user's car, spoken. They are likely driving: …]`.
+
+- `POST /api/plugins/conduit_push/turn-surface` with
+  `{"session_id": "<runtime session id>", "text_sha256": "<hex>", "surface": "carplay", "input": "spoken"}`
+  answers `{"ok": true, "recorded": true}`. `text_sha256` is the SHA-256 of
+  the UTF-8 text Conduit sends in `prompt.submit`. Surfaces: `iphone`,
+  `ipad`, `mac`, `vision`, `watch`, `carplay`, `siri`; `input` is `typed`
+  or `spoken`, or left out when unknown (a Shortcut). Capability
+  `turn-surface`.
+- The report is kept on Hermes' in-memory record of that chat (up to 8, for
+  15 minutes) and taken by the turn whose message has that hash, when the
+  turn came from Conduit's socket. A message that steered or redirected a
+  running turn never labels a later one (a goal's next step, a background
+  result), and a turn that merges several queued messages, or one Hermes
+  rewrote, gets no line. The plugin's own Watch jobs and call chats name
+  the Watch themselves.
+- `prompt.submit` refuses keys Hermes doesn't know, so the value can't ride
+  there. With the gateway out of this process (`plugins.isolation: host`, a
+  compute host) the route answers `"recorded": false`, and a turn on a chat
+  that Desktop and Conduit both have open isn't placed as Conduit's
+  (reply_sources), so neither gets a line, as before.
+
 ## Files in group chats (plugin 0.38+)
 
 A group chat room isn't a session, so Hermes' attach RPCs can't take a file

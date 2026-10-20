@@ -5984,6 +5984,61 @@ async def post_session_takeover(request: Request, response: Response,
     return {"ok": True, **result}
 
 
+# --- Where in Conduit a message was sent (hermes-conduit#888) ----------------
+#
+# Conduit names the surface (iPhone, iPad, Watch, CarPlay, Siri…) and how the
+# message was entered just before it sends it, with the message text's hash;
+# that message's turn gets one line saying so (turn_surface.py). It's kept on Hermes' own record of
+# the chat, so it needs the gateway in this process, like the Desktop views;
+# without it the answer says nothing was kept and the turn has no line.
+
+TURN_SURFACE_MAX_BODY_BYTES = 1024
+_turn_surface_module: Any = None
+_turn_surface_lock = threading.Lock()
+
+
+def _turn_surface() -> Any:
+    """turn_surface.py beside this folder, loaded once."""
+    global _turn_surface_module
+    with _turn_surface_lock:
+        if _turn_surface_module is None:
+            path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "turn_surface.py")
+            spec = importlib.util.spec_from_file_location("conduit_push_dashboard_turn_surface", path)
+            if spec is None or spec.loader is None:
+                raise RuntimeError("This plugin install is missing turn_surface.py; update the plugin")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _turn_surface_module = module
+        return _turn_surface_module
+
+
+def record_turn_surface(body: Any) -> bool:
+    """Keeps the surface on the chat's live record; False when there's none
+    here. Raises ValueError for a body that isn't one."""
+    module = _turn_surface()
+    report = module.parse(body)
+    server = _hermes_session_api()
+    session = server._sessions.get(report.session_id) if server is not None else None
+    if not isinstance(session, dict):
+        return False
+    module.record(session, report)
+    return True
+
+
+@router.post("/turn-surface")
+async def post_turn_surface(request: Request, response: Response) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    no_store = {"Cache-Control": "no-store"}
+    body = await _read_json_body(request, TURN_SURFACE_MAX_BODY_BYTES)
+    try:
+        recorded = record_turn_surface(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc), headers=no_store)
+    except Exception as exc:
+        raise _unexpected("turn-surface", exc, feature="Turn surface")
+    return {"ok": True, "recorded": recorded}
+
+
 # --- End-to-end encrypted notifications (#431) -------------------------------
 #
 # Conduit creates a per-pairing secret on the phone and hands it to this
@@ -9046,6 +9101,9 @@ class _WatchJobTransport:
 
     # A Watch job's reply is a Conduit one (reply_sources.py, #115).
     conduit_client = "conduit"
+    # And came from the Watch, spoken (turn_surface.py, hermes-conduit#888).
+    conduit_surface = "watch"
+    conduit_input = "spoken"
 
     def __init__(self, jobs: "_WatchJobs") -> None:
         self._jobs = jobs
@@ -11028,6 +11086,9 @@ class _WatchChatTransport:
     would to the app's WebSocket; ``_closed`` is what Hermes' reaper reads."""
 
     conduit_client = "conduit"
+    # And came from the Watch, spoken (turn_surface.py, hermes-conduit#888).
+    conduit_surface = "watch"
+    conduit_input = "spoken"
 
     def __init__(self, chat: "_WatchCallChat") -> None:
         self._chat = chat
@@ -13618,6 +13679,7 @@ ROUTE_CAPABILITIES = (
     "watch-local-live-approvals",
     "local-live-read-back",
     "desktop-views",
+    "turn-surface",
     "hermes-calls",
     "hermes-call-presence",
     "hermes-call-outcomes",
