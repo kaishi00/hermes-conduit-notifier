@@ -425,7 +425,8 @@ class LocationStore:
     def register_key(self, body: Any) -> dict[str, Any]:
         """A device's X25519 public key in, this profile's for that device
         out. Replaces the device's earlier key (the phone re-keys after a
-        reinstall or when the user turns sharing off and on)."""
+        reinstall or when the user turns sharing off and on). Registering
+        the same device key keeps its latest fix and batch watermark."""
         if not isinstance(body, dict):
             raise LocationError("malformed", "Expected a JSON object")
         device_id = body.get("device_id")
@@ -443,7 +444,7 @@ class LocationStore:
         kid = key_id(device_public, host_public)
         now = int(self.clock())
         with self._write() as db:
-            known = db.execute("SELECT 1 FROM devices WHERE id=?", (device_id,)).fetchone()
+            known = db.execute("SELECT device_public FROM devices WHERE id=?", (device_id,)).fetchone()
             count = db.execute("SELECT COUNT(*) FROM devices").fetchone()[0]
             if not known and count >= MAX_DEVICES:
                 raise LocationError("too_many_devices",
@@ -454,12 +455,14 @@ class LocationStore:
                 " VALUES(?,?,?,?,?,?,?)"
                 " ON CONFLICT(id) DO UPDATE SET name=excluded.name, device_public=excluded.device_public,"
                 " host_private=excluded.host_private, host_public=excluded.host_public, kid=excluded.kid,"
-                " created_at=excluded.created_at, last_sent=NULL",
+                " created_at=excluded.created_at,"
+                " last_sent=CASE WHEN devices.device_public=excluded.device_public THEN devices.last_sent END",
                 (device_id, name, device_public, host_private, host_public, kid, now),
             )
             # A new key means a reinstall or sharing turned off and on: what
             # this device said before is no longer where the user is.
-            db.execute("DELETE FROM fixes WHERE device=?", (device_id,))
+            if known and bytes(known[0]) != device_public:
+                db.execute("DELETE FROM fixes WHERE device=?", (device_id,))
             generation = _meta(db, "generation")
         return {"kid": kid, "host_public_key": b64u(host_public), "generation": generation}
 
