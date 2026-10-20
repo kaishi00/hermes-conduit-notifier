@@ -6052,8 +6052,8 @@ async def post_turn_surface(request: Request, response: Response) -> Dict[str, A
 E2E_LIMIT = 10
 E2E_WINDOW_S = 60.0
 E2E_MAX_BODY_BYTES = 4 * 1024
-_E2E_KID = re.compile(r"^[0-9a-f]{32}$")
-_E2E_B64URL = re.compile(r"^[A-Za-z0-9_-]{43}$")  # 32 bytes, unpadded
+_E2E_KID = re.compile(r"^[0-9a-f]{32}\Z")
+_E2E_B64URL = re.compile(r"^[A-Za-z0-9_-]{43}\Z")  # 32 bytes, unpadded
 _e2e_limiter = _MintLimiter(E2E_LIMIT, E2E_WINDOW_S, message="Too many encryption key requests; try again shortly")
 _e2e_lock = threading.Lock()
 
