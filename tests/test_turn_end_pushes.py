@@ -313,8 +313,16 @@ def test_a_child_whose_compaction_replaced_its_id_is_still_a_child(pushed, sessi
     assert plugin._is_child("c3") and plugin._is_child("c2")
     assert health._handle({"action": "overview"}, "c3", plugin._is_child, None)["error"] == "subagent"
     assert "c3" in plugin._compacted_children, "learned, so later calls skip the store"
-    plugin._subagent_stop(child_session_id="c", parent_session_id="p", parent_turn_id="t")
-    assert not plugin._compacted_children and not plugin._is_child("c3"), "the child ended: no more reads"
+    # Hermes reports the id the child ends under.
+    plugin._subagent_stop(child_session_id="c3", parent_session_id="p", parent_turn_id="t")
+    assert not plugin._child_sessions and not plugin._compacted_children
+    assert not plugin._is_child("c3"), "the child ended: no more reads"
+
+
+def test_a_child_ending_under_a_compacted_id_no_one_asked_about_is_cleared(pushed, sessions):
+    _compacted_child(sessions)
+    plugin._subagent_stop(child_session_id="c3", parent_session_id="p", parent_turn_id="t")
+    assert not plugin._child_sessions
 
 
 def test_the_parent_and_its_own_compactions_are_not_children(sessions):

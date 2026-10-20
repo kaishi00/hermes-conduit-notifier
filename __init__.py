@@ -23,8 +23,8 @@ from .events import approval_decision, clarification_text, event_id, is_silent_r
 
 logger = logging.getLogger(__name__)
 _child_sessions: set[str] = set()
-# Ids a reported child moved to on compaction, kept while any child runs.
-_compacted_children: set[str] = set()
+# Id a reported child moved to on compaction -> the id it was reported by.
+_compacted_children: dict[str, str] = {}
 _children_lock = threading.Lock()
 _profile = "default"
 _clarify_loop_active = False
@@ -416,10 +416,20 @@ def _subagent_start(**kwargs: Any) -> None:
 def _subagent_stop(**kwargs: Any) -> None:
     child = _text(kwargs.get("child_session_id"))
     if child:
+        # Hermes reports the id the child ends under, which a compaction may
+        # have moved from the one subagent_start reported.
         with _children_lock:
-            _child_sessions.discard(child)
-            if not _child_sessions:
-                _compacted_children.clear()
+            reported = _compacted_children.get(child, child)
+            unknown = reported not in _child_sessions and bool(_child_sessions)
+            known = set(_child_sessions)
+        if unknown:
+            found = _continues_a_child(child, known)
+            if isinstance(found, str):
+                reported = found
+        with _children_lock:
+            _child_sessions.discard(reported)
+            for learned in [key for key, root in _compacted_children.items() if root == reported]:
+                del _compacted_children[learned]
     parent = _text(kwargs.get("parent_session_id"))
     # A subagent that ends inside the turn that started it (delegate_task
     # waits for it) is part of that turn's reply: only one that outlives it,
@@ -638,12 +648,13 @@ def _is_child_session(session_id: Any) -> bool:
             return True
         if not _child_sessions or value in _not_child_lineage:
             return False  # no child running: nothing to read the store for
-        known = _child_sessions | _compacted_children
+        known = _child_sessions | set(_compacted_children)
     continues = _continues_a_child(value, known)
     if continues:
         with _children_lock:
-            if _child_sessions:
-                _compacted_children.add(value)
+            root = _compacted_children.get(continues, continues)
+            if root in _child_sessions:
+                _compacted_children[value] = root
         return True
     if continues is None:
         return False  # unread, so not kept: the next call reads again
@@ -654,10 +665,10 @@ def _is_child_session(session_id: Any) -> bool:
     return False
 
 
-def _continues_a_child(session_id: str, children: set[str]) -> bool | None:
-    """Whether ``session_id`` descends from a child, through compactions (or
-    delegations under it), read from Hermes' session store; None when that
-    can't be settled yet."""
+def _continues_a_child(session_id: str, children: set[str]) -> str | bool | None:
+    """The child ``session_id`` descends from, through compactions (or
+    delegations under it), read from Hermes' session store; False when none,
+    None when that can't be settled yet."""
     import sqlite3
 
     try:
@@ -684,7 +695,7 @@ def _continues_a_child(session_id: str, children: set[str]) -> bool | None:
             if reason == "branched":
                 return False  # a branch is a new conversation, not the child going on
             if parent in children:
-                return True  # a child's compaction, or a subagent under it
+                return parent  # a child's compaction, or a subagent under it
             settled = settled and bool(reason)
             current = parent
         return None  # longer than we follow: not an answer to keep
