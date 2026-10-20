@@ -85,12 +85,14 @@ def chat_by_id(home: Path, chat_id: str) -> Optional[HomeChat]:
 def find_turn(home: Path, *, chat_id: str, tag: str, since: float) -> Optional[TurnRows]:
     """The user row carrying ``tag`` in the chat or the sessions it continued
     into (compression, branches), written at or after ``since``, and the rows
-    after it. Archived rows count too: compaction keeps them as inactive."""
+    after it. Archived rows count too: compaction keeps them as inactive.
+    The latest copy wins: compressing mid-turn carries the user row into the
+    new session, and the reply follows it there."""
     users = _run(home, (
         "WITH RECURSIVE chain(id) AS (SELECT ? UNION SELECT s.id FROM sessions s JOIN chain c "
         "ON s.parent_session_id = c.id) "
         "SELECT m.id, m.session_id FROM messages m WHERE m.session_id IN (SELECT id FROM chain) "
-        "AND m.role = 'user' AND m.timestamp >= ? AND instr(m.content, ?) > 0 ORDER BY m.id LIMIT 1"
+        "AND m.role = 'user' AND m.timestamp >= ? AND instr(m.content, ?) > 0 ORDER BY m.id DESC LIMIT 1"
     ), (chat_id, since, tag))
     if not users:
         return None
@@ -114,19 +116,21 @@ def find_turn(home: Path, *, chat_id: str, tag: str, since: float) -> Optional[T
     return TurnRows(session_id, reply, failed, closed)
 
 
-def recent_messages(home: Path, *, exclude_chat: str, since: float) -> list[sqlite3.Row]:
+def recent_messages(home: Path, *, exclude_chat: str, since: float, max_chars: int = 2000,
+                    limit: int = 3000) -> list[sqlite3.Row]:
     """User and assistant rows since ``since`` in the chats a person had:
     not ``exclude_chat`` or what it continued into, not cron runs, hidden
-    chats or hidden rows. Oldest first, with the chat's id and title."""
+    chats or hidden rows. The newest ``limit``, each cut to ``max_chars``,
+    oldest first, with the chat's id and title."""
     return _run(home, (
         "WITH RECURSIVE excluded(id) AS (SELECT ? UNION SELECT s.id FROM sessions s JOIN excluded e "
         "ON s.parent_session_id = e.id) "
-        "SELECT s.id AS chat_id, s.title, m.role, m.content, m.timestamp FROM messages m "
-        "JOIN sessions s ON s.id = m.session_id "
+        "SELECT * FROM (SELECT s.id AS chat_id, s.title, m.role, substr(m.content, 1, ?) AS content, m.timestamp, "
+        "m.id FROM messages m JOIN sessions s ON s.id = m.session_id "
         "WHERE m.timestamp >= ? AND m.role IN ('user', 'assistant') AND m.active = 1 AND m.display_kind IS NULL "
         "AND s.source != 'cron' AND s.hidden = 0 AND s.id NOT IN (SELECT id FROM excluded) "
-        "ORDER BY m.timestamp, m.id"
-    ), (exclude_chat, since))
+        "ORDER BY m.timestamp DESC, m.id DESC LIMIT ?) ORDER BY timestamp, id"
+    ), (exclude_chat, max_chars, since, limit))
 
 
 def user_text_after(home: Path, *, session_id: str, tag: str) -> list[str]:
@@ -134,7 +138,7 @@ def user_text_after(home: Path, *, session_id: str, tag: str) -> list[str]:
     next hidden (Pulse) row."""
     rows = _run(home, (
         "SELECT role, content, display_kind FROM messages WHERE session_id = ? AND id > ("
-        "SELECT MIN(id) FROM messages WHERE session_id = ? AND role = 'user' AND instr(content, ?) > 0) "
+        "SELECT MAX(id) FROM messages WHERE session_id = ? AND role = 'user' AND instr(content, ?) > 0) "
         "ORDER BY id"
     ), (session_id, session_id, tag))
     text = []

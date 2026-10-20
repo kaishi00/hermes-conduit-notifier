@@ -224,6 +224,15 @@ class PulseStore:
             row = conn.execute("SELECT MAX(created_at) AS at FROM attempts WHERE kind=?", (kind,)).fetchone()
         return row["at"] if row and row["at"] is not None else None
 
+    def trim_finished(self, kind: str) -> None:
+        """Cuts finished attempts of ``kind`` down to their first line: the
+        full text was only kept to recognise the turn, and Hermes's own
+        transcript has it."""
+        marks = ",".join("?" * len(FINAL))
+        with _lock, self._connect() as conn:
+            conn.execute(f"UPDATE attempts SET text = substr(text, 1, instr(text || char(10), char(10)) - 1) "
+                         f"WHERE kind=? AND state IN ({marks}) AND instr(text, char(10)) > 0", (kind, *FINAL))
+
     def attempts_since(self, kind: str, since: float) -> list[dict]:
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM attempts WHERE kind=? AND created_at >= ? ORDER BY created_at",

@@ -253,7 +253,7 @@ def _pulse_report(pulse_store: Any, value: str) -> int:
             pulse_store.set("report_time", f"{hour:02d}:{minute:02d}")
             print(f"The daily shadow report goes out at {hour:02d}:{minute:02d}.")
             return 0
-    if ("/" in value or value == "UTC") and str(pulse_report.zone_for(value)) == value:
+    if pulse_report.known_zone(value):
         pulse_store.set("time_zone", value)
         print(f"Report times are in {value}.")
         return 0

@@ -210,6 +210,8 @@ def tick(now: Optional[float] = None) -> None:
     # The loop's heartbeat: `pulse status` warns when nothing runs the loop.
     pulse_store.set("last_tick_at", now)
     delivery.reconcile(pulse_store, home, process_started_at=_started_at, now=now)
+    # A report's text carries a day of private chat; keep it only while in flight.
+    pulse_store.trim_finished(REPORT)
     _collect_ratings(pulse_store, home, now)
     # One new turn per tick: a probe first, the report on a later tick.
     if not _maybe_probe(pulse_store, home, now):
@@ -263,19 +265,35 @@ def _maybe_report(pulse_store: store.PulseStore, home: Path, now: float) -> bool
     return True
 
 
-def report_zone(pulse_store: store.PulseStore, home: Path) -> Any:
-    return report.zone_for(pulse_store.get("time_zone") or report.phone_zone(home))
+_zone_cache: tuple[float, Any] = (0.0, None)
+ZONE_TTL_S = 3600.0
+
+
+def report_zone(pulse_store: store.PulseStore, home: Path, now: Optional[float] = None) -> Any:
+    """The report's time zone: the one set with `pulse report`, else the
+    phone's (read at most hourly), else the host's."""
+    global _zone_cache
+    if pulse_store.get("time_zone"):
+        return report.zone_for(pulse_store.get("time_zone"))
+    now = time.time() if now is None else now
+    if _zone_cache[1] is None or now - _zone_cache[0] >= ZONE_TTL_S:
+        _zone_cache = (now, report.zone_for(report.phone_zone(home)))
+    return _zone_cache[1]
 
 
 def _report_due(pulse_store: store.PulseStore, home: Path, now: float) -> bool:
     if not pulse_store.get("daily_report"):
         return False
-    at = report.due_today(now, report_zone(pulse_store, home), pulse_store.get("report_time"))
+    zone = report_zone(pulse_store, home, now)
+    at = report.due_today(now, zone, pulse_store.get("report_time"))
     if at is None or now - at > REPORT_WINDOW_S:
         return False
+    # Any report delivered or on its way today, an early `pulse report` too,
+    # stands in for the scheduled one.
+    if any(row["state"] not in (store.REFUSED, store.NOT_ADMITTED, store.FAILED)
+           for row in pulse_store.attempts_since(REPORT, report.start_of_day(now, zone))):
+        return False
     tries = pulse_store.attempts_since(REPORT, at)
-    if any(row["state"] not in (store.REFUSED, store.NOT_ADMITTED, store.FAILED) for row in tries):
-        return False  # delivered, or still on its way
     return len(tries) < REPORT_TRIES and (not tries or now - tries[-1]["updated_at"] >= REPORT_RETRY_S)
 
 

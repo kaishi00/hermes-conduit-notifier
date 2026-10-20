@@ -226,6 +226,19 @@ def test_a_turn_after_compression_is_found_in_the_tip(db, tmp_path):
     assert hermes.find_turn(tmp_path, chat_id=SID, tag="pAAAA-1", since=0).session_id == "tip"
 
 
+def test_a_turn_compressed_midway_is_followed_into_the_new_session(db, tmp_path):
+    db.session()
+    db.message("user", "Pulse daily shadow report pBBBB-1.", display_kind="hidden")
+    db.session(sid="tip", parent=SID)
+    db.message("assistant", "an older reply carried over", sid="tip")
+    db.message("user", "Pulse daily shadow report pBBBB-1.", sid="tip", display_kind="hidden")  # carried
+    db.message("assistant", "1. [date] Mum's birthday Friday", sid="tip")
+    db.message("user", "1 yes", sid="tip")
+    turn = hermes.find_turn(tmp_path, chat_id=SID, tag="pBBBB-1", since=0)
+    assert (turn.session_id, turn.reply) == ("tip", "1. [date] Mum's birthday Friday")
+    assert hermes.user_text_after(tmp_path, session_id="tip", tag="pBBBB-1") == ["1 yes"]
+
+
 def test_rows_from_before_the_attempt_dont_count(db, tmp_path):
     db.session()
     db.message("user", "Pulse delivery check pAAAA-1.", at=100.0)
@@ -385,6 +398,7 @@ def live(tmp_path, monkeypatch):
     monkeypatch.setattr(pulse, "_turns", {})
     monkeypatch.setattr(pulse, "_last_problem", "")
     monkeypatch.setattr(pulse, "_last_ratings", 0.0)
+    monkeypatch.setattr(pulse, "_zone_cache", (0.0, None))
     sent = lambda: [params["text"] for name, params in fake.calls if name == host.SUBMIT]
     pulse_store = store.open_store(tmp_path)
     # The daily report runs on the clock; its own tests turn it on.
@@ -755,6 +769,7 @@ def test_the_report_context_stays_within_its_budget(db, tmp_path, pulse_store):
 def test_items_and_ratings_are_read_from_the_text():
     items = report.report_items(REPLY)
     assert items == {1: "commitment", 2: "promise", 3: "other"}
+    assert report.report_items("1. [Commitment] Call Mum") == {1: "commitment"}
     ratings = report.parse_ratings("1 yes, 2: no, 3 y, 7 yes, 1 n", items)
     assert ratings == [report.Rating(1, "commitment", False), report.Rating(2, "promise", False),
                        report.Rating(3, "other", True)]
@@ -888,3 +903,40 @@ def test_the_next_report_time():
     assert report.due_today(morning + 3 * 3600, zone, "08:00") == morning + 2 * 3600
     assert report.next_time(morning + 3 * 3600, zone, "08:00") == morning + 2 * 3600 + 86400
     assert report.clock_text("bad") == "08:00"
+
+
+def test_a_finished_report_keeps_only_its_first_line(live, db):
+    db.session()
+    _due_report(live)
+    live.store.set("report_requested", True)
+    pulse.tick()
+    row = live.store.in_flight()[0]
+    assert "\n" in row["text"]
+    live.store.update_attempt(row["attempt_id"], state=store.DELIVERED)
+    pulse.tick(now=time.time() + 1)
+    assert live.store.attempt_by_tag(row["tag"])["text"] == f"Pulse daily shadow report {row['tag']}."
+
+
+def test_an_early_report_stands_in_for_the_scheduled_one(live, db):
+    db.session()
+    _due_report(live)
+    now = time.time()
+    if time.gmtime(now - 120).tm_mday != time.gmtime(now).tm_mday:
+        pytest.skip("just after midnight UTC")
+    live.store.set("report_requested", True)
+    pulse.tick(now=now - 60)
+    live.store.update_attempt(live.store.in_flight()[0]["attempt_id"], state=store.DELIVERED)
+    live.store.set("report_time", time.strftime("%H:%M", time.gmtime(now - 30)))
+    pulse.tick(now=now)
+    assert len(live.sent()) == 1
+
+
+def test_recent_messages_are_bounded(db, tmp_path):
+    db.session()
+    db.session("w", title="Work", pinned=0)
+    now = time.time()
+    for n in range(30):
+        db.message("user", f"{n:02d}" + "y" * 5000, sid="w", at=now - 100 + n)
+    rows = hermes.recent_messages(tmp_path, exclude_chat=SID, since=0, max_chars=50, limit=10)
+    assert [row["content"][:2] for row in rows] == [f"{n:02d}" for n in range(20, 30)]
+    assert all(len(row["content"]) == 50 for row in rows)
