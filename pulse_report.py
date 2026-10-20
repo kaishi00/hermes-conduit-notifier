@@ -362,7 +362,9 @@ def report_budget() -> int:
         threshold = int(os.environ.get(LCM_THRESHOLD) or LCM_DEFAULT_THRESHOLD)
     except ValueError:
         threshold = LCM_DEFAULT_THRESHOLD
-    return max(4_000, min(REPORT_BUDGET, threshold - LCM_MARGIN))
+    # Below the instructions plus a little context, no report fits; LCM's
+    # default is 12,000, so only a deliberately tiny threshold gets here.
+    return max(len(REPORT_TEXT) + 1_000, min(REPORT_BUDGET, threshold - LCM_MARGIN))
 
 
 def report_text(tag: str, context: str, since: str) -> str:

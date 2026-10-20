@@ -871,8 +871,9 @@ def test_the_report_context_stays_within_its_budget(db, tmp_path, pulse_store):
     assert none == "(Chats left out: no room in this report.)"
 
 
-def test_the_whole_report_message_stays_under_its_budget(db, tmp_path, live):
+def test_the_whole_report_message_stays_under_its_budget(db, tmp_path, live, monkeypatch):
     # A host swapped a 22k-character report for a file pointer the turn couldn't open.
+    monkeypatch.delenv(report.LCM_ENABLED, raising=False)
     now = time.time()
     db.session()
     for n in range(40):
