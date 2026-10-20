@@ -791,8 +791,8 @@ class _ProviderEntry:
                 with self._state:
                     self._running = False
                     self.stuck = False
+                    done.set()
                 self.call_lock.release()
-                done.set()
 
         with self._state:
             self._running = True
@@ -805,10 +805,12 @@ class _ProviderEntry:
             raise
         if not done.wait(max(deadline - time.monotonic(), 0.0)):
             with self._state:
-                if self._running:
+                completed = done.is_set()
+                if not completed and self._running:
                     self.stuck = True
-            logger.warning("Memory provider %r %s for Conduit timed out; abandoning the call", self.name, what)
-            raise TokenError(504, f"Memory {what} timed out")
+            if not completed:
+                logger.warning("Memory provider %r %s for Conduit timed out; abandoning the call", self.name, what)
+                raise TokenError(504, f"Memory {what} timed out")
         if "error" in box:
             raise box["error"]
         return box.get("value")
