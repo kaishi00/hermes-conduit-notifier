@@ -621,6 +621,32 @@ test('a push that fails after intake gives its event ID back, so the retry is se
   }
 });
 
+test('an hourly limit refusal gives the event id back', async () => {
+  const aPort = await closedPort();
+  const isolatedPath = join(dir, 'relay-data-hourly.json');
+  const fixture = new RelayStore(isolatedPath);
+  const created = fixture.createInstallation({ bundleId: 'com.milim.relay', deviceToken: 'f'.repeat(64), environment: 'production' });
+  fixture.updateInstallation(created.installation.id, { locationToken: '6'.repeat(64) });
+  const pairing = fixture.createPairing(created.installation.id);
+  const claim = fixture.claimPairing(pairing.code, 'hourly target');
+  const child = await startRelay(aPort, 'accept', isolatedPath, { RELAY_TEST_LOCATION_PUSHES_PER_HOUR: '1' });
+  children.push(child);
+  const base = `http://127.0.0.1:${aPort}`;
+  const send = (eventId) => api(base, '/v1/events', {
+    method: 'POST',
+    credential: `${created.installation.id}.${claim.gatewayId}.${claim.gatewaySecret}`,
+    body: { type: 'location.requested', event_id: eventId, profile: 'work', locate: { id: 'l_0123456789abcdefXYZ' } },
+  });
+  try {
+    assert.deepEqual(await send('locate:hourly00000000000000001'), { status: 202, json: { accepted: true, delivered: true } });
+    const refused = await send('locate:hourly00000000000000002');
+    assert.equal(refused.status, 429);
+    assert.deepEqual(await send('locate:hourly00000000000000002'), refused, 'the retry is refused again, not called a duplicate');
+  } finally {
+    await stopRelay(child);
+  }
+});
+
 test('a copy that arrives mid-send waits for it, and is told to retry when it fails', async () => {
   const aPort = await closedPort();
   const isolatedPath = join(dir, 'relay-data-in-flight.json');

@@ -109,7 +109,10 @@ const PHONE_BACKGROUND_TTL_S = 24 * 60 * 60;
 // A location request is only worth answering right away.
 const LOCATION_PUSH_TTL_S = 60;
 // Locate and maps lookups (conduit_maps) share it; the plugin keeps tighter budgets per kind.
-const LOCATION_PUSH_PER_HOUR = 60;
+// Test seam: the test suite can lower it to reach the limit quickly.
+const LOCATION_PUSH_PER_HOUR = process.env.RELAY_TEST_SEAMS === '1' && /^\d{1,3}$/.test(process.env.RELAY_TEST_LOCATION_PUSHES_PER_HOUR || '')
+  ? Number(process.env.RELAY_TEST_LOCATION_PUSHES_PER_HOUR)
+  : 60;
 // The answers the plugin retries: a send it can try again.
 const RETRYABLE_STATUS = (status) => status === 408 || status === 429 || status >= 500;
 // Event ids whose push is being sent -> a promise of whether it was kept
@@ -197,7 +200,8 @@ function main() {
     // it to one topic (the Watch's, say).
     const voipFailure = process.env.APNS_VOIP_FAILURE;
     const voipFailureTopic = process.env.APNS_VOIP_FAILURE_TOPIC;
-    // Test seam: the first N sends that aren't VoIP fail before sends start
+    // Test seam: the first N event pushes that aren't VoIP (not Live
+    // Activity updates or token challenges) fail before sends start
     // succeeding, like an APNs blip: the first throws (a dropped
     // connection), the second is refused, and so on alternately.
     const failFirst = process.env.APNS_FAIL_FIRST || '0';
@@ -208,7 +212,7 @@ function main() {
     if (!/^\d{1,5}$/.test(sendDelay)) throw new Error('APNS_SEND_DELAY_MS must be a whole number of milliseconds.');
     apnsSend = async (deviceToken, notification) => {
       if (Number(sendDelay)) await new Promise((resolve) => setTimeout(resolve, Number(sendDelay)));
-      if (failed < Number(failFirst) && notification.pushType !== 'voip') {
+      if (failed < Number(failFirst) && notification.payload?.conduit && notification.pushType !== 'voip') {
         failed += 1;
         if (failed % 2) throw new Error('connection dropped');
         return { ok: false, status: 503, reason: 'ServiceUnavailable' };
@@ -743,7 +747,10 @@ async function route(request, response) {
       await deliverEvent(response, installation, event, gateway);
       released = RETRYABLE_STATUS(response.statusCode);
     } finally {
-      if (released) store.releaseEvent(installation.id, event.eventId, credential.gatewayId);
+      if (released) {
+        store.releaseEvent(installation.id, event.eventId, credential.gatewayId);
+        console.warn(JSON.stringify({ level: 'warn', message: 'event push failed, id released for a retry', type: event.type, status: response.headersSent ? response.statusCode : undefined }));
+      }
       eventsInFlight.delete(inFlightKey);
       settle(!released);
     }
@@ -1152,8 +1159,9 @@ async function ring(installation, event, gateway) {
 }
 
 // An accepted event that isn't a clarify decision, sent to the phone. Every
-// outcome is written to `response`; a status of 300 or more means nothing
-// reached the device.
+// outcome is written to `response`, or thrown as a refusal (an hourly
+// limit). The caller keeps the event id for a 2xx or a 4xx a retry can't
+// fix, and gives it back for a throw, 408, 429 or 5xx.
 async function deliverEvent(response, installation, event, gateway) {
   // A fresh location for Hermes: a silent location push the phone's
   // extension answers straight to its host. Never a visible notification,
