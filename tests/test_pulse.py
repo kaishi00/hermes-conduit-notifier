@@ -865,6 +865,22 @@ def test_the_report_context_stays_within_its_budget(db, tmp_path, pulse_store):
     assert chats.startswith("### Chat 39")  # the most recent chat first
 
 
+def test_the_whole_report_message_stays_under_its_budget(db, tmp_path, live):
+    # A host swapped a 22k-character report for a file pointer the turn couldn't open.
+    now = time.time()
+    db.session()
+    for n in range(40):
+        db.session(f"c{n}", title=f"Chat {n}", pinned=0)
+        for m in range(20):
+            db.message("user", "x" * 1000, sid=f"c{n}", at=now - 3600 + n * 10 + m)
+    (tmp_path / "memories").mkdir(exist_ok=True)
+    (tmp_path / "memories" / "USER.md").write_text("u" * 9000)
+    (tmp_path / "memories" / "MEMORY.md").write_text("m" * 9000)
+    context, since = report.build(tmp_path, live.store, home_chat_id=SID, now=now)
+    assert len(report.report_text("p12345678-1", context, since)) <= report.REPORT_BUDGET
+    assert "### Chat 39" in context  # the chats still get their share
+
+
 def test_items_and_ratings_are_read_from_the_text():
     items = report.report_items(REPLY)
     assert items == {1: "commitment", 2: "promise", 3: "other"}

@@ -36,7 +36,12 @@ DEFAULT_TIMES = "08:00,13:00,18:00"
 MIN_WINDOW_S = 4 * 3600.0
 WINDOW_S = 86400.0
 # Budgets, in characters, so the report turn stays small for a cheap model.
+# The whole message stays under REPORT_BUDGET: a host may swap a longer user
+# message for a pointer to a file (seen 2026-10-20 at 22k characters), and a
+# Pulse turn can't use tools to open it. Chats get what the rest leaves.
+REPORT_BUDGET = 15_000
 CHATS_BUDGET = 12_000
+MIN_CHATS_BUDGET = 2_000
 PER_CHAT_BUDGET = 2_500
 PER_MESSAGE = 400
 MEMORY_BUDGET = 3_000
@@ -123,7 +128,7 @@ def their_home_chat(home: Path) -> str:
 
 
 def recent_chats(home: Path, *, home_chat_id: str, since: float, zone: tzinfo,
-                 others: Sequence[tuple[str, Path]] = ()) -> str:
+                 others: Sequence[tuple[str, Path]] = (), budget: int = CHATS_BUDGET) -> str:
     """User and assistant text since ``since``, per chat, most recent chat
     first. Not the home chat, cron runs or hidden rows. Chats from ``others``
     (other profiles) are labelled with the profile's name."""
@@ -155,7 +160,7 @@ def recent_chats(home: Path, *, home_chat_id: str, since: float, zone: tzinfo,
             lines.append(line)
             size += len(line) + 1
         block = f"### {_clip(chat['title'], 80)}\n" + "\n".join(reversed(lines))
-        if used + len(block) > CHATS_BUDGET:
+        if used + len(block) > budget:
             break
         out.append(block)
         used += len(block)
@@ -312,16 +317,26 @@ def build(home: Path, pulse_store: store.PulseStore, *, home_chat_id: str, now: 
     zone_name = pulse_store.get("time_zone") or zone_name
     zone = zone_for(zone_name)
     others = profile_homes(home) if pulse_store.get("report_profiles") == "all" else []
-    try:
-        chats = recent_chats(home, home_chat_id=home_chat_id, since=since, zone=zone, others=others)
-    except hermes.HermesUnreadable as error:
-        chats = f"Couldn't read the chats ({type(error).__name__})."
     header = f"## Now\n{datetime.fromtimestamp(now, zone).strftime('%A %d %B %Y, %H:%M')} ({zone_name or 'host time'})"
     start = _local(since, zone)
     sections = [header, phone, cron_jobs(home, others), memory_files(home, others),
-                failed_calls(pulse_store, since, zone),
-                f"## Chats since {start}\n" + (chats or "No chats since then.")]
-    return "\n\n".join(section for section in sections if section), start
+                failed_calls(pulse_store, since, zone)]
+    sections = [section for section in sections if section]
+    title = f"## Chats since {start}\n"
+    # Room the instructions and the other sections leave, so the whole
+    # message stays under REPORT_BUDGET.
+    left = REPORT_BUDGET - len(REPORT_TEXT) - sum(len(section) + 2 for section in sections) - len(title) - 100
+    budget = min(CHATS_BUDGET, max(MIN_CHATS_BUDGET, left))
+    try:
+        chats = recent_chats(home, home_chat_id=home_chat_id, since=since, zone=zone, others=others, budget=budget)
+    except hermes.HermesUnreadable as error:
+        chats = f"Couldn't read the chats ({type(error).__name__})."
+    sections.append(title + (chats or "No chats since then."))
+    context = "\n\n".join(sections)
+    room = REPORT_BUDGET - len(REPORT_TEXT) - 100
+    if len(context) > room:  # the other sections alone were too long: keep the start, which says what it is
+        context = context[:room - 1] + "…"
+    return context, start
 
 
 def report_text(tag: str, context: str, since: str) -> str:
