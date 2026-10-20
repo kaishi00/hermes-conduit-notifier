@@ -8530,7 +8530,7 @@ def _watch_max_jobs(value: Any) -> int:
     return min(value, WATCH_JOBS_MAX)
 
 
-def open_watch_grant(body: Any, *, profile: Optional[str], path: Any = None,
+def open_watch_grant(body: Any, *, profile: Optional[str], ticket_home: Optional[str] = None, path: Any = None,
                      relay: Optional[Callable[..., Tuple[int, Dict[str, Any]]]] = None,
                      start: Optional[Callable[[_WatchGrant], None]] = None,
                      session_api: Optional[Callable[[], Any]] = None,
@@ -8549,7 +8549,10 @@ def open_watch_grant(body: Any, *, profile: Optional[str], path: Any = None,
     ``job_profiles`` names the user's other profiles the call's jobs may run
     on ("for Fam, …"), as the phone's own jobs may. Like every route here it
     sits behind the dashboard's own auth, whose holder can already start
-    chats on any profile; the list only narrows what the Watch may name.
+    chats on any profile; the list only narrows what the Watch may name. A
+    native-http ticket is not that holder: Hermes binds it to one home
+    (``ticket_home``, the principal's ``profile_id``), so its list keeps only
+    profiles on that home (_clean_job_profiles).
     """
     relay = relay or _relay_request
     start_audio = start_audio or (lambda grant: grant.audio.start())
@@ -8578,7 +8581,7 @@ def open_watch_grant(body: Any, *, profile: Optional[str], path: Any = None,
     wants_jobs = any(tool in WATCH_JOB_TOOLS or tool == WATCH_JOB_FOLLOW_UP for tool in requested)
     server = session_api() if max_jobs > 0 and wants_jobs else None
     # Only a grant that runs jobs reads them, as job_options.
-    job_profiles = _clean_job_profiles(body.get("job_profiles"), own=profile) if server is not None else ()
+    job_profiles = _clean_job_profiles(body.get("job_profiles"), own=profile, ticket_home=ticket_home) if server is not None else ()
     tools = tuple(tool for tool in WATCH_TOOLS if tool in requested)
     if any(tool in WATCH_CHAT_TOOLS for tool in tools) and session_routes() is None:
         # A Hermes without the session search route: the Watch asks the
@@ -8791,8 +8794,11 @@ async def post_watch_tool_grant(request: Request, response: Response, profile: O
     response.headers["Pragma"] = "no-cache"
     no_store = {"Cache-Control": "no-store"}
     body = await _read_json_body(request, WATCH_GRANT_MAX_BODY_BYTES)
+    # A native ticket is one profile's principal; its home bounds job_profiles (open_watch_grant).
+    ticket_home = _native_ticket_home(request)
     try:
-        return {"ok": True, **(await _run_scoped(profile, lambda: open_watch_grant(body, profile=profile)))}
+        return {"ok": True, **(await _run_scoped(
+            profile, lambda: open_watch_grant(body, profile=profile, ticket_home=ticket_home)))}
     except TokenError as exc:
         logger.warning("Watch tool grant failed: %s", exc)
         raise HTTPException(status_code=exc.status, detail=str(exc), headers=no_store)
@@ -9007,9 +9013,52 @@ def _clean_job_options(value: Any) -> Dict[str, str]:
     return options
 
 
-def _clean_job_profiles(value: Any, *, own: Optional[str]) -> Tuple[str, ...]:
+def _native_ticket_home(request: Any) -> Optional[str]:
+    """The home a native-http ticket binds this request to, or None without one.
+
+    Hermes redeems the gateway ticket on the request and stamps the grant
+    (dashboard_auth/native_http.py): one profile's principal, whose
+    ``profile_id`` is the home it was minted for. The dashboard's owner may
+    run jobs on any profile; a ticket may not, and the grant's jobs would
+    otherwise run after the request is gone, where no binding reaches. Empty
+    means a ticket whose home this Hermes didn't say: name nothing. A hosted
+    plugin host sees no principal and can't run jobs, so only this process's
+    request needs the binding.
+    """
+    if request is None:
+        return None
+    grant = getattr(request.state, "native_http_principal", None)
+    if not isinstance(grant, dict):
+        return None
+    home = grant.get("profile_id")
+    return str(home) if isinstance(home, str) and home else ""
+
+
+def _job_profile_on_home(name: str, ticket_home: str) -> bool:
+    """Whether profile ``name``'s home is the native ticket's ``ticket_home``."""
+    try:
+        from hermes_constants import get_default_hermes_root
+    except (ImportError, AttributeError):  # an older Hermes: one home
+        from hermes_constants import get_hermes_home
+        root = Path(get_hermes_home())
+    else:
+        # A root that fails to resolve raises: guessing could miss a turn.
+        root = Path(get_default_hermes_root())
+    # The homes _hermes_homes() lists: the root, and each profiles/<name>
+    # under it; "default" names the root, as Hermes' own resolution does.
+    canon = name.strip().lower()
+    home = root if canon == "default" else root / "profiles" / canon
+    try:
+        return home.resolve() == Path(ticket_home).resolve()
+    except Exception:  # noqa: BLE001 — an unresolvable home is on no home
+        return False
+
+
+def _clean_job_profiles(value: Any, *, own: Optional[str],
+                        ticket_home: Optional[str] = None) -> Tuple[str, ...]:
     """The user's other profiles a Watch call's jobs may run on, as the
-    phone names them; the grant's own profile needs no naming."""
+    phone names them; the grant's own profile needs no naming. With a native
+    ticket's ``ticket_home``, only the profiles on that very home stay."""
     if value is None:
         return ()
     if not isinstance(value, list) or len(value) > WATCH_JOB_MAX_PROFILES:
@@ -9024,7 +9073,12 @@ def _clean_job_profiles(value: Any, *, own: Optional[str]) -> Tuple[str, ...]:
         if key and key not in seen:
             seen.add(key)
             names.append(name)
-    return tuple(names)
+    if ticket_home is None:
+        return tuple(names)
+    if not ticket_home:
+        # A ticket whose home this Hermes didn't say: nothing may be named.
+        return ()
+    return tuple(name for name in names if _job_profile_on_home(name, ticket_home))
 
 
 class _WatchJob:
