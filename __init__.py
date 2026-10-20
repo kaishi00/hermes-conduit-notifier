@@ -649,8 +649,9 @@ def _is_child_session(session_id: Any) -> bool:
 
 
 def _continues_a_child(session_id: str, children: set[str]) -> bool | None:
-    """Whether ``session_id`` follows a child through compactions, read from
-    Hermes' session store; None when the store couldn't be read."""
+    """Whether ``session_id`` descends from a child, through compactions (or
+    delegations under it), read from Hermes' session store; None when that
+    can't be settled yet."""
     import sqlite3
 
     try:
@@ -662,19 +663,23 @@ def _continues_a_child(session_id: str, children: set[str]) -> bool | None:
         _lineage_unread("couldn't open the session store to check a subagent's lineage")
         return None
     try:
-        current = session_id
+        current, settled = session_id, True
         for _ in range(_LINEAGE_HOPS):
             row = db.execute("SELECT parent_session_id FROM sessions WHERE id = ?", (current,)).fetchone()
             if row is None and current == session_id:
                 return None  # not stored yet, or another profile's store: ask again later
             parent = row[0] if row else None
             if not parent:
-                return False
+                # A root: no child above. Kept only if every link passed was
+                # settled; an open one may be a compaction still being written.
+                return False if settled else None
             ended = db.execute("SELECT end_reason FROM sessions WHERE id = ?", (parent,)).fetchone()
-            if not ended or ended[0] != "compression":
-                return False  # a delegated child's own parent, or a branch: not a continuation
+            reason = ended[0] if ended else None
+            if reason == "branched":
+                return False  # a branch is a new conversation, not the child going on
             if parent in children:
-                return True
+                return True  # a child's compaction, or a subagent under it
+            settled = settled and bool(reason)
             current = parent
         return None  # longer than we follow: not an answer to keep
     except sqlite3.Error:

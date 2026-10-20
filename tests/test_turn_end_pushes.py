@@ -322,6 +322,7 @@ def test_the_parent_and_its_own_compactions_are_not_children(sessions):
     assert not plugin._is_child("q")
     assert not plugin._is_child("unknown")
     assert {"p", "q"} <= plugin._not_child_lineage
+    assert "p2" not in plugin._not_child_lineage, "its parent is still open, so it's asked again"
     assert "unknown" not in plugin._not_child_lineage, "a session not stored yet is asked about again"
 
 
@@ -338,6 +339,23 @@ def test_a_session_branched_from_a_child_is_not_its_continuation(sessions):
     sessions("b", parent="c")
     plugin._subagent_start(child_session_id="c")
     assert not plugin._is_child("b")
+
+
+def test_a_compaction_read_before_the_old_session_ends_still_counts(sessions):
+    sessions("p")
+    sessions("c", parent="p")
+    sessions("x")
+    sessions("c2", parent="c")  # the old row isn't ended yet
+    sessions("x2", parent="x")
+    plugin._subagent_start(child_session_id="c")
+    assert plugin._is_child("c2"), "the parent is a child: no need to wait for its end"
+    assert not plugin._is_child("x2") and "x2" not in plugin._not_child_lineage
+
+
+def test_a_subagent_a_child_delegated_is_a_child(sessions):
+    _compacted_child(sessions)
+    sessions("g", parent="c3")
+    assert plugin._is_child("g")
 
 
 def test_a_lineage_longer_than_followed_is_not_kept(sessions, monkeypatch):
