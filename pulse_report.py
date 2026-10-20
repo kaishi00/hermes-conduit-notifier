@@ -163,7 +163,7 @@ def recent_chats(home: Path, *, home_chat_id: str, since: float, zone: tzinfo,
         if used + len(block) > budget:
             break
         out.append(block)
-        used += len(block)
+        used += len(block) + 2  # with the blank line that joins it to the next
     return "\n\n".join(out)
 
 
@@ -324,7 +324,8 @@ def build(home: Path, pulse_store: store.PulseStore, *, home_chat_id: str, now: 
     sections = [section for section in sections if section]
     title = f"## Chats since {start}\n"
     # Room the instructions and the other sections leave, so the whole
-    # message stays under REPORT_BUDGET.
+    # message stays under REPORT_BUDGET. The 100 covers what report_text
+    # fills into REPORT_TEXT: the tag, the start time, the kinds and the fence.
     left = REPORT_BUDGET - len(REPORT_TEXT) - sum(len(section) + 2 for section in sections) - len(title) - 100
     budget = min(CHATS_BUDGET, max(MIN_CHATS_BUDGET, left))
     try:
