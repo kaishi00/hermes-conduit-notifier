@@ -673,8 +673,10 @@ async function route(request, response) {
       if (!saved) return sendJson(response, 200, { accepted: true, duplicate: true });
       if (!notification) return sendJson(response, 202, { accepted: true, delivered: false });
       let result;
+      // The token this push went to: the device can register a new one meanwhile.
+      const sentToken = installation.deviceToken;
       try {
-        result = await apnsSend(installation.deviceToken, notification);
+        result = await apnsSend(sentToken, notification);
       } catch (error) {
         // A THROWN transport failure (dropped connection, DNS, TLS) is the
         // same outcome as a returned rejection: no device received the
@@ -684,7 +686,7 @@ async function route(request, response) {
         console.error(JSON.stringify({ level: 'error', message: 'apns send threw', error: error instanceof Error ? error.message : String(error) }));
         return sendJson(response, 502, { error: 'apns_unreachable' });
       }
-      if (result.status === 410 || result.reason === 'BadDeviceToken' || result.reason === 'Unregistered') deactivateInstallation(installation.id);
+      if (result.status === 410 || result.reason === 'BadDeviceToken' || result.reason === 'Unregistered') deactivateInstallationForToken(installation, sentToken);
       if (!result.ok) {
         // The answerable card never reached the device: flip the parked
         // decision to undeliverable so the plugin's next poll falls back to
@@ -710,8 +712,10 @@ async function route(request, response) {
     }
     const notification = notificationFor(event, installation.preferences, gateway);
     let result;
+    // The token this push went to: the device can register a new one meanwhile.
+    const sentToken = installation.deviceToken;
     try {
-      result = await apnsSend(installation.deviceToken, notification);
+      result = await apnsSend(sentToken, notification);
     } catch (error) {
       // Same contract as the decision path: a THROWN transport failure is
       // reported upstream, never left to surface as a 500. There is no
@@ -719,7 +723,7 @@ async function route(request, response) {
       console.error(JSON.stringify({ level: 'error', message: 'apns send threw', error: error instanceof Error ? error.message : String(error) }));
       return sendJson(response, 502, { error: 'apns_unreachable' });
     }
-    if (result.status === 410 || result.reason === 'BadDeviceToken' || result.reason === 'Unregistered') deactivateInstallation(installation.id);
+    if (result.status === 410 || result.reason === 'BadDeviceToken' || result.reason === 'Unregistered') deactivateInstallationForToken(installation, sentToken);
     if (!result.ok) return sendJson(response, 502, { error: 'apns_rejected', reason: result.reason, status: result.status });
     return sendJson(response, 202, { accepted: true, delivered: true });
   }
@@ -903,6 +907,15 @@ function retireOtherInstallations(deviceToken, exceptId) {
 function deactivateInstallation(id) {
   store.deactivateInstallation(id);
   releaseInstallation(id);
+}
+
+// A refused device token deactivates an installation only if it still owns
+// the token the refused push was sent to: one the phone registered while
+// the push was in flight stays, along with the activation and everything it
+// holds open.
+function deactivateInstallationForToken(installation, sentToken) {
+  if (!store.deactivateInstallationForToken(installation.id, sentToken)) return;
+  releaseInstallation(installation.id);
 }
 
 // Its Live Activities, and its Watch grants with their waiting calls, host
@@ -1224,13 +1237,15 @@ async function sendPhoneBackground(response, installation, event, gateway) {
   enforceRateLimit(`phone-background:${installation.id}`, PHONE_BACKGROUND_PER_HOUR, 60 * 60_000);
   const push = phoneBackgroundPushFor(event, gateway, { topic: config.topic });
   let result;
+  // The token this push went to: the device can register a new one meanwhile.
+  const sentToken = installation.deviceToken;
   try {
-    result = await apnsSend(installation.deviceToken, push);
+    result = await apnsSend(sentToken, push);
   } catch (error) {
     console.error(JSON.stringify({ level: 'error', message: 'apns background send threw', error: error instanceof Error ? error.message : String(error) }));
     return sendJson(response, 502, { error: 'apns_unreachable' });
   }
-  if (result.status === 410 || result.reason === 'BadDeviceToken' || result.reason === 'Unregistered') deactivateInstallation(installation.id);
+  if (result.status === 410 || result.reason === 'BadDeviceToken' || result.reason === 'Unregistered') deactivateInstallationForToken(installation, sentToken);
   if (!result.ok) return sendJson(response, 502, { error: 'apns_rejected', reason: result.reason, status: result.status });
   return sendJson(response, 202, { accepted: true, delivered: true, background: true });
 }

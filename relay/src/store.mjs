@@ -352,6 +352,14 @@ export class RelayStore {
     return this.updateInstallation(id, { active: false });
   }
 
+  // APNs refused the device token: only the installation still holding that
+  // token loses its access; a replacement registered while the refused push
+  // was in flight stays, along with everything it holds open.
+  deactivateInstallationForToken(id, token) {
+    if (this.data.installations[id]?.deviceToken !== token) return null;
+    return this.deactivateInstallation(id);
+  }
+
   // APNs refused the PushKit token: calls go out as notifications until the
   // phone registers a new one. Only that token: one the phone registered
   // while the refused push was in flight stays.
