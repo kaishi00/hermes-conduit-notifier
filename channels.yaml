@@ -10,4 +10,4 @@
 #
 # Must be a dotted number no newer than plugin.yaml's version
 # (tests/test_channels.py).
-stable: 0.51.4
+stable: 0.51.5
