@@ -6,6 +6,7 @@ import argparse
 import http.client
 import socket
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -34,11 +35,12 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
         help="Redact chat text from pushes; choice labels still transit so cards stay answerable",
     )
     redact.add_argument("mode", choices=["on", "off"])
-    pulse = commands.add_parser("pulse", help="Pulse, the proactivity experiment: on, off, status, probe, home, outcomes")
-    pulse.add_argument("pulse_action", choices=["on", "off", "status", "probe", "home", "outcomes"])
+    pulse = commands.add_parser("pulse", help="Pulse, the proactivity experiment: on, off, status, probe, report, home, outcomes")
+    pulse.add_argument("pulse_action", choices=["on", "off", "status", "probe", "report", "home", "outcomes"])
     pulse.add_argument("value", nargs="?", default="",
                        help="for home: the id of the chat to use, or 'auto' to find it by title; "
-                            "for outcomes: how many to show, or a chat id")
+                            "for outcomes: how many to show, or a chat id; "
+                            "for report: 'now', 'on', 'off', a time like 08:00, or a time zone like Europe/Paris")
     parser.set_defaults(func=dispatch)
 
 
@@ -158,7 +160,7 @@ def _pulse(args: argparse.Namespace) -> int:
     from . import pulse, pulse_delivery
     home = get_hermes_home()
     action = args.pulse_action
-    if action in ("status", "probe", "off", "outcomes") and not (Path(home) / pulse_delivery.store.DB_NAME).exists():
+    if action in ("status", "probe", "off", "outcomes", "report") and not (Path(home) / pulse_delivery.store.DB_NAME).exists():
         # Never turned on: say so without leaving a file behind.
         print("Pulse: off (never turned on). `hermes conduit-push pulse on` to start it.")
         return 1 if action == "probe" else 0
@@ -188,6 +190,8 @@ def _pulse(args: argparse.Namespace) -> int:
         return 0
     if action == "outcomes":
         return _pulse_outcomes(pulse_store, (args.value or "").strip())
+    if action == "report":
+        return _pulse_report(pulse_store, (args.value or "").strip())
     print(f"Pulse: {'on' if pulse_store.get('enabled') else 'off'}")
     chat, problem = pulse.home_chat(pulse_store, home)
     if chat is not None:
@@ -211,12 +215,50 @@ def _pulse(args: argparse.Namespace) -> int:
         print("Latest:")
         for row in recent:
             print("  " + _printable(pulse_delivery.describe(row)))
+    if pulse_store.get("daily_report"):
+        zone = pulse.report_zone(pulse_store, home)
+        upcoming = pulse.report.next_time(time.time(), zone, pulse_store.get("report_time"))
+        print(f"Daily report at {pulse.report.clock_text(pulse_store.get('report_time'))} ({zone}); next "
+              + datetime.fromtimestamp(upcoming, zone).strftime("%a %d %b %H:%M"))
+    else:
+        print("Daily report: off")
+    ratings = pulse.rating_counts(pulse_store)
+    if ratings:
+        print("Ratings so far: " + ", ".join(f"{kind} {yes} yes / {no} no" for kind, (yes, no) in ratings.items()))
     outcomes = pulse_store.outcome_counts(time.time() - 86400)
     if outcomes or pulse_store.get("enabled"):
         print("Tool outcomes in the last 24 hours: "
               + (", ".join(f"{n} {status}" for status, n in sorted(outcomes.items())) or "none yet"))
     print(f"State: {pulse_store.path}")
     return 0
+
+
+def _pulse_report(pulse_store: Any, value: str) -> int:
+    import re
+    from . import pulse_report
+    if value in ("", "now"):
+        if not pulse_store.get("enabled"):
+            print("Pulse is off: `hermes conduit-push pulse on` first.")
+            return 1
+        pulse_store.set("report_requested", True)
+        print("Asked the dashboard for a shadow report; it goes into the home chat within a minute or two.")
+        return 0
+    if value in ("on", "off"):
+        pulse_store.set("daily_report", value == "on")
+        print("The daily shadow report is on." if value == "on" else "The daily shadow report is off.")
+        return 0
+    if re.fullmatch(r"\d{1,2}:\d{2}", value):
+        hour, minute = (int(part) for part in value.split(":"))
+        if hour < 24 and minute < 60:
+            pulse_store.set("report_time", f"{hour:02d}:{minute:02d}")
+            print(f"The daily shadow report goes out at {hour:02d}:{minute:02d}.")
+            return 0
+    if ("/" in value or value == "UTC") and str(pulse_report.zone_for(value)) == value:
+        pulse_store.set("time_zone", value)
+        print(f"Report times are in {value}.")
+        return 0
+    print("Usage: hermes conduit-push pulse report [now|on|off|HH:MM|<time zone>]")
+    return 2
 
 
 def _pulse_outcomes(pulse_store: Any, value: str) -> int:

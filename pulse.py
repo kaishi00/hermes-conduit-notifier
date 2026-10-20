@@ -11,12 +11,16 @@ A Pulse turn is recognised by its tag in ``pre_llm_call``. On such a turn
 every tool is blocked in ``pre_tool_call`` (the probe needs none; later
 slices allow named reads only), and no push or Live Activity goes out for it.
 
+Once a day it also sends the shadow report (pulse_report): what Hermes would
+have told Eric today, for him to rate in the home chat.
+
 While Pulse is on, every tool call in the profile also gets a row in the
 outcome ledger (pulse_ledger), the record later slices check claims against.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import socket
@@ -31,11 +35,22 @@ from . import pulse_delivery as delivery
 from . import pulse_hermes as hermes
 from . import pulse_host as host
 from . import pulse_ledger as ledger
+from . import pulse_report as report
 from . import pulse_store as store
 
 logger = logging.getLogger(__name__)
 
 PROBE = "probe"
+REPORT = "report"
+# A report that didn't get through is tried again after this, up to
+# REPORT_TRIES a day, and only this long after its time (a dashboard down at
+# 08:00 still sends it at 11:00, but not at midnight).
+REPORT_RETRY_S = 1800.0
+REPORT_TRIES = 3
+REPORT_WINDOW_S = 8 * 3600.0
+# Ratings are read back from the home chat this often, for reports this old.
+RATINGS_EVERY_S = 300.0
+RATINGS_DAYS = 3
 TICK_S = 30.0
 # `pulse status` calls the loop stopped after this many missed ticks.
 STALE_TICK_S = 10 * TICK_S
@@ -58,6 +73,7 @@ _turns: dict[tuple[str, str], str] = {}
 _turns_lock = threading.Lock()
 # The last problem logged, so a missing home chat isn't logged every tick.
 _last_problem = ""
+_last_ratings = 0.0
 _owner = f"{socket.gethostname()}:{os.getpid()}"
 
 
@@ -107,7 +123,7 @@ def pre_llm_call(session_id: str, turn_id: Any, user_message: Any) -> Optional[s
             if row["state"] != store.RUNNING:
                 pulse_store.update_attempt(row["attempt_id"], state=store.RUNNING,
                                            turn_id=turn_id if isinstance(turn_id, str) else "")
-            return PROBE_NOTE
+            return report.REPORT_NOTE if row["kind"] == REPORT else PROBE_NOTE
     return None
 
 
@@ -178,7 +194,8 @@ def _hosts_chats() -> bool:
 
 
 def tick(now: Optional[float] = None) -> None:
-    """One pass: reconcile what's in flight, then probe if one is due."""
+    """One pass: reconcile what's in flight, read report ratings, then send
+    a probe or the daily report if one is due."""
     if _ctx is None or not _hosts_chats():
         return
     home = get_hermes_home()
@@ -193,23 +210,101 @@ def tick(now: Optional[float] = None) -> None:
     # The loop's heartbeat: `pulse status` warns when nothing runs the loop.
     pulse_store.set("last_tick_at", now)
     delivery.reconcile(pulse_store, home, process_started_at=_started_at, now=now)
+    _collect_ratings(pulse_store, home, now)
+    # One new turn per tick: a probe first, the report on a later tick.
+    if not _maybe_probe(pulse_store, home, now):
+        _maybe_report(pulse_store, home, now)
+
+
+def _send(pulse_store: store.PulseStore, *, kind: str, chat_id: str, text: Any) -> None:
+    profile = str(getattr(_ctx, "profile_name", "") or "")
+    delivery.submit(pulse_store, lambda chat_id, body: host.send(chat_id, body, profile=profile), kind=kind,
+                    chat_id=chat_id, text=text)
+
+
+def _maybe_probe(pulse_store: store.PulseStore, home: Path, now: float) -> bool:
+    """Sends a probe if one was asked for or is due; True when one went."""
     asked = pulse_store.take_probe_request()
     if not asked and not _probe_due(pulse_store, now):
-        return
+        return False
     if any(row["kind"] == PROBE for row in pulse_store.in_flight()):
         if asked:
             logger.info("conduit_push: Pulse: a delivery check is already in flight; not sending another")
-        return
+        return False
     chat, problem = home_chat(pulse_store, home)
     _log_problem(problem)
     if chat is None:
         if asked:
             logger.info("conduit_push: Pulse: the requested delivery check wasn't sent; run `pulse probe` again "
                         "once the home chat is there")
+        return False
+    _send(pulse_store, kind=PROBE, chat_id=chat.chat_id, text=lambda tag: PROBE_TEXT.format(tag=tag))
+    return True
+
+
+def _maybe_report(pulse_store: store.PulseStore, home: Path, now: float) -> bool:
+    """Sends the daily shadow report if asked for or due; True when it went."""
+    asked = pulse_store.take_request("report_requested")
+    if not asked and not _report_due(pulse_store, home, now):
+        return False
+    if any(row["kind"] == REPORT for row in pulse_store.in_flight()):
+        if asked:
+            logger.info("conduit_push: Pulse: a shadow report is already in flight; not sending another")
+        return False
+    chat, problem = home_chat(pulse_store, home)
+    _log_problem(problem)
+    if chat is None:
+        if asked:
+            logger.info("conduit_push: Pulse: the requested shadow report wasn't sent; run `pulse report` again "
+                        "once the home chat is there")
+        return False
+    context = report.build(home, pulse_store, home_chat_id=chat.chat_id, now=now)
+    _send(pulse_store, kind=REPORT, chat_id=chat.chat_id, text=lambda tag: report.report_text(tag, context))
+    return True
+
+
+def report_zone(pulse_store: store.PulseStore, home: Path) -> Any:
+    return report.zone_for(pulse_store.get("time_zone") or report.phone_zone(home))
+
+
+def _report_due(pulse_store: store.PulseStore, home: Path, now: float) -> bool:
+    if not pulse_store.get("daily_report"):
+        return False
+    at = report.due_today(now, report_zone(pulse_store, home), pulse_store.get("report_time"))
+    if at is None or now - at > REPORT_WINDOW_S:
+        return False
+    tries = pulse_store.attempts_since(REPORT, at)
+    if any(row["state"] not in (store.REFUSED, store.NOT_ADMITTED, store.FAILED) for row in tries):
+        return False  # delivered, or still on its way
+    return len(tries) < REPORT_TRIES and (not tries or now - tries[-1]["updated_at"] >= REPORT_RETRY_S)
+
+
+def _collect_ratings(pulse_store: store.PulseStore, home: Path, now: float) -> None:
+    """Reads Eric's ratings of recent reports back from the home chat."""
+    global _last_ratings
+    if now - _last_ratings < RATINGS_EVERY_S:
         return
-    profile = str(getattr(_ctx, "profile_name", "") or "")
-    delivery.submit(pulse_store, lambda chat_id, text: host.send(chat_id, text, profile=profile), kind=PROBE,
-                    chat_id=chat.chat_id, text=lambda tag: PROBE_TEXT.format(tag=tag))
+    _last_ratings = now
+    for row in pulse_store.attempts_since(REPORT, now - RATINGS_DAYS * 86400):
+        if row["state"] != store.DELIVERED:
+            continue
+        try:
+            items, ratings = report.ratings_after(home, chat_id=row["session_key"], tag=row["tag"],
+                                                  since=row["created_at"] - delivery.SINCE_SLACK_S)
+        except hermes.HermesUnreadable:
+            return
+        if items:
+            pulse_store.set_ratings(row["attempt_id"], json.dumps(items), report.ratings_json(ratings))
+
+
+def rating_counts(pulse_store: store.PulseStore) -> dict[str, tuple[int, int]]:
+    """Kind -> (rated useful, rated not), over every rated report."""
+    counts: dict[str, list[int]] = {}
+    for row in pulse_store.all_ratings():
+        for rating in report.ratings_from_json(row["ratings_json"]):
+            pair = counts.setdefault(rating.kind, [0, 0])
+            pair[0 if rating.useful else 1] += 1
+    return {kind: (yes, no) for kind, (yes, no) in sorted(counts.items())}
 
 
 def _log_problem(problem: str) -> None:

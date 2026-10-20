@@ -43,6 +43,12 @@ DEFAULTS: dict[str, Any] = {
     "home_session_key": "",
     # When the gateway's loop last ran with Pulse on (time.time()).
     "last_tick_at": None,
+    # The daily shadow report: on while Pulse is, at this local time, in the
+    # phone's time zone unless one is set here.
+    "daily_report": True,
+    "report_time": "08:00",
+    "time_zone": "",
+    "report_requested": False,
 }
 # Which process runs the loop: {"owner": ..., "until": time.time()}.
 LEADER = "leader"
@@ -85,6 +91,12 @@ CREATE TABLE IF NOT EXISTS outcomes (
     duration_ms INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS outcomes_at ON outcomes(at);
+CREATE TABLE IF NOT EXISTS report_ratings (
+    attempt_id TEXT PRIMARY KEY,
+    items_json TEXT NOT NULL,
+    ratings_json TEXT NOT NULL,
+    updated_at REAL NOT NULL
+);
 CREATE INDEX IF NOT EXISTS outcomes_session ON outcomes(session_id);
 """
 # ``attempts.session_key`` holds the home chat's stored session id (the
@@ -128,15 +140,19 @@ class PulseStore:
 
     def take_probe_request(self) -> bool:
         """Whether a probe was asked for (``pulse probe``), clearing the ask."""
+        return self.take_request("probe_requested")
+
+    def take_request(self, key: str) -> bool:
+        """Whether the flag ``key`` was set (a CLI ask), clearing it."""
         with _lock, self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute("SELECT value_json FROM settings WHERE key='probe_requested'").fetchone()
+            row = conn.execute("SELECT value_json FROM settings WHERE key=?", (key,)).fetchone()
             try:
                 asked = bool(row and json.loads(row["value_json"]))
             except ValueError:
                 asked = False
             if asked:
-                conn.execute("UPDATE settings SET value_json='false' WHERE key='probe_requested'")
+                conn.execute("UPDATE settings SET value_json='false' WHERE key=?", (key,))
             conn.execute("COMMIT")
         return asked
 
@@ -208,12 +224,39 @@ class PulseStore:
             row = conn.execute("SELECT MAX(created_at) AS at FROM attempts WHERE kind=?", (kind,)).fetchone()
         return row["at"] if row and row["at"] is not None else None
 
+    def attempts_since(self, kind: str, since: float) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT * FROM attempts WHERE kind=? AND created_at >= ? ORDER BY created_at",
+                                (kind, since)).fetchall()
+        return [dict(row) for row in rows]
+
     def counts(self, kind: str) -> dict[str, int]:
         with self._connect() as conn:
             rows = conn.execute("SELECT state, COUNT(*) AS n FROM attempts WHERE kind=? GROUP BY state",
                                 (kind,)).fetchall()
         return {row["state"]: row["n"] for row in rows}
 
+
+    # Report ratings -------------------------------------------------------
+
+    def set_ratings(self, attempt_id: str, items_json: str, ratings_json: str) -> bool:
+        """Stores a report's items and ratings; True when they changed."""
+        with _lock, self._connect() as conn:
+            row = conn.execute("SELECT items_json, ratings_json FROM report_ratings WHERE attempt_id=?",
+                               (attempt_id,)).fetchone()
+            if row is not None and (row["items_json"], row["ratings_json"]) == (items_json, ratings_json):
+                return False
+            conn.execute(
+                "INSERT INTO report_ratings(attempt_id, items_json, ratings_json, updated_at) VALUES(?,?,?,?) "
+                "ON CONFLICT(attempt_id) DO UPDATE SET items_json=excluded.items_json, "
+                "ratings_json=excluded.ratings_json, updated_at=excluded.updated_at",
+                (attempt_id, items_json, ratings_json, time.time()))
+        return True
+
+    def all_ratings(self) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT * FROM report_ratings ORDER BY attempt_id").fetchall()
+        return [dict(row) for row in rows]
 
     # Outcomes (designs/proactivity.md 3.6) --------------------------------
 

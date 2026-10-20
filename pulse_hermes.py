@@ -112,3 +112,36 @@ def find_turn(home: Path, *, chat_id: str, tag: str, since: float) -> Optional[T
         if text:
             reply = text
     return TurnRows(session_id, reply, failed, closed)
+
+
+def recent_messages(home: Path, *, exclude_chat: str, since: float) -> list[sqlite3.Row]:
+    """User and assistant rows since ``since`` in the chats a person had:
+    not ``exclude_chat`` or what it continued into, not cron runs, hidden
+    chats or hidden rows. Oldest first, with the chat's id and title."""
+    return _run(home, (
+        "WITH RECURSIVE excluded(id) AS (SELECT ? UNION SELECT s.id FROM sessions s JOIN excluded e "
+        "ON s.parent_session_id = e.id) "
+        "SELECT s.id AS chat_id, s.title, m.role, m.content, m.timestamp FROM messages m "
+        "JOIN sessions s ON s.id = m.session_id "
+        "WHERE m.timestamp >= ? AND m.role IN ('user', 'assistant') AND m.active = 1 AND m.display_kind IS NULL "
+        "AND s.source != 'cron' AND s.hidden = 0 AND s.id NOT IN (SELECT id FROM excluded) "
+        "ORDER BY m.timestamp, m.id"
+    ), (exclude_chat, since))
+
+
+def user_text_after(home: Path, *, session_id: str, tag: str) -> list[str]:
+    """What the user wrote after the user row carrying ``tag``, up to the
+    next hidden (Pulse) row."""
+    rows = _run(home, (
+        "SELECT role, content, display_kind FROM messages WHERE session_id = ? AND id > ("
+        "SELECT MIN(id) FROM messages WHERE session_id = ? AND role = 'user' AND instr(content, ?) > 0) "
+        "ORDER BY id"
+    ), (session_id, session_id, tag))
+    text = []
+    for row in rows:
+        if row["role"] != "user":
+            continue
+        if row["display_kind"] is not None:
+            break
+        text.append(row["content"] if isinstance(row["content"], str) else "")
+    return text
