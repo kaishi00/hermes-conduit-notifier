@@ -350,7 +350,7 @@ def _distance_to(view: dict[str, Any], wanted: Any, now: float) -> dict[str, Any
     if fix is None:
         return {"ok": False, "error": "unknown", "note": "No location has arrived yet."}
     if fix["place_id"] == place["id"]:
-        return {"ok": True, "place": place["name"], "distance": "there now", "as_of": _ago(now - fix["at"])}
+        return {"ok": True, "place": place["name"], "distance": "there at the last fix", "as_of": _ago(now - fix["at"])}
     metres = (fix.get("distances_m") or {}).get(place["id"])
     if metres is None:
         return {"ok": False, "error": "no_distance",
