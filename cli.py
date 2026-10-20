@@ -7,6 +7,7 @@ import http.client
 import socket
 import time
 from pathlib import Path
+from typing import Any
 
 from . import e2e
 from .client import DEFAULT_RELAY_URL, UnpairedLocally, build_outgoing, claim_pairing, e2e_status, load_state, post_event, send_now, set_redact_content, state_path, unpair
@@ -33,10 +34,11 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
         help="Redact chat text from pushes; choice labels still transit so cards stay answerable",
     )
     redact.add_argument("mode", choices=["on", "off"])
-    pulse = commands.add_parser("pulse", help="Pulse, the proactivity experiment: on, off, status, probe, home")
-    pulse.add_argument("pulse_action", choices=["on", "off", "status", "probe", "home"])
+    pulse = commands.add_parser("pulse", help="Pulse, the proactivity experiment: on, off, status, probe, home, outcomes")
+    pulse.add_argument("pulse_action", choices=["on", "off", "status", "probe", "home", "outcomes"])
     pulse.add_argument("value", nargs="?", default="",
-                       help="for home: the id of the chat to use, or 'auto' to find it by title")
+                       help="for home: the id of the chat to use, or 'auto' to find it by title; "
+                            "for outcomes: how many to show, or a chat id")
     parser.set_defaults(func=dispatch)
 
 
@@ -156,7 +158,7 @@ def _pulse(args: argparse.Namespace) -> int:
     from . import pulse, pulse_delivery
     home = get_hermes_home()
     action = args.pulse_action
-    if action in ("status", "probe", "off") and not (Path(home) / pulse_delivery.store.DB_NAME).exists():
+    if action in ("status", "probe", "off", "outcomes") and not (Path(home) / pulse_delivery.store.DB_NAME).exists():
         # Never turned on: say so without leaving a file behind.
         print("Pulse: off (never turned on). `hermes conduit-push pulse on` to start it.")
         return 1 if action == "probe" else 0
@@ -184,6 +186,8 @@ def _pulse(args: argparse.Namespace) -> int:
         pulse_store.set("home_session_key", "" if value == "auto" else value)
         print("Pulse finds its chat by title again." if value == "auto" else f"Pulse speaks in {_printable(value)}.")
         return 0
+    if action == "outcomes":
+        return _pulse_outcomes(pulse_store, (args.value or "").strip())
     print(f"Pulse: {'on' if pulse_store.get('enabled') else 'off'}")
     chat, problem = pulse.home_chat(pulse_store, home)
     if chat is not None:
@@ -207,7 +211,29 @@ def _pulse(args: argparse.Namespace) -> int:
         print("Latest:")
         for row in recent:
             print("  " + _printable(pulse_delivery.describe(row)))
+    outcomes = pulse_store.outcome_counts(time.time() - 86400)
+    if outcomes or pulse_store.get("enabled"):
+        print("Tool outcomes in the last 24 hours: "
+              + (", ".join(f"{n} {status}" for status, n in sorted(outcomes.items())) or "none yet"))
     print(f"State: {pulse_store.path}")
+    return 0
+
+
+def _pulse_outcomes(pulse_store: Any, value: str) -> int:
+    from . import pulse_ledger
+    limit, session_id = 20, None
+    if value.isdigit():
+        limit = max(1, min(int(value), 500))
+    elif value:
+        session_id = value
+    rows = pulse_store.recent_outcomes(limit, session_id=session_id)
+    if not rows:
+        print("No tool outcomes recorded yet." if pulse_store.get("enabled") else
+              "No tool outcomes recorded. They're recorded while Pulse is on.")
+        return 0
+    for row in reversed(rows):
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(row["at"]))
+        print(f"{when}  {_printable(pulse_ledger.line(row))}  [{_printable(row['session_id'])}]")
     return 0
 
 

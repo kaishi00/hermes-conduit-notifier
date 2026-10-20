@@ -10,6 +10,9 @@ restart and a reboot.
 A Pulse turn is recognised by its tag in ``pre_llm_call``. On such a turn
 every tool is blocked in ``pre_tool_call`` (the probe needs none; later
 slices allow named reads only), and no push or Live Activity goes out for it.
+
+While Pulse is on, every tool call in the profile also gets a row in the
+outcome ledger (pulse_ledger), the record later slices check claims against.
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ from hermes_constants import get_hermes_home
 from . import pulse_delivery as delivery
 from . import pulse_hermes as hermes
 from . import pulse_host as host
+from . import pulse_ledger as ledger
 from . import pulse_store as store
 
 logger = logging.getLogger(__name__)
@@ -132,6 +136,14 @@ def turn_ended(session_id: str, turn_id: Any) -> None:
     if row is not None and row["state"] in store.IN_FLIGHT:
         open_store().update_attempt(row["attempt_id"], detail=delivery.ENDED)
     _wake.set()
+
+
+def post_tool_call(**kwargs: Any) -> None:
+    """The outcome ledger's row for one tool call, in any session, while
+    Pulse is on (pulse_ledger)."""
+    ledger.record(get_hermes_home(), **{key: kwargs.get(key) for key in (
+        "tool_name", "args", "result", "session_id", "turn_id", "task_id", "tool_call_id", "status",
+        "error_type", "error_message")}, duration_ms=kwargs.get("duration_ms") or 0)
 
 
 def _mark_turn(session_id: str, turn_id: Any, tag: str) -> None:

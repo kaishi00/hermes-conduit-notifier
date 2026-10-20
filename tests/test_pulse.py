@@ -1,4 +1,5 @@
-"""Pulse slice 0: the home chat delivery probe (designs/proactivity.md 6.4.1, 6.4.2, 7.6).
+"""Pulse slice 0: the home chat delivery probe (designs/proactivity.md 6.4.1, 6.4.2, 7.6)
+and the outcome ledger (3.6).
 
 The home chat is a Conduit (Desktop-source) chat, reached through the
 dashboard's session host; the host is faked here with its two methods.
@@ -65,6 +66,7 @@ delivery = _load("conduit_push.pulse_delivery", ROOT / "pulse_delivery.py")
 pulse = _load("conduit_push.pulse", ROOT / "pulse.py")
 cli = _load("conduit_push.cli", ROOT / "cli.py")
 host = _load("conduit_push.pulse_host", ROOT / "pulse_host.py")
+ledger = _load("conduit_push.pulse_ledger", ROOT / "pulse_ledger.py")
 
 SID = "20261019_165824_560887"  # a Conduit chat's stored id, as Eric's host showed it
 
@@ -540,3 +542,122 @@ def test_reading_pulse_before_it_was_ever_on_leaves_no_file(live, tmp_path, monk
     for action in ("status", "off", "probe"):
         cli.dispatch(types.SimpleNamespace(conduit_push_action="pulse", pulse_action=action, value=""))
     assert not (tmp_path / store.DB_NAME).exists()
+
+
+# The outcome ledger ---------------------------------------------------------------
+
+@pytest.fixture
+def recording(live):
+    ledger.forget_cache()
+    live.store.set("enabled", True)
+    yield live
+    ledger.forget_cache()
+
+
+def _call(**overrides):
+    kwargs = dict(tool_name="conduit_phone", args={"action": "add_reminder", "title": "Call  the\ndentist",
+                                                   "notes": "secret"},
+                  result=json.dumps({"ok": True, "reminder": {"id": "R123", "title": "Call the dentist"}}),
+                  session_id=SID, turn_id="t1", task_id="task", tool_call_id="call-1", status="ok",
+                  error_type=None, error_message=None, duration_ms=42)
+    kwargs.update(overrides)
+    return kwargs
+
+
+def test_a_tool_call_leaves_one_outcome_row(recording):
+    plugin._post_tool_call(**_call())
+    [row] = recording.store.recent_outcomes()
+    assert (row["tool"], row["action"], row["label"], row["status"]) == (
+        "conduit_phone", "add_reminder", "Call the dentist", "ok")
+    assert (row["session_id"], row["turn_id"], row["tool_call_id"], row["duration_ms"]) == (SID, "t1", "call-1", 42)
+    assert json.loads(row["ids_json"]) == {"reminder.id": "R123"}
+    assert "secret" not in json.dumps(row)  # arguments are digested, not kept
+    assert ledger.line(row) == "conduit_phone add_reminder 'Call the dentist' → ok, reminder.id R123"
+
+
+def test_a_failed_call_keeps_its_error(recording):
+    plugin._post_tool_call(**_call(status="error", error_type="tool_error", error_message="phone unreachable",
+                                   result=json.dumps({"error": "phone unreachable"})))
+    [row] = recording.store.recent_outcomes()
+    assert row["status"] == "error" and row["error"] == "phone unreachable"
+    assert ledger.line(row).endswith("→ error: phone unreachable")
+
+
+def test_without_hermes_status_the_result_decides(recording):
+    plugin._post_tool_call(**_call(status=None, result=json.dumps({"error": "no such job"})))
+    plugin._post_tool_call(**_call(status=None, result="plain text output"))
+    rows = recording.store.recent_outcomes()
+    assert [(r["status"], r["error"]) for r in rows] == [("ok", ""), ("error", "no such job")]
+
+
+def test_nothing_is_recorded_while_pulse_is_off(live):
+    ledger.forget_cache()
+    plugin._post_tool_call(**_call())
+    assert live.store.recent_outcomes() == []
+
+
+def test_the_ledger_leaves_no_file_while_never_turned_on(live, tmp_path):
+    ledger.forget_cache()
+    (tmp_path / store.DB_NAME).unlink()
+    plugin._post_tool_call(**_call())
+    assert not (tmp_path / store.DB_NAME).exists()
+
+
+def test_a_ledger_failure_never_breaks_the_call(recording, monkeypatch):
+    def boom(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(store.PulseStore, "add_outcome", boom)
+    plugin._post_tool_call(**_call())  # no exception
+
+
+def test_subagent_calls_count_too(recording, monkeypatch):
+    monkeypatch.setattr(plugin, "_is_child", lambda session_id: True)
+    plugin._post_tool_call(**_call(session_id="child"))
+    assert [r["session_id"] for r in recording.store.recent_outcomes()] == ["child"]
+
+
+@pytest.mark.parametrize("result, expected", [
+    ({"id": 7, "path": "/tmp/a.txt", "ok": True}, {"id": "7", "path": "/tmp/a.txt"}),
+    ('{"job_id": "j1", "watchId": "w2", "valid": true}', {"job_id": "j1", "watchId": "w2"}),
+    ({"created": [{"event_id": "E9"}]}, {"created[0].event_id": "E9"}),
+    ({"id": True, "data": {"url": "https://example.com/x"}}, {"data.url": "https://example.com/x"}),
+    ("not json", {}),
+    (None, {}),
+    ({f"k{i}_id": str(i) for i in range(20)}, {f"k{i}_id": str(i) for i in range(ledger.MAX_IDS)}),
+])
+def test_identifiers_come_from_the_result(result, expected):
+    assert ledger.extract_ids(result) == expected
+
+
+def test_same_arguments_give_the_same_digest():
+    assert ledger.describe_call({"a": 1, "b": [2]})[2] == ledger.describe_call({"b": [2], "a": 1})[2]
+    assert ledger.describe_call({"a": 1})[2] != ledger.describe_call({"a": 2})[2]
+    assert ledger.describe_call(None) == ("", "", ledger.describe_call({})[2])
+
+
+def test_old_outcomes_are_pruned(recording):
+    now = time.time()
+    plugin._post_tool_call(**_call(tool_call_id="old"))
+    with sqlite3.connect(recording.store.path) as conn:
+        conn.execute("UPDATE outcomes SET at = ?", (now - ledger.RETENTION_S - 1,))
+    assert recording.store.prune_outcomes(before=now - ledger.RETENTION_S, keep=ledger.MAX_ROWS) == 1
+    for n in range(5):
+        plugin._post_tool_call(**_call(tool_call_id=f"c{n}"))
+    assert recording.store.prune_outcomes(before=0, keep=3) == 2
+    assert [r["tool_call_id"] for r in recording.store.recent_outcomes()] == ["c4", "c3", "c2"]
+
+
+def test_outcomes_command(recording, capsys, monkeypatch):
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", pulse.get_hermes_home)
+    run = lambda value="": cli.dispatch(types.SimpleNamespace(conduit_push_action="pulse", pulse_action="outcomes",
+                                                              value=value))
+    assert run() == 0 and "No tool outcomes recorded yet." in capsys.readouterr().out
+    plugin._post_tool_call(**_call())
+    plugin._post_tool_call(**_call(session_id="other", tool_name="terminal", args={}))
+    assert run() == 0
+    out = capsys.readouterr().out
+    assert out.index("conduit_phone") < out.index("terminal")  # oldest first
+    assert run("other") == 0 and "conduit_phone" not in capsys.readouterr().out
+    assert run("1") == 0 and capsys.readouterr().out.count("\n") == 1
+    cli.dispatch(types.SimpleNamespace(conduit_push_action="pulse", pulse_action="status", value=""))
+    assert "Tool outcomes in the last 24 hours: 2 ok" in capsys.readouterr().out

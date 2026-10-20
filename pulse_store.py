@@ -1,4 +1,4 @@
-"""Pulse's own state: its settings and every delivery attempt.
+"""Pulse's own state: its settings, every delivery attempt, and the outcome ledger.
 
 Pulse (designs/proactivity.md) sends messages as turns in one home chat. This
 store keeps what Pulse decided and tried; what Hermes actually did is read
@@ -67,6 +67,25 @@ CREATE TABLE IF NOT EXISTS attempts (
     updated_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS attempts_state ON attempts(state);
+CREATE TABLE IF NOT EXISTS outcomes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at REAL NOT NULL,
+    session_id TEXT NOT NULL DEFAULT '',
+    turn_id TEXT NOT NULL DEFAULT '',
+    task_id TEXT NOT NULL DEFAULT '',
+    tool_call_id TEXT NOT NULL DEFAULT '',
+    tool TEXT NOT NULL,
+    action TEXT NOT NULL DEFAULT '',
+    label TEXT NOT NULL DEFAULT '',
+    args_digest TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL,
+    error_type TEXT NOT NULL DEFAULT '',
+    error TEXT NOT NULL DEFAULT '',
+    ids_json TEXT NOT NULL DEFAULT '{}',
+    duration_ms INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS outcomes_at ON outcomes(at);
+CREATE INDEX IF NOT EXISTS outcomes_session ON outcomes(session_id);
 """
 # ``attempts.session_key`` holds the home chat's stored session id (the
 # column kept its first name so a store from the first build still opens).
@@ -193,6 +212,37 @@ class PulseStore:
             rows = conn.execute("SELECT state, COUNT(*) AS n FROM attempts WHERE kind=? GROUP BY state",
                                 (kind,)).fetchall()
         return {row["state"]: row["n"] for row in rows}
+
+
+    # Outcomes (designs/proactivity.md 3.6) --------------------------------
+
+    def add_outcome(self, row: dict[str, Any]) -> None:
+        columns = ("at", "session_id", "turn_id", "task_id", "tool_call_id", "tool", "action", "label",
+                   "args_digest", "status", "error_type", "error", "ids_json", "duration_ms")
+        with _lock, self._connect() as conn:
+            conn.execute(f"INSERT INTO outcomes({', '.join(columns)}) VALUES({','.join('?' * len(columns))})",
+                         tuple(row[column] for column in columns))
+
+    def recent_outcomes(self, limit: int = 20, *, session_id: Optional[str] = None) -> list[dict]:
+        where, params = ("WHERE session_id=? ", (session_id,)) if session_id else ("", ())
+        with self._connect() as conn:
+            rows = conn.execute(f"SELECT * FROM outcomes {where}ORDER BY id DESC LIMIT ?",
+                                (*params, limit)).fetchall()
+        return [dict(row) for row in rows]
+
+    def outcome_counts(self, since: float) -> dict[str, int]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT status, COUNT(*) AS n FROM outcomes WHERE at >= ? GROUP BY status",
+                                (since,)).fetchall()
+        return {row["status"]: row["n"] for row in rows}
+
+    def prune_outcomes(self, *, before: float, keep: int) -> int:
+        """Drops outcomes older than ``before``, and the oldest past ``keep``."""
+        with _lock, self._connect() as conn:
+            removed = conn.execute("DELETE FROM outcomes WHERE at < ?", (before,)).rowcount
+            removed += conn.execute("DELETE FROM outcomes WHERE id <= (SELECT id FROM outcomes ORDER BY id DESC "
+                                    "LIMIT 1 OFFSET ?)", (keep,)).rowcount
+        return removed
 
 
 class _Closing:
