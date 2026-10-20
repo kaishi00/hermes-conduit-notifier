@@ -325,19 +325,19 @@ def _maybe_memory(pulse_store: store.PulseStore, home: Path, now: float) -> None
     if chat is None:
         return  # without the home chat, Pulse's own reports would be read as chats
     pulse_store.set("memory_run_at", now)
-    _memory_thread = threading.Thread(target=_memory_run, args=(home, chat.chat_id, now), name="conduit-pulse-memory",
+    _memory_thread = threading.Thread(target=_memory_run, args=(home, chat.chat_id, now, _stop), name="conduit-pulse-memory",
                                       daemon=True)
     _memory_thread.start()
 
 
-def _memory_run(home: Path, home_chat_id: str, now: float) -> None:
+def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Event) -> None:
     try:
         pulse_store = open_store(home)
         sources = [("", Path(home), home_chat_id)]
         if pulse_store.get("report_profiles") == "all":
             sources += [(name, path, report.their_home_chat(path)) for name, path in report.profile_homes(home)]
         done = memory.run(pulse_store, sources, _memory_llm, zone=report_zone(pulse_store, home), now=now,
-                          still_leader=lambda: _leads(pulse_store))
+                          still_leader=lambda: not stopped.is_set() and _leads(pulse_store))
         if done["chunks"] or done["failed"]:
             usage = pulse_store.get("memory_usage")
             usage = usage if isinstance(usage, dict) else {}

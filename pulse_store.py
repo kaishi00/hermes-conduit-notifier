@@ -380,8 +380,8 @@ class PulseStore:
                 conn.execute("ROLLBACK")
                 return None
             for item in items:
-                row = {"profile": profile, "chat_id": chat_id, "recorded_at": now,
-                       "valid_from": item["mentioned_at"], **item}
+                row = {**item, "profile": profile, "chat_id": chat_id, "recorded_at": now,
+                       "valid_from": item["mentioned_at"]}
                 ids.append(conn.execute(
                     f"INSERT INTO items({', '.join(columns)}) VALUES({','.join('?' * len(columns))})",
                     tuple(row[column] for column in columns)).lastrowid)
@@ -392,10 +392,16 @@ class PulseStore:
             conn.execute("COMMIT")
         return ids
 
-    def chunk_failed(self, profile: str, chat_id: str, *, retry_at: float) -> int:
-        """Counts a failed read of the chat's next chunk; returns the count."""
+    def chunk_failed(self, profile: str, chat_id: str, *, retry_at: float, after_id: int = 0) -> int:
+        """Counts a failed read of the chat's next chunk, unless another
+        reader moved the chat past ``after_id`` meanwhile; returns the count."""
         with _lock, self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT message_id FROM watermarks WHERE profile=? AND chat_id=?",
+                               (profile, chat_id)).fetchone()
+            if (row["message_id"] if row else 0) != after_id:
+                conn.execute("ROLLBACK")
+                return 0
             conn.execute(
                 "INSERT INTO watermarks(profile, chat_id, message_id, at, failures, retry_at) VALUES(?,?,0,0,1,?) "
                 "ON CONFLICT(profile, chat_id) DO UPDATE SET failures=failures+1, retry_at=excluded.retry_at",

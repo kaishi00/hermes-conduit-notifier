@@ -194,8 +194,8 @@ def _row_with(evidence: str, chunk: Sequence[Any], hint: Any) -> Optional[Any]:
     """The row whose text holds every part of ``evidence`` (a quote may skip
     words with an ellipsis), trying the line the model named first."""
     parts = [part for part in (_norm(p) for p in _ELLIPSIS.split(evidence)) if part]
-    if not parts or sum(map(len, parts)) < 4:
-        return None
+    if not parts or sum(map(len, parts)) < 8 or min(map(len, parts)) < 3:
+        return None  # too little to tell where it came from
     order = list(chunk)
     if isinstance(hint, int) and not isinstance(hint, bool) and 1 <= hint <= len(chunk):
         order.insert(0, order.pop(hint - 1))
@@ -282,7 +282,8 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
                 items, tokens = extract(llm, chunk, zone, outcomes)
             except Exception as error:  # noqa: BLE001 — a model or network failure waits for a retry
                 done["failed"] += 1
-                failures = pulse_store.chunk_failed(chat.profile, chat.chat_id, retry_at=now + RETRY_S)
+                failures = pulse_store.chunk_failed(chat.profile, chat.chat_id, retry_at=now + RETRY_S,
+                                                    after_id=chat.after_id)
                 logger.warning("conduit_push: Pulse memory couldn't read a chat (try %d of %d): %s",
                                failures, MAX_FAILURES, type(error).__name__)
                 if failures >= MAX_FAILURES:

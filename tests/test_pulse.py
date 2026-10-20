@@ -18,6 +18,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import types
 
@@ -1151,6 +1152,7 @@ def test_only_items_said_in_the_chat_are_kept():
          "line": 7, "explicit": True, "due": "2026-10-21T09:00", "due_words": "at nine"},  # never said
         {"kind": "fact", "text": "The user's sister lives in Lyon.", "evidence": "my sister lives in Lyon", "line": 1},
         {"kind": "mood", "text": "x", "evidence": "promise", "line": 1},
+        {"kind": "fact", "text": "x", "evidence": "I ... on", "line": 1},  # too little to place
         "not an item"]})
     items, tokens = memory.extract(model, chunk, UTC)
     assert tokens == 100 and "[1] Tue 2026-10-20 00:01 User: I’ll call the dentist" in model.shown[0]
@@ -1233,6 +1235,9 @@ def test_a_chunk_two_processes_read_is_kept_once(remembering, db):
 
     done = _remember(remembering, Racing(reply), DAY + 70 + memory.IDLE_S)
     assert done["chunks"] == 0 and len(remembering.store.open_items()) == 1
+    # A failure on a chunk someone else already read isn't counted against the chat.
+    assert remembering.store.chunk_failed("", "work", retry_at=DAY, after_id=0) == 0
+    assert remembering.store.watermark("", "work")["failures"] == 0
 
 
 def test_tool_outcomes_show_once_across_chunks(remembering, db):
@@ -1309,6 +1314,7 @@ def test_the_loop_runs_memory_on_its_own_thread(remembering, db, monkeypatch):
     remembering.ctx.llm = Llm()
     monkeypatch.setattr(pulse, "_memory_thread", None)
     monkeypatch.setattr(pulse, "_memory_task", True)
+    monkeypatch.setattr(pulse, "_stop", threading.Event())
     start = time.time()
     pulse.tick(start)
     pulse._memory_thread.join(5)
@@ -1324,12 +1330,21 @@ def test_the_loop_runs_memory_on_its_own_thread(remembering, db, monkeypatch):
     pulse._memory_thread.join(5)
     assert [(c["task"], c["json_mode"]) for c in calls] == [(memory.TASK, True)]
     assert remembering.store.get("memory_usage") == {"chunks": 1, "items": 0, "tokens": 7, "failed": 0}
+    pulse._stop.set()  # an unloaded plugin's run makes no more calls
+    db.message("user", "more", sid="work", at=start + 130)
+    db.message("assistant", "ok", sid="work", at=start + 131)
+    remembering.store.set("memory_requested", True)
+    pulse.tick(start + 180)
+    pulse._memory_thread.join(5)
+    assert len(calls) == 1
 
 
 def test_memory_command(remembering, db, capsys, monkeypatch):
     monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", pulse.get_hermes_home)
     run = lambda value="", extra="": cli.dispatch(types.SimpleNamespace(
         conduit_push_action="pulse", pulse_action="memory", value=value, extra=extra))
+    remembering.store.path.unlink()
+    assert run() == 0 and run("fact") == 0 and not remembering.store.path.exists()  # listing leaves no file
     assert run("on") == 0 and remembering.store.get("memory") is True
     capsys.readouterr()
     assert run() == 0 and "hasn't kept anything" in capsys.readouterr().out
