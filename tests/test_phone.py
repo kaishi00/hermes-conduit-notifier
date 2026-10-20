@@ -969,7 +969,8 @@ def test_routes_round_trip(client):
     assert body["ok"] is True and body["v"] == 1
     assert [item["id"] for item in handset.open_answer(body)["changes"]] == [change["id"]]
     assert http.post(f"{BASE}/phone/exchange", json={**handset.exchange_request(), "op": "other"}).status_code == 400
-    assert http.post(f"{BASE}/phone/ingest", json={**handset.seal(batch), "kid": "f" * 32}).status_code == 409
+    response = http.post(f"{BASE}/phone/ingest", json={**handset.seal(batch), "kid": "f" * 32})
+    assert response.status_code == 409 and response.json()["code"] == "unknown_key"
     assert http.post(f"{BASE}/phone/wipe", json={}).status_code == 400
     assert http.post(f"{BASE}/phone/wipe", json={"all": True, "device_id": DEVICE}).status_code == 400
     assert http.post(f"{BASE}/phone/wipe", json={"device_id": DEVICE}).json()["remaining_devices"] == 0
@@ -1065,6 +1066,7 @@ def test_a_voice_read_needs_the_voice_seal(client):
     # Sealed for the changes exchange: it doesn't open as a voice read.
     response = client.http.post(f"{BASE}/voice-tools/call", json={**handset.exchange_request(), "op": "voice"})
     assert response.status_code == 409 and "set up" in response.json()["detail"]
+    assert response.json()["code"] == "bad_seal"
     # And a voice read doesn't run as an exchange.
     response = client.http.post(f"{BASE}/phone/exchange",
                                 json=_voice_request(handset, "conduit_calendar", {"action": "overview"}))

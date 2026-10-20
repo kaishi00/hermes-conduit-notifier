@@ -7137,7 +7137,7 @@ def _phone_voice_call(envelope: Dict[str, Any]) -> Dict[str, Any]:
     try:
         device_id, request, seal_answer = store.open_voice_request(envelope)
     except phone.PhoneError as exc:
-        raise TokenError(exc.status, str(exc)) from exc
+        raise TokenError(exc.status, str(exc), exc.code) from exc
     name = request.get("tool")
     if name not in phone.VOICE_TOOLS:
         raise TokenError(404, "This host has no voice tool by that name")
@@ -7467,7 +7467,7 @@ def _phone_call(fn: Callable[[Any], Dict[str, Any]]) -> Dict[str, Any]:
     try:
         return fn(module.PhoneStore(_calls_home()))
     except module.PhoneError as exc:
-        raise TokenError(exc.status, str(exc))
+        raise TokenError(exc.status, str(exc), exc.code)
 
 
 async def _phone_route(response: Response, profile: Optional[str], fn: Callable[[], Dict[str, Any]],
