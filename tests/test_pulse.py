@@ -861,8 +861,14 @@ def test_the_report_context_stays_within_its_budget(db, tmp_path, pulse_store):
         for m in range(20):
             db.message("user", "x" * 1000, sid=f"c{n}", at=now - 3600 + n * 10 + m)
     chats = report.recent_chats(tmp_path, home_chat_id=SID, since=now - 86400, zone=report.zone_for("UTC"))
-    assert len(chats) <= report.CHATS_BUDGET + 200
+    assert len(chats) <= report.CHATS_BUDGET
     assert chats.startswith("### Chat 39")  # the most recent chat first
+    small = report.recent_chats(tmp_path, home_chat_id=SID, since=now - 86400, zone=report.zone_for("UTC"),
+                                budget=1500)
+    assert small.startswith("### Chat 39") and len(small) <= 1500  # a bigger chat is cut, not dropped
+    none = report.recent_chats(tmp_path, home_chat_id=SID, since=now - 86400, zone=report.zone_for("UTC"),
+                               budget=10)
+    assert none == "(Chats left out: no room in this report.)"
 
 
 def test_the_whole_report_message_stays_under_its_budget(db, tmp_path, live):

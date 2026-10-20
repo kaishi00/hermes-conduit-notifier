@@ -159,17 +159,23 @@ def recent_chats(home: Path, *, home_chat_id: str, since: float, zone: tzinfo,
             chat["last"] = max(chat["last"], row["timestamp"])
     out, used = [], 0
     for chat in sorted(chats.values(), key=lambda c: c["last"], reverse=True):
+        title = f"### {_clip(chat['title'], 80)}\n"
+        # The chat's own budget, or what's left when that's less, so the
+        # last chat that gets in keeps its newest lines.
+        room = min(PER_CHAT_BUDGET, budget - used - len(title))
         lines, size = [], 0
-        for line in reversed(chat["lines"]):  # the newest that fit the chat's budget
-            if size + len(line) > PER_CHAT_BUDGET:
+        for line in reversed(chat["lines"]):  # the newest that fit
+            if size + len(line) > room:
                 break
             lines.append(line)
             size += len(line) + 1
-        block = f"### {_clip(chat['title'], 80)}\n" + "\n".join(reversed(lines))
-        if used + len(block) > budget:
+        if not lines:
             break
+        block = title + "\n".join(reversed(lines))
         out.append(block)
         used += len(block) + 2  # with the blank line that joins it to the next
+    if chats and not out:
+        return "(Chats left out: no room in this report.)"
     return "\n\n".join(out)
 
 
