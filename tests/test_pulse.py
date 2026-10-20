@@ -801,6 +801,31 @@ def test_a_report_looks_back_to_the_last_delivered_one(pulse_store):
     assert report.window_start(pulse_store, now) == now - 6 * 3600
 
 
+def test_the_report_reads_every_profile(live, db, tmp_path, request):
+    now = time.time()
+    db.session()
+    db.message("user", "home chat text", at=now - 60)
+    bot_home = tmp_path / "profiles" / "nahida"
+    bot_home.mkdir(parents=True)
+    bot = StateDB(bot_home, request.node.callspec.params["db"])
+    bot.session("b1", title="Bot Chat", pinned=0)
+    bot.message("user", "Remind me to call the landlord", sid="b1", at=now - 600)
+    (bot_home / "memories").mkdir()
+    (bot_home / "memories" / "USER.md").write_text("Prefers mornings.")
+    (bot_home / "cron").mkdir()
+    (bot_home / "cron" / "jobs.json").write_text(json.dumps([{"id": "j", "name": "Rent", "prompt": "Pay rent"}]))
+    (tmp_path / "profiles" / "empty").mkdir()  # no state.db: not a profile with chats
+    assert report.profile_homes(tmp_path) == [("nahida", bot_home)]
+    assert report.profile_homes(bot_home) == [("default", tmp_path)]
+    context, _ = report.build(tmp_path, live.store, home_chat_id=SID, now=now)
+    assert "### [nahida] Bot Chat\n" in context and "User: Remind me to call the landlord" in context
+    assert "home chat text" not in context
+    assert "(USER.md, profile nahida)\nPrefers mornings." in context and "- [nahida] Rent" in context
+    live.store.set("report_profiles", "this")
+    context, _ = report.build(tmp_path, live.store, home_chat_id=SID, now=now)
+    assert "nahida" not in context
+
+
 def test_the_report_lists_active_cron_jobs(tmp_path):
     assert report.cron_jobs(tmp_path) == ""
     (tmp_path / "cron").mkdir()
@@ -960,6 +985,8 @@ def test_report_command(live, db, capsys, monkeypatch):
     assert run("Europe/Paris") == 0 and live.store.get("time_zone") == "Europe/Paris"
     assert run("Mars/Olympus") == 2
     assert run("on") == 0 and live.store.get("daily_report") is True
+    assert run("this-profile") == 0 and live.store.get("report_profiles") == "this"
+    assert run("all-profiles") == 0 and live.store.get("report_profiles") == "all"
     capsys.readouterr()
     cli.dispatch(types.SimpleNamespace(conduit_push_action="pulse", pulse_action="status", value=""))
     assert "Shadow reports at 07:30 (Europe/Paris); next " in capsys.readouterr().out

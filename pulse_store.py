@@ -49,6 +49,9 @@ DEFAULTS: dict[str, Any] = {
     "report_time": "08:00,13:00,18:00",
     "time_zone": "",
     "report_requested": False,
+    # "all": the report also reads every other profile's chats, memories and
+    # cron jobs (Bot Mode's bots are profiles); "this": only this profile.
+    "report_profiles": "all",
 }
 # Which process runs the loop: {"owner": ..., "until": time.time()}.
 LEADER = "leader"

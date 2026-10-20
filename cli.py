@@ -224,6 +224,9 @@ def _pulse(args: argparse.Namespace) -> int:
         upcoming = pulse.report.next_time(time.time(), zone, pulse_store.get("report_time"))
         print(f"Shadow reports at {pulse.report.clock_text(pulse_store.get('report_time'))} ({zone}); next "
               + datetime.fromtimestamp(upcoming, zone).strftime("%a %d %b %H:%M"))
+        others = [name for name, _ in pulse.report.profile_homes(home)]
+        if pulse_store.get("report_profiles") == "all" and others:
+            print("The report also reads profiles: " + ", ".join(_printable(name) for name in others))
     else:
         print("Shadow reports: off")
     ratings = pulse.rating_counts(pulse_store)
@@ -250,6 +253,11 @@ def _pulse_report(pulse_store: Any, value: str) -> int:
         pulse_store.set("daily_report", value == "on")
         print("The shadow report is on." if value == "on" else "The shadow report is off.")
         return 0
+    if value in ("all-profiles", "this-profile"):
+        pulse_store.set("report_profiles", value.split("-")[0])
+        print("The shadow report reads every profile's chats." if value == "all-profiles"
+              else "The shadow report reads only this profile's chats.")
+        return 0
     times = pulse_report.parse_times(value)
     if times:
         pulse_store.set("report_time", times)
@@ -259,7 +267,7 @@ def _pulse_report(pulse_store: Any, value: str) -> int:
         pulse_store.set("time_zone", value)
         print(f"Report times are in {value}.")
         return 0
-    print("Usage: hermes conduit-push pulse report [now|on|off|HH:MM[,HH:MM...]|<time zone>]")
+    print("Usage: hermes conduit-push pulse report [now|on|off|HH:MM[,HH:MM...]|<time zone>|all-profiles|this-profile]")
     return 2
 
 

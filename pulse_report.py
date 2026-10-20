@@ -85,18 +85,48 @@ def _local(epoch: float, zone: tzinfo) -> str:
     return datetime.fromtimestamp(epoch, zone).strftime("%a %d %b %H:%M")
 
 
-def recent_chats(home: Path, *, home_chat_id: str, since: float, zone: tzinfo) -> str:
+def profile_homes(home: Path) -> list[tuple[str, Path]]:
+    """Every Hermes profile beside ``home`` that has chats, as (name, home):
+    the default profile is the root, named ones live in its profiles/
+    folder. Bot Mode's bots are profiles, so this is where their chats are."""
+    home = Path(home)
+    root = home.parent.parent if home.parent.name == "profiles" else home
+    try:
+        named = sorted(path for path in (root / "profiles").iterdir() if path.is_dir())
+    except OSError:
+        named = []
+    found, seen = [], {home.resolve()}
+    for name, path in [("default", root)] + [(path.name, path) for path in named]:
+        if path.resolve() not in seen and (path / hermes.STATE_DB).exists():
+            seen.add(path.resolve())
+            found.append((name, path))
+    return found
+
+
+def recent_chats(home: Path, *, home_chat_id: str, since: float, zone: tzinfo,
+                 others: list[tuple[str, Path]] = ()) -> str:
     """User and assistant text since ``since``, per chat, most recent chat
-    first. Not the home chat, cron runs or hidden rows."""
-    chats: dict[str, dict[str, Any]] = {}
-    for row in hermes.recent_messages(home, exclude_chat=home_chat_id, since=since):
-        text = _clip(row["content"], PER_MESSAGE)
-        if not text:
-            continue
-        chat = chats.setdefault(row["chat_id"], {"title": row["title"] or "Untitled chat", "lines": [], "last": 0.0})
-        who = "User" if row["role"] == "user" else "Hermes"
-        chat["lines"].append(f"[{_local(row['timestamp'], zone)}] {who}: {text}")
-        chat["last"] = row["timestamp"]
+    first. Not the home chat, cron runs or hidden rows. Chats from ``others``
+    (other profiles) are labelled with the profile's name."""
+    chats: dict[tuple[str, str], dict[str, Any]] = {}
+    sources = [("", home, home_chat_id)] + [(name, path, "") for name, path in others]
+    for profile, path, exclude in sources:
+        try:
+            rows = hermes.recent_messages(path, exclude_chat=exclude, since=since)
+        except hermes.HermesUnreadable:
+            if not profile:
+                raise
+            continue  # another profile's chats are a bonus, not a reason to fail
+        for row in rows:
+            text = _clip(row["content"], PER_MESSAGE)
+            if not text:
+                continue
+            title = row["title"] or "Untitled chat"
+            chat = chats.setdefault((profile, row["chat_id"]), {
+                "title": f"[{profile}] {title}" if profile else title, "lines": [], "last": 0.0})
+            who = "User" if row["role"] == "user" else "Hermes"
+            chat["lines"].append(f"[{_local(row['timestamp'], zone)}] {who}: {text}")
+            chat["last"] = max(chat["last"], row["timestamp"])
     out, used = [], 0
     for chat in sorted(chats.values(), key=lambda c: c["last"], reverse=True):
         lines, size = [], 0
@@ -157,16 +187,23 @@ def _ago(epoch: Any, now: float) -> str:
     return f"{minutes} min ago" if minutes < 120 else f"{minutes // 60} h ago"
 
 
-def memory_files(home: Path) -> str:
+def memory_files(home: Path, others: list[tuple[str, Path]] = ()) -> str:
+    """This profile's memory files, then other profiles' within one shared budget."""
+    sources = [("", home, MEMORY_BUDGET)]
+    if others:
+        share = max(500, MEMORY_BUDGET // (2 * len(others)))
+        sources += [(profile, path, share) for profile, path in others]
     parts = []
-    for name, label in (("USER.md", "What Hermes knows about the user"), ("MEMORY.md", "Hermes's own notes")):
-        try:
-            text = (Path(home) / "memories" / name).read_text(encoding="utf-8", errors="replace").strip()
-        except OSError:
-            continue
-        if text:
-            parts.append(f"## {label} ({name})\n" + (text if len(text) <= MEMORY_BUDGET
-                                                       else text[:MEMORY_BUDGET - 1] + "…"))
+    for profile, path, budget in sources:
+        for name, label in (("USER.md", "What Hermes knows about the user"), ("MEMORY.md", "Hermes's own notes")):
+            try:
+                text = (Path(path) / "memories" / name).read_text(encoding="utf-8", errors="replace").strip()
+            except OSError:
+                continue
+            if text:
+                where = f", profile {profile}" if profile else ""
+                parts.append(f"## {label} ({name}{where})\n"
+                             + (text if len(text) <= budget else text[:budget - 1] + "…"))
     return "\n\n".join(parts)
 
 
@@ -178,27 +215,33 @@ def _next_run(job: dict) -> float:
         return float("inf")
 
 
-def cron_jobs(home: Path) -> str:
-    """Hermes's active cron jobs: a promise with a job behind it is handled."""
+def _active_jobs(home: Path) -> list[dict]:
     try:
         data = json.loads((Path(home) / "cron" / "jobs.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return ""
+        return []
     jobs = data.get("jobs", []) if isinstance(data, dict) else data
     if isinstance(jobs, dict):
         jobs = list(jobs.values())
     if not isinstance(jobs, list):
-        return ""
-    active = [job for job in jobs if isinstance(job, dict) and job.get("enabled", True)
-              and job.get("state") not in ("paused", "completed")]
+        return []
+    return [job for job in jobs if isinstance(job, dict) and job.get("enabled", True)
+            and job.get("state") not in ("paused", "completed")]
+
+
+def cron_jobs(home: Path, others: list[tuple[str, Path]] = ()) -> str:
+    """Hermes's active cron jobs: a promise with a job behind it is handled."""
+    active = [("", job) for job in _active_jobs(home)]
+    for profile, path in others:
+        active += [(profile, job) for job in _active_jobs(path)]
     if not active:
         return ""
-    active.sort(key=_next_run)
+    active.sort(key=lambda entry: _next_run(entry[1]))
     lines = []
-    for job in active[:MAX_JOBS]:
+    for profile, job in active[:MAX_JOBS]:
         when = _clip(job.get("schedule_display") or "", 60)
         upcoming = job.get("next_run_at")
-        lines.append(f"- {_clip(job.get('name') or job.get('id'), 80)} ({when}"
+        lines.append(f"- {f'[{profile}] ' if profile else ''}{_clip(job.get('name') or job.get('id'), 80)} ({when}"
                      + (f", next {_clip(upcoming, 40)}" if upcoming else "") + f"): {_clip(job.get('prompt'), 160)}")
     more = f"\n(and {len(active) - MAX_JOBS} more)" if len(active) > MAX_JOBS else ""
     return "## Hermes's scheduled jobs\n" + "\n".join(lines) + more
@@ -247,13 +290,15 @@ def build(home: Path, pulse_store: store.PulseStore, *, home_chat_id: str, now: 
     phone, zone_name = phone_context(home, now)
     zone_name = pulse_store.get("time_zone") or zone_name
     zone = zone_for(zone_name)
+    others = profile_homes(home) if pulse_store.get("report_profiles") == "all" else []
     try:
-        chats = recent_chats(home, home_chat_id=home_chat_id, since=since, zone=zone)
+        chats = recent_chats(home, home_chat_id=home_chat_id, since=since, zone=zone, others=others)
     except hermes.HermesUnreadable as error:
         chats = f"Couldn't read the chats ({error})."
     header = f"## Now\n{datetime.fromtimestamp(now, zone).strftime('%A %d %B %Y, %H:%M')} ({zone_name or 'host time'})"
     start = _local(since, zone)
-    sections = [header, phone, cron_jobs(home), memory_files(home), failed_calls(pulse_store, since, zone),
+    sections = [header, phone, cron_jobs(home, others), memory_files(home, others),
+                failed_calls(pulse_store, since, zone),
                 f"## Chats since {start}\n" + (chats or "No chats since then.")]
     return "\n\n".join(section for section in sections if section), start
 
