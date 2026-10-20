@@ -7118,7 +7118,7 @@ def voice_tools_call(envelope: Any) -> Dict[str, Any]:
     try:
         device_id, request, seal_answer = store.open_voice_request(envelope)
     except error_class as exc:
-        raise TokenError(exc.status, str(exc)) from exc
+        raise TokenError(exc.status, str(exc), exc.code) from exc
     provider = request.get("provider")
     provider = provider if isinstance(provider, str) and _VOICE_PROVIDER.fullmatch(provider) else "voice"
     args = request.get("args")

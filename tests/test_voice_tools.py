@@ -137,8 +137,10 @@ def test_a_request_without_the_device_key_opens_nothing(client):
     phone = VoicePhone()
     _share(client, phone, _batch())
     envelope = phone.ask({"action": "overview"})
-    assert client.post(f"{BASE}/voice-tools/call", json={**envelope, "call_id": "call-other-1"}).status_code == 409
-    assert client.post(f"{BASE}/voice-tools/call", json={**envelope, "kid": "f" * 32}).status_code == 409
+    response = client.post(f"{BASE}/voice-tools/call", json={**envelope, "call_id": "call-other-1"})
+    assert response.status_code == 409 and response.json()["code"] == "bad_seal"
+    response = client.post(f"{BASE}/voice-tools/call", json={**envelope, "kid": "f" * 32})
+    assert response.status_code == 409 and response.json()["code"] == "unknown_key"
     stranger = VoicePhone()
     stranger.kid, stranger.request_key = phone.kid, secrets.token_bytes(32)
     assert client.post(f"{BASE}/voice-tools/call", json=stranger.ask({"action": "overview"})).status_code == 409
