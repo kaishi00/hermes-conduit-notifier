@@ -474,7 +474,7 @@ def _write(store: PhoneStore, kind: str, args: dict[str, Any], session_id: Any, 
             fields[key] = args[key]
     if not is_event and args.get("due") is not None and args.get("due_all_day") is not None:
         fields["due_all_day"] = args["due_all_day"]
-    with store.reader(need, args.get("device")) as opened:
+    with store.reader(need, args.get("device"), for_change=True) as opened:
         if opened is None:
             raise PhoneError("nothing_shared", "No device shares " + (
                 "its calendar" if is_event else "reminders") + " with Hermes.")
@@ -570,7 +570,8 @@ def _pending(store: PhoneStore) -> dict[str, Any]:
     return {"ok": True, "changes": changes,
             "note": "waiting: the phone hasn't answered yet (seen_by_phone says whether it has it). applied / "
                     "edited (the user changed it first; see note) / dismissed / failed (see note) / expired "
-                    "(a week without an answer)." if changes else "No changes asked for recently."}
+                    "(a week without an answer) / lost (the phone was set up again before it got it: tell the "
+                    "user and offer to ask again)." if changes else "No changes asked for recently."}
 
 
 def _alarms(store: PhoneStore, args: dict[str, Any], exact: bool) -> dict[str, Any]:
@@ -597,7 +598,7 @@ def _alarm_write(store: PhoneStore, kind: str, args: dict[str, Any], session_id:
     if stray:
         return {"ok": False, "error": "invalid", "note": f"{kind} doesn't take {', '.join(stray)}."}
     target = {"alarm_id": args.get("alarm_id")} if kind == "cancel_alarm" else None
-    with store.reader("alarms", args.get("device")) as opened:
+    with store.reader("alarms", args.get("device"), for_change=True) as opened:
         if opened is None:
             raise PhoneError("nothing_shared", "No device lets Hermes set alarms and timers.")
         _, device = opened

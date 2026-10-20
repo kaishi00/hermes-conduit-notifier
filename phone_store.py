@@ -51,6 +51,7 @@ import base64
 import contextlib
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -72,8 +73,10 @@ except ImportError:  # everything but Windows
     msvcrt = None  # type: ignore[assignment]
 from urllib.parse import urlsplit
 
+logger = logging.getLogger(__name__)
+
 FILE_NAME = "conduit-phone.sqlite3"
-SCHEMA_VERSION = 2  # 2: alarms and contacts (plugin 0.30.0)
+SCHEMA_VERSION = 3  # 2: alarms and contacts (plugin 0.30.0); 3: last_contact, prior_sharing (0.51.9)
 
 SALT = b"conduit-phone-v1"
 INFO_INGEST = b"conduit-phone-v1 ingest device-to-host"
@@ -108,6 +111,19 @@ _DISPLAY_ONLY_KINDS = ("delete_event", "complete_reminder", "delete_reminder")
 ALARM_CHANGE_KINDS = ("set_alarm", "set_timer", "cancel_alarm")
 CHANGE_KINDS = CALENDAR_CHANGE_KINDS + ALARM_CHANGE_KINDS
 OUTCOMES = ("applied", "edited", "dismissed", "failed", "expired")
+# Set by the host, never by the phone: the phone was set up again (a new key)
+# before it fetched the change, so it will never see it.
+LOST_NOTE = ("The phone was set up again before it got this change, so it never saw it. Tell the user, and "
+             "offer to ask again.")
+LOST_DELIVERED_NOTE = ("The phone was set up again after it got this change, before it answered. Ask the user "
+                       "whether it's on their phone before asking again, so it isn't added twice.")
+# How long a device that checked in but hasn't uploaded since a new key
+# holds its place as the device in use, instead of another one standing in.
+SETTING_UP_S = 10 * 60
+# When a device was last in touch: its last check-in (status) or upload. The
+# device in use comes first; a tie in the same second goes to the older row.
+_IN_TOUCH = "MAX(COALESCE(last_contact, 0), COALESCE(last_seen, 0))"
+_IN_TOUCH_ORDER = f"{_IN_TOUCH} DESC, rowid"
 EVENT_FIELDS = ("title", "start", "end", "all_day", "calendar_id", "location", "notes", "url", "alarms_min")
 REMINDER_FIELDS = ("title", "list_id", "due", "due_all_day", "priority", "notes", "url", "location_alarm")
 ALARM_FIELDS = ("label", "at", "time", "repeats")
@@ -567,9 +583,9 @@ class PhoneStore:
     def register_key(self, body: Any) -> dict[str, Any]:
         """A device's X25519 public key in, this profile's for that device
         out. A new device key for a known device drops that device's data and
-        its pending changes (a reinstall, or sharing turned off and on: the
-        phone sends everything again); the same device key again keeps them
-        and only refreshes the host key."""
+        marks its pending changes lost, so the agent hears it (a reinstall,
+        or sharing turned off and on: the phone sends everything again); the
+        same device key again keeps them and only refreshes the host key."""
         if not isinstance(body, dict):
             raise PhoneError("malformed", "Expected a JSON object")
         device_id = body.get("device_id")
@@ -594,7 +610,12 @@ class PhoneStore:
                                  "from Conduit first", status=409)
             fresh = not known or bytes(known[0]) != device_public
             if known and fresh:
-                _drop_device_data(db, device_id)
+                # The phone will never see what was waiting for its old key:
+                # say so to the agent instead of dropping it unseen.
+                db.execute("UPDATE changes SET state='lost', finished_at=?, reported_at=NULL,"
+                           " note=CASE WHEN delivered_at IS NULL THEN ? ELSE ? END WHERE device=? AND state='pending'",
+                           (now, LOST_NOTE, LOST_DELIVERED_NOTE, device_id))
+                _drop_device_data(db, device_id, keep_changes=True)
             db.execute(
                 "INSERT INTO devices(id, name, device_public, host_private, host_public, kid, created_at)"
                 " VALUES(?,?,?,?,?,?,?)"
@@ -604,8 +625,11 @@ class PhoneStore:
                 (device_id, name, device_public, host_private, host_public, kid, now),
             )
             if known and fresh:
-                db.execute("UPDATE devices SET last_seen=NULL, last_sent=NULL, sharing=NULL, tz=NULL,"
-                           " window_from=NULL, window_to=NULL WHERE id=?", (device_id,))
+                # What it shared before stays, so while it sets up it holds its
+                # place only for what it shared (``_pick_device``).
+                db.execute("UPDATE devices SET prior_sharing=COALESCE(sharing, prior_sharing), last_seen=NULL,"
+                           " last_sent=NULL, sharing=NULL, tz=NULL, window_from=NULL, window_to=NULL WHERE id=?",
+                           (device_id,))
             generation = _meta(db, "generation")
         return {"kid": kid, "host_public_key": b64u(host_public), "generation": generation}
 
@@ -767,7 +791,7 @@ class PhoneStore:
                 # Only this device's own changes, and only while they wait:
                 # a repeated result (the phone retrying) changes nothing.
                 db.execute("UPDATE changes SET state=?, finished_at=?, item_id=?, note=?, reported_at=NULL"
-                           " WHERE id=? AND device=? AND state='pending'",
+                           " WHERE id=? AND device=? AND state IN ('pending', 'lost')",
                            (result["outcome"], now, result.get("item_id"), result.get("note"), result["id"],
                             device_id))
             rows = db.execute(f"SELECT {_CHANGE_COLUMNS} FROM changes WHERE device=? AND state='pending'"
@@ -800,7 +824,7 @@ class PhoneStore:
         now = int(self.clock())
         with self._write() as db:
             _expire(db, now)
-            device_id, device_name, sharing = _pick_device(db, device, need)
+            device_id, device_name, sharing = _pick_device(db, device, need, now=now)
             if db.execute("SELECT COUNT(*) FROM changes WHERE state='pending'").fetchone()[0] >= MAX_PENDING:
                 raise PhoneError("too_many_pending",
                                  f"{MAX_PENDING} changes are already waiting for the phone; wait for the user to "
@@ -873,18 +897,23 @@ class PhoneStore:
     # Status and wipe ---------------------------------------------------------------
 
     def status(self, device_id: Any = None) -> dict[str, Any]:
-        """Counts and dates only, never content."""
+        """Counts and dates only, never content. A device asking about itself
+        is in use: that is noted, so its changes go to it (``_pick_device``)."""
+        now = int(self.clock())
+        stamp = None
         with self._read() as db:
             if db is None:
                 return {"stored": False, "generation": None, "device": None}
             answer: dict[str, Any] = {"stored": True, "generation": _meta(db, "generation"), "device": None}
             if isinstance(device_id, str) and _DEVICE_ID.match(device_id):
-                row = db.execute("SELECT kid, last_seen, sharing FROM devices WHERE id=?", (device_id,)).fetchone()
+                row = db.execute(f"SELECT kid, last_seen, sharing, {_IN_TOUCH} FROM devices WHERE id=?",
+                                 (device_id,)).fetchone()
                 if row is not None:
+                    stamp = row[3]
                     count = lambda table: db.execute(  # noqa: E731
                         f"SELECT COUNT(*) FROM {table} WHERE device=?", (device_id,)).fetchone()[0]
                     pending = db.execute("SELECT COUNT(*) FROM changes WHERE device=? AND state='pending'"
-                                         " AND expires_at>?", (device_id, int(self.clock()))).fetchone()[0]
+                                         " AND expires_at>?", (device_id, now)).fetchone()[0]
                     alarms = _decode(db.execute("SELECT alarms FROM devices WHERE id=?", (device_id,)).fetchone()[0], [])
                     answer["device"] = {
                         "kid": row[0], "last_sync": iso_utc(row[1]) if row[1] else None,
@@ -894,7 +923,33 @@ class PhoneStore:
                                    "alarms": len(alarms) if isinstance(alarms, list) else 0},
                         "pending": pending,
                     }
-            return answer
+        # A known device only, and at most one write a second per device
+        # (Conduit asks on every sync pass); a stamp from this second already
+        # puts it first.
+        if stamp is not None and stamp < now:
+            self._touch(device_id, answer["device"]["kid"], now)
+        return answer
+
+    def _touch(self, device_id: str, kid: str, now: int) -> None:
+        """Notes that a known device checked in. Never creates the store (a
+        wipe may have just removed it); a device gone or registered again
+        since the read (a new kid every time) is left alone."""
+        try:
+            connection = sqlite3.connect(f"{self.path.as_uri()}?mode=rw", uri=True, timeout=15,
+                                         isolation_level=None)
+        except sqlite3.DatabaseError as error:
+            logger.warning("conduit phone: couldn't note a check-in (%s); changes follow the last upload", error)
+            return
+        try:
+            # Only forward: a slower, older check-in never pulls it back.
+            connection.execute("UPDATE devices SET last_contact=? WHERE id=? AND kid=?"
+                               " AND COALESCE(last_contact, 0)<?", (now, device_id, kid, now))
+        except sqlite3.DatabaseError as error:
+            # The read just upgraded the schema, so this is a busy or broken
+            # file: routing falls back to the last upload, and says so.
+            logger.warning("conduit phone: couldn't note a check-in (%s); changes follow the last upload", error)
+        finally:
+            connection.close()
 
     def wipe(self, device_id: Any = None) -> dict[str, Any]:
         """Deletes one device's data, key and changes (pending ones are
@@ -948,7 +1003,7 @@ class PhoneStore:
             found = []
             for device_id, name, last_seen, sharing, tz, window_from, window_to, status_at, focus_at in db.execute(
                     "SELECT id, name, last_seen, sharing, tz, window_from, window_to, status_at, focus_at"
-                    " FROM devices WHERE last_seen IS NOT NULL ORDER BY last_seen DESC"):
+                    f" FROM devices WHERE last_seen IS NOT NULL ORDER BY {_IN_TOUCH_ORDER}"):
                 found.append({
                     "id": device_id, "name": name, "last_seen": last_seen, "sharing": _decode(sharing, {}),
                     "time_zone": tz, "window_from": window_from, "window_to": window_to,
@@ -961,20 +1016,24 @@ class PhoneStore:
 
     @contextlib.contextmanager
     def reader(self, need: str, device: Any = None,
-               exact: bool = False) -> Iterator[tuple[sqlite3.Connection, dict[str, Any]] | None]:
+               exact: bool = False, for_change: bool = False
+               ) -> Iterator[tuple[sqlite3.Connection, dict[str, Any]] | None]:
         """A read connection and the device to read: the one named, else the
         one that synced last sharing ``need`` (see ``shares``: "events",
         "reminders", "status", "focus", "calendars", "phone", "phone_tool",
         "alarms", "contacts" or "any"). None when nothing is shared.
         Raises PhoneError ``not_shared`` when the named device doesn't share
         it. ``exact``: ``device`` is an id and only that device is read (a
-        voice read), never another device by name."""
+        voice read), never another device by name. ``for_change``: the device
+        is the one a change will go to, so a device still setting up after a
+        new key isn't replaced by another (PhoneError ``device_not_ready``)."""
         with self._read() as db:
             if db is None:
                 yield None
                 return
             try:
-                device_id, name, sharing = _pick_device(db, device, need, exact=exact)
+                device_id, name, sharing = _pick_device(db, device, need, exact=exact,
+                                                        now=int(self.clock()) if for_change else None)
             except PhoneError as error:
                 if error.code == "nothing_shared" and not exact:
                     yield None
@@ -1236,6 +1295,16 @@ def _migrate(db: sqlite3.Connection, now: float) -> None:
         db.execute("ALTER TABLE devices ADD COLUMN alarms TEXT")
         db.execute("ALTER TABLE devices ADD COLUMN alarms_at INTEGER")
         db.execute(_CONTACTS_TABLE)
+        version = "2"
+    if version == "2":
+        # 0.51.9: when each device last checked in, so a change goes to the
+        # device in use rather than the last one that uploaded, and what a
+        # device set up again shared before its new key.
+        columns = {row[1] for row in db.execute("PRAGMA table_info(devices)")}
+        if "last_contact" not in columns:
+            db.execute("ALTER TABLE devices ADD COLUMN last_contact INTEGER")
+        if "prior_sharing" not in columns:
+            db.execute("ALTER TABLE devices ADD COLUMN prior_sharing TEXT")
         db.execute("UPDATE meta SET value=? WHERE key='schema'", (str(SCHEMA_VERSION),))
         return
     if version is not None:
@@ -1248,7 +1317,7 @@ def _migrate(db: sqlite3.Connection, now: float) -> None:
             device_public BLOB NOT NULL, host_private BLOB NOT NULL, host_public BLOB NOT NULL, kid TEXT NOT NULL,
             created_at INTEGER NOT NULL, last_seen INTEGER, last_sent INTEGER, tz TEXT, sharing TEXT,
             window_from TEXT, window_to TEXT, status TEXT, status_at INTEGER, focus TEXT, focus_at INTEGER,
-            alarms TEXT, alarms_at INTEGER);
+            alarms TEXT, alarms_at INTEGER, last_contact INTEGER, prior_sharing TEXT);
         CREATE TABLE IF NOT EXISTS calendars(
             device TEXT NOT NULL, id TEXT NOT NULL, title TEXT, kind TEXT NOT NULL, color TEXT, source TEXT,
             writable INTEGER NOT NULL, shared INTEGER NOT NULL, is_default INTEGER NOT NULL, position INTEGER NOT NULL,
@@ -1287,8 +1356,8 @@ _CONTACTS_TABLE = """
         PRIMARY KEY(device, id))"""
 
 
-def _drop_device_data(db: sqlite3.Connection, device_id: str) -> None:
-    for table in ("events", "reminders", "calendars", "changes", "contacts"):
+def _drop_device_data(db: sqlite3.Connection, device_id: str, keep_changes: bool = False) -> None:
+    for table in ("events", "reminders", "calendars", "contacts") + (() if keep_changes else ("changes",)):
         db.execute(f"DELETE FROM {table} WHERE device=?", (device_id,))
     db.execute("UPDATE devices SET status=NULL, status_at=NULL, focus=NULL, focus_at=NULL, alarms=NULL,"
                " alarms_at=NULL WHERE id=?", (device_id,))
@@ -1329,9 +1398,13 @@ _NEED_WORDS = {"events": "their calendar", "events_write": "adding to their cale
 
 
 def _pick_device(db: sqlite3.Connection, wanted: Any, need: str,
-                 exact: bool = False) -> tuple[str, str, dict[str, Any]]:
+                 exact: bool = False, now: int | None = None) -> tuple[str, str, dict[str, Any]]:
+    """The device a read or a change is for. Unnamed, it's the device in use:
+    the one that checked in (``status``) or uploaded most recently. ``now``
+    (for a change) also refuses to stand another device in for one that is
+    still setting up after a new key."""
     rows = [(row[0], row[1], _decode(row[2], {})) for row in db.execute(
-        "SELECT id, name, sharing FROM devices WHERE last_seen IS NOT NULL ORDER BY last_seen DESC")]
+        f"SELECT id, name, sharing FROM devices WHERE last_seen IS NOT NULL ORDER BY {_IN_TOUCH_ORDER}")]
     if exact:
         # Another device's name must never stand in for this one.
         named = [row for row in rows if row[0] == wanted]
@@ -1351,6 +1424,22 @@ def _pick_device(db: sqlite3.Connection, wanted: Any, need: str,
         if not shares(named[0][2], need):
             raise PhoneError("not_shared", f"{named[0][1]} doesn't share {_NEED_WORDS.get(need, need)} with Hermes")
         return named[0]
+    if now is not None:
+        # Bounded by the new key's age, not by check-ins: a device that keeps
+        # checking in but never uploads must not block changes for good. A
+        # device set up again holds its place only for what it shared before
+        # (a new one's sharing isn't known yet, so it holds it for anything).
+        # The first device in touch that could take the change decides.
+        for name, last_seen, created_at, sharing, prior_sharing, last_contact in db.execute(
+                "SELECT name, last_seen, created_at, sharing, prior_sharing, last_contact FROM devices"
+                f" ORDER BY {_IN_TOUCH_ORDER}"):
+            if last_seen is not None:
+                if shares(_decode(sharing, {}), need):
+                    break
+            elif (last_contact is not None and now - created_at < SETTING_UP_S
+                  and (prior_sharing is None or shares(_decode(prior_sharing, {}), need))):
+                raise PhoneError("device_not_ready", f"{name} is still setting up sharing with Hermes; ask again "
+                                 "in a minute, or name another device", status=409)
     for row in rows:
         if shares(row[2], need):
             return row

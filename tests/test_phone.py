@@ -289,6 +289,227 @@ def test_a_new_device_key_drops_the_device_data_and_the_same_key_keeps_it(store,
     assert store.ingest(fresh.seal(_batch("batch-0003")))["events"] == 5
 
 
+def test_a_new_device_key_marks_its_waiting_changes_lost_instead_of_dropping_them(store, iphone):
+    # A reinstall, a restore or sharing turned off and on gives the phone a
+    # new key, and the phone never sees what was waiting for the old one.
+    # The agent hears about it instead of telling the user to approve a card
+    # that will never come.
+    store.ingest(iphone.seal(_batch()))
+    change = store.add_change("add_reminder", {"title": "Rain boots in Léo's backpack"})
+    fresh = Phone(DEVICE)
+    fresh.accept(store.register_key(fresh.key_request()))
+    assert store.status(DEVICE)["device"]["pending"] == 0
+    store.ingest(fresh.seal(_batch("batch-0002")))
+    assert fresh.changes(store) == []
+    [lost] = store.unreported_outcomes()
+    assert lost["id"] == change["id"] and lost["state"] == "lost"
+    assert "set up again" in lost["note"]
+    assert store.changes()[0]["state"] == "lost"
+
+
+def test_a_change_the_phone_already_had_is_lost_with_a_check_first_note_and_its_late_outcome_lands(store, iphone):
+    # Sharing turned off and on: the same install fetched the change, gets a
+    # new key, then reports what it did with it.
+    store.ingest(iphone.seal(_batch()))
+    change = store.add_change("add_reminder", {"title": "Milk"})
+    assert [sent["id"] for sent in iphone.changes(store)] == [change["id"]]
+    again = Phone(DEVICE)
+    again.accept(store.register_key(again.key_request()))
+    [lost] = store.unreported_outcomes()
+    assert lost["state"] == "lost" and "before asking again" in lost["note"]
+    store.ingest(again.seal(_batch("batch-0002")))
+    again.changes(store, [{"id": change["id"], "outcome": "applied", "item_id": "r_milk2"}])
+    [applied] = store.unreported_outcomes()
+    assert applied["id"] == change["id"] and applied["state"] == "applied"
+
+
+def test_a_change_goes_to_the_device_last_in_touch(tmp_path):
+    # The phone checks in (status) on every pass, including when a message is
+    # sent; it uploads (last_seen) only when something changed. The device
+    # the user is holding is the one that checked in last.
+    clock = [NOW]
+    store = phone.PhoneStore(tmp_path, clock=lambda: clock[0])
+    handset = Phone()
+    handset.accept(store.register_key(handset.key_request()))
+    store.ingest(handset.seal(_batch()))
+    tablet = Phone("ipad-installation-2", name="iPad")
+    tablet.accept(store.register_key(tablet.key_request()))
+    clock[0] += 60
+    store.ingest(tablet.seal(_batch()))
+    clock[0] += 60
+    store.status(DEVICE)  # the iPhone checks in as the user sends a message
+    assert store.add_change("add_reminder", {"title": "Rain boots"})["device_name"] == "Eric's iPhone"
+    clock[0] += 60
+    store.status(tablet.device_id)
+    assert store.add_change("add_reminder", {"title": "Milk"})["device_name"] == "iPad"
+
+
+def test_a_device_still_setting_up_is_not_replaced_by_another(tmp_path):
+    # The iPad just got a new key and hasn't uploaded yet: its change must not
+    # land on the iPhone, which may be someone else's or in another room.
+    clock = [NOW]
+    store = phone.PhoneStore(tmp_path, clock=lambda: clock[0])
+    handset = Phone()
+    handset.accept(store.register_key(handset.key_request()))
+    store.ingest(handset.seal(_batch()))
+    clock[0] += 60
+    tablet = Phone("ipad-installation-2", name="iPad")
+    tablet.accept(store.register_key(tablet.key_request()))
+    store.status(tablet.device_id)
+    with pytest.raises(phone.PhoneError) as error:
+        store.add_change("add_reminder", {"title": "Milk"})
+    assert error.value.code == "device_not_ready" and "iPad" in str(error.value)
+    store.ingest(tablet.seal(_batch()))
+    assert store.add_change("add_reminder", {"title": "Milk"})["device_name"] == "iPad"
+    # Named explicitly, another device is still reachable.
+    assert store.add_change("add_reminder", {"title": "Bread"}, device=DEVICE)["device_name"] == "Eric's iPhone"
+
+
+def test_a_device_that_checks_in_but_never_uploads_stops_blocking_after_the_setting_up_window(tmp_path):
+    clock = [NOW]
+    store = phone.PhoneStore(tmp_path, clock=lambda: clock[0])
+    handset = Phone()
+    handset.accept(store.register_key(handset.key_request()))
+    store.ingest(handset.seal(_batch()))
+    tablet = Phone("ipad-installation-2", name="iPad")
+    tablet.accept(store.register_key(tablet.key_request()))
+    for _ in range(3):
+        clock[0] += phone.SETTING_UP_S // 2
+        store.status(tablet.device_id)
+    assert store.add_change("add_reminder", {"title": "Milk"})["device_name"] == "Eric's iPhone"
+
+
+def test_a_device_set_up_again_holds_its_place_only_for_what_it_shared_before(tmp_path):
+    # The iPad shared only phone status before its new key: a reminder can't
+    # be its change, so the iPhone, which shares reminders, takes it. Asked
+    # for something the iPad did share, it still holds its place.
+    clock = [NOW]
+    store = phone.PhoneStore(tmp_path, clock=lambda: clock[0])
+    handset = Phone()
+    handset.accept(store.register_key(handset.key_request()))
+    store.ingest(handset.seal(_batch()))
+    tablet = Phone("ipad-installation-2", name="iPad")
+    tablet.accept(store.register_key(tablet.key_request()))
+    clock[0] += 60
+    store.ingest(tablet.seal(_batch(sharing=_sharing(calendar="off", reminders=False, alarms=True))))
+    clock[0] += 60
+    again = Phone("ipad-installation-2", name="iPad")
+    again.accept(store.register_key(again.key_request()))
+    store.status(again.device_id)
+    assert store.add_change("add_reminder", {"title": "Milk"})["device_name"] == "Eric's iPhone"
+    with pytest.raises(phone.PhoneError) as error:
+        store.add_change("set_timer", {"label": "Pasta", "seconds": 600})
+    assert error.value.code == "device_not_ready"
+
+
+def test_a_device_setting_up_doesnt_block_once_another_is_in_touch_since(tmp_path):
+    clock = [NOW]
+    store = phone.PhoneStore(tmp_path, clock=lambda: clock[0])
+    handset = Phone()
+    handset.accept(store.register_key(handset.key_request()))
+    store.ingest(handset.seal(_batch()))
+    clock[0] += 60
+    tablet = Phone("ipad-installation-2", name="iPad")
+    tablet.accept(store.register_key(tablet.key_request()))
+    store.status(tablet.device_id)
+    with pytest.raises(phone.PhoneError) as error:
+        store.add_change("add_reminder", {"title": "Milk"})
+    assert error.value.code == "device_not_ready"
+    clock[0] += 60
+    store.status(DEVICE)  # the user picked up the iPhone since
+    assert store.add_change("add_reminder", {"title": "Milk"})["device_name"] == "Eric's iPhone"
+
+
+def test_a_device_setting_up_that_could_take_the_change_blocks_behind_one_that_couldnt(tmp_path):
+    # The iPad shared reminders and the old iPhone only status; both were set
+    # up again, the old iPhone checked in last. The reminder is the iPad's.
+    clock = [NOW]
+    store = phone.PhoneStore(tmp_path, clock=lambda: clock[0])
+    handset = Phone()
+    handset.accept(store.register_key(handset.key_request()))
+    store.ingest(handset.seal(_batch()))
+    tablet = Phone("ipad-installation-2", name="iPad")
+    tablet.accept(store.register_key(tablet.key_request()))
+    store.ingest(tablet.seal(_batch()))
+    old = Phone("old-iphone-3", name="Old iPhone")
+    old.accept(store.register_key(old.key_request()))
+    store.ingest(old.seal(_batch(sharing=_sharing(calendar="off", reminders=False))))
+    clock[0] += 60
+    for device in (Phone("ipad-installation-2", name="iPad"), Phone("old-iphone-3", name="Old iPhone")):
+        device.accept(store.register_key(device.key_request()))
+        clock[0] += 1
+        store.status(device.device_id)
+    with pytest.raises(phone.PhoneError) as error:
+        store.add_change("add_reminder", {"title": "Milk"})
+    assert error.value.code == "device_not_ready" and "iPad" in str(error.value)
+
+
+def test_a_check_in_read_before_a_new_key_doesnt_mark_the_new_registration(store, iphone):
+    store.ingest(iphone.seal(_batch()))
+    stale_kid = store.status(DEVICE)["device"]["kid"]
+    again = Phone(DEVICE)
+    again.accept(store.register_key(again.key_request()))
+    store._touch(DEVICE, stale_kid, NOW + 60)
+    import sqlite3
+    db = sqlite3.connect(store.path)
+    assert db.execute("SELECT last_contact FROM devices WHERE id=?", (DEVICE,)).fetchone()[0] != NOW + 60
+    db.close()
+
+
+def test_a_slower_older_check_in_never_pulls_the_stamp_back(store, iphone):
+    import sqlite3
+    store.ingest(iphone.seal(_batch()))
+    kid = store.status(DEVICE)["device"]["kid"]
+    store._touch(DEVICE, kid, NOW + 120)
+    store._touch(DEVICE, kid, NOW + 110)
+    db = sqlite3.connect(store.path)
+    assert db.execute("SELECT last_contact FROM devices WHERE id=?", (DEVICE,)).fetchone()[0] == NOW + 120
+    db.close()
+
+
+def test_a_check_in_writes_at_most_once_a_second(store, iphone, monkeypatch):
+    import sqlite3
+    store.ingest(iphone.seal(_batch()))
+    db = sqlite3.connect(store.path)
+    db.execute("UPDATE devices SET last_seen=last_seen-60")
+    db.commit()
+    db.close()
+    opened = []
+    connect = sqlite3.connect
+    monkeypatch.setattr(phone.sqlite3, "connect", lambda *a, **k: opened.append(a[0]) or connect(*a, **k))
+    store.status(DEVICE)
+    store.status(DEVICE)
+    assert sum("mode=rw" in str(path) for path in opened) == 1
+
+
+def test_a_check_in_that_cant_be_written_is_logged(store, iphone, monkeypatch, caplog):
+    import sqlite3
+    store.ingest(iphone.seal(_batch()))
+    db = sqlite3.connect(store.path)
+    db.execute("UPDATE devices SET last_seen=last_seen-60")
+    db.commit()
+    db.close()
+    connect = sqlite3.connect
+
+    def busy(path, *args, **kwargs):
+        if "mode=rw" in str(path):
+            raise sqlite3.OperationalError("database is locked")
+        return connect(path, *args, **kwargs)
+
+    monkeypatch.setattr(phone.sqlite3, "connect", busy)
+    with caplog.at_level("WARNING"):
+        assert store.status(DEVICE)["stored"] is True
+    assert "couldn't note a check-in" in caplog.text and "database is locked" in caplog.text
+
+
+def test_status_never_recreates_a_wiped_store_or_writes_for_an_unknown_device(store, iphone):
+    store.ingest(iphone.seal(_batch()))
+    store.status("not-a-known-device")
+    assert store.wipe()["remaining_devices"] == 0 and not store.path.exists()
+    assert store.status(DEVICE) == {"stored": False, "generation": None, "device": None}
+    assert not store.path.exists()
+
+
 def test_at_most_four_devices(store):
     for index in range(phone.MAX_DEVICES):
         store.register_key(Phone(f"device-{index:04d}").key_request())
@@ -1341,6 +1562,20 @@ def test_a_read_opens_the_file_once(store, iphone, monkeypatch):
     monkeypatch.setattr(phone.sqlite3, "connect", lambda *a, **k: opened.append(a) or connect(*a, **k))
     assert store.status(DEVICE)["stored"] is True
     assert len(opened) == 1
+
+def test_a_version_2_store_gains_last_contact_and_keeps_its_data(store, iphone):
+    import sqlite3
+    store.ingest(iphone.seal(_batch()))
+    db = sqlite3.connect(store.path)
+    db.execute("ALTER TABLE devices DROP COLUMN last_contact")
+    db.execute("ALTER TABLE devices DROP COLUMN prior_sharing")
+    db.execute("UPDATE meta SET value='2' WHERE key='schema'")
+    db.commit()
+    db.close()
+    assert [device["id"] for device in store.devices()] == [DEVICE]
+    assert store.status(DEVICE)["device"]["counts"]["events"] == 5
+    assert store.add_change("add_reminder", {"title": "Milk"})["device_id"] == DEVICE
+
 
 def test_alarms_and_contacts_land_and_are_forgotten_when_turned_off(store, iphone):
     result = store.ingest(iphone.seal(_phone_batch()))
