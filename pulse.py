@@ -29,6 +29,7 @@ import os
 import socket
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -338,12 +339,25 @@ def _maybe_memory(pulse_store: store.PulseStore, home: Path, now: float) -> None
 
 def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Event) -> None:
     try:
+        now = max(now, time.time())  # the thread may start a little after the tick
         pulse_store = open_store(home)
+        zone = report_zone(pulse_store, home)
+        day = datetime.fromtimestamp(now, zone).strftime("%Y-%m-%d")
+        today = pulse_store.get("memory_today")
+        used = int(today.get("tokens", 0) or 0) if isinstance(today, dict) and today.get("day") == day else 0
+        try:
+            cap = float(pulse_store.get("memory_daily_tokens"))
+        except (TypeError, ValueError):
+            cap = float(store.DEFAULTS["memory_daily_tokens"])
+        if used >= cap:
+            return  # `pulse status` says so
         sources = [("", Path(home), home_chat_id)]
         if pulse_store.get("report_profiles") == "all":
             sources += [(name, path, report.their_home_chat(path)) for name, path in report.profile_homes(home)]
-        done = memory.run(pulse_store, sources, _memory_llm, zone=report_zone(pulse_store, home), now=now,
-                          still_leader=lambda: not stopped.is_set() and _leads(pulse_store))
+        done = memory.run(pulse_store, sources, _memory_llm, zone=zone, now=now,
+                          still_leader=lambda: not stopped.is_set() and _leads(pulse_store), budget=cap - used)
+        if done["tokens"]:
+            pulse_store.set("memory_today", {"day": day, "tokens": used + done["tokens"]})
         if done["chunks"] or done["failed"]:
             usage = pulse_store.get("memory_usage")
             usage = usage if isinstance(usage, dict) else {}

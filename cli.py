@@ -246,6 +246,12 @@ def _pulse(args: argparse.Namespace) -> int:
           + (", ".join(f"{n} {kind}" for kind, n in sorted(kinds.items())) or "nothing kept yet")
           + f" ({int(usage.get('chunks', 0) or 0)} chat chunks read, {int(usage.get('tokens', 0) or 0)} tokens"
           + (f", {int(usage.get('failed', 0) or 0)} failed" if usage.get("failed") else "") + ")")
+    today = pulse_store.get("memory_today")
+    zone = pulse.report_zone(pulse_store, home)
+    if (isinstance(today, dict) and today.get("day") == datetime.now(zone).strftime("%Y-%m-%d")
+            and isinstance(pulse_store.get("memory_daily_tokens"), (int, float))
+            and int(today.get("tokens", 0) or 0) >= pulse_store.get("memory_daily_tokens")):
+        print(f"Memory used today's {pulse_store.get('memory_daily_tokens')} tokens; it reads again tomorrow.")
     ratings = pulse.rating_counts(pulse_store)
     if ratings:
         print("Ratings so far: " + ", ".join(f"{kind} {yes} yes / {no} no" for kind, (yes, no) in ratings.items()))

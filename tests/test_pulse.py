@@ -1176,6 +1176,10 @@ def test_a_due_date_must_be_said_near_its_item():
                                                    wrong("2026-10-29T09:30")]}), chunk, UTC)
     # not a Thursday, before it was said, a short year; a later Thursday stays
     assert [i["due"] for i in items] == ["", "", "", "2026-10-29T09:30"]
+    chunk = [_row(1, "user", "Renew the lease next month", DAY + 60)]
+    items, _ = memory.extract(FakeModel({"items": [{"kind": "commitment", "text": "x", "evidence": "Renew the lease",
+                                                    "due": "2026-11-20", "due_words": "next month"}]}), chunk, UTC)
+    assert items[0]["due"] == "2026-11-20"  # "month" names no Monday
 
 
 def test_chat_reads_match_hermes(db, tmp_path):
@@ -1262,6 +1266,18 @@ def test_tool_outcomes_show_once_across_chunks(remembering, db):
     model = FakeModel()
     _remember(remembering, model, DAY + memory.GAP_S + memory.IDLE_S + 200)
     assert ["add_reminder" in text for text in model.shown] == [True, False]
+
+
+def test_memory_stops_at_its_token_budget(remembering, db):
+    for sid in ("work", "w2"):
+        if sid == "w2":
+            db.session("w2", title="Other", pinned=0)
+        db.message("user", f"hello {sid}", sid=sid, at=DAY + 60)
+        db.message("assistant", "hi", sid=sid, at=DAY + 70)
+    model = FakeModel()
+    done = memory.run(remembering.store, [("", remembering.store.path.parent, SID)], model, zone=UTC,
+                      now=DAY + 70 + memory.IDLE_S, budget=50)
+    assert done["chunks"] == 1 and len(model.shown) == 1  # the first call used 100 tokens
 
 
 def test_a_continued_chat_starts_where_its_parent_stopped(remembering, db):
