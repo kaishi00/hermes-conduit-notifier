@@ -296,10 +296,10 @@ def report_times(value: Any) -> list[tuple[int, int]]:
 def parse_times(value: str) -> Optional[str]:
     """``"8:00, 17:00,12:30"`` -> ``"08:00,12:30,17:00"``; None unless every
     part is a time."""
-    parts = value.split(",")
-    if not all(_clock(part) for part in parts):
+    times = [_clock(part) for part in value.split(",")]
+    if not all(times):
         return None
-    return ",".join(f"{hour:02d}:{minute:02d}" for hour, minute in report_times(value))
+    return ",".join(f"{hour:02d}:{minute:02d}" for hour, minute in sorted(set(times)))
 
 
 def clock_text(value: Any) -> str:
