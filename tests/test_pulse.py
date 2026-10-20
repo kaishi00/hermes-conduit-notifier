@@ -806,7 +806,7 @@ def test_the_report_lists_active_cron_jobs(tmp_path):
     (tmp_path / "cron").mkdir()
     jobs = [
         {"id": "a1", "name": "Check the build", "prompt": "Look at CI and tell me", "schedule_display": "once at 09:00",
-         "next_run_at": "2026-10-21T09:00:00-04:00", "enabled": True, "state": "scheduled"},
+         "next_run_at": "2026-10-21T10:30:00+00:00", "enabled": True, "state": "scheduled"},
         {"id": "b2", "name": "Old job", "prompt": "x", "enabled": False, "state": "paused"},
         {"id": "c3", "name": "Morning news", "prompt": "News", "schedule_display": "every day at 07:00",
          "next_run_at": "2026-10-21T07:00:00-04:00"},
@@ -815,9 +815,9 @@ def test_the_report_lists_active_cron_jobs(tmp_path):
     text = report.cron_jobs(tmp_path)
     assert text.splitlines() == [
         "## Hermes's scheduled jobs",
+        "- Check the build (once at 09:00, next 2026-10-21T10:30:00+00:00): Look at CI and tell me",
         "- Morning news (every day at 07:00, next 2026-10-21T07:00:00-04:00): News",
-        "- Check the build (once at 09:00, next 2026-10-21T09:00:00-04:00): Look at CI and tell me",
-    ]
+    ]  # 10:30 UTC is 06:30 in New York: before 07:00 there, though it sorts after it as text
     (tmp_path / "cron" / "jobs.json").write_text("{broken")
     assert report.cron_jobs(tmp_path) == ""
 

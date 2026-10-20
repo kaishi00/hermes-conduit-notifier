@@ -170,6 +170,14 @@ def memory_files(home: Path) -> str:
     return "\n\n".join(parts)
 
 
+def _next_run(job: dict) -> float:
+    # ISO times can carry different offsets, so compare instants, not text.
+    try:
+        return datetime.fromisoformat(str(job.get("next_run_at"))).timestamp()
+    except (TypeError, ValueError, OverflowError):
+        return float("inf")
+
+
 def cron_jobs(home: Path) -> str:
     """Hermes's active cron jobs: a promise with a job behind it is handled."""
     try:
@@ -183,7 +191,7 @@ def cron_jobs(home: Path) -> str:
               and job.get("state") not in ("paused", "completed")]
     if not active:
         return ""
-    active.sort(key=lambda job: str(job.get("next_run_at") or "~"))
+    active.sort(key=_next_run)
     lines = []
     for job in active[:MAX_JOBS]:
         when = _clip(job.get("schedule_display") or "", 60)
