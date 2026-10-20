@@ -213,6 +213,72 @@ def test_a_nested_subagent_sends_nothing(pushed):
     assert pushed == []
 
 
+@pytest.fixture
+def delegation_flag(monkeypatch):
+    """Hermes' delegation flag, set or clear as the test says."""
+    state = {"set": False}
+    monkeypatch.setattr(plugin, "_delegated_child_check", lambda: state["set"])
+    return state
+
+
+def test_a_child_whose_compaction_rotated_its_id_is_still_a_child(delegation_flag):
+    health = sys.modules["conduit_push.health_tool"]
+    delegation_flag["set"] = True
+    assert plugin._is_child("rotated-id-no-subagent_start-saw")
+    answer = health._handle({"action": "overview"}, "rotated-id-no-subagent_start-saw", plugin._is_child, None)
+    assert answer["error"] == "subagent"
+    delegation_flag["set"] = False
+    assert not plugin._is_child("rotated-id-no-subagent_start-saw")
+
+
+def test_a_reported_child_id_answers_without_the_flag(delegation_flag):
+    plugin._subagent_start(child_session_id="known-child")
+    try:
+        assert plugin._is_child("known-child")
+        assert not plugin._is_child("someone-else")
+    finally:
+        plugin._child_sessions.discard("known-child")
+
+
+def test_a_background_task_ending_on_the_childs_thread_still_notifies(pushed, delegation_flag):
+    plugin._pre_llm_call(session_id="p", turn_id="t")
+    plugin._on_session_end(session_id="p", turn_id="t", completed=True, failed=False, interrupted=False)
+    delegation_flag["set"] = True  # the stop hook runs inside the child's run
+    _subagent()
+    assert _types(pushed) == ["background_task.finished"]
+
+
+def test_the_delegation_flag_is_looked_up_once(monkeypatch):
+    calls = []
+    module = types.ModuleType("agent.delegation_context")
+    module.is_delegated_child_context = lambda: calls.append(1) or True
+    monkeypatch.setitem(sys.modules, "agent", types.ModuleType("agent"))
+    monkeypatch.setitem(sys.modules, "agent.delegation_context", module)
+    monkeypatch.setattr(plugin, "_delegated_child_check", None)
+    assert plugin._is_child("x") and plugin._is_child("y")
+    assert len(calls) == 2 and plugin._delegated_child_check is module.is_delegated_child_context
+
+
+def test_a_hermes_without_the_flag_uses_ids_only(monkeypatch):
+    monkeypatch.setitem(sys.modules, "agent.delegation_context", None)  # import fails
+    monkeypatch.setattr(plugin, "_delegated_child_check", None)
+    assert not plugin._is_child("x")
+    assert plugin._delegated_child_check is False
+
+
+def test_a_flag_check_that_raises_falls_back_to_ids(monkeypatch):
+    def broken():
+        raise AttributeError("changed API")
+
+    monkeypatch.setattr(plugin, "_delegated_child_check", broken)
+    plugin._subagent_start(child_session_id="known-child")
+    try:
+        assert plugin._is_child("known-child")
+        assert not plugin._is_child("x")
+    finally:
+        plugin._child_sessions.discard("known-child")
+
+
 @pytest.mark.parametrize("markdown, plain", [
     ("## Done\n\n- [x] one\n- two", "Done\n\n• one\n• two"),
     ("| a | b |\n|---|---|\n| 1 | 2 |", "a · b\n1 · 2"),

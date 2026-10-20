@@ -420,7 +420,9 @@ def _subagent_stop(**kwargs: Any) -> None:
     # A subagent that ends inside the turn that started it (delegate_task
     # waits for it) is part of that turn's reply: only one that outlives it,
     # a background task, notifies. Nor does a nested one, or a muted cron job's.
-    if (_inside_parent_turn(parent, kwargs.get("parent_turn_id")) or _is_child(parent)
+    # The parent is asked about by id: this hook can run on the child's own
+    # thread, where the delegation flag is set but describes the child.
+    if (_inside_parent_turn(parent, kwargs.get("parent_turn_id")) or _is_child_id(parent)
             or cron_runs.quiet(parent, None)):
         return
     status = _text(kwargs.get("child_status")) or "finished"
@@ -572,7 +574,40 @@ def _voice_persona_note(history: Any) -> str | None:
     return None
 
 
+# Hermes' task-local "inside a delegated child" check, looked up once:
+# False means this Hermes has none (older, or tests), so ids alone answer.
+_delegated_child_check: Any = None
+
+
+def _inside_delegated_child() -> bool:
+    global _delegated_child_check
+    if _delegated_child_check is None:
+        try:
+            from agent.delegation_context import is_delegated_child_context
+
+            _delegated_child_check = is_delegated_child_context
+        except ImportError:
+            _delegated_child_check = False
+    if _delegated_child_check is False:
+        return False
+    try:
+        return bool(_delegated_child_check())
+    except Exception:  # noqa: BLE001 — the gate falls back to ids, but says so
+        logger.debug("conduit_push: delegation context check failed", exc_info=True)
+        return False
+
+
 def _is_child(session_id: Any) -> bool:
+    """A delegated child: Hermes' delegation flag first, then the ids
+    ``subagent_start`` reported. The flag marks the child's whole run, so it
+    survives a compaction that rotates the session id (a new id no
+    ``subagent_start`` ever reported)."""
+    return _inside_delegated_child() or _is_child_id(session_id)
+
+
+def _is_child_id(session_id: Any) -> bool:
+    """Whether ``subagent_start`` reported this id. For asking about a session
+    other than the one running: the delegation flag is the caller's, not the id's."""
     value = _text(session_id)
     with _children_lock:
         return bool(value and value in _child_sessions)
