@@ -192,7 +192,15 @@ function main() {
     // it to one topic (the Watch's, say).
     const voipFailure = process.env.APNS_VOIP_FAILURE;
     const voipFailureTopic = process.env.APNS_VOIP_FAILURE_TOPIC;
+    // Test seam: the first N sends that aren't VoIP fail (alternately
+    // refused and thrown) before sends start succeeding, like an APNs blip.
+    let failuresLeft = Number(process.env.APNS_FAIL_FIRST || 0);
     apnsSend = async (deviceToken, notification) => {
+      if (failuresLeft > 0 && notification.pushType !== 'voip') {
+        failuresLeft -= 1;
+        if (failuresLeft % 2) throw new Error('connection dropped');
+        return { ok: false, status: 503, reason: 'ServiceUnavailable' };
+      }
       if (voipFailure && notification.pushType === 'voip' && (!voipFailureTopic || notification.topic === voipFailureTopic)) {
         if (voipFailure === 'throw') throw new Error('voip connection dropped');
         return { ok: false, status: voipFailure === 'Unregistered' ? 410 : 400, reason: voipFailure };
@@ -596,7 +604,7 @@ async function route(request, response) {
     enforceEventBudget();
     // The ceiling counts every new call request that gets this far, delivered
     // or not (paused, previews off, no device), and each retry of one that
-    // failed before it was taken: a host past it is misbehaving.
+    // failed: a host past it is misbehaving.
     if (!duplicateEvent && event.type === 'call.requested') enforceCallCeiling(installation.id);
     // Plugin version recording runs BEFORE the dedupe return: a second
     // gateway on the same installation running the same plugin version sends
@@ -696,36 +704,20 @@ async function route(request, response) {
       }
       return sendJson(response, 202, { accepted: true, delivered: true });
     }
-    // A fresh location for Hermes: a silent location push the phone's
-    // extension answers straight to its host. Never a visible notification,
-    // and never paused by notification preferences (the user controls it in
-    // Conduit's location settings).
-    if (event.type === 'location.requested') return sendLocationRequest(response, installation, event, gateway);
-    if (!shouldDeliver(installation.preferences, event.type)) return sendJson(response, 202, { accepted: true, delivered: false });
-    // A change Hermes may make without asking: wake Conduit silently, never
-    // a visible notification.
-    if (event.type === 'phone.changes' && event.mode === 'background') return sendPhoneBackground(response, installation, event, gateway);
-    // A phone that can ring gets the call as a VoIP push; anything that stops
-    // it ringing sends the usual notification below instead.
-    if (event.type === 'call.requested' && installation.voipToken && await ring(installation, event, gateway)) {
-      return sendJson(response, 202, { accepted: true, delivered: true, rang: true });
-    }
-    const notification = notificationFor(event, installation.preferences, gateway);
-    let result;
-    // The token this push went to: the device can register a new one meanwhile.
-    const sentToken = installation.deviceToken;
+    // The id was taken before the send so a second copy arriving meanwhile
+    // stays a duplicate. A push that then fails (APNs refused or unreachable,
+    // an hourly limit) gives the id back: the plugin retries with the same
+    // id, and that retry must send rather than be told it was a duplicate.
+    // A clarify decision keeps its id, because a retry can't re-park it and
+    // its undeliverable flag already sends the plugin to Hermes' own path.
     try {
-      result = await apnsSend(sentToken, notification);
+      await deliverEvent(response, installation, event, gateway);
     } catch (error) {
-      // Same contract as the decision path: a THROWN transport failure is
-      // reported upstream, never left to surface as a 500. There is no
-      // parked decision on this path, so there is nothing to flip.
-      console.error(JSON.stringify({ level: 'error', message: 'apns send threw', error: error instanceof Error ? error.message : String(error) }));
-      return sendJson(response, 502, { error: 'apns_unreachable' });
+      store.releaseEvent(installation.id, event.eventId, credential.gatewayId);
+      throw error;
     }
-    if (result.status === 410 || result.reason === 'BadDeviceToken' || result.reason === 'Unregistered') deactivateInstallationForToken(installation, sentToken);
-    if (!result.ok) return sendJson(response, 502, { error: 'apns_rejected', reason: result.reason, status: result.status });
-    return sendJson(response, 202, { accepted: true, delivered: true });
+    if (response.statusCode >= 300) store.releaseEvent(installation.id, event.eventId, credential.gatewayId);
+    return;
   }
 
   // ── Clarify answer loop ──────────────────────────────────────────────
@@ -1127,6 +1119,42 @@ async function ring(installation, event, gateway) {
     });
   }
   return true;
+}
+
+// An accepted event that isn't a clarify decision, sent to the phone. Every
+// outcome is written to `response`; a status of 300 or more means nothing
+// reached the device.
+async function deliverEvent(response, installation, event, gateway) {
+  // A fresh location for Hermes: a silent location push the phone's
+  // extension answers straight to its host. Never a visible notification,
+  // and never paused by notification preferences (the user controls it in
+  // Conduit's location settings).
+  if (event.type === 'location.requested') return sendLocationRequest(response, installation, event, gateway);
+  if (!shouldDeliver(installation.preferences, event.type)) return sendJson(response, 202, { accepted: true, delivered: false });
+  // A change Hermes may make without asking: wake Conduit silently, never
+  // a visible notification.
+  if (event.type === 'phone.changes' && event.mode === 'background') return sendPhoneBackground(response, installation, event, gateway);
+  // A phone that can ring gets the call as a VoIP push; anything that stops
+  // it ringing sends the usual notification below instead.
+  if (event.type === 'call.requested' && installation.voipToken && await ring(installation, event, gateway)) {
+    return sendJson(response, 202, { accepted: true, delivered: true, rang: true });
+  }
+  const notification = notificationFor(event, installation.preferences, gateway);
+  let result;
+  // The token this push went to: the device can register a new one meanwhile.
+  const sentToken = installation.deviceToken;
+  try {
+    result = await apnsSend(sentToken, notification);
+  } catch (error) {
+    // Same contract as the decision path: a THROWN transport failure is
+    // reported upstream, never left to surface as a 500. There is no
+    // parked decision on this path, so there is nothing to flip.
+    console.error(JSON.stringify({ level: 'error', message: 'apns send threw', error: error instanceof Error ? error.message : String(error) }));
+    return sendJson(response, 502, { error: 'apns_unreachable' });
+  }
+  if (result.status === 410 || result.reason === 'BadDeviceToken' || result.reason === 'Unregistered') deactivateInstallationForToken(installation, sentToken);
+  if (!result.ok) return sendJson(response, 502, { error: 'apns_rejected', reason: result.reason, status: result.status });
+  return sendJson(response, 202, { accepted: true, delivered: true });
 }
 
 // True when APNs took a VoIP push for the phone's or the Watch's PushKit
@@ -1696,7 +1724,7 @@ function readConfig() {
   // The APNs test seams fake delivery (and the capture writes every payload
   // to disk), so a relay refuses to start with them unless the test suite
   // says it's a test.
-  const seams = ['APNS_MODE', 'APNS_CAPTURE_PATH', 'APNS_VOIP_FAILURE'].filter((name) => process.env[name]);
+  const seams = ['APNS_MODE', 'APNS_CAPTURE_PATH', 'APNS_VOIP_FAILURE', 'APNS_FAIL_FIRST'].filter((name) => process.env[name]);
   if (seams.length && process.env.RELAY_TEST_SEAMS !== '1') {
     throw new Error(`${seams.join(', ')} ${seams.length > 1 ? 'are test settings' : 'is a test setting'}; unset it for a real relay.`);
   }

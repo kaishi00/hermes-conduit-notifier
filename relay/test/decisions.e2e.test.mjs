@@ -584,6 +584,43 @@ test('event IDs stay out of the data file and a full event ledger keeps acceptin
     'deferred plugin metadata is written on shutdown');
 });
 
+test('a push that fails after intake gives its event ID back, so the retry is sent', async () => {
+  const aPort = await closedPort();
+  const isolatedPath = join(dir, 'relay-data-retry.json');
+  const capturePath = join(dir, `capture-retry-${Date.now()}.jsonl`);
+  const fixture = new RelayStore(isolatedPath);
+  const created = fixture.createInstallation({ bundleId: 'com.milim.relay', deviceToken: 'b'.repeat(64), environment: 'production' });
+  const pairing = fixture.createPairing(created.installation.id);
+  const claim = fixture.claimPairing(pairing.code, 'retry target');
+  // APNs drops the first send and refuses the second, then takes them.
+  const child = await startRelay(aPort, 'accept', isolatedPath, { APNS_CAPTURE_PATH: capturePath, APNS_FAIL_FIRST: '2' });
+  children.push(child);
+  const base = `http://127.0.0.1:${aPort}`;
+  // The plugin's retry: the same event, same id.
+  const send = () => api(base, '/v1/events', {
+    method: 'POST',
+    credential: `${created.installation.id}.${claim.gatewayId}.${claim.gatewaySecret}`,
+    body: { type: 'input.needed', event_id: 'input:retry0000001', session_id: 'sess-retry', profile: 'default' },
+  });
+  const captured = () => {
+    try {
+      return readFileSync(capturePath, 'utf8').trim().split('\n').filter(Boolean);
+    } catch {
+      return [];
+    }
+  };
+  try {
+    assert.deepEqual(await send(), { status: 502, json: { error: 'apns_unreachable' } });
+    assert.deepEqual(await send(), { status: 502, json: { error: 'apns_rejected', reason: 'ServiceUnavailable', status: 503 } },
+      'a retry after a failed send is sent again, not called a duplicate');
+    assert.deepEqual(await send(), { status: 202, json: { accepted: true, delivered: true } });
+    assert.deepEqual(await send(), { status: 200, json: { accepted: true, duplicate: true } }, 'a delivered event still dedupes');
+    assert.equal(captured().length, 1, 'the phone got the notification once');
+  } finally {
+    await stopRelay(child);
+  }
+});
+
 test('call requests reach APNs with the call category and stop at the per-installation ceiling', async () => {
   const aPort = await closedPort();
   const isolatedPath = join(dir, 'relay-data-calls.json');
