@@ -526,6 +526,40 @@ def test_a_watch_call_waits_while_another_local_live_call_runs_on_the_profile(ca
         api._local_live_unregister(phone)
 
 
+def test_a_rejoin_from_the_same_watch_starts_while_its_last_call_winds_down(call):
+    async def scenario():
+        bridge = _bridge()
+        # The bridge's previous call, still registered and open.
+        earlier = object.__new__(api._LocalLiveWatchCall)
+        earlier.session, earlier.profile, earlier.closed = types.SimpleNamespace(bridge=bridge), "", False
+        api._local_live_register(earlier)
+        try:
+            socket = await _attach(bridge)
+            started = await _start(bridge, socket, Watch())
+            assert started["type"] == "started"
+        finally:
+            api._local_live_unregister(earlier)
+        await bridge._end_session("test")
+
+    _run(scenario())
+
+
+def test_the_registration_gate_skips_only_the_calls_it_may_ignore():
+    class Call:
+        speaks = False
+        closed = False
+        profile = "busy-profile"
+
+    running, other = Call(), Call()
+    assert api._local_live_register(running)
+    try:
+        assert not api._local_live_register(other)
+        assert api._local_live_register(other, lambda call: call is running)
+        api._local_live_unregister(other)
+    finally:
+        api._local_live_unregister(running)
+
+
 def test_a_profile_call_is_filed_under_its_profile(call, monkeypatch):
     monkeypatch.setattr(api, "_profile_scope", lambda profile: api.nullcontext())
 

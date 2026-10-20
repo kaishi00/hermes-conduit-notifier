@@ -3176,13 +3176,16 @@ _local_live_calls: Dict[str, List[Any]] = {}
 _local_live_calls_lock = threading.Lock()
 
 
-def _local_live_register(call: Any) -> bool:
-    """Registers atomically; a profile may have only one live call."""
+def _local_live_register(call: Any, may_ignore: Optional[Callable[[Any], bool]] = None) -> bool:
+    """Registers atomically; a profile may have only one live call. A call
+    ``may_ignore`` says is still winding down (a Watch's earlier call on the
+    same bridge) doesn't count."""
     with _local_live_calls_lock:
-        calls = _local_live_calls.setdefault(call.profile, [])
-        if not call.speaks and any(not other.closed and not other.speaks for other in calls):
+        calls = _local_live_calls.get(call.profile, [])
+        if not call.speaks and any(not other.closed and not other.speaks
+                                   and not (may_ignore is not None and may_ignore(other)) for other in calls):
             return False
-        calls.append(call)
+        _local_live_calls.setdefault(call.profile, calls).append(call)
         return True
 
 
@@ -11753,8 +11756,7 @@ class _LocalLiveWatchSession(_WatchAudioSession):
             raise WatchAudioFailure("unavailable", LOCAL_LIVE_WATCH_NO_SESSIONS)
         # The speech server's turns go to the profile's newest live call: one
         # running elsewhere (the phone, another Watch grant) would take them.
-        if any(not call.speaks and not (isinstance(call, _LocalLiveWatchCall) and call.session.bridge is self.bridge)
-               for call in _local_live_open_calls(profile)):
+        if any(not call.speaks and not self._rejoins(call) for call in _local_live_open_calls(profile)):
             raise WatchAudioFailure("busy", "A Local Live call is already running on this Hermes profile")
         open_key = _limiter_key(profile)
         if not _speech_server_take_open(open_key):
@@ -11783,7 +11785,7 @@ class _LocalLiveWatchSession(_WatchAudioSession):
             # where its approvals go.
             chat.listener = runner.observe
             call = self.call = _LocalLiveWatchCall(self, _local_live_profile_key(profile))
-            if not _local_live_register(call):
+            if not _local_live_register(call, self._rejoins):
                 raise WatchAudioFailure("busy", "A Local Live call is already running on this Hermes profile")
             pacer = self.pacer = _WatchAudioPacer(self.send, LOCAL_LIVE_WATCH_RATE)
             read_back = self.read_back = _LocalLiveReadBack(call, self._to_watch_event, self._fail)
@@ -11902,6 +11904,10 @@ class _LocalLiveWatchSession(_WatchAudioSession):
 
     # Approvals on the Watch
 
+
+    def _rejoins(self, other: Any) -> bool:
+        """This Watch's earlier call, still winding down: a rejoin may start."""
+        return isinstance(other, _LocalLiveWatchCall) and other.session.bridge is self.bridge
     def _approvals_changed(self) -> None:
         """From Hermes' threads: the chat's pending approvals changed."""
         loop = self.loop
