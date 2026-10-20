@@ -197,8 +197,9 @@ def _row_with(evidence: str, chunk: Sequence[Any], hint: Any) -> Optional[Any]:
     if not parts or sum(map(len, parts)) < 8 or min(map(len, parts)) < 3:
         return None  # too little to tell where it came from
     order = list(chunk)
-    if isinstance(hint, int) and not isinstance(hint, bool) and 1 <= hint <= len(chunk):
-        order.insert(0, order.pop(hint - 1))
+    if isinstance(hint, (int, float)) and not isinstance(hint, bool) and float(hint).is_integer() \
+            and 1 <= hint <= len(chunk):
+        order.insert(0, order.pop(int(hint) - 1))
     for row in order:
         text = _norm(_text(row["content"]))
         if all(part in text for part in parts):
@@ -281,15 +282,21 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
             try:
                 items, tokens = extract(llm, chunk, zone, outcomes)
             except Exception as error:  # noqa: BLE001 — a model or network failure waits for a retry
-                done["failed"] += 1
+                if not still_leader():
+                    return done
                 failures = pulse_store.chunk_failed(chat.profile, chat.chat_id, retry_at=now + RETRY_S,
                                                     after_id=chat.after_id)
+                if not failures:
+                    break  # another process read this chunk meanwhile
+                done["failed"] += 1
                 logger.warning("conduit_push: Pulse memory couldn't read a chat (try %d of %d): %s",
                                failures, MAX_FAILURES, type(error).__name__)
                 if failures >= MAX_FAILURES:
                     pulse_store.advance(chat.profile, chat.chat_id, message_id=last["id"], at=last["timestamp"],
                                         after_id=chat.after_id)
                 break  # the rest of this chat waits for its next run
+            if not still_leader():
+                return done  # stopped during the call: keep nothing
             if pulse_store.advance(chat.profile, chat.chat_id, message_id=last["id"], at=last["timestamp"],
                                    items=items, after_id=chat.after_id) is None:
                 break  # another process read this chunk meanwhile

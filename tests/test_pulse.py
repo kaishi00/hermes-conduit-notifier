@@ -1149,7 +1149,7 @@ def test_only_items_said_in_the_chat_are_kept():
         {"kind": "commitment", "text": "The user will call the dentist.", "evidence": "I'll call the dentist on Friday",
          "line": 1, "explicit": True, "due": "2026-10-23", "due_words": "on Friday"},
         {"kind": "promise", "text": "Hermes will check the build.", "evidence": "\"I'll check the build ... tell you\"",
-         "line": 7, "explicit": True, "due": "2026-10-21T09:00", "due_words": "at nine"},  # never said
+         "line": 2.0, "explicit": True, "due": "2026-10-21T09:00", "due_words": "at nine"},  # never said
         {"kind": "fact", "text": "The user's sister lives in Lyon.", "evidence": "my sister lives in Lyon", "line": 1},
         {"kind": "mood", "text": "x", "evidence": "promise", "line": 1},
         {"kind": "fact", "text": "x", "evidence": "I ... on", "line": 1},  # too little to place
@@ -1323,6 +1323,11 @@ def test_the_loop_runs_memory_on_its_own_thread(remembering, db, monkeypatch):
     db.message("assistant", "hi", sid="work", at=start + 2)
     pulse.tick(start + 60)
     assert pulse._memory_thread.ident and calls == []  # not due again yet
+    stopping = threading.Event()
+    assert memory.run(remembering.store, [("", remembering.store.path.parent, SID)],
+                      lambda *_: (stopping.set(), ({"items": []}, 1))[1], zone=UTC, now=start + 4000,
+                      still_leader=lambda: not stopping.is_set())["chunks"] == 0  # stopped during the call
+    assert remembering.store.watermark("", "work") is None
     pulse._memory_thread.join(5)
     monkeypatch.setattr(memory, "IDLE_S", 0.0)
     remembering.store.set("memory_requested", True)
