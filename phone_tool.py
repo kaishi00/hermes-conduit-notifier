@@ -72,7 +72,8 @@ CALENDAR_SCHEMA: dict[str, Any] = {
         "Reads: overview (what's shared, calendars, freshness), calendars, events, free_busy, next, reminders. "
         "Writes queue a change the phone applies: add_event, update_event, delete_event, add_reminder, "
         "update_reminder, complete_reminder, delete_reminder; the user approves each on the phone, by tap or by saying "
-        "yes or no in a voice chat, unless they let Hermes add without asking (updates, deletes and completions always ask), so "
+        "yes or no in a voice chat as their very next words after the reply that queued it, unless they let Hermes add "
+        "without asking (updates, deletes and completions always ask), so "
         "never say a change is done until pending shows it applied. pending: recent changes and how they went. Read results are as of the phone's last sync. "
         f"Before setting up a scheduled job or standing rule around the calendar, load "
         f"skill_view(\"conduit_push:{SKILL_NAME}\"). {CALENDAR_FIRST}"
@@ -146,7 +147,8 @@ PHONE_SCHEMA: dict[str, Any] = {
         "don't volunteer it in a chat other people can read. "
         "Alarms and timers ring on the phone through Silent and Focus, when the user lets Hermes set them: "
         "alarms lists the ones you set that are still on; set_alarm, set_timer and cancel_alarm queue a change "
-        "the phone applies (the user approves it there, by tap or by saying yes or no in a voice chat, unless they let "
+        "the phone applies (the user approves it there, by tap or by saying yes or no in a voice chat as their very next "
+        "words after the reply that queued it, unless they let "
         "Hermes add without asking), so never say it's set until pending shows it applied. Set them when the user asks (\"wake me at 6:30\", \"timer for "
         "the pasta\") or for something they set up, never on your own initiative. pending: recent changes and how "
         f"they went. {PHONE_FIRST}"
@@ -454,8 +456,10 @@ def _queued(store: PhoneStore, change: dict[str, Any], profile: str) -> tuple[st
                           "shows applied."), earlier
     return "waiting_for_approval", ("Sent to the phone; waiting for the user to approve it there (they can also edit "
                                     "or dismiss it). In a voice chat they can just say yes or no and Conduit answers the "
-                                    "card for them, so don't ask them to tap first; if pending still shows it waiting "
-                                    "after they said it, their app may be older, so then ask them to tap the card. "
+                                    "card for them, so ask in this reply and don't ask them to tap first. Conduit takes "
+                                    "that yes or no only as the user's very next words after this reply. Only if "
+                                    "they say something else first, or pending still shows it waiting after they said "
+                                    "it, ask them to tap the card instead. "
                                     "When they answer, check pending before "
                                     "saying how it went; don't say it's done until pending shows applied."), earlier
 

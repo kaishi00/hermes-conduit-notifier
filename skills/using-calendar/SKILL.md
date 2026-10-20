@@ -124,6 +124,10 @@ In a live voice call the phone adds things itself and reads changes
 waiting for the user out loud, so the same rules hold: ask, then let them
 approve.
 
+In a voice chat with you, Conduit answers the card when the user says yes
+or no as their very next words after the reply that queued the change, so
+ask in that reply. If they say something else first, it waits for a tap.
+
 ## Privacy
 
 - The calendar is full of other people's details: names, emails, meeting
