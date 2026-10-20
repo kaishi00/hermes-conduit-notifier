@@ -1351,7 +1351,7 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: i
     parsed_contacts = _parse_contacts(contacts) if sharing["contacts"] and contacts is not None else None
 
     stored = db.execute("SELECT last_sent, status_at, focus_at FROM devices WHERE id=?", (device_id,)).fetchone()
-    sent_epoch = int(sent_at.timestamp())
+    sent_epoch = sent_at.timestamp()
     stale = stored[0] is not None and sent_epoch < stored[0]
 
     counts = {"events": 0, "reminders": 0, "deleted": 0}
