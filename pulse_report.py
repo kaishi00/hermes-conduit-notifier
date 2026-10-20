@@ -187,6 +187,8 @@ def cron_jobs(home: Path) -> str:
     jobs = data.get("jobs", []) if isinstance(data, dict) else data
     if isinstance(jobs, dict):
         jobs = list(jobs.values())
+    if not isinstance(jobs, list):
+        return ""
     active = [job for job in jobs if isinstance(job, dict) and job.get("enabled", True)
               and job.get("state") not in ("paused", "completed")]
     if not active:

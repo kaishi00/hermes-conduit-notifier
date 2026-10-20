@@ -818,8 +818,11 @@ def test_the_report_lists_active_cron_jobs(tmp_path):
         "- Check the build (once at 09:00, next 2026-10-21T10:30:00+00:00): Look at CI and tell me",
         "- Morning news (every day at 07:00, next 2026-10-21T07:00:00-04:00): News",
     ]  # 10:30 UTC is 06:30 in New York: before 07:00 there, though it sorts after it as text
-    (tmp_path / "cron" / "jobs.json").write_text("{broken")
-    assert report.cron_jobs(tmp_path) == ""
+    (tmp_path / "cron" / "jobs.json").write_text(json.dumps({"jobs": {job["id"]: job for job in jobs}}))
+    assert report.cron_jobs(tmp_path) == text  # keyed by id
+    for broken in ("{broken", '{"jobs": null}', '{"jobs": 5}'):
+        (tmp_path / "cron" / "jobs.json").write_text(broken)
+        assert report.cron_jobs(tmp_path) == ""
 
 
 def test_the_report_context_stays_within_its_budget(db, tmp_path, pulse_store):
