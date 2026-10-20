@@ -119,18 +119,20 @@ def find_turn(home: Path, *, chat_id: str, tag: str, since: float) -> Optional[T
 def recent_messages(home: Path, *, exclude_chat: str, since: float, max_chars: int = 2000,
                     limit: int = 3000) -> list[sqlite3.Row]:
     """User and assistant rows since ``since`` in the chats a person had:
-    not ``exclude_chat`` or what it continued into, not cron runs, hidden
+    not any part of ``exclude_chat``'s compression chain, not cron runs, hidden
     chats or hidden rows. The newest ``limit``, each cut to ``max_chars``,
     oldest first, with the chat's id and title."""
     return _run(home, (
-        "WITH RECURSIVE excluded(id) AS (SELECT ? UNION SELECT s.id FROM sessions s JOIN excluded e "
-        "ON s.parent_session_id = e.id) "
+        "WITH RECURSIVE up(id, parent) AS (SELECT id, parent_session_id FROM sessions WHERE id = ? "
+        "UNION SELECT s.id, s.parent_session_id FROM sessions s JOIN up ON s.id = up.parent), "
+        "excluded(id) AS (SELECT ? UNION SELECT id FROM up WHERE parent IS NULL "
+        "UNION SELECT s.id FROM sessions s JOIN excluded e ON s.parent_session_id = e.id) "
         "SELECT * FROM (SELECT s.id AS chat_id, s.title, m.role, substr(m.content, 1, ?) AS content, m.timestamp, "
         "m.id FROM messages m JOIN sessions s ON s.id = m.session_id "
         "WHERE m.timestamp >= ? AND m.role IN ('user', 'assistant') AND m.active = 1 AND m.display_kind IS NULL "
         "AND (s.source IS NULL OR s.source != 'cron') AND s.hidden = 0 AND s.id NOT IN (SELECT id FROM excluded) "
         "ORDER BY m.timestamp DESC, m.id DESC LIMIT ?) ORDER BY timestamp, id"
-    ), (exclude_chat, max_chars, since, limit))
+    ), (exclude_chat, exclude_chat, max_chars, since, limit))
 
 
 def user_text_after(home: Path, *, session_id: str, tag: str) -> list[str]:

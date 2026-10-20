@@ -13,6 +13,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import re
 import sqlite3
 import subprocess
 import sys
@@ -752,6 +753,8 @@ def test_the_report_context_is_the_recent_real_chats(live, db, tmp_path):
     assert "Eric likes short answers." in context
     assert "build → error: exit 1" in context
     text = report.report_text("pabc-1", context, since)
+    fence = re.search(r"<<<context (\w+)\n", text).group(1)
+    assert text.endswith(f"context {fence}>>>") and report.report_text("pabc-1", context, since) != text
     assert f"covering {since} onward" in text and text.startswith("Pulse shadow report pabc-1.") and context in text
     ledger.forget_cache()
 
@@ -978,6 +981,18 @@ def test_an_early_report_stands_in_for_the_scheduled_one(live, db):
     live.store.set("report_time", time.strftime("%H:%M", time.gmtime(now - 30)))
     pulse.tick(now=now)
     assert len(live.sent()) == 1
+
+
+def test_the_whole_home_chain_is_left_out_of_the_report(db, tmp_path):
+    db.session("root", title="Pulse")
+    db.session(SID, title="Pulse", parent="root")  # the home chat set by id to a compression tip
+    db.session("tip", title="Pulse", parent=SID)
+    db.session("w", title="Work", pinned=0)
+    now = time.time()
+    for sid in ("root", SID, "tip", "w"):
+        db.message("user", f"from {sid}", sid=sid, at=now - 60)
+    rows = hermes.recent_messages(tmp_path, exclude_chat=SID, since=0)
+    assert [row["content"] for row in rows] == ["from w"]
 
 
 def test_recent_messages_are_bounded(db, tmp_path):

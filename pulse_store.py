@@ -245,7 +245,6 @@ class PulseStore:
                                 (kind,)).fetchall()
         return {row["state"]: row["n"] for row in rows}
 
-
     # Report ratings -------------------------------------------------------
 
     def set_ratings(self, attempt_id: str, items_json: str, ratings_json: str) -> bool:
