@@ -389,11 +389,19 @@ class PresentStore:
         try:
             with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
                 handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
             temporary.replace(self.path)
         except BaseException:
             temporary.unlink(missing_ok=True)
             raise
         self.path.chmod(0o600)
+        if os.name == "posix":
+            directory = os.open(self.path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
 
 
 # --- Helpers ---------------------------------------------------------------------
