@@ -443,6 +443,32 @@ def test_a_second_host_process_stays_quiet(live, db, monkeypatch):
     assert live.sent() == []
 
 
+def test_a_process_with_an_older_build_leaves_the_loop(live, db, monkeypatch, capsys):
+    db.session()
+    live.store.set("enabled", True)
+    live.store.set("probe_requested", True)
+    monkeypatch.setattr(pulse, "build_stamp", lambda: "newer")  # installed over since this process started
+    pulse.tick()
+    assert live.sent() == [] and live.store.get(store.LEADER) is None
+    monkeypatch.setattr(pulse, "_build", "newer")  # a process started on the new build
+    pulse.tick()
+    assert len(live.sent()) == 1 and live.store.get(store.LEADER)["build"] == "newer"
+
+
+def test_status_names_a_loop_on_an_older_build(live, db, capsys, monkeypatch):
+    db.session()
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", pulse.get_hermes_home)
+    live.store.set("enabled", True)
+    live.store.set("last_tick_at", time.time())
+    status = lambda: cli.dispatch(types.SimpleNamespace(conduit_push_action="pulse", pulse_action="status", value=""))
+    live.store.claim_leader("Hermes:16293", pulse.LEADER_TTL_S, time.time())  # an old build writes no stamp
+    status()
+    assert "run by process Hermes:16293, which loaded an older build" in capsys.readouterr().out
+    live.store.claim_leader("Hermes:16293", pulse.LEADER_TTL_S, time.time(), build=pulse.build_stamp())
+    status()
+    assert "older build" not in capsys.readouterr().out
+
+
 def test_no_home_chat_means_no_probe(live, db):
     live.store.set("enabled", True)
     pulse.tick()

@@ -20,6 +20,7 @@ outcome ledger (pulse_ledger), the record later slices check claims against.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -75,6 +76,24 @@ _turns_lock = threading.Lock()
 _last_problem = ""
 _last_ratings = 0.0
 _owner = f"{socket.gethostname()}:{os.getpid()}"
+
+
+def build_stamp() -> str:
+    """The plugin's code as installed on disk now. Every process hosting
+    chats loads it once, so after an install the ones started before it run
+    the old code until restarted."""
+    digest = hashlib.sha256()
+    for path in sorted(Path(__file__).parent.glob("*.py")):
+        try:
+            info = path.stat()
+        except OSError:
+            continue
+        digest.update(f"{path.name}:{info.st_mtime_ns}:{info.st_size};".encode())
+    return digest.hexdigest()[:12]
+
+
+_build = build_stamp()
+_said_stale = False
 
 
 def register(ctx: Any) -> None:
@@ -205,7 +224,16 @@ def tick(now: Optional[float] = None) -> None:
     if not pulse_store.get("enabled"):
         return
     now = time.time() if now is None else now
-    if not pulse_store.claim_leader(_owner, LEADER_TTL_S, now):
+    if build_stamp() != _build:
+        # Installed over since this process started: leave the loop to a
+        # process running the new code (the lease runs out on its own).
+        global _said_stale
+        if not _said_stale:
+            logger.warning("conduit_push: Pulse: a newer build of the plugin is installed; this process (%s) "
+                           "stopped running Pulse until it's restarted", _owner)
+            _said_stale = True
+        return
+    if not pulse_store.claim_leader(_owner, LEADER_TTL_S, now, build=_build):
         return  # another process on this Hermes home runs the loop
     # The loop's heartbeat: `pulse status` warns when nothing runs the loop.
     pulse_store.set("last_tick_at", now)
