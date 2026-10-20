@@ -296,7 +296,7 @@ def build(home: Path, pulse_store: store.PulseStore, *, home_chat_id: str, now: 
     try:
         chats = recent_chats(home, home_chat_id=home_chat_id, since=since, zone=zone, others=others)
     except hermes.HermesUnreadable as error:
-        chats = f"Couldn't read the chats ({error})."
+        chats = f"Couldn't read the chats ({type(error).__name__})."
     header = f"## Now\n{datetime.fromtimestamp(now, zone).strftime('%A %d %B %Y, %H:%M')} ({zone_name or 'host time'})"
     start = _local(since, zone)
     sections = [header, phone, cron_jobs(home, others), memory_files(home, others),

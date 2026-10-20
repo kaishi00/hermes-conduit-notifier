@@ -15,7 +15,9 @@ A few times a day it also sends the shadow report (pulse_report): what Hermes
 would have brought up since the last one, for the user to rate in the home chat.
 
 While Pulse is on, every tool call in the profile also gets a row in the
-outcome ledger (pulse_ledger), the record later slices check claims against.
+outcome ledger (pulse_ledger), the record later slices check claims against,
+and quiet chats are read into memory items (pulse_memory), on a thread of
+their own so a slow model call never holds up delivery.
 """
 
 from __future__ import annotations
@@ -36,6 +38,7 @@ from . import pulse_delivery as delivery
 from . import pulse_hermes as hermes
 from . import pulse_host as host
 from . import pulse_ledger as ledger
+from . import pulse_memory as memory
 from . import pulse_report as report
 from . import pulse_store as store
 
@@ -52,6 +55,8 @@ REPORT_WINDOW_S = 8 * 3600.0
 # Ratings are read back from the home chat this often, for reports this old.
 RATINGS_EVERY_S = 300.0
 RATINGS_DAYS = 3
+# Quiet chats are looked for this often (or when `pulse memory now` asks).
+MEMORY_EVERY_S = 300.0
 TICK_S = 30.0
 # `pulse status` calls the loop stopped after this many missed ticks.
 STALE_TICK_S = 10 * TICK_S
@@ -76,6 +81,9 @@ _turns_lock = threading.Lock()
 _last_problem = ""
 _last_ratings = 0.0
 _owner = f"{socket.gethostname()}:{os.getpid()}"
+_memory_thread: Optional[threading.Thread] = None
+# Whether Hermes took the plugin's auxiliary task, so memory calls can name it.
+_memory_task = False
 
 
 def build_stamp() -> str:
@@ -99,8 +107,13 @@ _said_stale = False
 def register(ctx: Any) -> None:
     """Starts the Pulse loop for this load. It only acts in a process that
     hosts Conduit's chats, and only while Pulse is on."""
-    global _ctx, _thread, _stop, _started_at
+    global _ctx, _thread, _stop, _started_at, _memory_task
     _ctx = ctx
+    try:
+        ctx.register_auxiliary_task(memory.TASK, display_name=memory.TASK_NAME, description=memory.TASK_DESCRIPTION)
+        _memory_task = True
+    except Exception:  # noqa: BLE001 — an older Hermes: memory uses the main model
+        logger.debug("conduit_push: Pulse: no auxiliary task for memory", exc_info=True)
     if _thread is not None and _thread.is_alive() and not _stop.is_set():
         return  # loaded again without an unload: the running loop serves the new context
     _started_at = time.time()
@@ -241,6 +254,7 @@ def tick(now: Optional[float] = None) -> None:
     # A report's text carries a day of private chat; keep it only while in flight.
     pulse_store.trim_finished(REPORT)
     _collect_ratings(pulse_store, home, now)
+    _maybe_memory(pulse_store, home, now)
     # One new turn per tick: a probe first, the report on a later tick.
     if not _maybe_probe(pulse_store, home, now):
         _maybe_report(pulse_store, home, now)
@@ -291,6 +305,65 @@ def _maybe_report(pulse_store: store.PulseStore, home: Path, now: float) -> bool
     context, since = report.build(home, pulse_store, home_chat_id=chat.chat_id, now=now)
     _send(pulse_store, kind=REPORT, chat_id=chat.chat_id, text=lambda tag: report.report_text(tag, context, since))
     return True
+
+
+def _maybe_memory(pulse_store: store.PulseStore, home: Path, now: float) -> None:
+    """Starts a memory run on its own thread when one is due and none is
+    running. Memory starts from the first time it runs: older chats wait
+    for a backfill."""
+    global _memory_thread
+    if not pulse_store.get("memory") or (_memory_thread is not None and _memory_thread.is_alive()):
+        return
+    asked = pulse_store.take_request("memory_requested")
+    last = pulse_store.get("memory_run_at")
+    if not asked and isinstance(last, (int, float)) and now - last < MEMORY_EVERY_S:
+        return
+    since = pulse_store.get("memory_since")
+    if not isinstance(since, (int, float)) or isinstance(since, bool):
+        pulse_store.set("memory_since", now)
+    chat, _ = home_chat(pulse_store, home)
+    if chat is None:
+        return  # without the home chat, Pulse's own reports would be read as chats
+    pulse_store.set("memory_run_at", now)
+    _memory_thread = threading.Thread(target=_memory_run, args=(home, chat.chat_id, now), name="conduit-pulse-memory",
+                                      daemon=True)
+    _memory_thread.start()
+
+
+def _memory_run(home: Path, home_chat_id: str, now: float) -> None:
+    try:
+        pulse_store = open_store(home)
+        sources = [("", Path(home), home_chat_id)]
+        if pulse_store.get("report_profiles") == "all":
+            sources += [(name, path, "") for name, path in report.profile_homes(home)]
+        done = memory.run(pulse_store, sources, _memory_llm, zone=report_zone(pulse_store, home), now=now,
+                          still_leader=lambda: _leads(pulse_store))
+        if done["chunks"] or done["failed"]:
+            usage = pulse_store.get("memory_usage")
+            usage = usage if isinstance(usage, dict) else {}
+            pulse_store.set("memory_usage", {key: int(usage.get(key, 0) or 0) + done[key] for key in done})
+            pulse_store.set("memory_read_at", time.time())
+    except Exception:  # noqa: BLE001 — the next run tries again
+        logger.warning("conduit_push: Pulse memory run failed", exc_info=True)
+
+
+def _leads(pulse_store: store.PulseStore) -> bool:
+    """Whether this process still runs the loop (a memory run stops when not)."""
+    lease = pulse_store.get(store.LEADER)
+    return (isinstance(lease, dict) and lease.get("owner") == _owner and pulse_store.get("enabled")
+            and bool(pulse_store.get("memory")))
+
+
+def _memory_llm(instructions: str, text: str) -> tuple[Any, int]:
+    llm = getattr(_ctx, "llm", None)
+    if llm is None:
+        raise RuntimeError("this Hermes gives plugins no model access")
+    result = llm.complete_structured(
+        instructions=instructions, input=[{"type": "text", "text": text}], json_mode=True,
+        task=memory.TASK if _memory_task else None, purpose="pulse memory", timeout=memory.CALL_TIMEOUT_S,
+        max_tokens=memory.MAX_TOKENS)
+    usage = getattr(result, "usage", None)
+    return getattr(result, "parsed", None), int(getattr(usage, "total_tokens", 0) or 0)
 
 
 # One Hermes home per process, like _ctx, so the cache needs no key.

@@ -1,4 +1,4 @@
-"""Pulse's own state: its settings, every delivery attempt, and the outcome ledger.
+"""Pulse's own state: its settings, every delivery attempt, the outcome ledger and memory.
 
 Pulse (designs/proactivity.md) sends messages as turns in one home chat. This
 store keeps what Pulse decided and tried; what Hermes actually did is read
@@ -16,7 +16,7 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 DB_NAME = "conduit-pulse.db"
 # How long the store waits on another process's write before giving up.
@@ -49,9 +49,16 @@ DEFAULTS: dict[str, Any] = {
     "report_time": "08:00,13:00,18:00",
     "time_zone": "",
     "report_requested": False,
-    # "all": the report also reads every other profile's chats, memories and
-    # cron jobs (Bot Mode's bots are profiles); "this": only this profile.
+    # "all": the report and memory also read every other profile's chats,
+    # memories and cron jobs (Bot Mode's bots are profiles); "this": only
+    # this profile.
     "report_profiles": "all",
+    # Memory (pulse_memory): on while Pulse is. It reads chats written after
+    # ``memory_since`` (set when it first runs), at most every few minutes.
+    "memory": True,
+    "memory_since": None,
+    "memory_run_at": 0.0,
+    "memory_requested": False,
 }
 # Which process runs the loop: {"owner": ..., "until": time.time()}.
 LEADER = "leader"
@@ -101,7 +108,40 @@ CREATE TABLE IF NOT EXISTS report_ratings (
     updated_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS outcomes_session ON outcomes(session_id);
+CREATE TABLE IF NOT EXISTS items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    profile TEXT NOT NULL,
+    chat_id TEXT NOT NULL,
+    message_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    text TEXT NOT NULL,
+    evidence TEXT NOT NULL,
+    explicit INTEGER NOT NULL,
+    due TEXT NOT NULL DEFAULT '',
+    due_at REAL,
+    mentioned_at REAL NOT NULL,
+    recorded_at REAL NOT NULL,
+    valid_from REAL NOT NULL,
+    valid_to REAL,
+    superseded_at REAL,
+    superseded_by INTEGER,
+    status TEXT NOT NULL DEFAULT 'open',
+    closed_by TEXT NOT NULL DEFAULT '',
+    closed_at REAL
+);
+CREATE INDEX IF NOT EXISTS items_status ON items(status, kind);
+CREATE TABLE IF NOT EXISTS watermarks (
+    profile TEXT NOT NULL,
+    chat_id TEXT NOT NULL,
+    message_id INTEGER NOT NULL,
+    at REAL NOT NULL,
+    failures INTEGER NOT NULL DEFAULT 0,
+    retry_at REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (profile, chat_id)
+);
 """
+# ``items.profile`` and ``watermarks.profile`` are "" for the profile the
+# store belongs to, else the other profile's name (pulse_report.profile_homes).
 # ``attempts.session_key`` holds the home chat's stored session id (the
 # column kept its first name so a store from the first build still opens).
 
@@ -285,6 +325,12 @@ class PulseStore:
                                 (*params, limit)).fetchall()
         return [dict(row) for row in rows]
 
+    def outcomes_between(self, session_id: str, start: float, end: float, limit: int = 50) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT * FROM outcomes WHERE session_id=? AND at >= ? AND at <= ? ORDER BY at "
+                                "LIMIT ?", (session_id, start, end, limit)).fetchall()
+        return [dict(row) for row in rows]
+
     def outcome_counts(self, since: float) -> dict[str, int]:
         with self._connect() as conn:
             rows = conn.execute("SELECT status, COUNT(*) AS n FROM outcomes WHERE at >= ? GROUP BY status",
@@ -300,6 +346,76 @@ class PulseStore:
                                     "LIMIT 1 OFFSET ?)", (keep,)).rowcount
             conn.execute("COMMIT")
         return removed
+
+
+    # Memory (designs/pulse-slice-1.md) -----------------------------------
+
+    def watermark(self, profile: str, chat_id: str) -> Optional[dict]:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM watermarks WHERE profile=? AND chat_id=?",
+                               (profile, chat_id)).fetchone()
+        return dict(row) if row else None
+
+    def watermarks(self) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT * FROM watermarks").fetchall()
+        return [dict(row) for row in rows]
+
+    def advance(self, profile: str, chat_id: str, *, message_id: int, at: float,
+                items: Sequence[dict[str, Any]] = ()) -> list[int]:
+        """Records a read chunk: its items, and the chat read up to row
+        ``message_id`` (written at ``at``), in one transaction, so a chunk is
+        never half kept or read twice. Returns the new items' ids."""
+        columns = ("profile", "chat_id", "message_id", "kind", "text", "evidence", "explicit", "due", "due_at",
+                   "mentioned_at", "recorded_at", "valid_from")
+        now, ids = time.time(), []
+        with _lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            for item in items:
+                row = {"profile": profile, "chat_id": chat_id, "recorded_at": now,
+                       "valid_from": item["mentioned_at"], **item}
+                ids.append(conn.execute(
+                    f"INSERT INTO items({', '.join(columns)}) VALUES({','.join('?' * len(columns))})",
+                    tuple(row[column] for column in columns)).lastrowid)
+            conn.execute(
+                "INSERT INTO watermarks(profile, chat_id, message_id, at) VALUES(?,?,?,?) "
+                "ON CONFLICT(profile, chat_id) DO UPDATE SET message_id=excluded.message_id, at=excluded.at, "
+                "failures=0, retry_at=0", (profile, chat_id, message_id, at))
+            conn.execute("COMMIT")
+        return ids
+
+    def chunk_failed(self, profile: str, chat_id: str, *, retry_at: float) -> int:
+        """Counts a failed read of the chat's next chunk; returns the count."""
+        with _lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "INSERT INTO watermarks(profile, chat_id, message_id, at, failures, retry_at) VALUES(?,?,0,0,1,?) "
+                "ON CONFLICT(profile, chat_id) DO UPDATE SET failures=failures+1, retry_at=excluded.retry_at",
+                (profile, chat_id, retry_at))
+            failures = conn.execute("SELECT failures FROM watermarks WHERE profile=? AND chat_id=?",
+                                    (profile, chat_id)).fetchone()["failures"]
+            conn.execute("COMMIT")
+        return failures
+
+    def open_items(self, kind: str = "") -> list[dict]:
+        where, params = ("AND kind=? ", (kind,)) if kind else ("", ())
+        with self._connect() as conn:
+            rows = conn.execute(f"SELECT * FROM items WHERE status='open' AND superseded_at IS NULL {where}"
+                                f"ORDER BY mentioned_at DESC, id DESC", params).fetchall()
+        return [dict(row) for row in rows]
+
+    def close_item(self, item_id: int, *, status: str, closed_by: str) -> bool:
+        with _lock, self._connect() as conn:
+            changed = conn.execute(
+                "UPDATE items SET status=?, closed_by=?, closed_at=? WHERE id=? AND status='open'",
+                (status, closed_by, time.time(), item_id)).rowcount
+        return bool(changed)
+
+    def item_counts(self) -> dict[str, int]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT kind, COUNT(*) AS n FROM items WHERE status='open' AND superseded_at IS NULL "
+                                "GROUP BY kind").fetchall()
+        return {row["kind"]: row["n"] for row in rows}
 
 
 class _Closing:

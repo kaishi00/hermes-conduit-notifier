@@ -35,13 +35,15 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
         help="Redact chat text from pushes; choice labels still transit so cards stay answerable",
     )
     redact.add_argument("mode", choices=["on", "off"])
-    pulse = commands.add_parser("pulse", help="Pulse, the proactivity experiment: on, off, status, probe, report, home, outcomes")
-    pulse.add_argument("pulse_action", choices=["on", "off", "status", "probe", "report", "home", "outcomes"])
+    pulse = commands.add_parser("pulse", help="Pulse, the proactivity experiment: on, off, status, probe, report, home, outcomes, memory")
+    pulse.add_argument("pulse_action", choices=["on", "off", "status", "probe", "report", "home", "outcomes", "memory"])
     pulse.add_argument("value", nargs="?", default="",
                        help="for home: the id of the chat to use, or 'auto' to find it by title; "
                             "for outcomes: how many to show, or a chat id; "
                             "for report: 'now', 'on', 'off', times like 08:00,13:00, a time zone like Europe/Paris, "
-                            "'all-profiles' or 'this-profile'")
+                            "'all-profiles' or 'this-profile'; "
+                            "for memory: a kind to list, 'now', 'on', 'off', or 'forget' and an item number")
+    pulse.add_argument("extra", nargs="?", default="", help="for memory forget: the item number")
     parser.set_defaults(func=dispatch)
 
 
@@ -161,7 +163,7 @@ def _pulse(args: argparse.Namespace) -> int:
     from . import pulse, pulse_delivery
     home = get_hermes_home()
     action = args.pulse_action
-    if action in ("status", "probe", "off", "outcomes") and not (Path(home) / pulse_delivery.store.DB_NAME).exists():
+    if action in ("status", "probe", "off", "outcomes", "memory") and not (Path(home) / pulse_delivery.store.DB_NAME).exists():
         # Never turned on: say so without leaving a file behind.
         print("Pulse: off (never turned on). `hermes conduit-push pulse on` to start it.")
         return 1 if action == "probe" else 0
@@ -193,6 +195,8 @@ def _pulse(args: argparse.Namespace) -> int:
         return _pulse_outcomes(pulse_store, (args.value or "").strip())
     if action == "report":
         return _pulse_report(pulse_store, (args.value or "").strip())
+    if action == "memory":
+        return _pulse_memory(pulse_store, home, (args.value or "").strip(), str(getattr(args, "extra", "") or "").strip())
     print(f"Pulse: {'on' if pulse_store.get('enabled') else 'off'}")
     chat, problem = pulse.home_chat(pulse_store, home)
     if chat is not None:
@@ -225,11 +229,21 @@ def _pulse(args: argparse.Namespace) -> int:
         upcoming = pulse.report.next_time(time.time(), zone, pulse_store.get("report_time"))
         print(f"Shadow reports at {pulse.report.clock_text(pulse_store.get('report_time'))} ({zone}); next "
               + datetime.fromtimestamp(upcoming, zone).strftime("%a %d %b %H:%M"))
-        others = [name for name, _ in pulse.report.profile_homes(home)]
-        if pulse_store.get("report_profiles") == "all" and others:
-            print("The report also reads profiles: " + ", ".join(_printable(name) for name in others))
     else:
         print("Shadow reports: off")
+    if pulse_store.get("report_profiles") == "all":
+        others = [name for name, _ in pulse.report.profile_homes(home)]
+        if others:
+            print("The report and memory also read profiles: " + ", ".join(_printable(name) for name in others))
+    if pulse_store.get("memory"):
+        kinds = pulse_store.item_counts()
+        usage = pulse_store.get("memory_usage")
+        usage = usage if isinstance(usage, dict) else {}
+        print("Memory: " + (", ".join(f"{n} {kind}" for kind, n in sorted(kinds.items())) or "nothing kept yet")
+              + f" ({int(usage.get('chunks', 0) or 0)} chat chunks read, {int(usage.get('tokens', 0) or 0)} tokens"
+              + (f", {int(usage.get('failed', 0) or 0)} failed" if usage.get("failed") else "") + ")")
+    else:
+        print("Memory: off")
     ratings = pulse.rating_counts(pulse_store)
     if ratings:
         print("Ratings so far: " + ", ".join(f"{kind} {yes} yes / {no} no" for kind, (yes, no) in ratings.items()))
@@ -255,9 +269,9 @@ def _pulse_report(pulse_store: Any, value: str) -> int:
         print("The shadow report is on." if value == "on" else "The shadow report is off.")
         return 0
     if value in ("all-profiles", "this-profile"):
-        pulse_store.set("report_profiles", value.split("-")[0])
-        print("The shadow report reads every profile's chats, memories and cron jobs." if value == "all-profiles"
-              else "The shadow report reads only this profile.")
+        pulse_store.set("report_profiles", {"all-profiles": "all", "this-profile": "this"}[value])
+        print("The shadow report and memory read every profile's chats, memories and cron jobs."
+              if value == "all-profiles" else "The shadow report and memory read only this profile.")
         return 0
     times = pulse_report.parse_times(value)
     if times:
@@ -270,6 +284,47 @@ def _pulse_report(pulse_store: Any, value: str) -> int:
         return 0
     print("Usage: hermes conduit-push pulse report [now|on|off|HH:MM[,HH:MM...]|<time zone>|all-profiles|this-profile]")
     return 2
+
+
+def _pulse_memory(pulse_store: Any, home: Any, value: str, extra: str) -> int:
+    from . import pulse, pulse_memory
+    if value == "now":
+        if not pulse_store.get("enabled"):
+            print("Pulse is off: `hermes conduit-push pulse on` first.")
+            return 1
+        pulse_store.set("memory_requested", True)
+        print("Asked the dashboard to read quiet chats now; see `hermes conduit-push pulse memory` in a minute or two.")
+        return 0
+    if value in ("on", "off"):
+        pulse_store.set("memory", value == "on")
+        print("Pulse memory is on: chats are read once they've been quiet for 20 minutes." if value == "on"
+              else "Pulse memory is off. What it kept stays until you forget it.")
+        return 0
+    if value == "forget":
+        if not extra.lstrip("#").isdigit():
+            print("Usage: hermes conduit-push pulse memory forget <item number>")
+            return 2
+        if not pulse_store.close_item(int(extra.lstrip("#")), status="cancelled", closed_by="user"):
+            print(f"No open item #{_printable(extra.lstrip('#'))}.")
+            return 1
+        print(f"Forgot #{extra.lstrip('#')}.")
+        return 0
+    if value and value not in pulse_memory.KINDS:
+        print("Usage: hermes conduit-push pulse memory [" + "|".join(pulse_memory.KINDS) + "|now|on|off|forget <n>]")
+        return 2
+    items = pulse_store.open_items(value)
+    if not items:
+        print("Pulse hasn't kept anything yet." if pulse_store.get("memory") else "Pulse memory is off.")
+        return 0
+    zone = pulse.report_zone(pulse_store, home)
+    for kind in pulse_memory.KINDS:
+        group = [item for item in items if item["kind"] == kind]
+        if group:
+            print(f"{kind.capitalize()} ({len(group)})")
+            for item in group:
+                for line in pulse_memory.describe(item, zone).split("\n"):
+                    print("  " + _printable(line))
+    return 0
 
 
 def _pulse_outcomes(pulse_store: Any, value: str) -> int:
