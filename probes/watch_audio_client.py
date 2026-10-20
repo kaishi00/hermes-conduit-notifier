@@ -521,12 +521,15 @@ def main() -> int:
     path = args.out / f"watch-audio-{args.engine}.wav"
     output_rate = int((result.get("started") or {}).get("output_rate") or 24_000)
     if run.audio:
-        with wave.open(str(path), "wb") as wav:
-            wav.setnchannels(1)
-            wav.setsampwidth(2)
-            wav.setframerate(output_rate)
-            wav.writeframes(bytes(run.audio))
-        summary["recording"] = str(path)
+        try:
+            with wave.open(str(path), "wb") as wav:
+                wav.setnchannels(1)
+                wav.setsampwidth(2)
+                wav.setframerate(output_rate)
+                wav.writeframes(bytes(run.audio))
+            result["recording"] = str(path)
+        except Exception as exc:  # the summary matters more than the file
+            result["recording_error"] = exc.__class__.__name__
     summary.update(result)
     # 16-bit mono: two bytes a sample.
     summary.update(marks=run.marks, timeline=run.timeline, latency=latency(run.timeline),
