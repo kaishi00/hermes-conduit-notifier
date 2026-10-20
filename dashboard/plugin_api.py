@@ -1814,6 +1814,8 @@ GROK_LIVE_DEFAULT_MODEL = "grok-voice-latest"
 GROK_LIVE_DEFAULT_VOICE = "eve"
 GROK_LIVE_MODEL_ENV_VAR = "CONDUIT_GROK_LIVE_MODEL"
 GROK_LIVE_CONNECT_TIMEOUT_S = 15.0
+# Conduit sends audio throughout the call; release a quiet client's slot.
+GROK_LIVE_IDLE_S = 60.0
 # A call connects once per conversation (plus a few reconnects); cap a looping client.
 GROK_LIVE_LIMIT = 10
 GROK_LIVE_WINDOW_S = 60.0
@@ -2168,7 +2170,7 @@ async def _grok_live_relay(ws: WebSocket, refuse: Callable[[int, str], Any], tok
 
     async def client_to_xai() -> None:
         while True:
-            message = await ws.receive()
+            message = await asyncio.wait_for(ws.receive(), timeout=GROK_LIVE_IDLE_S)
             if message.get("type") == "websocket.disconnect":
                 return
             text, data = message.get("text"), message.get("bytes")
@@ -2212,6 +2214,8 @@ async def _grok_live_relay(ws: WebSocket, refuse: Callable[[int, str], Any], tok
     if outbound in done and not upstream_gone:
         if isinstance(outbound_failure, ValueError):
             await refuse(1009, "Frame too large")
+        elif isinstance(outbound_failure, asyncio.TimeoutError):
+            await refuse(1000, "Idle for too long")
         # Otherwise Conduit hung up (or its socket broke): nothing to tell it.
         return
     # xAI ended the call, seen by either side of the relay.
