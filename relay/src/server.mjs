@@ -110,6 +110,11 @@ const PHONE_BACKGROUND_TTL_S = 24 * 60 * 60;
 const LOCATION_PUSH_TTL_S = 60;
 // Locate and maps lookups (conduit_maps) share it; the plugin keeps tighter budgets per kind.
 const LOCATION_PUSH_PER_HOUR = 60;
+// The answers the plugin retries: a send it can try again.
+const RETRYABLE_STATUS = (status) => status === 408 || status === 429 || status >= 500;
+// Event ids whose push is being sent -> a promise of whether it was kept
+// (delivered, or failed in a way a retry can't fix).
+const eventsInFlight = new Map();
 const LOCATION_TOKEN_GONE = new Set(['BadDeviceToken', 'Unregistered', 'DeviceTokenNotForTopic']);
 // Registration proof (token-proof.mjs): how long a pushed challenge stays
 // usable, and how often one device token may be challenged (each is a push).
@@ -198,7 +203,11 @@ function main() {
     const failFirst = process.env.APNS_FAIL_FIRST || '0';
     if (!/^\d{1,3}$/.test(failFirst)) throw new Error('APNS_FAIL_FIRST must be a whole number of sends.');
     let failed = 0;
+    // Test seam: every send takes this long, so a copy can arrive mid-send.
+    const sendDelay = process.env.APNS_SEND_DELAY_MS || '0';
+    if (!/^\d{1,5}$/.test(sendDelay)) throw new Error('APNS_SEND_DELAY_MS must be a whole number of milliseconds.');
     apnsSend = async (deviceToken, notification) => {
+      if (Number(sendDelay)) await new Promise((resolve) => setTimeout(resolve, Number(sendDelay)));
       if (failed < Number(failFirst) && notification.pushType !== 'voip') {
         failed += 1;
         if (failed % 2) throw new Error('connection dropped');
@@ -584,6 +593,16 @@ async function route(request, response) {
     // here. Outgoing routing carries the dashboard binding of the
     // AUTHENTICATED gateway credential (bound at pairing/claim time).
     const duplicateEvent = store.hasAcceptedEvent(installation.id, event.eventId, credential.gatewayId);
+    // A copy of an event whose push is still being sent (the plugin timed out
+    // waiting and retried) waits for that send: a duplicate answer now would
+    // end the plugin's retries even if the send then fails and gives its id
+    // back. A failed send is answered as one, so the plugin tries again.
+    const inFlightKey = `${installation.id}:${credential.gatewayId}:${event.eventId}`;
+    const inFlight = duplicateEvent ? eventsInFlight.get(inFlightKey) : undefined;
+    if (inFlight) {
+      if (await inFlight) return sendJson(response, 200, { accepted: true, duplicate: true });
+      return sendJson(response, 503, { error: 'delivery_failed' });
+    }
     // Keep capacity preflight through savePendingDecision synchronous with no
     // await: otherwise requests could interleave after this check and consume
     // the same last slot. A catch after acceptEvent would still consume the ID.
@@ -713,18 +732,21 @@ async function route(request, response) {
     // id, and that retry must send rather than be told it was a duplicate.
     // A clarify decision keeps its id, because a retry can't re-park it and
     // its undeliverable flag already sends the plugin to Hermes' own path.
-    // Two edges stay open by design: a copy that arrived while the send was
-    // in flight was already told duplicate (only the failed request's retry
-    // recovers), and a send APNs took whose answer was lost can show twice
-    // on the phone (alerts collapse per gateway and session). Delivering
-    // twice beats never.
+    // One edge stays open by design: a send APNs took whose answer was lost
+    // (a timeout) can show twice on the phone. Delivering twice beats never.
+    // Only a failure a retry can fix gives the id back: a request the relay
+    // calls malformed (400) would fail the same way, so it keeps deduping.
+    let settle;
+    eventsInFlight.set(inFlightKey, new Promise((resolve) => { settle = resolve; }));
+    let released = true;
     try {
       await deliverEvent(response, installation, event, gateway);
-    } catch (error) {
-      store.releaseEvent(installation.id, event.eventId, credential.gatewayId);
-      throw error;
+      released = RETRYABLE_STATUS(response.statusCode);
+    } finally {
+      if (released) store.releaseEvent(installation.id, event.eventId, credential.gatewayId);
+      eventsInFlight.delete(inFlightKey);
+      settle(!released);
     }
-    if (response.statusCode >= 300) store.releaseEvent(installation.id, event.eventId, credential.gatewayId);
     return;
   }
 
@@ -1732,7 +1754,7 @@ function readConfig() {
   // The APNs test seams fake delivery (and the capture writes every payload
   // to disk), so a relay refuses to start with them unless the test suite
   // says it's a test.
-  const seams = ['APNS_MODE', 'APNS_CAPTURE_PATH', 'APNS_VOIP_FAILURE', 'APNS_FAIL_FIRST'].filter((name) => process.env[name]);
+  const seams = ['APNS_MODE', 'APNS_CAPTURE_PATH', 'APNS_VOIP_FAILURE', 'APNS_FAIL_FIRST', 'APNS_SEND_DELAY_MS'].filter((name) => process.env[name]);
   if (seams.length && process.env.RELAY_TEST_SEAMS !== '1') {
     throw new Error(`${seams.join(', ')} ${seams.length > 1 ? 'are test settings' : 'is a test setting'}; unset it for a real relay.`);
   }
