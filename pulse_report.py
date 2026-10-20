@@ -344,8 +344,14 @@ def build(home: Path, pulse_store: store.PulseStore, *, home_chat_id: str, now: 
         chats = recent_chats(home, home_chat_id=home_chat_id, since=since, zone=zone, others=others, budget=budget)
     except hermes.HermesUnreadable as error:
         chats = f"Couldn't read the chats ({type(error).__name__})."
-    sections.append(title + (chats or "No chats since then."))
-    return "\n\n".join(sections), start
+    chats = title + (chats or "No chats since then.")
+    # When the other sections leave the chats less than their minimum, the
+    # other sections give way: the chats are what the report is about.
+    room = report_budget() - len(REPORT_TEXT) - 100 - len(chats) - 2
+    rest = "\n\n".join(sections)
+    if len(rest) > room:
+        rest = rest[:max(0, room - 40)] + "\n(cut here: no room in this report)"
+    return rest + "\n\n" + chats, start
 
 
 def report_budget() -> int:

@@ -859,7 +859,7 @@ def test_the_report_lists_active_cron_jobs(tmp_path):
         assert report.cron_jobs(tmp_path) == ""
 
 
-def test_the_report_context_stays_within_its_budget(db, tmp_path, pulse_store):
+def test_the_report_context_stays_within_its_budget(db, tmp_path):
     now = time.time()
     db.session()
     for n in range(40):
@@ -901,6 +901,7 @@ def test_the_report_stays_under_lcms_externalization_threshold(db, tmp_path, liv
         db.session(f"c{n}", title=f"Chat {n}", pinned=0)
         for m in range(20):
             db.message("user", "x" * 1000, sid=f"c{n}", at=now - 3600 + n * 10 + m)
+    (tmp_path / "memories").mkdir(exist_ok=True)
     # LCM's default threshold counts even when nothing here says it's on.
     assert report.report_budget() == report.LCM_DEFAULT_THRESHOLD - report.LCM_MARGIN
     context, since = report.build(tmp_path, live.store, home_chat_id=SID, now=now)
@@ -913,6 +914,15 @@ def test_the_report_stays_under_lcms_externalization_threshold(db, tmp_path, liv
     monkeypatch.setenv(report.LCM_THRESHOLD, "1")
     assert report.report_budget() == len(report.REPORT_TEXT) + 1_000
     # The message itself never goes over, whatever the context.
+    monkeypatch.delenv(report.LCM_THRESHOLD)
+    for name in ("USER.md", "MEMORY.md"):
+        (tmp_path / "memories" / name).write_text("z" * 9000)
+    live.store.set("report_profiles", "this")
+    monkeypatch.setattr(report, "MEMORY_BUDGET", 12_000)  # the other sections alone fill the report
+    context, since = report.build(tmp_path, live.store, home_chat_id=SID, now=now)
+    assert "(cut here: no room in this report)" in context and "### Chat 39" in context
+    assert len(report.report_text("p12345678-1", context, since)) <= report.report_budget()
+    monkeypatch.setenv(report.LCM_THRESHOLD, "1")
     text = report.report_text("p12345678-12", "y" * 50_000, "Tue 20 Oct 18:00")
     assert len(text) <= report.report_budget() and text.endswith(">>>")
 
