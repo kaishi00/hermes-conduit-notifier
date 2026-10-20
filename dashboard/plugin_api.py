@@ -7161,7 +7161,7 @@ async def _voice_tools_route(response: Response, profile: Optional[str], fn: Cal
         raise HTTPException(status_code=504, detail=f"Voice tools {name} timed out",
                             headers={"Cache-Control": "no-store"})
     except TokenError as exc:
-        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+        return _store_refusal(exc)
     except HTTPException as exc:
         exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
         raise
