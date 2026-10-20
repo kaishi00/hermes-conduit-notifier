@@ -19,6 +19,7 @@ import json
 import re
 import threading
 import time
+import urllib.parse
 from pathlib import Path
 from typing import Any, Optional
 
@@ -34,6 +35,9 @@ MAX_IDS = 8
 MAX_ID_LEN = 160
 MAX_LABEL = 80
 MAX_ERROR = 200
+# The ledger write runs inside the tool call: under contention it gives up
+# quickly instead of holding the call up.
+WRITE_BUSY_TIMEOUT_S = 0.5
 
 # Arguments that name what a call was about. Never the command, prompt or
 # content: those can carry secrets, and the transcript already has them.
@@ -41,11 +45,13 @@ LABEL_KEYS = ("title", "name", "summary", "label", "query", "path", "url", "file
 ACTION_KEYS = ("action", "operation", "op", "mode")
 # Identifier keys the result may carry, at the top level or one level in.
 ID_KEYS = frozenset({"id", "path", "url", "file", "file_path", "uri", "href"})
+_URL = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 NESTED_KEYS = ("result", "data", "item", "reminder", "event", "job", "watch", "file", "created", "updated")
 
 _enabled: dict[str, tuple[float, bool]] = {}
-_enabled_lock = threading.Lock()
+_stores: dict[str, store.PulseStore] = {}
 _last_prune: dict[str, float] = {}
+_lock = threading.Lock()
 
 
 def recording(home: Path, now: Optional[float] = None) -> bool:
@@ -53,28 +59,60 @@ def recording(home: Path, now: Optional[float] = None) -> bool:
     home where Pulse was never turned on gets no store file."""
     now = time.monotonic() if now is None else now
     key = str(home)
-    with _enabled_lock:
+    with _lock:
         cached = _enabled.get(key)
         if cached and now < cached[0]:
             return cached[1]
-    on = (Path(home) / store.DB_NAME).exists() and bool(store.open_store(home).get("enabled"))
-    with _enabled_lock:
+    on = (Path(home) / store.DB_NAME).exists() and bool(_store(home).get("enabled"))
+    with _lock:
         _enabled[key] = (now + ENABLED_TTL_S, on)
     return on
 
 
+def _store(home: Path) -> store.PulseStore:
+    """One store per home for the hot path, so its schema runs once."""
+    key = str(home)
+    with _lock:
+        cached = _stores.get(key)
+    if cached is None:
+        cached = store.PulseStore(Path(home) / store.DB_NAME, busy_timeout_s=WRITE_BUSY_TIMEOUT_S)
+        with _lock:
+            cached = _stores.setdefault(key, cached)
+    return cached
+
+
 def forget_cache() -> None:
-    with _enabled_lock:
+    with _lock:
         _enabled.clear()
-    _last_prune.clear()
+        _stores.clear()
+        _last_prune.clear()
 
 
 def _text(value: Any) -> str:
-    return value if isinstance(value, str) else ""
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _printable(text: str) -> str:
+    return "".join(c for c in text if c.isprintable())
+
+
+def _safe_url(text: str) -> str:
+    """A URL without its user info, query or fragment, where tokens ride."""
+    if not _URL.match(text):
+        return text
+    try:
+        parts = urllib.parse.urlsplit(text)
+        host = parts.hostname or ""
+        if parts.port:
+            host = f"{host}:{parts.port}"
+    except ValueError:
+        return text.split("://", 1)[0] + "://…"
+    return urllib.parse.urlunsplit((parts.scheme, host, parts.path, "", ""))
 
 
 def _short(value: Any, limit: int) -> str:
-    text = re.sub(r"\s+", " ", value if isinstance(value, str) else str(value)).strip()
+    text = _safe_url(re.sub(r"\s+", " ", value if isinstance(value, str) else str(value)).strip())
+    text = _printable(text)
     return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
@@ -92,6 +130,8 @@ def _parsed(result: Any) -> Any:
 
 
 def _is_id_key(key: str) -> bool:
+    # ``id``, ``*_id``, a few path-like keys, and camelCase ``*Id`` that
+    # starts lowercase (``watchId``); ``ID`` or ``PaidId`` style keys don't count.
     lowered = key.lower()
     return lowered in ID_KEYS or lowered.endswith("_id") or (key.endswith("Id") and key[:1].islower())
 
@@ -155,7 +195,7 @@ def record(home: Path, *, tool_name: Any, args: Any = None, result: Any = None, 
         if failed and not error_message:
             error_message = parsed.get("error")
     action, label, digest = describe_call(args)
-    pulse_store = store.open_store(home)
+    pulse_store = _store(home)
     pulse_store.add_outcome({
         "at": now, "session_id": _text(session_id), "turn_id": _text(turn_id), "task_id": _text(task_id),
         "tool_call_id": _text(tool_call_id), "tool": tool, "action": action, "label": label,
@@ -165,8 +205,11 @@ def record(home: Path, *, tool_name: Any, args: Any = None, result: Any = None, 
         "duration_ms": duration_ms if isinstance(duration_ms, int) and duration_ms >= 0 else 0,
     })
     key = str(home)
-    if now - _last_prune.get(key, 0.0) >= PRUNE_EVERY_S:
-        _last_prune[key] = now
+    with _lock:
+        due = now - _last_prune.get(key, 0.0) >= PRUNE_EVERY_S
+        if due:
+            _last_prune[key] = now
+    if due:
         pulse_store.prune_outcomes(before=now - RETENTION_S, keep=MAX_ROWS)
     return True
 
@@ -189,4 +232,4 @@ def line(row: dict[str, Any]) -> str:
         ids = {}
     if isinstance(ids, dict) and ids:
         result += ", " + ", ".join(f"{key} {value}" for key, value in ids.items())
-    return f"{' '.join(parts)} → {result}"
+    return _printable(f"{' '.join(parts)} → {result}")

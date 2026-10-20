@@ -63,7 +63,11 @@ def register(ctx: Any) -> None:
     ctx.register_hook("on_session_end", _on_session_end)
     ctx.register_hook("pre_approval_request", _pre_approval_request)
     # Pulse's outcome ledger: every tool call's outcome while Pulse is on.
-    ctx.register_hook("post_tool_call", _post_tool_call)
+    # Optional: a Hermes without the hook records nothing.
+    try:
+        ctx.register_hook("post_tool_call", _post_tool_call)
+    except Exception:  # noqa: BLE001
+        logger.warning("conduit_push: post_tool_call hook unavailable; Pulse records no tool outcomes", exc_info=True)
     ctx.register_hook("subagent_start", _subagent_start)
     ctx.register_hook("subagent_stop", _subagent_stop)
     # A call held over a restart goes out when its hold runs out (#449).
@@ -164,12 +168,19 @@ def _pre_tool_call(**kwargs: Any) -> dict[str, str] | None:
     ))
 
 
+_ledger_warned = False
+
+
 def _post_tool_call(**kwargs: Any) -> None:
     # Every session counts, subagents and cron runs included (3.6).
     try:
         pulse.post_tool_call(**kwargs)
     except Exception:  # noqa: BLE001 — the ledger must never break a tool call
-        logger.debug("conduit_push: Pulse outcome not recorded", exc_info=True)
+        global _ledger_warned
+        # Once per process at warning level, so a broken ledger shows up in the log.
+        logger.log(logging.DEBUG if _ledger_warned else logging.WARNING, "conduit_push: Pulse outcome not recorded",
+                   exc_info=True)
+        _ledger_warned = True
 
 
 def _post_llm_call(**kwargs: Any) -> None:

@@ -94,13 +94,14 @@ _lock = threading.Lock()
 
 
 class PulseStore:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, busy_timeout_s: float = BUSY_TIMEOUT_S) -> None:
         self.path = Path(path)
+        self.busy_timeout_s = busy_timeout_s
         with self._connect() as conn:
             conn.executescript(_SCHEMA)
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.path), timeout=BUSY_TIMEOUT_S, isolation_level=None)
+        conn = sqlite3.connect(str(self.path), timeout=self.busy_timeout_s, isolation_level=None)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         return _Closing(conn)

@@ -661,3 +661,17 @@ def test_outcomes_command(recording, capsys, monkeypatch):
     assert run("1") == 0 and capsys.readouterr().out.count("\n") == 1
     cli.dispatch(types.SimpleNamespace(conduit_push_action="pulse", pulse_action="status", value=""))
     assert "Tool outcomes in the last 24 hours: 2 ok" in capsys.readouterr().out
+
+
+def test_urls_lose_their_credentials(recording):
+    plugin._post_tool_call(**_call(tool_name="web", args={"url": "https://me:tok@example.com/a?api_key=s#frag"},
+                                   result=json.dumps({"url": "https://example.com:8443/b?token=s"})))
+    [row] = recording.store.recent_outcomes()
+    assert row["label"] == "https://example.com/a"
+    assert json.loads(row["ids_json"]) == {"url": "https://example.com:8443/b"}
+    assert "tok" not in json.dumps(row) and "api_key" not in json.dumps(row)
+
+
+def test_a_digest_line_has_no_control_characters():
+    row = {"tool": "t", "action": "", "label": "a\x1b[31mred", "status": "error", "error": "x\x07", "ids_json": "{}"}
+    assert ledger.line(row) == "t 'a[31mred' → error: x"
