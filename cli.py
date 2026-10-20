@@ -167,7 +167,7 @@ def _pulse(args: argparse.Namespace) -> int:
     if (action in ("status", "probe", "off", "outcomes") or listing) and not (Path(home) / pulse_delivery.store.DB_NAME).exists():
         # Never turned on: say so without leaving a file behind.
         print("Pulse: off (never turned on). `hermes conduit-push pulse on` to start it.")
-        return 1 if action == "probe" or (action == "memory" and (args.value or "").strip() == "now") else 0
+        return 1 if action == "probe" or (action == "memory" and (args.value or "").strip() in ("now", "forget")) else 0
     pulse_store = pulse.open_store(home)
     if action in ("on", "off"):
         pulse_store.set("enabled", action == "on")
@@ -242,8 +242,10 @@ def _pulse(args: argparse.Namespace) -> int:
     kinds = pulse_store.item_counts()
     usage = pulse_store.get("memory_usage")
     usage = usage if isinstance(usage, dict) else {}
-    print(("Memory: " if pulse_store.get("memory") else "Memory: off; kept ")
-          + (", ".join(f"{n} {kind}" for kind, n in sorted(kinds.items())) or "nothing kept yet")
+    kept = ", ".join(f"{n} {kind}" for kind, n in sorted(kinds.items()))
+    print(("Memory: " if pulse_store.get("memory") else "Memory: off; ")
+          + (kept if not kept or pulse_store.get("memory") else "kept " + kept)
+          + ("" if kept else "nothing kept yet")
           + f" ({int(usage.get('chunks', 0) or 0)} chat chunks read, {int(usage.get('tokens', 0) or 0)} tokens"
           + (f", {int(usage.get('failed', 0) or 0)} failed" if usage.get("failed") else "") + ")")
     today = pulse_store.get("memory_today")

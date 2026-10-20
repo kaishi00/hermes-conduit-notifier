@@ -1380,7 +1380,7 @@ def test_memory_command(remembering, db, capsys, monkeypatch):
     run = lambda value="", extra="": cli.dispatch(types.SimpleNamespace(
         conduit_push_action="pulse", pulse_action="memory", value=value, extra=extra))
     remembering.store.path.unlink()
-    assert run() == 0 and run("fact") == 0 and run("now") == 1 and run("forget", "1") == 0
+    assert run() == 0 and run("fact") == 0 and run("now") == 1 and run("forget", "1") == 1
     assert not remembering.store.path.exists()  # nothing but on/off leaves a file on a home that never ran Pulse
     assert run("on") == 0 and remembering.store.get("memory") is True
     capsys.readouterr()
@@ -1407,3 +1407,6 @@ def test_memory_command(remembering, db, capsys, monkeypatch):
     capsys.readouterr()
     cli.dispatch(types.SimpleNamespace(conduit_push_action="pulse", pulse_action="status", value=""))
     assert "Memory: nothing kept yet (0 chat chunks read, 0 tokens)" in capsys.readouterr().out
+    remembering.store.set("memory", False)
+    cli.dispatch(types.SimpleNamespace(conduit_push_action="pulse", pulse_action="status", value=""))
+    assert "Memory: off; nothing kept yet (" in capsys.readouterr().out

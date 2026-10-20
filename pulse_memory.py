@@ -327,6 +327,7 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
                     pulse_store.advance(chat.profile, chat.chat_id, message_id=last["id"], at=last["timestamp"],
                                         after_id=chat.after_id)
                 break  # the rest of this chat waits for its next run
+            done["tokens"] += tokens  # spent whether or not the chunk is kept
             if not still_leader():
                 return done  # stopped during the call: keep nothing
             if pulse_store.advance(chat.profile, chat.chat_id, message_id=last["id"], at=last["timestamp"],
@@ -336,7 +337,6 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
             read_to = last["timestamp"]
             done["chunks"] += 1
             done["items"] += len(items)
-            done["tokens"] += tokens
     return done
 
 
