@@ -801,6 +801,27 @@ def test_a_report_looks_back_to_the_last_delivered_one(pulse_store):
     assert report.window_start(pulse_store, now) == now - 6 * 3600
 
 
+def test_the_report_lists_active_cron_jobs(tmp_path):
+    assert report.cron_jobs(tmp_path) == ""
+    (tmp_path / "cron").mkdir()
+    jobs = [
+        {"id": "a1", "name": "Check the build", "prompt": "Look at CI and tell me", "schedule_display": "once at 09:00",
+         "next_run_at": "2026-10-21T09:00:00-04:00", "enabled": True, "state": "scheduled"},
+        {"id": "b2", "name": "Old job", "prompt": "x", "enabled": False, "state": "paused"},
+        {"id": "c3", "name": "Morning news", "prompt": "News", "schedule_display": "every day at 07:00",
+         "next_run_at": "2026-10-21T07:00:00-04:00"},
+    ]
+    (tmp_path / "cron" / "jobs.json").write_text(json.dumps({"jobs": jobs}))
+    text = report.cron_jobs(tmp_path)
+    assert text.splitlines() == [
+        "## Hermes's scheduled jobs",
+        "- Morning news (every day at 07:00, next 2026-10-21T07:00:00-04:00): News",
+        "- Check the build (once at 09:00, next 2026-10-21T09:00:00-04:00): Look at CI and tell me",
+    ]
+    (tmp_path / "cron" / "jobs.json").write_text("{broken")
+    assert report.cron_jobs(tmp_path) == ""
+
+
 def test_the_report_context_stays_within_its_budget(db, tmp_path, pulse_store):
     now = time.time()
     db.session()

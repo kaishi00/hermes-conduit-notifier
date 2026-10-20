@@ -43,6 +43,7 @@ EVENTS_DAYS = 2
 MAX_EVENTS = 25
 MAX_REMINDERS = 25
 MAX_FAILURES = 10
+MAX_JOBS = 25
 
 REPORT_TEXT = """Pulse shadow report {tag}.
 
@@ -50,7 +51,7 @@ This is a dry run: nothing is sent to the user except this report. Below is what
 
 1. [kind] what you would have said, then (why now, and where it came from)
 
-kind is one of: {kinds}. Only include something worth interrupting the user for now: a commitment or promise coming due, something Hermes said it would do and hasn't, a date that needs preparing for, a follow-up they'd want. Leave out anything already done, anything their calendar or reminders already cover, anything an earlier report in this chat already brought up (unless something about it changed), and anything rated "no" in earlier reports. If nothing is worth it, say "Nothing worth bringing up right now." and stop.
+kind is one of: {kinds}. Only include something worth interrupting the user for now: a commitment or promise coming due, something Hermes said it would do and hasn't, a date that needs preparing for, a follow-up they'd want. Leave out anything already done, anything their calendar, reminders or Hermes's scheduled jobs already cover, anything an earlier report in this chat already brought up (unless something about it changed), and anything rated "no" in earlier reports. If nothing is worth it, say "Nothing worth bringing up right now." and stop.
 
 End with: "Rate them: reply like 1 yes, 2 no."
 
@@ -169,6 +170,30 @@ def memory_files(home: Path) -> str:
     return "\n\n".join(parts)
 
 
+def cron_jobs(home: Path) -> str:
+    """Hermes's active cron jobs: a promise with a job behind it is handled."""
+    try:
+        data = json.loads((Path(home) / "cron" / "jobs.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    jobs = data.get("jobs", []) if isinstance(data, dict) else data
+    if isinstance(jobs, dict):
+        jobs = list(jobs.values())
+    active = [job for job in jobs if isinstance(job, dict) and job.get("enabled", True)
+              and job.get("state") not in ("paused", "completed")]
+    if not active:
+        return ""
+    active.sort(key=lambda job: str(job.get("next_run_at") or "~"))
+    lines = []
+    for job in active[:MAX_JOBS]:
+        when = _clip(job.get("schedule_display") or "", 60)
+        upcoming = job.get("next_run_at")
+        lines.append(f"- {_clip(job.get('name') or job.get('id'), 80)} ({when}"
+                     + (f", next {_clip(upcoming, 40)}" if upcoming else "") + f"): {_clip(job.get('prompt'), 160)}")
+    more = f"\n(and {len(active) - MAX_JOBS} more)" if len(active) > MAX_JOBS else ""
+    return "## Hermes's scheduled jobs\n" + "\n".join(lines) + more
+
+
 def failed_calls(pulse_store: store.PulseStore, since: float, zone: tzinfo) -> str:
     rows = [row for row in pulse_store.recent_outcomes(500) if row["at"] >= since and row["status"] == "error"]
     if not rows:
@@ -218,7 +243,7 @@ def build(home: Path, pulse_store: store.PulseStore, *, home_chat_id: str, now: 
         chats = f"Couldn't read the chats ({error})."
     header = f"## Now\n{datetime.fromtimestamp(now, zone).strftime('%A %d %B %Y, %H:%M')} ({zone_name or 'host time'})"
     start = _local(since, zone)
-    sections = [header, phone, memory_files(home), failed_calls(pulse_store, since, zone),
+    sections = [header, phone, cron_jobs(home), memory_files(home), failed_calls(pulse_store, since, zone),
                 f"## Chats since {start}\n" + (chats or "No chats since then.")]
     return "\n\n".join(section for section in sections if section), start
 
