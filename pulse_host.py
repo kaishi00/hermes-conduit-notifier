@@ -125,7 +125,7 @@ def send(chat_id: str, text: str, *, profile: str = "",
         return methods[SUBMIT](f"pulse-{uuid.uuid4().hex[:12]}",
                                {"session_id": sid, "text": text, "display_kind": "hidden", "queued": True})
 
-    submitted = submit()
+    submitted, taken = submit(), ""
     if _not_owned(submitted):
         taken = (taking_over or take_over)(list(dict.fromkeys([chat_id, sid])))
         if taken not in ("free", "taken_over", "same_host"):
@@ -136,7 +136,8 @@ def send(chat_id: str, text: str, *, profile: str = "",
             return Sent(False, "", f"the chat refused the turn again after Pulse took it over ({taken}): "
                                    f"{_message(submitted)}")
     if not isinstance(submitted, dict) or "error" in submitted:
-        return Sent(False, "", f"the chat refused the turn: {_message(submitted)}")
+        after = f" after Pulse took it over ({taken})" if taken else ""
+        return Sent(False, "", f"the chat refused the turn{after}: {_message(submitted)}")
     result = submitted.get("result") if isinstance(submitted.get("result"), dict) else {}
     status = str(result.get("status") or "")
     return Sent(True, "streaming" if status == "streaming" else "queued", status)

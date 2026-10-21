@@ -430,6 +430,15 @@ def test_the_dashboard_and_pulse_copies_share_one_takeover_lock():
     assert pulse_copy._in_process is dashboard_copy._in_process
 
 
+def test_another_refusal_after_the_takeover_names_it(monkeypatch):
+    fake = FakeHost().install(monkeypatch)
+    replies = [NOT_OWNED, {"error": {"code": 4009, "message": "nope"}}]
+    monkeypatch.setitem(sys.modules["tui_gateway.server"]._methods, host.SUBMIT,
+                        lambda rid, params: fake.calls.append((host.SUBMIT, params)) or replies.pop(0))
+    sent = host.send(SID, "x", taking_over=lambda ids: "taken_over")
+    assert not sent.ok and sent.detail == "the chat refused the turn after Pulse took it over (taken_over): nope"
+
+
 def test_a_chat_busy_elsewhere_stays_refused(monkeypatch):
     fake = FakeHost(submit=NOT_OWNED).install(monkeypatch)
     sent = host.send(SID, "x", taking_over=lambda ids: "busy")
