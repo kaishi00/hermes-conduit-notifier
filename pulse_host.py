@@ -31,6 +31,10 @@ SUBMIT = "prompt.submit"
 # Like the dashboard's takeover route: a lock holder that never lets go
 # can't stall the Pulse loop longer than this.
 TAKEOVER_TIMEOUT_S = 20.0
+# The one takeover worker that may still be waiting on Hermes' lock: while it
+# is, a new takeover waits for it instead of starting another thread.
+_worker: Optional[threading.Thread] = None
+_worker_lock = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -59,7 +63,14 @@ def available() -> bool:
 def take_over(session_ids: list[str]) -> str:
     """Drops other processes' claims on the chat: chat_takeover's status
     ("free", "taken_over", "busy", "same_host"), or why it couldn't."""
-    from . import chat_takeover as takeover
+    global _worker
+    try:
+        from . import chat_takeover as takeover
+    except Exception as error:  # noqa: BLE001 — a partial install: a reason, not a crash
+        return f"takeover failed: {type(error).__name__}"
+    with _worker_lock:
+        if _worker is not None and _worker.is_alive():
+            return "a takeover is still waiting on Hermes"
     abandoned = threading.Event()
     outcome: list[str] = []
 
@@ -75,7 +86,12 @@ def take_over(session_ids: list[str]) -> str:
             outcome.append(f"takeover failed: {type(error).__name__}")
 
     worker = threading.Thread(target=run, name="conduit-pulse-takeover", daemon=True)
-    worker.start()
+    with _worker_lock:
+        _worker = worker
+    try:
+        worker.start()
+    except RuntimeError as error:
+        return f"takeover failed: {type(error).__name__}"
     worker.join(TAKEOVER_TIMEOUT_S)
     if worker.is_alive():
         abandoned.set()  # nothing is written after this
@@ -84,7 +100,7 @@ def take_over(session_ids: list[str]) -> str:
 
 
 def send(chat_id: str, text: str, *, profile: str = "",
-         taking_over: Callable[[list[str]], str] = take_over) -> Sent:
+         taking_over: Optional[Callable[[list[str]], str]] = None) -> Sent:
     """Reopens the chat (the live session when someone has it open) and
     submits ``text`` as a hidden turn. A chat busy with a turn queues it
     behind that turn instead of interrupting it."""
@@ -108,7 +124,7 @@ def send(chat_id: str, text: str, *, profile: str = "",
 
     submitted = submit()
     if _not_owned(submitted):
-        taken = taking_over(list(dict.fromkeys([chat_id, sid])))
+        taken = (taking_over or take_over)(list(dict.fromkeys([chat_id, sid])))
         if taken not in ("free", "taken_over", "same_host"):
             return Sent(False, "", f"the chat refused the turn: {_message(submitted)} "
                                    f"(Pulse couldn't take it over: {taken or 'unknown'})")

@@ -391,16 +391,36 @@ NOT_OWNED = {"error": {"code": 4090, "message": "This chat is open in another He
                        "data": {"reason": "SESSION_NOT_OWNED"}}}
 
 
-def test_a_chat_held_elsewhere_is_taken_over_and_sent_again(monkeypatch):
+@pytest.mark.parametrize("status", ["taken_over", "free"])
+def test_a_chat_held_elsewhere_is_taken_over_and_sent_again(monkeypatch, status):
     fake = FakeHost().install(monkeypatch)
-    replies = [NOT_OWNED, {"result": {"status": "streaming"}}]
+    replies, rids = [NOT_OWNED, {"result": {"status": "streaming"}}], []
     monkeypatch.setitem(sys.modules["tui_gateway.server"]._methods, host.SUBMIT,
-                        lambda rid, params: fake.calls.append((host.SUBMIT, params)) or replies.pop(0))
+                        lambda rid, params: rids.append(rid) or fake.calls.append((host.SUBMIT, params))
+                        or replies.pop(0))
     taken = []
-    sent = host.send(SID, "x", taking_over=lambda ids: taken.append(ids) or "taken_over")
-    assert sent == host.Sent(True, "streaming", "streaming")
+    monkeypatch.setattr(host, "take_over", lambda ids: taken.append(ids) or status)
+    assert host.send(SID, "x") == host.Sent(True, "streaming", "streaming")
     assert taken == [[SID, "ui-1"]]
     assert [name for name, _ in fake.calls] == [host.RESUME, host.SUBMIT, host.SUBMIT]
+    assert len(set(rids)) == 2  # the resend is a new request
+
+
+def test_one_takeover_waits_on_hermes_at_a_time(monkeypatch):
+    import threading
+
+    takeover = _load("conduit_push.chat_takeover", ROOT / "chat_takeover.py")
+    release = threading.Event()
+    monkeypatch.setattr(takeover, "modules", lambda: (object(), object()))
+    monkeypatch.setattr(takeover, "home", lambda: "home")
+    monkeypatch.setattr(takeover, "take_over_session", lambda ids, **_: release.wait(5) and {"status": "free"})
+    monkeypatch.setattr(host, "TAKEOVER_TIMEOUT_S", 0.05)
+    assert host.take_over([SID]) == "takeover timed out"
+    assert host.take_over([SID]) == "a takeover is still waiting on Hermes"
+    release.set()
+    host._worker.join(2)
+    monkeypatch.setattr(host, "TAKEOVER_TIMEOUT_S", 2)
+    assert host.take_over([SID]) == "free"
 
 
 def test_a_chat_busy_elsewhere_stays_refused(monkeypatch):

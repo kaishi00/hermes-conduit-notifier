@@ -19,6 +19,9 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 TURN_MARKER_SURFACES = frozenset({"desktop", "tui"})
+# The route's workers and Pulse take over in the same process; Hermes' file
+# lock may not exclude threads of one process, so they also take this one.
+_in_process = threading.Lock()
 
 
 class TakeoverError(Exception):
@@ -167,7 +170,7 @@ def take_over_session(session_ids: list, *, registry: Any, turn_marker: Any, hom
     lock = registry._FileLock(lock_path)
     if not (hasattr(lock, "__enter__") and hasattr(lock, "__exit__")):
         raise TakeoverError(501, "This Hermes version can't hand a chat over")
-    with lock:
+    with _in_process, lock:
         check_abandoned()
         try:
             entries = registry._read_entries(state_path, strict=True)
