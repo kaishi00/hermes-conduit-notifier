@@ -749,6 +749,7 @@ def test_a_digest_line_has_no_control_characters():
     ("example.com/x?api_key=k", "example.com/x"),
     ("https://[::1]:8443/b?t=1", "https://[::1]:8443/b"),
     ("plain words? fine", "plain words? fine"),
+    ("notes?token=x", "notes"),
 ])
 def test_url_like_values_are_cleaned(value, expected):
     assert ledger._safe_url(value) == expected

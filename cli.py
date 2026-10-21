@@ -379,7 +379,10 @@ def _pulse_backfill(pulse_store: Any, home: Any, extra: str) -> int:
     drops an unfinished one."""
     from . import pulse, pulse_control
     zone = pulse.report_zone(pulse_store, home)
-    day = lambda epoch: datetime.fromtimestamp(epoch, zone).strftime("%d %b %Y")
+
+    def day(epoch: float) -> str:
+        return datetime.fromtimestamp(epoch, zone).strftime("%d %b %Y")
+
     if extra and extra not in ("start", "stop", "cancel") \
             and not (extra.isdecimal() and len(extra) <= 3 and 1 <= int(extra) <= 365):
         print("Usage: hermes conduit-push pulse memory backfill [days (1-365)|start|stop|cancel]")

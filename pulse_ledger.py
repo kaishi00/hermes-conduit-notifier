@@ -98,9 +98,14 @@ def _printable(text: str) -> str:
 
 def _safe_url(text: str) -> str:
     """A URL without its user info, query or fragment, where tokens ride.
-    A value with no scheme loses everything from its first ``?`` or ``#``."""
+    A value with no scheme loses everything from its first ``?`` or ``#``
+    when it looks like a path or carries a ``key=value`` after it; plain
+    words with a question mark are kept."""
     if not _URL.match(text):
-        return re.split(r"[?#]", text, maxsplit=1)[0] if "/" in text and re.search(r"[?#]", text) else text
+        cut = re.search(r"[?#]", text)
+        if cut and ("/" in text or "=" in text[cut.start():]):
+            return text[:cut.start()]
+        return text
     try:
         parts = urllib.parse.urlsplit(text)
         host = parts.hostname or ""
