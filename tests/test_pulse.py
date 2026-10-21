@@ -1725,6 +1725,13 @@ def test_a_backfill_reads_older_chats_after_new_ones_then_finishes(remembering, 
     assert store_.get("memory_backfill")["done"] and not memory.active_backfill(store_)
     assert memory.backfill_window(store_, 30, now) is None  # already read that far
     assert memory.backfill_window(store_, 60, now) == (now - 60 * 86400, now - 30 * 86400)  # carries on from there
+    assert store_.get("memory_backfill")["scope"] == "all"
+    # Started for every profile but finished while memory read only this one: it counts for this one only.
+    store_.set("memory_backfill", {"from": now - 30 * 86400, "to": DAY, "active": True, "done": False, "scope": "all"})
+    assert memory.run(store_, [("", store_.path.parent, SID)], model, zone=UTC, now=now + 600,
+                      reads="this")["chunks"] == 0
+    assert store_.get("memory_backfill")["done"] and store_.get("memory_backfill")["scope"] == "this"
+    assert memory.backfill_window(store_, 30, now)[1] == DAY  # the other profiles' older chats are still due
 
 
 def test_a_backfill_reads_the_chat_going_on_when_it_started(remembering, db):

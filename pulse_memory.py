@@ -424,13 +424,15 @@ def _parse(parsed: dict, chunk: Sequence[Any], zone: tzinfo,
 # A run -----------------------------------------------------------------------------
 
 def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]], llm: Llm, *, zone: tzinfo,
-        now: float, still_leader: Callable[[], bool] = lambda: True, budget: float = float("inf")) -> dict[str, int]:
+        now: float, still_leader: Callable[[], bool] = lambda: True, budget: float = float("inf"),
+        reads: str = "all") -> dict[str, int]:
     """Reads up to ``MAX_CHUNKS`` chunks of quiet chats, or until ``budget``
     tokens are used, and keeps their items. A chunk's items and the chat's
     new watermark are written together; a failed chunk is tried again after
     ``RETRY_S``, and skipped after ``MAX_FAILURES`` tries. Once those are
     read, a backfill (``memory_backfill``) reads older history the same way,
-    and is marked done when nothing in its window is left."""
+    and is marked done when nothing in its window is left: for every
+    profile only if ``sources`` were every profile's (``reads`` "all")."""
     done = {"chunks": 0, "items": 0, "tokens": 0, "failed": 0, "skipped": 0}
     calls = 0
     pulse_store.expire_items(due_before=now - EXPIRE_S, now=now)
@@ -504,7 +506,9 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
     if backfill and not backfill_chats and not unreadable and still_leader() and not any(
             mark["failures"] and mark["retry_at"] > now
             for mark in pulse_store.watermarks("backfill_marks", backfill["from"])) \
-            and pulse_store.swap("memory_backfill", backfill, {**backfill, "active": False, "done": True}):
+            and pulse_store.swap("memory_backfill", backfill, {
+                **backfill, "active": False, "done": True,
+                "scope": "this" if reads != "all" else scope(pulse_store, backfill)}):
         logger.info("conduit_push: Pulse memory finished reading chats back to %s", backfill["from"])
     return done
 

@@ -257,9 +257,12 @@ def _pulse(args: argparse.Namespace) -> int:
     backfill = pulse_store.get("memory_backfill")
     if pulse_memory.has_window(backfill):
         back_to = datetime.fromtimestamp(backfill["from"], zone).strftime("%d %b %Y")
-        print("Backfill: read only this profile's older chats; a new backfill reads the others too."
+        print(f"Backfill: cancelled; memory has read back to {back_to}." if backfill.get("cancelled")
+              and pulse_memory.covers_scope(pulse_store, backfill) else
+              "Backfill: cancelled; a new backfill reads the other profiles' older chats too."
+              if backfill.get("cancelled") else
+              "Backfill: read only this profile's older chats; a new backfill reads the others too."
               if backfill.get("done") and not pulse_memory.covers_scope(pulse_store, backfill) else
-              f"Backfill: cancelled; memory has read back to {back_to}." if backfill.get("cancelled") else
               f"Backfill: read back to {back_to}." if backfill.get("done") else
               f"Backfill: reading chats back to {back_to}." if backfill.get("active") else
               f"Backfill: paused before reaching {back_to}; `pulse memory backfill start` carries on.")
@@ -397,7 +400,6 @@ def _pulse_backfill(pulse_store: Any, home: Any, extra: str) -> int:
         # What was read stays; memory counts as read back only to where this backfill began.
         if not pulse_store.swap("memory_backfill", backfill, {"from": backfill["to"], "to": backfill["to"],
                                                              "active": False, "done": True, "cancelled": True,
-                                                             "was_from": backfill["from"],
                                                              "scope": pulse_memory.scope(pulse_store, backfill)}):
             print("The backfill changed meanwhile; try again.")
             return 1
@@ -460,7 +462,8 @@ def _pulse_backfill(pulse_store: Any, home: Any, extra: str) -> int:
     resuming = isinstance(backfill, dict) and not backfill.get("done") \
         and (backfill.get("from"), backfill.get("to")) == window
     if resuming:
-        days = backfill.get("days", days)
+        kept = backfill.get("days")
+        days = kept if isinstance(kept, int) and not isinstance(kept, bool) and 1 <= kept <= 365 else days
     if not pulse_store.swap("memory_backfill", stored, {"from": window[0], "to": window[1], "days": days,
                                                        "active": True, "done": False, "started_at": now,
                                                        "scope": pulse_memory.scope(pulse_store,
