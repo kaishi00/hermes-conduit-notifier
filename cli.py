@@ -416,6 +416,9 @@ def _pulse_backfill(pulse_store: Any, home: Any, extra: str) -> int:
               "`hermes conduit-push pulse memory backfill start`, or `... backfill cancel` drops it. "
               "Once it's done, a backfill can go further back.")
         return 0
+    if extra == "start" and not pulse_store.get("memory"):
+        print("Pulse memory is off: `hermes conduit-push pulse memory on` first.")
+        return 1
     since = pulse_store.get("memory_since")
     if extra == "start" and (not isinstance(since, (int, float)) or isinstance(since, bool)):
         # Memory hasn't run yet: set where live reading starts first (unless its first run
@@ -449,19 +452,16 @@ def _pulse_backfill(pulse_store: Any, home: Any, extra: str) -> int:
         if cost["chats"]:
             print("To read them: `hermes conduit-push pulse memory backfill start`.")
         return 0
-    if not pulse_store.get("memory"):
-        print("Pulse memory is off: `hermes conduit-push pulse memory on` first.")
-        return 1
     resuming = isinstance(backfill, dict) and not backfill.get("done") \
         and (backfill.get("from"), backfill.get("to")) == window
-    if not resuming:
-        pulse_store.clear_backfill_marks()  # the new window is older than anything marked
     if resuming:
         days = backfill.get("days", days)
     if not pulse_store.swap("memory_backfill", stored, {"from": window[0], "to": window[1], "days": days,
                                                        "active": True, "done": False, "started_at": now}):
         print("The backfill changed meanwhile; try again.")
         return 1
+    if not resuming:  # older windows' marks count as none; drop them
+        pulse_store.clear_backfill_marks(keep_window=window[0])
     pulse_store.set("memory_requested", True)
     print(f"Memory is reading chats from {day(window[0])} to {day(window[1])}, after new chats and within "
           "its daily tokens. `hermes conduit-push pulse status` shows when it's done.")

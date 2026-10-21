@@ -424,9 +424,13 @@ class PulseStore:
             return None  # another window's mark
         return row
 
-    def clear_backfill_marks(self) -> None:
+    def clear_backfill_marks(self, keep_window: Optional[float] = None) -> None:
+        """Drops backfill marks; with ``keep_window``, all but that window's."""
         with _lock, self._connect() as conn:
-            conn.execute("DELETE FROM backfill_marks")
+            if keep_window is None:
+                conn.execute("DELETE FROM backfill_marks")
+            else:
+                conn.execute("DELETE FROM backfill_marks WHERE window_from!=?", (keep_window,))
 
     def advance(self, profile: str, chat_id: str, *, message_id: int, at: float,
                 items: Sequence[dict[str, Any]] = (), closed: Sequence[dict[str, Any]] = (),

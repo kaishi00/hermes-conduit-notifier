@@ -1810,10 +1810,13 @@ def test_backfill_command(remembering, db, capsys, monkeypatch):
     assert "Backfill: read back to" in status()
     assert run("7") == 0 and "already read back 7 days" in capsys.readouterr().out
     assert run("30") == 0 and "Reading back 30 days" in capsys.readouterr().out
+    store_.advance("", "w9", message_id=1, at=0, marks="backfill_marks", window=-5.0)
     assert run("start") == 0 and store_.watermarks("backfill_marks") == []  # a new, older window starts fresh
     store_.set("memory_backfill", None)
     store_.set("memory", False)
+    store_.set("memory_since", None)
     assert run("start") == 1 and "memory is off" in capsys.readouterr().out
+    assert store_.get("memory_since") is None  # a refused start doesn't move where live reading starts
     store_.set("memory", True)
     store_.set("memory_since", None)  # memory hasn't run yet
     assert run("start") == 0
