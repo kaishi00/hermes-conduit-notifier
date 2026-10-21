@@ -1739,9 +1739,10 @@ def test_a_backfill_reads_the_chat_going_on_when_it_started(remembering, db):
     gone = [("", store_.path.parent, SID), ("gone", store_.path.parent / "nowhere", "")]
     assert memory.run(store_, gone, model, zone=UTC, now=DAY + 120)["chunks"] == 0
     assert store_.get("memory_backfill")["active"]  # a profile it couldn't read isn't done
+    assert store_.get("memory_backfill_unreadable") == ["gone"]  # `pulse status` says why
     assert memory.estimate(gone, (DAY - 86400, DAY))["unreadable"] == ["gone"]
     _remember(remembering, model, DAY + 180)
-    assert store_.get("memory_backfill")["done"]
+    assert store_.get("memory_backfill")["done"] and store_.get("memory_backfill_unreadable") == []
 
 
 def test_a_backfill_stopped_mid_run_is_left_alone(remembering, db):

@@ -489,6 +489,11 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
             read_to = last["timestamp"]
             done["chunks"] += 1
             done["items"] += sum(1 for item in items if not item["same_as"])
+    if backfill and sorted(unreadable) != pulse_store.get("memory_backfill_unreadable"):
+        pulse_store.set("memory_backfill_unreadable", sorted(unreadable))
+        if unreadable:
+            logger.warning("conduit_push: Pulse memory's backfill can't read profile(s) %s; it finishes once they "
+                           "can be read", ", ".join(unreadable))
     if backfill and not backfill_chats and not unreadable and still_leader() and not any(
             mark["failures"] and mark["retry_at"] > now for mark in pulse_store.watermarks("backfill_marks")) \
             and pulse_store.swap("memory_backfill", backfill, {**backfill, "active": False, "done": True}):

@@ -65,6 +65,7 @@ DEFAULTS: dict[str, Any] = {
     # read after the chats as they happen (pulse_memory.run).
     "memory_backfill": None,
     "memory_backfill_days": 30,  # what `pulse memory backfill start` reads
+    "memory_backfill_unreadable": [],  # profiles the backfill couldn't read on its last run
 }
 # Which process runs the loop: {"owner": ..., "until": time.time()}.
 LEADER = "leader"
