@@ -377,107 +377,62 @@ def _pulse_backfill(pulse_store: Any, home: Any, extra: str) -> int:
     """`pulse memory backfill [days]` shows what reading that far back
     costs; `start` reads the last days shown, `stop` pauses it, `cancel`
     drops an unfinished one."""
-    from . import pulse, pulse_hermes, pulse_memory
-    now = time.time()
+    from . import pulse, pulse_control
     zone = pulse.report_zone(pulse_store, home)
     day = lambda epoch: datetime.fromtimestamp(epoch, zone).strftime("%d %b %Y")
-    stored = pulse_store.get("memory_backfill")
-    backfill = stored if pulse_memory.has_window(stored) else None
-    active = backfill if backfill and backfill.get("active") else None
-    if extra == "stop":
-        if not active:
-            print("No backfill is running.")
-            return 1
-        if not pulse_store.swap("memory_backfill", active, {**active, "active": False}):
-            print("The backfill changed meanwhile; try again.")
-            return 1
-        print("Backfill paused. `hermes conduit-push pulse memory backfill start` carries on where it stopped.")
-        return 0
-    if extra == "cancel":
-        if not backfill or backfill.get("done"):
-            print("No backfill to cancel.")
-            return 1
-        # What was read stays; memory counts as read back only to where this backfill began.
-        if not pulse_store.swap("memory_backfill", backfill, {"from": backfill["to"], "to": backfill["to"],
-                                                             "active": False, "done": True, "cancelled": True,
-                                                             "scope": pulse_memory.scope(pulse_store, backfill)}):
-            print("The backfill changed meanwhile; try again.")
-            return 1
-        pulse_store.clear_backfill_marks()
-        pulse_store.set("memory_backfill_unreadable", [])
-        print("Backfill cancelled. What it already read is kept; `hermes conduit-push pulse memory backfill "
-              "<days>` shows a new one.")
-        return 0
-    if extra and extra != "start" and not (extra.isdecimal() and len(extra) <= 3 and 1 <= int(extra) <= 365):
+    if extra and extra not in ("start", "stop", "cancel") \
+            and not (extra.isdecimal() and len(extra) <= 3 and 1 <= int(extra) <= 365):
         print("Usage: hermes conduit-push pulse memory backfill [days (1-365)|start|stop|cancel]")
         return 2
-    days = int(extra) if extra.isdecimal() else pulse_store.get("memory_backfill_days")
-    days = days if isinstance(days, int) and not isinstance(days, bool) and 1 <= days <= 365 \
-        else pulse.store.DEFAULTS["memory_backfill_days"]
-    if active:
-        print(f"Memory is already reading chats back to {day(active['from'])}. "
-              "`hermes conduit-push pulse memory backfill stop` pauses it.")
-        return 0 if extra != "start" else 1
-    if extra != "start" and backfill and not backfill.get("done"):
-        print(f"A paused backfill back to {day(backfill['from'])} carries on first: "
-              "`hermes conduit-push pulse memory backfill start`, or `... backfill cancel` drops it. "
-              "Once it's done, a backfill can go further back.")
+    try:
+        if extra == "stop":
+            pulse_control.backfill_stop(pulse_store)
+            print("Backfill paused. `hermes conduit-push pulse memory backfill start` carries on where it stopped.")
+        elif extra == "cancel":
+            pulse_control.backfill_cancel(pulse_store)
+            print("Backfill cancelled. What it already read is kept; `hermes conduit-push pulse memory backfill "
+                  "<days>` shows a new one.")
+        elif extra == "start":
+            started = pulse_control.backfill_start(pulse_store, Path(home))
+            print(f"Memory is reading chats from {day(started['from'])} to {day(started['to'])}, after new chats "
+                  "and within its daily tokens. `hermes conduit-push pulse status` shows when it's done.")
+            if not pulse_store.get("enabled"):
+                print("It starts once Pulse is on: `hermes conduit-push pulse on`.")
+        else:
+            cost = pulse_control.backfill_estimate(pulse_store, Path(home), int(extra) if extra else None)
+            print(f"Reading back {cost['days']} days ({day(cost['from'])} to {day(cost['to'])}) covers "
+                  f"{cost['chats']} chats, about {cost['chars']:,} characters in {cost['chunks']} chunks: roughly "
+                  f"{cost['tokens']:,} tokens on Hermes's \"Pulse memory\" model, about {cost['days_needed']} day(s) "
+                  f"at its {cost['daily_tokens']:,} tokens a day (shared with reading new chats).")
+            if cost["unreadable"]:
+                print("Couldn't read profile(s) " + ", ".join(_printable(name) for name in cost["unreadable"])
+                      + " just now; they aren't counted, and the backfill won't finish until they can be read.")
+            if cost["chats"]:
+                print("To read them: `hermes conduit-push pulse memory backfill start`.")
         return 0
-    if extra == "start" and not pulse_store.get("memory"):
-        print("Pulse memory is off: `hermes conduit-push pulse memory on` first.")
+    except pulse_control.Refused as refused:
+        data = refused.data
+        if refused.code == "reading":
+            print(f"Memory is already reading chats back to {day(data['from'])}. "
+                  "`hermes conduit-push pulse memory backfill stop` pauses it.")
+            return 1 if extra == "start" else 0
+        if refused.code == "paused":
+            print(f"A paused backfill back to {day(data['from'])} carries on first: "
+                  "`hermes conduit-push pulse memory backfill start`, or `... backfill cancel` drops it. "
+                  "Once it's done, a backfill can go further back.")
+            return 0
+        if refused.code == "already_read":
+            print(f"Memory has already read back {data['days']} days or more.")
+            return 0
+        print({"not_running": "No backfill is running.",
+               "nothing_to_cancel": "No backfill to cancel.",
+               "changed": "The backfill changed meanwhile; try again.",
+               "memory_off": "Pulse memory is off: `hermes conduit-push pulse memory on` first.",
+               "no_home_chat": "Pulse needs its home chat first, so its own reports aren't read as chats. "
+                               + _printable(str(data.get("problem", ""))),
+               "unreadable": f"Couldn't read Hermes's chats ({data.get('error')})."}.get(refused.code, refused.code)
+              .strip())
         return 1
-    since = pulse_store.get("memory_since")
-    if extra == "start" and (not isinstance(since, (int, float)) or isinstance(since, bool)):
-        # Memory hasn't run yet: set where live reading starts first (unless its first run
-        # just did), so the window below ends exactly there.
-        pulse_store.swap("memory_since", since, now)
-    window = pulse_memory.backfill_window(pulse_store, days, now)
-    if window is None:
-        print(f"Memory has already read back {days} days or more.")
-        return 0
-    chat, problem = pulse.home_chat(pulse_store, Path(home))
-    if chat is None:
-        print(f"Pulse needs its home chat first, so its own reports aren't read as chats. {_printable(problem)}".strip())
-        return 1
-    if extra != "start":
-        try:
-            cost = pulse_memory.estimate(pulse.memory_sources(pulse_store, Path(home), chat.chat_id), window)
-        except pulse_hermes.HermesUnreadable as error:
-            print(f"Couldn't read Hermes's chats ({type(error).__name__}).")
-            return 1
-        pulse_store.set("memory_backfill_days", days)
-        cap = pulse_store.get("memory_daily_tokens")
-        cap = cap if isinstance(cap, (int, float)) and not isinstance(cap, bool) and cap > 0 \
-            else pulse.store.DEFAULTS["memory_daily_tokens"]
-        print(f"Reading back {days} days ({day(window[0])} to {day(window[1])}) covers {cost['chats']} chats, "
-              f"about {cost['chars']:,} characters in {cost['chunks']} chunks: roughly {cost['tokens']:,} tokens "
-              f"on Hermes's \"Pulse memory\" model, about {-(-cost['tokens'] // int(cap))} day(s) at its "
-              f"{int(cap):,} tokens a day (shared with reading new chats).")
-        if cost["unreadable"]:
-            print("Couldn't read profile(s) " + ", ".join(_printable(name) for name in cost["unreadable"])
-                  + " just now; they aren't counted, and the backfill won't finish until they can be read.")
-        if cost["chats"]:
-            print("To read them: `hermes conduit-push pulse memory backfill start`.")
-        return 0
-    resuming = isinstance(backfill, dict) and not backfill.get("done") \
-        and (backfill.get("from"), backfill.get("to")) == window
-    if resuming:
-        kept = backfill.get("days")
-        days = kept if isinstance(kept, int) and not isinstance(kept, bool) and 1 <= kept <= 365 else days
-    if not pulse_store.swap("memory_backfill", stored, {"from": window[0], "to": window[1], "days": days,
-                                                       "active": True, "done": False, "started_at": now,
-                                                       "scope": pulse_memory.scope(pulse_store,
-                                                                                   backfill if resuming else None)}):
-        print("The backfill changed meanwhile; try again.")
-        return 1
-    if not resuming:  # older windows' marks count as none; drop them
-        pulse_store.clear_backfill_marks(keep_window=window[0])
-    pulse_store.set("memory_requested", True)
-    print(f"Memory is reading chats from {day(window[0])} to {day(window[1])}, after new chats and within "
-          "its daily tokens. `hermes conduit-push pulse status` shows when it's done.")
-    if not pulse_store.get("enabled"):
-        print("It starts once Pulse is on: `hermes conduit-push pulse on`.")
-    return 0
 
 
 def _pulse_outcomes(pulse_store: Any, value: str) -> int:

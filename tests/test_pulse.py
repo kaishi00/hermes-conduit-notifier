@@ -1878,3 +1878,100 @@ def test_memory_command(remembering, db, capsys, monkeypatch):
     remembering.store.set("memory", False)
     cli.dispatch(types.SimpleNamespace(conduit_push_action="pulse", pulse_action="status", value=""))
     assert "Memory: off; nothing kept yet (" in capsys.readouterr().out
+
+
+# Settings > Pulse (pulse_control and its dashboard routes) ---------------------
+
+control = _load("conduit_push.pulse_control", ROOT / "pulse_control.py")
+
+
+def test_pulse_state_and_settings_as_data(remembering, db):
+    store_ = remembering.store
+    store_.set("home_session_key", SID)
+    home = store_.path.parent
+    state = control.state(store_, home, now=DAY)
+    assert state["enabled"] is False and state["home_chat"]["id"] == SID and state["memory"] is False
+    assert state["report_times"] == ["08:00", "13:00", "18:00"] and state["backfill"] == {"state": "none"}
+    assert state["backfill_days"] == 30 and state["daily_tokens"] == store.DEFAULTS["memory_daily_tokens"]
+    control.update(store_, {"enabled": True, "daily_report": True, "report_times": ["17:30", "9:00"],
+                            "report_profiles": "this", "time_zone": "Europe/Paris"})
+    state = control.state(store_, home, now=DAY)
+    assert state["enabled"] and state["report_times"] == ["09:00", "17:30"] and state["report_profiles"] == "this"
+    assert state["time_zone"] == "Europe/Paris" and state["next_report_at"] > DAY
+    for bad in ({"enabled": "yes"}, {"report_times": ["25:00"]}, {"report_times": []}, {"report_profiles": "some"},
+                {"time_zone": "Mars/Base"}, {"memory": 1, "enabled": False}, []):
+        with pytest.raises(control.Refused) as refused:
+            control.update(store_, bad)
+        assert refused.value.code == "invalid"
+    assert store_.get("enabled") is True  # a refused change changes nothing
+    control.request_report(store_)
+    assert store_.get("report_requested") is True
+    store_.set("enabled", False)
+    with pytest.raises(control.Refused, match="pulse_off"):
+        control.request_report(store_)
+
+
+def test_pulse_backfill_steps_as_data(remembering, db):
+    store_ = remembering.store
+    store_.set("home_session_key", SID)
+    home = store_.path.parent
+    store_.set("memory", True)
+    db.message("user", "I'll renew my passport next month", sid="work", at=DAY - 3 * 86400)
+    with pytest.raises(control.Refused, match="not_running"):
+        control.backfill_stop(store_)
+    cost = control.backfill_estimate(store_, home, 7, now=DAY + 60)
+    assert (cost["days"], cost["chats"], cost["to"]) == (7, 1, DAY) and cost["days_needed"] == 1
+    started = control.backfill_start(store_, home, now=DAY + 60)  # the days last shown
+    assert started["days"] == 7 and not started["resumed"]
+    assert control.state(store_, home, now=DAY + 60)["backfill"]["state"] == "reading"
+    with pytest.raises(control.Refused) as refused:
+        control.backfill_start(store_, home, now=DAY + 60)
+    assert refused.value.code == "reading" and refused.value.data["from"] == started["from"]
+    control.backfill_stop(store_)
+    with pytest.raises(control.Refused, match="paused"):
+        control.backfill_estimate(store_, home, 30, now=DAY + 60)
+    assert control.backfill_start(store_, home, now=DAY + 60)["resumed"]
+    control.backfill_cancel(store_)
+    assert control.state(store_, home, now=DAY + 60)["backfill"]["state"] == "cancelled"
+    store_.set("memory", False)
+    with pytest.raises(control.Refused, match="memory_off"):
+        control.backfill_start(store_, home, now=DAY + 60)
+
+
+def test_pulse_routes(remembering, db, monkeypatch):
+    fastapi = pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    spec = importlib.util.spec_from_file_location("conduit_plugin_api_pulse", ROOT / "dashboard" / "plugin_api.py")
+    api = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(api)
+    store_ = remembering.store
+    store_.set("home_session_key", SID)
+    home = store_.path.parent
+    modules = {"pulse_control": control, "pulse": pulse}
+    monkeypatch.setattr(api, "_plugin_package_module", lambda name: modules[name])
+    monkeypatch.setattr(api, "_calls_home", lambda: home)
+    app = fastapi.FastAPI()
+    app.include_router(api.router, prefix="/api/plugins/conduit_push")
+    http = TestClient(app)
+    base = "/api/plugins/conduit_push/pulse"
+    got = http.get(base)
+    assert got.status_code == 200 and got.headers["cache-control"] == "no-store"
+    assert got.json()["ok"] and got.json()["home_chat"]["id"] == SID
+    put = http.put(base, json={"enabled": True, "daily_report": False})
+    assert put.status_code == 200 and put.json()["enabled"] and put.json()["next_report_at"] is None
+    bad = http.put(base, json={"report_times": ["noon"]})
+    assert bad.status_code == 400 and bad.json()["detail"] == {"code": "invalid", "field": "report_times"}
+    stop = http.post(f"{base}/backfill", json={"action": "stop"})
+    assert stop.status_code == 409 and stop.json()["detail"]["code"] == "not_running"
+    assert http.post(f"{base}/backfill", json={"action": "estimate", "days": 0}).status_code == 400
+    assert http.post(f"{base}/backfill", json={"action": "estimate", "days": 3})
+    assert http.post(f"{base}/report").json() == {"ok": True}
+    item = store_.advance("", "work", message_id=1, at=DAY, items=[{
+        "kind": "commitment", "text": "The user will renew their passport.", "evidence": "renew", "explicit": True,
+        "due": "", "due_at": None, "mentioned_at": DAY, "message_id": 1}])[0]
+    listed = http.get(f"{base}/memory").json()["items"]
+    assert [entry["id"] for entry in listed] == [item]
+    assert http.post(f"{base}/memory/forget", json={"id": item}).json()["forgotten"] is True
+    assert http.post(f"{base}/memory/forget", json={"id": "x"}).status_code == 400
+    assert http.get(f"{base}/memory", params={"kind": "nope"}).status_code == 400
+    assert "pulse" in api.ROUTE_CAPABILITIES
