@@ -1,15 +1,17 @@
 """Pulse's shadow report (designs/proactivity.md 13, slice 0 (d)).
 
-A few times a day Pulse gathers what Hermes can already see (chats since
-the last report, the phone's calendar and reminders, Hermes's memory files,
-and tool calls that failed) and sends it into the home chat as one hidden
-turn. The home chat's own model answers with "here's what I would have
+A few times a day Pulse gathers what Hermes can already see (what Pulse
+memory kept, chats since the last report that memory hasn't read, the
+phone's calendar and reminders, Hermes's memory files, and tool calls that
+failed) and sends it into the home chat as one hidden turn. The home chat's own model answers with "here's what I would have
 brought up": a few numbered items, or nothing. It sends nothing anywhere
 else.
 
 The user rates the items by replying ("1 yes, 2 no"). The ratings are read
 back from the home chat and counted per kind of item, the first, plain form
-of learning what's worth bringing up.
+of learning what's worth bringing up. A line drawn from a remembered item
+ends with its number, so its rating lands on that item too: one rated "no"
+stays out of later reports until the user brings it up again.
 
 Everything here only reads: state.db read-only, the phone store through
 its own reader, the memory files as text.
@@ -53,7 +55,7 @@ MIN_CHATS_BUDGET = 2_000
 PER_CHAT_BUDGET = 2_500
 PER_MESSAGE = 400
 MEMORY_BUDGET = 3_000
-# What Pulse remembers (pulse_memory), shown first in the report.
+# What Pulse remembers (pulse_memory), shown near the top of the report.
 ITEMS_BUDGET = 3_500
 MAX_REPORT_ITEMS = 40
 EVENTS_DAYS = 2
@@ -339,24 +341,26 @@ def rating_counts(pulse_store: store.PulseStore) -> dict[str, tuple[int, int]]:
     return {kind: (yes, no) for kind, (yes, no) in sorted(counts.items())}
 
 
-def rated_not_useful(pulse_store: store.PulseStore) -> set[int]:
-    """Remembered items whose latest rating in a report was "no"."""
+def rated_not_useful(pulse_store: store.PulseStore) -> dict[int, float]:
+    """Remembered items whose latest rating in a report was "no", and when
+    that rating was read."""
     latest: dict[int, tuple[float, bool]] = {}
     for row in pulse_store.all_ratings():
         for rating in ratings_from_json(row["ratings_json"]):
             if rating.memory is not None and row["updated_at"] >= latest.get(rating.memory, (-1.0, True))[0]:
                 latest[rating.memory] = (row["updated_at"], rating.useful)
-    return {memory for memory, (_, useful) in latest.items() if not useful}
+    return {memory: at for memory, (at, useful) in latest.items() if not useful}
 
 
 def remembered(pulse_store: store.PulseStore, zone: tzinfo, now: float) -> str:
     """Pulse memory's open items, dated ones soonest first, then by kind
-    and how recently they came up; not the ones rated "no"."""
+    and how recently they came up; not the ones rated "no" (until the user
+    brings one up again)."""
     skip = rated_not_useful(pulse_store)
     # Not what memory's next run expires either.
     items = [item for item in pulse_store.open_items(limit=MAX_REPORT_ITEMS * 3 + len(skip), soonest=True,
                                                      stale_before=now - pulse_memory.EXPIRE_S)
-             if item["id"] not in skip]
+             if item["mentioned_at"] > skip.get(item["id"], -1.0)]
     order = {kind: n for n, kind in enumerate(KIND_ORDER)}
     items.sort(key=lambda item: (item["due_at"] is None, item["due_at"] or 0.0,
                                  order.get(item["kind"], len(order)), -item["mentioned_at"]))
@@ -375,7 +379,7 @@ def remembered(pulse_store: store.PulseStore, zone: tzinfo, now: float) -> str:
         used += len(line) + 1
     if not lines:
         return ""
-    return REMEMBERED_TITLE + " (open items, from chats it has read)\n" + "\n".join(lines)
+    return REMEMBERED_TITLE + " (open items it kept from the chats it has read)\n" + "\n".join(lines)
 
 
 def ratings_section(pulse_store: store.PulseStore) -> str:
@@ -408,7 +412,8 @@ def build(home: Path, pulse_store: store.PulseStore, *, home_chat_id: str, now: 
     sections = [header, ratings_section(pulse_store), remembered(pulse_store, zone, now) if memory_on else "",
                 phone, cron_jobs(home, others), failed_calls(pulse_store, since, zone), memory_files(home, others)]
     sections = [section for section in sections if section]
-    # With memory on, chats it has already read are covered by what it remembers.
+    # With memory on, chats it has already read show only as what it kept from them
+    # (often nothing): the report spends its room on what memory hasn't seen.
     read = {(mark["profile"], mark["chat_id"]): mark["message_id"] for mark in pulse_store.watermarks()} \
         if memory_on else None
     read_since = pulse_store.get("memory_since")
@@ -476,8 +481,11 @@ def report_items(reply: str) -> dict[int, str]:
 def report_sources(reply: str, shown: Optional[set[int]] = None) -> dict[int, int]:
     """Item number -> the remembered item it names with "#n" at its end;
     with ``shown``, only items the report showed (so "PR #12" isn't one)."""
-    return {int(number): int(memory) for number, memory in _SOURCE.findall(reply or "")
-            if shown is None or int(memory) in shown}
+    first: dict[int, int] = {}  # a number used twice is the first such line, as in report_items
+    for match in _ITEM.finditer(reply or ""):
+        first.setdefault(int(match.group(1)), match.start())
+    return {int(match.group(1)): int(match.group(2)) for match in _SOURCE.finditer(reply or "")
+            if first.get(int(match.group(1))) == match.start() and (shown is None or int(match.group(2)) in shown)}
 
 
 def shown_items(text: str) -> set[int]:

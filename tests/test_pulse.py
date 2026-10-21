@@ -941,7 +941,7 @@ def test_items_and_ratings_are_read_from_the_text():
 def test_report_lines_name_the_remembered_item_they_came_from():
     reply = ("Here's what I would have brought up:\n1. [commitment] Send the deck (said in Work) #12\n"
              "2. [promise] Check the build (tool calls)\n3. [follow-up] Ask about #4 tickets\n"
-             "4. [date] Mum's birthday (#7).\nRate them: reply like 1 yes, 2 no.")
+             "4. [date] Mum's birthday (#7).\n1. [fact] A second line one #9\nRate them: reply like 1 yes, 2 no.")
     sources = report.report_sources(reply)
     assert sources == {1: 12, 4: 7}  # a "#4" inside the sentence isn't a source
     ratings = report.parse_ratings("1 yes, 2 no, 4 no", report.report_items(reply), sources)
@@ -1012,7 +1012,7 @@ def test_memory_shows_when_an_item_was_said_again():
     item = {"id": 3, "profile": "", "text": "The user will renew the passport.", "due": "", "explicit": 1,
             "evidence": "I need to renew my passport", "valid_from": DAY, "mentioned_at": DAY + 86400}
     assert memory.describe(item, UTC).endswith('"I need to renew my passport" (20 Oct, said again 21 Oct)')
-    assert memory.describe({**item, "mentioned_at": DAY + 365 * 86400}, UTC).endswith("(20 Oct, said again 20 Oct)")
+    assert memory.describe({**item, "mentioned_at": DAY + 365 * 86400}, UTC).endswith("(20 Oct 2026, said again 20 Oct 2027)")
     assert memory.describe({**item, "mentioned_at": DAY + 600}, UTC).endswith("(20 Oct)")
 
 
@@ -1135,8 +1135,13 @@ def test_a_no_on_a_remembered_item_keeps_it_out_of_later_reports(live, db):
     assert f"#{kept}" not in live.store.attempt_by_tag(row["tag"])["text"]  # trimmed once delivered
     pulse._last_ratings = 0.0
     pulse.tick(now=time.time() + 2)
-    assert report.rated_not_useful(live.store) == {kept}  # #99 wasn't shown, so it names nothing
+    assert set(report.rated_not_useful(live.store)) == {kept}  # #99 wasn't shown, so it names nothing
     assert report.remembered(live.store, UTC, time.time()) == ""
+    live.store.advance("", "work", message_id=2, at=time.time() + 3, after_id=1, items=[{
+        "kind": "commitment", "text": "The user will send the deck.", "evidence": "the deck", "explicit": 1, "due": "",
+        "due_at": None, "message_id": 2, "mentioned_at": time.time() + 3, "same_as": kept}])
+    assert f"#{kept} " in report.remembered(live.store, UTC, time.time())  # brought up again: back in the report
+
 
 def test_report_command(live, db, capsys, monkeypatch):
     db.session()
