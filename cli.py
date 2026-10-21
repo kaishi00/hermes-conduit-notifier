@@ -46,7 +46,7 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
                             "or 'backfill'")
     pulse.add_argument("extra", nargs="?", default="",
                        help="for memory forget: the item number; for memory backfill: how many days back "
-                            "(it shows what that costs), 'start' or 'stop'")
+                            "(it shows what that costs), 'start', 'stop' or 'cancel'")
     parser.set_defaults(func=dispatch)
 
 
@@ -365,7 +365,8 @@ def _pulse_memory(pulse_store: Any, home: Any, value: str, extra: str) -> int:
 
 def _pulse_backfill(pulse_store: Any, home: Any, extra: str) -> int:
     """`pulse memory backfill [days]` shows what reading that far back
-    costs; `start` reads the last days shown, `stop` pauses it."""
+    costs; `start` reads the last days shown, `stop` pauses it, `cancel`
+    drops an unfinished one."""
     from . import pulse, pulse_hermes, pulse_memory
     now = time.time()
     zone = pulse.report_zone(pulse_store, home)
@@ -382,8 +383,21 @@ def _pulse_backfill(pulse_store: Any, home: Any, extra: str) -> int:
             return 1
         print("Backfill paused. `hermes conduit-push pulse memory backfill start` carries on where it stopped.")
         return 0
+    if extra == "cancel":
+        if not backfill or backfill.get("done"):
+            print("No backfill to cancel.")
+            return 1
+        # What was read stays; memory counts as read back only to where this backfill began.
+        if not pulse_store.swap("memory_backfill", backfill, {"from": backfill["to"], "to": backfill["to"],
+                                                             "active": False, "done": True}):
+            print("The backfill changed meanwhile; try again.")
+            return 1
+        pulse_store.clear_backfill_marks()
+        print("Backfill cancelled. What it already read is kept; `hermes conduit-push pulse memory backfill "
+              "<days>` shows a new one.")
+        return 0
     if extra and extra != "start" and not (extra.isdecimal() and 1 <= int(extra) <= 365):
-        print("Usage: hermes conduit-push pulse memory backfill [days (1-365)|start|stop]")
+        print("Usage: hermes conduit-push pulse memory backfill [days (1-365)|start|stop|cancel]")
         return 2
     days = int(extra) if extra.isdecimal() else pulse_store.get("memory_backfill_days")
     days = days if isinstance(days, int) and not isinstance(days, bool) and 1 <= days <= 365 else 30
@@ -393,7 +407,8 @@ def _pulse_backfill(pulse_store: Any, home: Any, extra: str) -> int:
         return 0 if extra != "start" else 1
     if extra != "start" and backfill and not backfill.get("done"):
         print(f"A paused backfill back to {day(backfill['from'])} carries on first: "
-              "`hermes conduit-push pulse memory backfill start`. Once it's done, a backfill can go further back.")
+              "`hermes conduit-push pulse memory backfill start`, or `... backfill cancel` drops it. "
+              "Once it's done, a backfill can go further back.")
         return 0
     window = pulse_memory.backfill_window(pulse_store, days, now)
     if window is None:

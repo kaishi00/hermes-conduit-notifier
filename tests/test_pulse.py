@@ -1789,6 +1789,10 @@ def test_backfill_command(remembering, db, capsys, monkeypatch):
     assert run("30") == 0 and "A paused backfill back to" in capsys.readouterr().out  # no wider window yet
     assert memory.backfill_window(store_, 30, time.time()) == (backfill["from"], backfill["to"])
     assert run("start") == 0 and store_.watermarks("backfill_marks")  # carries on: its marks are kept
+    assert run("stop") == 0 and run("cancel") == 0 and store_.watermarks("backfill_marks") == []
+    cancelled = store_.get("memory_backfill")
+    assert cancelled["done"] and cancelled["from"] == backfill["to"] and run("cancel") == 1
+    assert run("start") == 0 and store_.get("memory_backfill")["to"] == backfill["to"]  # starts over from there
     store_.set("memory_backfill", {**store_.get("memory_backfill"), "active": False, "done": True})
     assert "Backfill: read back to" in status()
     assert run("7") == 0 and "already read back 7 days" in capsys.readouterr().out
