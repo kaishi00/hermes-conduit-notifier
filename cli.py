@@ -398,7 +398,7 @@ def _pulse_backfill(pulse_store: Any, home: Any, extra: str) -> int:
         print("Backfill cancelled. What it already read is kept; `hermes conduit-push pulse memory backfill "
               "<days>` shows a new one.")
         return 0
-    if extra and extra != "start" and not (extra.isdecimal() and 1 <= int(extra) <= 365):
+    if extra and extra != "start" and not (extra.isdecimal() and len(extra) <= 3 and 1 <= int(extra) <= 365):
         print("Usage: hermes conduit-push pulse memory backfill [days (1-365)|start|stop|cancel]")
         return 2
     days = int(extra) if extra.isdecimal() else pulse_store.get("memory_backfill_days")
@@ -450,9 +450,13 @@ def _pulse_backfill(pulse_store: Any, home: Any, extra: str) -> int:
     if resuming:
         days = backfill.get("days", days)
     since = pulse_store.get("memory_since")
-    if not isinstance(since, (int, float)) or isinstance(since, bool):
-        # Memory hasn't run yet: live reading starts exactly where this backfill ends.
-        pulse_store.set("memory_since", window[1])
+    if (not isinstance(since, (int, float)) or isinstance(since, bool)) \
+            and not pulse_store.swap("memory_since", since, window[1]):
+        # Memory hasn't run yet: live reading starts exactly where this backfill ends,
+        # or, if memory's first run just set where it starts, the backfill ends there.
+        since = pulse_store.get("memory_since")
+        if isinstance(since, (int, float)) and not isinstance(since, bool) and window[0] < since:
+            window = (window[0], since)
     pulse_store.set("memory_backfill", {"from": window[0], "to": window[1], "days": days, "active": True,
                                         "done": False, "started_at": now})
     pulse_store.set("memory_requested", True)

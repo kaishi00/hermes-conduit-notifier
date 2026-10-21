@@ -323,7 +323,7 @@ def _maybe_memory(pulse_store: store.PulseStore, home: Path, now: float) -> None
         return
     since = pulse_store.get("memory_since")
     if not isinstance(since, (int, float)) or isinstance(since, bool):
-        pulse_store.set("memory_since", now)
+        pulse_store.swap("memory_since", since, now)  # unless `pulse memory backfill start` just set it
     chat, problem = home_chat(pulse_store, home)
     _log_problem(problem)
     if chat is None:

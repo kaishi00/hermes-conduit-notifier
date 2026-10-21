@@ -1774,7 +1774,7 @@ def test_backfill_command(remembering, db, capsys, monkeypatch):
     store_.set("home_session_key", SID)
     store_.set("memory", True)
     db.message("user", "I'll renew my passport next month", sid="work", at=time.time() - 3 * 86400)
-    assert run("0") == 2 and run("400") == 2 and run("soon") == 2 and run("stop") == 1
+    assert run("0") == 2 and run("400") == 2 and run("0" * 5000) == 2 and run("soon") == 2 and run("stop") == 1
     capsys.readouterr()
     assert run("7") == 0
     out = capsys.readouterr().out
