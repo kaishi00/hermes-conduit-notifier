@@ -159,13 +159,15 @@ def _local(epoch: float, zone: tzinfo) -> datetime:
 # Which chats, and which part of them ------------------------------------------
 
 def due_chats(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]], *,
-              now: float, window: Optional[tuple[float, float]] = None) -> Iterator[Chat]:
+              now: float, window: Optional[tuple[float, float]] = None,
+              unreadable: Optional[list[str]] = None) -> Iterator[Chat]:
     """Chats with rows not read yet that have been quiet for ``IDLE_S``, in
     each source (profile, home, home chat to leave out). A chat Hermes
     continued from another (compression) starts where its parent stopped,
     so it waits while its parent still has rows to read: compression copies
     some of them into it. With ``window`` (from, to), a backfill: only rows
-    written in it, recorded in their own marks."""
+    written in it, recorded in their own marks. Another profile's home that
+    can't be read is skipped, and named in ``unreadable``."""
     if window:
         (since, until), table = window, "backfill_marks"
     else:
@@ -179,6 +181,8 @@ def due_chats(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, 
         except hermes.HermesUnreadable:
             if not profile:
                 raise
+            if unreadable is not None:
+                unreadable.append(profile)
             continue  # another profile's chats are a bonus, not a reason to fail
         behind = {row["chat_id"] for row in rows
                   if (marks.get((profile, row["chat_id"])) or {"message_id": 0})["message_id"] < row["last_id"]}
@@ -426,8 +430,9 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
     calls = 0
     pulse_store.expire_items(due_before=now - EXPIRE_S, now=now)
     backfill = active_backfill(pulse_store)
-    backfill_chats = list(due_chats(pulse_store, sources, now=now, window=(backfill["from"], backfill["to"]))) \
-        if backfill else []
+    unreadable: list[str] = []  # a profile that couldn't be read keeps the backfill from finishing
+    backfill_chats = list(due_chats(pulse_store, sources, now=now, window=(backfill["from"], backfill["to"]),
+                                    unreadable=unreadable)) if backfill else []
     window = (backfill["from"], backfill["to"]) if backfill else None
     # A backfill stopped or replaced meanwhile (`pulse memory backfill`) isn't this run's to carry on.
     current = lambda: (lambda b: b is not None and (b["from"], b["to"]) == window)(active_backfill(pulse_store))
@@ -484,7 +489,7 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
             read_to = last["timestamp"]
             done["chunks"] += 1
             done["items"] += sum(1 for item in items if not item["same_as"])
-    if backfill and not backfill_chats and still_leader() and not any(
+    if backfill and not backfill_chats and not unreadable and still_leader() and not any(
             mark["failures"] and mark["retry_at"] > now for mark in pulse_store.watermarks("backfill_marks")) \
             and pulse_store.swap("memory_backfill", backfill, {**backfill, "active": False, "done": True}):
         logger.info("conduit_push: Pulse memory finished reading chats back to %s", backfill["from"])
@@ -496,12 +501,12 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
 def active_backfill(pulse_store: store.PulseStore) -> Optional[dict]:
     """The backfill being read, if any: {"from", "to", ...} epoch seconds."""
     backfill = pulse_store.get("memory_backfill")
-    if not isinstance(backfill, dict) or not backfill.get("active") or not _window_of(backfill):
+    if not isinstance(backfill, dict) or not backfill.get("active") or not has_window(backfill):
         return None
     return backfill
 
 
-def _window_of(backfill: Any) -> bool:
+def has_window(backfill: Any) -> bool:
     return isinstance(backfill, dict) and all(
         isinstance(backfill.get(key), (int, float)) and not isinstance(backfill.get(key), bool) for key in ("from", "to"))
 
@@ -515,7 +520,7 @@ def backfill_window(pulse_store: store.PulseStore, days: int, now: float) -> Opt
     since = pulse_store.get("memory_since")
     to = since if isinstance(since, (int, float)) and not isinstance(since, bool) else now
     backfill = pulse_store.get("memory_backfill")
-    if _window_of(backfill):
+    if has_window(backfill):
         if not backfill.get("done"):
             return backfill["from"], backfill["to"]
         to = backfill["from"]
@@ -523,11 +528,13 @@ def backfill_window(pulse_store: store.PulseStore, days: int, now: float) -> Opt
     return (start, to) if start < to else None
 
 
-def estimate(sources: Sequence[tuple[str, Path, str]], window: tuple[float, float]) -> dict[str, int]:
+def estimate(sources: Sequence[tuple[str, Path, str]], window: tuple[float, float]) -> dict[str, Any]:
     """Roughly what reading ``window`` costs: its chats, characters, chunks
     and tokens (the rows at about 4 characters a token, plus per chunk the
-    instructions, the remembered items shown beside it, and the reply)."""
+    instructions, the remembered items shown beside it, and the reply), and
+    the profiles that couldn't be read."""
     chats = chars = 0
+    unreadable = []
     for profile, home, exclude in sources:
         try:
             rows = hermes.chat_activity(home, exclude_chat=exclude, since=window[0], until=window[1],
@@ -535,12 +542,13 @@ def estimate(sources: Sequence[tuple[str, Path, str]], window: tuple[float, floa
         except hermes.HermesUnreadable:
             if not profile:
                 raise
+            unreadable.append(profile)
             continue
         chats += len(rows)
         chars += sum(int(row["chars"] or 0) for row in rows)
     chunks_ = -(-chars // (CHUNK_CHARS // 2)) if chars else 0  # chunks end early at gaps and new days
     tokens = chars // 4 + chunks_ * (len(INSTRUCTIONS) // 4 + MAX_CANDIDATES * 40 + MAX_TOKENS)
-    return {"chats": chats, "chars": chars, "chunks": chunks_, "tokens": tokens}
+    return {"chats": chats, "chars": chars, "chunks": chunks_, "tokens": tokens, "unreadable": unreadable}
 
 
 def describe(item: dict, zone: tzinfo) -> str:

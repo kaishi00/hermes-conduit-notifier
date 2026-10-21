@@ -1736,6 +1736,12 @@ def test_a_backfill_reads_the_chat_going_on_when_it_started(remembering, db):
     assert _remember(remembering, model, DAY + 60)["chunks"] == 1 and "call the bank" in model.shown[0]
     assert store_.get("memory_backfill")["active"]  # not done before its last chat was read
     assert store_.swap("memory_backfill", {"x": 1}, None) is False and store_.get("memory_backfill")["active"]
+    gone = [("", store_.path.parent, SID), ("gone", store_.path.parent / "nowhere", "")]
+    assert memory.run(store_, gone, model, zone=UTC, now=DAY + 120)["chunks"] == 0
+    assert store_.get("memory_backfill")["active"]  # a profile it couldn't read isn't done
+    assert memory.estimate(gone, (DAY - 86400, DAY))["unreadable"] == ["gone"]
+    _remember(remembering, model, DAY + 180)
+    assert store_.get("memory_backfill")["done"]
 
 
 def test_a_backfill_stopped_mid_run_is_left_alone(remembering, db):
@@ -1791,6 +1797,10 @@ def test_backfill_command(remembering, db, capsys, monkeypatch):
     store_.set("memory_backfill", None)
     store_.set("memory", False)
     assert run("start") == 1 and "memory is off" in capsys.readouterr().out
+    store_.set("memory", True)
+    store_.set("memory_since", None)  # memory hasn't run yet
+    assert run("start") == 0
+    assert store_.get("memory_since") == store_.get("memory_backfill")["to"]  # live reading starts where it ends
 
 
 def test_memory_command(remembering, db, capsys, monkeypatch):
