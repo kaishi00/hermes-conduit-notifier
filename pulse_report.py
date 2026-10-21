@@ -83,6 +83,7 @@ REPORT_NOTE = ("This turn was started by Pulse's shadow report. Follow the instr
 _ITEM = re.compile(r"^\s*(\d{1,2})[.)]\s*\[([A-Za-z-]+)\]", re.MULTILINE)
 _SOURCE = re.compile(r"^\s*(\d{1,2})[.)]\s*\[[A-Za-z-]+\].*?#(\d{1,9})\W*$", re.MULTILINE)
 _SHOWN = re.compile(r"^#(\d{1,9}) \[", re.MULTILINE)
+REMEMBERED_TITLE = "## What Pulse remembers"
 _RATING = re.compile(r"(?<![\d.])(\d{1,2})\s*[:=.)-]?\s*(yes|no|y|n|👍|👎)(?![a-z])", re.IGNORECASE)
 
 
@@ -159,7 +160,7 @@ def recent_chats(home: Path, *, home_chat_id: str, since: float, zone: tzinfo,
             continue  # another profile's chats are a bonus, not a reason to fail
         for row in rows:
             if read and row["timestamp"] > read_since and row["id"] <= read.get((profile, row["chat_id"]), 0):
-                continue  # memory read it, or skipped it after failed reads: what it kept is remembered
+                continue  # memory read it (or gave up on it after failed reads): out of the report
             text = _clip(row["content"], PER_MESSAGE)
             if not text:
                 continue
@@ -372,7 +373,7 @@ def remembered(pulse_store: store.PulseStore, zone: tzinfo, now: float) -> str:
         used += len(line) + 1
     if not lines:
         return ""
-    return "## What Pulse remembers (open items, from chats it has read)\n" + "\n".join(lines)
+    return REMEMBERED_TITLE + " (open items, from chats it has read)\n" + "\n".join(lines)
 
 
 def ratings_section(pulse_store: store.PulseStore) -> str:
@@ -478,8 +479,10 @@ def report_sources(reply: str, shown: Optional[set[int]] = None) -> dict[int, in
 
 
 def shown_items(text: str) -> set[int]:
-    """The remembered items a report message showed."""
-    return {int(n) for n in _SHOWN.findall(text or "")}
+    """The remembered items a report message showed: only lines under its
+    "What Pulse remembers" heading, so a chat quoting "#9 [fact]" adds none."""
+    _, found, rest = (text or "").partition(REMEMBERED_TITLE)
+    return {int(n) for n in _SHOWN.findall(rest.split("\n## ")[0])} if found else set()
 
 
 def parse_ratings(text: str, items: dict[int, str], sources: Optional[dict[int, int]] = None) -> list[Rating]:
@@ -493,10 +496,11 @@ def parse_ratings(text: str, items: dict[int, str], sources: Optional[dict[int, 
     return [Rating(n, items[n], useful, (sources or {}).get(n)) for n, useful in sorted(found.items())]
 
 
-def ratings_after(home: Path, *, chat_id: str, tag: str, since: float,
-                  shown: Optional[set[int]] = None) -> tuple[dict[int, str], list[Rating]]:
+def ratings_after(home: Path, *, chat_id: str, tag: str, since: float) -> tuple[dict[int, str], list[Rating]]:
     """The delivered report's items, and the user's ratings in what they
-    wrote after it in the home chat (up to the next Pulse turn)."""
+    wrote after it in the home chat (up to the next Pulse turn). A rating
+    names a remembered item only if the report message, as Hermes keeps it,
+    showed that item (Pulse trims its own copy once delivered)."""
     turn = hermes.find_turn(home, chat_id=chat_id, tag=tag, since=since)
     if turn is None or not turn.reply:
         return {}, []
@@ -504,7 +508,7 @@ def ratings_after(home: Path, *, chat_id: str, tag: str, since: float,
     if not items:
         return {}, []
     replies = hermes.user_text_after(home, session_id=turn.session_id, tag=tag)
-    return items, parse_ratings("\n".join(replies), items, report_sources(turn.reply, shown))
+    return items, parse_ratings("\n".join(replies), items, report_sources(turn.reply, shown_items(turn.prompt)))
 
 
 def ratings_json(ratings: list[Rating]) -> str:

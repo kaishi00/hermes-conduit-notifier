@@ -222,7 +222,7 @@ def test_turn_rows_follow_the_tagged_user_row(db, tmp_path):
     db.message("assistant", "")
     db.message("assistant", "Check arrived.", active=0)
     turn = hermes.find_turn(tmp_path, chat_id=SID, tag="pAAAA-1", since=0)
-    assert turn == hermes.TurnRows(SID, "Check arrived.", False, False)
+    assert turn == hermes.TurnRows(SID, "Check arrived.", False, False, "Pulse delivery check pAAAA-1.")
     db.message("user", "next")
     assert hermes.find_turn(tmp_path, chat_id=SID, tag="pAAAA-1", since=0).closed
 
@@ -1110,6 +1110,29 @@ def test_ratings_are_read_back_and_counted(live, db):
     pulse.tick(now=time.time() + 2)
     assert pulse.rating_counts(live.store) == {"commitment": (1, 0), "promise": (0, 1)}
 
+
+
+def test_a_no_on_a_remembered_item_keeps_it_out_of_later_reports(live, db):
+    db.session()
+    _due_report(live)
+    live.store.set("memory", True)
+    now = time.time()
+    [kept] = live.store.advance("", "work", message_id=1, at=now - 3600, items=[{
+        "kind": "commitment", "text": "The user will send the deck.", "evidence": "I'll send the deck",
+        "explicit": 1, "due": "", "due_at": None, "message_id": 1, "mentioned_at": now - 3600}])
+    live.store.set("report_requested", True)
+    pulse.tick()
+    row = live.store.in_flight()[0]
+    assert f"#{kept} [commitment]" in row["text"]
+    db.message("user", row["text"], display_kind="hidden")  # Hermes keeps the whole message; Pulse trims its copy
+    db.message("assistant", f"1. [commitment] Send the deck #{kept}\n2. [follow-up] Chase PR #99")
+    db.message("user", "1 no, 2 no")
+    pulse.tick(now=time.time() + 1)
+    assert f"#{kept}" not in live.store.attempt_by_tag(row["tag"])["text"]  # trimmed once delivered
+    pulse._last_ratings = 0.0
+    pulse.tick(now=time.time() + 2)
+    assert report.rated_not_useful(live.store) == {kept}  # #99 wasn't shown, so it names nothing
+    assert report.remembered(live.store, UTC, time.time()) == ""
 
 def test_report_command(live, db, capsys, monkeypatch):
     db.session()
