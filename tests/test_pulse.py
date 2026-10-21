@@ -1306,6 +1306,13 @@ def test_a_replacement_of_a_replaced_item_replaces_the_current_one(remembering):
     assert [i["id"] for i in remembering.store.open_items()] == [new]
     with remembering.store._connect() as conn:
         assert conn.execute("SELECT superseded_by FROM items WHERE id=?", (mid,)).fetchone()[0] == new
+    assert remembering.store.advance("", "work", message_id=4, at=DAY + 9, after_id=3,
+                                     items=[item("still Rome", same_as=old, mentioned_at=DAY + 9)]) == []
+    assert remembering.store.open_items()[0]["mentioned_at"] == DAY + 9  # the repeat landed on the current item
+    remembering.store.close_item(new, status="done", closed_by="user")
+    assert remembering.store.advance("", "work", message_id=5, at=DAY, after_id=4,
+                                     items=[item("Rome again", same_as=new)]) == []  # closed: already on record
+    assert remembering.store.open_items() == []
 
 
 def test_candidates_are_this_chats_items_then_the_closest_ones():
