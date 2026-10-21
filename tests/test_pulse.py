@@ -1751,6 +1751,8 @@ def test_a_backfill_stopped_mid_run_is_left_alone(remembering, db):
     for n, sid in enumerate(("work", "w2")):
         db.message("user", f"Old thing {n}", sid=sid, at=DAY - (5 - n) * 86400)
         db.message("assistant", "Ok.", sid=sid, at=DAY - (5 - n) * 86400 + 10)
+    cost = memory.estimate([("", store_.path.parent, SID)], (DAY - 30 * 86400, DAY))
+    assert (cost["chats"], cost["chunks"]) == (2, 2)  # at least one model call per chat, however short
     store_.set("memory_backfill", {"from": DAY - 30 * 86400, "to": DAY, "active": True, "done": False})
     shown = []
 

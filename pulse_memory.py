@@ -489,7 +489,7 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
             read_to = last["timestamp"]
             done["chunks"] += 1
             done["items"] += sum(1 for item in items if not item["same_as"])
-    if backfill and sorted(unreadable) != pulse_store.get("memory_backfill_unreadable"):
+    if backfill and current() and sorted(unreadable) != pulse_store.get("memory_backfill_unreadable"):
         pulse_store.set("memory_backfill_unreadable", sorted(unreadable))
         if unreadable:
             logger.warning("conduit_push: Pulse memory's backfill can't read profile(s) %s; it finishes once they "
@@ -539,7 +539,7 @@ def estimate(sources: Sequence[tuple[str, Path, str]], window: tuple[float, floa
     and tokens (the rows at about 4 characters a token, plus per chunk the
     instructions, the remembered items shown beside it, and the reply), and
     the profiles that couldn't be read."""
-    chats = chars = 0
+    chats = chars = chunks_ = 0
     unreadable = []
     for profile, home, exclude in sources:
         try:
@@ -552,7 +552,8 @@ def estimate(sources: Sequence[tuple[str, Path, str]], window: tuple[float, floa
             continue
         chats += len(rows)
         chars += sum(int(row["chars"] or 0) for row in rows)
-    chunks_ = -(-chars // (CHUNK_CHARS // 2)) if chars else 0  # chunks end early at gaps and new days
+        # A chunk never spans chats, and ends early at gaps and new days.
+        chunks_ += sum(max(1, -(-int(row["chars"] or 0) // (CHUNK_CHARS // 2))) for row in rows)
     tokens = chars // 4 + chunks_ * (len(INSTRUCTIONS) // 4 + MAX_CANDIDATES * 40 + MAX_TOKENS)
     return {"chats": chats, "chars": chars, "chunks": chunks_, "tokens": tokens, "unreadable": unreadable}
 

@@ -348,7 +348,7 @@ def _pulse_memory(pulse_store: Any, home: Any, value: str, extra: str) -> int:
         return _pulse_backfill(pulse_store, home, extra)
     if value and value not in pulse_memory.KINDS:
         print("Usage: hermes conduit-push pulse memory [" + "|".join(pulse_memory.KINDS)
-              + "|now|on|off|forget <n>|backfill [days|start|stop]]")
+              + "|now|on|off|forget <n>|backfill [days|start|stop|cancel]]")
         return 2
     items = pulse_store.open_items(value, limit=MEMORY_LIST + 1)
     if len(items) > MEMORY_LIST:
