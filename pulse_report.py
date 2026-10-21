@@ -353,10 +353,10 @@ def remembered(pulse_store: store.PulseStore, zone: tzinfo, now: float) -> str:
     """Pulse memory's open items, dated ones soonest first, then by kind
     and how recently they came up; not the ones rated "no"."""
     skip = rated_not_useful(pulse_store)
-    stale = now - pulse_memory.EXPIRE_S  # what memory's next run expires (pulse_store.expire_items)
-    items = [item for item in pulse_store.open_items(limit=MAX_REPORT_ITEMS * 3 + len(skip), soonest=True)
-             if item["id"] not in skip
-             and not (item["due_at"] is not None and item["due_at"] < stale and item["mentioned_at"] < stale)]
+    # Not what memory's next run expires either.
+    items = [item for item in pulse_store.open_items(limit=MAX_REPORT_ITEMS * 3 + len(skip), soonest=True,
+                                                     stale_before=now - pulse_memory.EXPIRE_S)
+             if item["id"] not in skip]
     order = {kind: n for n, kind in enumerate(KIND_ORDER)}
     items.sort(key=lambda item: (item["due_at"] is None, item["due_at"] or 0.0,
                                  order.get(item["kind"], len(order)), -item["mentioned_at"]))

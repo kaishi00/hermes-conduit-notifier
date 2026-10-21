@@ -456,10 +456,14 @@ class PulseStore:
         return failures
 
     def open_items(self, kind: str = "", limit: int = -1, *, profile: Optional[str] = None,
-                   soonest: bool = False) -> list[dict]:
+                   soonest: bool = False, stale_before: Optional[float] = None) -> list[dict]:
         """Open items, most recently mentioned first, or with ``soonest``
-        dated ones soonest due first and then the rest."""
+        dated ones soonest due first and then the rest. With ``stale_before``,
+        not the ones ``expire_items(due_before=stale_before)`` would close."""
         where, params = "", []
+        if stale_before is not None:
+            where, params = where + "AND NOT (due_at IS NOT NULL AND due_at < ? AND mentioned_at < ?) ", \
+                params + [stale_before, stale_before]
         if kind:
             where, params = where + "AND kind=? ", params + [kind]
         if profile is not None:
