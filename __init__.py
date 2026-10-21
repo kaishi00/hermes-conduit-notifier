@@ -333,14 +333,17 @@ def _on_session_end(**kwargs: Any) -> None:
     if _is_child(session_id):
         return
     _end_parent_turn(session_id)
+    pulse_turn = pulse.is_pulse_turn(session_id, kwargs.get("turn_id"))
     _quietly(pulse.turn_ended, session_id, kwargs.get("turn_id"))
     # A turn Hermes doesn't call failed but that didn't complete (it hit the
     # step limit) still answered: its reply goes out, not a failure. A Hermes
     # that doesn't say counts it failed, as before.
     answered = (not kwargs.get("interrupted") and kwargs.get("failed") is not True
                 and (kwargs.get("completed") or kwargs.get("failed") is False))
-    _quietly(live_activity.reporter.turn_ended, session_id,
-             "done" if answered else "stopped" if kwargs.get("interrupted") else "failed")
+    if not pulse_turn:
+        # A Pulse turn never started a Live Activity, so there is none to end.
+        _quietly(live_activity.reporter.turn_ended, session_id,
+                 "done" if answered else "stopped" if kwargs.get("interrupted") else "failed")
     if answered:
         if not _settle_ready(session_id, kwargs.get("turn_id"), "done"):
             calls.turn_ended(session_id, "done", profile=_profile, fallback=None)
@@ -349,7 +352,7 @@ def _on_session_end(**kwargs: Any) -> None:
     if kwargs.get("interrupted"):
         calls.turn_ended(session_id, "stopped", profile=_profile, fallback=None)
         return
-    if pulse.is_pulse_turn(session_id, kwargs.get("turn_id")):
+    if pulse_turn:
         # Pulse records its own failures (``pulse status``).
         return
     if cron_runs.quiet(session_id, kwargs.get("task_id")):

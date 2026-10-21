@@ -2020,4 +2020,7 @@ def test_pulse_routes(remembering, db, monkeypatch):
     got = http.get(base)
     assert got.status_code == 200 and got.json()["enabled"] is False
     assert http.get(f"{base}/memory").json()["items"] == []
+    assert http.post(f"{base}/report").json()["detail"]["code"] == "pulse_off"
+    assert http.post(f"{base}/backfill", json={"action": "stop"}).json()["detail"]["code"] == "not_running"
+    assert http.post(f"{base}/memory/forget", json={"id": 1}).json()["forgotten"] is False
     assert not (fresh / store.DB_NAME).exists()

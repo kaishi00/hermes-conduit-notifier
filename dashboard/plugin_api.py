@@ -6870,6 +6870,8 @@ _pulse_limiter = _MintLimiter(PULSE_LIMIT, PULSE_WINDOW_S, message="Too many Pul
 
 
 def _pulse_call(action: Any, reads_only: bool = False) -> Any:
+    """``reads_only``: an action that writes nothing on a host that never
+    turned Pulse on, answered there from a scratch store."""
     control = _plugin_package_module("pulse_control")
     pulse = _plugin_package_module("pulse")
     home = _calls_home()
@@ -6922,7 +6924,9 @@ async def put_pulse(request: Request, response: Response) -> Dict[str, Any]:
 async def post_pulse_report(response: Response) -> Dict[str, Any]:
     """Asks for a shadow report now."""
     response.headers["Cache-Control"] = "no-store"
-    return await _pulse_route("report", lambda control, store, home: (control.request_report(store), {})[1])
+    # Refused while Pulse is off, so a host that never turned it on keeps no file.
+    return await _pulse_route("report", lambda control, store, home: (control.request_report(store), {})[1],
+                              reads_only=True)
 
 
 @router.post("/pulse/backfill")
@@ -6949,7 +6953,8 @@ async def post_pulse_backfill(request: Request, response: Response) -> Dict[str,
             control.backfill_cancel(store)
         return control.state(store, home)
 
-    return await _pulse_route("backfill", action)
+    # Only a start can change a host that never turned Pulse on.
+    return await _pulse_route("backfill", action, reads_only=action_name != "start")
 
 
 @router.get("/pulse/memory")
@@ -6966,7 +6971,8 @@ async def post_pulse_forget(request: Request, response: Response) -> Dict[str, A
     response.headers["Cache-Control"] = "no-store"
     body = await _read_json_body(request, PULSE_MAX_BODY_BYTES)
     item_id = body.get("id") if isinstance(body, dict) else None
-    return await _pulse_route("forget", lambda control, store, home: {"forgotten": control.forget(store, item_id)})
+    return await _pulse_route("forget", lambda control, store, home: {"forgotten": control.forget(store, item_id)},
+                              reads_only=True)
 
 
 # --- Confirm prompts Hermes shows on the phone ---------------------------------
