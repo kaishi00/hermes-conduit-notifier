@@ -6869,11 +6869,15 @@ PULSE_WINDOW_S = 60.0
 _pulse_limiter = _MintLimiter(PULSE_LIMIT, PULSE_WINDOW_S, message="Too many Pulse requests; try again shortly")
 
 
-def _pulse_call(action: Any) -> Any:
+def _pulse_call(action: Any, reads_only: bool = False) -> Any:
     control = _plugin_package_module("pulse_control")
     pulse = _plugin_package_module("pulse")
     home = _calls_home()
     try:
+        if reads_only and not (Path(home) / pulse.store.DB_NAME).exists():
+            # Never turned on: answer from the defaults and leave no file behind.
+            with tempfile.TemporaryDirectory() as scratch:
+                return action(control, pulse.open_store(Path(scratch)), home)
         return action(control, pulse.open_store(home), home)
     except control.Refused as refused:
         # 409 with the reason's code, so Conduit words it; "invalid" is the caller's mistake.
@@ -6882,10 +6886,10 @@ def _pulse_call(action: Any) -> Any:
                             headers={"Cache-Control": "no-store"})
 
 
-async def _pulse_route(name: str, action: Any) -> Dict[str, Any]:
+async def _pulse_route(name: str, action: Any, reads_only: bool = False) -> Dict[str, Any]:
     try:
         _pulse_limiter.acquire("")
-        return {"ok": True, **(await asyncio.to_thread(_pulse_call, action))}
+        return {"ok": True, **(await asyncio.to_thread(_pulse_call, action, reads_only))}
     except TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
     except HTTPException as exc:
@@ -6898,7 +6902,7 @@ async def _pulse_route(name: str, action: Any) -> Dict[str, Any]:
 @router.get("/pulse")
 async def get_pulse(response: Response) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
-    return await _pulse_route("status", lambda control, store, home: control.state(store, home))
+    return await _pulse_route("status", lambda control, store, home: control.state(store, home), reads_only=True)
 
 
 @router.put("/pulse")
@@ -6952,7 +6956,8 @@ async def post_pulse_backfill(request: Request, response: Response) -> Dict[str,
 async def get_pulse_memory(response: Response, kind: str = "") -> Dict[str, Any]:
     """What Pulse remembers: open items, most recently mentioned first."""
     response.headers["Cache-Control"] = "no-store"
-    return await _pulse_route("memory", lambda control, store, home: {"items": control.items(store, kind)})
+    return await _pulse_route("memory", lambda control, store, home: {"items": control.items(store, kind)},
+                              reads_only=True)
 
 
 @router.post("/pulse/memory/forget")

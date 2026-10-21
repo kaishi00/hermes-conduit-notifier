@@ -386,10 +386,14 @@ def extract(llm: Llm, chunk: Sequence[Any], zone: tzinfo, outcomes: Sequence[dic
             remembered: Sequence[dict] = ()) -> tuple[list[dict], list[dict], int]:
     """The chunk's items, the remembered items it closes, and the tokens the
     call used."""
+    remembered_text = render_remembered(remembered, zone) or "(nothing yet)"
+    chat_text = render(chunk, zone, outcomes)
     mark = secrets.token_hex(6)
+    while mark in remembered_text or mark in chat_text:
+        mark = secrets.token_hex(6)
     instructions = INSTRUCTIONS.replace("MARK", mark)
-    text = (f"<<<remembered {mark}\n{render_remembered(remembered, zone) or '(nothing yet)'}\nremembered {mark}>>>\n\n"
-            f"<<<chat {mark}\n{render(chunk, zone, outcomes)}\nchat {mark}>>>")
+    text = (f"<<<remembered {mark}\n{remembered_text}\nremembered {mark}>>>\n\n"
+            f"<<<chat {mark}\n{chat_text}\nchat {mark}>>>")
     # What the call sent, when the model doesn't report usage: a failed call
     # is charged its input, not output it never produced.
     estimate = (len(instructions) + len(text)) // 4
@@ -425,15 +429,19 @@ def _parse(parsed: dict, chunk: Sequence[Any], zone: tzinfo,
 
 def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]], llm: Llm, *, zone: tzinfo,
         now: float, still_leader: Callable[[], bool] = lambda: True, budget: float = float("inf"),
-        reads: str = "all") -> dict[str, int]:
+        reads: str = "all", done: Optional[dict[str, int]] = None) -> dict[str, int]:
     """Reads up to ``MAX_CHUNKS`` chunks of quiet chats, or until ``budget``
     tokens are used, and keeps their items. A chunk's items and the chat's
     new watermark are written together; a failed chunk is tried again after
     ``RETRY_S``, and skipped after ``MAX_FAILURES`` tries. Once those are
     read, a backfill (``memory_backfill``) reads older history the same way,
     and is marked done when nothing in its window is left: for every
-    profile only if ``sources`` were every profile's (``reads`` "all")."""
-    done = {"chunks": 0, "items": 0, "tokens": 0, "failed": 0, "skipped": 0}
+    profile only if ``sources`` were every profile's (``reads`` "all").
+    Counts go into ``done`` as they happen, so a caller's dict keeps them
+    when the run stops on an unreadable state.db."""
+    done = {} if done is None else done
+    for key in ("chunks", "items", "tokens", "failed", "skipped"):
+        done.setdefault(key, 0)
     calls = 0
     pulse_store.expire_items(due_before=now - EXPIRE_S, now=now)
     backfill = active_backfill(pulse_store)
@@ -442,7 +450,9 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
                                     unreadable=unreadable)) if backfill else []
     window = (backfill["from"], backfill["to"]) if backfill else None
     # A backfill stopped or replaced meanwhile (`pulse memory backfill`) isn't this run's to carry on.
-    current = lambda: (lambda b: b is not None and (b["from"], b["to"]) == window)(active_backfill(pulse_store))
+    def current() -> bool:
+        active = active_backfill(pulse_store)
+        return active is not None and (active["from"], active["to"]) == window
     for chat in itertools.chain(due_chats(pulse_store, sources, now=now), backfill_chats):
         if chat.until is not None and not current():
             break

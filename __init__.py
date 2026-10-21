@@ -113,9 +113,10 @@ def register(ctx: Any) -> None:
     # notifications down with it.
     try:
         ctx.register_hook("pre_llm_call", _pre_llm_call)
+        pulse.turns_marked = True
     except Exception:  # noqa: BLE001
-        logger.warning("conduit_push: pre_llm_call hook unavailable; voice replies get no persona hint and "
-                       "Hermes doesn't hear about declined calls", exc_info=True)
+        logger.warning("conduit_push: pre_llm_call hook unavailable; voice replies get no persona hint, "
+                       "Hermes doesn't hear about declined calls and Pulse doesn't run", exc_info=True)
     # Lock Screen progress (#605): each model request and its token use.
     # Optional like the hooks above: an older Hermes without them still
     # reports tools, approvals and the end of the turn.

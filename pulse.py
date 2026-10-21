@@ -71,6 +71,9 @@ PROBE_NOTE = ("This turn was started by Pulse, the plugin that lets Hermes speak
 BLOCK_MESSAGE = "Pulse turns can't use tools."
 
 _ctx: Any = None
+# Set once pre_llm_call is registered: without it a Pulse turn isn't
+# recognized, so it would run with tools and push like the user's own.
+turns_marked = False
 _thread: Optional[threading.Thread] = None
 _stop = threading.Event()
 _wake = threading.Event()
@@ -181,9 +184,10 @@ def turn_ended(session_id: str, turn_id: Any) -> None:
         return
     with _turns_lock:
         tag = _turns.get((session_id, turn_id))
-    row = open_store().attempt_by_tag(tag) if tag else None
+    pulse_store = open_store() if tag else None
+    row = pulse_store.attempt_by_tag(tag) if pulse_store else None
     if row is not None and row["state"] in store.IN_FLIGHT:
-        open_store().update_attempt(row["attempt_id"], detail=delivery.ENDED)
+        pulse_store.update_attempt(row["attempt_id"], detail=delivery.ENDED)
     _wake.set()
 
 
@@ -229,7 +233,7 @@ def _hosts_chats() -> bool:
 def tick(now: Optional[float] = None) -> None:
     """One pass: reconcile what's in flight, read report ratings, then send
     a probe or the shadow report if one is due."""
-    if _ctx is None or not _hosts_chats():
+    if _ctx is None or not turns_marked or not _hosts_chats():
         return
     home = get_hermes_home()
     if not (Path(home) / store.DB_NAME).exists():
@@ -364,16 +368,20 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
             return  # `pulse status` says so
         profiles = pulse_store.get("report_profiles")
         sources = memory_sources(pulse_store, home, home_chat_id, profiles)
-        done = memory.run(pulse_store, sources, _memory_llm, zone=zone, now=now,
-                          reads="all" if profiles == "all" else "this",
-                          still_leader=lambda: not stopped.is_set() and _leads(pulse_store), budget=cap - used)
-        if done["tokens"]:
-            pulse_store.set("memory_today", {"day": day, "tokens": used + done["tokens"]})
-        if done["chunks"] or done["failed"] or done["tokens"]:
-            usage = pulse_store.get("memory_usage")
-            usage = usage if isinstance(usage, dict) else {}
-            pulse_store.set("memory_usage", {key: int(usage.get(key, 0) or 0) + done[key]
-                                            for key in ("chunks", "tokens", "failed", "skipped")})
+        done: dict[str, int] = {}
+        try:
+            memory.run(pulse_store, sources, _memory_llm, zone=zone, now=now,
+                       reads="all" if profiles == "all" else "this",
+                       still_leader=lambda: not stopped.is_set() and _leads(pulse_store), budget=cap - used, done=done)
+        finally:
+            # A run stopped by an unreadable state.db still spent its tokens.
+            if done.get("tokens"):
+                pulse_store.set("memory_today", {"day": day, "tokens": used + done["tokens"]})
+            if done.get("chunks") or done.get("failed") or done.get("tokens"):
+                usage = pulse_store.get("memory_usage")
+                usage = usage if isinstance(usage, dict) else {}
+                pulse_store.set("memory_usage", {key: int(usage.get(key, 0) or 0) + done.get(key, 0)
+                                                for key in ("chunks", "tokens", "failed", "skipped")})
     except Exception:  # noqa: BLE001 — the next run tries again
         logger.warning("conduit_push: Pulse memory run failed", exc_info=True)
 

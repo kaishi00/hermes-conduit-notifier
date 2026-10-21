@@ -403,6 +403,7 @@ def live(tmp_path, monkeypatch):
                                 _manager=types.SimpleNamespace(has_tui_message_injector=True))
     monkeypatch.setattr(pulse, "get_hermes_home", lambda: tmp_path)
     monkeypatch.setattr(pulse, "_ctx", ctx)
+    monkeypatch.setattr(pulse, "turns_marked", True)
     monkeypatch.setattr(pulse, "_started_at", time.time() - 10)
     monkeypatch.setattr(pulse, "_turns", {})
     monkeypatch.setattr(pulse, "_last_problem", "")
@@ -431,6 +432,17 @@ def test_nothing_is_sent_outside_the_chat_host(live, db, monkeypatch):
     live.ctx._manager.has_tui_message_injector = True
     pulse.tick()
     assert live.sent() == []
+
+
+def test_nothing_is_sent_where_pulse_turns_cant_be_recognized(live, db, monkeypatch):
+    db.session()
+    live.store.set("enabled", True)
+    monkeypatch.setattr(pulse, "turns_marked", False)  # a Hermes without pre_llm_call
+    pulse.tick()
+    assert live.sent() == []
+    monkeypatch.setattr(pulse, "turns_marked", True)
+    pulse.tick()
+    assert len(live.sent()) == 1
 
 
 def test_a_probe_goes_to_the_home_chat_once_at_a_time(live, db):
@@ -1474,6 +1486,30 @@ def _remember(live, model, now, sources=None):
     return memory.run(live.store, sources or [("", live.store.path.parent, SID)], model, zone=UTC, now=now)
 
 
+def test_tokens_spent_before_an_unreadable_state_db_are_kept(remembering, db, monkeypatch):
+    db.session("more", title="More", pinned=0)
+    db.message("user", "Remind me to renew my passport", sid="work", at=DAY + 60)
+    db.message("assistant", "Will do.", sid="work", at=DAY + 60)
+    db.message("user", "Book the dentist", sid="more", at=DAY + 60)
+    db.message("assistant", "Booked.", sid="more", at=DAY + 60)
+    model = FakeModel({"items": []})
+    read = hermes.chat_messages
+    calls = []
+
+    def flaky(*args, **kwargs):
+        calls.append(1)
+        if len(calls) > 1:
+            raise hermes.HermesUnreadable("locked")
+        return read(*args, **kwargs)
+
+    monkeypatch.setattr(hermes, "chat_messages", flaky)
+    done = {}
+    with pytest.raises(hermes.HermesUnreadable):
+        memory.run(remembering.store, [("", remembering.store.path.parent, SID)], model, zone=UTC,
+                   now=DAY + 60 + memory.IDLE_S, done=done)
+    assert (done["chunks"], done["tokens"]) == (1, 100)
+
+
 def test_a_quiet_chat_is_read_once_from_where_it_stopped(remembering, db):
     db.message("user", "home chat text", at=DAY + 10)
     db.message("user", "Remind me to renew my passport", sid="work", at=DAY + 60)
@@ -1976,3 +2012,11 @@ def test_pulse_routes(remembering, db, monkeypatch):
     assert http.post(f"{base}/memory/forget", json={"id": "x"}).status_code == 400
     assert http.get(f"{base}/memory", params={"kind": "nope"}).status_code == 400
     assert "pulse" in api.ROUTE_CAPABILITIES
+    # A host that never turned Pulse on is answered without a file left behind.
+    fresh = home / "fresh"
+    fresh.mkdir()
+    monkeypatch.setattr(api, "_calls_home", lambda: fresh)
+    got = http.get(base)
+    assert got.status_code == 200 and got.json()["enabled"] is False
+    assert http.get(f"{base}/memory").json()["items"] == []
+    assert not (fresh / store.DB_NAME).exists()
