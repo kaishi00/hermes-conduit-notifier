@@ -1561,6 +1561,33 @@ what Conduit allows:
 The tool shows only once a Conduit has synced with the profile. Limits: 20
 requested changes per device per hour, 10 per call, 8 devices per profile.
 
+## Conduit preferences synced across devices (plugin 0.54+)
+
+Every iPhone and iPad signed in to a profile shares Conduit's preferences
+through this plugin: appearance, voice settings, CarPlay and the other
+saved dashboards (label and address only). Conduit turns this on in
+**Settings > Sync across devices**.
+
+- **What's kept.** Conduit sends only the preferences it chooses to sync, to
+  `PUT /api/plugins/conduit_push/conduit-prefs`, and stores nothing else
+  here. Passwords, sign-in sessions, Cloudflare tokens, custom headers and
+  per-device consent never leave the device. The values live in the
+  profile's `conduit-prefs.json` (private to the host user).
+- **Conflicts.** The later change wins, timed by this host's clock when it
+  arrives.
+- **Moving to another host.** Either open Conduit on the new host and choose
+  **Settings > Sync across devices > Copy this device's settings here**, or
+  copy the file across from the command line:
+
+  ```bash
+  hermes conduit-push prefs export conduit-prefs.json   # on the old host
+  hermes conduit-push prefs import conduit-prefs.json   # on the new host
+  ```
+
+  `import` merges, with the imported values winning; add `--replace` to drop
+  the ones the file doesn't list. Use `hermes -p <profile> conduit-push prefs …`
+  for a profile other than the default. `prefs show` lists what's synced.
+
 ## Hermes asks you to confirm (plugin 0.34+)
 
 Before an action you should OK (sending a message for you, buying, deleting),

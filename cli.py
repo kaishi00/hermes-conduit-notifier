@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import http.client
+import json
+import os
 import socket
 import time
 from datetime import datetime
@@ -47,6 +49,15 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     pulse.add_argument("extra", nargs="?", default="",
                        help="for memory forget: the item number; for memory backfill: how many days back "
                             "(it shows what that costs), 'start', 'stop' or 'cancel'")
+    prefs = commands.add_parser(
+        "prefs",
+        help="Conduit's synced preferences: export them to a file, or import one from another host",
+    )
+    prefs.add_argument("prefs_action", choices=["show", "export", "import"])
+    prefs.add_argument("file", nargs="?", default="",
+                       help="for export: where to write (prints to the terminal without one); for import: the file to read")
+    prefs.add_argument("--replace", action="store_true",
+                       help="for import: drop the preferences the file doesn't list, instead of keeping them")
     parser.set_defaults(func=dispatch)
 
 
@@ -156,7 +167,9 @@ def dispatch(args: argparse.Namespace) -> int:
         return 0
     if action == "pulse":
         return _pulse(args)
-    print("Usage: hermes conduit-push {pair|status|test|redact|unpair|pulse}")
+    if action == "prefs":
+        return _prefs(args)
+    print("Usage: hermes conduit-push {pair|status|test|redact|unpair|pulse|prefs}")
     return 2
 
 
@@ -282,6 +295,58 @@ def _pulse(args: argparse.Namespace) -> int:
         print("Tool outcomes in the last 24 hours: "
               + (", ".join(f"{n} {status}" for status, n in sorted(outcomes.items())) or "none yet"))
     print(f"State: {pulse_store.path}")
+    return 0
+
+
+def _prefs(args: argparse.Namespace) -> int:
+    from hermes_constants import get_hermes_home
+
+    from . import prefs_store
+
+    store = prefs_store.PrefsStore(Path(get_hermes_home()))
+    action = args.prefs_action
+    path = str(getattr(args, "file", "") or "")
+    if action == "show":
+        values = store.view()["values"]
+        if not values:
+            print("No Conduit preferences are synced to this profile yet.")
+            return 0
+        for key in sorted(values):
+            entry = values[key]
+            when = datetime.fromtimestamp(entry["at"]).strftime("%Y-%m-%d %H:%M")
+            print(f"{key}: {_printable(json.dumps(entry['value'], ensure_ascii=False))[:120]} "
+                  f"({when}, {_printable(entry.get('by_name') or 'Conduit')})")
+        return 0
+    if action == "export":
+        exported = store.export()
+        encoded = json.dumps(exported, indent=2, ensure_ascii=False) + "\n"
+        if not path:
+            print(encoded, end="")
+            return 0
+        try:
+            # Private like the store itself.
+            descriptor = os.open(Path(path).expanduser(), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            if hasattr(os, "fchmod"):  # an export over an older, wider file
+                os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(encoded)
+        except OSError as error:
+            print(f"Couldn't write {path}: {error}")
+            return 1
+        print(f"Exported {len(exported['values'])} preferences to {path}. "
+              "Import it on the other host with `hermes conduit-push prefs import <file>`.")
+        return 0
+    if not path:
+        print("Name the file to import: hermes conduit-push prefs import <file> [--replace]")
+        return 2
+    try:
+        document = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
+        imported = store.import_(document, replace=bool(getattr(args, "replace", False)))
+    except (OSError, ValueError, RecursionError) as error:
+        print(f"Couldn't import {path}: {error}")
+        return 1
+    print(f"Imported. This profile now syncs {len(imported['values'])} Conduit preferences; "
+          "Conduit picks them up the next time it connects.")
     return 0
 
 

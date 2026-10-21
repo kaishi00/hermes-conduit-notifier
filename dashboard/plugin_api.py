@@ -6740,6 +6740,97 @@ async def put_conduit_settings(request: Request, response: Response, profile: Op
         raise _unexpected("settings", exc, feature="Conduit settings")
 
 
+# --- Conduit preferences synced across devices --------------------------------
+#
+# Each iPhone and iPad signed in to this profile keeps its preferences here
+# (prefs_store.py) so the others pick them up (hermes-conduit#1089). Conduit
+# chooses the keys and never sends credentials. Export and import move the
+# whole set to another host.
+
+CONDUIT_PREFS_LIMIT = 30
+CONDUIT_PREFS_WINDOW_S = 60.0
+# The store's whole map, with room for the request around it.
+CONDUIT_PREFS_MAX_BODY_BYTES = 600 * 1024
+
+_conduit_prefs_limiter = _MintLimiter(CONDUIT_PREFS_LIMIT, CONDUIT_PREFS_WINDOW_S,
+                                      message="Too many preference syncs; try again shortly")
+_prefs_store_module: Any = None
+
+
+def _prefs_store() -> Any:
+    """prefs_store.py beside this folder, loaded once."""
+    global _prefs_store_module
+    with _calls_store_lock:
+        if _prefs_store_module is None:
+            path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "prefs_store.py")
+            spec = importlib.util.spec_from_file_location("conduit_push_dashboard_prefs_store", path)
+            if spec is None or spec.loader is None:
+                raise TokenError(501, "This plugin install is missing prefs_store.py; update the plugin")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _prefs_store_module = module
+        return _prefs_store_module
+
+
+def conduit_prefs(action: str, body: Any = None, *, replace: bool = False) -> Dict[str, Any]:
+    """The installation id names a device; it doesn't authenticate one. The
+    dashboard's auth is the boundary, as on every route here. Unlike
+    /conduit-settings this needs no pairing: preferences can be imported on a
+    new host, and synced by a device that never turned on notifications."""
+    module = _prefs_store()
+    store = module.PrefsStore(_calls_home())
+    try:
+        if action == "sync":
+            return store.sync(body)
+        if action == "import":
+            return store.import_(body, replace=replace)
+        if action == "export":
+            return {"export": store.export()}
+        return store.view()
+    except module.PrefsError as exc:
+        raise TokenError(413 if exc.code in ("too_large", "too_many") else 400, str(exc))
+
+
+async def _prefs_route(profile: Optional[str], run: Callable[[], Dict[str, Any]]) -> Dict[str, Any]:
+    try:
+        _conduit_prefs_limiter.acquire(_limiter_key(profile))
+        return {"ok": True, **(await _run_scoped(profile, run))}
+    except TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
+        raise
+    except Exception as exc:
+        raise _unexpected("prefs", exc, feature="Conduit preferences")
+
+
+@router.get("/conduit-prefs")
+async def get_conduit_prefs(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    return await _prefs_route(profile, lambda: conduit_prefs("view"))
+
+
+@router.put("/conduit-prefs")
+async def put_conduit_prefs(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    body = await _read_json_body(request, CONDUIT_PREFS_MAX_BODY_BYTES)
+    return await _prefs_route(profile, lambda: conduit_prefs("sync", body))
+
+
+@router.get("/conduit-prefs/export")
+async def get_conduit_prefs_export(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    return await _prefs_route(profile, lambda: conduit_prefs("export"))
+
+
+@router.post("/conduit-prefs/import")
+async def post_conduit_prefs_import(request: Request, response: Response, profile: Optional[str] = None,
+                                    replace: bool = False) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    body = await _read_json_body(request, CONDUIT_PREFS_MAX_BODY_BYTES)
+    return await _prefs_route(profile, lambda: conduit_prefs("import", body, replace=replace))
+
+
 # --- Pulse settings ------------------------------------------------------------
 #
 # Conduit's Settings > Pulse page (TestFlight builds): Pulse's state and the
@@ -13931,6 +14022,7 @@ ROUTE_CAPABILITIES = (
     "hermes-call-presence",
     "hermes-call-outcomes",
     "conduit-settings",
+    "conduit-prefs",
     "pulse",
     "present-v1",
     "health-sync",

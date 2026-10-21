@@ -65,6 +65,7 @@ def test_every_capability_names_a_served_route_family():
         "hermes-call-presence": "/calls/presence",
         "hermes-call-outcomes": "/calls/outcomes",
         "conduit-settings": "/conduit-settings",
+        "conduit-prefs": "/conduit-prefs",
         "pulse": "/pulse",
         "present-v1": "/present/",
         "health-sync": "/health/",
