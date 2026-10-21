@@ -187,6 +187,29 @@ def test_a_refused_caller_pauses_every_turn_instead_of_retrying(reporter, relay,
     assert len(relay.posts) == 3
 
 
+def test_a_refusal_holds_back_the_rest_of_the_batch(reporter, relay, clock):
+    for session_id in ("s-1", "s-2", "s-3"):
+        reporter.turn_started(session_id)
+    relay.failure = client.RelayRejected(403, "request_rejected")
+    clock[0] += live.FIRST_DELAY_S
+    reporter.flush()
+    assert len(relay.posts) == 1
+    relay.failure = None
+    clock[0] += live.REFUSED_S
+    reporter.flush()
+    assert sorted(post["session_id"] for post in relay.posts[1:]) == ["s-1", "s-2", "s-3"]
+
+
+def test_a_working_credential_clears_the_refusal(monkeypatch):
+    state = {"relay_url": "https://relay.example", "credential": "c", "relay_rejected_at": "2026-10-21T00:00:00Z"}
+    marked = []
+    monkeypatch.setattr(client, "load_state", lambda: state)
+    monkeypatch.setattr(client, "_mark_relay_rejected", lambda sent_with, rejected: marked.append((sent_with, rejected)))
+    monkeypatch.setattr(client, "request_json", lambda url, **kwargs: {"tracked": True})
+    assert live._post_to_relay({"session_id": "s", "state": {"phase": "thinking", "tools": 0}}) == {"tracked": True}
+    assert marked == [(state, False)]
+
+
 def test_a_refused_credential_tells_status_to_pair_again(monkeypatch):
     state = {"relay_url": "https://relay.example", "credential": "c"}
     marked = []
