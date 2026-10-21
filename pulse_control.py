@@ -149,9 +149,8 @@ def backfill_start(pulse_store: Any, home: Path, days: Optional[int] = None,
     """Starts (or carries on) reading back ``days`` (else the last asked):
     {"from", "to", "days", "resumed"}."""
     now = time.time() if now is None else now
-    if days_value(days):
-        pulse_store.set("memory_backfill_days", days)
-    days = stored_days(pulse_store)
+    asked = days_value(days)
+    days = asked or stored_days(pulse_store)
     stored, backfill, _ = _backfills(pulse_store)
     window, _ = _window(pulse_store, home, days, now, starting=True)
     resuming = isinstance(backfill, dict) and not backfill.get("done") \
@@ -165,6 +164,8 @@ def backfill_start(pulse_store: Any, home: Path, days: Optional[int] = None,
         raise Refused("changed")
     if not resuming:  # older windows' marks count as none; drop them
         pulse_store.clear_backfill_marks(keep_window=window[0])
+    if asked:  # a later estimate or start without days reads the same
+        pulse_store.set("memory_backfill_days", asked)
     pulse_store.set("memory_requested", True)
     return {"from": window[0], "to": window[1], "days": days, "resumed": resuming}
 
@@ -173,12 +174,16 @@ SETTINGS = ("enabled", "memory", "daily_report", "report_profiles", "report_time
 
 
 def update(pulse_store: Any, body: Any) -> None:
-    """Applies the settings in ``body`` (any of SETTINGS), all or none:
-    booleans for "enabled", "memory" and "daily_report"; "all" or "this"
+    """Applies the settings in ``body`` (any of SETTINGS). Every value is
+    checked before any is written, so a bad one changes nothing; any other
+    key is refused too. Values: booleans for "enabled", "memory" and "daily_report"; "all" or "this"
     for "report_profiles"; a list of "HH:MM" for "report_times"; an IANA
     name, or "" for the phone's, for "time_zone"."""
     if not isinstance(body, dict):
         raise Refused("invalid", field="")
+    for field in body:
+        if field not in SETTINGS:
+            raise Refused("invalid", field=str(field)[:64])
     changes: dict[str, Any] = {}
     for field in ("enabled", "memory", "daily_report"):
         if field in body:

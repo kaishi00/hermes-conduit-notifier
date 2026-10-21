@@ -1899,7 +1899,7 @@ def test_pulse_state_and_settings_as_data(remembering, db):
     assert state["enabled"] and state["report_times"] == ["09:00", "17:30"] and state["report_profiles"] == "this"
     assert state["time_zone"] == "Europe/Paris" and state["next_report_at"] > DAY
     for bad in ({"enabled": "yes"}, {"report_times": ["25:00"]}, {"report_times": []}, {"report_profiles": "some"},
-                {"time_zone": "Mars/Base"}, {"memory": 1, "enabled": False}, []):
+                {"time_zone": "Mars/Base"}, {"memory": 1, "enabled": False}, {"report_time": "08:00"}, []):
         with pytest.raises(control.Refused) as refused:
             control.update(store_, bad)
         assert refused.value.code == "invalid"
@@ -1925,8 +1925,9 @@ def test_pulse_backfill_steps_as_data(remembering, db):
     assert started["days"] == 7 and not started["resumed"]
     assert control.state(store_, home, now=DAY + 60)["backfill"]["state"] == "reading"
     with pytest.raises(control.Refused) as refused:
-        control.backfill_start(store_, home, now=DAY + 60)
+        control.backfill_start(store_, home, 20, now=DAY + 60)
     assert refused.value.code == "reading" and refused.value.data["from"] == started["from"]
+    assert store_.get("memory_backfill_days") == 7  # a refused start doesn't change the days
     control.backfill_stop(store_)
     with pytest.raises(control.Refused, match="paused"):
         control.backfill_estimate(store_, home, 30, now=DAY + 60)
