@@ -154,7 +154,7 @@ def recent_chats(home: Path, *, home_chat_id: str, since: float, zone: tzinfo,
             continue  # another profile's chats are a bonus, not a reason to fail
         for row in rows:
             if read and row["id"] <= read.get((profile, row["chat_id"]), 0):
-                continue  # memory has read it: what mattered is under "What Pulse remembers"
+                continue  # memory read it, or skipped it after failed reads: what it kept is remembered
             text = _clip(row["content"], PER_MESSAGE)
             if not text:
                 continue
@@ -343,11 +343,11 @@ def rated_not_useful(pulse_store: store.PulseStore) -> set[int]:
     return {memory for memory, (_, useful) in latest.items() if not useful}
 
 
-def remembered(pulse_store: store.PulseStore, zone: tzinfo, now: float) -> str:
+def remembered(pulse_store: store.PulseStore, zone: tzinfo) -> str:
     """Pulse memory's open items, dated ones soonest first, then by kind
     and how recently they came up; not the ones rated "no"."""
     skip = rated_not_useful(pulse_store)
-    items = [item for item in pulse_store.open_items(limit=MAX_REPORT_ITEMS * 3) if item["id"] not in skip]
+    items = [item for item in pulse_store.open_items(limit=MAX_REPORT_ITEMS * 3, soonest=True) if item["id"] not in skip]
     order = {kind: n for n, kind in enumerate(KIND_ORDER)}
     items.sort(key=lambda item: (item["due_at"] is None, item["due_at"] or 0.0,
                                  order.get(item["kind"], len(order)), -item["mentioned_at"]))
@@ -396,7 +396,7 @@ def build(home: Path, pulse_store: store.PulseStore, *, home_chat_id: str, now: 
     header = f"## Now\n{datetime.fromtimestamp(now, zone).strftime('%A %d %B %Y, %H:%M')} ({zone_name or 'host time'})"
     start = _local(since, zone)
     memory_on = bool(pulse_store.get("memory"))
-    sections = [header, ratings_section(pulse_store), remembered(pulse_store, zone, now) if memory_on else "",
+    sections = [header, ratings_section(pulse_store), remembered(pulse_store, zone) if memory_on else "",
                 phone, cron_jobs(home, others), failed_calls(pulse_store, since, zone), memory_files(home, others)]
     sections = [section for section in sections if section]
     # With memory on, chats it has already read are covered by what it remembers.

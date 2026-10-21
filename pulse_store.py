@@ -455,7 +455,10 @@ class PulseStore:
             conn.execute("COMMIT")
         return failures
 
-    def open_items(self, kind: str = "", limit: int = -1, *, profile: Optional[str] = None) -> list[dict]:
+    def open_items(self, kind: str = "", limit: int = -1, *, profile: Optional[str] = None,
+                   soonest: bool = False) -> list[dict]:
+        """Open items, most recently mentioned first, or with ``soonest``
+        dated ones soonest due first and then the rest."""
         where, params = "", []
         if kind:
             where, params = where + "AND kind=? ", params + [kind]
@@ -463,7 +466,8 @@ class PulseStore:
             where, params = where + "AND profile=? ", params + [profile]
         with self._connect() as conn:
             rows = conn.execute(f"SELECT * FROM items WHERE status='open' AND superseded_at IS NULL {where}"
-                                f"ORDER BY mentioned_at DESC, id DESC LIMIT ?", (*params, limit)).fetchall()
+                                f"ORDER BY {'due_at IS NULL, due_at, ' if soonest else ''}mentioned_at DESC, id DESC LIMIT ?",
+                                (*params, limit)).fetchall()
         return [dict(row) for row in rows]
 
     def expire_items(self, *, due_before: float, now: float) -> int:

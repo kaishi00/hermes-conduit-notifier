@@ -979,6 +979,28 @@ def test_the_report_reads_what_memory_remembers(live, db, tmp_path):
     assert "What Pulse remembers" not in context and "send the deck to Mara before Friday" in context
 
 
+def test_a_dated_item_said_long_ago_still_leads_the_report(live, db, tmp_path):
+    now = time.time()
+    db.session()
+    store_ = live.store
+    store_.set("memory", True)
+    item = lambda n, **more: {"kind": "interest", "text": f"The user likes topic {n}.", "evidence": "x",
+                              "explicit": 1, "due": "", "due_at": None, "message_id": 1,
+                              "mentioned_at": now - 3600 + n, **more}
+    [old] = store_.advance("", "a", message_id=1, at=now - 90 * 86400, items=[item(
+        0, kind="fact", text="The user's mum's birthday is 3 March.", due="2027-03-03", due_at=now + 130 * 86400,
+        mentioned_at=now - 90 * 86400)])
+    store_.advance("", "b", message_id=1, at=now, items=[item(n) for n in range(1, report.MAX_REPORT_ITEMS * 3 + 10)])
+    remembered = report.remembered(store_, UTC)
+    assert remembered.split("\n")[1].startswith(f"#{old} [fact] The user's mum's birthday")
+
+
+def test_memory_shows_when_an_item_was_said_again():
+    item = {"id": 3, "profile": "", "text": "The user will renew the passport.", "due": "", "explicit": 1,
+            "evidence": "I need to renew my passport", "valid_from": DAY, "mentioned_at": DAY + 86400}
+    assert memory.describe(item, UTC).endswith('"I need to renew my passport" (20 Oct, said again 21 Oct)')
+
+
 def _due_report(live):
     live.store.set("enabled", True)
     live.store.set("daily_report", True)
