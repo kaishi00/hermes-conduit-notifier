@@ -1800,7 +1800,9 @@ def test_backfill_command(remembering, db, capsys, monkeypatch):
     assert run("30") == 0 and "A paused backfill back to" in capsys.readouterr().out  # no wider window yet
     assert memory.backfill_window(store_, 30, time.time()) == (backfill["from"], backfill["to"])
     assert run("start") == 0 and store_.watermarks("backfill_marks")  # carries on: its marks are kept
+    store_.set("memory_backfill_unreadable", ["gone"])
     assert run("stop") == 0 and run("cancel") == 0 and store_.watermarks("backfill_marks") == []
+    assert store_.get("memory_backfill_unreadable") == []
     cancelled = store_.get("memory_backfill")
     assert cancelled["done"] and cancelled["from"] == backfill["to"] and run("cancel") == 1
     assert "Backfill: cancelled; memory has read back to" in status()
@@ -1809,6 +1811,17 @@ def test_backfill_command(remembering, db, capsys, monkeypatch):
     store_.set("memory_backfill", {**store_.get("memory_backfill"), "active": False, "done": True})
     assert "Backfill: read back to" in status()
     assert run("7") == 0 and "already read back 7 days" in capsys.readouterr().out
+    # Read under `report this-profile`: once the report reads every profile, the others' older chats are still due.
+    finished = store_.get("memory_backfill")
+    assert finished["scope"] == "all"
+    store_.set("memory_backfill", {**finished, "scope": "this"})
+    store_.set("report_profiles", "this")
+    assert memory.backfill_window(store_, 7, time.time()) is None and memory.scope(store_) == "this"
+    store_.set("report_profiles", "all")
+    assert memory.backfill_window(store_, 7, time.time())[1] == store_.get("memory_since")
+    assert "read only this profile's older chats" in status()
+    assert memory.scope(store_, store_.get("memory_backfill")) == "this"  # carrying one on stays narrow
+    store_.set("memory_backfill", finished)
     assert run("30") == 0 and "Reading back 30 days" in capsys.readouterr().out
     store_.advance("", "w9", message_id=1, at=0, marks="backfill_marks", window=-5.0)
     assert run("start") == 0 and store_.watermarks("backfill_marks") == []  # a new, older window starts fresh

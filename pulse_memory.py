@@ -519,6 +519,20 @@ def active_backfill(pulse_store: store.PulseStore) -> Optional[dict]:
     return backfill
 
 
+def covers_scope(pulse_store: store.PulseStore, backfill: dict) -> bool:
+    """Whether a finished backfill read every profile memory reads now: one
+    read under `pulse report this-profile` doesn't count for the others once
+    the report reads every profile, so their older chats are still to read."""
+    return backfill.get("scope") != "this" or pulse_store.get("report_profiles") != "all"
+
+
+def scope(pulse_store: store.PulseStore, backfill: Any = None) -> str:
+    """The profiles a backfill starting (or carrying on) now covers: "this"
+    if it, or memory now, reads only this profile."""
+    narrow = isinstance(backfill, dict) and backfill.get("scope") == "this"
+    return "this" if narrow or pulse_store.get("report_profiles") != "all" else "all"
+
+
 def has_window(backfill: Any) -> bool:
     return isinstance(backfill, dict) and all(
         isinstance(backfill.get(key), (int, float)) and not isinstance(backfill.get(key), bool)
@@ -537,7 +551,8 @@ def backfill_window(pulse_store: store.PulseStore, days: int, now: float) -> Opt
     if has_window(backfill):
         if not backfill.get("done"):
             return backfill["from"], backfill["to"]
-        to = backfill["from"]
+        if covers_scope(pulse_store, backfill):
+            to = backfill["from"]
     start = now - days * 86400.0
     return (start, to) if start < to else None
 
