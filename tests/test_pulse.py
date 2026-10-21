@@ -1764,6 +1764,13 @@ def test_a_backfill_stopped_mid_run_is_left_alone(remembering, db):
     assert _remember(remembering, model, DAY + 3600)["chunks"] == 0 and len(shown) == 1
     assert store_.watermarks("backfill_marks") == []  # the chunk in flight when it stopped isn't kept
     assert store_.get("memory_backfill")["active"] is False and not store_.get("memory_backfill")["done"]
+    # A chunk that lands after `cancel` keeps its old window's stamp, so the next window reads that chat afresh.
+    assert store_.advance("", "work", message_id=7, at=0, marks="backfill_marks", window=1.0) == []
+    assert store_.watermarks("backfill_marks", 2.0) == [] and len(store_.watermarks("backfill_marks", 1.0)) == 1
+    assert store_.advance("", "work", message_id=3, at=0, marks="backfill_marks", window=2.0) == []
+    assert [mark["message_id"] for mark in store_.watermarks("backfill_marks", 2.0)] == [3]
+    assert store_.watermarks("backfill_marks", 1.0) == []
+    assert not memory.has_window({"from": 1e30, "to": 2e30}) and not memory.has_window({"from": -1.0, "to": 2.0})
 
 
 def test_backfill_command(remembering, db, capsys, monkeypatch):

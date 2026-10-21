@@ -154,11 +154,14 @@ CREATE TABLE IF NOT EXISTS backfill_marks (
     at REAL NOT NULL,
     failures INTEGER NOT NULL DEFAULT 0,
     retry_at REAL NOT NULL DEFAULT 0,
+    window_from REAL NOT NULL DEFAULT 0,
     PRIMARY KEY (profile, chat_id)
 );
 """
 # Where memory has read each chat to: ``watermarks`` for chats as they
-# happen, ``backfill_marks`` for a backfill of older history (same shape).
+# happen, ``backfill_marks`` for a backfill of older history (same shape, plus
+# the start of the window each mark belongs to: a mark from another window,
+# say one written as a backfill was cancelled, counts as no mark).
 MARKS = ("watermarks", "backfill_marks")
 
 
@@ -403,11 +406,23 @@ class PulseStore:
                                (profile, chat_id)).fetchone()
         return dict(row) if row else None
 
-    def watermarks(self, marks: str = "watermarks") -> list[dict]:
+    def watermarks(self, marks: str = "watermarks", window: Optional[float] = None) -> list[dict]:
+        """Where each chat was read to; with ``window``, only that backfill window's marks."""
         _check_marks(marks)
         with self._connect() as conn:
-            rows = conn.execute(f"SELECT * FROM {marks}").fetchall()
+            if marks == "backfill_marks" and window is not None:
+                rows = conn.execute("SELECT * FROM backfill_marks WHERE window_from=?", (window,)).fetchall()
+            else:
+                rows = conn.execute(f"SELECT * FROM {marks}").fetchall()
         return [dict(row) for row in rows]
+
+    @staticmethod
+    def _mark(conn: Any, marks: str, profile: str, chat_id: str, window: float) -> Optional[Any]:
+        row = conn.execute(f"SELECT * FROM {marks} WHERE profile=? AND chat_id=?", (profile, chat_id)).fetchone()
+        if row is not None and marks == "backfill_marks" and row["window_from"] != window:
+            conn.execute("DELETE FROM backfill_marks WHERE profile=? AND chat_id=?", (profile, chat_id))
+            return None  # another window's mark
+        return row
 
     def clear_backfill_marks(self) -> None:
         with _lock, self._connect() as conn:
@@ -415,7 +430,7 @@ class PulseStore:
 
     def advance(self, profile: str, chat_id: str, *, message_id: int, at: float,
                 items: Sequence[dict[str, Any]] = (), closed: Sequence[dict[str, Any]] = (),
-                after_id: int = 0, marks: str = "watermarks") -> Optional[list[int]]:
+                after_id: int = 0, marks: str = "watermarks", window: float = 0.0) -> Optional[list[int]]:
         """Records a read chunk: its items, the remembered items it repeats,
         replaces or closes, and the chat read up to row ``message_id``
         (written at ``at``), in one transaction, so a chunk is never half
@@ -427,7 +442,7 @@ class PulseStore:
         due date it lacked) up to date; one with ``replaces`` supersedes the
         old item, which is kept with when and by what it stopped being true.
         Nothing is deleted. ``marks`` names the table that says where the
-        chat was read to (MARKS)."""
+        chat was read to (MARKS), and ``window`` the backfill window's start."""
         _check_marks(marks)
         columns = ("profile", "chat_id", "message_id", "kind", "text", "evidence", "explicit", "due", "due_at",
                    "mentioned_at", "recorded_at", "valid_from")
@@ -435,8 +450,7 @@ class PulseStore:
         now, ids = time.time(), []
         with _lock, self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(f"SELECT message_id FROM {marks} WHERE profile=? AND chat_id=?",
-                               (profile, chat_id)).fetchone()
+            row = self._mark(conn, marks, profile, chat_id, window)
             if (row["message_id"] if row else 0) != after_id:
                 conn.execute("ROLLBACK")
                 return None
@@ -475,11 +489,14 @@ class PulseStore:
                 f"INSERT INTO {marks}(profile, chat_id, message_id, at) VALUES(?,?,?,?) "
                 "ON CONFLICT(profile, chat_id) DO UPDATE SET message_id=excluded.message_id, at=excluded.at, "
                 "failures=0, retry_at=0", (profile, chat_id, message_id, at))
+            if marks == "backfill_marks":
+                conn.execute("UPDATE backfill_marks SET window_from=? WHERE profile=? AND chat_id=?",
+                             (window, profile, chat_id))
             conn.execute("COMMIT")
         return ids
 
     def chunk_failed(self, profile: str, chat_id: str, *, retry_at: float, after_id: int = 0,
-                     now: float = 0.0, marks: str = "watermarks") -> int:
+                     now: float = 0.0, marks: str = "watermarks", window: float = 0.0) -> int:
         """Counts a failed read of the chat's next chunk, unless another
         reader moved the chat past ``after_id`` or already counted a failure
         that is still waiting for its retry; returns the count, or 0 when
@@ -487,8 +504,7 @@ class PulseStore:
         _check_marks(marks)
         with _lock, self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(f"SELECT message_id, failures, retry_at FROM {marks} WHERE profile=? AND chat_id=?",
-                               (profile, chat_id)).fetchone()
+            row = self._mark(conn, marks, profile, chat_id, window)
             if (row["message_id"] if row else 0) != after_id:
                 conn.execute("ROLLBACK")
                 return 0
@@ -499,6 +515,9 @@ class PulseStore:
                 f"INSERT INTO {marks}(profile, chat_id, message_id, at, failures, retry_at) VALUES(?,?,0,0,1,?) "
                 "ON CONFLICT(profile, chat_id) DO UPDATE SET failures=failures+1, retry_at=excluded.retry_at",
                 (profile, chat_id, retry_at))
+            if marks == "backfill_marks":
+                conn.execute("UPDATE backfill_marks SET window_from=? WHERE profile=? AND chat_id=?",
+                             (window, profile, chat_id))
             failures = conn.execute(f"SELECT failures FROM {marks} WHERE profile=? AND chat_id=?",
                                     (profile, chat_id)).fetchone()["failures"]
             conn.execute("COMMIT")

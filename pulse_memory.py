@@ -64,6 +64,8 @@ MAX_CANDIDATES = 30
 MAX_OPEN = 500
 # An item whose due date passed this long ago, with nothing since, expires.
 EXPIRE_S = 7 * 86400.0
+# Past any real date (year 5138): a stored time beyond it is corrupt, and datetime can't show it.
+MAX_EPOCH = 1e11
 # Who may say each kind; a fact can come from either.
 SPEAKERS = {"commitment": "user", "intention": "user", "interest": "user", "watch": "user",
             "promise": "assistant"}
@@ -134,6 +136,7 @@ class Chat:
     read_to: float  # when the last row already read was written (``since`` when none)
     until: Optional[float] = None  # a backfill reads only rows written up to this time
     marks: str = "watermarks"  # where this read is recorded (pulse_store.MARKS)
+    window: float = 0.0  # a backfill's window start, which its marks carry
 
 
 def _text(content: Any) -> str:
@@ -174,7 +177,8 @@ def due_chats(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, 
         since, until, table = pulse_store.get("memory_since"), None, "watermarks"
     if not isinstance(since, (int, float)) or isinstance(since, bool):
         return
-    marks: dict[tuple[str, str], dict] = {(m["profile"], m["chat_id"]): m for m in pulse_store.watermarks(table)}
+    marks: dict[tuple[str, str], dict] = {(m["profile"], m["chat_id"]): m
+                                          for m in pulse_store.watermarks(table, since if window else None)}
     for profile, home, exclude in sources:
         try:
             rows = hermes.chat_activity(home, exclude_chat=exclude, since=since, until=until)
@@ -193,13 +197,14 @@ def due_chats(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, 
             if mark and (mark["retry_at"] > now or mark["message_id"] >= row["last_id"]):
                 continue
             if mark and mark["message_id"] > 0:
-                yield Chat(profile, home, row["chat_id"], mark["message_id"], since, mark["at"], until, table)
+                yield Chat(profile, home, row["chat_id"], mark["message_id"], since, mark["at"], until, table,
+                           since if window else 0.0)
                 continue
             if row["parent"] in behind:
                 continue
             parent = marks.get((profile, row["parent"])) if row["parent"] else None
             start = max(since, parent["at"]) if parent and parent["message_id"] > 0 else since
-            yield Chat(profile, home, row["chat_id"], 0, start, start, until, table)
+            yield Chat(profile, home, row["chat_id"], 0, start, start, until, table, since if window else 0.0)
 
 
 def chunks(rows: Sequence[Any], zone: tzinfo, now: float) -> list[list[Any]]:
@@ -466,7 +471,8 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
                 if not still_leader() or (chat.until is not None and not current()):
                     return done
                 failures = pulse_store.chunk_failed(chat.profile, chat.chat_id, retry_at=now + RETRY_S,
-                                                    after_id=chat.after_id, now=now, marks=chat.marks)
+                                                    after_id=chat.after_id, now=now, marks=chat.marks,
+                                                    window=chat.window)
                 if not failures:
                     break  # another process read this chunk meanwhile
                 done["failed"] += 1
@@ -477,13 +483,14 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
                                    "nothing from it is remembered", failures)
                     done["skipped"] += 1
                     pulse_store.advance(chat.profile, chat.chat_id, message_id=last["id"], at=last["timestamp"],
-                                        after_id=chat.after_id, marks=chat.marks)
+                                        after_id=chat.after_id, marks=chat.marks, window=chat.window)
                 break  # the rest of this chat waits for its next run
             done["tokens"] += tokens  # spent whether or not the chunk is kept
             if not still_leader() or (chat.until is not None and not current()):
                 return done  # stopped (or the backfill stopped) during the call: keep nothing
             if pulse_store.advance(chat.profile, chat.chat_id, message_id=last["id"], at=last["timestamp"],
-                                   items=items, closed=closed, after_id=chat.after_id, marks=chat.marks) is None:
+                                   items=items, closed=closed, after_id=chat.after_id, marks=chat.marks,
+                                   window=chat.window) is None:
                 break  # another process read this chunk meanwhile
             chat = replace(chat, after_id=last["id"], read_to=last["timestamp"])
             read_to = last["timestamp"]
@@ -495,7 +502,8 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
             logger.warning("conduit_push: Pulse memory's backfill can't read profile(s) %s; it finishes once they "
                            "can be read", ", ".join(unreadable))
     if backfill and not backfill_chats and not unreadable and still_leader() and not any(
-            mark["failures"] and mark["retry_at"] > now for mark in pulse_store.watermarks("backfill_marks")) \
+            mark["failures"] and mark["retry_at"] > now
+            for mark in pulse_store.watermarks("backfill_marks", backfill["from"])) \
             and pulse_store.swap("memory_backfill", backfill, {**backfill, "active": False, "done": True}):
         logger.info("conduit_push: Pulse memory finished reading chats back to %s", backfill["from"])
     return done
@@ -513,8 +521,8 @@ def active_backfill(pulse_store: store.PulseStore) -> Optional[dict]:
 
 def has_window(backfill: Any) -> bool:
     return isinstance(backfill, dict) and all(
-        isinstance(backfill.get(key), (int, float)) and not isinstance(backfill.get(key), bool) for key in ("from", "to")
-    ) and backfill["from"] <= backfill["to"]
+        isinstance(backfill.get(key), (int, float)) and not isinstance(backfill.get(key), bool)
+        and 0 <= backfill[key] <= MAX_EPOCH for key in ("from", "to")) and backfill["from"] <= backfill["to"]
 
 
 def backfill_window(pulse_store: store.PulseStore, days: int, now: float) -> Optional[tuple[float, float]]:
