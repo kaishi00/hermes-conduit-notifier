@@ -1284,7 +1284,7 @@ def test_the_model_sees_what_is_remembered_and_can_repeat_replace_or_close_it():
                   {"number": 9, "status": "done", "evidence": "Lease renewed!", "line": 1},  # never shown
                   {"number": 4, "status": "done", "evidence": "never said", "line": 2}]})
     items, closed, _ = memory.extract(model, chunk, UTC, remembered=remembered)
-    assert "[4] promise: Hermes will check the build." in model.shown[0]
+    assert "#4 promise: Hermes will check the build. (said 2026-10-20: \"I'll check the build\")" in model.shown[0]
     assert model.shown[0].index("<<<remembered") < model.shown[0].index("<<<chat")
     assert [(i["kind"], i["same_as"], i["replaces"]) for i in items] == [
         ("promise", 4, None), ("fact", None, 5), ("commitment", None, None), ("commitment", 3, None)]
@@ -1369,7 +1369,8 @@ def test_a_quiet_chat_is_read_once_from_where_it_stopped(remembering, db):
     db.message("user", "Also book the vet", sid="work", at=DAY + 7300)
     db.message("assistant", "Sure.", sid="work", at=DAY + 7310)
     _remember(remembering, model, DAY + 7310 + memory.IDLE_S)
-    assert "renew my passport" not in model.shown[1] and "Also book the vet" in model.shown[1]
+    chat = model.shown[1].split("<<<chat")[1]
+    assert "renew my passport" not in chat and "Also book the vet" in chat  # read once (it's remembered, above)
     assert remembering.store.item_counts() == {"commitment": 1}
 
 
@@ -1384,7 +1385,7 @@ def test_repeats_update_one_item_and_changes_supersede_it(remembering, db):
     db.message("assistant", "Noted.", sid="work", at=DAY + 9010)
     model = FakeModel({"items": [{**item, "same_as": first["id"]}]})
     done = _remember(remembering, model, DAY + 9010 + memory.IDLE_S)
-    assert done["items"] == 0 and f"[{first['id']}] commitment" in model.shown[0]
+    assert done["items"] == 0 and f"#{first['id']} commitment" in model.shown[0]
     [again] = remembering.store.open_items()
     assert again["id"] == first["id"] and again["mentioned_at"] == DAY + 9000
     db.message("user", "Actually I'll renew it on Friday instead", sid="work", at=DAY + 20000)
