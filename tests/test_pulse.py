@@ -938,6 +938,47 @@ def test_items_and_ratings_are_read_from_the_text():
     assert report.parse_ratings("I said no 1 time", items) == []
 
 
+def test_report_lines_name_the_remembered_item_they_came_from():
+    reply = ("Here's what I would have brought up:\n1. [commitment] Send the deck (said in Work) #12\n"
+             "2. [promise] Check the build (tool calls)\n3. [follow-up] Ask about #4 tickets\n"
+             "4. [date] Mum's birthday (#7).\nRate them: reply like 1 yes, 2 no.")
+    sources = report.report_sources(reply)
+    assert sources == {1: 12, 4: 7}  # a "#4" inside the sentence isn't a source
+    ratings = report.parse_ratings("1 yes, 2 no, 4 no", report.report_items(reply), sources)
+    assert ratings == [report.Rating(1, "commitment", True, 12), report.Rating(2, "promise", False),
+                       report.Rating(4, "date", False, 7)]
+    assert report.ratings_from_json(report.ratings_json(ratings)) == ratings
+    assert report.ratings_from_json('[[1, "promise", true]]') == [report.Rating(1, "promise", True)]  # older rows
+    assert report.ratings_from_json('[[1], "x"]') == [] and report.ratings_from_json("{") == []
+
+
+def test_the_report_reads_what_memory_remembers(live, db, tmp_path):
+    now = time.time()
+    _report_day(db, now)
+    db.message("user", "Book the vet next week", sid="work", at=now - 1800)
+    store_ = live.store
+    store_.set("memory", True)
+    mark = max(row["id"] for row in hermes.recent_messages(tmp_path, exclude_chat=SID, since=now - 7200)
+               if row["content"].startswith("Noted"))
+    item = lambda text, kind="commitment", **more: {
+        "kind": kind, "text": text, "evidence": text, "explicit": 1, "due": "", "due_at": None, "message_id": mark,
+        "mentioned_at": now - 3600, **more}
+    ids = store_.advance("", "work", message_id=mark, at=now - 3500, items=[
+        item("The user will send the deck to Mara.", due="2026-10-23", due_at=now + 86400),
+        item("The user's sister is Ana.", kind="fact"), item("Hermes will check the build.", kind="promise")])
+    store_.set_ratings("a1", json.dumps({1: "fact"}), report.ratings_json([report.Rating(1, "fact", False, ids[1])]))
+    context, _ = report.build(tmp_path, store_, home_chat_id=SID, now=now)
+    remembered = context.split("## What Pulse remembers")[1].split("\n## ")[0]
+    assert remembered.index(f"#{ids[0]} [commitment]") < remembered.index(f"#{ids[2]} [promise]")  # dated first
+    assert "(due 2026-10-23)" in remembered and "sister" not in remembered  # rated "no"
+    assert "## How the user rated earlier reports\n- fact: 0 useful, 1 not" in context
+    chats = context.split("that memory hasn't read yet")[1]
+    assert "Book the vet next week" in chats and "send the deck to Mara before Friday" not in chats
+    store_.set("memory", False)
+    context, _ = report.build(tmp_path, store_, home_chat_id=SID, now=now)
+    assert "What Pulse remembers" not in context and "send the deck to Mara before Friday" in context
+
+
 def _due_report(live):
     live.store.set("enabled", True)
     live.store.set("daily_report", True)

@@ -440,12 +440,7 @@ def _collect_ratings(pulse_store: store.PulseStore, home: Path, now: float) -> N
 
 def rating_counts(pulse_store: store.PulseStore) -> dict[str, tuple[int, int]]:
     """Kind -> (rated useful, rated not), over every rated report."""
-    counts: dict[str, list[int]] = {}
-    for row in pulse_store.all_ratings():
-        for rating in report.ratings_from_json(row["ratings_json"]):
-            pair = counts.setdefault(rating.kind, [0, 0])
-            pair[0 if rating.useful else 1] += 1
-    return {kind: (yes, no) for kind, (yes, no) in sorted(counts.items())}
+    return report.rating_counts(pulse_store)
 
 
 def _log_problem(problem: str) -> None:
