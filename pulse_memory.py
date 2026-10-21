@@ -473,8 +473,8 @@ def describe(item: dict, zone: tzinfo) -> str:
     where = f"[{item['profile']}] " if item["profile"] else ""
     due = f" (due {item['due']})" if item["due"] else ""
     # The quote is from when the item was first said; a repeat moves only the last mention.
-    said = _local(item["valid_from"], zone).strftime("%d %b")
-    last = _local(item["mentioned_at"], zone).strftime("%d %b")
-    again = f", said again {last}" if last != said else ""
+    first, latest = _local(item["valid_from"], zone), _local(item["mentioned_at"], zone)
+    said = first.strftime("%d %b")
+    again = f", said again {latest.strftime('%d %b')}" if latest.date() != first.date() else ""
     inferred = "" if item["explicit"] else ", inferred"
     return f"#{item['id']} {where}{item['text']}{due}\n    \"{item['evidence']}\" ({said}{again}{inferred})"

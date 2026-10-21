@@ -431,7 +431,8 @@ def _collect_ratings(pulse_store: store.PulseStore, home: Path, now: float) -> N
             continue
         try:
             items, ratings = report.ratings_after(home, chat_id=row["session_key"], tag=row["tag"],
-                                                  since=row["created_at"] - delivery.SINCE_SLACK_S)
+                                                  since=row["created_at"] - delivery.SINCE_SLACK_S,
+                                                  shown=report.shown_items(row["text"]))
         except hermes.HermesUnreadable:
             continue
         if items:

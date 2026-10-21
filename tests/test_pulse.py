@@ -950,6 +950,10 @@ def test_report_lines_name_the_remembered_item_they_came_from():
     assert report.ratings_from_json(report.ratings_json(ratings)) == ratings
     assert report.ratings_from_json('[[1, "promise", true]]') == [report.Rating(1, "promise", True)]  # older rows
     assert report.ratings_from_json('[[1], "x"]') == [] and report.ratings_from_json("{") == []
+    assert report.ratings_from_json('[["a", "x", true], [2, "fact", false, 7]]') == [report.Rating(2, "fact", False, 7)]
+    shown = report.shown_items("## What Pulse remembers\n#12 [commitment] Send the deck\n#3 [fact] x")
+    assert shown == {12, 3} and report.report_sources(reply, shown) == {1: 12}  # #7 wasn't in the report
+    assert report.report_items("1. [fact] The vet") == {1: "fact"}  # a remembered kind keeps its name
 
 
 def test_the_report_reads_what_memory_remembers(live, db, tmp_path):
@@ -974,6 +978,9 @@ def test_the_report_reads_what_memory_remembers(live, db, tmp_path):
     assert "## How the user rated earlier reports\n- fact: 0 useful, 1 not" in context
     chats = context.split("that memory hasn't read yet")[1]
     assert "Book the vet next week" in chats and "send the deck to Mara before Friday" not in chats
+    store_.set("memory_since", now - 2000)  # memory never read what came before it was turned on
+    context, _ = report.build(tmp_path, store_, home_chat_id=SID, now=now)
+    assert "send the deck to Mara before Friday" in context.split("that memory hasn't read yet")[1]
     store_.set("memory", False)
     context, _ = report.build(tmp_path, store_, home_chat_id=SID, now=now)
     assert "What Pulse remembers" not in context and "send the deck to Mara before Friday" in context
@@ -991,14 +998,18 @@ def test_a_dated_item_said_long_ago_still_leads_the_report(live, db, tmp_path):
         0, kind="fact", text="The user's mum's birthday is 3 March.", due="2027-03-03", due_at=now + 130 * 86400,
         mentioned_at=now - 90 * 86400)])
     store_.advance("", "b", message_id=1, at=now, items=[item(n) for n in range(1, report.MAX_REPORT_ITEMS * 3 + 10)])
-    remembered = report.remembered(store_, UTC)
+    remembered = report.remembered(store_, UTC, now)
     assert remembered.split("\n")[1].startswith(f"#{old} [fact] The user's mum's birthday")
+    [late] = store_.advance("", "c", message_id=1, at=now, items=[item(0, due="2026-01-01", due_at=now - 30 * 86400)])
+    assert f"#{late} " not in report.remembered(store_, UTC, now)  # long past due, waiting for expiry
 
 
 def test_memory_shows_when_an_item_was_said_again():
     item = {"id": 3, "profile": "", "text": "The user will renew the passport.", "due": "", "explicit": 1,
             "evidence": "I need to renew my passport", "valid_from": DAY, "mentioned_at": DAY + 86400}
     assert memory.describe(item, UTC).endswith('"I need to renew my passport" (20 Oct, said again 21 Oct)')
+    assert memory.describe({**item, "mentioned_at": DAY + 365 * 86400}, UTC).endswith("(20 Oct, said again 20 Oct)")
+    assert memory.describe({**item, "mentioned_at": DAY + 600}, UTC).endswith("(20 Oct)")
 
 
 def _due_report(live):
