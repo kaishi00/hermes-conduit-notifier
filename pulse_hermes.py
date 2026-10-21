@@ -145,25 +145,29 @@ def recent_messages(home: Path, *, exclude_chat: str, since: float, max_chars: i
     ), (exclude_chat, exclude_chat, max_chars, since, limit))
 
 
-def chat_activity(home: Path, *, exclude_chat: str, since: float) -> list[sqlite3.Row]:
-    """Per chat a person wrote in after ``since`` (as in ``recent_messages``):
-    its id, the chat it continued from, its newest row's id and time."""
+def chat_activity(home: Path, *, exclude_chat: str, since: float,
+                  until: Optional[float] = None, max_chars: int = 2000) -> list[sqlite3.Row]:
+    """Per chat a person wrote in after ``since`` (and up to ``until``, as
+    in ``recent_messages``): its id, the chat it continued from, its newest
+    such row's id and time, and how many characters its rows hold, each
+    counted up to ``max_chars``."""
     return _run(home, (
         _EXCLUDED + "SELECT s.id AS chat_id, s.parent_session_id AS parent, MAX(m.id) AS last_id, "
-        "MAX(m.timestamp) AS last_at FROM messages m JOIN sessions s ON s.id = m.session_id "
-        "WHERE m.timestamp > ? AND " + _PERSON_ROWS + " GROUP BY s.id ORDER BY last_at"
-    ), (exclude_chat, exclude_chat, since))
+        "MAX(m.timestamp) AS last_at, SUM(MIN(LENGTH(m.content), ?)) AS chars FROM messages m "
+        "JOIN sessions s ON s.id = m.session_id WHERE m.timestamp > ? AND m.timestamp <= ? AND "
+        + _PERSON_ROWS + " GROUP BY s.id ORDER BY last_at"
+    ), (exclude_chat, exclude_chat, max_chars, since, float("inf") if until is None else until))
 
 
 def chat_messages(home: Path, *, chat_id: str, after_id: int, since: float, max_chars: int,
-                  limit: int) -> list[sqlite3.Row]:
+                  limit: int, until: Optional[float] = None) -> list[sqlite3.Row]:
     """One chat's visible user and assistant rows after row ``after_id`` and
-    time ``since``, oldest first, each cut to ``max_chars``."""
+    time ``since`` (up to ``until``), oldest first, each cut to ``max_chars``."""
     return _run(home, (
         "SELECT id, role, substr(content, 1, ?) AS content, timestamp FROM messages "
-        "WHERE session_id = ? AND id > ? AND timestamp > ? AND role IN ('user', 'assistant') AND active = 1 "
-        "AND display_kind IS NULL ORDER BY id LIMIT ?"
-    ), (max_chars, chat_id, after_id, since, limit))
+        "WHERE session_id = ? AND id > ? AND timestamp > ? AND timestamp <= ? AND role IN ('user', 'assistant') "
+        "AND active = 1 AND display_kind IS NULL ORDER BY id LIMIT ?"
+    ), (max_chars, chat_id, after_id, since, float("inf") if until is None else until, limit))
 
 
 def user_text_after(home: Path, *, session_id: str, tag: str) -> list[str]:

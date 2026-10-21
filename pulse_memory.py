@@ -25,10 +25,11 @@ any other auxiliary model.
 
 from __future__ import annotations
 
+import itertools
 import logging
 import re
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, tzinfo
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional, Sequence
@@ -131,6 +132,8 @@ class Chat:
     after_id: int  # read rows after this one...
     since: float  # ...written after this time
     read_to: float  # when the last row already read was written (``since`` when none)
+    until: Optional[float] = None  # a backfill reads only rows written up to this time
+    marks: str = "watermarks"  # where this read is recorded (pulse_store.MARKS)
 
 
 def _text(content: Any) -> str:
@@ -156,19 +159,23 @@ def _local(epoch: float, zone: tzinfo) -> datetime:
 # Which chats, and which part of them ------------------------------------------
 
 def due_chats(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]], *,
-              now: float) -> Iterator[Chat]:
+              now: float, window: Optional[tuple[float, float]] = None) -> Iterator[Chat]:
     """Chats with rows not read yet that have been quiet for ``IDLE_S``, in
     each source (profile, home, home chat to leave out). A chat Hermes
     continued from another (compression) starts where its parent stopped,
     so it waits while its parent still has rows to read: compression copies
-    some of them into it."""
-    since = pulse_store.get("memory_since")
+    some of them into it. With ``window`` (from, to), a backfill: only rows
+    written in it, recorded in their own marks."""
+    if window:
+        (since, until), table = window, "backfill_marks"
+    else:
+        since, until, table = pulse_store.get("memory_since"), None, "watermarks"
     if not isinstance(since, (int, float)) or isinstance(since, bool):
         return
-    marks: dict[tuple[str, str], dict] = {(m["profile"], m["chat_id"]): m for m in pulse_store.watermarks()}
+    marks: dict[tuple[str, str], dict] = {(m["profile"], m["chat_id"]): m for m in pulse_store.watermarks(table)}
     for profile, home, exclude in sources:
         try:
-            rows = hermes.chat_activity(home, exclude_chat=exclude, since=since)
+            rows = hermes.chat_activity(home, exclude_chat=exclude, since=since, until=until)
         except hermes.HermesUnreadable:
             if not profile:
                 raise
@@ -182,13 +189,13 @@ def due_chats(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, 
             if mark and (mark["retry_at"] > now or mark["message_id"] >= row["last_id"]):
                 continue
             if mark and mark["message_id"] > 0:
-                yield Chat(profile, home, row["chat_id"], mark["message_id"], since, mark["at"])
+                yield Chat(profile, home, row["chat_id"], mark["message_id"], since, mark["at"], until, table)
                 continue
             if row["parent"] in behind:
                 continue
             parent = marks.get((profile, row["parent"])) if row["parent"] else None
             start = max(since, parent["at"]) if parent and parent["message_id"] > 0 else since
-            yield Chat(profile, home, row["chat_id"], 0, start, start)
+            yield Chat(profile, home, row["chat_id"], 0, start, start, until, table)
 
 
 def chunks(rows: Sequence[Any], zone: tzinfo, now: float) -> list[list[Any]]:
@@ -412,14 +419,19 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
     """Reads up to ``MAX_CHUNKS`` chunks of quiet chats, or until ``budget``
     tokens are used, and keeps their items. A chunk's items and the chat's
     new watermark are written together; a failed chunk is tried again after
-    ``RETRY_S``, and skipped after ``MAX_FAILURES`` tries."""
+    ``RETRY_S``, and skipped after ``MAX_FAILURES`` tries. Once those are
+    read, a backfill (``memory_backfill``) reads older history the same way,
+    and is marked done when nothing in its window is left."""
     done = {"chunks": 0, "items": 0, "tokens": 0, "failed": 0, "skipped": 0}
     calls = 0
     pulse_store.expire_items(due_before=now - EXPIRE_S, now=now)
-    for chat in due_chats(pulse_store, sources, now=now):
+    backfill = active_backfill(pulse_store)
+    backfill_chats = list(due_chats(pulse_store, sources, now=now, window=(backfill["from"], backfill["to"]))) \
+        if backfill else []
+    for chat in itertools.chain(due_chats(pulse_store, sources, now=now), backfill_chats):
         try:
             rows = hermes.chat_messages(chat.home, chat_id=chat.chat_id, after_id=chat.after_id, since=chat.since,
-                                        max_chars=PER_MESSAGE, limit=MAX_ROWS)
+                                        max_chars=PER_MESSAGE, limit=MAX_ROWS, until=chat.until)
         except hermes.HermesUnreadable:
             if not chat.profile:
                 raise
@@ -443,7 +455,7 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
                 if not still_leader():
                     return done
                 failures = pulse_store.chunk_failed(chat.profile, chat.chat_id, retry_at=now + RETRY_S,
-                                                    after_id=chat.after_id, now=now)
+                                                    after_id=chat.after_id, now=now, marks=chat.marks)
                 if not failures:
                     break  # another process read this chunk meanwhile
                 done["failed"] += 1
@@ -454,19 +466,69 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
                                    "nothing from it is remembered", failures)
                     done["skipped"] += 1
                     pulse_store.advance(chat.profile, chat.chat_id, message_id=last["id"], at=last["timestamp"],
-                                        after_id=chat.after_id)
+                                        after_id=chat.after_id, marks=chat.marks)
                 break  # the rest of this chat waits for its next run
             done["tokens"] += tokens  # spent whether or not the chunk is kept
             if not still_leader():
                 return done  # stopped during the call: keep nothing
             if pulse_store.advance(chat.profile, chat.chat_id, message_id=last["id"], at=last["timestamp"],
-                                   items=items, closed=closed, after_id=chat.after_id) is None:
+                                   items=items, closed=closed, after_id=chat.after_id, marks=chat.marks) is None:
                 break  # another process read this chunk meanwhile
-            chat = Chat(chat.profile, chat.home, chat.chat_id, last["id"], chat.since, last["timestamp"])
+            chat = replace(chat, after_id=last["id"], read_to=last["timestamp"])
             read_to = last["timestamp"]
             done["chunks"] += 1
             done["items"] += sum(1 for item in items if not item["same_as"])
+    if backfill and not backfill_chats and still_leader() and not any(
+            mark["failures"] and mark["retry_at"] > now for mark in pulse_store.watermarks("backfill_marks")):
+        pulse_store.set("memory_backfill", {**backfill, "active": False, "done": True})
+        logger.info("conduit_push: Pulse memory finished reading chats back to %s", backfill["from"])
     return done
+
+
+# Backfill ------------------------------------------------------------------------
+
+def active_backfill(pulse_store: store.PulseStore) -> Optional[dict]:
+    """The backfill being read, if any: {"from", "to", ...} epoch seconds."""
+    backfill = pulse_store.get("memory_backfill")
+    if not isinstance(backfill, dict) or not backfill.get("active"):
+        return None
+    if not all(isinstance(backfill.get(key), (int, float)) for key in ("from", "to")):
+        return None
+    return backfill
+
+
+def backfill_window(pulse_store: store.PulseStore, days: int, now: float) -> Optional[tuple[float, float]]:
+    """What a backfill of ``days`` would read: from ``days`` ago to where
+    memory has read back to already (where it started, or the start of a
+    finished backfill; an unfinished one carries on from its own end).
+    None when that is nothing."""
+    since = pulse_store.get("memory_since")
+    to = since if isinstance(since, (int, float)) and not isinstance(since, bool) else now
+    backfill = pulse_store.get("memory_backfill")
+    if isinstance(backfill, dict) and isinstance(backfill.get("from"), (int, float)):
+        to = backfill["from"] if backfill.get("done") else backfill.get("to", to)
+    start = now - days * 86400.0
+    return (start, to) if start < to else None
+
+
+def estimate(sources: Sequence[tuple[str, Path, str]], window: tuple[float, float]) -> dict[str, int]:
+    """Roughly what reading ``window`` costs: its chats, characters, chunks
+    and tokens (the rows at about 4 characters a token, plus per chunk the
+    instructions, the remembered items shown beside it, and the reply)."""
+    chats = chars = 0
+    for profile, home, exclude in sources:
+        try:
+            rows = hermes.chat_activity(home, exclude_chat=exclude, since=window[0], until=window[1],
+                                        max_chars=PER_MESSAGE)
+        except hermes.HermesUnreadable:
+            if not profile:
+                raise
+            continue
+        chats += len(rows)
+        chars += sum(min(int(row["chars"] or 0), MAX_ROWS * PER_MESSAGE) for row in rows)
+    chunks_ = -(-chars // (CHUNK_CHARS // 2)) if chars else 0  # chunks end early at gaps and new days
+    tokens = chars // 4 + chunks_ * (len(INSTRUCTIONS) // 4 + MAX_CANDIDATES * 40 + MAX_TOKENS)
+    return {"chats": chats, "chars": chars, "chunks": chunks_, "tokens": tokens}
 
 
 def describe(item: dict, zone: tzinfo) -> str:

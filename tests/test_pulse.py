@@ -1698,6 +1698,69 @@ def test_the_loop_runs_memory_on_its_own_thread(remembering, db, monkeypatch):
     assert len(calls) == 1
 
 
+def test_a_backfill_reads_older_chats_after_new_ones_then_finishes(remembering, db):
+    store_ = remembering.store
+    db.message("user", "I'll renew my passport next month", sid="work", at=DAY - 5 * 86400)
+    db.message("assistant", "Noted.", sid="work", at=DAY - 5 * 86400 + 10)
+    db.message("user", "Way too old", sid="work", at=DAY - 40 * 86400)
+    db.message("user", "Book the vet", sid="work", at=DAY + 60)
+    db.message("assistant", "Sure.", sid="work", at=DAY + 70)
+    now = DAY + 70 + memory.IDLE_S
+    assert memory.backfill_window(store_, 30, now) == (now - 30 * 86400, DAY)  # back to where memory started
+    cost = memory.estimate([("", store_.path.parent, SID)], (now - 30 * 86400, DAY))
+    assert (cost["chats"], cost["chunks"]) == (1, 1) and cost["chars"] == len("I'll renew my passport next month") + 6
+    store_.set("memory_backfill", {"from": now - 30 * 86400, "to": DAY, "active": True, "done": False})
+    model = FakeModel({"items": []}, {"items": [{"kind": "commitment", "text": "The user will renew their passport.",
+                                                 "evidence": "renew my passport", "line": 1, "explicit": True}]})
+    done = _remember(remembering, model, now)
+    assert done["chunks"] == 2 and "Book the vet" in model.shown[0]  # new chats first
+    old = model.shown[1].split("<<<chat")[1]
+    assert "renew my passport" in old and "Book the vet" not in old and "Way too old" not in old
+    [item] = store_.open_items()
+    assert item["mentioned_at"] == DAY - 5 * 86400
+    assert store_.watermark("", "work")["message_id"] == 5  # the backfill keeps its own marks
+    assert [m["message_id"] for m in store_.watermarks("backfill_marks")] == [2]
+    assert store_.get("memory_backfill")["active"]  # it finishes on the run that finds nothing left
+    assert _remember(remembering, model, now + 300)["chunks"] == 0
+    assert store_.get("memory_backfill")["done"] and not memory.active_backfill(store_)
+    assert memory.backfill_window(store_, 30, now) is None  # already read that far
+    assert memory.backfill_window(store_, 60, now) == (now - 60 * 86400, now - 30 * 86400)  # carries on from there
+
+
+def test_backfill_command(remembering, db, capsys, monkeypatch):
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", pulse.get_hermes_home)
+    run = lambda extra="": cli.dispatch(types.SimpleNamespace(
+        conduit_push_action="pulse", pulse_action="memory", value="backfill", extra=extra))
+    status = lambda: (cli.dispatch(types.SimpleNamespace(conduit_push_action="pulse", pulse_action="status",
+                                                          value="")), capsys.readouterr().out)[1]
+    store_ = remembering.store
+    store_.set("memory_since", time.time() - 60)
+    store_.set("home_session_key", SID)
+    store_.set("memory", True)
+    db.message("user", "I'll renew my passport next month", sid="work", at=time.time() - 3 * 86400)
+    assert run("0") == 2 and run("400") == 2 and run("soon") == 2 and run("stop") == 1
+    capsys.readouterr()
+    assert run("7") == 0
+    out = capsys.readouterr().out
+    assert "Reading back 7 days" in out and "covers 1 chats" in out and "backfill start" in out
+    assert store_.get("memory_backfill_days") == 7 and store_.get("memory_backfill") is None
+    assert run("start") == 0 and "Memory is reading chats from" in capsys.readouterr().out
+    backfill = store_.get("memory_backfill")
+    assert backfill["active"] and backfill["days"] == 7 and store_.get("memory_requested") is True
+    assert "Backfill: reading chats back to" in status()
+    assert run("start") == 1 and "already reading" in capsys.readouterr().out
+    store_.advance("", "work", message_id=1, at=0, marks="backfill_marks")
+    assert run("stop") == 0 and "Backfill: paused" in status()
+    assert run("start") == 0 and store_.watermarks("backfill_marks")  # carries on: its marks are kept
+    store_.set("memory_backfill", {**store_.get("memory_backfill"), "active": False, "done": True})
+    assert "Backfill: read back to" in status()
+    assert run("7") == 0 and "already read back 7 days" in capsys.readouterr().out
+    assert run("30") == 0 and "Reading back 30 days" in capsys.readouterr().out
+    assert run("start") == 0 and store_.watermarks("backfill_marks") == []  # a new, older window starts fresh
+    store_.set("memory_backfill", None)
+    store_.set("memory", False)
+    assert run("start") == 1 and "memory is off" in capsys.readouterr().out
+
 def test_memory_command(remembering, db, capsys, monkeypatch):
     monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", pulse.get_hermes_home)
     run = lambda value="", extra="": cli.dispatch(types.SimpleNamespace(

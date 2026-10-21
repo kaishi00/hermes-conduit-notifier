@@ -337,6 +337,15 @@ def _maybe_memory(pulse_store: store.PulseStore, home: Path, now: float) -> None
     _memory_thread.start()
 
 
+def memory_sources(pulse_store: store.PulseStore, home: Path, home_chat_id: str) -> list[tuple[str, Path, str]]:
+    """What memory reads: (profile, home, home chat to leave out), this
+    profile first, then the others when the report reads every profile."""
+    sources = [("", Path(home), home_chat_id)]
+    if pulse_store.get("report_profiles") == "all":
+        sources += [(name, path, report.their_home_chat(path)) for name, path in report.profile_homes(home)]
+    return sources
+
+
 def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Event) -> None:
     try:
         now = max(now, time.time())  # the thread may start a little after the tick
@@ -351,9 +360,7 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
             cap = float(store.DEFAULTS["memory_daily_tokens"])
         if used >= cap:
             return  # `pulse status` says so
-        sources = [("", Path(home), home_chat_id)]
-        if pulse_store.get("report_profiles") == "all":
-            sources += [(name, path, report.their_home_chat(path)) for name, path in report.profile_homes(home)]
+        sources = memory_sources(pulse_store, home, home_chat_id)
         done = memory.run(pulse_store, sources, _memory_llm, zone=zone, now=now,
                           still_leader=lambda: not stopped.is_set() and _leads(pulse_store), budget=cap - used)
         if done["tokens"]:
