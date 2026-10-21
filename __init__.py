@@ -197,8 +197,8 @@ def _post_llm_call(**kwargs: Any) -> None:
     # A cron run says nothing when the user muted its job or it answered
     # [SILENT] by Hermes' cron rule ("[SILENT] No changes" too). A Pulse
     # probe is Pulse checking on itself: nothing to tell the phone.
-    quiet = (is_silent_response(response) or cron_runs.quiet(session_id, kwargs.get("task_id"), response)
-             or pulse.is_pulse_turn(session_id, kwargs.get("turn_id")))
+    pulse_turn = pulse.is_pulse_turn(session_id, kwargs.get("turn_id"))
+    quiet = is_silent_response(response) or cron_runs.quiet(session_id, kwargs.get("task_id"), response) or pulse_turn
     ready = None if quiet else push_event(
         "response.ready",
         identifier=event_id("response", kwargs.get("turn_id"), session_id),
@@ -220,8 +220,8 @@ def _post_llm_call(**kwargs: Any) -> None:
         return
     key = (session_id, turn_id)
     # A Hermes that never reports the turn's end still gets its reply out,
-    # and its Live Activity ended.
-    timer = _later(READY_GRACE_S, lambda: _turn_end_missed(session_id, turn_id))
+    # and its Live Activity ended (a Pulse turn never started one).
+    timer = _later(READY_GRACE_S, lambda: _turn_end_missed(session_id, turn_id, live=not pulse_turn))
     with _pending_lock:
         earlier = _pending_ready.pop(key, None)
         _pending_ready[key] = (ready, send, timer)
@@ -237,8 +237,8 @@ def _post_llm_call(**kwargs: Any) -> None:
         _finish_ready(old_session, old_ready, old_send)
 
 
-def _turn_end_missed(session_id: str, turn_id: str) -> None:
-    if _settle_ready(session_id, turn_id, "done"):
+def _turn_end_missed(session_id: str, turn_id: str, live: bool = True) -> None:
+    if _settle_ready(session_id, turn_id, "done") and live:
         _quietly(live_activity.reporter.turn_ended, session_id, "done")
 
 

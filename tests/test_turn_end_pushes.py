@@ -110,6 +110,17 @@ def test_a_reply_whose_turn_end_never_comes_goes_out_after_the_grace(pushed, mon
     assert _types(pushed) == ["response.ready"]
 
 
+def test_a_pulse_turn_whose_end_never_comes_ends_no_live_activity(pushed, monkeypatch):
+    later, ended = [], []
+    monkeypatch.setattr(plugin, "_later", lambda delay, work: later.append((delay, work)))
+    monkeypatch.setattr(plugin.pulse, "is_pulse_turn", lambda session_id, turn_id: True)
+    monkeypatch.setattr(plugin.live_activity.reporter, "turn_ended", lambda *args: ended.append(args))
+    plugin._post_llm_call(session_id="s", turn_id="t", assistant_response="1 item.")
+    [(_, work)] = later
+    work()
+    assert pushed == [] and ended == []
+
+
 def test_held_replies_are_per_chat(pushed):
     plugin._post_llm_call(session_id="a", turn_id="t", assistant_response="For A.")
     plugin._post_llm_call(session_id="b", turn_id="t", assistant_response="For B.")
