@@ -143,6 +143,8 @@ CREATE TABLE IF NOT EXISTS watermarks (
     PRIMARY KEY (profile, chat_id)
 );
 """
+# How far a replacement follows earlier replacements to the item still current.
+MAX_CHAIN = 20
 # ``items.profile`` and ``watermarks.profile`` are "" for the profile the
 # store belongs to, else the other profile's name (pulse_report.profile_homes).
 # ``attempts.session_key`` holds the home chat's stored session id (the
@@ -403,9 +405,15 @@ class PulseStore:
                     f"INSERT INTO items({', '.join(columns)}) VALUES({','.join('?' * len(columns))})",
                     tuple(row[column] for column in columns)).lastrowid
                 ids.append(new_id)
-                if item.get("replaces"):
-                    conn.execute(f"UPDATE items SET superseded_at=?, superseded_by=?, valid_to=? WHERE id=? AND {live}",
-                                 (now, new_id, item["mentioned_at"], item["replaces"], profile))
+                target = item.get("replaces")
+                for _ in range(MAX_CHAIN):  # already replaced (by an earlier chunk): replace its successor
+                    if not target or conn.execute(
+                            f"UPDATE items SET superseded_at=?, superseded_by=?, valid_to=? WHERE id=? AND {live}",
+                            (now, new_id, item["mentioned_at"], target, profile)).rowcount:
+                        break
+                    row = conn.execute("SELECT superseded_by FROM items WHERE id=? AND profile=? AND status='open'",
+                                       (target, profile)).fetchone()
+                    target = row["superseded_by"] if row and row["superseded_by"] != new_id else None
             for entry in closed:
                 conn.execute(f"UPDATE items SET status=?, closed_by=?, closed_at=? WHERE id=? AND {live}",
                              (entry["status"], f"chat {chat_id} message {entry['message_id']}: {entry['evidence']}",
@@ -464,7 +472,8 @@ class PulseStore:
     def close_item(self, item_id: int, *, status: str, closed_by: str) -> bool:
         with _lock, self._connect() as conn:
             changed = conn.execute(
-                "UPDATE items SET status=?, closed_by=?, closed_at=? WHERE id=? AND status='open'",
+                "UPDATE items SET status=?, closed_by=?, closed_at=? WHERE id=? AND status='open' "
+                "AND superseded_at IS NULL",
                 (status, closed_by, time.time(), item_id)).rowcount
         return bool(changed)
 

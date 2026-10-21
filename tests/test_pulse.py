@@ -1289,6 +1289,23 @@ def test_the_model_sees_what_is_remembered_and_can_repeat_replace_or_close_it():
     assert [(i["kind"], i["same_as"], i["replaces"]) for i in items] == [
         ("promise", 4, None), ("fact", None, 5), ("commitment", None, None), ("commitment", 3, None)]
     assert [(c["id"], c["status"]) for c in closed] == [(3, "done")]
+    items, _, _ = memory.extract(FakeModel({"items": [
+        {"kind": "promise", "text": "x", "evidence": "I'll check the build tomorrow", "line": 2, "same_as": 4.0}]}),
+        chunk, UTC, remembered=remembered)
+    assert items[0]["same_as"] == 4  # a whole-number float, as JSON may give it
+
+
+def test_a_replacement_of_a_replaced_item_replaces_the_current_one(remembering):
+    item = lambda evidence, **more: {"kind": "fact", "text": evidence, "evidence": evidence, "explicit": 1, "due": "",
+                                     "due_at": None, "message_id": 1, "mentioned_at": DAY, **more}
+    [old] = remembering.store.advance("", "work", message_id=1, at=DAY, items=[item("lives in Paris")])
+    [mid] = remembering.store.advance("", "work", message_id=2, at=DAY, after_id=1,
+                                      items=[item("lives in Lyon", replaces=old)])
+    [new] = remembering.store.advance("", "work", message_id=3, at=DAY, after_id=2,
+                                      items=[item("lives in Rome", replaces=old)])  # the model named the first one
+    assert [i["id"] for i in remembering.store.open_items()] == [new]
+    with remembering.store._connect() as conn:
+        assert conn.execute("SELECT superseded_by FROM items WHERE id=?", (mid,)).fetchone()[0] == new
 
 
 def test_candidates_are_this_chats_items_then_the_closest_ones():
@@ -1379,6 +1396,7 @@ def test_repeats_update_one_item_and_changes_supersede_it(remembering, db):
         {"number": now_open["id"], "status": "done", "evidence": "Passport renewed", "line": 1}]}),
         DAY + 30010 + memory.IDLE_S)
     assert remembering.store.open_items() == []
+    assert not remembering.store.close_item(first["id"], status="cancelled", closed_by="user")  # superseded already
     with remembering.store._connect() as conn:
         closed = dict(conn.execute("SELECT * FROM items WHERE id=?", (now_open["id"],)).fetchone())
     assert closed["status"] == "done" and "Passport renewed" in closed["closed_by"]

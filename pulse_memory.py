@@ -309,6 +309,8 @@ def _weekday(when: datetime) -> str:
 def _number(value: Any, allowed: set[int]) -> Optional[int]:
     if isinstance(value, bool) or not isinstance(value, (int, float, str)):
         return None
+    if isinstance(value, float):
+        value = int(value) if value.is_integer() else str(value)
     try:
         number = int(str(value).strip().lstrip("#"))
     except ValueError:
@@ -379,7 +381,7 @@ def extract(llm: Llm, chunk: Sequence[Any], zone: tzinfo, outcomes: Sequence[dic
         raise ChunkFailed(type(error).__name__, estimate) from error
     tokens = tokens if isinstance(tokens, int) and tokens > 0 else estimate + MAX_TOKENS
     if not isinstance(parsed, dict) or not isinstance(parsed.get("items"), list):
-        raise BadReply("BadReply", tokens)
+        raise BadReply("BadReply: not a JSON object with an items list", tokens)
     if len(parsed["items"]) > MAX_ITEMS:
         logger.info("conduit_push: Pulse memory kept the first %d of %d items from a chunk", MAX_ITEMS,
                     len(parsed["items"]))
