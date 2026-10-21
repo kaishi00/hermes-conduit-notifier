@@ -1727,6 +1727,23 @@ def test_a_backfill_reads_older_chats_after_new_ones_then_finishes(remembering, 
     assert memory.backfill_window(store_, 60, now) == (now - 60 * 86400, now - 30 * 86400)  # carries on from there
 
 
+def test_a_backfill_stopped_mid_run_is_left_alone(remembering, db):
+    store_ = remembering.store
+    db.session("w2", title="Other", pinned=0)
+    for n, sid in enumerate(("work", "w2")):
+        db.message("user", f"Old thing {n}", sid=sid, at=DAY - (5 - n) * 86400)
+        db.message("assistant", "Ok.", sid=sid, at=DAY - (5 - n) * 86400 + 10)
+    store_.set("memory_backfill", {"from": DAY - 30 * 86400, "to": DAY, "active": True, "done": False})
+    shown = []
+
+    def model(instructions, text):
+        shown.append(text)
+        store_.set("memory_backfill", {**store_.get("memory_backfill"), "active": False})  # `backfill stop`
+        return {"items": []}, 100
+
+    assert _remember(remembering, model, DAY + 3600)["chunks"] == 1 and len(shown) == 1
+    assert store_.get("memory_backfill")["active"] is False and not store_.get("memory_backfill")["done"]
+
 def test_backfill_command(remembering, db, capsys, monkeypatch):
     monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", pulse.get_hermes_home)
     run = lambda extra="": cli.dispatch(types.SimpleNamespace(
@@ -1751,6 +1768,8 @@ def test_backfill_command(remembering, db, capsys, monkeypatch):
     assert run("start") == 1 and "already reading" in capsys.readouterr().out
     store_.advance("", "work", message_id=1, at=0, marks="backfill_marks")
     assert run("stop") == 0 and "Backfill: paused" in status()
+    assert run("30") == 0 and "A paused backfill back to" in capsys.readouterr().out  # no wider window yet
+    assert memory.backfill_window(store_, 30, time.time()) == (backfill["from"], backfill["to"])
     assert run("start") == 0 and store_.watermarks("backfill_marks")  # carries on: its marks are kept
     store_.set("memory_backfill", {**store_.get("memory_backfill"), "active": False, "done": True})
     assert "Backfill: read back to" in status()

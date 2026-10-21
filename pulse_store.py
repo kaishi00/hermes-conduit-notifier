@@ -159,6 +159,12 @@ CREATE TABLE IF NOT EXISTS backfill_marks (
 # Where memory has read each chat to: ``watermarks`` for chats as they
 # happen, ``backfill_marks`` for a backfill of older history (same shape).
 MARKS = ("watermarks", "backfill_marks")
+
+
+def _check_marks(marks: str) -> None:
+    if marks not in MARKS:  # named into SQL
+        raise ValueError(f"unknown marks table {marks!r}")
+
 # How far a replacement follows earlier replacements to the item still current.
 MAX_CHAIN = 20
 # ``items.profile`` and ``watermarks.profile`` are "" for the profile the
@@ -379,7 +385,7 @@ class PulseStore:
         return dict(row) if row else None
 
     def watermarks(self, marks: str = "watermarks") -> list[dict]:
-        assert marks in MARKS
+        _check_marks(marks)
         with self._connect() as conn:
             rows = conn.execute(f"SELECT * FROM {marks}").fetchall()
         return [dict(row) for row in rows]
@@ -403,7 +409,7 @@ class PulseStore:
         old item, which is kept with when and by what it stopped being true.
         Nothing is deleted. ``marks`` names the table that says where the
         chat was read to (MARKS)."""
-        assert marks in MARKS
+        _check_marks(marks)
         columns = ("profile", "chat_id", "message_id", "kind", "text", "evidence", "explicit", "due", "due_at",
                    "mentioned_at", "recorded_at", "valid_from")
         live = "status='open' AND superseded_at IS NULL AND profile=?"
@@ -459,7 +465,7 @@ class PulseStore:
         reader moved the chat past ``after_id`` or already counted a failure
         that is still waiting for its retry; returns the count, or 0 when
         it didn't count this one."""
-        assert marks in MARKS
+        _check_marks(marks)
         with _lock, self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(f"SELECT message_id, failures, retry_at FROM {marks} WHERE profile=? AND chat_id=?",

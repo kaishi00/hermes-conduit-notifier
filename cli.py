@@ -387,6 +387,10 @@ def _pulse_backfill(pulse_store: Any, home: Any, extra: str) -> int:
         print(f"Memory is already reading chats back to {day(backfill['from'])}. "
               "`hermes conduit-push pulse memory backfill stop` pauses it.")
         return 0 if extra != "start" else 1
+    if extra != "start" and isinstance(backfill, dict) and backfill.get("from") and not backfill.get("done"):
+        print(f"A paused backfill back to {day(backfill['from'])} carries on first: "
+              "`hermes conduit-push pulse memory backfill start`. Once it's done, a backfill can go further back.")
+        return 0
     window = pulse_memory.backfill_window(pulse_store, days, now)
     if window is None:
         print(f"Memory has already read back {days} days or more.")
@@ -403,7 +407,8 @@ def _pulse_backfill(pulse_store: Any, home: Any, extra: str) -> int:
             return 1
         pulse_store.set("memory_backfill_days", days)
         cap = pulse_store.get("memory_daily_tokens")
-        cap = cap if isinstance(cap, (int, float)) and not isinstance(cap, bool) and cap > 0 else 300_000
+        cap = cap if isinstance(cap, (int, float)) and not isinstance(cap, bool) and cap > 0 \
+            else pulse.store.DEFAULTS["memory_daily_tokens"]
         print(f"Reading back {days} days ({day(window[0])} to {day(window[1])}) covers {cost['chats']} chats, "
               f"about {cost['chars']:,} characters in {cost['chunks']} chunks: roughly {cost['tokens']:,} tokens "
               f"on Hermes's \"Pulse memory\" model, about {-(-cost['tokens'] // int(cap))} day(s) at its "
@@ -414,9 +419,12 @@ def _pulse_backfill(pulse_store: Any, home: Any, extra: str) -> int:
     if not pulse_store.get("memory"):
         print("Pulse memory is off: `hermes conduit-push pulse memory on` first.")
         return 1
-    resuming = isinstance(backfill, dict) and not backfill.get("done") and backfill.get("to") == window[1]
+    resuming = isinstance(backfill, dict) and not backfill.get("done") \
+        and (backfill.get("from"), backfill.get("to")) == window
     if not resuming:
         pulse_store.clear_backfill_marks()  # the new window is older than anything marked
+    if resuming:
+        days = backfill.get("days", days)
     pulse_store.set("memory_backfill", {"from": window[0], "to": window[1], "days": days, "active": True,
                                         "done": False, "started_at": now})
     pulse_store.set("memory_requested", True)

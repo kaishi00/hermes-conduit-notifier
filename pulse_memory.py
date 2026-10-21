@@ -428,7 +428,12 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
     backfill = active_backfill(pulse_store)
     backfill_chats = list(due_chats(pulse_store, sources, now=now, window=(backfill["from"], backfill["to"]))) \
         if backfill else []
+    window = (backfill["from"], backfill["to"]) if backfill else None
+    # A backfill stopped or replaced meanwhile (`pulse memory backfill`) isn't this run's to carry on.
+    current = lambda: (lambda b: b is not None and (b["from"], b["to"]) == window)(active_backfill(pulse_store))
     for chat in itertools.chain(due_chats(pulse_store, sources, now=now), backfill_chats):
+        if chat.until is not None and not current():
+            break
         try:
             rows = hermes.chat_messages(chat.home, chat_id=chat.chat_id, after_id=chat.after_id, since=chat.since,
                                         max_chars=PER_MESSAGE, limit=MAX_ROWS, until=chat.until)
@@ -438,7 +443,8 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
             continue
         read_to = chat.read_to
         for chunk in chunks(rows, zone, now):
-            if calls >= MAX_CHUNKS or done["tokens"] >= budget or not still_leader():
+            if calls >= MAX_CHUNKS or done["tokens"] >= budget or not still_leader() \
+                    or (chat.until is not None and not current()):
                 return done
             last = chunk[-1]
             # The ledger only has this profile's tool calls.
@@ -478,7 +484,7 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
             read_to = last["timestamp"]
             done["chunks"] += 1
             done["items"] += sum(1 for item in items if not item["same_as"])
-    if backfill and not backfill_chats and still_leader() and not any(
+    if backfill and not backfill_chats and still_leader() and current() and not any(
             mark["failures"] and mark["retry_at"] > now for mark in pulse_store.watermarks("backfill_marks")):
         pulse_store.set("memory_backfill", {**backfill, "active": False, "done": True})
         logger.info("conduit_push: Pulse memory finished reading chats back to %s", backfill["from"])
@@ -500,13 +506,16 @@ def active_backfill(pulse_store: store.PulseStore) -> Optional[dict]:
 def backfill_window(pulse_store: store.PulseStore, days: int, now: float) -> Optional[tuple[float, float]]:
     """What a backfill of ``days`` would read: from ``days`` ago to where
     memory has read back to already (where it started, or the start of a
-    finished backfill; an unfinished one carries on from its own end).
-    None when that is nothing."""
+    finished backfill). An unfinished backfill keeps its own window, so its
+    marks stay true: going further back waits until it is done. None when
+    that is nothing."""
     since = pulse_store.get("memory_since")
     to = since if isinstance(since, (int, float)) and not isinstance(since, bool) else now
     backfill = pulse_store.get("memory_backfill")
-    if isinstance(backfill, dict) and isinstance(backfill.get("from"), (int, float)):
-        to = backfill["from"] if backfill.get("done") else backfill.get("to", to)
+    if isinstance(backfill, dict) and all(isinstance(backfill.get(key), (int, float)) for key in ("from", "to")):
+        if not backfill.get("done"):
+            return backfill["from"], backfill["to"]
+        to = backfill["from"]
     start = now - days * 86400.0
     return (start, to) if start < to else None
 
@@ -525,7 +534,7 @@ def estimate(sources: Sequence[tuple[str, Path, str]], window: tuple[float, floa
                 raise
             continue
         chats += len(rows)
-        chars += sum(min(int(row["chars"] or 0), MAX_ROWS * PER_MESSAGE) for row in rows)
+        chars += sum(int(row["chars"] or 0) for row in rows)
     chunks_ = -(-chars // (CHUNK_CHARS // 2)) if chars else 0  # chunks end early at gaps and new days
     tokens = chars // 4 + chunks_ * (len(INSTRUCTIONS) // 4 + MAX_CANDIDATES * 40 + MAX_TOKENS)
     return {"chats": chats, "chars": chars, "chunks": chunks_, "tokens": tokens}
