@@ -1,0 +1,277 @@
+"""Pulse as data, for Conduit's Settings > Pulse page and the CLI alike:
+its state, the settings a tester changes, and the backfill's steps. Nothing
+here prints; a step Pulse won't take raises Refused with a code that each
+caller words its own way."""
+
+from __future__ import annotations
+
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Optional
+
+from . import pulse, pulse_delivery, pulse_hermes, pulse_memory
+
+RECENT = 5
+ITEMS = 200
+MAX_DAYS = 365
+
+
+class Refused(Exception):
+    """A step Pulse won't take now. ``code`` says why:
+
+    - ``reading``: a backfill is already reading (``from``).
+    - ``paused``: an unfinished backfill carries on first (``from``).
+    - ``already_read``: memory has read back ``days`` already.
+    - ``memory_off``: memory is off.
+    - ``pulse_off``: Pulse is off.
+    - ``no_home_chat``: Pulse has no home chat (``problem``).
+    - ``unreadable``: Hermes's chats couldn't be read (``error``).
+    - ``not_running`` / ``nothing_to_cancel``: no backfill to stop or cancel.
+    - ``changed``: the backfill changed meanwhile; try again.
+    - ``invalid``: a setting's value isn't one Pulse takes (``field``).
+    """
+
+    def __init__(self, code: str, **data: Any) -> None:
+        super().__init__(code)
+        self.code = code
+        self.data = data
+
+
+def _number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def days_value(value: Any) -> Optional[int]:
+    """A backfill's days, 1 to 365, or None."""
+    return value if isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= MAX_DAYS else None
+
+
+def stored_days(pulse_store: Any) -> int:
+    return days_value(pulse_store.get("memory_backfill_days")) or pulse.store.DEFAULTS["memory_backfill_days"]
+
+
+def daily_tokens(pulse_store: Any) -> int:
+    cap = pulse_store.get("memory_daily_tokens")
+    return int(cap) if _number(cap) and cap > 0 else pulse.store.DEFAULTS["memory_daily_tokens"]
+
+
+def _backfills(pulse_store: Any) -> tuple[Any, Optional[dict], Optional[dict]]:
+    """The stored value, the backfill if it has a window, and that one if it's reading."""
+    stored = pulse_store.get("memory_backfill")
+    backfill = stored if pulse_memory.has_window(stored) else None
+    return stored, backfill, backfill if backfill and backfill.get("active") else None
+
+
+def backfill_state(pulse_store: Any) -> dict[str, Any]:
+    """{"state": none|reading|paused|done|cancelled, "from", "to", "days",
+    "narrow", "unreadable"}; "narrow" when a finished one read this profile
+    only and memory now reads every profile."""
+    _, backfill, _ = _backfills(pulse_store)
+    if backfill is None:
+        return {"state": "none"}
+    state = ("cancelled" if backfill.get("cancelled") else "done" if backfill.get("done")
+             else "reading" if backfill.get("active") else "paused")
+    stalled = pulse_store.get("memory_backfill_unreadable")
+    return {"state": state, "from": backfill["from"], "to": backfill["to"],
+            "days": days_value(backfill.get("days")),
+            "narrow": bool(backfill.get("done")) and not pulse_memory.covers_scope(pulse_store, backfill),
+            "unreadable": [str(name) for name in stalled] if state == "reading" and isinstance(stalled, list) else []}
+
+
+def backfill_stop(pulse_store: Any) -> None:
+    _, _, active = _backfills(pulse_store)
+    if not active:
+        raise Refused("not_running")
+    if not pulse_store.swap("memory_backfill", active, {**active, "active": False}):
+        raise Refused("changed")
+
+
+def backfill_cancel(pulse_store: Any) -> None:
+    """Drops an unfinished backfill. What it read stays; memory counts as
+    read back only to where it began."""
+    _, backfill, _ = _backfills(pulse_store)
+    if not backfill or backfill.get("done"):
+        raise Refused("nothing_to_cancel")
+    if not pulse_store.swap("memory_backfill", backfill, {"from": backfill["to"], "to": backfill["to"],
+                                                         "active": False, "done": True, "cancelled": True,
+                                                         "scope": pulse_memory.scope(pulse_store, backfill)}):
+        raise Refused("changed")
+    pulse_store.clear_backfill_marks()
+    pulse_store.set("memory_backfill_unreadable", [])
+
+
+def _window(pulse_store: Any, home: Path, days: int, now: float, *, starting: bool) -> tuple[tuple[float, float], Any]:
+    """The window ``days`` reads and the home chat, or Refused."""
+    _, backfill, active = _backfills(pulse_store)
+    if active:
+        raise Refused("reading", **{"from": active["from"]})
+    if not starting and backfill and not backfill.get("done"):
+        raise Refused("paused", **{"from": backfill["from"]})
+    if starting and not pulse_store.get("memory"):
+        raise Refused("memory_off")
+    since = pulse_store.get("memory_since")
+    if starting and not _number(since):
+        # Memory hasn't run yet: set where live reading starts first (unless its first run
+        # just did), so the window ends exactly there.
+        pulse_store.swap("memory_since", since, now)
+    window = pulse_memory.backfill_window(pulse_store, days, now)
+    if window is None:
+        raise Refused("already_read", days=days)
+    chat, problem = pulse.home_chat(pulse_store, Path(home))
+    if chat is None:
+        raise Refused("no_home_chat", problem=problem)
+    return window, chat
+
+
+def backfill_estimate(pulse_store: Any, home: Path, days: Optional[int] = None,
+                      now: Optional[float] = None) -> dict[str, Any]:
+    """What reading back ``days`` (else the last asked) would cost:
+    {"days", "from", "to", "chats", "chars", "chunks", "tokens",
+    "daily_tokens", "days_needed", "unreadable"}. Remembers the days, so a
+    start without them reads what was shown."""
+    now = time.time() if now is None else now
+    days = days_value(days) or stored_days(pulse_store)
+    window, chat = _window(pulse_store, home, days, now, starting=False)
+    try:
+        cost = pulse_memory.estimate(pulse.memory_sources(pulse_store, Path(home), chat.chat_id), window)
+    except pulse_hermes.HermesUnreadable as error:
+        raise Refused("unreadable", error=type(error).__name__)
+    pulse_store.set("memory_backfill_days", days)
+    cap = daily_tokens(pulse_store)
+    return {"days": days, "from": window[0], "to": window[1], "chats": cost["chats"], "chars": cost["chars"],
+            "chunks": cost["chunks"], "tokens": cost["tokens"], "daily_tokens": cap,
+            "days_needed": -(-cost["tokens"] // cap), "unreadable": list(cost["unreadable"])}
+
+
+def backfill_start(pulse_store: Any, home: Path, days: Optional[int] = None,
+                   now: Optional[float] = None) -> dict[str, Any]:
+    """Starts (or carries on) reading back ``days`` (else the last asked):
+    {"from", "to", "days", "resumed"}."""
+    now = time.time() if now is None else now
+    asked = days_value(days)
+    days = asked or stored_days(pulse_store)
+    stored, backfill, _ = _backfills(pulse_store)
+    window, _ = _window(pulse_store, home, days, now, starting=True)
+    resuming = isinstance(backfill, dict) and not backfill.get("done") \
+        and (backfill.get("from"), backfill.get("to")) == window
+    if resuming:
+        days = days_value(backfill.get("days")) or days
+    if not pulse_store.swap("memory_backfill", stored, {"from": window[0], "to": window[1], "days": days,
+                                                       "active": True, "done": False, "started_at": now,
+                                                       "scope": pulse_memory.scope(pulse_store,
+                                                                                   backfill if resuming else None)}):
+        raise Refused("changed")
+    if not resuming:  # older windows' marks count as none; drop them
+        pulse_store.clear_backfill_marks(keep_window=window[0])
+    if asked:  # a later estimate or start without days reads the same
+        pulse_store.set("memory_backfill_days", asked)
+    pulse_store.set("memory_requested", True)
+    return {"from": window[0], "to": window[1], "days": days, "resumed": resuming}
+
+
+SETTINGS = ("enabled", "memory", "daily_report", "report_profiles", "report_times", "time_zone")
+
+
+def update(pulse_store: Any, body: Any) -> None:
+    """Applies the settings in ``body`` (any of SETTINGS). Every value is
+    checked before any is written, so a bad one changes nothing; any other
+    key is refused too. Values: booleans for "enabled", "memory" and "daily_report"; "all" or "this"
+    for "report_profiles"; a list of "HH:MM" for "report_times"; an IANA
+    name, or "" for the phone's, for "time_zone"."""
+    if not isinstance(body, dict):
+        raise Refused("invalid", field="")
+    for field in body:
+        if field not in SETTINGS:
+            raise Refused("invalid", field=str(field)[:64])
+    changes: dict[str, Any] = {}
+    for field in ("enabled", "memory", "daily_report"):
+        if field in body:
+            if not isinstance(body[field], bool):
+                raise Refused("invalid", field=field)
+            changes[field] = body[field]
+    if "report_profiles" in body:
+        if body["report_profiles"] not in ("all", "this"):
+            raise Refused("invalid", field="report_profiles")
+        changes["report_profiles"] = body["report_profiles"]
+    if "report_times" in body:
+        times = body["report_times"]
+        parsed = pulse.report.parse_times(",".join(times)) if isinstance(times, list) and 0 < len(times) <= 12 \
+            and all(isinstance(value, str) and len(value) <= 5 for value in times) else None
+        if parsed is None:
+            raise Refused("invalid", field="report_times")
+        changes["report_time"] = parsed
+    if "time_zone" in body:
+        zone = body["time_zone"]
+        if not isinstance(zone, str) or len(zone) > 64 or (zone and not pulse.report.known_zone(zone)):
+            raise Refused("invalid", field="time_zone")
+        changes["time_zone"] = zone
+    for key, value in changes.items():
+        pulse_store.set(key, value)
+
+
+def request_report(pulse_store: Any) -> None:
+    if not pulse_store.get("enabled"):
+        raise Refused("pulse_off")
+    pulse_store.set("report_requested", True)
+
+
+def forget(pulse_store: Any, item_id: Any) -> bool:
+    if not isinstance(item_id, int) or isinstance(item_id, bool) or item_id < 1:
+        raise Refused("invalid", field="id")
+    return pulse_store.close_item(item_id, status="cancelled", closed_by="user")
+
+
+def items(pulse_store: Any, kind: str = "") -> list[dict[str, Any]]:
+    """Open memory items, most recently mentioned first."""
+    if kind and kind not in pulse_memory.KINDS:
+        raise Refused("invalid", field="kind")
+    return [{"id": item["id"], "kind": item["kind"], "text": item["text"], "evidence": item["evidence"],
+             "explicit": bool(item["explicit"]), "due": item["due"], "due_at": item["due_at"],
+             "mentioned_at": item["mentioned_at"], "profile": item["profile"], "chat_id": item["chat_id"]}
+            for item in pulse_store.open_items(kind, limit=ITEMS)]
+
+
+def state(pulse_store: Any, home: Path, now: Optional[float] = None) -> dict[str, Any]:
+    """Everything Settings > Pulse shows, as data. Times are epoch seconds."""
+    now = time.time() if now is None else now
+    chat, problem = pulse.home_chat(pulse_store, Path(home))
+    ticked = pulse_store.get("last_tick_at")
+    running = _number(ticked) and now - ticked <= pulse.STALE_TICK_S
+    lease = pulse_store.get(pulse_delivery.store.LEADER)
+    zone = pulse.report_zone(pulse_store, Path(home), now)
+    usage = pulse_store.get("memory_usage")
+    usage = usage if isinstance(usage, dict) else {}
+    today = pulse_store.get("memory_today")
+    day = datetime.fromtimestamp(now, zone).strftime("%Y-%m-%d")
+    used = int(today.get("tokens", 0) or 0) if isinstance(today, dict) and today.get("day") == day else 0
+    profiles = pulse_store.get("report_profiles")
+    return {
+        "enabled": bool(pulse_store.get("enabled")),
+        "running": bool(running),
+        "stale_build": bool(running and isinstance(lease, dict) and lease.get("build") != pulse.build_stamp()),
+        "home_chat": {"id": chat.chat_id, "title": chat.title, "pinned": bool(chat.pinned)} if chat else None,
+        "home_problem": problem,
+        "home_title": pulse_store.get("home_title") or "Pulse",
+        "checks": pulse_store.counts(pulse.PROBE),
+        "recent": [{"at": row["created_at"], "kind": row["kind"], "state": row["state"],
+                    "detail": row.get("detail") or ""} for row in pulse_store.recent(RECENT)],
+        "daily_report": bool(pulse_store.get("daily_report")),
+        "report_times": [f"{hour:02d}:{minute:02d}"
+                         for hour, minute in pulse.report.report_times(pulse_store.get("report_time"))],
+        "time_zone": str(zone),
+        "time_zone_set": pulse_store.get("time_zone") or "",
+        "next_report_at": pulse.report.next_time(now, zone, pulse_store.get("report_time"))
+        if pulse_store.get("daily_report") else None,
+        "report_profiles": "all" if profiles == "all" else "this",
+        "other_profiles": [name for name, _ in pulse.report.profile_homes(Path(home))] if profiles == "all" else [],
+        "memory": bool(pulse_store.get("memory")),
+        "memory_counts": pulse_store.item_counts(),
+        "memory_chunks": int(usage.get("chunks", 0) or 0),
+        "memory_tokens": int(usage.get("tokens", 0) or 0),
+        "daily_tokens": daily_tokens(pulse_store),
+        "tokens_today": used,
+        "backfill": backfill_state(pulse_store),
+        "backfill_days": stored_days(pulse_store),
+        "ratings": {kind: {"yes": yes, "no": no} for kind, (yes, no) in pulse.rating_counts(pulse_store).items()},
+    }

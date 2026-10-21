@@ -6856,6 +6856,114 @@ async def put_conduit_settings(request: Request, response: Response, profile: Op
         raise _unexpected("settings", exc, feature="Conduit settings")
 
 
+# --- Pulse settings ------------------------------------------------------------
+#
+# Conduit's Settings > Pulse page (TestFlight builds): Pulse's state and the
+# settings a tester changes, as pulse_control.py has them. Pulse is one per
+# host, in the dashboard's own Hermes home, so these routes take no profile.
+
+PULSE_MAX_BODY_BYTES = 4 * 1024
+PULSE_LIMIT = 60
+PULSE_WINDOW_S = 60.0
+
+_pulse_limiter = _MintLimiter(PULSE_LIMIT, PULSE_WINDOW_S, message="Too many Pulse requests; try again shortly")
+
+
+def _pulse_call(action: Any) -> Any:
+    control = _plugin_package_module("pulse_control")
+    pulse = _plugin_package_module("pulse")
+    home = _calls_home()
+    try:
+        return action(control, pulse.open_store(home), home)
+    except control.Refused as refused:
+        # 409 with the reason's code, so Conduit words it; "invalid" is the caller's mistake.
+        raise HTTPException(status_code=400 if refused.code == "invalid" else 409,
+                            detail={"code": refused.code, **refused.data},
+                            headers={"Cache-Control": "no-store"})
+
+
+async def _pulse_route(name: str, action: Any) -> Dict[str, Any]:
+    try:
+        _pulse_limiter.acquire("")
+        return {"ok": True, **(await asyncio.to_thread(_pulse_call, action))}
+    except TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
+        raise
+    except Exception as exc:
+        raise _unexpected(name, exc, feature="Pulse")
+
+
+@router.get("/pulse")
+async def get_pulse(response: Response) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    return await _pulse_route("status", lambda control, store, home: control.state(store, home))
+
+
+@router.put("/pulse")
+async def put_pulse(request: Request, response: Response) -> Dict[str, Any]:
+    """Changes any of pulse_control.SETTINGS; answers with the new state."""
+    response.headers["Cache-Control"] = "no-store"
+    body = await _read_json_body(request, PULSE_MAX_BODY_BYTES)
+
+    def action(control: Any, store: Any, home: Any) -> Dict[str, Any]:
+        control.update(store, body)
+        return control.state(store, home)
+
+    return await _pulse_route("settings", action)
+
+
+@router.post("/pulse/report")
+async def post_pulse_report(response: Response) -> Dict[str, Any]:
+    """Asks for a shadow report now."""
+    response.headers["Cache-Control"] = "no-store"
+    return await _pulse_route("report", lambda control, store, home: (control.request_report(store), {})[1])
+
+
+@router.post("/pulse/backfill")
+async def post_pulse_backfill(request: Request, response: Response) -> Dict[str, Any]:
+    """{"action": "estimate"|"start"|"stop"|"cancel", "days": 1-365}:
+    an estimate answers {"estimate": {...}}, the others the new state."""
+    response.headers["Cache-Control"] = "no-store"
+    body = await _read_json_body(request, PULSE_MAX_BODY_BYTES)
+    action_name = body.get("action") if isinstance(body, dict) else None
+    days = body.get("days") if isinstance(body, dict) else None
+    if action_name not in ("estimate", "start", "stop", "cancel") \
+            or (days is not None and (isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= 365)):
+        raise HTTPException(status_code=400, detail={"code": "invalid", "field": "action" if action_name not in (
+            "estimate", "start", "stop", "cancel") else "days"}, headers={"Cache-Control": "no-store"})
+
+    def action(control: Any, store: Any, home: Any) -> Dict[str, Any]:
+        if action_name == "estimate":
+            return {"estimate": control.backfill_estimate(store, home, days)}
+        if action_name == "start":
+            control.backfill_start(store, home, days)
+        elif action_name == "stop":
+            control.backfill_stop(store)
+        else:
+            control.backfill_cancel(store)
+        return control.state(store, home)
+
+    return await _pulse_route("backfill", action)
+
+
+@router.get("/pulse/memory")
+async def get_pulse_memory(response: Response, kind: str = "") -> Dict[str, Any]:
+    """What Pulse remembers: open items, most recently mentioned first."""
+    response.headers["Cache-Control"] = "no-store"
+    return await _pulse_route("memory", lambda control, store, home: {"items": control.items(store, kind)})
+
+
+@router.post("/pulse/memory/forget")
+async def post_pulse_forget(request: Request, response: Response) -> Dict[str, Any]:
+    """{"id": n}: closes one remembered item; {"forgotten": false} if it wasn't open."""
+    response.headers["Cache-Control"] = "no-store"
+    body = await _read_json_body(request, PULSE_MAX_BODY_BYTES)
+    item_id = body.get("id") if isinstance(body, dict) else None
+    return await _pulse_route("forget", lambda control, store, home: {"forgotten": control.forget(store, item_id)})
+
+
 # --- Confirm prompts Hermes shows on the phone ---------------------------------
 #
 # Before an action the user should OK, conduit_present keeps a confirm prompt
@@ -13928,6 +14036,7 @@ ROUTE_CAPABILITIES = (
     "hermes-call-presence",
     "hermes-call-outcomes",
     "conduit-settings",
+    "pulse",
     "present-v1",
     "health-sync",
     "voice-tools",
