@@ -314,8 +314,12 @@ def _pulse_memory(pulse_store: Any, home: Any, value: str, extra: str) -> int:
         return 0
     if value in ("on", "off"):
         pulse_store.set("memory", value == "on")
-        print("Pulse memory is on: chats are read once they've been quiet for 20 minutes." if value == "on"
-              else "Pulse memory is off. What it kept stays until you forget it.")
+        if value == "off":
+            print("Pulse memory is off. What it kept stays until you forget it.")
+        elif pulse_store.get("enabled"):
+            print("Pulse memory is on: chats are read once they've been quiet for 20 minutes.")
+        else:
+            print("Pulse memory is on, and reads chats once Pulse is on: `hermes conduit-push pulse on`.")
         return 0
     if value == "forget":
         if not extra.lstrip("#").isdecimal() or len(extra) > 18:
