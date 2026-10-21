@@ -1000,8 +1000,12 @@ def test_a_dated_item_said_long_ago_still_leads_the_report(live, db, tmp_path):
     store_.advance("", "b", message_id=1, at=now, items=[item(n) for n in range(1, report.MAX_REPORT_ITEMS * 3 + 10)])
     remembered = report.remembered(store_, UTC, now)
     assert remembered.split("\n")[1].startswith(f"#{old} [fact] The user's mum's birthday")
-    [late] = store_.advance("", "c", message_id=1, at=now, items=[item(0, due="2026-01-01", due_at=now - 30 * 86400)])
+    [late] = store_.advance("", "c", message_id=1, at=now, items=[item(
+        0, due="2026-01-01", due_at=now - 30 * 86400, mentioned_at=now - 30 * 86400)])
     assert f"#{late} " not in report.remembered(store_, UTC, now)  # long past due, waiting for expiry
+    [again] = store_.advance("", "d", message_id=1, at=now, items=[item(0, due="2026-01-01", due_at=now - 30 * 86400,
+                                                                   mentioned_at=now)])
+    assert f"#{again} " in report.remembered(store_, UTC, now)  # said again since: expiry keeps it, so does the report
 
 
 def test_memory_shows_when_an_item_was_said_again():
