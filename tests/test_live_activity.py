@@ -166,6 +166,27 @@ def test_a_relay_without_the_route_turns_reporting_off_for_a_while(reporter, rel
     assert relay.posts[-1]["session_id"] == "s-2"
 
 
+@pytest.mark.parametrize("status", [401, 403])
+def test_a_refused_caller_pauses_every_turn_instead_of_retrying(reporter, relay, clock, status):
+    reporter.turn_started("s-1")
+    clock[0] += live.FIRST_DELAY_S
+    reporter.flush()
+    relay.failure = client.RelayRejected(status, "request_rejected")
+    reporter.turn_ended("s-1", "done")
+    reporter.flush()
+    reporter.turn_started("s-2")
+    for _ in range(30):
+        clock[0] += live.END_RETRY_S
+        reporter.flush()
+    assert len(relay.posts) == 2
+    relay.failure = None
+    clock[0] += live.REFUSED_S
+    reporter.thinking("s-2")
+    reporter.flush()
+    assert relay.posts[-1]["session_id"] in ("s-1", "s-2")
+    assert len(relay.posts) > 2
+
+
 def test_an_end_the_relay_did_not_take_is_sent_again(reporter, relay, clock):
     reporter.turn_started("s-1")
     clock[0] += live.FIRST_DELAY_S

@@ -53,6 +53,10 @@ END_RETRY_S = 10.0
 END_GIVE_UP_S = 15 * 60.0
 # The relay has no Live Activity route: try again after this long.
 UNSUPPORTED_S = 30 * 60.0
+# The relay (or a filter in front of it) refused the credential or the
+# caller: every turn waits this long. Retrying an end every 10 s instead kept
+# a CrowdSec brute-force ban renewing itself for days.
+REFUSED_S = 30 * 60.0
 # How long a sent end keeps a second end of the same turn from going out.
 ENDED_MEMORY_S = 120.0
 # Turns tracked at once; the oldest is forgotten past this.
@@ -296,6 +300,8 @@ class LiveActivityReporter:
                 if status == 404:
                     # The relay has no route at all: every turn waits.
                     self._paused_until = now + UNSUPPORTED_S
+                elif status in (401, 403):
+                    self._paused_until = now + REFUSED_S
                 else:
                     turn.retry_at = now + (END_RETRY_S if payload.get("end") is not None else BACKOFF_S)
                 # The state (an end included) goes out on the next try,
