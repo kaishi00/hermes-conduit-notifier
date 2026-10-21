@@ -1727,6 +1727,17 @@ def test_a_backfill_reads_older_chats_after_new_ones_then_finishes(remembering, 
     assert memory.backfill_window(store_, 60, now) == (now - 60 * 86400, now - 30 * 86400)  # carries on from there
 
 
+def test_a_backfill_reads_the_chat_going_on_when_it_started(remembering, db):
+    store_ = remembering.store
+    db.message("user", "I'll call the bank", sid="work", at=DAY - 120)  # minutes before memory started
+    db.message("assistant", "Ok.", sid="work", at=DAY - 110)
+    store_.set("memory_backfill", {"from": DAY - 86400, "to": DAY, "active": True, "done": False})
+    model = FakeModel()
+    assert _remember(remembering, model, DAY + 60)["chunks"] == 1 and "call the bank" in model.shown[0]
+    assert store_.get("memory_backfill")["active"]  # not done before its last chat was read
+    assert store_.swap("memory_backfill", {"x": 1}, None) is False and store_.get("memory_backfill")["active"]
+
+
 def test_a_backfill_stopped_mid_run_is_left_alone(remembering, db):
     store_ = remembering.store
     db.session("w2", title="Other", pinned=0)
@@ -1743,6 +1754,7 @@ def test_a_backfill_stopped_mid_run_is_left_alone(remembering, db):
 
     assert _remember(remembering, model, DAY + 3600)["chunks"] == 1 and len(shown) == 1
     assert store_.get("memory_backfill")["active"] is False and not store_.get("memory_backfill")["done"]
+
 
 def test_backfill_command(remembering, db, capsys, monkeypatch):
     monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", pulse.get_hermes_home)
@@ -1779,6 +1791,7 @@ def test_backfill_command(remembering, db, capsys, monkeypatch):
     store_.set("memory_backfill", None)
     store_.set("memory", False)
     assert run("start") == 1 and "memory is off" in capsys.readouterr().out
+
 
 def test_memory_command(remembering, db, capsys, monkeypatch):
     monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", pulse.get_hermes_home)

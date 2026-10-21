@@ -208,6 +208,24 @@ class PulseStore:
                 (key, json.dumps(value)),
             )
 
+    def swap(self, key: str, old: Any, new: Any) -> bool:
+        """Sets ``key`` to ``new`` only if it still holds ``old`` (another
+        process may have changed it since it was read)."""
+        with _lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT value_json FROM settings WHERE key=?", (key,)).fetchone()
+            try:
+                current = json.loads(row["value_json"]) if row else DEFAULTS.get(key)
+            except ValueError:
+                current = DEFAULTS.get(key)
+            if current != old:
+                conn.execute("ROLLBACK")
+                return False
+            conn.execute("INSERT INTO settings(key, value_json) VALUES(?, ?) "
+                         "ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json", (key, json.dumps(new)))
+            conn.execute("COMMIT")
+        return True
+
     def take_probe_request(self) -> bool:
         """Whether a probe was asked for (``pulse probe``), clearing the ask."""
         return self.take_request("probe_requested")

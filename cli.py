@@ -375,7 +375,9 @@ def _pulse_backfill(pulse_store: Any, home: Any, extra: str) -> int:
         if not pulse_memory.active_backfill(pulse_store):
             print("No backfill is running.")
             return 1
-        pulse_store.set("memory_backfill", {**backfill, "active": False})
+        if not pulse_store.swap("memory_backfill", backfill, {**backfill, "active": False}):
+            print("The backfill changed meanwhile; try again.")
+            return 1
         print("Backfill paused. `hermes conduit-push pulse memory backfill start` carries on where it stopped.")
         return 0
     if extra and extra != "start" and not (extra.isdecimal() and 1 <= int(extra) <= 365):
@@ -397,7 +399,7 @@ def _pulse_backfill(pulse_store: Any, home: Any, extra: str) -> int:
         return 0
     chat, problem = pulse.home_chat(pulse_store, Path(home))
     if chat is None:
-        print(f"Pulse needs its home chat first, so its own reports aren't read as chats. {problem}".strip())
+        print(f"Pulse needs its home chat first, so its own reports aren't read as chats. {_printable(problem)}".strip())
         return 1
     if extra != "start":
         try:

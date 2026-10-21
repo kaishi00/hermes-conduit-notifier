@@ -183,7 +183,7 @@ def due_chats(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, 
         behind = {row["chat_id"] for row in rows
                   if (marks.get((profile, row["chat_id"])) or {"message_id": 0})["message_id"] < row["last_id"]}
         for row in rows:
-            if row["last_at"] > now - IDLE_S:
+            if row["last_at"] > now - IDLE_S and not window:  # a backfill's rows end where live reading starts
                 continue
             mark = marks.get((profile, row["chat_id"]))
             if mark and (mark["retry_at"] > now or mark["message_id"] >= row["last_id"]):
@@ -484,9 +484,9 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
             read_to = last["timestamp"]
             done["chunks"] += 1
             done["items"] += sum(1 for item in items if not item["same_as"])
-    if backfill and not backfill_chats and still_leader() and current() and not any(
-            mark["failures"] and mark["retry_at"] > now for mark in pulse_store.watermarks("backfill_marks")):
-        pulse_store.set("memory_backfill", {**backfill, "active": False, "done": True})
+    if backfill and not backfill_chats and still_leader() and not any(
+            mark["failures"] and mark["retry_at"] > now for mark in pulse_store.watermarks("backfill_marks")) \
+            and pulse_store.swap("memory_backfill", backfill, {**backfill, "active": False, "done": True}):
         logger.info("conduit_push: Pulse memory finished reading chats back to %s", backfill["from"])
     return done
 
@@ -496,11 +496,14 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
 def active_backfill(pulse_store: store.PulseStore) -> Optional[dict]:
     """The backfill being read, if any: {"from", "to", ...} epoch seconds."""
     backfill = pulse_store.get("memory_backfill")
-    if not isinstance(backfill, dict) or not backfill.get("active"):
-        return None
-    if not all(isinstance(backfill.get(key), (int, float)) for key in ("from", "to")):
+    if not isinstance(backfill, dict) or not backfill.get("active") or not _window_of(backfill):
         return None
     return backfill
+
+
+def _window_of(backfill: Any) -> bool:
+    return isinstance(backfill, dict) and all(
+        isinstance(backfill.get(key), (int, float)) and not isinstance(backfill.get(key), bool) for key in ("from", "to"))
 
 
 def backfill_window(pulse_store: store.PulseStore, days: int, now: float) -> Optional[tuple[float, float]]:
@@ -512,7 +515,7 @@ def backfill_window(pulse_store: store.PulseStore, days: int, now: float) -> Opt
     since = pulse_store.get("memory_since")
     to = since if isinstance(since, (int, float)) and not isinstance(since, bool) else now
     backfill = pulse_store.get("memory_backfill")
-    if isinstance(backfill, dict) and all(isinstance(backfill.get(key), (int, float)) for key in ("from", "to")):
+    if _window_of(backfill):
         if not backfill.get("done"):
             return backfill["from"], backfill["to"]
         to = backfill["from"]
