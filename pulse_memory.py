@@ -265,8 +265,8 @@ def _row_with(evidence: str, chunk: Sequence[Any], hint: Any) -> Optional[Any]:
     if not parts or sum(map(len, parts)) < 8 or min(map(len, parts)) < 3:
         return None  # too little to tell where it came from
     order = list(chunk)
-    if isinstance(hint, (int, float)) and not isinstance(hint, bool) and float(hint).is_integer() \
-            and 1 <= hint <= len(chunk):
+    if isinstance(hint, (int, float)) and not isinstance(hint, bool) and 1 <= hint <= len(chunk) \
+            and float(hint).is_integer():
         order.insert(0, order.pop(int(hint) - 1))
     for row in order:
         text = _norm(_text(row["content"]))
@@ -383,6 +383,14 @@ def extract(llm: Llm, chunk: Sequence[Any], zone: tzinfo, outcomes: Sequence[dic
     tokens = tokens if isinstance(tokens, int) and tokens > 0 else estimate + MAX_TOKENS
     if not isinstance(parsed, dict) or not isinstance(parsed.get("items"), list):
         raise BadReply("BadReply: not a JSON object with an items list", tokens)
+    try:
+        return _parse(parsed, chunk, zone, remembered) + (tokens,)
+    except Exception as error:  # noqa: BLE001 — a reply this code didn't foresee fails its chunk, not the run
+        raise BadReply(f"BadReply: {type(error).__name__}", tokens) from error
+
+
+def _parse(parsed: dict, chunk: Sequence[Any], zone: tzinfo,
+           remembered: Sequence[dict]) -> tuple[list[dict], list[dict]]:
     if len(parsed["items"]) > MAX_ITEMS:
         logger.info("conduit_push: Pulse memory kept the first %d of %d items from a chunk", MAX_ITEMS,
                     len(parsed["items"]))
@@ -393,7 +401,7 @@ def extract(llm: Llm, chunk: Sequence[Any], zone: tzinfo, outcomes: Sequence[dic
             items.append(item)
     closed_raw = parsed.get("closed") if isinstance(parsed.get("closed"), list) else []
     closed = [entry for entry in (_closed(raw, chunk, remembered) for raw in closed_raw[:MAX_ITEMS]) if entry]
-    return items, closed, tokens
+    return items, closed
 
 
 # A run -----------------------------------------------------------------------------

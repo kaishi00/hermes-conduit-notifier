@@ -1223,6 +1223,9 @@ def test_only_items_said_in_the_chat_are_kept():
     assert items[0]["due_at"] == DAY + 3 * 86400 and items[0]["mentioned_at"] == DAY + 60
     with pytest.raises(memory.BadReply):
         memory.extract(FakeModel(["items"]), chunk, UTC)
+    items, _, _ = memory.extract(FakeModel({"items": [{"kind": "fact", "text": "x", "evidence": "call the dentist",
+                                                        "line": 10 ** 400}]}), chunk, UTC)
+    assert items[0]["message_id"] == 11  # a wild line number is only a wrong hint
 
 
 def test_a_due_date_must_be_said_near_its_item():
@@ -1309,8 +1312,14 @@ def test_a_replacement_of_a_replaced_item_replaces_the_current_one(remembering):
     assert remembering.store.advance("", "work", message_id=4, at=DAY + 9, after_id=3,
                                      items=[item("still Rome", same_as=old, mentioned_at=DAY + 9)]) == []
     assert remembering.store.open_items()[0]["mentioned_at"] == DAY + 9  # the repeat landed on the current item
+    remembering.store.advance("", "work", message_id=6, at=DAY, after_id=4, items=[
+        item("Rome by Friday", same_as=new, due="2026-10-23", due_at=DAY + 3 * 86400)])
+    assert remembering.store.open_items()[0]["due"] == "2026-10-23"  # a date said with the repeat
+    remembering.store.advance("", "work", message_id=7, at=DAY, after_id=6, items=[
+        item("Rome", same_as=new, due="2026-10-21", due_at=DAY + 86400)])
+    assert remembering.store.open_items()[0]["due"] == "2026-10-23"  # an earlier one doesn't move it back
     remembering.store.close_item(new, status="done", closed_by="user")
-    assert remembering.store.advance("", "work", message_id=5, at=DAY, after_id=4,
+    assert remembering.store.advance("", "work", message_id=8, at=DAY, after_id=7,
                                      items=[item("Rome again", same_as=new)]) == []  # closed: already on record
     assert remembering.store.open_items() == []
 

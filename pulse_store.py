@@ -398,10 +398,13 @@ class PulseStore:
                     # one of an item closed since is already on record.
                     target = _current(conn, item["same_as"], profile)
                     if target is None or conn.execute(
+                            # A date said again, or a later one, moves the item's date.
                             f"UPDATE items SET mentioned_at=MAX(mentioned_at, ?), "
-                            f"due=CASE WHEN due='' THEN ? ELSE due END, due_at=COALESCE(due_at, ?) "
+                            f"due=CASE WHEN ? IS NOT NULL AND (due_at IS NULL OR ? > due_at) THEN ? ELSE due END, "
+                            f"due_at=CASE WHEN ? IS NOT NULL AND (due_at IS NULL OR ? > due_at) THEN ? ELSE due_at END "
                             f"WHERE id=? AND {live}",
-                            (item["mentioned_at"], item["due"], item["due_at"], target, profile)).rowcount:
+                            (item["mentioned_at"], item["due_at"], item["due_at"], item["due"], item["due_at"],
+                             item["due_at"], item["due_at"], target, profile)).rowcount:
                         continue
                 row = {**item, "profile": profile, "chat_id": chat_id, "recorded_at": now,
                        "valid_from": item["mentioned_at"]}
