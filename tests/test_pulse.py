@@ -1318,6 +1318,12 @@ def test_a_replacement_of_a_replaced_item_replaces_the_current_one(remembering):
     remembering.store.advance("", "work", message_id=7, at=DAY, after_id=6, items=[
         item("Rome", same_as=new, due="2026-10-21", due_at=DAY + 86400)])
     assert remembering.store.open_items()[0]["due"] == "2026-10-23"  # an earlier one doesn't move it back
+    assert remembering.store.advance("", "work", message_id=7, at=DAY, after_id=7, closed=[
+        {"id": old, "status": "done", "evidence": "x", "message_id": 7}]) == []  # through the chain to the current one
+    assert remembering.store.open_items() == []
+    with remembering.store._connect() as conn:
+        conn.execute("UPDATE items SET status='open', closed_by='', closed_at=NULL WHERE id=?", (new,))
+        conn.commit()
     remembering.store.close_item(new, status="done", closed_by="user")
     assert remembering.store.advance("", "work", message_id=8, at=DAY, after_id=7,
                                      items=[item("Rome again", same_as=new)]) == []  # closed: already on record

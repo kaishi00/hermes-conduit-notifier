@@ -417,10 +417,12 @@ class PulseStore:
                 if target is not None and target != new_id:
                     conn.execute(f"UPDATE items SET superseded_at=?, superseded_by=?, valid_to=? WHERE id=? AND {live}",
                                  (now, new_id, item["mentioned_at"], target, profile))
-            for entry in closed:
-                conn.execute(f"UPDATE items SET status=?, closed_by=?, closed_at=? WHERE id=? AND {live}",
-                             (entry["status"], f"chat {chat_id} message {entry['message_id']}: {entry['evidence']}",
-                              now, entry["id"], profile))
+            for entry in closed:  # an item replaced since closes through its successor
+                target = _current(conn, entry["id"], profile)
+                if target is not None:
+                    conn.execute(f"UPDATE items SET status=?, closed_by=?, closed_at=? WHERE id=? AND {live}",
+                                 (entry["status"], f"chat {chat_id} message {entry['message_id']}: {entry['evidence']}",
+                                  now, target, profile))
             conn.execute(
                 "INSERT INTO watermarks(profile, chat_id, message_id, at) VALUES(?,?,?,?) "
                 "ON CONFLICT(profile, chat_id) DO UPDATE SET message_id=excluded.message_id, at=excluded.at, "
