@@ -10,6 +10,12 @@ process that hosts those sessions.
 
 Everything here goes through the host's method table. A Hermes without it
 (or without either method) reports itself unavailable instead of failing.
+
+The chat is Pulse's own, so when another surface holds it (Hermes Desktop
+keeps a chat it has open, and Hermes refuses anyone else's turn with
+SESSION_NOT_OWNED) Pulse takes it over the way Conduit's "Take over" does
+(chat_takeover.py) and sends once more. A turn running there is never cut
+off: that answers busy and the send stays refused.
 """
 
 from __future__ import annotations
@@ -46,7 +52,20 @@ def available() -> bool:
     return _methods() is not None
 
 
-def send(chat_id: str, text: str, *, profile: str = "") -> Sent:
+def take_over(session_ids: list[str]) -> str:
+    """Drops other processes' claims on the chat: chat_takeover's status
+    ("free", "taken_over", "busy", "same_host"), or why it couldn't."""
+    from . import chat_takeover as takeover
+    try:
+        registry, turn_marker = takeover.modules()
+        return str(takeover.take_over_session(session_ids, registry=registry, turn_marker=turn_marker,
+                                              home=takeover.home(), by="Pulse").get("status") or "")
+    except takeover.TakeoverError as error:
+        return str(error)
+
+
+def send(chat_id: str, text: str, *, profile: str = "",
+         taking_over: Callable[[list[str]], str] = take_over) -> Sent:
     """Reopens the chat (the live session when someone has it open) and
     submits ``text`` as a hidden turn. A chat busy with a turn queues it
     behind that turn instead of interrupting it."""
@@ -63,12 +82,28 @@ def send(chat_id: str, text: str, *, profile: str = "") -> Sent:
     sid = ((resumed.get("result") or {}).get("session_id") or "") if isinstance(resumed.get("result"), dict) else ""
     if not sid:
         return Sent(False, "", "couldn't open the chat: no session id came back")
-    submitted = methods[SUBMIT](rid, {"session_id": sid, "text": text, "display_kind": "hidden", "queued": True})
+    def submit() -> Any:
+        return methods[SUBMIT](rid, {"session_id": sid, "text": text, "display_kind": "hidden", "queued": True})
+
+    submitted = submit()
+    if _not_owned(submitted):
+        taken = taking_over(list(dict.fromkeys([chat_id, sid])))
+        if taken not in ("free", "taken_over", "same_host"):
+            return Sent(False, "", f"the chat refused the turn: {_message(submitted)} "
+                                   f"(Pulse couldn't take it over: {taken or 'unknown'})")
+        submitted = submit()
     if not isinstance(submitted, dict) or "error" in submitted:
         return Sent(False, "", f"the chat refused the turn: {_message(submitted)}")
     result = submitted.get("result") if isinstance(submitted.get("result"), dict) else {}
     status = str(result.get("status") or "")
     return Sent(True, "streaming" if status == "streaming" else "queued", status)
+
+
+def _not_owned(response: Any) -> bool:
+    """Hermes refused the turn because another live surface holds the chat."""
+    error = response.get("error") if isinstance(response, dict) else None
+    data = error.get("data") if isinstance(error, dict) else None
+    return isinstance(data, dict) and data.get("reason") == "SESSION_NOT_OWNED"
 
 
 def _message(response: Any) -> str:

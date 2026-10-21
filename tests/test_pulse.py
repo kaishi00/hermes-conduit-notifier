@@ -387,6 +387,36 @@ def test_send_reports_a_refusal(monkeypatch):
     assert not sent.ok and "session not found" in sent.detail
 
 
+NOT_OWNED = {"error": {"code": 4090, "message": "This chat is open in another Hermes window/terminal.",
+                       "data": {"reason": "SESSION_NOT_OWNED"}}}
+
+
+def test_a_chat_held_elsewhere_is_taken_over_and_sent_again(monkeypatch):
+    fake = FakeHost().install(monkeypatch)
+    replies = [NOT_OWNED, {"result": {"status": "streaming"}}]
+    monkeypatch.setitem(sys.modules["tui_gateway.server"]._methods, host.SUBMIT,
+                        lambda rid, params: fake.calls.append((host.SUBMIT, params)) or replies.pop(0))
+    taken = []
+    sent = host.send(SID, "x", taking_over=lambda ids: taken.append(ids) or "taken_over")
+    assert sent == host.Sent(True, "streaming", "streaming")
+    assert taken == [[SID, "ui-1"]]
+    assert [name for name, _ in fake.calls] == [host.RESUME, host.SUBMIT, host.SUBMIT]
+
+
+def test_a_chat_busy_elsewhere_stays_refused(monkeypatch):
+    fake = FakeHost(submit=NOT_OWNED).install(monkeypatch)
+    sent = host.send(SID, "x", taking_over=lambda ids: "busy")
+    assert not sent.ok and "couldn't take it over: busy" in sent.detail
+    assert [name for name, _ in fake.calls] == [host.RESUME, host.SUBMIT]
+
+
+def test_another_refusal_takes_nothing_over(monkeypatch):
+    FakeHost(submit={"error": {"code": 4009, "message": "nope"}}).install(monkeypatch)
+    taken = []
+    assert not host.send(SID, "x", taking_over=lambda ids: taken.append(ids) or "taken_over").ok
+    assert taken == []
+
+
 def test_no_host_means_unavailable(monkeypatch):
     monkeypatch.delitem(sys.modules, "tui_gateway.server", raising=False)
     assert not host.available()
@@ -2024,3 +2054,10 @@ def test_pulse_routes(remembering, db, monkeypatch):
     assert http.post(f"{base}/backfill", json={"action": "stop"}).json()["detail"]["code"] == "not_running"
     assert http.post(f"{base}/memory/forget", json={"id": 1}).json()["forgotten"] is False
     assert not (fresh / store.DB_NAME).exists()
+
+
+def test_take_over_names_why_it_could_not(monkeypatch):
+    takeover = _load("conduit_push.chat_takeover", ROOT / "chat_takeover.py")
+    monkeypatch.setattr(takeover, "modules", lambda: (_ for _ in ()).throw(
+        takeover.TakeoverError(501, "This Hermes version can't hand a chat over")))
+    assert host.take_over([SID]) == "This Hermes version can't hand a chat over"
