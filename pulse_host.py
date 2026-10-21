@@ -62,15 +62,16 @@ def available() -> bool:
 
 def take_over(session_ids: list[str]) -> str:
     """Drops other processes' claims on the chat: chat_takeover's status
-    ("free", "taken_over", "busy", "same_host"), or why it couldn't."""
+    ("free", "taken_over", "busy", "same_host"), or why it couldn't.
+
+    One worker at a time: a worker that timed out waiting on Hermes' lock is
+    left waiting, and until it finishes every refusal reports that instead of
+    starting another thread (a lock Hermes never releases needs a restart)."""
     global _worker
     try:
         from . import chat_takeover as takeover
     except Exception as error:  # noqa: BLE001 — a partial install: a reason, not a crash
         return f"takeover failed: {type(error).__name__}"
-    with _worker_lock:
-        if _worker is not None and _worker.is_alive():
-            return "a takeover is still waiting on Hermes"
     abandoned = threading.Event()
     outcome: list[str] = []
 
@@ -85,8 +86,10 @@ def take_over(session_ids: list[str]) -> str:
         except Exception as error:  # noqa: BLE001 — a reason for `pulse status`, never a crash in the loop
             outcome.append(f"takeover failed: {type(error).__name__}")
 
-    worker = threading.Thread(target=run, name="conduit-pulse-takeover", daemon=True)
     with _worker_lock:
+        if _worker is not None and _worker.is_alive():
+            return "a takeover is still waiting on Hermes"
+        worker = threading.Thread(target=run, name="conduit-pulse-takeover", daemon=True)
         _worker = worker
     try:
         worker.start()

@@ -423,6 +423,13 @@ def test_one_takeover_waits_on_hermes_at_a_time(monkeypatch):
     assert host.take_over([SID]) == "free"
 
 
+def test_the_dashboard_and_pulse_copies_share_one_takeover_lock():
+    pulse_copy = _load("conduit_push.chat_takeover", ROOT / "chat_takeover.py")
+    dashboard_copy = _load("conduit_push_dashboard_pkg.chat_takeover", ROOT / "chat_takeover.py")
+    assert pulse_copy is not dashboard_copy
+    assert pulse_copy._in_process is dashboard_copy._in_process
+
+
 def test_a_chat_busy_elsewhere_stays_refused(monkeypatch):
     fake = FakeHost(submit=NOT_OWNED).install(monkeypatch)
     sent = host.send(SID, "x", taking_over=lambda ids: "busy")

@@ -13,6 +13,7 @@ from __future__ import annotations
 import inspect
 import logging
 import os
+import sys
 import threading
 from typing import Any, Optional
 
@@ -21,7 +22,10 @@ logger = logging.getLogger(__name__)
 TURN_MARKER_SURFACES = frozenset({"desktop", "tui"})
 # The route's workers and Pulse take over in the same process; Hermes' file
 # lock may not exclude threads of one process, so they also take this one.
-_in_process = threading.Lock()
+# The dashboard loads this file as conduit_push_dashboard_pkg.chat_takeover
+# and Pulse as conduit_push.chat_takeover, so the lock lives on sys, which
+# both copies share (dict.setdefault is atomic).
+_in_process = sys.__dict__.setdefault("_conduit_chat_takeover_lock", threading.Lock())
 
 
 class TakeoverError(Exception):
