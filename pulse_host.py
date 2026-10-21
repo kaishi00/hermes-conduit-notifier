@@ -21,12 +21,16 @@ off: that answers busy and the send stays refused.
 from __future__ import annotations
 
 import sys
+import threading
 import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 RESUME = "session.resume"
 SUBMIT = "prompt.submit"
+# Like the dashboard's takeover route: a lock holder that never lets go
+# can't stall the Pulse loop longer than this.
+TAKEOVER_TIMEOUT_S = 20.0
 
 
 @dataclass(frozen=True)
@@ -56,12 +60,27 @@ def take_over(session_ids: list[str]) -> str:
     """Drops other processes' claims on the chat: chat_takeover's status
     ("free", "taken_over", "busy", "same_host"), or why it couldn't."""
     from . import chat_takeover as takeover
-    try:
-        registry, turn_marker = takeover.modules()
-        return str(takeover.take_over_session(session_ids, registry=registry, turn_marker=turn_marker,
-                                              home=takeover.home(), by="Pulse").get("status") or "")
-    except takeover.TakeoverError as error:
-        return str(error)
+    abandoned = threading.Event()
+    outcome: list[str] = []
+
+    def run() -> None:
+        try:
+            registry, turn_marker = takeover.modules()
+            outcome.append(str(takeover.take_over_session(
+                session_ids, registry=registry, turn_marker=turn_marker, home=takeover.home(), by="Pulse",
+                abandoned=abandoned).get("status") or ""))
+        except takeover.TakeoverError as error:
+            outcome.append(str(error))
+        except Exception as error:  # noqa: BLE001 — a reason for `pulse status`, never a crash in the loop
+            outcome.append(f"takeover failed: {type(error).__name__}")
+
+    worker = threading.Thread(target=run, name="conduit-pulse-takeover", daemon=True)
+    worker.start()
+    worker.join(TAKEOVER_TIMEOUT_S)
+    if worker.is_alive():
+        abandoned.set()  # nothing is written after this
+        return "takeover timed out"
+    return outcome[0] if outcome else "takeover failed"
 
 
 def send(chat_id: str, text: str, *, profile: str = "",
@@ -83,7 +102,9 @@ def send(chat_id: str, text: str, *, profile: str = "",
     if not sid:
         return Sent(False, "", "couldn't open the chat: no session id came back")
     def submit() -> Any:
-        return methods[SUBMIT](rid, {"session_id": sid, "text": text, "display_kind": "hidden", "queued": True})
+        # A request id per call: the resend is a new request, not the refused one.
+        return methods[SUBMIT](f"pulse-{uuid.uuid4().hex[:12]}",
+                               {"session_id": sid, "text": text, "display_kind": "hidden", "queued": True})
 
     submitted = submit()
     if _not_owned(submitted):
@@ -92,6 +113,9 @@ def send(chat_id: str, text: str, *, profile: str = "",
             return Sent(False, "", f"the chat refused the turn: {_message(submitted)} "
                                    f"(Pulse couldn't take it over: {taken or 'unknown'})")
         submitted = submit()
+        if _not_owned(submitted):
+            return Sent(False, "", f"the chat refused the turn again after Pulse took it over ({taken}): "
+                                   f"{_message(submitted)}")
     if not isinstance(submitted, dict) or "error" in submitted:
         return Sent(False, "", f"the chat refused the turn: {_message(submitted)}")
     result = submitted.get("result") if isinstance(submitted.get("result"), dict) else {}

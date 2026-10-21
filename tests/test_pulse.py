@@ -2061,3 +2061,39 @@ def test_take_over_names_why_it_could_not(monkeypatch):
     monkeypatch.setattr(takeover, "modules", lambda: (_ for _ in ()).throw(
         takeover.TakeoverError(501, "This Hermes version can't hand a chat over")))
     assert host.take_over([SID]) == "This Hermes version can't hand a chat over"
+
+
+def test_take_over_turns_any_failure_into_a_reason(monkeypatch):
+    takeover = _load("conduit_push.chat_takeover", ROOT / "chat_takeover.py")
+    monkeypatch.setattr(takeover, "modules", lambda: (_ for _ in ()).throw(OSError("disk")))
+    assert host.take_over([SID]) == "takeover failed: OSError"
+
+
+def test_a_takeover_that_hangs_is_abandoned(monkeypatch):
+    import threading
+
+    takeover = _load("conduit_push.chat_takeover", ROOT / "chat_takeover.py")
+    release, seen = threading.Event(), []
+
+    def stuck(ids, *, abandoned, **_):
+        release.wait(5)
+        seen.append(abandoned.is_set())
+        return {"status": "taken_over"}
+
+    monkeypatch.setattr(takeover, "modules", lambda: (object(), object()))
+    monkeypatch.setattr(takeover, "home", lambda: "home")
+    monkeypatch.setattr(takeover, "take_over_session", stuck)
+    monkeypatch.setattr(host, "TAKEOVER_TIMEOUT_S", 0.05)
+    assert host.take_over([SID]) == "takeover timed out"
+    release.set()
+    for _ in range(100):
+        if seen:
+            break
+        time.sleep(0.01)
+    assert seen == [True]  # the worker sees it was abandoned, so it writes nothing
+
+
+def test_a_chat_refused_again_after_the_takeover_says_so(monkeypatch):
+    FakeHost(submit=NOT_OWNED).install(monkeypatch)
+    sent = host.send(SID, "x", taking_over=lambda ids: "same_host")
+    assert not sent.ok and "again after Pulse took it over (same_host)" in sent.detail
