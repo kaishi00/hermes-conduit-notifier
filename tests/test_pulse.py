@@ -1758,7 +1758,8 @@ def test_a_backfill_stopped_mid_run_is_left_alone(remembering, db):
         store_.set("memory_backfill", {**store_.get("memory_backfill"), "active": False})  # `backfill stop`
         return {"items": []}, 100
 
-    assert _remember(remembering, model, DAY + 3600)["chunks"] == 1 and len(shown) == 1
+    assert _remember(remembering, model, DAY + 3600)["chunks"] == 0 and len(shown) == 1
+    assert store_.watermarks("backfill_marks") == []  # the chunk in flight when it stopped isn't kept
     assert store_.get("memory_backfill")["active"] is False and not store_.get("memory_backfill")["done"]
 
 
@@ -1792,6 +1793,8 @@ def test_backfill_command(remembering, db, capsys, monkeypatch):
     assert run("stop") == 0 and run("cancel") == 0 and store_.watermarks("backfill_marks") == []
     cancelled = store_.get("memory_backfill")
     assert cancelled["done"] and cancelled["from"] == backfill["to"] and run("cancel") == 1
+    assert "Backfill: cancelled; memory has read back to" in status()
+    assert not memory.has_window({"from": 2.0, "to": 1.0}) and not memory.has_window({"from": True, "to": 2.0})
     assert run("start") == 0 and store_.get("memory_backfill")["to"] == backfill["to"]  # starts over from there
     store_.set("memory_backfill", {**store_.get("memory_backfill"), "active": False, "done": True})
     assert "Backfill: read back to" in status()

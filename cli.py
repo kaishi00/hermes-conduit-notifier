@@ -257,7 +257,8 @@ def _pulse(args: argparse.Namespace) -> int:
     backfill = pulse_store.get("memory_backfill")
     if pulse_memory.has_window(backfill):
         back_to = datetime.fromtimestamp(backfill["from"], zone).strftime("%d %b %Y")
-        print(f"Backfill: read back to {back_to}." if backfill.get("done") else
+        print(f"Backfill: cancelled; memory has read back to {back_to}." if backfill.get("cancelled") else
+              f"Backfill: read back to {back_to}." if backfill.get("done") else
               f"Backfill: reading chats back to {back_to}." if backfill.get("active") else
               f"Backfill: paused before reaching {back_to}; `pulse memory backfill start` carries on.")
     if (isinstance(today, dict) and today.get("day") == datetime.now(zone).strftime("%Y-%m-%d")
@@ -389,7 +390,8 @@ def _pulse_backfill(pulse_store: Any, home: Any, extra: str) -> int:
             return 1
         # What was read stays; memory counts as read back only to where this backfill began.
         if not pulse_store.swap("memory_backfill", backfill, {"from": backfill["to"], "to": backfill["to"],
-                                                             "active": False, "done": True}):
+                                                             "active": False, "done": True, "cancelled": True,
+                                                             "was_from": backfill["from"]}):
             print("The backfill changed meanwhile; try again.")
             return 1
         pulse_store.clear_backfill_marks()

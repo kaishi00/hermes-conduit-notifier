@@ -463,7 +463,7 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
                 items, closed, tokens = extract(llm, chunk, zone, outcomes, remembered)
             except ChunkFailed as error:  # waits for a retry
                 done["tokens"] += error.tokens
-                if not still_leader():
+                if not still_leader() or (chat.until is not None and not current()):
                     return done
                 failures = pulse_store.chunk_failed(chat.profile, chat.chat_id, retry_at=now + RETRY_S,
                                                     after_id=chat.after_id, now=now, marks=chat.marks)
@@ -480,8 +480,8 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
                                         after_id=chat.after_id, marks=chat.marks)
                 break  # the rest of this chat waits for its next run
             done["tokens"] += tokens  # spent whether or not the chunk is kept
-            if not still_leader():
-                return done  # stopped during the call: keep nothing
+            if not still_leader() or (chat.until is not None and not current()):
+                return done  # stopped (or the backfill stopped) during the call: keep nothing
             if pulse_store.advance(chat.profile, chat.chat_id, message_id=last["id"], at=last["timestamp"],
                                    items=items, closed=closed, after_id=chat.after_id, marks=chat.marks) is None:
                 break  # another process read this chunk meanwhile
@@ -508,7 +508,8 @@ def active_backfill(pulse_store: store.PulseStore) -> Optional[dict]:
 
 def has_window(backfill: Any) -> bool:
     return isinstance(backfill, dict) and all(
-        isinstance(backfill.get(key), (int, float)) and not isinstance(backfill.get(key), bool) for key in ("from", "to"))
+        isinstance(backfill.get(key), (int, float)) and not isinstance(backfill.get(key), bool) for key in ("from", "to")
+    ) and backfill["from"] <= backfill["to"]
 
 
 def backfill_window(pulse_store: store.PulseStore, days: int, now: float) -> Optional[tuple[float, float]]:
