@@ -17,8 +17,8 @@ Sends are coalesced per session on one background thread: at most one every
 once. The relay answers whether the phone registered an activity for the
 session; one that didn't (yet) is asked again only every
 ``UNTRACKED_RETRY_S`` (Conduit registers a moment after the turn starts), so a
-turn nobody watches costs a request or two. A relay without the route turns
-the whole thing off for a while.
+turn nobody watches costs a request or two. A relay without the route, or
+one that refuses the caller (401/403), turns the whole thing off for a while.
 """
 
 from __future__ import annotations
@@ -415,13 +415,20 @@ def _post_to_relay(payload: dict[str, Any]) -> dict[str, Any]:
         return {"tracked": False}
     if state.get("redact_content"):
         payload = {**payload, "state": {k: v for k, v in payload["state"].items() if k != "tool"}}
-    return client.request_json(
-        f"{state['relay_url'].rstrip('/')}/v1/live-activity",
-        method="POST",
-        credential=state["credential"],
-        payload=payload,
-        timeout=10.0,
-    )
+    try:
+        return client.request_json(
+            f"{state['relay_url'].rstrip('/')}/v1/live-activity",
+            method="POST",
+            credential=state["credential"],
+            payload=payload,
+            timeout=10.0,
+        )
+    except client.RelayRejected as error:
+        # The same "pair again" signal notifications raise, for a host whose
+        # only relay traffic is Live Activities.
+        if error.status == 401:
+            client._mark_relay_rejected(state, True)
+        raise
 
 
 reporter = LiveActivityReporter()

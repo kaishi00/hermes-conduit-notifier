@@ -183,8 +183,23 @@ def test_a_refused_caller_pauses_every_turn_instead_of_retrying(reporter, relay,
     clock[0] += live.REFUSED_S
     reporter.thinking("s-2")
     reporter.flush()
-    assert relay.posts[-1]["session_id"] in ("s-1", "s-2")
-    assert len(relay.posts) > 2
+    assert relay.posts[-1]["session_id"] == "s-2"
+    assert len(relay.posts) == 3
+
+
+def test_a_refused_credential_tells_status_to_pair_again(monkeypatch):
+    state = {"relay_url": "https://relay.example", "credential": "c"}
+    marked = []
+    monkeypatch.setattr(client, "load_state", lambda: state)
+    monkeypatch.setattr(client, "_mark_relay_rejected", lambda sent_with, rejected: marked.append((sent_with, rejected)))
+
+    def refuse(url, **kwargs):
+        raise client.RelayRejected(401, "unauthorized")
+
+    monkeypatch.setattr(client, "request_json", refuse)
+    with pytest.raises(client.RelayRejected):
+        live._post_to_relay({"session_id": "s", "state": {"phase": "thinking", "tools": 0}})
+    assert marked == [(state, True)]
 
 
 def test_an_end_the_relay_did_not_take_is_sent_again(reporter, relay, clock):
