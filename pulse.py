@@ -355,11 +355,23 @@ def _turn_cards(pulse_store: store.PulseStore, home: Path, changed: list[dict], 
             logger.debug("conduit_push: Pulse: no card for %s yet", row["tag"], exc_info=True)
 
 
+def turn_model(pulse_store: Any) -> Optional[dict[str, str]]:
+    """The model Settings > Pulse picked, or None for the chat's own. A stored
+    value that isn't one word per field is dropped: it goes into a flag string."""
+    model = pulse_store.get(MODEL)
+    if not isinstance(model, dict):
+        return None
+    name, provider = model.get("model"), model.get("provider") or ""
+    if not isinstance(name, str) or not isinstance(provider, str) or not host.plain_flag_value(name) \
+            or (provider and not host.plain_flag_value(provider)):
+        return None
+    return {"provider": provider, "model": name}
+
+
 def _sender(pulse_store: store.PulseStore) -> Callable[[str, str], host.Sent]:
     """Sends a Pulse turn on this profile, on the model Settings > Pulse picked."""
     profile = str(getattr(_ctx, "profile_name", "") or "")
-    model = pulse_store.get(MODEL)
-    model = model if isinstance(model, dict) and model.get("model") else None
+    model = turn_model(pulse_store)
     return lambda chat_id, body: host.send(chat_id, body, profile=profile, model=model)
 
 

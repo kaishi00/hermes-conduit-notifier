@@ -150,6 +150,11 @@ def send(chat_id: str, text: str, *, profile: str = "", model: Optional[dict] = 
     return Sent(True, "streaming" if status == "streaming" else "queued", status)
 
 
+def plain_flag_value(value: str) -> bool:
+    """One word that can't read as a flag in config.set's value string."""
+    return bool(value) and not value.startswith("-") and not any(char.isspace() for char in value)
+
+
 def _use_model(methods: dict[str, Callable[..., Any]], sid: str, resumed: Any, model: dict) -> None:
     """Puts the chat on Pulse's model unless it is on it already. The user
     picked it in Settings > Pulse, so a price guard doesn't hold it back. A
@@ -158,7 +163,7 @@ def _use_model(methods: dict[str, Callable[..., Any]], sid: str, resumed: Any, m
     info = resumed.get("info") if isinstance(resumed, dict) else None
     if isinstance(info, dict) and info.get("model") == name and (not provider or info.get("provider") == provider):
         return
-    if not name or CONFIG_SET not in methods:
+    if not plain_flag_value(name) or (provider and not plain_flag_value(provider)) or CONFIG_SET not in methods:
         return
     value = f"{name} --provider {provider} --session" if provider else f"{name} --session"
     try:

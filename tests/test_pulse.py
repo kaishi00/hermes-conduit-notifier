@@ -402,16 +402,19 @@ def test_send_puts_the_chat_on_pulses_model_first(monkeypatch):
     assert host.send(SID, "x", model=model).ok and fake.calls[-1][0] == host.SUBMIT
 
 
-def test_the_pulse_model_setting(pulse_store):
+def test_the_pulse_model_setting(pulse_store, tmp_path):
     store_ = pulse_store
     control.update(store_, {"model": {"provider": "openrouter", "model": "google/gemini-flash"}})
     assert store_.get(pulse.MODEL) == {"provider": "openrouter", "model": "google/gemini-flash"}
     for bad in ({"model": "flash"}, {"model": {"model": ""}}, {"model": {"model": "a b"}},
+                {"model": {"model": "--provider"}}, {"model": {"model": "m", "provider": "-x"}},
                 {"model": {"model": "m", "base_url": "x"}}):
         with pytest.raises(control.Refused):
             control.update(store_, bad)
     control.update(store_, {"model": None})
     assert store_.get(pulse.MODEL) is None
+    store_.set(pulse.MODEL, {"provider": "", "model": "x --base-url y"})
+    assert pulse.turn_model(store_) is None and control.state(store_, tmp_path)["model"] is None
 
 
 def test_send_reports_a_refusal(monkeypatch):

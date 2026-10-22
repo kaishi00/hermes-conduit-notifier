@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import pulse, pulse_delivery, pulse_hermes, pulse_learning, pulse_memory
+from . import pulse_host as host
 
 RECENT = 5
 ITEMS = 200
@@ -227,7 +228,8 @@ def _model(value: Any) -> Optional[dict[str, str]]:
         raise Refused("invalid", field="model")
     name, provider = value.get("model"), value.get("provider", "")
     if not isinstance(name, str) or not isinstance(provider, str) or not name.strip() \
-            or len(name) > 200 or len(provider) > 100 or any(char.isspace() for char in name + provider):
+            or len(name) > 200 or len(provider) > 100 or not host.plain_flag_value(name) \
+            or (provider and not host.plain_flag_value(provider)):
         raise Refused("invalid", field="model")
     return {"provider": provider, "model": name}
 
@@ -344,7 +346,7 @@ def state(pulse_store: Any, home: Path, now: Optional[float] = None) -> dict[str
         "home_chat": {"id": chat.chat_id, "title": chat.title, "pinned": bool(chat.pinned)} if chat else None,
         "home_problem": problem,
         "home_title": pulse_store.get("home_title") or "Pulse",
-        "model": pulse_store.get(pulse.MODEL) or None,
+        "model": pulse.turn_model(pulse_store),
         "checks": pulse_store.counts(pulse.PROBE),
         "recent": [{"at": row["created_at"], "kind": row["kind"], "state": row["state"],
                     "detail": row.get("detail") or ""} for row in pulse_store.recent(RECENT)],
