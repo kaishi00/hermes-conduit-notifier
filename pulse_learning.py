@@ -216,9 +216,15 @@ def rate(pulse_store: store.PulseStore, card_id: Any, rating: Any, reason: Any =
 
     _change_score(pulse_store, kind, change)
     if step.get("to"):
-        made.append(_lesson(pulse_store, kind, LEVEL, value=step["to"], card=card,
-                            cause=f"{STEP_AT} thumbs {'up' if delta > 0 else 'down'}", now=now,
-                            expect=step["from"]))
+        cause = f"{STEP_AT} thumbs {'up' if delta > 0 else 'down'}"
+        lesson = _lesson(pulse_store, kind, LEVEL, value=step["to"], card=card, cause=cause, now=now,
+                         expect=step["from"])
+        if lesson is None:  # the level moved meanwhile: the spent thumbs step from where it is now
+            moved = level(pulse_store, kind)
+            to = _step(moved, louder=delta > 0)
+            if to:
+                lesson = _lesson(pulse_store, kind, LEVEL, value=to, card=card, cause=cause, now=now, expect=moved)
+        made.append(lesson)
     return made
 
 

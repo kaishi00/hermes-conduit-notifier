@@ -365,6 +365,25 @@ def test_a_level_already_in_force_adds_no_second_lesson_even_past_the_early_chec
     assert learning.level(live.store, "followup") == "brief"
 
 
+def test_a_step_refused_over_a_move_made_meanwhile_steps_from_the_new_level(live, monkeypatch):
+    first, second = told_card(live), told_card(live, "Another one.")
+    control.rate(live.store, first["id"], "down")
+    real = live.store.swap
+    row = {"kind": "followup", "what": learning.LEVEL, "value": "screen", "profile": "", "chat_id": "",
+           "card_id": None, "cause": "set", "created_at": 2.0}
+
+    def swap(key, old, new):  # another writer moves the level just as the thumbs are spent
+        if key == learning.SCORES:
+            monkeypatch.setattr(live.store, "swap", real)
+            assert live.store.add_lesson(row)
+        return real(key, old, new)
+
+    monkeypatch.setattr(live.store, "swap", swap)
+    made = control.rate(live.store, second["id"], "down")
+    assert learning.level(live.store, "followup") == "brief"
+    assert [lesson["what"] for lesson in made] == ["level"]
+
+
 def test_ratings_are_refused_while_pulse_is_off(live):
     card = told_card(live)
     live.store.set("enabled", False)
