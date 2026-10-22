@@ -2089,6 +2089,8 @@ def test_pulse_routes(remembering, db, monkeypatch):
     assert feed["levels"] == {"followup": "push"}
     assert http.post(f"{base}/feed/seen", json={"ids": None}).json()["seen"] == 1
     assert http.post(f"{base}/feed/seen", json={"ids": "all"}).status_code == 400
+    assert http.post(f"{base}/feed/seen", json={}).status_code == 400
+    assert http.post(f"{base}/feed/seen", json={"ids": []}).json()["seen"] == 0
     assert http.post(f"{base}/rate", json={"card": card, "rating": "sideways"}).json()["detail"] == {
         "code": "invalid", "field": "rating"}
     [lesson] = http.post(f"{base}/rate", json={"card": card, "rating": "down", "reason": "too_often"}).json()["learned"]

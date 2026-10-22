@@ -6970,7 +6970,10 @@ async def post_pulse_seen(request: Request, response: Response) -> Dict[str, Any
     """{"ids": [n, ...]} marks those cards seen, {"ids": null} every card: {"seen": count}."""
     response.headers["Cache-Control"] = "no-store"
     body = await _read_json_body(request, PULSE_MAX_BODY_BYTES)
-    ids = body.get("ids") if isinstance(body, dict) else []
+    if not isinstance(body, dict) or "ids" not in body:
+        raise HTTPException(status_code=400, detail={"code": "invalid", "field": "ids"},
+                            headers={"Cache-Control": "no-store"})
+    ids = body["ids"]
     return await _pulse_route("seen", lambda control, store, home: {"seen": control.see(store, ids)},
                               reads_only=True)
 

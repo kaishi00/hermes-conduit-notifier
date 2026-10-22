@@ -360,7 +360,7 @@ def next_send(pulse_store: store.PulseStore, now: float, home: Optional[Path] = 
             continue  # settle() closes it
         if mute(pulse_store, item, followup, now):
             continue
-        if loudness != "push" and not attempts:
+        if loudness != "push":  # a push that failed earlier becomes a card instead of trying again
             _told(pulse_store, item, followup, now, loudness, home)
             continue
         if len(attempts) >= TRIES:
@@ -389,8 +389,8 @@ def _told(pulse_store: store.PulseStore, item: dict, followup: dict, now: float,
     told = pulse_store.close_item(followup["item_id"], status="done",
                                   closed_by="pulse follow-up" if loudness == "push" else f"pulse follow-up ({loudness})")
     pulse_store.decide_followup(followup["item_id"],
-                                decision=({"push": "told", "screen": "shown", "brief": "held"}[loudness] if told
-                                          else "closed"),
+                                decision=({"push": "told", "screen": "shown", "brief": "held"}.get(loudness, "shown")
+                                          if told else "closed"),
                                 news=followup["news"], why=followup["why"], checks=followup["checks"],
                                 next_check_at=None, now=now)
 

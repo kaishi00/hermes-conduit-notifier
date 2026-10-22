@@ -35,7 +35,9 @@ def test_a_delivered_follow_up_becomes_a_card_linked_to_its_chat(live):
     feed = control.feed(live.store)
     assert feed["unseen"] == 1 and feed["levels"] == {"followup": "push"}
     assert feed["cards"][0]["id"] == card["id"]
-    assert control.see(live.store, [card["id"]]) == 1 and live.store.unseen_cards() == 0
+    assert control.see(live.store, [card["id"], 999]) == 1 and live.store.unseen_cards() == 0
+    with pytest.raises(ValueError):
+        live.store.add_card({"kind": "followup", "level": "push", "created_at": 1, "rating) VALUES(1); --": 1})
 
 
 def test_two_thumbs_down_move_follow_ups_to_the_screen_and_two_up_bring_them_back(live):
@@ -207,6 +209,7 @@ def test_cli_rates_and_lists_what_was_learned(live, monkeypatch, capsys):
     assert run("learned", "undo", str(lesson["id"])) == 0 and "Undone." in capsys.readouterr().out
     assert run("learned", "followup", "screen") == 0 and "shown in Pulse" in capsys.readouterr().out
     assert run("rate", str(card["id"]), "meh") == 2
+    assert run("learned", "followup") == 2
 
 
 def test_cli_on_a_host_that_never_turned_pulse_on_leaves_no_file(tmp_path, monkeypatch, capsys):
@@ -217,3 +220,87 @@ def test_cli_on_a_host_that_never_turned_pulse_on_leaves_no_file(tmp_path, monke
                                                         extra=argv[2] if len(argv) > 2 else ""))
     assert run("cards") == 0 and run("learned") == 0 and run("rate", "1", "up") == 1
     assert not (tmp_path / store.DB_NAME).exists()
+
+
+def brief_due_now(live):
+    from datetime import datetime, timezone
+    live.store.set("time_zone", "UTC")
+    live.store.set("brief_time", datetime.fromtimestamp(time.time() - 60, timezone.utc).strftime("%H:%M"))
+
+
+def test_held_cards_go_out_in_the_morning_brief_once(live):
+    control.set_level(live.store, "followup", "brief")
+    tell(live)
+    pulse.tick()  # the follow-up becomes a held card
+    assert live.sent() == []
+    brief_due_now(live)
+    pulse.tick()
+    [text] = live.sent()
+    assert text.startswith("Pulse morning brief ") and "everything is green" in text and 'the chat "Deploy"' in text
+    [attempt] = live.store.in_flight()
+    assert attempt["kind"] == "brief"
+    live.store.update_attempt(attempt["attempt_id"], state=store.DELIVERED)
+    pulse.tick()
+    assert live.store.cards()[0]["briefed_at"] is not None and live.store.held_cards(10) == []
+    pulse.tick()
+    assert len(live.sent()) == 1
+
+
+def test_no_brief_without_held_cards_or_before_its_time(live):
+    brief_due_now(live)
+    pulse.tick()
+    assert live.sent() == []
+    from datetime import datetime, timezone
+    live.store.set("brief_time", datetime.fromtimestamp(time.time() + 3600, timezone.utc).strftime("%H:%M"))
+    control.set_level(live.store, "followup", "brief")
+    tell(live)
+    pulse.tick()
+    assert live.sent() == [] and len(live.store.held_cards(10)) == 1
+
+
+def test_a_brief_turn_pushes(live):
+    control.set_level(live.store, "followup", "brief")
+    tell(live)
+    pulse.tick()
+    brief_due_now(live)
+    pulse.tick()
+    [attempt] = live.store.in_flight()
+    pulse._mark_turn(SID, "turn-b", attempt["tag"])
+    assert pulse.pushes(SID, "turn-b") is True
+
+
+def test_a_failed_push_becomes_a_card_once_follow_ups_go_quiet(live):
+    item_id = tell(live)
+    pulse.tick()
+    [attempt] = live.store.in_flight()
+    live.store.update_attempt(attempt["attempt_id"], state=store.FAILED, detail="boom")
+    control.set_level(live.store, "followup", "screen")
+    pulse.tick()
+    assert len(live.sent()) == 1 and live.store.cards()[0]["level"] == "screen"
+    assert live.store.item(item_id)["status"] == "done"
+
+
+def test_too_late_brings_booked_checks_sooner(live):
+    card = told_card(live)
+    item_id = promise(live, "Hermes will check the logs.")
+    now = time.time()
+    followup.schedule(live.store, now)
+    before = {r["item_id"]: r["next_check_at"] for r in live.store.followups()}[item_id]
+    control.rate(live.store, card["id"], "down", "too_late")
+    after = {r["item_id"]: r["next_check_at"] for r in live.store.followups()}[item_id]
+    assert after < before and after >= now
+
+
+def test_old_cards_are_pruned_but_held_ones_stay(live):
+    for n in range(5):
+        live.store.add_card({"kind": "followup", "level": "brief" if n == 0 else "push", "created_at": n})
+    assert live.store.prune_cards(2) == 2
+    assert sorted(card["created_at"] for card in live.store.cards()) == [0, 3, 4]
+
+
+def test_brief_time_setting(live):
+    control.update(live.store, {"brief_time": "7:30"})
+    assert live.store.get("brief_time") == "07:30"
+    for bad in ("7:30,9:00", "noon", 7):
+        with pytest.raises(control.Refused):
+            control.update(live.store, {"brief_time": bad})

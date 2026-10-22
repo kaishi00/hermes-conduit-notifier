@@ -40,6 +40,7 @@ from typing import Any, Optional
 from hermes_constants import get_hermes_home
 
 from . import pulse_delivery as delivery
+from . import pulse_brief as brief
 from . import pulse_followup as followup
 from . import pulse_hermes as hermes
 from . import pulse_host as host
@@ -53,6 +54,8 @@ logger = logging.getLogger(__name__)
 PROBE = "probe"
 REPORT = "report"
 FOLLOWUP = followup.FOLLOWUP
+BRIEF = brief.BRIEF
+CARDS_KEEP = 500
 # A report that didn't get through is tried again after this, up to
 # REPORT_TRIES a day, and only this long after its time (a dashboard down at
 # 08:00 still sends it at 11:00, but not at midnight).
@@ -165,7 +168,8 @@ def pre_llm_call(session_id: str, turn_id: Any, user_message: Any) -> Optional[s
             if row["state"] != store.RUNNING:
                 pulse_store.update_attempt(row["attempt_id"], state=store.RUNNING,
                                            turn_id=turn_id if isinstance(turn_id, str) else "")
-            return {REPORT: report.REPORT_NOTE, FOLLOWUP: followup.NOTE}.get(row["kind"], PROBE_NOTE)
+            return {REPORT: report.REPORT_NOTE, FOLLOWUP: followup.NOTE, BRIEF: brief.NOTE}.get(row["kind"],
+                                                                                                 PROBE_NOTE)
     return None
 
 
@@ -178,7 +182,8 @@ def is_pulse_turn(session_id: str, turn_id: Any) -> bool:
 
 def pushes(session_id: str, turn_id: Any) -> bool:
     """Whether a Pulse turn's reply goes to the phone like any reply: a
-    follow-up does (it's news for the user); a probe or a report doesn't."""
+    follow-up or the morning brief does (it's news for the user); a probe
+    or a report doesn't."""
     if not is_pulse_turn(session_id, turn_id):
         return False
     with _turns_lock:
@@ -188,7 +193,7 @@ def pushes(session_id: str, turn_id: Any) -> bool:
     except Exception:  # noqa: BLE001 — an unreadable store keeps the turn quiet, never breaks the hook
         logger.debug("conduit_push: Pulse couldn't read the turn's attempt", exc_info=True)
         return False
-    return bool(row) and row["kind"] == FOLLOWUP
+    return bool(row) and row["kind"] in (FOLLOWUP, BRIEF)
 
 
 def pre_tool_call(session_id: str, turn_id: Any) -> Optional[dict[str, str]]:
@@ -280,12 +285,16 @@ def tick(now: Optional[float] = None) -> None:
     # A report's text carries a day of private chat; keep it only while in flight.
     pulse_store.trim_finished(REPORT)
     pulse_store.trim_finished(FOLLOWUP)  # likewise the chat a follow-up quotes
+    pulse_store.trim_finished(BRIEF)
     _collect_ratings(pulse_store, home, now)
     # Even with follow-ups turned off: one already sent still lands.
     followup.settle(pulse_store, now, home)
+    brief.settle(pulse_store, now)
+    pulse_store.prune_cards(CARDS_KEEP)
     _maybe_memory(pulse_store, home, now)
-    # One new turn per tick: a probe first, then a follow-up, then the report.
-    if not _maybe_probe(pulse_store, home, now) and not _maybe_followup(pulse_store, home, now):
+    # One new turn per tick: a probe first, then a follow-up, the brief, then the report.
+    if not _maybe_probe(pulse_store, home, now) and not _maybe_followup(pulse_store, home, now) \
+            and not _maybe_brief(pulse_store, home, now):
         _maybe_report(pulse_store, home, now)
 
 
@@ -354,6 +363,27 @@ def _maybe_followup(pulse_store: store.PulseStore, home: Path, now: float) -> bo
     profile = str(getattr(_ctx, "profile_name", "") or "")
     delivery.submit(pulse_store, lambda chat_id, body: host.send(chat_id, body, profile=profile), kind=FOLLOWUP,
                     chat_id=chat.chat_id, text=text, item_id=followup.attempt_item_id(item["id"]), attempt=attempt)
+    return True
+
+
+def _maybe_brief(pulse_store: store.PulseStore, home: Path, now: float) -> bool:
+    """Sends the morning brief when it's time and cards are held for it; True when it went."""
+    cards = pulse_store.held_cards(brief.MAX_CARDS)
+    if not cards:
+        return False
+    zone = report_zone(pulse_store, home, now)
+    planned = brief.next_attempt(pulse_store, now, zone, pulse_store.get("brief_time"))
+    if planned is None:
+        return False
+    chat, problem = home_chat(pulse_store, home)
+    _log_problem(problem)
+    if chat is None:
+        return False
+    item_id, attempt = planned
+    pulse_store.set(brief.PENDING, {"item_id": item_id, "ids": [card["id"] for card in cards]})
+    profile = str(getattr(_ctx, "profile_name", "") or "")
+    delivery.submit(pulse_store, lambda chat_id, body: host.send(chat_id, body, profile=profile), kind=BRIEF,
+                    chat_id=chat.chat_id, text=brief.text_for(cards), item_id=item_id, attempt=attempt)
     return True
 
 

@@ -6,7 +6,9 @@ code, not as a hint to a model:
 
 - Each kind sits on a loudness ladder: ``push`` (a turn in the home chat
   and a push), ``screen`` (a card in the Pulse screen, no turn, no push),
-  ``brief`` (held for the morning brief), ``off`` (not checked at all). Net
+  ``brief`` (a card held for the morning brief, which stamps ``briefed_at``;
+  until the brief is built it waits in the Pulse screen), ``off`` (not
+  checked at all). Net
   thumbs down move it a step quieter, net thumbs up a step back louder.
 - A thumbs down can carry a reason:
   - ``not_relevant``: a rule, "no updates about this": that chat's items are
@@ -53,7 +55,7 @@ def _clip(text: Any, limit: int) -> str:
 
 def level(pulse_store: store.PulseStore, kind: str) -> str:
     """The kind's loudness: its newest level lesson still in force, else its default."""
-    lessons = pulse_store.lessons(kind, LEVEL)
+    lessons = [lesson for lesson in pulse_store.lessons(kind, LEVEL) if lesson["value"] in LEVELS]
     return lessons[-1]["value"] if lessons else DEFAULT_LEVELS.get(kind, "push")
 
 
@@ -120,9 +122,9 @@ def _step(current: str, louder: bool) -> Optional[str]:
 def set_level(pulse_store: store.PulseStore, kind: str, level_name: str, now: float, *,
               cause: str = "set", card: Optional[dict] = None) -> Optional[dict]:
     """Moves the kind to ``level_name``; the lesson, or None when it's there already."""
-    if kind not in DEFAULT_LEVELS:
+    if not isinstance(kind, str) or kind not in DEFAULT_LEVELS:
         raise Invalid("kind")
-    if level_name not in LEVELS:
+    if not isinstance(level_name, str) or level_name not in LEVELS:
         raise Invalid("level")
     if level(pulse_store, kind) == level_name:
         return None
@@ -130,20 +132,24 @@ def set_level(pulse_store: store.PulseStore, kind: str, level_name: str, now: fl
     return _lesson(pulse_store, kind, LEVEL, value=level_name, card=card, cause=cause, now=now)
 
 
+def _change_score(pulse_store: store.PulseStore, kind: str, change: Any) -> int:
+    """Applies ``change`` (old score -> new) to the kind's score with a swap,
+    so the CLI and the dashboard rating at once don't lose a thumb."""
+    while True:
+        stored = pulse_store.get(SCORES)
+        scores = dict(stored) if isinstance(stored, dict) else {}
+        current = scores.get(kind) if isinstance(scores.get(kind), int) else 0
+        scores[kind] = change(current)
+        if pulse_store.swap(SCORES, stored, scores):
+            return scores[kind]
+
+
 def _scores_reset(pulse_store: store.PulseStore, kind: str) -> None:
-    scores = pulse_store.get(SCORES)
-    scores = dict(scores) if isinstance(scores, dict) else {}
-    scores.pop(kind, None)
-    pulse_store.set(SCORES, scores)
+    _change_score(pulse_store, kind, lambda current: 0)
 
 
 def _score(pulse_store: store.PulseStore, kind: str, delta: int) -> int:
-    scores = pulse_store.get(SCORES)
-    scores = dict(scores) if isinstance(scores, dict) else {}
-    current = scores.get(kind) if isinstance(scores.get(kind), int) else 0
-    scores[kind] = max(-STEP_AT, min(STEP_AT, current + delta))
-    pulse_store.set(SCORES, scores)
-    return scores[kind]
+    return _change_score(pulse_store, kind, lambda current: max(-STEP_AT, min(STEP_AT, current + delta)))
 
 
 def rate(pulse_store: store.PulseStore, card_id: Any, rating: Any, reason: Any = "", *,
@@ -159,10 +165,13 @@ def rate(pulse_store: store.PulseStore, card_id: Any, rating: Any, reason: Any =
     reason = reason or ""
     if reason not in ("",) + REASONS or (reason and rating != "down"):
         raise Invalid("reason")
+    if card["kind"] not in DEFAULT_LEVELS:  # checked before the rating is kept
+        raise Invalid("card")
+    while not pulse_store.rate_card(card, rating=rating, reason=reason, now=now):
+        card = pulse_store.card(card["id"])  # rated meanwhile: count from what it says now
     if card["rating"] == rating and card["reason"] == reason:
         return []
     kind = card["kind"]
-    pulse_store.rate_card(card["id"], rating=rating, reason=reason, now=now)
     delta = (1 if rating == "up" else -1) - {"up": 1, "down": -1}.get(card["rating"], 0)
     made: list[dict] = []
     if reason == "not_relevant" and not muted_by(pulse_store, kind, card["profile"], card["chat_id"]):
@@ -172,6 +181,8 @@ def rate(pulse_store: store.PulseStore, card_id: Any, rating: Any, reason: Any =
         made.append(_lesson(pulse_store, kind, SEEN, card=card, cause="already knew", now=now))
     elif reason == "too_late" and len(pulse_store.lessons(kind, SOONER_LESSON)) < MAX_SOONER:
         made.append(_lesson(pulse_store, kind, SOONER_LESSON, card=card, cause="too late", now=now))
+        if kind == "followup":  # checks already booked come sooner too
+            pulse_store.sooner_followups(SOONER, now)
     elif reason == "too_often" and LEVELS.index(level(pulse_store, kind)) < LEVELS.index("brief"):
         made.append(set_level(pulse_store, kind, "brief", now, cause="too often", card=card))
         return made

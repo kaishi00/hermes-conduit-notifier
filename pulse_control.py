@@ -170,7 +170,8 @@ def backfill_start(pulse_store: Any, home: Path, days: Optional[int] = None,
     return {"from": window[0], "to": window[1], "days": days, "resumed": resuming}
 
 
-SETTINGS = ("enabled", "memory", "followups", "daily_report", "report_profiles", "report_times", "time_zone")
+SETTINGS = ("enabled", "memory", "followups", "daily_report", "report_profiles", "report_times", "time_zone",
+            "brief_time")
 
 
 def update(pulse_store: Any, body: Any) -> None:
@@ -201,6 +202,12 @@ def update(pulse_store: Any, body: Any) -> None:
         if parsed is None:
             raise Refused("invalid", field="report_times")
         changes["report_time"] = parsed
+    if "brief_time" in body:
+        value = body["brief_time"]
+        parsed = pulse.report.parse_times(value) if isinstance(value, str) and len(value) <= 5 else None
+        if parsed is None or "," in parsed:
+            raise Refused("invalid", field="brief_time")
+        changes["brief_time"] = parsed
     if "time_zone" in body:
         zone = body["time_zone"]
         if not isinstance(zone, str) or len(zone) > 64 or (zone and not pulse.report.known_zone(zone)):
@@ -334,6 +341,8 @@ def state(pulse_store: Any, home: Path, now: Optional[float] = None) -> dict[str
         "followup_usage": {key: int(follow_usage.get(key, 0) or 0) for key in ("checks", "tokens", "failed")},
         "levels": pulse_learning.levels(pulse_store),
         "unseen_cards": pulse_store.unseen_cards(),
+        "brief_time": pulse.report.clock_text(pulse_store.get("brief_time") or pulse.brief.DEFAULT_TIME),
+        "held_cards": len(pulse_store.held_cards(pulse.brief.MAX_CARDS)),
         "memory_chunks": int(usage.get("chunks", 0) or 0),
         "memory_tokens": int(usage.get("tokens", 0) or 0),
         "daily_tokens": daily_tokens(pulse_store),

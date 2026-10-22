@@ -438,7 +438,7 @@ def _pulse_followups(pulse_store: Any, home: Any, value: str) -> int:
 
 def _learning_status(pulse_store: Any) -> str:
     from . import pulse_learning
-    moved = [f"{pulse_learning.KIND_NAMES.get(kind, kind)} {pulse_learning.LEVEL_NAMES[level]}"
+    moved = [f"{pulse_learning.KIND_NAMES.get(kind, kind)} {pulse_learning.LEVEL_NAMES.get(level, level)}"
              for kind, level in pulse_learning.levels(pulse_store).items()
              if level != pulse_learning.DEFAULT_LEVELS[kind]]
     lessons = len(pulse_learning.learned(pulse_store))
@@ -474,6 +474,9 @@ def _pulse_learning(pulse_store: Any, action: str, value: str, extra: str) -> in
             print("Undone." if pulse_control.undo(pulse_store, int(extra)) else "Nothing to undo with that number.")
             return 0
         if value:
+            if not extra:
+                print("Usage: hermes conduit-push pulse learned [undo <lesson> | <kind> push|screen|brief|off]")
+                return 2
             lesson = pulse_control.set_level(pulse_store, value, extra)
             print(_printable(lesson["text"]) if lesson else "It's set that way already.")
             return 0
@@ -482,7 +485,7 @@ def _pulse_learning(pulse_store: Any, action: str, value: str, extra: str) -> in
         return 2
     lessons = pulse_learning.learned(pulse_store)
     for kind, level in pulse_learning.levels(pulse_store).items():
-        print(f"{pulse_learning.KIND_NAMES.get(kind, kind)}: {pulse_learning.LEVEL_NAMES[level]}")
+        print(f"{pulse_learning.KIND_NAMES.get(kind, kind)}: {pulse_learning.LEVEL_NAMES.get(level, level)}")
     if not lessons:
         print("Nothing learned from ratings yet.")
     for lesson in lessons:
