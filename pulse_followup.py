@@ -144,6 +144,7 @@ def first_check(item: dict, pace: float = 1.0) -> float:
     start = float(item["recorded_at"])
     if item.get("kind") == COMMITMENT:
         if isinstance(due, (int, float)) and not isinstance(due, bool):
+            # Tied to the day said, so ratings' pace doesn't move it.
             # "T" in the date as said: a time was given.
             remind = due - REMIND_BEFORE_S if "T" in str(item.get("due") or "") else due + REMIND_HOUR * 3600.0
             return max(start, remind)
@@ -286,11 +287,18 @@ def run(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzinfo, no
                 pulse_store.decide_followup(item["id"], decision="wait", news="", why=row["why"],
                                             checks=int(row["checks"]), next_check_at=last + STALE_EVERY_S, now=now)
                 continue
+            held_until = _hold_reminder(pulse_store, now) if item["kind"] == COMMITMENT else None
+            if held_until is not None:
+                pulse_store.decide_followup(item["id"], decision="wait", news="", why=row["why"],
+                                            checks=int(row["checks"]), next_check_at=held_until, now=now)
+                continue
             pulse_store.set("followup_stale_at", now)
             # Only after a real check read the chat (a promise found by a
             # backfill is read first). No model call: the count stays.
+            due = isinstance(item.get("due_at"), (int, float)) and not isinstance(item.get("due_at"), bool)
             pulse_store.decide_followup(item["id"], decision="tell", news=STALE_NEWS,
-                                        why="still open a week after it was due with nothing showing it happened",
+                                        why=f"still open a week after it was {'due' if due else 'said'} "
+                                            "with nothing showing it happened",
                                         checks=int(row["checks"]), next_check_at=None, now=now)
             continue
         text = ""
@@ -323,6 +331,10 @@ def run(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzinfo, no
         done["checks"] = done.get("checks", 0) + 1
         decision = outcome["decision"]
         if decision == "tell" and item["kind"] == COMMITMENT:
+            current = pulse_store.item(item["id"])
+            if current is None or current["status"] != "open" or current["superseded_at"] is not None:
+                pulse_store.end_followups(keep=set(), now=now, only=item["id"])
+                continue  # closed by the user (or the chat) during the call
             held_until = _hold_reminder(pulse_store, now)
             if held_until is not None:
                 pulse_store.decide_followup(item["id"], decision="wait", news="",

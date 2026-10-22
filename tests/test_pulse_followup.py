@@ -582,3 +582,18 @@ def test_only_a_few_reminders_go_out_a_day(live):
     promise(live)
     check_now(live, llm_saying(decision="tell", news="Done.", why="finished"), now=now + 1)
     assert sum(row["decision"] == "tell" for row in live.store.followups()) == followup.REMINDERS_PER_DAY + 1
+
+
+def test_a_week_old_commitment_counts_against_the_days_reminders(live):
+    item_id = commitment(live, said_at=time.time() - followup.GIVE_UP_S - 60)
+    now = time.time() + followup.FIRST_CHECK_S + 1
+    check_now(live, llm_saying(decision="wait"), now=now)
+    live.store.set(followup.REMINDERS_TOLD, [now] * followup.REMINDERS_PER_DAY)
+    check_now(live, llm_saying(decision="wait"), now=now + followup.BACKOFF_S[0] + 1)
+    [row] = live.store.followups()
+    assert row["decision"] == "wait" and row["next_check_at"] == pytest.approx(now + 86400)
+    live.store.set(followup.REMINDERS_TOLD, [])
+    check_now(live, llm_saying(decision="wait"), now=now + 86400 + 1)
+    [row] = live.store.followups()
+    assert row["decision"] == "tell" and row["news"] == followup.STALE_NEWS and "after it was said" in row["why"]
+    assert live.store.item(item_id)["status"] == "open"
