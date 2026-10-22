@@ -7736,16 +7736,32 @@ def _start_rule_jobs(fired: Any) -> list:
     return started
 
 
-def _remove_rule_jobs(job_ids: Any) -> None:
-    for job_id in job_ids if isinstance(job_ids, list) else []:
-        if not job_id:
-            continue
+def _clear_rule_jobs() -> None:
+    """Removes the jobs of deleted place rules still on the store's list
+    (#227); runs inside the profile's scope. The store listed each one as it
+    deleted the rule, so a job that can't go now (or a crash before this) is
+    retried on the next rule change here, in the tool, or at the next start.
+    remove_job answers False for a job that's already gone, which counts as
+    removed too; only a failure keeps the job listed."""
+    try:
+        store = _location_store().LocationStore(_calls_home())
+        pending = store.pending_rule_jobs()
+    except Exception:  # noqa: BLE001 — the change itself succeeded
+        logger.warning("conduit_push: place rule jobs not read", exc_info=True)
+        return
+    gone = []
+    for job_id in pending:
         try:
             from cron.jobs import remove_job
 
             remove_job(job_id)
+            gone.append(job_id)
         except Exception:  # noqa: BLE001 — the rule is gone; its job's prompt does nothing without an event
             logger.warning("conduit_push: could not remove place rule job %s", job_id, exc_info=True)
+    try:
+        store.rule_jobs_gone(gone)
+    except Exception:  # noqa: BLE001 — still listed: removed again next time, which is harmless
+        logger.warning("conduit_push: removed place rule jobs not taken off the list", exc_info=True)
 
 
 def _location_ingest(body: Any) -> Dict[str, Any]:
@@ -7757,7 +7773,8 @@ def _location_ingest(body: Any) -> Dict[str, Any]:
 
 def _location_wipe(device_id: Any) -> Dict[str, Any]:
     result = _location_call(lambda store: store.wipe(device_id))
-    _remove_rule_jobs(result.pop("rule_jobs", []))
+    result.pop("rule_jobs", None)
+    _clear_rule_jobs()
     return result
 
 
@@ -7765,7 +7782,7 @@ def _location_remove_rule(rule_id: str) -> Dict[str, Any]:
     job_id = _location_call(lambda store: {"job": store.remove_rule(rule_id)})["job"]
     if job_id is None:
         raise TokenError(404, "No place rule has that id")
-    _remove_rule_jobs([job_id])
+    _clear_rule_jobs()
     return {"removed": True}
 
 
