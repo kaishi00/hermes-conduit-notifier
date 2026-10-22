@@ -333,9 +333,9 @@ def state(pulse_store: Any, home: Path, now: Optional[float] = None) -> dict[str
     zone = pulse.report_zone(pulse_store, Path(home), now)
     usage = pulse_store.get("memory_usage")
     usage = usage if isinstance(usage, dict) else {}
-    today = pulse_store.get("memory_today")
     day = datetime.fromtimestamp(now, zone).strftime("%Y-%m-%d")
-    used = int(today.get("tokens", 0) or 0) if isinstance(today, dict) and today.get("day") == day else 0
+    used, _ = pulse._spent_today(pulse_store, "memory", day)
+    follow_used, follow_cap = pulse._spent_today(pulse_store, "followup", day)
     profiles = pulse_store.get("report_profiles")
     follow_usage = pulse_store.get("followup_usage")
     follow_usage = follow_usage if isinstance(follow_usage, dict) else {}
@@ -367,6 +367,8 @@ def state(pulse_store: Any, home: Path, now: Optional[float] = None) -> dict[str
                                  and pulse_store.get("memory")),
         "followup_counts": pulse_store.followup_counts(),
         "followup_usage": {key: int(follow_usage.get(key, 0) or 0) for key in ("checks", "tokens", "failed")},
+        "followup_daily_tokens": follow_cap,
+        "followup_tokens_today": follow_used,
         "levels": pulse_learning.levels(pulse_store),
         "unseen_cards": pulse_store.unseen_cards(),
         "brief_time": pulse.report.clock_text(pulse_store.get("brief_time") or pulse.brief.DEFAULT_TIME),

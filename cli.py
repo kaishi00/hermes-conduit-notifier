@@ -335,10 +335,13 @@ def _pulse(args: argparse.Namespace) -> int:
         follow = pulse_store.followup_counts()
         usage = pulse_store.get("followup_usage")
         usage = usage if isinstance(usage, dict) else {}
-        print("Follow-ups on Hermes's promises: "
+        print("Follow-ups on Hermes's promises and your to-dos: "
               + (", ".join(f"{n} {decision}" for decision, n in sorted(follow.items())) or "none yet")
               + f" ({int(usage.get('checks', 0) or 0)} checks, {int(usage.get('tokens', 0) or 0)} tokens"
               + (f", {int(usage.get('failed', 0) or 0)} failed" if usage.get("failed") else "") + ")")
+        follow_used, follow_cap = pulse._spent_today(pulse_store, "followup", datetime.now(zone).strftime("%Y-%m-%d"))
+        if follow_used >= follow_cap:
+            print(f"Follow-ups used today's {follow_cap} tokens; checks resume tomorrow.")
     else:
         print("Follow-ups: off")
     learning_lines = _learning_status(pulse_store)
@@ -461,6 +464,11 @@ def _pulse_followups(pulse_store: Any, home: Any, value: str) -> int:
                                       != "off")) if not on]
         if off:
             print(f"Off: {', '.join(off)}. Turn it on first.")
+            return 1
+        day = datetime.now(pulse.report_zone(pulse_store, home)).strftime("%Y-%m-%d")
+        follow_used, follow_cap = pulse._spent_today(pulse_store, "followup", day)
+        if follow_used >= follow_cap:
+            print(f"Follow-ups used today's {follow_cap} tokens; checks resume tomorrow.")
             return 1
         pulse_store.set(pulse_followup.NOW_REQUESTED, time.time())
         pulse_store.set("memory_requested", True)
