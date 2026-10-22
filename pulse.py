@@ -282,7 +282,7 @@ def tick(now: Optional[float] = None) -> None:
     pulse_store.trim_finished(FOLLOWUP)  # likewise the chat a follow-up quotes
     _collect_ratings(pulse_store, home, now)
     # Even with follow-ups turned off: one already sent still lands.
-    followup.settle(pulse_store, now)
+    followup.settle(pulse_store, now, home)
     _maybe_memory(pulse_store, home, now)
     # One new turn per tick: a probe first, then a follow-up, then the report.
     if not _maybe_probe(pulse_store, home, now) and not _maybe_followup(pulse_store, home, now):
@@ -341,7 +341,7 @@ def _maybe_followup(pulse_store: store.PulseStore, home: Path, now: float) -> bo
     one went."""
     if not pulse_store.get("followups"):
         return False
-    picked = followup.next_send(pulse_store, now)
+    picked = followup.next_send(pulse_store, now, home)
     if picked is None:
         return False
     chat, problem = home_chat(pulse_store, home)

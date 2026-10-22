@@ -377,6 +377,27 @@ def test_the_week_old_ask_keeps_the_promise_for_one_last_check(live):
     assert len(live.sent()) == 1  # asked once, never again
 
 
+def test_news_from_the_last_check_after_the_ask_is_sent_and_settled_on_its_own(live):
+    item_id = promise(live, said_at=time.time() - followup.GIVE_UP_S - 60)
+    now = time.time() + followup.FIRST_CHECK_S + 1
+    check_now(live, llm_saying(decision="wait"), now=now)
+    check_now(live, llm_saying(decision="wait"), now=now + followup.BACKOFF_S[0] + 1)
+    pulse.tick()
+    [attempt] = live.store.in_flight()
+    live.store.update_attempt(attempt["attempt_id"], state=store.DELIVERED)
+    pulse.tick()
+    [row] = live.store.followups()
+    check_now(live, llm_saying(decision="tell", news="The deploy finished after all.", why="it shows"),
+              now=row["next_check_at"] + 1)
+    pulse.tick()
+    assert len(live.sent()) == 2 and "finished after all" in live.sent()[-1]
+    assert live.store.item(item_id)["status"] == "open"  # not settled by the ask's old delivery
+    [attempt] = live.store.in_flight()
+    live.store.update_attempt(attempt["attempt_id"], state=store.DELIVERED)
+    pulse.tick()
+    assert live.store.followups()[0]["decision"] == "told" and live.store.item(item_id)["status"] == "done"
+
+
 def test_a_promise_the_user_closed_while_its_news_was_on_the_way_isnt_told(live):
     item_id = tell(live)
     pulse.tick()

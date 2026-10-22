@@ -37,9 +37,10 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
         help="Redact chat text from pushes; choice labels still transit so cards stay answerable",
     )
     redact.add_argument("mode", choices=["on", "off"])
-    pulse = commands.add_parser("pulse", help="Pulse, the proactivity experiment: on, off, status, probe, report, home, outcomes, memory, followups")
+    pulse = commands.add_parser("pulse", help="Pulse, the proactivity experiment: on, off, status, probe, report, home, outcomes, memory, followups, "
+                                                 "cards, rate, learned")
     pulse.add_argument("pulse_action", choices=["on", "off", "status", "probe", "report", "home", "outcomes", "memory",
-                                                "followups"])
+                                                "followups", "cards", "rate", "learned"])
     pulse.add_argument("value", nargs="?", default="",
                        help="for home: the id of the chat to use, or 'auto' to find it by title; "
                             "for outcomes: how many to show, or a chat id; "
@@ -47,10 +48,14 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
                             "'all-profiles' or 'this-profile'; "
                             "for memory: a kind to list, 'now', 'on', 'off', 'forget' and an item number, "
                             "or 'backfill'; "
-                            "for followups: 'on' or 'off', or nothing to list them")
+                            "for followups: 'on' or 'off', or nothing to list them; "
+                            "for rate: the card number; "
+                            "for learned: 'undo' and a lesson number, or a kind and a loudness to set")
     pulse.add_argument("extra", nargs="?", default="",
                        help="for memory forget: the item number; for memory backfill: how many days back "
-                            "(it shows what that costs), 'start', 'stop' or 'cancel'")
+                            "(it shows what that costs), 'start', 'stop' or 'cancel'; "
+                            "for rate: 'up', 'down', or a reason for a thumbs down (not_relevant, already_knew, "
+                            "too_late, too_often); for learned: the lesson number, or push, screen, brief or off")
     prefs = commands.add_parser(
         "prefs",
         help="Conduit's synced preferences: export them to a file, or import one from another host",
@@ -182,12 +187,13 @@ def _pulse(args: argparse.Namespace) -> int:
     home = get_hermes_home()
     action = args.pulse_action
     # Follow-ups are on by default, so even `followups on|off` needs no file yet.
-    listing = action == "followups" or (action == "memory" and (args.value or "").strip() not in ("on", "off"))
+    listing = action in ("followups", "cards", "rate") or (action == "learned" and (args.value or "").strip() in ("", "undo")) \
+        or (action == "memory" and (args.value or "").strip() not in ("on", "off"))
     if (action in ("status", "probe", "off", "outcomes") or listing) and not (Path(home) / pulse_delivery.store.DB_NAME).exists():
         # Never turned on: say so without leaving a file behind.
         print("Pulse: off (never turned on). `hermes conduit-push pulse on` to start it."
               + (" Nothing was changed." if action == "followups" and (args.value or "").strip() else ""))
-        return 1 if action == "probe" or (action == "memory" and (args.value or "").strip() in ("now", "forget")) \
+        return 1 if action in ("probe", "rate") or (action == "memory" and (args.value or "").strip() in ("now", "forget")) \
             or (action == "followups" and (args.value or "").strip() == "on") else 0
     pulse_store = pulse.open_store(home)
     if action in ("on", "off"):
@@ -222,6 +228,9 @@ def _pulse(args: argparse.Namespace) -> int:
         return _pulse_report(pulse_store, (args.value or "").strip())
     if action == "followups":
         return _pulse_followups(pulse_store, home, (args.value or "").strip())
+    if action in ("cards", "rate", "learned"):
+        return _pulse_learning(pulse_store, action, (args.value or "").strip(),
+                               str(getattr(args, "extra", "") or "").strip())
     if action == "memory":
         return _pulse_memory(pulse_store, home, (args.value or "").strip(), str(getattr(args, "extra", "") or "").strip())
     print(f"Pulse: {'on' if pulse_store.get('enabled') else 'off'}")
@@ -306,6 +315,9 @@ def _pulse(args: argparse.Namespace) -> int:
               + (f", {int(usage.get('failed', 0) or 0)} failed" if usage.get("failed") else "") + ")")
     else:
         print("Follow-ups: off")
+    learning_lines = _learning_status(pulse_store)
+    if learning_lines:
+        print(learning_lines)
     ratings = pulse.rating_counts(pulse_store)
     if ratings:
         print("Ratings so far: " + ", ".join(f"{kind} {yes} yes / {no} no" for kind, (yes, no) in ratings.items()))
@@ -421,6 +433,60 @@ def _pulse_followups(pulse_store: Any, home: Any, value: str) -> int:
     zone = pulse.report_zone(pulse_store, home)
     for row in rows:
         print(_printable(pulse_followup.describe(row, pulse_store.item(row["item_id"]), zone)))
+    return 0
+
+
+def _learning_status(pulse_store: Any) -> str:
+    from . import pulse_learning
+    moved = [f"{pulse_learning.KIND_NAMES.get(kind, kind)} {pulse_learning.LEVEL_NAMES[level]}"
+             for kind, level in pulse_learning.levels(pulse_store).items()
+             if level != pulse_learning.DEFAULT_LEVELS[kind]]
+    lessons = len(pulse_learning.learned(pulse_store))
+    unseen = pulse_store.unseen_cards()
+    parts = moved + ([f"{lessons} thing(s) learned from ratings"] if lessons else []) \
+        + ([f"{unseen} unseen card(s)"] if unseen else [])
+    return ("Pulse screen: " + "; ".join(parts)) if parts else ""
+
+
+def _pulse_learning(pulse_store: Any, action: str, value: str, extra: str) -> int:
+    from . import pulse_control, pulse_learning
+    if action == "cards":
+        cards = pulse_store.cards(MEMORY_LIST)
+        if not cards:
+            print("No cards yet: Pulse hasn't brought you anything.")
+        for card in cards:
+            rated = f" (rated {card['rating']}{', ' + card['reason'] if card['reason'] else ''})" if card["rating"] else ""
+            print(_printable(f"#{card['id']} [{card['level']}] {card['title']}: {card['news']}{rated}"))
+        return 0
+    try:
+        if action == "rate":
+            if not value.isdigit() or not extra:
+                print("Usage: hermes conduit-push pulse rate <card> up|down|not_relevant|already_knew|too_late|too_often")
+                return 2
+            rating, reason = ("down", extra) if extra in pulse_learning.REASONS else (extra, "")
+            made = pulse_control.rate(pulse_store, int(value), rating, reason)
+            print("Rated." + "".join(f"\nPulse learned: {_printable(lesson['text'])}" for lesson in made))
+            return 0
+        if value == "undo":
+            if not extra.isdigit():
+                print("Usage: hermes conduit-push pulse learned undo <lesson>")
+                return 2
+            print("Undone." if pulse_control.undo(pulse_store, int(extra)) else "Nothing to undo with that number.")
+            return 0
+        if value:
+            lesson = pulse_control.set_level(pulse_store, value, extra)
+            print(_printable(lesson["text"]) if lesson else "It's set that way already.")
+            return 0
+    except pulse_control.Refused as refused:
+        print(f"Pulse doesn't take that {refused.data.get('field', 'value')}.")
+        return 2
+    lessons = pulse_learning.learned(pulse_store)
+    for kind, level in pulse_learning.levels(pulse_store).items():
+        print(f"{pulse_learning.KIND_NAMES.get(kind, kind)}: {pulse_learning.LEVEL_NAMES[level]}")
+    if not lessons:
+        print("Nothing learned from ratings yet.")
+    for lesson in lessons:
+        print(_printable(f"#{lesson['id']} {lesson['text']}"))
     return 0
 
 

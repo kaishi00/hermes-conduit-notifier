@@ -6958,6 +6958,70 @@ async def post_pulse_forget(request: Request, response: Response) -> Dict[str, A
                               reads_only=True)
 
 
+@router.get("/pulse/feed")
+async def get_pulse_feed(response: Response) -> Dict[str, Any]:
+    """The Pulse screen: cards newest first, how many are unseen, and each kind's loudness."""
+    response.headers["Cache-Control"] = "no-store"
+    return await _pulse_route("feed", lambda control, store, home: control.feed(store), reads_only=True)
+
+
+@router.post("/pulse/feed/seen")
+async def post_pulse_seen(request: Request, response: Response) -> Dict[str, Any]:
+    """{"ids": [n, ...]} marks those cards seen, {"ids": null} every card: {"seen": count}."""
+    response.headers["Cache-Control"] = "no-store"
+    body = await _read_json_body(request, PULSE_MAX_BODY_BYTES)
+    ids = body.get("ids") if isinstance(body, dict) else []
+    return await _pulse_route("seen", lambda control, store, home: {"seen": control.see(store, ids)},
+                              reads_only=True)
+
+
+@router.post("/pulse/rate")
+async def post_pulse_rate(request: Request, response: Response) -> Dict[str, Any]:
+    """{"card": n, "rating": "up"|"down", "reason": optional, for a down:
+    "not_relevant"|"already_knew"|"too_late"|"too_often"}: {"learned": [...]},
+    the lessons it made."""
+    response.headers["Cache-Control"] = "no-store"
+    body = await _read_json_body(request, PULSE_MAX_BODY_BYTES)
+    body = body if isinstance(body, dict) else {}
+    return await _pulse_route("rate", lambda control, store, home: {"learned": control.rate(
+        store, body.get("card"), body.get("rating"), body.get("reason") or "")}, reads_only=True)
+
+
+@router.get("/pulse/learned")
+async def get_pulse_learned(response: Response) -> Dict[str, Any]:
+    """What ratings taught Pulse, newest first, and each kind's loudness."""
+    response.headers["Cache-Control"] = "no-store"
+    return await _pulse_route("learned", lambda control, store, home: control.learned(store), reads_only=True)
+
+
+@router.post("/pulse/learned/undo")
+async def post_pulse_undo(request: Request, response: Response) -> Dict[str, Any]:
+    """{"id": n}: undoes one lesson; answers with what's learned now."""
+    response.headers["Cache-Control"] = "no-store"
+    body = await _read_json_body(request, PULSE_MAX_BODY_BYTES)
+    lesson_id = body.get("id") if isinstance(body, dict) else None
+
+    def action(control: Any, store: Any, home: Any) -> Dict[str, Any]:
+        return {"undone": control.undo(store, lesson_id), **control.learned(store)}
+
+    return await _pulse_route("undo", action, reads_only=True)
+
+
+@router.put("/pulse/levels")
+async def put_pulse_levels(request: Request, response: Response) -> Dict[str, Any]:
+    """{"kind": "followup", "level": "push"|"screen"|"brief"|"off"}: sets a
+    kind's loudness by hand; answers with what's learned now."""
+    response.headers["Cache-Control"] = "no-store"
+    body = await _read_json_body(request, PULSE_MAX_BODY_BYTES)
+    body = body if isinstance(body, dict) else {}
+
+    def action(control: Any, store: Any, home: Any) -> Dict[str, Any]:
+        control.set_level(store, body.get("kind"), body.get("level"))
+        return control.learned(store)
+
+    return await _pulse_route("levels", action)
+
+
 # --- Confirm prompts Hermes shows on the phone ---------------------------------
 #
 # Before an action the user should OK, conduit_present keeps a confirm prompt

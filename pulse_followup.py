@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from . import pulse_hermes as hermes
+from . import pulse_learning as learning
 from . import pulse_ledger as ledger
 from . import pulse_report as report
 from . import pulse_store as store
@@ -48,7 +49,8 @@ GIVE_UP_S = 7 * 86400.0
 # doesn't turn into a burst of them; the rest wait their turn.
 STALE_EVERY_S = 86400.0
 # A promise whose checks fail this many times in a row (the model endpoint
-# is down for weeks) expires, with the reason in the journal.
+# is down for days) expires, with the reason in the journal. A check that
+# works in between resets the count: only a sustained outage ends it.
 MAX_FAILURES = 6
 # Checks per run, like memory's chunks per run: a backlog (after a backfill)
 # spreads over runs instead of spending the shared daily cap at once.
@@ -72,7 +74,7 @@ Return a JSON object {"decision": ..., "news": ..., "why": ..., "check_again_hou
 - "decision": one of
   - "tell": there is something the user should hear now: what Hermes said it would watch for happened or failed, a result it said it would bring is there, or the time it gave has come. Only when the material shows it, or the due time has passed.
   - "done": Hermes already kept the promise in that chat, or a scheduled job will. Nothing to send.
-  - "drop": the user called it off, or it no longer applies. Nothing to send.
+  - "drop": the user called it off, it no longer applies, or it's about a topic the user said they want no updates about (listed in the material, if any). Nothing to send.
   - "wait": nothing to tell yet.
 - "news": for "tell", one or two sentences of what to tell the user, from the material only. Never invent a result. Otherwise null.
 - "why": one short sentence saying what in the material led to the decision.
@@ -87,6 +89,11 @@ NOTE = ("This turn was started by Pulse, the part of Hermes that keeps what Herm
         "nothing shows it happened, ask if they still want it. Make clear it's a follow-up on what you said in "
         "that chat, and only pass on what the message says. Don't use any tools.")
 STALE_NEWS = "It has been over a week and nothing shows it happened."
+# Added after the user rated a follow-up "already knew".
+SEEN_INSTRUCTION = ("\n\nThe user doesn't want to hear what they already saw: when that chat shows they already "
+                    "know the news (Hermes told them there and they answered, or they said it themselves), "
+                    "answer \"done\".")
+MUTED = "muted"
 
 
 def _clip(text: Any, limit: int) -> str:
@@ -98,12 +105,13 @@ def _local(epoch: float, zone: tzinfo) -> str:
     return datetime.fromtimestamp(epoch, zone).strftime("%a %d %b %H:%M")
 
 
-def first_check(item: dict) -> float:
+def first_check(item: dict, pace: float = 1.0) -> float:
+    """``pace``: the share of the usual wait (less after "too late" ratings)."""
     due = item.get("due_at")
     start = float(item["recorded_at"])
     if isinstance(due, (int, float)) and not isinstance(due, bool) and due > start:
         return float(due)
-    return start + FIRST_CHECK_S
+    return start + FIRST_CHECK_S * pace
 
 
 def give_up_from(item: dict) -> float:
@@ -114,10 +122,11 @@ def give_up_from(item: dict) -> float:
     return max(said, float(due)) if isinstance(due, (int, float)) and not isinstance(due, bool) else said
 
 
-def next_wait(checks: int, hint: Any) -> float:
-    """The wait after the ``checks``-th check: the backoff, brought forward
-    when the model saw a reason to look sooner (never under half an hour)."""
-    wait = BACKOFF_S[min(max(checks - 1, 0), len(BACKOFF_S) - 1)]
+def next_wait(checks: int, hint: Any, pace: float = 1.0) -> float:
+    """The wait after the ``checks``-th check: the backoff (times ``pace``),
+    brought forward when the model saw a reason to look sooner (never under
+    half an hour)."""
+    wait = max(1800.0, BACKOFF_S[min(max(checks - 1, 0), len(BACKOFF_S) - 1)] * pace)
     if isinstance(hint, (int, float)) and not isinstance(hint, bool) and hint > 0:
         wait = min(wait, max(0.5, min(float(hint), 72.0)) * 3600.0)
     return wait
@@ -127,10 +136,13 @@ def schedule(pulse_store: store.PulseStore, now: float) -> None:
     """Gives every open promise a check schedule, and drops the schedule of
     one that was closed or replaced (memory supersedes and closes items)."""
     open_ids = set()
+    off = learning.level(pulse_store, FOLLOWUP) == "off"
+    pace = learning.pace(pulse_store, FOLLOWUP)
     for kind in KINDS:
         for item in pulse_store.open_items(kind):
             open_ids.add(item["id"])
-            pulse_store.add_followup(item["id"], next_check_at=first_check(item), now=now)
+            if not off:  # turned off by ratings: no new schedules until it's back on
+                pulse_store.add_followup(item["id"], next_check_at=first_check(item, pace), now=now)
     pulse_store.end_followups(keep=open_ids, now=now)
 
 
@@ -182,16 +194,20 @@ def material(pulse_store: store.PulseStore, home: Path, item: dict, *, zone: tzi
     jobs = report.cron_jobs(where)
     if jobs:
         parts.append(jobs)
+    topics = [rule["value"] for rule in learning.rules(pulse_store, FOLLOWUP) if rule["value"]]
+    if topics:
+        parts.append("## Topics the user wants no updates about\n" + "\n".join(f"- {topic}" for topic in topics))
     return "\n\n".join(parts)
 
 
-def check(llm: Llm, text: str) -> tuple[dict[str, Any], int]:
+def check(llm: Llm, text: str, *, skip_seen: bool = False) -> tuple[dict[str, Any], int]:
     """One check: the decision, news, why and wait hint, or a ``wait`` with
     the reason when the reply is unusable."""
     mark = secrets.token_hex(4)
     while mark in text:  # the material can't close its own fence
         mark = secrets.token_hex(4)
-    parsed, tokens = llm(INSTRUCTIONS, f"<<<check {mark}\n{text}\ncheck {mark}>>>")
+    parsed, tokens = llm(INSTRUCTIONS + (SEEN_INSTRUCTION if skip_seen else ""),
+                         f"<<<check {mark}\n{text}\ncheck {mark}>>>")
     if not isinstance(parsed, dict) or parsed.get("decision") not in DECISIONS:
         return {"decision": "wait", "news": "", "why": "the check's reply was unusable", "hint": None}, tokens
     news = _clip(parsed.get("news"), NEWS_LIMIT)
@@ -207,6 +223,10 @@ def run(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzinfo, no
     """Checks the promises that are due, soonest first, while the budget
     and the lease last."""
     done = {} if done is None else done
+    if learning.level(pulse_store, FOLLOWUP) == "off":
+        return
+    pace = learning.pace(pulse_store, FOLLOWUP)
+    skip_seen = learning.skips_seen(pulse_store, FOLLOWUP)
     for row in pulse_store.due_followups(now):
         if not still_leader() or done.get("tokens", 0) >= budget or \
                 done.get("checks", 0) + done.get("failed", 0) >= MAX_CHECKS:
@@ -214,6 +234,8 @@ def run(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzinfo, no
         item = pulse_store.item(row["item_id"])
         if item is None or item["status"] != "open" or item["superseded_at"] is not None:
             pulse_store.end_followups(keep=set(), now=now, only=row["item_id"])
+            continue
+        if mute(pulse_store, item, row, now):
             continue
         checks = int(row["checks"]) + 1
         if row["decision"] == "wait" and now - give_up_from(item) >= GIVE_UP_S:
@@ -232,7 +254,7 @@ def run(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzinfo, no
         text = ""
         try:
             text = material(pulse_store, home, item, zone=zone, now=now)
-            outcome, tokens = check(llm, text)
+            outcome, tokens = check(llm, text, skip_seen=skip_seen)
         except Exception as error:  # noqa: BLE001 — a failed check waits for the next
             logger.warning("conduit_push: Pulse follow-up check failed", exc_info=True)
             # A call that failed may still have been billed: count its input
@@ -251,7 +273,8 @@ def run(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzinfo, no
                 continue
             pulse_store.decide_followup(item["id"], decision=CHECK_FAILED, news="",
                                         why=f"the check failed ({type(error).__name__})", checks=checks,
-                                        next_check_at=now + next_wait(checks, None), now=now, failures=failures)
+                                        next_check_at=now + next_wait(checks, None, pace), now=now,
+                                        failures=failures)
             done["failed"] = done.get("failed", 0) + 1
             continue
         done["tokens"] = done.get("tokens", 0) + tokens
@@ -270,8 +293,20 @@ def run(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzinfo, no
             decision = "closed"  # closed by the user (or the chat) during the call: the item says so
         pulse_store.decide_followup(item["id"], decision=decision, news=outcome["news"], why=outcome["why"],
                                     checks=checks,
-                                    next_check_at=now + next_wait(checks, outcome["hint"]) if decision == "wait" else None,
+                                    next_check_at=now + next_wait(checks, outcome["hint"], pace) if decision == "wait" else None,
                                     now=now)
+
+
+def mute(pulse_store: store.PulseStore, item: dict, row: dict, now: float) -> bool:
+    """Closes the item when a "not relevant" rule covers its chat; whether it did."""
+    rule = learning.muted_by(pulse_store, FOLLOWUP, item["profile"], item["chat_id"])
+    if rule is None:
+        return False
+    closed = pulse_store.close_item(item["id"], status="cancelled", closed_by=f"pulse rule {rule['id']}")
+    pulse_store.decide_followup(item["id"], decision=MUTED if closed else "closed", news=row["news"],
+                                why=f"you asked for no updates about \"{rule['value']}\""[:WHY_LIMIT],
+                                checks=int(row["checks"]), next_check_at=None, now=now)
+    return True
 
 
 def text_for(item: dict, followup: dict, *, title: str, zone: tzinfo) -> Callable[[str], str]:
@@ -300,9 +335,15 @@ def attempts_of(pulse_store: store.PulseStore, item_id: int) -> list[dict]:
     return pulse_store.attempts_for_suffix(f"-f{item_id}")
 
 
-def next_send(pulse_store: store.PulseStore, now: float) -> Optional[tuple[dict, dict, int]]:
+def next_send(pulse_store: store.PulseStore, now: float, home: Optional[Path] = None
+              ) -> Optional[tuple[dict, dict, int]]:
     """The follow-up to send now, its item and the attempt number: the
-    oldest ``tell`` whose last attempt failed long enough ago, or none."""
+    oldest ``tell`` whose last attempt failed long enough ago, or none.
+    Below "push" on the loudness ladder nothing is sent: each ``tell``
+    becomes a card in the Pulse screen (or waits for the brief) instead."""
+    loudness = learning.level(pulse_store, FOLLOWUP)
+    if loudness == "off":
+        return None
     for followup in pulse_store.followups_to_tell():
         item = pulse_store.item(followup["item_id"])
         attempts = attempts_of(pulse_store, followup["item_id"])
@@ -317,6 +358,11 @@ def next_send(pulse_store: store.PulseStore, now: float) -> Optional[tuple[dict,
             return None  # one follow-up in flight at a time
         if any(row["state"] == store.DELIVERED for row in attempts):
             continue  # settle() closes it
+        if mute(pulse_store, item, followup, now):
+            continue
+        if loudness != "push" and not attempts:
+            _told(pulse_store, item, followup, now, loudness, home)
+            continue
         if len(attempts) >= TRIES:
             continue
         if attempts and now - attempts[-1]["updated_at"] < RETRY_S:
@@ -325,24 +371,43 @@ def next_send(pulse_store: store.PulseStore, now: float) -> Optional[tuple[dict,
     return None
 
 
-def settle(pulse_store: store.PulseStore, now: float) -> None:
+def _told(pulse_store: store.PulseStore, item: dict, followup: dict, now: float, loudness: str,
+          home: Optional[Path]) -> None:
+    """A follow-up reached the user (delivered, or a card at ``loudness``):
+    its card, then the promise closes, or, for the week-old "still want
+    it?", stays open for one last check."""
+    learning.add_card(pulse_store, kind=FOLLOWUP, item=item, level_name=loudness, news=followup["news"],
+                      why=followup["why"], chat_title=chat_title(home, item) if home is not None else "", now=now)
+    if followup["news"] == STALE_NEWS and item["status"] == "open" and item["superseded_at"] is None:
+        # The ask is done with: news from the last check gets its own attempts.
+        pulse_store.retire_attempts(f"-f{item['id']}")
+        pulse_store.decide_followup(followup["item_id"], decision=ASKED, news=followup["news"],
+                                    why=followup["why"], checks=followup["checks"],
+                                    next_check_at=now + BACKOFF_S[-1], now=now)
+        return
+    # Closed by the user (or the chat) while it was on its way: the item says so, not "told".
+    told = pulse_store.close_item(followup["item_id"], status="done",
+                                  closed_by="pulse follow-up" if loudness == "push" else f"pulse follow-up ({loudness})")
+    pulse_store.decide_followup(followup["item_id"],
+                                decision=({"push": "told", "screen": "shown", "brief": "held"}[loudness] if told
+                                          else "closed"),
+                                news=followup["news"], why=followup["why"], checks=followup["checks"],
+                                next_check_at=None, now=now)
+
+
+def settle(pulse_store: store.PulseStore, now: float, home: Optional[Path] = None) -> None:
     """Closes the promises whose follow-up was delivered, and marks the ones
     that ran out of tries (`pulse followups` shows both)."""
     for followup in pulse_store.followups_to_tell():
         attempts = attempts_of(pulse_store, followup["item_id"])
         if any(row["state"] == store.DELIVERED for row in attempts):
             item = pulse_store.item(followup["item_id"])
-            if (followup["news"] == STALE_NEWS and item is not None and item["status"] == "open"
-                    and item["superseded_at"] is None):
-                pulse_store.decide_followup(followup["item_id"], decision=ASKED, news=followup["news"],
-                                            why=followup["why"], checks=followup["checks"],
-                                            next_check_at=now + BACKOFF_S[-1], now=now)
+            if item is None:
+                pulse_store.decide_followup(followup["item_id"], decision="closed", news=followup["news"],
+                                            why=followup["why"], checks=followup["checks"], next_check_at=None,
+                                            now=now)
                 continue
-            # Closed by the user (or the chat) while it was on its way: the item says so, not "told".
-            told = pulse_store.close_item(followup["item_id"], status="done", closed_by="pulse follow-up")
-            pulse_store.decide_followup(followup["item_id"], decision="told" if told else "closed",
-                                        news=followup["news"], why=followup["why"], checks=followup["checks"],
-                                        next_check_at=None, now=now)
+            _told(pulse_store, item, followup, now, "push", home)
         elif len(attempts) >= TRIES and all(row["state"] not in store.IN_FLIGHT for row in attempts):
             # Out of memory's open promises, so it isn't counted or reported as open; the journal says why.
             expired = pulse_store.close_item(followup["item_id"], status="expired",

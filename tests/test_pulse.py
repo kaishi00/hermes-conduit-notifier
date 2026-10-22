@@ -2082,6 +2082,23 @@ def test_pulse_routes(remembering, db, monkeypatch):
     got = http.get(f"{base}/followups")
     assert got.headers["cache-control"] == "no-store"
     assert [(entry["id"], entry["decision"]) for entry in got.json()["followups"]] == [(item, "waiting")]
+    card = store_.add_card({"kind": "followup", "item_id": item, "level": "push", "title": "t", "news": "n",
+                            "created_at": DAY})
+    feed = http.get(f"{base}/feed").json()
+    assert [entry["id"] for entry in feed["cards"]] == [card] and feed["unseen"] == 1
+    assert feed["levels"] == {"followup": "push"}
+    assert http.post(f"{base}/feed/seen", json={"ids": None}).json()["seen"] == 1
+    assert http.post(f"{base}/feed/seen", json={"ids": "all"}).status_code == 400
+    assert http.post(f"{base}/rate", json={"card": card, "rating": "sideways"}).json()["detail"] == {
+        "code": "invalid", "field": "rating"}
+    [lesson] = http.post(f"{base}/rate", json={"card": card, "rating": "down", "reason": "too_often"}).json()["learned"]
+    assert lesson["value"] == "brief"
+    assert http.get(f"{base}/learned").json()["levels"] == {"followup": "brief"}
+    undone = http.post(f"{base}/learned/undo", json={"id": lesson["id"]}).json()
+    assert undone["undone"] is True and undone["levels"] == {"followup": "push"}
+    assert http.put(f"{base}/levels", json={"kind": "followup", "level": "screen"}).json()["levels"] == {
+        "followup": "screen"}
+    assert http.put(f"{base}/levels", json={"kind": "followup", "level": "loud"}).status_code == 400
     assert "pulse" in api.ROUTE_CAPABILITIES
     # A host that never turned Pulse on is answered without a file left behind.
     fresh = home / "fresh"
@@ -2091,6 +2108,9 @@ def test_pulse_routes(remembering, db, monkeypatch):
     assert got.status_code == 200 and got.json()["enabled"] is False
     assert http.get(f"{base}/memory").json()["items"] == []
     assert http.get(f"{base}/followups").json()["followups"] == []
+    assert http.get(f"{base}/feed").json()["cards"] == []
+    assert http.get(f"{base}/learned").json()["lessons"] == []
+    assert http.post(f"{base}/rate", json={"card": 1, "rating": "up"}).json()["detail"]["field"] == "card"
     assert http.post(f"{base}/report").json()["detail"]["code"] == "pulse_off"
     assert http.post(f"{base}/backfill", json={"action": "stop"}).json()["detail"]["code"] == "not_running"
     assert http.post(f"{base}/memory/forget", json={"id": 1}).json()["forgotten"] is False
