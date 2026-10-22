@@ -35,6 +35,8 @@ RATINGS = ("up", "down")
 REASONS = ("not_relevant", "already_knew", "too_late", "too_often")
 # Net thumbs, one way, that move a kind a step along the ladder.
 STEP_AT = 2
+# Rating scores are a shared setting changed by swap; this many lost races in a row is a bug, not load.
+SWAP_TRIES = 50
 SOONER = 0.5
 MAX_SOONER = 2
 SCORES = "rating_scores"
@@ -113,11 +115,13 @@ class Invalid(ValueError):
 
 def _lesson(pulse_store: store.PulseStore, kind: str, what: str, *, value: str = "", card: Optional[dict] = None,
             cause: str, now: float, unless: tuple = (), limit: int = 0) -> Optional[dict]:
-    """The lesson added, or None when ``limit`` like it are in force already."""
+    """The lesson added, or None when ``limit`` like it are in force already
+    (or, for a level, when the kind is at that level already)."""
     row = {"kind": kind, "what": what, "value": value, "profile": card["profile"] if card else "",
            "chat_id": card["chat_id"] if card and what == RULE else "", "card_id": card["id"] if card else None,
            "cause": cause, "created_at": now}
-    lesson_id = pulse_store.add_lesson(row, unless=unless, limit=limit)
+    changes_from = DEFAULT_LEVELS.get(kind, "push") if what == LEVEL else None
+    lesson_id = pulse_store.add_lesson(row, unless=unless, limit=limit, changes_from=changes_from)
     if lesson_id is None:
         return None
     row["id"] = lesson_id
@@ -145,13 +149,14 @@ def set_level(pulse_store: store.PulseStore, kind: str, level_name: str, now: fl
 def _change_score(pulse_store: store.PulseStore, kind: str, change: Any) -> int:
     """Applies ``change`` (old score -> new) to the kind's score with a swap,
     so the CLI and the dashboard rating at once don't lose a thumb."""
-    while True:
+    for _ in range(SWAP_TRIES):
         stored = pulse_store.get(SCORES)
         scores = dict(stored) if isinstance(stored, dict) else {}
         current = scores.get(kind) if isinstance(scores.get(kind), int) else 0
         scores[kind] = change(current)
         if pulse_store.swap(SCORES, stored, scores):
             return scores[kind]
+    raise RuntimeError("Pulse rating scores kept changing; try again")
 
 
 def _scores_reset(pulse_store: store.PulseStore, kind: str) -> None:
@@ -184,7 +189,7 @@ def rate(pulse_store: store.PulseStore, card_id: Any, rating: Any, reason: Any =
     made: list[dict] = []
     if reason == "not_relevant":
         made.append(_lesson(pulse_store, kind, RULE, value=_clip(card["title"], TOPIC_LIMIT), card=card,
-                            cause="not relevant", now=now, unless=("profile", "chat_id"), limit=1))
+                            cause="not relevant", now=now, unless=("profile", "chat_id", "value"), limit=1))
     elif reason == "already_knew":
         made.append(_lesson(pulse_store, kind, SEEN, card=card, cause="already knew", now=now, limit=1))
     elif reason == "too_late":
@@ -197,14 +202,14 @@ def rate(pulse_store: store.PulseStore, card_id: Any, rating: Any, reason: Any =
         return made
     if not delta:
         return made
-    current_level = level(pulse_store, kind)
     step: dict[str, Any] = {}
 
     def change(score: int) -> int:
         # The step and the score going back to 0 are one swap, so two
         # ratings at once can't both spend the same two thumbs.
+        # The level is read on each try, so a move made meanwhile counts.
         new = max(-STEP_AT, min(STEP_AT, score + delta))
-        step["to"] = _step(current_level, louder=new > 0) if abs(new) >= STEP_AT else None
+        step["to"] = _step(level(pulse_store, kind), louder=new > 0) if abs(new) >= STEP_AT else None
         return 0 if step["to"] else new
 
     _change_score(pulse_store, kind, change)

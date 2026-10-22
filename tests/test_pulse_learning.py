@@ -341,6 +341,43 @@ def test_two_not_relevant_ratings_from_one_chat_make_one_rule(live):
     assert len(learning.rules(live.store, "followup")) == 1
 
 
+def test_not_relevant_on_another_topic_in_the_same_chat_adds_its_rule(live):
+    first = told_card(live)
+    with live.store._connect() as db:
+        db.execute("UPDATE cards SET title = 'Another topic' WHERE id = ?", (first["id"],))
+    second = told_card(live, "Another one.")
+    control.rate(live.store, first["id"], "down", "not_relevant")
+    control.rate(live.store, second["id"], "down", "not_relevant")
+    assert len(learning.rules(live.store, "followup")) == 2
+
+
+def test_a_level_already_in_force_adds_no_second_lesson_even_past_the_early_check(live):
+    assert learning.set_level(live.store, "followup", "screen", 1.0)
+    row = {"kind": "followup", "what": learning.LEVEL, "value": "screen", "profile": "", "chat_id": "",
+           "card_id": None, "cause": "set", "created_at": 2.0}
+    assert live.store.add_lesson(row, changes_from="push") is None  # a racing set lands here
+    assert live.store.add_lesson(dict(row, value="push"), changes_from="push")
+    assert live.store.add_lesson(dict(row, value="push"), changes_from="push") is None
+    assert [lesson["value"] for lesson in live.store.lessons("followup", learning.LEVEL)] == ["screen", "push"]
+
+
+def test_ratings_are_refused_while_pulse_is_off(live):
+    card = told_card(live)
+    live.store.set("enabled", False)
+    with pytest.raises(control.Refused) as refused:
+        control.rate(live.store, card["id"], "down", "too_often")
+    assert refused.value.code == "pulse_off"
+    assert live.store.card(card["id"])["rating"] == ""
+
+
+def test_cli_refuses_ids_too_long_for_a_number(live, monkeypatch):
+    import sys
+    import types
+    monkeypatch.setitem(sys.modules, "hermes_constants", types.SimpleNamespace(get_hermes_home=lambda: live.home))
+    assert cli._pulse(types.SimpleNamespace(pulse_action="rate", value="9" * 5000, extra="up")) == 2
+    assert cli._pulse(types.SimpleNamespace(pulse_action="learned", value="undo", extra="9" * 5000)) == 2
+
+
 def test_levels_are_refused_while_pulse_is_off(live, monkeypatch, capsys):
     import sys
     import types

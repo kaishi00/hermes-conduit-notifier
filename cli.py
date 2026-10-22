@@ -461,7 +461,7 @@ def _pulse_learning(pulse_store: Any, action: str, value: str, extra: str) -> in
         return 0
     try:
         if action == "rate":
-            if not value.isdecimal() or not extra:
+            if not value.isdecimal() or len(value) > 18 or not extra:
                 print("Usage: hermes conduit-push pulse rate <card> up|down|not_relevant|already_knew|too_late|too_often")
                 return 2
             rating, reason = ("down", extra) if extra in pulse_learning.REASONS else (extra, "")
@@ -469,7 +469,7 @@ def _pulse_learning(pulse_store: Any, action: str, value: str, extra: str) -> in
             print("Rated." + "".join(f"\nPulse learned: {_printable(lesson['text'])}" for lesson in made))
             return 0
         if value == "undo":
-            if not extra.isdecimal():
+            if not extra.isdecimal() or len(extra) > 18:
                 print("Usage: hermes conduit-push pulse learned undo <lesson>")
                 return 2
             print("Undone." if pulse_control.undo(pulse_store, int(extra)) else "Nothing to undo with that number.")
