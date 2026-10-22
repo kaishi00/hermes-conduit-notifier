@@ -1,0 +1,57 @@
+name: hermes-conduit-rooms
+
+services:
+  conduit-rooms:
+    build:
+      context: ..
+    container_name: conduit-rooms
+    restart: unless-stopped
+    environment:
+      HOST: 0.0.0.0
+      PORT: 9130
+      DATA_PATH: /var/lib/conduit-rooms/mailbox.sqlite
+      TRUST_PROXY: 1
+      # Set it to keep registration to those who send it (a private
+      # mailbox); leave it empty for open registration.
+      MAILBOX_REGISTRATION_TOKEN: ${MAILBOX_REGISTRATION_TOKEN:-}
+      MAILBOX_MAX_ENVELOPE_BYTES: ${MAILBOX_MAX_ENVELOPE_BYTES:-}
+      MAILBOX_TTL_SECONDS: ${MAILBOX_TTL_SECONDS:-}
+      MAILBOX_MAX_WAIT_SECONDS: ${MAILBOX_MAX_WAIT_SECONDS:-}
+      MAILBOX_MAX_INBOXES: ${MAILBOX_MAX_INBOXES:-}
+      MAILBOX_MAX_SENDERS_PER_INBOX: ${MAILBOX_MAX_SENDERS_PER_INBOX:-}
+      MAILBOX_MAX_PENDING_PER_INBOX: ${MAILBOX_MAX_PENDING_PER_INBOX:-}
+      MAILBOX_MAX_PENDING_BYTES_PER_INBOX: ${MAILBOX_MAX_PENDING_BYTES_PER_INBOX:-}
+      MAILBOX_MAX_PENDING_PER_SENDER: ${MAILBOX_MAX_PENDING_PER_SENDER:-}
+      MAILBOX_MAX_TOTAL_BYTES: ${MAILBOX_MAX_TOTAL_BYTES:-}
+      MAILBOX_SENDS_PER_MINUTE_PER_SENDER: ${MAILBOX_SENDS_PER_MINUTE_PER_SENDER:-}
+      MAILBOX_OWNER_REQUESTS_PER_MINUTE_PER_INBOX: ${MAILBOX_OWNER_REQUESTS_PER_MINUTE_PER_INBOX:-}
+      MAILBOX_REGISTRATIONS_PER_MINUTE: ${MAILBOX_REGISTRATIONS_PER_MINUTE:-}
+      MAILBOX_REGISTRATIONS_PER_HOUR_PER_CLIENT: ${MAILBOX_REGISTRATIONS_PER_HOUR_PER_CLIENT:-}
+      MAILBOX_FAILED_AUTH_PER_MINUTE_PER_CLIENT: ${MAILBOX_FAILED_AUTH_PER_MINUTE_PER_CLIENT:-}
+      MAILBOX_MAX_WAITERS: ${MAILBOX_MAX_WAITERS:-}
+      MAILBOX_MAX_WAITERS_PER_INBOX: ${MAILBOX_MAX_WAITERS_PER_INBOX:-}
+      MAILBOX_INBOX_IDLE_DAYS: ${MAILBOX_INBOX_IDLE_DAYS:-}
+    volumes:
+      # Create ./data owned by the image's node user (uid 1000) before the
+      # first start: a directory Docker creates for the mount is root's, and
+      # the mailbox exits when it can't write there.
+      - ./data:/var/lib/conduit-rooms
+    networks:
+      - pangolin
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:9130/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+networks:
+  pangolin:
+    external: true

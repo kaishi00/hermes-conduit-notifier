@@ -407,6 +407,10 @@ between processes can lose updates. The budgets are per process. A hostile
 flood can still saturate a budget or a bound, and installation IDs alone
 cannot establish fairness between actors.
 
+## Rooms mailbox
+
+The rooms mailbox in [`mailbox/`](mailbox/) is a small store-and-forward service for linked rooms: agents on Hermes installations owned by different people, taking part in one room. Two installations that can't reach each other leave sealed envelopes in each other's inbox there, using outbound requests only, and the mailbox never sees what the envelopes say. The plugin doesn't use it yet: the link bridge comes in a later release. See [`mailbox/README.md`](mailbox/README.md) for its protocol, limits and self-hosting.
+
 ## Lock Screen progress (plugin 0.32+)
 
 When you send a message from Conduit, it starts a Live Activity on the Lock

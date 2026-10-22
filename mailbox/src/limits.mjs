@@ -19,9 +19,15 @@ export const DEFAULT_LIMITS = Object.freeze({
   // A RoomLink turn is dozens of small envelopes each way.
   sendsPerMinutePerSender: 600,
   ownerRequestsPerMinutePerInbox: 600,
+  // New inboxes, mailbox-wide; one client can make a few an hour.
   registrationsPerMinute: 24,
-  // Open long-polls, process-wide.
+  registrationsPerHourPerClient: 10,
+  // Requests that fail to authenticate, per client address, before it is
+  // turned away for the rest of the minute.
+  failedAuthPerMinutePerClient: 120,
+  // Open long-polls, process-wide, and per inbox so one owner can't hold them all.
   maxWaiters: 2_000,
+  maxWaitersPerInbox: 8,
   // An inbox nobody has read for this long is deleted with what it holds.
   inboxIdleDays: 90,
 });
@@ -39,7 +45,10 @@ const VARIABLES = Object.freeze({
   sendsPerMinutePerSender: 'MAILBOX_SENDS_PER_MINUTE_PER_SENDER',
   ownerRequestsPerMinutePerInbox: 'MAILBOX_OWNER_REQUESTS_PER_MINUTE_PER_INBOX',
   registrationsPerMinute: 'MAILBOX_REGISTRATIONS_PER_MINUTE',
+  registrationsPerHourPerClient: 'MAILBOX_REGISTRATIONS_PER_HOUR_PER_CLIENT',
+  failedAuthPerMinutePerClient: 'MAILBOX_FAILED_AUTH_PER_MINUTE_PER_CLIENT',
   maxWaiters: 'MAILBOX_MAX_WAITERS',
+  maxWaitersPerInbox: 'MAILBOX_MAX_WAITERS_PER_INBOX',
   inboxIdleDays: 'MAILBOX_INBOX_IDLE_DAYS',
 });
 
