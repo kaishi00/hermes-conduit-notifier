@@ -15,7 +15,7 @@ from hermes_constants import get_hermes_home
 
 from . import (call_tool, call_watches, calls, chat_on_screen, clarify_loop, client, conduit_first, cron_runs,
                desktop_selected, health_tool, live_activity, location_tool, maps_tool, phone_tool, present_tool, pulse,
-               reply_sources, settings_tool, show_tool, turn_surface, voice_archive)
+               reply_sources, room_memory, settings_tool, show_tool, turn_surface, voice_archive)
 from .session_titles import title as _session_title, titled as _titled
 from .client import enqueue
 from .events import approval_decision, clarification_text, event_id, is_silent_response, plain_text, push_event
@@ -60,6 +60,9 @@ def register(ctx: Any) -> None:
     pulse.register(ctx)
     if hasattr(ctx, "on_unload"):
         ctx.on_unload(_unload)
+    # A group room's turns aren't saved into the memory provider as the
+    # owner's own words (room_memory).
+    room_memory.install()
     ctx.register_hook("pre_tool_call", _pre_tool_call)
     ctx.register_hook("post_llm_call", _post_llm_call)
     ctx.register_hook("on_session_end", _on_session_end)
@@ -276,9 +279,10 @@ def _finish_ready(session_id: str, ready: dict[str, Any] | None, send: bool) -> 
 
 def _unload() -> None:
     """Hermes unloads the plugin: replies held for a turn's end are
-    dropped with their timers, held calls stay stored for the next load, and
-    the delivery and Live Activity threads end (waiting about a second for
-    a send in progress). Nothing more goes to the relay from this load."""
+    dropped with their timers, held calls stay stored for the next load, the
+    group room memory guard comes off, and the delivery and Live Activity
+    threads end (waiting about a second for a send in progress). Nothing
+    more goes to the relay from this load."""
     with _pending_lock:
         held = list(_pending_ready.values())
         _pending_ready.clear()
@@ -286,6 +290,7 @@ def _unload() -> None:
         _cancel(timer)
     calls.stop()
     pulse.stop()
+    room_memory.uninstall()
     deadline = time.monotonic() + 1.0
     live_activity.reporter.stop(timeout=max(0.0, deadline - time.monotonic()))
     client.stop(timeout=max(0.0, deadline - time.monotonic()))

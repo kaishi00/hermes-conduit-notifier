@@ -1377,6 +1377,23 @@ returns each room's revision (`{"ok": true, "revisions": {"<room id>":
 room, so listing never reads picture bytes), up to 500 rooms (the
 oldest go first). Capability `room-images`.
 
+## Group rooms and memory (plugin 0.62+)
+
+In a gateway-hosted group room, each member's turn runs on its own host in a
+hidden session (`source: bot_room`, titled `Group: <room id>`), and the
+turn's message is the room's new messages, from several people and bots.
+Hermes hands that turn to the profile's external memory provider (Honcho,
+Hindsight and the like) with no author, so the provider would file everything
+said in the room as the owner's own words. The plugin keeps room sessions
+from saving into the provider: the per-turn sync, the session-end extraction
+and the provider's part of the summary before a compaction are skipped for
+them, also after a compaction moves the session to a new id. Recall still
+runs, and `MEMORY.md` and `USER.md` still load, so a member knows its owner
+in the room; it just doesn't learn from what others say there. The memory and
+skill tools work as before. If Hermes' memory manager is shaped differently
+from what the plugin expects, it logs a warning and leaves memory as Hermes
+has it.
+
 ## Artifacts (plugin 0.40+)
 
 Conduit's Artifacts screens list what a profile's chats produced:
