@@ -2,6 +2,7 @@
 
 import json
 import re
+import sqlite3
 import sys
 import time
 import types
@@ -486,3 +487,15 @@ def test_a_backlog_of_checks_spreads_over_runs(live):
     llm = llm_saying(decision="wait")
     check_now(live, llm, now=time.time() + followup.FIRST_CHECK_S + 1)
     assert len(llm.calls) == followup.MAX_CHECKS
+
+
+def test_a_still_wanted_ask_for_a_replaced_promise_books_no_last_check(live):
+    item_id = tell(live, news=followup.STALE_NEWS)
+    pulse.tick()
+    with sqlite3.connect(live.store.path) as conn:
+        conn.execute("UPDATE items SET superseded_at=? WHERE id=?", (time.time(), item_id))
+    [attempt] = live.store.in_flight()
+    live.store.update_attempt(attempt["attempt_id"], state=store.DELIVERED)
+    pulse.tick()
+    row = live.store.followups()[0]
+    assert row["decision"] == "closed" and row["next_check_at"] is None

@@ -332,7 +332,8 @@ def settle(pulse_store: store.PulseStore, now: float) -> None:
         attempts = attempts_of(pulse_store, followup["item_id"])
         if any(row["state"] == store.DELIVERED for row in attempts):
             item = pulse_store.item(followup["item_id"])
-            if followup["news"] == STALE_NEWS and item is not None and item["status"] == "open":
+            if (followup["news"] == STALE_NEWS and item is not None and item["status"] == "open"
+                    and item["superseded_at"] is None):
                 pulse_store.decide_followup(followup["item_id"], decision=ASKED, news=followup["news"],
                                             why=followup["why"], checks=followup["checks"],
                                             next_check_at=now + BACKOFF_S[-1], now=now)
@@ -349,7 +350,7 @@ def settle(pulse_store: store.PulseStore, now: float) -> None:
             pulse_store.decide_followup(followup["item_id"], decision="undelivered" if expired else "closed",
                                         news=followup["news"],
                                         why=f"{followup['why']} (not delivered after {TRIES} tries: "
-                                            f"{attempts[-1]['detail']})"[:WHY_LIMIT + 200],
+                                            f"{attempts[-1]['detail']})"[:WHY_LIMIT],
                                         checks=followup["checks"], next_check_at=None, now=now)
 
 

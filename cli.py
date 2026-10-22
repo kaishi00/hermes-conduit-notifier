@@ -185,7 +185,8 @@ def _pulse(args: argparse.Namespace) -> int:
     listing = action == "followups" or (action == "memory" and (args.value or "").strip() not in ("on", "off"))
     if (action in ("status", "probe", "off", "outcomes") or listing) and not (Path(home) / pulse_delivery.store.DB_NAME).exists():
         # Never turned on: say so without leaving a file behind.
-        print("Pulse: off (never turned on). `hermes conduit-push pulse on` to start it.")
+        print("Pulse: off (never turned on). `hermes conduit-push pulse on` to start it."
+              + (" Nothing was changed." if action == "followups" and (args.value or "").strip() else ""))
         return 1 if action == "probe" or (action == "memory" and (args.value or "").strip() in ("now", "forget")) \
             or (action == "followups" and (args.value or "").strip() == "on") else 0
     pulse_store = pulse.open_store(home)
