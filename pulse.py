@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import socket
+import sqlite3
 import threading
 import time
 from datetime import datetime
@@ -309,23 +310,34 @@ TURN_WHY = {
 }
 
 
+# How long a delivered report or brief whose card didn't land is tried again.
+TURN_CARD_RETRY_S = 600
+
+
 def _turn_cards(pulse_store: store.PulseStore, home: Path, changed: list[dict], now: float) -> None:
-    """A report or brief that just reached the Pulse chat goes on the Pulse
-    screen too, as Hermes wrote it, linked to its message in the chat."""
-    for row in changed:
+    """A report or brief that reached the Pulse chat goes on the Pulse screen
+    too, as Hermes wrote it, linked to its message in the chat. Those
+    delivered in the last few minutes are tried again, so a card a busy
+    state.db kept out still lands (a card is never added twice)."""
+    rows = {row["attempt_id"]: row for row in changed}
+    for kind in TURN_WHY:
+        for row in pulse_store.attempts_since(kind, now - TURN_CARD_RETRY_S - 86400):
+            if row["updated_at"] >= now - TURN_CARD_RETRY_S:
+                rows.setdefault(row["attempt_id"], row)
+    for row in rows.values():
         if row["state"] != store.DELIVERED or row["kind"] not in TURN_WHY:
             continue
         try:
             turn = hermes.find_turn(home, chat_id=row["session_key"], tag=row["tag"],
                                     since=row["created_at"] - delivery.SINCE_SLACK_S)
-        except hermes.HermesUnreadable:
-            continue
-        if turn is not None:
-            # A brief comes with a push; a report doesn't.
-            learning.add_turn_card(pulse_store, kind=row["kind"], chat_id=row["session_key"],
-                                   chat_title=pulse_store.get("home_title") or "Pulse", turn=turn,
-                                   level_name="push" if row["kind"] == BRIEF else "screen",
-                                   why=TURN_WHY[row["kind"]], now=now)
+            if turn is not None:
+                # A brief comes with a push; a report doesn't.
+                learning.add_turn_card(pulse_store, kind=row["kind"], chat_id=row["session_key"],
+                                       chat_title=pulse_store.get("home_title") or "Pulse", turn=turn,
+                                       level_name="push" if row["kind"] == BRIEF else "screen",
+                                       why=TURN_WHY[row["kind"]], now=now)
+        except (hermes.HermesUnreadable, sqlite3.Error):
+            logger.debug("conduit_push: Pulse: no card for %s yet", row["tag"], exc_info=True)
 
 
 def _send(pulse_store: store.PulseStore, *, kind: str, chat_id: str, text: Any) -> None:

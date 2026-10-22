@@ -1,5 +1,6 @@
 """Ratings that change what Pulse does (pulse_learning)."""
 
+import sqlite3
 import time
 
 import pytest
@@ -467,3 +468,29 @@ def test_a_failed_report_makes_no_card_and_feed_has_no_chat_without_home(live, t
     pulse.tick()
     assert live.store.cards() == []
     assert control.feed(live.store)["home_chat_id"] == ""
+
+
+def test_a_report_card_a_busy_state_db_kept_out_lands_on_a_later_tick(live, monkeypatch):
+    live.store.set("report_requested", True)
+    pulse.tick()
+    [attempt] = live.store.in_flight()
+    live.db.message("user", attempt["text"])
+    live.db.message("assistant", "Here's your report.")
+    learning = pulse.learning
+    real = learning.add_turn_card
+
+    def locked(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(learning, "add_turn_card", locked)
+    pulse.tick()  # delivered, but the card couldn't be written; the tick goes on
+    assert live.store.cards() == [] and live.store.get("last_tick_at")
+    monkeypatch.setattr(learning, "add_turn_card", real)
+    pulse.tick()
+    assert [card["kind"] for card in live.store.cards()] == ["report"]
+
+
+def test_feed_names_no_chat_while_pulse_is_off(live):
+    assert control.feed(live.store, live.home)["home_chat_id"] == SID
+    live.store.set("enabled", False)
+    assert control.feed(live.store, live.home)["home_chat_id"] == ""
