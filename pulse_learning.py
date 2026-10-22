@@ -82,6 +82,11 @@ def muted_by(pulse_store: store.PulseStore, kind: str, profile: str, chat_id: st
 
 def add_card(pulse_store: store.PulseStore, *, kind: str, item: dict, level_name: str, news: str, why: str,
              chat_title: str, now: float) -> int:
+    """The item's card for this news; the one already there when a crash
+    came between making it and closing the item."""
+    existing = pulse_store.card_for(kind, item["id"], news)
+    if existing is not None:
+        return existing
     return pulse_store.add_card({
         "kind": kind, "item_id": item["id"], "level": level_name, "title": _clip(item["text"], 300),
         "quote": _clip(item["evidence"], 300), "news": news, "why": why, "profile": item["profile"],
@@ -148,10 +153,6 @@ def _scores_reset(pulse_store: store.PulseStore, kind: str) -> None:
     _change_score(pulse_store, kind, lambda current: 0)
 
 
-def _score(pulse_store: store.PulseStore, kind: str, delta: int) -> int:
-    return _change_score(pulse_store, kind, lambda current: max(-STEP_AT, min(STEP_AT, current + delta)))
-
-
 def rate(pulse_store: store.PulseStore, card_id: Any, rating: Any, reason: Any = "", *,
          now: float) -> list[dict]:
     """Records a rating and acts on it; the lessons it made. Rating a card
@@ -169,6 +170,8 @@ def rate(pulse_store: store.PulseStore, card_id: Any, rating: Any, reason: Any =
         raise Invalid("card")
     while not pulse_store.rate_card(card, rating=rating, reason=reason, now=now):
         card = pulse_store.card(card["id"])  # rated meanwhile: count from what it says now
+        if card is None:
+            raise Invalid("card")
     if card["rating"] == rating and card["reason"] == reason:
         return []
     kind = card["kind"]
@@ -188,12 +191,20 @@ def rate(pulse_store: store.PulseStore, card_id: Any, rating: Any, reason: Any =
         return made
     if not delta:
         return made
-    score = _score(pulse_store, kind, delta)
-    if abs(score) >= STEP_AT:
-        moved = _step(level(pulse_store, kind), louder=score > 0)
-        if moved is not None:
-            made.append(set_level(pulse_store, kind, moved, now,
-                                  cause=f"{STEP_AT} thumbs {'up' if score > 0 else 'down'}", card=card))
+    current_level = level(pulse_store, kind)
+    step: dict[str, Any] = {}
+
+    def change(score: int) -> int:
+        # The step and the score going back to 0 are one swap, so two
+        # ratings at once can't both spend the same two thumbs.
+        new = max(-STEP_AT, min(STEP_AT, score + delta))
+        step["to"] = _step(current_level, louder=new > 0) if abs(new) >= STEP_AT else None
+        return 0 if step["to"] else new
+
+    _change_score(pulse_store, kind, change)
+    if step.get("to"):
+        made.append(_lesson(pulse_store, kind, LEVEL, value=step["to"], card=card,
+                            cause=f"{STEP_AT} thumbs {'up' if delta > 0 else 'down'}", now=now))
     return made
 
 

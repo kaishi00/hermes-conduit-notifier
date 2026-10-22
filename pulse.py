@@ -56,6 +56,8 @@ REPORT = "report"
 FOLLOWUP = followup.FOLLOWUP
 BRIEF = brief.BRIEF
 CARDS_KEEP = 500
+# Held cards a brief never took (no home chat for weeks) go too, past CARDS_KEEP.
+HELD_DAYS = 30
 # A report that didn't get through is tried again after this, up to
 # REPORT_TRIES a day, and only this long after its time (a dashboard down at
 # 08:00 still sends it at 11:00, but not at midnight).
@@ -290,7 +292,7 @@ def tick(now: Optional[float] = None) -> None:
     # Even with follow-ups turned off: one already sent still lands.
     followup.settle(pulse_store, now, home)
     brief.settle(pulse_store, now)
-    pulse_store.prune_cards(CARDS_KEEP)
+    pulse_store.prune_cards(CARDS_KEEP, held_before=now - HELD_DAYS * 86400.0)
     _maybe_memory(pulse_store, home, now)
     # One new turn per tick: a probe first, then a follow-up, the brief, then the report.
     if not _maybe_probe(pulse_store, home, now) and not _maybe_followup(pulse_store, home, now) \

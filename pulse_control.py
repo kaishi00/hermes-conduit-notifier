@@ -342,7 +342,7 @@ def state(pulse_store: Any, home: Path, now: Optional[float] = None) -> dict[str
         "levels": pulse_learning.levels(pulse_store),
         "unseen_cards": pulse_store.unseen_cards(),
         "brief_time": pulse.report.clock_text(pulse_store.get("brief_time") or pulse.brief.DEFAULT_TIME),
-        "held_cards": len(pulse_store.held_cards(pulse.brief.MAX_CARDS)),
+        "held_cards": pulse_store.held_count(),
         "memory_chunks": int(usage.get("chunks", 0) or 0),
         "memory_tokens": int(usage.get("tokens", 0) or 0),
         "daily_tokens": daily_tokens(pulse_store),

@@ -739,6 +739,17 @@ class PulseStore:
             return conn.execute(f"UPDATE cards SET seen_at=? WHERE seen_at IS NULL AND id IN ({','.join('?' * len(ids))})",
                                 (now, *ids)).rowcount
 
+    def card_for(self, kind: str, item_id: int, news: str) -> Optional[int]:
+        with self._connect() as conn:
+            row = conn.execute("SELECT id FROM cards WHERE kind=? AND item_id=? AND news=?",
+                               (kind, item_id, news)).fetchone()
+        return int(row["id"]) if row else None
+
+    def held_count(self) -> int:
+        with self._connect() as conn:
+            return int(conn.execute("SELECT COUNT(*) FROM cards WHERE level='brief' AND briefed_at IS NULL")
+                       .fetchone()[0])
+
     def held_cards(self, limit: int) -> list[dict]:
         """Cards waiting for the morning brief, oldest first."""
         with self._connect() as conn:
@@ -753,12 +764,13 @@ class PulseStore:
             conn.execute(f"UPDATE cards SET briefed_at=? WHERE briefed_at IS NULL AND id IN ({','.join('?' * len(ids))})",
                          (now, *ids))
 
-    def prune_cards(self, keep: int) -> int:
-        """Drops the oldest cards past ``keep``, never one still held for the brief."""
+    def prune_cards(self, keep: int, held_before: float = 0.0) -> int:
+        """Drops the oldest cards past ``keep``, but not one still held for the
+        brief unless it was made before ``held_before`` (no brief for weeks)."""
         with _lock, self._connect() as conn:
             return conn.execute(
-                "DELETE FROM cards WHERE NOT (level='brief' AND briefed_at IS NULL) AND id NOT IN "
-                "(SELECT id FROM cards ORDER BY created_at DESC, id DESC LIMIT ?)", (keep,)).rowcount
+                "DELETE FROM cards WHERE (NOT (level='brief' AND briefed_at IS NULL) OR created_at < ?) AND id NOT IN "
+                "(SELECT id FROM cards ORDER BY created_at DESC, id DESC LIMIT ?)", (held_before, keep)).rowcount
 
     def rate_card(self, card: dict, *, rating: str, reason: str, now: float) -> bool:
         """Rates ``card`` only if its rating is still the one read (another

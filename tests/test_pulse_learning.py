@@ -10,6 +10,13 @@ from test_pulse_followup import CHAT, check_now, followup, live, llm_saying, pro
 learning = _load("conduit_push.pulse_learning", ROOT / "pulse_learning.py")
 
 
+def brief_later(live):
+    """The brief's time ten hours from now: its last slot is always too old to send."""
+    from datetime import datetime, timezone
+    live.store.set("time_zone", "UTC")
+    live.store.set("brief_time", datetime.fromtimestamp(time.time() + 10 * 3600, timezone.utc).strftime("%H:%M"))
+
+
 def delivered(live):
     pulse.tick()
     [attempt] = live.store.in_flight()
@@ -71,6 +78,7 @@ def test_at_screen_level_news_becomes_a_card_without_a_turn(live):
 
 
 def test_at_brief_level_news_is_held(live):
+    brief_later(live)
     control.set_level(live.store, "followup", "brief")
     tell(live)
     pulse.tick()
@@ -229,6 +237,7 @@ def brief_due_now(live):
 
 
 def test_held_cards_go_out_in_the_morning_brief_once(live):
+    brief_later(live)
     control.set_level(live.store, "followup", "brief")
     tell(live)
     pulse.tick()  # the follow-up becomes a held card
@@ -259,6 +268,7 @@ def test_no_brief_without_held_cards_or_before_its_time(live):
 
 
 def test_a_brief_turn_pushes(live):
+    brief_later(live)
     control.set_level(live.store, "followup", "brief")
     tell(live)
     pulse.tick()
@@ -304,3 +314,20 @@ def test_brief_time_setting(live):
     for bad in ("7:30,9:00", "noon", 7):
         with pytest.raises(control.Refused):
             control.update(live.store, {"brief_time": bad})
+
+
+def test_a_card_is_made_once_per_item_and_news(live):
+    item = {"id": 7, "text": "t", "evidence": "e", "profile": "", "chat_id": CHAT, "message_id": 1}
+    first = learning.add_card(live.store, kind="followup", item=item, level_name="screen", news="n", why="w",
+                              chat_title="", now=1)
+    again = learning.add_card(live.store, kind="followup", item=item, level_name="screen", news="n", why="w",
+                              chat_title="", now=2)
+    assert first == again and len(live.store.cards()) == 1
+
+
+def test_held_cards_older_than_a_month_can_be_pruned(live):
+    for n in range(3):
+        live.store.add_card({"kind": "followup", "level": "brief", "created_at": n})
+    assert live.store.prune_cards(1) == 0
+    assert live.store.prune_cards(1, held_before=1.5) == 2
+    assert live.store.held_count() == 1
