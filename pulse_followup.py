@@ -57,6 +57,9 @@ REMIND_HOUR = 9
 REMIND_BEFORE_S = 3600.0
 REMINDERS_PER_DAY = 3
 REMINDERS_TOLD = "reminders_told_at"
+# A reminder decided while the day's were spent: its news is kept and told
+# when a slot frees, without another check.
+REMINDER_HELD = "reminder held"
 # Waits between later checks; the last one repeats.
 BACKOFF_S = (2 * 3600.0, 6 * 3600.0, 86400.0, 2 * 86400.0, 3 * 86400.0)
 GIVE_UP_S = 7 * 86400.0
@@ -280,6 +283,10 @@ def run(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzinfo, no
             continue
         if mute(pulse_store, item, row, now):
             continue
+        if row["decision"] == REMINDER_HELD:
+            _tell_reminder(pulse_store, item["id"], news=row["news"], why=row["why"], checks=int(row["checks"]),
+                           now=now)
+            continue
         checks = int(row["checks"]) + 1
         if row["decision"] == "wait" and now - give_up_from(item) >= GIVE_UP_S:
             last = pulse_store.get("followup_stale_at")
@@ -287,19 +294,16 @@ def run(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzinfo, no
                 pulse_store.decide_followup(item["id"], decision="wait", news="", why=row["why"],
                                             checks=int(row["checks"]), next_check_at=last + STALE_EVERY_S, now=now)
                 continue
-            held_until = _hold_reminder(pulse_store, now) if item["kind"] == COMMITMENT else None
-            if held_until is not None:
-                pulse_store.decide_followup(item["id"], decision="wait", news="", why=row["why"],
-                                            checks=int(row["checks"]), next_check_at=held_until, now=now)
-                continue
             pulse_store.set("followup_stale_at", now)
             # Only after a real check read the chat (a promise found by a
             # backfill is read first). No model call: the count stays.
             due = isinstance(item.get("due_at"), (int, float)) and not isinstance(item.get("due_at"), bool)
-            pulse_store.decide_followup(item["id"], decision="tell", news=STALE_NEWS,
-                                        why=f"still open a week after it was {'due' if due else 'said'} "
-                                            "with nothing showing it happened",
-                                        checks=int(row["checks"]), next_check_at=None, now=now)
+            why = f"still open a week after it was {'due' if due else 'said'} with nothing showing it happened"
+            if item["kind"] == COMMITMENT:
+                _tell_reminder(pulse_store, item["id"], news=STALE_NEWS, why=why, checks=int(row["checks"]), now=now)
+            else:
+                pulse_store.decide_followup(item["id"], decision="tell", news=STALE_NEWS, why=why,
+                                            checks=int(row["checks"]), next_check_at=None, now=now)
             continue
         text = ""
         try:
@@ -335,12 +339,8 @@ def run(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzinfo, no
             if current is None or current["status"] != "open" or current["superseded_at"] is not None:
                 pulse_store.end_followups(keep=set(), now=now, only=item["id"])
                 continue  # closed by the user (or the chat) during the call
-            held_until = _hold_reminder(pulse_store, now)
-            if held_until is not None:
-                pulse_store.decide_followup(item["id"], decision="wait", news="",
-                                            why=f"{REMINDERS_PER_DAY} reminders went out today; this one waits",
-                                            checks=checks, next_check_at=held_until, now=now)
-                continue
+            _tell_reminder(pulse_store, item["id"], news=outcome["news"], why=outcome["why"], checks=checks, now=now)
+            continue
         if decision == "wait" and row["decision"] == ASKED:
             expired = pulse_store.close_item(item["id"], status="expired",
                                              closed_by="pulse follow-up: asked if still wanted, nothing since")
@@ -358,9 +358,19 @@ def run(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzinfo, no
                                     now=now)
 
 
+def _tell_reminder(pulse_store: store.PulseStore, item_id: int, *, news: str, why: str, checks: int,
+                   now: float) -> None:
+    """A commitment's reminder: told now when the day has a slot left, else
+    held with its news until one frees."""
+    held_until = _hold_reminder(pulse_store, now)
+    pulse_store.decide_followup(item_id, decision="tell" if held_until is None else REMINDER_HELD, news=news,
+                                why=why, checks=checks, next_check_at=held_until, now=now)
+
+
 def _hold_reminder(pulse_store: store.PulseStore, now: float) -> Optional[float]:
-    """When a reminder can go: None for now (and it's counted), else when
-    the oldest of today's REMINDERS_PER_DAY is a day old."""
+    """When a reminder can go: None for now (and it's counted, as one made
+    ready today), else when the oldest of today's REMINDERS_PER_DAY is a
+    day old."""
     told = pulse_store.get(REMINDERS_TOLD)
     told = sorted(at for at in (told if isinstance(told, list) else [])
                   if isinstance(at, (int, float)) and not isinstance(at, bool) and now - at < 86400.0)

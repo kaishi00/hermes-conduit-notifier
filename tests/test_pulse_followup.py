@@ -575,13 +575,19 @@ def test_only_a_few_reminders_go_out_a_day(live):
     check_now(live, llm_saying(decision="tell", news="Reminder.", why="due"), now=now)
     rows = {row["item_id"]: row for row in live.store.followups()}
     told = [item for item in items if rows[item]["decision"] == "tell"]
-    held = [item for item in items if rows[item]["decision"] == "wait"]
+    held = [item for item in items if rows[item]["decision"] == followup.REMINDER_HELD]
     assert len(told) == followup.REMINDERS_PER_DAY and len(held) == 1
-    assert rows[held[0]]["next_check_at"] == pytest.approx(now + 86400)
+    assert rows[held[0]]["next_check_at"] == pytest.approx(now + 86400) and rows[held[0]]["news"] == "Reminder."
     # Promises aren't held back by the reminders.
     promise(live)
     check_now(live, llm_saying(decision="tell", news="Done.", why="finished"), now=now + 1)
     assert sum(row["decision"] == "tell" for row in live.store.followups()) == followup.REMINDERS_PER_DAY + 1
+    # A freed slot tells the held one as it was, without another check.
+    later = llm_saying(decision="wait")
+    check_now(live, later, now=now + 86400 + 1)
+    assert later.calls == []
+    row = {row["item_id"]: row for row in live.store.followups()}[held[0]]
+    assert row["decision"] == "tell" and row["news"] == "Reminder." and row["next_check_at"] is None
 
 
 def test_a_week_old_commitment_counts_against_the_days_reminders(live):
@@ -591,8 +597,7 @@ def test_a_week_old_commitment_counts_against_the_days_reminders(live):
     live.store.set(followup.REMINDERS_TOLD, [now] * followup.REMINDERS_PER_DAY)
     check_now(live, llm_saying(decision="wait"), now=now + followup.BACKOFF_S[0] + 1)
     [row] = live.store.followups()
-    assert row["decision"] == "wait" and row["next_check_at"] == pytest.approx(now + 86400)
-    live.store.set(followup.REMINDERS_TOLD, [])
+    assert row["decision"] == followup.REMINDER_HELD and row["next_check_at"] == pytest.approx(now + 86400)
     check_now(live, llm_saying(decision="wait"), now=now + 86400 + 1)
     [row] = live.store.followups()
     assert row["decision"] == "tell" and row["news"] == followup.STALE_NEWS and "after it was said" in row["why"]
