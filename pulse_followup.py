@@ -36,6 +36,10 @@ KINDS = ("promise",)
 DECISIONS = ("tell", "done", "drop", "wait")
 # A check whose call failed: still waiting, but the chat wasn't read.
 CHECK_FAILED = "check failed"
+# The week-old "still want it?" went out: the promise stays open for one last
+# check (a "yes" in the home chat isn't read by memory, but follow-through in
+# the chat is); still nothing then, and it expires.
+ASKED = "asked"
 FIRST_CHECK_S = 1800.0
 # Waits between later checks; the last one repeats.
 BACKOFF_S = (2 * 3600.0, 6 * 3600.0, 86400.0, 2 * 86400.0, 3 * 86400.0)
@@ -157,7 +161,8 @@ def material(pulse_store: store.PulseStore, home: Path, item: dict, *, zone: tzi
     if not item["profile"]:
         outcomes = pulse_store.outcomes_between(item["chat_id"], float(item["valid_from"]), now, MAX_OUTCOMES)
         parts.append("## Tool calls in that chat since\n"
-                     + ("\n".join(f"- [{_local(row['at'], zone)}] {ledger.line(row)}" for row in outcomes) or "None."))
+                     + ("\n".join(f"- [{_local(row['at'], zone)}] {ledger.line(row)}" for row in reversed(outcomes))
+                        or "None."))
     if where is not None:
         jobs = report.cron_jobs(where)
         if jobs:
@@ -204,7 +209,8 @@ def run(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzinfo, no
             outcome, tokens = check(llm, text, secrets.token_hex(4))
         except Exception as error:  # noqa: BLE001 — a failed check waits for the next
             logger.warning("conduit_push: Pulse follow-up check failed", exc_info=True)
-            pulse_store.decide_followup(item["id"], decision=CHECK_FAILED, news="",
+            pulse_store.decide_followup(item["id"], decision=ASKED if row["decision"] == ASKED else CHECK_FAILED,
+                                        news="",
                                         why=f"the check failed ({type(error).__name__})", checks=checks,
                                         next_check_at=now + next_wait(checks, None), now=now)
             done["failed"] = done.get("failed", 0) + 1
@@ -212,6 +218,13 @@ def run(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzinfo, no
         done["tokens"] = done.get("tokens", 0) + tokens
         done["checks"] = done.get("checks", 0) + 1
         decision = outcome["decision"]
+        if decision == "wait" and row["decision"] == ASKED:
+            pulse_store.close_item(item["id"], status="expired",
+                                   closed_by="pulse follow-up: asked if still wanted, nothing since")
+            pulse_store.decide_followup(item["id"], decision="expired", news="",
+                                        why="asked if it was still wanted; nothing happened since", checks=checks,
+                                        next_check_at=None, now=now)
+            continue
         if decision in ("done", "drop"):
             pulse_store.close_item(item["id"], status="done" if decision == "done" else "cancelled",
                                    closed_by=f"pulse follow-up check: {outcome['why']}"[:300])
@@ -278,13 +291,22 @@ def settle(pulse_store: store.PulseStore, now: float) -> None:
     for followup in pulse_store.followups_to_tell():
         attempts = attempts_of(pulse_store, followup["item_id"])
         if any(row["state"] == store.DELIVERED for row in attempts):
-            pulse_store.close_item(followup["item_id"], status="done", closed_by="pulse follow-up")
-            pulse_store.decide_followup(followup["item_id"], decision="told", news=followup["news"],
-                                        why=followup["why"], checks=followup["checks"], next_check_at=None, now=now)
+            if followup["news"] == STALE_NEWS:
+                pulse_store.decide_followup(followup["item_id"], decision=ASKED, news=followup["news"],
+                                            why=followup["why"], checks=followup["checks"],
+                                            next_check_at=now + BACKOFF_S[-1], now=now)
+                continue
+            # Closed by the user (or the chat) while it was on its way: the item says so, not "told".
+            told = pulse_store.close_item(followup["item_id"], status="done", closed_by="pulse follow-up")
+            pulse_store.decide_followup(followup["item_id"], decision="told" if told else "closed",
+                                        news=followup["news"], why=followup["why"], checks=followup["checks"],
+                                        next_check_at=None, now=now)
         elif len(attempts) >= TRIES and all(row["state"] not in store.IN_FLIGHT for row in attempts):
             # Out of memory's open promises, so it isn't counted or reported as open; the journal says why.
-            pulse_store.close_item(followup["item_id"], status="expired", closed_by="pulse follow-up not delivered")
-            pulse_store.decide_followup(followup["item_id"], decision="undelivered", news=followup["news"],
+            expired = pulse_store.close_item(followup["item_id"], status="expired",
+                                             closed_by="pulse follow-up not delivered")
+            pulse_store.decide_followup(followup["item_id"], decision="undelivered" if expired else "closed",
+                                        news=followup["news"],
                                         why=f"{followup['why']} (not delivered after {TRIES} tries: "
                                             f"{attempts[-1]['detail']})"[:WHY_LIMIT + 200],
                                         checks=followup["checks"], next_check_at=None, now=now)

@@ -355,3 +355,41 @@ def test_a_sent_follow_up_lands_after_follow_ups_are_turned_off(live):
     pulse.tick()
     assert live.store.item(item_id)["status"] == "done"
     assert "\n" not in followup.attempts_of(live.store, item_id)[0]["text"]  # the quoted chat isn't kept
+
+
+def test_the_week_old_ask_keeps_the_promise_for_one_last_check(live):
+    item_id = promise(live, said_at=time.time() - followup.GIVE_UP_S - 60)
+    now = time.time() + followup.FIRST_CHECK_S + 1
+    check_now(live, llm_saying(decision="wait"), now=now)
+    check_now(live, llm_saying(decision="wait"), now=now + followup.BACKOFF_S[0] + 1)
+    pulse.tick()
+    [attempt] = live.store.in_flight()
+    live.store.update_attempt(attempt["attempt_id"], state=store.DELIVERED)
+    pulse.tick()
+    [row] = live.store.followups()
+    assert row["decision"] == followup.ASKED and row["next_check_at"] is not None
+    assert live.store.item(item_id)["status"] == "open"
+    check_now(live, llm_saying(decision="wait"), now=row["next_check_at"] + 1)
+    assert live.store.followups()[0]["decision"] == "expired"
+    assert live.store.item(item_id)["status"] == "expired"
+    assert len(live.sent()) == 1  # asked once, never again
+
+
+def test_a_promise_the_user_closed_while_its_news_was_on_the_way_isnt_told(live):
+    item_id = tell(live)
+    pulse.tick()
+    live.store.close_item(item_id, status="cancelled", closed_by="user")
+    [attempt] = live.store.in_flight()
+    live.store.update_attempt(attempt["attempt_id"], state=store.DELIVERED)
+    pulse.tick()
+    assert live.store.followups()[0]["decision"] == "closed"
+    assert live.store.item(item_id)["closed_by"] == "user"
+
+
+def test_followups_command_leaves_no_file_while_never_turned_on(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(pulse, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path)
+    for value, code in (("on", 1), ("off", 0), ("", 0)):
+        assert cli.dispatch(types.SimpleNamespace(conduit_push_action="pulse", pulse_action="followups",
+                                                  value=value, extra="")) == code
+    assert not (tmp_path / store.DB_NAME).exists()

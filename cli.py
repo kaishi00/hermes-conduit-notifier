@@ -181,11 +181,13 @@ def _pulse(args: argparse.Namespace) -> int:
     from . import pulse, pulse_delivery, pulse_memory
     home = get_hermes_home()
     action = args.pulse_action
-    listing = action in ("memory", "followups") and (args.value or "").strip() not in ("on", "off")
+    # Follow-ups are on by default, so even `followups on|off` needs no file yet.
+    listing = action == "followups" or (action == "memory" and (args.value or "").strip() not in ("on", "off"))
     if (action in ("status", "probe", "off", "outcomes") or listing) and not (Path(home) / pulse_delivery.store.DB_NAME).exists():
         # Never turned on: say so without leaving a file behind.
         print("Pulse: off (never turned on). `hermes conduit-push pulse on` to start it.")
-        return 1 if action == "probe" or (action == "memory" and (args.value or "").strip() in ("now", "forget")) else 0
+        return 1 if action == "probe" or (action == "memory" and (args.value or "").strip() in ("now", "forget")) \
+            or (action == "followups" and (args.value or "").strip() == "on") else 0
     pulse_store = pulse.open_store(home)
     if action in ("on", "off"):
         pulse_store.set("enabled", action == "on")
