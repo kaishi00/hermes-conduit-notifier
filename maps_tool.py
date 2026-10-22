@@ -220,7 +220,10 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
     if not misses:
         return _unavailable(view, args, action, needs_phone=True)
     last = misses[-1]
-    return _fallback(view, request, last["error"], " ".join(dict.fromkeys(miss["note"] for miss in misses)))
+    answer = _fallback(view, request, last["error"], " ".join(dict.fromkeys(miss["note"] for miss in misses)))
+    # The relay's reason the phone couldn't be asked (#287).
+    reason = next((miss["reason"] for miss in misses if isinstance(miss.get("reason"), str)), None)
+    return {**answer, "reason": reason} if reason else answer
 
 
 # A miss another engine (or the guess) may make up for; anything else (not
@@ -254,9 +257,7 @@ def _ask_phone(store: LocationStore, phone: dict[str, Any], request: dict[str, A
         return {"ok": False, "error": "unreachable", "note": "The phone couldn't be asked just now."}
     if isinstance(sent, dict) and sent.get("delivered") is False:
         store.cancel_maps(request_id)
-        return {"ok": False, "error": "not_set_up",
-                "note": "The phone can't answer maps lookups yet (Conduit or the notification relay needs updating, "
-                        "or background sharing was just turned on)."}
+        return location_tool.not_delivered("maps", sent, "maps lookups")
     waited = 0.0
     while waited < MAPS_WAIT_S:
         sleep(MAPS_POLL_S)

@@ -343,7 +343,8 @@ def test_no_answer_gives_a_labelled_guess_to_a_saved_place(home, monkeypatch):
 def test_a_relay_that_cant_wake_the_phone_spends_nothing(home, monkeypatch):
     store, _ = _shared(home, fix=fix("significant"))
     monkeypatch.setattr(maps, "client", FakeClient({"accepted": True, "delivered": False}))
-    assert _call({"action": "lookup", "query": "Heathrow"})["error"] == "not_set_up"
+    answer = _call({"action": "lookup", "query": "Heathrow"})
+    assert answer["error"] == "not_set_up" and "reason" not in answer
     with sqlite3.connect(store.path) as db:
         assert db.execute("SELECT COUNT(*) FROM maps").fetchone()[0] == 0
 
@@ -496,8 +497,10 @@ def test_directions_from_me_at_area_detail_leave_out_the_first_turns(home, apple
 
 def test_keep_maps_on_the_phone_turns_the_host_engine_off(home, apple, monkeypatch):
     _shared(home, sharing=maps_sharing(maps_host=False), fix=fix("significant"))
-    monkeypatch.setattr(maps, "client", FakeClient({"accepted": True, "delivered": False}))
-    assert _call({"action": "lookup", "query": "Heathrow"})["error"] == "not_set_up"
+    monkeypatch.setattr(maps, "client", FakeClient({"accepted": True, "delivered": False, "reason": "no_location_token"}))
+    answer = _call({"action": "lookup", "query": "Heathrow"})
+    assert answer["error"] == "not_set_up" and answer["reason"] == "no_location_token"
+    assert "no location push token" in answer["note"]
     assert apple.urls == []
 
 
