@@ -62,8 +62,11 @@ REMINDERS_TOLD = "reminders_told_at"
 REMINDER_HELD = "reminder held"
 # A commitment's status once its reminder reached the user.
 REMINDED = "reminded"
-# `pulse followups now` (for testing): every check due at once, the day's reminders unspent.
+# `pulse followups now` (for testing), when it was asked: every check due at
+# once, the day's reminders unspent. An ask the loop didn't take within
+# NOW_WINDOW_S (memory over its cap, no home chat) lapses.
 NOW_REQUESTED = "followups_now_requested"
+NOW_WINDOW_S = 600.0
 # Waits between later checks; the last one repeats.
 BACKOFF_S = (2 * 3600.0, 6 * 3600.0, 86400.0, 2 * 86400.0, 3 * 86400.0)
 GIVE_UP_S = 7 * 86400.0
@@ -172,11 +175,16 @@ def give_up_from(item: dict) -> float:
 def check_all_now(pulse_store: store.PulseStore, now: float) -> None:
     """Brings every scheduled check forward to ``now`` and frees the day's
     reminders, when `pulse followups now` asked (after ``schedule``)."""
-    if not pulse_store.take_request(NOW_REQUESTED):
+    asked = pulse_store.get(NOW_REQUESTED)
+    if not isinstance(asked, (int, float)) or isinstance(asked, bool):
+        return
+    pulse_store.set(NOW_REQUESTED, None)
+    if now - asked > NOW_WINDOW_S:
         return
     pulse_store.set(REMINDERS_TOLD, [])
-    for row in pulse_store.followups(-1):
-        if row["next_check_at"] is not None and row["next_check_at"] > now:
+    for row in pulse_store.followups(-1):  # -1: every row
+        # Not the "still want it?" ones: their next check closes them on no news.
+        if row["next_check_at"] is not None and row["next_check_at"] > now and row["decision"] != ASKED:
             pulse_store.decide_followup(row["item_id"], decision=row["decision"], news=row["news"], why=row["why"],
                                         checks=int(row["checks"]), next_check_at=now, now=now,
                                         failures=int(row["failures"]))

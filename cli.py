@@ -446,7 +446,7 @@ def _pulse_followups(pulse_store: Any, home: Any, value: str) -> int:
     if value in ("on", "off"):
         pulse_store.set("followups", value == "on")
         if value == "off":
-            pulse_store.set(pulse_followup.NOW_REQUESTED, False)  # a `now` not yet taken doesn't wait for "on"
+            pulse_store.set(pulse_followup.NOW_REQUESTED, None)  # a `now` not yet taken doesn't wait for "on"
         print("Pulse follow-ups are off: what Hermes promised and what you said you'd do are no longer checked on."
               if value == "off" else
               "Pulse follow-ups are on: Pulse checks on what Hermes promised and reminds you of what you said "
@@ -454,10 +454,15 @@ def _pulse_followups(pulse_store: Any, home: Any, value: str) -> int:
               + ("" if pulse_store.get("memory") else " They need memory too: `hermes conduit-push pulse memory on`."))
         return 0
     if value == "now":
-        if not (pulse_store.get("enabled") and pulse_store.get("memory") and pulse_store.get("followups")):
-            print("Pulse, its memory and follow-ups all need to be on first.")
+        from . import pulse_learning
+        off = [name for name, on in (("Pulse", pulse_store.get("enabled")), ("memory", pulse_store.get("memory")),
+                                     ("follow-ups", pulse_store.get("followups")),
+                                     ("follow-ups' loudness", pulse_learning.level(pulse_store, pulse_followup.FOLLOWUP)
+                                      != "off")) if not on]
+        if off:
+            print(f"Off: {', '.join(off)}. Turn it on first.")
             return 1
-        pulse_store.set(pulse_followup.NOW_REQUESTED, True)
+        pulse_store.set(pulse_followup.NOW_REQUESTED, time.time())
         pulse_store.set("memory_requested", True)
         print("Asked the dashboard to check every promise and to-do now, and to let today's reminders go out again "
               f"(still {pulse_followup.REMINDERS_PER_DAY} a day); see `hermes conduit-push pulse followups` in a "

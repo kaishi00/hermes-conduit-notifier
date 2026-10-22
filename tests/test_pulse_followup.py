@@ -334,11 +334,11 @@ def test_followups_command(live, capsys, monkeypatch):
     assert "the chat shows it finished" in out
     assert run("off") == 0 and live.store.get("followups") is False
     assert run("maybe") == 2
-    assert run("now") == 1 and live.store.get(followup.NOW_REQUESTED) is not True  # follow-ups are off
+    assert run("now") == 1 and live.store.get(followup.NOW_REQUESTED) is None  # follow-ups are off
     live.store.set("followups", True)
     live.store.set("memory", True)
-    assert run("now") == 0 and live.store.get(followup.NOW_REQUESTED) is True and live.store.get("memory_requested")
-    live.store.set("followups", False)
+    assert run("now") == 0 and live.store.get(followup.NOW_REQUESTED) and live.store.get("memory_requested")
+    assert run("off") == 0 and live.store.get(followup.NOW_REQUESTED) is None
     capsys.readouterr()
     cli.dispatch(types.SimpleNamespace(conduit_push_action="pulse", pulse_action="status", value="", extra=""))
     assert "Follow-ups: off" in capsys.readouterr().out
@@ -630,7 +630,10 @@ def test_followups_now_checks_everything_at_once(live):
     live.store.set(followup.REMINDERS_TOLD, [now] * followup.REMINDERS_PER_DAY)
     followup.check_all_now(live.store, now)  # not asked: nothing moves
     assert live.store.followups()[0]["next_check_at"] > now + 3600
-    live.store.set(followup.NOW_REQUESTED, True)
+    live.store.set(followup.NOW_REQUESTED, now - followup.NOW_WINDOW_S - 1)  # an ask left too long lapses
+    followup.check_all_now(live.store, now)
+    assert live.store.followups()[0]["next_check_at"] > now + 3600 and live.store.get(followup.NOW_REQUESTED) is None
+    live.store.set(followup.NOW_REQUESTED, now - 5)
     llm = llm_saying(decision="tell", news="Renew the passport.", why="nothing shows it")
     followup.schedule(live.store, now)
     followup.check_all_now(live.store, now)
@@ -638,4 +641,15 @@ def test_followups_now_checks_everything_at_once(live):
                  still_leader=lambda: True, budget=10_000)
     [row] = live.store.followups()
     assert len(llm.calls) == 1 and row["item_id"] == later and row["decision"] == "tell"
-    assert live.store.get(followup.NOW_REQUESTED) is False
+    assert live.store.get(followup.NOW_REQUESTED) is None
+
+
+def test_followups_now_leaves_a_still_want_it_ask_alone(live):
+    item_id = promise(live)
+    now = time.time()
+    followup.schedule(live.store, now)
+    live.store.decide_followup(item_id, decision=followup.ASKED, news=followup.STALE_NEWS, why="", checks=2,
+                               next_check_at=now + followup.BACKOFF_S[-1], now=now)
+    live.store.set(followup.NOW_REQUESTED, now)
+    followup.check_all_now(live.store, now)
+    assert live.store.followups()[0]["next_check_at"] == now + followup.BACKOFF_S[-1]

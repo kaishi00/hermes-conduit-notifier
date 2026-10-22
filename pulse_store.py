@@ -67,6 +67,7 @@ DEFAULTS: dict[str, Any] = {
     "memory_since": None,
     "memory_run_at": 0.0,
     "memory_requested": False,
+    "followups_now_requested": None,  # when `pulse followups now` asked (pulse_followup)
     # Memory stops for the day once its model calls used this many tokens.
     "memory_daily_tokens": 300_000,
     # A backfill of older history: {"from", "to", "days", "active", "done"},
