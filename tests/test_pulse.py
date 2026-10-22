@@ -453,6 +453,18 @@ def test_a_chat_held_elsewhere_is_taken_over_and_sent_again(monkeypatch, status)
     assert len(set(rids)) == 2  # the resend is a new request
 
 
+def test_a_taken_over_chat_is_put_on_pulses_model_again(monkeypatch):
+    fake = FakeHost().install(monkeypatch)
+    methods = sys.modules["tui_gateway.server"]._methods
+    switches = [{"error": {"message": "held elsewhere"}}, {"result": {"value": "m"}}]
+    methods[host.CONFIG_SET] = lambda rid, params: fake.calls.append((host.CONFIG_SET, params)) or switches.pop(0)
+    replies = [NOT_OWNED, {"result": {"status": "queued"}}]
+    methods[host.SUBMIT] = lambda rid, params: fake.calls.append((host.SUBMIT, params)) or replies.pop(0)
+    monkeypatch.setattr(host, "take_over", lambda ids: "taken_over")
+    assert host.send(SID, "x", model={"provider": "", "model": "m"}).ok
+    assert [name for name, _ in fake.calls] == [host.RESUME, host.CONFIG_SET, host.SUBMIT, host.CONFIG_SET, host.SUBMIT]
+
+
 def test_one_takeover_waits_on_hermes_at_a_time(monkeypatch):
     import threading
 

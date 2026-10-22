@@ -140,6 +140,8 @@ def send(chat_id: str, text: str, *, profile: str = "", model: Optional[dict] = 
         if taken not in ("free", "taken_over", "same_host"):
             return Sent(False, "", f"the chat refused the turn: {_message(submitted)} "
                                    f"(Pulse couldn't take it over: {taken or 'unknown'})")
+        if model:  # the surface that held the chat may have kept it from switching
+            _use_model(methods, sid, resumed.get("result"), model)
         submitted = submit()
         if _not_owned(submitted):
             return Sent(False, "", f"the chat refused the turn again after Pulse took it over ({taken}): "
