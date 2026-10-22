@@ -130,27 +130,33 @@ def home_for(home: Path, profile: str) -> Optional[Path]:
     return next((path for name, path in report.profile_homes(home) if name == profile), None)
 
 
+class ChatUnreadable(Exception):
+    """The promise's chat can't be read: the check waits instead of judging
+    a chat it never saw."""
+
+
 def material(pulse_store: store.PulseStore, home: Path, item: dict, *, zone: tzinfo, now: float) -> str:
     """What a check reads: the newest of what was said since the promise,
     as much as the budget holds."""
     where = home_for(home, item["profile"])
+    if where is None:
+        raise ChatUnreadable(f"no profile named {item['profile']!r} any more")
     parts = [f"Now: {_local(now, zone)}",
              f"Promise: {_clip(item['text'], 300)}",
              f"Hermes's words: \"{_clip(item['evidence'], 300)}\" ({_local(item['valid_from'], zone)})"]
     if item.get("due"):
         parts.append(f"Due: {item['due']}")
     lines: list[str] = []
-    if where is not None:
-        try:
-            rows = hermes.chat_messages(where, chat_id=item["chat_id"], after_id=int(item["message_id"]),
-                                        since=0.0, max_chars=PER_MESSAGE, limit=MAX_MESSAGES, newest=True)
-        except hermes.HermesUnreadable:
-            rows = []
-        for row in rows:
-            text = _clip(row["content"], PER_MESSAGE)
-            if text:
-                who = "User" if row["role"] == "user" else "Hermes"
-                lines.append(f"[{_local(row['timestamp'], zone)}] {who}: {text}")
+    try:
+        rows = hermes.chat_messages(where, chat_id=item["chat_id"], after_id=int(item["message_id"]),
+                                    since=0.0, max_chars=PER_MESSAGE, limit=MAX_MESSAGES, newest=True)
+    except hermes.HermesUnreadable as error:
+        raise ChatUnreadable(str(error)) from None
+    for row in rows:
+        text = _clip(row["content"], PER_MESSAGE)
+        if text:
+            who = "User" if row["role"] == "user" else "Hermes"
+            lines.append(f"[{_local(row['timestamp'], zone)}] {who}: {text}")
     kept, size = [], 0
     for line in reversed(lines):
         if size + len(line) > CHAT_BUDGET:
@@ -163,10 +169,9 @@ def material(pulse_store: store.PulseStore, home: Path, item: dict, *, zone: tzi
         parts.append("## Tool calls in that chat since\n"
                      + ("\n".join(f"- [{_local(row['at'], zone)}] {ledger.line(row)}" for row in reversed(outcomes))
                         or "None."))
-    if where is not None:
-        jobs = report.cron_jobs(where)
-        if jobs:
-            parts.append(jobs)
+    jobs = report.cron_jobs(where)
+    if jobs:
+        parts.append(jobs)
     return "\n\n".join(parts)
 
 
@@ -204,11 +209,15 @@ def run(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzinfo, no
                                         why="still open a week after it was due with nothing showing it happened",
                                         checks=int(row["checks"]), next_check_at=None, now=now)
             continue
+        text = ""
         try:
             text = material(pulse_store, home, item, zone=zone, now=now)
             outcome, tokens = check(llm, text, secrets.token_hex(4))
         except Exception as error:  # noqa: BLE001 — a failed check waits for the next
             logger.warning("conduit_push: Pulse follow-up check failed", exc_info=True)
+            # A call that failed may still have been billed: count its input
+            # roughly, so a failing loop still meets the daily cap.
+            done["tokens"] = done.get("tokens", 0) + len(text) // 4
             pulse_store.decide_followup(item["id"], decision=ASKED if row["decision"] == ASKED else CHECK_FAILED,
                                         news="",
                                         why=f"the check failed ({type(error).__name__})", checks=checks,

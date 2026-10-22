@@ -393,3 +393,25 @@ def test_followups_command_leaves_no_file_while_never_turned_on(tmp_path, monkey
         assert cli.dispatch(types.SimpleNamespace(conduit_push_action="pulse", pulse_action="followups",
                                                   value=value, extra="")) == code
     assert not (tmp_path / store.DB_NAME).exists()
+
+
+def test_a_chat_that_cant_be_read_isnt_judged(live, monkeypatch):
+    promise(live)
+
+    def unreadable(*args, **kwargs):
+        raise followup.hermes.HermesUnreadable("locked")
+
+    monkeypatch.setattr(followup.hermes, "chat_messages", unreadable)
+    llm = llm_saying(decision="tell", news="x")
+    check_now(live, llm, now=time.time() + followup.FIRST_CHECK_S + 1)
+    assert llm.calls == [] and live.store.followups()[0]["decision"] == followup.CHECK_FAILED
+
+
+def test_a_failed_call_still_counts_toward_the_cap(live):
+    promise(live)
+
+    def broken(instructions, text):
+        raise TimeoutError()
+
+    done = check_now(live, broken, now=time.time() + followup.FIRST_CHECK_S + 1)
+    assert done["tokens"] > 0
