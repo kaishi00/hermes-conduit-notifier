@@ -44,6 +44,7 @@ from . import pulse_brief as brief
 from . import pulse_followup as followup
 from . import pulse_hermes as hermes
 from . import pulse_host as host
+from . import pulse_learning as learning
 from . import pulse_ledger as ledger
 from . import pulse_memory as memory
 from . import pulse_report as report
@@ -283,7 +284,8 @@ def tick(now: Optional[float] = None) -> None:
         return  # another process on this Hermes home runs the loop
     # The loop's heartbeat: `pulse status` warns when nothing runs the loop.
     pulse_store.set("last_tick_at", now)
-    delivery.reconcile(pulse_store, home, process_started_at=_started_at, now=now)
+    changed = delivery.reconcile(pulse_store, home, process_started_at=_started_at, now=now)
+    _turn_cards(pulse_store, home, changed, now)
     # A report's text carries a day of private chat; keep it only while in flight.
     pulse_store.trim_finished(REPORT)
     pulse_store.trim_finished(FOLLOWUP)  # likewise the chat a follow-up quotes
@@ -298,6 +300,32 @@ def tick(now: Optional[float] = None) -> None:
     if not _maybe_probe(pulse_store, home, now) and not _maybe_followup(pulse_store, home, now) \
             and not _maybe_brief(pulse_store, home, now):
         _maybe_report(pulse_store, home, now)
+
+
+# Why a report or brief card is on the Pulse screen.
+TURN_WHY = {
+    REPORT: "Your Pulse report: what Hermes saw in your chats since the last one.",
+    BRIEF: "Your morning brief: the news you asked Pulse to hold for the morning.",
+}
+
+
+def _turn_cards(pulse_store: store.PulseStore, home: Path, changed: list[dict], now: float) -> None:
+    """A report or brief that just reached the Pulse chat goes on the Pulse
+    screen too, as Hermes wrote it, linked to its message in the chat."""
+    for row in changed:
+        if row["state"] != store.DELIVERED or row["kind"] not in TURN_WHY:
+            continue
+        try:
+            turn = hermes.find_turn(home, chat_id=row["session_key"], tag=row["tag"],
+                                    since=row["created_at"] - delivery.SINCE_SLACK_S)
+        except hermes.HermesUnreadable:
+            continue
+        if turn is not None:
+            # A brief comes with a push; a report doesn't.
+            learning.add_turn_card(pulse_store, kind=row["kind"], chat_id=row["session_key"],
+                                   chat_title=pulse_store.get("home_title") or "Pulse", turn=turn,
+                                   level_name="push" if row["kind"] == BRIEF else "screen",
+                                   why=TURN_WHY[row["kind"]], now=now)
 
 
 def _send(pulse_store: store.PulseStore, *, kind: str, chat_id: str, text: Any) -> None:

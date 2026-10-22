@@ -6976,9 +6976,9 @@ async def post_pulse_forget(request: Request, response: Response) -> Dict[str, A
 
 @router.get("/pulse/feed")
 async def get_pulse_feed(response: Response) -> Dict[str, Any]:
-    """The Pulse screen: cards newest first, how many are unseen, and each kind's loudness."""
+    """The Pulse screen: cards newest first, how many are unseen, each kind's loudness and the Pulse chat's id."""
     response.headers["Cache-Control"] = "no-store"
-    return await _pulse_route("feed", lambda control, store, home: control.feed(store), reads_only=True)
+    return await _pulse_route("feed", lambda control, store, home: control.feed(store, home), reads_only=True)
 
 
 @router.post("/pulse/feed/seen")

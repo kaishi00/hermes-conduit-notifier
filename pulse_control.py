@@ -252,11 +252,14 @@ def followups(pulse_store: Any, limit: int = ITEMS) -> list[dict[str, Any]]:
     return out
 
 
-def feed(pulse_store: Any, limit: int = pulse_learning.CARDS) -> dict[str, Any]:
+def feed(pulse_store: Any, home: Optional[Path] = None, limit: int = pulse_learning.CARDS) -> dict[str, Any]:
     """The Pulse screen: what Pulse brought the user, newest first, how many
-    are unseen, and each kind's loudness."""
+    are unseen, each kind's loudness, and the Pulse chat's id ("" when
+    there's none), which Conduit keeps behind the screen."""
+    chat = pulse.home_chat(pulse_store, Path(home))[0] if home is not None else None
     return {"cards": [pulse_learning.card_entry(card) for card in pulse_store.cards(limit)],
-            "unseen": pulse_store.unseen_cards(), "levels": pulse_learning.levels(pulse_store)}
+            "unseen": pulse_store.unseen_cards(), "levels": pulse_learning.levels(pulse_store),
+            "home_chat_id": chat.chat_id if chat else ""}
 
 
 def see(pulse_store: Any, ids: Any, now: Optional[float] = None) -> int:

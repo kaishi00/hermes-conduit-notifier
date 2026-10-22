@@ -745,6 +745,12 @@ class PulseStore:
                                (kind, item_id, news)).fetchone()
         return int(row["id"]) if row else None
 
+    def card_for_message(self, kind: str, chat_id: str, message_id: int) -> Optional[int]:
+        with self._connect() as conn:
+            row = conn.execute("SELECT id FROM cards WHERE kind=? AND chat_id=? AND message_id=?",
+                               (kind, chat_id, message_id)).fetchone()
+        return int(row["id"]) if row else None
+
     def held_count(self) -> int:
         with self._connect() as conn:
             return int(conn.execute("SELECT COUNT(*) FROM cards WHERE level='brief' AND briefed_at IS NULL")

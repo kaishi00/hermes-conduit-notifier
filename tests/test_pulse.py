@@ -222,7 +222,7 @@ def test_turn_rows_follow_the_tagged_user_row(db, tmp_path):
     db.message("assistant", "")
     db.message("assistant", "Check arrived.", active=0)
     turn = hermes.find_turn(tmp_path, chat_id=SID, tag="pAAAA-1", since=0)
-    assert turn == hermes.TurnRows(SID, "Check arrived.", False, False, "Pulse delivery check pAAAA-1.")
+    assert turn == hermes.TurnRows(SID, "Check arrived.", False, False, "Pulse delivery check pAAAA-1.", 5)
     db.message("user", "next")
     assert hermes.find_turn(tmp_path, chat_id=SID, tag="pAAAA-1", since=0).closed
 

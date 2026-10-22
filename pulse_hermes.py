@@ -40,6 +40,7 @@ class TurnRows:
     failed: bool  # Hermes marked the turn failed
     closed: bool  # a later user row exists, so the turn is over
     prompt: str = ""  # the tagged user row's own text
+    reply_id: Optional[int] = None  # the reply's messages.id
 
 
 def _connect(home: Path) -> sqlite3.Connection:
@@ -100,9 +101,9 @@ def find_turn(home: Path, *, chat_id: str, tag: str, since: float) -> Optional[T
     user_id, session_id = users[0]["id"], users[0]["session_id"]
     prompt = users[0]["content"] if isinstance(users[0]["content"], str) else ""
     rows = _run(home, (
-        "SELECT role, content, display_kind FROM messages WHERE session_id = ? AND id > ? ORDER BY id"
+        "SELECT id, role, content, display_kind FROM messages WHERE session_id = ? AND id > ? ORDER BY id"
     ), (session_id, user_id))
-    reply, failed, closed = "", False, False
+    reply, reply_id, failed, closed = "", None, False, False
     for row in rows:
         if row["role"] == "user":
             closed = True
@@ -114,8 +115,8 @@ def find_turn(home: Path, *, chat_id: str, tag: str, since: float) -> Optional[T
             continue
         text = row["content"].strip() if isinstance(row["content"], str) else ""
         if text:
-            reply = text
-    return TurnRows(session_id, reply, failed, closed, prompt)
+            reply, reply_id = text, row["id"]
+    return TurnRows(session_id, reply, failed, closed, prompt, reply_id)
 
 
 # The chats a person had: every session but ``excluded`` (the home chat's

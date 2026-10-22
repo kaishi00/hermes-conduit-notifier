@@ -419,3 +419,51 @@ def test_cli_learned_set_on_a_host_that_never_turned_pulse_on_leaves_no_file(tmp
     monkeypatch.setitem(sys.modules, "hermes_constants", types.SimpleNamespace(get_hermes_home=lambda: tmp_path))
     assert cli._pulse(types.SimpleNamespace(pulse_action="learned", value="followup", extra="screen")) == 1
     assert not (tmp_path / store.DB_NAME).exists()
+
+
+def test_a_delivered_brief_lands_on_the_pulse_screen_as_hermes_wrote_it(live):
+    brief_later(live)
+    control.set_level(live.store, "followup", "brief")
+    tell(live)
+    pulse.tick()
+    brief_due_now(live)
+    pulse.tick()
+    [attempt] = live.store.in_flight()
+    live.db.message("user", attempt["text"])
+    reply_id = live.db.message("assistant", "Good morning!\n\n- The deploy finished and everything is green.")
+    pulse.tick()
+    brief_card = live.store.cards()[0]
+    assert brief_card["kind"] == "brief" and brief_card["level"] == "push" and brief_card["chat_id"] == SID
+    assert brief_card["news"] == "Good morning!\n\n- The deploy finished and everything is green."
+    assert brief_card["message_id"] == reply_id and brief_card["why"] and brief_card["item_id"] is None
+    pulse.tick()
+    assert [card["kind"] for card in live.store.cards()].count("brief") == 1
+    page = control.feed(live.store, live.home)
+    assert page["home_chat_id"] == SID and page["cards"][0]["kind"] == "brief"
+    with pytest.raises(control.Refused):  # no loudness ladder for briefs (yet)
+        control.rate(live.store, brief_card["id"], "up")
+
+
+def test_a_requested_report_lands_on_the_pulse_screen_without_a_push(live):
+    live.store.set("report_requested", True)
+    pulse.tick()
+    [attempt] = live.store.in_flight()
+    assert attempt["kind"] == "report"
+    pulse._mark_turn(SID, "turn-r", attempt["tag"])
+    assert pulse.pushes(SID, "turn-r") is False
+    live.db.message("user", attempt["text"])
+    reply_id = live.db.message("assistant", "Here's your report.\n1. Deploy: green")
+    pulse.tick()
+    [card] = live.store.cards()
+    assert card["kind"] == "report" and card["level"] == "screen" and card["message_id"] == reply_id
+    assert live.store.unseen_cards() == 1
+
+
+def test_a_failed_report_makes_no_card_and_feed_has_no_chat_without_home(live, tmp_path):
+    live.store.set("report_requested", True)
+    pulse.tick()
+    [attempt] = live.store.in_flight()
+    live.store.update_attempt(attempt["attempt_id"], state=store.FAILED, detail="boom")
+    pulse.tick()
+    assert live.store.cards() == []
+    assert control.feed(live.store)["home_chat_id"] == ""

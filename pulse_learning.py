@@ -97,6 +97,29 @@ def add_card(pulse_store: store.PulseStore, *, kind: str, item: dict, level_name
         "created_at": now})
 
 
+# A report or brief as it reached the Pulse chat, on the Pulse screen too.
+TURN_KINDS = ("report", "brief")
+TURN_NEWS_LIMIT = 6000
+
+
+def add_turn_card(pulse_store: store.PulseStore, *, kind: str, chat_id: str, chat_title: str, turn: Any,
+                  level_name: str, why: str, now: float) -> Optional[int]:
+    """The card for a delivered report or brief turn (``turn`` is its
+    pulse_hermes.TurnRows), once: the one already there for that reply."""
+    if kind not in TURN_KINDS or not turn.reply or turn.reply_id is None:
+        return None
+    existing = pulse_store.card_for_message(kind, turn.session_id, turn.reply_id)
+    if existing is not None:
+        return existing
+    news = turn.reply.strip()  # its lines and lists kept, unlike a follow-up's one-line news
+    if len(news) > TURN_NEWS_LIMIT:
+        news = news[:TURN_NEWS_LIMIT - 1] + "…"
+    return pulse_store.add_card({
+        "kind": kind, "item_id": None, "level": level_name, "news": news, "why": why,
+        "chat_id": turn.session_id or chat_id, "chat_title": _clip(chat_title, 120), "message_id": turn.reply_id,
+        "created_at": now})
+
+
 def card_entry(card: dict) -> dict[str, Any]:
     return {key: card[key] for key in ("id", "kind", "item_id", "level", "title", "quote", "news", "why", "profile",
                                        "chat_id", "chat_title", "message_id", "created_at", "seen_at", "briefed_at",
