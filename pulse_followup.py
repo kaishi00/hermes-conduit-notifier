@@ -44,6 +44,9 @@ FIRST_CHECK_S = 1800.0
 # Waits between later checks; the last one repeats.
 BACKOFF_S = (2 * 3600.0, 6 * 3600.0, 86400.0, 2 * 86400.0, 3 * 86400.0)
 GIVE_UP_S = 7 * 86400.0
+# At most one "still want it?" a day, so a backfill full of old promises
+# doesn't turn into a burst of them; the rest wait their turn.
+STALE_EVERY_S = 86400.0
 # A follow-up that didn't get through is tried again, up to this many times.
 TRIES = 3
 RETRY_S = 1800.0
@@ -203,6 +206,12 @@ def run(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzinfo, no
             continue
         checks = int(row["checks"]) + 1
         if row["decision"] == "wait" and now - give_up_from(item) >= GIVE_UP_S:
+            last = pulse_store.get("followup_stale_at")
+            if isinstance(last, (int, float)) and not isinstance(last, bool) and now - last < STALE_EVERY_S:
+                pulse_store.decide_followup(item["id"], decision="wait", news="", why=row["why"],
+                                            checks=int(row["checks"]), next_check_at=last + STALE_EVERY_S, now=now)
+                continue
+            pulse_store.set("followup_stale_at", now)
             # Only after a real check read the chat (a promise found by a
             # backfill is read first). No model call: the count stays.
             pulse_store.decide_followup(item["id"], decision="tell", news=STALE_NEWS,
@@ -234,9 +243,10 @@ def run(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzinfo, no
                                         why="asked if it was still wanted; nothing happened since", checks=checks,
                                         next_check_at=None, now=now)
             continue
-        if decision in ("done", "drop"):
-            pulse_store.close_item(item["id"], status="done" if decision == "done" else "cancelled",
-                                   closed_by=f"pulse follow-up check: {outcome['why']}"[:300])
+        if decision in ("done", "drop") and not pulse_store.close_item(
+                item["id"], status="done" if decision == "done" else "cancelled",
+                closed_by=f"pulse follow-up check: {outcome['why']}"[:300]):
+            decision = "closed"  # closed by the user (or the chat) during the call: the item says so
         pulse_store.decide_followup(item["id"], decision=decision, news=outcome["news"], why=outcome["why"],
                                     checks=checks,
                                     next_check_at=now + next_wait(checks, outcome["hint"]) if decision == "wait" else None,
@@ -300,7 +310,8 @@ def settle(pulse_store: store.PulseStore, now: float) -> None:
     for followup in pulse_store.followups_to_tell():
         attempts = attempts_of(pulse_store, followup["item_id"])
         if any(row["state"] == store.DELIVERED for row in attempts):
-            if followup["news"] == STALE_NEWS:
+            item = pulse_store.item(followup["item_id"])
+            if followup["news"] == STALE_NEWS and item is not None and item["status"] == "open":
                 pulse_store.decide_followup(followup["item_id"], decision=ASKED, news=followup["news"],
                                             why=followup["why"], checks=followup["checks"],
                                             next_check_at=now + BACKOFF_S[-1], now=now)

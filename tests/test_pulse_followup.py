@@ -415,3 +415,28 @@ def test_a_failed_call_still_counts_toward_the_cap(live):
 
     done = check_now(live, broken, now=time.time() + followup.FIRST_CHECK_S + 1)
     assert done["tokens"] > 0
+
+
+def test_old_promises_ask_if_still_wanted_one_a_day(live):
+    first = promise(live, "Hermes will do one.", said_at=time.time() - followup.GIVE_UP_S - 60)
+    second = promise(live, "Hermes will do two.", said_at=time.time() - followup.GIVE_UP_S - 60)
+    now = time.time() + followup.FIRST_CHECK_S + 1
+    check_now(live, llm_saying(decision="wait"), now=now)
+    check_now(live, llm_saying(decision="wait"), now=now + followup.BACKOFF_S[0] + 1)
+    rows = {row["item_id"]: row for row in live.store.followups()}
+    assert sorted(row["decision"] for row in rows.values()) == ["tell", "wait"]
+    waiting = next(row for row in rows.values() if row["decision"] == "wait")
+    assert waiting["next_check_at"] >= now + followup.STALE_EVERY_S - 1
+    assert {first, second} == set(rows)
+
+
+def test_a_check_that_closes_a_promise_the_user_already_closed_says_closed(live, monkeypatch):
+    item_id = promise(live)
+
+    def llm(instructions, text):
+        live.store.close_item(item_id, status="cancelled", closed_by="user")  # during the call
+        return {"decision": "done", "why": "kept"}, 5
+
+    check_now(live, llm, now=time.time() + followup.FIRST_CHECK_S + 1)
+    assert live.store.followups()[0]["decision"] == "closed"
+    assert live.store.item(item_id)["closed_by"] == "user"
