@@ -553,7 +553,8 @@ def _set_rule_locked(store: LocationStore, view: dict[str, Any], raw: Any) -> di
             try:
                 store.pend_rule_job(job_id)
             except Exception:  # noqa: BLE001 — the store itself failed; one try
-                call_watches._call(cronjob, action="remove", job_id=job_id)
+                if not call_watches._call(cronjob, action="remove", job_id=job_id).get("success"):
+                    logger.warning("conduit_push: place rule job %s left with no rule and not listed", job_id)
             else:
                 _clear_rule_jobs(store, cronjob)
         raise
@@ -606,7 +607,9 @@ def _clear_rule_jobs(store: LocationStore, cronjob: Callable[..., str]) -> None:
 
 def clear_rule_jobs_at_start(delay: float = STARTUP_CLEANUP_DELAY_S) -> threading.Thread:
     """Retries this profile's leftover rule jobs once, a little after the
-    plugin loads (Hermes's scheduler is set up by then), off the load path."""
+    plugin loads (Hermes's scheduler is set up by then), off the load path.
+    Only the profile's own store: rules, and so their jobs, live with the
+    profile that shares location, never one that reads it through another."""
     def run() -> None:
         time.sleep(delay)
         try:
