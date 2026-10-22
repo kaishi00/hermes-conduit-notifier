@@ -711,7 +711,8 @@ def test_locate_without_a_token_falls_back_and_spends_nothing(home, monkeypatch)
 
 def test_a_relay_without_a_reason_or_with_a_strange_one_gets_the_plain_note(home, monkeypatch):
     _shared(home, fix=fix("significant"))
-    for answer in ({"accepted": True, "delivered": False}, {"delivered": False, "reason": "no\nlocation " * 50}):
+    for answer in ({"accepted": True, "delivered": False}, {"delivered": False, "reason": "no\nlocation " * 50},
+                   {"delivered": False, "reason": "no_location_token\n"}):
         monkeypatch.setattr(tool, "client", FakeClient(answer))
         result = _call({"action": "locate"}, sleep=lambda seconds: None)
         assert result["error"] == "not_set_up" and "reason" not in result

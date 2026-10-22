@@ -388,7 +388,7 @@ def _history(store: LocationStore, view: dict[str, Any], args: dict[str, Any], n
 # --- Fresh lookup --------------------------------------------------------------------
 
 
-_REASON = re.compile(r"^[a-z_]{1,40}$")
+_REASON = re.compile(r"[a-z_]{1,40}")
 
 
 def not_delivered(kind: str, answer: dict[str, Any], what: str) -> dict[str, Any]:
@@ -397,18 +397,18 @@ def not_delivered(kind: str, answer: dict[str, Any], what: str) -> dict[str, Any
     reason = answer.get("reason")
     # The relay's own short code (no_location_token), nothing else: it goes
     # to the log and to the model.
-    if not isinstance(reason, str) or not _REASON.match(reason):
+    if not isinstance(reason, str) or not _REASON.fullmatch(reason):
         reason = None
     logger.info("Conduit %s request not delivered by the relay: %s", kind, reason or "no reason given")
-    return {"ok": False, "error": "not_set_up", "note": not_delivered_note(answer, what),
+    return {"ok": False, "error": "not_set_up", "note": not_delivered_note(reason, what),
             **({"reason": reason} if reason else {})}
 
 
-def not_delivered_note(answer: dict[str, Any], what: str) -> str:
-    if answer.get("reason") == "no_location_token":
+def not_delivered_note(reason: str | None, what: str) -> str:
+    if reason == "no_location_token":
         return (f"The phone can't answer {what} yet: the notification relay has no location push token for it. "
-                "The user can fix this by opening Conduit's Settings > Notifications with background location "
-                "sharing on (or updating Conduit).")
+                "The user can fix this by updating Conduit and opening it with background location sharing on "
+                "(on an older Conduit, opening its Settings > Notifications sends the token until it next starts).")
     return (f"The phone can't answer {what} yet (Conduit or the notification relay needs updating, "
             "or background sharing was just turned on).")
 
