@@ -7,8 +7,7 @@ import types
 
 import pytest
 
-from test_pulse import (SID, StateDB, FIXTURE_SCHEMA, FakeHost, ROOT, _load, cli, delivery, host, plugin, pulse,
-                        store)
+from test_pulse import SID, StateDB, FIXTURE_SCHEMA, FakeHost, ROOT, _load, cli, host, plugin, pulse, store
 
 followup = _load("conduit_push.pulse_followup", ROOT / "pulse_followup.py")
 CHAT = "work"
@@ -440,3 +439,17 @@ def test_a_check_that_closes_a_promise_the_user_already_closed_says_closed(live,
     check_now(live, llm, now=time.time() + followup.FIRST_CHECK_S + 1)
     assert live.store.followups()[0]["decision"] == "closed"
     assert live.store.item(item_id)["closed_by"] == "user"
+
+
+def test_an_asked_promise_whose_last_check_fails_expires(live):
+    item_id = promise(live)
+    followup.schedule(live.store, time.time())
+    live.store.decide_followup(item_id, decision=followup.ASKED, news=followup.STALE_NEWS, why="", checks=2,
+                               next_check_at=time.time() - 1, now=time.time())
+
+    def broken(instructions, text):
+        raise TimeoutError()
+
+    check_now(live, broken)
+    assert live.store.followups()[0]["decision"] == "expired"
+    assert live.store.item(item_id)["status"] == "expired"

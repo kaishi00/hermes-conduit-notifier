@@ -18,6 +18,7 @@ follow-up that says nothing shows it happened and asks if it's still wanted.
 from __future__ import annotations
 
 import logging
+import re
 import secrets
 import time
 from datetime import datetime, tzinfo
@@ -84,7 +85,8 @@ STALE_NEWS = "It has been over a week and nothing shows it happened."
 
 
 def _clip(text: Any, limit: int) -> str:
-    return report._clip(text, limit)
+    text = re.sub(r"\s+", " ", text if isinstance(text, str) else "").strip()
+    return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
 def _local(epoch: float, zone: tzinfo) -> str:
@@ -227,8 +229,17 @@ def run(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzinfo, no
             # A call that failed may still have been billed: count its input
             # roughly, so a failing loop still meets the daily cap.
             done["tokens"] = done.get("tokens", 0) + len(text) // 4
-            pulse_store.decide_followup(item["id"], decision=ASKED if row["decision"] == ASKED else CHECK_FAILED,
-                                        news="",
+            if row["decision"] == ASKED:
+                # The user was asked already; a last check that can't run ends it rather than looping.
+                pulse_store.close_item(item["id"], status="expired",
+                                       closed_by="pulse follow-up: asked if still wanted, last check failed")
+                pulse_store.decide_followup(item["id"], decision="expired", news="",
+                                            why=f"asked if it was still wanted; the last check failed "
+                                                f"({type(error).__name__})", checks=checks, next_check_at=None,
+                                            now=now)
+                done["failed"] = done.get("failed", 0) + 1
+                continue
+            pulse_store.decide_followup(item["id"], decision=CHECK_FAILED, news="",
                                         why=f"the check failed ({type(error).__name__})", checks=checks,
                                         next_check_at=now + next_wait(checks, None), now=now)
             done["failed"] = done.get("failed", 0) + 1
