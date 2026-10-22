@@ -315,6 +315,9 @@ TURN_WHY = {
 
 # How long a delivered report or brief whose card didn't land is tried again.
 TURN_CARD_RETRY_S = 600
+# The attempts whose cards landed, newest last.
+TURN_CARDS_DONE = "turn_cards_done"
+TURN_CARDS_DONE_KEEP = 50
 
 
 def _turn_cards(pulse_store: store.PulseStore, home: Path, changed: list[dict], now: float) -> None:
@@ -327,18 +330,27 @@ def _turn_cards(pulse_store: store.PulseStore, home: Path, changed: list[dict], 
         for row in pulse_store.attempts_since(kind, now - TURN_CARD_RETRY_S - 86400):
             if row["updated_at"] >= now - TURN_CARD_RETRY_S:
                 rows.setdefault(row["attempt_id"], row)
-    for row in rows.values():
-        if row["state"] != store.DELIVERED or row["kind"] not in TURN_WHY:
-            continue
+    # An attempt whose card landed isn't looked up again: a compaction since
+    # would give its reply new ids, and a second card.
+    done = pulse_store.get(TURN_CARDS_DONE)
+    done = [str(attempt) for attempt in done] if isinstance(done, list) else []
+    rows = {attempt: row for attempt, row in rows.items() if row["state"] == store.DELIVERED
+            and row["kind"] in TURN_WHY and attempt not in done}
+    if not rows:
+        return
+    chat = home_chat(pulse_store, home)[0]
+    title = (chat.title if chat else "") or pulse_store.get("home_title") or "Pulse"
+    for attempt, row in rows.items():
         try:
             turn = hermes.find_turn(home, chat_id=row["session_key"], tag=row["tag"],
                                     since=row["created_at"] - delivery.SINCE_SLACK_S)
-            if turn is not None:
-                # A brief comes with a push; a report doesn't.
-                learning.add_turn_card(pulse_store, kind=row["kind"], chat_id=row["session_key"],
-                                       chat_title=pulse_store.get("home_title") or "Pulse", turn=turn,
-                                       level_name="push" if row["kind"] == BRIEF else "screen",
-                                       why=TURN_WHY[row["kind"]], now=now)
+            # A brief comes with a push; a report doesn't.
+            card = turn is not None and learning.add_turn_card(
+                pulse_store, kind=row["kind"], chat_id=row["session_key"], chat_title=title, turn=turn,
+                level_name="push" if row["kind"] == BRIEF else "screen", why=TURN_WHY[row["kind"]], now=now)
+            if card:
+                done = (done + [attempt])[-TURN_CARDS_DONE_KEEP:]
+                pulse_store.set(TURN_CARDS_DONE, done)
         except (hermes.HermesUnreadable, sqlite3.Error):
             logger.debug("conduit_push: Pulse: no card for %s yet", row["tag"], exc_info=True)
 
