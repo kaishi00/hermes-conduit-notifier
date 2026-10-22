@@ -48,7 +48,7 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
                             "'all-profiles' or 'this-profile'; "
                             "for memory: a kind to list, 'now', 'on', 'off', 'forget' and an item number, "
                             "or 'backfill'; "
-                            "for followups: 'on' or 'off', or nothing to list them; "
+                            "for followups: 'on', 'off', 'now' (check everything now, for testing), or nothing to list them; "
                             "for rate: the card number; "
                             "for learned: 'undo' and a lesson number, or a kind and a loudness to set")
     pulse.add_argument("extra", nargs="?", default="",
@@ -445,6 +445,8 @@ def _pulse_followups(pulse_store: Any, home: Any, value: str) -> int:
     from . import pulse, pulse_followup
     if value in ("on", "off"):
         pulse_store.set("followups", value == "on")
+        if value == "off":
+            pulse_store.set(pulse_followup.NOW_REQUESTED, False)  # a `now` not yet taken doesn't wait for "on"
         print("Pulse follow-ups are off: what Hermes promised and what you said you'd do are no longer checked on."
               if value == "off" else
               "Pulse follow-ups are on: Pulse checks on what Hermes promised and reminds you of what you said "
@@ -457,9 +459,9 @@ def _pulse_followups(pulse_store: Any, home: Any, value: str) -> int:
             return 1
         pulse_store.set(pulse_followup.NOW_REQUESTED, True)
         pulse_store.set("memory_requested", True)
-        print("Asked the dashboard to check every promise and to-do now, and to let today's reminders go out again; "
-              "see `hermes conduit-push pulse followups` in a minute or two. Meant for testing: each check is a "
-              "model call.")
+        print("Asked the dashboard to check every promise and to-do now, and to let today's reminders go out again "
+              f"(still {pulse_followup.REMINDERS_PER_DAY} a day); see `hermes conduit-push pulse followups` in a "
+              "minute or two. Meant for testing: each check is a model call.")
         return 0
     if value:
         print("Usage: hermes conduit-push pulse followups [on|off|now]")
