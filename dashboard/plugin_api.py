@@ -7022,7 +7022,8 @@ async def put_pulse_levels(request: Request, response: Response) -> Dict[str, An
         control.set_level(store, body.get("kind"), body.get("level"))
         return control.learned(store)
 
-    return await _pulse_route("levels", action)
+    # Refused while Pulse is off, so a host that never turned it on keeps no file.
+    return await _pulse_route("levels", action, reads_only=True)
 
 
 # --- Confirm prompts Hermes shows on the phone ---------------------------------

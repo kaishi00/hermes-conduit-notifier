@@ -331,3 +331,31 @@ def test_held_cards_older_than_a_month_can_be_pruned(live):
     assert live.store.prune_cards(1) == 0
     assert live.store.prune_cards(1, held_before=1.5) == 2
     assert live.store.held_count() == 1
+
+
+def test_two_not_relevant_ratings_from_one_chat_make_one_rule(live):
+    first, second = told_card(live), told_card(live, "Another one.")
+    control.rate(live.store, first["id"], "down", "not_relevant")
+    made = control.rate(live.store, second["id"], "down", "not_relevant")
+    assert [lesson["what"] for lesson in made] == ["level"]  # two downs step the ladder; no second rule
+    assert len(learning.rules(live.store, "followup")) == 1
+
+
+def test_levels_are_refused_while_pulse_is_off(live, monkeypatch, capsys):
+    import sys
+    import types
+    live.store.set("enabled", False)
+    with pytest.raises(control.Refused) as refused:
+        control.set_level(live.store, "followup", "screen")
+    assert refused.value.code == "pulse_off"
+    monkeypatch.setitem(sys.modules, "hermes_constants", types.SimpleNamespace(get_hermes_home=lambda: live.home))
+    assert cli._pulse(types.SimpleNamespace(pulse_action="learned", value="followup", extra="screen")) == 1
+    assert cli._pulse(types.SimpleNamespace(pulse_action="rate", value="²", extra="up")) == 2
+
+
+def test_cli_learned_set_on_a_host_that_never_turned_pulse_on_leaves_no_file(tmp_path, monkeypatch):
+    import sys
+    import types
+    monkeypatch.setitem(sys.modules, "hermes_constants", types.SimpleNamespace(get_hermes_home=lambda: tmp_path))
+    assert cli._pulse(types.SimpleNamespace(pulse_action="learned", value="followup", extra="screen")) == 1
+    assert not (tmp_path / store.DB_NAME).exists()

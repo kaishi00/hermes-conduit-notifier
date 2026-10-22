@@ -781,12 +781,27 @@ class PulseStore:
                 "WHERE id=? AND rating=? AND reason=?",
                 (rating, reason, now, now, card["id"], card["rating"], card["reason"])).rowcount)
 
-    def add_lesson(self, row: dict[str, Any]) -> int:
+    def add_lesson(self, row: dict[str, Any], *, unless: Sequence[str] = (), limit: int = 0) -> Optional[int]:
+        """Adds a lesson; with ``limit``, only while fewer than that many in
+        force match its kind, what and the ``unless`` columns (checked in the
+        same transaction, so two ratings at once can't both add one)."""
         _check_columns(row, LESSON_COLUMNS)
+        _check_columns(dict.fromkeys(unless), LESSON_COLUMNS)
         with _lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if limit:
+                match = ["kind", "what", *unless]
+                count = conn.execute("SELECT COUNT(*) FROM lessons WHERE undone_at IS NULL AND "
+                                     + " AND ".join(f"{column}=?" for column in match),
+                                     tuple(row[column] for column in match)).fetchone()[0]
+                if count >= limit:
+                    conn.execute("ROLLBACK")
+                    return None
             columns = ", ".join(row)
-            return int(conn.execute(f"INSERT INTO lessons({columns}) VALUES({', '.join('?' * len(row))})",
-                                    tuple(row.values())).lastrowid)
+            lesson_id = int(conn.execute(f"INSERT INTO lessons({columns}) VALUES({', '.join('?' * len(row))})",
+                                         tuple(row.values())).lastrowid)
+            conn.execute("COMMIT")
+        return lesson_id
 
     def lessons(self, kind: Optional[str] = None, what: Optional[str] = None) -> list[dict]:
         """The lessons still in force, oldest first."""

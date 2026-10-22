@@ -291,6 +291,8 @@ def undo(pulse_store: Any, lesson_id: Any, now: Optional[float] = None) -> bool:
 
 
 def set_level(pulse_store: Any, kind: Any, level: Any, now: Optional[float] = None) -> Optional[dict]:
+    if not pulse_store.get("enabled"):
+        raise Refused("pulse_off")
     lesson = _learning(lambda: pulse_learning.set_level(pulse_store, kind, level,
                                                         time.time() if now is None else now))
     return pulse_learning.lesson_entry(lesson) if lesson else None
