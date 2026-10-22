@@ -445,8 +445,10 @@ def _pulse_followups(pulse_store: Any, home: Any, value: str) -> int:
     from . import pulse, pulse_followup
     if value in ("on", "off"):
         pulse_store.set("followups", value == "on")
-        print("Pulse follow-ups are off: promises Hermes makes are no longer checked on." if value == "off" else
-              "Pulse follow-ups are on: Pulse checks on what Hermes promised and brings the news to its chat."
+        print("Pulse follow-ups are off: what Hermes promised and what you said you'd do are no longer checked on."
+              if value == "off" else
+              "Pulse follow-ups are on: Pulse checks on what Hermes promised and reminds you of what you said "
+              "you'd do, in its chat."
               + ("" if pulse_store.get("memory") else " They need memory too: `hermes conduit-push pulse memory on`."))
         return 0
     if value:
@@ -454,7 +456,7 @@ def _pulse_followups(pulse_store: Any, home: Any, value: str) -> int:
         return 2
     rows = pulse_store.followups(MEMORY_LIST)
     if not rows:
-        print("No promises to follow up yet." if pulse_store.get("followups") else "Pulse follow-ups are off.")
+        print("Nothing to follow up yet." if pulse_store.get("followups") else "Pulse follow-ups are off.")
         return 0
     zone = pulse.report_zone(pulse_store, home)
     for row in rows:

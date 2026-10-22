@@ -51,6 +51,18 @@ def promise(live, text="Hermes will tell the user when the deploy finishes.", *,
     return item_id
 
 
+def commitment(live, text="The user will renew their passport.", *, said_at=None, due="", due_at=None,
+               words="I need to renew my passport"):
+    said_at = time.time() - 3600 if said_at is None else said_at
+    message_id = live.db.message("user", words, sid=CHAT, at=said_at)
+    mark = live.store.watermark("", CHAT)
+    [item_id] = live.store.advance("", CHAT, message_id=message_id, at=said_at,
+                                   after_id=mark["message_id"] if mark else 0, items=[{
+        "kind": "commitment", "text": text, "evidence": words, "explicit": 1,
+        "due": due, "due_at": due_at, "message_id": message_id, "mentioned_at": said_at}])
+    return item_id
+
+
 def llm_saying(**reply):
     calls = []
 
@@ -314,7 +326,7 @@ def test_followups_command(live, capsys, monkeypatch):
     monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", pulse.get_hermes_home)
     run = lambda value="": cli.dispatch(types.SimpleNamespace(conduit_push_action="pulse", pulse_action="followups",
                                                               value=value, extra=""))
-    assert run() == 0 and "No promises to follow up yet." in capsys.readouterr().out
+    assert run() == 0 and "Nothing to follow up yet." in capsys.readouterr().out
     tell(live)
     assert run() == 0
     out = capsys.readouterr().out
@@ -520,3 +532,53 @@ def test_a_still_wanted_ask_for_a_replaced_promise_books_no_last_check(live):
     pulse.tick()
     row = live.store.followups()[0]
     assert row["decision"] == "closed" and row["next_check_at"] is None
+
+
+def test_a_commitment_is_checked_on_its_day_or_a_day_after_it_was_said(live):
+    now = time.time()
+    undated = commitment(live, said_at=now - 3600)
+    on_a_day = commitment(live, "The user will call the bank.", due="2026-11-02", due_at=now + 5 * 86400,
+                          words="call the bank on Monday")
+    at_a_time = commitment(live, "The user will pick up the kids.", due="2026-11-02T15:00", due_at=now + 86400,
+                           words="pick up the kids at 3")
+    followup.schedule(live.store, now)
+    checks = {row["item_id"]: row["next_check_at"] for row in live.store.followups()}
+    said = live.store.item(undated)["valid_from"]
+    assert checks[undated] == pytest.approx(said + followup.COMMITMENT_FIRST_S)
+    assert checks[on_a_day] == pytest.approx(now + 5 * 86400 + followup.REMIND_HOUR * 3600)
+    assert checks[at_a_time] == pytest.approx(now + 86400 - followup.REMIND_BEFORE_S)
+
+
+def test_a_commitment_check_reads_as_the_users_and_reminds_them(live):
+    item_id = commitment(live, said_at=time.time() - 2 * 86400)
+    seen = []
+
+    def llm(instructions, text):
+        seen.append((instructions, text))
+        return {"decision": "tell", "news": "You said you'd renew your passport.", "why": "nothing shows it"}, 7
+
+    check_now(live, llm, now=time.time() + followup.FIRST_CHECK_S + 1)
+    [(instructions, text)] = seen
+    assert instructions.startswith(followup.COMMITMENT_INSTRUCTIONS)
+    assert "What the user said they'd do: The user will renew their passport." in text
+    assert "The user's words: \"I need to renew my passport\"" in text
+    pulse.tick()
+    [sent] = live.sent()
+    assert sent.startswith("Pulse reminder ") and 'the user said: "I need to renew my passport"' in sent
+    assert "renew your passport" in sent and live.store.item(item_id)["status"] == "open"
+
+
+def test_only_a_few_reminders_go_out_a_day(live):
+    now = time.time() + followup.FIRST_CHECK_S + 1
+    items = [commitment(live, f"The user will do thing {n}.", said_at=time.time() - 2 * 86400, words=f"I'll do thing {n}")
+             for n in range(followup.REMINDERS_PER_DAY + 1)]
+    check_now(live, llm_saying(decision="tell", news="Reminder.", why="due"), now=now)
+    rows = {row["item_id"]: row for row in live.store.followups()}
+    told = [item for item in items if rows[item]["decision"] == "tell"]
+    held = [item for item in items if rows[item]["decision"] == "wait"]
+    assert len(told) == followup.REMINDERS_PER_DAY and len(held) == 1
+    assert rows[held[0]]["next_check_at"] == pytest.approx(now + 86400)
+    # Promises aren't held back by the reminders.
+    promise(live)
+    check_now(live, llm_saying(decision="tell", news="Done.", why="finished"), now=now + 1)
+    assert sum(row["decision"] == "tell" for row in live.store.followups()) == followup.REMINDERS_PER_DAY + 1
