@@ -20,6 +20,7 @@ import logging
 import re
 import sqlite3
 import threading
+import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -33,6 +34,11 @@ ROOM_SOURCE = "bot_room"
 ROOM_SESSION_ID = re.compile(r"room_[0-9a-f]{32}")
 # Compaction continuations followed back to the room's own session.
 LINEAGE_HOPS = 32
+# Hermes' own budget for a read-only reader (hermes_state): a rollback-journal
+# store keeps readers waiting while another process commits, and a WAL
+# writer's checkpoint shows them "disk I/O error" for a few milliseconds.
+READ_TIMEOUT = 5.0
+READ_RETRIES, READ_RETRY_PAUSE = 3, 0.05
 # Set on a MemoryManager while its session is a room's; a compaction that
 # moves the session to a new id keeps it.
 MARK = "_conduit_room_session"
@@ -44,6 +50,7 @@ _lock = threading.Lock()
 _guarded_class: Any = None
 _guarded: dict[str, tuple[Callable[..., Any], Callable[..., Any]]] = {}
 _odd_id_logged = False
+_unread_count = 0
 
 
 def is_room_session(session_id: Any, home: Any = None) -> bool:
@@ -63,17 +70,35 @@ def is_room_session(session_id: Any, home: Any = None) -> bool:
         logger.warning("conduit_push: session %s looks like a group room's but isn't named like one", value)
     if home is None:
         return False
-    try:
-        return _stored_room(Path(home) / STATE_DB, value)
-    except Exception:  # noqa: BLE001 - the agent starts whatever this finds
-        logger.debug("conduit_push: couldn't tell whether session %s is a group room", value, exc_info=True)
-        return False
+    for attempt in range(READ_RETRIES + 1):
+        try:
+            return _stored_room(Path(home) / STATE_DB, value)
+        except Exception as error:  # noqa: BLE001 - the agent starts whatever this finds
+            if attempt == READ_RETRIES or "disk i/o error" not in str(error).lower():
+                _store_unread(value)
+                return False
+            time.sleep(READ_RETRY_PAUSE)
+    return False
+
+
+def _store_unread(session_id: str) -> None:
+    """Warns on the first failure and every 100th after: the session then
+    counts as an ordinary chat, so if it is a room its turns reach the memory
+    provider, and an operator should see that."""
+    global _unread_count
+    _unread_count += 1
+    if _unread_count % 100 == 1:
+        logger.warning("conduit_push: couldn't read the session store to tell whether session %s is a group "
+                       "room (%d times so far); if it is, its turns are saved into the memory provider",
+                       session_id, _unread_count, exc_info=True)
+    else:
+        logger.debug("conduit_push: couldn't tell whether session %s is a group room", session_id, exc_info=True)
 
 
 def _stored_room(path: Path, session_id: str) -> bool:
     if not path.exists():
         return False
-    conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=1.0)
+    conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=READ_TIMEOUT)
     try:
         current = session_id
         for _ in range(LINEAGE_HOPS):

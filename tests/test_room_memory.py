@@ -3,6 +3,7 @@ import importlib.util
 import logging
 import sqlite3
 import sys
+import threading
 import types
 from pathlib import Path
 
@@ -175,6 +176,57 @@ def test_an_unreadable_session_store_counts_as_not_a_room(guard, hermes, tmp_pat
     manager = _bound(hermes, "sess_unknown", tmp_path)
     manager.sync_all("hi", "hello", session_id="sess_unknown")
     assert manager.saved == [("sync_all", "hi", "sess_unknown")]
+
+
+def test_a_store_that_stays_unreadable_is_a_warning_once_not_every_turn(guard, tmp_path, caplog):
+    (tmp_path / "state.db").write_bytes(b"not a database")
+
+    with caplog.at_level(logging.DEBUG):
+        assert guard.is_room_session("sess_first", tmp_path) is False
+        assert guard.is_room_session("sess_second", tmp_path) is False
+    warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "sess_first" in warnings[0].getMessage()
+
+
+def test_a_store_caught_mid_checkpoint_is_read_again(guard, hermes, tmp_path, monkeypatch):
+    # A WAL writer's checkpoint can show a read-only reader "disk I/O error"
+    # for a few milliseconds; Hermes' own reads retry it (hermes_state).
+    _state_db(tmp_path, [("sess_local_room", "bot_room", None, None)])
+    failures = [1]
+
+    class MidCheckpoint(sqlite3.Connection):
+        def execute(self, *args, **kwargs):
+            if failures[0]:
+                failures[0] -= 1
+                raise sqlite3.OperationalError("disk I/O error")
+            return super().execute(*args, **kwargs)
+
+    connect = sqlite3.connect
+    monkeypatch.setattr(sqlite3, "connect", lambda *args, **kwargs: connect(*args, factory=MidCheckpoint, **kwargs))
+    manager = _bound(hermes, "sess_local_room", tmp_path)
+
+    assert _turn_end(manager, "sess_local_room") == ""
+    assert manager.saved == []
+    assert failures == [0]
+
+
+def test_a_room_session_is_found_while_another_connection_commits(guard, hermes, tmp_path):
+    # Where WAL isn't available Hermes falls back to a rollback journal, and a
+    # reader waits out another process's commit; Hermes gives its reads 5 s.
+    _state_db(tmp_path, [("sess_local_room", "bot_room", None, None)])
+    writer = sqlite3.connect(tmp_path / "state.db", check_same_thread=False)
+    writer.execute("BEGIN EXCLUSIVE")
+    commit = threading.Timer(1.5, writer.commit)
+    commit.start()
+    try:
+        manager = _bound(hermes, "sess_local_room", tmp_path)
+    finally:
+        commit.join()
+        writer.close()
+
+    assert _turn_end(manager, "sess_local_room") == ""
+    assert manager.saved == []
 
 
 GUARDED = ("initialize_all", "on_session_switch", "sync_all", "on_session_end", "on_pre_compress")

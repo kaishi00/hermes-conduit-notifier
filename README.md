@@ -1392,7 +1392,9 @@ runs, and `MEMORY.md` and `USER.md` still load, so a member knows its owner
 in the room; it just doesn't learn from what others say there. The memory and
 skill tools work as before. If Hermes' memory manager lacks one of the
 methods the plugin guards, the plugin guards the rest and logs a warning
-naming what's missing.
+naming what's missing. If Hermes' session store (`state.db`) can't be read
+when the plugin needs it to tell whether a session is a room, the plugin logs
+a warning and treats that session as an ordinary chat.
 
 ## Artifacts (plugin 0.40+)
 
