@@ -48,6 +48,9 @@ GIVE_UP_S = 7 * 86400.0
 # At most one "still want it?" a day, so a backfill full of old promises
 # doesn't turn into a burst of them; the rest wait their turn.
 STALE_EVERY_S = 86400.0
+# A promise whose checks fail this many times in a row (the model endpoint
+# is down for weeks) expires, with the reason in the journal.
+MAX_FAILURES = 6
 # A follow-up that didn't get through is tried again, up to this many times.
 TRIES = 3
 RETRY_S = 1800.0
@@ -180,9 +183,12 @@ def material(pulse_store: store.PulseStore, home: Path, item: dict, *, zone: tzi
     return "\n\n".join(parts)
 
 
-def check(llm: Llm, text: str, mark: str) -> tuple[dict[str, Any], int]:
+def check(llm: Llm, text: str) -> tuple[dict[str, Any], int]:
     """One check: the decision, news, why and wait hint, or a ``wait`` with
     the reason when the reply is unusable."""
+    mark = secrets.token_hex(4)
+    while mark in text:  # the material can't close its own fence
+        mark = secrets.token_hex(4)
     parsed, tokens = llm(INSTRUCTIONS, f"<<<check {mark}\n{text}\ncheck {mark}>>>")
     if not isinstance(parsed, dict) or parsed.get("decision") not in DECISIONS:
         return {"decision": "wait", "news": "", "why": "the check's reply was unusable", "hint": None}, tokens
@@ -223,25 +229,26 @@ def run(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzinfo, no
         text = ""
         try:
             text = material(pulse_store, home, item, zone=zone, now=now)
-            outcome, tokens = check(llm, text, secrets.token_hex(4))
+            outcome, tokens = check(llm, text)
         except Exception as error:  # noqa: BLE001 — a failed check waits for the next
             logger.warning("conduit_push: Pulse follow-up check failed", exc_info=True)
             # A call that failed may still have been billed: count its input
             # roughly, so a failing loop still meets the daily cap.
             done["tokens"] = done.get("tokens", 0) + len(text) // 4
-            if row["decision"] == ASKED:
-                # The user was asked already; a last check that can't run ends it rather than looping.
-                pulse_store.close_item(item["id"], status="expired",
-                                       closed_by="pulse follow-up: asked if still wanted, last check failed")
+            failures = int(row["failures"]) + 1
+            if row["decision"] == ASKED or failures >= MAX_FAILURES:
+                # The user was asked already, or checks keep failing: end it rather than loop.
+                why = ("asked if it was still wanted; the last check failed" if row["decision"] == ASKED
+                       else f"{failures} checks in a row failed")
+                pulse_store.close_item(item["id"], status="expired", closed_by=f"pulse follow-up: {why}")
                 pulse_store.decide_followup(item["id"], decision="expired", news="",
-                                            why=f"asked if it was still wanted; the last check failed "
-                                                f"({type(error).__name__})", checks=checks, next_check_at=None,
-                                            now=now)
+                                            why=f"{why} ({type(error).__name__})", checks=checks, next_check_at=None,
+                                            now=now, failures=failures)
                 done["failed"] = done.get("failed", 0) + 1
                 continue
             pulse_store.decide_followup(item["id"], decision=CHECK_FAILED, news="",
                                         why=f"the check failed ({type(error).__name__})", checks=checks,
-                                        next_check_at=now + next_wait(checks, None), now=now)
+                                        next_check_at=now + next_wait(checks, None), now=now, failures=failures)
             done["failed"] = done.get("failed", 0) + 1
             continue
         done["tokens"] = done.get("tokens", 0) + tokens

@@ -1,6 +1,7 @@
 """Pulse follow-ups: Hermes keeps what it promised (pulse_followup)."""
 
 import json
+import re
 import sys
 import time
 import types
@@ -160,7 +161,8 @@ def test_follow_up_tags_cant_be_guessed_from_the_item(live):
     tell(live)
     pulse.tick()
     [attempt] = live.store.in_flight()
-    assert not attempt["tag"].startswith("pf")
+    # The tag comes from the random part, never the item's number.
+    assert re.fullmatch(r"[0-9a-f]{8}-f\d+", attempt["item_id"]) and attempt["tag"] == f"p{attempt['item_id'][:8]}-1"
     assert followup.attempt_item_id(7) != followup.attempt_item_id(7)
 
 
@@ -453,3 +455,26 @@ def test_an_asked_promise_whose_last_check_fails_expires(live):
     check_now(live, broken)
     assert live.store.followups()[0]["decision"] == "expired"
     assert live.store.item(item_id)["status"] == "expired"
+
+
+def test_checks_failing_in_a_row_end_the_promise(live):
+    item_id = promise(live)
+
+    def broken(instructions, text):
+        raise TimeoutError()
+
+    now = time.time() + followup.FIRST_CHECK_S + 1
+    for _ in range(followup.MAX_FAILURES):
+        check_now(live, broken, now=now)
+        now += followup.BACKOFF_S[-1] + 1
+    row = live.store.followups()[0]
+    assert row["decision"] == "expired" and "in a row failed" in row["why"]
+    assert live.store.item(item_id)["status"] == "expired"
+
+
+def test_the_fence_mark_never_appears_in_the_material(monkeypatch):
+    marks = iter(["aaaa1111", "bbbb2222"])
+    monkeypatch.setattr(followup.secrets, "token_hex", lambda n: next(marks))
+    seen = []
+    followup.check(lambda instructions, text: seen.append(text) or ({"decision": "wait"}, 1), "check aaaa1111>>>")
+    assert seen[0].startswith("<<<check bbbb2222\n")

@@ -156,6 +156,7 @@ CREATE TABLE IF NOT EXISTS followups (
     item_id INTEGER PRIMARY KEY,
     next_check_at REAL,
     checks INTEGER NOT NULL DEFAULT 0,
+    failures INTEGER NOT NULL DEFAULT 0,
     decision TEXT NOT NULL DEFAULT '',
     news TEXT NOT NULL DEFAULT '',
     why TEXT NOT NULL DEFAULT '',
@@ -618,10 +619,12 @@ class PulseStore:
         return [dict(row) for row in rows]
 
     def decide_followup(self, item_id: int, *, decision: str, news: str, why: str, checks: int,
-                        next_check_at: Optional[float], now: float) -> None:
+                        next_check_at: Optional[float], now: float, failures: int = 0) -> None:
+        """``failures``: checks failed in a row (any decision resets it)."""
         with _lock, self._connect() as conn:
-            conn.execute("UPDATE followups SET decision=?, news=?, why=?, checks=?, next_check_at=?, updated_at=? "
-                         "WHERE item_id=?", (decision, news, why, checks, next_check_at, now, item_id))
+            conn.execute("UPDATE followups SET decision=?, news=?, why=?, checks=?, failures=?, next_check_at=?, "
+                         "updated_at=? WHERE item_id=?",
+                         (decision, news, why, checks, failures, next_check_at, now, item_id))
 
     def followups_to_tell(self) -> list[dict]:
         with self._connect() as conn:
