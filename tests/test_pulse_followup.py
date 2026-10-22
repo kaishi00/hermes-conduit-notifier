@@ -478,3 +478,11 @@ def test_the_fence_mark_never_appears_in_the_material(monkeypatch):
     seen = []
     followup.check(lambda instructions, text: seen.append(text) or ({"decision": "wait"}, 1), "check aaaa1111>>>")
     assert seen[0].startswith("<<<check bbbb2222\n")
+
+
+def test_a_backlog_of_checks_spreads_over_runs(live):
+    for n in range(followup.MAX_CHECKS + 3):
+        promise(live, f"Hermes will do thing {n}.")
+    llm = llm_saying(decision="wait")
+    check_now(live, llm, now=time.time() + followup.FIRST_CHECK_S + 1)
+    assert len(llm.calls) == followup.MAX_CHECKS

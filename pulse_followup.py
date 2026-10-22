@@ -20,7 +20,6 @@ from __future__ import annotations
 import logging
 import re
 import secrets
-import time
 from datetime import datetime, tzinfo
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -51,6 +50,9 @@ STALE_EVERY_S = 86400.0
 # A promise whose checks fail this many times in a row (the model endpoint
 # is down for weeks) expires, with the reason in the journal.
 MAX_FAILURES = 6
+# Checks per run, like memory's chunks per run: a backlog (after a backfill)
+# spreads over runs instead of spending the shared daily cap at once.
+MAX_CHECKS = 8
 # A follow-up that didn't get through is tried again, up to this many times.
 TRIES = 3
 RETRY_S = 1800.0
@@ -206,7 +208,8 @@ def run(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzinfo, no
     and the lease last."""
     done = {} if done is None else done
     for row in pulse_store.due_followups(now):
-        if not still_leader() or done.get("tokens", 0) >= budget:
+        if not still_leader() or done.get("tokens", 0) >= budget or \
+                done.get("checks", 0) + done.get("failed", 0) >= MAX_CHECKS:
             return
         item = pulse_store.item(row["item_id"])
         if item is None or item["status"] != "open" or item["superseded_at"] is not None:
@@ -240,8 +243,8 @@ def run(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzinfo, no
                 # The user was asked already, or checks keep failing: end it rather than loop.
                 why = ("asked if it was still wanted; the last check failed" if row["decision"] == ASKED
                        else f"{failures} checks in a row failed")
-                pulse_store.close_item(item["id"], status="expired", closed_by=f"pulse follow-up: {why}")
-                pulse_store.decide_followup(item["id"], decision="expired", news="",
+                expired = pulse_store.close_item(item["id"], status="expired", closed_by=f"pulse follow-up: {why}")
+                pulse_store.decide_followup(item["id"], decision="expired" if expired else "closed", news="",
                                             why=f"{why} ({type(error).__name__})", checks=checks, next_check_at=None,
                                             now=now, failures=failures)
                 done["failed"] = done.get("failed", 0) + 1
@@ -255,9 +258,9 @@ def run(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzinfo, no
         done["checks"] = done.get("checks", 0) + 1
         decision = outcome["decision"]
         if decision == "wait" and row["decision"] == ASKED:
-            pulse_store.close_item(item["id"], status="expired",
-                                   closed_by="pulse follow-up: asked if still wanted, nothing since")
-            pulse_store.decide_followup(item["id"], decision="expired", news="",
+            expired = pulse_store.close_item(item["id"], status="expired",
+                                             closed_by="pulse follow-up: asked if still wanted, nothing since")
+            pulse_store.decide_followup(item["id"], decision="expired" if expired else "closed", news="",
                                         why="asked if it was still wanted; nothing happened since", checks=checks,
                                         next_check_at=None, now=now)
             continue
