@@ -60,6 +60,8 @@ REMINDERS_TOLD = "reminders_told_at"
 # A reminder decided while the day's were spent: its news is kept and told
 # when a slot frees, without another check.
 REMINDER_HELD = "reminder held"
+# A commitment's status once its reminder reached the user.
+REMINDED = "reminded"
 # Waits between later checks; the last one repeats.
 BACKOFF_S = (2 * 3600.0, 6 * 3600.0, 86400.0, 2 * 86400.0, 3 * 86400.0)
 GIVE_UP_S = 7 * 86400.0
@@ -471,8 +473,10 @@ def _told(pulse_store: store.PulseStore, item: dict, followup: dict, now: float,
                                     next_check_at=now + BACKOFF_S[-1], now=now)
         return
     # Closed by the user (or the chat) while it was on its way: the item says so, not "told".
-    told = pulse_store.close_item(followup["item_id"], status="done",
-                                  closed_by="pulse follow-up" if loudness == "push" else f"pulse follow-up ({loudness})")
+    # A reminded commitment isn't done, only reminded: memory's "done" needs the chat to show it.
+    status, by = (REMINDED, "pulse reminder") if item["kind"] == COMMITMENT else ("done", "pulse follow-up")
+    told = pulse_store.close_item(followup["item_id"], status=status,
+                                  closed_by=by if loudness == "push" else f"{by} ({loudness})")
     pulse_store.decide_followup(followup["item_id"],
                                 decision=({"push": "told", "screen": "shown", "brief": "held"}.get(loudness, "shown")
                                           if told else "closed"),

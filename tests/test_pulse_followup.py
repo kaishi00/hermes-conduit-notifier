@@ -566,6 +566,11 @@ def test_a_commitment_check_reads_as_the_users_and_reminds_them(live):
     [sent] = live.sent()
     assert sent.startswith("Pulse reminder ") and 'the user said: "I need to renew my passport"' in sent
     assert "renew your passport" in sent and live.store.item(item_id)["status"] == "open"
+    [attempt] = live.store.in_flight()
+    live.store.update_attempt(attempt["attempt_id"], state=store.DELIVERED)
+    pulse.tick()
+    item = live.store.item(item_id)
+    assert item["status"] == followup.REMINDED and item["closed_by"] == "pulse reminder"
 
 
 def test_only_a_few_reminders_go_out_a_day(live):
