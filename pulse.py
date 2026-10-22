@@ -531,6 +531,7 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
                 # After memory, so a promise it just read is scheduled now.
                 now = max(now, time.time())
                 followup.schedule(pulse_store, now)
+                followup.check_all_now(pulse_store, now)
                 try:
                     followup.run(pulse_store, home, lambda instructions, text: _memory_llm(
                                      instructions, text, purpose="pulse follow-up"), zone=zone, now=now,

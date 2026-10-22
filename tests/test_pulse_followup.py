@@ -334,6 +334,12 @@ def test_followups_command(live, capsys, monkeypatch):
     assert "the chat shows it finished" in out
     assert run("off") == 0 and live.store.get("followups") is False
     assert run("maybe") == 2
+    assert run("now") == 1 and live.store.get(followup.NOW_REQUESTED) is not True  # follow-ups are off
+    live.store.set("followups", True)
+    live.store.set("memory", True)
+    assert run("now") == 0 and live.store.get(followup.NOW_REQUESTED) is True and live.store.get("memory_requested")
+    live.store.set("followups", False)
+    capsys.readouterr()
     cli.dispatch(types.SimpleNamespace(conduit_push_action="pulse", pulse_action="status", value="", extra=""))
     assert "Follow-ups: off" in capsys.readouterr().out
 
@@ -615,3 +621,21 @@ def test_already_knew_doesnt_reach_a_reminder_check():
     followup.check(llm, "x", skip_seen=True)
     followup.check(llm, "x", skip_seen=True, kind=followup.COMMITMENT)
     assert seen[0].endswith(followup.SEEN_INSTRUCTION) and seen[1] == followup.COMMITMENT_INSTRUCTIONS
+
+
+def test_followups_now_checks_everything_at_once(live):
+    later = commitment(live, said_at=time.time() - 60)  # undated: first checked a day out
+    now = time.time()
+    followup.schedule(live.store, now)
+    live.store.set(followup.REMINDERS_TOLD, [now] * followup.REMINDERS_PER_DAY)
+    followup.check_all_now(live.store, now)  # not asked: nothing moves
+    assert live.store.followups()[0]["next_check_at"] > now + 3600
+    live.store.set(followup.NOW_REQUESTED, True)
+    llm = llm_saying(decision="tell", news="Renew the passport.", why="nothing shows it")
+    followup.schedule(live.store, now)
+    followup.check_all_now(live.store, now)
+    followup.run(live.store, live.home, llm, zone=pulse.report.zone_for("UTC"), now=now,
+                 still_leader=lambda: True, budget=10_000)
+    [row] = live.store.followups()
+    assert len(llm.calls) == 1 and row["item_id"] == later and row["decision"] == "tell"
+    assert live.store.get(followup.NOW_REQUESTED) is False
