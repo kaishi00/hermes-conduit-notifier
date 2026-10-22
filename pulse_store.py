@@ -341,9 +341,12 @@ class PulseStore:
             conn.execute(f"UPDATE attempts SET text = substr(text, 1, instr(text || char(10), char(10)) - 1) "
                          f"WHERE kind=? AND state IN ({marks}) AND instr(text, char(10)) > 0", (kind, *FINAL))
 
-    def attempts_for(self, item_id: str) -> list[dict]:
+    def attempts_for_suffix(self, suffix: str) -> list[dict]:
+        """Attempts whose item id ends with ``suffix`` (a follow-up's attempts
+        each get a fresh id ending with its item), oldest first."""
         with self._connect() as conn:
-            rows = conn.execute("SELECT * FROM attempts WHERE item_id=? ORDER BY attempt", (item_id,)).fetchall()
+            rows = conn.execute("SELECT * FROM attempts WHERE substr(item_id, -?) = ? ORDER BY created_at, attempt",
+                                (len(suffix), suffix)).fetchall()
         return [dict(row) for row in rows]
 
     def attempts_since(self, kind: str, since: float) -> list[dict]:

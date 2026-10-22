@@ -295,8 +295,12 @@ def _pulse(args: argparse.Namespace) -> int:
         print("Follow-ups: waiting on memory, which finds Hermes's promises: `hermes conduit-push pulse memory on`")
     elif pulse_store.get("followups"):
         follow = pulse_store.followup_counts()
+        usage = pulse_store.get("followup_usage")
+        usage = usage if isinstance(usage, dict) else {}
         print("Follow-ups on Hermes's promises: "
-              + (", ".join(f"{n} {decision}" for decision, n in sorted(follow.items())) or "none yet"))
+              + (", ".join(f"{n} {decision}" for decision, n in sorted(follow.items())) or "none yet")
+              + f" ({int(usage.get('checks', 0) or 0)} checks, {int(usage.get('tokens', 0) or 0)} tokens"
+              + (f", {int(usage.get('failed', 0) or 0)} failed" if usage.get("failed") else "") + ")")
     else:
         print("Follow-ups: off")
     ratings = pulse.rating_counts(pulse_store)

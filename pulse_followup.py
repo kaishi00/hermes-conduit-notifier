@@ -34,6 +34,8 @@ logger = logging.getLogger(__name__)
 FOLLOWUP = "followup"
 KINDS = ("promise",)
 DECISIONS = ("tell", "done", "drop", "wait")
+# A check whose call failed: still waiting, but the chat wasn't read.
+CHECK_FAILED = "check failed"
 FIRST_CHECK_S = 1800.0
 # Waits between later checks; the last one repeats.
 BACKOFF_S = (2 * 3600.0, 6 * 3600.0, 86400.0, 2 * 86400.0, 3 * 86400.0)
@@ -190,7 +192,7 @@ def run(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzinfo, no
             pulse_store.end_followups(keep=set(), now=now, only=row["item_id"])
             continue
         checks = int(row["checks"]) + 1
-        if int(row["checks"]) > 0 and now - give_up_from(item) >= GIVE_UP_S:
+        if row["decision"] == "wait" and now - give_up_from(item) >= GIVE_UP_S:
             # Only after a real check read the chat (a promise found by a
             # backfill is read first). No model call: the count stays.
             pulse_store.decide_followup(item["id"], decision="tell", news=STALE_NEWS,
@@ -202,7 +204,7 @@ def run(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzinfo, no
             outcome, tokens = check(llm, text, secrets.token_hex(4))
         except Exception as error:  # noqa: BLE001 — a failed check waits for the next
             logger.warning("conduit_push: Pulse follow-up check failed", exc_info=True)
-            pulse_store.decide_followup(item["id"], decision="wait", news="",
+            pulse_store.decide_followup(item["id"], decision=CHECK_FAILED, news="",
                                         why=f"the check failed ({type(error).__name__})", checks=checks,
                                         next_check_at=now + next_wait(checks, None), now=now)
             done["failed"] = done.get("failed", 0) + 1
@@ -236,7 +238,13 @@ def chat_title(home: Path, item: dict) -> str:
 
 
 def attempt_item_id(item_id: int) -> str:
-    return f"f{item_id:07d}"
+    """A fresh id per attempt, random first: the turn's tag is made from its
+    start, so a tag can't be guessed from the item's number."""
+    return f"{secrets.token_hex(4)}-f{item_id}"
+
+
+def attempts_of(pulse_store: store.PulseStore, item_id: int) -> list[dict]:
+    return pulse_store.attempts_for_suffix(f"-f{item_id}")
 
 
 def next_send(pulse_store: store.PulseStore, now: float) -> Optional[tuple[dict, dict, int]]:
@@ -244,7 +252,7 @@ def next_send(pulse_store: store.PulseStore, now: float) -> Optional[tuple[dict,
     oldest ``tell`` whose last attempt failed long enough ago, or none."""
     for followup in pulse_store.followups_to_tell():
         item = pulse_store.item(followup["item_id"])
-        attempts = pulse_store.attempts_for(attempt_item_id(followup["item_id"]))
+        attempts = attempts_of(pulse_store, followup["item_id"])
         if item is None or item["status"] != "open" or item["superseded_at"] is not None:
             if not any(row["state"] in store.IN_FLIGHT or row["state"] == store.DELIVERED for row in attempts):
                 # Forgotten, replaced or closed by the chat before it went out.
@@ -268,7 +276,7 @@ def settle(pulse_store: store.PulseStore, now: float) -> None:
     """Closes the promises whose follow-up was delivered, and marks the ones
     that ran out of tries (`pulse followups` shows both)."""
     for followup in pulse_store.followups_to_tell():
-        attempts = pulse_store.attempts_for(attempt_item_id(followup["item_id"]))
+        attempts = attempts_of(pulse_store, followup["item_id"])
         if any(row["state"] == store.DELIVERED for row in attempts):
             pulse_store.close_item(followup["item_id"], status="done", closed_by="pulse follow-up")
             pulse_store.decide_followup(followup["item_id"], decision="told", news=followup["news"],

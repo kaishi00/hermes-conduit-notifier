@@ -140,7 +140,29 @@ def test_a_failed_check_waits_and_counts(live):
 
     done = check_now(live, broken, now=time.time() + followup.FIRST_CHECK_S + 1)
     [row] = live.store.followups()
-    assert row["decision"] == "wait" and "TimeoutError" in row["why"] and done["failed"] == 1
+    assert row["decision"] == followup.CHECK_FAILED and "TimeoutError" in row["why"] and done["failed"] == 1
+    assert row["next_check_at"] is not None
+
+
+def test_a_failed_check_of_an_old_promise_doesnt_count_as_reading_it(live):
+    promise(live, said_at=time.time() - followup.GIVE_UP_S - 60)
+
+    def broken(instructions, text):
+        raise TimeoutError()
+
+    now = time.time() + followup.FIRST_CHECK_S + 1
+    check_now(live, broken, now=now)
+    llm = llm_saying(decision="wait")
+    check_now(live, llm, now=now + followup.BACKOFF_S[0] + 1)
+    assert len(llm.calls) == 1  # read now, not told it was forgotten unread
+
+
+def test_follow_up_tags_cant_be_guessed_from_the_item(live):
+    tell(live)
+    pulse.tick()
+    [attempt] = live.store.in_flight()
+    assert not attempt["tag"].startswith("pf")
+    assert followup.attempt_item_id(7) != followup.attempt_item_id(7)
 
 
 def test_a_check_reads_the_newest_of_a_long_chat(live):
@@ -332,4 +354,4 @@ def test_a_sent_follow_up_lands_after_follow_ups_are_turned_off(live):
     live.store.update_attempt(attempt["attempt_id"], state=store.DELIVERED)
     pulse.tick()
     assert live.store.item(item_id)["status"] == "done"
-    assert "\n" not in live.store.attempts_for(attempt["item_id"])[0]["text"]  # the quoted chat isn't kept
+    assert "\n" not in followup.attempts_of(live.store, item_id)[0]["text"]  # the quoted chat isn't kept

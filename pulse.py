@@ -428,7 +428,8 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
                 now = max(now, time.time())
                 followup.schedule(pulse_store, now)
                 try:
-                    followup.run(pulse_store, home, _memory_llm, zone=zone, now=now,
+                    followup.run(pulse_store, home, lambda instructions, text: _memory_llm(
+                                     instructions, text, purpose="pulse follow-up"), zone=zone, now=now,
                                  still_leader=lambda: (not stopped.is_set() and _leads(pulse_store)
                                                        and bool(pulse_store.get("followups"))),
                                  budget=cap - used - done.get("tokens", 0), done=checked)
@@ -461,13 +462,13 @@ def _leads(pulse_store: store.PulseStore) -> bool:
             and bool(pulse_store.get("memory")))
 
 
-def _memory_llm(instructions: str, text: str) -> tuple[Any, int]:
+def _memory_llm(instructions: str, text: str, purpose: str = "pulse memory") -> tuple[Any, int]:
     llm = getattr(_ctx, "llm", None)
     if llm is None:
         raise RuntimeError("this Hermes gives plugins no model access")
     result = llm.complete_structured(
         instructions=instructions, input=[{"type": "text", "text": text}], json_mode=True,
-        task=memory.TASK if _memory_task else None, purpose="pulse memory", timeout=memory.CALL_TIMEOUT_S,
+        task=memory.TASK if _memory_task else None, purpose=purpose, timeout=memory.CALL_TIMEOUT_S,
         max_tokens=memory.MAX_TOKENS)
     usage = getattr(result, "usage", None)
     return getattr(result, "parsed", None), int(getattr(usage, "total_tokens", 0) or 0)

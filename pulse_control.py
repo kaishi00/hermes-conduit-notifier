@@ -284,6 +284,9 @@ def state(pulse_store: Any, home: Path, now: Optional[float] = None) -> dict[str
         # Follow-ups run with memory, which finds the promises: off without it.
         "followups_active": bool(pulse_store.get("followups") and pulse_store.get("memory")),
         "followup_counts": pulse_store.followup_counts(),
+        "followup_usage": {key: int((pulse_store.get("followup_usage") or {}).get(key, 0) or 0)
+                           for key in ("checks", "tokens", "failed")}
+        if isinstance(pulse_store.get("followup_usage"), dict) else {"checks": 0, "tokens": 0, "failed": 0},
         "memory_chunks": int(usage.get("chunks", 0) or 0),
         "memory_tokens": int(usage.get("tokens", 0) or 0),
         "daily_tokens": daily_tokens(pulse_store),
