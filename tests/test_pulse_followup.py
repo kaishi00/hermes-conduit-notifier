@@ -602,3 +602,11 @@ def test_a_week_old_commitment_counts_against_the_days_reminders(live):
     [row] = live.store.followups()
     assert row["decision"] == "tell" and row["news"] == followup.STALE_NEWS and "after it was said" in row["why"]
     assert live.store.item(item_id)["status"] == "open"
+
+
+def test_already_knew_doesnt_reach_a_reminder_check():
+    seen = []
+    llm = lambda instructions, text: seen.append(instructions) or ({"decision": "wait"}, 1)
+    followup.check(llm, "x", skip_seen=True)
+    followup.check(llm, "x", skip_seen=True, kind=followup.COMMITMENT)
+    assert seen[0].endswith(followup.SEEN_INSTRUCTION) and seen[1] == followup.COMMITMENT_INSTRUCTIONS

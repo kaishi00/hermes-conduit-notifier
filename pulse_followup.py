@@ -252,7 +252,8 @@ def check(llm: Llm, text: str, *, skip_seen: bool = False, kind: str = PROMISE) 
     while mark in text:  # the material can't close its own fence
         mark = secrets.token_hex(4)
     instructions = COMMITMENT_INSTRUCTIONS if kind == COMMITMENT else INSTRUCTIONS
-    parsed, tokens = llm(instructions + (SEEN_INSTRUCTION if skip_seen else ""),
+    # "Already knew" is about news: a reminder is meant to repeat.
+    parsed, tokens = llm(instructions + (SEEN_INSTRUCTION if skip_seen and kind != COMMITMENT else ""),
                          f"<<<check {mark}\n{text}\ncheck {mark}>>>")
     if not isinstance(parsed, dict) or parsed.get("decision") not in DECISIONS:
         return {"decision": "wait", "news": "", "why": "the check's reply was unusable", "hint": None}, tokens
