@@ -114,14 +114,15 @@ class Invalid(ValueError):
 
 
 def _lesson(pulse_store: store.PulseStore, kind: str, what: str, *, value: str = "", card: Optional[dict] = None,
-            cause: str, now: float, unless: tuple = (), limit: int = 0) -> Optional[dict]:
+            cause: str, now: float, unless: tuple = (), limit: int = 0,
+            expect: Optional[str] = None) -> Optional[dict]:
     """The lesson added, or None when ``limit`` like it are in force already
     (or, for a level, when the kind is at that level already)."""
     row = {"kind": kind, "what": what, "value": value, "profile": card["profile"] if card else "",
            "chat_id": card["chat_id"] if card and what == RULE else "", "card_id": card["id"] if card else None,
            "cause": cause, "created_at": now}
     changes_from = DEFAULT_LEVELS.get(kind, "push") if what == LEVEL else None
-    lesson_id = pulse_store.add_lesson(row, unless=unless, limit=limit, changes_from=changes_from)
+    lesson_id = pulse_store.add_lesson(row, unless=unless, limit=limit, changes_from=changes_from, expect=expect)
     if lesson_id is None:
         return None
     row["id"] = lesson_id
@@ -209,13 +210,15 @@ def rate(pulse_store: store.PulseStore, card_id: Any, rating: Any, reason: Any =
         # ratings at once can't both spend the same two thumbs.
         # The level is read on each try, so a move made meanwhile counts.
         new = max(-STEP_AT, min(STEP_AT, score + delta))
-        step["to"] = _step(level(pulse_store, kind), louder=new > 0) if abs(new) >= STEP_AT else None
+        step["from"] = level(pulse_store, kind)
+        step["to"] = _step(step["from"], louder=new > 0) if abs(new) >= STEP_AT else None
         return 0 if step["to"] else new
 
     _change_score(pulse_store, kind, change)
     if step.get("to"):
         made.append(_lesson(pulse_store, kind, LEVEL, value=step["to"], card=card,
-                            cause=f"{STEP_AT} thumbs {'up' if delta > 0 else 'down'}", now=now))
+                            cause=f"{STEP_AT} thumbs {'up' if delta > 0 else 'down'}", now=now,
+                            expect=step["from"]))
     return made
 
 

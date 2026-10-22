@@ -359,6 +359,10 @@ def test_a_level_already_in_force_adds_no_second_lesson_even_past_the_early_chec
     assert live.store.add_lesson(dict(row, value="push"), changes_from="push")
     assert live.store.add_lesson(dict(row, value="push"), changes_from="push") is None
     assert [lesson["value"] for lesson in live.store.lessons("followup", learning.LEVEL)] == ["screen", "push"]
+    # A step worked out from "push" isn't laid over a move to "brief" made meanwhile.
+    assert live.store.add_lesson(dict(row, value="brief"), changes_from="push")
+    assert live.store.add_lesson(dict(row, value="screen"), changes_from="push", expect="push") is None
+    assert learning.level(live.store, "followup") == "brief"
 
 
 def test_ratings_are_refused_while_pulse_is_off(live):
