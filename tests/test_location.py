@@ -709,6 +709,15 @@ def test_locate_without_a_token_falls_back_and_spends_nothing(home, monkeypatch)
     store.start_locate()  # the budget wasn't spent
 
 
+def test_a_relay_without_a_reason_or_with_a_strange_one_gets_the_plain_note(home, monkeypatch):
+    _shared(home, fix=fix("significant"))
+    for answer in ({"accepted": True, "delivered": False}, {"delivered": False, "reason": "no\nlocation " * 50}):
+        monkeypatch.setattr(tool, "client", FakeClient(answer))
+        result = _call({"action": "locate"}, sleep=lambda seconds: None)
+        assert result["error"] == "not_set_up" and "reason" not in result
+        assert "needs updating" in result["note"]
+
+
 def test_locate_needs_background_sharing(home, monkeypatch):
     _shared(home, sharing=sharing(background=False), fix=fix())
     assert _call({"action": "locate"})["error"] == "background_off"

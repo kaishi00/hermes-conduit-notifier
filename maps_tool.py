@@ -222,7 +222,7 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
     last = misses[-1]
     answer = _fallback(view, request, last["error"], " ".join(dict.fromkeys(miss["note"] for miss in misses)))
     # The relay's reason the phone couldn't be asked (#287).
-    reason = next((miss["reason"] for miss in misses if miss.get("reason")), None)
+    reason = next((miss["reason"] for miss in misses if isinstance(miss.get("reason"), str)), None)
     return {**answer, "reason": reason} if reason else answer
 
 
