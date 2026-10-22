@@ -13,9 +13,9 @@ from typing import Any
 
 from hermes_constants import get_hermes_home
 
-from . import (call_tool, call_watches, calls, clarify_loop, client, conduit_first, cron_runs, desktop_selected,
-               health_tool, live_activity, location_tool, maps_tool, phone_tool, present_tool, pulse, reply_sources,
-               settings_tool, show_tool, turn_surface, voice_archive)
+from . import (call_tool, call_watches, calls, chat_on_screen, clarify_loop, client, conduit_first, cron_runs,
+               desktop_selected, health_tool, live_activity, location_tool, maps_tool, phone_tool, present_tool, pulse,
+               reply_sources, settings_tool, show_tool, turn_surface, voice_archive)
 from .session_titles import title as _session_title, titled as _titled
 from .client import enqueue
 from .events import approval_decision, clarification_text, event_id, is_silent_response, plain_text, push_event
@@ -210,9 +210,12 @@ def _post_llm_call(**kwargs: Any) -> None:
         body=plain_text(response),
     )
     # A quick reply in a chat Hermes Desktop has selected: the user most
-    # likely watched it arrive there (#87). A reply to a message sent from a
-    # source the user turned off (Desktop, a messaging app…) arrives there (#115).
-    send = ready is not None and not _desktop_watched(session_id, started) and _source_notifies(kwargs.get("platform"))
+    # likely watched it arrive there (#87); so did one in a chat Conduit has
+    # on screen, on any device (chat_on_screen.py). A reply to a message sent
+    # from a source the user turned off (Desktop, a messaging app…) arrives
+    # there (#115).
+    send = (ready is not None and not _desktop_watched(session_id, started) and not _conduit_watched(session_id, started)
+            and _source_notifies(kwargs.get("platform")))
     # Hermes also runs this hook for a turn that failed with text (its error
     # explanation): on_session_end, right after, says which it was, so the
     # reply waits for it and a failed turn sends only its failure notice.
@@ -315,6 +318,14 @@ def _desktop_watched(session_id: str, started: float | None) -> bool:
         return desktop_selected.quick(started) and desktop_selected.selected(get_hermes_home(), session_id)
     except Exception:  # noqa: BLE001 — can't tell, so the push goes out
         logger.debug("conduit_push: Desktop selection unreadable", exc_info=True)
+        return False
+
+
+def _conduit_watched(session_id: str, started: float | None) -> bool:
+    try:
+        return chat_on_screen.attended(started) and chat_on_screen.on_screen(get_hermes_home(), session_id)
+    except Exception:  # noqa: BLE001 — can't tell, so the push goes out
+        logger.debug("conduit_push: Conduit's on-screen chats unreadable", exc_info=True)
         return False
 
 

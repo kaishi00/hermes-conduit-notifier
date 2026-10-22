@@ -6645,6 +6645,64 @@ async def put_reply_sources(request: Request, response: Response,
                              feature="Reply notifications")
 
 
+# --- A chat Conduit has on screen (chat_on_screen.py) ------------------------
+#
+# While a turn runs in a chat open in Conduit, Conduit holds it here as on
+# screen, renewing the hold while the turn runs and dropping it (hold 0) when
+# the user leaves the chat or the app. A reply that lands in it then sends no
+# "reply ready" push: the user watched it arrive. The holds live in the
+# profile's home, read by the plugin's turn-end hook (agent process).
+
+ON_SCREEN_LIMIT = 60
+ON_SCREEN_WINDOW_S = 60.0
+ON_SCREEN_MAX_BODY_BYTES = 4096
+_on_screen_limiter = _MintLimiter(ON_SCREEN_LIMIT, ON_SCREEN_WINDOW_S,
+                                  message="Too many on-screen reports; try again shortly")
+_chat_on_screen_module: Any = None
+_chat_on_screen_lock = threading.Lock()
+
+
+def _chat_on_screen() -> Any:
+    """chat_on_screen.py beside this folder, loaded once."""
+    global _chat_on_screen_module
+    with _chat_on_screen_lock:
+        if _chat_on_screen_module is None:
+            path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "chat_on_screen.py")
+            spec = importlib.util.spec_from_file_location("conduit_push_dashboard_chat_on_screen", path)
+            if spec is None or spec.loader is None or not os.path.isfile(path):
+                raise TokenError(501, "This plugin install is missing chat_on_screen.py; update the plugin")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _chat_on_screen_module = module
+        return _chat_on_screen_module
+
+
+def set_chat_on_screen(body: Any) -> Dict[str, Any]:
+    module = _chat_on_screen()
+    try:
+        device, session_ids, hold_s = module.parse(body)
+    except ValueError as exc:
+        raise TokenError(400, str(exc))
+    return {"on_screen": module.hold(_cron_home(), device, session_ids, hold_s)}
+
+
+@router.put("/notifications/on-screen")
+async def put_chat_on_screen(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    no_store = {"Cache-Control": "no-store"}
+    try:
+        body = await _read_json_body(request, ON_SCREEN_MAX_BODY_BYTES)
+        _on_screen_limiter.acquire(_limiter_key(profile))
+        return {"ok": True, **(await _run_scoped(profile, lambda: set_chat_on_screen(body)))}
+    except TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers=no_store)
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), **no_store}
+        raise
+    except Exception as exc:
+        raise _unexpected("on-screen", exc, feature="Reply notifications")
+
+
 # --- Hermes calls you (#449) -------------------------------------------------
 #
 # Conduit asks to be called when a job the user handed to a Live Voice call
@@ -14281,6 +14339,7 @@ ROUTE_CAPABILITIES = (
     "self-restart",
     "cron-notifications",
     "reply-sources",
+    "chat-on-screen",
     "room-files",
     "room-images",
     "speech-server",

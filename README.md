@@ -1264,6 +1264,37 @@ There is nothing to set up.
   turn with no start time, a file that can't be read, or `plugins.isolation:
   host` (where Desktop views aren't observed) all push as before.
 
+## Quiet while you read in Conduit (plugin 0.60+)
+
+A reply that lands in a chat you have open in Conduit sends no "response
+ready" push, on whichever device you have it open: chatting on a Mac or an
+iPad no longer buzzes the paired iPhone and the Apple Watch for each answer
+you just watched arrive. Conduit knows when it is in front, so a long turn
+stays quiet as long as you keep using Conduit; one left running with nobody
+touching or typing for 2 minutes pushes, like Desktop's rule. Every other
+notification stays as it was: other chats, background jobs, approvals,
+questions, failed turns and calls. There is nothing to set up.
+
+- While a turn runs in the open chat, with Conduit's window active and the
+  chat not covered by the list, Conduit holds the chat as on screen with
+  `PUT /api/plugins/conduit_push/notifications/on-screen?profile=…` and
+  `{"device": "mac", "session_ids": ["<runtime id>", "<stored id>"],
+  "hold_s": 90}`, renewing it every 30 seconds while the turn runs and
+  someone used Conduit in the last 2 minutes, and sending `"hold_s": 0` once
+  nobody has. Low Power Mode and Low Data Mode stretch the renewal like
+  Conduit's other polls, and the hold stays three renewals long. Nothing is
+  sent while no turn runs.
+- After the turn ends the last hold runs out on its own, so the reply's own
+  hooks still see it. Leaving the chat or the app sends `"hold_s": 0`, and
+  the next reply there pushes as before.
+- Each device kind (`iphone`, `ipad`, `mac`, `vision`, `watch`) keeps its own
+  file in `<hermes home>/conduit-on-screen/` (private to the user), so one
+  device leaving never ends another's hold (two devices of the same kind
+  share a file, and the later report wins). A turn longer than 30 minutes
+  pushes whatever Conduit says. A hold longer than 10 minutes, a
+  file that can't be read, or a turn whose hooks don't share the profile's
+  home with the dashboard pushes as before. Capability `chat-on-screen`.
+
 ## Reply notifications by source (plugin 0.35+)
 
 If you also talk to Hermes in Desktop, a messaging app or the terminal, you
