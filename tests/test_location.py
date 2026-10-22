@@ -703,6 +703,9 @@ def test_locate_without_a_token_falls_back_and_spends_nothing(home, monkeypatch)
     monkeypatch.setattr(tool, "client", FakeClient({"accepted": True, "delivered": False, "reason": "no_location_token"}))
     result = _call({"action": "locate"}, sleep=lambda seconds: None)
     assert result["error"] == "not_set_up" and result["known"] is True
+    # The relay's reason reaches the agent, with what the user can do (#287).
+    assert result["reason"] == "no_location_token"
+    assert "no location push token" in result["note"] and result["note"].endswith("Use action now.")
     store.start_locate()  # the budget wasn't spent
 
 

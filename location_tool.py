@@ -387,6 +387,24 @@ def _history(store: LocationStore, view: dict[str, Any], args: dict[str, Any], n
 # --- Fresh lookup --------------------------------------------------------------------
 
 
+def not_delivered(kind: str, answer: dict[str, Any], what: str) -> dict[str, Any]:
+    """A request the relay couldn't hand to the phone (``delivered: false``),
+    with the relay's reason (#287): logged, and kept in the tool result."""
+    reason = answer.get("reason") if isinstance(answer.get("reason"), str) else None
+    logger.info("Conduit %s request not delivered by the relay: %s", kind, reason or "no reason given")
+    return {"ok": False, "error": "not_set_up", "note": not_delivered_note(answer, what),
+            **({"reason": reason} if reason else {})}
+
+
+def not_delivered_note(answer: dict[str, Any], what: str) -> str:
+    if answer.get("reason") == "no_location_token":
+        return (f"The phone can't answer {what} yet: the notification relay has no location push token for it. "
+                "The user can fix this by opening Conduit's Settings > Notifications with background location "
+                "sharing on (or updating Conduit).")
+    return (f"The phone can't answer {what} yet (Conduit or the notification relay needs updating, "
+            "or background sharing was just turned on).")
+
+
 def _locate(store: LocationStore, view: dict[str, Any], profile: str, sleep: Callable[[float], None]) -> dict[str, Any]:
     if not view["sharing"].get("background"):
         return {"ok": False, "error": "background_off",
@@ -408,9 +426,8 @@ def _locate(store: LocationStore, view: dict[str, Any], profile: str, sleep: Cal
                 "note": "The phone couldn't be asked just now. Use action now."}
     if isinstance(answer, dict) and answer.get("delivered") is False:
         store.cancel_locate(locate_id)
-        return {**_fix_view(view, store.clock()), "ok": False, "error": "not_set_up",
-                "note": "The phone can't answer fresh lookups yet (Conduit or the notification relay needs updating, "
-                        "or background sharing was just turned on). Use action now."}
+        return {**_fix_view(view, store.clock()), **not_delivered("locate", answer, "fresh lookups"),
+                "note": not_delivered_note(answer, "fresh lookups") + " Use action now."}
     waited = 0.0
     while waited < LOCATE_WAIT_S:
         sleep(LOCATE_POLL_S)
