@@ -6940,6 +6940,14 @@ async def get_pulse_memory(response: Response, kind: str = "") -> Dict[str, Any]
                               reads_only=True)
 
 
+@router.get("/pulse/followups")
+async def get_pulse_followups(response: Response) -> Dict[str, Any]:
+    """Promises Pulse checks on and its last decision for each, newest first."""
+    response.headers["Cache-Control"] = "no-store"
+    return await _pulse_route("followups", lambda control, store, home: {"followups": control.followups(store)},
+                              reads_only=True)
+
+
 @router.post("/pulse/memory/forget")
 async def post_pulse_forget(request: Request, response: Response) -> Dict[str, Any]:
     """{"id": n}: closes one remembered item; {"forgotten": false} if it wasn't open."""

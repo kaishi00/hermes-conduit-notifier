@@ -2078,6 +2078,10 @@ def test_pulse_routes(remembering, db, monkeypatch):
     assert http.post(f"{base}/memory/forget", json={"id": item}).json()["forgotten"] is True
     assert http.post(f"{base}/memory/forget", json={"id": "x"}).status_code == 400
     assert http.get(f"{base}/memory", params={"kind": "nope"}).status_code == 400
+    store_.add_followup(item, next_check_at=DAY, now=DAY)
+    got = http.get(f"{base}/followups")
+    assert got.headers["cache-control"] == "no-store"
+    assert [(entry["id"], entry["decision"]) for entry in got.json()["followups"]] == [(item, "waiting")]
     assert "pulse" in api.ROUTE_CAPABILITIES
     # A host that never turned Pulse on is answered without a file left behind.
     fresh = home / "fresh"
@@ -2086,6 +2090,7 @@ def test_pulse_routes(remembering, db, monkeypatch):
     got = http.get(base)
     assert got.status_code == 200 and got.json()["enabled"] is False
     assert http.get(f"{base}/memory").json()["items"] == []
+    assert http.get(f"{base}/followups").json()["followups"] == []
     assert http.post(f"{base}/report").json()["detail"]["code"] == "pulse_off"
     assert http.post(f"{base}/backfill", json={"action": "stop"}).json()["detail"]["code"] == "not_running"
     assert http.post(f"{base}/memory/forget", json={"id": 1}).json()["forgotten"] is False

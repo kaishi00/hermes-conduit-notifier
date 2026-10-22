@@ -170,13 +170,13 @@ def backfill_start(pulse_store: Any, home: Path, days: Optional[int] = None,
     return {"from": window[0], "to": window[1], "days": days, "resumed": resuming}
 
 
-SETTINGS = ("enabled", "memory", "daily_report", "report_profiles", "report_times", "time_zone")
+SETTINGS = ("enabled", "memory", "followups", "daily_report", "report_profiles", "report_times", "time_zone")
 
 
 def update(pulse_store: Any, body: Any) -> None:
     """Applies the settings in ``body`` (any of SETTINGS). Every value is
     checked before any is written, so a bad one changes nothing; any other
-    key is refused too. Values: booleans for "enabled", "memory" and "daily_report"; "all" or "this"
+    key is refused too. Values: booleans for "enabled", "memory", "followups" and "daily_report"; "all" or "this"
     for "report_profiles"; a list of "HH:MM" for "report_times"; an IANA
     name, or "" for the phone's, for "time_zone"."""
     if not isinstance(body, dict):
@@ -185,7 +185,7 @@ def update(pulse_store: Any, body: Any) -> None:
         if field not in SETTINGS:
             raise Refused("invalid", field=str(field)[:64])
     changes: dict[str, Any] = {}
-    for field in ("enabled", "memory", "daily_report"):
+    for field in ("enabled", "memory", "followups", "daily_report"):
         if field in body:
             if not isinstance(body[field], bool):
                 raise Refused("invalid", field=field)
@@ -232,6 +232,19 @@ def items(pulse_store: Any, kind: str = "") -> list[dict[str, Any]]:
             for item in pulse_store.open_items(kind, limit=ITEMS)]
 
 
+def followups(pulse_store: Any, limit: int = ITEMS) -> list[dict[str, Any]]:
+    """Promises Pulse checks on, most recently decided first: the journal."""
+    out = []
+    for row in pulse_store.followups(limit):
+        item = pulse_store.item(row["item_id"])
+        out.append({"id": row["item_id"], "text": item["text"] if item else "", "evidence": item["evidence"] if item else "",
+                    "profile": item["profile"] if item else "", "chat_id": item["chat_id"] if item else "",
+                    "message_id": item["message_id"] if item else None,
+                    "decision": row["decision"] or "waiting", "why": row["why"], "news": row["news"],
+                    "checks": row["checks"], "next_check_at": row["next_check_at"], "updated_at": row["updated_at"]})
+    return out
+
+
 def state(pulse_store: Any, home: Path, now: Optional[float] = None) -> dict[str, Any]:
     """Everything Settings > Pulse shows, as data. Times are epoch seconds."""
     now = time.time() if now is None else now
@@ -267,6 +280,8 @@ def state(pulse_store: Any, home: Path, now: Optional[float] = None) -> dict[str
         "other_profiles": [name for name, _ in pulse.report.profile_homes(Path(home))] if profiles == "all" else [],
         "memory": bool(pulse_store.get("memory")),
         "memory_counts": pulse_store.item_counts(),
+        "followups": bool(pulse_store.get("followups")),
+        "followup_counts": pulse_store.followup_counts(),
         "memory_chunks": int(usage.get("chunks", 0) or 0),
         "memory_tokens": int(usage.get("tokens", 0) or 0),
         "daily_tokens": daily_tokens(pulse_store),

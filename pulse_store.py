@@ -56,6 +56,9 @@ DEFAULTS: dict[str, Any] = {
     # Memory (pulse_memory): on while Pulse is. It reads chats written after
     # ``memory_since`` (set when it first runs), at most every few minutes.
     "memory": True,
+    # Follow-ups (pulse_followup): Pulse checks on what Hermes promised and
+    # brings the news to the home chat. On while Pulse and memory are.
+    "followups": True,
     "memory_since": None,
     "memory_run_at": 0.0,
     "memory_requested": False,
@@ -147,6 +150,19 @@ CREATE TABLE IF NOT EXISTS watermarks (
     retry_at REAL NOT NULL DEFAULT 0,
     PRIMARY KEY (profile, chat_id)
 );
+-- Pulse follow-ups (pulse_followup): a check schedule per open promise and
+-- the last decision, which `pulse followups` shows as the journal.
+CREATE TABLE IF NOT EXISTS followups (
+    item_id INTEGER PRIMARY KEY,
+    next_check_at REAL,
+    checks INTEGER NOT NULL DEFAULT 0,
+    decision TEXT NOT NULL DEFAULT '',
+    news TEXT NOT NULL DEFAULT '',
+    why TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS followups_due ON followups(next_check_at);
 CREATE TABLE IF NOT EXISTS backfill_marks (
     profile TEXT NOT NULL,
     chat_id TEXT NOT NULL,
@@ -324,6 +340,11 @@ class PulseStore:
         with _lock, self._connect() as conn:
             conn.execute(f"UPDATE attempts SET text = substr(text, 1, instr(text || char(10), char(10)) - 1) "
                          f"WHERE kind=? AND state IN ({marks}) AND instr(text, char(10)) > 0", (kind, *FINAL))
+
+    def attempts_for(self, item_id: str) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT * FROM attempts WHERE item_id=? ORDER BY attempt", (item_id,)).fetchall()
+        return [dict(row) for row in rows]
 
     def attempts_since(self, kind: str, since: float) -> list[dict]:
         with self._connect() as conn:
@@ -561,6 +582,58 @@ class PulseStore:
                 "AND superseded_at IS NULL",
                 (status, closed_by, time.time(), item_id)).rowcount
         return bool(changed)
+
+    def item(self, item_id: int) -> Optional[dict]:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
+        return dict(row) if row else None
+
+    # Follow-ups -------------------------------------------------------------
+
+    def add_followup(self, item_id: int, *, next_check_at: float, now: float) -> None:
+        """A check schedule for an item that has none yet."""
+        with _lock, self._connect() as conn:
+            conn.execute("INSERT OR IGNORE INTO followups(item_id, next_check_at, created_at, updated_at) "
+                         "VALUES(?,?,?,?)", (item_id, next_check_at, now, now))
+
+    def end_followups(self, *, keep: set, now: float, only: Optional[int] = None) -> None:
+        """Stops checking items no longer open (``only``: just that one).
+        A follow-up waiting to be told, told or undelivered keeps its row."""
+        with _lock, self._connect() as conn:
+            rows = conn.execute("SELECT item_id FROM followups WHERE next_check_at IS NOT NULL"
+                                + (" AND item_id=?" if only is not None else ""),
+                                (only,) if only is not None else ()).fetchall()
+            for row in rows:
+                if row["item_id"] not in keep:
+                    conn.execute("UPDATE followups SET next_check_at=NULL, decision='closed', updated_at=? "
+                                 "WHERE item_id=?", (now, row["item_id"]))
+
+    def due_followups(self, now: float) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT * FROM followups WHERE next_check_at IS NOT NULL AND next_check_at <= ? "
+                                "ORDER BY next_check_at", (now,)).fetchall()
+        return [dict(row) for row in rows]
+
+    def decide_followup(self, item_id: int, *, decision: str, news: str, why: str, checks: int,
+                        next_check_at: Optional[float], now: float) -> None:
+        with _lock, self._connect() as conn:
+            conn.execute("UPDATE followups SET decision=?, news=?, why=?, checks=?, next_check_at=?, updated_at=? "
+                         "WHERE item_id=?", (decision, news, why, checks, next_check_at, now, item_id))
+
+    def followups_to_tell(self) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT * FROM followups WHERE decision='tell' ORDER BY updated_at").fetchall()
+        return [dict(row) for row in rows]
+
+    def followups(self, limit: int = 50) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT * FROM followups ORDER BY updated_at DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(row) for row in rows]
+
+    def followup_counts(self) -> dict[str, int]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT decision, COUNT(*) AS n FROM followups GROUP BY decision").fetchall()
+        return {(row["decision"] or "waiting"): row["n"] for row in rows}
 
     def item_counts(self) -> dict[str, int]:
         with self._connect() as conn:

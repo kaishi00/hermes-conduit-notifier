@@ -196,9 +196,11 @@ def _post_llm_call(**kwargs: Any) -> None:
     started = _take_turn_start(kwargs.get("turn_id"))
     # A cron run says nothing when the user muted its job or it answered
     # [SILENT] by Hermes' cron rule ("[SILENT] No changes" too). A Pulse
-    # probe is Pulse checking on itself: nothing to tell the phone.
+    # probe or report is Pulse working on its own: nothing to tell the phone.
+    # A Pulse follow-up is news for the user, so it goes like any reply.
     pulse_turn = pulse.is_pulse_turn(session_id, kwargs.get("turn_id"))
-    quiet = is_silent_response(response) or cron_runs.quiet(session_id, kwargs.get("task_id"), response) or pulse_turn
+    quiet = (is_silent_response(response) or cron_runs.quiet(session_id, kwargs.get("task_id"), response)
+             or (pulse_turn and not pulse.pushes(session_id, kwargs.get("turn_id"))))
     ready = None if quiet else push_event(
         "response.ready",
         identifier=event_id("response", kwargs.get("turn_id"), session_id),

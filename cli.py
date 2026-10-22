@@ -37,15 +37,17 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
         help="Redact chat text from pushes; choice labels still transit so cards stay answerable",
     )
     redact.add_argument("mode", choices=["on", "off"])
-    pulse = commands.add_parser("pulse", help="Pulse, the proactivity experiment: on, off, status, probe, report, home, outcomes, memory")
-    pulse.add_argument("pulse_action", choices=["on", "off", "status", "probe", "report", "home", "outcomes", "memory"])
+    pulse = commands.add_parser("pulse", help="Pulse, the proactivity experiment: on, off, status, probe, report, home, outcomes, memory, followups")
+    pulse.add_argument("pulse_action", choices=["on", "off", "status", "probe", "report", "home", "outcomes", "memory",
+                                                "followups"])
     pulse.add_argument("value", nargs="?", default="",
                        help="for home: the id of the chat to use, or 'auto' to find it by title; "
                             "for outcomes: how many to show, or a chat id; "
                             "for report: 'now', 'on', 'off', times like 08:00,13:00, a time zone like Europe/Paris, "
                             "'all-profiles' or 'this-profile'; "
                             "for memory: a kind to list, 'now', 'on', 'off', 'forget' and an item number, "
-                            "or 'backfill'")
+                            "or 'backfill'; "
+                            "for followups: 'on' or 'off', or nothing to list them")
     pulse.add_argument("extra", nargs="?", default="",
                        help="for memory forget: the item number; for memory backfill: how many days back "
                             "(it shows what that costs), 'start', 'stop' or 'cancel'")
@@ -179,7 +181,7 @@ def _pulse(args: argparse.Namespace) -> int:
     from . import pulse, pulse_delivery, pulse_memory
     home = get_hermes_home()
     action = args.pulse_action
-    listing = action == "memory" and (args.value or "").strip() not in ("on", "off")
+    listing = action in ("memory", "followups") and (args.value or "").strip() not in ("on", "off")
     if (action in ("status", "probe", "off", "outcomes") or listing) and not (Path(home) / pulse_delivery.store.DB_NAME).exists():
         # Never turned on: say so without leaving a file behind.
         print("Pulse: off (never turned on). `hermes conduit-push pulse on` to start it.")
@@ -215,6 +217,8 @@ def _pulse(args: argparse.Namespace) -> int:
         return _pulse_outcomes(pulse_store, (args.value or "").strip())
     if action == "report":
         return _pulse_report(pulse_store, (args.value or "").strip())
+    if action == "followups":
+        return _pulse_followups(pulse_store, home, (args.value or "").strip())
     if action == "memory":
         return _pulse_memory(pulse_store, home, (args.value or "").strip(), str(getattr(args, "extra", "") or "").strip())
     print(f"Pulse: {'on' if pulse_store.get('enabled') else 'off'}")
@@ -287,6 +291,12 @@ def _pulse(args: argparse.Namespace) -> int:
             and isinstance(pulse_store.get("memory_daily_tokens"), (int, float))
             and int(today.get("tokens", 0) or 0) >= pulse_store.get("memory_daily_tokens")):
         print(f"Memory used today's {pulse_store.get('memory_daily_tokens')} tokens; it reads again tomorrow.")
+    if pulse_store.get("followups"):
+        follow = pulse_store.followup_counts()
+        print("Follow-ups on Hermes's promises: "
+              + (", ".join(f"{n} {decision}" for decision, n in sorted(follow.items())) or "none yet"))
+    else:
+        print("Follow-ups: off")
     ratings = pulse.rating_counts(pulse_store)
     if ratings:
         print("Ratings so far: " + ", ".join(f"{kind} {yes} yes / {no} no" for kind, (yes, no) in ratings.items()))
@@ -382,6 +392,27 @@ def _pulse_report(pulse_store: Any, value: str) -> int:
 
 
 MEMORY_LIST = 50
+
+
+def _pulse_followups(pulse_store: Any, home: Any, value: str) -> int:
+    from . import pulse, pulse_followup
+    if value in ("on", "off"):
+        pulse_store.set("followups", value == "on")
+        print("Pulse follow-ups are off: promises Hermes makes are no longer checked on." if value == "off" else
+              "Pulse follow-ups are on: Pulse checks on what Hermes promised and brings the news to its chat."
+              + ("" if pulse_store.get("memory") else " They need memory too: `hermes conduit-push pulse memory on`."))
+        return 0
+    if value:
+        print("Usage: hermes conduit-push pulse followups [on|off]")
+        return 2
+    rows = pulse_store.followups(MEMORY_LIST)
+    if not rows:
+        print("No promises to follow up yet." if pulse_store.get("followups") else "Pulse follow-ups are off.")
+        return 0
+    zone = pulse.report_zone(pulse_store, home)
+    for row in rows:
+        print(_printable(pulse_followup.describe(row, pulse_store.item(row["item_id"]), zone)))
+    return 0
 
 
 def _pulse_memory(pulse_store: Any, home: Any, value: str, extra: str) -> int:
