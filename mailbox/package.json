@@ -1,0 +1,13 @@
+{
+  "name": "@hermes-conduit/rooms-mailbox",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning src/server.mjs",
+    "test": "node --disable-warning=ExperimentalWarning --test"
+  }
+}
