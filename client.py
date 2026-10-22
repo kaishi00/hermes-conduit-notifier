@@ -221,7 +221,25 @@ def claim_pairing(code: str, relay_url: str = DEFAULT_RELAY_URL, gateway_name: s
         if previous.get("redact_key"):
             state["redact_key"] = previous["redact_key"]
         _write_state(state, path)
+    _revoke_replaced(previous, state["credential"])
     return state
+
+
+def _revoke_replaced(previous: dict[str, Any], credential: str) -> None:
+    """Best-effort revoke of the credential a re-pair replaced: the relay
+    mints a new gateway per claim, so the old one would stay live and take
+    one of the phone's gateway slots (#250). The new pairing works either way."""
+    old = previous.get("credential")
+    if not isinstance(old, str) or not old or old == credential:
+        return
+    try:
+        url = check_request_url(f"{str(previous.get('relay_url') or '').rstrip('/')}/v1/gateways/current")
+        request_json(url, method="DELETE", credential=old, timeout=5.0)
+    except RelayRejected as error:
+        if error.status != 401:
+            logger.info("Conduit relay did not revoke the replaced pairing: %s", error)
+    except Exception as error:
+        logger.info("Conduit relay did not revoke the replaced pairing: %s", type(error).__name__)
 
 
 class UnpairedLocally(RuntimeError):

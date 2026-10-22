@@ -6277,6 +6277,10 @@ def _claim_pairing(relay_url: str, code: str, gateway_name: str) -> Dict[str, An
     if status == 404:
         raise TokenError(410, "This pairing code expired or was already used. Create a new one.")
     if status == 429:
+        if isinstance(body, dict) and body.get("error") == "gateway_limit_reached":
+            # Every pairing slot this phone has at the relay is taken: waiting won't free one.
+            raise TokenError(409, "The push relay holds too many pairings for this iPhone. Turn notifications off "
+                                  "and on again in Conduit's Settings > Notifications to start fresh, then pair again.")
         raise TokenError(429, "The push relay is rate limiting pairing; try again shortly")
     if status == 403 and not unreadable and not _looks_like_json_object(raw):
         # The relay always answers with a JSON error: a bare 403 is something
@@ -6295,13 +6299,47 @@ def _claim_pairing(relay_url: str, code: str, gateway_name: str) -> Dict[str, An
     return body
 
 
+def _revoke_replaced_pairing(relay_url: str, credential: str) -> None:
+    """Revokes a credential that a new pairing replaced, off the pairing path.
+
+    The relay mints a new gateway per claim, so without this every re-pair
+    leaves a live gateway behind until the phone's slots run out (#250).
+    Best effort: the new pairing already works either way.
+    """
+    try:
+        url = _relay_urls().check_request_url(f"{relay_url.rstrip('/')}/v1/gateways/current")
+    except ValueError:
+        # Plain http:// off this machine (a pairing saved before HTTPS was
+        # required): the credential isn't sent there.
+        return
+
+    def revoke() -> None:
+        try:
+            status, _body = _relay_request(url, "DELETE", credential, None, PAIR_TIMEOUT_S)
+            if not 200 <= status < 300 and status != 401:
+                logger.info("Conduit plugin: the relay answered revoking the replaced pairing with HTTP %s", status)
+        except Exception as exc:
+            logger.info("Conduit plugin: the replaced pairing wasn't revoked at the relay: %s", type(exc).__name__)
+
+    try:
+        _start_revoke_thread(revoke)
+    except RuntimeError as exc:
+        # Out of threads. The pairing is saved, and this doesn't undo it.
+        logger.warning("Conduit plugin: the replaced pairing wasn't revoked at the relay: %s", exc)
+
+
+def _start_revoke_thread(target: Callable[[], None]) -> None:
+    threading.Thread(target=target, name="conduit-pair-revoke", daemon=True).start()
+
+
 def pair_profile(body: Any, profile: Optional[str] = None, path: Any = None,
                  claim: Optional[Callable[[str, str, str], Dict[str, Any]]] = None,
                  limit: Optional[Callable[[], None]] = None) -> Dict[str, Any]:
     """Claims the phone's pairing code for this profile. Never returns the credential.
 
     `limit` runs once the request is well formed, so a mistyped code costs no
-    rate-limit slot.
+    rate-limit slot. The credential this pairing replaces is revoked at its
+    relay afterwards.
     """
     if not isinstance(body, dict):
         raise TokenError(400, "Expected a JSON object")
@@ -6347,6 +6385,10 @@ def pair_profile(body: Any, profile: Optional[str] = None, path: Any = None,
                 and previous.get("gateway_id") == state["gateway_id"]:
             state["e2e"] = previous["e2e"]
         _save_pairing_state(path, state)
+    old_credential, old_relay = previous.get("credential"), previous.get("relay_url")
+    if isinstance(old_credential, str) and old_credential and old_credential != state["credential"] \
+            and isinstance(old_relay, str) and old_relay:
+        _revoke_replaced_pairing(old_relay, old_credential)
     return {"paired": True, "installation_id": state["installation_id"], "gateway_id": state["gateway_id"],
             "gateway_name": gateway_name, "relay_url": state["relay_url"]}
 
@@ -7944,7 +7986,9 @@ def _relay_request(url: str, method: str, credential: str, payload: Optional[Dic
         headers["Content-Type"] = "application/json"
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with _relay_opener.open(request, timeout=timeout) as response:
+        # Plain HTTP (only ever to this machine) skips any proxy, which would see the credential in clear.
+        opener = _relay_opener if _relay_urls().is_https(url) else _direct_relay_opener
+        with opener.open(request, timeout=timeout) as response:
             raw = response.read(64 * 1024)
             status = response.status
     except urllib.error.HTTPError as error:

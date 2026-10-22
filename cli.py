@@ -90,6 +90,9 @@ def dispatch(args: argparse.Namespace) -> int:
             state = claim_pairing(args.code, args.relay_url, args.name)
         except _RELAY_ERRORS as error:
             print(f"Pairing failed: {error}")
+            if getattr(error, "detail", "") == "gateway_limit_reached":
+                print("The relay holds too many pairings for that phone. Turn notifications off and on again in "
+                      "Conduit's Settings > Notifications to start fresh, then pair with a new code.")
             if getattr(error, "edge_blocked", False):
                 print("That empty 403 came from something in front of the relay blocking this host, so pairing "
                       f"can't get through. To get it lifted, {_block_operator(str(args.relay_url or DEFAULT_RELAY_URL))}.")
