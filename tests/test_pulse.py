@@ -381,6 +381,39 @@ def test_send_reopens_the_chat_and_submits_a_hidden_queued_turn(monkeypatch):
     ]
 
 
+def test_send_puts_the_chat_on_pulses_model_first(monkeypatch):
+    fake = FakeHost().install(monkeypatch)
+    sys.modules["tui_gateway.server"]._methods[host.CONFIG_SET] = \
+        lambda rid, params: fake.calls.append((host.CONFIG_SET, params)) or {"result": {"value": "m"}}
+    model = {"provider": "openrouter", "model": "google/gemini-flash"}
+    assert host.send(SID, "x", model=model).ok
+    assert [call[0] for call in fake.calls] == [host.RESUME, host.CONFIG_SET, host.SUBMIT]
+    assert fake.calls[1][1] == {"key": "model", "session_id": "ui-1", "confirm_expensive_model": True,
+                                "value": "google/gemini-flash --provider openrouter --session"}
+    # Already on it: no switch.
+    fake.calls.clear()
+    fake.resume = {"result": {"session_id": "ui-1", "info": {"model": "google/gemini-flash", "provider": "openrouter"}}}
+    assert host.send(SID, "x", model=model).ok
+    assert [call[0] for call in fake.calls] == [host.RESUME, host.SUBMIT]
+    # A refused switch still sends, on the chat's own model.
+    fake.calls.clear()
+    fake.resume = {"result": {"session_id": "ui-1"}}
+    sys.modules["tui_gateway.server"]._methods[host.CONFIG_SET] = lambda rid, params: {"error": {"message": "no"}}
+    assert host.send(SID, "x", model=model).ok and fake.calls[-1][0] == host.SUBMIT
+
+
+def test_the_pulse_model_setting(pulse_store):
+    store_ = pulse_store
+    control.update(store_, {"model": {"provider": "openrouter", "model": "google/gemini-flash"}})
+    assert store_.get(pulse.MODEL) == {"provider": "openrouter", "model": "google/gemini-flash"}
+    for bad in ({"model": "flash"}, {"model": {"model": ""}}, {"model": {"model": "a b"}},
+                {"model": {"model": "m", "base_url": "x"}}):
+        with pytest.raises(control.Refused):
+            control.update(store_, bad)
+    control.update(store_, {"model": None})
+    assert store_.get(pulse.MODEL) is None
+
+
 def test_send_reports_a_refusal(monkeypatch):
     FakeHost(resume={"error": {"code": 4007, "message": "session not found"}}).install(monkeypatch)
     sent = host.send(SID, "x")

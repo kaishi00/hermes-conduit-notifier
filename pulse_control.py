@@ -171,7 +171,7 @@ def backfill_start(pulse_store: Any, home: Path, days: Optional[int] = None,
 
 
 SETTINGS = ("enabled", "memory", "followups", "daily_report", "report_profiles", "report_times", "time_zone",
-            "brief_time")
+            "brief_time", "model")
 
 
 def update(pulse_store: Any, body: Any) -> None:
@@ -179,7 +179,8 @@ def update(pulse_store: Any, body: Any) -> None:
     checked before any is written, so a bad one changes nothing; any other
     key is refused too. Values: booleans for "enabled", "memory", "followups" and "daily_report"; "all" or "this"
     for "report_profiles"; a list of "HH:MM" for "report_times"; an IANA
-    name, or "" for the phone's, for "time_zone"."""
+    name, or "" for the phone's, for "time_zone"; {"provider", "model"} for
+    "model" (the model Pulse's turns run on), or null for the chat's own."""
     if not isinstance(body, dict):
         raise Refused("invalid", field="")
     for field in body:
@@ -213,8 +214,22 @@ def update(pulse_store: Any, body: Any) -> None:
         if not isinstance(zone, str) or len(zone) > 64 or (zone and not pulse.report.known_zone(zone)):
             raise Refused("invalid", field="time_zone")
         changes["time_zone"] = zone
+    if "model" in body:
+        changes[pulse.MODEL] = _model(body["model"])
     for key, value in changes.items():
         pulse_store.set(key, value)
+
+
+def _model(value: Any) -> Optional[dict[str, str]]:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) - {"provider", "model"}:
+        raise Refused("invalid", field="model")
+    name, provider = value.get("model"), value.get("provider", "")
+    if not isinstance(name, str) or not isinstance(provider, str) or not name.strip() \
+            or len(name) > 200 or len(provider) > 100 or any(char.isspace() for char in name + provider):
+        raise Refused("invalid", field="model")
+    return {"provider": provider, "model": name}
 
 
 def request_report(pulse_store: Any) -> None:
@@ -329,6 +344,7 @@ def state(pulse_store: Any, home: Path, now: Optional[float] = None) -> dict[str
         "home_chat": {"id": chat.chat_id, "title": chat.title, "pinned": bool(chat.pinned)} if chat else None,
         "home_problem": problem,
         "home_title": pulse_store.get("home_title") or "Pulse",
+        "model": pulse_store.get(pulse.MODEL) or None,
         "checks": pulse_store.counts(pulse.PROBE),
         "recent": [{"at": row["created_at"], "kind": row["kind"], "state": row["state"],
                     "detail": row.get("detail") or ""} for row in pulse_store.recent(RECENT)],
