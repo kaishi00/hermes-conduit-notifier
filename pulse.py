@@ -34,6 +34,7 @@ import socket
 import sqlite3
 import threading
 import time
+from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -585,12 +586,30 @@ def _memory_llm(instructions: str, text: str, purpose: str = "pulse memory") -> 
     llm = getattr(_ctx, "llm", None)
     if llm is None:
         raise RuntimeError("this Hermes gives plugins no model access")
-    result = llm.complete_structured(
-        instructions=instructions, input=[{"type": "text", "text": text}], json_mode=True,
-        task=memory.TASK if _memory_task else None, purpose=purpose, timeout=memory.CALL_TIMEOUT_S,
-        max_tokens=memory.MAX_TOKENS)
+    with _own_profile_scope():
+        result = llm.complete_structured(
+            instructions=instructions, input=[{"type": "text", "text": text}], json_mode=True,
+            task=memory.TASK if _memory_task else None, purpose=purpose, timeout=memory.CALL_TIMEOUT_S,
+            max_tokens=memory.MAX_TOKENS)
     usage = getattr(result, "usage", None)
     return getattr(result, "parsed", None), int(getattr(usage, "total_tokens", 0) or 0)
+
+
+def _own_profile_scope() -> Any:
+    """This profile's secret scope for a model call off any request.
+
+    Once the dashboard has served another profile (Conduit's ``?profile=``)
+    it hosts several, and a key read with no scope raises
+    UnscopedSecretError instead of reading this profile's .env.
+    """
+    try:
+        from hermes_cli.web_server_profiles import _config_profile_scope
+    except ImportError as exc:
+        # Only a Hermes without profile hosting has nothing to scope.
+        if exc.name not in ("hermes_cli", "hermes_cli.web_server_profiles"):
+            raise
+        return nullcontext()
+    return _config_profile_scope(None)
 
 
 # One Hermes home per process, like _ctx, so the cache needs no key.

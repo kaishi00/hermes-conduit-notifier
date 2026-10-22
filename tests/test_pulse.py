@@ -9,6 +9,7 @@ Pulse reads, and, when a Hermes checkout or install is available, one built
 from Hermes's own schema (set HERMES_AGENT_SRC to a checkout). The second is
 the contract test: it fails when Hermes renames what Pulse depends on.
 """
+import contextlib
 import importlib.util
 import json
 import os
@@ -1815,6 +1816,30 @@ def test_other_profiles_are_remembered_with_their_name(remembering, db, tmp_path
     assert (item["profile"], item["chat_id"]) == ("nahida", "b1")
     assert len(model.shown) == 1 and report.their_home_chat(bot_home) == "bp"
     assert memory.describe(item, UTC).startswith("#1 [nahida] The user's mum's birthday is 3 March.\n")
+
+
+def test_model_calls_run_in_this_profiles_secret_scope(remembering, monkeypatch):
+    # A dashboard that has served another profile raises on an unscoped key read.
+    scope = []
+
+    @contextlib.contextmanager
+    def config_profile_scope(profile):
+        scope.append(profile)
+        yield
+        scope.append("left")
+
+    class Llm:
+        def complete_structured(self, **kwargs):
+            assert scope == [None]  # inside this profile's scope
+            return types.SimpleNamespace(parsed={"items": []}, usage=types.SimpleNamespace(total_tokens=5))
+
+    module = types.ModuleType("hermes_cli.web_server_profiles")
+    module._config_profile_scope = config_profile_scope
+    monkeypatch.setitem(sys.modules, "hermes_cli", sys.modules.get("hermes_cli") or types.ModuleType("hermes_cli"))
+    monkeypatch.setitem(sys.modules, "hermes_cli.web_server_profiles", module)
+    remembering.ctx.llm = Llm()
+    assert pulse._memory_llm("instructions", "text", purpose="pulse follow-up") == ({"items": []}, 5)
+    assert scope == [None, "left"]
 
 
 def test_the_loop_runs_memory_on_its_own_thread(remembering, db, monkeypatch):
