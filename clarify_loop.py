@@ -231,6 +231,10 @@ def _first_answer_wins(
             if "original_error" in outcome:
                 raise outcome["original_error"]
             return outcome["original"]
+        if client.notifications_paused():
+            # The relay refused this pairing after the push was queued: the
+            # push was dropped, and polling would only hammer the refusal.
+            break
         try:
             status = client.poll_decision(request_id)
         except Exception:

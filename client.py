@@ -252,13 +252,18 @@ def enqueue(event: dict[str, Any]) -> bool:
     """Queue an event for asynchronous relay delivery.
 
     Returns True when the event was accepted by the local delivery queue and
-    False when it was DROPPED (queue full, or the profile lost its pairing
-    between the caller's check and here). Fire-and-forget callers can ignore
+    False when it was DROPPED (queue full, the profile lost its pairing
+    between the caller's check and here, or the relay refused this pairing
+    and its notifications are paused). Fire-and-forget callers can ignore
     the result; the clarify middleware MUST NOT — it parks a relay decision
     on this event, so a drop has to fall back to the native clarify path
     instead of polling an answer that can never arrive.
     """
-    if _stopped.is_set() or not load_state():
+    state = load_state()
+    if _stopped.is_set() or not state:
+        return False
+    if _paused_until(state) > time.monotonic():
+        logger.info("Conduit notification dropped for %s: %s", event.get("type", "event"), _pause_reason(state))
         return False
     _start_worker()
     try:
@@ -277,7 +282,17 @@ def send_now(event: dict[str, Any], timeout: float = 15.0) -> dict[str, Any]:
     state = load_state()
     if not state:
         raise RuntimeError("This Hermes profile is not paired with Conduit.")
-    return _send(event, state, timeout)
+    try:
+        answer = _send(event, state, timeout)
+    except RelayRejected as error:
+        # `test` is a probe too: `status` should say what it just saw. A
+        # refusal doesn't start a pause (one person typed it), but an
+        # accepted test ends one.
+        if error.status in (401, 403):
+            record_relay_refusal(state, error)
+        raise
+    record_relay_accepted(state)
+    return answer
 
 
 def _send(event: dict[str, Any], state: dict[str, Any], timeout: float = 15.0) -> dict[str, Any]:
@@ -504,19 +519,35 @@ def cancel_decision(request_id: str) -> bool:
         return False
 
 
+def looks_like_json_object(raw: bytes) -> bool:
+    """A body that starts as a JSON object (whitespace and a BOM aside), cut
+    short or not: the relay's answer rather than a firewall's."""
+    return raw.lstrip().removeprefix(b"\xef\xbb\xbf").lstrip().startswith(b"{")
+
+
 class RelayRejected(RuntimeError):
     """The relay answered with an HTTP error or a redirect (never followed).
     ``status`` tells a redirect (3xx) or refusal (4xx) from the relay failing
-    to handle the request (5xx)."""
+    to handle the request (5xx). ``from_relay`` is False when the answer had
+    no JSON error body: the relay always sends one, so something in front of
+    it (a firewall, a rate limiter, a reverse proxy) answered instead."""
 
-    def __init__(self, status: int, detail: str) -> None:
+    def __init__(self, status: int, detail: str, *, from_relay: bool = True) -> None:
         # Safe to log verbatim: one printable line of 200 characters at most,
         # whatever the relay sent.
         detail = " ".join("".join(ch if ch.isprintable() else " " for ch in str(detail)).split())[:200]
         detail = detail or "request_rejected"
-        super().__init__(f"Conduit relay rejected the request: {detail} ({status}).")
+        super().__init__(f"Conduit relay rejected the request: {detail} ({status})." if from_relay
+                         else f"Something in front of the Conduit relay refused the request ({status}).")
         self.status = status
         self.detail = detail
+        self.from_relay = from_relay
+
+    @property
+    def edge_blocked(self) -> bool:
+        """A bare 403 from in front of the relay: this host's address is
+        blocked there. Pairing again can't help, it meets the same block."""
+        return self.status == 403 and not self.from_relay
 
 
 def request_json(
@@ -578,10 +609,19 @@ def _request(
             return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as error:
         try:
-            detail = json.loads(error.read(4096)).get("error") or "request_rejected"
+            raw = error.read(4096)
         except Exception:
-            detail = "request_rejected"
-        raise RelayRejected(error.code, detail) from error
+            raw = None
+        try:
+            body = json.loads(raw) if raw else None
+        except Exception:
+            body = None
+        # The relay always answers with a JSON object. An empty or non-JSON
+        # body is something in front of it; one cut short or unreadable is
+        # still counted as the relay's, so a misread never says "blocked".
+        from_relay = raw is None or looks_like_json_object(raw)
+        detail = (body.get("error") if isinstance(body, dict) else None) or "request_rejected"
+        raise RelayRejected(error.code, detail, from_relay=from_relay) from error
 
 
 def _start_worker() -> None:
@@ -599,6 +639,7 @@ def _start_worker() -> None:
 def start() -> None:
     """Lets events be queued again after stop() (the plugin was enabled
     again without a fresh import)."""
+    _clear_refusal()
     _stopped.clear()
 
 
@@ -610,6 +651,8 @@ def stop(timeout: float = 1.0) -> None:
     with _worker_lock:
         _stopped.set()
         _generation += 1
+        # A reload (after pairing again, say) starts unpaused.
+        _clear_refusal()
         running, _worker, _worker_started = _worker, None, False
         dropped = 0
         while True:
@@ -635,6 +678,47 @@ def stop(timeout: float = 1.0) -> None:
 # one event stop after RETRY_BUDGET seconds instead of holding up the rest.
 RETRY_DELAYS = (1.0, 2.0, 4.0)
 RETRY_BUDGET = 30.0
+
+# A 401 or 403 is the relay (or something in front of it) refusing this host,
+# and the next event would be refused the same way. Notifications are parked
+# for the pairing instead: 1 minute after the first refusal, doubling with
+# each refusal in a row up to 30 minutes, and events queued meanwhile are
+# dropped. The first event after the pause goes out as the probe; an accepted
+# one ends it. Each pairing (credential) has its own pause: profiles served
+# by one process don't share one, and pairing again isn't held by the old one.
+REFUSED_FIRST_S = 60.0
+REFUSED_MAX_S = 30 * 60.0
+_refusals: dict[str, dict[str, Any]] = {}
+_refusal_lock = threading.Lock()
+
+
+def _paused_until(state: dict[str, Any]) -> float:
+    """When this pairing's refusal pause ends (0 when it has none)."""
+    with _refusal_lock:
+        return _refusals.get(str(state.get("credential")), {}).get("until", 0.0)
+
+
+def notifications_paused() -> bool:
+    """Whether this profile's pairing is in a refusal pause: its events are
+    dropped, and nothing should poll the relay for it meanwhile."""
+    state = load_state()
+    return bool(state) and _paused_until(state) > time.monotonic()
+
+
+def _pause_reason(state: dict[str, Any]) -> str:
+    with _refusal_lock:
+        blocked = _refusals.get(str(state.get("credential")), {}).get("edge_blocked")
+    return ("something in front of the relay is blocking this host, notifications are paused" if blocked
+            else "the relay refused this pairing, notifications are paused")
+
+
+def _clear_refusal(credential: Any = None) -> None:
+    """Ends every pause, or only the one held for ``credential``."""
+    with _refusal_lock:
+        if credential is None:
+            _refusals.clear()
+        else:
+            _refusals.pop(str(credential), None)
 
 
 def _delivery_worker(generation: int = 0) -> None:
@@ -669,7 +753,7 @@ def _pause(seconds: float) -> None:
 
 def _deliver(event: dict[str, Any], *, sleep: Callable[[float], None] = _pause,
              clock: Callable[[], float] = time.monotonic) -> bool:
-    started = clock()
+    started, generation = clock(), _generation
     for delay in (*RETRY_DELAYS, None):
         if _stopped.is_set():
             logger.info("Conduit notification dropped for %s: the plugin was unloaded", event.get("type", "event"))
@@ -677,6 +761,11 @@ def _deliver(event: dict[str, Any], *, sleep: Callable[[float], None] = _pause,
         state = load_state()
         if not state:
             logger.warning("Conduit notification dropped for %s: this profile is no longer paired", event.get("type", "event"))
+            return False
+        paused_until, now = _paused_until(state), clock()
+        if now < paused_until:
+            logger.info("Conduit notification dropped for %s: %s for %d more seconds",
+                        event.get("type", "event"), _pause_reason(state), paused_until - now)
             return False
         try:
             _send(event, state)
@@ -686,11 +775,10 @@ def _deliver(event: dict[str, Any], *, sleep: Callable[[float], None] = _pause,
                 sleep(delay)
                 continue
             logger.warning("Conduit notification delivery failed for %s: %s", event.get("type", "event"), error)
-            if isinstance(error, RelayRejected) and error.status == 401:
-                _mark_relay_rejected(state, True)
+            if isinstance(error, RelayRejected) and error.status in (401, 403):
+                _refused(state, error, clock(), generation)
             return False
-        if state.get("relay_rejected_at"):
-            _mark_relay_rejected(state, False)
+        record_relay_accepted(state)
         return True
     return False  # not reached: the last attempt has no delay
 
@@ -706,23 +794,65 @@ def _worth_retrying(error: Exception) -> bool:
     return isinstance(error, (TimeoutError, ConnectionError))
 
 
-def _mark_relay_rejected(sent_with: dict[str, Any], rejected: bool) -> None:
+def _refused(state: dict[str, Any], error: RelayRejected, now: float, generation: int) -> None:
+    with _refusal_lock:
+        # A refusal in flight across a stop() mustn't pause the reload.
+        if generation != _generation:
+            return
+        previous = _refusals.get(str(state.get("credential")), {}).get("paused_for")
+        paused_for = min(previous * 2, REFUSED_MAX_S) if previous else REFUSED_FIRST_S
+        _refusals[str(state.get("credential"))] = {"paused_for": paused_for, "until": now + paused_for,
+                                                   "edge_blocked": error.edge_blocked}
+    logger.warning("Conduit notifications paused for %d minute(s): %s", paused_for // 60,
+                   "something in front of the relay is blocking this host (an empty 403)" if error.edge_blocked
+                   else f"the relay answered {error.status}")
+    record_relay_refusal(state, error)
+
+
+def record_relay_refusal(sent_with: dict[str, Any], error: RelayRejected) -> None:
+    """What `status` (and Conduit) should say about a refusal: a 401 means the
+    relay no longer knows this gateway, a bare 403 that this host is blocked
+    in front of the relay. A relay's own 403 is neither."""
+    # The newest answer stands: one kind of refusal replaces the other. A 401
+    # without the relay's JSON came from in front of it: it says nothing
+    # about the pairing.
+    if error.status == 401 and error.from_relay:
+        _mark_relay_rejected(sent_with, True, replaces="relay_blocked_at")
+    elif error.edge_blocked:
+        _mark_relay_rejected(sent_with, True, field="relay_blocked_at", replaces="relay_rejected_at")
+
+
+def record_relay_accepted(sent_with: dict[str, Any]) -> None:
+    """The relay took a request with this pairing: its notification pause
+    ends, and neither mark holds."""
+    _clear_refusal(sent_with.get("credential"))
+    for field in ("relay_rejected_at", "relay_blocked_at"):
+        if sent_with.get(field):
+            _mark_relay_rejected(sent_with, False, field=field)
+
+
+def _mark_relay_rejected(sent_with: dict[str, Any], rejected: bool, *, field: str = "relay_rejected_at",
+                         replaces: str | None = None) -> None:
     """Records that the relay refused this pairing's credential (401), or that
     it accepts it again. A 401 means the relay no longer knows the gateway:
     the phone removed it, or the relay lost its data. The pairing is kept
     (it holds the redaction key, and the relay may be restored), but
-    `status` tells the user to pair again. Only the pairing that was used is
-    marked: one replaced or removed meanwhile is left alone."""
+    `status` tells the user to pair again. ``field`` "relay_blocked_at" marks
+    a bare 403 from in front of the relay the same way, which `status` says
+    pairing again won't fix; ``replaces`` names the other mark, dropped in
+    the same write. Only the pairing that was used is marked: one replaced or
+    removed meanwhile is left alone."""
 
     def mark(current: dict[str, Any]) -> bool:
         if any(current.get(name) != sent_with.get(name) for name in ("credential", "installation_id", "gateway_id")):
             return False
         if rejected:
-            if current.get("relay_rejected_at"):
-                return False
-            current["relay_rejected_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            replaced = replaces is not None and current.pop(replaces, None) is not None
+            if current.get(field):
+                return replaced
+            current[field] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             return True
-        return current.pop("relay_rejected_at", None) is not None
+        return current.pop(field, None) is not None
 
     try:
         update_state(mark)

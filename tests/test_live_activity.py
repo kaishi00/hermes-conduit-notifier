@@ -204,7 +204,7 @@ def test_a_working_credential_clears_the_refusal(monkeypatch):
     state = {"relay_url": "https://relay.example", "credential": "c", "relay_rejected_at": "2026-10-21T00:00:00Z"}
     marked = []
     monkeypatch.setattr(client, "load_state", lambda: state)
-    monkeypatch.setattr(client, "_mark_relay_rejected", lambda sent_with, rejected: marked.append((sent_with, rejected)))
+    monkeypatch.setattr(client, "_mark_relay_rejected", lambda sent_with, rejected, **_: marked.append((sent_with, rejected)))
     monkeypatch.setattr(client, "request_json", lambda url, **kwargs: {"tracked": True})
     assert live._post_to_relay({"session_id": "s", "state": {"phase": "thinking", "tools": 0}}) == {"tracked": True}
     assert marked == [(state, False)]
@@ -214,7 +214,7 @@ def test_a_failed_refusal_mark_still_reports_the_relay_answer(monkeypatch):
     state = {"relay_url": "https://relay.example", "credential": "c", "relay_rejected_at": "x"}
     monkeypatch.setattr(client, "load_state", lambda: state)
 
-    def broken(sent_with, rejected):
+    def broken(sent_with, rejected, **_):
         raise RuntimeError("state unavailable")
 
     monkeypatch.setattr(client, "_mark_relay_rejected", broken)
@@ -269,7 +269,7 @@ def test_a_refused_credential_tells_status_to_pair_again(monkeypatch):
     state = {"relay_url": "https://relay.example", "credential": "c"}
     marked = []
     monkeypatch.setattr(client, "load_state", lambda: state)
-    monkeypatch.setattr(client, "_mark_relay_rejected", lambda sent_with, rejected: marked.append((sent_with, rejected)))
+    monkeypatch.setattr(client, "_mark_relay_rejected", lambda sent_with, rejected, **_: marked.append((sent_with, rejected)))
 
     def refuse(url, **kwargs):
         raise client.RelayRejected(401, "unauthorized")
@@ -482,3 +482,37 @@ def test_huge_context_numbers_never_raise(reporter, relay, clock):
     clock[0] += live.FIRST_DELAY_S
     reporter.flush()
     assert relay.posts[-1]["state"]["context"] == 100
+
+
+def test_a_bare_403_marks_the_host_blocked_not_the_credential(monkeypatch):
+    state = {"relay_url": "https://relay.example", "credential": "c"}
+    marked = []
+    monkeypatch.setattr(client, "load_state", lambda: state)
+    monkeypatch.setattr(client, "_mark_relay_rejected",
+                        lambda sent_with, rejected, field="relay_rejected_at", **_: marked.append((field, rejected)))
+
+    def refuse(url, **kwargs):
+        raise client.RelayRejected(403, "request_rejected", from_relay=False)
+
+    monkeypatch.setattr(client, "request_json", refuse)
+    with pytest.raises(client.RelayRejected):
+        live._post_to_relay({"session_id": "s", "state": {"phase": "thinking", "tools": 0}})
+    assert marked == [("relay_blocked_at", True)]
+
+    state["relay_blocked_at"] = "2026-10-21T00:00:00Z"
+    marked.clear()
+    monkeypatch.setattr(client, "request_json", lambda url, **kwargs: {"tracked": True})
+    live._post_to_relay({"session_id": "s", "state": {"phase": "thinking", "tools": 0}})
+    assert marked == [("relay_blocked_at", False)]
+
+
+def test_an_accepted_report_ends_the_notification_pause(monkeypatch):
+    state = {"relay_url": "https://relay.example", "credential": "c"}
+    monkeypatch.setattr(client, "load_state", lambda: state)
+    monkeypatch.setattr(client, "request_json", lambda url, **kwargs: {"tracked": True})
+    client._refusals["c"] = {"paused_for": 60.0, "until": 1e12, "edge_blocked": True}
+    try:
+        live._post_to_relay({"session_id": "s", "state": {"phase": "thinking", "tools": 0}})
+        assert "c" not in client._refusals
+    finally:
+        client._refusals.pop("c", None)

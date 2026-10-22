@@ -410,7 +410,7 @@ def test_status_reports_the_pairing_without_a_key(state_file):
     response = _http().get(f"{BASE}/e2e")
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
-    assert response.json() == {"ok": True, "paired": True, "installation_id": INSTALLATION, "gateway_id": GATEWAY, "e2e": None, "crypto": True, "relay_rejected": False}
+    assert response.json() == {"ok": True, "paired": True, "installation_id": INSTALLATION, "gateway_id": GATEWAY, "e2e": None, "crypto": True, "relay_rejected": False, "relay_blocked": False}
 
 
 def test_provisioning_stores_the_key_owner_only_and_never_returns_it(state_file):

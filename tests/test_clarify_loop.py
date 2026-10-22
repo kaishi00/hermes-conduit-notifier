@@ -55,6 +55,7 @@ class _FakeState:
 
     def __init__(self, poll_results):
         self.paired = True
+        self.paused = False
         self.poll_results = list(poll_results)
         self.enqueued = []
         self.poll_ids = []
@@ -62,6 +63,9 @@ class _FakeState:
 
     def load_state(self):
         return {"credential": "x"} if self.paired else None
+
+    def notifications_paused(self):
+        return self.paused
 
     def poll_decision(self, request_id):
         self.poll_ids.append(request_id)
@@ -87,6 +91,7 @@ class _FakeState:
 def _install(fake):
     loop.client.load_state = fake.load_state
     loop.client.poll_decision = fake.poll_decision
+    loop.client.notifications_paused = fake.notifications_paused
     loop.client.enqueue = fake.enqueue
     loop.client.cancel_decision = fake.cancel_decision
     loop.POLL_INTERVAL_SECONDS = 0.01
@@ -123,6 +128,18 @@ def test_unpaired_profile_keeps_original_path_only():
     result = loop.middleware(**_kwargs(lambda a: "original", {"question": "Q?"}))
     assert result == "original"
     assert fake.enqueued == []
+
+
+def test_a_pause_after_the_push_was_queued_stops_polling():
+    # The relay refused the pairing after enqueue accepted the push: the push
+    # is dropped, so the loop stops instead of polling the refusal.
+    fake = _FakeState([])
+    fake.paused = True
+    _install(fake)
+    result = loop.middleware(**_kwargs(lambda a: "original", {"question": "Q?"}))
+    assert result == "original"
+    assert len(fake.enqueued) == 1
+    assert fake.poll_ids == []
 
 
 def test_queue_full_drop_uses_the_native_path_immediately_without_polling():

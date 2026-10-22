@@ -448,21 +448,20 @@ def _post_to_relay(payload: dict[str, Any]) -> dict[str, Any]:
             timeout=10.0,
         )
     except client.RelayRejected as error:
-        # The same "pair again" signal notifications raise (and clear), for a
-        # host whose only relay traffic is Live Activities.
-        if error.status == 401:
-            _mark_refused(state, True)
+        # The same "pair again" / "blocked" signals notifications raise (and
+        # clear), for a host whose only relay traffic is Live Activities.
+        _mark_refused(lambda: client.record_relay_refusal(state, error))
         raise
-    if state.get("relay_rejected_at"):
-        _mark_refused(state, False)
+    # Also ends a notification pause: the relay takes this pairing again.
+    _mark_refused(lambda: client.record_relay_accepted(state))
     return answer
 
 
-def _mark_refused(state: dict[str, Any], rejected: bool) -> None:
+def _mark_refused(mark: Any) -> None:
     # A failure here must not replace the relay's answer: that would turn a
     # refusal into a per-turn retry, or a delivered update into a resend.
     try:
-        client._mark_relay_rejected(state, rejected)
+        mark()
     except Exception:  # noqa: BLE001
         logger.warning("Conduit could not record the relay's refusal", exc_info=True)
 
