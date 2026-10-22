@@ -40,8 +40,9 @@ HOME = "_conduit_room_home"
 _GUARD_FLAG = "__conduit_room_guard__"
 
 _lock = threading.Lock()
-# "class" -> MemoryManager; each method name -> (Hermes' own method, the guard this load set)
-_guarded: dict[str, Any] = {}
+# The MemoryManager this load guards, and each method name -> (Hermes' own method, this load's guard)
+_guarded_class: Any = None
+_guarded: dict[str, tuple[Callable[..., Any], Callable[..., Any]]] = {}
 _odd_id_logged = False
 
 
@@ -132,7 +133,8 @@ def _initialize_all(original: Callable[..., Any]) -> Callable[..., Any]:
 def _on_session_switch(original: Callable[..., Any]) -> Callable[..., Any]:
     def on_session_switch(self: Any, *args: Any, **kwargs: Any) -> Any:
         # A compaction continues the same conversation; /new, /resume and
-        # /branch move the manager to the session they name.
+        # /branch move the manager to the session they name. Hermes passes
+        # reason by keyword (the method takes it through **kwargs).
         if kwargs.get("reason") != "compression":
             new_session_id = kwargs.get("new_session_id", args[0] if args else "")
             setattr(self, MARK, is_room_session(new_session_id, getattr(self, HOME, None) or _hermes_home()))
@@ -176,11 +178,13 @@ _WRAPPERS = {
 
 
 def install() -> bool:
-    """Guards Hermes' MemoryManager, once per process. False when this Hermes
-    has no memory manager, or one shaped differently: then room turns are
-    saved the way Hermes saves them, and the log says so."""
+    """Guards Hermes' MemoryManager, once per process. Each of the methods
+    above that this Hermes has is guarded; one it lacks (a Hermes shaped
+    differently) is named in the log, because whatever Hermes calls instead
+    reaches the provider unguarded. False when there's nothing to guard."""
+    global _guarded_class
     with _lock:
-        if _guarded:
+        if _guarded_class is not None:
             return True
         try:
             from agent.memory_manager import MemoryManager
@@ -193,24 +197,28 @@ def install() -> bool:
             # A guard an earlier load of the plugin left behind wraps Hermes' own.
             while callable(method) and getattr(method, _GUARD_FLAG, False):
                 method = getattr(method, "__wrapped__", None)
-            found[name] = method
-        missing = sorted(name for name, method in found.items() if not callable(method))
+            if callable(method):
+                found[name] = method
+        missing = sorted(set(_WRAPPERS) - set(found))
         if missing:
-            logger.warning("conduit_push: Hermes' memory manager has no %s, so group room turns are saved into "
-                           "the memory provider as Hermes sends them", ", ".join(missing))
+            logger.warning("conduit_push: Hermes' memory manager has no %s, so group room turns may be saved "
+                           "into the memory provider the way Hermes sends them", ", ".join(missing))
+        if not found:
             return False
-        guards = {name: wrap(found[name]) for name, wrap in _WRAPPERS.items()}
+        guards = {name: _WRAPPERS[name](method) for name, method in found.items()}
         for name, guard in guards.items():
             setattr(MemoryManager, name, guard)
-        _guarded.update({name: (found[name], guards[name]) for name in guards}, **{"class": MemoryManager})
+        _guarded.update({name: (found[name], guard) for name, guard in guards.items()})
+        _guarded_class = MemoryManager
         return True
 
 
 def uninstall() -> None:
     """Puts Hermes' own methods back (the plugin unloads). A method another
     load of the plugin has guarded since is left to that load."""
+    global _guarded_class
     with _lock:
-        manager_class = _guarded.pop("class", None)
+        manager_class, _guarded_class = _guarded_class, None
         for name, (own, guard) in _guarded.items():
             if manager_class is not None and manager_class.__dict__.get(name) is guard:
                 setattr(manager_class, name, own)

@@ -1390,9 +1390,9 @@ and the provider's part of the summary before a compaction are skipped for
 them, also after a compaction moves the session to a new id. Recall still
 runs, and `MEMORY.md` and `USER.md` still load, so a member knows its owner
 in the room; it just doesn't learn from what others say there. The memory and
-skill tools work as before. If Hermes' memory manager is shaped differently
-from what the plugin expects, it logs a warning and leaves memory as Hermes
-has it.
+skill tools work as before. If Hermes' memory manager lacks one of the
+methods the plugin guards, the plugin guards the rest and logs a warning
+naming what's missing.
 
 ## Artifacts (plugin 0.40+)
 

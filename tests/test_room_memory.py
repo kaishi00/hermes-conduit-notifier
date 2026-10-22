@@ -258,25 +258,52 @@ def test_a_room_like_session_id_hermes_names_differently_is_logged_once(guard, c
     assert caplog.text.count("looks like a group room's") == 1
 
 
-def test_a_hermes_shaped_differently_is_left_alone_and_logged(monkeypatch, caplog):
+def _hermes_with(monkeypatch, manager_class):
+    memory_manager = types.ModuleType("agent.memory_manager")
+    memory_manager.MemoryManager = manager_class
+    monkeypatch.setitem(sys.modules, "agent", types.ModuleType("agent"))
+    monkeypatch.setitem(sys.modules, "agent.memory_manager", memory_manager)
+
+
+def test_a_hermes_lacking_some_methods_has_the_rest_guarded_and_the_gap_logged(monkeypatch, caplog):
     class MemoryManager:
+        def __init__(self):
+            self.saved = []
+
         def initialize_all(self, session_id, **kwargs):
             pass
 
         def sync_all(self, user_content, assistant_content, **kwargs):
-            pass
+            self.saved.append(user_content)
 
-    memory_manager = types.ModuleType("agent.memory_manager")
-    memory_manager.MemoryManager = MemoryManager
-    monkeypatch.setitem(sys.modules, "agent", types.ModuleType("agent"))
-    monkeypatch.setitem(sys.modules, "agent.memory_manager", memory_manager)
+    _hermes_with(monkeypatch, MemoryManager)
     own_sync = MemoryManager.__dict__["sync_all"]
     room_memory = _load()
 
     with caplog.at_level(logging.WARNING):
-        assert room_memory.install() is False
+        assert room_memory.install()
+    try:
+        assert "on_pre_compress, on_session_end, on_session_switch" in caplog.text
+        room = MemoryManager()
+        room.initialize_all(session_id=REMOTE_ROOM)
+        room.sync_all("Mona: hi", "Laifu: hello", session_id=REMOTE_ROOM)
+        assert room.saved == []
+    finally:
+        room_memory.uninstall()
     assert MemoryManager.__dict__["sync_all"] is own_sync
-    assert "on_pre_compress, on_session_end, on_session_switch" in caplog.text
+
+
+def test_a_hermes_with_none_of_the_methods_is_left_alone(monkeypatch, caplog):
+    class MemoryManager:
+        pass
+
+    _hermes_with(monkeypatch, MemoryManager)
+
+    with caplog.at_level(logging.WARNING):
+        assert _load().install() is False
+    assert caplog.text.count("has no initialize_all, on_pre_compress, on_session_end, on_session_switch, "
+                             "sync_all") == 1
+    assert vars(MemoryManager).keys().isdisjoint(GUARDED)
 
 
 def test_no_hermes_memory_at_all_is_not_an_error(monkeypatch):
