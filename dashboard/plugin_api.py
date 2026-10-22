@@ -14100,6 +14100,8 @@ ROUTE_CAPABILITIES = (
     "conduit-settings",
     "conduit-prefs",
     "pulse",
+    # The Pulse screen: cards, ratings and lessons (/pulse/feed, /rate, /learned, /levels).
+    "pulse_feed",
     "present-v1",
     "health-sync",
     "voice-tools",

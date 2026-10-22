@@ -2101,7 +2101,7 @@ def test_pulse_routes(remembering, db, monkeypatch):
     assert http.put(f"{base}/levels", json={"kind": "followup", "level": "screen"}).json()["levels"] == {
         "followup": "screen"}
     assert http.put(f"{base}/levels", json={"kind": "followup", "level": "loud"}).status_code == 400
-    assert "pulse" in api.ROUTE_CAPABILITIES
+    assert "pulse" in api.ROUTE_CAPABILITIES and "pulse_feed" in api.ROUTE_CAPABILITIES
     # A host that never turned Pulse on is answered without a file left behind.
     fresh = home / "fresh"
     fresh.mkdir()
