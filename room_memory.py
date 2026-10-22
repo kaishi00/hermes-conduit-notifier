@@ -33,13 +33,16 @@ ROOM_SOURCE = "bot_room"
 ROOM_SESSION_ID = re.compile(r"room_[0-9a-f]{32}")
 # Compaction continuations followed back to the room's own session.
 LINEAGE_HOPS = 32
-# Set on a MemoryManager bound to a room session; it outlives a compaction
-# that moves the session to a new id.
+# Set on a MemoryManager while its session is a room's; a compaction that
+# moves the session to a new id keeps it.
 MARK = "_conduit_room_session"
+HOME = "_conduit_room_home"
 _GUARD_FLAG = "__conduit_room_guard__"
 
 _lock = threading.Lock()
-_guarded: dict[str, Any] = {}  # "class" -> MemoryManager, method name -> Hermes' own method
+# "class" -> MemoryManager; each method name -> (Hermes' own method, the guard this load set)
+_guarded: dict[str, Any] = {}
+_odd_id_logged = False
 
 
 def is_room_session(session_id: Any, home: Any = None) -> bool:
@@ -51,6 +54,12 @@ def is_room_session(session_id: Any, home: Any = None) -> bool:
         return False
     if ROOM_SESSION_ID.fullmatch(value):
         return True
+    global _odd_id_logged
+    if value.startswith("room_") and not _odd_id_logged:
+        # Hermes may have changed how it names remote room sessions; then only
+        # the stored source below still finds them.
+        _odd_id_logged = True
+        logger.warning("conduit_push: session %s looks like a group room's but isn't named like one", value)
     if home is None:
         return False
     try:
@@ -76,7 +85,8 @@ def _stored_room(path: Path, session_id: str) -> bool:
             if not parent:
                 return False
             # Only a compaction carries the room on; a branch or a delegation is
-            # a conversation of its own.
+            # a conversation of its own. Hermes ends the parent and writes the
+            # child in one transaction, so a child is never seen half-made.
             ended = conn.execute("SELECT end_reason FROM sessions WHERE id = ?", (parent,)).fetchone()
             if ended is None or ended[0] != "compression":
                 return False
@@ -99,56 +109,66 @@ def _in_room(manager: Any, session_id: Any = "") -> bool:
     return bool(getattr(manager, MARK, False)) or bool(ROOM_SESSION_ID.fullmatch(str(session_id or "")))
 
 
-def _guard(original: Callable[..., Any]) -> Callable[..., Any]:
-    def mark(wrapper: Callable[..., Any]) -> Callable[..., Any]:
-        functools.update_wrapper(wrapper, original)
-        setattr(wrapper, _GUARD_FLAG, True)
-        return wrapper
-    return mark
+def _guard(original: Callable[..., Any], wrapper: Callable[..., Any]) -> Callable[..., Any]:
+    functools.update_wrapper(wrapper, original)
+    setattr(wrapper, _GUARD_FLAG, True)
+    return wrapper
 
+
+# The wrappers take whatever Hermes passes and hand it on as it came, so a
+# change to these signatures upstream can't break every chat.
 
 def _initialize_all(original: Callable[..., Any]) -> Callable[..., Any]:
-    @_guard(original)
-    def initialize_all(self: Any, session_id: Any, **kwargs: Any) -> Any:
-        # Hermes binds a manager to one session here, once; a room session's
+    def initialize_all(self: Any, *args: Any, **kwargs: Any) -> Any:
+        # Hermes binds a manager to the agent's session here; a room session's
         # row exists by then (the room's admission writes it).
-        if is_room_session(session_id, kwargs.get("hermes_home") or _hermes_home()):
-            setattr(self, MARK, True)
-        return original(self, session_id, **kwargs)
-    return initialize_all
+        home = kwargs.get("hermes_home") or _hermes_home()
+        setattr(self, HOME, home)
+        setattr(self, MARK, is_room_session(kwargs.get("session_id", args[0] if args else ""), home))
+        return original(self, *args, **kwargs)
+    return _guard(original, initialize_all)
+
+
+def _on_session_switch(original: Callable[..., Any]) -> Callable[..., Any]:
+    def on_session_switch(self: Any, *args: Any, **kwargs: Any) -> Any:
+        # A compaction continues the same conversation; /new, /resume and
+        # /branch move the manager to the session they name.
+        if kwargs.get("reason") != "compression":
+            new_session_id = kwargs.get("new_session_id", args[0] if args else "")
+            setattr(self, MARK, is_room_session(new_session_id, getattr(self, HOME, None) or _hermes_home()))
+        return original(self, *args, **kwargs)
+    return _guard(original, on_session_switch)
 
 
 def _sync_all(original: Callable[..., Any]) -> Callable[..., Any]:
-    @_guard(original)
-    def sync_all(self: Any, user_content: Any, assistant_content: Any, *args: Any, **kwargs: Any) -> Any:
+    def sync_all(self: Any, *args: Any, **kwargs: Any) -> Any:
         if _in_room(self, kwargs.get("session_id")):
             return None
-        return original(self, user_content, assistant_content, *args, **kwargs)
-    return sync_all
+        return original(self, *args, **kwargs)
+    return _guard(original, sync_all)
 
 
 def _on_session_end(original: Callable[..., Any]) -> Callable[..., Any]:
-    @_guard(original)
     def on_session_end(self: Any, *args: Any, **kwargs: Any) -> Any:
         if _in_room(self):
             return None
         return original(self, *args, **kwargs)
-    return on_session_end
+    return _guard(original, on_session_end)
 
 
 def _on_pre_compress(original: Callable[..., Any]) -> Callable[..., Any]:
-    @_guard(original)
     def on_pre_compress(self: Any, *args: Any, **kwargs: Any) -> Any:
         # Nothing for the summary, the same as a manager without providers;
         # the room's transcript still compresses.
         if _in_room(self):
             return ""
         return original(self, *args, **kwargs)
-    return on_pre_compress
+    return _guard(original, on_pre_compress)
 
 
 _WRAPPERS = {
     "initialize_all": _initialize_all,
+    "on_session_switch": _on_session_switch,
     "sync_all": _sync_all,
     "on_session_end": _on_session_end,
     "on_pre_compress": _on_pre_compress,
@@ -179,17 +199,19 @@ def install() -> bool:
             logger.warning("conduit_push: Hermes' memory manager has no %s, so group room turns are saved into "
                            "the memory provider as Hermes sends them", ", ".join(missing))
             return False
-        for name, wrap in _WRAPPERS.items():
-            setattr(MemoryManager, name, wrap(found[name]))
-        _guarded.update(found, **{"class": MemoryManager})
+        guards = {name: wrap(found[name]) for name, wrap in _WRAPPERS.items()}
+        for name, guard in guards.items():
+            setattr(MemoryManager, name, guard)
+        _guarded.update({name: (found[name], guards[name]) for name in guards}, **{"class": MemoryManager})
         return True
 
 
 def uninstall() -> None:
-    """Puts Hermes' own methods back (the plugin unloads)."""
+    """Puts Hermes' own methods back (the plugin unloads). A method another
+    load of the plugin has guarded since is left to that load."""
     with _lock:
         manager_class = _guarded.pop("class", None)
-        for name, method in _guarded.items():
-            if manager_class is not None:
-                setattr(manager_class, name, method)
+        for name, (own, guard) in _guarded.items():
+            if manager_class is not None and manager_class.__dict__.get(name) is guard:
+                setattr(manager_class, name, own)
         _guarded.clear()

@@ -30,6 +30,9 @@ def _manager_class():
         def initialize_all(self, session_id, **kwargs):
             self.session_id = session_id
 
+        def on_session_switch(self, new_session_id, *, parent_session_id="", reset=False, **kwargs):
+            self.session_id = new_session_id
+
         def sync_all(self, user_content, assistant_content, *, session_id="", messages=None, turn_author=None):
             self.saved.append(("sync_all", user_content, session_id))
 
@@ -128,10 +131,28 @@ def test_a_compacted_room_session_stays_guarded_under_its_new_id(guard, hermes, 
     assert _turn_end(rebuilt, "sess_room_3") == ""
     assert rebuilt.saved == []
 
-    # A manager bound before the compaction keeps its mark when the id moves.
+    # A manager bound before the compaction keeps its mark when the id moves
+    # (Hermes switches the live manager to the child).
     earlier = _bound(hermes, REMOTE_ROOM)
+    earlier.on_session_switch("sess_after_compaction", parent_session_id=REMOTE_ROOM, reset=False,
+                              reason="compression")
     earlier.sync_all("Mona: and lunch?", "Laifu: noon", session_id="sess_after_compaction")
     assert earlier.saved == []
+
+
+def test_a_manager_moved_to_another_chat_follows_that_chat(guard, hermes, tmp_path):
+    home = _state_db(tmp_path, [("sess_room", "bot_room", None, None), ("sess_mine", "cli", None, None)])
+    manager = _bound(hermes, "sess_room", home)
+
+    # /new or /resume out of the room: the chat it lands in is saved again...
+    manager.on_session_switch("sess_mine", reset=True)
+    manager.sync_all("Eric: notes for me", "Furina: noted", session_id="sess_mine")
+    assert manager.saved == [("sync_all", "Eric: notes for me", "sess_mine")]
+
+    # ...and resuming the room stops it again.
+    manager.on_session_switch("sess_room")
+    manager.sync_all("Mona: Saturday works", "Laifu: Saturday it is", session_id="sess_room")
+    assert manager.saved == [("sync_all", "Eric: notes for me", "sess_mine")]
 
 
 def test_a_branch_off_a_room_is_a_chat_of_its_own(guard, hermes, tmp_path):
@@ -156,8 +177,11 @@ def test_an_unreadable_session_store_counts_as_not_a_room(guard, hermes, tmp_pat
     assert manager.saved == [("sync_all", "hi", "sess_unknown")]
 
 
+GUARDED = ("initialize_all", "on_session_switch", "sync_all", "on_session_end", "on_pre_compress")
+
+
 def test_installing_twice_wraps_once_and_uninstall_puts_hermes_methods_back(hermes):
-    own = {name: hermes.__dict__[name] for name in ("initialize_all", "sync_all", "on_session_end", "on_pre_compress")}
+    own = {name: hermes.__dict__[name] for name in GUARDED}
     room_memory = _load()
 
     assert room_memory.install() and room_memory.install()
@@ -172,8 +196,66 @@ def test_a_reloaded_plugin_wraps_hermes_own_method_not_the_old_guard(hermes):
 
     assert first.install() and second.install()
     assert hermes.__dict__["sync_all"].__wrapped__ is own_sync
+    # The old load unloading afterwards leaves the new load's guard on.
+    newer = hermes.__dict__["sync_all"]
+    first.uninstall()
+    assert hermes.__dict__["sync_all"] is newer
     second.uninstall()
     assert hermes.__dict__["sync_all"] is own_sync
+
+
+def test_the_guard_hands_on_whatever_hermes_sends(monkeypatch, tmp_path):
+    class MemoryManager:
+        """A Hermes whose methods take other shapes than today's."""
+
+        def __init__(self):
+            self.saved = []
+
+        def initialize_all(self, **kwargs):
+            self.bound = kwargs
+
+        def on_session_switch(self, **kwargs):
+            pass
+
+        def sync_all(self, *, user, assistant, session_id="", extra=None):
+            self.saved.append((user, extra))
+
+        def on_session_end(self, messages, reason):
+            self.saved.append(("end", reason))
+
+        def on_pre_compress(self, messages, budget, **kwargs):
+            return f"summary within {budget}"
+
+    memory_manager = types.ModuleType("agent.memory_manager")
+    memory_manager.MemoryManager = MemoryManager
+    monkeypatch.setitem(sys.modules, "agent", types.ModuleType("agent"))
+    monkeypatch.setitem(sys.modules, "agent.memory_manager", memory_manager)
+    room_memory = _load()
+    assert room_memory.install()
+    try:
+        chat = MemoryManager()
+        chat.initialize_all(session_id="sess_chat", hermes_home=str(tmp_path), platform="cli")
+        chat.sync_all(user="hi", assistant="hello", session_id="sess_chat", extra=1)
+        chat.on_session_end([], "closed")
+        assert chat.on_pre_compress([], 500) == "summary within 500"
+        assert chat.saved == [("hi", 1), ("end", "closed")]
+        assert chat.bound == {"session_id": "sess_chat", "hermes_home": str(tmp_path), "platform": "cli"}
+
+        room = MemoryManager()
+        room.initialize_all(session_id=REMOTE_ROOM)
+        room.sync_all(user="Mona: hi", assistant="Laifu: hello", session_id=REMOTE_ROOM)
+        room.on_session_end([], "closed")
+        assert room.on_pre_compress([], 500) == ""
+        assert room.saved == []
+    finally:
+        room_memory.uninstall()
+
+
+def test_a_room_like_session_id_hermes_names_differently_is_logged_once(guard, caplog):
+    with caplog.at_level(logging.WARNING):
+        assert guard.is_room_session("room_NOT-A-DIGEST") is False
+        assert guard.is_room_session("room_another") is False
+    assert caplog.text.count("looks like a group room's") == 1
 
 
 def test_a_hermes_shaped_differently_is_left_alone_and_logged(monkeypatch, caplog):
@@ -194,7 +276,7 @@ def test_a_hermes_shaped_differently_is_left_alone_and_logged(monkeypatch, caplo
     with caplog.at_level(logging.WARNING):
         assert room_memory.install() is False
     assert MemoryManager.__dict__["sync_all"] is own_sync
-    assert "on_pre_compress, on_session_end" in caplog.text
+    assert "on_pre_compress, on_session_end, on_session_switch" in caplog.text
 
 
 def test_no_hermes_memory_at_all_is_not_an_error(monkeypatch):
