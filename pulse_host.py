@@ -21,6 +21,7 @@ off: that answers busy and the send stays refused.
 from __future__ import annotations
 
 import logging
+import re
 import sys
 import threading
 import uuid
@@ -111,7 +112,8 @@ def send(chat_id: str, text: str, *, profile: str = "", model: Optional[dict] = 
     submits ``text`` as a hidden turn. A chat busy with a turn queues it
     behind that turn instead of interrupting it. With ``model``
     ({"provider", "model"}), the chat is put on that model first, as its
-    own model picker would (a busy chat takes it at its next turn)."""
+    own model picker would (a busy chat takes it at its next turn). It is
+    the chat's model after the turn too: Pulse's chat runs on Pulse's model."""
     methods = _methods()
     if methods is None:
         return Sent(False, "", "this Hermes has no session host to send through")
@@ -150,9 +152,13 @@ def send(chat_id: str, text: str, *, profile: str = "", model: Optional[dict] = 
     return Sent(True, "streaming" if status == "streaming" else "queued", status)
 
 
+_FLAG_VALUE = re.compile(r"[A-Za-z0-9._:/@+][A-Za-z0-9._:/@+-]*")
+
+
 def plain_flag_value(value: str) -> bool:
-    """One word that can't read as a flag in config.set's value string."""
-    return bool(value) and not value.startswith("-") and not any(char.isspace() for char in value)
+    """A model or provider name that reads as one plain word, never a flag or
+    a quote, in config.set's value string."""
+    return bool(_FLAG_VALUE.fullmatch(value))
 
 
 def _use_model(methods: dict[str, Callable[..., Any]], sid: str, resumed: Any, model: dict) -> None:

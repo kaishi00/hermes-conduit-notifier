@@ -408,6 +408,7 @@ def test_the_pulse_model_setting(pulse_store, tmp_path):
     assert store_.get(pulse.MODEL) == {"provider": "openrouter", "model": "google/gemini-flash"}
     for bad in ({"model": "flash"}, {"model": {"model": ""}}, {"model": {"model": "a b"}},
                 {"model": {"model": "--provider"}}, {"model": {"model": "m", "provider": "-x"}},
+                {"model": {"model": 'x"'}}, {"model": {"model": "x\x00"}},
                 {"model": {"model": "m", "base_url": "x"}}):
         with pytest.raises(control.Refused):
             control.update(store_, bad)
@@ -415,6 +416,16 @@ def test_the_pulse_model_setting(pulse_store, tmp_path):
     assert store_.get(pulse.MODEL) is None
     store_.set(pulse.MODEL, {"provider": "", "model": "x --base-url y"})
     assert pulse.turn_model(store_) is None and control.state(store_, tmp_path)["model"] is None
+
+
+def test_pulse_turns_go_out_on_pulses_model(pulse_store, tmp_path, monkeypatch):
+    sent = []
+    monkeypatch.setattr(host, "send", lambda chat_id, body, **kw: sent.append(kw["model"]))
+    pulse._sender(pulse_store)("c", "x")
+    control.update(pulse_store, {"model": {"provider": "openrouter", "model": "anthropic/claude-haiku-4.5"}})
+    pulse._sender(pulse_store)("c", "x")
+    assert sent == [None, {"provider": "openrouter", "model": "anthropic/claude-haiku-4.5"}]
+    assert control.state(pulse_store, tmp_path)["model"] == sent[1]
 
 
 def test_send_reports_a_refusal(monkeypatch):

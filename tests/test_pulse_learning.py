@@ -489,8 +489,10 @@ def test_a_report_card_a_busy_state_db_kept_out_lands_on_a_later_tick(live, monk
     pulse.tick()
     assert [card["kind"] for card in live.store.cards()] == ["report"]
     assert live.store.get(pulse.TURN_CARDS_DONE) == [attempt["attempt_id"]]
-    monkeypatch.setattr(learning, "add_turn_card", locked)
+    looked = []
+    monkeypatch.setattr(pulse.hermes, "find_turn", lambda *a, **kw: looked.append(a))
     pulse.tick()  # its card landed: not looked up again
+    assert looked == [] and len(live.store.cards()) == 1
 
 
 def test_feed_names_no_chat_while_pulse_is_off(live):

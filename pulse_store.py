@@ -41,6 +41,9 @@ DEFAULTS: dict[str, Any] = {
     "probe_requested": False,
     # A session key chosen with `pulse home`, over the chat found by title.
     "home_session_key": "",
+    # Settings > Pulse's model ({"provider", "model"}): Pulse's chat stays on
+    # it, put back before each Pulse turn. None leaves the chat's own.
+    "turn_model": None,
     # When the gateway's loop last ran with Pulse on (time.time()).
     "last_tick_at": None,
     # The shadow report: on while Pulse is, at these local times, in the
