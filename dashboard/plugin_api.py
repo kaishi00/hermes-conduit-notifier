@@ -14118,6 +14118,8 @@ ROUTE_CAPABILITIES = (
     "pulse",
     # The Pulse screen: cards, ratings and lessons (/pulse/feed, /rate, /learned, /levels).
     "pulse_feed",
+    # PUT /pulse takes "model": the model Pulse's turns run on.
+    "pulse_model",
     "present-v1",
     "health-sync",
     "voice-tools",

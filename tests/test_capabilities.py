@@ -68,6 +68,7 @@ def test_every_capability_names_a_served_route_family():
         "conduit-prefs": "/conduit-prefs",
         "pulse": "/pulse",
         "pulse_feed": "/pulse/feed",
+        "pulse_model": "/pulse",
         "present-v1": "/present/",
         "health-sync": "/health/",
         "voice-tools": "/voice-tools",
