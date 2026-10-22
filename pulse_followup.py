@@ -64,7 +64,7 @@ REMINDER_HELD = "reminder held"
 REMINDED = "reminded"
 # `pulse followups now` (for testing), when it was asked: every check due at
 # once, the day's reminders unspent. An ask the loop didn't take within
-# NOW_WINDOW_S (memory over its cap, no home chat) lapses.
+# NOW_WINDOW_S (follow-ups over followup_daily_tokens, no home chat) lapses.
 NOW_REQUESTED = "followups_now_requested"
 NOW_WINDOW_S = 600.0
 # Waits between later checks; the last one repeats.
@@ -78,7 +78,7 @@ STALE_EVERY_S = 86400.0
 # works in between resets the count: only a sustained outage ends it.
 MAX_FAILURES = 6
 # Checks per run, like memory's chunks per run: a backlog (after a backfill)
-# spreads over runs instead of spending the shared daily cap at once.
+# spreads over runs instead of spending followup_daily_tokens at once.
 MAX_CHECKS = 8
 # A follow-up that didn't get through is tried again, up to this many times.
 TRIES = 3

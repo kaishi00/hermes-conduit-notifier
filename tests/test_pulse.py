@@ -1865,7 +1865,8 @@ def test_follow_ups_run_on_their_own_budget_after_memory_spent_its(remembering, 
     store_ = remembering.store
     store_.set("enabled", True)
     store_.set("memory", True)
-    day = datetime.fromtimestamp(time.time(), pulse.report_zone(store_, store_.path.parent)).strftime("%Y-%m-%d")
+    now = time.time() + 600  # ahead of the clock, so the run's day is this one
+    day = datetime.fromtimestamp(now, pulse.report_zone(store_, store_.path.parent)).strftime("%Y-%m-%d")
     store_.set("memory_today", {"day": day, "tokens": store_.get("memory_daily_tokens")})
     ran = []
     monkeypatch.setattr(pulse.memory, "run", lambda *a, **kw: ran.append("memory"))
@@ -1875,13 +1876,13 @@ def test_follow_ups_run_on_their_own_budget_after_memory_spent_its(remembering, 
         done["tokens"] = 900
 
     monkeypatch.setattr(pulse.followup, "run", checks)
-    pulse._memory_run(store_.path.parent, SID, DAY, threading.Event())
+    pulse._memory_run(store_.path.parent, SID, now, threading.Event())
     assert ran == [("followups", store.DEFAULTS["followup_daily_tokens"])]
     assert store_.get("followup_today") == {"day": day, "tokens": 900}
     assert store_.get("memory_today")["tokens"] == store_.get("memory_daily_tokens")  # memory's day is its own
     store_.set("followup_today", {"day": day, "tokens": store.DEFAULTS["followup_daily_tokens"]})
     ran.clear()
-    pulse._memory_run(store_.path.parent, SID, DAY, threading.Event())
+    pulse._memory_run(store_.path.parent, SID, now, threading.Event())
     assert ran == []  # both spent
 
 

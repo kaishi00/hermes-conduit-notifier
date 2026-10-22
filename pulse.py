@@ -528,6 +528,9 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
             if follows:
                 # After memory, so a promise it just read is scheduled now.
                 now = max(now, time.time())
+                # Memory expires week-old items as it reads; on a day it
+                # doesn't, they still mustn't be reminded of.
+                pulse_store.expire_items(due_before=now - memory.EXPIRE_S, now=now)
                 followup.schedule(pulse_store, now)
                 followup.check_all_now(pulse_store, now)
                 try:
@@ -557,15 +560,17 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
         logger.warning("conduit_push: Pulse memory run failed", exc_info=True)
 
 
-def _spent_today(pulse_store: store.PulseStore, name: str, day: str) -> tuple[float, float]:
+def _spent_today(pulse_store: store.PulseStore, name: str, day: str) -> tuple[int, int]:
     """Tokens ``name`` ("memory" or "followup") used on ``day``, and its daily cap."""
     today = pulse_store.get(f"{name}_today")
-    used = int(today.get("tokens", 0) or 0) if isinstance(today, dict) and today.get("day") == day else 0
     try:
-        cap = float(pulse_store.get(f"{name}_daily_tokens"))
+        used = int(today.get("tokens", 0) or 0) if isinstance(today, dict) and today.get("day") == day else 0
     except (TypeError, ValueError):
-        cap = float(store.DEFAULTS[f"{name}_daily_tokens"])
-    return float(used), cap
+        used = 0
+    cap = pulse_store.get(f"{name}_daily_tokens")
+    if isinstance(cap, bool) or not isinstance(cap, (int, float)) or cap <= 0:
+        cap = store.DEFAULTS[f"{name}_daily_tokens"]
+    return used, int(cap)
 
 
 def _leads(pulse_store: store.PulseStore) -> bool:

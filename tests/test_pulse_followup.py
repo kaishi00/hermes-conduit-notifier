@@ -6,6 +6,7 @@ import sqlite3
 import sys
 import time
 import types
+from datetime import datetime
 
 import pytest
 
@@ -339,7 +340,15 @@ def test_followups_command(live, capsys, monkeypatch):
     live.store.set("memory", True)
     assert run("now") == 0 and live.store.get(followup.NOW_REQUESTED) and live.store.get("memory_requested")
     assert run("off") == 0 and live.store.get(followup.NOW_REQUESTED) is None
+    live.store.set("followups", True)
+    today = datetime.now(pulse.report_zone(live.store, live.store.path.parent)).strftime("%Y-%m-%d")
+    live.store.set("followup_today", {"day": today, "tokens": live.store.get("followup_daily_tokens")})
     capsys.readouterr()
+    assert run("now") == 1 and live.store.get(followup.NOW_REQUESTED) is None  # today's follow-up tokens are spent
+    assert "checks resume tomorrow" in capsys.readouterr().out
+    cli.dispatch(types.SimpleNamespace(conduit_push_action="pulse", pulse_action="status", value="", extra=""))
+    assert "Follow-ups used today's" in capsys.readouterr().out
+    live.store.set("followups", False)
     cli.dispatch(types.SimpleNamespace(conduit_push_action="pulse", pulse_action="status", value="", extra=""))
     assert "Follow-ups: off" in capsys.readouterr().out
 
