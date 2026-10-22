@@ -143,13 +143,46 @@ def test_a_failed_check_waits_and_counts(live):
     assert row["decision"] == "wait" and "TimeoutError" in row["why"] and done["failed"] == 1
 
 
+def test_a_check_reads_the_newest_of_a_long_chat(live):
+    promise(live, said_at=time.time() - 7200)
+    for n in range(followup.MAX_MESSAGES + 20):
+        live.db.message("user", f"chatter {n}", sid=CHAT, at=time.time() - 3000 + n)
+    live.db.message("assistant", "Deploy finished: all green.", sid=CHAT, at=time.time() - 10)
+    llm = llm_saying(decision="wait")
+    check_now(live, llm, now=time.time() + followup.FIRST_CHECK_S + 1)
+    assert "Deploy finished: all green." in llm.calls[0] and "chatter 0\n" not in llm.calls[0]
+
+
+def test_a_promise_due_later_is_not_called_forgotten(live):
+    now = time.time()
+    item_id = promise(live, said_at=now - followup.GIVE_UP_S - 60, due_at=now + 20 * 86400)
+    followup.schedule(live.store, now)
+    live.store.decide_followup(item_id, decision="wait", news="", why="", checks=0, next_check_at=now - 1, now=now)
+    llm = llm_saying(decision="wait")
+    check_now(live, llm, now=now)
+    assert len(llm.calls) == 1 and live.store.followups()[0]["decision"] == "wait"
+
+
+def test_follow_ups_say_they_wait_on_memory(live, capsys, monkeypatch):
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", pulse.get_hermes_home)
+    control = _load("conduit_push.pulse_control", ROOT / "pulse_control.py")
+    assert control.state(live.store, live.home)["followups_active"] is False
+    cli.dispatch(types.SimpleNamespace(conduit_push_action="pulse", pulse_action="status", value="", extra=""))
+    assert "Follow-ups: waiting on memory" in capsys.readouterr().out
+    live.store.set("memory", True)
+    assert control.state(live.store, live.home)["followups_active"] is True
+
+
 def test_a_promise_open_for_a_week_is_never_dropped_silently(live):
     item_id = promise(live, said_at=time.time() - followup.GIVE_UP_S - 60)
     llm = llm_saying(decision="wait")
-    check_now(live, llm, now=time.time() + followup.FIRST_CHECK_S + 1)
-    assert llm.calls == []
+    now = time.time() + followup.FIRST_CHECK_S + 1
+    check_now(live, llm, now=now)
+    assert len(llm.calls) == 1  # an old promise (a backfill finds them) is read once first
+    check_now(live, llm, now=now + followup.BACKOFF_S[0] + 1)
+    assert len(llm.calls) == 1
     [row] = live.store.followups()
-    assert row["decision"] == "tell" and row["news"] == followup.STALE_NEWS
+    assert row["decision"] == "tell" and row["news"] == followup.STALE_NEWS and row["checks"] == 1
     assert live.store.item(item_id)["status"] == "open"
 
 
@@ -216,7 +249,7 @@ def test_a_failed_follow_up_is_tried_again_then_marked_undelivered(live, monkeyp
     assert len(live.sent()) == followup.TRIES
     row = live.store.followups()[0]
     assert row["decision"] == "undelivered" and "Hermes marked the turn failed" in row["why"]
-    assert live.store.item(item_id)["status"] == "open"
+    assert live.store.item(item_id)["status"] == "expired"
 
 
 def test_follow_ups_off_sends_nothing(live):
@@ -289,3 +322,14 @@ def test_news_for_a_promise_forgotten_before_it_went_out_is_not_sent(live):
     pulse.tick()
     assert live.sent() == []
     assert live.store.followups()[0]["decision"] == "closed"
+
+
+def test_a_sent_follow_up_lands_after_follow_ups_are_turned_off(live):
+    item_id = tell(live)
+    pulse.tick()
+    live.store.set("followups", False)
+    [attempt] = live.store.in_flight()
+    live.store.update_attempt(attempt["attempt_id"], state=store.DELIVERED)
+    pulse.tick()
+    assert live.store.item(item_id)["status"] == "done"
+    assert "\n" not in live.store.attempts_for(attempt["item_id"])[0]["text"]  # the quoted chat isn't kept

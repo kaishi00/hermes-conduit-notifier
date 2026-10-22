@@ -160,14 +160,16 @@ def chat_activity(home: Path, *, exclude_chat: str, since: float,
 
 
 def chat_messages(home: Path, *, chat_id: str, after_id: int, since: float, max_chars: int,
-                  limit: int, until: Optional[float] = None) -> list[sqlite3.Row]:
+                  limit: int, until: Optional[float] = None, newest: bool = False) -> list[sqlite3.Row]:
     """One chat's visible user and assistant rows after row ``after_id`` and
-    time ``since`` (up to ``until``), oldest first, each cut to ``max_chars``."""
-    return _run(home, (
+    time ``since`` (up to ``until``), oldest first, each cut to ``max_chars``:
+    the first ``limit`` of them, or with ``newest`` the last."""
+    rows = _run(home, (
         "SELECT id, role, substr(content, 1, ?) AS content, timestamp FROM messages "
         "WHERE session_id = ? AND id > ? AND timestamp > ? AND timestamp <= ? AND role IN ('user', 'assistant') "
-        "AND active = 1 AND display_kind IS NULL ORDER BY id LIMIT ?"
+        f"AND active = 1 AND display_kind IS NULL ORDER BY id {'DESC' if newest else ''} LIMIT ?"
     ), (max_chars, chat_id, after_id, since, float("inf") if until is None else until, limit))
+    return rows[::-1] if newest else rows
 
 
 def user_text_after(home: Path, *, session_id: str, tag: str) -> list[str]:

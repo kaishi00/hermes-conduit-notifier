@@ -281,6 +281,8 @@ def state(pulse_store: Any, home: Path, now: Optional[float] = None) -> dict[str
         "memory": bool(pulse_store.get("memory")),
         "memory_counts": pulse_store.item_counts(),
         "followups": bool(pulse_store.get("followups")),
+        # Follow-ups run with memory, which finds the promises: off without it.
+        "followups_active": bool(pulse_store.get("followups") and pulse_store.get("memory")),
         "followup_counts": pulse_store.followup_counts(),
         "memory_chunks": int(usage.get("chunks", 0) or 0),
         "memory_tokens": int(usage.get("tokens", 0) or 0),

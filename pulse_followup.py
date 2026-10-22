@@ -18,6 +18,7 @@ follow-up that says nothing shows it happened and asks if it's still wanted.
 from __future__ import annotations
 
 import logging
+import secrets
 import time
 from datetime import datetime, tzinfo
 from pathlib import Path
@@ -68,8 +69,8 @@ In the chat "{title}" ({said}), you told the user: "{evidence}"
 NOTE = ("This turn was started by Pulse, the part of Hermes that keeps what Hermes promised. The message says "
         "what you promised the user in another chat and what Pulse found. Tell the user in one or two short, "
         "friendly sentences, starting with what it's about so it makes sense on its own; if the message says "
-        "nothing shows it happened, ask if they still want it. Don't say Pulse started this turn. Don't use "
-        "any tools.")
+        "nothing shows it happened, ask if they still want it. Make clear it's a follow-up on what you said in "
+        "that chat, and only pass on what the message says. Don't use any tools.")
 STALE_NEWS = "It has been over a week and nothing shows it happened."
 
 
@@ -87,6 +88,14 @@ def first_check(item: dict) -> float:
     if isinstance(due, (int, float)) and not isinstance(due, bool) and due > start:
         return float(due)
     return start + FIRST_CHECK_S
+
+
+def give_up_from(item: dict) -> float:
+    """A promise counts as forgotten a week after this: when it was said,
+    or its due time when that's later (one due in a month isn't late yet)."""
+    due = item.get("due_at")
+    said = float(item["valid_from"])
+    return max(said, float(due)) if isinstance(due, (int, float)) and not isinstance(due, bool) else said
 
 
 def next_wait(checks: int, hint: Any) -> float:
@@ -116,7 +125,8 @@ def home_for(home: Path, profile: str) -> Optional[Path]:
 
 
 def material(pulse_store: store.PulseStore, home: Path, item: dict, *, zone: tzinfo, now: float) -> str:
-    """What a check reads, newest material kept when it runs long."""
+    """What a check reads: the newest of what was said since the promise,
+    as much as the budget holds."""
     where = home_for(home, item["profile"])
     parts = [f"Now: {_local(now, zone)}",
              f"Promise: {_clip(item['text'], 300)}",
@@ -127,7 +137,7 @@ def material(pulse_store: store.PulseStore, home: Path, item: dict, *, zone: tzi
     if where is not None:
         try:
             rows = hermes.chat_messages(where, chat_id=item["chat_id"], after_id=int(item["message_id"]),
-                                        since=0.0, max_chars=PER_MESSAGE, limit=MAX_MESSAGES)
+                                        since=0.0, max_chars=PER_MESSAGE, limit=MAX_MESSAGES, newest=True)
         except hermes.HermesUnreadable:
             rows = []
         for row in rows:
@@ -171,8 +181,6 @@ def run(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzinfo, no
         still_leader: Callable[[], bool], budget: float, done: Optional[dict[str, int]] = None) -> None:
     """Checks the promises that are due, soonest first, while the budget
     and the lease last."""
-    import secrets
-
     done = {} if done is None else done
     for row in pulse_store.due_followups(now):
         if not still_leader() or done.get("tokens", 0) >= budget:
@@ -182,10 +190,12 @@ def run(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzinfo, no
             pulse_store.end_followups(keep=set(), now=now, only=row["item_id"])
             continue
         checks = int(row["checks"]) + 1
-        if now - float(item["valid_from"]) >= GIVE_UP_S:
+        if int(row["checks"]) > 0 and now - give_up_from(item) >= GIVE_UP_S:
+            # Only after a real check read the chat (a promise found by a
+            # backfill is read first). No model call: the count stays.
             pulse_store.decide_followup(item["id"], decision="tell", news=STALE_NEWS,
-                                        why="still open after a week with nothing showing it happened",
-                                        checks=checks, next_check_at=None, now=now)
+                                        why="still open a week after it was due with nothing showing it happened",
+                                        checks=int(row["checks"]), next_check_at=None, now=now)
             continue
         try:
             text = material(pulse_store, home, item, zone=zone, now=now)
@@ -264,6 +274,8 @@ def settle(pulse_store: store.PulseStore, now: float) -> None:
             pulse_store.decide_followup(followup["item_id"], decision="told", news=followup["news"],
                                         why=followup["why"], checks=followup["checks"], next_check_at=None, now=now)
         elif len(attempts) >= TRIES and all(row["state"] not in store.IN_FLIGHT for row in attempts):
+            # Out of memory's open promises, so it isn't counted or reported as open; the journal says why.
+            pulse_store.close_item(followup["item_id"], status="expired", closed_by="pulse follow-up not delivered")
             pulse_store.decide_followup(followup["item_id"], decision="undelivered", news=followup["news"],
                                         why=f"{followup['why']} (not delivered after {TRIES} tries: "
                                             f"{attempts[-1]['detail']})"[:WHY_LIMIT + 200],

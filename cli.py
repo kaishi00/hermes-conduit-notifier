@@ -291,7 +291,9 @@ def _pulse(args: argparse.Namespace) -> int:
             and isinstance(pulse_store.get("memory_daily_tokens"), (int, float))
             and int(today.get("tokens", 0) or 0) >= pulse_store.get("memory_daily_tokens")):
         print(f"Memory used today's {pulse_store.get('memory_daily_tokens')} tokens; it reads again tomorrow.")
-    if pulse_store.get("followups"):
+    if pulse_store.get("followups") and not pulse_store.get("memory"):
+        print("Follow-ups: waiting on memory, which finds Hermes's promises: `hermes conduit-push pulse memory on`")
+    elif pulse_store.get("followups"):
         follow = pulse_store.followup_counts()
         print("Follow-ups on Hermes's promises: "
               + (", ".join(f"{n} {decision}" for decision, n in sorted(follow.items())) or "none yet"))

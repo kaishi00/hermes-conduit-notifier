@@ -279,9 +279,10 @@ def tick(now: Optional[float] = None) -> None:
     delivery.reconcile(pulse_store, home, process_started_at=_started_at, now=now)
     # A report's text carries a day of private chat; keep it only while in flight.
     pulse_store.trim_finished(REPORT)
+    pulse_store.trim_finished(FOLLOWUP)  # likewise the chat a follow-up quotes
     _collect_ratings(pulse_store, home, now)
-    if pulse_store.get("followups"):
-        followup.settle(pulse_store, now)
+    # Even with follow-ups turned off: one already sent still lands.
+    followup.settle(pulse_store, now)
     _maybe_memory(pulse_store, home, now)
     # One new turn per tick: a probe first, then a follow-up, then the report.
     if not _maybe_probe(pulse_store, home, now) and not _maybe_followup(pulse_store, home, now):
@@ -415,9 +416,13 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
         done: dict[str, int] = {}
         checked: dict[str, int] = {}
         try:
-            memory.run(pulse_store, sources, _memory_llm, zone=zone, now=now,
-                       reads="all" if profiles == "all" else "this",
-                       still_leader=lambda: not stopped.is_set() and _leads(pulse_store), budget=cap - used, done=done)
+            try:
+                memory.run(pulse_store, sources, _memory_llm, zone=zone, now=now,
+                           reads="all" if profiles == "all" else "this",
+                           still_leader=lambda: not stopped.is_set() and _leads(pulse_store), budget=cap - used,
+                           done=done)
+            except Exception:  # noqa: BLE001 — follow-ups on what memory already has still run
+                logger.warning("conduit_push: Pulse memory run failed", exc_info=True)
             if pulse_store.get("followups"):
                 # After memory, so a promise it just read is scheduled now.
                 now = max(now, time.time())
