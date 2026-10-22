@@ -70,6 +70,10 @@ DEFAULTS: dict[str, Any] = {
     "followups_now_requested": None,  # when `pulse followups now` asked (pulse_followup)
     # Memory stops for the day once its model calls used this many tokens.
     "memory_daily_tokens": 300_000,
+    # Follow-up checks have their own day, so a backfill that spends
+    # memory's can't keep promises and to-dos from being checked.
+    "followup_daily_tokens": 60_000,
+    "followup_today": None,  # {"day", "tokens"}
     # A backfill of older history: {"from", "to", "days", "active", "done"},
     # read after the chats as they happen (pulse_memory.run).
     "memory_backfill": None,

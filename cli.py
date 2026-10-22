@@ -335,7 +335,7 @@ def _pulse(args: argparse.Namespace) -> int:
         follow = pulse_store.followup_counts()
         usage = pulse_store.get("followup_usage")
         usage = usage if isinstance(usage, dict) else {}
-        print("Follow-ups on Hermes's promises: "
+        print("Follow-ups on Hermes's promises and your to-dos: "
               + (", ".join(f"{n} {decision}" for decision, n in sorted(follow.items())) or "none yet")
               + f" ({int(usage.get('checks', 0) or 0)} checks, {int(usage.get('tokens', 0) or 0)} tokens"
               + (f", {int(usage.get('failed', 0) or 0)} failed" if usage.get("failed") else "") + ")")

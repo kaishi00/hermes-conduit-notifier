@@ -507,13 +507,10 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
         pulse_store = open_store(home)
         zone = report_zone(pulse_store, home)
         day = datetime.fromtimestamp(now, zone).strftime("%Y-%m-%d")
-        today = pulse_store.get("memory_today")
-        used = int(today.get("tokens", 0) or 0) if isinstance(today, dict) and today.get("day") == day else 0
-        try:
-            cap = float(pulse_store.get("memory_daily_tokens"))
-        except (TypeError, ValueError):
-            cap = float(store.DEFAULTS["memory_daily_tokens"])
-        if used >= cap:
+        used, cap = _spent_today(pulse_store, "memory", day)
+        follow_used, follow_cap = _spent_today(pulse_store, "followup", day)
+        follows = bool(pulse_store.get("followups")) and follow_used < follow_cap
+        if used >= cap and not follows:
             return  # `pulse status` says so
         profiles = pulse_store.get("report_profiles")
         sources = memory_sources(pulse_store, home, home_chat_id, profiles)
@@ -521,13 +518,14 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
         checked: dict[str, int] = {}
         try:
             try:
-                memory.run(pulse_store, sources, _memory_llm, zone=zone, now=now,
-                           reads="all" if profiles == "all" else "this",
-                           still_leader=lambda: not stopped.is_set() and _leads(pulse_store), budget=cap - used,
-                           done=done)
+                if used < cap:
+                    memory.run(pulse_store, sources, _memory_llm, zone=zone, now=now,
+                               reads="all" if profiles == "all" else "this",
+                               still_leader=lambda: not stopped.is_set() and _leads(pulse_store), budget=cap - used,
+                               done=done)
             except Exception:  # noqa: BLE001 — follow-ups on what memory already has still run
                 logger.warning("conduit_push: Pulse memory run failed", exc_info=True)
-            if pulse_store.get("followups"):
+            if follows:
                 # After memory, so a promise it just read is scheduled now.
                 now = max(now, time.time())
                 followup.schedule(pulse_store, now)
@@ -537,7 +535,7 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
                                      instructions, text, purpose="pulse follow-up"), zone=zone, now=now,
                                  still_leader=lambda: (not stopped.is_set() and _leads(pulse_store)
                                                        and bool(pulse_store.get("followups"))),
-                                 budget=cap - used - done.get("tokens", 0), done=checked)
+                                 budget=follow_cap - follow_used, done=checked)
                 finally:
                     if checked.get("checks") or checked.get("failed"):
                         usage = pulse_store.get("followup_usage")
@@ -546,10 +544,10 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
                                                           for key in ("checks", "tokens", "failed")})
         finally:
             # A run stopped by an unreadable state.db still spent its tokens.
-            # Follow-up checks share memory's daily cap.
-            spent = done.get("tokens", 0) + checked.get("tokens", 0)
-            if spent:
-                pulse_store.set("memory_today", {"day": day, "tokens": used + spent})
+            if done.get("tokens"):
+                pulse_store.set("memory_today", {"day": day, "tokens": used + done["tokens"]})
+            if checked.get("tokens"):
+                pulse_store.set("followup_today", {"day": day, "tokens": follow_used + checked["tokens"]})
             if done.get("chunks") or done.get("failed") or done.get("tokens"):
                 usage = pulse_store.get("memory_usage")
                 usage = usage if isinstance(usage, dict) else {}
@@ -557,6 +555,17 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
                                                 for key in ("chunks", "tokens", "failed", "skipped")})
     except Exception:  # noqa: BLE001 — the next run tries again
         logger.warning("conduit_push: Pulse memory run failed", exc_info=True)
+
+
+def _spent_today(pulse_store: store.PulseStore, name: str, day: str) -> tuple[float, float]:
+    """Tokens ``name`` ("memory" or "followup") used on ``day``, and its daily cap."""
+    today = pulse_store.get(f"{name}_today")
+    used = int(today.get("tokens", 0) or 0) if isinstance(today, dict) and today.get("day") == day else 0
+    try:
+        cap = float(pulse_store.get(f"{name}_daily_tokens"))
+    except (TypeError, ValueError):
+        cap = float(store.DEFAULTS[f"{name}_daily_tokens"])
+    return float(used), cap
 
 
 def _leads(pulse_store: store.PulseStore) -> bool:
