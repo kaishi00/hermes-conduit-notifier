@@ -2358,11 +2358,16 @@ The static site source lives in [`docs/`](docs/).
 
 ## Development
 
-The runtime uses only the Python standard library plus Hermes APIs. Run the pure event tests with:
+The runtime uses only the Python standard library plus Hermes APIs. CI ([`.github/workflows/tests.yml`](.github/workflows/tests.yml)) runs the plugin, relay and mailbox tests on every PR and every push to main. To run them locally:
 
 ```bash
+pip install -r tests/requirements.txt
 python -m pytest --rootdir=tests tests
+(cd relay && npm test)
+(cd mailbox && npm test)
 ```
+
+Working on a feature with siblings in the app (a voice mode, the Watch, CarPlay)? See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

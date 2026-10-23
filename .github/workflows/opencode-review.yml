@@ -161,6 +161,10 @@ jobs:
               in layers or environment
             - General: error messages leaking internals, missing rate limits,
               race conditions in shared state
+            - Connected features: CONTRIBUTING.md lists what changes together
+              (the plugin version files, and the app-side siblings). A sibling
+              the PR leaves out without saying why in its Siblings section is
+              a major finding.
 
             If you find no issues, say so explicitly. Do NOT summarize what you did
             or describe your process. Output only the review.

@@ -11,6 +11,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 VERSION = re.compile(r"^version:\s*[\"']?([0-9]+(?:\.[0-9]+)*)", re.MULTILINE)
 HEADING = re.compile(r"^## ([0-9]+\.[0-9]+\.[0-9]+) \((\d{4}-\d{2}-\d{2})\)$")
 SECTIONS = ["Security", "Fixes", "New and improved"]
+# A version bump changes these together, with a new entry on top of CHANGELOG.md.
+VERSION_FILES = "plugin.yaml, events.py, dashboard/manifest.json and tests/test_clarify_loop.py"
 
 
 def _parts(version):
@@ -42,14 +44,23 @@ def _entries():
 def test_plugin_version_has_an_entry_on_top():
     version = VERSION.search((ROOT / "plugin.yaml").read_text(encoding="utf-8")).group(1)
     entries = _entries()
-    assert entries and entries[0][0] == version, (
-        f"plugin.yaml is {version}: add `## {version} (YYYY-MM-DD)` at the top of CHANGELOG.md")
+    top = entries[0][0] if entries else "missing"
+    assert top == version, (
+        f"plugin.yaml is {version} but the top CHANGELOG.md entry is {top}: a version bump "
+        f"changes {VERSION_FILES} and adds `## {version} (YYYY-MM-DD)` at the top of CHANGELOG.md")
 
 
 def test_entries_are_newest_first_and_dated():
     entries = _entries()
-    versions = [_parts(version) for version, _, _ in entries]
-    assert versions == sorted(versions, reverse=True) and len(set(versions)) == len(versions)
+    versions = [version for version, _, _ in entries]
+    # Two PRs that bump from the same main pick the same number; the second
+    # one's run (the PR merged into main) then has that entry twice.
+    taken = sorted({version for version in versions if versions.count(version) > 1}, key=_parts)
+    assert not taken, (
+        f"CHANGELOG.md has {', '.join(taken)} more than once: another PR took that version on main. "
+        f"Take the next free one: {VERSION_FILES}, plus its entry here")
+    parts = [_parts(version) for version in versions]
+    assert parts == sorted(parts, reverse=True), "CHANGELOG.md entries go newest first"
     for version, date, _ in entries:
         datetime.date.fromisoformat(date)
 
