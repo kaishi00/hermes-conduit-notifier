@@ -201,11 +201,12 @@ def _post_llm_call(**kwargs: Any) -> None:
     started = _take_turn_start(kwargs.get("turn_id"))
     # A cron run says nothing when the user muted its job or it answered
     # [SILENT] by Hermes' cron rule ("[SILENT] No changes" too). A Pulse
-    # probe or report is Pulse working on its own: nothing to tell the phone.
-    # A Pulse follow-up is news for the user, so it goes like any reply.
+    # probe, or a report that found nothing, is Pulse working on its own:
+    # nothing to tell the phone. A follow-up, a brief or a report's items are
+    # news for the user, so they go like any reply.
     pulse_turn = pulse.is_pulse_turn(session_id, kwargs.get("turn_id"))
     quiet = (is_silent_response(response) or cron_runs.quiet(session_id, kwargs.get("task_id"), response)
-             or (pulse_turn and not pulse.pushes(session_id, kwargs.get("turn_id"))))
+             or (pulse_turn and not pulse.pushes(session_id, kwargs.get("turn_id"), response)))
     chat_title = "" if quiet else _session_title(session_id)
     ready = None if quiet else push_event(
         "response.ready",
@@ -215,7 +216,7 @@ def _post_llm_call(**kwargs: Any) -> None:
         title=chat_title,
         title_label="response.ready",
         session_title=chat_title,
-        body=plain_text(response),
+        body=plain_text(pulse.push_body(session_id, kwargs.get("turn_id"), response) if pulse_turn else response),
     )
     # A quick reply in a chat Hermes Desktop has selected: the user most
     # likely watched it arrive there (#87); so did one in a chat Conduit has

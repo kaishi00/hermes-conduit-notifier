@@ -445,13 +445,19 @@ def test_a_delivered_brief_lands_on_the_pulse_screen_as_hermes_wrote_it(live):
         control.rate(live.store, brief_card["id"], "up")
 
 
-def test_a_requested_report_lands_on_the_pulse_screen_without_a_push(live):
+def test_a_requested_report_lands_on_the_pulse_screen_and_pushes_its_items(live):
     live.store.set("report_requested", True)
     pulse.tick()
     [attempt] = live.store.in_flight()
     assert attempt["kind"] == "report"
     pulse._mark_turn(SID, "turn-r", attempt["tag"])
     assert pulse.pushes(SID, "turn-r") is False
+    assert pulse.pushes(SID, "turn-r", "Nothing worth bringing up right now.") is False
+    # A report that brought something up tells the phone, in plain lines.
+    reply = "1. [date] Dentist Friday at 9\n2. [promise] Send the deck #4"
+    assert pulse.pushes(SID, "turn-r", reply) is True
+    assert pulse.push_body(SID, "turn-r", reply) == "Dentist Friday at 9\nSend the deck"
+    assert pulse.push_body(SID, "other-turn", reply) == reply
     live.db.message("user", attempt["text"])
     reply_id = live.db.message("assistant", "Here's your report.\n1. Deploy: green")
     pulse.tick()

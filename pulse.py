@@ -188,20 +188,37 @@ def is_pulse_turn(session_id: str, turn_id: Any) -> bool:
         return (session_id, turn_id) in _turns
 
 
-def pushes(session_id: str, turn_id: Any) -> bool:
-    """Whether a Pulse turn's reply goes to the phone like any reply: a
-    follow-up or the morning brief does (it's news for the user); a probe
-    or a report doesn't."""
+def _turn_kind(session_id: str, turn_id: Any) -> str:
+    """The kind of attempt a Pulse turn is ("" when it isn't one, or its
+    store can't be read)."""
     if not is_pulse_turn(session_id, turn_id):
-        return False
+        return ""
     with _turns_lock:
         tag = _turns.get((session_id, turn_id))
     try:
         row = open_store().attempt_by_tag(tag) if tag else None
     except Exception:  # noqa: BLE001 — an unreadable store keeps the turn quiet, never breaks the hook
         logger.debug("conduit_push: Pulse couldn't read the turn's attempt", exc_info=True)
-        return False
-    return bool(row) and row["kind"] in (FOLLOWUP, BRIEF)
+        return ""
+    return row["kind"] if row else ""
+
+
+def pushes(session_id: str, turn_id: Any, response: Any = None) -> bool:
+    """Whether a Pulse turn's reply goes to the phone like any reply: a
+    follow-up or the morning brief does (it's news for the user), and so
+    does a report that brought something up (``response``, its items
+    becoming cards); a probe doesn't."""
+    kind = _turn_kind(session_id, turn_id)
+    if kind == REPORT:
+        return bool(learning.report_lines(response if isinstance(response, str) else ""))
+    return kind in (FOLLOWUP, BRIEF)
+
+
+def push_body(session_id: str, turn_id: Any, response: str) -> str:
+    """What a Pulse turn's push says: a report's items, one a line, without
+    the numbers, kinds and remembered-item refs that are for the cards."""
+    lines = learning.report_lines(response) if _turn_kind(session_id, turn_id) == REPORT else []
+    return "\n".join(text for _, text, _ in lines) if lines else response
 
 
 def pre_tool_call(session_id: str, turn_id: Any) -> Optional[dict[str, str]]:

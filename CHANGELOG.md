@@ -20,6 +20,8 @@ checks it). The format is fixed, because Conduit reads it:
   2 no". Each thing it noticed is its own card, labelled with what it is
   about (a date, a promise, a follow-up), with thumbs up and down. Items
   about something Pulse remembers also get Do it and Done.
+- A report that noticed something now sends a notification listing the
+  items. One that found nothing stays quiet.
 
 ## 0.65.2 (2026-10-23)
 
