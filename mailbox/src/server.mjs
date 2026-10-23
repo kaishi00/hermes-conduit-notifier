@@ -167,6 +167,8 @@ export function createMailbox({
     const idempotencyKey = request.headers['idempotency-key'];
     if (idempotencyKey !== undefined && !IDEMPOTENCY_KEY_PATTERN.test(idempotencyKey)) throw new MailboxError('invalid_idempotency_key', 400);
     const body = await readBody(request, limits.maxEnvelopeBytes, 'envelope_too_large');
+    // The owner may have removed the sender, or changed its token, while the body arrived.
+    if (store.senderFor(inbox, tokenHash(bearer[1])) !== sender) throw new MailboxError('unauthorized', 401);
     const receipt = store.put(inbox, sender, body, idempotencyKey ?? null);
     if (!receipt.duplicate) polls.wake(inbox);
     sendJson(response, receipt.duplicate ? 200 : 201, { seq: receipt.seq, expires_at: receipt.expires_at });

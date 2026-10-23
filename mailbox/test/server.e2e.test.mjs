@@ -318,6 +318,31 @@ test('an envelope that says it is too large is refused before it is read', async
   assert.equal(answer?.statusCode, 413);
 });
 
+test('a sender removed or given a new token while its envelope arrives is refused like an unknown token', async (t) => {
+  const { base } = await start(t);
+  const { port } = new URL(base);
+  for (const [change, owned] of [
+    ['removed', (me) => me.call('DELETE', `/v1/inboxes/${me.inbox}/senders/laifu`)],
+    ['given a new token', (me) => me.call('PUT', `/v1/inboxes/${me.inbox}/senders/laifu`, { token_sha256: sha256('laifu-next-token-0123456789') })],
+  ]) {
+    const me = await ownerWithSender(base);
+    const upload = httpRequest({ port, host: '127.0.0.1', method: 'POST', path: `/v1/inboxes/${me.inbox}/envelopes`,
+      headers: { authorization: `Bearer ${LAIFU_TOKEN}`, 'content-length': 6, expect: '100-continue' } });
+    upload.on('error', () => {});
+    // The mailbox asks for the body only once the token has checked out.
+    await once(upload, 'continue');
+    assert.equal((await owned(me)).status, 204, change);
+    upload.end(Buffer.from('sealed'));
+
+    const [answer] = await once(upload, 'response');
+    let text = '';
+    answer.setEncoding('utf8');
+    for await (const chunk of answer) text += chunk;
+    assert.equal(answer.statusCode, 401, change);
+    assert.deepEqual(JSON.parse(text), { error: 'unauthorized' }, change);
+  }
+});
+
 test('an envelope at the size limit is accepted and one byte over is refused', async (t) => {
   const { base } = await start(t, { limits: { maxEnvelopeBytes: 16 } });
   const me = await ownerWithSender(base);
