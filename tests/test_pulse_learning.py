@@ -518,6 +518,8 @@ def test_cards_of_reports_that_brought_nothing_up_are_taken_away(live):
     full = card("Here's what I would have brought up:\n1. [promise] Send the deck #4\nRate them: reply like 1 yes, 2 no.")
     bold = card("Nothing worth bringing up right now, except:\n**1.** [promise] Call Sam")
     assert learning.empty_turn("brief", "Nothing worth bringing up right now.") is False
+    # The words the report is told to use when it has nothing.
+    assert learning._REPORT_NOTHING.search(pulse.report.REPORT_TEXT)
     assert learning.drop_empty_reports(live.store) == 1
     assert {c["id"] for c in live.store.cards()} == {full, bold} and empty not in {c["id"] for c in live.store.cards()}
 

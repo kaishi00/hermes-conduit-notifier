@@ -2295,3 +2295,9 @@ def test_do_it_checks_run_with_follow_ups_off(remembering, monkeypatch):
     pulse._memory_run(store_.path.parent, SID, now, threading.Event())
     assert ran == [("acts", float("inf"))]
     assert store_.get("followup_usage")["checks"] == 1
+    # Follow-ups on: Do it still goes first, outside their budget.
+    store_.set("followups", True)
+    store_.set("followup_today", {"day": day, "tokens": 0})
+    ran.clear()
+    pulse._memory_run(store_.path.parent, SID, now, threading.Event())
+    assert ran == [("acts", float("inf")), "followups"]

@@ -518,9 +518,9 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
         used, cap = _spent_today(pulse_store, "memory", day)
         follow_used, follow_cap = _spent_today(pulse_store, "followup", day)
         follows = bool(pulse_store.get("followups")) and follow_used < follow_cap
-        # Do it is the user's own ask: its chat is read with follow-ups off
-        # or their budget spent (at most a few reads per tap).
-        acts = not follows and bool(pulse_store.due_acts(now))
+        # Do it is the user's own ask: its chat is read whatever follow-ups'
+        # switch or budget (at most a few reads per tap, MAX_CHECKS a run).
+        acts = bool(pulse_store.due_acts(now))
         if used >= cap and not follows and not acts:
             return  # `pulse status` says so
         profiles = pulse_store.get("report_profiles")
