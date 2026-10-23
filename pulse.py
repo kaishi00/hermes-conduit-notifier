@@ -219,12 +219,13 @@ def pushes(session_id: str, turn_id: Any, response: Any = None) -> bool:
 PUSH_TITLES = {FOLLOWUP: ("pulse.followup", "Pulse · Follow-up"), BRIEF: ("pulse.brief", "Your morning brief")}
 
 
-def push_copy(session_id: str, turn_id: Any, response: str) -> dict[str, Any]:
+def push_copy(session_id: str, turn_id: Any, response: Any) -> dict[str, Any]:
     """What a Pulse turn's push says, as push_event takes it: titled by
     what it is, not by Pulse's hidden chat. A report's body is its items,
     one after another, without the numbers, kinds and remembered-item refs
     that are for the cards, and ``count`` says how many there are."""
     kind = _turn_kind(session_id, turn_id)
+    response = response if isinstance(response, str) else ""
     lines = learning.report_lines(response) if kind == REPORT else []
     if lines:
         title = "Pulse noticed something" if len(lines) == 1 else f"Pulse noticed {len(lines)} things"

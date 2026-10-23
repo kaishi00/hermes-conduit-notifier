@@ -311,6 +311,15 @@ def test_old_cards_are_pruned_but_held_ones_stay(live):
     assert sorted(card["created_at"] for card in live.store.cards()) == [0, 3, 4]
 
 
+def test_a_held_card_put_away_is_pruned_like_any_other(live):
+    for n in range(4):
+        live.store.add_card({"kind": "followup", "level": "brief" if n < 2 else "push", "created_at": n})
+    held = min(live.store.cards(), key=lambda card: card["created_at"])
+    assert live.store.dismiss_card(held["id"], True, 10)
+    assert live.store.prune_cards(2) == 1
+    assert sorted(card["created_at"] for card in live.store.cards()) == [1, 2, 3]
+
+
 def test_brief_time_setting(live):
     control.update(live.store, {"brief_time": "7:30"})
     assert live.store.get("brief_time") == "07:30"

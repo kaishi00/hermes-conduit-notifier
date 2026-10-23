@@ -1021,10 +1021,11 @@ class PulseStore:
 
     def prune_cards(self, keep: int, held_before: float = 0.0) -> int:
         """Drops the oldest cards past ``keep``, but not one still held for the
-        brief unless it was made before ``held_before`` (no brief for weeks)."""
+        brief unless it was made before ``held_before`` (no brief for weeks). A
+        card put away with Not now is no longer held."""
         with _lock, self._connect() as conn:
             dropped = conn.execute(
-                "DELETE FROM cards WHERE (NOT (level='brief' AND briefed_at IS NULL "
+                "DELETE FROM cards WHERE (NOT (level='brief' AND briefed_at IS NULL AND dismissed_at IS NULL "
                 "AND id NOT IN (SELECT card_id FROM card_done)) OR created_at < ?) AND id NOT IN "
                 "(SELECT id FROM cards ORDER BY created_at DESC, id DESC LIMIT ?)", (held_before, keep)).rowcount
             conn.execute("DELETE FROM card_done WHERE card_id NOT IN (SELECT id FROM cards)")
