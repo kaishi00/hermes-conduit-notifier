@@ -690,6 +690,13 @@ class PulseStore:
                 (status, closed_by, time.time(), item_id)).rowcount
         return bool(changed)
 
+    def current_item(self, item_id: int) -> Optional[int]:
+        """The open item standing for ``item_id`` now: itself, or what
+        replaced it; None once it's closed."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT profile FROM items WHERE id=?", (item_id,)).fetchone()
+            return _current(conn, item_id, row["profile"]) if row else None
+
     def item(self, item_id: int) -> Optional[dict]:
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
@@ -765,20 +772,32 @@ class PulseStore:
             return int(conn.execute(f"INSERT INTO cards({columns}) VALUES({', '.join('?' * len(row))})",
                                     tuple(row.values())).lastrowid)
 
-    def add_cards(self, rows: Sequence[dict[str, Any]], settings: Optional[dict[str, Any]] = None) -> list[int]:
-        """Adds these cards in one transaction, all or none, with ``settings``
-        set in it too (a mark that they were added can't be lost apart)."""
+    def add_cards(self, rows: Sequence[dict[str, Any]], *, attempt: str = "", marks: Sequence[str] = (),
+                  keep: int = 50) -> list[int]:
+        """Adds these cards in one transaction, all or none. With ``attempt``,
+        it's appended to each list setting in ``marks`` (the last ``keep``)
+        in the same write, so the mark can't be lost apart from the cards;
+        and an attempt the first of them already holds adds nothing (another
+        process got there first)."""
         for row in rows:
             _check_columns(row, CARD_COLUMNS)
         with _lock, self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
+                lists = {}
+                for key in marks if attempt else ():
+                    found = conn.execute("SELECT value_json FROM settings WHERE key=?", (key,)).fetchone()
+                    value = json.loads(found["value_json"]) if found else None
+                    lists[key] = [str(entry) for entry in value] if isinstance(value, list) else []
+                if marks and attempt and attempt in lists[marks[0]]:
+                    conn.execute("ROLLBACK")
+                    return []
                 ids = [int(conn.execute(f"INSERT INTO cards({', '.join(row)}) VALUES({', '.join('?' * len(row))})",
                                         tuple(row.values())).lastrowid) for row in rows]
-                for key, value in (settings or {}).items():
+                for key, value in lists.items():
                     conn.execute("INSERT INTO settings(key, value_json) VALUES(?, ?) "
                                  "ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json",
-                                 (key, json.dumps(value)))
+                                 (key, json.dumps((value + [attempt])[-keep:])))
                 conn.execute("COMMIT")
             except BaseException:
                 conn.execute("ROLLBACK")

@@ -375,16 +375,12 @@ def _turn_cards(pulse_store: store.PulseStore, home: Path, changed: list[dict], 
                 # Each item its own card; a reply in some other shape stays one
                 # card. The cards and the marks that they landed are one write,
                 # so a retry never adds them twice.
-                split = pulse_store.get(store.SPLIT_REPORTS)
-                split = [str(attempt) for attempt in split] if isinstance(split, list) else []
-                marked = (done + [attempt])[-TURN_CARDS_DONE_KEEP:]
                 learning.add_noticed_cards(
                     pulse_store, turn=turn, lines=lines, chat_id=row["session_key"], chat_title=title,
                     shown=report.shown_items(turn.prompt), kinds=report.KINDS,
                     item_chat_title=lambda item: followup.chat_title(home, item), now=now,
-                    settings={TURN_CARDS_DONE: marked,
-                              store.SPLIT_REPORTS: (split + [attempt])[-TURN_CARDS_DONE_KEEP:]})
-                done = marked
+                    attempt=str(attempt), marks=(TURN_CARDS_DONE, store.SPLIT_REPORTS), keep=TURN_CARDS_DONE_KEEP)
+                done = (done + [attempt])[-TURN_CARDS_DONE_KEEP:]
                 continue
             card = turn is not None and learning.add_turn_card(
                 pulse_store, kind=row["kind"], chat_id=row["session_key"], chat_title=title, turn=turn,

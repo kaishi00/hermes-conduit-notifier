@@ -186,16 +186,17 @@ def report_lines(reply: Optional[str]) -> list[tuple[str, str, Optional[int]]]:
 
 def add_noticed_cards(pulse_store: store.PulseStore, *, turn: Any, lines: list[tuple[str, str, Optional[int]]],
                       chat_id: str, chat_title: str, shown: set[int], kinds: tuple[str, ...],
-                      item_chat_title: Callable[[dict], str], now: float,
-                      settings: Optional[dict[str, Any]] = None) -> list[int]:
+                      item_chat_title: Callable[[dict], str], now: float, attempt: str = "",
+                      marks: tuple[str, ...] = (), keep: int = 50) -> list[int]:
     """A delivered report's items (``report_lines``) as cards, one each, all
-    at once, with ``settings`` set in the same write. An item drawn from a
-    remembered thing (its "#n", shown in the report) points at the chat that
-    thing came from, so Do it and Done work on it; the rest point at the
-    report in the Pulse chat."""
+    at once, marked as ``add_cards`` marks them. An item drawn from a
+    remembered thing (its "#n", shown in the report; what replaced it since,
+    if anything) points at the chat that thing came from, so Do it and Done
+    work on it; the rest point at the report in the Pulse chat."""
     rows = []
     for kind, text, ref in lines:
-        item = pulse_store.item(ref) if ref is not None and ref in shown else None
+        current = pulse_store.current_item(ref) if ref is not None and ref in shown else None
+        item = pulse_store.item(current) if current is not None else None
         row: dict[str, Any] = {
             "kind": NOTICED, "level": "screen", "topic": kind if kind in kinds else "other",
             "news": _clip(text, NOTICED_NEWS_LIMIT), "why": NOTICED_WHY, "created_at": now}
@@ -207,7 +208,7 @@ def add_noticed_cards(pulse_store: store.PulseStore, *, turn: Any, lines: list[t
             row.update(item_id=None, title=_clip(text, 300), chat_id=turn.session_id or chat_id,
                        message_id=turn.reply_id, chat_title=_clip(chat_title, 120))
         rows.append(row)
-    return pulse_store.add_cards(rows, settings)
+    return pulse_store.add_cards(rows, attempt=attempt, marks=marks, keep=keep)
 
 
 def card_entry(card: dict, done: Optional[dict] = None) -> dict[str, Any]:

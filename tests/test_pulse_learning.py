@@ -558,7 +558,7 @@ def test_report_item_cards_and_their_mark_land_together(live, monkeypatch):
     # The mark fails to land: the cards don't either, and the next tick adds them once.
     real = store.PulseStore.add_cards
 
-    def busy(self, rows, settings=None):
+    def busy(self, rows, **marks):
         raise sqlite3.OperationalError("database is locked")
 
     monkeypatch.setattr(store.PulseStore, "add_cards", busy)
@@ -567,6 +567,10 @@ def test_report_item_cards_and_their_mark_land_together(live, monkeypatch):
     monkeypatch.setattr(store.PulseStore, "add_cards", real)
     pulse.tick()
     pulse.tick()
+    assert len(live.store.cards()) == 2
+    # Another process that split it too, from a stale read, adds nothing.
+    row = {"kind": "noticed", "level": "screen", "news": "again", "created_at": time.time()}
+    assert live.store.add_cards([row], attempt=attempt["attempt_id"], marks=(pulse.TURN_CARDS_DONE,)) == []
     assert len(live.store.cards()) == 2
 
 
