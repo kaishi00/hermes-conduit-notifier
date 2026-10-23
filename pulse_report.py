@@ -341,7 +341,6 @@ def zone_for(name: Optional[str]) -> tzinfo:
     return datetime.now().astimezone().tzinfo or timezone.utc
 
 
-NOTICED = "noticed"  # pulse_learning.NOTICED: a report item's own card
 KIND_ORDER = ("promise", "commitment", "watch", "intention", "interest", "fact")
 
 
@@ -352,7 +351,7 @@ def rating_counts(pulse_store: store.PulseStore) -> dict[str, tuple[int, int]]:
         for rating in ratings_from_json(row["ratings_json"]):
             pair = counts.setdefault(rating.kind, [0, 0])
             pair[0 if rating.useful else 1] += 1
-    for card in pulse_store.rated_cards(NOTICED):  # a report item rated on its own card
+    for card in pulse_store.rated_cards(store.NOTICED):  # a report item rated on its own card
         pair = counts.setdefault(card["topic"] or "other", [0, 0])
         pair[0 if card["rating"] == "up" else 1] += 1
     return {kind: (yes, no) for kind, (yes, no) in sorted(counts.items())}
@@ -366,7 +365,7 @@ def rated_not_useful(pulse_store: store.PulseStore) -> dict[int, float]:
         for rating in ratings_from_json(row["ratings_json"]):
             if rating.memory is not None and row["updated_at"] >= latest.get(rating.memory, (-1.0, True))[0]:
                 latest[rating.memory] = (row["updated_at"], rating.useful)
-    for card in pulse_store.rated_cards(NOTICED):
+    for card in pulse_store.rated_cards(store.NOTICED):
         at = card["rated_at"] or 0.0
         if card["item_id"] is not None and at >= latest.get(card["item_id"], (-1.0, True))[0]:
             latest[card["item_id"]] = (at, card["rating"] == "up")

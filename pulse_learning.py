@@ -25,7 +25,7 @@ closed stay closed, checks already brought forward stay sooner).
 from __future__ import annotations
 
 import re
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from . import pulse_store as store
 
@@ -161,12 +161,13 @@ def drop_empty_reports(pulse_store: store.PulseStore) -> int:
 
 
 # One item of a report, as its own card (the report's lines, split).
-NOTICED = "noticed"
+NOTICED = store.NOTICED
 NOTICED_NEWS_LIMIT = 1200
 NOTICED_WHY = "From your Pulse report: something Hermes noticed in your chats, calendar or notes."
 # "1. [date] text #12", also bold or bulleted; the number, the kind, the rest.
 _REPORT_LINE = re.compile(r"^\s*(?:[-*]\s+)?(?:\*\*)?(\d{1,2})[.)](?:\*\*)?\s*\[([A-Za-z-]+)\]\s*(.+?)\s*$", re.MULTILINE)
 _LINE_REF = re.compile(r"\s*#(\d{1,9})\W*$")
+_ANY_REF = re.compile(r"#\d")
 
 
 def report_lines(reply: Optional[str]) -> list[tuple[str, str, Optional[int]]]:
@@ -177,19 +178,23 @@ def report_lines(reply: Optional[str]) -> list[tuple[str, str, Optional[int]]]:
         if number in numbers:
             continue
         numbers.add(number)
-        ref = _LINE_REF.search(text)
-        lines.append((kind.lower(), _LINE_REF.sub("", text).strip(), int(ref.group(1)) if ref else None))
+        # A "#n" counts only as the line's one: "PR #12 needs #4" links nothing.
+        ref = _LINE_REF.search(text) if len(_ANY_REF.findall(text)) == 1 else None
+        lines.append((kind.lower(), (text[:ref.start()] if ref else text).strip(), int(ref.group(1)) if ref else None))
     return [line for line in lines if line[1]]
 
 
-def add_noticed_cards(pulse_store: store.PulseStore, *, turn: Any, chat_id: str, chat_title: str,
-                      shown: set[int], kinds: tuple[str, ...], item_chat_title: Any, now: float) -> list[int]:
-    """A delivered report's items as cards, one each, all at once. An item
-    drawn from a remembered thing (its "#n", shown in the report) points at
-    the chat that thing came from, so Do it and Done work on it; the rest
-    point at the report in the Pulse chat."""
+def add_noticed_cards(pulse_store: store.PulseStore, *, turn: Any, lines: list[tuple[str, str, Optional[int]]],
+                      chat_id: str, chat_title: str, shown: set[int], kinds: tuple[str, ...],
+                      item_chat_title: Callable[[dict], str], now: float,
+                      settings: Optional[dict[str, Any]] = None) -> list[int]:
+    """A delivered report's items (``report_lines``) as cards, one each, all
+    at once, with ``settings`` set in the same write. An item drawn from a
+    remembered thing (its "#n", shown in the report) points at the chat that
+    thing came from, so Do it and Done work on it; the rest point at the
+    report in the Pulse chat."""
     rows = []
-    for kind, text, ref in report_lines(turn.reply):
+    for kind, text, ref in lines:
         item = pulse_store.item(ref) if ref is not None and ref in shown else None
         row: dict[str, Any] = {
             "kind": NOTICED, "level": "screen", "topic": kind if kind in kinds else "other",
@@ -202,7 +207,7 @@ def add_noticed_cards(pulse_store: store.PulseStore, *, turn: Any, chat_id: str,
             row.update(item_id=None, title=_clip(text, 300), chat_id=turn.session_id or chat_id,
                        message_id=turn.reply_id, chat_title=_clip(chat_title, 120))
         rows.append(row)
-    return pulse_store.add_cards(rows)
+    return pulse_store.add_cards(rows, settings)
 
 
 def card_entry(card: dict, done: Optional[dict] = None) -> dict[str, Any]:
@@ -319,6 +324,8 @@ def rate(pulse_store: store.PulseStore, card_id: Any, rating: Any, reason: Any =
         raise Invalid("reason")
     if card["kind"] not in DEFAULT_LEVELS and card["kind"] != NOTICED:  # checked before the rating is kept
         raise Invalid("card")
+    if reason and card["kind"] == NOTICED:  # no ladder or rule for a reason to move
+        raise Invalid("reason")
     while not pulse_store.rate_card(card, rating=rating, reason=reason, now=now):
         card = pulse_store.card(card["id"])  # rated meanwhile: count from what it says now
         if card is None:

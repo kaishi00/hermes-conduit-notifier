@@ -1250,6 +1250,8 @@ def test_ratings_are_read_back_and_counted(live, db):
     db.message("user", "3 yes")  # belongs to the next Pulse turn
     pulse.tick(now=time.time() + 1)
     assert live.store.attempt_by_tag(row["tag"])["state"] == store.DELIVERED
+    assert pulse.rating_counts(live.store) == {}  # split into cards: rated there, not by typing
+    live.store.set(store.SPLIT_REPORTS, [])  # as a report from before item cards
     pulse._last_ratings = 0.0
     pulse.tick(now=time.time() + 2)
     assert pulse.rating_counts(live.store) == {"commitment": (1, 0), "promise": (0, 1)}
@@ -1273,6 +1275,7 @@ def test_a_no_on_a_remembered_item_keeps_it_out_of_later_reports(live, db):
     db.message("user", "1 no, 2 no")
     pulse.tick(now=time.time() + 1)
     assert f"#{kept}" not in live.store.attempt_by_tag(row["tag"])["text"]  # trimmed once delivered
+    live.store.set(store.SPLIT_REPORTS, [])  # as a report from before item cards, rated by typing
     pulse._last_ratings = 0.0
     pulse.tick(now=time.time() + 2)
     assert set(report.rated_not_useful(live.store)) == {kept}  # #99 wasn't shown, so it names nothing

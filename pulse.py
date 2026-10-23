@@ -353,14 +353,21 @@ def _turn_cards(pulse_store: store.PulseStore, home: Path, changed: list[dict], 
                 done = (done + [attempt])[-TURN_CARDS_DONE_KEEP:]
                 pulse_store.set(TURN_CARDS_DONE, done)
                 continue
-            if turn is not None and row["kind"] == REPORT and learning.report_lines(turn.reply):
-                # Each item its own card; a reply in some other shape stays one card.
+            lines = learning.report_lines(turn.reply) if turn is not None and row["kind"] == REPORT else []
+            if lines:
+                # Each item its own card; a reply in some other shape stays one
+                # card. The cards and the marks that they landed are one write,
+                # so a retry never adds them twice.
+                split = pulse_store.get(store.SPLIT_REPORTS)
+                split = [str(attempt) for attempt in split] if isinstance(split, list) else []
+                marked = (done + [attempt])[-TURN_CARDS_DONE_KEEP:]
                 learning.add_noticed_cards(
-                    pulse_store, turn=turn, chat_id=row["session_key"], chat_title=title,
+                    pulse_store, turn=turn, lines=lines, chat_id=row["session_key"], chat_title=title,
                     shown=report.shown_items(turn.prompt), kinds=report.KINDS,
-                    item_chat_title=lambda item: followup.chat_title(home, item), now=now)
-                done = (done + [attempt])[-TURN_CARDS_DONE_KEEP:]
-                pulse_store.set(TURN_CARDS_DONE, done)
+                    item_chat_title=lambda item: followup.chat_title(home, item), now=now,
+                    settings={TURN_CARDS_DONE: marked,
+                              store.SPLIT_REPORTS: (split + [attempt])[-TURN_CARDS_DONE_KEEP:]})
+                done = marked
                 continue
             card = turn is not None and learning.add_turn_card(
                 pulse_store, kind=row["kind"], chat_id=row["session_key"], chat_title=title, turn=turn,
@@ -686,8 +693,11 @@ def _collect_ratings(pulse_store: store.PulseStore, home: Path, now: float) -> N
     if now - _last_ratings < RATINGS_EVERY_S:
         return
     _last_ratings = now
+    # A report split into cards is rated on them, not by typing.
+    split = pulse_store.get(store.SPLIT_REPORTS)
+    split = {str(attempt) for attempt in split} if isinstance(split, list) else set()
     for row in pulse_store.attempts_since(REPORT, now - RATINGS_DAYS * 86400):
-        if row["state"] != store.DELIVERED:
+        if row["state"] != store.DELIVERED or str(row["attempt_id"]) in split:
             continue
         try:
             items, ratings = report.ratings_after(home, chat_id=row["session_key"], tag=row["tag"],

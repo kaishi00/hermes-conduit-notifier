@@ -529,6 +529,42 @@ def test_a_report_becomes_one_card_per_item(live, monkeypatch):
     assert live.store.item(item_id)["status"] == "done"
     with pytest.raises(control.Refused):
         control.done(live.store, date["id"])  # nothing remembered behind it
+    # A reason has nothing to move on an item's card.
+    with pytest.raises(control.Refused):
+        control.rate(live.store, odd["id"], "down", "too_late")
+    # Typed ratings of a split report aren't read: an item counts once.
+    assert live.store.get(store.SPLIT_REPORTS) == [attempt["attempt_id"]]
+    live.db.message("user", "2 yes")
+    monkeypatch.setattr(pulse, "_last_ratings", 0.0)
+    pulse._collect_ratings(live.store, live.home, time.time())
+    assert pulse.report.rating_counts(live.store) == {"date": (1, 0), "promise": (0, 1)}
+
+
+def test_report_item_cards_and_their_mark_land_together(live, monkeypatch):
+    live.store.set("report_requested", True)
+    pulse.tick()
+    [attempt] = live.store.in_flight()
+    live.db.message("user", attempt["text"])
+    live.db.message("assistant", "1. [date] Dentist Friday\n2. [fact] The repo moved")
+    # The mark fails to land: the cards don't either, and the next tick adds them once.
+    real = store.PulseStore.add_cards
+
+    def busy(self, rows, settings=None):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(store.PulseStore, "add_cards", busy)
+    pulse.tick()
+    assert live.store.cards() == [] and not live.store.get(pulse.TURN_CARDS_DONE)
+    monkeypatch.setattr(store.PulseStore, "add_cards", real)
+    pulse.tick()
+    pulse.tick()
+    assert len(live.store.cards()) == 2
+
+
+def test_a_line_naming_more_than_one_number_links_nothing():
+    assert learning.report_lines("1. [interest] PR #12 is waiting on #4") == [
+        ("interest", "PR #12 is waiting on #4", None)]
+    assert learning.report_lines("1. [promise] Send the deck #4") == [("promise", "Send the deck", 4)]
 
 
 def test_report_text_asks_for_cards_not_a_shadow():

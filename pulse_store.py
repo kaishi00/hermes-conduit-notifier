@@ -257,6 +257,12 @@ def _check_marks(marks: str) -> None:
     if marks not in MARKS:  # named into SQL
         raise ValueError(f"unknown marks table {marks!r}")
 
+# A report's item on its own card (pulse_learning.add_noticed_cards).
+NOTICED = "noticed"
+# The report attempts split into such cards, newest last: their typed
+# ratings aren't read, so an item isn't counted twice.
+SPLIT_REPORTS = "split_reports"
+
 CARD_COLUMNS = ("kind", "item_id", "level", "title", "quote", "news", "why", "profile", "chat_id", "chat_title",
                 "message_id", "topic", "created_at")
 LESSON_COLUMNS = ("kind", "what", "value", "profile", "chat_id", "card_id", "cause", "created_at")
@@ -286,7 +292,12 @@ class PulseStore:
             conn.executescript(_SCHEMA)
             # A store from before cards had a topic.
             if "topic" not in {row[1] for row in conn.execute("PRAGMA table_info(cards)")}:
-                conn.execute("ALTER TABLE cards ADD COLUMN topic TEXT NOT NULL DEFAULT ''")
+                try:
+                    conn.execute("ALTER TABLE cards ADD COLUMN topic TEXT NOT NULL DEFAULT ''")
+                except sqlite3.OperationalError:
+                    # Another process opening the same store added it first.
+                    if "topic" not in {row[1] for row in conn.execute("PRAGMA table_info(cards)")}:
+                        raise
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.path), timeout=self.busy_timeout_s, isolation_level=None)
@@ -754,8 +765,9 @@ class PulseStore:
             return int(conn.execute(f"INSERT INTO cards({columns}) VALUES({', '.join('?' * len(row))})",
                                     tuple(row.values())).lastrowid)
 
-    def add_cards(self, rows: Sequence[dict[str, Any]]) -> list[int]:
-        """Adds these cards in one transaction: all or none."""
+    def add_cards(self, rows: Sequence[dict[str, Any]], settings: Optional[dict[str, Any]] = None) -> list[int]:
+        """Adds these cards in one transaction, all or none, with ``settings``
+        set in it too (a mark that they were added can't be lost apart)."""
         for row in rows:
             _check_columns(row, CARD_COLUMNS)
         with _lock, self._connect() as conn:
@@ -763,6 +775,10 @@ class PulseStore:
             try:
                 ids = [int(conn.execute(f"INSERT INTO cards({', '.join(row)}) VALUES({', '.join('?' * len(row))})",
                                         tuple(row.values())).lastrowid) for row in rows]
+                for key, value in (settings or {}).items():
+                    conn.execute("INSERT INTO settings(key, value_json) VALUES(?, ?) "
+                                 "ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json",
+                                 (key, json.dumps(value)))
                 conn.execute("COMMIT")
             except BaseException:
                 conn.execute("ROLLBACK")
