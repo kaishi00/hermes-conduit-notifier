@@ -78,7 +78,7 @@ def nudge(pulse_store: store.PulseStore) -> str:
 
 
 def nudging(pulse_store: store.PulseStore) -> dict[str, Any]:
-    return NUDGES[nudge(pulse_store)]
+    return dict(NUDGES[nudge(pulse_store)])
 
 
 def pace(pulse_store: store.PulseStore, kind: str) -> float:

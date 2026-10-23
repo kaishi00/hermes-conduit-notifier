@@ -469,6 +469,8 @@ def _pulse_nudge(pulse_store: Any, value: str) -> int:
             return 2
     level = pulse_learning.nudge(pulse_store)
     print(f"Pulse nudges: {level} ({NUDGE_TEXT[level]}).")
+    if value:
+        print("Checks already booked keep their time and take the new pace from their next check.")
     return 0
 
 
