@@ -484,7 +484,8 @@ def test_a_requested_report_lands_on_the_pulse_screen_and_pushes_its_items(live)
     assert pulse.push_copy(SID, "turn-r", reply) == {
         "title_label": "pulse.noticed", "title": "Pulse noticed 2 things", "count": 2,
         "body": "Dentist Friday at 9 · Send the deck"}
-    assert pulse.push_copy(SID, "turn-r", "1. [date] Dentist\n   Friday")["title"] == "Pulse noticed something"
+    one = pulse.push_copy(SID, "turn-r", "1. [date] Dentist\n   Friday")
+    assert one["title"] == "Pulse noticed something" and "count" not in one
     assert pulse.push_copy(SID, "other-turn", reply)["body"] == reply
     live.db.message("user", attempt["text"])
     reply_id = live.db.message("assistant", "Here's your report.\n1. Deploy: green")
@@ -745,6 +746,8 @@ def test_cli_marks_a_card_done_and_undoes_it(live, monkeypatch, capsys):
     assert run("cards") == 0 and "(done)" in capsys.readouterr().out
     assert run("done", str(card["id"]), "undo") == 0 and "Back as it was" in capsys.readouterr().out
     assert run("done", "x") == 2 and run("done", str(card["id"]), "maybe") == 2
+    live.store.dismiss_card(card["id"], True, 5)
+    assert run("cards") == 0 and "(put away)" in capsys.readouterr().out
 
 
 def test_pruned_cards_take_their_done_marks(live):

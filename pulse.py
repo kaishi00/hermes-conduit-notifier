@@ -223,14 +223,16 @@ def push_copy(session_id: str, turn_id: Any, response: Any) -> dict[str, Any]:
     """What a Pulse turn's push says, as push_event takes it: titled by
     what it is, not by Pulse's hidden chat. A report's body is its items,
     one after another, without the numbers, kinds and remembered-item refs
-    that are for the cards, and ``count`` says how many there are."""
+    that are for the cards, and ``count`` says how many there are (two or more)."""
     kind = _turn_kind(session_id, turn_id)
     response = response if isinstance(response, str) else ""
     lines = learning.report_lines(response) if kind == REPORT else []
     if lines:
-        title = "Pulse noticed something" if len(lines) == 1 else f"Pulse noticed {len(lines)} things"
-        return {"title_label": "pulse.noticed", "title": title, "count": len(lines),
+        copy = {"title_label": "pulse.noticed", "title": "Pulse noticed something",
                 "body": " · ".join(" ".join(text.split()) for _, text, _ in lines)}
+        if len(lines) > 1:  # one thing is "something", with no count
+            copy.update(title=f"Pulse noticed {len(lines)} things", count=len(lines))
+        return copy
     label, title = PUSH_TITLES.get(kind, ("response.ready", "Pulse"))
     return {"title_label": label, "title": title, "body": response}
 

@@ -562,6 +562,7 @@ def _pulse_learning(pulse_store: Any, action: str, value: str, extra: str) -> in
         for card in cards:
             rated = f" (rated {card['rating']}{', ' + card['reason'] if card['reason'] else ''})" if card["rating"] else ""
             finished = " (done)" if card["id"] in marks else ""
+            finished += " (put away)" if card.get("dismissed_at") else ""
             topic = f" [{card['topic']}]" if card["topic"] else ""
             print(_printable(f"#{card['id']} [{card['level']}]{topic} {card['title']}: {card['news']}{rated}{finished}"))
         return 0
