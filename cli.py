@@ -216,7 +216,9 @@ def _pulse(args: argparse.Namespace) -> int:
     action = args.pulse_action
     # Follow-ups are on by default, so even `followups on|off` needs no file yet.
     listing = action in ("followups", "cards", "rate", "learned") \
-        or (action == "memory" and (args.value or "").strip() not in ("on", "off"))
+        or (action == "memory" and (args.value or "").strip() not in ("on", "off")) \
+        or (action == "nudge" and not (args.value or "").strip()) \
+        or (action == "budget" and not str(getattr(args, "extra", "") or "").strip())
     if (action in ("status", "probe", "off", "outcomes") or listing) and not (Path(home) / pulse_delivery.store.DB_NAME).exists():
         # Never turned on: say so without leaving a file behind.
         print("Pulse: off (never turned on). `hermes conduit-push pulse on` to start it."

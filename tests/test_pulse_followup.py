@@ -668,7 +668,7 @@ def test_the_nudge_level_sets_reminders_pace_budget_and_the_reports_bar(live, ca
     control = _load("conduit_push.pulse_control", ROOT / "pulse_control.py")
     learning, report = followup.learning, followup.report
     assert learning.nudge(live.store) == "balanced" and pulse._spent_today(live.store, "followup", "")[1] == 150_000
-    for bad in ({"nudge": "loud"}, {"memory_daily_tokens": 5}, {"memory_daily_tokens": None},
+    for bad in ({"nudge": "loud"}, {"nudge": []}, {"memory_daily_tokens": 5}, {"memory_daily_tokens": None},
                 {"followup_daily_tokens": True}, {"followup_daily_tokens": 10_000_000}):
         with pytest.raises(control.Refused):
             control.update(live.store, bad)

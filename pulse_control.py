@@ -224,7 +224,7 @@ def update(pulse_store: Any, body: Any) -> None:
     if "model" in body:
         changes[pulse.MODEL] = _model(body["model"])
     if "nudge" in body:
-        if body["nudge"] not in pulse_learning.NUDGES:
+        if not isinstance(body["nudge"], str) or body["nudge"] not in pulse_learning.NUDGES:
             raise Refused("invalid", field="nudge")
         changes["nudge"] = body["nudge"]
     for field in ("memory_daily_tokens", "followup_daily_tokens"):
