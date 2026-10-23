@@ -499,3 +499,79 @@ def test_feed_names_no_chat_while_pulse_is_off(live):
     assert control.feed(live.store, live.home)["home_chat_id"] == SID
     live.store.set("enabled", False)
     assert control.feed(live.store, live.home)["home_chat_id"] == ""
+
+
+def test_done_closes_the_promise_without_a_rating_and_undo_puts_it_back(live):
+    item_id = promise(live)
+    check_now(live, llm_saying(decision="wait", news="", why="not yet"), now=time.time() + followup.FIRST_CHECK_S + 1)
+    before = live.store.followup(item_id)
+    assert before["decision"] == "wait" and before["next_check_at"] is not None
+    card_id = learning.add_card(live.store, kind="followup", item=live.store.item(item_id), level_name="screen",
+                                news="Still waiting on the deploy.", why="", chat_title="Deploy", now=time.time())
+    assert control.done(live.store, card_id) is True
+    assert control.done(live.store, card_id) is False  # already
+    item = live.store.item(item_id)
+    assert item["status"] == "done" and item["closed_by"] == learning.DONE_BY
+    assert live.store.followup(item_id)["next_check_at"] is None
+    [entry] = [card for card in control.feed(live.store)["cards"] if card["id"] == card_id]
+    assert entry["done_at"] is not None and entry["rating"] == "" and entry["seen_at"] is not None
+    assert learning.learned(live.store) == []  # no lesson: Pulse was right to bring it up
+    assert control.done(live.store, card_id, False) is True
+    item = live.store.item(item_id)
+    assert item["status"] == "open" and item["closed_by"] == ""
+    after = live.store.followup(item_id)
+    assert after["decision"] == "wait" and after["next_check_at"] >= before["next_check_at"] - 1
+    assert control.feed(live.store)["cards"][0]["done_at"] is None
+    assert control.done(live.store, card_id, False) is False
+
+
+def test_done_upgrades_a_reminded_or_told_card_and_undo_restores_that(live):
+    card = told_card(live)
+    item = live.store.item(card["item_id"])
+    told_status, told_by = item["status"], item["closed_by"]
+    assert control.done(live.store, card["id"]) is True
+    assert live.store.item(card["item_id"])["status"] == "done"
+    assert control.done(live.store, card["id"], False) is True
+    item = live.store.item(card["item_id"])
+    assert (item["status"], item["closed_by"]) == (told_status, told_by)
+
+
+def test_a_done_card_leaves_the_morning_brief(live):
+    brief_later(live)
+    control.set_level(live.store, "followup", "brief")
+    tell(live)
+    pulse.tick()
+    [card] = live.store.cards()
+    assert live.store.held_count() == 1
+    control.done(live.store, card["id"])
+    assert live.store.held_count() == 0 and live.store.held_cards(10) == []
+
+
+def test_done_refuses_what_isnt_a_follow_up_card(live):
+    card = told_card(live)
+    for card_id, value, field in ((999, True, "card"), ("1", True, "card"), (True, True, "card"),
+                                  (card["id"], "yes", "done"), (card["id"], 1, "done")):
+        with pytest.raises(control.Refused) as refused:
+            control.done(live.store, card_id, value)
+        assert refused.value.data == {"field": field}
+
+
+def test_cli_marks_a_card_done_and_undoes_it(live, monkeypatch, capsys):
+    import sys
+    import types
+    monkeypatch.setitem(sys.modules, "hermes_constants", types.SimpleNamespace(get_hermes_home=lambda: live.home))
+    card = told_card(live)
+    run = lambda *argv: cli._pulse(types.SimpleNamespace(pulse_action=argv[0], value=argv[1] if len(argv) > 1 else "",
+                                                        extra=argv[2] if len(argv) > 2 else ""))
+    assert run("done", str(card["id"])) == 0 and "Marked done" in capsys.readouterr().out
+    assert run("cards") == 0 and "(done)" in capsys.readouterr().out
+    assert run("done", str(card["id"]), "undo") == 0 and "Back as it was" in capsys.readouterr().out
+    assert run("done", "x") == 2 and run("done", str(card["id"]), "maybe") == 2
+
+
+def test_pruned_cards_take_their_done_marks(live):
+    card = told_card(live)
+    control.done(live.store, card["id"])
+    told_card(live, "The build failed.")
+    live.store.prune_cards(1)
+    assert live.store.done_marks([card["id"]]) == {}

@@ -24,6 +24,7 @@ closed stay closed, checks already brought forward stay sooner).
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Optional
 
@@ -140,10 +141,59 @@ def add_turn_card(pulse_store: store.PulseStore, *, kind: str, chat_id: str, cha
         "created_at": now})
 
 
-def card_entry(card: dict) -> dict[str, Any]:
-    return {key: card[key] for key in ("id", "kind", "item_id", "level", "title", "quote", "news", "why", "profile",
-                                       "chat_id", "chat_title", "message_id", "created_at", "seen_at", "briefed_at",
-                                       "rating", "reason", "rated_at")}
+def card_entry(card: dict, done_at: Optional[float] = None) -> dict[str, Any]:
+    entry = {key: card[key] for key in ("id", "kind", "item_id", "level", "title", "quote", "news", "why", "profile",
+                                        "chat_id", "chat_title", "message_id", "created_at", "seen_at", "briefed_at",
+                                        "rating", "reason", "rated_at")}
+    return {**entry, "done_at": done_at}
+
+
+# Done -------------------------------------------------------------------------
+
+# Who closed an item the user marked done on the Pulse screen; Undo only puts
+# back an item this still holds closed.
+DONE_BY = "user: done on the Pulse screen"
+
+
+def done(pulse_store: store.PulseStore, card_id: Any, is_done: Any, *, now: float) -> bool:
+    """Marks a follow-up card done, or takes the mark off (Undo); whether it
+    changed. Done closes its promise as done and stops its checks, without a
+    rating: Pulse was right to bring it up, the user just hadn't said. Undo
+    puts the promise and its checks back as they were."""
+    card = pulse_store.card(card_id) if isinstance(card_id, int) and not isinstance(card_id, bool) else None
+    if card is None or card["kind"] != "followup" or card["item_id"] is None:
+        raise Invalid("card")
+    if not isinstance(is_done, bool):
+        raise Invalid("done")
+    item_id = card["item_id"]
+    if is_done:
+        item, followup = pulse_store.item(item_id), pulse_store.followup(item_id)
+        prior = {"status": item["status"], "closed_by": item["closed_by"], "closed_at": item["closed_at"]} if item else {}
+        if followup is not None:
+            prior.update(decision=followup["decision"], next_check_at=followup["next_check_at"])
+        if not pulse_store.mark_done(card["id"], json.dumps(prior), now):
+            return False
+        pulse_store.finish_item(item_id, closed_by=DONE_BY, now=now)
+        pulse_store.end_followups(keep=set(), now=now, only=item_id)
+        pulse_store.see_cards([card["id"]], now)
+        return True
+    mark = pulse_store.unmark_done(card["id"])
+    if mark is None:
+        return False
+    try:
+        prior = json.loads(mark["prior_json"])
+    except ValueError:
+        prior = {}
+    prior = prior if isinstance(prior, dict) else {}
+    if isinstance(prior.get("status"), str):
+        pulse_store.restore_item(item_id, status=prior["status"], closed_by=str(prior.get("closed_by") or ""),
+                                 closed_at=prior.get("closed_at"), only_closed_by=DONE_BY)
+    if isinstance(prior.get("decision"), str) and prior["decision"] != "closed":
+        due = prior.get("next_check_at")
+        pulse_store.restore_followup(item_id, decision=prior["decision"],
+                                     next_check_at=max(float(due), now) if isinstance(due, (int, float)) else None,
+                                     now=now)
+    return True
 
 
 # Rating -----------------------------------------------------------------------

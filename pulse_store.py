@@ -213,6 +213,14 @@ CREATE TABLE IF NOT EXISTS lessons (
     created_at REAL NOT NULL,
     undone_at REAL
 );
+-- Follow-up cards the user marked done on the Pulse screen
+-- (pulse_learning.done), with what the item and its checks were before, so
+-- Undo puts them back.
+CREATE TABLE IF NOT EXISTS card_done (
+    card_id INTEGER PRIMARY KEY,
+    done_at REAL NOT NULL,
+    prior_json TEXT NOT NULL DEFAULT '{}'
+);
 CREATE TABLE IF NOT EXISTS backfill_marks (
     profile TEXT NOT NULL,
     chat_id TEXT NOT NULL,
@@ -654,6 +662,23 @@ class PulseStore:
                 (status, closed_by, time.time(), item_id)).rowcount
         return bool(changed)
 
+    def finish_item(self, item_id: int, *, closed_by: str, now: float) -> bool:
+        """The user says it's done: an open, reminded or expired item becomes
+        done (one already done stays as it was)."""
+        with _lock, self._connect() as conn:
+            return bool(conn.execute(
+                "UPDATE items SET status='done', closed_by=?, closed_at=? WHERE id=? AND status != 'done' "
+                "AND superseded_at IS NULL", (closed_by, now, item_id)).rowcount)
+
+    def restore_item(self, item_id: int, *, status: str, closed_by: str, closed_at: Optional[float],
+                     only_closed_by: str) -> bool:
+        """Puts an item back as it was, only while ``only_closed_by`` still
+        holds it closed."""
+        with _lock, self._connect() as conn:
+            return bool(conn.execute(
+                "UPDATE items SET status=?, closed_by=?, closed_at=? WHERE id=? AND closed_by=?",
+                (status, closed_by, closed_at, item_id, only_closed_by)).rowcount)
+
     def item(self, item_id: int) -> Optional[dict]:
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
@@ -685,6 +710,17 @@ class PulseStore:
             conn.execute("UPDATE followups SET next_check_at = ? + (next_check_at - ?) * ?, updated_at=? "
                          "WHERE next_check_at > ? AND decision IN ('', 'wait', 'check failed')",
                          (now, now, factor, now, now))
+
+    def followup(self, item_id: int) -> Optional[dict]:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM followups WHERE item_id=?", (item_id,)).fetchone()
+        return dict(row) if row else None
+
+    def restore_followup(self, item_id: int, *, decision: str, next_check_at: Optional[float], now: float) -> None:
+        """Puts back the checks that marking a card done closed."""
+        with _lock, self._connect() as conn:
+            conn.execute("UPDATE followups SET decision=?, next_check_at=?, updated_at=? "
+                         "WHERE item_id=? AND decision='closed'", (decision, next_check_at, now, item_id))
 
     def due_followups(self, now: float) -> list[dict]:
         with self._connect() as conn:
@@ -762,15 +798,41 @@ class PulseStore:
 
     def held_count(self) -> int:
         with self._connect() as conn:
-            return int(conn.execute("SELECT COUNT(*) FROM cards WHERE level='brief' AND briefed_at IS NULL")
-                       .fetchone()[0])
+            return int(conn.execute("SELECT COUNT(*) FROM cards WHERE level='brief' AND briefed_at IS NULL "
+                                    "AND id NOT IN (SELECT card_id FROM card_done)").fetchone()[0])
 
     def held_cards(self, limit: int) -> list[dict]:
-        """Cards waiting for the morning brief, oldest first."""
+        """Cards waiting for the morning brief, oldest first (not one the
+        user already marked done)."""
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM cards WHERE level='brief' AND briefed_at IS NULL "
+                                "AND id NOT IN (SELECT card_id FROM card_done) "
                                 "ORDER BY created_at, id LIMIT ?", (limit,)).fetchall()
         return [dict(row) for row in rows]
+
+    def mark_done(self, card_id: int, prior_json: str, now: float) -> bool:
+        """Marks a card done; False when it was already."""
+        with _lock, self._connect() as conn:
+            return bool(conn.execute("INSERT OR IGNORE INTO card_done(card_id, done_at, prior_json) VALUES(?,?,?)",
+                                     (card_id, now, prior_json)).rowcount)
+
+    def unmark_done(self, card_id: int) -> Optional[dict]:
+        """Takes the done mark off a card; the mark, or None if there was none."""
+        with _lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM card_done WHERE card_id=?", (card_id,)).fetchone()
+            conn.execute("DELETE FROM card_done WHERE card_id=?", (card_id,))
+            conn.execute("COMMIT")
+        return dict(row) if row else None
+
+    def done_marks(self, ids: list[int]) -> dict[int, float]:
+        """When each of these cards was marked done, for the ones that were."""
+        if not ids:
+            return {}
+        with self._connect() as conn:
+            rows = conn.execute(f"SELECT card_id, done_at FROM card_done WHERE card_id IN ({','.join('?' * len(ids))})",
+                                tuple(ids)).fetchall()
+        return {int(row["card_id"]): float(row["done_at"]) for row in rows}
 
     def brief_cards(self, ids: list[int], now: float) -> None:
         if not ids:
@@ -783,9 +845,12 @@ class PulseStore:
         """Drops the oldest cards past ``keep``, but not one still held for the
         brief unless it was made before ``held_before`` (no brief for weeks)."""
         with _lock, self._connect() as conn:
-            return conn.execute(
-                "DELETE FROM cards WHERE (NOT (level='brief' AND briefed_at IS NULL) OR created_at < ?) AND id NOT IN "
+            dropped = conn.execute(
+                "DELETE FROM cards WHERE (NOT (level='brief' AND briefed_at IS NULL "
+                "AND id NOT IN (SELECT card_id FROM card_done)) OR created_at < ?) AND id NOT IN "
                 "(SELECT id FROM cards ORDER BY created_at DESC, id DESC LIMIT ?)", (held_before, keep)).rowcount
+            conn.execute("DELETE FROM card_done WHERE card_id NOT IN (SELECT id FROM cards)")
+            return dropped
 
     def rate_card(self, card: dict, *, rating: str, reason: str, now: float) -> bool:
         """Rates ``card`` only if its rating is still the one read (another

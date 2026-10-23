@@ -38,9 +38,9 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     )
     redact.add_argument("mode", choices=["on", "off"])
     pulse = commands.add_parser("pulse", help="Pulse, the proactivity experiment: on, off, status, probe, report, home, outcomes, memory, followups, "
-                                                 "cards, rate, learned, nudge, budget")
+                                                 "cards, rate, done, learned, nudge, budget")
     pulse.add_argument("pulse_action", choices=["on", "off", "status", "probe", "report", "home", "outcomes", "memory",
-                                                "followups", "cards", "rate", "learned", "nudge", "budget"])
+                                                "followups", "cards", "rate", "done", "learned", "nudge", "budget"])
     pulse.add_argument("value", nargs="?", default="",
                        help="for home: the id of the chat to use, or 'auto' to find it by title; "
                             "for outcomes: how many to show, or a chat id; "
@@ -49,7 +49,7 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
                             "for memory: a kind to list, 'now', 'on', 'off', 'forget' and an item number, "
                             "or 'backfill'; "
                             "for followups: 'on', 'off', 'now' (check everything now, for testing), or nothing to list them; "
-                            "for rate: the card number; "
+                            "for rate and done: the card number; "
                             "for learned: 'undo' and a lesson number, or a kind and a loudness to set; "
                             "for nudge: gentle, balanced or eager; "
                             "for budget: memory or followups")
@@ -57,7 +57,7 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
                        help="for memory forget: the item number; for memory backfill: how many days back "
                             "(it shows what that costs), 'start', 'stop' or 'cancel'; "
                             "for rate: 'up', 'down', or a reason for a thumbs down (not_relevant, already_knew, "
-                            "too_late, too_often); for learned: the lesson number, or push, screen, brief or off; "
+                            "too_late, too_often); for done: 'undo' to take the mark off; for learned: the lesson number, or push, screen, brief or off; "
                             "for budget: tokens a day, or 'auto' for follow-ups to go with the nudge level")
     prefs = commands.add_parser(
         "prefs",
@@ -215,7 +215,7 @@ def _pulse(args: argparse.Namespace) -> int:
     home = get_hermes_home()
     action = args.pulse_action
     # Follow-ups are on by default, so even `followups on|off` needs no file yet.
-    listing = action in ("followups", "cards", "rate", "learned") \
+    listing = action in ("followups", "cards", "rate", "done", "learned") \
         or (action == "memory" and (args.value or "").strip() not in ("on", "off")) \
         or (action == "nudge" and not (args.value or "").strip()) \
         or (action == "budget" and not str(getattr(args, "extra", "") or "").strip())
@@ -223,7 +223,7 @@ def _pulse(args: argparse.Namespace) -> int:
         # Never turned on: say so without leaving a file behind.
         print("Pulse: off (never turned on). `hermes conduit-push pulse on` to start it."
               + (" Nothing was changed." if action in ("followups", "learned") and (args.value or "").strip() else ""))
-        return 1 if action in ("probe", "rate") or (action == "learned" and (args.value or "").strip()) \
+        return 1 if action in ("probe", "rate", "done") or (action == "learned" and (args.value or "").strip()) \
             or (action == "memory" and (args.value or "").strip() in ("now", "forget")) \
             or (action == "followups" and (args.value or "").strip() in ("on", "now")) else 0
     pulse_store = pulse.open_store(home)
@@ -259,7 +259,7 @@ def _pulse(args: argparse.Namespace) -> int:
         return _pulse_report(pulse_store, (args.value or "").strip())
     if action == "followups":
         return _pulse_followups(pulse_store, home, (args.value or "").strip())
-    if action in ("cards", "rate", "learned"):
+    if action in ("cards", "rate", "done", "learned"):
         return _pulse_learning(pulse_store, action, (args.value or "").strip(),
                                str(getattr(args, "extra", "") or "").strip())
     if action == "nudge":
@@ -558,9 +558,11 @@ def _pulse_learning(pulse_store: Any, action: str, value: str, extra: str) -> in
         cards = pulse_store.cards(MEMORY_LIST)
         if not cards:
             print("No cards yet: Pulse hasn't brought you anything.")
+        marks = pulse_store.done_marks([card["id"] for card in cards])
         for card in cards:
             rated = f" (rated {card['rating']}{', ' + card['reason'] if card['reason'] else ''})" if card["rating"] else ""
-            print(_printable(f"#{card['id']} [{card['level']}] {card['title']}: {card['news']}{rated}"))
+            finished = " (done)" if card["id"] in marks else ""
+            print(_printable(f"#{card['id']} [{card['level']}] {card['title']}: {card['news']}{rated}{finished}"))
         return 0
     try:
         if action == "rate":
@@ -570,6 +572,14 @@ def _pulse_learning(pulse_store: Any, action: str, value: str, extra: str) -> in
             rating, reason = ("down", extra) if extra in pulse_learning.REASONS else (extra, "")
             made = pulse_control.rate(pulse_store, int(value), rating, reason)
             print("Rated." + "".join(f"\nPulse learned: {_printable(lesson['text'])}" for lesson in made))
+            return 0
+        if action == "done":
+            if not value.isdecimal() or len(value) > 18 or extra not in ("", "undo"):
+                print("Usage: hermes conduit-push pulse done <card> [undo]")
+                return 2
+            changed = pulse_control.done(pulse_store, int(value), extra != "undo")
+            print(("Marked done: Pulse stops checking on it." if extra != "undo" else "Back as it was.") if changed
+                  else "Nothing changed.")
             return 0
         if value == "undo":
             if not extra.isdecimal() or len(extra) > 18:

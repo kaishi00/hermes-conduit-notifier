@@ -296,7 +296,9 @@ def feed(pulse_store: Any, home: Optional[Path] = None, limit: int = pulse_learn
     # Pulse off: no chat stands behind the screen, whatever is titled Pulse.
     on = home is not None and pulse_store.get("enabled")
     chat = pulse.home_chat(pulse_store, Path(home))[0] if on else None
-    return {"cards": [pulse_learning.card_entry(card) for card in pulse_store.cards(limit)],
+    cards = pulse_store.cards(limit)
+    marks = pulse_store.done_marks([card["id"] for card in cards])
+    return {"cards": [pulse_learning.card_entry(card, marks.get(card["id"])) for card in cards],
             "unseen": pulse_store.unseen_cards(), "levels": pulse_learning.levels(pulse_store),
             "home_chat_id": chat.chat_id if chat else ""}
 
@@ -324,6 +326,13 @@ def rate(pulse_store: Any, card_id: Any, rating: Any, reason: Any = "", now: Opt
     now = time.time() if now is None else now
     made = _learning(lambda: pulse_learning.rate(pulse_store, card_id, rating, reason, now=now))
     return [pulse_learning.lesson_entry(lesson) for lesson in made if lesson]
+
+
+def done(pulse_store: Any, card_id: Any, is_done: Any = True, now: Optional[float] = None) -> bool:
+    """Marks a follow-up card done (its promise closes, no rating), or Undo
+    with False; whether it changed."""
+    return _learning(lambda: pulse_learning.done(pulse_store, card_id, is_done,
+                                                 now=time.time() if now is None else now))
 
 
 def learned(pulse_store: Any) -> dict[str, Any]:

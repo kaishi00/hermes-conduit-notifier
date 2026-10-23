@@ -7342,6 +7342,17 @@ async def post_pulse_rate(request: Request, response: Response) -> Dict[str, Any
         store, body.get("card"), body.get("rating"), body.get("reason") or "")}, reads_only=True)
 
 
+@router.post("/pulse/done")
+async def post_pulse_done(request: Request, response: Response) -> Dict[str, Any]:
+    """{"card": n, "done": true|false}: marks a follow-up card done (its
+    promise closes, no rating) or takes the mark off: {"changed": bool}."""
+    response.headers["Cache-Control"] = "no-store"
+    body = await _read_json_body(request, PULSE_MAX_BODY_BYTES)
+    body = body if isinstance(body, dict) else {}
+    return await _pulse_route("done", lambda control, store, home: {"changed": control.done(
+        store, body.get("card"), body.get("done", True))}, reads_only=True)
+
+
 @router.get("/pulse/learned")
 async def get_pulse_learned(response: Response) -> Dict[str, Any]:
     """What ratings taught Pulse, newest first, and each kind's loudness."""
@@ -14602,6 +14613,7 @@ ROUTE_CAPABILITIES = (
     "pulse_model",
     # PUT /pulse takes "nudge" and the daily token budgets.
     "pulse_nudge",
+    "pulse_done",
     "present-v1",
     "health-sync",
     "voice-tools",
