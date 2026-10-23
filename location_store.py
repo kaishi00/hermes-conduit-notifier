@@ -836,8 +836,8 @@ class LocationStore:
         return _rule_row(row)
 
     def remove_rule(self, rule_id: Any) -> str | None:
-        """Removes a rule; its job's id (for the caller to remove), or None
-        when there was no such rule."""
+        """Removes a rule and lists its job for removal; the job's id, ""
+        for a rule without one, or None when there was no such rule."""
         if not isinstance(rule_id, str) or not _RULE_ID.match(rule_id) or not self.path.exists():
             return None
         with self._write() as db:
@@ -1073,14 +1073,17 @@ def _rule_row(row: tuple[Any, ...]) -> dict[str, Any]:
 
 
 def _only_pending_jobs(db: sqlite3.Connection) -> bool:
+    # Reads and locates need a device's data (snapshot), so a store with no
+    # device and no rule has none worth keeping.
     return (db.execute(f"SELECT 1 FROM meta WHERE key GLOB '{_PENDING_JOB}*' LIMIT 1").fetchone() is not None
             and db.execute("SELECT 1 FROM devices LIMIT 1").fetchone() is None
             and db.execute("SELECT 1 FROM rules LIMIT 1").fetchone() is None)
 
 
 def _pend_rule_jobs(db: sqlite3.Connection, job_ids: Iterable[Any], now: float) -> None:
+    # Ids come from Hermes's scheduler; a bound keeps a broken answer out of meta.
     db.executemany("INSERT OR IGNORE INTO meta VALUES(?, ?)",
-                   [(_PENDING_JOB + str(job_id), str(now)) for job_id in job_ids if job_id])
+                   [(_PENDING_JOB + str(job_id), str(now)) for job_id in job_ids if job_id and len(str(job_id)) <= 200])
 
 
 def _meta(db: sqlite3.Connection, key: str) -> str | None:

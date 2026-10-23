@@ -7741,8 +7741,9 @@ def _clear_rule_jobs() -> None:
     (#227); runs inside the profile's scope. The store listed each one as it
     deleted the rule, so a job that can't go now (or a crash before this) is
     retried on the next rule change here, in the tool, or at the next start.
-    remove_job answers False for a job that's already gone, which counts as
-    removed too; only a failure keeps the job listed."""
+    A job counts as gone once remove_job removes it, or answers False and
+    get_job confirms the scheduler doesn't have it; anything else keeps it
+    listed."""
     try:
         store = _location_store().LocationStore(_calls_home())
         pending = store.pending_rule_jobs()
@@ -7752,10 +7753,12 @@ def _clear_rule_jobs() -> None:
     gone = []
     for job_id in pending:
         try:
-            from cron.jobs import remove_job
+            from cron import jobs as cron_jobs
 
-            remove_job(job_id)
-            gone.append(job_id)
+            if cron_jobs.remove_job(job_id) or cron_jobs.get_job(job_id) is None:
+                gone.append(job_id)
+            else:
+                logger.warning("conduit_push: place rule job %s not removed yet", job_id)
         except Exception:  # noqa: BLE001 — the rule is gone; its job's prompt does nothing without an event
             logger.warning("conduit_push: could not remove place rule job %s", job_id, exc_info=True)
     try:

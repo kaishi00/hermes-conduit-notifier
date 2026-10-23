@@ -954,6 +954,7 @@ def client(tmp_path, monkeypatch):
     jobs = types.ModuleType("cron.jobs")
     jobs.trigger_job = lambda job_id, extra_prompt=None: started.append((job_id, extra_prompt)) or {"id": job_id}
     jobs.remove_job = lambda job_id: removed.append(job_id) or True
+    jobs.get_job = lambda job_id: None
     cron.jobs = jobs
     monkeypatch.setitem(sys.modules, "cron", cron)
     monkeypatch.setitem(sys.modules, "cron.jobs", jobs)
@@ -1008,6 +1009,11 @@ def test_a_wipe_whose_job_removal_fails_retries_on_the_next_change(client, monke
     assert client.post(f"{BASE}/location/wipe", json={"all": True}).json()["remaining_devices"] == 0
     assert client.removed == [] and store.pending_rule_jobs() == ["job-2", "job-1"]
     assert client.get(f"{BASE}/location/status").json()["stored"] is False
+    # A refusal without an error keeps a job the scheduler still has.
+    monkeypatch.setattr(sys.modules["cron.jobs"], "remove_job", lambda job_id: False)
+    monkeypatch.setattr(sys.modules["cron.jobs"], "get_job", lambda job_id: {"id": job_id})
+    client.post(f"{BASE}/location/wipe", json={"all": True})
+    assert store.pending_rule_jobs() == ["job-2", "job-1"]
     monkeypatch.setattr(sys.modules["cron.jobs"], "remove_job", remove_job)
     assert client.post(f"{BASE}/location/wipe", json={"all": True}).status_code == 200
     assert client.removed == ["job-2", "job-1"] and not store.path.exists()
