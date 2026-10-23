@@ -602,7 +602,8 @@ def _clear_rule_jobs(store: LocationStore, cronjob: Callable[..., str]) -> None:
                 present = {str(job.get("job_id")) for job in jobs}
                 gone += [job_id for job_id in left if job_id not in present]
                 left = [job_id for job_id in left if job_id in present]
-            logger.warning("conduit_push: place rule jobs not removed yet: %s", ", ".join(left))
+            if left:
+                logger.warning("conduit_push: place rule jobs not removed yet: %s", ", ".join(left))
         store.rule_jobs_gone(gone)
     except Exception:  # noqa: BLE001 — the jobs stay listed; the next change or start tries again
         logger.warning("conduit_push: place rule jobs not cleared", exc_info=True)
