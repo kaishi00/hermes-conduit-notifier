@@ -527,6 +527,7 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
         sources = memory_sources(pulse_store, home, home_chat_id, profiles)
         done: dict[str, int] = {}
         checked: dict[str, int] = {}
+        acted: dict[str, int] = {}
         try:
             try:
                 if used < cap:
@@ -542,9 +543,9 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
                                             instructions, text, purpose="pulse follow-up"), zone=zone,
                                         now=max(now, time.time()),
                                         still_leader=lambda: not stopped.is_set() and _leads(pulse_store),
-                                        budget=float("inf"), done=checked)
+                                        budget=float("inf"), done=acted)
                 finally:
-                    _count_checks(pulse_store, checked)
+                    _count_checks(pulse_store, acted)  # in the totals, not the follow-up day's budget
             if follows:
                 # After memory, so a promise it just read is scheduled now.
                 now = max(now, time.time())

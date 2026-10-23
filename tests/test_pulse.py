@@ -2301,3 +2301,5 @@ def test_do_it_checks_run_with_follow_ups_off(remembering, monkeypatch):
     ran.clear()
     pulse._memory_run(store_.path.parent, SID, now, threading.Event())
     assert ran == [("acts", float("inf")), "followups"]
+    assert store_.get("followup_usage")["checks"] == 2  # each act check counted once
+    assert store_.get("followup_today") == {"day": day, "tokens": 0}  # nor spent from follow-ups' day
