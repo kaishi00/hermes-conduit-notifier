@@ -696,11 +696,12 @@ VOICE_NOTE = ("On a voice call: answer by ear in a sentence or two, times the wa
               "when there is one (deleting takes the id from this read); to change one, send the request to Hermes.")
 
 
-def voice_tools(store: PhoneStore | None = None) -> dict[str, dict[str, Any]]:
+def voice_tools(store: PhoneStore | None = None, device_id: str | None = None) -> dict[str, dict[str, Any]]:
     """The read-only tools a voice call may use, by name: description and
-    parameters. Only those some device shares."""
+    parameters. Only those some device shares; with ``device_id`` (the
+    calling device), only those that device shares, as its reads see."""
     store = store or _store()
-    devices = store.devices()
+    devices = [device for device in store.devices() if device_id is None or device["id"] == device_id]
     tools: dict[str, dict[str, Any]] = {}
     if any(shares(device["sharing"], "calendars") for device in devices):
         properties = CALENDAR_SCHEMA["parameters"]["properties"]

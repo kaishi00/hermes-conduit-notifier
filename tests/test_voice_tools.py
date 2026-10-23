@@ -101,6 +101,15 @@ def test_the_list_offers_health_only_once_data_arrived(client):
     assert "action" in tools[0]["parameters"]["properties"]
 
 
+def test_the_list_offers_health_only_when_the_calling_device_shared_it(client):
+    _share(client, VoicePhone(), _batch())
+    names = lambda **query: [tool["name"] for tool in client.get(f"{BASE}/voice-tools", params=query).json()["tools"]]
+    assert names(health_device=DEVICE) == ["conduit_health"]
+    # Another device's call reads only its own data, of which there is none.
+    assert names(health_device="another-phone") == []
+    assert names(health_device=" ") == ["conduit_health"], "a blank id is no device named"
+
+
 def test_a_voice_read_comes_back_sealed_for_the_asking_phone(client):
     phone = VoicePhone()
     _share(client, phone, _batch())

@@ -444,13 +444,32 @@ def test_reads_are_logged_without_what_was_read(store, phone):
     assert store.status(DEVICE)["reads_24h"] == 1
 
 
-def test_wipe_all_deletes_the_file_and_names_the_rule_jobs(store, phone):
+def test_wipe_all_keeps_the_file_until_the_rule_jobs_are_gone(store, phone):
     _rule(store)
     store.ingest(phone.seal(phone.batch(fix=fix())))
     assert store.wipe(DEVICE)["remaining_devices"] == 0
     assert store.path.exists(), "rules outlive one device's data"
     assert store.wipe()["rule_jobs"] == ["job-1"]
+    # A crash before the scheduler removes the job mustn't lose it (#227).
+    assert store.path.exists() and store.pending_rule_jobs() == ["job-1"]
+    assert store.status()["stored"] is False and store.rules() == [] and store.snapshot() is None
+    store.rule_jobs_gone(["job-1"])
     assert not store.path.exists()
+
+
+def test_a_deleted_rules_job_stays_listed_until_its_gone(store, phone):
+    _rule(store)
+    _rule(store, id="r_brief0002", job_id="job-2", what="evening brief")
+    assert store.remove_rule("r_brief0001") == "job-1"
+    # The rule and its listing are one transaction: a crash right after
+    # leaves the job for a later run to remove.
+    reopened = location.LocationStore(store.path.parent, clock=lambda: NOW)
+    assert reopened.pending_rule_jobs() == ["job-1"]
+    assert [rule["id"] for rule in reopened.rules()] == ["r_brief0002"]
+    assert store.remove_rule("r_brief0002") == "job-2"
+    assert store.pending_rule_jobs() == ["job-1", "job-2"]
+    store.rule_jobs_gone(["job-2"])
+    assert store.pending_rule_jobs() == ["job-1"] and store.path.exists() and store.status()["stored"] is True
 
 
 def test_shared_vector_matches_conduit():
@@ -569,12 +588,15 @@ class FakeScheduler:
         self.jobs = {}
         self.calls = []
         self.list_fails = False
+        self.remove_fails = False
+        self.made = 0
 
     def __call__(self, **kwargs):
         self.calls.append(kwargs)
         action = kwargs["action"]
         if action == "create":
-            job_id = f"job-{len(self.jobs) + 1}"
+            self.made += 1
+            job_id = f"job-{self.made}"
             self.jobs[job_id] = {"job_id": job_id, **kwargs}
             return json.dumps({"success": True, "job_id": job_id})
         if action == "update":
@@ -585,7 +607,9 @@ class FakeScheduler:
                 return json.dumps({"success": False, "error": "busy"})
             return json.dumps({"success": True, "jobs": list(self.jobs.values())})
         if action == "remove":
-            self.jobs.pop(kwargs["job_id"], None)
+            if self.remove_fails or kwargs["job_id"] not in self.jobs:
+                return json.dumps({"success": False, "error": "Job not found" if not self.remove_fails else "busy"})
+            self.jobs.pop(kwargs["job_id"])
             return json.dumps({"success": True})
         raise AssertionError(action)
 
@@ -616,6 +640,55 @@ def test_set_rule_writes_one_job_and_changes_it_in_place(home, scheduler):
     assert len(rules) == 1 and rules[0]["calls"] is False
     assert _call({"action": "remove_rule", "id": rules[0]["id"]})["result"] == "removed"
     assert scheduler.jobs == {} and _call({"action": "rules"})["rules"] == []
+
+
+def test_a_job_the_scheduler_wouldnt_remove_goes_on_the_next_rule_change(home, scheduler):
+    _shared(home, fix=fix())
+    _call({"action": "set_rule", "rule": RULE})
+    rule_id = _call({"action": "rules"})["rules"][0]["id"]
+    scheduler.remove_fails = True
+    assert _call({"action": "remove_rule", "id": rule_id})["result"] == "removed"
+    assert list(scheduler.jobs) == ["job-1"]
+    store = location.LocationStore(home, clock=lambda: NOW)
+    assert store.pending_rule_jobs() == ["job-1"]
+    scheduler.remove_fails = False
+    _call({"action": "set_rule", "rule": {**RULE, "what": "evening brief"}})
+    assert list(scheduler.jobs) == ["job-2"] and store.pending_rule_jobs() == []
+
+
+def test_a_job_thats_already_gone_comes_off_the_list(home, scheduler):
+    store, _ = _shared(home, fix=fix())
+    store.pend_rule_job("job-gone")
+    scheduler.remove_fails = True  # Hermes refuses to remove a job it doesn't have
+    tool._clear_rule_jobs(store, scheduler)
+    assert store.pending_rule_jobs() == []
+    store.pend_rule_job("job-gone")
+    scheduler.list_fails = True  # not knowing, it stays listed
+    tool._clear_rule_jobs(store, scheduler)
+    assert store.pending_rule_jobs() == ["job-gone"]
+
+
+def test_a_crash_between_deleting_a_rule_and_its_job_is_cleared_at_start(home, scheduler, monkeypatch):
+    _shared(home, fix=fix())
+    _call({"action": "set_rule", "rule": RULE})
+    store = location.LocationStore(home, clock=lambda: NOW)
+    store.remove_rule(store.rules()[0]["id"])  # the process dies before the scheduler call
+    assert list(scheduler.jobs) == ["job-1"]
+    monkeypatch.setattr(tool, "_cleanup_started", None)
+    tool.clear_rule_jobs_at_start(delay=0).join(5)
+    assert scheduler.jobs == {} and store.pending_rule_jobs() == []
+
+
+def test_a_wiped_store_with_a_leftover_job_goes_once_its_removed(home, scheduler, monkeypatch):
+    store, _ = _shared(home, fix=fix())
+    _call({"action": "set_rule", "rule": RULE})
+    store.wipe()  # the dashboard died before removing the job
+    assert store.path.exists() and list(scheduler.jobs) == ["job-1"]
+    assert _call({"action": "rules"}, session_id="session-1")["rules"] == []
+    assert store.reads() == [], "a wiped store logs no reads while it waits"
+    monkeypatch.setattr(tool, "_cleanup_started", None)
+    tool.clear_rule_jobs_at_start(delay=0).join(5)
+    assert scheduler.jobs == {} and not store.path.exists()
 
 
 def test_set_rule_scrubs_the_task_but_keeps_its_lines(home, scheduler):
@@ -885,6 +958,7 @@ def client(tmp_path, monkeypatch):
     jobs = types.ModuleType("cron.jobs")
     jobs.trigger_job = lambda job_id, extra_prompt=None: started.append((job_id, extra_prompt)) or {"id": job_id}
     jobs.remove_job = lambda job_id: removed.append(job_id) or True
+    jobs.get_job = lambda job_id: None
     cron.jobs = jobs
     monkeypatch.setitem(sys.modules, "cron", cron)
     monkeypatch.setitem(sys.modules, "cron.jobs", jobs)
@@ -921,6 +995,32 @@ def test_routes_round_trip_and_start_rule_jobs(client):
     assert client.post(f"{BASE}/location/wipe", json={}).status_code == 400
     assert client.post(f"{BASE}/location/wipe", json={"all": True}).json()["remaining_devices"] == 0
     assert client.get(f"{BASE}/location/status").json()["stored"] is False
+
+
+def test_a_wipe_whose_job_removal_fails_retries_on_the_next_change(client, monkeypatch):
+    phone = Phone()
+    phone.accept(client.post(f"{BASE}/location/key", json=phone.key_request()).json())
+    store = location.LocationStore(client.home)
+    _rule(store)
+    _rule(store, id="r_brief0002", job_id="job-2", what="evening brief")
+    remove_job = sys.modules["cron.jobs"].remove_job
+
+    def broken(job_id):
+        raise OSError("jobs.json is locked")
+
+    monkeypatch.setattr(sys.modules["cron.jobs"], "remove_job", broken)
+    assert client.delete(f"{BASE}/location/rules/r_brief0002").json()["removed"] is True
+    assert client.post(f"{BASE}/location/wipe", json={"all": True}).json()["remaining_devices"] == 0
+    assert client.removed == [] and sorted(store.pending_rule_jobs()) == ["job-1", "job-2"]
+    assert client.get(f"{BASE}/location/status").json()["stored"] is False
+    # A refusal without an error keeps a job the scheduler still has.
+    monkeypatch.setattr(sys.modules["cron.jobs"], "remove_job", lambda job_id: False)
+    monkeypatch.setattr(sys.modules["cron.jobs"], "get_job", lambda job_id: {"id": job_id})
+    client.post(f"{BASE}/location/wipe", json={"all": True})
+    assert sorted(store.pending_rule_jobs()) == ["job-1", "job-2"]
+    monkeypatch.setattr(sys.modules["cron.jobs"], "remove_job", remove_job)
+    assert client.post(f"{BASE}/location/wipe", json={"all": True}).status_code == 200
+    assert sorted(client.removed) == ["job-1", "job-2"] and not store.path.exists()
 
 
 def test_status_says_whether_hermes_can_ask_for_a_fresh_position(client, monkeypatch):

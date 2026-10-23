@@ -106,6 +106,9 @@ REQUEST_TIMEOUT_S = 15.0
 # bursts, but stop a looping client from burning the host's Gemini quota.
 MINT_LIMIT = 20
 MINT_WINDOW_S = 60.0
+# Keys one limiter tracks at once. Keys are profile names a scope accepted,
+# so this only bites a host with that many profiles busy in one window.
+LIMITER_MAX_KEYS = 256
 # A voice lookup is one query; cap a looping client well above that.
 SEARCH_LIMIT = 30
 SEARCH_WINDOW_S = 60.0
@@ -385,11 +388,13 @@ class _MintLimiter:
         window_s: float,
         clock: Callable[[], float] = time.monotonic,
         message: str = "Too many Gemini Live token requests; try again shortly",
+        max_keys: int = LIMITER_MAX_KEYS,
     ) -> None:
         self.limit = limit
         self.message = message
         self.window_s = window_s
         self.clock = clock
+        self.max_keys = max_keys
         self._mints: Dict[str, deque] = {}
         self._lock = threading.Lock()
 
@@ -403,6 +408,10 @@ class _MintLimiter:
             for stale in [k for k, q in self._mints.items() if not q or now - q[-1] >= self.window_s]:
                 del self._mints[stale]
             if limit <= 0:
+                raise TokenError(429, self.message)
+            # A full map turns new keys away, so it stays bounded whatever
+            # callers send; the dashboard's own profile ("") always fits.
+            if key and key not in self._mints and len(self._mints) >= self.max_keys:
                 raise TokenError(429, self.message)
             mints = self._mints.setdefault(key, deque())
             while mints and now - mints[0] >= self.window_s:
@@ -475,6 +484,32 @@ async def _run_scoped(
             return fn()
 
     return await asyncio.get_running_loop().run_in_executor(executor, scoped)
+
+
+def _limited(limiter: "_MintLimiter", profile: Optional[str], fn: Callable[[], _Scoped]) -> Callable[[], _Scoped]:
+    """``fn`` behind a slot of ``limiter``, for ``_run_scoped``: the slot is
+    taken inside the scope, so a ?profile= the scope refuses gets no bucket."""
+    def run() -> _Scoped:
+        limiter.acquire(_limiter_key(profile))
+        return fn()
+
+    return run
+
+
+async def _scoped_acquire(limiter: "_MintLimiter", profile: Optional[str]) -> None:
+    """A slot of ``limiter`` taken before a route reads its body, once
+    Hermes' scope has accepted ``profile`` (an unknown one is refused there
+    and never gets a bucket)."""
+    try:
+        await _run_scoped(profile, lambda: limiter.acquire(_limiter_key(profile)))
+    except TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
+        raise
+    except Exception as exc:
+        # A broken scope is the host's failure, named like the routes' own.
+        raise _unexpected("profile check", exc, feature="Conduit")
 
 
 _search_executor = ThreadPoolExecutor(max_workers=SEARCH_WORKERS, thread_name_prefix="conduit-web-search")
@@ -1174,7 +1209,12 @@ GPT_LIVE_PERSONA = (
 )
 
 _gpt_live_executor = ThreadPoolExecutor(max_workers=GPT_LIVE_WORKERS, thread_name_prefix="conduit-gpt-live")
-_gpt_live_status_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="conduit-gpt-live-status")
+GPT_LIVE_STATUS_WORKERS = 2
+_gpt_live_status_executor = ThreadPoolExecutor(max_workers=GPT_LIVE_STATUS_WORKERS,
+                                               thread_name_prefix="conduit-gpt-live-status")
+# A timed-out status read keeps its worker until Hermes answers, so a check
+# finding every worker busy is turned away (503) rather than queued behind them.
+_gpt_live_status_slots = threading.BoundedSemaphore(GPT_LIVE_STATUS_WORKERS)
 _gpt_live_limiter = _MintLimiter(GPT_LIVE_LIMIT, GPT_LIVE_WINDOW_S,
                                  message="Too many GPT-Live session requests; try again shortly")
 _gpt_live_api_daily = _MintLimiter(GPT_LIVE_API_DAILY_CALLS, GPT_LIVE_DAY_S,
@@ -1755,9 +1795,35 @@ def create_gpt_live_session(
 @router.get("/gpt-live/status")
 async def get_gpt_live_status(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
+    # The slot is freed exactly once: by the read when it ran, else by this
+    # request (a read it gave up on before it started never runs).
+    state = {"started": False, "abandoned": False}
+    state_lock = threading.Lock()
+
+    def status() -> Dict[str, Any]:
+        with state_lock:
+            if state["abandoned"]:
+                return {}
+            state["started"] = True
+        try:
+            return gpt_live_status()
+        finally:
+            _gpt_live_status_slots.release()
+
+    if not _gpt_live_status_slots.acquire(blocking=False):
+        raise HTTPException(status_code=503, detail="GPT-Live status is still waiting on Hermes; try again shortly",
+                            headers={"Cache-Control": "no-store"})
     try:
-        return {"ok": True, **(await asyncio.wait_for(
-            _run_scoped(profile, gpt_live_status, _gpt_live_status_executor), timeout=GPT_LIVE_REQUEST_TIMEOUT_S))}
+        try:
+            result = await asyncio.wait_for(_run_scoped(profile, status, _gpt_live_status_executor),
+                                            timeout=GPT_LIVE_REQUEST_TIMEOUT_S)
+        except BaseException:
+            with state_lock:
+                if not state["started"]:
+                    state["abandoned"] = True
+                    _gpt_live_status_slots.release()
+            raise
+        return {"ok": True, **result}
     except asyncio.TimeoutError:
         logger.warning("GPT-Live status for Conduit timed out after %ss", GPT_LIVE_REQUEST_TIMEOUT_S)
         raise HTTPException(status_code=504, detail="GPT-Live status timed out", headers={"Cache-Control": "no-store"})
@@ -2846,7 +2912,10 @@ LOCAL_LIVE_VERIFIED_TTL_S = 30.0
 # naming one profile cost no less than they did.
 LOCAL_LIVE_KEY_CHECK_LIMIT = 60
 LOCAL_LIVE_KEY_CHECK_TOTAL_LIMIT = 300
-_local_live_key_check_limiter = _MintLimiter(LOCAL_LIVE_KEY_CHECK_LIMIT, 60.0, message="Too many Local Live key checks")
+# Its keys are bounded by the total budget below (a refused check gives its
+# slot back), so a flood of made-up profile names never fills it.
+_local_live_key_check_limiter = _MintLimiter(LOCAL_LIVE_KEY_CHECK_LIMIT, 60.0, message="Too many Local Live key checks",
+                                             max_keys=LOCAL_LIVE_KEY_CHECK_TOTAL_LIMIT + 1)
 _local_live_key_check_total_limiter = _MintLimiter(LOCAL_LIVE_KEY_CHECK_TOTAL_LIMIT, 60.0,
                                                    message="Too many Local Live key checks")
 
@@ -3357,9 +3426,18 @@ async def post_local_live_key(response: Response, profile: Optional[str] = None)
     if not _local_live_profile_can_carry_key(profile):
         raise HTTPException(status_code=400, detail=LOCAL_LIVE_PROFILE_NAME_REASON, headers={"Cache-Control": "no-store"})
     try:
-        key = await _run_scoped(profile, lambda: local_live_key(profile, rotate=True), _speech_server_executor)
+        key = await asyncio.wait_for(
+            _run_scoped(profile, lambda: local_live_key(profile, rotate=True), _speech_server_executor),
+            timeout=SPEECH_SERVER_SETUP_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        # The worker can't be stopped: the rotation may still land, which a
+        # retry (or the status route's key) then picks up.
+        raise HTTPException(status_code=504, detail="Local Live key rotation timed out", headers={"Cache-Control": "no-store"})
     except TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
+        raise
     except Exception as exc:
         raise _unexpected("key", exc, feature="Local Live")
     return {"ok": True, "api_key": key}
@@ -6247,7 +6325,8 @@ async def get_e2e(response: Response, profile: Optional[str] = None) -> Dict[str
         return {"ok": True, **(await _run_scoped(profile, e2e_status))}
     except TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
-    except HTTPException:
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
         raise
     except Exception as exc:
         raise _unexpected("status", exc, feature="Encrypted notifications")
@@ -6258,12 +6337,13 @@ async def post_e2e(request: Request, response: Response, profile: Optional[str] 
     # The body is a secret: never cached on the way back either.
     response.headers["Cache-Control"] = "no-store"
     try:
-        _e2e_limiter.acquire(_limiter_key(profile))
+        await _scoped_acquire(_e2e_limiter, profile)
         body = await _read_json_body(request, E2E_MAX_BODY_BYTES)
         return {"ok": True, **(await _run_scoped(profile, lambda: provision_e2e(body)))}
     except TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
-    except HTTPException:
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
         raise
     except Exception as exc:
         raise _unexpected("key", exc, feature="Encrypted notifications")
@@ -6568,8 +6648,7 @@ async def _cron_route(profile: Optional[str], response: Response, fn: Callable[[
                       route: str, feature: str = "Cron notifications") -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     try:
-        _cron_limiter.acquire(_limiter_key(profile))
-        return {"ok": True, **(await _run_scoped(profile, fn))}
+        return {"ok": True, **(await _run_scoped(profile, _limited(_cron_limiter, profile, fn)))}
     except TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
     except HTTPException as exc:
@@ -6692,8 +6771,8 @@ async def put_chat_on_screen(request: Request, response: Response, profile: Opti
     no_store = {"Cache-Control": "no-store"}
     try:
         body = await _read_json_body(request, ON_SCREEN_MAX_BODY_BYTES)
-        _on_screen_limiter.acquire(_limiter_key(profile))
-        return {"ok": True, **(await _run_scoped(profile, lambda: set_chat_on_screen(body)))}
+        return {"ok": True, **(await _run_scoped(
+            profile, _limited(_on_screen_limiter, profile, lambda: set_chat_on_screen(body))))}
     except TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers=no_store)
     except HTTPException as exc:
@@ -6844,8 +6923,7 @@ async def _calls_route(profile: Optional[str], response: Response, fn: Callable[
                        route: str) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     try:
-        _calls_limiter.acquire(_limiter_key(profile))
-        return {"ok": True, **(await _run_scoped(profile, fn))}
+        return {"ok": True, **(await _run_scoped(profile, _limited(_calls_limiter, profile, fn)))}
     except TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
     except HTTPException as exc:
@@ -6947,8 +7025,8 @@ async def put_conduit_settings(request: Request, response: Response, profile: Op
     response.headers["Cache-Control"] = "no-store"
     body = await _read_json_body(request, CONDUIT_SETTINGS_MAX_BODY_BYTES)
     try:
-        _conduit_settings_limiter.acquire(_limiter_key(profile))
-        return {"ok": True, **(await _run_scoped(profile, lambda: sync_conduit_settings(body)))}
+        return {"ok": True, **(await _run_scoped(
+            profile, _limited(_conduit_settings_limiter, profile, lambda: sync_conduit_settings(body))))}
     except TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
     except HTTPException as exc:
@@ -7011,8 +7089,7 @@ def conduit_prefs(action: str, body: Any = None, *, replace: bool = False) -> Di
 
 async def _prefs_route(profile: Optional[str], run: Callable[[], Dict[str, Any]]) -> Dict[str, Any]:
     try:
-        _conduit_prefs_limiter.acquire(_limiter_key(profile))
-        return {"ok": True, **(await _run_scoped(profile, run))}
+        return {"ok": True, **(await _run_scoped(profile, _limited(_conduit_prefs_limiter, profile, run)))}
     except TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
     except HTTPException as exc:
@@ -7296,8 +7373,8 @@ async def post_present_exchange(request: Request, response: Response, profile: O
     response.headers["Cache-Control"] = "no-store"
     body = await _read_json_body(request, PRESENT_MAX_BODY_BYTES)
     try:
-        _present_exchange_limiter.acquire(_limiter_key(profile))
-        return {"ok": True, **(await _run_scoped(profile, lambda: exchange_present(body)))}
+        return {"ok": True, **(await _run_scoped(
+            profile, _limited(_present_exchange_limiter, profile, lambda: exchange_present(body))))}
     except TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
     except HTTPException as exc:
@@ -7412,10 +7489,7 @@ async def get_health_status(response: Response, profile: Optional[str] = None,
 @router.post("/health/key")
 async def post_health_key(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
-    try:
-        _health_key_limiter.acquire(_limiter_key(profile))
-    except TokenError as exc:
-        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+    await _scoped_acquire(_health_key_limiter, profile)
     body = await _read_json_body(request, HEALTH_MAX_KEY_BODY_BYTES)
     return await _health_route(response, profile, lambda: _health_call(lambda store: store.register_key(body)), "key")
 
@@ -7423,20 +7497,14 @@ async def post_health_key(request: Request, response: Response, profile: Optiona
 @router.post("/health/ingest")
 async def post_health_ingest(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
-    try:
-        _health_ingest_limiter.acquire(_limiter_key(profile))
-    except TokenError as exc:
-        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+    await _scoped_acquire(_health_ingest_limiter, profile)
     body = await _read_json_body(request, HEALTH_MAX_INGEST_BODY_BYTES)
     return await _health_route(response, profile, lambda: _health_call(lambda store: store.ingest(body)), "upload")
 
 
 @router.post("/health/wipe")
 async def post_health_wipe(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
-    try:
-        _health_wipe_limiter.acquire(_limiter_key(profile))
-    except TokenError as exc:
-        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+    await _scoped_acquire(_health_wipe_limiter, profile)
     body = await _read_json_body(request, HEALTH_MAX_KEY_BODY_BYTES)
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Expected a JSON object", headers={"Cache-Control": "no-store"})
@@ -7508,14 +7576,19 @@ def _voice_tool_modules() -> Dict[str, Tuple[Any, Any, Any, str]]:
     return modules
 
 
-def _voice_tool_entries() -> Dict[str, Dict[str, Any]]:
-    """Voice-readable tools by name: their schema, and which sealed key they use."""
+def _voice_tool_entries(devices: Optional[Dict[str, Optional[str]]] = None) -> Dict[str, Dict[str, Any]]:
+    """Voice-readable tools by name: their schema, and which sealed key they
+    use. ``devices`` names the calling device per sealed key ("health",
+    "location", "phone"): a tool is then offered as that device shares it,
+    since its reads see that device alone; without one, as any device does."""
+    devices = devices or {}
     entries: Dict[str, Dict[str, Any]] = {}
     for name, (tool, store_class, _, key) in _voice_tool_modules().items():
         # A store that can't be read (damaged file) hides that tool alone.
         try:
             store = store_class(_calls_home())
-            if not tool.voice_shared(store):
+            device_id = (devices.get(key) or "").strip()
+            if not (tool.voice_shared(store, device_id) if device_id else tool.voice_shared(store)):
                 continue
             entries[name] = {
                 "key": key,
@@ -7528,7 +7601,7 @@ def _voice_tool_entries() -> Dict[str, Dict[str, Any]]:
     # A problem there takes only those tools off the list.
     try:
         phone = _plugin_package_module("phone_tool")
-        offered = phone.voice_tools(phone.PhoneStore(_calls_home()))
+        offered = phone.voice_tools(phone.PhoneStore(_calls_home()), (devices.get("phone") or "").strip() or None)
     except Exception:  # noqa: BLE001
         logger.warning("Conduit voice tools: the calendar and phone tools couldn't be listed", exc_info=True)
         offered = {}
@@ -7537,8 +7610,8 @@ def _voice_tool_entries() -> Dict[str, Dict[str, Any]]:
     return entries
 
 
-def voice_tools_list() -> Dict[str, Any]:
-    return {"tools": [{"name": name, **entry} for name, entry in _voice_tool_entries().items()]}
+def voice_tools_list(devices: Optional[Dict[str, Optional[str]]] = None) -> Dict[str, Any]:
+    return {"tools": [{"name": name, **entry} for name, entry in _voice_tool_entries(devices).items()]}
 
 
 def voice_tools_call(envelope: Any) -> Dict[str, Any]:
@@ -7617,22 +7690,21 @@ async def _voice_tools_route(response: Response, profile: Optional[str], fn: Cal
 
 
 @router.get("/voice-tools")
-async def get_voice_tools(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+async def get_voice_tools(response: Response, profile: Optional[str] = None, health_device: Optional[str] = None,
+                          location_device: Optional[str] = None,
+                          phone_device: Optional[str] = None) -> Dict[str, Any]:
+    """The tools a call may use. Conduit names its own device in each store
+    (``*_device``), so it's offered only what that device's reads can answer."""
     response.headers["Cache-Control"] = "no-store"
-    try:
-        _voice_tools_limiter.acquire(_limiter_key(profile))
-    except TokenError as exc:
-        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
-    return await _voice_tools_route(response, profile, voice_tools_list, "list")
+    await _scoped_acquire(_voice_tools_limiter, profile)
+    devices = {"health": health_device, "location": location_device, "phone": phone_device}
+    return await _voice_tools_route(response, profile, lambda: voice_tools_list(devices), "list")
 
 
 @router.post("/voice-tools/call")
 async def post_voice_tools_call(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
-    try:
-        _voice_tools_limiter.acquire(_limiter_key(profile))
-    except TokenError as exc:
-        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+    await _scoped_acquire(_voice_tools_limiter, profile)
     body = await _read_json_body(request, VOICE_TOOLS_MAX_BODY_BYTES)
     return await _voice_tools_route(response, profile, lambda: voice_tools_call(body), "call")
 
@@ -7708,13 +7780,6 @@ async def _location_route(response: Response, profile: Optional[str], fn: Callab
         raise _unexpected(name, exc, feature="Location sharing")
 
 
-def _location_limit(limiter: Any, profile: Optional[str]) -> None:
-    try:
-        limiter.acquire(_limiter_key(profile))
-    except TokenError as exc:
-        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
-
-
 def _start_rule_jobs(fired: Any) -> list:
     """Starts the scheduled job of each place rule an ingest set off; runs
     inside the profile's scope. The rule already counts as run today, so a
@@ -7736,16 +7801,35 @@ def _start_rule_jobs(fired: Any) -> list:
     return started
 
 
-def _remove_rule_jobs(job_ids: Any) -> None:
-    for job_id in job_ids if isinstance(job_ids, list) else []:
-        if not job_id:
-            continue
+def _clear_rule_jobs() -> None:
+    """Removes the jobs of deleted place rules still on the store's list
+    (#227); runs inside the profile's scope. The store listed each one as it
+    deleted the rule, so a job that can't go now (or a crash before this) is
+    retried on the next rule change here, in the tool, or at the next start.
+    A job counts as gone once remove_job removes it, or answers False and
+    get_job confirms the scheduler doesn't have it; anything else keeps it
+    listed."""
+    try:
+        store = _location_store().LocationStore(_calls_home())
+        pending = store.pending_rule_jobs()
+    except Exception:  # noqa: BLE001 — the change itself succeeded
+        logger.warning("conduit_push: place rule jobs not read", exc_info=True)
+        return
+    gone = []
+    for job_id in pending:
         try:
-            from cron.jobs import remove_job
+            from cron import jobs as cron_jobs
 
-            remove_job(job_id)
+            if cron_jobs.remove_job(job_id) or cron_jobs.get_job(job_id) is None:
+                gone.append(job_id)
+            else:
+                logger.warning("conduit_push: place rule job %s not removed yet", job_id)
         except Exception:  # noqa: BLE001 — the rule is gone; its job's prompt does nothing without an event
             logger.warning("conduit_push: could not remove place rule job %s", job_id, exc_info=True)
+    try:
+        store.rule_jobs_gone(gone)
+    except Exception:  # noqa: BLE001 — still listed: removed again next time, which is harmless
+        logger.warning("conduit_push: removed place rule jobs not taken off the list", exc_info=True)
 
 
 def _location_ingest(body: Any) -> Dict[str, Any]:
@@ -7757,7 +7841,8 @@ def _location_ingest(body: Any) -> Dict[str, Any]:
 
 def _location_wipe(device_id: Any) -> Dict[str, Any]:
     result = _location_call(lambda store: store.wipe(device_id))
-    _remove_rule_jobs(result.pop("rule_jobs", []))
+    result.pop("rule_jobs", None)
+    _clear_rule_jobs()
     return result
 
 
@@ -7765,7 +7850,7 @@ def _location_remove_rule(rule_id: str) -> Dict[str, Any]:
     job_id = _location_call(lambda store: {"job": store.remove_rule(rule_id)})["job"]
     if job_id is None:
         raise TokenError(404, "No place rule has that id")
-    _remove_rule_jobs([job_id])
+    _clear_rule_jobs()
     return {"removed": True}
 
 
@@ -7782,7 +7867,7 @@ async def get_location_status(response: Response, profile: Optional[str] = None,
 @router.post("/location/key")
 async def post_location_key(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
-    _location_limit(_location_key_limiter, profile)
+    await _scoped_acquire(_location_key_limiter, profile)
     body = await _read_json_body(request, LOCATION_MAX_KEY_BODY_BYTES)
     return await _location_route(response, profile,
                                  lambda: _location_call(lambda store: store.register_key(body)), "key")
@@ -7792,7 +7877,7 @@ async def post_location_key(request: Request, response: Response, profile: Optio
 async def post_location_ingest(request: Request, response: Response,
                                profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
-    _location_limit(_location_ingest_limiter, profile)
+    await _scoped_acquire(_location_ingest_limiter, profile)
     body = await _read_json_body(request, LOCATION_MAX_INGEST_BODY_BYTES)
     return await _location_route(response, profile, lambda: _location_ingest(body), "upload")
 
@@ -7810,7 +7895,7 @@ _location_maps_limiter = _MintLimiter(LOCATION_MAPS_LIMIT, LOCATION_MAPS_WINDOW_
 @router.get("/location/maps/{request_id}")
 async def get_location_maps(request_id: str, response: Response, profile: Optional[str] = None,
                             device_id: Optional[str] = None, kid: Optional[str] = None) -> Dict[str, Any]:
-    _location_limit(_location_maps_limiter, profile)
+    await _scoped_acquire(_location_maps_limiter, profile)
     return await _location_route(response, profile, lambda: _location_call(
         lambda store: store.maps_request(request_id, device_id, kid)), "maps request")
 
@@ -7819,7 +7904,7 @@ async def get_location_maps(request_id: str, response: Response, profile: Option
 async def post_location_maps(request_id: str, request: Request, response: Response,
                              profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
-    _location_limit(_location_maps_limiter, profile)
+    await _scoped_acquire(_location_maps_limiter, profile)
     body = await _read_json_body(request, LOCATION_MAX_MAPS_BODY_BYTES)
     return await _location_route(response, profile, lambda: _location_call(
         lambda store: store.answer_maps(request_id, body)), "maps answer")
@@ -7842,13 +7927,13 @@ async def get_location_rules(response: Response, profile: Optional[str] = None) 
 
 @router.delete("/location/rules/{rule_id}")
 async def delete_location_rule(rule_id: str, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
-    _location_limit(_location_wipe_limiter, profile)
+    await _scoped_acquire(_location_wipe_limiter, profile)
     return await _location_route(response, profile, lambda: _location_remove_rule(rule_id), "rule delete")
 
 
 @router.post("/location/wipe")
 async def post_location_wipe(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
-    _location_limit(_location_wipe_limiter, profile)
+    await _scoped_acquire(_location_wipe_limiter, profile)
     body = await _read_json_body(request, LOCATION_MAX_KEY_BODY_BYTES)
     no_store = {"Cache-Control": "no-store"}
     if not isinstance(body, dict):
@@ -7931,13 +8016,6 @@ async def _phone_route(response: Response, profile: Optional[str], fn: Callable[
         raise _unexpected(name, exc, feature="Calendar sharing")
 
 
-def _phone_limit(limiter: Any, profile: Optional[str]) -> None:
-    try:
-        limiter.acquire(_limiter_key(profile))
-    except TokenError as exc:
-        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
-
-
 @router.get("/phone/status")
 async def get_phone_status(response: Response, profile: Optional[str] = None,
                            device_id: Optional[str] = None) -> Dict[str, Any]:
@@ -7948,7 +8026,7 @@ async def get_phone_status(response: Response, profile: Optional[str] = None,
 @router.post("/phone/key")
 async def post_phone_key(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
-    _phone_limit(_phone_key_limiter, profile)
+    await _scoped_acquire(_phone_key_limiter, profile)
     body = await _read_json_body(request, PHONE_MAX_KEY_BODY_BYTES)
     return await _phone_route(response, profile, lambda: _phone_call(lambda store: store.register_key(body)), "key")
 
@@ -7956,7 +8034,7 @@ async def post_phone_key(request: Request, response: Response, profile: Optional
 @router.post("/phone/ingest")
 async def post_phone_ingest(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
-    _phone_limit(_phone_ingest_limiter, profile)
+    await _scoped_acquire(_phone_ingest_limiter, profile)
     body = await _read_json_body(request, PHONE_MAX_INGEST_BODY_BYTES)
     return await _phone_route(response, profile, lambda: _phone_call(lambda store: store.ingest(body)), "upload")
 
@@ -7964,14 +8042,14 @@ async def post_phone_ingest(request: Request, response: Response, profile: Optio
 @router.post("/phone/exchange")
 async def post_phone_exchange(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
-    _phone_limit(_phone_exchange_limiter, profile)
+    await _scoped_acquire(_phone_exchange_limiter, profile)
     body = await _read_json_body(request, PHONE_MAX_EXCHANGE_BODY_BYTES)
     return await _phone_route(response, profile, lambda: _phone_call(lambda store: store.exchange(body)), "exchange")
 
 
 @router.post("/phone/wipe")
 async def post_phone_wipe(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
-    _phone_limit(_phone_wipe_limiter, profile)
+    await _scoped_acquire(_phone_wipe_limiter, profile)
     body = await _read_json_body(request, PHONE_MAX_KEY_BODY_BYTES)
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Expected a JSON object", headers={"Cache-Control": "no-store"})
@@ -14295,7 +14373,7 @@ async def get_artifacts(response: Response, profile: Optional[str] = None, befor
             _artifacts_slots.release()
 
     try:
-        _artifacts_limiter.acquire(_limiter_key(profile))
+        await _scoped_acquire(_artifacts_limiter, profile)
         if not _artifacts_slots.acquire(blocking=False):
             raise HTTPException(status_code=503, detail="Hermes is still reading artifacts; try again shortly",
                                 headers={"Cache-Control": "no-store"})
@@ -14381,6 +14459,8 @@ ROUTE_CAPABILITIES = (
     "location-profiles",
     "pairing",
     "self-restart",
+    # POST /self/update runs the whole update on the host and notifies.
+    "self-update",
     "cron-notifications",
     "reply-sources",
     "chat-on-screen",
@@ -14600,3 +14680,367 @@ async def post_self_restart(response: Response) -> Dict[str, Any]:
     except Exception as exc:
         raise _unexpected("restart", exc, feature="Restart")
 
+
+
+# --- Self update --------------------------------------------------------------
+#
+# The whole update on the host, so Conduit can hand it over and be closed:
+# Hermes pulls the plugin (the call behind its agent-plugins update route), the
+# gateway restarts (the spawn behind /api/gateway/restart) and this dashboard
+# re-execs once no chat turn runs here, as /self/restart does. The job lives in
+# a file in the Hermes root, so the restarted dashboard can finish it: it
+# records how the update ended and notifies the profile that asked, through
+# that profile's relay pairing. A Hermes without those calls, or a dashboard
+# that can't restart itself, answers 501 and Conduit runs the steps itself.
+
+PLUGIN_NAME = "conduit_push"
+SELF_UPDATE_FILE = "conduit-self-update.json"
+SELF_UPDATE_GATEWAY_LIMIT_S = 180.0
+SELF_UPDATE_CHATS_RECHECK_S = 2.0
+# A turn marker left behind can't hold the update forever.
+SELF_UPDATE_CHATS_LIMIT_S = 7200.0
+# The restarted dashboard notifies once it has had a moment to come up.
+SELF_UPDATE_NOTIFY_DELAY_S = 5.0
+# A job that hasn't moved for this long is over, however it was left.
+SELF_UPDATE_STALE_S = 3600.0
+SELF_UPDATE_RUNNING = ("downloading", "restarting_gateway", "waiting_for_chats", "restarting_dashboard")
+# Reentrant: a start reads the status under it too.
+_self_update_lock = threading.RLock()
+_self_update_thread: Optional[threading.Thread] = None
+# The job this process started, for when its file can't be read back.
+_self_update_job: Optional[Dict[str, Any]] = None
+# Each start pulls and restarts the gateway: a few per hour is plenty.
+_self_update_limiter = _MintLimiter(3, 600.0, message="Too many plugin updates; try again in a few minutes")
+
+
+def _self_update_path() -> Path:
+    return _hermes_homes()[0] / SELF_UPDATE_FILE
+
+
+def _read_self_update(path: Path) -> Optional[Dict[str, Any]]:
+    try:
+        job = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+    return job if isinstance(job, dict) and isinstance(job.get("id"), str) else None
+
+
+def _write_self_update(path: Path, job: Dict[str, Any]) -> None:
+    job["updated_at"] = time.time()
+    handle, temp = tempfile.mkstemp(prefix=".conduit-self-update.", dir=str(path.parent))
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as out:
+            json.dump(job, out)
+        os.replace(temp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temp)
+        raise
+
+
+def _hermes_update_steps() -> Tuple[Callable[[], Dict[str, Any]], Callable[[], int]]:
+    """Hermes' own plugin pull and gateway restart, or 501 when this Hermes lacks them."""
+    try:
+        plugins_cmd = importlib.import_module("hermes_cli.plugins_cmd")
+        web_server = importlib.import_module("hermes_cli.web_server")
+    except ImportError as exc:
+        # Only a Hermes without these modules; a broken import inside Hermes is a real failure.
+        if exc.name not in ("hermes_cli", "hermes_cli.plugins_cmd", "hermes_cli.web_server"):
+            raise
+        raise TokenError(501, "This Hermes can't run the plugin update on its own")
+    dashboard_update_user_plugin = getattr(plugins_cmd, "dashboard_update_user_plugin", None)
+    _spawn_gateway_restart = getattr(web_server, "_spawn_gateway_restart", None)
+    if not callable(dashboard_update_user_plugin) or not callable(_spawn_gateway_restart):
+        raise TokenError(501, "This Hermes can't run the plugin update on its own")
+
+    def pull() -> Dict[str, Any]:
+        return dashboard_update_user_plugin(PLUGIN_NAME)
+
+    def restart_gateway() -> int:
+        proc, _reused = _spawn_gateway_restart(None, interrupt=True)
+        try:
+            return proc.wait(timeout=SELF_UPDATE_GATEWAY_LIMIT_S)
+        except subprocess.TimeoutExpired:
+            # Failed is failed: a restart finishing later mustn't contradict the job.
+            with contextlib.suppress(OSError):
+                proc.kill()
+            raise
+
+    return pull, restart_gateway
+
+
+def _self_update_failed(job: Dict[str, Any], detail: str, code: Optional[str] = None) -> None:
+    # failed_step says how far it got: Conduit runs the steps itself only
+    # when the pull itself failed.
+    job.update(failed_step=job.get("step"), step="failed", detail=detail, finished_at=time.time())
+    if code:
+        job["code"] = code
+
+
+def _run_self_update(job: Dict[str, Any], path: Path, pull: Callable[[], Dict[str, Any]],
+                     restart_gateway: Callable[[], int], schedule: Callable[[float, Callable[[], None]], Any],
+                     homes: Callable[[], List[Path]], notify: Callable[[Dict[str, Any]], None],
+                     sleep: Callable[[float], None] = time.sleep) -> None:
+    global _self_restart_scheduled
+    claimed_restart = False
+    try:
+        result = pull()
+        if not result.get("ok"):
+            # Not found, no owned checkout, a re-pin needing consent, a blocked
+            # scan: Hermes' own words, which Conduit acts on.
+            code = next((flag for flag in ("consent_required", "scan_blocked") if result.get(flag)), None)
+            _self_update_failed(job, str(result.get("error") or "Hermes didn't apply the update"), code)
+            return
+        job.update(step="restarting_gateway", version=_plugin_version())
+        if job["version"] is None:
+            _self_update_failed(job, "The update left a plugin.yaml without a readable version on the host")
+            return
+        _write_self_update(path, job)
+        try:
+            exit_code = restart_gateway()
+        except subprocess.TimeoutExpired:
+            exit_code = None
+        if exit_code != 0:
+            _self_update_failed(job, "The plugin is updated, but the gateway didn't restart. "
+                                     "Run hermes gateway status on the host.")
+            return
+        if LOADED_VERSION is not None and job["version"] == LOADED_VERSION:
+            # Nothing new on disk for this dashboard to load.
+            job.update(step="done", loaded_version=LOADED_VERSION, finished_at=time.time())
+            return
+        waited = 0.0
+        while running := _running_turns(os.getpid(), homes(), _own_start_time()):
+            if waited >= SELF_UPDATE_CHATS_LIMIT_S:
+                _self_update_failed(job, "Chats were still running after two hours. Restart the Hermes "
+                                         "dashboard on this host to finish the update", "restart_needed")
+                return
+            if job.get("running_chats") != running:
+                job.update(step="waiting_for_chats", running_chats=running)
+                _write_self_update(path, job)
+            sleep(SELF_UPDATE_CHATS_RECHECK_S)
+            waited += SELF_UPDATE_CHATS_RECHECK_S
+        with _self_restart_lock:
+            # Taken before the step is written, so a status read never sees
+            # the restart step without a restart on its way.
+            already = _self_restart_scheduled
+            _self_restart_scheduled = True
+        claimed_restart = not already
+        job.update(step="restarting_dashboard", running_chats=0)
+        _write_self_update(path, job)
+        if already:
+            return
+        # It checks again for a turn started meanwhile.
+        schedule(SELF_RESTART_DELAY_S, lambda: _restart_when_idle(schedule, homes))
+        claimed_restart = False
+        return
+    except Exception as exc:  # noqa: BLE001 — the job says how it ended, whatever ended it
+        if claimed_restart:
+            # Nothing was scheduled: a later restart must not read as already on its way.
+            with _self_restart_lock:
+                _self_restart_scheduled = False
+        logger.exception("Conduit plugin: the update on the host failed")
+        _self_update_failed(job, f"The update failed on the host ({type(exc).__name__})")
+    finally:
+        if job["step"] in ("done", "failed"):
+            with contextlib.suppress(OSError):
+                _write_self_update(path, job)
+            notify(job)
+
+
+def start_self_update(profile: Optional[str], schedule: Callable[[float, Callable[[], None]], Any], *,
+                      path: Optional[Path] = None,
+                      steps: Optional[Tuple[Callable[[], Dict[str, Any]], Callable[[], int]]] = None,
+                      homes: Optional[Callable[[], List[Path]]] = None,
+                      notify: Optional[Callable[[Dict[str, Any]], None]] = None) -> Dict[str, Any]:
+    """Starts the update on the host, or returns the one still under way."""
+    global _self_update_thread, _self_update_job
+    refusal = _self_restart_refusal()
+    if refusal is not None:
+        raise TokenError(*refusal)
+    pull, restart_gateway = steps or _hermes_update_steps()
+    path = path or _self_update_path()
+    with _self_update_lock:
+        if _self_update_thread is not None and _self_update_thread.is_alive():
+            return _read_self_update(path) or dict(_self_update_job or {"id": "", "step": "downloading"})
+        # A job whose thread ended can still be under way: the dashboard
+        # restart it handed over hasn't happened yet.
+        current = self_update_status(path, notify=notify)
+        if current is not None and current.get("step") in SELF_UPDATE_RUNNING:
+            return current
+        mint = _self_update_limiter.acquire("")
+        job: Dict[str, Any] = {
+            "id": uuid.uuid4().hex, "step": "downloading", "from_version": LOADED_VERSION,
+            "boot_id": BOOT_ID, "pid": os.getpid(), "profile": profile or "", "started_at": time.time(),
+        }
+        try:
+            _write_self_update(path, job)
+            thread = threading.Thread(
+                target=_run_self_update, name="conduit-self-update", daemon=True,
+                args=(job, path, pull, restart_gateway, schedule, homes or _hermes_homes, notify or _notify_self_update))
+            thread.start()
+        except BaseException:
+            # Nothing started: the attempt doesn't count against the limit.
+            _self_update_limiter.release("", mint)
+            raise
+        _self_update_job, _self_update_thread = job, thread
+        return dict(job)
+
+
+def self_update_status(path: Optional[Path] = None, now: Optional[float] = None,
+                       notify: Optional[Callable[[Dict[str, Any]], None]] = None) -> Optional[Dict[str, Any]]:
+    """The latest job, with one this dashboard can no longer finish marked failed."""
+    path = path or _self_update_path()
+    with _self_update_lock:
+        return _self_update_status(path, now, notify or _notify_self_update)
+
+
+def _job_time(value: Any) -> float:
+    """A job file's timestamp; an unreadable one counts as long ago."""
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _self_update_status(path: Path, now: Optional[float],
+                        notify: Callable[[Dict[str, Any]], None]) -> Optional[Dict[str, Any]]:
+    job = _read_self_update(path)
+    if job is None or job.get("step") not in SELF_UPDATE_RUNNING:
+        return job
+    alive = _self_update_thread is not None and _self_update_thread.is_alive()
+    if alive and job.get("boot_id") == BOOT_ID:
+        # Its thread is still on it, however long the chats take.
+        return job
+    if job.get("boot_id") == BOOT_ID and job["step"] == "restarting_dashboard" and _self_restart_scheduled:
+        # The restart waits for the chats; it finishes the job when it lands.
+        return job
+    if job.get("boot_id") == BOOT_ID and job["step"] != "restarting_dashboard" and not alive:
+        _self_update_failed(job, "The update stopped on the host before it finished")
+    elif job.get("boot_id") == BOOT_ID and job["step"] == "restarting_dashboard" and not _self_restart_scheduled:
+        # The re-exec failed (and was logged): the new plugin waits for a restart.
+        _self_update_failed(job, "Restart the Hermes dashboard on this host to finish the update",
+                            "restart_needed")
+    elif (now or time.time()) - _job_time(job.get("updated_at")) > SELF_UPDATE_STALE_S:
+        _self_update_failed(job, "The update didn't finish on the host")
+    else:
+        return job
+    with contextlib.suppress(OSError):
+        _write_self_update(path, job)
+    # Conduit may be closed: the asking profile hears it ended.
+    timer = threading.Timer(0, notify, args=(dict(job),))
+    timer.daemon = True
+    timer.start()
+    return job
+
+
+def _another_live_process(pid: Any) -> bool:
+    """Whether `pid` is a running process other than this one. The dashboard's
+    re-exec keeps its pid; a dashboard restarted any other way has a new one."""
+    if not isinstance(pid, int) or pid <= 0 or pid == os.getpid():
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def finish_self_update_after_restart(path: Optional[Path] = None,
+                                     notify: Optional[Callable[[Dict[str, Any]], None]] = None,
+                                     delay: float = SELF_UPDATE_NOTIFY_DELAY_S) -> Optional[Dict[str, Any]]:
+    """In a new dashboard process: ends a job the previous process left running."""
+    path = path or _self_update_path()
+    job = _read_self_update(path)
+    if job is None or job.get("step") not in SELF_UPDATE_RUNNING or job.get("boot_id") == BOOT_ID:
+        return None
+    if _another_live_process(job.get("pid")):
+        # Another process loading this file (a probe), while the dashboard runs the job.
+        return None
+    # Pulled (it has a version) and this process loaded it: done, whatever
+    # restarted the dashboard (an update's own re-exec or a /self/restart).
+    if job.get("version") is not None and LOADED_VERSION == job["version"]:
+        job.update(step="done", loaded_version=LOADED_VERSION, finished_at=time.time())
+    else:
+        _self_update_failed(job, "The dashboard restarted before the update finished")
+    _write_self_update(path, job)
+    timer = threading.Timer(delay, notify or _notify_self_update, args=(dict(job),))
+    timer.daemon = True
+    timer.start()
+    return job
+
+
+_plugin_package_lock = threading.Lock()
+
+
+def _plugin_client() -> Any:
+    """client.py, imported as part of a package of this plugin's own files.
+
+    This module is loaded by path, outside the plugin's package, and client.py
+    imports its siblings relatively; the package here holds only what it
+    imports, and never runs the plugin's __init__ (which registers hooks).
+    """
+    name = "conduit_push_dashboard_package"
+    with _plugin_package_lock:
+        if name not in sys.modules:
+            package = types.ModuleType(name)
+            package.__path__ = [os.path.dirname(os.path.dirname(os.path.abspath(__file__)))]
+            sys.modules[name] = package
+        return importlib.import_module(f"{name}.client")
+
+
+def _notify_self_update(job: Dict[str, Any]) -> None:
+    """Tells the profile that asked how the update ended, when it is paired."""
+    profile = job.get("profile") or None
+    if job.get("step") == "done":
+        title = "Conduit plugin updated"
+        body = f"Version {job.get('loaded_version') or job.get('version')} is running."
+    else:
+        title = "Conduit plugin update didn't finish"
+        body = str(job.get("detail") or "Open Conduit to see what happened.")
+    try:
+        with _profile_scope(profile):
+            client = _plugin_client()
+            if not client.load_state():
+                return
+            events = sys.modules[f"{client.__package__}.events"]
+            event = events.push_event("background_task.finished", identifier=events.event_id("plugin-update", job["id"]),
+                                      profile=profile or "default", title=title, body=body)
+            client.send_now(event)
+    except Exception as exc:  # noqa: BLE001 — a notification is a courtesy; the job file has the outcome
+        logger.warning("Conduit plugin: couldn't send the update notification (%s)", type(exc).__name__)
+
+
+@router.post("/self/update")
+async def post_self_update(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    loop = asyncio.get_running_loop()
+
+    def schedule(delay: float, fn: Callable[[], None]) -> None:
+        # From the job's thread: the restart runs on the dashboard's own loop.
+        loop.call_soon_threadsafe(loop.call_later, delay, fn)
+
+    try:
+        return {"ok": True, "job": await asyncio.to_thread(start_self_update, profile, schedule)}
+    except TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _unexpected("update", exc, feature="Update")
+
+
+@router.get("/self/update")
+async def get_self_update(response: Response) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return {"ok": True, "job": await asyncio.to_thread(self_update_status), "boot_id": BOOT_ID,
+                "loaded_version": LOADED_VERSION}
+    except Exception as exc:
+        raise _unexpected("update status", exc, feature="Update")
+
+
+with contextlib.suppress(Exception):
+    # A job the previous dashboard process handed over at its restart.
+    finish_self_update_after_restart()

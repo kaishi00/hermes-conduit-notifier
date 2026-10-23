@@ -83,6 +83,7 @@ def test_every_capability_names_a_served_route_family():
         "phone-contacts": "/phone/",
         "pairing": "/pair",
         "self-restart": "/self/restart",
+        "self-update": "/self/update",
         "cron-notifications": "/cron/notifications",
         "reply-sources": "/notifications/reply-sources",
         "chat-on-screen": "/notifications/on-screen",

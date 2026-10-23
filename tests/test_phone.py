@@ -1413,6 +1413,20 @@ def test_voice_lists_calendar_and_phone_reads_only_once_shared(client):
     assert "add_event" not in tools["conduit_calendar"]["description"]
 
 
+def test_voice_lists_only_what_the_calling_device_shares(client):
+    # The iPhone shares phone status alone; the iPad shares the calendar.
+    # A call on the iPhone reads the iPhone only, so it isn't offered the
+    # iPad's calendar; without a device the list stays any device's.
+    _route_shared(client, calendar="off", reminders=False)
+    _route_shared(client, Phone("ipad-installation-2", name="iPad"), status=False, focus=False)
+    tools = lambda **query: {tool["name"]: tool for tool in client.http.get(
+        f"{BASE}/voice-tools", params=query).json()["tools"]}
+    assert set(tools()) == {"conduit_calendar", "conduit_phone"}
+    assert set(tools(phone_device=DEVICE)) == {"conduit_phone"}
+    assert set(tools(phone_device="ipad-installation-2")) == {"conduit_calendar"}
+    assert tools(phone_device="someone-else") == {}
+
+
 def test_voice_reads_this_phones_calendar_sealed(client):
     handset = _route_shared(client)
     found = _voice_read(client, handset, "conduit_calendar",
@@ -1566,7 +1580,7 @@ def test_a_broken_calendar_store_leaves_health_listed(client, monkeypatch):
     real = api._plugin_package_module
     health = real("health_tool")
     # Some phone shares health, so its tool is listed.
-    monkeypatch.setattr(health.HealthStore, "overview", lambda self: {"devices": [{"id": "phone-installation-3"}]})
+    monkeypatch.setattr(health.HealthStore, "overview", lambda self, only=None: {"devices": [{"id": "phone-installation-3"}]})
 
     def broken(name):
         if name == "phone_tool":

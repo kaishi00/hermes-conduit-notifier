@@ -2317,6 +2317,30 @@ gateway (`POST /api/gateway/restart`), then this dashboard:
 The first update to 0.24 still runs the old code, which has no restart route:
 restart the dashboard by hand once.
 
+From 0.63 the host can run the whole update itself, so Conduit can be closed
+while it runs:
+
+- `POST /api/plugins/conduit_push/self/update?profile=<name>` starts it and
+  answers `{ok, job}`: Hermes pulls the plugin, the gateway restarts, and the
+  dashboard re-executes once no chat turn runs here. A second call while one
+  runs answers the same job. 501 where `/self/restart` would, or when Hermes
+  lacks its own pull and gateway restart calls; Conduit then runs the steps
+  above itself. 429 after three starts in ten minutes.
+- `GET /api/plugins/conduit_push/self/update` answers `{ok, job, boot_id,
+  loaded_version}`. `job.step` is `downloading`, `restarting_gateway`,
+  `waiting_for_chats` (with `running_chats`), `restarting_dashboard`, `done`
+  or `failed` (with `detail`, `failed_step` naming the step it failed in,
+  and `code` for `consent_required`, `scan_blocked` or `restart_needed`).
+  Chats still running after two hours fail the job with `restart_needed`:
+  the new plugin is on disk and loads on the next dashboard restart.
+- The job is kept in `conduit-self-update.json` in the Hermes root. The
+  restarted dashboard marks it done and sends the profile that asked a
+  notification saying which version is running, or why the update didn't
+  finish.
+
+Every version is listed in [CHANGELOG.md](CHANGELOG.md), which Conduit's update
+notice reads.
+
 ## Conduit support and privacy
 
 The repository also hosts the public Hermes Conduit support and privacy pages:

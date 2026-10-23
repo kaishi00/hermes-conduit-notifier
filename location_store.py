@@ -44,7 +44,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterable, Iterator
 
 try:
     import fcntl
@@ -59,6 +59,10 @@ FILE_NAME = "conduit-location.sqlite3"
 SCHEMA_VERSION = 3
 # Versions _migrate brings up to SCHEMA_VERSION.
 OLDER_SCHEMAS = ("1", "2")
+# The jobs of deleted rules wait in meta under this prefix (and the time they
+# were deleted) until the scheduler no longer has them (#227). In meta, so an
+# older plugin still opens the file.
+_PENDING_JOB = "rule_job_pending:"
 
 SALT = b"conduit-location-v1"
 INFO_INGEST = b"conduit-location-v1 ingest device-to-host"
@@ -633,7 +637,8 @@ class LocationStore:
 
     def status(self, device_id: Any = None) -> dict[str, Any]:
         with self._read() as db:
-            if db is None:
+            # A wiped store kept only for its rules' jobs holds nothing of the user's.
+            if db is None or _only_pending_jobs(db):
                 return {"stored": False, "generation": None, "device": None, "reads_24h": 0, "rules": 0}
             now = self.clock()
             answer: dict[str, Any] = {
@@ -686,27 +691,37 @@ class LocationStore:
                     db.execute(f"DELETE FROM {table} WHERE {column}=?", (device_id,))
             if device_id is None:
                 jobs = [row[0] for row in db.execute("SELECT job_id FROM rules WHERE job_id IS NOT NULL")]
+                _pend_rule_jobs(db, jobs, self.clock())
                 for table in ("rules", "reads", "locates"):
                     db.execute(f"DELETE FROM {table}")
         with self._locked():
-            remaining = self._count("devices")
-            if remaining == 0 and self._count("rules") == 0:
-                # Companions first: a crash part-way never leaves a WAL that a
-                # fresh database could pick up.
-                for suffix in ("-wal", "-shm", "-journal", ""):
-                    # Windows refuses while a reader has it open; the data
-                    # is already deleted, and the next wipe tries again.
-                    with contextlib.suppress(OSError):
-                        os.unlink(f"{self.path}{suffix}")
+            remaining = self._count("SELECT COUNT(*) FROM devices")
+            self._drop_if_empty()
         return {"deleted": True, "remaining_devices": remaining, "rule_jobs": jobs}
 
-    def _count(self, table: str) -> int:
-        """Rows in a table; the caller holds ``_locked()``."""
+    def _drop_if_empty(self) -> None:
+        """Deletes the file once no device, rule or job still waiting to be
+        removed is left; the caller holds ``_locked()``. A wipe keeps the
+        file until its rules' jobs are gone, so a crash in between can't
+        lose them."""
+        if (self._count("SELECT COUNT(*) FROM devices") or self._count("SELECT COUNT(*) FROM rules")
+                or self._count(f"SELECT COUNT(*) FROM meta WHERE key GLOB '{_PENDING_JOB}*'")):
+            return
+        # Companions first: a crash part-way never leaves a WAL that a
+        # fresh database could pick up.
+        for suffix in ("-wal", "-shm", "-journal", ""):
+            # Windows refuses while a reader has it open; the data
+            # is already deleted, and the next wipe tries again.
+            with contextlib.suppress(OSError):
+                os.unlink(f"{self.path}{suffix}")
+
+    def _count(self, query: str) -> int:
+        """A COUNT query's answer; the caller holds ``_locked()``."""
         if not self.path.exists():
             return 0
         connection = sqlite3.connect(self.path, timeout=15)
         try:
-            return connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            return connection.execute(query).fetchone()[0]
         except sqlite3.DatabaseError:
             return 0
         finally:
@@ -821,16 +836,44 @@ class LocationStore:
         return _rule_row(row)
 
     def remove_rule(self, rule_id: Any) -> str | None:
-        """Removes a rule; its job's id (for the caller to remove), or None
-        when there was no such rule."""
+        """Removes a rule and lists its job for removal; the job's id, ""
+        for a rule without one, or None when there was no such rule."""
         if not isinstance(rule_id, str) or not _RULE_ID.match(rule_id) or not self.path.exists():
             return None
         with self._write() as db:
             row = db.execute("SELECT job_id FROM rules WHERE id=?", (rule_id,)).fetchone()
             if row is None:
                 return None
+            # In the same transaction: a job whose removal fails, or never
+            # happens (a crash), is still on the list to retry.
+            _pend_rule_jobs(db, [row[0]], self.clock())
             db.execute("DELETE FROM rules WHERE id=?", (rule_id,))
             return row[0] or ""
+
+    def pending_rule_jobs(self) -> list[str]:
+        """Jobs of deleted rules that the scheduler hasn't confirmed gone,
+        oldest first."""
+        with self._read() as db:
+            if db is None:
+                return []
+            return [key[len(_PENDING_JOB):] for (key,) in db.execute(
+                f"SELECT key FROM meta WHERE key GLOB '{_PENDING_JOB}*' ORDER BY CAST(value AS REAL), key")]
+
+    def pend_rule_job(self, job_id: str) -> None:
+        """Puts a job no rule points at on the list to remove."""
+        with self._write() as db:
+            _pend_rule_jobs(db, [job_id], self.clock())
+
+    def rule_jobs_gone(self, job_ids: Iterable[str]) -> None:
+        """Takes jobs the scheduler no longer has off the list (and the file
+        goes once nothing else is in it)."""
+        job_ids = [job_id for job_id in job_ids if job_id]
+        if not job_ids or not self.path.exists():
+            return
+        with self._write() as db:
+            db.executemany("DELETE FROM meta WHERE key=?", [(_PENDING_JOB + job_id,) for job_id in job_ids])
+        with self._locked():
+            self._drop_if_empty()
 
     # On-demand locate -------------------------------------------------------------------
 
@@ -1027,6 +1070,20 @@ def _rule_row(row: tuple[Any, ...]) -> dict[str, Any]:
 
 
 # --- Schema and batch apply -----------------------------------------------------------
+
+
+def _only_pending_jobs(db: sqlite3.Connection) -> bool:
+    # Reads and locates need a device's data (snapshot), so a store with no
+    # device and no rule has none worth keeping.
+    return (db.execute(f"SELECT 1 FROM meta WHERE key GLOB '{_PENDING_JOB}*' LIMIT 1").fetchone() is not None
+            and db.execute("SELECT 1 FROM devices LIMIT 1").fetchone() is None
+            and db.execute("SELECT 1 FROM rules LIMIT 1").fetchone() is None)
+
+
+def _pend_rule_jobs(db: sqlite3.Connection, job_ids: Iterable[Any], now: float) -> None:
+    # Ids come from Hermes's scheduler; a bound keeps a broken answer out of meta.
+    db.executemany("INSERT OR IGNORE INTO meta VALUES(?, ?)",
+                   [(_PENDING_JOB + str(job_id), str(now)) for job_id in job_ids if job_id and len(str(job_id)) <= 200])
 
 
 def _meta(db: sqlite3.Connection, key: str) -> str | None:

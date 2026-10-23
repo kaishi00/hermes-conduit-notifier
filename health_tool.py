@@ -148,9 +148,10 @@ def voice_description() -> str:
     return f"{DESCRIPTION} {VOICE_NOTE}"
 
 
-def voice_shared(store: HealthStore) -> bool:
-    """Whether any device has shared health here (the voice list offers the tool)."""
-    return bool(store.overview()["devices"])
+def voice_shared(store: HealthStore, device_id: str | None = None) -> bool:
+    """Whether any device (or ``device_id``, the calling one) has shared
+    health here (the voice list offers the tool)."""
+    return bool(store.overview(device_id)["devices"])
 
 
 VOICE_ACTIONS = frozenset(SCHEMA["parameters"]["properties"]["action"].get("enum", ()))

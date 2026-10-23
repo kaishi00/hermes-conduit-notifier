@@ -49,6 +49,8 @@ RULE_PREFIX = "Place rule: "
 # replies [SILENT].
 RULE_SCHEDULE = "0 4 29 2 *"
 EVENT_MARK = "[Conduit place event:"
+# How long after the plugin loads its leftover rule jobs are retried.
+STARTUP_CLEANUP_DELAY_S = 30.0
 MAX_HISTORY_DAYS = 31
 MAX_HISTORY_ROWS = 200
 LOCATE_WAIT_S = 20.0
@@ -110,7 +112,8 @@ SCHEMA: dict[str, Any] = {
 
 
 def register(ctx: Any, *, is_child: Callable[[Any], bool], profile: Callable[[], str], skill_path: Any) -> None:
-    """Registers the tool and its skill, if this Hermes supports them."""
+    """Registers the tool and its skill, if this Hermes supports them, and
+    retries the jobs of rules deleted before."""
     if hasattr(ctx, "register_tool"):
         def handler(args: Any, session_id: Any = None, **_: Any) -> str:
             return handle(args, session_id=session_id, is_child=is_child, profile=profile())
@@ -128,6 +131,7 @@ def register(ctx: Any, *, is_child: Callable[[Any], bool], profile: Callable[[],
             ctx.register_skill(SKILL_NAME, skill_path)
         except Exception:  # noqa: BLE001
             logger.warning("conduit_push: could not register the %s skill", SKILL_NAME, exc_info=True)
+    clear_rule_jobs_at_start()
 
 
 def _store() -> LocationStore:
@@ -177,9 +181,10 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
     # Reads through another profile's store are logged there under this one.
     session_label = profile if owner is not None else ""
     if action == "rules":
-        # Nothing stored (never shared, or wiped): nothing read, and a log
-        # row would bring the wiped file back.
-        if store.exists():
+        # Nothing stored (never shared, or wiped, even while the file waits
+        # on its rules' jobs): nothing read, and a log row would bring the
+        # wiped file back.
+        if store.exists() and store.status()["stored"]:
             _log(store, action, session)
         return {"ok": True, "rules": [_rule_view(rule) for rule in store.rules()],
                 "note": f"Up to {MAX_RULES} rules. They run only while the user shares location in the background."}
@@ -227,9 +232,10 @@ def voice_description() -> str:
             + VOICE_NOTE)
 
 
-def voice_shared(store: LocationStore) -> bool:
-    """Whether any device has shared location here (the voice list offers the tool)."""
-    return store.snapshot() is not None
+def voice_shared(store: LocationStore, device_id: str | None = None) -> bool:
+    """Whether any device (or ``device_id``, the calling one) has shared
+    location here (the voice list offers the tool)."""
+    return store.snapshot(device_id) is not None
 
 
 def voice_parameters() -> dict[str, Any]:
@@ -469,6 +475,8 @@ def _locate(store: LocationStore, view: dict[str, Any], profile: str, sleep: Cal
 # One set_rule at a time: two parallel calls with the same `what` would
 # otherwise both find no rule and both make a job.
 _rule_lock = threading.Lock()
+# The one start-up pass of this process (clear_rule_jobs_at_start).
+_cleanup_started: threading.Thread | None = None
 
 
 def _set_rule(store: LocationStore, view: dict[str, Any], raw: Any) -> dict[str, Any]:
@@ -516,6 +524,7 @@ def _set_rule_locked(store: LocationStore, view: dict[str, Any], raw: Any) -> di
     if cronjob is None:
         return {"ok": False, "error": "no_scheduler", "note": "This Hermes can't keep scheduled jobs, so place rules "
                                                               "can't run here."}
+    _clear_rule_jobs(store, cronjob)
     fields: dict[str, Any] = {"name": RULE_PREFIX + what, "prompt": run_prompt(rule), "schedule": RULE_SCHEDULE}
     job = None
     if existing and existing.get("job_id"):
@@ -543,8 +552,15 @@ def _set_rule_locked(store: LocationStore, view: dict[str, Any], raw: Any) -> di
                                 "job_id": job_id}, replacing=existing is not None)
     except Exception:
         if job is None:
-            # A job no rule points at could never be removed with remove_rule.
-            call_watches._call(cronjob, action="remove", job_id=job_id)
+            # A job no rule points at could never be removed with remove_rule:
+            # it goes on the store's list first, so a failed removal is retried.
+            try:
+                store.pend_rule_job(job_id)
+            except Exception:  # noqa: BLE001 — the store itself failed; one try
+                if not call_watches._call(cronjob, action="remove", job_id=job_id).get("success"):
+                    logger.warning("conduit_push: place rule job %s left with no rule and not listed", job_id)
+            else:
+                _clear_rule_jobs(store, cronjob)
         raise
     return {"ok": True, "result": "changed" if existing else "created", "rule": _rule_view(saved),
             "note": ("Tell the user what it does in a sentence. It runs only while they share location in the "
@@ -555,16 +571,75 @@ def _set_rule_locked(store: LocationStore, view: dict[str, Any], raw: Any) -> di
 
 
 def _remove_rule(store: LocationStore, rule_id: Any) -> dict[str, Any]:
-    job_id = store.remove_rule(rule_id)
-    if job_id is None:
+    # The store puts the rule's job on its list to remove as it deletes the
+    # rule; the job goes below, or on a later rule change or start.
+    if store.remove_rule(rule_id) is None:
         return {"ok": False, "error": "unknown_rule", "note": "No place rule has that id. Use rules to see them."}
-    if job_id:
-        cronjob = call_watches._cronjob()
-        if cronjob is not None:
+    cronjob = call_watches._cronjob()
+    if cronjob is not None:
+        _clear_rule_jobs(store, cronjob)
+    return {"ok": True, "result": "removed"}
+
+
+def _clear_rule_jobs(store: LocationStore, cronjob: Callable[..., str]) -> None:
+    """Removes the jobs of deleted rules that are still on the store's list
+    (#227), and takes each off once the scheduler no longer has it. A job
+    that's already gone counts as removed, so this can run any number of
+    times; one the scheduler keeps stays listed for next time."""
+    try:
+        pending = store.pending_rule_jobs()
+        if not pending:
+            return
+        left = []
+        for job_id in pending:
             answer = call_watches._call(cronjob, action="remove", job_id=job_id)
             if not answer.get("success"):
-                logger.warning("conduit_push: place rule job %s not removed: %s", job_id, answer.get("error"))
-    return {"ok": True, "result": "removed"}
+                left.append(job_id)
+        gone = [job_id for job_id in pending if job_id not in left]
+        if left:
+            # Removing a job that's already gone fails too: the list says.
+            jobs = _jobs(cronjob)
+            if jobs is not None:
+                present = {str(job.get("job_id")) for job in jobs}
+                gone += [job_id for job_id in left if job_id not in present]
+                left = [job_id for job_id in left if job_id in present]
+            if left:
+                logger.warning("conduit_push: place rule jobs not removed yet: %s", ", ".join(left))
+        store.rule_jobs_gone(gone)
+    except Exception:  # noqa: BLE001 — the jobs stay listed; the next change or start tries again
+        logger.warning("conduit_push: place rule jobs not cleared", exc_info=True)
+
+
+def clear_rule_jobs_at_start(delay: float = STARTUP_CLEANUP_DELAY_S) -> threading.Thread:
+    """Retries this profile's leftover rule jobs once, a little after the
+    plugin loads (Hermes's scheduler is set up by then), off the load path.
+    Only the profile's own store: rules, and so their jobs, live with the
+    profile that shares location, never one that reads it through another."""
+    global _cleanup_started
+    with _rule_lock:
+        # Once per process: the plugin may be registered again.
+        if _cleanup_started is not None:
+            return _cleanup_started
+
+    def run() -> None:
+        time.sleep(delay)
+        try:
+            store = LocationStore(get_hermes_home())
+            if not store.exists():
+                return
+            cronjob = call_watches._cronjob()
+            if cronjob is not None:
+                _clear_rule_jobs(store, cronjob)
+        except Exception:  # noqa: BLE001
+            logger.warning("conduit_push: place rule jobs not cleared at start", exc_info=True)
+
+    thread = threading.Thread(target=run, name="conduit-location-rule-jobs", daemon=True)
+    with _rule_lock:
+        if _cleanup_started is not None:
+            return _cleanup_started
+        _cleanup_started = thread
+    thread.start()
+    return thread
 
 
 def run_prompt(rule: dict[str, Any]) -> str:
