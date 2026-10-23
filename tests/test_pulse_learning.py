@@ -278,6 +278,8 @@ def test_a_brief_turn_pushes(live):
     [attempt] = live.store.in_flight()
     pulse._mark_turn(SID, "turn-b", attempt["tag"])
     assert pulse.pushes(SID, "turn-b") is True
+    assert pulse.push_copy(SID, "turn-b", "Two things waited.") == {
+        "title_label": "pulse.brief", "title": "Your morning brief", "body": "Two things waited."}
 
 
 def test_a_failed_push_becomes_a_card_once_follow_ups_go_quiet(live):
@@ -437,6 +439,11 @@ def test_a_delivered_brief_lands_on_the_pulse_screen_as_hermes_wrote_it(live):
     assert brief_card["kind"] == "brief" and brief_card["level"] == "push" and brief_card["chat_id"] == SID
     assert brief_card["news"] == "Good morning!\n\n- The deploy finished and everything is green."
     assert brief_card["message_id"] == reply_id and brief_card["why"] and brief_card["item_id"] is None
+    # The held card it brought carries the brief's tag, so Conduit shows it under the brief.
+    held = next(card for card in live.store.cards() if card["kind"] == "followup")
+    assert held["briefed_at"] is not None and held["brief"] == brief_card["brief"] == attempt["item_id"]
+    entry = next(c for c in control.feed(live.store, live.home)["cards"] if c["id"] == held["id"])
+    assert entry["brief"] == attempt["item_id"] and entry["dismissed_at"] is None
     pulse.tick()
     assert [card["kind"] for card in live.store.cards()].count("brief") == 1
     page = control.feed(live.store, live.home)
@@ -456,8 +463,11 @@ def test_a_requested_report_lands_on_the_pulse_screen_and_pushes_its_items(live)
     # A report that brought something up tells the phone, in plain lines.
     reply = "1. [date] Dentist Friday at 9\n2. [promise] Send the deck #4"
     assert pulse.pushes(SID, "turn-r", reply) is True
-    assert pulse.push_body(SID, "turn-r", reply) == "Dentist Friday at 9\nSend the deck"
-    assert pulse.push_body(SID, "other-turn", reply) == reply
+    assert pulse.push_copy(SID, "turn-r", reply) == {
+        "title_label": "pulse.noticed", "title": "Pulse noticed 2 things", "count": 2,
+        "body": "Dentist Friday at 9 · Send the deck"}
+    assert pulse.push_copy(SID, "turn-r", "1. [date] Dentist\n   Friday")["title"] == "Pulse noticed something"
+    assert pulse.push_copy(SID, "other-turn", reply)["body"] == reply
     live.db.message("user", attempt["text"])
     reply_id = live.db.message("assistant", "Here's your report.\n1. Deploy: green")
     pulse.tick()
@@ -817,3 +827,59 @@ def test_a_store_from_before_card_topics_gets_the_column(live):
     card_id = reopened.add_card({"kind": "noticed", "level": "screen", "news": "x", "topic": "date",
                                  "created_at": time.time()})
     assert reopened.card(card_id)["topic"] == "date"
+
+
+def test_not_now_takes_a_card_off_the_list_and_learns_nothing(live):
+    card = told_card(live)
+    assert control.dismiss(live.store, card["id"], True, now=100.0) is True
+    assert control.dismiss(live.store, card["id"], True, now=200.0) is False  # once
+    gone = live.store.card(card["id"])
+    assert gone["dismissed_at"] == 100.0 and gone["seen_at"] is not None and gone["rating"] == ""
+    assert live.store.lessons("followup", learning.LEVEL) == [] and learning.level(live.store, "followup") == "push"
+    assert control.dismiss(live.store, card["id"], False) is True
+    assert live.store.card(card["id"])["dismissed_at"] is None
+    for card_id, value, field in ((card["id"], None, "dismissed"), (999999, True, "card"), (True, True, "card")):
+        with pytest.raises(control.Refused) as refused:
+            control.dismiss(live.store, card_id, value)
+        assert refused.value.data == {"field": field}
+
+
+def test_a_held_card_swiped_away_stays_out_of_the_brief(live):
+    brief_later(live)
+    control.set_level(live.store, "followup", "brief")
+    tell(live)
+    pulse.tick()
+    [held] = live.store.held_cards(10)
+    control.dismiss(live.store, held["id"], True)
+    assert live.store.held_cards(10) == [] and live.store.held_count() == 0
+    brief_due_now(live)
+    pulse.tick()
+    assert live.sent() == []
+
+
+def test_a_remembered_thing_swiped_away_rests_a_week(live):
+    item_id = promise(live)
+    now = time.time()
+    card_id = live.store.add_card({"kind": "noticed", "item_id": item_id, "level": "screen", "news": "x",
+                                   "topic": "promise", "created_at": now})
+    zone = pulse.report.timezone.utc
+    assert f"#{item_id} " in pulse.report.remembered(live.store, zone, now)
+    control.dismiss(live.store, card_id, True, now=now)
+    assert f"#{item_id} " not in pulse.report.remembered(live.store, zone, now + 60)
+    assert f"#{item_id} " in pulse.report.remembered(live.store, zone, now + pulse.report.DISMISS_REST_S + 60)
+
+
+def test_a_store_from_before_briefs_and_not_now_gets_their_columns(tmp_path):
+    path = tmp_path / store.DB_NAME
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE cards (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, item_id INTEGER, "
+                     "level TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', quote TEXT NOT NULL DEFAULT '', "
+                     "news TEXT NOT NULL DEFAULT '', why TEXT NOT NULL DEFAULT '', profile TEXT NOT NULL DEFAULT '', "
+                     "chat_id TEXT NOT NULL DEFAULT '', chat_title TEXT NOT NULL DEFAULT '', message_id INTEGER, "
+                     "created_at REAL NOT NULL, seen_at REAL, briefed_at REAL, rating TEXT NOT NULL DEFAULT '', "
+                     "reason TEXT NOT NULL DEFAULT '', rated_at REAL)")
+        conn.execute("INSERT INTO cards(kind, level, created_at) VALUES('followup', 'screen', 1)")
+    old = store.PulseStore(path)
+    [card] = old.cards()
+    assert card["topic"] == "" and card["brief"] == "" and card["dismissed_at"] is None
+    assert old.dismiss_card(card["id"], True, 5.0) is True

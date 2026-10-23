@@ -51,7 +51,7 @@ MAX_CT_CHARS = 2600
 # Fields that carry content. Everything else on an event stays visible to the
 # relay because it routes on it.
 INNER_FIELDS = ("title", "body", "session_id", "profile", "gateway", "stored_session_id", "decision", "call",
-                "locate", "maps", "title_label", "session_title")
+                "locate", "maps", "title_label", "session_title", "count")
 
 KID_PATTERN = re.compile(r"^[0-9a-f]{32}\Z")
 _B64URL_PATTERN = re.compile(r"^[A-Za-z0-9_-]*\Z")

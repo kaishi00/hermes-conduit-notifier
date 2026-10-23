@@ -30,9 +30,11 @@ TEXT = """Pulse morning brief {tag}.
 What Pulse held for this morning:
 {lines}"""
 NOTE = ("This turn was started by Pulse, the part of Hermes that speaks up on its own. The message lists news the "
-        "user asked to get in a morning brief instead of as it happened. Give them a short morning brief: one "
-        "friendly line per item, each starting with what it's about so it makes sense on its own. Only pass on "
-        "what the message says. Don't use any tools.")
+        "user asked to get in a morning brief instead of as it happened. Each item is already shown to them as its "
+        "own card under your reply, so don't list them again: open their morning brief in one or two short, "
+        "friendly sentences that sum up what's in it, the one that needs them most first. Your reply is also "
+        "the notification, so keep it under 200 characters. Only pass on what the message says. Don't use any "
+        "tools.")
 
 
 def _clip(text: Any, limit: int) -> str:
@@ -72,7 +74,7 @@ def settle(pulse_store: store.PulseStore, now: float) -> None:
     rows = pulse_store.attempts_for_suffix(pending["item_id"])
     if any(row["state"] == store.DELIVERED for row in rows):
         ids = [value for value in pending.get("ids") or [] if isinstance(value, int) and not isinstance(value, bool)]
-        pulse_store.brief_cards(ids, now)
+        pulse_store.brief_cards(ids, now, pending["item_id"])
         pulse_store.set(PENDING, None)
     elif len(rows) >= TRIES and all(row["state"] not in store.IN_FLIGHT for row in rows):
         pulse_store.set(PENDING, None)  # the cards stay held for tomorrow's

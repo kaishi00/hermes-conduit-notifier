@@ -123,9 +123,10 @@ TURN_NEWS_LIMIT = 6000
 
 
 def add_turn_card(pulse_store: store.PulseStore, *, kind: str, chat_id: str, chat_title: str, turn: Any,
-                  level_name: str, why: str, now: float) -> Optional[int]:
+                  level_name: str, why: str, now: float, brief: str = "") -> Optional[int]:
     """The card for a delivered report or brief turn (``turn`` is its
-    pulse_hermes.TurnRows), once: the one already there for that reply."""
+    pulse_hermes.TurnRows), once: the one already there for that reply.
+    ``brief``: a brief's attempt item id, which its held cards carry too."""
     if kind not in TURN_KINDS or not turn.reply or turn.reply_id is None or empty_turn(kind, turn.reply):
         return None
     existing = pulse_store.card_for_message(kind, turn.session_id, turn.reply_id)
@@ -137,7 +138,7 @@ def add_turn_card(pulse_store: store.PulseStore, *, kind: str, chat_id: str, cha
     return pulse_store.add_card({
         "kind": kind, "item_id": None, "level": level_name, "news": news, "why": why,
         "chat_id": turn.session_id or chat_id, "chat_title": _clip(chat_title, 120), "message_id": turn.reply_id,
-        "created_at": now})
+        "brief": brief, "created_at": now})
 
 
 # A report item's line starts with its number ("1. [kind] ..."); a report
@@ -215,7 +216,7 @@ def card_entry(card: dict, done: Optional[dict] = None) -> dict[str, Any]:
     """``done``: its done mark, as ``done_marks`` gives it."""
     entry = {key: card[key] for key in ("id", "kind", "item_id", "level", "title", "quote", "news", "why", "profile",
                                         "chat_id", "chat_title", "message_id", "topic", "created_at", "seen_at",
-                                        "briefed_at", "rating", "reason", "rated_at")}
+                                        "briefed_at", "brief", "dismissed_at", "rating", "reason", "rated_at")}
     return {**entry, "done_at": done["done_at"] if done else None, "done_by": done["done_by"] if done else ""}
 
 
@@ -247,6 +248,22 @@ def done(pulse_store: store.PulseStore, card_id: Any, is_done: Any, *, now: floa
     if is_done:
         return pulse_store.mark_done(card["id"], card["item_id"], closed_by=DONE_BY, now=now)
     return pulse_store.unmark_done(card["id"], card["item_id"], closed_by=(DONE_BY, ACT_DONE_BY), now=now)
+
+
+# Not now ----------------------------------------------------------------------
+
+def dismiss(pulse_store: store.PulseStore, card_id: Any, dismissed: Any, *, now: float) -> bool:
+    """Swipes a card away ("Not now"), or puts it back; whether it changed.
+    Nothing is learned: the kind keeps its loudness and no rating counts.
+    A held card swiped away stays out of the morning brief, and a
+    remembered thing behind one rests a week
+    (pulse_report.DISMISS_REST_S)."""
+    card = pulse_store.card(card_id) if isinstance(card_id, int) and not isinstance(card_id, bool) else None
+    if card is None:
+        raise Invalid("card")
+    if not isinstance(dismissed, bool):
+        raise Invalid("dismissed")
+    return pulse_store.dismiss_card(card["id"], dismissed, now)
 
 
 # Rating -----------------------------------------------------------------------

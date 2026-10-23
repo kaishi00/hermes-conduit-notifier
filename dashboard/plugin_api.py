@@ -7354,6 +7354,18 @@ async def post_pulse_done(request: Request, response: Response) -> Dict[str, Any
         store, body.get("card"), body.get("done"))}, reads_only=True)
 
 
+@router.post("/pulse/dismiss")
+async def post_pulse_dismiss(request: Request, response: Response) -> Dict[str, Any]:
+    """{"card": n, "dismissed": true|false}: swipes a card away ("Not now":
+    off the list, nothing learned) or puts it back: {"changed": bool}."""
+    response.headers["Cache-Control"] = "no-store"
+    body = await _read_json_body(request, PULSE_MAX_BODY_BYTES)
+    body = body if isinstance(body, dict) else {}
+    # "dismissed" is required: a body without it changes nothing.
+    return await _pulse_route("dismiss", lambda control, store, home: {"changed": control.dismiss(
+        store, body.get("card"), body.get("dismissed"))}, reads_only=True)
+
+
 @router.post("/pulse/acted")
 async def post_pulse_acted(request: Request, response: Response) -> Dict[str, Any]:
     """{"card": n}: Do it on a follow-up card. Pulse reads that chat once it
@@ -14652,6 +14664,8 @@ ROUTE_CAPABILITIES = (
     "pulse_nudge",
     "pulse_done",
     "pulse_acted",
+    # POST /pulse/dismiss, cards' "brief" and "dismissed_at", Pulse push labels with a count.
+    "pulse_dismiss",
     "present-v1",
     "health-sync",
     "voice-tools",

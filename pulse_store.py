@@ -193,6 +193,11 @@ CREATE TABLE IF NOT EXISTS cards (
     message_id INTEGER,
     -- A report item's kind (pulse_report.KINDS) on a "noticed" card.
     topic TEXT NOT NULL DEFAULT '',
+    -- The morning brief it went out in (that brief's attempt item id), on
+    -- the brief's own card and the held cards it brought.
+    brief TEXT NOT NULL DEFAULT '',
+    -- Swiped away ("Not now"): off the list, nothing learned.
+    dismissed_at REAL,
     created_at REAL NOT NULL,
     seen_at REAL,
     briefed_at REAL,
@@ -266,7 +271,10 @@ SPLIT_REPORTS = "split_reports"
 SPLIT_ITEMS = '"split"'
 
 CARD_COLUMNS = ("kind", "item_id", "level", "title", "quote", "news", "why", "profile", "chat_id", "chat_title",
-                "message_id", "topic", "created_at")
+                "message_id", "topic", "brief", "created_at")
+# Card columns added after the first build, oldest first, with their types.
+_ADDED_CARD_COLUMNS = (("topic", "TEXT NOT NULL DEFAULT ''"), ("brief", "TEXT NOT NULL DEFAULT ''"),
+                       ("dismissed_at", "REAL"))
 LESSON_COLUMNS = ("kind", "what", "value", "profile", "chat_id", "card_id", "cause", "created_at")
 
 
@@ -299,13 +307,15 @@ class PulseStore:
         self.busy_timeout_s = busy_timeout_s
         with self._connect() as conn:
             conn.executescript(_SCHEMA)
-            # A store from before cards had a topic.
-            if "topic" not in {row[1] for row in conn.execute("PRAGMA table_info(cards)")}:
+            # A store from before cards had these.
+            for column, kind in _ADDED_CARD_COLUMNS:
+                if column in {row[1] for row in conn.execute("PRAGMA table_info(cards)")}:
+                    continue
                 try:
-                    conn.execute("ALTER TABLE cards ADD COLUMN topic TEXT NOT NULL DEFAULT ''")
+                    conn.execute(f"ALTER TABLE cards ADD COLUMN {column} {kind}")
                 except sqlite3.OperationalError:
                     # Another process opening the same store added it first.
-                    if "topic" not in {row[1] for row in conn.execute("PRAGMA table_info(cards)")}:
+                    if column not in {row[1] for row in conn.execute("PRAGMA table_info(cards)")}:
                         raise
 
     def _connect(self) -> sqlite3.Connection:
@@ -868,14 +878,15 @@ class PulseStore:
     def held_count(self) -> int:
         with self._connect() as conn:
             return int(conn.execute("SELECT COUNT(*) FROM cards WHERE level='brief' AND briefed_at IS NULL "
+                                    "AND dismissed_at IS NULL "
                                     "AND id NOT IN (SELECT card_id FROM card_done)").fetchone()[0])
 
     def held_cards(self, limit: int) -> list[dict]:
         """Cards waiting for the morning brief, oldest first (not one the
-        user already marked done)."""
+        user already marked done or swiped away)."""
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM cards WHERE level='brief' AND briefed_at IS NULL "
-                                "AND id NOT IN (SELECT card_id FROM card_done) "
+                                "AND dismissed_at IS NULL AND id NOT IN (SELECT card_id FROM card_done) "
                                 "ORDER BY created_at, id LIMIT ?", (limit,)).fetchall()
         return [dict(row) for row in rows]
 
@@ -970,12 +981,29 @@ class PulseStore:
             conn.execute("UPDATE card_acts SET check_at=?, checks=?, outcome=?, why=? WHERE card_id=? AND acted_at=?",
                          (check_at, checks, outcome, why, card_id, acted_at))
 
-    def brief_cards(self, ids: list[int], now: float) -> None:
+    def brief_cards(self, ids: list[int], now: float, brief: str = "") -> None:
+        """Stamps held cards as gone out in the brief ``brief``."""
         if not ids:
             return
         with _lock, self._connect() as conn:
-            conn.execute(f"UPDATE cards SET briefed_at=? WHERE briefed_at IS NULL AND id IN ({','.join('?' * len(ids))})",
-                         (now, *ids))
+            conn.execute(f"UPDATE cards SET briefed_at=?, brief=? WHERE briefed_at IS NULL "
+                         f"AND id IN ({','.join('?' * len(ids))})", (now, brief, *ids))
+
+    def dismiss_card(self, card_id: int, dismissed: bool, now: float) -> bool:
+        """Swipes a card away (and marks it seen), or puts it back; whether it changed."""
+        with _lock, self._connect() as conn:
+            if dismissed:
+                return conn.execute("UPDATE cards SET dismissed_at=?, seen_at=COALESCE(seen_at, ?) "
+                                    "WHERE id=? AND dismissed_at IS NULL", (now, now, card_id)).rowcount > 0
+            return conn.execute("UPDATE cards SET dismissed_at=NULL WHERE id=? AND dismissed_at IS NOT NULL",
+                                (card_id,)).rowcount > 0
+
+    def dismissed_items(self, since: float) -> dict[int, float]:
+        """Remembered items a card of was swiped away since ``since``, and when (the latest)."""
+        with self._connect() as conn:
+            rows = conn.execute("SELECT item_id, MAX(dismissed_at) AS at FROM cards WHERE item_id IS NOT NULL "
+                                "AND dismissed_at >= ? GROUP BY item_id", (since,)).fetchall()
+        return {int(row["item_id"]): float(row["at"]) for row in rows}
 
     def turn_cards(self, kind: str) -> list[dict]:
         with self._connect() as conn:

@@ -380,11 +380,19 @@ def rated_not_useful(pulse_store: store.PulseStore) -> dict[int, float]:
     return {memory: at for memory, (at, useful) in latest.items() if not useful}
 
 
+# How long a remembered thing whose card was swiped away ("Not now") stays
+# out of the report, unless it comes up in a chat again.
+DISMISS_REST_S = 7 * 86400.0
+
+
 def remembered(pulse_store: store.PulseStore, zone: tzinfo, now: float) -> str:
     """Pulse memory's open items, dated ones soonest first, then by kind
     and how recently they came up; not the ones rated "no" (until the user
     brings one up again)."""
     skip = rated_not_useful(pulse_store)
+    # Swiped away lately: it rests a while, like a "no" that wears off.
+    for memory, at in pulse_store.dismissed_items(now - DISMISS_REST_S).items():
+        skip[memory] = max(skip.get(memory, -1.0), at)
     # Not what memory's next run expires either.
     items = [item for item in pulse_store.open_items(limit=MAX_REPORT_ITEMS * 3 + len(skip), soonest=True,
                                                      stale_before=now - pulse_memory.EXPIRE_S)

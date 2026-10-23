@@ -207,16 +207,20 @@ def _post_llm_call(**kwargs: Any) -> None:
     pulse_turn = pulse.is_pulse_turn(session_id, kwargs.get("turn_id"))
     quiet = (is_silent_response(response) or cron_runs.quiet(session_id, kwargs.get("task_id"), response)
              or (pulse_turn and not pulse.pushes(session_id, kwargs.get("turn_id"), response)))
-    chat_title = "" if quiet else _session_title(session_id)
+    chat_title = "" if quiet or pulse_turn else _session_title(session_id)
+    # A Pulse push is titled by what it brings, not by Pulse's hidden chat.
+    copy = (pulse.push_copy(session_id, kwargs.get("turn_id"), response) if pulse_turn and not quiet
+            else {"title": chat_title, "title_label": "response.ready", "body": response})
     ready = None if quiet else push_event(
         "response.ready",
         identifier=event_id("response", kwargs.get("turn_id"), session_id),
         session_id=session_id,
         profile=_profile,
-        title=chat_title,
-        title_label="response.ready",
+        title=copy["title"],
+        title_label=copy["title_label"],
         session_title=chat_title,
-        body=plain_text(pulse.push_body(session_id, kwargs.get("turn_id"), response) if pulse_turn else response),
+        body=plain_text(copy["body"]),
+        count=copy.get("count"),
     )
     # A quick reply in a chat Hermes Desktop has selected: the user most
     # likely watched it arrive there (#87); so did one in a chat Conduit has

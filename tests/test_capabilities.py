@@ -72,6 +72,7 @@ def test_every_capability_names_a_served_route_family():
         "pulse_nudge": "/pulse",
         "pulse_done": "/pulse/done",
         "pulse_acted": "/pulse/acted",
+        "pulse_dismiss": "/pulse/dismiss",
         "present-v1": "/present/",
         "health-sync": "/health/",
         "voice-tools": "/voice-tools",

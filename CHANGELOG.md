@@ -13,6 +13,16 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.67.0 (2026-10-23)
+
+### New and improved
+- Swipe a Pulse card away with Not now. It hides the card without teaching
+  Pulse anything, and Pulse leaves that topic alone for a week.
+- The morning brief shows as one block with the cards it brought, under a
+  short opener.
+- Pulse pushes say what they bring: "Pulse noticed 3 things", "Your morning
+  brief" or a follow-up.
+
 ## 0.66.1 (2026-10-23)
 
 ### Fixes

@@ -214,11 +214,24 @@ def pushes(session_id: str, turn_id: Any, response: Any = None) -> bool:
     return kind in (FOLLOWUP, BRIEF)
 
 
-def push_body(session_id: str, turn_id: Any, response: str) -> str:
-    """What a Pulse turn's push says: a report's items, one a line, without
-    the numbers, kinds and remembered-item refs that are for the cards."""
-    lines = learning.report_lines(response) if _turn_kind(session_id, turn_id) == REPORT else []
-    return "\n".join(text for _, text, _ in lines) if lines else response
+# What Conduit titles a Pulse push (its `title_label`), and the English
+# `title` an app without that label shows.
+PUSH_TITLES = {FOLLOWUP: ("pulse.followup", "Pulse · Follow-up"), BRIEF: ("pulse.brief", "Your morning brief")}
+
+
+def push_copy(session_id: str, turn_id: Any, response: str) -> dict[str, Any]:
+    """What a Pulse turn's push says, as push_event takes it: titled by
+    what it is, not by Pulse's hidden chat. A report's body is its items,
+    one after another, without the numbers, kinds and remembered-item refs
+    that are for the cards, and ``count`` says how many there are."""
+    kind = _turn_kind(session_id, turn_id)
+    lines = learning.report_lines(response) if kind == REPORT else []
+    if lines:
+        title = "Pulse noticed something" if len(lines) == 1 else f"Pulse noticed {len(lines)} things"
+        return {"title_label": "pulse.noticed", "title": title, "count": len(lines),
+                "body": " · ".join(" ".join(text.split()) for _, text, _ in lines)}
+    label, title = PUSH_TITLES.get(kind, ("response.ready", "Pulse"))
+    return {"title_label": label, "title": title, "body": response}
 
 
 def pre_tool_call(session_id: str, turn_id: Any) -> Optional[dict[str, str]]:
@@ -382,7 +395,8 @@ def _turn_cards(pulse_store: store.PulseStore, home: Path, changed: list[dict], 
                 continue
             card = turn is not None and learning.add_turn_card(
                 pulse_store, kind=row["kind"], chat_id=row["session_key"], chat_title=title, turn=turn,
-                level_name="push" if row["kind"] == BRIEF else "screen", why=TURN_WHY[row["kind"]], now=now)
+                level_name="push" if row["kind"] == BRIEF else "screen", why=TURN_WHY[row["kind"]], now=now,
+                brief=str(row["item_id"] or "") if row["kind"] == BRIEF else "")
             if card:
                 _mark_turn_card(pulse_store, attempt)
         except (hermes.HermesUnreadable, sqlite3.Error):
