@@ -380,6 +380,7 @@ function sendJson(response, status, body, headers = {}) {
 }
 
 function sendEmpty(response, status) {
+  if (response.headersSent || response.destroyed) return;
   response.writeHead(status, { 'cache-control': 'no-store' });
   response.end();
 }

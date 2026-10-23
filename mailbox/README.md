@@ -24,7 +24,7 @@ docker compose up -d
 
 If you skip step 2, Docker creates `data/` owned by root on a Linux host. The mailbox runs as `node`, can't write there, and exits at startup naming the directory.
 
-The mailbox listens on port 9130. Put it behind an HTTPS reverse proxy, at the root of its own host name: owners sign the request path, so the proxy must pass it on unchanged, with no path prefix. The Compose file joins the external `pangolin` network and sets `TRUST_PROXY=1`; change both to match your proxy. With `TRUST_PROXY` set, the mailbox rate-limits by the address the outermost trusted proxy appended to `X-Forwarded-For`. That holds only when every request comes through the proxy, so don't publish port 9130 or share its network with anything else.
+The mailbox listens on port 9130. Put it behind an HTTPS reverse proxy, at the root of its own host name: owners sign the request path, so the proxy must pass it on unchanged, with no path prefix. The Compose file joins the external `pangolin` network and sets `TRUST_PROXY=1`; change both to match your proxy. With `TRUST_PROXY` set, the mailbox rate-limits by the address the outermost trusted proxy appended to `X-Forwarded-For`. That holds only when every request comes through the proxy, so don't publish port 9130 or share its network with anything else. The proxy must also append that address (Traefik, which Pangolin uses, does by default): a request without it counts against the proxy's own address, which every client then shares.
 
 Without Docker, from this directory:
 
@@ -41,7 +41,7 @@ npm test
 | `MAILBOX_REGISTRATION_TOKEN` | empty | Empty means open registration. When it's set (at least 16 characters, no spaces), only a registration that sends it as `Mailbox-Registration` can make an inbox. |
 | `MAILBOX_*` | see [Limits](#limits) | Capacity limits. |
 
-Run one mailbox process per `DATA_PATH`. Its rate limits, replay protection and waiting polls live in that process.
+Run one mailbox process per `DATA_PATH`. Its rate limits, replay protection and waiting polls live in that process. A restart forgets which signatures it has seen, so an owner request captured in the five minutes before a restart could be sent once more after it. Requests travel over HTTPS, so only someone who can read that traffic could capture one.
 
 ## Protocol v1
 
@@ -76,7 +76,7 @@ The timestamp must be within 300 seconds of the mailbox's clock, and each signat
 | `GET /v1/inboxes/{inbox}/envelopes?after=&limit=&wait=` | owner | Envelopes after `seq` `after`, oldest first: `{"envelopes": [{"seq", "sender", "received_at", "body"}], "next"}`, with each body in standard base64. `limit` is 1 to 100 (default 50). With `wait` (seconds, cut to `max_wait_seconds`), an empty inbox holds the request until an envelope arrives or the wait ends. Poll again with `after=next`. |
 | `POST /v1/inboxes/{inbox}/ack` `{"through"}`, `{"seqs"}` or both | owner | Deletes the envelopes up to and including `through`, and those listed in `seqs` (up to 100), and answers `{"deleted"}`. |
 
-Every error is `{"error": "<code>"}`. An unknown inbox, a wrong token, and a bad or replayed signature all get 401 `unauthorized`, so nobody can find out which inboxes exist. The other codes:
+Every error is `{"error": "<code>"}`. An unknown inbox, a wrong token, and a bad or replayed signature all get 401 `unauthorized`, so the answer never says whether an inbox exists. The other codes:
 
 | Status | Codes |
 |---|---|

@@ -18,3 +18,4 @@ node_modules/
 # Rooms mailbox: settings and the envelope database
 mailbox/deploy/.env
 mailbox/deploy/data/
+mailbox/data/
