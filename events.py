@@ -229,6 +229,10 @@ def redact_event(event: dict[str, Any]) -> dict[str, Any]:
     if isinstance(label, str) and _TITLE_LABEL.match(label):
         # Which title the phone writes: not content, so it stays.
         redacted["title_label"] = label
+    count = event.get("count")
+    if isinstance(count, int) and not isinstance(count, bool) and 0 < count <= 100:
+        # How many things a Pulse report noticed, for that title: a number, not content.
+        redacted["count"] = count
     decision = sanitize_decision(event.get("decision")) if event.get("decision") is not None else {}
     if decision.get("kind") == "approval":
         # Unknown labels never transit; fall back to the always-valid subset
