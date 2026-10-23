@@ -140,11 +140,12 @@ def add_turn_card(pulse_store: store.PulseStore, *, kind: str, chat_id: str, cha
         "created_at": now})
 
 
-def card_entry(card: dict, done_at: Optional[float] = None) -> dict[str, Any]:
+def card_entry(card: dict, done: Optional[dict] = None) -> dict[str, Any]:
+    """``done``: its done mark, as ``done_marks`` gives it."""
     entry = {key: card[key] for key in ("id", "kind", "item_id", "level", "title", "quote", "news", "why", "profile",
                                         "chat_id", "chat_title", "message_id", "created_at", "seen_at", "briefed_at",
                                         "rating", "reason", "rated_at")}
-    return {**entry, "done_at": done_at}
+    return {**entry, "done_at": done["done_at"] if done else None, "done_by": done["done_by"] if done else ""}
 
 
 # Done -------------------------------------------------------------------------
@@ -152,6 +153,16 @@ def card_entry(card: dict, done_at: Optional[float] = None) -> dict[str, Any]:
 # Who closed an item the user marked done on the Pulse screen; Undo only puts
 # back an item this still holds closed.
 DONE_BY = "user: done on the Pulse screen"
+# Pulse marked it, having read the chat get it done after Do it (pulse_followup).
+ACT_DONE_BY = "pulse: done in the chat after Do it"
+
+
+def followup_card(pulse_store: store.PulseStore, card_id: Any) -> dict:
+    """The follow-up card ``card_id`` names, or Invalid("card")."""
+    card = pulse_store.card(card_id) if isinstance(card_id, int) and not isinstance(card_id, bool) else None
+    if card is None or card["kind"] != "followup" or card["item_id"] is None:
+        raise Invalid("card")
+    return card
 
 
 def done(pulse_store: store.PulseStore, card_id: Any, is_done: Any, *, now: float) -> bool:
@@ -159,14 +170,12 @@ def done(pulse_store: store.PulseStore, card_id: Any, is_done: Any, *, now: floa
     changed. Done closes its promise as done and stops its checks, without a
     rating: Pulse was right to bring it up, the user just hadn't said. Undo
     puts the promise and its checks back as they were."""
-    card = pulse_store.card(card_id) if isinstance(card_id, int) and not isinstance(card_id, bool) else None
-    if card is None or card["kind"] != "followup" or card["item_id"] is None:
-        raise Invalid("card")
+    card = followup_card(pulse_store, card_id)
     if not isinstance(is_done, bool):
         raise Invalid("done")
     if is_done:
         return pulse_store.mark_done(card["id"], card["item_id"], closed_by=DONE_BY, now=now)
-    return pulse_store.unmark_done(card["id"], card["item_id"], closed_by=DONE_BY, now=now)
+    return pulse_store.unmark_done(card["id"], card["item_id"], closed_by=(DONE_BY, ACT_DONE_BY), now=now)
 
 
 # Rating -----------------------------------------------------------------------

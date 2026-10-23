@@ -576,3 +576,86 @@ def test_pruned_cards_take_their_done_marks(live):
     told_card(live, "The build failed.")
     live.store.prune_cards(1)
     assert live.store.done_marks([card["id"]]) == {}
+
+
+def run_acts(live, llm, now):
+    done = {}
+    followup.check_acts(live.store, live.home, llm, zone=pulse.report.zone_for("UTC"), now=now,
+                        still_leader=lambda: True, budget=10_000, done=done)
+    return done
+
+
+def test_do_it_marks_the_card_done_once_the_chat_shows_it_got_done(live):
+    card = told_card(live)
+    acted_at = time.time()
+    assert control.acted(live.store, card["id"], now=acted_at) is True
+    said = llm_saying(done=True, why="Hermes confirmed the deploy note was sent")
+    # Nothing answered yet: no model call, look again later.
+    assert run_acts(live, said, acted_at + followup.ACT_FIRST_S) == {} and said.calls == []
+    assert live.store.act(card["id"])["check_at"] > acted_at + followup.ACT_FIRST_S
+    second = acted_at + 2 * followup.ACT_FIRST_S
+    live.db.message("user", "Pulse reminded me: the deploy. Let's take care of it now.", sid=CHAT, at=acted_at + 5)
+    live.db.message("assistant", "Done, I sent the deploy note.", sid=CHAT, at=second - 30)
+    # Answered but still going a moment ago: wait for the chat to go quiet.
+    run_acts(live, said, second)
+    assert said.calls == []
+    run_acts(live, said, second + followup.ACT_FIRST_S)
+    [text] = said.calls
+    assert "Done, I sent the deploy note." in text and "everything is green" in text
+    [entry] = [c for c in control.feed(live.store)["cards"] if c["id"] == card["id"]]
+    assert entry["done_at"] is not None and entry["done_by"] == "pulse"
+    assert live.store.act(card["id"])["outcome"] == "done"
+    # Undo works on what Pulse marked too.
+    assert control.done(live.store, card["id"], False) is True
+    assert live.store.done_marks([card["id"]]) == {}
+
+
+def test_an_open_promise_pulse_saw_done_after_do_it_closes_and_undo_reopens_it(live):
+    item_id = promise(live)
+    card_id = learning.add_card(live.store, kind="followup", item=live.store.item(item_id), level_name="screen",
+                                news="Still waiting on the deploy.", why="", chat_title="Deploy", now=time.time())
+    acted_at = time.time()
+    control.acted(live.store, card_id, now=acted_at)
+    live.db.message("assistant", "Deploy is out.", sid=CHAT, at=acted_at + 30)
+    run_acts(live, llm_saying(done=True, why="it's out"), acted_at + followup.ACT_FIRST_S + followup.ACT_QUIET_S)
+    item = live.store.item(item_id)
+    assert item["status"] == "done" and item["closed_by"] == learning.ACT_DONE_BY
+    control.done(live.store, card_id, False)
+    assert live.store.item(item_id)["status"] == "open"
+
+
+def test_do_it_not_done_looks_again_then_stops(live):
+    card = told_card(live)
+    acted_at = time.time()
+    control.acted(live.store, card["id"], now=acted_at)
+    live.db.message("assistant", "That failed, the server is down.", sid=CHAT, at=acted_at + 30)
+    said = llm_saying(done=False, why="it failed")
+    now = acted_at + followup.ACT_FIRST_S + followup.ACT_QUIET_S
+    for again in followup.ACT_AGAIN_S:
+        run_acts(live, said, now)
+        act = live.store.act(card["id"])
+        assert act["outcome"] == "" and act["check_at"] == now + again
+        now += again
+    run_acts(live, said, now)
+    assert live.store.act(card["id"])["outcome"] == "not done" and live.store.act(card["id"])["check_at"] is None
+    assert len(said.calls) == len(followup.ACT_AGAIN_S) + 1
+    assert live.store.done_marks([card["id"]]) == {}
+
+
+def test_do_it_left_unsent_gives_up_without_a_model_call(live):
+    card = told_card(live)
+    acted_at = time.time()
+    control.acted(live.store, card["id"], now=acted_at)
+    said = llm_saying(done=True, why="")
+    run_acts(live, said, acted_at + followup.ACT_GIVE_UP_S + 1)
+    assert said.calls == [] and live.store.act(card["id"])["outcome"] == "no answer"
+
+
+def test_do_it_on_a_done_card_books_nothing_and_done_stops_a_booked_check(live):
+    card = told_card(live)
+    control.acted(live.store, card["id"])
+    control.done(live.store, card["id"])
+    assert live.store.act(card["id"])["check_at"] is None
+    assert control.acted(live.store, card["id"]) is False
+    with pytest.raises(control.Refused):
+        control.acted(live.store, 999)

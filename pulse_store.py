@@ -219,7 +219,19 @@ CREATE TABLE IF NOT EXISTS lessons (
 CREATE TABLE IF NOT EXISTS card_done (
     card_id INTEGER PRIMARY KEY,
     done_at REAL NOT NULL,
+    -- "user" (Done on the screen) or "pulse" (it saw the chat get it done after Do it).
+    done_by TEXT NOT NULL DEFAULT 'user',
     prior_json TEXT NOT NULL DEFAULT '{}'
+);
+-- Do it on a follow-up card (pulse_followup.check_acts): once the chat has
+-- answered, Pulse reads it and marks the card done if it got done.
+CREATE TABLE IF NOT EXISTS card_acts (
+    card_id INTEGER PRIMARY KEY,
+    acted_at REAL NOT NULL,
+    check_at REAL,
+    checks INTEGER NOT NULL DEFAULT 0,
+    outcome TEXT NOT NULL DEFAULT '',
+    why TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS backfill_marks (
     profile TEXT NOT NULL,
@@ -787,7 +799,7 @@ class PulseStore:
                                 "ORDER BY created_at, id LIMIT ?", (limit,)).fetchall()
         return [dict(row) for row in rows]
 
-    def mark_done(self, card_id: int, item_id: int, *, closed_by: str, now: float) -> bool:
+    def mark_done(self, card_id: int, item_id: int, *, closed_by: str, now: float, by: str = "user") -> bool:
         """Marks a follow-up card done in one transaction: keeps what its item
         and checks were (for Undo), closes an open, reminded or expired item
         as done by ``closed_by``, stops its checks and marks the card seen.
@@ -800,8 +812,9 @@ class PulseStore:
             item = conn.execute("SELECT status, closed_by, closed_at FROM items WHERE id=?", (item_id,)).fetchone()
             check = conn.execute("SELECT decision, next_check_at FROM followups WHERE item_id=?", (item_id,)).fetchone()
             prior = {**(dict(item) if item else {}), **(dict(check) if check else {})}
-            conn.execute("INSERT INTO card_done(card_id, done_at, prior_json) VALUES(?,?,?)",
-                         (card_id, now, json.dumps(prior)))
+            conn.execute("INSERT INTO card_done(card_id, done_at, done_by, prior_json) VALUES(?,?,?,?)",
+                         (card_id, now, by, json.dumps(prior)))
+            conn.execute("UPDATE card_acts SET check_at=NULL WHERE card_id=?", (card_id,))
             conn.execute("UPDATE items SET status='done', closed_by=?, closed_at=? WHERE id=? "
                          "AND status IN ('open', 'reminded', 'expired') AND superseded_at IS NULL",
                          (closed_by, now, item_id))
@@ -811,9 +824,9 @@ class PulseStore:
             conn.execute("COMMIT")
         return True
 
-    def unmark_done(self, card_id: int, item_id: int, *, closed_by: str, now: float) -> bool:
+    def unmark_done(self, card_id: int, item_id: int, *, closed_by: Sequence[str], now: float) -> bool:
         """Undo, in one transaction: takes the mark off and puts the item
-        back as it was while ``closed_by`` still holds it closed, and its
+        back as it was while one of ``closed_by`` still holds it closed, and its
         checks back where the mark stopped them. False with no mark."""
         with _lock, self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -828,9 +841,10 @@ class PulseStore:
                 prior = {}
             prior = prior if isinstance(prior, dict) else {}
             if isinstance(prior.get("status"), str):
-                conn.execute("UPDATE items SET status=?, closed_by=?, closed_at=? WHERE id=? AND closed_by=?",
+                conn.execute("UPDATE items SET status=?, closed_by=?, closed_at=? WHERE id=? "
+                             f"AND closed_by IN ({','.join('?' * len(closed_by))})",
                              (prior["status"], str(prior.get("closed_by") or ""), prior.get("closed_at"),
-                              item_id, closed_by))
+                              item_id, *closed_by))
             if isinstance(prior.get("decision"), str) and prior["decision"] != "closed":
                 due = prior.get("next_check_at")
                 conn.execute("UPDATE followups SET decision=?, next_check_at=?, updated_at=? "
@@ -840,14 +854,41 @@ class PulseStore:
             conn.execute("COMMIT")
         return True
 
-    def done_marks(self, ids: list[int]) -> dict[int, float]:
-        """When each of these cards was marked done, for the ones that were."""
+    def done_marks(self, ids: list[int]) -> dict[int, dict]:
+        """Each of these cards' done mark ({done_at, done_by}), for the ones
+        marked."""
         if not ids:
             return {}
         with self._connect() as conn:
-            rows = conn.execute(f"SELECT card_id, done_at FROM card_done WHERE card_id IN ({','.join('?' * len(ids))})",
-                                tuple(ids)).fetchall()
-        return {int(row["card_id"]): float(row["done_at"]) for row in rows}
+            rows = conn.execute("SELECT card_id, done_at, done_by FROM card_done "
+                                f"WHERE card_id IN ({','.join('?' * len(ids))})", tuple(ids)).fetchall()
+        return {int(row["card_id"]): {"done_at": float(row["done_at"]), "done_by": row["done_by"]} for row in rows}
+
+    def act_on_card(self, card_id: int, *, now: float, check_at: float) -> None:
+        """Do it on a card: a check of its chat at ``check_at`` (a second Do it
+        starts over)."""
+        with _lock, self._connect() as conn:
+            conn.execute("INSERT INTO card_acts(card_id, acted_at, check_at) VALUES(?,?,?) "
+                         "ON CONFLICT(card_id) DO UPDATE SET acted_at=excluded.acted_at, check_at=excluded.check_at, "
+                         "checks=0, outcome='', why=''", (card_id, now, check_at))
+
+    def due_acts(self, now: float) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT * FROM card_acts WHERE check_at IS NOT NULL AND check_at <= ? "
+                                "ORDER BY check_at", (now,)).fetchall()
+        return [dict(row) for row in rows]
+
+    def act(self, card_id: int) -> Optional[dict]:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM card_acts WHERE card_id=?", (card_id,)).fetchone()
+        return dict(row) if row else None
+
+    def decide_act(self, card_id: int, *, acted_at: float, check_at: Optional[float], checks: int, outcome: str,
+                   why: str) -> None:
+        """Only while the act is the one read (a new Do it meanwhile starts over)."""
+        with _lock, self._connect() as conn:
+            conn.execute("UPDATE card_acts SET check_at=?, checks=?, outcome=?, why=? WHERE card_id=? AND acted_at=?",
+                         (check_at, checks, outcome, why, card_id, acted_at))
 
     def brief_cards(self, ids: list[int], now: float) -> None:
         if not ids:
@@ -865,6 +906,7 @@ class PulseStore:
                 "AND id NOT IN (SELECT card_id FROM card_done)) OR created_at < ?) AND id NOT IN "
                 "(SELECT id FROM cards ORDER BY created_at DESC, id DESC LIMIT ?)", (held_before, keep)).rowcount
             conn.execute("DELETE FROM card_done WHERE card_id NOT IN (SELECT id FROM cards)")
+            conn.execute("DELETE FROM card_acts WHERE card_id NOT IN (SELECT id FROM cards)")
             return dropped
 
     def rate_card(self, card: dict, *, rating: str, reason: str, now: float) -> bool:

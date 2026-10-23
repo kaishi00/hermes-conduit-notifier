@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from . import pulse, pulse_delivery, pulse_hermes, pulse_learning, pulse_memory
+from . import pulse, pulse_delivery, pulse_followup, pulse_hermes, pulse_learning, pulse_memory
 from . import pulse_host as host
 
 RECENT = 5
@@ -333,6 +333,12 @@ def done(pulse_store: Any, card_id: Any, is_done: Any = True, now: Optional[floa
     with False; whether it changed."""
     return _learning(lambda: pulse_learning.done(pulse_store, card_id, is_done,
                                                  now=time.time() if now is None else now))
+
+
+def acted(pulse_store: Any, card_id: Any, now: Optional[float] = None) -> bool:
+    """Do it on a follow-up card: Pulse reads that chat once it has answered
+    and marks the card done if it got done; whether a check was booked."""
+    return _learning(lambda: pulse_followup.act(pulse_store, card_id, now=time.time() if now is None else now))
 
 
 def learned(pulse_store: Any) -> dict[str, Any]:
