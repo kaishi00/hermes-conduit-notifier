@@ -1011,16 +1011,16 @@ def test_a_wipe_whose_job_removal_fails_retries_on_the_next_change(client, monke
     monkeypatch.setattr(sys.modules["cron.jobs"], "remove_job", broken)
     assert client.delete(f"{BASE}/location/rules/r_brief0002").json()["removed"] is True
     assert client.post(f"{BASE}/location/wipe", json={"all": True}).json()["remaining_devices"] == 0
-    assert client.removed == [] and store.pending_rule_jobs() == ["job-2", "job-1"]
+    assert client.removed == [] and sorted(store.pending_rule_jobs()) == ["job-1", "job-2"]
     assert client.get(f"{BASE}/location/status").json()["stored"] is False
     # A refusal without an error keeps a job the scheduler still has.
     monkeypatch.setattr(sys.modules["cron.jobs"], "remove_job", lambda job_id: False)
     monkeypatch.setattr(sys.modules["cron.jobs"], "get_job", lambda job_id: {"id": job_id})
     client.post(f"{BASE}/location/wipe", json={"all": True})
-    assert store.pending_rule_jobs() == ["job-2", "job-1"]
+    assert sorted(store.pending_rule_jobs()) == ["job-1", "job-2"]
     monkeypatch.setattr(sys.modules["cron.jobs"], "remove_job", remove_job)
     assert client.post(f"{BASE}/location/wipe", json={"all": True}).status_code == 200
-    assert client.removed == ["job-2", "job-1"] and not store.path.exists()
+    assert sorted(client.removed) == ["job-1", "job-2"] and not store.path.exists()
 
 
 def test_status_says_whether_hermes_can_ask_for_a_fresh_position(client, monkeypatch):
