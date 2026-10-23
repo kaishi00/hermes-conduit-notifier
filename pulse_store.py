@@ -480,7 +480,7 @@ class PulseStore:
         """Stores a report's items and ratings; True when they changed. A
         report split into cards takes none: it's rated on its cards."""
         with _lock, self._connect() as conn:
-            if attempt_id in _listed(conn, SPLIT_REPORTS):
+            if str(attempt_id) in _listed(conn, SPLIT_REPORTS):
                 return False
             row = conn.execute("SELECT items_json, ratings_json FROM report_ratings WHERE attempt_id=?",
                                (attempt_id,)).fetchone()
@@ -791,7 +791,7 @@ class PulseStore:
         """Adds these cards in one transaction, all or none. With ``attempt``,
         it's appended to each list setting in ``marks`` (the last ``keep``)
         in the same write, so the mark can't be lost apart from the cards;
-        and an attempt the first of them already holds adds nothing (another
+        and an attempt any of them already holds adds nothing (another
         process got there first). A report split into cards (SPLIT_REPORTS in
         ``marks``) loses its typed ratings in the same write: it's rated on
         its cards from then on, so an item counts once."""
@@ -801,7 +801,7 @@ class PulseStore:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 lists = {key: _listed(conn, key) for key in (marks if attempt else ())}
-                if marks and attempt and attempt in lists[marks[0]]:
+                if marks and attempt and any(attempt in listed for listed in lists.values()):
                     conn.execute("ROLLBACK")
                     return []
                 ids = [int(conn.execute(f"INSERT INTO cards({', '.join(row)}) VALUES({', '.join('?' * len(row))})",
