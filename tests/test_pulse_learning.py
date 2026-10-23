@@ -574,6 +574,27 @@ def test_report_item_cards_and_their_mark_land_together(live, monkeypatch):
     assert len(live.store.cards()) == 2
 
 
+def test_a_rating_typed_before_the_split_goes_with_it(live):
+    live.store.set("report_requested", True)
+    pulse.tick()
+    [attempt] = live.store.in_flight()
+    live.db.message("user", attempt["text"])
+    live.db.message("assistant", "1. [date] Dentist Friday\n2. [fact] The repo moved")
+    live.store.set_ratings(attempt["attempt_id"], "[]", '[[1, "date", true]]')
+    pulse.tick()
+    assert len(live.store.cards()) == 2
+    # Long after, with the split mark trimmed away, it still doesn't count.
+    live.store.set(store.SPLIT_REPORTS, [])
+    assert pulse.report.rating_counts(live.store) == {}
+
+
+def test_a_settled_card_mark_is_appended_once(live):
+    pulse._mark_turn_card(live.store, "a1")
+    pulse._mark_turn_card(live.store, "a2")
+    pulse._mark_turn_card(live.store, "a1")
+    assert live.store.get(pulse.TURN_CARDS_DONE) == ["a1", "a2"]
+
+
 def test_a_line_naming_more_than_one_number_links_nothing():
     assert learning.report_lines("1. [interest] PR #12 is waiting on #4") == [
         ("interest", "PR #12 is waiting on #4", None)]

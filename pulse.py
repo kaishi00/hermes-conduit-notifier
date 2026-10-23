@@ -367,8 +367,7 @@ def _turn_cards(pulse_store: store.PulseStore, home: Path, changed: list[dict], 
             # A brief comes with a push; a report doesn't.
             if turn is not None and learning.empty_turn(row["kind"], turn.reply):
                 # Nothing brought up: no card, and no looking it up again.
-                done = (done + [attempt])[-TURN_CARDS_DONE_KEEP:]
-                pulse_store.set(TURN_CARDS_DONE, done)
+                _mark_turn_card(pulse_store, attempt)
                 continue
             lines = learning.report_lines(turn.reply) if turn is not None and row["kind"] == REPORT else []
             if lines:
@@ -380,16 +379,24 @@ def _turn_cards(pulse_store: store.PulseStore, home: Path, changed: list[dict], 
                     shown=report.shown_items(turn.prompt), kinds=report.KINDS,
                     item_chat_title=lambda item: followup.chat_title(home, item), now=now,
                     attempt=str(attempt), marks=(TURN_CARDS_DONE, store.SPLIT_REPORTS), keep=TURN_CARDS_DONE_KEEP)
-                done = (done + [attempt])[-TURN_CARDS_DONE_KEEP:]
+                # Rated on its cards from now on: a rating typed before they
+                # landed goes, so the item counts once even after the split
+                # mark is trimmed away.
+                pulse_store.drop_ratings(str(attempt))
                 continue
             card = turn is not None and learning.add_turn_card(
                 pulse_store, kind=row["kind"], chat_id=row["session_key"], chat_title=title, turn=turn,
                 level_name="push" if row["kind"] == BRIEF else "screen", why=TURN_WHY[row["kind"]], now=now)
             if card:
-                done = (done + [attempt])[-TURN_CARDS_DONE_KEEP:]
-                pulse_store.set(TURN_CARDS_DONE, done)
+                _mark_turn_card(pulse_store, attempt)
         except (hermes.HermesUnreadable, sqlite3.Error):
             logger.debug("conduit_push: Pulse: no card for %s yet", row["tag"], exc_info=True)
+
+
+def _mark_turn_card(pulse_store: store.PulseStore, attempt: Any) -> None:
+    """Notes that ``attempt``'s card is settled, appended in one write so a
+    second process's marks are never written over."""
+    pulse_store.add_cards([], attempt=str(attempt), marks=(TURN_CARDS_DONE,), keep=TURN_CARDS_DONE_KEEP)
 
 
 def turn_model(pulse_store: Any) -> Optional[dict[str, str]]:

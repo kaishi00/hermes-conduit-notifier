@@ -467,6 +467,10 @@ class PulseStore:
 
     # Report ratings -------------------------------------------------------
 
+    def drop_ratings(self, attempt_id: str) -> None:
+        with _lock, self._connect() as conn:
+            conn.execute("DELETE FROM report_ratings WHERE attempt_id=?", (attempt_id,))
+
     def set_ratings(self, attempt_id: str, items_json: str, ratings_json: str) -> bool:
         """Stores a report's items and ratings; True when they changed."""
         with _lock, self._connect() as conn:

@@ -13,6 +13,15 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.66.1 (2026-10-23)
+
+### Fixes
+- If you rated a Pulse report by typing before its items showed as cards,
+  that rating could be counted a second time weeks later. It now goes once
+  the cards appear.
+- Two Pulse processes settling cards at the same moment could each forget
+  the other's, so a card could be looked up again. They no longer clash.
+
 ## 0.66.0 (2026-10-23)
 
 ### New and improved
