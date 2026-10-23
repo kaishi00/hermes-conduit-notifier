@@ -57,8 +57,9 @@ def test_entries_are_newest_first_and_dated():
     # one's run (the PR merged into main) then has that entry twice.
     taken = sorted({version for version in versions if versions.count(version) > 1}, key=_parts)
     assert not taken, (
-        f"CHANGELOG.md has {', '.join(taken)} more than once: another PR took that version on main. "
-        f"Take the next free one: {VERSION_FILES}, plus its entry here")
+        f"CHANGELOG.md has {', '.join(taken)} more than once. If another PR took that version on "
+        f"main, take the next free one: {VERSION_FILES}, plus its entry here. If this PR added "
+        "its entry twice, drop one.")
     parts = [_parts(version) for version in versions]
     assert parts == sorted(parts, reverse=True), "CHANGELOG.md entries go newest first"
     for version, date, _ in entries:
