@@ -14366,6 +14366,8 @@ ROUTE_CAPABILITIES = (
     "pulse_feed",
     # PUT /pulse takes "model": the model Pulse's turns run on.
     "pulse_model",
+    # PUT /pulse takes "nudge" and the daily token budgets.
+    "pulse_nudge",
     "present-v1",
     "health-sync",
     "voice-tools",

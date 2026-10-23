@@ -69,6 +69,7 @@ def test_every_capability_names_a_served_route_family():
         "pulse": "/pulse",
         "pulse_feed": "/pulse/feed",
         "pulse_model": "/pulse",
+        "pulse_nudge": "/pulse",
         "present-v1": "/present/",
         "health-sync": "/health/",
         "voice-tools": "/voice-tools",
