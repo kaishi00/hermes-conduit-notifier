@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.67.0 (2026-10-23)
+## 0.68.0 (2026-10-23)
 
 ### New and improved
 - Swipe a Pulse card away with Not now. It hides the card without teaching
@@ -22,6 +22,13 @@ checks it). The format is fixed, because Conduit reads it:
   short opener.
 - Pulse pushes say what they bring: "Pulse noticed 3 things", "Your morning
   brief" or a follow-up.
+
+## 0.67.0 (2026-10-23)
+
+### New and improved
+- Ask Hermes to text someone and it writes the message on their contact
+  card. Tap Send text and Messages opens with the number and the text
+  filled in; nothing is sent until you tap Send there.
 
 ## 0.66.1 (2026-10-23)
 

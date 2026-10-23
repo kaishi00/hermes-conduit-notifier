@@ -17,7 +17,10 @@ cards come back in the tool's answer, so they stay in the chat's history and
 Conduit draws them again whenever the chat is opened. Without ``markdown``,
 the cards' own Markdown is shown where they can't be drawn. A card with a
 ``live`` name replaces the conversation's earlier card of that name, so
-Hermes keeps a status up to date by showing it again.
+Hermes keeps a status up to date by showing it again. A contact card can
+carry a text message Hermes wrote for the user to send; Conduit opens
+Messages with it filled in and the user taps Send, so nothing is ever sent
+for them.
 """
 
 from __future__ import annotations
@@ -35,6 +38,9 @@ from .present_store import (CHAT_CARDS_FEATURE, MAX_CARD_MARKDOWN_CHARS, MAX_CAR
 logger = logging.getLogger("hermes.plugins.conduit_push")
 
 TOOL_NAME = "conduit_show"
+# A Conduit that offers Send text for a contact card's message says this in
+# its exchange (plugin 0.67+).
+TEXT_DRAFTS_FEATURE = "text-drafts"
 TOOLSET = "conduit"
 
 SCHEMA: dict[str, Any] = {
@@ -47,6 +53,9 @@ SCHEMA: dict[str, Any] = {
         "places to swipe through, big numbers (stats), a line, bar or pie chart, a weather forecast, a comparison "
         "of two to four options, steps the user can tick off (with timers), photos, videos or audio to play, people "
         "to call, message or email, or the status of something in progress (a delivery, a flight, a match, a job). "
+        "When the user asks you to text someone, show a contact card for them with their phone and the message "
+        "you wrote: Conduit offers Send text, which opens Messages with it filled in, and the user taps Send there. "
+        "Say it's ready to send, never that it was sent. "
         "To keep a card up to date, give it a live name and show the whole card again with the same name as "
         "things change: it replaces the earlier one. For places, Conduit adds what Apple "
         "Maps knows (address, phone, website, travel time), so give names, addresses, coordinates or conduit_maps "
@@ -81,6 +90,8 @@ UNSUPPORTED_CARDS_NOTE = ("This version of Conduit can't draw these cards. On a 
                           "in a typed chat, write it in your reply.")
 LEFT_OUT_NOTE = ("This version of Conduit can't draw {kinds} cards, so they weren't shown: give what they held in "
                  "your reply.")
+NO_TEXT_DRAFTS_NOTE = ("This version of Conduit can't fill in a text message, so the message was left off the card: "
+                       "give the user the text in your reply.")
 SHOWN_NOTE = ("On the user's screen. Say in a sentence that it's there and give the gist; don't read it out or "
               "repeat it in your reply.")
 IN_CHAT_NOTE = ("The cards are shown in the chat; Markdown isn't, so put anything else in your reply. Give the "
@@ -162,6 +173,11 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
         cards = [card for card in cards if card["type"] not in hidden]
         if not cards and not given_markdown:
             return {"ok": False, "error": "unsupported_cards", "note": UNSUPPORTED_CARDS_NOTE}
+    no_texts = _has_messages(cards) and not store.has_feature_everywhere(TEXT_DRAFTS_FEATURE)
+    if no_texts:
+        # An older Conduit would show the person with no Send text, and
+        # Hermes would think the message was waiting on the user's phone.
+        cards = _without_messages(cards)
     fallback = bool(cards) and not given_markdown
     if fallback:
         markdown = _fallback(cards)
@@ -172,21 +188,33 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
         if error.code == "no_device" and cards and store.has_feature(CHAT_CARDS_FEATURE):
             # No call screen to put it on, but the chat draws it from this
             # answer.
-            return {"ok": True, "cards": cards, "note": _with_left_out(IN_CHAT_NOTE, left_out)}
+            return {"ok": True, "cards": cards, "note": _with_left_out(IN_CHAT_NOTE, left_out, no_texts)}
         note = str(error)
         if error.code in ("no_device", "rate_limited"):
             note += " Tell the user the gist instead."
-        return {"ok": False, "error": error.code, "note": _with_left_out(note, left_out)}
+        return {"ok": False, "error": error.code, "note": _with_left_out(note, left_out, no_texts)}
     answer: dict[str, Any] = {"ok": True, "id": card["id"]}
     if cards:
         # The chat's history keeps the cards from here.
         answer["cards"] = cards
-    answer["note"] = _with_left_out(SHOWN_NOTE, left_out)
+    answer["note"] = _with_left_out(SHOWN_NOTE, left_out, no_texts)
     return answer
 
 
-def _with_left_out(note: str, left_out: list[str]) -> str:
-    return f"{note} {LEFT_OUT_NOTE.format(kinds=', '.join(left_out))}" if left_out else note
+def _with_left_out(note: str, left_out: list[str], no_texts: bool = False) -> str:
+    if left_out:
+        note = f"{note} {LEFT_OUT_NOTE.format(kinds=', '.join(left_out))}"
+    return f"{note} {NO_TEXT_DRAFTS_NOTE}" if no_texts else note
+
+
+def _has_messages(cards: list[dict[str, Any]]) -> bool:
+    return any("message" in person for card in cards if card["type"] == "contact" for person in card["people"])
+
+
+def _without_messages(cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [{**card, "people": [{key: value for key, value in person.items() if key != "message"}
+                                for person in card["people"]]} if card["type"] == "contact" else card
+            for card in cards]
 
 
 def _fallback(cards: list[dict[str, Any]]) -> str:

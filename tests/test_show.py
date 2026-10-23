@@ -406,3 +406,36 @@ def test_a_conduit_not_seen_for_weeks_no_longer_holds_cards_back(tool_home):
     store.exchange({"installation_id": "ipad-installation-2", "results": [],
                     "features": ["chat-cards", "info-cards"]})
     assert _call({"title": "Steps", "cards": [STATS]}) == {"ok": True, "cards": [STATS], "note": tool.IN_CHAT_NOTE}
+
+
+TEXT = {"type": "contact", "people": [{"name": "Mei", "detail": "Wife", "phone": "+86 139 6261 8677",
+                                       "message": "Landed safe, see you soon"}]}
+
+
+def test_a_text_message_goes_only_to_a_conduit_that_offers_send_text(tool_home):
+    _exchange(PresentStore(tool_home), features=("chat-cards", "media-cards"))
+    answer = _call({"title": "Text Mei", "cards": [TEXT]})
+    assert answer["ok"] is True and "message" not in answer["cards"][0]["people"][0], \
+        "an older Conduit would show no Send text"
+    assert answer["cards"][0]["people"][0]["phone"] == "+86 139 6261 8677", "the person still shows"
+    assert tool.NO_TEXT_DRAFTS_NOTE in answer["note"], "Hermes hears to give the text in its reply"
+    _exchange(PresentStore(tool_home), features=("chat-cards", "media-cards", tool.TEXT_DRAFTS_FEATURE))
+    answer = _call({"title": "Text Mei", "cards": [TEXT]})
+    assert answer == {"ok": True, "cards": [TEXT], "note": tool.IN_CHAT_NOTE}
+
+
+def test_the_tool_says_a_text_is_sent_only_by_the_users_tap():
+    description = tool.SCHEMA["description"]
+    assert "Send text" in description and "never that it was sent" in description
+
+
+
+def test_a_text_left_off_is_left_out_of_the_markdown_and_named_when_nothing_shows(tool_home, monkeypatch):
+    _exchange(PresentStore(tool_home), features=("show-cards", "media-cards"))
+    _call({"title": "Text Mei", "cards": [TEXT]})
+    [card] = _exchange(PresentStore(tool_home), features=("show-cards", "media-cards"))["cards"]
+    assert "Text to send" not in card["markdown"], "the Markdown is built from the cards without the text"
+    monkeypatch.setattr(store_module, "CARDS_PER_HOUR", 1)
+    answer = _call({"title": "Text Mei", "cards": [TEXT]})
+    assert answer["error"] == "rate_limited" and tool.NO_TEXT_DRAFTS_NOTE in answer["note"], \
+        "an answer that shows nothing still says the text was left off"

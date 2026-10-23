@@ -128,6 +128,12 @@ def test_fallback_markdown_shows_media_contacts_and_statuses():
     assert "**Out for delivery** · 75% · 14:20  \n✓ Shipped → Delivered" in text
 
 
+def test_fallback_markdown_shows_the_text_to_send():
+    [card] = card_schema.normalize_cards([{"type": "contact", "people": [
+        {"name": "Mei", "phone": "+86 139 6261 8677", "message": "Landed *safe*"}]}])
+    assert "**Mei**  \n+86 139 6261 8677  \nText to send: Landed \\*safe\\*" in card_schema.fallback_markdown([card])
+
+
 def test_a_done_status_reads_as_complete_whatever_progress_it_carries():
     cards = card_schema.normalize_cards([{"type": "status", "status": {"state": "Delivered", "phase": "done",
                                                                        "progress": 0.4}}])

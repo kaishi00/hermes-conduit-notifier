@@ -31,7 +31,8 @@ test suites run, so the two can't drift:
   negative, for a pie); a forecast needs a source and something to show,
   and drops a day whose low is above its high; a comparison recommends one
   option at most; media needs a source, and an image has no duration or
-  artwork; a contact keeps only a phone and an email that look like one;
+  artwork; a contact keeps only a phone and an email that look like one,
+  and a person's message only with their phone;
   a live name is kept on the first card of a set that has it.
 
 The tool (agent process) and the dashboard (dashboard process, voice call
@@ -247,6 +248,9 @@ def _apply_rules(card: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any] | 
                 del person["phone"]
             if "email" in person and not _EMAIL.match(person["email"]):
                 del person["email"]
+            # A text goes to their number, so there's none without it.
+            if "phone" not in person:
+                person.pop("message", None)
             # The phone loads photos over https only.
             if "photo" in person and not _is_https(person["photo"]["url"]):
                 del person["photo"]
@@ -509,6 +513,8 @@ def _contact_markdown(card: dict[str, Any]) -> list[str]:
             lines.append(f"[Website]({person['url']})")
         if person.get("note"):
             lines.append(f"_{_escape(person['note'])}_")
+        if person.get("message"):
+            lines.append(f"Text to send: {_escape(person['message'])}")
         parts.append("  \n".join(lines))
     return parts
 
