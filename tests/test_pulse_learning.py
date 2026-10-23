@@ -550,7 +550,8 @@ def test_a_done_card_leaves_the_morning_brief(live):
 def test_done_refuses_what_isnt_a_follow_up_card(live):
     card = told_card(live)
     for card_id, value, field in ((999, True, "card"), ("1", True, "card"), (True, True, "card"),
-                                  (card["id"], "yes", "done"), (card["id"], 1, "done")):
+                                  (card["id"], "yes", "done"), (card["id"], 1, "done"),
+                                  (card["id"], None, "done")):
         with pytest.raises(control.Refused) as refused:
             control.done(live.store, card_id, value)
         assert refused.value.data == {"field": field}

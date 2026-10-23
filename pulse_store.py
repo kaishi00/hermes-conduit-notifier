@@ -662,23 +662,6 @@ class PulseStore:
                 (status, closed_by, time.time(), item_id)).rowcount
         return bool(changed)
 
-    def finish_item(self, item_id: int, *, closed_by: str, now: float) -> bool:
-        """The user says it's done: an open, reminded or expired item becomes
-        done (one already done stays as it was)."""
-        with _lock, self._connect() as conn:
-            return bool(conn.execute(
-                "UPDATE items SET status='done', closed_by=?, closed_at=? WHERE id=? AND status != 'done' "
-                "AND superseded_at IS NULL", (closed_by, now, item_id)).rowcount)
-
-    def restore_item(self, item_id: int, *, status: str, closed_by: str, closed_at: Optional[float],
-                     only_closed_by: str) -> bool:
-        """Puts an item back as it was, only while ``only_closed_by`` still
-        holds it closed."""
-        with _lock, self._connect() as conn:
-            return bool(conn.execute(
-                "UPDATE items SET status=?, closed_by=?, closed_at=? WHERE id=? AND closed_by=?",
-                (status, closed_by, closed_at, item_id, only_closed_by)).rowcount)
-
     def item(self, item_id: int) -> Optional[dict]:
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
@@ -715,12 +698,6 @@ class PulseStore:
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM followups WHERE item_id=?", (item_id,)).fetchone()
         return dict(row) if row else None
-
-    def restore_followup(self, item_id: int, *, decision: str, next_check_at: Optional[float], now: float) -> None:
-        """Puts back the checks that marking a card done closed."""
-        with _lock, self._connect() as conn:
-            conn.execute("UPDATE followups SET decision=?, next_check_at=?, updated_at=? "
-                         "WHERE item_id=? AND decision='closed'", (decision, next_check_at, now, item_id))
 
     def due_followups(self, now: float) -> list[dict]:
         with self._connect() as conn:
@@ -810,20 +787,58 @@ class PulseStore:
                                 "ORDER BY created_at, id LIMIT ?", (limit,)).fetchall()
         return [dict(row) for row in rows]
 
-    def mark_done(self, card_id: int, prior_json: str, now: float) -> bool:
-        """Marks a card done; False when it was already."""
-        with _lock, self._connect() as conn:
-            return bool(conn.execute("INSERT OR IGNORE INTO card_done(card_id, done_at, prior_json) VALUES(?,?,?)",
-                                     (card_id, now, prior_json)).rowcount)
-
-    def unmark_done(self, card_id: int) -> Optional[dict]:
-        """Takes the done mark off a card; the mark, or None if there was none."""
+    def mark_done(self, card_id: int, item_id: int, *, closed_by: str, now: float) -> bool:
+        """Marks a follow-up card done in one transaction: keeps what its item
+        and checks were (for Undo), closes an open, reminded or expired item
+        as done by ``closed_by``, stops its checks and marks the card seen.
+        False when it was marked already."""
         with _lock, self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute("SELECT * FROM card_done WHERE card_id=?", (card_id,)).fetchone()
-            conn.execute("DELETE FROM card_done WHERE card_id=?", (card_id,))
+            if conn.execute("SELECT 1 FROM card_done WHERE card_id=?", (card_id,)).fetchone():
+                conn.execute("ROLLBACK")
+                return False
+            item = conn.execute("SELECT status, closed_by, closed_at FROM items WHERE id=?", (item_id,)).fetchone()
+            check = conn.execute("SELECT decision, next_check_at FROM followups WHERE item_id=?", (item_id,)).fetchone()
+            prior = {**(dict(item) if item else {}), **(dict(check) if check else {})}
+            conn.execute("INSERT INTO card_done(card_id, done_at, prior_json) VALUES(?,?,?)",
+                         (card_id, now, json.dumps(prior)))
+            conn.execute("UPDATE items SET status='done', closed_by=?, closed_at=? WHERE id=? "
+                         "AND status IN ('open', 'reminded', 'expired') AND superseded_at IS NULL",
+                         (closed_by, now, item_id))
+            conn.execute("UPDATE followups SET next_check_at=NULL, decision='closed', updated_at=? "
+                         "WHERE item_id=? AND next_check_at IS NOT NULL", (now, item_id))
+            conn.execute("UPDATE cards SET seen_at=COALESCE(seen_at, ?) WHERE id=?", (now, card_id))
             conn.execute("COMMIT")
-        return dict(row) if row else None
+        return True
+
+    def unmark_done(self, card_id: int, item_id: int, *, closed_by: str, now: float) -> bool:
+        """Undo, in one transaction: takes the mark off and puts the item
+        back as it was while ``closed_by`` still holds it closed, and its
+        checks back where the mark stopped them. False with no mark."""
+        with _lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT prior_json FROM card_done WHERE card_id=?", (card_id,)).fetchone()
+            if row is None:
+                conn.execute("ROLLBACK")
+                return False
+            conn.execute("DELETE FROM card_done WHERE card_id=?", (card_id,))
+            try:
+                prior = json.loads(row["prior_json"])
+            except ValueError:
+                prior = {}
+            prior = prior if isinstance(prior, dict) else {}
+            if isinstance(prior.get("status"), str):
+                conn.execute("UPDATE items SET status=?, closed_by=?, closed_at=? WHERE id=? AND closed_by=?",
+                             (prior["status"], str(prior.get("closed_by") or ""), prior.get("closed_at"),
+                              item_id, closed_by))
+            if isinstance(prior.get("decision"), str) and prior["decision"] != "closed":
+                due = prior.get("next_check_at")
+                conn.execute("UPDATE followups SET decision=?, next_check_at=?, updated_at=? "
+                             "WHERE item_id=? AND decision='closed'",
+                             (prior["decision"], max(float(due), now) if isinstance(due, (int, float)) else None,
+                              now, item_id))
+            conn.execute("COMMIT")
+        return True
 
     def done_marks(self, ids: list[int]) -> dict[int, float]:
         """When each of these cards was marked done, for the ones that were."""

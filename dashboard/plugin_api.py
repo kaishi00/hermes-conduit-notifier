@@ -7349,8 +7349,9 @@ async def post_pulse_done(request: Request, response: Response) -> Dict[str, Any
     response.headers["Cache-Control"] = "no-store"
     body = await _read_json_body(request, PULSE_MAX_BODY_BYTES)
     body = body if isinstance(body, dict) else {}
+    # "done" is required: a body without it changes nothing.
     return await _pulse_route("done", lambda control, store, home: {"changed": control.done(
-        store, body.get("card"), body.get("done", True))}, reads_only=True)
+        store, body.get("card"), body.get("done"))}, reads_only=True)
 
 
 @router.get("/pulse/learned")

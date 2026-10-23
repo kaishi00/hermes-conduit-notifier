@@ -24,7 +24,6 @@ closed stay closed, checks already brought forward stay sooner).
 
 from __future__ import annotations
 
-import json
 import re
 from typing import Any, Optional
 
@@ -165,35 +164,9 @@ def done(pulse_store: store.PulseStore, card_id: Any, is_done: Any, *, now: floa
         raise Invalid("card")
     if not isinstance(is_done, bool):
         raise Invalid("done")
-    item_id = card["item_id"]
     if is_done:
-        item, followup = pulse_store.item(item_id), pulse_store.followup(item_id)
-        prior = {"status": item["status"], "closed_by": item["closed_by"], "closed_at": item["closed_at"]} if item else {}
-        if followup is not None:
-            prior.update(decision=followup["decision"], next_check_at=followup["next_check_at"])
-        if not pulse_store.mark_done(card["id"], json.dumps(prior), now):
-            return False
-        pulse_store.finish_item(item_id, closed_by=DONE_BY, now=now)
-        pulse_store.end_followups(keep=set(), now=now, only=item_id)
-        pulse_store.see_cards([card["id"]], now)
-        return True
-    mark = pulse_store.unmark_done(card["id"])
-    if mark is None:
-        return False
-    try:
-        prior = json.loads(mark["prior_json"])
-    except ValueError:
-        prior = {}
-    prior = prior if isinstance(prior, dict) else {}
-    if isinstance(prior.get("status"), str):
-        pulse_store.restore_item(item_id, status=prior["status"], closed_by=str(prior.get("closed_by") or ""),
-                                 closed_at=prior.get("closed_at"), only_closed_by=DONE_BY)
-    if isinstance(prior.get("decision"), str) and prior["decision"] != "closed":
-        due = prior.get("next_check_at")
-        pulse_store.restore_followup(item_id, decision=prior["decision"],
-                                     next_check_at=max(float(due), now) if isinstance(due, (int, float)) else None,
-                                     now=now)
-    return True
+        return pulse_store.mark_done(card["id"], card["item_id"], closed_by=DONE_BY, now=now)
+    return pulse_store.unmark_done(card["id"], card["item_id"], closed_by=DONE_BY, now=now)
 
 
 # Rating -----------------------------------------------------------------------
