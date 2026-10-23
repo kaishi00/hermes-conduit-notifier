@@ -586,6 +586,9 @@ def test_a_rating_typed_before_the_split_goes_with_it(live):
     # Long after, with the split mark trimmed away, it still doesn't count.
     live.store.set(store.SPLIT_REPORTS, [])
     assert pulse.report.rating_counts(live.store) == {}
+    # Nor is it read back from the chat and stored again.
+    assert live.store.set_ratings(attempt["attempt_id"], "[]", '[[1, "date", true]]') is False
+    assert pulse.report.rating_counts(live.store) == {}
 
 
 def test_a_split_report_takes_no_typed_rating(live):

@@ -262,6 +262,8 @@ NOTICED = "noticed"
 # The report attempts split into such cards, newest last: their typed
 # ratings aren't read, so an item isn't counted twice.
 SPLIT_REPORTS = "split_reports"
+# The items_json of a split report's ratings row: it holds no ratings and takes none.
+SPLIT_ITEMS = '"split"'
 
 CARD_COLUMNS = ("kind", "item_id", "level", "title", "quote", "news", "why", "profile", "chat_id", "chat_title",
                 "message_id", "topic", "created_at")
@@ -482,6 +484,8 @@ class PulseStore:
                 return False
             row = conn.execute("SELECT items_json, ratings_json FROM report_ratings WHERE attempt_id=?",
                                (attempt_id,)).fetchone()
+            if row is not None and row["items_json"] == SPLIT_ITEMS:
+                return False
             if row is not None and (row["items_json"], row["ratings_json"]) == (items_json, ratings_json):
                 return False
             conn.execute(
@@ -803,7 +807,13 @@ class PulseStore:
                 ids = [int(conn.execute(f"INSERT INTO cards({', '.join(row)}) VALUES({', '.join('?' * len(row))})",
                                         tuple(row.values())).lastrowid) for row in rows]
                 if SPLIT_REPORTS in lists:
-                    conn.execute("DELETE FROM report_ratings WHERE attempt_id=?", (attempt,))
+                    # Its typed ratings go, and the row stays as a mark that
+                    # outlasts the trimmed list, so none are read back later.
+                    conn.execute(
+                        "INSERT INTO report_ratings(attempt_id, items_json, ratings_json, updated_at) "
+                        "VALUES(?, ?, '[]', ?) ON CONFLICT(attempt_id) DO UPDATE SET "
+                        "items_json=excluded.items_json, ratings_json='[]', updated_at=excluded.updated_at",
+                        (attempt, SPLIT_ITEMS, time.time()))
                 for key, value in lists.items():
                     conn.execute("INSERT INTO settings(key, value_json) VALUES(?, ?) "
                                  "ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json",
