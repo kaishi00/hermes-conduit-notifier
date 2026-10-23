@@ -982,11 +982,13 @@ class PulseStore:
                          (check_at, checks, outcome, why, card_id, acted_at))
 
     def brief_cards(self, ids: list[int], now: float, brief: str = "") -> None:
-        """Stamps held cards as gone out in the brief ``brief``."""
+        """Stamps held cards as gone out in the brief ``brief``; one put away
+        while the brief was out stays held, so putting it back brings it to
+        the next brief."""
         if not ids:
             return
         with _lock, self._connect() as conn:
-            conn.execute(f"UPDATE cards SET briefed_at=?, brief=? WHERE briefed_at IS NULL "
+            conn.execute(f"UPDATE cards SET briefed_at=?, brief=? WHERE briefed_at IS NULL AND dismissed_at IS NULL "
                          f"AND id IN ({','.join('?' * len(ids))})", (now, brief, *ids))
 
     def dismiss_card(self, card_id: int, dismissed: bool, now: float) -> bool:

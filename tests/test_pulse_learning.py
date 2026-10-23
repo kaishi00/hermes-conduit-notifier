@@ -320,6 +320,15 @@ def test_a_held_card_put_away_is_pruned_like_any_other(live):
     assert sorted(card["created_at"] for card in live.store.cards()) == [1, 2, 3]
 
 
+def test_a_card_put_away_while_its_brief_is_out_waits_for_the_next(live):
+    first = live.store.add_card({"kind": "followup", "level": "brief", "created_at": 1})
+    second = live.store.add_card({"kind": "followup", "level": "brief", "created_at": 2})
+    assert live.store.dismiss_card(second, True, 5)
+    live.store.brief_cards([first, second], 6, "b1")
+    assert live.store.dismiss_card(second, False, 7)
+    assert [card["id"] for card in live.store.held_cards(10)] == [second]
+
+
 def test_brief_time_setting(live):
     control.update(live.store, {"brief_time": "7:30"})
     assert live.store.get("brief_time") == "07:30"
