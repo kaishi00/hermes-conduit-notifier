@@ -668,21 +668,25 @@ def test_a_job_thats_already_gone_comes_off_the_list(home, scheduler):
     assert store.pending_rule_jobs() == ["job-gone"]
 
 
-def test_a_crash_between_deleting_a_rule_and_its_job_is_cleared_at_start(home, scheduler):
+def test_a_crash_between_deleting_a_rule_and_its_job_is_cleared_at_start(home, scheduler, monkeypatch):
     _shared(home, fix=fix())
     _call({"action": "set_rule", "rule": RULE})
     store = location.LocationStore(home, clock=lambda: NOW)
     store.remove_rule(store.rules()[0]["id"])  # the process dies before the scheduler call
     assert list(scheduler.jobs) == ["job-1"]
+    monkeypatch.setattr(tool, "_cleanup_started", None)
     tool.clear_rule_jobs_at_start(delay=0).join(5)
     assert scheduler.jobs == {} and store.pending_rule_jobs() == []
 
 
-def test_a_wiped_store_with_a_leftover_job_goes_once_its_removed(home, scheduler):
+def test_a_wiped_store_with_a_leftover_job_goes_once_its_removed(home, scheduler, monkeypatch):
     store, _ = _shared(home, fix=fix())
     _call({"action": "set_rule", "rule": RULE})
     store.wipe()  # the dashboard died before removing the job
     assert store.path.exists() and list(scheduler.jobs) == ["job-1"]
+    assert _call({"action": "rules"}, session_id="session-1")["rules"] == []
+    assert store.reads() == [], "a wiped store logs no reads while it waits"
+    monkeypatch.setattr(tool, "_cleanup_started", None)
     tool.clear_rule_jobs_at_start(delay=0).join(5)
     assert scheduler.jobs == {} and not store.path.exists()
 

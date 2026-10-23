@@ -181,9 +181,10 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
     # Reads through another profile's store are logged there under this one.
     session_label = profile if owner is not None else ""
     if action == "rules":
-        # Nothing stored (never shared, or wiped): nothing read, and a log
-        # row would bring the wiped file back.
-        if store.exists():
+        # Nothing stored (never shared, or wiped, even while the file waits
+        # on its rules' jobs): nothing read, and a log row would bring the
+        # wiped file back.
+        if store.exists() and store.status()["stored"]:
             _log(store, action, session)
         return {"ok": True, "rules": [_rule_view(rule) for rule in store.rules()],
                 "note": f"Up to {MAX_RULES} rules. They run only while the user shares location in the background."}
@@ -473,6 +474,8 @@ def _locate(store: LocationStore, view: dict[str, Any], profile: str, sleep: Cal
 # One set_rule at a time: two parallel calls with the same `what` would
 # otherwise both find no rule and both make a job.
 _rule_lock = threading.Lock()
+# The one start-up pass of this process (clear_rule_jobs_at_start).
+_cleanup_started: threading.Thread | None = None
 
 
 def _set_rule(store: LocationStore, view: dict[str, Any], raw: Any) -> dict[str, Any]:
@@ -610,6 +613,12 @@ def clear_rule_jobs_at_start(delay: float = STARTUP_CLEANUP_DELAY_S) -> threadin
     plugin loads (Hermes's scheduler is set up by then), off the load path.
     Only the profile's own store: rules, and so their jobs, live with the
     profile that shares location, never one that reads it through another."""
+    global _cleanup_started
+    with _rule_lock:
+        # Once per process: the plugin may be registered again.
+        if _cleanup_started is not None:
+            return _cleanup_started
+
     def run() -> None:
         time.sleep(delay)
         try:
@@ -623,6 +632,10 @@ def clear_rule_jobs_at_start(delay: float = STARTUP_CLEANUP_DELAY_S) -> threadin
             logger.warning("conduit_push: place rule jobs not cleared at start", exc_info=True)
 
     thread = threading.Thread(target=run, name="conduit-location-rule-jobs", daemon=True)
+    with _rule_lock:
+        if _cleanup_started is not None:
+            return _cleanup_started
+        _cleanup_started = thread
     thread.start()
     return thread
 
