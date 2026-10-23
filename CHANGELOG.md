@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.65.2 (2026-10-23)
+
+### Fixes
+- Updating the plugin from Conduit failed with "The update failed on the
+  host (TypeError)" on a Hermes from before October 20: the gateway restart
+  asked for an option that Hermes didn't have yet. The update now restarts
+  the gateway on older Hermes too.
+
 ## 0.65.1 (2026-10-23)
 
 ### New and improved

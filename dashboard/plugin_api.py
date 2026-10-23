@@ -14958,12 +14958,18 @@ def _hermes_update_steps() -> Tuple[Callable[[], Dict[str, Any]], Callable[[], i
     _spawn_gateway_restart = getattr(web_server, "_spawn_gateway_restart", None)
     if not callable(dashboard_update_user_plugin) or not callable(_spawn_gateway_restart):
         raise TokenError(501, "This Hermes can't run the plugin update on its own")
+    # interrupt arrived with the drain refusal (Hermes 2026-10-20); before it
+    # nothing refused a restart, so an older Hermes restarts without it.
+    try:
+        restart_kwargs = {"interrupt": True} if "interrupt" in inspect.signature(_spawn_gateway_restart).parameters else {}
+    except (TypeError, ValueError):
+        restart_kwargs = {}
 
     def pull() -> Dict[str, Any]:
         return dashboard_update_user_plugin(PLUGIN_NAME)
 
     def restart_gateway() -> int:
-        proc, _reused = _spawn_gateway_restart(None, interrupt=True)
+        proc, _reused = _spawn_gateway_restart(None, **restart_kwargs)
         try:
             return proc.wait(timeout=SELF_UPDATE_GATEWAY_LIMIT_S)
         except subprocess.TimeoutExpired:

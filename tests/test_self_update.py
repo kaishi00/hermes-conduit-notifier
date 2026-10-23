@@ -286,3 +286,39 @@ def test_starts_are_rate_limited(monkeypatch, tmp_path):
     with pytest.raises(api.TokenError) as raised:
         run(3)
     assert raised.value.status == 429
+
+
+def _fake_hermes(monkeypatch, spawn):
+    plugins_cmd = types.ModuleType("hermes_cli.plugins_cmd")
+    plugins_cmd.dashboard_update_user_plugin = lambda name: {"ok": True, "name": name}
+    web_server = types.ModuleType("hermes_cli.web_server")
+    web_server._spawn_gateway_restart = spawn
+    monkeypatch.setitem(sys.modules, "hermes_cli", types.ModuleType("hermes_cli"))
+    monkeypatch.setitem(sys.modules, "hermes_cli.plugins_cmd", plugins_cmd)
+    monkeypatch.setitem(sys.modules, "hermes_cli.web_server", web_server)
+
+
+def test_the_gateway_restart_interrupts_on_a_hermes_that_drains(monkeypatch):
+    calls = []
+
+    def spawn(profile=None, *, interrupt=False):
+        calls.append((profile, interrupt))
+        return types.SimpleNamespace(wait=lambda timeout: 0), False
+
+    _fake_hermes(monkeypatch, spawn)
+    pull, restart_gateway = api._hermes_update_steps()
+    assert pull() == {"ok": True, "name": "conduit_push"}
+    assert restart_gateway() == 0 and calls == [(None, True)]
+
+
+def test_the_gateway_restart_works_on_a_hermes_before_interrupt(monkeypatch):
+    # Hermes before 2026-10-20 took no interrupt: passing it was a TypeError.
+    calls = []
+
+    def spawn(profile=None):
+        calls.append(profile)
+        return types.SimpleNamespace(wait=lambda timeout: 0), False
+
+    _fake_hermes(monkeypatch, spawn)
+    _pull, restart_gateway = api._hermes_update_steps()
+    assert restart_gateway() == 0 and calls == [None]
