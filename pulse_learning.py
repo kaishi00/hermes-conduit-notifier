@@ -44,6 +44,16 @@ LEVEL, RULE, SOONER_LESSON, SEEN = "level", "rule", "sooner", "seen"
 TOPIC_LIMIT = 200
 CARDS = 100
 
+# How much Pulse nudges, the user's own pick (Settings > Pulse, `pulse nudge`):
+# reminders a day, how soon checks come round (times the ratings' pace), the
+# follow-up token budget when none is set, and how high the report's bar is.
+NUDGES = {
+    "gentle": {"reminders": 1, "pace": 1.5, "followup_tokens": 60_000},
+    "balanced": {"reminders": 3, "pace": 1.0, "followup_tokens": 150_000},
+    "eager": {"reminders": 6, "pace": 0.5, "followup_tokens": 300_000},
+}
+DEFAULT_NUDGE = "balanced"
+
 KIND_NAMES = {"followup": "Follow-ups"}
 LEVEL_NAMES = {"push": "sent with a push", "screen": "shown in Pulse without a push",
                "brief": "held for the morning brief", "off": "off"}
@@ -62,9 +72,19 @@ def level(pulse_store: store.PulseStore, kind: str) -> str:
     return lessons[-1]["value"] if lessons else DEFAULT_LEVELS.get(kind, "push")
 
 
+def nudge(pulse_store: store.PulseStore) -> str:
+    value = pulse_store.get("nudge")
+    return value if isinstance(value, str) and value in NUDGES else DEFAULT_NUDGE
+
+
+def nudging(pulse_store: store.PulseStore) -> dict[str, Any]:
+    return NUDGES[nudge(pulse_store)]
+
+
 def pace(pulse_store: store.PulseStore, kind: str) -> float:
-    """How much of the usual wait a check waits: 1, or less after "too late"."""
-    return SOONER ** min(len(pulse_store.lessons(kind, SOONER_LESSON)), MAX_SOONER)
+    """How much of the usual wait a check waits: the nudge level's share,
+    less after "too late" ratings."""
+    return nudging(pulse_store)["pace"] * SOONER ** min(len(pulse_store.lessons(kind, SOONER_LESSON)), MAX_SOONER)
 
 
 def skips_seen(pulse_store: store.PulseStore, kind: str) -> bool:

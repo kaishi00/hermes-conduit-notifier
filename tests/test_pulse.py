@@ -1052,7 +1052,7 @@ def test_the_report_stays_under_lcms_externalization_threshold(db, tmp_path, liv
     monkeypatch.setenv(report.LCM_THRESHOLD, "junk")
     assert report.report_budget() == report.LCM_DEFAULT_THRESHOLD - report.LCM_MARGIN
     monkeypatch.setenv(report.LCM_THRESHOLD, "1")
-    assert report.report_budget() == len(report.REPORT_TEXT) + 1_000
+    assert report.report_budget() == len(report.REPORT_TEXT) + report.BAR_ROOM + 1_000
     # The message itself never goes over, whatever the context.
     monkeypatch.delenv(report.LCM_THRESHOLD)
     for name in ("USER.md", "MEMORY.md"):
@@ -1902,10 +1902,10 @@ def test_follow_ups_run_on_their_own_budget_after_memory_spent_its(remembering, 
 
     monkeypatch.setattr(pulse.followup, "run", checks)
     pulse._memory_run(store_.path.parent, SID, now, threading.Event())
-    assert ran == [("followups", store.DEFAULTS["followup_daily_tokens"])]
+    assert ran == [("followups", pulse.learning.NUDGES["balanced"]["followup_tokens"])]
     assert store_.get("followup_today") == {"day": day, "tokens": 900}
     assert store_.get("memory_today")["tokens"] == store_.get("memory_daily_tokens")  # memory's day is its own
-    store_.set("followup_today", {"day": day, "tokens": store.DEFAULTS["followup_daily_tokens"]})
+    store_.set("followup_today", {"day": day, "tokens": pulse.learning.NUDGES["balanced"]["followup_tokens"]})
     ran.clear()
     pulse._memory_run(store_.path.parent, SID, now, threading.Event())
     assert ran == []  # both spent

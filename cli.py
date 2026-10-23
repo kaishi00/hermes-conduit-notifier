@@ -38,9 +38,9 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     )
     redact.add_argument("mode", choices=["on", "off"])
     pulse = commands.add_parser("pulse", help="Pulse, the proactivity experiment: on, off, status, probe, report, home, outcomes, memory, followups, "
-                                                 "cards, rate, learned")
+                                                 "cards, rate, learned, nudge, budget")
     pulse.add_argument("pulse_action", choices=["on", "off", "status", "probe", "report", "home", "outcomes", "memory",
-                                                "followups", "cards", "rate", "learned"])
+                                                "followups", "cards", "rate", "learned", "nudge", "budget"])
     pulse.add_argument("value", nargs="?", default="",
                        help="for home: the id of the chat to use, or 'auto' to find it by title; "
                             "for outcomes: how many to show, or a chat id; "
@@ -50,12 +50,15 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
                             "or 'backfill'; "
                             "for followups: 'on', 'off', 'now' (check everything now, for testing), or nothing to list them; "
                             "for rate: the card number; "
-                            "for learned: 'undo' and a lesson number, or a kind and a loudness to set")
+                            "for learned: 'undo' and a lesson number, or a kind and a loudness to set; "
+                            "for nudge: gentle, balanced or eager; "
+                            "for budget: memory or followups")
     pulse.add_argument("extra", nargs="?", default="",
                        help="for memory forget: the item number; for memory backfill: how many days back "
                             "(it shows what that costs), 'start', 'stop' or 'cancel'; "
                             "for rate: 'up', 'down', or a reason for a thumbs down (not_relevant, already_knew, "
-                            "too_late, too_often); for learned: the lesson number, or push, screen, brief or off")
+                            "too_late, too_often); for learned: the lesson number, or push, screen, brief or off; "
+                            "for budget: tokens a day, or 'auto' for follow-ups to go with the nudge level")
     prefs = commands.add_parser(
         "prefs",
         help="Conduit's synced preferences: export them to a file, or import one from another host",
@@ -208,7 +211,7 @@ def dispatch(args: argparse.Namespace) -> int:
 def _pulse(args: argparse.Namespace) -> int:
     from hermes_constants import get_hermes_home
 
-    from . import pulse, pulse_delivery, pulse_memory
+    from . import pulse, pulse_delivery, pulse_learning, pulse_memory
     home = get_hermes_home()
     action = args.pulse_action
     # Follow-ups are on by default, so even `followups on|off` needs no file yet.
@@ -257,6 +260,10 @@ def _pulse(args: argparse.Namespace) -> int:
     if action in ("cards", "rate", "learned"):
         return _pulse_learning(pulse_store, action, (args.value or "").strip(),
                                str(getattr(args, "extra", "") or "").strip())
+    if action == "nudge":
+        return _pulse_nudge(pulse_store, (args.value or "").strip())
+    if action == "budget":
+        return _pulse_budget(pulse_store, (args.value or "").strip(), str(getattr(args, "extra", "") or "").strip())
     if action == "memory":
         return _pulse_memory(pulse_store, home, (args.value or "").strip(), str(getattr(args, "extra", "") or "").strip())
     print(f"Pulse: {'on' if pulse_store.get('enabled') else 'off'}")
@@ -307,7 +314,6 @@ def _pulse(args: argparse.Namespace) -> int:
           + f" ({int(usage.get('chunks', 0) or 0)} chat chunks read, {int(usage.get('tokens', 0) or 0)} tokens"
           + (f", {int(usage.get('failed', 0) or 0)} failed" if usage.get("failed") else "")
           + (f", {int(usage.get('skipped', 0) or 0)} skipped after failing" if usage.get("skipped") else "") + ")")
-    today = pulse_store.get("memory_today")
     zone = pulse.report_zone(pulse_store, home)
     backfill = pulse_store.get("memory_backfill")
     if pulse_memory.has_window(backfill):
@@ -325,10 +331,9 @@ def _pulse(args: argparse.Namespace) -> int:
         if backfill.get("active") and isinstance(stalled, list) and stalled:
             print("  It can't read profile(s) " + ", ".join(_printable(name) for name in stalled)
                   + " right now, and finishes once it can.")
-    if (isinstance(today, dict) and today.get("day") == datetime.now(zone).strftime("%Y-%m-%d")
-            and isinstance(pulse_store.get("memory_daily_tokens"), (int, float))
-            and int(today.get("tokens", 0) or 0) >= pulse_store.get("memory_daily_tokens")):
-        print(f"Memory used today's {pulse_store.get('memory_daily_tokens')} tokens; it reads again tomorrow.")
+    memory_used, memory_cap = pulse._spent_today(pulse_store, "memory", datetime.now(zone).strftime("%Y-%m-%d"))
+    if memory_used >= memory_cap:
+        print(f"Memory used today's {memory_cap} tokens; it reads again tomorrow.")
     if pulse_store.get("followups") and not pulse_store.get("memory"):
         print("Follow-ups: waiting on memory, which finds Hermes's promises: `hermes conduit-push pulse memory on`")
     elif pulse_store.get("followups"):
@@ -344,6 +349,7 @@ def _pulse(args: argparse.Namespace) -> int:
             print(f"Follow-ups used today's {follow_cap} tokens; checks resume tomorrow.")
     else:
         print("Follow-ups: off")
+    print(f"Nudging: {pulse_learning.nudge(pulse_store)} (`hermes conduit-push pulse nudge gentle|balanced|eager`)")
     learning_lines = _learning_status(pulse_store)
     if learning_lines:
         print(learning_lines)
@@ -444,6 +450,47 @@ def _pulse_report(pulse_store: Any, value: str) -> int:
 MEMORY_LIST = 50
 
 
+NUDGE_TEXT = {
+    "gentle": "only what's worth interrupting you for, 1 reminder a day, checks spaced out",
+    "balanced": "a heads-up on what's open or coming due, 3 reminders a day",
+    "eager": "small things too, 6 reminders a day, checks come round sooner",
+}
+
+
+def _pulse_nudge(pulse_store: Any, value: str) -> int:
+    from . import pulse_control, pulse_learning
+    if value:
+        try:
+            pulse_control.update(pulse_store, {"nudge": value})
+        except pulse_control.Refused:
+            print("Usage: hermes conduit-push pulse nudge [gentle|balanced|eager]")
+            return 2
+    level = pulse_learning.nudge(pulse_store)
+    print(f"Pulse nudges: {level} ({NUDGE_TEXT[level]}).")
+    return 0
+
+
+def _pulse_budget(pulse_store: Any, which: str, value: str) -> int:
+    from . import pulse, pulse_control
+    field = {"memory": "memory_daily_tokens", "followups": "followup_daily_tokens"}.get(which)
+    if field is None:
+        print("Usage: hermes conduit-push pulse budget memory|followups [tokens a day|auto]")
+        return 2
+    if value:
+        try:
+            amount = None if value == "auto" and field == "followup_daily_tokens" else int(value.replace(",", "").replace("_", ""))
+            pulse_control.update(pulse_store, {field: amount})
+        except (ValueError, pulse_control.Refused):
+            print(f"Give a whole number of tokens a day from {pulse_control.MIN_DAILY_TOKENS:,} to "
+                  f"{pulse_control.MAX_DAILY_TOKENS:,}" + (", or 'auto'." if field == "followup_daily_tokens" else "."))
+            return 2
+    _, cap = pulse._spent_today(pulse_store, "memory" if which == "memory" else "followup", "")
+    auto = field == "followup_daily_tokens" and not isinstance(pulse_store.get(field), int)
+    print(f"{'Memory' if which == 'memory' else 'Follow-ups'} can use {cap:,} tokens a day"
+          + (" (the nudge level's)." if auto else "."))
+    return 0
+
+
 def _pulse_followups(pulse_store: Any, home: Any, value: str) -> int:
     from . import pulse, pulse_followup
     if value in ("on", "off"):
@@ -473,7 +520,7 @@ def _pulse_followups(pulse_store: Any, home: Any, value: str) -> int:
         pulse_store.set(pulse_followup.NOW_REQUESTED, time.time())
         pulse_store.set("memory_requested", True)
         print("Asked the dashboard to check every promise and to-do now, and to let today's reminders go out again "
-              f"(still {pulse_followup.REMINDERS_PER_DAY} a day); see `hermes conduit-push pulse followups` in a "
+              f"(still {pulse_learning.nudging(pulse_store)['reminders']} a day); see `hermes conduit-push pulse followups` in a "
               "minute or two. Meant for testing: each check is a model call.")
         return 0
     if value:

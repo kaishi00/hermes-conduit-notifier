@@ -418,7 +418,8 @@ def _maybe_report(pulse_store: store.PulseStore, home: Path, now: float) -> bool
                         "once the home chat is there")
         return False
     context, since = report.build(home, pulse_store, home_chat_id=chat.chat_id, now=now)
-    _send(pulse_store, kind=REPORT, chat_id=chat.chat_id, text=lambda tag: report.report_text(tag, context, since))
+    _send(pulse_store, kind=REPORT, chat_id=chat.chat_id, text=lambda tag: report.report_text(tag, context, since,
+                                                                                         learning.nudge(pulse_store)))
     return True
 
 
@@ -569,8 +570,9 @@ def _spent_today(pulse_store: store.PulseStore, name: str, day: str) -> tuple[in
     except (TypeError, ValueError):
         used = 0
     cap = pulse_store.get(f"{name}_daily_tokens")
-    if isinstance(cap, bool) or not isinstance(cap, (int, float)) or cap <= 0:
-        cap = store.DEFAULTS[f"{name}_daily_tokens"]
+    if isinstance(cap, bool) or not isinstance(cap, (int, float)) or cap < 1:
+        cap = (learning.nudging(pulse_store)["followup_tokens"] if name == "followup"
+               else store.DEFAULTS[f"{name}_daily_tokens"])
     return used, int(cap)
 
 

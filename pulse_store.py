@@ -72,8 +72,9 @@ DEFAULTS: dict[str, Any] = {
     "memory_daily_tokens": 300_000,
     # Follow-up checks have their own day, so a backfill that spends
     # memory's can't keep promises and to-dos from being checked.
-    "followup_daily_tokens": 60_000,
+    "followup_daily_tokens": None,  # None: the nudge level's
     "followup_today": None,  # {"day", "tokens"}
+    "nudge": "balanced",  # gentle, balanced or eager: pulse_learning.NUDGES
     # A backfill of older history: {"from", "to", "days", "active", "done"},
     # read after the chats as they happen (pulse_memory.run).
     "memory_backfill": None,

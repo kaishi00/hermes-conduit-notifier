@@ -64,13 +64,27 @@ MAX_REMINDERS = 25
 MAX_FAILURES = 10
 MAX_JOBS = 25
 
+# The report's bar for an item, by how much the user wants Pulse to nudge
+# (pulse_learning.NUDGES).
+BARS = {
+    "gentle": "Only include something worth interrupting the user for now: a commitment or promise coming due, "
+              "something Hermes said it would do and hasn't, a date that needs preparing for, a follow-up they'd want.",
+    "balanced": "Include what the user would want a heads-up on: a commitment or promise coming due or sitting "
+                "undone, something Hermes said it would do and hasn't, a date that needs preparing for, a follow-up "
+                "they'd want. When unsure, include the one or two most useful.",
+    "eager": "The user wants to be nudged: bring up the most useful things they could act on, even small ones: "
+             "commitments and promises open or coming due, things Hermes said it would do, dates ahead, loose ends "
+             "worth closing, follow-ups. Say nothing is worth it only when there is truly nothing.",
+}
+BAR_ROOM = max(len(bar) for bar in BARS.values())
+
 REPORT_TEXT = """Pulse shadow report {tag}.
 
 This is a dry run: nothing is sent to the user except this report. Below is what Hermes can see now, covering {since} onward. Write "Here's what I would have brought up:" and then at most 5 numbered items, one line each, in this form:
 
 1. [kind] what you would have said, then (why now, and where it came from) #12
 
-kind is one of: {kinds}. When an item comes from something under "What Pulse remembers", end its line with that thing's number after "#", like #12; otherwise leave the number out. Only include something worth interrupting the user for now: a commitment or promise coming due, something Hermes said it would do and hasn't, a date that needs preparing for, a follow-up they'd want. Leave out anything already done, anything their calendar, reminders or Hermes's scheduled jobs already cover, anything an earlier report in this chat already brought up (unless something about it changed), and anything rated "no" in earlier reports. Weigh each kind by how the user rated it before. If nothing is worth it, say "Nothing worth bringing up right now." and stop.
+kind is one of: {kinds}. When an item comes from something under "What Pulse remembers", end its line with that thing's number after "#", like #12; otherwise leave the number out. {bar} Leave out anything already done, anything their calendar, reminders or Hermes's scheduled jobs already cover, anything an earlier report in this chat already brought up (unless something about it changed), and anything rated "no" in earlier reports. Weigh each kind by how the user rated it before. If nothing qualifies, say "Nothing worth bringing up right now." and stop.
 
 End with: "Rate them: reply like 1 yes, 2 no."
 
@@ -423,7 +437,7 @@ def build(home: Path, pulse_store: store.PulseStore, *, home_chat_id: str, now: 
     # message stays under report_budget(). The 100 estimates what report_text
     # fills into REPORT_TEXT (the tag, the start time, the kinds and the
     # fence); report_text itself cuts anything still over.
-    left = report_budget() - len(REPORT_TEXT) - sum(len(section) + 2 for section in sections) - len(title) - 100
+    left = report_budget() - len(REPORT_TEXT) - BAR_ROOM - sum(len(section) + 2 for section in sections) - len(title) - 100
     budget = min(CHATS_BUDGET, max(MIN_CHATS_BUDGET, left))
     try:
         chats = recent_chats(home, home_chat_id=home_chat_id, since=since, zone=zone, others=others, budget=budget,
@@ -433,7 +447,7 @@ def build(home: Path, pulse_store: store.PulseStore, *, home_chat_id: str, now: 
     chats = title + (chats or "No chats since then.")
     # When the other sections leave the chats less than their minimum, the
     # other sections give way: the chats are what the report is about.
-    room = report_budget() - len(REPORT_TEXT) - 100 - len(chats) - 2
+    room = report_budget() - len(REPORT_TEXT) - BAR_ROOM - 100 - len(chats) - 2
     rest = "\n\n".join(sections)
     if len(rest) > room:
         rest = rest[:max(0, room - 40)] + "\n(cut here: no room in this report)"
@@ -451,21 +465,23 @@ def report_budget() -> int:
         threshold = LCM_DEFAULT_THRESHOLD
     # Below the instructions plus a little context, no report fits; LCM's
     # default is 12,000, so only a deliberately tiny threshold gets here.
-    return max(len(REPORT_TEXT) + 1_000, min(REPORT_BUDGET, threshold - LCM_MARGIN))
+    return max(len(REPORT_TEXT) + BAR_ROOM + 1_000, min(REPORT_BUDGET, threshold - LCM_MARGIN))
 
 
-def report_text(tag: str, context: str, since: str) -> str:
+def report_text(tag: str, context: str, since: str, nudge: str = "balanced") -> str:
     """The report turn's message, its context cut at the end if it would
     take the message over report_budget()."""
+    bar = BARS.get(nudge, BARS["balanced"])
     kinds = ", ".join(KINDS)
     # A fresh marker per report, so text in the context can't close the fence.
     fence = secrets.token_hex(6)
     while fence in context:
         fence = secrets.token_hex(6)
-    room = report_budget() - len(REPORT_TEXT.format(tag=tag, kinds=kinds, context="", since=since, fence=fence))
+    room = report_budget() - len(REPORT_TEXT.format(tag=tag, kinds=kinds, context="", since=since, fence=fence,
+                                                    bar=bar))
     if len(context) > room:
         context = context[:max(0, room - 1)] + "…"
-    return REPORT_TEXT.format(tag=tag, kinds=kinds, context=context, since=since, fence=fence)
+    return REPORT_TEXT.format(tag=tag, kinds=kinds, context=context, since=since, fence=fence, bar=bar)
 
 
 # Ratings ------------------------------------------------------------------------

@@ -14,8 +14,8 @@ tool calls in it from the outcome ledger, Hermes's scheduled jobs) that says:
 - ``drop``: called off or no longer applies: closed;
 - ``wait``: nothing yet; checked again later, backing off.
 
-At most REMINDERS_PER_DAY commitment reminders go out in a day, so memory's
-backlog doesn't arrive at once; the rest wait for tomorrow.
+At most the nudge level's reminders (pulse_learning.NUDGES) go out in a day,
+so memory's backlog doesn't arrive at once; the rest wait for tomorrow.
 
 A promise is never dropped silently: one still open after GIVE_UP_S gets a
 follow-up that says nothing shows it happened and asks if it's still wanted.
@@ -55,7 +55,6 @@ FIRST_CHECK_S = 1800.0
 COMMITMENT_FIRST_S = 86400.0
 REMIND_HOUR = 9
 REMIND_BEFORE_S = 3600.0
-REMINDERS_PER_DAY = 3
 REMINDERS_TOLD = "reminders_told_at"
 # A reminder decided while the day's were spent: its news is kept and told
 # when a slot frees, without another check.
@@ -395,13 +394,14 @@ def _tell_reminder(pulse_store: store.PulseStore, item_id: int, *, news: str, wh
 
 def _hold_reminder(pulse_store: store.PulseStore, now: float) -> Optional[float]:
     """When a reminder can go: None for now (and it's counted, as one made
-    ready today), else when the oldest of today's REMINDERS_PER_DAY is a
-    day old."""
+    ready today), else when the oldest of today's reminders (the nudge
+    level's number) is a day old."""
+    per_day = learning.nudging(pulse_store)["reminders"]
     told = pulse_store.get(REMINDERS_TOLD)
     told = sorted(at for at in (told if isinstance(told, list) else [])
                   if isinstance(at, (int, float)) and not isinstance(at, bool) and now - at < 86400.0)
-    if len(told) >= REMINDERS_PER_DAY:
-        return told[-REMINDERS_PER_DAY] + 86400.0
+    if len(told) >= per_day:
+        return told[-per_day] + 86400.0
     pulse_store.set(REMINDERS_TOLD, told + [now])
     return None
 

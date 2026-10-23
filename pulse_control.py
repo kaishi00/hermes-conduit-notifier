@@ -172,7 +172,10 @@ def backfill_start(pulse_store: Any, home: Path, days: Optional[int] = None,
 
 
 SETTINGS = ("enabled", "memory", "followups", "daily_report", "report_profiles", "report_times", "time_zone",
-            "brief_time", "model")
+            "brief_time", "model", "nudge", "memory_daily_tokens", "followup_daily_tokens")
+# What a daily token budget may be set to.
+MIN_DAILY_TOKENS = 10_000
+MAX_DAILY_TOKENS = 5_000_000
 
 
 def update(pulse_store: Any, body: Any) -> None:
@@ -181,7 +184,10 @@ def update(pulse_store: Any, body: Any) -> None:
     key is refused too. Values: booleans for "enabled", "memory", "followups" and "daily_report"; "all" or "this"
     for "report_profiles"; a list of "HH:MM" for "report_times"; an IANA
     name, or "" for the phone's, for "time_zone"; {"provider", "model"} for
-    "model" (the model Pulse's turns run on), or null for the chat's own."""
+    "model" (the model Pulse's turns run on), or null for the chat's own;
+    "gentle", "balanced" or "eager" for "nudge"; a whole number of tokens,
+    MIN_DAILY_TOKENS to MAX_DAILY_TOKENS, for "memory_daily_tokens" and
+    "followup_daily_tokens" (null for follow-ups: the nudge level's)."""
     if not isinstance(body, dict):
         raise Refused("invalid", field="")
     for field in body:
@@ -217,6 +223,20 @@ def update(pulse_store: Any, body: Any) -> None:
         changes["time_zone"] = zone
     if "model" in body:
         changes[pulse.MODEL] = _model(body["model"])
+    if "nudge" in body:
+        if body["nudge"] not in pulse_learning.NUDGES:
+            raise Refused("invalid", field="nudge")
+        changes["nudge"] = body["nudge"]
+    for field in ("memory_daily_tokens", "followup_daily_tokens"):
+        if field in body:
+            value = body[field]
+            if value is None and field == "followup_daily_tokens":
+                changes[field] = None
+            elif isinstance(value, int) and not isinstance(value, bool) \
+                    and MIN_DAILY_TOKENS <= value <= MAX_DAILY_TOKENS:
+                changes[field] = value
+            else:
+                raise Refused("invalid", field=field)
     for key, value in changes.items():
         pulse_store.set(key, value)
 
@@ -369,6 +389,9 @@ def state(pulse_store: Any, home: Path, now: Optional[float] = None) -> dict[str
         "followup_usage": {key: int(follow_usage.get(key, 0) or 0) for key in ("checks", "tokens", "failed")},
         "followup_daily_tokens": follow_cap,
         "followup_tokens_today": follow_used,
+        # Whether the budget was set, or comes with the nudge level.
+        "followup_daily_tokens_set": _number(pulse_store.get("followup_daily_tokens")),
+        "nudge": pulse_learning.nudge(pulse_store),
         "levels": pulse_learning.levels(pulse_store),
         "unseen_cards": pulse_store.unseen_cards(),
         "brief_time": pulse.report.clock_text(pulse_store.get("brief_time") or pulse.brief.DEFAULT_TIME),

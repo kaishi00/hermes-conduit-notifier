@@ -342,7 +342,7 @@ def test_followups_command(live, capsys, monkeypatch):
     assert run("off") == 0 and live.store.get(followup.NOW_REQUESTED) is None
     live.store.set("followups", True)
     today = datetime.now(pulse.report_zone(live.store, live.store.path.parent)).strftime("%Y-%m-%d")
-    live.store.set("followup_today", {"day": today, "tokens": live.store.get("followup_daily_tokens")})
+    live.store.set("followup_today", {"day": today, "tokens": followup.learning.NUDGES["balanced"]["followup_tokens"]})
     capsys.readouterr()
     assert run("now") == 1 and live.store.get(followup.NOW_REQUESTED) is None  # today's follow-up tokens are spent
     assert "checks resume tomorrow" in capsys.readouterr().out
@@ -591,17 +591,17 @@ def test_a_commitment_check_reads_as_the_users_and_reminds_them(live):
 def test_only_a_few_reminders_go_out_a_day(live):
     now = time.time() + followup.FIRST_CHECK_S + 1
     items = [commitment(live, f"The user will do thing {n}.", said_at=time.time() - 2 * 86400, words=f"I'll do thing {n}")
-             for n in range(followup.REMINDERS_PER_DAY + 1)]
+             for n in range(followup.learning.NUDGES["balanced"]["reminders"] + 1)]
     check_now(live, llm_saying(decision="tell", news="Reminder.", why="due"), now=now)
     rows = {row["item_id"]: row for row in live.store.followups()}
     told = [item for item in items if rows[item]["decision"] == "tell"]
     held = [item for item in items if rows[item]["decision"] == followup.REMINDER_HELD]
-    assert len(told) == followup.REMINDERS_PER_DAY and len(held) == 1
+    assert len(told) == followup.learning.NUDGES["balanced"]["reminders"] and len(held) == 1
     assert rows[held[0]]["next_check_at"] == pytest.approx(now + 86400) and rows[held[0]]["news"] == "Reminder."
     # Promises aren't held back by the reminders.
     promise(live)
     check_now(live, llm_saying(decision="tell", news="Done.", why="finished"), now=now + 1)
-    assert sum(row["decision"] == "tell" for row in live.store.followups()) == followup.REMINDERS_PER_DAY + 1
+    assert sum(row["decision"] == "tell" for row in live.store.followups()) == followup.learning.NUDGES["balanced"]["reminders"] + 1
     # A freed slot tells the held one as it was, without another check.
     later = llm_saying(decision="wait")
     check_now(live, later, now=now + 86400 + 1)
@@ -614,7 +614,7 @@ def test_a_week_old_commitment_counts_against_the_days_reminders(live):
     item_id = commitment(live, said_at=time.time() - followup.GIVE_UP_S - 60)
     now = time.time() + followup.FIRST_CHECK_S + 1
     check_now(live, llm_saying(decision="wait"), now=now)
-    live.store.set(followup.REMINDERS_TOLD, [now] * followup.REMINDERS_PER_DAY)
+    live.store.set(followup.REMINDERS_TOLD, [now] * followup.learning.NUDGES["balanced"]["reminders"])
     check_now(live, llm_saying(decision="wait"), now=now + followup.BACKOFF_S[0] + 1)
     [row] = live.store.followups()
     assert row["decision"] == followup.REMINDER_HELD and row["next_check_at"] == pytest.approx(now + 86400)
@@ -636,7 +636,7 @@ def test_followups_now_checks_everything_at_once(live):
     later = commitment(live, said_at=time.time() - 60)  # undated: first checked a day out
     now = time.time()
     followup.schedule(live.store, now)
-    live.store.set(followup.REMINDERS_TOLD, [now] * followup.REMINDERS_PER_DAY)
+    live.store.set(followup.REMINDERS_TOLD, [now] * followup.learning.NUDGES["balanced"]["reminders"])
     followup.check_all_now(live.store, now)  # not asked: nothing moves
     assert live.store.followups()[0]["next_check_at"] > now + 3600
     live.store.set(followup.NOW_REQUESTED, now - followup.NOW_WINDOW_S - 1)  # an ask left too long lapses
@@ -662,3 +662,45 @@ def test_followups_now_leaves_a_still_want_it_ask_alone(live):
     live.store.set(followup.NOW_REQUESTED, now)
     followup.check_all_now(live.store, now)
     assert live.store.followups()[0]["next_check_at"] == now + followup.BACKOFF_S[-1]
+
+
+def test_the_nudge_level_sets_reminders_pace_budget_and_the_reports_bar(live, capsys, monkeypatch):
+    control = _load("conduit_push.pulse_control", ROOT / "pulse_control.py")
+    learning, report = followup.learning, followup.report
+    assert learning.nudge(live.store) == "balanced" and pulse._spent_today(live.store, "followup", "")[1] == 150_000
+    for bad in ({"nudge": "loud"}, {"memory_daily_tokens": 5}, {"memory_daily_tokens": None},
+                {"followup_daily_tokens": True}, {"followup_daily_tokens": 10_000_000}):
+        with pytest.raises(control.Refused):
+            control.update(live.store, bad)
+    control.update(live.store, {"nudge": "eager"})
+    assert learning.nudging(live.store)["reminders"] == 6 and learning.pace(live.store, followup.FOLLOWUP) == 0.5
+    assert pulse._spent_today(live.store, "followup", "")[1] == 300_000  # goes with the level until set
+    control.update(live.store, {"followup_daily_tokens": 80_000, "memory_daily_tokens": 100_000})
+    assert pulse._spent_today(live.store, "followup", "")[1] == 80_000
+    assert pulse._spent_today(live.store, "memory", "")[1] == 100_000
+    state = control.state(live.store, live.store.path.parent)
+    assert (state["nudge"], state["followup_daily_tokens"], state["followup_daily_tokens_set"]) == ("eager", 80_000, True)
+    control.update(live.store, {"followup_daily_tokens": None})
+    assert pulse._spent_today(live.store, "followup", "")[1] == 300_000
+    since = "Tue 20 Oct 18:00"
+    assert report.BARS["eager"] in report.report_text("p1-1", "", since, "eager")
+    assert report.BARS["gentle"] in report.report_text("p1-1", "", since, "gentle")
+    assert report.BARS["balanced"] in report.report_text("p1-1", "", since, "nonsense")
+    now = time.time()
+    for _ in range(6):
+        assert followup._hold_reminder(live.store, now) is None
+    assert followup._hold_reminder(live.store, now) == now + 86400.0  # the seventh waits a day
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", pulse.get_hermes_home)
+    run = lambda action, value="", extra="": cli.dispatch(types.SimpleNamespace(
+        conduit_push_action="pulse", pulse_action=action, value=value, extra=extra))
+    capsys.readouterr()
+    assert run("nudge", "gentle") == 0 and "gentle" in capsys.readouterr().out
+    assert learning.nudging(live.store)["reminders"] == 1
+    assert run("nudge", "loud") == 2
+    assert run("budget", "followups", "90,000") == 0 and "90,000 tokens a day." in capsys.readouterr().out
+    assert run("budget", "followups", "auto") == 0 and "60,000 tokens a day (the nudge level's)" in capsys.readouterr().out
+    assert run("budget", "memory", "auto") == 2 and run("budget", "memory", "200000") == 0
+    assert live.store.get("memory_daily_tokens") == 200_000
+    capsys.readouterr()
+    run("status")
+    assert "Nudging: gentle" in capsys.readouterr().out
