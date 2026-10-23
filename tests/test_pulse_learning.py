@@ -588,6 +588,12 @@ def test_a_rating_typed_before_the_split_goes_with_it(live):
     assert pulse.report.rating_counts(live.store) == {}
 
 
+def test_a_split_report_takes_no_typed_rating(live):
+    live.store.set(store.SPLIT_REPORTS, ["a1"])
+    assert live.store.set_ratings("a1", "[]", '[[1, "date", true]]') is False
+    assert live.store.all_ratings() == []
+
+
 def test_a_settled_card_mark_is_appended_once(live):
     pulse._mark_turn_card(live.store, "a1")
     pulse._mark_turn_card(live.store, "a2")

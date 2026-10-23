@@ -379,10 +379,6 @@ def _turn_cards(pulse_store: store.PulseStore, home: Path, changed: list[dict], 
                     shown=report.shown_items(turn.prompt), kinds=report.KINDS,
                     item_chat_title=lambda item: followup.chat_title(home, item), now=now,
                     attempt=str(attempt), marks=(TURN_CARDS_DONE, store.SPLIT_REPORTS), keep=TURN_CARDS_DONE_KEEP)
-                # Rated on its cards from now on: a rating typed before they
-                # landed goes, so the item counts once even after the split
-                # mark is trimmed away.
-                pulse_store.drop_ratings(str(attempt))
                 continue
             card = turn is not None and learning.add_turn_card(
                 pulse_store, kind=row["kind"], chat_id=row["session_key"], chat_title=title, turn=turn,
