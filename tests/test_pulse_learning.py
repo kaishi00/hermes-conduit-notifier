@@ -495,6 +495,47 @@ def test_a_report_card_a_busy_state_db_kept_out_lands_on_a_later_tick(live, monk
     assert looked == [] and len(live.store.cards()) == 1
 
 
+def test_a_report_becomes_one_card_per_item(live, monkeypatch):
+    item_id = promise(live)
+    live.store.set("report_requested", True)
+    pulse.tick()
+    [attempt] = live.store.in_flight()
+    live.db.message("user", attempt["text"] + f"\n\n## What Pulse remembers\n#{item_id} [promise] Tell the deploy")
+    reply_id = live.db.message("assistant", f"""1. [date] The dentist is Friday at 9 (calendar).
+2. [promise] Hermes still owes the deploy note (from Monday) #{item_id}
+3. [Weird] Something odd #999999""")
+    pulse.tick()
+    cards = sorted(live.store.cards(), key=lambda card: card["id"])
+    assert [(c["kind"], c["topic"]) for c in cards] == [("noticed", "date"), ("noticed", "promise"),
+                                                         ("noticed", "other")]
+    date, owed, odd = cards
+    assert date["news"] == "The dentist is Friday at 9 (calendar)." and date["item_id"] is None
+    assert date["chat_id"] == SID and date["message_id"] == reply_id and date["level"] == "screen"
+    # Drawn from a remembered thing: points at its chat, so Do it and Done work.
+    assert owed["item_id"] == item_id and owed["chat_id"] == CHAT and owed["news"].endswith("(from Monday)")
+    assert odd["item_id"] is None  # #999999 wasn't shown in the report
+    assert live.store.get(pulse.TURN_CARDS_DONE) == [attempt["attempt_id"]]
+    pulse.tick()
+    assert len(live.store.cards()) == 3  # once
+    entry = next(c for c in control.feed(live.store)["cards"] if c["id"] == owed["id"])
+    assert entry["topic"] == "promise"
+    # Thumbs on an item: no ladder, but the report counts it, and a remembered
+    # thing rated down stays out of later reports.
+    assert control.rate(live.store, date["id"], "up") == []
+    assert control.rate(live.store, owed["id"], "down") == []
+    assert pulse.report.rating_counts(live.store) == {"date": (1, 0), "promise": (0, 1)}
+    assert item_id in pulse.report.rated_not_useful(live.store)
+    assert control.done(live.store, owed["id"]) is True
+    assert live.store.item(item_id)["status"] == "done"
+    with pytest.raises(control.Refused):
+        control.done(live.store, date["id"])  # nothing remembered behind it
+
+
+def test_report_text_asks_for_cards_not_a_shadow():
+    text = pulse.report.report_text("pAAAA-1", "context", "Mon 09:00")
+    assert "would have" not in text and "Rate them" not in text and "dry run" not in text
+
+
 def test_a_report_that_brought_nothing_up_makes_no_card(live, monkeypatch):
     live.store.set("report_requested", True)
     pulse.tick()
@@ -688,3 +729,12 @@ def test_do_it_on_a_done_card_books_nothing_and_done_stops_a_booked_check(live):
     assert control.acted(live.store, card["id"]) is False
     with pytest.raises(control.Refused):
         control.acted(live.store, 999)
+
+
+def test_a_store_from_before_card_topics_gets_the_column(live):
+    with sqlite3.connect(live.store.path) as conn:
+        conn.execute("ALTER TABLE cards DROP COLUMN topic")
+    reopened = store.PulseStore(live.store.path)
+    card_id = reopened.add_card({"kind": "noticed", "level": "screen", "news": "x", "topic": "date",
+                                 "created_at": time.time()})
+    assert reopened.card(card_id)["topic"] == "date"

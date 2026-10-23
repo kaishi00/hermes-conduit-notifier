@@ -425,21 +425,21 @@ def _pulse_report(pulse_store: Any, value: str) -> int:
             print("Pulse is off: `hermes conduit-push pulse on` first.")
             return 1
         pulse_store.set("report_requested", True)
-        print("Asked the dashboard for a shadow report; it goes into the home chat within a minute or two.")
+        print("Asked the dashboard for a report; it goes into the home chat within a minute or two.")
         return 0
     if value in ("on", "off"):
         pulse_store.set("daily_report", value == "on")
-        print("The shadow report is on." if value == "on" else "The shadow report is off.")
+        print("The report is on." if value == "on" else "The report is off.")
         return 0
     if value in ("all-profiles", "this-profile"):
         pulse_store.set("report_profiles", {"all-profiles": "all", "this-profile": "this"}[value])
-        print("The shadow report and memory read every profile's chats, memories and cron jobs."
-              if value == "all-profiles" else "The shadow report and memory read only this profile.")
+        print("The report and memory read every profile's chats, memories and cron jobs."
+              if value == "all-profiles" else "The report and memory read only this profile.")
         return 0
     times = pulse_report.parse_times(value)
     if times:
         pulse_store.set("report_time", times)
-        print(f"The shadow report goes out at {pulse_report.clock_text(times)}.")
+        print(f"The report goes out at {pulse_report.clock_text(times)}.")
         return 0
     if pulse_report.known_zone(value):
         pulse_store.set("time_zone", value)

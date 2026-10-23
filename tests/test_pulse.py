@@ -930,7 +930,7 @@ def test_the_report_context_is_the_recent_real_chats(live, db, tmp_path):
     text = report.report_text("pabc-1", context, since)
     fence = re.search(r"<<<context (\w+)\n", text).group(1)
     assert text.endswith(f"context {fence}>>>") and report.report_text("pabc-1", context, since) != text
-    assert f"covering {since} onward" in text and text.startswith("Pulse shadow report pabc-1.") and context in text
+    assert f"covering {since} onward" in text and text.startswith("Pulse report pabc-1.") and context in text
     ledger.forget_cache()
 
 
@@ -1177,7 +1177,7 @@ def test_the_report_goes_out_once_after_its_time(live, db):
     live.store.set("report_time", today)
     pulse.tick(now=now)
     [text] = live.sent()
-    assert text.startswith("Pulse shadow report")
+    assert text.startswith("Pulse report")
     row = live.store.in_flight()[0]
     assert row["kind"] == pulse.REPORT
     pulse.tick(now=now + 60)
@@ -1234,7 +1234,7 @@ def test_a_probe_and_a_report_due_together_go_on_separate_ticks(live, db):
     pulse.tick()
     assert len(live.sent()) == 1 and live.sent()[0].startswith("Pulse delivery check")
     pulse.tick()
-    assert len(live.sent()) == 2 and live.sent()[1].startswith("Pulse shadow report")
+    assert len(live.sent()) == 2 and live.sent()[1].startswith("Pulse report")
 
 
 def test_ratings_are_read_back_and_counted(live, db):
@@ -1356,7 +1356,7 @@ def test_a_finished_report_keeps_only_its_first_line(live, db):
     assert "\n" in row["text"]
     live.store.update_attempt(row["attempt_id"], state=store.DELIVERED)
     pulse.tick(now=time.time() + 1)
-    assert live.store.attempt_by_tag(row["tag"])["text"] == f"Pulse shadow report {row['tag']}."
+    assert live.store.attempt_by_tag(row["tag"])["text"] == f"Pulse report {row['tag']}."
 
 
 def test_an_early_report_stands_in_for_the_scheduled_one(live, db):

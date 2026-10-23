@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.66.0 (2026-10-23)
+
+### New and improved
+- Pulse's report no longer arrives as one block to rate by typing "1 yes,
+  2 no". Each thing it noticed is its own card, labelled with what it is
+  about (a date, a promise, a follow-up), with thumbs up and down. Items
+  about something Pulse remembers also get Do it and Done.
+
 ## 0.65.2 (2026-10-23)
 
 ### Fixes

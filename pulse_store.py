@@ -191,6 +191,8 @@ CREATE TABLE IF NOT EXISTS cards (
     chat_id TEXT NOT NULL DEFAULT '',
     chat_title TEXT NOT NULL DEFAULT '',
     message_id INTEGER,
+    -- A report item's kind (pulse_report.KINDS) on a "noticed" card.
+    topic TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL,
     seen_at REAL,
     briefed_at REAL,
@@ -256,7 +258,7 @@ def _check_marks(marks: str) -> None:
         raise ValueError(f"unknown marks table {marks!r}")
 
 CARD_COLUMNS = ("kind", "item_id", "level", "title", "quote", "news", "why", "profile", "chat_id", "chat_title",
-                "message_id", "created_at")
+                "message_id", "topic", "created_at")
 LESSON_COLUMNS = ("kind", "what", "value", "profile", "chat_id", "card_id", "cause", "created_at")
 
 
@@ -282,6 +284,9 @@ class PulseStore:
         self.busy_timeout_s = busy_timeout_s
         with self._connect() as conn:
             conn.executescript(_SCHEMA)
+            # A store from before cards had a topic.
+            if "topic" not in {row[1] for row in conn.execute("PRAGMA table_info(cards)")}:
+                conn.execute("ALTER TABLE cards ADD COLUMN topic TEXT NOT NULL DEFAULT ''")
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.path), timeout=self.busy_timeout_s, isolation_level=None)
@@ -748,6 +753,26 @@ class PulseStore:
             columns = ", ".join(row)
             return int(conn.execute(f"INSERT INTO cards({columns}) VALUES({', '.join('?' * len(row))})",
                                     tuple(row.values())).lastrowid)
+
+    def add_cards(self, rows: Sequence[dict[str, Any]]) -> list[int]:
+        """Adds these cards in one transaction: all or none."""
+        for row in rows:
+            _check_columns(row, CARD_COLUMNS)
+        with _lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                ids = [int(conn.execute(f"INSERT INTO cards({', '.join(row)}) VALUES({', '.join('?' * len(row))})",
+                                        tuple(row.values())).lastrowid) for row in rows]
+                conn.execute("COMMIT")
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+            return ids
+
+    def rated_cards(self, kind: str) -> list[dict]:
+        with self._connect() as conn:
+            return [dict(row) for row in conn.execute(
+                "SELECT item_id, topic, rating, rated_at FROM cards WHERE kind=? AND rating!=''", (kind,))]
 
     def card(self, card_id: int) -> Optional[dict]:
         with self._connect() as conn:

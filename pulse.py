@@ -11,8 +11,8 @@ A Pulse turn is recognised by its tag in ``pre_llm_call``. On such a turn
 every tool is blocked in ``pre_tool_call`` (the probe needs none; later
 slices allow named reads only), and no push or Live Activity goes out for it.
 
-A few times a day it also sends the shadow report (pulse_report): what Hermes
-would have brought up since the last one, for the user to rate in the home chat.
+A few times a day it also sends the report (pulse_report): what Hermes would
+bring up since the last one, each item its own card on the Pulse screen.
 
 While Pulse is on, every tool call in the profile also gets a row in the
 outcome ledger (pulse_ledger), the record later slices check claims against,
@@ -266,7 +266,7 @@ def _hosts_chats() -> bool:
 
 def tick(now: Optional[float] = None) -> None:
     """One pass: reconcile what's in flight, read report ratings, then send
-    a probe or the shadow report if one is due."""
+    a probe or the report if one is due."""
     if _ctx is None or not turns_marked or not _hosts_chats():
         return
     home = get_hermes_home()
@@ -324,7 +324,8 @@ TURN_CARDS_DONE_KEEP = 50
 
 def _turn_cards(pulse_store: store.PulseStore, home: Path, changed: list[dict], now: float) -> None:
     """A report or brief that reached the Pulse chat goes on the Pulse screen
-    too, as Hermes wrote it, linked to its message in the chat. Those
+    too: a report as one card per item, a brief as Hermes wrote it, linked
+    to its message in the chat. Those
     delivered in the last few minutes are tried again, so a card a busy
     state.db kept out still lands (a card is never added twice)."""
     rows = {row["attempt_id"]: row for row in changed}
@@ -349,6 +350,15 @@ def _turn_cards(pulse_store: store.PulseStore, home: Path, changed: list[dict], 
             # A brief comes with a push; a report doesn't.
             if turn is not None and learning.empty_turn(row["kind"], turn.reply):
                 # Nothing brought up: no card, and no looking it up again.
+                done = (done + [attempt])[-TURN_CARDS_DONE_KEEP:]
+                pulse_store.set(TURN_CARDS_DONE, done)
+                continue
+            if turn is not None and row["kind"] == REPORT and learning.report_lines(turn.reply):
+                # Each item its own card; a reply in some other shape stays one card.
+                learning.add_noticed_cards(
+                    pulse_store, turn=turn, chat_id=row["session_key"], chat_title=title,
+                    shown=report.shown_items(turn.prompt), kinds=report.KINDS,
+                    item_chat_title=lambda item: followup.chat_title(home, item), now=now)
                 done = (done + [attempt])[-TURN_CARDS_DONE_KEEP:]
                 pulse_store.set(TURN_CARDS_DONE, done)
                 continue
@@ -408,19 +418,19 @@ def _maybe_probe(pulse_store: store.PulseStore, home: Path, now: float) -> bool:
 
 
 def _maybe_report(pulse_store: store.PulseStore, home: Path, now: float) -> bool:
-    """Sends the shadow report if asked for or due; True when it went."""
+    """Sends the report if asked for or due; True when it went."""
     asked = pulse_store.take_request("report_requested")
     if not asked and not _report_due(pulse_store, home, now):
         return False
     if any(row["kind"] == REPORT for row in pulse_store.in_flight()):
         if asked:
-            logger.info("conduit_push: Pulse: a shadow report is already in flight; not sending another")
+            logger.info("conduit_push: Pulse: a report is already in flight; not sending another")
         return False
     chat, problem = home_chat(pulse_store, home)
     _log_problem(problem)
     if chat is None:
         if asked:
-            logger.info("conduit_push: Pulse: the requested shadow report wasn't sent; run `pulse report` again "
+            logger.info("conduit_push: Pulse: the requested report wasn't sent; run `pulse report` again "
                         "once the home chat is there")
         return False
     context, since = report.build(home, pulse_store, home_chat_id=chat.chat_id, now=now)
