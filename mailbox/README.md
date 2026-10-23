@@ -114,7 +114,7 @@ Each bound is a backstop against floods, sized far above what linked installatio
 | Waiting polls per inbox | 8 | `MAILBOX_MAX_WAITERS_PER_INBOX` |
 | Days before an unread inbox is deleted | 90 | `MAILBOX_INBOX_IDLE_DAYS` |
 
-Registering a new inbox counts against the registration rates; registering one that exists counts as an owner request. Each inbox has its own room for the signatures it has used, twelve minutes of its owner rate (7,200 by default), so an owner that fills it is answered `rate_limited` until its oldest signatures expire, and no other owner notices. The per-address rates follow up to 100,000 addresses at a time: past that, new addresses go uncounted rather than anyone being turned away, and the mailbox-wide registration rate still holds.
+Registering a new inbox counts against the registration rates; registering one that exists counts as an owner request. Each inbox has its own room for the signatures it has used, twelve minutes of its owner rate (7,200 by default), so an owner that fills it is answered `rate_limited` until its oldest signatures expire, and no other owner notices. A remembered signature takes about 150 bytes: the rooms use that much for each owner request accepted in the last five minutes (up to ten, for an owner whose clock runs ahead), and one room at most about 1 MB. The per-address rates follow up to 100,000 addresses at a time: past that, new addresses go uncounted rather than anyone being turned away, and the mailbox-wide registration rate still holds.
 
 ## What the mailbox keeps
 
