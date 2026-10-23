@@ -76,7 +76,7 @@ The timestamp must be within 300 seconds of the mailbox's clock, and each signat
 | `GET /v1/inboxes/{inbox}/envelopes?after=&limit=&wait=` | owner | Envelopes after `seq` `after`, oldest first: `{"envelopes": [{"seq", "sender", "received_at", "body"}], "next"}`, with each body in standard base64. `limit` is 1 to 100 (default 50). With `wait` (seconds, cut to `max_wait_seconds`), an empty inbox holds the request until an envelope arrives or the wait ends. Poll again with `after=next`. |
 | `POST /v1/inboxes/{inbox}/ack` `{"through"}`, `{"seqs"}` or both | owner | Deletes the envelopes up to and including `through`, and those listed in `seqs` (up to 100), and answers `{"deleted"}`. |
 
-Every error is `{"error": "<code>"}`. An unknown inbox, a wrong token, and a bad or replayed signature all get 401 `unauthorized`, so the answer never says whether an inbox exists. The other codes:
+Every error is `{"error": "<code>"}`. An unknown inbox, a wrong token, and a bad or replayed signature all get 401 `unauthorized`, and an unknown inbox takes as long to refuse as a bad signature, so neither the answer nor its timing says whether an inbox exists. The other codes:
 
 | Status | Codes |
 |---|---|
@@ -86,7 +86,6 @@ Every error is `{"error": "<code>"}`. An unknown inbox, a wrong token, and a bad
 | 409 | `token_in_use` (another sender of the inbox has that token), `too_many_senders` |
 | 413 | `envelope_too_large`, `payload_too_large` (an owner request over 16 KB) |
 | 429 | `rate_limited`, `inbox_full`, `sender_backlog`, `too_many_waiters` |
-| 503 | `busy`: the mailbox can't remember another signature yet. Retry in a few seconds. |
 | 507 | `mailbox_full` |
 
 An envelope that isn't acknowledged within `ttl_seconds` (7 days) is deleted. So is an inbox whose owner hasn't made a request for `MAILBOX_INBOX_IDLE_DAYS` (90 days), along with everything it holds.
@@ -115,7 +114,7 @@ Each bound is a backstop against floods, sized far above what linked installatio
 | Waiting polls per inbox | 8 | `MAILBOX_MAX_WAITERS_PER_INBOX` |
 | Days before an unread inbox is deleted | 90 | `MAILBOX_INBOX_IDLE_DAYS` |
 
-Registering an inbox that already exists doesn't count against the registration rates. The mailbox remembers up to 100,000 signatures at a time, each for no longer than its timestamp could pass. Past that, it answers owner requests with `busy` until older signatures age out.
+Registering a new inbox counts against the registration rates; registering one that exists counts as an owner request. Each inbox has its own room for the signatures it has used, twelve minutes of its owner rate (7,200 by default), so an owner that fills it is answered `rate_limited` until its oldest signatures expire, and no other owner notices. The per-address rates follow up to 100,000 addresses at a time: past that, new addresses go uncounted rather than anyone being turned away, and the mailbox-wide registration rate still holds.
 
 ## What the mailbox keeps
 

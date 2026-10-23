@@ -33,48 +33,73 @@ export function signedString({ method, target, ts, nonce, body }) {
   return Buffer.from(`mailbox-v1\n${method}\n${target}\n${ts}\n${nonce}\n${sha256(body)}`, 'utf8');
 }
 
-export function verifyOwnerRequest({ key, method, target, body, authorization, now, replay }) {
+// The signature, when `authorization` signs this request with `key` within
+// the window, and until when it must be remembered: past that, its
+// timestamp is refused anyway. Undefined otherwise. Whether the signature
+// was used before is the ReplayCache's to say.
+export function verifyOwnerSignature({ key, method, target, body, authorization, now }) {
   const match = AUTHORIZATION_PATTERN.exec(typeof authorization === 'string' ? authorization : '');
-  if (!match) return false;
+  if (!match) return undefined;
   const ts = Number(match[1]);
-  if (Math.abs(now - ts) > SIGNATURE_WINDOW_SECONDS) return false;
-  let valid;
+  if (Math.abs(now - ts) > SIGNATURE_WINDOW_SECONDS) return undefined;
   try {
     const publicKey = createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: key.toString('base64url') }, format: 'jwk' });
-    valid = verify(null, signedString({ method, target, ts: match[1], nonce: match[2], body }), publicKey, Buffer.from(match[3], 'base64url'));
+    const message = signedString({ method, target, ts: match[1], nonce: match[2], body });
+    if (!verify(null, message, publicKey, Buffer.from(match[3], 'base64url'))) return undefined;
   } catch {
-    return false;
+    return undefined;
   }
-  // Checked last, so a forged signature can't use up a real one's slot. Kept
-  // until the timestamp itself would be refused.
-  return valid && replay.claim(match[3], now, ts + SIGNATURE_WINDOW_SECONDS + 1);
+  return { signature: match[3], until: ts + SIGNATURE_WINDOW_SECONDS + 1 };
 }
 
-// Signatures still inside their window, so a captured request can't be sent
-// again. Past `maxEntries` live signatures it refuses new ones until some
-// age out, and says it is `full` so the server can answer busy, not 401.
+// The signatures each inbox has used while they could still pass, so a
+// captured request can't be sent again. Every inbox has its own room of
+// `maxPerInbox`: one that runs out is refused until its claims expire,
+// and no other inbox notices.
 export class ReplayCache {
-  constructor(maxEntries = 100_000) {
-    this.maxEntries = maxEntries;
-    this.seen = new Map();
-    this.sweptAt = 0;
+  constructor(maxPerInbox = 7_200) {
+    this.maxPerInbox = maxPerInbox;
+    this.inboxes = new Map();
   }
 
-  get full() {
-    return this.seen.size >= this.maxEntries;
+  seen(inbox, signature, now) {
+    const until = this.inboxes.get(inbox)?.claims.get(signature);
+    return until !== undefined && until > now;
   }
 
-  // Claims `signature` until `expiresAt`; false if it is claimed already or
-  // there is no room.
-  claim(signature, now, expiresAt) {
-    const until = this.seen.get(signature);
-    if (until !== undefined && until > now) return false;
-    if (this.seen.size >= this.maxEntries / 2 && now - this.sweptAt >= 10) {
-      this.sweptAt = now;
-      for (const [seen, before] of this.seen) if (before <= now) this.seen.delete(seen);
+  // Claims `signature` for `inbox` until `until`; false if it is claimed
+  // already or the inbox has no room left.
+  claim(inbox, signature, now, until) {
+    if (this.seen(inbox, signature, now)) return false;
+    let room = this.inboxes.get(inbox);
+    if (!room) this.inboxes.set(inbox, (room = { claims: new Map(), sweptAt: 0 }));
+    // Claims expire by the second, so a full room is swept once a second at most.
+    if (room.claims.size >= this.maxPerInbox && room.sweptAt !== now) {
+      room.sweptAt = now;
+      forgetExpired(room.claims, now);
     }
-    if (until === undefined && this.full) return false;
-    this.seen.set(signature, expiresAt);
+    if (room.claims.size >= this.maxPerInbox) return false;
+    room.claims.set(signature, until);
     return true;
   }
+
+  // Forgets expired claims, and inboxes left with none; how many it forgot.
+  sweep(now) {
+    let forgotten = 0;
+    for (const [inbox, room] of this.inboxes) {
+      forgotten += forgetExpired(room.claims, now);
+      if (!room.claims.size) this.inboxes.delete(inbox);
+    }
+    return forgotten;
+  }
+}
+
+function forgetExpired(claims, now) {
+  let forgotten = 0;
+  for (const [signature, until] of claims) {
+    if (until > now) continue;
+    claims.delete(signature);
+    forgotten += 1;
+  }
+  return forgotten;
 }

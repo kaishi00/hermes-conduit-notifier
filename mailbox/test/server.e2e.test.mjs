@@ -1,9 +1,15 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { createHash, generateKeyPairSync, randomBytes, sign } from 'node:crypto';
 import { once } from 'node:events';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
+import { createServer as createTcpServer } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
 import { ReplayCache } from '../src/auth.mjs';
 import { DEFAULT_LIMITS } from '../src/limits.mjs';
 import { createMailbox, readConfig } from '../src/server.mjs';
@@ -19,10 +25,10 @@ function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('base64url');
 }
 
-async function start(t, { limits = {}, registrationToken, proxyHops, replay } = {}) {
+async function start(t, { limits = {}, registrationToken, proxyHops, replay, clientBuckets } = {}) {
   const merged = { ...DEFAULT_LIMITS, ...limits };
   const store = new MailboxStore(':memory:', merged);
-  const mailbox = createMailbox({ store, limits: merged, registrationToken, proxyHops, replay, log: { error() {}, info() {} } });
+  const mailbox = createMailbox({ store, limits: merged, registrationToken, proxyHops, replay, clientBuckets, log: { error() {}, info() {} } });
   mailbox.server.listen(0, '127.0.0.1');
   await once(mailbox.server, 'listening');
   t.after(() => mailbox.close());
@@ -207,7 +213,12 @@ test('an unknown inbox, a wrong token and a foreign signature all get the same a
 
 test('a captured owner request can\'t be sent again', async (t) => {
   const { base } = await start(t);
-  const me = await ownerWithSender(base);
+  const me = owner(base);
+  const registration = me.signed('POST', '/v1/inboxes', { key: base64url(me.key) });
+  const register = () => fetch(`${base}/v1/inboxes`, { method: 'POST', headers: { authorization: registration.authorization }, body: registration.bytes });
+  assert.equal((await register()).status, 201);
+  assert.equal((await register()).status, 401, 'a registration');
+
   const target = `/v1/inboxes/${me.inbox}/ack`;
   const { authorization, bytes } = me.signed('POST', target, { through: 1 });
   const replay = () => fetch(base + target, { method: 'POST', headers: { authorization }, body: bytes });
@@ -218,14 +229,78 @@ test('a captured owner request can\'t be sent again', async (t) => {
   assert.deepEqual(await again.json(), { error: 'unauthorized' });
 });
 
-test('a mailbox with no room to remember another signature answers busy, not unauthorized', async (t) => {
-  const { base } = await start(t, { replay: new ReplayCache(1) });
+test('a replayed request doesn\'t spend its owner\'s rate', async (t) => {
+  const { base } = await start(t, { limits: { ownerRequestsPerMinutePerInbox: 3 } });
   const me = owner(base);
   assert.equal((await me.register()).status, 201);
+  const target = `/v1/inboxes/${me.inbox}`;
+  const { authorization } = me.signed('GET', target);
+  const replayed = () => fetch(base + target, { headers: { authorization } });
 
-  const busy = await me.call('GET', `/v1/inboxes/${me.inbox}`);
-  assert.equal(busy.status, 503);
-  assert.deepEqual(await busy.json(), { error: 'busy' });
+  assert.equal((await replayed()).status, 200);
+  for (let i = 0; i < 3; i += 1) assert.equal((await replayed()).status, 401);
+  assert.equal((await me.call('GET', target)).status, 200);
+  assert.equal((await me.call('GET', target)).status, 200);
+  assert.equal((await me.call('GET', target)).status, 429, 'only the requests it let through count');
+});
+
+test('a request refused for its owner\'s rate is used up all the same', async (t) => {
+  const { base } = await start(t, { limits: { ownerRequestsPerMinutePerInbox: 1 } });
+  const me = owner(base);
+  assert.equal((await me.register()).status, 201);
+  const target = `/v1/inboxes/${me.inbox}`;
+  assert.equal((await me.call('GET', target)).status, 200);
+  const { authorization } = me.signed('DELETE', target);
+  const captured = () => fetch(base + target, { method: 'DELETE', headers: { authorization } });
+
+  assert.equal((await captured()).status, 429);
+  // Otherwise it could be sent again once the rate resets, and delete an
+  // inbox its owner was told it still had.
+  assert.equal((await captured()).status, 401);
+});
+
+test('an owner that runs out of room for signatures is slowed down, and other owners carry on', async (t) => {
+  const { base } = await start(t, { replay: new ReplayCache(3) });
+  const busy = owner(base);
+  const quiet = owner(base);
+  assert.equal((await busy.register()).status, 201);
+  assert.equal((await quiet.register()).status, 201);
+
+  assert.equal((await busy.call('GET', `/v1/inboxes/${busy.inbox}`)).status, 200);
+  assert.equal((await busy.call('GET', `/v1/inboxes/${busy.inbox}`)).status, 200);
+  const over = await busy.call('GET', `/v1/inboxes/${busy.inbox}`);
+  assert.equal(over.status, 429);
+  assert.deepEqual(await over.json(), { error: 'rate_limited' });
+  assert.equal((await quiet.call('GET', `/v1/inboxes/${quiet.inbox}`)).status, 200);
+});
+
+test('registrations the rates refuse leave nothing behind and take no room from owners', async (t) => {
+  const replay = new ReplayCache(4);
+  const { base } = await start(t, { replay, limits: { registrationsPerMinute: 1 } });
+  const me = await ownerWithSender(base);
+
+  for (let i = 0; i < 20; i += 1) {
+    const stranger = owner(base);
+    const { authorization, bytes } = stranger.signed('POST', '/v1/inboxes', { key: base64url(stranger.key) });
+    const refused = await fetch(`${base}/v1/inboxes`, { method: 'POST', headers: { authorization }, body: bytes });
+    assert.equal(refused.status, 429, `registration ${i}`);
+    assert.deepEqual(await refused.json(), { error: 'rate_limited' });
+    const signature = authorization.slice(authorization.indexOf(',sig=') + 5);
+    assert.equal(replay.seen(stranger.inbox, signature, Math.floor(Date.now() / 1000)), false, 'no claim for a key the rates refused');
+  }
+  assert.equal((await me.call('GET', `/v1/inboxes/${me.inbox}`)).status, 200);
+});
+
+test('registering an inbox that exists counts against its owner\'s rate', async (t) => {
+  const { base } = await start(t, { limits: { ownerRequestsPerMinutePerInbox: 2 } });
+  const me = owner(base);
+
+  assert.equal((await me.register()).status, 201);
+  assert.equal((await me.register()).status, 200);
+  assert.equal((await me.register()).status, 200);
+  const over = await me.register();
+  assert.equal(over.status, 429);
+  assert.deepEqual(await over.json(), { error: 'rate_limited' });
 });
 
 test('an envelope that says it is too large is refused before it is read', async (t) => {
@@ -318,6 +393,23 @@ test('a client that keeps failing to authenticate is turned away, by the address
   assert.equal((await send(base, me.inbox, Buffer.from('x'), from('203.0.113.8'))).status, 201, 'another client');
 });
 
+test('failures from more addresses than the mailbox tracks lock nobody out', async (t) => {
+  const { base } = await start(t, { proxyHops: 1, clientBuckets: 3, limits: { ownerRequestsPerMinutePerInbox: 2 } });
+  const me = owner(base);
+  assert.equal((await me.register({ 'x-forwarded-for': '203.0.113.200' })).status, 201);
+  const stranger = owner(base);
+  for (let i = 1; i <= 5; i += 1) {
+    const headers = { 'x-forwarded-for': `203.0.113.${i}` };
+    assert.equal((await stranger.call('GET', `/v1/inboxes/${stranger.inbox}`, undefined, { headers })).status, 401);
+  }
+
+  const from = { headers: { 'x-forwarded-for': '203.0.113.201' } };
+  assert.equal((await me.call('GET', `/v1/inboxes/${me.inbox}`, undefined, from)).status, 200);
+  assert.equal((await me.call('GET', `/v1/inboxes/${me.inbox}`, undefined, from)).status, 200);
+  assert.equal((await me.call('GET', `/v1/inboxes/${me.inbox}`, undefined, from)).status, 429, 'still counted');
+  assert.equal((await owner(base).register({ 'x-forwarded-for': '203.0.113.202' })).status, 201, 'a new address can still register');
+});
+
 test('removing a sender stops its token at once', async (t) => {
   const { base } = await start(t);
   const me = await ownerWithSender(base);
@@ -368,4 +460,59 @@ test('configuration fails at boot when it is wrong', () => {
   assert.equal(config.limits.ttlSeconds, 60);
   assert.equal(config.registrationToken, undefined);
   assert.equal(readConfig({ DATA_PATH: '/tmp/m.sqlite' }).port, 9130);
+});
+
+const SERVER_PATH = fileURLToPath(new URL('../src/server.mjs', import.meta.url));
+
+// The mailbox as its own process, the way the image starts it.
+function spawnMailbox(t, env) {
+  const directory = mkdtempSync(join(tmpdir(), 'rooms-mailbox-'));
+  const child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', SERVER_PATH], {
+    env: { PATH: process.env.PATH, DATA_PATH: join(directory, 'mailbox.sqlite'), HOST: '127.0.0.1', ...env },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  t.after(() => {
+    child.kill('SIGKILL');
+    rmSync(directory, { recursive: true, force: true });
+  });
+  const output = { stdout: '', stderr: '' };
+  child.stdout.on('data', (chunk) => { output.stdout += chunk; });
+  child.stderr.on('data', (chunk) => { output.stderr += chunk; });
+  const closed = once(child, 'close').then(([code, signal]) => ({ code, signal, ...output }));
+  const listening = new Promise((resolve, reject) => {
+    child.stdout.on('data', () => {
+      if (output.stdout.includes('"message":"Rooms mailbox listening"')) resolve();
+    });
+    closed.then(() => reject(new Error(`the mailbox exited before listening: ${output.stderr}`)));
+  });
+  listening.catch(() => {});
+  return { child, closed, listening };
+}
+
+async function freePort() {
+  const probe = createTcpServer().listen(0, '127.0.0.1');
+  await once(probe, 'listening');
+  const { port } = probe.address();
+  await new Promise((resolve) => probe.close(resolve));
+  return port;
+}
+
+test('the mailbox says why and exits when it can\'t listen', async (t) => {
+  const taken = createTcpServer().listen(0, '127.0.0.1');
+  await once(taken, 'listening');
+  t.after(() => taken.close());
+
+  const { code, stderr } = await spawnMailbox(t, { PORT: String(taken.address().port) }).closed;
+  assert.equal(code, 1);
+  assert.match(stderr, /"message":"server error".*EADDRINUSE/);
+});
+
+test('SIGTERM stops the mailbox cleanly', async (t) => {
+  const mailbox = spawnMailbox(t, { PORT: String(await freePort()) });
+  await mailbox.listening;
+
+  mailbox.child.kill('SIGTERM');
+  const { code, signal } = await mailbox.closed;
+  assert.equal(signal, null);
+  assert.equal(code, 0);
 });

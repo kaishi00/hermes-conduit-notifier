@@ -1,11 +1,12 @@
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, generateKeyPairSync, timingSafeEqual } from 'node:crypto';
 import { mkdirSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { isIP } from 'node:net';
 import { dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { ReplayCache, inboxIdFor, parseKey, tokenHash, verifyOwnerRequest } from './auth.mjs';
+import { ReplayCache, inboxIdFor, parseKey, tokenHash, verifyOwnerSignature } from './auth.mjs';
 import { limitsFromEnv } from './limits.mjs';
+import { RateLimits } from './rates.mjs';
 import { MailboxError, MailboxStore } from './store.mjs';
 
 const MINUTE_MS = 60_000;
@@ -21,6 +22,10 @@ const TOKEN_HASH_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const BEARER_PATTERN = /^Bearer ([\x21-\x7e]{1,512})$/;
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9_.:-]{1,128}$/;
 const WHOLE_NUMBER_PATTERN = /^\d{1,15}$/;
+// A request to an unknown inbox is checked against this key, whose private
+// half is thrown away, so refusing it takes as long as refusing a bad
+// signature and the timing doesn't say which inboxes exist.
+const STAND_IN_KEY = Buffer.from(generateKeyPairSync('ed25519').publicKey.export({ format: 'jwk' }).x, 'base64url');
 
 const jsonLog = {
   info: (fields) => console.log(JSON.stringify({ level: 'info', ...fields })),
@@ -29,11 +34,21 @@ const jsonLog = {
 
 // The mailbox's HTTP server over `store`. Nothing it logs names an inbox,
 // a sender, a token or a signature: only routes, statuses and timings.
-export function createMailbox({ store, limits, registrationToken, proxyHops = 0, replay = new ReplayCache(), log = jsonLog }) {
+export function createMailbox({
+  store, limits, registrationToken, proxyHops = 0,
+  // Room for twelve minutes of owner requests per inbox: a signature is
+  // remembered for ten at most.
+  replay = new ReplayCache(12 * limits.ownerRequestsPerMinutePerInbox),
+  clientBuckets = 100_000, log = jsonLog,
+}) {
+  // Per inbox, per sender and mailbox-wide, counted only for requests that
+  // authenticated, so the store's own limits bound the keys.
   const rates = new RateLimits();
+  // Per client address, which a flood can rotate: past `clientBuckets`
+  // addresses, new ones go uncounted rather than locking anyone out.
+  const clientRates = new RateLimits(clientBuckets);
   const polls = new Polls(limits);
   const registrationDigest = registrationToken === undefined ? undefined : digest(registrationToken);
-  let busyLoggedAt = 0;
 
   const server = createServer({ requestTimeout: 60_000, headersTimeout: 20_000 }, async (request, response) => {
     const startedAt = Date.now();
@@ -119,11 +134,19 @@ export function createMailbox({ store, limits, registrationToken, proxyHops = 0,
       refused(client);
       throw new MailboxError('registration_closed', 403);
     }
-    if (!signedByOwner(request, key, body)) throw refused(client);
     const inbox = inboxIdFor(key);
-    // Registering an inbox that exists is free; only new ones count.
-    if (!store.inboxKey(inbox) && (!rates.take(`register:${client}`, limits.registrationsPerHourPerClient, HOUR_MS)
-      || !rates.take('register', limits.registrationsPerMinute, MINUTE_MS))) {
+    const now = Math.floor(Date.now() / 1000);
+    const signed = ownerSignature(request, key, body, now);
+    if (!signed || replay.seen(inbox, signed.signature, now)) throw refused(client);
+    if (store.inboxKey(inbox)) {
+      // Confirming an inbox is an owner request like any other.
+      admitOwner(inbox, signed, now);
+    } else if (!clientRates.take(`register:${client}`, limits.registrationsPerHourPerClient, HOUR_MS)
+      || !rates.take('register', limits.registrationsPerMinute, MINUTE_MS)
+      // A new key's signature is claimed only once the registration rates
+      // let it through, so fresh keys can't take room faster than inboxes
+      // can be made.
+      || !replay.claim(inbox, signed.signature, now, signed.until)) {
       throw new MailboxError('rate_limited', 429);
     }
     const { created } = store.register(key);
@@ -179,37 +202,42 @@ export function createMailbox({ store, limits, registrationToken, proxyHops = 0,
     turnAwayFailing(client);
     const body = await readBody(request, OWNER_BODY_MAX_BYTES, 'payload_too_large');
     const key = store.inboxKey(inbox);
-    if (!key || !signedByOwner(request, key, body)) throw refused(client);
-    if (!rates.take(`owner:${inbox}`, limits.ownerRequestsPerMinutePerInbox, MINUTE_MS)) throw new MailboxError('rate_limited', 429);
+    const now = Math.floor(Date.now() / 1000);
+    const signed = ownerSignature(request, key ?? STAND_IN_KEY, body, now);
+    if (!key || !signed || replay.seen(inbox, signed.signature, now)) throw refused(client);
+    admitOwner(inbox, signed, now);
     store.touch(inbox);
     return body;
   }
 
-  function signedByOwner(request, key, body) {
-    const now = Math.floor(Date.now() / 1000);
-    if (verifyOwnerRequest({ key, method: request.method, target: request.url, body, authorization: request.headers.authorization, now, replay })) {
-      return true;
+  function ownerSignature(request, key, body, now) {
+    return verifyOwnerSignature({ key, method: request.method, target: request.url, body, authorization: request.headers.authorization, now });
+  }
+
+  // Claims an owner's checked signature, then counts the request against its
+  // inbox's rate. The claim comes first, so a request refused for its rate
+  // can't be sent again once the rate resets; an inbox out of room for
+  // claims is slowed down alone.
+  function admitOwner(inbox, signed, now) {
+    if (!replay.claim(inbox, signed.signature, now, signed.until)
+      || !rates.take(`owner:${inbox}`, limits.ownerRequestsPerMinutePerInbox, MINUTE_MS)) {
+      throw new MailboxError('rate_limited', 429);
     }
-    if (!replay.full) return false;
-    if (Date.now() - busyLoggedAt > MINUTE_MS) {
-      busyLoggedAt = Date.now();
-      log.error({ message: 'replay cache full: owner requests are refused until signatures age out' });
-    }
-    throw new MailboxError('busy', 503);
   }
 
   // Counts a failed authentication against the client; the 401 to throw.
   function refused(client) {
-    rates.take(`failed:${client}`, limits.failedAuthPerMinutePerClient, MINUTE_MS);
+    clientRates.take(`failed:${client}`, limits.failedAuthPerMinutePerClient, MINUTE_MS);
     return new MailboxError('unauthorized', 401);
   }
 
   function turnAwayFailing(client) {
-    if (rates.exceeded(`failed:${client}`, limits.failedAuthPerMinutePerClient)) throw new MailboxError('rate_limited', 429);
+    if (clientRates.exceeded(`failed:${client}`, limits.failedAuthPerMinutePerClient)) throw new MailboxError('rate_limited', 429);
   }
 
   const pruner = setInterval(() => {
     try {
+      replay.sweep(Math.floor(Date.now() / 1000));
       const pruned = store.prune();
       if (pruned.envelopes || pruned.inboxes) log.info({ message: 'pruned', ...pruned });
     } catch (error) {
@@ -282,39 +310,6 @@ class Polls {
 
   endAll() {
     for (const inbox of [...this.byInbox.keys()]) this.wake(inbox, 'timeout');
-  }
-}
-
-// Fixed windows counted per key. Past `maxBuckets` live keys a new key is
-// refused until a sweep frees room, so rotating keys can't grow the map.
-class RateLimits {
-  constructor(maxBuckets = 100_000) {
-    this.maxBuckets = maxBuckets;
-    this.buckets = new Map();
-    this.sweptAt = 0;
-  }
-
-  // Counts one more for `key`; false once it is past `maximum` this window.
-  take(key, maximum, windowMs, now = Date.now()) {
-    const full = this.buckets.size >= this.maxBuckets;
-    if (this.buckets.size > 10_000 && now - this.sweptAt > (full ? 5_000 : 30_000)) {
-      this.sweptAt = now;
-      for (const [seen, bucket] of this.buckets) if (bucket.resetAt <= now) this.buckets.delete(seen);
-    }
-    let bucket = this.buckets.get(key);
-    if (!bucket || bucket.resetAt <= now) {
-      if (!bucket && this.buckets.size >= this.maxBuckets) return false;
-      bucket = { count: 0, resetAt: now + windowMs };
-      this.buckets.set(key, bucket);
-    }
-    bucket.count += 1;
-    return bucket.count <= maximum;
-  }
-
-  // Whether `key` has used all of `maximum` this window, without counting.
-  exceeded(key, maximum, now = Date.now()) {
-    const bucket = this.buckets.get(key);
-    return Boolean(bucket && bucket.resetAt > now && bucket.count >= maximum);
   }
 }
 
@@ -443,12 +438,22 @@ function main() {
   const store = new MailboxStore(config.dataPath, config.limits);
   store.prune();
   const mailbox = createMailbox({ store, limits: config.limits, registrationToken: config.registrationToken, proxyHops: config.proxyHops });
+  // A port in use or a host it can't bind, as a log line rather than a stack.
+  mailbox.server.on('error', (error) => {
+    jsonLog.error({ message: 'server error', error: error.message });
+    process.exit(1);
+  });
   mailbox.server.listen(config.port, config.host, () => {
     jsonLog.info({ message: 'Rooms mailbox listening', host: config.host, port: config.port, registration: config.registrationToken ? 'token' : 'open' });
   });
   const shutdown = async () => {
-    await mailbox.close();
-    store.close();
+    try {
+      await mailbox.close();
+      store.close();
+    } catch (error) {
+      jsonLog.error({ message: 'shutdown failed', error: error instanceof Error ? error.message : String(error) });
+      process.exit(1);
+    }
     process.exit(0);
   };
   process.once('SIGTERM', shutdown);
