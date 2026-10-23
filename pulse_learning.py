@@ -126,7 +126,7 @@ def add_turn_card(pulse_store: store.PulseStore, *, kind: str, chat_id: str, cha
                   level_name: str, why: str, now: float) -> Optional[int]:
     """The card for a delivered report or brief turn (``turn`` is its
     pulse_hermes.TurnRows), once: the one already there for that reply."""
-    if kind not in TURN_KINDS or not turn.reply or turn.reply_id is None:
+    if kind not in TURN_KINDS or not turn.reply or turn.reply_id is None or empty_turn(kind, turn.reply):
         return None
     existing = pulse_store.card_for_message(kind, turn.session_id, turn.reply_id)
     if existing is not None:
@@ -138,6 +138,26 @@ def add_turn_card(pulse_store: store.PulseStore, *, kind: str, chat_id: str, cha
         "kind": kind, "item_id": None, "level": level_name, "news": news, "why": why,
         "chat_id": turn.session_id or chat_id, "chat_title": _clip(chat_title, 120), "message_id": turn.reply_id,
         "created_at": now})
+
+
+# A report item's line starts with its number ("1. [kind] ..."); a report
+# that says it has nothing (pulse_report.REPORT_TEXT's words) and has no item
+# brought nothing up.
+_REPORT_ITEM = re.compile(r"^\s*(?:[-*]\s+)?(?:\*\*)?\d+[.)]", re.MULTILINE)
+_REPORT_NOTHING = re.compile(r"nothing worth bringing up", re.IGNORECASE)
+
+
+def empty_turn(kind: str, reply: Optional[str]) -> bool:
+    """A report that brought nothing up: no card, it would only crowd the
+    ones that did."""
+    return kind == "report" and bool(_REPORT_NOTHING.search(reply or "")) and not _REPORT_ITEM.search(reply or "")
+
+
+def drop_empty_reports(pulse_store: store.PulseStore) -> int:
+    """Takes away the cards of reports that brought nothing up (made before
+    those stopped getting one)."""
+    return pulse_store.drop_cards([card["id"] for card in pulse_store.turn_cards("report")
+                                   if empty_turn("report", card["news"])])
 
 
 def card_entry(card: dict, done: Optional[dict] = None) -> dict[str, Any]:

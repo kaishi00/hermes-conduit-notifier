@@ -13,6 +13,17 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.64.1 (2026-10-23)
+
+### Fixes
+- After Do it on a follow-up card, Pulse now checks the chat even with
+  follow-up checks turned off or their daily budget spent, so the card still
+  gets marked done.
+
+### New and improved
+- A Pulse report that found nothing worth bringing up no longer leaves a card
+  on the Pulse screen, and earlier ones like it are cleared away.
+
 ## 0.64.0 (2026-10-23)
 
 ### New and improved

@@ -495,6 +495,33 @@ def test_a_report_card_a_busy_state_db_kept_out_lands_on_a_later_tick(live, monk
     assert looked == [] and len(live.store.cards()) == 1
 
 
+def test_a_report_that_brought_nothing_up_makes_no_card(live, monkeypatch):
+    live.store.set("report_requested", True)
+    pulse.tick()
+    [attempt] = live.store.in_flight()
+    live.db.message("user", attempt["text"])
+    live.db.message("assistant", "Here's what I would have brought up:\n\nNothing worth bringing up right now.")
+    pulse.tick()
+    assert live.store.cards() == [] and live.store.get(pulse.TURN_CARDS_DONE) == [attempt["attempt_id"]]
+    looked = []
+    monkeypatch.setattr(pulse.hermes, "find_turn", lambda *a, **kw: looked.append(a))
+    pulse.tick()
+    assert looked == []
+
+
+def test_cards_of_reports_that_brought_nothing_up_are_taken_away(live):
+    def card(news):
+        return live.store.add_card({"kind": "report", "item_id": None, "level": "screen", "news": news, "why": "",
+                                    "chat_id": SID, "chat_title": "Pulse", "message_id": 1, "created_at": time.time()})
+
+    empty = card("Here's what I would have brought up:\nNothing worth bringing up right now.\nRate them: reply like 1 yes, 2 no.")
+    full = card("Here's what I would have brought up:\n1. [promise] Send the deck #4\nRate them: reply like 1 yes, 2 no.")
+    bold = card("Nothing worth bringing up right now, except:\n**1.** [promise] Call Sam")
+    assert learning.empty_turn("brief", "Nothing worth bringing up right now.") is False
+    assert learning.drop_empty_reports(live.store) == 1
+    assert {c["id"] for c in live.store.cards()} == {full, bold} and empty not in {c["id"] for c in live.store.cards()}
+
+
 def test_feed_names_no_chat_while_pulse_is_off(live):
     assert control.feed(live.store, live.home)["home_chat_id"] == SID
     live.store.set("enabled", False)

@@ -897,6 +897,20 @@ class PulseStore:
             conn.execute(f"UPDATE cards SET briefed_at=? WHERE briefed_at IS NULL AND id IN ({','.join('?' * len(ids))})",
                          (now, *ids))
 
+    def turn_cards(self, kind: str) -> list[dict]:
+        with self._connect() as conn:
+            return [dict(row) for row in conn.execute("SELECT id, news FROM cards WHERE kind=?", (kind,))]
+
+    def drop_cards(self, ids: Sequence[int]) -> int:
+        if not ids:
+            return 0
+        marks = ",".join("?" * len(ids))
+        with _lock, self._connect() as conn:
+            dropped = conn.execute(f"DELETE FROM cards WHERE id IN ({marks})", tuple(ids)).rowcount
+            conn.execute(f"DELETE FROM card_done WHERE card_id IN ({marks})", tuple(ids))
+            conn.execute(f"DELETE FROM card_acts WHERE card_id IN ({marks})", tuple(ids))
+            return dropped
+
     def prune_cards(self, keep: int, held_before: float = 0.0) -> int:
         """Drops the oldest cards past ``keep``, but not one still held for the
         brief unless it was made before ``held_before`` (no brief for weeks)."""

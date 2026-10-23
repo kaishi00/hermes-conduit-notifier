@@ -356,7 +356,10 @@ def check_acts(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzi
                 done.get("checks", 0) + done.get("failed", 0) >= MAX_CHECKS:
             return
         card = pulse_store.card(row["card_id"])
-        decide = lambda **fields: pulse_store.decide_act(row["card_id"], acted_at=row["acted_at"], **fields)
+
+        def decide(**fields: Any) -> None:
+            pulse_store.decide_act(row["card_id"], acted_at=row["acted_at"], **fields)
+
         if card is None or card["item_id"] is None or pulse_store.done_marks([card["id"]]):
             decide(check_at=None, checks=row["checks"], outcome="closed", why="")
             continue
@@ -366,7 +369,8 @@ def check_acts(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzi
             if not answered or now - last < ACT_QUIET_S:
                 # Not answered yet, or still going: look again, unless Do it was left unsent.
                 if now - row["acted_at"] >= ACT_GIVE_UP_S:
-                    decide(check_at=None, checks=row["checks"], outcome="no answer", why="nothing sent after Do it")
+                    decide(check_at=None, checks=row["checks"], outcome="no answer",
+                           why="the chat kept going" if answered else "nothing sent after Do it")
                 else:
                     decide(check_at=now + ACT_FIRST_S, checks=row["checks"], outcome="", why="")
                 continue

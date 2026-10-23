@@ -2271,3 +2271,27 @@ def test_a_chat_refused_again_after_the_takeover_says_so(monkeypatch):
     FakeHost(submit=NOT_OWNED).install(monkeypatch)
     sent = host.send(SID, "x", taking_over=lambda ids: "same_host")
     assert not sent.ok and "again after Pulse took it over (same_host)" in sent.detail
+
+
+def test_do_it_checks_run_with_follow_ups_off(remembering, monkeypatch):
+    store_ = remembering.store
+    store_.set("enabled", True)
+    store_.set("memory", True)
+    store_.set("followups", False)
+    now = time.time() + 600
+    day = datetime.fromtimestamp(now, pulse.report_zone(store_, store_.path.parent)).strftime("%Y-%m-%d")
+    store_.set("memory_today", {"day": day, "tokens": store_.get("memory_daily_tokens")})  # memory spent too
+    ran = []
+    monkeypatch.setattr(pulse.followup, "run", lambda *a, **kw: ran.append("followups"))
+
+    def acts(*args, budget, done, **kwargs):
+        ran.append(("acts", budget))
+        done.update(tokens=40, checks=1)
+
+    monkeypatch.setattr(pulse.followup, "check_acts", acts)
+    pulse._memory_run(store_.path.parent, SID, now, threading.Event())
+    assert ran == []  # nothing booked
+    store_.act_on_card(1, now=now - 700, check_at=now - 100)
+    pulse._memory_run(store_.path.parent, SID, now, threading.Event())
+    assert ran == [("acts", float("inf"))]
+    assert store_.get("followup_usage")["checks"] == 1

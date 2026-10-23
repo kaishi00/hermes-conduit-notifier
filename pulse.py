@@ -299,6 +299,7 @@ def tick(now: Optional[float] = None) -> None:
     # Even with follow-ups turned off: one already sent still lands.
     followup.settle(pulse_store, now, home)
     brief.settle(pulse_store, now)
+    learning.drop_empty_reports(pulse_store)
     pulse_store.prune_cards(CARDS_KEEP, held_before=now - HELD_DAYS * 86400.0)
     _maybe_memory(pulse_store, home, now)
     # One new turn per tick: a probe first, then a follow-up, the brief, then the report.
@@ -346,6 +347,11 @@ def _turn_cards(pulse_store: store.PulseStore, home: Path, changed: list[dict], 
             turn = hermes.find_turn(home, chat_id=row["session_key"], tag=row["tag"],
                                     since=row["created_at"] - delivery.SINCE_SLACK_S)
             # A brief comes with a push; a report doesn't.
+            if turn is not None and learning.empty_turn(row["kind"], turn.reply):
+                # Nothing brought up: no card, and no looking it up again.
+                done = (done + [attempt])[-TURN_CARDS_DONE_KEEP:]
+                pulse_store.set(TURN_CARDS_DONE, done)
+                continue
             card = turn is not None and learning.add_turn_card(
                 pulse_store, kind=row["kind"], chat_id=row["session_key"], chat_title=title, turn=turn,
                 level_name="push" if row["kind"] == BRIEF else "screen", why=TURN_WHY[row["kind"]], now=now)
@@ -512,7 +518,10 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
         used, cap = _spent_today(pulse_store, "memory", day)
         follow_used, follow_cap = _spent_today(pulse_store, "followup", day)
         follows = bool(pulse_store.get("followups")) and follow_used < follow_cap
-        if used >= cap and not follows:
+        # Do it is the user's own ask: its chat is read with follow-ups off
+        # or their budget spent (at most a few reads per tap).
+        acts = not follows and bool(pulse_store.due_acts(now))
+        if used >= cap and not follows and not acts:
             return  # `pulse status` says so
         profiles = pulse_store.get("report_profiles")
         sources = memory_sources(pulse_store, home, home_chat_id, profiles)
@@ -527,6 +536,15 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
                                done=done)
             except Exception:  # noqa: BLE001 — follow-ups on what memory already has still run
                 logger.warning("conduit_push: Pulse memory run failed", exc_info=True)
+            if acts:
+                try:
+                    followup.check_acts(pulse_store, home, lambda instructions, text: _memory_llm(
+                                            instructions, text, purpose="pulse follow-up"), zone=zone,
+                                        now=max(now, time.time()),
+                                        still_leader=lambda: not stopped.is_set() and _leads(pulse_store),
+                                        budget=float("inf"), done=checked)
+                finally:
+                    _count_checks(pulse_store, checked)
             if follows:
                 # After memory, so a promise it just read is scheduled now.
                 now = max(now, time.time())
@@ -542,11 +560,7 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
                                                        and bool(pulse_store.get("followups"))),
                                  budget=follow_cap - follow_used, done=checked)
                 finally:
-                    if checked.get("checks") or checked.get("failed"):
-                        usage = pulse_store.get("followup_usage")
-                        usage = usage if isinstance(usage, dict) else {}
-                        pulse_store.set("followup_usage", {key: int(usage.get(key, 0) or 0) + checked.get(key, 0)
-                                                          for key in ("checks", "tokens", "failed")})
+                    _count_checks(pulse_store, checked)
         finally:
             # A run stopped by an unreadable state.db still spent its tokens.
             if done.get("tokens"):
@@ -560,6 +574,14 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
                                                 for key in ("chunks", "tokens", "failed", "skipped")})
     except Exception:  # noqa: BLE001 — the next run tries again
         logger.warning("conduit_push: Pulse memory run failed", exc_info=True)
+
+
+def _count_checks(pulse_store: store.PulseStore, checked: dict[str, int]) -> None:
+    if checked.get("checks") or checked.get("failed"):
+        usage = pulse_store.get("followup_usage")
+        usage = usage if isinstance(usage, dict) else {}
+        pulse_store.set("followup_usage", {key: int(usage.get(key, 0) or 0) + checked.get(key, 0)
+                                          for key in ("checks", "tokens", "failed")})
 
 
 def _spent_today(pulse_store: store.PulseStore, name: str, day: str) -> tuple[int, int]:
