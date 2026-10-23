@@ -431,12 +431,13 @@ def _pre_approval_request(**kwargs: Any) -> None:
     ))
     # With alert calls on, an approval left unanswered for a minute calls the
     # user too (#449), beside the answerable notification.
-    calls.alert(session_id, "approval", description, profile=_profile)
+    calls.alert(session_id, "approval", description, profile=_profile,
+                turn_session_id=_text(kwargs.get("session_id")))
 
 
 def _post_approval_response(**kwargs: Any) -> None:
     session_key = _text(kwargs.get("session_key"))
-    calls.cancel_alerts(session_key, "approval")
+    calls.cancel_alerts(session_key or _text(kwargs.get("session_id")), "approval")
     _quietly(live_activity.reporter.thinking, _text(kwargs.get("session_id")) or session_key)
 
 

@@ -675,6 +675,31 @@ def test_an_unanswered_approval_calls_beside_its_notification(home, fake, clock,
     assert (event["call"]["kind"], event["call"]["reason"], event["call"]["session_ids"]) == ("approval", "Run the migration", ["sk-1"])
 
 
+def test_an_approval_answered_in_chat_does_not_ring_after_the_turn(home, fake, clock, monkeypatch):
+    def sleep(seconds, wake=None):
+        # Answered in the chat: the turn ends under its own session id.
+        calls.turn_ended("st-1", "done", profile="default", fallback=READY)
+        clock[0] += seconds
+    monkeypatch.setattr(calls, "_sleep", sleep)
+    _settings(home, alerts=True)
+    plugin._pre_approval_request(session_key="sk-1", session_id="st-1", description="Run the migration",
+                                 turn_id="t1")
+    assert fake.sent == []
+
+
+def test_an_unanswered_approval_call_names_the_turns_session_too(home, fake, clock, monkeypatch):
+    def sleep(seconds, wake=None):
+        clock[0] += seconds
+    monkeypatch.setattr(calls, "_sleep", sleep)
+    _settings(home, alerts=True)
+    plugin._pre_approval_request(session_key="sk-1", session_id="st-1", description="Run the migration",
+                                 turn_id="t1")
+    [event] = fake.sent
+    # Conduit reports a declined or missed call under these: the turn's id
+    # lets the next turn hear it.
+    assert (event["session_id"], event["call"]["session_ids"]) == ("sk-1", ["sk-1", "st-1"])
+
+
 def test_an_alert_due_before_a_held_call_is_not_kept_waiting(home, fake, clock, monkeypatch):
     naps = []
 

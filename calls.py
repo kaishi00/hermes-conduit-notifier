@@ -253,14 +253,18 @@ def tool_watch(session_id: str, reason: str, *, asked: bool) -> dict[str, Any]:
     return _store(get_hermes_home()).add_tool_watch(session_id, reason, asked)
 
 
-def alert(session_id: str, kind: str, reason: str, *, profile: str) -> None:
+def alert(session_id: str, kind: str, reason: str, *, profile: str, turn_session_id: str = "") -> None:
     """Hermes waits on the user's approval or answer: call if it stays
-    unanswered (alert calls on). Never raises: a hook calls this."""
-    if not session_id:
+    unanswered (alert calls on). ``turn_session_id``: the id the turn hooks
+    know the session by when ``session_id`` is the gateway's key, so the
+    turn's end drops the alert and its outcome reaches the next turn. Never
+    raises: a hook calls this."""
+    ids = list(dict.fromkeys(value for value in (session_id, turn_session_id) if value))
+    if not ids:
         return
     try:
         home = get_hermes_home()
-        if _store(home).add_alert(session_id, kind, reason) is not None:
+        if _store(home).add_alert(ids, kind, reason) is not None:
             _wait_for_holds(home, profile)
     except Exception:  # noqa: BLE001
         logger.warning("Conduit could not set up an alert call", exc_info=True)

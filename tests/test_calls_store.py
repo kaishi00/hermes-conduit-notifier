@@ -491,6 +491,17 @@ def test_a_session_already_watched_keeps_its_watch_when_hermes_asks_too(tmp_path
     assert result["status"] == "call" and result["watch"]["reason"] == "The server is back."
 
 
+def test_the_users_request_wins_over_a_watch_hermes_set_on_its_own(tmp_path):
+    store = _store(tmp_path, enabled=True, decides=True)
+    watch_id = store.add_tool_watch("st-1", "Heads up.", asked=False)["id"]
+    assert store.add_watch(["rt-1", "st-1"], "Check the server") == {"status": "watching", "id": watch_id}
+    [watch] = store._load()["watches"]
+    assert (watch["origin"], watch["asked"], watch["title"]) == ("conduit", True, "Check the server")
+    # "Hermes decides" off never refuses what the user asked for.
+    store.update_settings({"decides": False})
+    assert store.fire("rt-1", "done")["status"] == "call"
+
+
 def test_a_tool_watch_turned_off_before_its_turn_ends_does_not_call(tmp_path):
     store = _store(tmp_path, enabled=True, decides=True)
     store.add_tool_watch("st-1", "Heads up.", asked=False)
@@ -528,6 +539,28 @@ def test_an_answered_question_or_a_finished_turn_calls_no_more(tmp_path):
     clock.now += 120
     assert store.fire_due() == [], "the turn ending dropped the approval"
     assert store.watch_count() == 0
+
+
+def test_an_alert_under_the_gateway_key_follows_the_turns_session_id(tmp_path):
+    clock = Clock()
+    store = _store(tmp_path, clock=clock, enabled=True, alerts=True)
+    store.add_alert(["sk-1", "st-1"], "approval", "Push?")
+    assert store.add_alert(["sk-1", "st-1"], "approval", "again") is None, "one at a time"
+    assert store.add_alert(["st-1"], "approval", "replayed without the key") is None, "the same wait"
+    # Answered in chat: the turn ends under its own id and drops the alert.
+    assert store.fire("st-1", "done") is None
+    clock.now += 120
+    assert store.fire_due() == []
+    store.add_alert(["sk-1", "st-1"], "approval", "Push?")
+    clock.now += 61
+    [due] = store.fire_due()
+    assert (due["session_id"], due["watch"]["session_ids"]) == ("sk-1", ["sk-1", "st-1"])
+    # The user declined: the next turn hears it, under either id.
+    store.record_outcome(due["watch"]["id"], due["watch"]["session_ids"], "declined", kind="approval")
+    assert [entry["outcome"] for entry in store.take_outcomes("st-1")] == ["declined"]
+    # A key that isn't a session key leaves the turn's id to call.
+    assert store.add_alert(["bad\x00key", "st-2"], "approval", "Push?")
+    assert store._load()["watches"][-1]["session_ids"] == ["st-2"]
 
 
 def test_an_alert_does_not_write_anything_while_alerts_are_off(tmp_path):

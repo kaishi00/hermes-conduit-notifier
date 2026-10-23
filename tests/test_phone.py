@@ -923,7 +923,8 @@ def test_a_change_reaches_the_phone_and_its_outcome_comes_back(store, iphone):
                                "end": "2026-10-16T16:00:00+01:00", "all_day": False, "calendar_id": "c_personal",
                                "location": "12 High St", "notes": None, "url": None, "alarms_min": [30]}}
     view = store.changes(mark_reported=False)
-    assert view[0]["state"] == "waiting" and view[0]["seen_by_phone"] is True
+    assert view[0]["state"] == "waiting" and view[0]["offered_to_phone"] is True
+    assert view[0]["offered_at"] == "2026-10-14T07:00:00Z" and "seen_by_phone" not in view[0]
     # The phone reports the outcome and gets the (now empty) queue back.
     assert iphone.changes(store, [{"id": change["id"], "outcome": "applied", "item_id": "e_new"}],
                           call_id="call-00000002") == []
@@ -1489,7 +1490,25 @@ def test_an_exchange_that_outlives_its_key_hands_out_nothing(store, iphone, monk
         store.exchange(envelope)
     assert refused.value.code == "unknown_key"
     [kept] = store.changes(mark_reported=False)
-    assert kept["state"] == "waiting" and kept["seen_by_phone"] is False, "the new key's change isn't handed out"
+    assert kept["state"] == "waiting" and kept["offered_to_phone"] is False, "the new key's change isn't handed out"
+
+
+def test_a_change_whose_answer_was_lost_is_offered_again_not_seen(store, iphone):
+    """An answer that never reaches the phone leaves the change offered: the
+    agent isn't told the phone has it, and the next exchange carries it
+    again until the phone reports a result."""
+    store.ingest(iphone.seal(_batch()))
+    change = store.add_change("add_reminder", {"title": "Milk"})
+    store.exchange(iphone.exchange_request())  # the sealed answer is lost on its way
+    [offered] = store.changes(mark_reported=False)
+    assert offered["state"] == "waiting" and offered["offered_to_phone"] is True
+    assert "seen_by_phone" not in offered
+    [again] = iphone.changes(store, call_id="call-00000002")
+    assert again["id"] == change["id"]
+    assert iphone.changes(store, [{"id": change["id"], "outcome": "applied", "item_id": "r_milk"}],
+                          call_id="call-00000003") == []
+    [done] = store.changes(mark_reported=False)
+    assert done["state"] == "applied" and "offered_to_phone" not in done
 
 
 def test_an_exchange_that_outlives_its_kid_records_no_outcome(store, iphone, monkeypatch):

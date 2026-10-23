@@ -581,7 +581,9 @@ def _phone(args: dict[str, Any], store: PhoneStore | None = None, exact: bool = 
 def _pending(store: PhoneStore) -> dict[str, Any]:
     changes = store.changes(20)
     return {"ok": True, "changes": changes,
-            "note": "waiting: the phone hasn't answered yet (seen_by_phone says whether it has it). applied / "
+            "note": "waiting: the phone hasn't answered yet (offered_to_phone says whether it was sent to the phone, "
+                    "offered_at when first, not that it arrived: only one of the outcomes below means the phone "
+                    "has it). applied / "
                     "edited (the user changed it first; see note) / dismissed / failed (see note) / expired "
                     "(a week without an answer) / lost (the phone was set up again before it got it: tell the "
                     "user and offer to ask again)." if changes else "No changes asked for recently."}

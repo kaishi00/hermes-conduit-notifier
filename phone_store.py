@@ -118,8 +118,8 @@ OUTCOMES = ("applied", "edited", "dismissed", "failed", "expired")
 # before it fetched the change, so it will never see it.
 LOST_NOTE = ("The phone was set up again before it got this change, so it never saw it. Tell the user, and "
              "offer to ask again.")
-LOST_DELIVERED_NOTE = ("The phone was set up again after it got this change, before it answered. Ask the user "
-                       "whether it's on their phone before asking again, so it isn't added twice.")
+LOST_DELIVERED_NOTE = ("The phone was set up again after this change was offered to it, before it answered. Ask "
+                       "the user whether it's on their phone before asking again, so it isn't added twice.")
 # How long a device that checked in but hasn't uploaded since a new key
 # holds its place as the device in use, instead of another one standing in.
 SETTING_UP_S = 10 * 60
@@ -801,6 +801,8 @@ class PhoneStore:
             rows = db.execute(f"SELECT {_CHANGE_COLUMNS} FROM changes WHERE device=? AND state='pending'"
                               " ORDER BY created_at, rowid LIMIT ?", (device_id, MAX_CHANGES_PER_ANSWER)).fetchall()
             if rows:
+                # Offered, not seen: the sealed answer can still be lost on its
+                # way. Only a result from the phone says it has the change.
                 db.execute("UPDATE changes SET delivered_at=? WHERE delivered_at IS NULL AND id IN (%s)"
                            % ",".join("?" * len(rows)), (now, *[row[0] for row in rows]))
         return [_change_wire(row) for row in rows]
@@ -1265,7 +1267,11 @@ def _change_view(row: tuple[Any, ...]) -> dict[str, Any]:
         entry["auto"] = True
     if row[9] == "pending":
         entry["expires_at"] = iso_utc(row[8])
-        entry["seen_by_phone"] = row[13] is not None
+        # delivered_at is when an answer carried it, not proof the phone got
+        # that answer; the phone's result (the state) is the only receipt.
+        entry["offered_to_phone"] = row[13] is not None
+        if row[13] is not None:
+            entry["offered_at"] = iso_utc(row[13])
     else:
         entry["finished_at"] = iso_utc(row[10]) if row[10] else None
         if row[11]:
@@ -1339,6 +1345,8 @@ def _migrate(db: sqlite3.Connection, now: float) -> None:
             due_all_day INTEGER NOT NULL, priority INTEGER NOT NULL, completed INTEGER NOT NULL, completed_at TEXT,
             location_alarm TEXT, recurring INTEGER NOT NULL, url TEXT, notes TEXT, received_at INTEGER NOT NULL,
             PRIMARY KEY(device, id));
+        -- delivered_at: when a sync answer first carried the change, not proof
+        -- the phone got it (only its result is)
         CREATE TABLE IF NOT EXISTS changes(
             id TEXT PRIMARY KEY, device TEXT NOT NULL, kind TEXT NOT NULL, target TEXT, fields TEXT NOT NULL,
             auto INTEGER NOT NULL, reason TEXT, session_title TEXT, created_at INTEGER NOT NULL,

@@ -214,6 +214,12 @@ class CallStore:
             for watch in state["watches"]:
                 if watch["origin"] != "alert" and set(watch["session_ids"]).issubset(ids):
                     watch["session_ids"] = ids
+                    # A watch Hermes set on its own becomes the user's: their
+                    # request calls even with "Hermes decides" off.
+                    watch["origin"] = "conduit"
+                    watch["asked"] = True
+                    if not watch["title"]:
+                        watch["title"] = clean_title
                     if hold:
                         watch["hold_until"] = max(watch["hold_until"], now + hold)
                     return {"status": "watching", "id": watch["id"]}
@@ -248,27 +254,34 @@ class CallStore:
             state["watches"].append(watch)
             return {"status": "watching", "id": watch["id"]}
 
-    def add_alert(self, session_id: Any, kind: str, reason: Any, delay_s: int = ALERT_DELAY_S) -> str | None:
+    def add_alert(self, session_id: str | list[str], kind: str, reason: Any,
+                  delay_s: int = ALERT_DELAY_S) -> str | None:
         """Hermes is waiting on the user's approval or answer in
-        ``session_id``: unless it's answered within ``delay_s`` seconds
-        (``cancel_alerts``), the waiter calls. The alert's id, or None when
-        alerts are off (nothing is written then) or one is already waiting."""
+        ``session_id`` (or a list of the ids one session goes by, the first
+        the one the call opens): unless it's answered within ``delay_s``
+        seconds (``cancel_alerts``), the waiter calls. The alert's id, or None
+        when alerts are off (nothing is written then) or one is already
+        waiting. An id that isn't a session key is left out, so the others
+        still call."""
         if kind not in ALERT_KINDS:
             raise ValueError(f"unknown alert {kind}")
-        ids = _session_ids([session_id])
+        named = session_id if isinstance(session_id, list) else [session_id]
+        ids = _session_ids([value for value in named if isinstance(value, str) and _session_key(value.strip())])
+        delay = _seconds(delay_s, "delay_s", MAX_HOLD_S)
         settings = self.settings()
         if not settings["enabled"] or not settings["alerts"]:
             return None
         with self._locked() as state:
             if not state["settings"]["enabled"] or not state["settings"]["alerts"]:
                 return None
-            if any(watch["origin"] == "alert" and watch["session_ids"] == ids and watch["pending"]["outcome"] == kind
-                   for watch in state["watches"]):
+            # The same wait, whichever of its ids a replayed hook names.
+            if any(watch["origin"] == "alert" and set(watch["session_ids"]) & set(ids)
+                   and watch["pending"]["outcome"] == kind for watch in state["watches"]):
                 return None
             if len(state["watches"]) >= MAX_WATCHES:
                 return None
             now = self.clock()
-            watch = _new_watch(ids, now, origin="alert", reason=_reason(reason), hold_until=now + delay_s)
+            watch = _new_watch(ids, now, origin="alert", reason=_reason(reason), hold_until=now + delay)
             watch["pending"] = {"outcome": kind, "session_id": ids[0]}
             state["watches"].append(watch)
             return watch["id"]
