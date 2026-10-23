@@ -344,10 +344,18 @@ def zone_for(name: Optional[str]) -> tzinfo:
 KIND_ORDER = ("promise", "commitment", "watch", "intention", "interest", "fact")
 
 
+def _typed_ratings(pulse_store: store.PulseStore) -> list[dict]:
+    """Ratings typed in the Pulse chat, but not of a report split into cards:
+    its cards are where it's rated, so an item counts once."""
+    split = pulse_store.get(store.SPLIT_REPORTS)
+    split = {str(attempt) for attempt in split} if isinstance(split, list) else set()
+    return [row for row in pulse_store.all_ratings() if str(row["attempt_id"]) not in split]
+
+
 def rating_counts(pulse_store: store.PulseStore) -> dict[str, tuple[int, int]]:
     """Report kind -> (rated useful, rated not), over every rated report."""
     counts: dict[str, list[int]] = {}
-    for row in pulse_store.all_ratings():
+    for row in _typed_ratings(pulse_store):
         for rating in ratings_from_json(row["ratings_json"]):
             pair = counts.setdefault(rating.kind, [0, 0])
             pair[0 if rating.useful else 1] += 1
@@ -361,7 +369,7 @@ def rated_not_useful(pulse_store: store.PulseStore) -> dict[int, float]:
     """Remembered items whose latest rating in a report was "no", and when
     that rating was read."""
     latest: dict[int, tuple[float, bool]] = {}
-    for row in pulse_store.all_ratings():
+    for row in _typed_ratings(pulse_store):
         for rating in ratings_from_json(row["ratings_json"]):
             if rating.memory is not None and row["updated_at"] >= latest.get(rating.memory, (-1.0, True))[0]:
                 latest[rating.memory] = (row["updated_at"], rating.useful)

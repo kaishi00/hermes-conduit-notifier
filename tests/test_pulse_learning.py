@@ -544,6 +544,9 @@ def test_a_report_becomes_one_card_per_item(live, monkeypatch):
     monkeypatch.setattr(pulse, "_last_ratings", 0.0)
     pulse._collect_ratings(live.store, live.home, time.time())
     assert pulse.report.rating_counts(live.store) == {"date": (1, 0), "promise": (0, 1)}
+    # Even a rating typed before the cards landed doesn't count again.
+    live.store.set_ratings(attempt["attempt_id"], "[]", '[[2, "promise", true]]')
+    assert pulse.report.rating_counts(live.store) == {"date": (1, 0), "promise": (0, 1)}
 
 
 def test_report_item_cards_and_their_mark_land_together(live, monkeypatch):
