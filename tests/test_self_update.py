@@ -320,5 +320,17 @@ def test_the_gateway_restart_works_on_a_hermes_before_interrupt(monkeypatch):
         return types.SimpleNamespace(wait=lambda timeout: 0), False
 
     _fake_hermes(monkeypatch, spawn)
-    _pull, restart_gateway = api._hermes_update_steps()
+    _, restart_gateway = api._hermes_update_steps()
     assert restart_gateway() == 0 and calls == [None]
+
+
+def test_the_gateway_restart_skips_interrupt_when_it_cannot_be_passed_by_name(monkeypatch):
+    calls = []
+
+    def spawn(profile=None, interrupt=False, /):
+        calls.append((profile, interrupt))
+        return types.SimpleNamespace(wait=lambda timeout: 0), False
+
+    _fake_hermes(monkeypatch, spawn)
+    _, restart_gateway = api._hermes_update_steps()
+    assert restart_gateway() == 0 and calls == [(None, False)]

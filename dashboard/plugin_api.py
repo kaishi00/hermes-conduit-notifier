@@ -14961,9 +14961,11 @@ def _hermes_update_steps() -> Tuple[Callable[[], Dict[str, Any]], Callable[[], i
     # interrupt arrived with the drain refusal (Hermes 2026-10-20); before it
     # nothing refused a restart, so an older Hermes restarts without it.
     try:
-        restart_kwargs = {"interrupt": True} if "interrupt" in inspect.signature(_spawn_gateway_restart).parameters else {}
+        inspect.signature(_spawn_gateway_restart).bind(None, interrupt=True)
     except (TypeError, ValueError):
-        restart_kwargs = {}
+        restart_kwargs: Dict[str, Any] = {}
+    else:
+        restart_kwargs = {"interrupt": True}
 
     def pull() -> Dict[str, Any]:
         return dashboard_update_user_plugin(PLUGIN_NAME)
