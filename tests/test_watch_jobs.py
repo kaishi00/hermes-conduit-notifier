@@ -895,11 +895,13 @@ def test_an_approval_request_is_news_once_and_approving_it_answers_hermes():
     server.ask_approval("rt-1")
     [item] = news(grant)["news"]
     assert item["status"] == "needs_approval"
+    fingerprint = item["approval"].pop("fingerprint")
     assert item["approval"] == {"request_id": "appr-1", "command": "rm -rf build",
                                 "description": "Delete the build folder", "cut": False}
     # Told once, but listed as open on every answer until it settles.
     again = news(grant)
-    assert again["news"] == [] and again["approvals"] == [{"job_id": "watch-1", "request_id": "appr-1"}]
+    assert again["news"] == [] and again["approvals"] == [{"job_id": "watch-1", "request_id": "appr-1",
+                                                           "fingerprint": fingerprint}]
     answer = api.run_watch_job_call(grant, "answer_approval",
                                     {"job_id": "watch-1", "request_id": "appr-1", "choice": "once"})
     assert answer == {"ok": True, "status": "approved", "job_id": "watch-1"}
@@ -909,6 +911,113 @@ def test_an_approval_request_is_news_once_and_approving_it_answers_hermes():
     # A second request is news again.
     server.ask_approval("rt-1", request_id="appr-2", server_id="srq-2")
     assert news(grant)["news"][0]["approval"]["request_id"] == "appr-2"
+
+
+def answer(grant, choice="once", **args):
+    return api.run_watch_job_call(grant, "answer_approval", {"job_id": "watch-1", "choice": choice, **args})
+
+
+def test_an_approval_without_an_id_is_answered_only_for_the_command_the_watch_showed():
+    # hermes-conduit-notifier#232 N7-3: with no request_id Hermes answers its
+    # oldest pending request, so the Watch's card names the command it showed.
+    grant = make_jobs()
+    server = grant.jobs.server
+    start(grant)
+    server.emit("rt-1", "approval.request", {"command": "ls build", "description": "List the build folder"})
+    [shown] = news(grant)["news"]
+    assert shown["approval"]["request_id"] == ""
+    # Another request takes its place before the answer arrives.
+    server.emit("rt-1", "approval.request", {"command": "rm -rf ~", "description": "Delete everything"})
+    changed = answer(grant, request_id="", fingerprint=shown["approval"]["fingerprint"])
+    assert changed["status"] == "changed"
+    assert server.methods("approval.respond") == []
+    # The new request is news, with its own fingerprint.
+    [current] = news(grant)["news"]
+    assert current["approval"]["command"] == "rm -rf ~"
+    assert current["approval"]["fingerprint"] != shown["approval"]["fingerprint"]
+    assert answer(grant, "deny", request_id="", fingerprint=current["approval"]["fingerprint"])["status"] == "denied"
+    assert server.methods("approval.respond") == [{"session_id": "rt-1", "choice": "deny"}]
+
+
+def test_an_approval_without_an_id_needs_the_watchs_fingerprint():
+    grant = make_jobs()
+    server = grant.jobs.server
+    start(grant)
+    server.ask_approval("rt-1", request_id="", server_id="srq-1")
+    news(grant)
+    refused = answer(grant, request_id="")
+    assert (refused["ok"], refused["status"]) == (False, 400)
+    assert server.methods("approval.respond") == []
+
+
+def test_a_same_command_asked_again_under_a_new_server_request_is_news_again():
+    grant = make_jobs()
+    server = grant.jobs.server
+    start(grant)
+    server.ask_approval("rt-1", request_id="", server_id="srq-1")
+    [first] = news(grant)["news"]
+    server.ask_approval("rt-1", request_id="", server_id="srq-2")
+    [second] = news(grant)["news"]
+    assert first["approval"]["fingerprint"] != second["approval"]["fingerprint"]
+    assert answer(grant, request_id="", fingerprint=first["approval"]["fingerprint"])["status"] == "changed"
+    assert answer(grant, request_id="", fingerprint=second["approval"]["fingerprint"])["status"] == "approved"
+
+
+def test_a_request_changed_under_the_same_id_is_news_again():
+    grant = make_jobs()
+    server = grant.jobs.server
+    start(grant)
+    server.ask_approval("rt-1", request_id="appr-1", server_id="srq-1")
+    assert [item["approval"]["command"] for item in news(grant)["news"]] == ["rm -rf build"]
+    server.ask_approval("rt-1", request_id="appr-1", server_id="srq-1", command="rm -rf ~")
+    assert [item["approval"]["command"] for item in news(grant)["news"]] == ["rm -rf ~"]
+
+
+def test_a_second_answer_while_one_is_on_its_way_isnt_sent():
+    grant = make_jobs()
+    server = grant.jobs.server
+    start(grant)
+    server.emit("rt-1", "approval.request", {"command": "ls build", "description": "List"})
+    [item] = news(grant)["news"]
+    fingerprint = item["approval"]["fingerprint"]
+    seconds = []
+    rpc = grant.jobs.rpc
+
+    def answering(method, params, *rest, **kw):
+        if method == "approval.respond":
+            seconds.append(answer(grant, "once", request_id="", fingerprint=fingerprint))
+        return rpc(method, params, *rest, **kw)
+
+    grant.jobs.rpc = answering
+    assert answer(grant, "deny", request_id="", fingerprint=fingerprint)["status"] == "denied"
+    assert [second["status"] for second in seconds] == ["not_pending"]
+    assert server.methods("approval.respond") == [{"session_id": "rt-1", "choice": "deny"}]
+    assert grant.jobs.jobs["watch-1"].approval_answering is False
+
+
+def test_two_long_commands_cut_alike_have_different_fingerprints():
+    grant = make_jobs()
+    server = grant.jobs.server
+    start(grant)
+    server.emit("rt-1", "approval.request", {"command": "x" * 2_100 + "a", "description": "Run it"})
+    [first] = news(grant)["news"]
+    server.emit("rt-1", "approval.request", {"command": "x" * 2_100 + "b", "description": "Run it"})
+    [second] = news(grant)["news"]
+    assert first["approval"]["command"] == second["approval"]["command"]
+    assert first["approval"]["fingerprint"] != second["approval"]["fingerprint"]
+    assert answer(grant, "deny", request_id="", fingerprint=first["approval"]["fingerprint"])["status"] == "changed"
+
+
+def test_an_approval_with_an_id_keeps_working_without_a_fingerprint():
+    grant = make_jobs()
+    start(grant)
+    grant.jobs.server.ask_approval("rt-1")
+    [item] = news(grant)["news"]
+    assert answer(grant, request_id="appr-1")["status"] == "approved"
+    grant.jobs.server.ask_approval("rt-1", request_id="appr-2", server_id="srq-2")
+    news(grant)
+    # A fingerprint that no longer matches still holds the answer back.
+    assert answer(grant, request_id="appr-2", fingerprint=item["approval"]["fingerprint"])["status"] == "changed"
 
 
 @pytest.mark.parametrize("command", ["x" * 2_001, "😀" * 2_000])

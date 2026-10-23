@@ -9643,9 +9643,12 @@ class _WatchJob:
         # (for request.cancel), the redacted command and its description.
         self.approval: Optional[Dict[str, Any]] = None
         # Told to the Watch: the outcome, and the approval request last told
-        # (None before any, as a request's key can be empty).
+        # (None before any request has been told).
         self.outcome_told = False
         self.approval_told: Optional[str] = None
+        # An answer to the pending approval is on its way to Hermes: a
+        # second one would go to Hermes' next request when it has no id.
+        self.approval_answering = False
         self.closed = False
         # The start's own answer: pending until the start settles or is
         # answered "accepted"; its outcome isn't news meanwhile.
@@ -9685,15 +9688,27 @@ class _WatchJob:
                 "command": self.approval["command"],
                 "cut": self.approval["cut"],
                 "description": _json_clip(self.approval["description"], WATCH_JOB_DETAIL_BYTES),
+                "fingerprint": self.approval["fingerprint"],
             }
         return item
 
     @property
     def approval_key(self) -> str:
-        """Which approval request is pending, for telling each one once."""
+        """Which approval request is pending, for telling each one once: its
+        fingerprint, which holds its ids, so a request changed under the
+        same id is news again too."""
         if not self.approval:
             return ""
-        return self.approval["request_id"] or self.approval["server_request_id"]
+        return self.approval["fingerprint"]
+
+
+def _watch_approval_fingerprint(approval: Dict[str, Any], command: str) -> str:
+    """Names the request as the Watch shows it: its command and description,
+    and Hermes' ids for it. hermes-conduit-notifier#232 (N7-3). The whole
+    ``command`` counts too, so two long ones cut alike still differ."""
+    shown = [command, approval["command"], approval["cut"], approval["description"],
+             approval["request_id"], approval["server_request_id"]]
+    return hashlib.sha256(json.dumps(shown, ensure_ascii=False).encode()).hexdigest()[:24]
 
 
 class _WatchJobTransport:
@@ -9932,6 +9947,7 @@ class _WatchJobs:
                 "cut": shown_command != command,
                 "description": text("description", 500) or "Approval required",
             }
+            job.approval["fingerprint"] = _watch_approval_fingerprint(job.approval, command)
             job.status = "needs_approval"
             self.changed.notify_all()
 
@@ -10307,7 +10323,8 @@ class _WatchJobs:
                 running = sum(1 for job in self.jobs.values() if job.active)
                 # Every request still open, so the Watch drops a card
                 # answered elsewhere or timed out.
-                approvals = [{"job_id": job.job_id, "request_id": job.approval["request_id"]}
+                approvals = [{"job_id": job.job_id, "request_id": job.approval["request_id"],
+                              "fingerprint": job.approval["fingerprint"]}
                              for job in self.jobs.values() if job.approval and job.status == "needs_approval"]
                 answer = {"ok": True, "news": [], "running": running, "more": True, "approvals": approvals}
                 news = self._take_news(max(0, WATCH_JOB_ANSWER_BYTES - _json_bytes(answer)), marks)
@@ -10400,6 +10417,21 @@ class _WatchJobs:
         if wanted != approval["request_id"]:
             # Only the request the Watch showed: a newer one needs its own answer.
             return {"ok": True, "status": "not_pending", "message": "That approval request has been replaced."}
+        shown = str(args.get("fingerprint") or "")
+        if not approval["request_id"] and not shown:
+            # Without an id Hermes answers its oldest pending request, so
+            # only the card's fingerprint says which one the user read.
+            return {"ok": False, "status": 400,
+                    "detail": "Update Conduit to answer this request on the Watch, or answer it in Conduit on your iPhone"}
+        if shown and shown != approval["fingerprint"]:
+            # The request changed under the same (or no) id since the Watch
+            # showed it: the new one is news again, for its own answer.
+            with self.changed:
+                if job.approval and job.approval["fingerprint"] == approval["fingerprint"]:
+                    job.approval_told = None
+                self.changed.notify_all()
+            return {"ok": True, "status": "changed",
+                    "message": "The request changed before the answer reached Hermes. Show the user the new one and ask again."}
         if choice == "once" and approval.get("cut"):
             # The Watch showed only part of the command: approving it would
             # approve what the user never saw.
@@ -10408,12 +10440,22 @@ class _WatchJobs:
         params: Dict[str, Any] = {"session_id": job.session_id, "choice": choice}
         if approval["request_id"]:
             params["request_id"] = approval["request_id"]
+        with self.lock:
+            if job.approval_answering:
+                return {"ok": True, "status": "not_pending", "message": "That request is already being answered."}
+            if not job.approval or job.approval["fingerprint"] != approval["fingerprint"]:
+                return {"ok": True, "status": "changed",
+                        "message": "The request changed before the answer reached Hermes. Show the user the new one and ask again."}
+            job.approval_answering = True
         try:
             resolved = self.rpc("approval.respond", params).get("resolved")
         except WatchJobError as exc:
             return {"ok": True, "status": "failed", "message": f"Hermes didn't take the answer: {exc}"}
+        finally:
+            with self.lock:
+                job.approval_answering = False
         with self.changed:
-            if job.approval and job.approval["request_id"] == approval["request_id"]:
+            if job.approval and job.approval["fingerprint"] == approval["fingerprint"]:
                 self._approval_gone(job)
             self.changed.notify_all()
         # Hermes answers how many approvals the decision unblocked.

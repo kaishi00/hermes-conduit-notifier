@@ -2140,7 +2140,12 @@ seals the answers back. This host opens no inbound route of its own.
   user's per-call limit (default 5, at most 20, 0 for none), counting the
   jobs that started; three run at once. A grant with jobs allows 120 calls,
   since the Watch also asks for job news (finished jobs and approval
-  requests) while they run. A start Hermes takes longer than 18 s to accept
+  requests) while they run. Each approval request carries a `fingerprint` of the
+  request as shown; `answer_approval` sends it back, and is answered
+  `changed` (the new request comes as news) if the request changed since.
+  A request Hermes sent without a `request_id` can only be answered with
+  the card's `fingerprint`, since Hermes then answers its oldest pending
+  request. A start Hermes takes longer than 18 s to accept
   is answered `accepted`, inside the relay's wait, and a start that then
   fails comes as job news. News whose answer doesn't reach the relay is
   sent again with the next call. A renewal names the call's previous grant
