@@ -788,10 +788,12 @@ def test_user_agent_derives_from_the_plugin_version():
     assert loop.client.PLUGIN_VERSION == "0.65.2"
 
 
-def test_send_now_redacts_only_when_the_profile_opts_in(monkeypatch):
+def test_send_now_redacts_only_when_the_profile_opts_in(monkeypatch, tmp_path):
     client = loop.client
     sent = []
     monkeypatch.setattr(client, "request_json", lambda url, **kwargs: sent.append(kwargs["payload"]) or {})
+    # Redacting mints a redact_key and saves it with the pairing.
+    monkeypatch.setattr(client, "state_path", lambda: tmp_path / "conduit-push.json")
     event = {"event_id": "approval:12345678", "type": "approval.needed", "body": "Run rm -rf build"}
 
     monkeypatch.setattr(client, "load_state", lambda: {"relay_url": "https://relay", "credential": "x"})
@@ -803,12 +805,13 @@ def test_send_now_redacts_only_when_the_profile_opts_in(monkeypatch):
     assert "body" not in sent[1]
 
 
-def test_enqueued_events_are_redacted_once_on_delivery(monkeypatch):
+def test_enqueued_events_are_redacted_once_on_delivery(monkeypatch, tmp_path):
     # Other tests replace loop.client.enqueue with a fake for good, so load a
     # private copy of the real client module to exercise the real queue.
     spec = importlib.util.spec_from_file_location("conduit_push._client_under_test", ROOT / "client.py")
     client = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(client)
+    monkeypatch.setattr(client, "state_path", lambda: tmp_path / "conduit-push.json")
     sent = []
     monkeypatch.setattr(client, "request_json", lambda url, **kwargs: sent.append(kwargs["payload"]) or {})
     monkeypatch.setattr(client, "load_state", lambda: {"relay_url": "https://relay", "credential": "x", "redact_content": True})
