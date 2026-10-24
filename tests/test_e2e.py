@@ -644,3 +644,17 @@ def test_the_same_key_id_with_another_secret_is_refused(state_file):
     assert http.post(f"{BASE}/e2e", json=_body(secret=e2e.b64u(NEW_SECRET))).status_code == 409
     stored = json.loads(state_file.read_text())
     assert stored["e2e"]["secret"] == e2e.b64u(SECRET) and "e2e_previous" not in stored
+
+
+def test_status_still_answers_when_pruning_cannot_write(state_file, monkeypatch):
+    state = json.loads(state_file.read_text())
+    state["e2e"] = {"kid": NEW_KID, "secret": e2e.b64u(NEW_SECRET), "created_at": "2026-10-01T00:00:00Z"}
+    state["e2e_previous"] = {"kid": KID, "secret": e2e.b64u(SECRET), "retired_at": "2020-01-01T00:00:00Z"}
+    state_file.write_text(json.dumps(state))
+
+    def read_only(*_args, **_kwargs):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(api, "_save_pairing_state", read_only)
+    response = _http().get(f"{BASE}/e2e")
+    assert response.status_code == 200 and response.json()["previous_kid"] is None

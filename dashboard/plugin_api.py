@@ -6335,12 +6335,16 @@ def _e2e_live_previous(state: Dict[str, Any], now: float) -> Optional[Dict[str, 
 
 def _e2e_prune_previous(path: Any, now: float) -> None:
     """Deletes a replaced key once its overlap is over, so its secret doesn't
-    sit on disk (and in backups) until the next rotation."""
-    with _e2e_lock, _pairing_state_lock(path):
-        state = _load_pairing_state(path)
-        if state and "e2e_previous" in state and _e2e_live_previous(state, now) is None:
-            state.pop("e2e_previous", None)
-            _save_pairing_state(path, state)
+    sit on disk (and in backups) until the next rotation. Best effort: a
+    status read never fails on it, and an expired key opens nothing anyway."""
+    try:
+        with _e2e_lock, _pairing_state_lock(path):
+            state = _load_pairing_state(path)
+            if state and "e2e_previous" in state and _e2e_live_previous(state, now) is None:
+                state.pop("e2e_previous", None)
+                _save_pairing_state(path, state)
+    except OSError:
+        pass
 
 
 def e2e_status(path: Any = None) -> Dict[str, Any]:
@@ -6399,8 +6403,9 @@ def provision_e2e(body: Any, path: Any = None) -> Dict[str, Any]:
     Only the last replaced key is kept: a second rotation inside the overlap
     retires the one before it at once. Keys rotate days apart, and answers
     are sealed seconds after the push they answer, so none is lost in
-    practice. The replaced key itself can't come back: a rotation must not
-    roll the pairing back to a key it retired (a delayed retry, or a copy).
+    practice. While its overlap lasts, the replaced key can't come back: a
+    delayed retry of its handover must not roll the pairing back. After that
+    the host no longer knows it, and the phone never sends a retired key.
     """
     if not isinstance(body, dict):
         raise TokenError(400, "Expected a JSON object")
