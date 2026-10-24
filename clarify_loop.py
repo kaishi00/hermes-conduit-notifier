@@ -519,6 +519,10 @@ def _full_choice_answer(raw: Any, offered: list[str], multi: bool) -> Any:
     return _full_choice(raw, offered)
 
 
+# The shortest clipped choice a call's answer is mapped back from.
+CALL_CHOICE_PREFIX_MIN = 80
+
+
 def _full_choice(answer: str, offered: list[str]) -> str:
     """The offered choice a card label stands for. Cards show each choice cut
     to 80 characters (``events.card_choice_labels``), so a tapped long choice
@@ -528,6 +532,10 @@ def _full_choice(answer: str, offered: list[str]) -> str:
     if not text or text in offered:
         return answer
     matches = {choice for choice in offered if text in card_choice_labels(choice)}
+    if not matches and len(text) >= CALL_CHOICE_PREFIX_MIN:
+        # A call's pick of a choice too long for the calls store, which
+        # keeps its start (calls_store.MAX_WAITING_CHOICE_CHARS).
+        matches = {choice for choice in offered if choice.strip().startswith(text)}
     return matches.pop() if len(matches) == 1 else answer
 
 

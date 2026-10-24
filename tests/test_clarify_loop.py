@@ -1066,3 +1066,10 @@ def test_a_call_answer_wins_and_formats_like_a_device_answer(monkeypatch):
     while request_id not in fake.cancelled_ids and time.monotonic() < deadline:
         time.sleep(0.01)
     assert fake.cancelled_ids == [request_id]
+
+
+def test_a_calls_pick_of_a_choice_longer_than_the_store_keeps_answers_with_the_full_choice():
+    long_choice = "Deploy to staging and " + "run every integration suite " * 12
+    offered = [long_choice, "prod"]
+    assert loop._full_choice(long_choice[:200], offered) == long_choice
+    assert loop._full_choice("Deploy", offered) == "Deploy", "a short prefix names no choice"
