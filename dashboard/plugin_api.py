@@ -6991,15 +6991,44 @@ def answer_call_waiting(body: Any) -> Dict[str, Any]:
     on in its chat: a question's ``answer`` (a choice's number or label, "the
     recommended one", or their own words) for ``question`` (its number in the
     batch), or an approval's ``choice`` (once or deny, with ``reason``). The
-    agent's process passes it to Hermes within seconds."""
+    agent's process passes it to Hermes within seconds. An approval's answer
+    waits to hear that it did: "answered" only once Hermes took it."""
     if not isinstance(body, dict):
         raise TokenError(400, "Expected a JSON object")
+    store = _calls_store().CallStore(_calls_home())
     try:
-        return _calls_store().CallStore(_calls_home()).answer_waiting(
+        result = store.answer_waiting(
             body.get("session_id"), answer=body.get("answer"), choice=body.get("choice"),
             question=body.get("question"), reason=body.get("reason"))
     except ValueError as exc:
         raise TokenError(400, str(exc))
+    return _approval_delivered(store, result)
+
+
+# How a call's approval answer fared, for the call to say (calls_store
+# DELIVERY_STATES). Read by the model, so not localized.
+_APPROVAL_NOT_DELIVERED = {
+    "missed": ("not_waiting", "It didn't go through: Hermes wasn't waiting on that approval any more (it was "
+                              "answered in Conduit, or timed out), so nothing was {done}. The user can check the chat "
+                              "in Conduit."),
+    "withdrawn": ("failed", "It didn't go through: Hermes didn't pick the answer up in time, so nothing was {done}. "
+                            "The user can answer it in Conduit."),
+    "claimed": ("unconfirmed", "Hermes hasn't confirmed the answer yet, so it may not have gone through. The user can "
+                          "check the chat in Conduit."),
+}
+
+
+def _approval_delivered(store: Any, result: Dict[str, Any]) -> Dict[str, Any]:
+    """``answer_waiting``'s result, with an approval's answer as it fared:
+    the call says it went only when Hermes took it."""
+    answer_id = result.pop("answer_id", None)
+    if answer_id is None or result.get("status") != "answered":
+        return result
+    fared = store.approval_delivery(answer_id)
+    if fared == "resolved":
+        return result
+    status, message = _APPROVAL_NOT_DELIVERED.get(fared, _APPROVAL_NOT_DELIVERED["missed"])
+    return {"status": status, "message": message.format(done="approved" if result.get("choice") == "once" else "denied")}
 
 
 async def _calls_route(profile: Optional[str], response: Response, fn: Callable[[], Dict[str, Any]],
@@ -12695,15 +12724,27 @@ def _local_live_call_answer(grant: _WatchGrant, words: str) -> Optional[str]:
             if not grant.answer_approvals:
                 return "Hermes is waiting on your approval in that chat. Answer it in Conduit on your iPhone."
             if asks:
-                result = store.answer_waiting(session_id, choice="deny",
-                                              reason=f"{store_module.ASKS_FIRST_LEAD} {words}")
+                result = _approval_delivered(store, store.answer_waiting(
+                    session_id, choice="deny", reason=f"{store_module.ASKS_FIRST_LEAD} {words}"))
                 return ("I've asked Hermes. It will explain, then ask again."
-                        if result.get("status") == "answered" else result.get("message") or None)
-            result = store.answer_waiting(session_id, choice="once" if said else "deny")
+                        if result.get("status") == "answered" else _local_live_undelivered(result))
+            result = _approval_delivered(store, store.answer_waiting(session_id, choice="once" if said else "deny"))
             if result.get("status") != "answered":
-                return result.get("message") or None
+                return _local_live_undelivered(result)
             return "Approved once. Hermes runs it now." if result.get("choice") == "once" else "Denied. Hermes won't run it."
     return None
+
+
+def _local_live_undelivered(result: Dict[str, Any]) -> Optional[str]:
+    """What a Watch Local Live call says when its approval answer didn't
+    reach Hermes (_approval_delivered), to the user rather than a model."""
+    if result.get("status") == "not_waiting":
+        return "That didn't go through: Hermes wasn't waiting on it any more. Check the chat in Conduit."
+    if result.get("status") == "failed":
+        return "That didn't go through, so nothing changed. Answer it in Conduit on your iPhone."
+    if result.get("status") == "unconfirmed":
+        return "Hermes hasn't confirmed it yet. Check the chat in Conduit."
+    return result.get("message") or None
 
 
 class _LocalLiveWatchCall:

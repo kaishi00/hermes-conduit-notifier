@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.70.1 (2026-10-24)
+
+### Fixes
+- Answering an approval by voice on the Apple Watch could say "approved"
+  when nothing ran, because the request had just been answered elsewhere or
+  timed out. The call now says so instead, and says "approved" only once
+  Hermes has taken the answer.
+
 ## 0.70.0 (2026-10-24)
 
 ### New and improved
