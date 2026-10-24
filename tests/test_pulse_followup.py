@@ -613,12 +613,24 @@ def test_only_a_few_reminders_go_out_a_day(live):
     promise(live)
     check_now(live, llm_saying(decision="tell", news="Done.", why="finished"), now=now + 1)
     assert sum(row["decision"] == "tell" for row in live.store.followups()) == followup.learning.NUDGES["balanced"]["reminders"] + 1
-    # A freed slot tells the held one as it was, without another check.
-    later = llm_saying(decision="wait")
+    # A freed slot checks the held one again first: still to do, it's told.
+    later = llm_saying(decision="tell", news="Reminder, still.", why="due")
     check_now(live, later, now=now + 86400 + 1)
-    assert later.calls == []
+    assert len(later.calls) == 1
     row = {row["item_id"]: row for row in live.store.followups()}[held[0]]
-    assert row["decision"] == "tell" and row["news"] == "Reminder." and row["next_check_at"] is None
+    assert row["decision"] == "tell" and row["news"] == "Reminder, still." and row["next_check_at"] is None
+
+
+def test_a_held_reminder_done_while_it_waited_closes_instead(live):
+    now = time.time() + followup.FIRST_CHECK_S + 1
+    items = [commitment(live, f"The user will do thing {n}.", said_at=time.time() - 2 * 86400, words=f"I'll do thing {n}")
+             for n in range(followup.learning.NUDGES["balanced"]["reminders"] + 1)]
+    check_now(live, llm_saying(decision="tell", news="Reminder.", why="due"), now=now)
+    [held] = [row["item_id"] for row in live.store.followups() if row["decision"] == followup.REMINDER_HELD]
+    check_now(live, llm_saying(decision="done", why="they did it in another chat"), now=now + 86400 + 1)
+    row = {row["item_id"]: row for row in live.store.followups()}[held]
+    assert row["decision"] == "done" and live.store.item(held)["status"] == "done"
+    assert held in items
 
 
 def test_a_week_old_commitment_counts_against_the_days_reminders(live):
@@ -800,6 +812,15 @@ def test_without_hermes_redactor_a_background_command_isnt_shown(live, monkeypat
     check_now(live, llm, now=time.time() + followup.FIRST_CHECK_S + 1)
     section = llm.calls[0].split("## Running in the background now\n", 1)[1]
     assert section.startswith("- a background process") and "curl" not in section and "watching" not in section
+
+
+def test_a_check_reads_the_phones_calendar_and_reminders(live, monkeypatch):
+    commitment(live, "The user will call the florist.", words="I need to call the florist", said_at=time.time() - 2 * 86400)
+    monkeypatch.setattr(followup.report, "phone_context",
+                        lambda home, now: ("## Open reminders\n- Call the florist (due tomorrow)", None))
+    llm = llm_saying(decision="done", why="a phone reminder covers it")
+    check_now(live, llm, now=time.time() + followup.FIRST_CHECK_S + 1)
+    assert "## Open reminders\n- Call the florist" in llm.calls[0]
 
 
 def test_a_check_without_a_background_checkpoint_says_nothing_of_it(live):

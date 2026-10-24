@@ -8,10 +8,11 @@ import sys
 import threading
 import time
 import types
+from datetime import datetime
 
 import pytest
 
-from test_pulse import ROOT, SID, _load, cli, host, pulse, pulse_store, report, store  # noqa: F401
+from test_pulse import FIXTURE_SCHEMA, ROOT, SID, StateDB, _load, cli, host, pulse, pulse_store, report, store  # noqa: F401
 from test_pulse_followup import CHAT, commitment, fake_redactor, live  # noqa: F401
 
 candidates = _load("conduit_push.pulse_candidates", ROOT / "pulse_candidates.py")
@@ -250,6 +251,28 @@ def test_the_report_picks_the_closest_later_row_and_skips_the_items_own_continua
     later = text.split("## Later on the same subject", 1)[1].split("\n\n", 1)[0]
     assert f"#{first}: " in later and "Uploaded 2.2.1" in later
     assert "still open" not in later and "mockups" not in later
+
+
+def test_later_lines_cover_watches_intentions_and_other_profiles(live):
+    now = time.time()
+    bot_home = live.home / "profiles" / "nahida"
+    bot_home.mkdir(parents=True)
+    bot = StateDB(bot_home, FIXTURE_SCHEMA)
+    bot.session("b1", title="Bot Chat", pinned=0)
+    bot.session("b2", title="Later", pinned=0)
+    bot.message("assistant", "The landlord called back about the lease renewal, it's signed.", sid="b2", at=now - 60)
+    live.db.session(sid="gym", title="Gym", pinned=0)
+    live.db.message("user", "Started the morning running routine today, three kilometres.", sid="gym", at=now - 60)
+    def item(n, kind, text, profile="", chat_id=CHAT):
+        return {"id": n, "kind": kind, "text": text, "evidence": "", "profile": profile, "chat_id": chat_id,
+                "valid_from": now - 86400}
+    items = [item(1, "intention", "The user wants to start a morning running routine."),
+             item(2, "watch", "Tell the user when the landlord answers about the lease renewal.", "nahida", "b1"),
+             item(3, "fact", "The user likes morning running.")]
+    text = report.later_lines(live.home, items, home_chat_id=SID, zone=datetime.now().astimezone().tzinfo)
+    assert "#1: " in text and "running routine today" in text
+    assert "#2: " in text and "it's signed" in text
+    assert "#3: " not in text  # facts aren't followed
 
 
 # The report, made from the list ------------------------------------------------------
