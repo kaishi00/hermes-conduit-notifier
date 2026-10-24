@@ -6333,14 +6333,27 @@ def _e2e_live_previous(state: Dict[str, Any], now: float) -> Optional[Dict[str, 
     return record
 
 
+def _e2e_prune_previous(path: Any, now: float) -> None:
+    """Deletes a replaced key once its overlap is over, so its secret doesn't
+    sit on disk (and in backups) until the next rotation."""
+    with _e2e_lock, _pairing_state_lock(path):
+        state = _load_pairing_state(path)
+        if state and "e2e_previous" in state and _e2e_live_previous(state, now) is None:
+            state.pop("e2e_previous", None)
+            _save_pairing_state(path, state)
+
+
 def e2e_status(path: Any = None) -> Dict[str, Any]:
     """This profile's pairing and key state. Never includes the secret.
 
     ``rotate`` asks the phone for a new key: requested from the host
     (`hermes conduit-push e2e rotate`), or the key is past
     E2E_KEY_MAX_AGE_S. A phone that sees the field knows this plugin keeps
-    the replaced key for answers, so rotating loses nothing."""
-    state = _load_pairing_state(path if path is not None else _pairing_state_path())
+    the replaced key for answers, so rotating loses nothing, unless
+    ``rotate_without_overlap`` says the host asked to drop it (a key that may
+    have leaked)."""
+    path = path if path is not None else _pairing_state_path()
+    state = _load_pairing_state(path)
     crypto = _e2e_crypto_available()
     if not state:
         return {"paired": False, "crypto": crypto}
@@ -6354,6 +6367,8 @@ def e2e_status(path: Any = None) -> Dict[str, Any]:
     now = time.time()
     created = _e2e_time(record.get("created_at")) if usable else None
     previous = _e2e_live_previous(state, now) if usable else None
+    if state.get("e2e_previous") is not None and previous is None:
+        _e2e_prune_previous(path, now)
     return {
         "paired": True,
         "installation_id": state.get("installation_id"),
@@ -6362,6 +6377,7 @@ def e2e_status(path: Any = None) -> Dict[str, Any]:
         "previous_kid": previous["kid"] if previous else None,
         "rotate": usable and (bool(state.get("rotate_requested_at")) or created is None
                               or now >= created + E2E_KEY_MAX_AGE_S),
+        "rotate_without_overlap": usable and bool(state.get("rotate_without_overlap")),
         "crypto": crypto,
         # The relay answered 401 to this pairing's last delivery (client.py):
         # it no longer knows this gateway, so the phone should pair again.
@@ -6380,6 +6396,11 @@ def provision_e2e(body: Any, path: Any = None) -> Dict[str, Any]:
     pairing) is refused. A new key for the same pairing is a rotation: the
     key it replaces still opens answers for E2E_PREVIOUS_KEY_GRACE_S (unless
     the host asked to rotate without overlap), and pushes use the new one.
+    Only the last replaced key is kept: a second rotation inside the overlap
+    retires the one before it at once. Keys rotate days apart, and answers
+    are sealed seconds after the push they answer, so none is lost in
+    practice. The replaced key itself can't come back: a rotation must not
+    roll the pairing back to a key it retired (a delayed retry, or a copy).
     """
     if not isinstance(body, dict):
         raise TokenError(400, "Expected a JSON object")
@@ -6412,6 +6433,9 @@ def provision_e2e(body: Any, path: Any = None) -> Dict[str, Any]:
             # Key ids are random per key: the same id with another secret
             # would make answers ambiguous during the overlap.
             raise TokenError(409, "This key id is already in use with a different secret")
+        previous_record = state.get("e2e_previous")
+        if isinstance(previous_record, dict) and previous_record.get("kid") == kid:
+            raise TokenError(409, "This key was replaced; send a new one")
         rotated = isinstance(current, dict) and isinstance(current.get("kid"), str) and current["kid"] != kid \
             and isinstance(current.get("secret"), str) and _E2E_B64URL.match(current["secret"])
         if rotated and not state.get("rotate_without_overlap"):
