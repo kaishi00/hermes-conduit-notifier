@@ -8518,7 +8518,8 @@ def _watch_answer_sessions(value: Any) -> Tuple[str, ...]:
     if not isinstance(value, list) or not 0 < len(value) <= 4:
         return ()
     ids = [item.strip() for item in value if isinstance(item, str) and item.strip()]
-    if len(ids) != len(value) or any(len(item) > 512 or not item.isprintable() for item in ids):
+    # The store's own bound, in UTF-8 bytes, so no id it refuses is granted.
+    if len(ids) != len(value) or any(len(item.encode("utf-8", "replace")) > 512 or not item.isprintable() for item in ids):
         return ()
     return tuple(dict.fromkeys(ids))
 
