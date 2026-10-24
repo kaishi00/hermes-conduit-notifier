@@ -513,6 +513,26 @@ def test_poll_answers_that_are_never_objects_fall_back_after_grace_window():
     assert len(fake.cancelled_ids) == 1, "the parked decision is released"
 
 
+def test_a_batch_answers_map_that_is_not_an_object_is_tolerated_until_answered():
+    # A string or a list answers map is unproductive like a body that isn't
+    # an object (#165), not a TypeError that leaves the decision parked.
+    for answers in ("q0", ["q0"]):
+        fake = _FakeState([
+            {"status": "answered", "answers": answers, "remaining": []},
+            {"status": "answered", "answers": {"q0": "staging"}, "remaining": []},
+        ])
+        _install(fake)
+        original, release = _blocking_original("never used")
+        try:
+            result = loop.middleware(**_kwargs(original, {
+                "questions": [{"question": "Which environment?", "choices": ["staging", "prod"]}],
+            }))
+        finally:
+            release.set()
+        assert json.loads(result)["responses"][0]["user_response"] == "staging", answers
+        assert len(fake.poll_ids) == 2, answers
+
+
 def test_persistent_transport_errors_stop_after_grace_window():
     # A persistently unreachable relay must not poll the full budget: errors
     # count against the same grace as unknowns.
