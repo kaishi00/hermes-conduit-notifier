@@ -81,6 +81,7 @@ export class Rings {
     this.maxWaitersPerRing = maxWaitersPerRing;
     this.maxControlWaitersPerRing = maxControlWaitersPerRing;
     this.controlMaxMs = controlMaxMs;
+    if (!Number.isSafeInteger(maxAdopted) || maxAdopted < 1) throw new RangeError('maxAdopted must be a positive integer');
     this.maxAdopted = maxAdopted;
     this.adopted = 0;
     this.now = now;
@@ -178,7 +179,8 @@ export class Rings {
   // change, or 'unknown' and 'not_answered' as for a session store. A call
   // once ended stays ended. `adopt`: a ring the relay doesn't know (it
   // restarted) comes back as a control alone, the Watch's answer taken as
-  // given: only the call's two devices hold its token.
+  // given: only the call's two devices hold its id (logs leave it out), and
+  // the first to write after the restart sets its token.
   setControl(id, token, by, { muted, ended, adopt = false } = {}) {
     const ring = this.find(id, token) ?? (adopt ? this.adopt(id, token) : undefined);
     if (!ring) return 'unknown';

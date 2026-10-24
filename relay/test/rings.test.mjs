@@ -72,6 +72,9 @@ test('the ring maximum is a positive whole number', () => {
     assert.throws(() => new Rings({ maxRings }), RangeError, String(maxRings));
   }
   assert.equal(new Rings({ maxRings: 1 }).maxRings, 1);
+  for (const maxAdopted of [0, -1, 1.5, Number.NaN, '10']) {
+    assert.throws(() => new Rings({ maxAdopted }), RangeError, String(maxAdopted));
+  }
 });
 
 test('a Watch answer keeps its sealed start for the phone; nothing else does', () => {

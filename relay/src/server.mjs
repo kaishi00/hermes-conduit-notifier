@@ -1791,8 +1791,9 @@ function httpError(status, code) {
   return error;
 }
 
+// A ring's id is half of what adopts it after a restart, so logs leave it out.
 function safePath(value) {
-  try { return new URL(value ?? '/', config.publicUrl).pathname; } catch { return '/invalid'; }
+  try { return new URL(value ?? '/', config.publicUrl).pathname.replace(/^\/v1\/rings\/[^/]+/, '/v1/rings/:id'); } catch { return '/invalid'; }
 }
 
 function readConfig() {
