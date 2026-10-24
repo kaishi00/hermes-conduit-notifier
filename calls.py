@@ -351,10 +351,22 @@ def follow_approval(session_key: str, command: str) -> None:
 
     def follow() -> None:
         try:
-            follow_answer()
-        finally:
+            while True:
+                follow_answer()
+                with _followed_lock:
+                    # A new approval in the chat while this one was answered:
+                    # its hook found this follower running, so keep watching.
+                    try:
+                        again = not _stopped.is_set() and _store(home).has_waiting(session_key, "approval")
+                    except Exception:  # noqa: BLE001
+                        again = False
+                    if not again:
+                        _followed.discard((home, session_key))
+                        return
+        except BaseException:
             with _followed_lock:
                 _followed.discard((home, session_key))
+            raise
 
     def follow_answer() -> None:
         store = _store(home)
