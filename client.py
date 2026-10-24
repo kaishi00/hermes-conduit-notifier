@@ -171,8 +171,19 @@ def _keep_provisioned_key(value: dict[str, Any], path: Path) -> None:
         or current.get("gateway_id") != value.get("gateway_id")
     ):
         return
-    if "e2e" not in value or _key_created_at(current["e2e"]) > _key_created_at(value["e2e"]):
+    # A tie (two keys stored in the same second) goes to the file: only the
+    # dashboard stores keys, so the file's is the newer one.
+    if "e2e" not in value or (
+        current["e2e"] != value["e2e"] and _key_created_at(current["e2e"]) >= _key_created_at(value["e2e"])
+    ):
         value["e2e"] = current["e2e"]
+        # The rotation that stored it came with these: the key it replaced
+        # and the cleared request.
+        for field in ("e2e_previous", "rotate_requested_at", "rotate_without_overlap"):
+            if field in current:
+                value[field] = current[field]
+            else:
+                value.pop(field, None)
 
 
 def _key_created_at(record: Any) -> str:
@@ -472,13 +483,15 @@ def opened_answers(status: dict[str, Any], state: dict[str, Any], request_id: st
         "request_id": request_id,
     }
     try:
-        keys = e2e.keys_from_state(state)
+        # The key a rotation just replaced still opens answers the phone
+        # sealed before it learned of the new one.
+        keys = e2e.answer_keys(state)
         opened = dict(status)
         if has_answer:
-            opened["answer"] = e2e.open_answer(status.get("answer"), keys, question_id="", **context)
+            opened["answer"] = e2e.open_answer_any(status.get("answer"), keys, question_id="", **context)
         if has_answers:
             opened["answers"] = {
-                str(qid): e2e.open_answer(value, keys, question_id=str(qid), **context)
+                str(qid): e2e.open_answer_any(value, keys, question_id=str(qid), **context)
                 for qid, value in status["answers"].items()
             }
         return opened
@@ -495,13 +508,39 @@ def e2e_status(state: dict[str, Any] | None = None) -> dict[str, Any]:
         usable = e2e.keys_from_state(state or {}) is not None
     except Exception:
         usable = False
+    previous = e2e.previous_key_record(state or {})
     return {
         # On only with a key that can actually seal; a broken one sends
         # content-free events and reads as off here.
         "enabled": usable,
         "kid": record.get("kid") if isinstance(record, dict) else None,
+        "created_at": record.get("created_at") if isinstance(record, dict) else None,
+        "previous_kid": previous.get("kid") if previous else None,
+        "rotate_requested": bool((state or {}).get("rotate_requested_at")),
+        "rotate_without_overlap": bool((state or {}).get("rotate_without_overlap")),
+        "rotation_due": usable and e2e.rotation_due(state or {}),
         "crypto": e2e.available(),
     }
+
+
+def request_key_rotation(*, without_overlap: bool = False) -> bool:
+    """Asks the paired phone for a new encryption key on its next dashboard
+    connect. ``without_overlap`` (a key that may have leaked) also drops the
+    previous key now, and the current one as soon as the new one arrives;
+    until then the current key still seals pushes (unpair cuts it off now).
+    False when the profile isn't paired or has no key."""
+    def change(state: dict[str, Any]) -> bool:
+        if state.get("e2e") is None:
+            return False
+        state["rotate_requested_at"] = time.strftime(e2e.KEY_TIME_FORMAT, time.gmtime())
+        if without_overlap:
+            state["rotate_without_overlap"] = True
+            state.pop("e2e_previous", None)
+        else:
+            state.pop("rotate_without_overlap", None)
+        return True
+
+    return update_state(change)
 
 
 def post_event(payload: dict[str, Any], timeout: float = 15.0) -> dict[str, Any]:

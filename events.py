@@ -10,7 +10,7 @@ from typing import Any
 
 # Keep in sync with plugin.yaml. Reported on every event so the relay can
 # expose per-gateway compatibility state to the app (Settings > Notifications).
-PLUGIN_VERSION = "0.70.4"
+PLUGIN_VERSION = "0.71.2"
 PLUGIN_CAPABILITIES = [
     "approval-decisions",
     "clarify-loop",
@@ -103,9 +103,9 @@ def push_event(
     # call, an update or a phone change reads as its attachment too. A reply
     # comes through plain_text, which already did this and kept fenced code.
     if title:
-        event["title"] = _clean(_shown(title), 120)
+        event["title"] = _shown_clean(title, 120)
     if body:
-        event["body"] = _clean(_shown(body), 500)
+        event["body"] = _shown_clean(body, 500)
     # Conduit writes the title in its own language (#1144): `title_label`
     # names which one (an event type, or `phone.<kind>`), and the chat's
     # title rides on its own instead of glued into `title`. `title` stays for
@@ -193,10 +193,10 @@ def sanitize_call(value: Any) -> dict[str, Any] | None:
     if value.get("origin") == "alert":
         # Hermes called on its own about a failed turn (alert calls).
         call["origin"] = "alert"
-    title = _clean(value.get("title") if isinstance(value.get("title"), str) else "", 120)
+    title = _shown_clean(value.get("title") if isinstance(value.get("title"), str) else "", 120)
     if title:
         call["title"] = title
-    reason = _clean(value.get("reason") if isinstance(value.get("reason"), str) else "", 200)
+    reason = _shown_clean(value.get("reason") if isinstance(value.get("reason"), str) else "", 200)
     if reason:
         call["reason"] = reason
     return call
@@ -480,7 +480,7 @@ def sanitize_decision(decision: dict[str, Any]) -> dict[str, Any]:
         key = session_key(decision.get("session_key"))
         if key:
             sanitized["session_key"] = key
-        description = _clean(decision.get("description", ""), 500)
+        description = _shown_clean(decision.get("description", ""), 500)
         if description:
             sanitized["description"] = description
         choices = decision.get("choices")
@@ -497,13 +497,16 @@ def sanitize_decision(decision: dict[str, Any]) -> dict[str, Any]:
         return sanitized
     if kind == "clarify":
         sanitized: dict[str, Any] = {"kind": "clarify"}
-        for key in ("request_id", "question"):
-            value = _clean(decision.get(key, ""), 500)
-            if value:
-                sanitized[key] = value
+        request_id = _clean(decision.get("request_id", ""), 500)
+        if request_id:
+            sanitized["request_id"] = request_id
+        question_text = _shown_clean(decision.get("question", ""), 500)
+        if question_text:
+            sanitized["question"] = question_text
         choices = decision.get("choices")
         if isinstance(choices, list):
-            cleaned = [value for value in (_clean(choice, 80) for choice in choices) if value]
+            # Shown as card_choice_labels reads them, so a tapped label maps back.
+            cleaned = [value for value in (_shown_clean(choice, 80) for choice in choices) if value]
             if cleaned:
                 sanitized["choices"] = cleaned[:MAX_BATCH_CHOICES]
         # Batch form: the full question set rides alongside the collapsed
@@ -524,7 +527,7 @@ def sanitize_decision(decision: dict[str, Any]) -> dict[str, Any]:
                 # shrink a batch this plugin emits.
                 if not _QID_PATTERN.fullmatch(qid) or qid in _QID_RESERVED or qid in seen_qids:
                     continue
-                text = _clean(entry.get("question", ""), 500)
+                text = _shown_clean(entry.get("question", ""), 500)
                 if not text:
                     continue
                 question: dict[str, Any] = {"qid": qid, "question": text}
@@ -532,7 +535,7 @@ def sanitize_decision(decision: dict[str, Any]) -> dict[str, Any]:
                 if isinstance(labels, list):
                     cleaned_labels: list[str] = []
                     for label in labels[:MAX_BATCH_CHOICES]:
-                        cleaned = _clean(label, 80)
+                        cleaned = _shown_clean(label, 80)
                         if cleaned and cleaned not in cleaned_labels:
                             cleaned_labels.append(cleaned)
                     if cleaned_labels:
@@ -707,11 +710,17 @@ def card_choice_labels(choice: Any) -> set[str]:
     (``sanitize_decision``: whitespace collapsed, 80 code points) and the
     relay's on a plaintext pairing (``cleanText``: 80 UTF-16 units), so an
     answer made from a cut label can be mapped back to the full choice."""
-    label = _clean(choice, 80)
+    label = _shown_clean(choice, 80)
     if not label:
         return set()
     units = label.encode("utf-16-le", "surrogatepass")[:160]
     return {label, units.decode("utf-16-le", "surrogatepass").strip()}
+
+
+def _shown_clean(value: Any, maximum: int) -> str:
+    """``_clean`` for text a card or the call screen shows: MEDIA tags read
+    as their attachments first."""
+    return _clean(_shown(value), maximum)
 
 
 def _clean(value: str, maximum: int) -> str:

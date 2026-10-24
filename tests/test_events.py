@@ -590,3 +590,24 @@ def test_no_push_shows_a_media_path():
     assert push_event("approval.needed", identifier="f", body=fenced)["body"] == "Run: ``` cat MEDIA:/tmp/a.png ```"
     reply = push_event("response.ready", identifier="r", body=plain_text(fenced))
     assert reply["body"] == "Run: cat MEDIA:/tmp/a.png"
+
+
+def test_cards_and_the_call_screen_show_no_media_path():
+    from events import card_choice_labels
+    approval = sanitize_decision({"kind": "approval", "session_key": "agent:main:abc",
+                                  "description": "Upload MEDIA:/tmp/out/chart.png", "choices": ["once", "deny"]})
+    assert approval["description"] == "Upload 📎 chart.png"
+    clarify = sanitize_decision({
+        "kind": "clarify", "request_id": "r1", "question": "Which one? MEDIA:/tmp/a/plan.pdf",
+        "choices": ["MEDIA:/tmp/a/b.png", "Neither"],
+        "questions": [{"qid": "q1", "question": "Send MEDIA:/tmp/a/plan.pdf?", "choices": ["MEDIA:/tmp/a/c.key"]}]})
+    assert clarify["question"] == "Which one? 📎 plan.pdf"
+    assert clarify["choices"] == ["📎 b.png", "Neither"]
+    assert clarify["questions"][0] == {"qid": "q1", "question": "Send 📎 plan.pdf?", "choices": ["📎 c.key"]}
+    # A tapped card label maps back to the choice Hermes offered.
+    assert "📎 b.png" in card_choice_labels("MEDIA:/tmp/a/b.png")
+    call = sanitize_call({**CALL,
+                          "title": "Deck MEDIA:/opt/data/cache/documents/doc_0123456789ab_Q4.pptx",
+                          "reason": "Send MEDIA:/tmp/x/notes.txt?"})
+    assert call["title"] == "Deck 📎 Q4.pptx"
+    assert call["reason"] == "Send 📎 notes.txt?"

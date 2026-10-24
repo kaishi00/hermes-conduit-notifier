@@ -6205,6 +6205,12 @@ E2E_WINDOW_S = 60.0
 E2E_MAX_BODY_BYTES = 4 * 1024
 _E2E_KID = re.compile(r"^[0-9a-f]{32}\Z")
 _E2E_B64URL = re.compile(r"^[A-Za-z0-9_-]{43}\Z")  # 32 bytes, unpadded
+# Same as e2e.KEY_MAX_AGE_S and e2e.PREVIOUS_KEY_GRACE_S (tests/test_e2e.py
+# checks): the phone rotates a key this old, and the key a rotation replaced
+# opens answers this long.
+E2E_KEY_MAX_AGE_S = 30 * 24 * 3600
+E2E_PREVIOUS_KEY_GRACE_S = 7 * 24 * 3600
+_E2E_TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 _e2e_limiter = _MintLimiter(E2E_LIMIT, E2E_WINDOW_S, message="Too many encryption key requests; try again shortly")
 _e2e_lock = threading.Lock()
 
@@ -6309,9 +6315,49 @@ def _e2e_crypto_available() -> bool:
     return True
 
 
+def _e2e_time(value: Any) -> Optional[float]:
+    try:
+        return datetime.strptime(str(value), _E2E_TIME_FORMAT).replace(tzinfo=timezone.utc).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def _e2e_live_previous(state: Dict[str, Any], now: float) -> Optional[Dict[str, Any]]:
+    """The key the last rotation replaced, while it still opens answers."""
+    record = state.get("e2e_previous")
+    if not isinstance(record, dict) or not isinstance(record.get("kid"), str) or not _E2E_KID.match(record["kid"]):
+        return None
+    retired = _e2e_time(record.get("retired_at"))
+    if retired is None or now >= retired + E2E_PREVIOUS_KEY_GRACE_S:
+        return None
+    return record
+
+
+def _e2e_prune_previous(path: Any, now: float) -> None:
+    """Deletes a replaced key once its overlap is over, so its secret doesn't
+    sit on disk (and in backups) until the next rotation. Best effort: a
+    status read never fails on it, and an expired key opens nothing anyway."""
+    try:
+        with _e2e_lock, _pairing_state_lock(path):
+            state = _load_pairing_state(path)
+            if state and "e2e_previous" in state and _e2e_live_previous(state, now) is None:
+                state.pop("e2e_previous", None)
+                _save_pairing_state(path, state)
+    except OSError:
+        pass
+
+
 def e2e_status(path: Any = None) -> Dict[str, Any]:
-    """This profile's pairing and key state. Never includes the secret."""
-    state = _load_pairing_state(path if path is not None else _pairing_state_path())
+    """This profile's pairing and key state. Never includes the secret.
+
+    ``rotate`` asks the phone for a new key: requested from the host
+    (`hermes conduit-push e2e rotate`), or the key is past
+    E2E_KEY_MAX_AGE_S. A phone that sees the field knows this plugin keeps
+    the replaced key for answers, so rotating loses nothing, unless
+    ``rotate_without_overlap`` says the host asked to drop it (a key that may
+    have leaked)."""
+    path = path if path is not None else _pairing_state_path()
+    state = _load_pairing_state(path)
     crypto = _e2e_crypto_available()
     if not state:
         return {"paired": False, "crypto": crypto}
@@ -6321,11 +6367,21 @@ def e2e_status(path: Any = None) -> Dict[str, Any]:
     # A key whose secret is unusable reads as none, so the phone replaces it.
     if not isinstance(secret, str) or not _E2E_B64URL.match(secret):
         kid = None
+    usable = isinstance(kid, str) and bool(_E2E_KID.match(kid))
+    now = time.time()
+    created = _e2e_time(record.get("created_at")) if usable else None
+    previous = _e2e_live_previous(state, now) if usable else None
+    if state.get("e2e_previous") is not None and previous is None:
+        _e2e_prune_previous(path, now)
     return {
         "paired": True,
         "installation_id": state.get("installation_id"),
         "gateway_id": state.get("gateway_id"),
-        "e2e": {"kid": kid} if isinstance(kid, str) and _E2E_KID.match(kid) else None,
+        "e2e": {"kid": kid, "created_at": record.get("created_at")} if usable else None,
+        "previous_kid": previous["kid"] if previous else None,
+        "rotate": usable and (bool(state.get("rotate_requested_at")) or created is None
+                              or now >= created + E2E_KEY_MAX_AGE_S),
+        "rotate_without_overlap": usable and bool(state.get("rotate_without_overlap")),
         "crypto": crypto,
         # The relay answered 401 to this pairing's last delivery (client.py):
         # it no longer knows this gateway, so the phone should pair again.
@@ -6341,7 +6397,17 @@ def provision_e2e(body: Any, path: Any = None) -> Dict[str, Any]:
 
     Only for the pairing the phone owns: the installation and gateway ids
     must match this profile's pairing, so a key for another phone (or an old
-    pairing) is refused. Replaces an earlier key for the same pairing.
+    pairing) is refused. A new key for the same pairing is a rotation: the
+    key it replaces still opens answers for E2E_PREVIOUS_KEY_GRACE_S (unless
+    the host asked to rotate without overlap), and pushes use the new one.
+    Only the last replaced key is kept: a second rotation inside the overlap
+    retires the one before it at once. Keys rotate days apart, and answers
+    are sealed seconds after the push they answer, so none is lost in
+    practice. While its overlap lasts, the replaced key can't come back: a
+    delayed retry of its handover must not roll the pairing back. After that
+    (or after a rotation without overlap, or a second one inside it) the host
+    no longer knows the key; the phone never sends a key it retired, and
+    every POST already needs the dashboard sign-in, so no tombstones are kept.
     """
     if not isinstance(body, dict):
         raise TokenError(400, "Expected a JSON object")
@@ -6366,11 +6432,34 @@ def provision_e2e(body: Any, path: Any = None) -> Dict[str, Any]:
             raise TokenError(409, "Pair this Hermes profile with Conduit again to turn on encryption")
         if state.get("installation_id") != installation_id or state.get("gateway_id") != gateway_id:
             raise TokenError(409, "This Hermes profile is paired with a different device")
+        now = datetime.now(timezone.utc)
+        current = state.get("e2e")
+        if isinstance(current, dict) and current.get("kid") == kid:
+            if isinstance(current.get("secret"), str) and hmac.compare_digest(current["secret"], secret):
+                return {"kid": kid}  # a retry of a key already stored
+            # Key ids are random per key: the same id with another secret
+            # would make answers ambiguous during the overlap.
+            raise TokenError(409, "This key id is already in use with a different secret")
+        previous_record = state.get("e2e_previous")
+        if isinstance(previous_record, dict) and previous_record.get("kid") == kid:
+            raise TokenError(409, "This key was replaced; send a new one")
+        rotated = isinstance(current, dict) and isinstance(current.get("kid"), str) and current["kid"] != kid \
+            and isinstance(current.get("secret"), str) and _E2E_B64URL.match(current["secret"])
+        if rotated and not state.get("rotate_without_overlap"):
+            state["e2e_previous"] = {
+                "kid": current["kid"],
+                "secret": current["secret"],
+                "retired_at": now.strftime(_E2E_TIME_FORMAT),
+            }
+        else:
+            state.pop("e2e_previous", None)
         state["e2e"] = {
             "kid": kid,
             "secret": secret,
-            "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "created_at": now.strftime(_E2E_TIME_FORMAT),
         }
+        state.pop("rotate_requested_at", None)
+        state.pop("rotate_without_overlap", None)
         _save_pairing_state(path, state)
     return {"kid": kid}
 
@@ -6623,6 +6712,9 @@ def pair_profile(body: Any, profile: Optional[str] = None, path: Any = None,
         if previous.get("e2e") is not None and previous.get("installation_id") == state["installation_id"] \
                 and previous.get("gateway_id") == state["gateway_id"]:
             state["e2e"] = previous["e2e"]
+            for field in ("e2e_previous", "rotate_requested_at", "rotate_without_overlap"):
+                if field in previous:
+                    state[field] = previous[field]
         _save_pairing_state(path, state)
     old_credential, old_relay = previous.get("credential"), previous.get("relay_url")
     if isinstance(old_credential, str) and old_credential and old_credential != state["credential"] \

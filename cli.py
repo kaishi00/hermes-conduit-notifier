@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from . import e2e
-from .client import DEFAULT_RELAY_URL, RelayRejected, UnpairedLocally, build_outgoing, claim_pairing, e2e_status, load_state, post_event, record_relay_accepted, record_relay_refusal, send_now, set_redact_content, state_path, unpair
+from .client import DEFAULT_RELAY_URL, RelayRejected, UnpairedLocally, build_outgoing, claim_pairing, e2e_status, load_state, post_event, record_relay_accepted, record_relay_refusal, request_key_rotation, send_now, set_redact_content, state_path, unpair
 from .relay_urls import check_request_url
 from .events import event_id, plugin_hello, push_event
 
@@ -37,6 +37,18 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
         help="Redact chat text from pushes; choice labels still transit so cards stay answerable",
     )
     redact.add_argument("mode", choices=["on", "off"])
+    encryption = commands.add_parser(
+        "e2e",
+        help="End-to-end encryption of notifications: rotate asks the phone for a new key on its next connect",
+    )
+    encryption.add_argument("e2e_action", choices=["rotate"])
+    encryption.add_argument(
+        "--now",
+        action="store_true",
+        help="For a key that may have leaked: drop the old key as soon as the new one arrives, with no overlap "
+             "(pushes already on their way then show generic text). The current key keeps working until Conduit "
+             "next connects to this dashboard; `hermes conduit-push unpair` cuts it off now",
+    )
     pulse = commands.add_parser("pulse", help="Pulse, the proactivity experiment: on, off, status, probe, report, home, outcomes, memory, followups, "
                                                  "cards, rate, done, learned, nudge, budget, candidates")
     pulse.add_argument("pulse_action", choices=["on", "off", "status", "probe", "report", "home", "outcomes", "memory",
@@ -135,7 +147,18 @@ def dispatch(args: argparse.Namespace) -> int:
         print(f"Redact content: {'on' if state.get('redact_content') else 'off'}")
         encryption = e2e_status(state)
         if encryption["enabled"]:
-            print(f"End-to-end encryption: on (key {encryption['kid'][:8]}…)")
+            print(f"End-to-end encryption: on (key {encryption['kid'][:8]}…, "
+                  f"since {_printable(encryption['created_at'] or 'an unknown date')})")
+            if encryption["previous_kid"]:
+                print(f"Previous key {encryption['previous_kid'][:8]}… still opens answers for up to 7 days.")
+            if encryption["rotate_requested"] and encryption["rotate_without_overlap"]:
+                print("Key rotation: asked for with --now; Conduit hands over a new key the next time it connects to "
+                      "this dashboard, and the current key stops opening answers then.")
+            elif encryption["rotate_requested"]:
+                print("Key rotation: asked for; Conduit hands over a new key the next time it connects to this dashboard.")
+            elif encryption["rotation_due"]:
+                print("Key rotation: due (the key is over 30 days old); Conduit hands over a new key the next time "
+                      "it connects to this dashboard.")
         elif not encryption["crypto"]:
             print("End-to-end encryption: off (this host is missing the cryptography package)")
         else:
@@ -191,6 +214,28 @@ def dispatch(args: argparse.Namespace) -> int:
             else "Notification content is no longer redacted."
         )
         return 0
+    if action == "e2e":
+        state = load_state()
+        if not state:
+            print("This Hermes profile is not paired with Conduit.")
+            return 1
+        try:
+            requested = request_key_rotation(without_overlap=args.now)
+        except _RELAY_ERRORS as error:
+            print(f"Couldn't ask for a new key: {error}")
+            return 1
+        if not requested:
+            print("This pairing has no encryption key yet: open Conduit > Settings > Notifications to turn it on.")
+            return 1
+        print("Asked Conduit for a new encryption key. It hands one over the next time it connects to this "
+              "dashboard; until then notifications stay sealed with the current key.")
+        if not args.now:
+            print("The current key still opens answers for 7 days after the new one arrives, so nothing in "
+                  "flight is lost. For a key that may have leaked, use `--now`.")
+        else:
+            print("The current key stops working as soon as the new one arrives, with no overlap. Until Conduit "
+                  "connects it still seals notifications; to cut it off right away, run `hermes conduit-push unpair`.")
+        return 0
     if action == "unpair":
         try:
             revoked = unpair()
@@ -206,7 +251,7 @@ def dispatch(args: argparse.Namespace) -> int:
         return _pulse(args)
     if action == "prefs":
         return _prefs(args)
-    print("Usage: hermes conduit-push {pair|status|test|redact|unpair|pulse|prefs}")
+    print("Usage: hermes conduit-push {pair|status|test|redact|e2e|unpair|pulse|prefs}")
     return 2
 
 

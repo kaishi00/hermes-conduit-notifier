@@ -4,6 +4,7 @@ import os
 import pathlib
 import sys
 import tempfile
+import time
 import types
 
 import pytest
@@ -410,7 +411,7 @@ def test_status_reports_the_pairing_without_a_key(state_file):
     response = _http().get(f"{BASE}/e2e")
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
-    assert response.json() == {"ok": True, "paired": True, "installation_id": INSTALLATION, "gateway_id": GATEWAY, "e2e": None, "crypto": True, "relay_rejected": False, "relay_blocked": False}
+    assert response.json() == {"ok": True, "paired": True, "installation_id": INSTALLATION, "gateway_id": GATEWAY, "e2e": None, "previous_kid": None, "rotate": False, "rotate_without_overlap": False, "crypto": True, "relay_rejected": False, "relay_blocked": False}
 
 
 def test_provisioning_stores_the_key_owner_only_and_never_returns_it(state_file):
@@ -423,7 +424,8 @@ def test_provisioning_stores_the_key_owner_only_and_never_returns_it(state_file)
     assert stored["credential"] == "c"
     assert oct(state_file.stat().st_mode & 0o777) == "0o600"
     status = _http().get(f"{BASE}/e2e").json()
-    assert status["e2e"] == {"kid": KID}
+    assert status["e2e"] == {"kid": KID, "created_at": stored["e2e"]["created_at"]}
+    assert status["rotate"] is False and status["previous_kid"] is None
     assert e2e.b64u(SECRET) not in json.dumps(status)
 
 
@@ -482,3 +484,207 @@ def test_the_title_label_and_chat_title_ride_inside_the_envelope():
     inner = e2e.open_event(sealed, keys, installation_id=INSTALLATION, gateway_id=GATEWAY)
     assert inner["title_label"] == "approval.needed"
     assert inner["session_title"] == "Quarterly numbers"
+
+
+# --- Key rotation --------------------------------------------------------------
+
+NEW_KID = "fedcba9876543210fedcba9876543210"
+NEW_SECRET = bytes(range(32, 64))
+THIRD_KID = "00112233445566778899aabbccddeeff"
+THIRD_SECRET = bytes(range(64, 96))
+
+
+def _new_keys():
+    return e2e.derive_keys(NEW_KID, NEW_SECRET)
+
+
+@pytest.fixture()
+def client_state(state_file, monkeypatch):
+    """client reads and writes state_file. load_state is patched too: other
+    test modules replace it on the shared module."""
+    monkeypatch.setattr(client, "state_path", lambda: state_file)
+    monkeypatch.setattr(client, "load_state", lambda: json.loads(state_file.read_text()) if state_file.exists() else None)
+    return state_file
+
+
+def test_rotation_constants_match_the_dashboard():
+    assert api.E2E_KEY_MAX_AGE_S == e2e.KEY_MAX_AGE_S
+    assert api.E2E_PREVIOUS_KEY_GRACE_S == e2e.PREVIOUS_KEY_GRACE_S
+    assert api._E2E_TIME_FORMAT == e2e.KEY_TIME_FORMAT
+
+
+def test_a_new_key_keeps_the_old_one_for_answers(state_file):
+    http = _http()
+    assert http.post(f"{BASE}/e2e", json=_body()).status_code == 200
+    assert http.post(f"{BASE}/e2e", json=_body(kid=NEW_KID, secret=e2e.b64u(NEW_SECRET))).status_code == 200
+    stored = json.loads(state_file.read_text())
+    assert stored["e2e"]["kid"] == NEW_KID
+    assert stored["e2e_previous"]["kid"] == KID and stored["e2e_previous"]["retired_at"]
+    status = http.get(f"{BASE}/e2e").json()
+    assert status["e2e"]["kid"] == NEW_KID and status["previous_kid"] == KID
+    assert e2e.b64u(SECRET) not in json.dumps(status)
+    # Pushes use the new key; answers open with either.
+    assert client.build_outgoing(_clarify_event(), stored)["e2e"]["kid"] == NEW_KID
+    old = {"status": "answered", "answer": _answer("Yes")}
+    new = {"status": "answered", "answer": _answer("No", keys=_new_keys())}
+    assert client.opened_answers(old, stored, "conduit-push-abc123def456")["answer"] == "Yes"
+    assert client.opened_answers(new, stored, "conduit-push-abc123def456")["answer"] == "No"
+
+
+def test_resending_the_same_key_is_not_a_rotation(state_file):
+    http = _http()
+    http.post(f"{BASE}/e2e", json=_body())
+    http.post(f"{BASE}/e2e", json=_body())
+    assert "e2e_previous" not in json.loads(state_file.read_text())
+
+
+def test_the_previous_key_stops_opening_answers_after_the_grace_period():
+    retired = e2e.key_time("2026-10-01T00:00:00Z")
+    state = _state(e2e={"kid": NEW_KID, "secret": e2e.b64u(NEW_SECRET), "created_at": "2026-10-01T00:00:00Z"},
+                   e2e_previous={"kid": KID, "secret": e2e.b64u(SECRET), "retired_at": "2026-10-01T00:00:00Z"})
+    assert [k.kid for k in e2e.answer_keys(state, now=retired + e2e.PREVIOUS_KEY_GRACE_S - 1)] == [NEW_KID, KID]
+    assert [k.kid for k in e2e.answer_keys(state, now=retired + e2e.PREVIOUS_KEY_GRACE_S)] == [NEW_KID]
+    expired = dict(state, e2e_previous=dict(state["e2e_previous"], retired_at="2020-01-01T00:00:00Z"))
+    status = {"status": "answered", "answer": _answer("Yes")}
+    assert client.opened_answers(status, expired, "conduit-push-abc123def456") == {"status": "rejected"}
+
+
+def test_an_answer_with_a_forged_kid_is_still_rejected():
+    state = _state(e2e_previous={"kid": NEW_KID, "secret": e2e.b64u(NEW_SECRET),
+                                 "retired_at": time.strftime(e2e.KEY_TIME_FORMAT, time.gmtime())})
+    forged = _answer("Yes", keys=e2e.derive_keys(NEW_KID, bytes(32)))
+    assert client.opened_answers({"status": "answered", "answer": forged}, state,
+                                 "conduit-push-abc123def456") == {"status": "rejected"}
+
+
+def test_status_asks_for_a_rotation_when_the_key_is_old(state_file):
+    state = json.loads(state_file.read_text())
+    state["e2e"] = {"kid": KID, "secret": e2e.b64u(SECRET), "created_at": "2020-01-01T00:00:00Z"}
+    state_file.write_text(json.dumps(state))
+    assert _http().get(f"{BASE}/e2e").json()["rotate"] is True
+    fresh = time.strftime(e2e.KEY_TIME_FORMAT, time.gmtime())
+    assert e2e.rotation_due(dict(state, e2e=dict(state["e2e"], created_at=fresh))) is False
+    assert e2e.rotation_due(dict(state, e2e=dict(state["e2e"], created_at="2020-01-01T00:00:00Z"))) is True
+
+
+def test_a_host_request_asks_for_a_rotation_until_the_new_key_arrives(state_file, client_state):
+    http = _http()
+    http.post(f"{BASE}/e2e", json=_body())
+    assert http.get(f"{BASE}/e2e").json()["rotate"] is False
+    assert client.request_key_rotation() is True
+    assert http.get(f"{BASE}/e2e").json()["rotate"] is True
+    assert client.e2e_status(client.load_state())["rotate_requested"] is True
+    http.post(f"{BASE}/e2e", json=_body(kid=NEW_KID, secret=e2e.b64u(NEW_SECRET)))
+    stored = json.loads(state_file.read_text())
+    assert "rotate_requested_at" not in stored and stored["e2e_previous"]["kid"] == KID
+    assert http.get(f"{BASE}/e2e").json()["rotate"] is False
+
+
+def test_a_rotation_without_overlap_drops_the_old_key(state_file, client_state):
+    http = _http()
+    http.post(f"{BASE}/e2e", json=_body())
+    http.post(f"{BASE}/e2e", json=_body(kid=NEW_KID, secret=e2e.b64u(NEW_SECRET)))
+    assert client.request_key_rotation(without_overlap=True) is True
+    assert "e2e_previous" not in json.loads(state_file.read_text())
+    assert http.get(f"{BASE}/e2e").json()["rotate_without_overlap"] is True
+    assert client.e2e_status(client.load_state())["rotate_without_overlap"] is True
+    http.post(f"{BASE}/e2e", json=_body(kid=THIRD_KID, secret=e2e.b64u(THIRD_SECRET)))
+    stored = json.loads(state_file.read_text())
+    assert stored["e2e"]["kid"] == THIRD_KID and "e2e_previous" not in stored
+    assert "rotate_without_overlap" not in stored
+    assert http.get(f"{BASE}/e2e").json()["rotate_without_overlap"] is False
+
+
+def test_a_rotation_cannot_bring_back_the_key_it_replaced(state_file):
+    http = _http()
+    http.post(f"{BASE}/e2e", json=_body())
+    http.post(f"{BASE}/e2e", json=_body(kid=NEW_KID, secret=e2e.b64u(NEW_SECRET)))
+    # A delayed retry of the old key's handover.
+    assert http.post(f"{BASE}/e2e", json=_body()).status_code == 409
+    stored = json.loads(state_file.read_text())
+    assert stored["e2e"]["kid"] == NEW_KID and stored["e2e_previous"]["kid"] == KID
+
+
+def test_status_deletes_a_replaced_key_after_its_overlap(state_file):
+    state = json.loads(state_file.read_text())
+    state["e2e"] = {"kid": NEW_KID, "secret": e2e.b64u(NEW_SECRET), "created_at": "2026-10-01T00:00:00Z"}
+    state["e2e_previous"] = {"kid": KID, "secret": e2e.b64u(SECRET), "retired_at": "2020-01-01T00:00:00Z"}
+    state_file.write_text(json.dumps(state))
+    assert _http().get(f"{BASE}/e2e").json()["previous_kid"] is None
+    assert "e2e_previous" not in json.loads(state_file.read_text())
+
+
+def test_a_rotation_needs_a_key(state_file, client_state):
+    assert client.request_key_rotation() is False
+
+
+def test_a_stale_write_keeps_the_rotation_that_happened_meanwhile(monkeypatch, tmp_path):
+    path = tmp_path / "conduit-push.json"
+    monkeypatch.setattr(client, "state_path", lambda: path)
+    previous = {"kid": KID, "secret": e2e.b64u(SECRET), "retired_at": "2026-10-06T21:00:00Z"}
+    path.write_text(json.dumps(_state(e2e={"kid": NEW_KID, "secret": e2e.b64u(NEW_SECRET),
+                                           "created_at": "2026-10-06T21:00:00Z"}, e2e_previous=previous)))
+    stale = _state(e2e={"kid": KID, "secret": e2e.b64u(SECRET), "created_at": "2026-10-06T20:00:00Z"},
+                   rotate_requested_at="2026-10-06T19:00:00Z")
+    client.save_state(stale)
+    stored = json.loads(path.read_text())
+    assert stored["e2e"]["kid"] == NEW_KID and stored["e2e_previous"] == previous
+    assert "rotate_requested_at" not in stored
+
+
+def test_a_stale_write_from_the_same_second_keeps_the_stored_key(monkeypatch, tmp_path):
+    path = tmp_path / "conduit-push.json"
+    monkeypatch.setattr(client, "state_path", lambda: path)
+    same_second = "2026-10-06T21:00:00Z"
+    path.write_text(json.dumps(_state(e2e={"kid": NEW_KID, "secret": e2e.b64u(NEW_SECRET), "created_at": same_second})))
+    client.save_state(_state(e2e={"kid": KID, "secret": e2e.b64u(SECRET), "created_at": same_second}))
+    assert json.loads(path.read_text())["e2e"]["kid"] == NEW_KID
+    # The same key written back keeps the caller's own fields.
+    client.save_state(_state(e2e={"kid": NEW_KID, "secret": e2e.b64u(NEW_SECRET), "created_at": same_second},
+                             rotate_requested_at=same_second))
+    assert json.loads(path.read_text())["rotate_requested_at"] == same_second
+
+
+def test_a_plain_rotation_after_one_without_overlap_keeps_the_overlap(state_file, client_state):
+    _http().post(f"{BASE}/e2e", json=_body())
+    assert client.request_key_rotation(without_overlap=True) is True
+    assert client.request_key_rotation() is True
+    assert "rotate_without_overlap" not in json.loads(state_file.read_text())
+
+
+def test_the_same_key_id_with_another_secret_is_refused(state_file):
+    http = _http()
+    http.post(f"{BASE}/e2e", json=_body())
+    assert http.post(f"{BASE}/e2e", json=_body(secret=e2e.b64u(NEW_SECRET))).status_code == 409
+    stored = json.loads(state_file.read_text())
+    assert stored["e2e"]["secret"] == e2e.b64u(SECRET) and "e2e_previous" not in stored
+
+
+def test_status_still_answers_when_pruning_cannot_write(state_file, monkeypatch):
+    state = json.loads(state_file.read_text())
+    state["e2e"] = {"kid": NEW_KID, "secret": e2e.b64u(NEW_SECRET), "created_at": "2026-10-01T00:00:00Z"}
+    state["e2e_previous"] = {"kid": KID, "secret": e2e.b64u(SECRET), "retired_at": "2020-01-01T00:00:00Z"}
+    state_file.write_text(json.dumps(state))
+
+    def read_only(*_args, **_kwargs):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(api, "_save_pairing_state", read_only)
+    response = _http().get(f"{BASE}/e2e")
+    assert response.status_code == 200 and response.json()["previous_kid"] is None
+
+
+def test_a_pairing_that_never_rotates_keeps_working(state_file):
+    """A key from before 0.71 (no created_at), with a phone that never
+    rotates it: pushes stay sealed with it and its answers open, however
+    long it's kept. Rotation is only ever asked for, never forced."""
+    state = json.loads(state_file.read_text())
+    state["e2e"] = {"kid": KID, "secret": e2e.b64u(SECRET)}
+    state_file.write_text(json.dumps(state))
+    status = _http().get(f"{BASE}/e2e").json()
+    assert status["e2e"]["kid"] == KID and status["rotate"] is True
+    stored = json.loads(state_file.read_text())
+    assert stored["e2e"] == {"kid": KID, "secret": e2e.b64u(SECRET)}
+    assert client.build_outgoing(_clarify_event(), stored)["e2e"]["kid"] == KID
+    answered = {"status": "answered", "answer": _answer("Yes")}
+    assert client.opened_answers(answered, stored, "conduit-push-abc123def456")["answer"] == "Yes"

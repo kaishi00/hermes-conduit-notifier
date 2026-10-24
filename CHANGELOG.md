@@ -13,13 +13,30 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.70.4 (2026-10-24)
+## 0.71.2 (2026-10-24)
 
 ### Fixes
 - A notification no longer shows a file's path on the host
   (MEDIA:/opt/data/cache/…): replies, questions, approvals, calls, updates
   and phone changes show a paperclip and the file's name, or its type when
-  the name is only a code.
+  the name is only a code. So do the answer card under a question or an
+  approval, and the call screen.
+
+## 0.71.1 (2026-10-24)
+
+### Fixes
+- Pictures Hermes made with image generation now show in Artifacts. Without
+  the update, a chat's generated images are missing from its Artifacts list
+  and from the Artifacts page.
+
+## 0.71.0 (2026-10-24)
+
+### New and improved
+- Encryption keys for notifications now rotate. Conduit hands this host a
+  new key every 30 days, or sooner when you ask (`hermes conduit-push e2e
+  rotate`). The old key still opens your answers for 7 days, so nothing in
+  flight is lost; `rotate --now` drops it at once for a key that may have
+  leaked.
 
 ## 0.70.3 (2026-10-24)
 

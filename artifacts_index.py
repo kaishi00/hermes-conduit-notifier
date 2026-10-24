@@ -8,7 +8,8 @@ open again:
 - ``written``: a document, image or media file Hermes wrote with a tool
   (``write_file``, or a producer tool such as ``text_to_speech`` or
   ``image_generate`` that reports the file it saved). Source code a coding
-  session writes is left out by its extension;
+  session writes is left out by its extension. A picture ``image_generate``
+  reports by URL is listed as a link;
 - ``attached``: a file the user sent, as its ``@file:`` reference;
 - ``link``: a web link in one of Hermes' replies.
 
@@ -80,7 +81,7 @@ _FENCE_RE = re.compile(r"```.*?(?:```|\Z)", re.DOTALL)
 _PRODUCER_TOOL_RE = re.compile(
     r"(?:^|_)(?:creat(?:e|ion)|download|export|generat(?:e|ion)|render|save|speech|tts|write)(?:_|$)",
     re.IGNORECASE)
-_PRODUCER_KEYS = ("file_path", "output_path", "output_file", "saved_to", "image_path", "audio_path",
+_PRODUCER_KEYS = ("file_path", "output_path", "output_file", "saved_to", "image", "image_path", "audio_path",
                   "video_path", "path", "files_created", "files_written")
 # Tools whose arguments name the file they write.
 _WRITE_TOOLS = {"write_file"}
@@ -217,7 +218,8 @@ def tool_call_items(raw: Any) -> Iterable[tuple]:
 
 
 def tool_result_items(tool_name: Any, content: Any) -> Iterable[tuple]:
-    """Files a producer tool reports it saved (``{"file_path": …}``)."""
+    """Files a producer tool reports it saved (``{"file_path": …}``), and a
+    picture ``image_generate`` reports by URL, as an image link."""
     if not isinstance(tool_name, str) or not _PRODUCER_TOOL_RE.search(tool_name):
         return
     payload = _json(content)
@@ -230,6 +232,10 @@ def tool_result_items(tool_name: Any, content: Any) -> Iterable[tuple]:
                 path = _unquote(value)
                 if _is_local_path(path) and _extension(path) in _WRITTEN:
                     yield ("written", kind_for(path), path, "")
+                elif key == "image" and value.strip().startswith(("https://", "http://")):
+                    # image_generate reports a hosted picture by its URL: a
+                    # whole JSON value, so no sentence punctuation to trim.
+                    yield ("link", "image", value.strip(), "")
 
 
 def _number(value: Any) -> float:
@@ -332,7 +338,7 @@ def _candidate_sql(columns: set) -> str:
         "(m.role = 'user' AND m.content LIKE '%@file:%')",
         # Every key in _PRODUCER_KEYS has one of these in it.
         "(m.role = 'tool' AND (m.content LIKE '%path%' OR m.content LIKE '%_file%'"
-        " OR m.content LIKE '%saved_to%' OR m.content LIKE '%files_%'))",
+        " OR m.content LIKE '%saved_to%' OR m.content LIKE '%files_%' OR m.content LIKE '%\"image\"%'))",
     ]
     if "tool_calls" in columns:
         parts.append("(m.role = 'assistant' AND m.tool_calls LIKE '%write_file%')")
