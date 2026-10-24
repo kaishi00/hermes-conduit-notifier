@@ -220,7 +220,12 @@ def dispatch(args: argparse.Namespace) -> int:
         if not state:
             print("This Hermes profile is not paired with Conduit.")
             return 1
-        if not request_key_rotation(without_overlap=args.now):
+        try:
+            requested = request_key_rotation(without_overlap=args.now)
+        except _RELAY_ERRORS as error:
+            print(f"Couldn't ask for a new key: {error}")
+            return 1
+        if not requested:
             print("This pairing has no encryption key yet: open Conduit > Settings > Notifications to turn it on.")
             return 1
         print("Asked Conduit for a new encryption key. It hands one over the next time it connects to this "

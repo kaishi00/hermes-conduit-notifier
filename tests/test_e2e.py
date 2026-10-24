@@ -632,6 +632,19 @@ def test_a_stale_write_keeps_the_rotation_that_happened_meanwhile(monkeypatch, t
     assert "rotate_requested_at" not in stored
 
 
+def test_a_stale_write_from_the_same_second_keeps_the_stored_key(monkeypatch, tmp_path):
+    path = tmp_path / "conduit-push.json"
+    monkeypatch.setattr(client, "state_path", lambda: path)
+    same_second = "2026-10-06T21:00:00Z"
+    path.write_text(json.dumps(_state(e2e={"kid": NEW_KID, "secret": e2e.b64u(NEW_SECRET), "created_at": same_second})))
+    client.save_state(_state(e2e={"kid": KID, "secret": e2e.b64u(SECRET), "created_at": same_second}))
+    assert json.loads(path.read_text())["e2e"]["kid"] == NEW_KID
+    # The same key written back keeps the caller's own fields.
+    client.save_state(_state(e2e={"kid": NEW_KID, "secret": e2e.b64u(NEW_SECRET), "created_at": same_second},
+                             rotate_requested_at=same_second))
+    assert json.loads(path.read_text())["rotate_requested_at"] == same_second
+
+
 def test_a_plain_rotation_after_one_without_overlap_keeps_the_overlap(state_file, client_state):
     _http().post(f"{BASE}/e2e", json=_body())
     assert client.request_key_rotation(without_overlap=True) is True
