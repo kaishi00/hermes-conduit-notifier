@@ -756,6 +756,7 @@ def test_a_check_lists_what_runs_in_the_background(live):
         {"session_id": "proc_1", "command": "watch-proton-bridge.sh --until-unlocked", "pid": None,
          "started_at": time.time() - 900, "parent_session_id": CHAT, "watch_patterns": ["unlocked"]},
         {"session_id": "proc_2", "command": "gone.sh", "pid": 2 ** 22 + 12345, "pid_scope": "host"},
+        {"session_id": "proc_3", "command": "odd-parent.sh", "parent_session_id": 7},
         "not an entry"]))
     llm = llm_saying(decision="wait")
     check_now(live, llm, now=time.time() + followup.FIRST_CHECK_S + 1)
@@ -764,6 +765,7 @@ def test_a_check_lists_what_runs_in_the_background(live):
     assert "watch-proton-bridge.sh --until-unlocked" in section and "started in \"Deploy\"" in section
     assert "watching for unlocked" in section
     assert "gone.sh" not in section  # its process is gone
+    assert "- odd-parent.sh\n" in section + "\n"  # a parent that isn't a chat id is left out
 
 
 def test_a_background_check_never_signals_on_windows_or_with_a_corrupt_pid(monkeypatch):

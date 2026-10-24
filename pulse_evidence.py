@@ -187,8 +187,11 @@ def background(home: Path, zone: tzinfo) -> str:
     running = processes(home)
     if not running:
         return ""
+    def parent(entry: dict) -> str:
+        value = entry.get("parent_session_id")
+        return value if isinstance(value, str) else ""
     try:
-        titles = hermes.chat_titles(home, [entry.get("parent_session_id") or "" for entry in running])
+        titles = hermes.chat_titles(home, [parent(entry) for entry in running])
     except hermes.HermesUnreadable:
         titles = {}
     out = []
@@ -196,7 +199,7 @@ def background(home: Path, zone: tzinfo) -> str:
         started = entry.get("started_at")
         when = (f", since {_local(started, zone)}"
                 if isinstance(started, (int, float)) and not isinstance(started, bool) and started > 0 else "")
-        title = titles.get(entry.get("parent_session_id") or "", "")
+        title = titles.get(parent(entry), "")
         source = f", started in \"{_clip(title, 60)}\"" if title else ""
         watching = entry.get("watch_patterns")
         watch = (f", watching for {', '.join(_clip(p, 40) for p in watching[:3])}"

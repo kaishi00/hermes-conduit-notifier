@@ -469,7 +469,7 @@ def later_lines(home: Path, items: Sequence[dict], *, home_chat_id: str, zone: t
         try:
             own = hermes.chain_ids(home, item["chat_id"]) if item["chat_id"] else set()
         except hermes.HermesUnreadable:
-            return ""
+            continue
         theirs = [row for row in rows if row["chat_id"] not in own]
         found = evidence.closest(theirs, f"{item['text']} {item['evidence']}", after=float(item["valid_from"]))
         if found is None:
