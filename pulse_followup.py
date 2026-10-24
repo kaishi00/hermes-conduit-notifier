@@ -337,8 +337,10 @@ def act_material(home: Path, card: dict, acted_at: float, *, zone: tzinfo,
     if where is None:
         raise ChatUnreadable(f"no profile named {card['profile']!r} any more")
     try:
-        rows = hermes.chat_messages(where, chat_id=card["chat_id"], after_id=0, since=acted_at - 60.0,
-                                    max_chars=PER_MESSAGE, limit=MAX_MESSAGES)
+        # Through the chat's compression chain, like a follow-up check.
+        rows = [row for row in hermes.chain_messages(where, chat_id=card["chat_id"], after_id=0,
+                                                     max_chars=PER_MESSAGE, limit=MAX_MESSAGES)
+                if float(row["timestamp"] or 0) >= acted_at - 60.0]
     except hermes.HermesUnreadable as error:
         raise ChatUnreadable(str(error)) from None
     lines, last, answered = [], acted_at, False
@@ -443,8 +445,9 @@ def held_material(home: Path, card: dict, *, zone: tzinfo, now: float) -> str:
     lines: list[str] = []
     if card["chat_id"]:
         try:
-            rows = hermes.chat_messages(where, chat_id=card["chat_id"], after_id=0, since=since,
-                                        max_chars=PER_MESSAGE, limit=MAX_MESSAGES, newest=True)
+            rows = [row for row in hermes.chain_messages(where, chat_id=card["chat_id"], after_id=0,
+                                                         max_chars=PER_MESSAGE, limit=MAX_MESSAGES)
+                    if float(row["timestamp"] or 0) >= since]
         except hermes.HermesUnreadable as error:
             raise ChatUnreadable(str(error)) from None
         lines = [f"[{_local(row['timestamp'], zone)}] {'User' if row['role'] == 'user' else 'Hermes'}: "
@@ -482,6 +485,7 @@ def check_held(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzi
         if not still_leader() or done.get("tokens", 0) >= budget or \
                 done.get("checks", 0) + done.get("failed", 0) >= MAX_CHECKS:
             break
+        before = checked.get(str(card["id"]))
         checked[str(card["id"])] = now
         text = ""
         try:
@@ -492,6 +496,10 @@ def check_held(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzi
             parsed, tokens = llm(HELD_INSTRUCTIONS, f"<<<held {mark}\n{text}\nheld {mark}>>>")
         except Exception:  # noqa: BLE001 — the brief tells it as it was
             logger.warning("conduit_push: Pulse held card check failed", exc_info=True)
+            if before is None:
+                checked.pop(str(card["id"]), None)  # a failed check tries again next run
+            else:
+                checked[str(card["id"])] = before
             done["tokens"] = done.get("tokens", 0) + len(text) // 4
             done["failed"] = done.get("failed", 0) + 1
             continue

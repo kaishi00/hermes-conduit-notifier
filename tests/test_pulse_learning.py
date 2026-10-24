@@ -864,6 +864,32 @@ def test_a_card_held_for_the_brief_done_meanwhile_is_left_out_of_it(live):
     assert [card["id"] for card in live.store.held_cards(12)] == [card_id]
 
 
+def test_a_held_card_check_follows_its_chat_into_the_continuation(live):
+    item_id = promise(live)
+    card_id = learning.add_card(live.store, kind="followup", item=live.store.item(item_id), level_name="brief",
+                                news="The deploy is still waiting on approval.", why="", chat_title="Deploy",
+                                now=time.time() - 3600)
+    live.db.session(sid="deploy-2", title="Deploy", pinned=0, parent=CHAT)
+    live.db.message("assistant", "Approval came through, deploy is live.", sid="deploy-2", at=time.time() - 60)
+    said = llm_saying(stale=True, why="it went live")
+    run_held(live, said, time.time())
+    assert "Approval came through" in said.calls[0] and live.store.done_marks([card_id])
+
+
+def test_a_failed_held_check_tries_again_next_run(live):
+    item_id = promise(live)
+    learning.add_card(live.store, kind="followup", item=live.store.item(item_id), level_name="brief",
+                      news="Waiting on the deploy.", why="", chat_title="Deploy", now=time.time() - 3600)
+
+    def broken(instructions, text):
+        raise RuntimeError("model down")
+    now = time.time()
+    assert run_held(live, broken, now)["failed"] == 1
+    said = llm_saying(stale=False, why="still waiting")
+    run_held(live, said, now + 60)
+    assert len(said.calls) == 1
+
+
 def test_do_it_left_unsent_gives_up_without_a_model_call(live):
     card = told_card(live)
     acted_at = time.time()
