@@ -939,7 +939,8 @@ def test_a_change_reaches_the_phone_and_its_outcome_comes_back(store, iphone):
 # Conduit keeps a change's URL only when it's http or https and applies the
 # rest without it, so anything else is refused here rather than lost there.
 @pytest.mark.parametrize("url", ["javascript:alert(1)", "ftp://files.example.com/a", "example.com/booking",
-                                 "/booking", "mailto:a@example.com", "https://"])
+                                 "/booking", "mailto:a@example.com", "https://", "https://:8080",
+                                 "https://user@/booking"])
 @pytest.mark.parametrize("kind, fields", [
     ("add_event", {"title": "Dentist", "start": "2026-10-16T15:00:00+01:00", "end": "2026-10-16T16:00:00+01:00"}),
     ("add_reminder", {"title": "Milk"}),

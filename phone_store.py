@@ -464,7 +464,7 @@ def _write_url(value: Any, field: str) -> str | None:
         parts = urlsplit(text)
     except ValueError:
         parts = None
-    if parts is None or parts.scheme.lower() not in ("http", "https") or not parts.netloc:
+    if parts is None or parts.scheme.lower() not in ("http", "https") or not parts.hostname:
         raise PhoneError("malformed", f"{field} must be an http or https URL")
     return text
 
