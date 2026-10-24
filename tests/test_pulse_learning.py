@@ -887,6 +887,8 @@ def test_a_failed_held_check_tries_again_next_run(live):
     assert run_held(live, broken, now)["failed"] == 1
     said = llm_saying(stale=False, why="still waiting")
     run_held(live, said, now + 60)
+    assert said.calls == []  # not every run: after a while
+    run_held(live, said, now + followup.HELD_RETRY_S)
     assert len(said.calls) == 1
 
 
@@ -898,6 +900,16 @@ def test_a_held_check_leaves_the_cards_of_a_brief_on_its_way(live):
     said = llm_saying(stale=True, why="")
     run_held(live, said, time.time())
     assert said.calls == []
+
+
+def test_a_card_marked_done_while_its_brief_was_out_comes_back_with_undo(live):
+    item_id = promise(live)
+    card_id = learning.add_card(live.store, kind="followup", item=live.store.item(item_id), level_name="brief",
+                                news="Waiting on the deploy.", why="", chat_title="Deploy", now=time.time())
+    control.done(live.store, card_id, True)
+    live.store.brief_cards([card_id], time.time(), "x-brief")
+    control.done(live.store, card_id, False)
+    assert [card["id"] for card in live.store.held_cards(12)] == [card_id]
 
 
 def test_do_it_left_unsent_gives_up_without_a_model_call(live):
