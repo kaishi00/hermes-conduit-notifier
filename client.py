@@ -179,9 +179,13 @@ def _key_created_at(record: Any) -> str:
     return str(record.get("created_at") or "") if isinstance(record, dict) else ""
 
 
-def remove_state() -> None:
+def remove_state(credential: str | None = None) -> None:
+    """Remove the saved pairing; with ``credential``, only while the saved
+    pairing still carries it, so a pairing claimed meanwhile stays."""
     path = state_path()
     with state_file_lock(path):
+        if credential is not None and (load_state() or {}).get("credential") not in (None, credential):
+            return
         try:
             path.unlink()
         except FileNotFoundError:
@@ -256,13 +260,14 @@ def unpair() -> bool:
     try:
         url = check_request_url(f"{str(state.get('relay_url') or '').rstrip('/')}/v1/gateways/current")
     except ValueError:
-        remove_state()
+        remove_state(state["credential"])
         raise UnpairedLocally(
             "Removed this profile's pairing, but its saved relay URL is not https://, so the relay was not told. "
             "Remove this gateway in Conduit to revoke it there."
         ) from None
     request_json(url, method="DELETE", credential=state["credential"])
-    remove_state()
+    # A pairing claimed while the relay revoked this one is not the one revoked.
+    remove_state(state["credential"])
     return True
 
 
