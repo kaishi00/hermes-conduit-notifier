@@ -30,8 +30,10 @@ jobs:
         contains(github.event.issue.labels.*.name, 'waiting on contributor'))
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # Labeling a pull request through the issues API takes both.
     permissions:
       issues: write
+      pull-requests: write
     steps:
       - env:
           GH_TOKEN: ${{ github.token }}
