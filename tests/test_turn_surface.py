@@ -135,7 +135,9 @@ def test_the_line_names_the_surface_and_how_it_was_entered():
     None, [], {}, {"session_id": "rt-1", "surface": "iphone"},
     {**_report("iphone"), "session_id": ""}, {**_report("iphone"), "session_id": "x" * 201},
     {**_report("iphone"), "session_id": 3}, {**_report("iphone"), "surface": "toaster"},
-    {**_report("iphone"), "input": "sung"}, {**_report("iphone"), "text_sha256": "ABC"},
+    {**_report("iphone"), "surface": ["iphone"]}, {**_report("iphone"), "surface": {}},
+    {**_report("iphone"), "input": "sung"}, {**_report("iphone"), "input": ["typed"]},
+    {**_report("iphone"), "input": {}}, {**_report("iphone"), "text_sha256": "ABC"},
     {**_report("iphone"), "text_sha256": surfaces.text_sha256("hi").upper()},
 ])
 def test_a_body_that_isnt_one_is_refused(body):

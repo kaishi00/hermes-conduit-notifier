@@ -1025,3 +1025,83 @@ def test_a_muted_job_does_not_notify_when_it_finishes_or_fails(cron_home, fake):
     plugin._on_session_end(session_id="local-1", task_id="cron:a1b2c3d4e5f6:x",
                            turn_id="t4", completed=False, interrupted=False)
     assert [event["type"] for event in fake.enqueued] == ["response.ready", "turn.failed"]
+
+
+def test_an_approval_answered_on_a_call_resolves_only_the_request_it_read_out(home, fake, monkeypatch):
+    # The approval hook keeps the command; the Watch's answer comes back
+    # through the store, and the agent's process resolves that request.
+    import threading
+    import time as _time
+
+    resolved = threading.Event()
+    seen = {}
+    approval = types.ModuleType("tools.approval")
+    approval.list_gateway_approvals = lambda key: [
+        {"request_id": "r-other", "command": "make clean"},
+        {"request_id": "r-1", "command": "rm -rf build"},
+    ]
+
+    def resolve(key, choice, reason=None, request_id=None):
+        seen.update(key=key, choice=choice, reason=reason, request_id=request_id)
+        resolved.set()
+        return 1
+
+    approval.resolve_gateway_approval = resolve
+    monkeypatch.setitem(sys.modules, "tools.approval", approval)
+    monkeypatch.setattr(calls, "APPROVAL_ANSWER_POLL_S", 0.01)
+    # The alert's own call isn't what this checks.
+    monkeypatch.setattr(calls, "alert", lambda *args, **kwargs: None)
+    _settings(home, alerts=True)
+    plugin._pre_approval_request(session_key="sk-1", session_id="rt-1", description="Delete the build",
+                                 command="rm -rf build", turn_id="t1")
+    store = calls._store(home)
+    assert store.waiting_for("rt-1")["command"] == "rm -rf build"
+    assert store.answer_waiting("sk-1", choice="deny", reason="Before I choose: why?")["status"] == "answered"
+    assert resolved.wait(5)
+    assert seen == {"key": "sk-1", "choice": "deny", "reason": "Before I choose: why?", "request_id": "r-1"}
+    deadline = _time.monotonic() + 2
+    while store.waiting_for("sk-1") is not None and _time.monotonic() < deadline:
+        _time.sleep(0.01)
+    assert store.waiting_for("sk-1") is None
+
+
+def test_a_call_answer_waits_for_hermes_to_list_its_approval(home, fake, monkeypatch):
+    # The answer is kept until a pending request takes it: one Hermes lists
+    # a moment late still gets it.
+    import threading
+
+    resolved = threading.Event()
+    listed = {"calls": 0}
+    approval = types.ModuleType("tools.approval")
+
+    def pending(key):
+        listed["calls"] += 1
+        return [] if listed["calls"] < 3 else [{"request_id": "r-1", "command": "rm -rf build"}]
+
+    def resolve(key, choice, request_id=None):
+        resolved.set()
+        return 1
+
+    approval.list_gateway_approvals = pending
+    approval.resolve_gateway_approval = resolve
+    monkeypatch.setitem(sys.modules, "tools.approval", approval)
+    monkeypatch.setattr(calls, "APPROVAL_ANSWER_POLL_S", 0.01)
+    monkeypatch.setattr(calls, "alert", lambda *args, **kwargs: None)
+    _settings(home, alerts=True)
+    plugin._pre_approval_request(session_key="sk-1", session_id="rt-1", description="Delete the build",
+                                 command="rm -rf build", turn_id="t1")
+    store = calls._store(home)
+    assert store.answer_waiting("sk-1", choice="once")["status"] == "answered"
+    assert resolved.wait(5), "resolved once Hermes listed it, with no reason it can't take"
+    assert listed["calls"] >= 3
+
+
+def test_a_call_answer_resolves_nothing_when_two_pending_approvals_share_its_command(monkeypatch):
+    approval = types.ModuleType("tools.approval")
+    approval.list_gateway_approvals = lambda key: [
+        {"request_id": "r-1", "command": "make clean"},
+        {"request_id": "r-2", "command": "make clean"},
+    ]
+    approval.resolve_gateway_approval = lambda *args, **kwargs: pytest.fail("resolved a request the user can't be told")
+    monkeypatch.setitem(sys.modules, "tools.approval", approval)
+    assert calls._resolve_approval("sk-1", "make clean", {"choice": "once", "reason": "", "command_sha": ""}) == 0

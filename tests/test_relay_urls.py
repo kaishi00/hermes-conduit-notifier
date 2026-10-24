@@ -241,6 +241,45 @@ def test_unpair_with_a_legacy_http_url_removes_the_local_pairing_and_says_so(mon
     assert client.load_state() is None
 
 
+def test_unpair_keeps_a_pairing_claimed_while_the_relay_revoked_the_old_one(monkeypatch, tmp_path):
+    _paired_client(monkeypatch, tmp_path)
+    client.save_state({"credential": "old", "relay_url": "https://relay.example"})
+    revoked = []
+
+    def revoke(url, method, credential, **kwargs):
+        revoked.append(credential)
+        client.save_state({"credential": "new", "relay_url": "https://relay.example"})  # claimed meanwhile
+        return {}
+
+    monkeypatch.setattr(client, "request_json", revoke)
+    assert client.unpair() is True
+    assert revoked == ["old"]
+    assert client.load_state()["credential"] == "new"
+
+
+def test_unpair_when_not_paired_keeps_a_pairing_claimed_meanwhile(monkeypatch, tmp_path):
+    _paired_client(monkeypatch, tmp_path)
+    client.remove_state()
+    loaded = client.load_state
+
+    def load_then_claim():
+        value = loaded()
+        monkeypatch.setattr(client, "load_state", loaded)
+        client.save_state({"credential": "new", "relay_url": "https://relay.example"})  # claimed meanwhile
+        return value
+
+    monkeypatch.setattr(client, "load_state", load_then_claim)
+    assert client.unpair() is False
+    assert client.load_state()["credential"] == "new"
+
+
+def test_unpair_when_not_paired_still_removes_a_leftover_file(monkeypatch, tmp_path):
+    _paired_client(monkeypatch, tmp_path)
+    client.state_path().write_text("{}", encoding="utf-8")
+    assert client.unpair() is False
+    assert not client.state_path().exists()
+
+
 @pytest.mark.parametrize("answer", [{}, [], {"credential": "", "installation_id": "i"}, {"credential": "c"}])
 def test_cli_claim_refuses_a_malformed_answer_without_saving(monkeypatch, tmp_path, answer):
     _paired_client(monkeypatch, tmp_path)

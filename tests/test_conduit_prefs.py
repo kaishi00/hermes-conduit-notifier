@@ -244,3 +244,9 @@ def test_an_empty_sync_on_a_new_profile_leaves_no_file(tmp_path):
     store = _store(tmp_path)
     store.sync({"installation_id": PHONE, "changes": {}})
     assert not store.path.exists()
+
+
+@pytest.mark.parametrize("pattern, valid", [("_KEY", "voice.mode"), ("_INSTALLATION", "a" * 8)])
+def test_ids_with_a_trailing_newline_are_refused(pattern, valid):
+    assert getattr(store_module, pattern).match(valid)
+    assert getattr(store_module, pattern).match(valid + "\n") is None

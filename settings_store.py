@@ -83,9 +83,9 @@ HOUR_S = 3600
 # A device not seen for this long is forgotten.
 DEVICE_TTL_S = 60 * 24 * 3600
 
-_KEY = re.compile(r"^[a-z][a-z0-9_.]{0,63}$")
-_INSTALLATION = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
-_REQUEST_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+_KEY = re.compile(r"^[a-z][a-z0-9_.]{0,63}\Z")
+_INSTALLATION = re.compile(r"^[A-Za-z0-9_-]{8,64}\Z")
+_REQUEST_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}\Z")
 # A Hermes session key, kept whole: one with a control character or over this
 # many UTF-8 bytes is dropped, never cut. The same rule as the plugin's
 # events.session_key; this module imports nothing from the plugin package.

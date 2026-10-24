@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.71.0 (2026-10-24)
+## 0.72.0 (2026-10-24)
 
 ### Security
 - Encryption keys for notifications now rotate every 7 days through a key
@@ -22,13 +22,44 @@ checks it). The format is fixed, because Conduit reads it:
   with X25519): a recording of today's traffic can't open later
   notifications, even with a future quantum computer.
 
-## 0.70.0 (2026-10-24)
+## 0.71.0 (2026-10-24)
 
 ### New and improved
 - Encryption keys for notifications now rotate. Conduit hands this host a
   new key every 30 days, or sooner when you ask (`hermes conduit-push e2e
   rotate`). The old key still opens your answers for 7 days, so nothing in
   flight is lost.
+
+## 0.70.0 (2026-10-24)
+
+### New and improved
+- A call from Hermes about a question or an approval can be answered on the
+  Apple Watch, even with your iPhone out of reach: the Watch reads out the
+  choices (and which one Hermes recommends) or the command, and your spoken
+  answer goes to Hermes. Needs approval, question and failure calls on.
+- With the Watch on Local Live, a call from Hermes rings it too, and what
+  you say answers what Hermes asked.
+
+## 0.69.2 (2026-10-24)
+
+### Security
+- A Watch could approve "once" a request that showed no command at all.
+  Such a request can now only be denied, like one too long to show whole.
+
+### Fixes
+- On a Hermes that doesn't name its turns, the Lock Screen could keep
+  showing a finished reply as running. It now ends after two minutes at most.
+- Unpairing while a new pairing was claimed could delete the new one.
+- A calendar or reminder link with no host name is refused instead of
+  dropped by the phone.
+- When the relay stopped answering, each notification could hold up the
+  ones behind it for about a minute, until some were dropped. Each now gives
+  up after about 30 seconds.
+- A call watch run that Hermes names only by its job said the phone would
+  ring when it couldn't; it now says what it found instead.
+- A calendar store written by a newer plugin says to update the plugin
+  instead of asking you to try again forever.
+- Malformed answers or reports from the phone no longer cause server errors.
 
 ## 0.69.1 (2026-10-24)
 

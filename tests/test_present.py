@@ -553,3 +553,9 @@ def test_the_wake_shows_the_cleaned_first_line(tool_home, pushes):
     [event] = pushes
     assert event["body"] == "]0;evil hi"
     assert "\x1b" not in event["body"] and "\x07" not in event["body"]
+
+
+@pytest.mark.parametrize("pattern", ["_INSTALLATION", "_PROMPT_ID"])
+def test_ids_with_a_trailing_newline_are_refused(pattern):
+    assert getattr(store_module, pattern).match("a" * 8)
+    assert getattr(store_module, pattern).match("a" * 8 + "\n") is None
