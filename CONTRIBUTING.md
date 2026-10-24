@@ -45,3 +45,9 @@ push to main. To run them locally:
     python -m pytest --rootdir=tests tests
     (cd relay && npm test)
     (cd mailbox && npm test)
+
+## Review labels
+
+A PR labeled `waiting on contributor` is waiting on its author. Push or comment
+on the PR when you've answered it, and a workflow swaps the label for
+`waiting on Eric`, so the maintainer knows it's his turn again.
