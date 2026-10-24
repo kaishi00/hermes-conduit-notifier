@@ -590,24 +590,24 @@ class CallStore:
             return "missed"
         deadline = time.monotonic() + wait_s
         while True:
-            fared = self._delivery(answer_id)
+            fared, kept = self._delivery(answer_id)
             if fared in ("resolved", "missed", "withdrawn"):
                 return fared
-            if fared == "sent" and not self._answer_kept(answer_id):
+            if fared == "sent" and not kept:
                 # Answered on its card (or timed out) before anything took it.
                 return self._withdraw(answer_id, "missed")
             if time.monotonic() >= deadline:
                 return self._withdraw(answer_id, "withdrawn")
             sleep(poll_s)
 
-    def _delivery(self, answer_id: str) -> str | None:
+    def _delivery(self, answer_id: str) -> tuple[str | None, bool]:
+        """An answer's delivery state, and whether its wait still holds it:
+        one read."""
         if not self.path.exists():
-            return None
-        return next((entry["state"] for entry in self._load()["delivered"] if entry["id"] == answer_id), None)
-
-    def _answer_kept(self, answer_id: str) -> bool:
-        return any(entry["kind"] == "approval" and entry["answer_id"] == answer_id
-                   for entry in self._load()["waiting"])
+            return None, False
+        state = self._load()
+        return (next((entry["state"] for entry in state["delivered"] if entry["id"] == answer_id), None),
+                any(entry["kind"] == "approval" and entry["answer_id"] == answer_id for entry in state["waiting"]))
 
     def _withdraw(self, answer_id: str, fared: str) -> str:
         """Takes back an answer nothing has claimed: ``fared`` it is. One

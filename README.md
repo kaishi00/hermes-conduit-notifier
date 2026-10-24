@@ -1475,7 +1475,7 @@ and the dashboard routes under one file lock, so they survive restarts:
 | PUT | `/api/plugins/conduit_push/calls/presence?profile=` (0.14+) | `{hold_s}` (0 releases) | `{ok, status: "present"}` or `{ok, status: "away"}` |
 | POST | `/api/plugins/conduit_push/calls/outcomes?profile=` (0.15+) | `{call_id, session_ids: [...], outcome: "declined" or "missed", kind?, title?, reason?, age_s?}` | `{ok, status: "recorded"}` |
 | GET | `/api/plugins/conduit_push/calls/waiting?session_id=&profile=` (0.70+) | | `{ok, waiting}`: null, `{kind: "question", questions: [{number, question, choices, multi_select, answered}]}` or `{kind: "approval", description, command, command_cut, answered}` |
-| POST | `/api/plugins/conduit_push/calls/waiting/answer?profile=` (0.70+) | `{session_id, answer?, question?, choice?, reason?}` | `{ok, status: "answered", ...}`, `{ok, status: "not_waiting"}`, `{ok, status: "refused", message}`, or for an approval Hermes didn't take (0.70.1+) `{ok, status: "not_waiting" or "failed" or "unconfirmed", message}` |
+| POST | `/api/plugins/conduit_push/calls/waiting/answer?profile=` (0.70+) | `{session_id, answer?, question?, choice?, reason?}` | `{ok, status: "answered", ...}`, `{ok, status: "not_waiting"}`, `{ok, status: "refused", message}`, or for an approval Hermes didn't take (0.70.1+) `{ok, status: "too_late" or "failed" or "unconfirmed", message}` |
 
 - With alert calls on, what Hermes waits on is kept too (0.70+): a question
   batch's choices, or an approval's description and command (up to 600
@@ -1493,7 +1493,7 @@ and the dashboard routes under one file lock, so they survive restarts:
   it, and a command too long to read out whole can only be denied. The
   answer waits up to 10 seconds to hear how it fared (0.70.1+), so the call
   never says "approved" when nothing ran: `answered` once Hermes took it,
-  `not_waiting` when no pending request was the one read out (answered on
+  `too_late` when no pending request was the one read out (answered on
   its card, or timed out), `failed` when nothing picked it up in time (it's
   taken back, so it can't land later), `unconfirmed` while still being
   passed on. Gone once answered anywhere, and after 2 hours.

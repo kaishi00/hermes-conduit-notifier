@@ -827,7 +827,7 @@ def test_answer_call_says_an_approval_answer_didnt_go_when_hermes_didnt_take_it(
     store.note_waiting("st-1", "approval", description="Clear the build cache", command="rm -rf build")
     _hermes_takes(store, "st-1", resolved=False)
     missed = api.answer_watch_hermes_call(grant, {"choice": "once"})
-    assert missed["status"] == "not_waiting" and "nothing was approved" in missed["message"]
+    assert missed["status"] == "too_late" and "nothing was approved" in missed["message"]
     assert store.waiting_for("st-1") is None
 
     # Nothing picks it up in time: taken back, so it can't land after the
