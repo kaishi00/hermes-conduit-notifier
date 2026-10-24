@@ -60,7 +60,7 @@ INNER_FIELDS = ("title", "body", "session_id", "profile", "gateway", "stored_ses
                 "locate", "maps", "title_label", "session_title", "count")
 
 # The phone rotates a key this old on its next dashboard connect.
-KEY_MAX_AGE_S = 30 * 24 * 3600
+KEY_MAX_AGE_S = 7 * 24 * 3600
 # How long the key a rotation replaced still opens answers.
 PREVIOUS_KEY_GRACE_S = 7 * 24 * 3600
 KEY_TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
@@ -411,3 +411,196 @@ def open_answer(sealed: Any, keys: Keys, *, installation_id: str, gateway_id: st
         return plain.decode("utf-8")
     except UnicodeDecodeError as error:
         raise E2EError("the answer is not valid text") from error
+
+
+# --- Inline key rotation (conduit-e2e/2) ---------------------------------------
+#
+# Every later key comes from a key exchange done inside messages sealed with
+# the current key, so only a pairing's first key depends on the dashboard
+# connection that carried it. The phone sends a fresh X25519 share and, on
+# iOS 26 and later, an ML-KEM-768 encapsulation key, sealed with the answer
+# key. The host answers with its X25519 share and the ML-KEM ciphertext,
+# sealed with the push key. The new secret mixes both shared secrets with the
+# old secret, so a recording of the first handover stops being useful after
+# the first rotation (ML-KEM), and a leaked key stops opening anything after
+# the next one (both suites).
+
+SUITE_PQ = "mlkem768+x25519"
+SUITE_CLASSICAL = "x25519"
+ROTATE_SALT = b"conduit-e2e-v2 rotate"
+ROTATE_AAD_TAG = "conduit-e2e/2"
+MLKEM768_EK_BYTES = 1184
+MLKEM768_CT_BYTES = 1088
+X25519_BYTES = 32
+
+
+def rotate_suites() -> list[str]:
+    """The rotation suites this host can run, best first."""
+    suites = []
+    try:
+        from cryptography.hazmat.primitives.asymmetric import mlkem  # noqa: F401
+
+        mlkem.MLKEM768PrivateKey.generate()
+        suites.append(SUITE_PQ)
+    except Exception:
+        pass
+    try:
+        from cryptography.hazmat.primitives.asymmetric import x25519  # noqa: F401
+
+        suites.append(SUITE_CLASSICAL)
+    except Exception:
+        pass
+    return suites
+
+
+def rotate_request_aad(*, kid: str, installation_id: str, gateway_id: str, suite: str) -> bytes:
+    return "\n".join([ROTATE_AAD_TAG, "rotate-request", f"kid={kid}", f"inst={installation_id}",
+                      f"gw={gateway_id}", f"suite={suite}"]).encode("utf-8")
+
+
+def rotate_reply_aad(*, kid: str, kid_new: str, installation_id: str, gateway_id: str, suite: str) -> bytes:
+    return "\n".join([ROTATE_AAD_TAG, "rotate-reply", f"kid={kid}", f"kid_new={kid_new}", f"inst={installation_id}",
+                      f"gw={gateway_id}", f"suite={suite}"]).encode("utf-8")
+
+
+def rotation_info(*, kid: str, kid_new: str, installation_id: str, gateway_id: str, suite: str,
+                  ek: bytes, xpub: bytes, host_xpub: bytes, ct: bytes) -> bytes:
+    """HKDF info: every value both sides sent, so the two derive the same
+    secret only from the same exchange."""
+    return "\n".join([
+        ROTATE_SALT.decode("ascii"), f"kid={kid}", f"kid_new={kid_new}", f"inst={installation_id}",
+        f"gw={gateway_id}", f"suite={suite}", "ek=" + hashlib.sha256(ek).hexdigest(), "xpub=" + xpub.hex(),
+        "host_xpub=" + host_xpub.hex(), "ct=" + hashlib.sha256(ct).hexdigest(),
+    ]).encode("utf-8")
+
+
+def rotated_secret(*, ss_pq: bytes, ss_x: bytes, old_secret: bytes, info: bytes) -> bytes:
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+    return HKDF(algorithm=hashes.SHA256(), length=SECRET_BYTES, salt=ROTATE_SALT, info=info).derive(
+        ss_pq + ss_x + old_secret)
+
+
+def _seal_json(key: bytes, value: dict[str, Any], aad: bytes) -> dict[str, str]:
+    nonce = os.urandom(NONCE_BYTES)
+    raw = json.dumps(value, separators=(",", ":")).encode("utf-8")
+    return {"n": b64u(nonce), "ct": b64u(_aead(key).encrypt(nonce, raw, aad))}
+
+
+def _open_json(key: bytes, sealed: Any, aad: bytes) -> dict[str, Any]:
+    if not isinstance(sealed, dict):
+        raise E2EError("the rotation message is malformed")
+    try:
+        plain = _aead(key).decrypt(unb64u(str(sealed.get("n") or "")), unb64u(str(sealed.get("ct") or "")), aad)
+        value = json.loads(plain.decode("utf-8"))
+    except E2EError:
+        raise
+    except Exception as error:
+        raise E2EError("the rotation message did not verify") from error
+    if not isinstance(value, dict):
+        raise E2EError("the rotation message is malformed")
+    return value
+
+
+def _raw(value: Any, length: int, name: str) -> bytes:
+    data = unb64u(value) if isinstance(value, str) else b""
+    if len(data) != length:
+        raise E2EError(f"{name} must be {length} bytes")
+    return data
+
+
+@dataclass(frozen=True)
+class Rotation:
+    kid_new: str
+    secret: bytes
+    suite: str
+    reply: dict[str, Any]
+
+
+def answer_rotation(request: dict[str, Any], keys: Keys, old_secret: bytes, *,
+                    installation_id: str, gateway_id: str) -> Rotation:
+    """Host side: opens the phone's rotate request (sealed with the current
+    key), runs the key exchange and returns the new secret with the sealed
+    reply."""
+    suite = request.get("suite")
+    if suite not in (SUITE_PQ, SUITE_CLASSICAL):
+        raise E2EError("unknown rotation suite")
+    if request.get("kid") != keys.kid:
+        raise E2EError("the request was sealed with another key")
+    inner = _open_json(keys.answer, request.get("sealed"), rotate_request_aad(
+        kid=keys.kid, installation_id=installation_id, gateway_id=gateway_id, suite=suite))
+    kid_new = inner.get("kid_new")
+    if not valid_kid(kid_new) or kid_new == keys.kid or inner.get("suite") != suite:
+        raise E2EError("the rotation request is malformed")
+    xpub = _raw(inner.get("xpub"), X25519_BYTES, "xpub")
+    from cryptography.hazmat.primitives.asymmetric import x25519
+
+    host_x = x25519.X25519PrivateKey.generate()
+    host_xpub = host_x.public_key().public_bytes_raw()
+    try:
+        ss_x = host_x.exchange(x25519.X25519PublicKey.from_public_bytes(xpub))
+    except ValueError as error:
+        raise E2EError("xpub is not a usable X25519 key") from error
+    ek, ct, ss_pq = b"", b"", b""
+    if suite == SUITE_PQ:
+        from cryptography.hazmat.primitives.asymmetric import mlkem
+
+        ek = _raw(inner.get("ek"), MLKEM768_EK_BYTES, "ek")
+        try:
+            ss_pq, ct = mlkem.MLKEM768PublicKey.from_public_bytes(ek).encapsulate()
+        except ValueError as error:
+            raise E2EError("ek is not a usable ML-KEM-768 key") from error
+    info = rotation_info(kid=keys.kid, kid_new=kid_new, installation_id=installation_id, gateway_id=gateway_id,
+                         suite=suite, ek=ek, xpub=xpub, host_xpub=host_xpub, ct=ct)
+    secret = rotated_secret(ss_pq=ss_pq, ss_x=ss_x, old_secret=old_secret, info=info)
+    content = {"kid_new": kid_new, "suite": suite, "host_xpub": b64u(host_xpub)}
+    if ct:
+        content["ct"] = b64u(ct)
+    reply = {"kid": keys.kid, "kid_new": kid_new, "suite": suite,
+             "sealed": _seal_json(keys.push, content, rotate_reply_aad(
+                 kid=keys.kid, kid_new=kid_new, installation_id=installation_id, gateway_id=gateway_id, suite=suite))}
+    return Rotation(kid_new=kid_new, secret=secret, suite=suite, reply=reply)
+
+
+def start_rotation(keys: Keys, *, installation_id: str, gateway_id: str, suite: str,
+                   kid_new: str) -> tuple[dict[str, Any], Any]:
+    """Device-side mirror (Conduit does this on the phone); tests use it.
+    Returns the request and the private state finish_rotation needs."""
+    from cryptography.hazmat.primitives.asymmetric import x25519
+
+    x_priv = x25519.X25519PrivateKey.generate()
+    inner: dict[str, Any] = {"kid_new": kid_new, "suite": suite, "xpub": b64u(x_priv.public_key().public_bytes_raw())}
+    kem = None
+    if suite == SUITE_PQ:
+        from cryptography.hazmat.primitives.asymmetric import mlkem
+
+        kem = mlkem.MLKEM768PrivateKey.generate()
+        inner["ek"] = b64u(kem.public_key().public_bytes_raw())
+    request = {"kid": keys.kid, "suite": suite, "installation_id": installation_id, "gateway_id": gateway_id,
+               "sealed": _seal_json(keys.answer, inner, rotate_request_aad(
+                   kid=keys.kid, installation_id=installation_id, gateway_id=gateway_id, suite=suite))}
+    return request, (x_priv, kem, inner)
+
+
+def finish_rotation(reply: dict[str, Any], keys: Keys, old_secret: bytes, pending: Any, *,
+                    installation_id: str, gateway_id: str) -> bytes:
+    """Device-side mirror: the new secret from the host's reply."""
+    from cryptography.hazmat.primitives.asymmetric import x25519
+
+    x_priv, kem, inner = pending
+    suite, kid_new = inner["suite"], inner["kid_new"]
+    content = _open_json(keys.push, reply.get("sealed"), rotate_reply_aad(
+        kid=keys.kid, kid_new=kid_new, installation_id=installation_id, gateway_id=gateway_id, suite=suite))
+    if content.get("kid_new") != kid_new or content.get("suite") != suite:
+        raise E2EError("the rotation reply is for another request")
+    host_xpub = _raw(content.get("host_xpub"), X25519_BYTES, "host_xpub")
+    ss_x = x_priv.exchange(x25519.X25519PublicKey.from_public_bytes(host_xpub))
+    ek, ct, ss_pq = b"", b"", b""
+    if suite == SUITE_PQ:
+        ct = _raw(content.get("ct"), MLKEM768_CT_BYTES, "ct")
+        ek = unb64u(inner["ek"])
+        ss_pq = kem.decapsulate(ct)
+    info = rotation_info(kid=keys.kid, kid_new=kid_new, installation_id=installation_id, gateway_id=gateway_id,
+                         suite=suite, ek=ek, xpub=unb64u(inner["xpub"]), host_xpub=host_xpub, ct=ct)
+    return rotated_secret(ss_pq=ss_pq, ss_x=ss_x, old_secret=old_secret, info=info)

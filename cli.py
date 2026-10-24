@@ -147,14 +147,18 @@ def dispatch(args: argparse.Namespace) -> int:
         print(f"Redact content: {'on' if state.get('redact_content') else 'off'}")
         encryption = e2e_status(state)
         if encryption["enabled"]:
+            origin = {
+                "mlkem768+x25519": "quantum-safe, from an ML-KEM-768 + X25519 rotation",
+                "x25519": "from an X25519 rotation",
+            }.get(encryption["suite"], "handed over through the dashboard")
             print(f"End-to-end encryption: on (key {encryption['kid'][:8]}…, "
-                  f"since {_printable(encryption['created_at'] or 'an unknown date')})")
+                  f"since {_printable(encryption['created_at'] or 'an unknown date')}, {origin})")
             if encryption["previous_kid"]:
                 print(f"Previous key {encryption['previous_kid'][:8]}… still opens answers for up to 7 days.")
             if encryption["rotate_requested"]:
                 print("Key rotation: asked for; Conduit hands over a new key the next time it connects to this dashboard.")
             elif encryption["rotation_due"]:
-                print("Key rotation: due (the key is over 30 days old); Conduit hands over a new key the next time "
+                print("Key rotation: due (the key is over 7 days old); Conduit hands over a new key the next time "
                       "it connects to this dashboard.")
         elif not encryption["crypto"]:
             print("End-to-end encryption: off (this host is missing the cryptography package)")

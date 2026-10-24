@@ -6208,7 +6208,7 @@ _E2E_B64URL = re.compile(r"^[A-Za-z0-9_-]{43}\Z")  # 32 bytes, unpadded
 # Same as e2e.KEY_MAX_AGE_S and e2e.PREVIOUS_KEY_GRACE_S (tests/test_e2e.py
 # checks): the phone rotates a key this old, and the key a rotation replaced
 # opens answers this long.
-E2E_KEY_MAX_AGE_S = 30 * 24 * 3600
+E2E_KEY_MAX_AGE_S = 7 * 24 * 3600
 E2E_PREVIOUS_KEY_GRACE_S = 7 * 24 * 3600
 _E2E_TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 _e2e_limiter = _MintLimiter(E2E_LIMIT, E2E_WINDOW_S, message="Too many encryption key requests; try again shortly")
@@ -6358,7 +6358,10 @@ def e2e_status(path: Any = None) -> Dict[str, Any]:
         "paired": True,
         "installation_id": state.get("installation_id"),
         "gateway_id": state.get("gateway_id"),
-        "e2e": {"kid": kid, "created_at": record.get("created_at")} if usable else None,
+        "e2e": {"kid": kid, "created_at": record.get("created_at"), "suite": record.get("suite") or "handover"} if usable else None,
+        # Inline rotation (POST /e2e/rotate) and its key exchanges, best
+        # first; the phone picks the best one it can run.
+        "rotate_suites": _e2e_rotate_suites() if usable else [],
         "previous_kid": previous["kid"] if previous else None,
         "rotate": usable and (bool(state.get("rotate_requested_at")) or created is None
                               or now >= created + E2E_KEY_MAX_AGE_S),
@@ -6431,6 +6434,103 @@ def provision_e2e(body: Any, path: Any = None) -> Dict[str, Any]:
         state.pop("rotate_without_overlap", None)
         _save_pairing_state(path, state)
     return {"kid": kid}
+
+
+_e2e_module_lock = threading.Lock()
+_e2e_module_value: Any = None
+_e2e_suites_value: Optional[List[str]] = None
+
+
+def _e2e_module() -> Any:
+    """e2e.py beside this folder, loaded once: the rotation's key exchange."""
+    global _e2e_module_value
+    with _e2e_module_lock:
+        if _e2e_module_value is None:
+            path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "e2e.py")
+            spec = importlib.util.spec_from_file_location("conduit_push_dashboard_e2e", path)
+            if spec is None or spec.loader is None:
+                raise TokenError(501, "This plugin install is missing e2e.py; update the plugin")
+            module = importlib.util.module_from_spec(spec)
+            # dataclasses look the module up while the class is built.
+            sys.modules[spec.name] = module
+            spec.loader.exec_module(module)
+            _e2e_module_value = module
+        return _e2e_module_value
+
+
+def _e2e_rotate_suites() -> List[str]:
+    global _e2e_suites_value
+    if _e2e_suites_value is None:
+        try:
+            _e2e_suites_value = list(_e2e_module().rotate_suites())
+        except Exception:
+            _e2e_suites_value = []
+    return _e2e_suites_value
+
+
+def rotate_e2e(body: Any, path: Any = None) -> Dict[str, Any]:
+    """Inline rotation: the phone's request, sealed with the current key,
+    carries its half of a key exchange (X25519, and ML-KEM-768 on iOS 26+);
+    the new secret mixes the exchange with the old secret, so it never
+    crosses the dashboard connection. The old key stays as e2e_previous for
+    E2E_PREVIOUS_KEY_GRACE_S. A retry of a rotation that already happened
+    gets the same reply."""
+    if not isinstance(body, dict):
+        raise TokenError(400, "Expected a JSON object")
+    installation_id, gateway_id = body.get("installation_id"), body.get("gateway_id")
+    if not isinstance(installation_id, str) or not installation_id or not isinstance(gateway_id, str) or not gateway_id:
+        raise TokenError(400, "installation_id and gateway_id are required")
+    if body.get("suite") not in _e2e_rotate_suites():
+        raise TokenError(400, "This host can't run that rotation suite")
+    module = _e2e_module()
+    path = path if path is not None else _pairing_state_path()
+    with _e2e_lock, _pairing_state_lock(path):
+        state = _load_pairing_state(path)
+        if not state:
+            raise TokenError(409, "This Hermes profile isn't paired with Conduit")
+        if state.get("installation_id") != installation_id or state.get("gateway_id") != gateway_id:
+            raise TokenError(409, "This Hermes profile is paired with a different device")
+        current, previous = state.get("e2e"), state.get("e2e_previous")
+        if isinstance(previous, dict) and previous.get("kid") == body.get("kid") \
+                and isinstance(current, dict) and isinstance(previous.get("rotate_reply"), dict) \
+                and previous["rotate_reply"].get("kid_new") == current.get("kid"):
+            return {"rotation": previous["rotate_reply"]}  # the phone missed our answer
+        if not isinstance(current, dict):
+            raise TokenError(409, "This pairing has no key to rotate yet")
+        try:
+            keys = module.keys_from_state(state)
+            rotation = module.answer_rotation(body, keys, module.unb64u(str(current.get("secret") or "")),
+                                              installation_id=installation_id, gateway_id=gateway_id)
+        except module.E2EError as exc:
+            raise TokenError(409, f"The rotation request was refused: {exc}")
+        now = datetime.now(timezone.utc).strftime(_E2E_TIME_FORMAT)
+        if state.get("rotate_without_overlap"):
+            state.pop("e2e_previous", None)
+        else:
+            state["e2e_previous"] = {"kid": current["kid"], "secret": current["secret"], "retired_at": now,
+                                     "rotate_reply": rotation.reply}
+        state["e2e"] = {"kid": rotation.kid_new, "secret": module.b64u(rotation.secret), "created_at": now,
+                        "suite": rotation.suite}
+        state.pop("rotate_requested_at", None)
+        state.pop("rotate_without_overlap", None)
+        _save_pairing_state(path, state)
+    return {"rotation": rotation.reply}
+
+
+@router.post("/e2e/rotate")
+async def post_e2e_rotate(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        await _scoped_acquire(_e2e_limiter, profile)
+        body = await _read_json_body(request, E2E_MAX_BODY_BYTES)
+        return {"ok": True, **(await _run_scoped(profile, lambda: rotate_e2e(body)))}
+    except TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
+        raise
+    except Exception as exc:
+        raise _unexpected("rotation", exc, feature="Encrypted notifications")
 
 
 @router.get("/e2e")
@@ -14700,6 +14800,8 @@ ROUTE_CAPABILITIES = (
     "voice-chat-calls",
     "session-takeover",
     "e2e-notifications",
+    # POST /e2e/rotate: keys rotate inline through a key exchange.
+    "e2e-inline-rotation",
     "watch-tools",
     "watch-jobs",
     "watch-job-follow-ups",

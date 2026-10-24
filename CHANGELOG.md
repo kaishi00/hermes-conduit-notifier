@@ -13,6 +13,15 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.71.0 (2026-10-24)
+
+### Security
+- Encryption keys for notifications now rotate every 7 days through a key
+  exchange inside the encrypted channel, so new keys never travel over the
+  dashboard connection. On iOS 26 the exchange is quantum-safe (ML-KEM-768
+  with X25519): a recording of today's traffic can't open later
+  notifications, even with a future quantum computer.
+
 ## 0.70.0 (2026-10-24)
 
 ### New and improved

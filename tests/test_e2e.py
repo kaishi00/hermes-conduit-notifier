@@ -411,7 +411,7 @@ def test_status_reports_the_pairing_without_a_key(state_file):
     response = _http().get(f"{BASE}/e2e")
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
-    assert response.json() == {"ok": True, "paired": True, "installation_id": INSTALLATION, "gateway_id": GATEWAY, "e2e": None, "previous_kid": None, "rotate": False, "crypto": True, "relay_rejected": False, "relay_blocked": False}
+    assert response.json() == {"ok": True, "paired": True, "installation_id": INSTALLATION, "gateway_id": GATEWAY, "e2e": None, "previous_kid": None, "rotate": False, "rotate_suites": [], "crypto": True, "relay_rejected": False, "relay_blocked": False}
 
 
 def test_provisioning_stores_the_key_owner_only_and_never_returns_it(state_file):
@@ -424,7 +424,7 @@ def test_provisioning_stores_the_key_owner_only_and_never_returns_it(state_file)
     assert stored["credential"] == "c"
     assert oct(state_file.stat().st_mode & 0o777) == "0o600"
     status = _http().get(f"{BASE}/e2e").json()
-    assert status["e2e"] == {"kid": KID, "created_at": stored["e2e"]["created_at"]}
+    assert status["e2e"] == {"kid": KID, "created_at": stored["e2e"]["created_at"], "suite": "handover"}
     assert status["rotate"] is False and status["previous_kid"] is None
     assert e2e.b64u(SECRET) not in json.dumps(status)
 
@@ -490,6 +490,7 @@ def test_the_title_label_and_chat_title_ride_inside_the_envelope():
 
 NEW_KID = "fedcba9876543210fedcba9876543210"
 NEW_SECRET = bytes(range(32, 64))
+ROTATION_VECTOR = "3e1d41576dbc23aae71465d40df6185ddc2dedef720e3f6da49a767b2f89b1fd"
 
 
 def _new_keys():
@@ -621,3 +622,109 @@ def test_the_same_key_id_with_another_secret_is_refused(state_file):
     assert http.post(f"{BASE}/e2e", json=_body(secret=e2e.b64u(NEW_SECRET))).status_code == 409
     stored = json.loads(state_file.read_text())
     assert stored["e2e"]["secret"] == e2e.b64u(SECRET) and "e2e_previous" not in stored
+
+
+# --- Inline rotation -------------------------------------------------------------
+
+
+def _rotate(http, suite, keys=None, kid_new=NEW_KID):
+    keys = keys or _keys()
+    request, pending = e2e.start_rotation(keys, installation_id=INSTALLATION, gateway_id=GATEWAY, suite=suite,
+                                          kid_new=kid_new)
+    return request, pending, http.post(f"{BASE}/e2e/rotate", json=request)
+
+
+@pytest.mark.parametrize("suite", [e2e.SUITE_PQ, e2e.SUITE_CLASSICAL])
+def test_an_inline_rotation_derives_the_same_secret_on_both_sides(state_file, suite):
+    http = _http()
+    http.post(f"{BASE}/e2e", json=_body())
+    assert suite in http.get(f"{BASE}/e2e").json()["rotate_suites"]
+    request, pending, response = _rotate(http, suite)
+    assert response.status_code == 200, response.text
+    reply = response.json()["rotation"]
+    secret = e2e.finish_rotation(reply, _keys(), SECRET, pending, installation_id=INSTALLATION, gateway_id=GATEWAY)
+    stored = json.loads(state_file.read_text())
+    assert stored["e2e"]["kid"] == NEW_KID and stored["e2e"]["suite"] == suite
+    assert e2e.unb64u(stored["e2e"]["secret"]) == secret
+    assert stored["e2e_previous"]["kid"] == KID
+    # The new secret never crossed the wire.
+    assert stored["e2e"]["secret"] not in json.dumps(request) + response.text
+    status = http.get(f"{BASE}/e2e").json()
+    assert status["e2e"]["suite"] == suite and status["previous_kid"] == KID and status["rotate"] is False
+    # Pushes use the new key; answers sealed with the old one still open.
+    assert client.build_outgoing(_clarify_event(), stored)["e2e"]["kid"] == NEW_KID
+    old = {"status": "answered", "answer": _answer("Yes")}
+    assert client.opened_answers(old, stored, "conduit-push-abc123def456")["answer"] == "Yes"
+
+
+def test_a_retried_rotation_gets_the_same_reply(state_file):
+    http = _http()
+    http.post(f"{BASE}/e2e", json=_body())
+    request, pending, first = _rotate(http, e2e.SUITE_CLASSICAL)
+    again = http.post(f"{BASE}/e2e/rotate", json=request)
+    assert again.status_code == 200 and again.json() == first.json()
+    secret = e2e.finish_rotation(again.json()["rotation"], _keys(), SECRET, pending,
+                                 installation_id=INSTALLATION, gateway_id=GATEWAY)
+    assert e2e.unb64u(json.loads(state_file.read_text())["e2e"]["secret"]) == secret
+
+
+@pytest.mark.parametrize("change", ["other_key", "other_pairing", "tampered", "same_kid", "unknown_suite"])
+def test_rotation_requests_not_sealed_by_the_paired_phone_are_refused(state_file, change):
+    http = _http()
+    http.post(f"{BASE}/e2e", json=_body())
+    keys = e2e.derive_keys(KID, NEW_SECRET) if change == "other_key" else _keys()
+    request, _ = e2e.start_rotation(keys, installation_id=INSTALLATION, gateway_id=GATEWAY,
+                                    suite=e2e.SUITE_CLASSICAL, kid_new=KID if change == "same_kid" else NEW_KID)
+    if change == "other_pairing":
+        request["gateway_id"] = "gw-2"
+    if change == "tampered":
+        request["sealed"]["ct"] = request["sealed"]["ct"][:-2] + ("AA" if not request["sealed"]["ct"].endswith("AA") else "BB")
+    if change == "unknown_suite":
+        request["suite"] = "rsa"
+    response = http.post(f"{BASE}/e2e/rotate", json=request)
+    assert response.status_code in (400, 409)
+    stored = json.loads(state_file.read_text())
+    assert stored["e2e"]["kid"] == KID and "e2e_previous" not in stored
+
+
+def test_a_suite_downgrade_in_transit_is_refused(state_file):
+    http = _http()
+    http.post(f"{BASE}/e2e", json=_body())
+    request, _ = e2e.start_rotation(_keys(), installation_id=INSTALLATION, gateway_id=GATEWAY,
+                                    suite=e2e.SUITE_PQ, kid_new=NEW_KID)
+    request["suite"] = e2e.SUITE_CLASSICAL
+    assert http.post(f"{BASE}/e2e/rotate", json=request).status_code == 409
+
+
+def test_rotation_needs_a_key(state_file):
+    request, _ = e2e.start_rotation(_keys(), installation_id=INSTALLATION, gateway_id=GATEWAY,
+                                    suite=e2e.SUITE_CLASSICAL, kid_new=NEW_KID)
+    assert _http().post(f"{BASE}/e2e/rotate", json=request).status_code == 409
+
+
+def test_an_inline_rotation_after_a_host_request_skips_the_overlap_when_asked(state_file, client_state):
+    http = _http()
+    http.post(f"{BASE}/e2e", json=_body())
+    assert client.request_key_rotation(without_overlap=True) is True
+    assert http.get(f"{BASE}/e2e").json()["rotate"] is True
+    _, _, response = _rotate(http, e2e.SUITE_CLASSICAL)
+    assert response.status_code == 200
+    stored = json.loads(state_file.read_text())
+    assert "e2e_previous" not in stored and "rotate_requested_at" not in stored
+    assert http.get(f"{BASE}/e2e").json()["rotate"] is False
+
+
+def test_the_rotation_request_fits_the_route(state_file):
+    request, _ = e2e.start_rotation(_keys(), installation_id=INSTALLATION, gateway_id=GATEWAY,
+                                    suite=e2e.SUITE_PQ, kid_new=NEW_KID)
+    assert len(json.dumps(request).encode()) < api.E2E_MAX_BODY_BYTES
+
+
+def test_rotation_derivation_vector():
+    # Shared with ConduitTests/NotificationE2ETests.swift: the phone derives
+    # the same secret from the same exchange.
+    info = e2e.rotation_info(kid=KID, kid_new=NEW_KID, installation_id=INSTALLATION, gateway_id=GATEWAY,
+                             suite=e2e.SUITE_PQ, ek=bytes(range(16)), xpub=bytes(32), host_xpub=bytes([1]) * 32,
+                             ct=bytes(range(8)))
+    secret = e2e.rotated_secret(ss_pq=bytes([2]) * 32, ss_x=bytes([3]) * 32, old_secret=SECRET, info=info)
+    assert secret.hex() == ROTATION_VECTOR
