@@ -496,3 +496,33 @@ def test_a_live_activity_whose_turn_end_never_comes_ends_done_after_the_grace(pu
     work()
     reporter.flush()
     assert _ends(posts) == ["done"]
+
+
+def test_a_live_activity_of_a_turn_without_its_id_ends_done_after_the_grace(pushed, lock_screen, monkeypatch):
+    reporter, posts = lock_screen
+    monkeypatch.setattr(plugin, "_unnamed_ends", {})
+    later = []
+    monkeypatch.setattr(plugin, "_later", lambda delay, work: later.append((delay, work)))
+    plugin._post_llm_call(session_id="s", assistant_response="Done.")
+    assert _types(pushed) == ["response.ready"], "without an id the reply can't wait"
+    reporter.flush()
+    assert _ends(posts) == []
+    [(delay, work)] = later
+    assert delay == plugin.READY_GRACE_S
+    work()
+    reporter.flush()
+    assert _ends(posts) == ["done"]
+
+
+def test_a_turn_without_its_id_keeps_the_end_on_session_end_reports(pushed, lock_screen, monkeypatch):
+    reporter, posts = lock_screen
+    monkeypatch.setattr(plugin, "_unnamed_ends", {})
+    later = []
+    monkeypatch.setattr(plugin, "_later", lambda delay, work: later.append(work))
+    plugin._post_llm_call(session_id="s", assistant_response="The provider returned an error.")
+    plugin._on_session_end(session_id="s", completed=False, failed=True, interrupted=False)
+    [work] = later
+    work()  # a timer already past cancel() ends nothing
+    reporter.flush()
+    assert _ends(posts) == ["failed"]
+    assert plugin._unnamed_ends == {}
