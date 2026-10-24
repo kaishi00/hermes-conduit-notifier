@@ -1,5 +1,6 @@
 """Ratings that change what Pulse does (pulse_learning)."""
 
+import json
 import sqlite3
 import time
 
@@ -874,6 +875,24 @@ def test_a_held_card_check_follows_its_chat_into_the_continuation(live):
     said = llm_saying(stale=True, why="it went live")
     run_held(live, said, time.time())
     assert "Approval came through" in said.calls[0] and live.store.done_marks([card_id])
+
+
+def test_a_held_card_check_reads_the_scheduled_jobs(live):
+    item_id = promise(live)
+    card_id = learning.add_card(live.store, kind="followup", item=live.store.item(item_id), level_name="brief",
+                                news="Remember to check the backup tonight.", why="", chat_title="Deploy",
+                                now=time.time() - 3600)
+    (live.home / "cron").mkdir(exist_ok=True)
+    (live.home / "cron" / "jobs.json").write_text(json.dumps(
+        [{"id": "b", "name": "Backup check", "schedule_display": "every day at 22:00", "prompt": "Check the backup"}]))
+    said = llm_saying(stale=True, why="a job checks it")
+    run_held(live, said, time.time())
+    assert "Backup check" in said.calls[0] and live.store.done_marks([card_id])
+
+
+def test_a_held_check_with_nothing_held_writes_nothing(live):
+    run_held(live, llm_saying(stale=True, why=""), time.time())
+    assert live.store.get(followup.HELD_CHECKED) in (None, {})
 
 
 def test_a_failed_held_check_tries_again_next_run(live):
