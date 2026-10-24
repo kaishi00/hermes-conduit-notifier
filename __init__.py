@@ -278,15 +278,26 @@ def _hold_unnamed_end(session_id: str) -> None:
             del _unnamed_ends[session_id]
         _quietly(live_activity.reporter.turn_ended, session_id, "done")
 
+    # Registered before its timer starts, so a drop in between isn't lost.
+    with _pending_lock:
+        earlier = _unnamed_ends.pop(session_id, None)
+        _unnamed_ends[session_id] = (token, None)
+        overflow = []
+        while len(_unnamed_ends) > MAX_TURN_STARTS:
+            oldest = next(iter(_unnamed_ends))
+            overflow.append((oldest, _unnamed_ends.pop(oldest)))
+    if earlier is not None:
+        _cancel(earlier[1])
     timer = _later(READY_GRACE_S, missed)
     with _pending_lock:
-        earlier = [_unnamed_ends.pop(session_id, None)]
-        _unnamed_ends[session_id] = (token, timer)
-        while len(_unnamed_ends) > MAX_TURN_STARTS:
-            earlier.append(_unnamed_ends.pop(next(iter(_unnamed_ends))))
-    for pending in earlier:
-        if pending is not None:
-            _cancel(pending[1])
+        if _unnamed_ends.get(session_id, (None, None))[0] is token:
+            _unnamed_ends[session_id] = (token, timer)
+            timer = None
+    _cancel(timer)  # dropped meanwhile
+    # Far more chats than ever end at once: the oldest end now.
+    for old_session, (_, old_timer) in overflow:
+        _cancel(old_timer)
+        _quietly(live_activity.reporter.turn_ended, old_session, "done")
 
 
 def _drop_unnamed_end(session_id: str) -> None:
