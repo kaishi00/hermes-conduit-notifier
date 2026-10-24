@@ -439,7 +439,8 @@ Return a JSON object {"stale": ..., "why": ...}:
 - "why": one short sentence saying what in the material led to that."""
 
 
-def held_material(pulse_store: store.PulseStore, home: Path, card: dict, *, zone: tzinfo, now: float) -> str:
+def held_material(pulse_store: store.PulseStore, home: Path, card: dict, *, zone: tzinfo, now: float,
+                  phone: str | None = None) -> str:
     """What a held card's check reads: its news and what happened since it was held."""
     where = home_for(home, card["profile"])
     if where is None:
@@ -474,7 +475,8 @@ def held_material(pulse_store: store.PulseStore, home: Path, card: dict, *, zone
                                        exclude=(card["chat_id"], report.their_home_chat(where)), zone=zone)
     except hermes.HermesUnreadable:
         later = ""
-    phone, _ = report.phone_context(home, now)
+    if phone is None:
+        phone, _ = report.phone_context(home, now)
     parts += [section for section in (later, evidence.background(where, zone), report.cron_jobs(where), phone)
               if section]
     return "\n\n".join(parts)
@@ -497,6 +499,7 @@ def check_held(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzi
              and now - checked.get(str(card["id"]), 0.0) >= HELD_EVERY_S]
     if not cards and not checked:
         return
+    phone = report.phone_context(home, now)[0] if cards else ""  # the same for every card
     for card in cards:
         if not still_leader() or done.get("tokens", 0) >= budget or \
                 done.get("checks", 0) + done.get("failed", 0) >= MAX_CHECKS:
@@ -504,7 +507,7 @@ def check_held(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzi
         checked[str(card["id"])] = now
         text = ""
         try:
-            text = held_material(pulse_store, home, card, zone=zone, now=now)
+            text = held_material(pulse_store, home, card, zone=zone, now=now, phone=phone)
             mark = secrets.token_hex(4)
             while mark in text:
                 mark = secrets.token_hex(4)
