@@ -193,7 +193,9 @@ def processes(home: Path) -> list[dict]:
 
 def background(home: Path, zone: tzinfo) -> str:
     """The "running in the background" section: each process's command, when
-    it started and the chat that started it; "" when nothing runs."""
+    it started and the chat that started it; "" when nothing runs. The text
+    goes to the model and into the report turn; Hermes redacts secrets from
+    each command before it writes the checkpoint."""
     running = processes(home)
     if not running:
         return ""
