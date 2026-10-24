@@ -327,7 +327,11 @@ def follow_approval(session_key: str, command: str) -> None:
     Only the request the call read out: the one whose command it is."""
     if not session_key:
         return
-    home = get_hermes_home()
+    try:
+        home = get_hermes_home()
+    except Exception:  # noqa: BLE001
+        logger.warning("Conduit could not follow an approval for a call", exc_info=True)
+        return
 
     def follow() -> None:
         store = _store(home)
@@ -359,8 +363,12 @@ def follow_approval(session_key: str, command: str) -> None:
     if _stopped.is_set():
         return
     # A thread of its own, not _spawn: it waits as long as the approval does.
-    threading.Thread(target=contextvars.copy_context().run, args=(follow,), name="conduit-call-approval",
-                     daemon=True).start()
+    try:
+        threading.Thread(target=contextvars.copy_context().run, args=(follow,), name="conduit-call-approval",
+                         daemon=True).start()
+    except RuntimeError:
+        # A hook never raises: the user answers on the card instead.
+        logger.warning("Conduit could not follow an approval for a call", exc_info=True)
 
 
 def _resolve_approval(session_key: str, command: str, answer: dict[str, Any]) -> int:
