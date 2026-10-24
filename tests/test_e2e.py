@@ -672,3 +672,19 @@ def test_status_still_answers_when_pruning_cannot_write(state_file, monkeypatch)
     monkeypatch.setattr(api, "_save_pairing_state", read_only)
     response = _http().get(f"{BASE}/e2e")
     assert response.status_code == 200 and response.json()["previous_kid"] is None
+
+
+def test_a_pairing_that_never_rotates_keeps_working(state_file):
+    """A key from before 0.71 (no created_at), with a phone that never
+    rotates it: pushes stay sealed with it and its answers open, however
+    long it's kept. Rotation is only ever asked for, never forced."""
+    state = json.loads(state_file.read_text())
+    state["e2e"] = {"kid": KID, "secret": e2e.b64u(SECRET)}
+    state_file.write_text(json.dumps(state))
+    status = _http().get(f"{BASE}/e2e").json()
+    assert status["e2e"]["kid"] == KID and status["rotate"] is True
+    stored = json.loads(state_file.read_text())
+    assert stored["e2e"] == {"kid": KID, "secret": e2e.b64u(SECRET)}
+    assert client.build_outgoing(_clarify_event(), stored)["e2e"]["kid"] == KID
+    answered = {"status": "answered", "answer": _answer("Yes")}
+    assert client.opened_answers(answered, stored, "conduit-push-abc123def456")["answer"] == "Yes"
