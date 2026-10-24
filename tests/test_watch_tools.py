@@ -1,3 +1,4 @@
+import contextlib
 """Watch tool grants: wrist-down lookups for a Conduit Watch call through the relay."""
 
 import base64
@@ -744,3 +745,32 @@ def test_chats_are_granted_only_where_hermes_can_search_sessions(tmp_path):
 
 def test_capabilities_name_watch_chats():
     assert "watch-chats" in api.ROUTE_CAPABILITIES
+
+
+# --- Answering a call from Hermes ------------------------------------------------
+
+def test_answer_call_answers_only_the_chat_its_grant_names(tmp_path, monkeypatch):
+    monkeypatch.setattr(api, "_calls_home", lambda: tmp_path)
+    monkeypatch.setattr(api, "_profile_scope", lambda profile: contextlib.nullcontext())
+    store = api._calls_store().CallStore(tmp_path)
+    store.update_settings({"enabled": True, "alerts": True})
+    batch = [{"qid": "q0", "question": "Which environment?", "choices": ["staging (Recommended)", "prod"],
+              "multi_select": False}]
+    store.note_waiting(["rt-1", "st-1"], "question", request_id="conduit-push-a", questions=batch)
+    store.note_waiting("other", "question", request_id="conduit-push-b", questions=batch)
+
+    with pytest.raises(api.TokenError) as err:
+        api.open_watch_grant({"tools": ["answer_call"]}, profile=None, path=write_pairing(tmp_path),
+                             relay=FakeRelay(), start=lambda g: None)
+    assert err.value.status == 400
+    opened = api.open_watch_grant({"tools": ["web_search", "answer_call"], "answer_sessions": ["st-1", "rt-1"]},
+                                  profile=None, path=write_pairing(tmp_path), relay=FakeRelay(),
+                                  start=lambda g: None)
+    assert opened["tools"] == ["web_search", "answer_call"]
+    grant = api._watch_grants.all()[0]
+    answer = api.run_watch_tool(grant, {"tool": "answer_call",
+                                        "args": {"answer": "the recommended one", "session_id": "other"}})
+    assert answer == {"ok": True, "status": "answered", "question": 1, "answer": "staging"}
+    assert store.take_answers("conduit-push-a") == {"q0": "staging (Recommended)"}
+    assert store.take_answers("conduit-push-b") is None, "never another chat's question"
+    assert api.run_watch_tool(grant, {"tool": "answer_call", "args": {"answer": "1"}})["status"] == "not_waiting"

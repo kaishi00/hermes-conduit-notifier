@@ -162,6 +162,10 @@ def middleware(is_child_session: Callable[[str], bool] | None = None, **kwargs: 
     # the user (#449); any answer, from anywhere, stops it.
     # A batch says how many wait, so a reason clipped to its length keeps it.
     reason = question if len(batch) == 1 else f"{len(batch)} questions, first: {question}"
+    # The whole batch, for a call answered with no chat open (the Watch) to
+    # read out and answer; the answers come back through
+    # ``calls.taken_answers``.
+    calls.note_waiting(session_id, "question", request_id=request_id, questions=batch)
     calls.alert(session_id, "question", reason, profile=profile)
     try:
         return _first_answer_wins(
@@ -250,6 +254,12 @@ def _first_answer_wins(
             # that leaves the decision parked.
             status = {"status": "__error__"}
         state = str(status.get("status") or "")
+        call_answers = calls.taken_answers(request_id)
+        if call_answers is not None:
+            # Answered on a call from Hermes, with no chat open (the Watch):
+            # the parked decision is released like after a native answer.
+            _release_decision(request_id, relay_won)
+            return _call_answer_result(batch, batch_protocol, call_answers)
         if state == "answered":
             if batch_protocol and "answers" in status:
                 # Complete batch: the relay only reports answered once every
@@ -309,7 +319,7 @@ def _first_answer_wins(
             if consecutive_unproductive >= UNKNOWN_POLL_GRACE:
                 break
         unanswered_polls += 1
-        time.sleep(_poll_delay(unanswered_polls))
+        _sleep_until_call_answers(request_id, _poll_delay(unanswered_polls))
 
     # Poll budget exhausted (unlimited clarify timeout): fall back to whatever
     # the original path produces, waiting for it if necessary. The parked
@@ -322,6 +332,32 @@ def _first_answer_wins(
     if "original_error" in outcome:
         raise outcome["original_error"]
     return outcome["original"]
+
+
+# How often a parked question looks for a call's answers between relay polls.
+CALL_ANSWER_POLL_SECONDS = 1.0
+
+
+def _sleep_until_call_answers(request_id: str, seconds: float) -> None:
+    """Sleeps ``seconds``, waking early once a call has answered the batch,
+    so the answer doesn't wait out the relay's poll backoff."""
+    remaining = seconds
+    while remaining > 0:
+        step = min(CALL_ANSWER_POLL_SECONDS, remaining)
+        time.sleep(step)
+        remaining -= step
+        if remaining > 0 and calls.has_call_answers(request_id):
+            return
+
+
+def _call_answer_result(batch: list[dict[str, Any]], batch_protocol: bool, answers: dict[str, str]) -> str:
+    """The tool result for answers given on a call: the same shapes as a
+    device's answers through the relay."""
+    if batch_protocol:
+        return _format_batch_result(batch, answers)
+    entry = batch[0]
+    return _format_result(question=entry["question"], offered=list(entry["choices"]),
+                          answer=str(answers.get(entry["qid"]) or ""), multi_select=entry["multi_select"])
 
 
 def _release_decision(request_id: str, relay_won: bool) -> None:

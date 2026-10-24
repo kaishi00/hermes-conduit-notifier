@@ -265,3 +265,34 @@ def test_a_malformed_outcome_is_refused(paired, body):
     response = _http().post(f"{BASE}/calls/outcomes", json=body)
     assert response.status_code == 400
     assert response.headers["cache-control"] == "no-store"
+
+
+# --- What Hermes waits on ------------------------------------------------------
+
+def test_a_call_reads_and_answers_what_hermes_waits_on(paired):
+    home = paired
+    http = _http()
+    assert http.put(f"{BASE}/calls", json={"settings": {"enabled": True, "alerts": True}}).status_code == 200
+    store = api._calls_store().CallStore(home)
+    store.note_waiting(["rt-1", "st-1"], "question", request_id="conduit-push-a", questions=[
+        {"qid": "q0", "question": "Which environment?", "choices": ["staging (Recommended)", "prod"],
+         "multi_select": False}])
+    response = http.get(f"{BASE}/calls/waiting", params={"session_id": "st-1"})
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json()["waiting"]["questions"][0]["choices"] == ["staging (Recommended)", "prod"]
+    response = http.post(f"{BASE}/calls/waiting/answer", json={"session_id": "rt-1", "answer": "number two"})
+    assert response.json() == {"ok": True, "status": "answered", "question": 1, "answer": "prod"}
+    assert store.take_answers("conduit-push-a") == {"q0": "prod"}
+    assert http.get(f"{BASE}/calls/waiting", params={"session_id": "st-1"}).json() == {"ok": True, "waiting": None}
+    assert http.post(f"{BASE}/calls/waiting/answer", json={"session_id": "rt-1", "answer": "1"}).json()["status"] == "not_waiting"
+
+
+@pytest.mark.parametrize("body", [{"answer": "1"}, {"session_id": "rt-1"}, []])
+def test_a_malformed_call_answer_is_refused(paired, body):
+    http = _http()
+    assert http.put(f"{BASE}/calls", json={"settings": {"enabled": True, "alerts": True}}).status_code == 200
+    api._calls_store().CallStore(paired).note_waiting("rt-1", "question", request_id="conduit-push-a", questions=[
+        {"qid": "q0", "question": "Which?", "choices": ["a", "b"], "multi_select": False}])
+    response = http.post(f"{BASE}/calls/waiting/answer", json=body)
+    assert response.status_code == 400

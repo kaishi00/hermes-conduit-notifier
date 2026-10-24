@@ -785,7 +785,7 @@ def test_user_agent_derives_from_the_plugin_version():
     # One source of truth: bumping PLUGIN_VERSION updates the relay UA
     # automatically instead of leaving a stale hand-written constant.
     assert loop.client.USER_AGENT == f"Hermes-Conduit-Notifier/{loop.client.PLUGIN_VERSION}"
-    assert loop.client.PLUGIN_VERSION == "0.69.1"
+    assert loop.client.PLUGIN_VERSION == "0.70.0"
 
 
 def test_send_now_redacts_only_when_the_profile_opts_in(monkeypatch, tmp_path):
@@ -1038,3 +1038,31 @@ def test_a_legacy_scalar_answer_maps_a_cut_label_back_too():
     finally:
         release.set()
     assert json.loads(result)["user_response"] == LONG_CHOICE
+
+
+def test_a_call_answer_wins_and_formats_like_a_device_answer(monkeypatch):
+    # Answered on a call from Hermes with no chat open (the Watch): the
+    # batch's answers come from the calls store, and the parked decision is
+    # released as after a native answer.
+    fake = _FakeState([{"status": "pending"}] * 5)
+    _install(fake)
+    noted = []
+    taken = iter([None, {"q0": "staging", "q1": json.dumps(["unit", "ui"])}])
+    monkeypatch.setattr(loop.calls, "note_waiting", lambda *args, **kwargs: noted.append((args, kwargs)) or True)
+    monkeypatch.setattr(loop.calls, "taken_answers", lambda request_id: next(taken, None))
+    monkeypatch.setattr(loop.calls, "has_call_answers", lambda request_id: True)
+    original, release = _blocking_original("never used")
+    try:
+        result = loop.middleware(**_kwargs(original, _batch_args()))
+    finally:
+        release.set()
+    parsed = json.loads(result)
+    assert [row["user_response"] for row in parsed["responses"]] == ["staging", ["unit", "ui"]]
+    request_id = fake.enqueued[0]["decision"]["request_id"]
+    (args, kwargs), = noted
+    assert args == ("sess-1", "question") and kwargs["request_id"] == request_id
+    assert [entry["question"] for entry in kwargs["questions"]] == ["Which environment?", "Which tests should run?"]
+    deadline = time.monotonic() + 2
+    while request_id not in fake.cancelled_ids and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert fake.cancelled_ids == [request_id]

@@ -271,13 +271,113 @@ def alert(session_id: str, kind: str, reason: str, *, profile: str, turn_session
 
 
 def cancel_alerts(session_id: str, kind: str | None = None) -> None:
-    """The user answered: no call for it. Never raises."""
+    """The user answered: no call for it, and nothing left for a call to
+    answer. Never raises."""
     if not session_id:
         return
     try:
-        _store(get_hermes_home()).cancel_alerts(session_id, kind)
+        store = _store(get_hermes_home())
+        store.cancel_alerts(session_id, kind)
+        store.forget_waiting(session_id, kind)
     except Exception:  # noqa: BLE001
         logger.warning("Conduit could not cancel an alert call", exc_info=True)
+
+
+def note_waiting(session_id: str, kind: str, *, turn_session_id: str = "", **detail: Any) -> bool:
+    """Keeps what Hermes waits on (``CallStore.note_waiting``) for a call
+    to read and answer. Never raises: a hook calls this."""
+    ids = list(dict.fromkeys(value for value in (session_id, turn_session_id) if value))
+    if not ids:
+        return False
+    try:
+        return _store(get_hermes_home()).note_waiting(ids, kind, **detail)
+    except Exception:  # noqa: BLE001
+        logger.warning("Conduit could not keep what Hermes waits on for a call", exc_info=True)
+        return False
+
+
+def taken_answers(request_id: str) -> dict[str, str] | None:
+    """A question batch answered in full from a call, taken. Never raises."""
+    try:
+        return _store(get_hermes_home()).take_answers(request_id)
+    except Exception:  # noqa: BLE001
+        logger.warning("Conduit could not read a call's answers", exc_info=True)
+        return None
+
+
+def has_call_answers(request_id: str) -> bool:
+    """Whether a call has answered every question of ``request_id``,
+    without taking them. Never raises."""
+    try:
+        return _store(get_hermes_home()).answers_ready(request_id)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+# How often an approval waiting on the user looks for an answer from a call,
+# and for how long at most (Hermes' own approval timeout ends it sooner).
+APPROVAL_ANSWER_POLL_S = 1.0
+APPROVAL_ANSWER_MAX_S = 2 * 3600.0
+
+
+def follow_approval(session_key: str, command: str) -> None:
+    """An approval waits on the user in ``session_key`` and a call may
+    answer it (``note_waiting`` kept it): until it's answered or gone,
+    passes a call's answer to Hermes as its own /approve or /deny would.
+    Only the request the call read out: the one whose command it is."""
+    if not session_key:
+        return
+    home = get_hermes_home()
+
+    def follow() -> None:
+        store = _store(home)
+        deadline = time.monotonic() + APPROVAL_ANSWER_MAX_S
+        # Its own wait, not _sleep: the plugin's unload ends it at once.
+        while time.monotonic() < deadline and not _stopped.wait(APPROVAL_ANSWER_POLL_S):
+            try:
+                if not store.has_waiting(session_key, "approval"):
+                    return
+                answer = store.take_approval(session_key)
+            except Exception:  # noqa: BLE001
+                logger.warning("Conduit could not read a call's approval answer", exc_info=True)
+                return
+            if answer is None:
+                continue
+            resolved = _resolve_approval(session_key, command, answer)
+            logger.info("Conduit passed a call's approval answer (%s): %s resolved", answer["choice"], resolved)
+            return
+
+    if _stopped.is_set():
+        return
+    # A thread of its own, not _spawn: it waits as long as the approval does.
+    threading.Thread(target=contextvars.copy_context().run, args=(follow,), name="conduit-call-approval",
+                     daemon=True).start()
+
+
+def _resolve_approval(session_key: str, command: str, answer: dict[str, Any]) -> int:
+    """Answers the pending approval whose command is ``command``, by its
+    request id: never another one queued in the same session."""
+    import hashlib
+
+    from tools.approval import list_gateway_approvals, resolve_gateway_approval
+
+    wanted = answer.get("command_sha") or hashlib.sha256(command.encode("utf-8")).hexdigest()
+    pending = list_gateway_approvals(session_key)
+    matches = [entry for entry in pending
+               if hashlib.sha256(str(entry.get("command") or "").encode("utf-8")).hexdigest() == wanted]
+    if not matches:
+        return 0
+    request_id = str(matches[0].get("request_id") or "")
+    if not request_id and len(pending) != 1:
+        # A Hermes without request ids answers its oldest: only safe alone.
+        return 0
+    kwargs: dict[str, Any] = {"request_id": request_id} if request_id else {}
+    reason = answer.get("reason") or None
+    try:
+        return resolve_gateway_approval(session_key, answer["choice"], reason=reason, **kwargs)
+    except TypeError:
+        # A Hermes before /deny reasons.
+        return resolve_gateway_approval(session_key, answer["choice"], **kwargs)
 
 
 def failed_turn(session_id: str, *, profile: str, fallback: dict[str, Any] | None, turn_id: Any = None) -> bool:

@@ -4,7 +4,7 @@ Hermes Conduit Notifier is the open-source Hermes plugin that connects a Hermes 
 
 - **Notifications and calls**: approval, input, reply, failure and background-task notifications, Hermes calling you (CallKit on the phone and Watch), and Lock Screen progress while a turn runs, all delivered through the Conduit push relay in [`relay/`](relay/), end-to-end encrypted where APNs allows.
 - **Live voice**: single-use Gemini Live tokens, GPT-Live sessions on the host's ChatGPT subscription or API key, Grok Live relayed with the host's xAI sign-in, Local Live and Classic voice through your own speech server, voice web lookups, memory and personality for voice, and saved call transcripts.
-- **Apple Watch**: short-lived grants that let a Watch call run lookups and Hermes jobs, and stream GPT-Live, Grok and Local Live audio, through the relay, sealed end to end.
+- **Apple Watch**: short-lived grants that let a Watch call run lookups and Hermes jobs, answer what Hermes waits on in a call from Hermes, and stream GPT-Live, Grok and Local Live audio, through the relay, sealed end to end.
 - **Phone data the user opts into**: Apple Health, location, maps, calendar, reminders, Focus, phone status, contacts and alarms, sent by the phone straight to this host and sealed end to end, with the `conduit_health`, `conduit_location`, `conduit_maps`, `conduit_calendar`, `conduit_phone` and `conduit_contacts` tools for the agent.
 - **Conduit extras**: rich cards and on-screen cards during calls, Artifacts, group pictures, chat takeover, cron notification settings, Conduit settings the agent can change, and one-tap pairing and updates from the app.
 
@@ -1474,7 +1474,22 @@ and the dashboard routes under one file lock, so they survive restarts:
 | DELETE | `/api/plugins/conduit_push/calls/watches/{id}?profile=` | | `{ok, removed}` |
 | PUT | `/api/plugins/conduit_push/calls/presence?profile=` (0.14+) | `{hold_s}` (0 releases) | `{ok, status: "present"}` or `{ok, status: "away"}` |
 | POST | `/api/plugins/conduit_push/calls/outcomes?profile=` (0.15+) | `{call_id, session_ids: [...], outcome: "declined" or "missed", kind?, title?, reason?, age_s?}` | `{ok, status: "recorded"}` |
+| GET | `/api/plugins/conduit_push/calls/waiting?session_id=&profile=` (0.70+) | | `{ok, waiting}`: null, `{kind: "question", questions: [{number, question, choices, multi_select, answered}]}` or `{kind: "approval", description, command, command_cut, answered}` |
+| POST | `/api/plugins/conduit_push/calls/waiting/answer?profile=` (0.70+) | `{session_id, answer?, question?, choice?, reason?}` | `{ok, status: "answered", ...}`, `{ok, status: "not_waiting"}` or `{ok, status: "refused", message}` |
 
+- With alert calls on, what Hermes waits on is kept too (0.70+): a question
+  batch's choices, or an approval's description and command (up to 600
+  characters). A call answered with no chat open, the Apple Watch's, reads it
+  from `/calls/waiting` and sends the user's spoken answer to
+  `/calls/waiting/answer` (or `answer_call` on its Watch grant). A question
+  takes `answer`, a choice's number or label, "the recommended one", or the
+  user's own words, for `question` (its number in the batch; the first
+  unanswered by default), and answers the next one with `next`. The clarify
+  loop takes the batch once every question has an answer. An approval takes
+  `choice` (`once` or `deny`, with `reason` for a deny): the agent's process
+  resolves the request with that command, never another one queued beside
+  it, and a command too long to read out whole can only be denied. Gone once
+  answered anywhere, and after 2 hours.
 - A watch names up to 4 session ids (the job's runtime and stored ids) and a
   title of up to 120 characters. It fires once, on the first turn end of any
   of them: `done` (the turn finished), `failed`, or `stopped` (interrupted).

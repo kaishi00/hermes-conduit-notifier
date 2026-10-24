@@ -6976,6 +6976,32 @@ def record_call_outcome(body: Any) -> Dict[str, Any]:
         raise TokenError(400, str(exc))
 
 
+def call_waiting(session_id: Any) -> Dict[str, Any]:
+    """What Hermes waits on in a chat a call is about (a question batch's
+    choices, an approval's command and description), for a call answered
+    with no chat open: the Apple Watch's. Kept only while alert calls are
+    on (calls_store.note_waiting); ``waiting`` is null otherwise."""
+    if not isinstance(session_id, str) or not session_id.strip():
+        raise TokenError(400, "Name the chat's session_id")
+    return {"waiting": _calls_store().CallStore(_calls_home()).waiting_for(session_id)}
+
+
+def answer_call_waiting(body: Any) -> Dict[str, Any]:
+    """The user's spoken answer, on a call from Hermes, to what Hermes waits
+    on in its chat: a question's ``answer`` (a choice's number or label, "the
+    recommended one", or their own words) for ``question`` (its number in the
+    batch), or an approval's ``choice`` (once or deny, with ``reason``). The
+    agent's process passes it to Hermes within seconds."""
+    if not isinstance(body, dict):
+        raise TokenError(400, "Expected a JSON object")
+    try:
+        return _calls_store().CallStore(_calls_home()).answer_waiting(
+            body.get("session_id"), answer=body.get("answer"), choice=body.get("choice"),
+            question=body.get("question"), reason=body.get("reason"))
+    except ValueError as exc:
+        raise TokenError(400, str(exc))
+
+
 async def _calls_route(profile: Optional[str], response: Response, fn: Callable[[], Dict[str, Any]],
                        route: str) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
@@ -7023,6 +7049,19 @@ async def delete_call_watch(watch_id: str, response: Response, profile: Optional
 async def put_call_presence(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     body = await _read_json_body(request, CALLS_MAX_BODY_BYTES)
     return await _calls_route(profile, response, lambda: set_call_presence(body), "presence")
+
+
+@router.get("/calls/waiting")
+async def get_call_waiting(response: Response, session_id: Optional[str] = None,
+                           profile: Optional[str] = None) -> Dict[str, Any]:
+    return await _calls_route(profile, response, lambda: call_waiting(session_id), "waiting")
+
+
+@router.post("/calls/waiting/answer")
+async def post_call_waiting_answer(request: Request, response: Response,
+                                   profile: Optional[str] = None) -> Dict[str, Any]:
+    body = await _read_json_body(request, CALLS_MAX_BODY_BYTES)
+    return await _calls_route(profile, response, lambda: answer_call_waiting(body), "answer")
 
 
 @router.post("/calls/outcomes")
@@ -8174,6 +8213,10 @@ async def post_phone_wipe(request: Request, response: Response, profile: Optiona
 # restart drops them and the Watch falls back to the iPhone.
 # (hermes-conduit designs/apple-watch-voice-direct.md)
 #
+# A grant can also carry answer_call: on a call from Hermes about a question
+# or an approval, the user's spoken answer to it (answer_call_waiting), for
+# the chat the grant names in answer_sessions and no other.
+#
 # A grant can also carry find_chat and read_chat: the user's earlier chats on
 # the grant's profile, found by Hermes' own session search and read as the
 # iPhone reads them for a live call (watch chats, below).
@@ -8185,7 +8228,10 @@ async def post_phone_wipe(request: Request, response: Response, profile: Optiona
 # here.
 
 WATCH_CHAT_TOOLS = ("find_chat", "read_chat")
-WATCH_TOOLS = ("web_search", "recall_memory") + WATCH_CHAT_TOOLS
+# The user's spoken answer to what Hermes waits on in the chat a call from
+# Hermes is about (answer_call_waiting), wrist up or down.
+WATCH_CALL_ANSWER = "answer_call"
+WATCH_TOOLS = ("web_search", "recall_memory") + WATCH_CHAT_TOOLS + (WATCH_CALL_ANSWER,)
 WATCH_LIVE_TOKEN = "live_token"
 # Tokens one grant may mint: a few fresh sessions per call, never a stream.
 # A renewal, which only the iPhone can ask for, counts its own.
@@ -8197,7 +8243,7 @@ WATCH_GRANTS_PER_PROFILE = 2
 WATCH_GRANT_LIMIT = 10
 WATCH_GRANT_WINDOW_S = 60.0
 # Tools, the job cap and the phone's job model settings.
-WATCH_GRANT_MAX_BODY_BYTES = 2048
+WATCH_GRANT_MAX_BODY_BYTES = 4096
 # The relay holds a poll this long when no call waits.
 WATCH_POLL_WAIT_MS = 25_000
 WATCH_POLL_TIMEOUT_S = WATCH_POLL_WAIT_MS / 1000 + 10
@@ -8361,6 +8407,9 @@ class _WatchGrant:
         # Summaries made for read_chat, by (session id, turns covered,
         # whether the page held the whole chat).
         self.chat_summaries: Dict[Tuple[str, int, bool], str] = {}
+        # The chat a call from Hermes is about, by the ids its session goes
+        # by: the only one answer_call answers.
+        self.answer_sessions: Tuple[str, ...] = ()
         self.seen: set = set()
         self.lock = threading.Lock()
         self.closed = threading.Event()
@@ -8457,6 +8506,29 @@ def _scoped_call(profile: Optional[str], fn: Callable[[], Dict[str, Any]]) -> Di
         return fn()
 
 
+def _watch_answer_sessions(value: Any) -> Tuple[str, ...]:
+    """The ids of the chat a Watch call from Hermes is about (up to 4), or
+    none when malformed."""
+    if not isinstance(value, list) or not 0 < len(value) <= 4:
+        return ()
+    ids = [item.strip() for item in value if isinstance(item, str) and item.strip()]
+    if len(ids) != len(value) or any(len(item) > 512 or not item.isprintable() for item in ids):
+        return ()
+    return tuple(dict.fromkeys(ids))
+
+
+def answer_watch_hermes_call(grant: _WatchGrant, args: Dict[str, Any]) -> Dict[str, Any]:
+    """answer_call: the user's spoken answer to what Hermes waits on in the
+    grant's call from Hermes (answer_call_waiting), never another chat's."""
+    result: Dict[str, Any] = {"status": "not_waiting",
+                              "message": "Hermes isn't waiting on the user in that chat any more."}
+    for session_id in grant.answer_sessions:
+        result = answer_call_waiting({**args, "session_id": session_id})
+        if result.get("status") != "not_waiting":
+            break
+    return result
+
+
 def _clean_watch_args(value: Any) -> Dict[str, Any]:
     if not isinstance(value, dict):
         return {}
@@ -8478,6 +8550,14 @@ def run_watch_tool(grant: _WatchGrant, request: Dict[str, Any]) -> Dict[str, Any
         return run_watch_job_call(grant, tool, args)
     if tool == WATCH_LIVE_TOKEN:
         return run_watch_live_token(grant)
+    if tool == WATCH_CALL_ANSWER:
+        try:
+            return {"ok": True, **_scoped_call(grant.profile, lambda: answer_watch_hermes_call(grant, args))}
+        except TokenError as exc:
+            return {"ok": False, "status": exc.status, "detail": str(exc)}
+        except Exception as exc:  # noqa: BLE001 — named; the message can carry the answer
+            _log_watch_failure("Answering Hermes for a Conduit Watch call failed", exc)
+            return {"ok": False, "status": 500, "detail": f"The answer didn't reach Hermes ({type(exc).__name__})"}
     if tool == "find_chat":
         with grant.lock:
             run: Dict[str, Any] = {"dispatched_after": grant.chat_searches}
@@ -9209,6 +9289,10 @@ def open_watch_grant(body: Any, *, profile: Optional[str], ticket_home: Optional
     # Only a grant that runs jobs reads them, as job_options.
     job_profiles = _clean_job_profiles(body.get("job_profiles"), own=profile, ticket_home=ticket_home) if server is not None else ()
     tools = tuple(tool for tool in WATCH_TOOLS if tool in requested)
+    answer_sessions = _watch_answer_sessions(body.get("answer_sessions"))
+    if not answer_sessions:
+        # answer_call answers only the chat of the call from Hermes it names.
+        tools = tuple(tool for tool in tools if tool != WATCH_CALL_ANSWER)
     if any(tool in WATCH_CHAT_TOOLS for tool in tools) and session_routes() is None:
         # A Hermes without the session search route: the Watch asks the
         # iPhone instead, which searches the titles it lists.
@@ -9228,6 +9312,8 @@ def open_watch_grant(body: Any, *, profile: Optional[str], ticket_home: Optional
             raise TokenError(503, "GEMINI_API_KEY is not set on this Hermes host")
         if all(tool in WATCH_CHAT_TOOLS for tool in requested):
             raise TokenError(501, "Searching chats needs a newer Hermes on this host")
+        if all(tool == WATCH_CALL_ANSWER for tool in requested):
+            raise TokenError(400, "answer_call needs answer_sessions: the chat of the call from Hermes")
         raise TokenError(501, "This host can't run Hermes jobs for the Watch")
     max_calls = WATCH_JOB_GRANT_MAX_CALLS if server is not None else WATCH_GRANT_MAX_CALLS
     if not _e2e_crypto_available():
@@ -9266,6 +9352,8 @@ def open_watch_grant(body: Any, *, profile: Optional[str], ticket_home: Optional
     ttl = _watch_grant_ttl(response.get("expires_at"), now)
     grant = _WatchGrant(grant_id=grant_id, profile=profile, tools=tools, secret=secret, relay_url=relay_url,
                         credential=credential, expires_at=time.monotonic() + ttl, max_calls=max_calls)
+    if WATCH_CALL_ANSWER in tools:
+        grant.answer_sessions = answer_sessions
     if audio:
         if response.get("audio") is not True:
             # A relay from before Watch audio opened a grant without it.
@@ -14653,6 +14741,9 @@ ROUTE_CAPABILITIES = (
     "hermes-calls",
     "hermes-call-presence",
     "hermes-call-outcomes",
+    # GET /calls/waiting, POST /calls/waiting/answer, and answer_call on a
+    # Watch grant: a call reads and answers what Hermes waits on.
+    "hermes-call-answers",
     "conduit-settings",
     "conduit-prefs",
     "pulse",
