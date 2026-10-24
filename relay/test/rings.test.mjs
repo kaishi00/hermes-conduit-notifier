@@ -223,10 +223,14 @@ test('a control in use keeps its ring past the ring\'s time, up to its limit', a
     assert.equal((await rings.readControl(ring.id, ring.token)).status, 'control', 'each read keeps it');
   }
   assert.deepEqual(rings.settle(later.id, later.token, 'phone', 'answered'), {}, 'a ring with no control still goes');
+  while (clock.now + RING_TTL_MS / 2 < 1_000 + RING_CONTROL_MAX_MS) {
+    clock.now += RING_TTL_MS / 2;
+    await rings.readControl(ring.id, ring.token);
+  }
+  clock.now = 1_000 + RING_CONTROL_MAX_MS - 1;
+  assert.equal((await rings.readControl(ring.id, ring.token)).status, 'control', 'kept up to its limit');
   clock.now = 1_000 + RING_CONTROL_MAX_MS;
-  await rings.readControl(ring.id, ring.token);
-  clock.now += RING_TTL_MS;
-  assert.deepEqual(await rings.readControl(ring.id, ring.token), { status: 'unknown' }, 'not past the limit');
+  assert.deepEqual(await rings.readControl(ring.id, ring.token), { status: 'unknown' }, 'and not a moment past it');
 });
 
 test('a control read waits a while, takes four at a time and ends when the ring goes', async () => {
@@ -248,7 +252,9 @@ test('a control write is a mute, an end or both, from the phone or the Watch', (
   assert.deepEqual(validControl(id, { token, by: 'phone', muted: true, adopt: true }), { token, by: 'phone', muted: true, adopt: true });
   assert.equal(validControl(id, { token, by: 'phone', muted: true, adopt: 'yes' }), null);
   assert.equal(validControl(id, { token, by: 'phone' }), null, 'nothing to change');
-  assert.equal(validControl(id, { token, by: 'phone', ended: false }), null, 'an end is only ever true');
+  assert.equal(validControl(id, { token, by: 'phone', ended: false }), null, 'an end is only ever set');
+  assert.deepEqual(validControl(id, { token, by: 'watch', muted: true, ended: false }), { token, by: 'watch', muted: true }, 'a false end beside a mute is no end');
+  assert.equal(validControl(id, { token, by: 'watch', muted: true, ended: 'no' }), null);
   assert.equal(validControl(id, { token, by: 'phone', muted: 1 }), null);
   assert.equal(validControl(id, { token, by: 'ipad', muted: true }), null);
   assert.equal(validControl(id, { token: 'short', by: 'phone', muted: true }), null);
@@ -289,4 +295,13 @@ test('adopted rings are capped apart and never push out a ringing call', () => {
   assert.equal(rings.setControl(id(4), token, 'watch', { muted: false, adopt: true }).control.seq, 1, 'room made among adopted rings');
   assert.notEqual(rings.rings.get(real.id), undefined, 'the real ring stays');
   assert.equal(RING_ADOPTED_MAX, 1_000);
+});
+
+test('a waiting read only takes a change past what it saw', async () => {
+  const rings = ringsAt({ now: 1_000 });
+  const ring = rings.create('install-1');
+  rings.settle(ring.id, ring.token, 'watch', 'answered');
+  const ahead = rings.readControl(ring.id, ring.token, { after: 5, waitMs: 5_000 });
+  rings.setControl(ring.id, ring.token, 'phone', { muted: true });
+  assert.deepEqual(await ahead, { status: 'pending' }, 'seq 1 is not past 5');
 });

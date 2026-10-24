@@ -213,7 +213,7 @@ export class Rings {
         clearTimeout(timer);
         ring.controlWaiters.delete(done);
         signal?.removeEventListener('abort', ended);
-        resolve(control ? { status: 'control', control } : { status: 'pending' });
+        resolve(control && control.seq > after ? { status: 'control', control } : { status: 'pending' });
       };
       const ended = () => done(null);
       const timer = setTimeout(ended, Math.min(waitMs, RING_CONTROL_WAIT_MAX_MS));
@@ -244,11 +244,13 @@ export class Rings {
   }
 
   // A control in use keeps its ring another `ttlMs`, moved to the map's end
-  // so the sweep's order holds, until `controlMaxMs` after it rang.
+  // so the sweep's order holds, and gone `controlMaxMs` after it rang at the
+  // latest.
   keepAlive(ring) {
     const now = this.now();
-    if (now - ring.createdAt >= this.controlMaxMs) return;
-    ring.aliveAt = now;
+    const latest = ring.createdAt + this.controlMaxMs - this.ttlMs;
+    if (ring.aliveAt >= latest) return;
+    ring.aliveAt = Math.min(now, latest);
     this.rings.delete(ring.id);
     this.rings.set(ring.id, ring);
   }
@@ -267,6 +269,12 @@ export class Rings {
     this.sweep();
     const ring = this.rings.get(id);
     const matches = tokenMatches(token, ring?.tokenHash ?? NO_RING);
+    // Out of its time, though the sweep hasn't reached it (a control at its
+    // limit can sit behind younger rings).
+    if (ring && ring.aliveAt <= this.now() - this.ttlMs) {
+      this.drop(ring);
+      return undefined;
+    }
     return ring && matches ? ring : undefined;
   }
 
@@ -322,9 +330,9 @@ export function validControl(id, body) {
   if (typeof token !== 'string' || !TOKEN_PATTERN.test(token)) return null;
   if (!RING_SETTLED_BY.has(by)) return null;
   if (muted !== undefined && typeof muted !== 'boolean') return null;
-  if (ended !== undefined && ended !== true) return null;
+  if (ended !== undefined && typeof ended !== 'boolean') return null;
   if (adopt !== undefined && typeof adopt !== 'boolean') return null;
-  if (muted === undefined && ended === undefined) return null;
+  if (muted === undefined && ended !== true) return null;
   return { token, by, ...(muted !== undefined ? { muted } : {}), ...(ended ? { ended } : {}), ...(adopt ? { adopt } : {}) };
 }
 

@@ -17,12 +17,13 @@ import { WATCH_TOOLS_CAPABILITY, WatchToolGrants, watchToolRoutes } from './watc
 
 // Self-reported relay version/capabilities, surfaced via GET /v1/meta so the
 // app can show compatibility state (keep the version in sync with package.json).
+const RELAY_CAPABILITIES = ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls', 'voip-calls', 'watch-calls', 'ring-sessions', 'ring-controls', 'location-push', 'phone-changes', MAPS_TOKENS_CAPABILITY, LIVE_ACTIVITIES_CAPABILITY, TOKEN_PROOF_CAPABILITY];
 const RELAY_INFO = (() => {
   try {
     const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-    return { version: String(pkg.version || 'unknown'), capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls', 'voip-calls', 'watch-calls', 'ring-sessions', 'ring-controls', 'location-push', 'phone-changes', MAPS_TOKENS_CAPABILITY, LIVE_ACTIVITIES_CAPABILITY, TOKEN_PROOF_CAPABILITY] };
+    return { version: String(pkg.version || 'unknown'), capabilities: RELAY_CAPABILITIES };
   } catch {
-    return { version: 'unknown', capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls', 'voip-calls', 'watch-calls', 'ring-sessions', 'ring-controls', 'location-push', 'phone-changes', MAPS_TOKENS_CAPABILITY, LIVE_ACTIVITIES_CAPABILITY, TOKEN_PROOF_CAPABILITY] };
+    return { version: 'unknown', capabilities: RELAY_CAPABILITIES };
   }
 })();
 
