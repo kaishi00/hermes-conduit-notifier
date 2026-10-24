@@ -179,12 +179,13 @@ def _key_created_at(record: Any) -> str:
     return str(record.get("created_at") or "") if isinstance(record, dict) else ""
 
 
-def remove_state(credential: str | None = None) -> None:
+def remove_state(credential: str | None = None, *, unpaired: bool = False) -> None:
     """Remove the saved pairing; with ``credential``, only while the saved
-    pairing still carries it, so a pairing claimed meanwhile stays."""
+    pairing still carries it, and with ``unpaired`` only while none is saved
+    (a leftover file), so a pairing claimed meanwhile stays."""
     path = state_path()
     with state_file_lock(path):
-        if credential is not None and (load_state() or {}).get("credential") not in (None, credential):
+        if (credential is not None or unpaired) and (load_state() or {}).get("credential") not in (None, credential):
             return
         try:
             path.unlink()
@@ -255,7 +256,7 @@ class UnpairedLocally(RuntimeError):
 def unpair() -> bool:
     state = load_state()
     if not state:
-        remove_state()
+        remove_state(unpaired=True)
         return False
     try:
         url = check_request_url(f"{str(state.get('relay_url') or '').rstrip('/')}/v1/gateways/current")
