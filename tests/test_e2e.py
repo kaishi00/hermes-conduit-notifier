@@ -751,3 +751,17 @@ def test_rotation_derivation_vector():
                              ct=bytes(range(8)))
     secret = e2e.rotated_secret(ss_pq=bytes([2]) * 32, ss_x=bytes([3]) * 32, old_secret=SECRET, info=info)
     assert secret.hex() == ROTATION_VECTOR
+
+
+def test_status_still_answers_when_pruning_cannot_write(state_file, monkeypatch):
+    state = json.loads(state_file.read_text())
+    state["e2e"] = {"kid": NEW_KID, "secret": e2e.b64u(NEW_SECRET), "created_at": "2026-10-01T00:00:00Z"}
+    state["e2e_previous"] = {"kid": KID, "secret": e2e.b64u(SECRET), "retired_at": "2020-01-01T00:00:00Z"}
+    state_file.write_text(json.dumps(state))
+
+    def read_only(*_args, **_kwargs):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(api, "_save_pairing_state", read_only)
+    response = _http().get(f"{BASE}/e2e")
+    assert response.status_code == 200 and response.json()["previous_kid"] is None
