@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.70.1 (2026-10-24)
+## 0.70.2 (2026-10-24)
 
 ### Fixes
 - Pulse no longer asks about something you finished later in another chat or
@@ -24,6 +24,14 @@ checks it). The format is fixed, because Conduit reads it:
   it, so a finished one closes instead.
 - On Windows, the dashboard's check for an update still in progress could
   end the process it looked at. It now only asks Windows whether it runs.
+
+## 0.70.1 (2026-10-24)
+
+### Fixes
+- Answering an approval by voice on the Apple Watch could say "approved"
+  when nothing ran, because the request had just been answered elsewhere or
+  timed out. The call now says so instead, and says "approved" only once
+  Hermes has taken the answer.
 
 ## 0.70.0 (2026-10-24)
 

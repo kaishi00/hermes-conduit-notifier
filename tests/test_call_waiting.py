@@ -120,3 +120,56 @@ def test_an_approval_with_no_command_can_only_be_denied(store):
     store.note_waiting("s1", "approval", description="Clean up", command="")
     assert store.answer_waiting("s1", choice="once")["status"] == "refused"
     assert store.answer_waiting("s1", choice="deny")["status"] == "answered"
+
+
+def test_a_calls_approval_answer_is_said_to_go_only_once_hermes_took_it(store):
+    store.note_waiting("s1", "approval", description="Delete the build cache", command="rm -rf build")
+    answer_id = store.answer_waiting("s1", choice="once")["answer_id"]
+    claimed = store.take_approval("s1", keep=True)
+    assert claimed["answer_id"] == answer_id
+    # Being passed on: not taken back however long it takes.
+    assert store.approval_delivery(answer_id, wait_s=0) == "claimed"
+    assert store.waiting_for("s1")["answered"] is True
+    store.settle_approval(answer_id, True)
+    assert store.approval_delivery(answer_id, wait_s=0) == "resolved"
+    assert store.waiting_for("s1") is None
+
+    store.note_waiting("s1", "approval", description="Deploy", command="make deploy")
+    answer_id = store.answer_waiting("s1", choice="deny")["answer_id"]
+    store.take_approval("s1", keep=True)
+    store.settle_approval(answer_id, False)
+    assert store.approval_delivery(answer_id, wait_s=0) == "missed"
+
+
+def test_a_calls_approval_answer_nothing_took_is_taken_back(store):
+    store.note_waiting("s1", "approval", description="Deploy", command="make deploy")
+    answer_id = store.answer_waiting("s1", choice="once")["answer_id"]
+    assert store.approval_delivery(answer_id, wait_s=0) == "withdrawn"
+    # Still waiting, unanswered: the agent's process finds nothing to pass on.
+    assert store.waiting_for("s1")["answered"] is False
+    assert store.take_approval("s1", keep=True) is None
+    assert store.approval_delivery(answer_id, wait_s=0) == "withdrawn"
+
+    # Answered on its card before anything took it: missed, at once.
+    answer_id = store.answer_waiting("s1", choice="once")["answer_id"]
+    store.forget_waiting("s1", "approval")
+    assert store.approval_delivery(answer_id, wait_s=60) == "missed"
+
+
+def test_an_approval_answer_from_a_plugin_before_delivery_reads_as_unanswered(store):
+    store.note_waiting("s1", "approval", description="Deploy", command="make deploy")
+    state = json.loads(store.path.read_text())
+    state["waiting"][0]["choice"] = "once"
+    store.path.write_text(json.dumps(state))
+    assert store.waiting_for("s1")["answered"] is False
+    assert store.take_approval("s1") is None
+
+
+def test_an_answer_whose_delivery_record_is_gone_is_still_taken_back(store):
+    store.note_waiting("s1", "approval", description="Deploy", command="make deploy")
+    answer_id = store.answer_waiting("s1", choice="once")["answer_id"]
+    state = json.loads(store.path.read_text())
+    state["delivered"] = []
+    store.path.write_text(json.dumps(state))
+    assert store.approval_delivery(answer_id, wait_s=0) == "withdrawn"
+    assert store.waiting_for("s1")["answered"] is False

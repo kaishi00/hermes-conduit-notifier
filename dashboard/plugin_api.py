@@ -6991,15 +6991,89 @@ def answer_call_waiting(body: Any) -> Dict[str, Any]:
     on in its chat: a question's ``answer`` (a choice's number or label, "the
     recommended one", or their own words) for ``question`` (its number in the
     batch), or an approval's ``choice`` (once or deny, with ``reason``). The
-    agent's process passes it to Hermes within seconds."""
+    agent's process passes it to Hermes within seconds. An approval's answer
+    waits to hear that it did: "answered" only once Hermes took it."""
+    if not isinstance(body, dict):
+        raise TokenError(400, "Expected a JSON object")
+    store = _calls_store().CallStore(_calls_home())
+    return _approval_delivered(store, _answer_waiting(store, body))
+
+
+def _answer_waiting(store: Any, body: Any) -> Dict[str, Any]:
     if not isinstance(body, dict):
         raise TokenError(400, "Expected a JSON object")
     try:
-        return _calls_store().CallStore(_calls_home()).answer_waiting(
+        return store.answer_waiting(
             body.get("session_id"), answer=body.get("answer"), choice=body.get("choice"),
             question=body.get("question"), reason=body.get("reason"))
     except ValueError as exc:
         raise TokenError(400, str(exc))
+
+
+# How a call's approval answer fared, for the call to say (calls_store
+# DELIVERY_STATES). Read by the model, so not localized.
+_APPROVAL_NOT_DELIVERED = {
+    "missed": ("too_late", "It didn't go through: Hermes wasn't waiting on that approval any more (it was "
+                              "answered in Conduit, or timed out), so nothing was {done}. The user can check the chat "
+                              "in Conduit."),
+    "withdrawn": ("failed", "It didn't go through: Hermes didn't pick the answer up in time, so nothing was {done}. "
+                            "The user can answer it in Conduit."),
+    "claimed": ("unconfirmed", "Hermes hasn't confirmed the answer yet, so it may not have gone through. The user can "
+                          "check the chat in Conduit."),
+}
+
+
+# Watch calls waiting at once to hear how their approval answer fared: each
+# holds a worker (the Watch tools' pool, or its Local Live call's own) for up
+# to calls_store.APPROVAL_DELIVERY_WAIT_S. One user's Watch answers one at a
+# time; the bound only keeps a burst from taking the pool. The HTTP route
+# waits on the event loop instead (_approval_delivered_async).
+_APPROVAL_DELIVERY_WAITS = threading.BoundedSemaphore(2)
+
+
+def _approval_delivered(store: Any, result: Dict[str, Any]) -> Dict[str, Any]:
+    """``answer_waiting``'s result, with an approval's answer as it fared:
+    the call says it went only when Hermes took it."""
+    answer_id = result.pop("answer_id", None)
+    if answer_id is None or result.get("status") != "answered":
+        return result
+    # A moment for a slot first: a fresh answer is taken back only past that.
+    if _APPROVAL_DELIVERY_WAITS.acquire(timeout=1.0):
+        try:
+            fared = store.approval_delivery(answer_id)
+        finally:
+            _APPROVAL_DELIVERY_WAITS.release()
+    else:
+        # Too many waiting already: no wait, so an answer nothing took yet
+        # is taken back and the user answers in Conduit.
+        fared = store.approval_delivery(answer_id, wait_s=0)
+    return _approval_outcome(result, fared)
+
+
+async def _approval_delivered_async(store: Any, result: Dict[str, Any]) -> Dict[str, Any]:
+    """_approval_delivered for a route: it waits on the event loop, holding
+    no worker meanwhile."""
+    answer_id = result.pop("answer_id", None)
+    if answer_id is None or result.get("status") != "answered":
+        return result
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _calls_store().APPROVAL_DELIVERY_WAIT_S
+    while True:
+        fared = await asyncio.to_thread(store.approval_fared, answer_id)
+        if fared is not None:
+            break
+        if loop.time() >= deadline:
+            fared = await asyncio.to_thread(store.approval_delivery, answer_id, wait_s=0)
+            break
+        await asyncio.sleep(0.2)
+    return _approval_outcome(result, fared)
+
+
+def _approval_outcome(result: Dict[str, Any], fared: str) -> Dict[str, Any]:
+    if fared == "resolved":
+        return result
+    status, message = _APPROVAL_NOT_DELIVERED.get(fared, _APPROVAL_NOT_DELIVERED["missed"])
+    return {"status": status, "message": message.format(done="approved" if result.get("choice") == "once" else "denied")}
 
 
 async def _calls_route(profile: Optional[str], response: Response, fn: Callable[[], Dict[str, Any]],
@@ -7061,7 +7135,19 @@ async def get_call_waiting(response: Response, session_id: Optional[str] = None,
 async def post_call_waiting_answer(request: Request, response: Response,
                                    profile: Optional[str] = None) -> Dict[str, Any]:
     body = await _read_json_body(request, CALLS_MAX_BODY_BYTES)
-    return await _calls_route(profile, response, lambda: answer_call_waiting(body), "answer")
+    stores: list = []
+
+    def answer() -> Dict[str, Any]:
+        stores.append(_calls_store().CallStore(_calls_home()))
+        return _answer_waiting(stores[0], body)
+
+    result = await _calls_route(profile, response, answer, "answer")
+    if "answer_id" not in result:
+        return result
+    try:
+        return {"ok": True, **(await _approval_delivered_async(stores[0], result))}
+    except Exception as exc:
+        raise _unexpected("answer", exc, feature="Calls")
 
 
 @router.post("/calls/outcomes")
@@ -12695,15 +12781,29 @@ def _local_live_call_answer(grant: _WatchGrant, words: str) -> Optional[str]:
             if not grant.answer_approvals:
                 return "Hermes is waiting on your approval in that chat. Answer it in Conduit on your iPhone."
             if asks:
-                result = store.answer_waiting(session_id, choice="deny",
-                                              reason=f"{store_module.ASKS_FIRST_LEAD} {words}")
+                result = _approval_delivered(store, store.answer_waiting(
+                    session_id, choice="deny", reason=f"{store_module.ASKS_FIRST_LEAD} {words}"))
                 return ("I've asked Hermes. It will explain, then ask again."
-                        if result.get("status") == "answered" else result.get("message") or None)
-            result = store.answer_waiting(session_id, choice="once" if said else "deny")
+                        if result.get("status") == "answered" else _local_live_undelivered(result))
+            result = _approval_delivered(store, store.answer_waiting(session_id, choice="once" if said else "deny"))
             if result.get("status") != "answered":
-                return result.get("message") or None
+                return _local_live_undelivered(result)
             return "Approved once. Hermes runs it now." if result.get("choice") == "once" else "Denied. Hermes won't run it."
     return None
+
+
+def _local_live_undelivered(result: Dict[str, Any]) -> Optional[str]:
+    """What a Watch Local Live call says when its approval answer didn't
+    reach Hermes (_approval_delivered), to the user rather than a model."""
+    if result.get("status") == "too_late":
+        return "That didn't go through: Hermes wasn't waiting on it any more. Check the chat in Conduit."
+    if result.get("status") == "failed":
+        return "That didn't go through, so nothing changed. Answer it in Conduit on your iPhone."
+    if result.get("status") == "unconfirmed":
+        return "Hermes hasn't confirmed it yet. Check the chat in Conduit."
+    if result.get("status") == "refused":
+        return "I can't approve that one by voice. Say no to deny it, or approve it in Conduit on your iPhone."
+    return result.get("message") or None
 
 
 class _LocalLiveWatchCall:

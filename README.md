@@ -1475,7 +1475,7 @@ and the dashboard routes under one file lock, so they survive restarts:
 | PUT | `/api/plugins/conduit_push/calls/presence?profile=` (0.14+) | `{hold_s}` (0 releases) | `{ok, status: "present"}` or `{ok, status: "away"}` |
 | POST | `/api/plugins/conduit_push/calls/outcomes?profile=` (0.15+) | `{call_id, session_ids: [...], outcome: "declined" or "missed", kind?, title?, reason?, age_s?}` | `{ok, status: "recorded"}` |
 | GET | `/api/plugins/conduit_push/calls/waiting?session_id=&profile=` (0.70+) | | `{ok, waiting}`: null, `{kind: "question", questions: [{number, question, choices, multi_select, answered}]}` or `{kind: "approval", description, command, command_cut, answered}` |
-| POST | `/api/plugins/conduit_push/calls/waiting/answer?profile=` (0.70+) | `{session_id, answer?, question?, choice?, reason?}` | `{ok, status: "answered", ...}`, `{ok, status: "not_waiting"}` or `{ok, status: "refused", message}` |
+| POST | `/api/plugins/conduit_push/calls/waiting/answer?profile=` (0.70+) | `{session_id, answer?, question?, choice?, reason?}` | `{ok, status: "answered", ...}`, `{ok, status: "not_waiting"}`, `{ok, status: "refused", message}`, or for an approval Hermes didn't take (0.70.1+) `{ok, status: "too_late" or "failed" or "unconfirmed", message}` |
 
 - With alert calls on, what Hermes waits on is kept too (0.70+): a question
   batch's choices, or an approval's description and command (up to 600
@@ -1490,8 +1490,13 @@ and the dashboard routes under one file lock, so they survive restarts:
   loop takes the batch once every question has an answer. An approval takes
   `choice` (`once` or `deny`, with `reason` for a deny): the agent's process
   resolves the request with that command, never another one queued beside
-  it, and a command too long to read out whole can only be denied. Gone once
-  answered anywhere, and after 2 hours.
+  it, and a command too long to read out whole can only be denied. The
+  answer waits up to 10 seconds to hear how it fared (0.70.1+), so the call
+  never says "approved" when nothing ran: `answered` once Hermes took it,
+  `too_late` when no pending request was the one read out (answered on
+  its card, or timed out), `failed` when nothing picked it up in time (it's
+  taken back, so it can't land later), `unconfirmed` while still being
+  passed on. Gone once answered anywhere, and after 2 hours.
 - A watch names up to 4 session ids (the job's runtime and stored ids) and a
   title of up to 120 characters. It fires once, on the first turn end of any
   of them: `done` (the turn finished), `failed`, or `stopped` (interrupted).
@@ -2159,12 +2164,12 @@ seals the answers back. This host opens no inbound route of its own.
   `start_job`, `list_jobs` and `cancel_job` (granted with the Watch app's
   own `job_news` and `answer_approval`). A grant lasts at most 30
   minutes, holds one profile, and ends when the call does.
-- **`answer_call`** (plugin 0.70.0) answers what Hermes waits on in a call
+- **`answer_call`** (plugin 0.70.0; its approvals confirmed from 0.70.1) answers what Hermes waits on in a call
   from Hermes: granted only with `answer_sessions`, the call's chats, and
   bound to them. It answers a question with the user's words or the number
   of their choice, and approves or denies only with `answer_approvals: true`
-  (the Watch's "Tap or voice" setting). On Local Live the host passes the
-  user's words to it itself.
+  (the Watch's "Tap or voice" setting), saying it went only once Hermes
+  took it. On Local Live the host passes the user's words to it itself.
 - **Jobs** start an ordinary Hermes chat on the grant's profile through
   Hermes' own session API in the dashboard process, filed under Voice Jobs in
   Conduit like a job started from the phone; `job_options` carries the
