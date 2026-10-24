@@ -2,8 +2,8 @@ import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 
 import {
-  RING_ROUTE, RING_SESSION_MAX_CHARS, RING_SESSION_ROUTE, RING_SESSION_TTL_MS, RING_START_MAX_CHARS, RING_TTL_MS,
-  Rings, ringBearer, validSessionStore, validSettle,
+  RING_CONTROL_MAX_MS, RING_CONTROL_ROUTE, RING_ROUTE, RING_SESSION_MAX_CHARS, RING_SESSION_ROUTE, RING_SESSION_TTL_MS,
+  RING_START_MAX_CHARS, RING_TTL_MS, Rings, ringBearer, validControl, validSessionStore, validSettle,
 } from '../src/rings.mjs';
 
 function ringsAt(clock, options = {}) {
@@ -187,4 +187,70 @@ test('a session store and fetch are well formed', () => {
   assert.equal(RING_SESSION_ROUTE.exec(`/v1/rings/${id}/session`)[1], id);
   assert.equal(RING_SESSION_ROUTE.exec(`/v1/rings/${id}/settled`), null);
   assert.equal(RING_ROUTE.exec(`/v1/rings/${id}/session`), null);
+});
+
+test('a call kept on the phone shares its mute and end through the ring, which only the Watch\'s answer opens', async () => {
+  const rings = ringsAt({ now: 1_000 });
+  const ring = rings.create('install-1');
+  assert.equal(rings.setControl(ring.id, ring.token, 'phone', { muted: false }), 'not_answered', 'still ringing');
+  assert.deepEqual(await rings.readControl(ring.id, ring.token), { status: 'not_answered' });
+  rings.settle(ring.id, ring.token, 'watch', 'answered');
+  assert.equal(rings.setControl(ring.id, 'x'.repeat(43), 'phone', { muted: false }), 'unknown', 'a wrong token');
+  assert.deepEqual(await rings.readControl(ring.id, ring.token), { status: 'pending' }, 'nothing set yet');
+  assert.deepEqual(rings.setControl(ring.id, ring.token, 'phone', { muted: false }), { control: { seq: 1, muted: false, ended: false, by: 'phone' } });
+  const waiting = rings.readControl(ring.id, ring.token, { after: 1, waitMs: 5_000 });
+  assert.deepEqual(rings.setControl(ring.id, ring.token, 'watch', { muted: true }), { control: { seq: 2, muted: true, ended: false, by: 'watch' } });
+  assert.deepEqual(await waiting, { status: 'control', control: { seq: 2, muted: true, ended: false, by: 'watch' } });
+  assert.deepEqual(await rings.readControl(ring.id, ring.token, { after: 2 }), { status: 'pending' });
+  assert.deepEqual(rings.setControl(ring.id, ring.token, 'phone', { ended: true }).control, { seq: 3, muted: true, ended: true, by: 'phone' }, 'an end keeps the mute');
+  assert.deepEqual(rings.setControl(ring.id, ring.token, 'watch', { muted: false }).control, { seq: 4, muted: false, ended: true, by: 'watch' }, 'and stays ended');
+  assert.deepEqual(await rings.readControl(ring.id, ring.token, { after: 0 }), { status: 'control', control: { seq: 4, muted: false, ended: true, by: 'watch' } }, 'a reader that missed changes gets the whole control');
+
+  const phoneCall = rings.create('install-1');
+  rings.settle(phoneCall.id, phoneCall.token, 'phone', 'answered');
+  assert.equal(rings.setControl(phoneCall.id, phoneCall.token, 'phone', { ended: true }), 'not_answered');
+});
+
+test('a control in use keeps its ring past the ring\'s time, up to its limit', async () => {
+  const clock = { now: 1_000 };
+  const rings = ringsAt(clock);
+  const ring = rings.create('install-1');
+  rings.settle(ring.id, ring.token, 'watch', 'answered');
+  rings.setControl(ring.id, ring.token, 'phone', { muted: false });
+  const later = rings.create('install-1');
+  for (let elapsed = 0; elapsed < RING_TTL_MS * 3; elapsed += RING_TTL_MS / 2) {
+    clock.now += RING_TTL_MS / 2;
+    assert.equal((await rings.readControl(ring.id, ring.token)).status, 'control', 'each read keeps it');
+  }
+  assert.deepEqual(rings.settle(later.id, later.token, 'phone', 'answered'), {}, 'a ring with no control still goes');
+  clock.now = 1_000 + RING_CONTROL_MAX_MS;
+  await rings.readControl(ring.id, ring.token);
+  clock.now += RING_TTL_MS;
+  assert.deepEqual(await rings.readControl(ring.id, ring.token), { status: 'unknown' }, 'not past the limit');
+});
+
+test('a control read waits a while, takes four at a time and ends when the ring goes', async () => {
+  const rings = ringsAt({ now: 1_000 });
+  const ring = rings.create('install-1');
+  rings.settle(ring.id, ring.token, 'watch', 'answered');
+  assert.deepEqual(await rings.readControl(ring.id, ring.token, { waitMs: 20 }), { status: 'pending' });
+  const waits = [1, 2, 3, 4].map(() => rings.readControl(ring.id, ring.token, { waitMs: 5_000 }));
+  assert.deepEqual(await rings.readControl(ring.id, ring.token, { waitMs: 5_000 }), { status: 'busy' });
+  rings.forget(ring.id);
+  assert.deepEqual(await Promise.all(waits), [1, 2, 3, 4].map(() => ({ status: 'pending' })));
+});
+
+test('a control write is a mute, an end or both, from the phone or the Watch', () => {
+  const token = 'b'.repeat(43);
+  const id = 'a'.repeat(22);
+  assert.deepEqual(validControl(id, { token, by: 'watch', muted: true }), { token, by: 'watch', muted: true });
+  assert.deepEqual(validControl(id, { token, by: 'phone', ended: true, muted: false }), { token, by: 'phone', muted: false, ended: true });
+  assert.equal(validControl(id, { token, by: 'phone' }), null, 'nothing to change');
+  assert.equal(validControl(id, { token, by: 'phone', ended: false }), null, 'an end is only ever true');
+  assert.equal(validControl(id, { token, by: 'phone', muted: 1 }), null);
+  assert.equal(validControl(id, { token, by: 'ipad', muted: true }), null);
+  assert.equal(validControl(id, { token: 'short', by: 'phone', muted: true }), null);
+  assert.equal(validControl('a'.repeat(21), { token, by: 'phone', muted: true }), null);
+  assert.equal(RING_CONTROL_ROUTE.exec(`/v1/rings/${id}/control`)[1], id);
+  assert.equal(RING_CONTROL_ROUTE.exec('/v1/rings/abc/control'), null);
 });

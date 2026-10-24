@@ -242,6 +242,8 @@ gateway-bound inactive records still require separately reviewed maintenance.
 | POST | `/v1/rings/:id/settled` | The phone or the Watch answered or declined a call that rings on both (0.10+; the ring's token from the call push) |
 | PUT | `/v1/rings/:id/session` | The phone stores the sealed session of a call the Watch answered (0.11+; the ring's token) |
 | GET | `/v1/rings/:id/session` | The Watch fetches it, waiting up to `?wait=20` seconds (0.11+; the ring's token as the bearer) |
+| POST | `/v1/rings/:id/control` | The phone or the Watch mutes, unmutes or ends a call the Watch answered that stays on the phone's headset (0.17+; the ring's token) |
+| GET | `/v1/rings/:id/control` | Either reads the other's change past `?after=` its last seq, waiting up to `?wait=20` seconds (0.17+; the ring's token as the bearer) |
 
 Watch tool grants carry an Apple Watch call's lookups while the Watch can't
 reach Conduit on the iPhone. Calls and answers are sealed with a per-call key
@@ -302,6 +304,19 @@ otherwise), lasts 2 minutes in memory, and is at most 96 KB; the relay holds
 32 MB of them at most, dropping the oldest first, and a ring takes two waiting
 fetches at a time. An older relay ignores `start`, and the Watch then starts
 the call over its link to the iPhone, as before.
+
+A call the Watch answers while the phone has a headset on (AirPods) stays on
+the phone, so its voice plays there as a phone call's does, and the Watch's
+call screen keeps Mute and End. The phone answers its own ring, says so in the
+session it stores (`callOnPhone`), and the two share the call's mute and end
+through `/v1/rings/:id/control`: either posts `{token, by, muted?, ended?}`,
+and each long-polls `GET ?after=<seq>&wait=20` for the other's (200 with
+`{seq, muted, ended, by}`, or 204 when nothing changed in time). Only those
+flags go through. A control exists only for a ring the Watch answered (409
+otherwise); a call once ended stays ended, and a ring takes four waiting reads
+at a time. Each read or write keeps the ring another 10 minutes, up to 4 hours
+after it rang. On a relay older than 0.17 the control is 404, and the Watch
+takes the call as before.
 
 ### Registration proof
 

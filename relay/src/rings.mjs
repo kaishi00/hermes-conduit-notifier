@@ -18,6 +18,14 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 // (`start`) and on to the phone in the stop push, and the phone stores the
 // call's session here for the Watch to fetch with the ring's token. Both are
 // sealed with a key only the two devices hold: the relay sees their size.
+//
+// A call answered on the Watch while the phone has a headset on (AirPods)
+// stays on the phone, so its voice plays there ("On the phone's headset"):
+// the phone answers its own ringing call and the Watch's call screen keeps
+// Mute and End. The two keep each other's controls through here, since the
+// phone's call keeps their link down: either posts the call's mute or its end
+// to the ring's control, and each long-polls it for the other's. The control
+// holds no words, only the two flags.
 
 // Long enough for a push that reached the device late (the phone rings one up
 // to 90 s late) to be answered (45 s of ringing), with room to spare.
@@ -34,12 +42,18 @@ export const RING_START_MAX_CHARS = 1024;
 export const RING_SESSION_MAX_CHARS = 96 * 1024;
 // The longest a fetch waits for the phone's session.
 export const RING_SESSION_WAIT_MAX_MS = 20_000;
+// The longest a control read waits for a change.
+export const RING_CONTROL_WAIT_MAX_MS = 20_000;
+// A call on the phone's headset outlasts its ring: each control read or write
+// keeps the ring another RING_TTL_MS, up to this long after it rang.
+export const RING_CONTROL_MAX_MS = 4 * 60 * 60 * 1000;
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{22}$/;
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const SEALED_PATTERN = /^[A-Za-z0-9_-]+$/;
 export const RING_ROUTE = /^\/v1\/rings\/([A-Za-z0-9_-]{22})\/settled$/;
 export const RING_SESSION_ROUTE = /^\/v1\/rings\/([A-Za-z0-9_-]{22})\/session$/;
+export const RING_CONTROL_ROUTE = /^\/v1\/rings\/([A-Za-z0-9_-]{22})\/control$/;
 
 export class Rings {
   constructor({
@@ -48,6 +62,8 @@ export class Rings {
     maxSessionChars = 32 * 1024 * 1024,
     sessionTtlMs = RING_SESSION_TTL_MS,
     maxWaitersPerRing = 2,
+    maxControlWaitersPerRing = 4,
+    controlMaxMs = RING_CONTROL_MAX_MS,
     now = Date.now,
   } = {}) {
     if (!Number.isSafeInteger(maxRings) || maxRings < 1) throw new RangeError('maxRings must be a positive integer');
@@ -56,6 +72,8 @@ export class Rings {
     this.maxSessionChars = maxSessionChars;
     this.sessionTtlMs = sessionTtlMs;
     this.maxWaitersPerRing = maxWaitersPerRing;
+    this.maxControlWaitersPerRing = maxControlWaitersPerRing;
+    this.controlMaxMs = controlMaxMs;
     this.now = now;
     this.rings = new Map();
     // The stored sessions' size, held to maxSessionChars.
@@ -74,7 +92,10 @@ export class Rings {
     while (this.rings.size >= this.maxRings) this.drop(this.rings.values().next().value);
     const id = randomBytes(16).toString('base64url');
     const token = randomBytes(32).toString('base64url');
-    this.rings.set(id, { id, installationId, tokenHash: digest(token), createdAt: this.now(), settled: null });
+    const now = this.now();
+    // `aliveAt`: when its time last started, which a control moves on. The
+    // map stays in that order, oldest first, for the sweep.
+    this.rings.set(id, { id, installationId, tokenHash: digest(token), createdAt: now, aliveAt: now, settled: null });
     return { id, token };
   }
 
@@ -143,10 +164,67 @@ export class Rings {
     });
   }
 
+  // The phone or the Watch sets the call's mute or ends it, for a ring the
+  // Watch answered: { control } with the call's whole control after the
+  // change, or 'unknown' and 'not_answered' as for a session store. A call
+  // once ended stays ended.
+  setControl(id, token, by, { muted, ended } = {}) {
+    const ring = this.find(id, token);
+    if (!ring) return 'unknown';
+    if (!answeredOnWatch(ring)) return 'not_answered';
+    const control = ring.control ?? { seq: 0, muted: false, ended: false };
+    ring.control = {
+      seq: control.seq + 1,
+      muted: typeof muted === 'boolean' ? muted : control.muted,
+      ended: control.ended || ended === true,
+      by,
+    };
+    this.keepAlive(ring);
+    for (const wake of [...(ring.controlWaiters ?? [])]) wake(ring.control);
+    return { control: ring.control };
+  }
+
+  // The call's control once it's past `after` (the last seq the reader saw),
+  // waiting up to `waitMs` for a change: { status: 'control', control }, else
+  // { status: 'pending' }. 'unknown', 'not_answered' and 'busy' as for a
+  // session fetch.
+  async readControl(id, token, { after = 0, waitMs = 0, signal } = {}) {
+    const ring = this.find(id, token);
+    if (!ring) return { status: 'unknown' };
+    if (!answeredOnWatch(ring)) return { status: 'not_answered' };
+    this.keepAlive(ring);
+    if (ring.control && ring.control.seq > after) return { status: 'control', control: ring.control };
+    if (waitMs <= 0 || signal?.aborted) return { status: 'pending' };
+    ring.controlWaiters ??= new Set();
+    if (ring.controlWaiters.size >= this.maxControlWaitersPerRing) return { status: 'busy' };
+    return new Promise((resolve) => {
+      const done = (control) => {
+        clearTimeout(timer);
+        ring.controlWaiters.delete(done);
+        signal?.removeEventListener('abort', ended);
+        resolve(control ? { status: 'control', control } : { status: 'pending' });
+      };
+      const ended = () => done(null);
+      const timer = setTimeout(ended, Math.min(waitMs, RING_CONTROL_WAIT_MAX_MS));
+      signal?.addEventListener('abort', ended, { once: true });
+      ring.controlWaiters.add(done);
+    });
+  }
+
+  // A control in use keeps its ring another `ttlMs`, moved to the map's end
+  // so the sweep's order holds, until `controlMaxMs` after it rang.
+  keepAlive(ring) {
+    const now = this.now();
+    if (now - ring.createdAt >= this.controlMaxMs) return;
+    ring.aliveAt = now;
+    this.rings.delete(ring.id);
+    this.rings.set(ring.id, ring);
+  }
+
   sweep() {
     const cutoff = this.now() - this.ttlMs;
     for (const ring of this.rings.values()) {
-      if (ring.createdAt > cutoff) break;
+      if (ring.aliveAt > cutoff) break;
       this.drop(ring);
     }
   }
@@ -178,6 +256,7 @@ export class Rings {
     this.dropSession(ring);
     this.rings.delete(ring.id);
     for (const wake of [...(ring.waiters ?? [])]) wake(null);
+    for (const wake of [...(ring.controlWaiters ?? [])]) wake(null);
   }
 }
 
@@ -200,6 +279,19 @@ export function validSessionStore(id, body) {
   if (typeof token !== 'string' || !TOKEN_PATTERN.test(token)) return null;
   if (!isSealed(sealed, RING_SESSION_MAX_CHARS)) return null;
   return { token, sealed };
+}
+
+// The control write's fields, or null when malformed: a mute, an end, or
+// both, from the phone or the Watch.
+export function validControl(id, body) {
+  if (!ID_PATTERN.test(id) || !body || typeof body !== 'object') return null;
+  const { token, by, muted, ended } = body;
+  if (typeof token !== 'string' || !TOKEN_PATTERN.test(token)) return null;
+  if (!RING_SETTLED_BY.has(by)) return null;
+  if (muted !== undefined && typeof muted !== 'boolean') return null;
+  if (ended !== undefined && ended !== true) return null;
+  if (muted === undefined && ended === undefined) return null;
+  return { token, by, ...(muted !== undefined ? { muted } : {}), ...(ended ? { ended } : {}) };
 }
 
 // The ring token a session fetch carries as its bearer, or null.
