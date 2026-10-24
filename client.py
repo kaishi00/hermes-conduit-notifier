@@ -698,9 +698,12 @@ def stop(timeout: float = 1.0) -> None:
 # event_id per pairing and answers a repeat as a duplicate, and an event's id
 # stays the same from one send to the next (redaction and encryption re-key it
 # the same way every time). One thread delivers everything, so the retries of
-# one event stop after RETRY_BUDGET seconds instead of holding up the rest.
+# one event stop after RETRY_BUDGET seconds instead of holding up the rest:
+# the waits for an answer count, so a send is cut to what the budget has left.
 RETRY_DELAYS = (1.0, 2.0, 4.0)
 RETRY_BUDGET = 30.0
+SEND_TIMEOUT = 15.0
+MIN_SEND_TIMEOUT = 1.0
 
 # A 401 or 403 is the relay (or something in front of it) refusing this host,
 # and the next event would be refused the same way. Notifications are parked
@@ -791,7 +794,7 @@ def _deliver(event: dict[str, Any], *, sleep: Callable[[float], None] = _pause,
                         event.get("type", "event"), _pause_reason(state), paused_until - now)
             return False
         try:
-            _send(event, state)
+            _send(event, state, timeout=max(MIN_SEND_TIMEOUT, min(SEND_TIMEOUT, started + RETRY_BUDGET - now)))
         except Exception as error:
             if delay is not None and _worth_retrying(error) and clock() - started + delay <= RETRY_BUDGET:
                 logger.info("Conduit notification delivery for %s will be retried: %s", event.get("type", "event"), error)
