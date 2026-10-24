@@ -13,6 +13,27 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.69.2 (2026-10-24)
+
+### Security
+- A Watch could approve "once" a request that showed no command at all.
+  Such a request can now only be denied, like one too long to show whole.
+
+### Fixes
+- On a Hermes that doesn't name its turns, the Lock Screen could keep
+  showing a finished reply as running. It now ends after two minutes at most.
+- Unpairing while a new pairing was claimed could delete the new one.
+- A calendar or reminder link with no host name is refused instead of
+  dropped by the phone.
+- When the relay stopped answering, each notification could hold up the
+  ones behind it for about a minute, until some were dropped. Each now gives
+  up after about 30 seconds.
+- A call watch run that Hermes names only by its job said the phone would
+  ring when it couldn't; it now says what it found instead.
+- A calendar store written by a newer plugin says to update the plugin
+  instead of asking you to try again forever.
+- Malformed answers or reports from the phone no longer cause server errors.
+
 ## 0.69.1 (2026-10-24)
 
 ### Fixes

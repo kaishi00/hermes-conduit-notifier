@@ -249,6 +249,10 @@ def _first_answer_wins(
             # proxy): unproductive like a transport failure, not a crash
             # that leaves the decision parked.
             status = {"status": "__error__"}
+        if batch_protocol and not isinstance(status.get("answers") or {}, dict):
+            # An answers map that isn't an object: unproductive too, not a
+            # crash past relay_won that leaves the decision parked.
+            status = {"status": "__error__"}
         state = str(status.get("status") or "")
         if state == "answered":
             if batch_protocol and "answers" in status:

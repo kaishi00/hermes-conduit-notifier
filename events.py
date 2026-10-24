@@ -10,7 +10,7 @@ from typing import Any
 
 # Keep in sync with plugin.yaml. Reported on every event so the relay can
 # expose per-gateway compatibility state to the app (Settings > Notifications).
-PLUGIN_VERSION = "0.69.1"
+PLUGIN_VERSION = "0.69.2"
 PLUGIN_CAPABILITIES = [
     "approval-decisions",
     "clarify-loop",
@@ -162,7 +162,7 @@ _MAPS_ID = re.compile(r"^m_[A-Za-z0-9_-]{16,64}\Z")
 
 # How a watched job ended, or (an alert call) what Hermes waits on.
 CALL_KINDS = ("done", "failed", "stopped", "approval", "question")
-_CALL_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+_CALL_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}\Z")
 
 
 def sanitize_call(value: Any) -> dict[str, Any] | None:

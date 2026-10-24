@@ -40,6 +40,9 @@ _pending_lock = threading.Lock()
 # on_session_end follows post_llm_call in the same finalizer, after only the
 # memory sync; the grace is for a Hermes that never reports the end.
 READY_GRACE_S = 120.0
+# Session id -> (a token, the grace timer) for a turn Hermes named no id for:
+# its reply can't wait for the end, but its Live Activity's end still does.
+_unnamed_ends: dict[str, tuple[object, Any]] = {}
 # Parent session -> (its running turn's id, when it started by
 # time.monotonic()): a subagent that finishes inside it is part of its reply.
 _parent_turns: dict[str, tuple[str, float]] = {}
@@ -235,6 +238,8 @@ def _post_llm_call(**kwargs: Any) -> None:
     turn_id = kwargs.get("turn_id")
     if not isinstance(turn_id, str) or not turn_id:
         _finish_ready(session_id, ready, send)
+        if not pulse_turn:
+            _hold_unnamed_end(session_id)
         return
     key = (session_id, turn_id)
     # A Hermes that never reports the turn's end still gets its reply out,
@@ -258,6 +263,48 @@ def _post_llm_call(**kwargs: Any) -> None:
 def _turn_end_missed(session_id: str, turn_id: str, live: bool = True) -> None:
     if _settle_ready(session_id, turn_id, "done") and live:
         _quietly(live_activity.reporter.turn_ended, session_id, "done")
+
+
+def _hold_unnamed_end(session_id: str) -> None:
+    """A Hermes that names no turn and never reports its end still gets
+    the Live Activity ended, after the grace; on_session_end or the chat's
+    next turn takes the timer's place."""
+    token = object()
+
+    def missed() -> None:
+        with _pending_lock:
+            if _unnamed_ends.get(session_id, (None, None))[0] is not token:
+                return
+            del _unnamed_ends[session_id]
+        _quietly(live_activity.reporter.turn_ended, session_id, "done")
+
+    # Registered before its timer starts, so a drop in between isn't lost.
+    with _pending_lock:
+        earlier = _unnamed_ends.pop(session_id, None)
+        _unnamed_ends[session_id] = (token, None)
+        overflow = []
+        while len(_unnamed_ends) > MAX_TURN_STARTS:
+            oldest = next(iter(_unnamed_ends))
+            overflow.append((oldest, _unnamed_ends.pop(oldest)))
+    if earlier is not None:
+        _cancel(earlier[1])
+    timer = _later(READY_GRACE_S, missed)
+    with _pending_lock:
+        if _unnamed_ends.get(session_id, (None, None))[0] is token:
+            _unnamed_ends[session_id] = (token, timer)
+            timer = None
+    _cancel(timer)  # dropped meanwhile
+    # Far more chats than ever end at once: the oldest end now.
+    for old_session, (_, old_timer) in overflow:
+        _cancel(old_timer)
+        _quietly(live_activity.reporter.turn_ended, old_session, "done")
+
+
+def _drop_unnamed_end(session_id: str) -> None:
+    with _pending_lock:
+        pending = _unnamed_ends.pop(session_id, None)
+    if pending is not None:
+        _cancel(pending[1])
 
 
 def _settle_ready(session_id: str, turn_id: Any, outcome: str) -> bool:
@@ -296,7 +343,11 @@ def _unload() -> None:
     with _pending_lock:
         held = list(_pending_ready.values())
         _pending_ready.clear()
+        unnamed = list(_unnamed_ends.values())
+        _unnamed_ends.clear()
     for _ready, _send, timer in held:
+        _cancel(timer)
+    for _token, timer in unnamed:
         _cancel(timer)
     calls.stop()
     pulse.stop()
@@ -361,6 +412,7 @@ def _on_session_end(**kwargs: Any) -> None:
     if _is_child(session_id):
         return
     _end_parent_turn(session_id)
+    _drop_unnamed_end(session_id)
     pulse_turn = pulse.is_pulse_turn(session_id, kwargs.get("turn_id"))
     _quietly(pulse.turn_ended, session_id, kwargs.get("turn_id"))
     # A turn Hermes doesn't call failed but that didn't complete (it hit the
@@ -595,6 +647,7 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
     if not child:
         _note_turn_start(kwargs.get("turn_id"))
         _start_parent_turn(session_id, kwargs.get("turn_id"))
+        _drop_unnamed_end(session_id)
         _quietly(live_activity.reporter.turn_started, session_id)
         # A voice chat archived when its call ended is in use again (#1124).
         try:

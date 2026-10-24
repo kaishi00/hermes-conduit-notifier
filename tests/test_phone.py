@@ -939,7 +939,8 @@ def test_a_change_reaches_the_phone_and_its_outcome_comes_back(store, iphone):
 # Conduit keeps a change's URL only when it's http or https and applies the
 # rest without it, so anything else is refused here rather than lost there.
 @pytest.mark.parametrize("url", ["javascript:alert(1)", "ftp://files.example.com/a", "example.com/booking",
-                                 "/booking", "mailto:a@example.com", "https://"])
+                                 "/booking", "mailto:a@example.com", "https://", "https://:8080",
+                                 "https://user@/booking"])
 @pytest.mark.parametrize("kind, fields", [
     ("add_event", {"title": "Dentist", "start": "2026-10-16T15:00:00+01:00", "end": "2026-10-16T16:00:00+01:00"}),
     ("add_reminder", {"title": "Milk"}),
@@ -1665,6 +1666,18 @@ def test_a_version_1_store_that_cant_upgrade_yet_says_so_instead_of_reading_as_e
         assert raised.value.code == "upgrade_pending" and raised.value.status == 503
     monkeypatch.undo()
     assert [device["id"] for device in store.devices()] == [DEVICE]
+
+
+def test_an_older_store_no_upgrade_reaches_says_to_update_not_to_retry(store, iphone):
+    import sqlite3
+    store.ingest(iphone.seal(_batch()))
+    db = sqlite3.connect(store.path)
+    db.execute("UPDATE meta SET value='0' WHERE key='schema'")
+    db.commit()
+    db.close()
+    with pytest.raises(phone.PhoneError) as raised:
+        store.devices()
+    assert raised.value.code == "schema" and raised.value.status == 409
 
 
 def test_a_read_opens_the_file_once(store, iphone, monkeypatch):

@@ -179,9 +179,14 @@ def _key_created_at(record: Any) -> str:
     return str(record.get("created_at") or "") if isinstance(record, dict) else ""
 
 
-def remove_state() -> None:
+def remove_state(credential: str | None = None, *, unpaired: bool = False) -> None:
+    """Remove the saved pairing; with ``credential``, only while the saved
+    pairing still carries it, and with ``unpaired`` only while none is saved
+    (a leftover file), so a pairing claimed meanwhile stays."""
     path = state_path()
     with state_file_lock(path):
+        if (credential is not None or unpaired) and (load_state() or {}).get("credential") not in (None, credential):
+            return
         try:
             path.unlink()
         except FileNotFoundError:
@@ -251,18 +256,19 @@ class UnpairedLocally(RuntimeError):
 def unpair() -> bool:
     state = load_state()
     if not state:
-        remove_state()
+        remove_state(unpaired=True)
         return False
     try:
         url = check_request_url(f"{str(state.get('relay_url') or '').rstrip('/')}/v1/gateways/current")
     except ValueError:
-        remove_state()
+        remove_state(state["credential"])
         raise UnpairedLocally(
             "Removed this profile's pairing, but its saved relay URL is not https://, so the relay was not told. "
             "Remove this gateway in Conduit to revoke it there."
         ) from None
     request_json(url, method="DELETE", credential=state["credential"])
-    remove_state()
+    # A pairing claimed while the relay revoked this one is not the one revoked.
+    remove_state(state["credential"])
     return True
 
 
@@ -693,9 +699,12 @@ def stop(timeout: float = 1.0) -> None:
 # event_id per pairing and answers a repeat as a duplicate, and an event's id
 # stays the same from one send to the next (redaction and encryption re-key it
 # the same way every time). One thread delivers everything, so the retries of
-# one event stop after RETRY_BUDGET seconds instead of holding up the rest.
+# one event stop after RETRY_BUDGET seconds instead of holding up the rest:
+# the waits for an answer count, so a send is cut to what the budget has left.
 RETRY_DELAYS = (1.0, 2.0, 4.0)
 RETRY_BUDGET = 30.0
+SEND_TIMEOUT = 15.0
+MIN_SEND_TIMEOUT = 1.0
 
 # A 401 or 403 is the relay (or something in front of it) refusing this host,
 # and the next event would be refused the same way. Notifications are parked
@@ -786,7 +795,7 @@ def _deliver(event: dict[str, Any], *, sleep: Callable[[float], None] = _pause,
                         event.get("type", "event"), _pause_reason(state), paused_until - now)
             return False
         try:
-            _send(event, state)
+            _send(event, state, timeout=max(MIN_SEND_TIMEOUT, min(SEND_TIMEOUT, started + RETRY_BUDGET - now)))
         except Exception as error:
             if delay is not None and _worth_retrying(error) and clock() - started + delay <= RETRY_BUDGET:
                 logger.info("Conduit notification delivery for %s will be retried: %s", event.get("type", "event"), error)

@@ -166,6 +166,25 @@ def test_retries_give_up_after_the_budget(paired, monkeypatch):
     assert len(relay.event_ids) == 2
 
 
+def test_the_budget_counts_the_waits_for_an_answer(paired, monkeypatch):
+    # A relay that never answers: each send waits out its timeout, so the
+    # retries stop near RETRY_BUDGET, not three 15 s timeouts plus the delays.
+    paired([])
+    monkeypatch.setattr(client, "RETRY_DELAYS", (1.0, 2.0, 4.0))
+    now, timeouts = [0.0], []
+
+    def blackholed(event, state, timeout=15.0):
+        timeouts.append(timeout)
+        now[0] += timeout
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(client, "_send", blackholed)
+    assert client._deliver(_event(), sleep=lambda seconds: now.__setitem__(0, now[0] + seconds),
+                           clock=lambda: now[0]) is False
+    assert timeouts == [15.0, 14.0]
+    assert now[0] <= client.RETRY_BUDGET
+
+
 def test_a_relay_401_is_recorded_for_status_and_keeps_the_pairing(paired, capsys):
     relay = paired([401], redact_content=True, redact_key="k" * 64)
 

@@ -464,7 +464,7 @@ def _write_url(value: Any, field: str) -> str | None:
         parts = urlsplit(text)
     except ValueError:
         parts = None
-    if parts is None or parts.scheme.lower() not in ("http", "https") or not parts.netloc:
+    if parts is None or parts.scheme.lower() not in ("http", "https") or not parts.hostname:
         raise PhoneError("malformed", f"{field} must be an http or https URL")
     return text
 
@@ -567,7 +567,9 @@ class PhoneStore:
                 try:
                     with self._write():
                         pass
-                except (PhoneError, sqlite3.DatabaseError, OSError) as error:
+                except (sqlite3.DatabaseError, OSError) as error:
+                    # A schema no upgrade reaches (_migrate's 409) goes up as
+                    # it is: waiting won't fix it, updating the plugin will.
                     raise PhoneError("upgrade_pending", "The calendar store is being upgraded; try again in a moment",
                                      status=503) from error
                 opened = self._open_read()

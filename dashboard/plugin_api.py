@@ -6857,7 +6857,7 @@ async def put_chat_on_screen(request: Request, response: Response, profile: Opti
 CALLS_LIMIT = 30
 CALLS_WINDOW_S = 60.0
 CALLS_MAX_BODY_BYTES = 4096
-_CALL_WATCH_ID = re.compile(r"^[0-9a-f]{24}$")
+_CALL_WATCH_ID = re.compile(r"^[0-9a-f]{24}\Z")
 _calls_limiter = _MintLimiter(CALLS_LIMIT, CALLS_WINDOW_S, message="Too many call requests; try again shortly")
 _calls_store_module: Any = None
 _calls_store_lock = threading.Lock()
@@ -8217,9 +8217,9 @@ _WATCH_INFO = {
     "result": b"conduit-watch-tools-v1 result host-to-watch",
 }
 _WATCH_AAD_TAG = "conduit-watch-tools/1"
-_WATCH_ID = re.compile(r"^[A-Za-z0-9_-]{22}$")
-_WATCH_NONCE = re.compile(r"^[A-Za-z0-9_-]{16}$")
-_WATCH_CT = re.compile(r"^[A-Za-z0-9_-]{22,}$")
+_WATCH_ID = re.compile(r"^[A-Za-z0-9_-]{22}\Z")
+_WATCH_NONCE = re.compile(r"^[A-Za-z0-9_-]{16}\Z")
+_WATCH_CT = re.compile(r"^[A-Za-z0-9_-]{22,}\Z")
 # The relay keys travel to it: HTTPS only (tests widen this for a local relay).
 _WATCH_RELAY_SCHEMES: Tuple[str, ...] = ("https://",)
 _watch_grant_limiter = _MintLimiter(WATCH_GRANT_LIMIT, WATCH_GRANT_WINDOW_S,
@@ -10102,7 +10102,8 @@ class _WatchJobs:
                 "request_id": text("request_id", 128),
                 "server_request_id": server_request_id,
                 "command": shown_command,
-                "cut": shown_command != command,
+                # No command to show is never shown whole: it can only be denied.
+                "cut": not command or shown_command != command,
                 "description": text("description", 500) or "Approval required",
             }
             job.approval["fingerprint"] = _watch_approval_fingerprint(job.approval, command)
@@ -10611,7 +10612,7 @@ class _WatchJobs:
             # The Watch showed only part of the command: approving it would
             # approve what the user never saw.
             return {"ok": False, "status": 400,
-                    "detail": "The command was too long to show whole, so it can only be denied"}
+                    "detail": "The command could not be shown whole, so it can only be denied"}
         params: Dict[str, Any] = {"session_id": job.session_id, "choice": choice}
         if approval["request_id"]:
             params["request_id"] = approval["request_id"]
@@ -12118,7 +12119,7 @@ class _WatchCallChat:
                     "id": secrets.token_hex(8), "request_id": text("request_id", 128), "at": time.monotonic(),
                     "server_request_id": text("server_request_id", 128),
                     "command": command[:LOCAL_LIVE_WATCH_APPROVAL_COMMAND_CHARS],
-                    "cut": len(command) > LOCAL_LIVE_WATCH_APPROVAL_COMMAND_CHARS,
+                    "cut": not command or len(command) > LOCAL_LIVE_WATCH_APPROVAL_COMMAND_CHARS,
                     "description": text("description", 500) or "Approval required",
                 })
             return True
@@ -14207,7 +14208,7 @@ ROOM_IMAGE_LIMIT = 60
 ROOM_IMAGE_WINDOW_S = 600.0
 _room_image_limiter = _MintLimiter(ROOM_IMAGE_LIMIT, ROOM_IMAGE_WINDOW_S,
                                    message="Too many picture changes; try again shortly")
-_ROOM_IMAGE_ID = re.compile(r"^[A-Za-z0-9._:-]{1,200}$")
+_ROOM_IMAGE_ID = re.compile(r"^[A-Za-z0-9._:-]{1,200}\Z")
 _room_image_lock = threading.Lock()
 # Writes wait on one another (the locks below), so they get their own threads
 # rather than the default pool other routes share.
