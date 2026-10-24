@@ -145,6 +145,36 @@ def test_another_restart_after_the_pull_still_finishes_the_job(tmp_path):
     assert job["step"] == "done"
 
 
+def test_a_gateway_restart_that_took_the_dashboard_down_finishes_the_job(tmp_path):
+    # A service manager restarted the dashboard with the gateway: the restart
+    # command died with it and the job read as failed (Eric, 2026-10-24).
+    path = tmp_path / api.SELF_UPDATE_FILE
+    failed = {"id": "j1", "step": "failed", "failed_step": "restarting_gateway", "boot_id": "old",
+              "version": api.LOADED_VERSION, "finished_at": api.time.time() - 5,
+              "detail": "The plugin is updated, but the gateway didn't restart. Run hermes gateway status on the host."}
+    path.write_text(json.dumps(failed))
+    notified = []
+    job = api.finish_self_update_after_restart(path, notified.append, delay=0)
+    assert job["step"] == "done" and job["loaded_version"] == api.LOADED_VERSION
+    assert "detail" not in job and "failed_step" not in job
+    api.time.sleep(0.2)
+    assert [n["step"] for n in notified] == ["done"]
+
+
+def test_an_old_or_other_failure_stays_failed(tmp_path):
+    path = tmp_path / api.SELF_UPDATE_FILE
+    base = {"id": "j1", "step": "failed", "failed_step": "restarting_gateway", "boot_id": "old",
+            "version": api.LOADED_VERSION, "finished_at": api.time.time() - 5}
+    for changed in ({"finished_at": api.time.time() - api.SELF_UPDATE_TAKEN_DOWN_S - 60},
+                    {"failed_step": "downloading"},
+                    {"code": "restart_needed"},
+                    {"version": "0.0.1"},
+                    {"boot_id": api.BOOT_ID}):
+        path.write_text(json.dumps({**base, **changed}))
+        assert api.finish_self_update_after_restart(path, lambda job: None, delay=0) is None
+        assert json.loads(path.read_text())["step"] == "failed"
+
+
 def test_status_fails_a_job_nobody_runs_and_says_so(tmp_path):
     path = tmp_path / api.SELF_UPDATE_FILE
     notified = []

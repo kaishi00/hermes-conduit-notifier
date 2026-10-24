@@ -14923,6 +14923,9 @@ SELF_UPDATE_CHATS_LIMIT_S = 7200.0
 SELF_UPDATE_NOTIFY_DELAY_S = 5.0
 # A job that hasn't moved for this long is over, however it was left.
 SELF_UPDATE_STALE_S = 3600.0
+# A gateway restart that fails this shortly before a new dashboard starts
+# took the dashboard down with it (a service manager restarting both).
+SELF_UPDATE_TAKEN_DOWN_S = 300.0
 SELF_UPDATE_RUNNING = ("downloading", "restarting_gateway", "waiting_for_chats", "restarting_dashboard")
 # Reentrant: a start reads the status under it too.
 _self_update_lock = threading.RLock()
@@ -15175,13 +15178,29 @@ def _another_live_process(pid: Any) -> bool:
     return True
 
 
+def _taken_down_by_gateway_restart(job: Dict[str, Any], now: Optional[float] = None) -> bool:
+    """A job its dashboard marked failed as it went down with the gateway restart.
+
+    A service manager can restart the dashboard together with the gateway, so
+    the restart command it was waiting on dies with it and reads as failed.
+    The new plugin is what this process loaded: that update finished.
+    """
+    return (job.get("step") == "failed" and job.get("failed_step") == "restarting_gateway"
+            and not job.get("code")
+            and (now or time.time()) - _job_time(job.get("finished_at")) <= SELF_UPDATE_TAKEN_DOWN_S)
+
+
 def finish_self_update_after_restart(path: Optional[Path] = None,
                                      notify: Optional[Callable[[Dict[str, Any]], None]] = None,
                                      delay: float = SELF_UPDATE_NOTIFY_DELAY_S) -> Optional[Dict[str, Any]]:
-    """In a new dashboard process: ends a job the previous process left running."""
+    """In a new dashboard process: ends a job the previous process left running,
+    or one it marked failed as the gateway restart took it down."""
     path = path or _self_update_path()
     job = _read_self_update(path)
-    if job is None or job.get("step") not in SELF_UPDATE_RUNNING or job.get("boot_id") == BOOT_ID:
+    if job is None or job.get("boot_id") == BOOT_ID:
+        return None
+    taken_down = _taken_down_by_gateway_restart(job)
+    if job.get("step") not in SELF_UPDATE_RUNNING and not (taken_down and LOADED_VERSION == job.get("version")):
         return None
     if _another_live_process(job.get("pid")):
         # Another process loading this file (a probe), while the dashboard runs the job.
@@ -15189,6 +15208,8 @@ def finish_self_update_after_restart(path: Optional[Path] = None,
     # Pulled (it has a version) and this process loaded it: done, whatever
     # restarted the dashboard (an update's own re-exec or a /self/restart).
     if job.get("version") is not None and LOADED_VERSION == job["version"]:
+        for key in ("failed_step", "detail", "code"):
+            job.pop(key, None)
         job.update(step="done", loaded_version=LOADED_VERSION, finished_at=time.time())
     else:
         _self_update_failed(job, "The dashboard restarted before the update finished")

@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.69.1 (2026-10-24)
+
+### Fixes
+- An update from Conduit could read as failed ("the gateway didn't restart")
+  when the host restarts the dashboard together with the gateway. The update
+  had worked: the restarted dashboard now finishes it and says so.
+
 ## 0.69.0 (2026-10-24)
 
 ### New and improved
