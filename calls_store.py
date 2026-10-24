@@ -1014,7 +1014,7 @@ def map_answer(answer: str, choices: list[str], multi_select: bool) -> tuple[str
 
 def _without_recommended(choice: str) -> str:
     stripped = choice.strip()
-    if stripped.endswith(RECOMMENDED_LABEL):
+    if stripped.casefold().endswith(RECOMMENDED_LABEL.casefold()):
         return stripped[: -len(RECOMMENDED_LABEL)].strip()
     return stripped
 
