@@ -515,7 +515,8 @@ def e2e_status(state: dict[str, Any] | None = None) -> dict[str, Any]:
 def request_key_rotation(*, without_overlap: bool = False) -> bool:
     """Asks the paired phone for a new encryption key on its next dashboard
     connect. ``without_overlap`` (a key that may have leaked) also drops the
-    previous key now, and the current one as soon as the new one arrives.
+    previous key now, and the current one as soon as the new one arrives;
+    until then the current key still seals pushes (unpair cuts it off now).
     False when the profile isn't paired or has no key."""
     def change(state: dict[str, Any]) -> bool:
         if state.get("e2e") is None:
@@ -524,6 +525,8 @@ def request_key_rotation(*, without_overlap: bool = False) -> bool:
         if without_overlap:
             state["rotate_without_overlap"] = True
             state.pop("e2e_previous", None)
+        else:
+            state.pop("rotate_without_overlap", None)
         return True
 
     return update_state(change)

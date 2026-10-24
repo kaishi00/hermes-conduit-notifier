@@ -606,3 +606,18 @@ def test_a_stale_write_keeps_the_rotation_that_happened_meanwhile(monkeypatch, t
     stored = json.loads(path.read_text())
     assert stored["e2e"]["kid"] == NEW_KID and stored["e2e_previous"] == previous
     assert "rotate_requested_at" not in stored
+
+
+def test_a_plain_rotation_after_one_without_overlap_keeps_the_overlap(state_file, client_state):
+    _http().post(f"{BASE}/e2e", json=_body())
+    assert client.request_key_rotation(without_overlap=True) is True
+    assert client.request_key_rotation() is True
+    assert "rotate_without_overlap" not in json.loads(state_file.read_text())
+
+
+def test_the_same_key_id_with_another_secret_is_refused(state_file):
+    http = _http()
+    http.post(f"{BASE}/e2e", json=_body())
+    assert http.post(f"{BASE}/e2e", json=_body(secret=e2e.b64u(NEW_SECRET))).status_code == 409
+    stored = json.loads(state_file.read_text())
+    assert stored["e2e"]["secret"] == e2e.b64u(SECRET) and "e2e_previous" not in stored

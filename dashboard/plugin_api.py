@@ -6406,8 +6406,12 @@ def provision_e2e(body: Any, path: Any = None) -> Dict[str, Any]:
             raise TokenError(409, "This Hermes profile is paired with a different device")
         now = datetime.now(timezone.utc)
         current = state.get("e2e")
-        if isinstance(current, dict) and current.get("kid") == kid and current.get("secret") == secret:
-            return {"kid": kid}  # a retry of a key already stored
+        if isinstance(current, dict) and current.get("kid") == kid:
+            if isinstance(current.get("secret"), str) and hmac.compare_digest(current["secret"], secret):
+                return {"kid": kid}  # a retry of a key already stored
+            # Key ids are random per key: the same id with another secret
+            # would make answers ambiguous during the overlap.
+            raise TokenError(409, "This key id is already in use with a different secret")
         rotated = isinstance(current, dict) and isinstance(current.get("kid"), str) and current["kid"] != kid \
             and isinstance(current.get("secret"), str) and _E2E_B64URL.match(current["secret"])
         if rotated and not state.get("rotate_without_overlap"):

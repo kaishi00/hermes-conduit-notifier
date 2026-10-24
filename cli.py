@@ -46,7 +46,8 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
         "--now",
         action="store_true",
         help="For a key that may have leaked: drop the old key as soon as the new one arrives, with no overlap "
-             "(pushes already on their way then show generic text)",
+             "(pushes already on their way then show generic text). The current key keeps working until Conduit "
+             "next connects to this dashboard; `hermes conduit-push unpair` cuts it off now",
     )
     pulse = commands.add_parser("pulse", help="Pulse, the proactivity experiment: on, off, status, probe, report, home, outcomes, memory, followups, "
                                                  "cards, rate, done, learned, nudge, budget, candidates")
@@ -221,7 +222,8 @@ def dispatch(args: argparse.Namespace) -> int:
         print("Asked Conduit for a new encryption key. It hands one over the next time it connects to this "
               "dashboard; until then notifications stay sealed with the current key.")
         if args.now:
-            print("The current key stops working as soon as the new one arrives, with no overlap.")
+            print("The current key stops working as soon as the new one arrives, with no overlap. Until Conduit "
+                  "connects it still seals notifications; to cut it off right away, run `hermes conduit-push unpair`.")
         return 0
     if action == "unpair":
         try:
@@ -238,7 +240,7 @@ def dispatch(args: argparse.Namespace) -> int:
         return _pulse(args)
     if action == "prefs":
         return _prefs(args)
-    print("Usage: hermes conduit-push {pair|status|test|redact|unpair|pulse|prefs}")
+    print("Usage: hermes conduit-push {pair|status|test|redact|e2e|unpair|pulse|prefs}")
     return 2
 
 
