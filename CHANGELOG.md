@@ -31,6 +31,18 @@ checks it). The format is fixed, because Conduit reads it:
   flight is lost; `rotate --now` drops it at once for a key that may have
   leaked.
 
+## 0.70.2 (2026-10-24)
+
+### Fixes
+- Pulse no longer asks about something you finished later in another chat or
+  a cron run, or that a newer release moved past: a follow-up and the report
+  now read later chats on the same subject, follow a long chat into its
+  continuation, and see what Hermes is still running in the background.
+- A week-old follow-up checks once more before asking whether you still want
+  it, so a finished one closes instead.
+- On Windows, the dashboard's check for an update still in progress could
+  end the process it looked at. It now only asks Windows whether it runs.
+
 ## 0.70.1 (2026-10-24)
 
 ### Fixes

@@ -155,7 +155,10 @@ def dispatch(args: argparse.Namespace) -> int:
                   f"since {_printable(encryption['created_at'] or 'an unknown date')}, {origin})")
             if encryption["previous_kid"]:
                 print(f"Previous key {encryption['previous_kid'][:8]}… still opens answers for up to 7 days.")
-            if encryption["rotate_requested"]:
+            if encryption["rotate_requested"] and encryption["rotate_without_overlap"]:
+                print("Key rotation: asked for with --now; Conduit hands over a new key the next time it connects to "
+                      "this dashboard, and the current key stops opening answers then.")
+            elif encryption["rotate_requested"]:
                 print("Key rotation: asked for; Conduit hands over a new key the next time it connects to this dashboard.")
             elif encryption["rotation_due"]:
                 print("Key rotation: due (the key is over 7 days old); Conduit hands over a new key the next time "

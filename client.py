@@ -518,6 +518,7 @@ def e2e_status(state: dict[str, Any] | None = None) -> dict[str, Any]:
         "suite": (record.get("suite") or "handover") if isinstance(record, dict) else None,
         "previous_kid": previous.get("kid") if previous else None,
         "rotate_requested": bool((state or {}).get("rotate_requested_at")),
+        "rotate_without_overlap": bool((state or {}).get("rotate_without_overlap")),
         "rotation_due": usable and e2e.rotation_due(state or {}),
         "crypto": e2e.available(),
     }

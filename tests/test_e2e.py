@@ -588,6 +588,7 @@ def test_a_rotation_without_overlap_drops_the_old_key(state_file, client_state):
     assert client.request_key_rotation(without_overlap=True) is True
     assert "e2e_previous" not in json.loads(state_file.read_text())
     assert http.get(f"{BASE}/e2e").json()["rotate_without_overlap"] is True
+    assert client.e2e_status(client.load_state())["rotate_without_overlap"] is True
     http.post(f"{BASE}/e2e", json=_body(kid=THIRD_KID, secret=e2e.b64u(THIRD_SECRET)))
     stored = json.loads(state_file.read_text())
     assert stored["e2e"]["kid"] == THIRD_KID and "e2e_previous" not in stored
