@@ -1668,6 +1668,18 @@ def test_a_version_1_store_that_cant_upgrade_yet_says_so_instead_of_reading_as_e
     assert [device["id"] for device in store.devices()] == [DEVICE]
 
 
+def test_an_older_store_no_upgrade_reaches_says_to_update_not_to_retry(store, iphone):
+    import sqlite3
+    store.ingest(iphone.seal(_batch()))
+    db = sqlite3.connect(store.path)
+    db.execute("UPDATE meta SET value='0' WHERE key='schema'")
+    db.commit()
+    db.close()
+    with pytest.raises(phone.PhoneError) as raised:
+        store.devices()
+    assert raised.value.code == "schema" and raised.value.status == 409
+
+
 def test_a_read_opens_the_file_once(store, iphone, monkeypatch):
     import sqlite3
     store.ingest(iphone.seal(_batch()))

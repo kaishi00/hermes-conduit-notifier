@@ -567,7 +567,9 @@ class PhoneStore:
                 try:
                     with self._write():
                         pass
-                except (PhoneError, sqlite3.DatabaseError, OSError) as error:
+                except (sqlite3.DatabaseError, OSError) as error:
+                    # A schema no upgrade reaches (_migrate's 409) goes up as
+                    # it is: waiting won't fix it, updating the plugin will.
                     raise PhoneError("upgrade_pending", "The calendar store is being upgraded; try again in a moment",
                                      status=503) from error
                 opened = self._open_read()
