@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.71.1 (2026-10-24)
+
+### Fixes
+- Pictures Hermes made with image generation now show in Artifacts. Without
+  the update, a chat's generated images are missing from its Artifacts list
+  and from the Artifacts page.
+
 ## 0.71.0 (2026-10-24)
 
 ### New and improved
