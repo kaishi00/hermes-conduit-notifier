@@ -26,11 +26,10 @@ jobs:
         github.actor == github.event.pull_request.user.login &&
         contains(github.event.pull_request.labels.*.name, 'waiting on contributor')) ||
       (github.event_name == 'issue_comment' && github.event.issue.pull_request && github.event.issue.state == 'open' &&
-        github.event.comment.user.login == github.event.issue.user.login &&
+        github.event.comment.user.login == github.event.issue.user.login && github.event.comment.user.type == 'User' &&
         contains(github.event.issue.labels.*.name, 'waiting on contributor'))
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    # Both labels already exist in the repository.
     permissions:
       issues: write
     steps:
@@ -49,6 +48,8 @@ jobs:
               gh api -X DELETE "$labels/waiting%20on%20Eric" >/dev/null
             fi
           elif grep -qx 'waiting on contributor' <<<"$current"; then
+            # Creates the label the first time (an existing one answers 422).
+            gh api "repos/$REPO/labels" -f name='waiting on Eric' -f color=1d76db >/dev/null 2>&1 || true
             gh api "$labels" -f 'labels[]=waiting on Eric' >/dev/null
             gh api -X DELETE "$labels/waiting%20on%20contributor" >/dev/null
           fi
