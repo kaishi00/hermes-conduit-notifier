@@ -22,6 +22,8 @@ checks it). The format is fixed, because Conduit reads it:
   continuation, and see what Hermes is still running in the background.
 - A week-old follow-up checks once more before asking whether you still want
   it, so a finished one closes instead.
+- On Windows, the dashboard's check for an update still in progress could
+  end the process it looked at. It now only asks Windows whether it runs.
 
 ## 0.70.0 (2026-10-24)
 

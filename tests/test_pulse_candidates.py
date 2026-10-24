@@ -231,6 +231,26 @@ def test_the_report_shows_what_later_chats_said_about_an_item_and_what_runs(live
     assert text.index(report.REMEMBERED_TITLE) < text.index("## Later on the same subject")
 
 
+def test_the_report_picks_the_closest_later_row_and_skips_the_items_own_continuation(live):
+    now = time.time()
+    first = commitment(live, "The user will add iPad and Duo support in the patch after the 2.0 release.",
+                       words="duo/ipad support didn't make it into the 2.0 release, it'll be in the patch after that",
+                       said_at=now - 7 * 86400)
+    live.store.set("memory", True)
+    live.db.session(sid="own-2", title="Continued", pinned=0, parent=CHAT)
+    live.db.message("assistant", "iPad and Duo support for the patch after 2.0 release is still open.", sid="own-2",
+                    at=now - 30)
+    live.db.session(sid="ship", title="Conduit Build", pinned=0)
+    live.db.message("assistant", "Uploaded 2.2.1 with iPad and Duo support in this patch release.", sid="ship",
+                    at=now - 3600)
+    live.db.message("assistant", "The iPad mockups look fine.", sid="ship", at=now - 60)
+    text = report.gather(live.home, live.store, home_chat_id=SID, now=now, room=candidates.CONTEXT_BUDGET,
+                         keyed=True).text
+    later = text.split("## Later on the same subject", 1)[1].split("\n\n", 1)[0]
+    assert f"#{first}: " in later and "Uploaded 2.2.1" in later
+    assert "still open" not in later and "mockups" not in later
+
+
 # The report, made from the list ------------------------------------------------------
 
 class Llm:

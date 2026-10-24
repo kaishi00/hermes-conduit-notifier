@@ -15388,11 +15388,29 @@ def _self_update_status(path: Path, now: Optional[float],
     return job
 
 
+def _windows_pid_running(pid: int) -> bool:
+    """Windows has no signal 0: os.kill(pid, 0) there terminates the process.
+    Open it for a query instead; one this process may not open counts as
+    running."""
+    import ctypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return ctypes.get_last_error() != 87  # ERROR_INVALID_PARAMETER: no such process
+    try:
+        code = ctypes.c_ulong()
+        return not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)) or code.value == 259  # STILL_ACTIVE
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def _another_live_process(pid: Any) -> bool:
     """Whether `pid` is a running process other than this one. The dashboard's
     re-exec keeps its pid; a dashboard restarted any other way has a new one."""
-    if not isinstance(pid, int) or pid <= 0 or pid == os.getpid():
+    if not isinstance(pid, int) or isinstance(pid, bool) or not 0 < pid <= 2**31 - 1 or pid == os.getpid():
         return False
+    if os.name == "nt":
+        return _windows_pid_running(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:

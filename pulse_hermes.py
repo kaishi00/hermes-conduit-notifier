@@ -216,6 +216,16 @@ def later_messages(home: Path, *, after: float, exclude: Iterable[str], max_char
     return _run(home, _LATER, (ids, max_chars, after, limit))
 
 
+def chain_ids(home: Path, chat_id: str) -> set[str]:
+    """``chat_id`` and the chats in its compression chain, up and down."""
+    rows = _run(home, (
+        "WITH RECURSIVE up(id, parent) AS (SELECT id, parent_session_id FROM sessions WHERE id = ? "
+        "UNION SELECT s.id, s.parent_session_id FROM sessions s JOIN up ON s.id = up.parent), "
+        "chain(id) AS (SELECT id FROM up UNION SELECT s.id FROM sessions s JOIN chain c ON s.parent_session_id = c.id) "
+        "SELECT id FROM chain"), (chat_id,))
+    return {row["id"] for row in rows} | {chat_id}
+
+
 def chat_titles(home: Path, ids: Iterable[str]) -> dict[str, str]:
     """Titles of the chats in ``ids``."""
     wanted = sorted({chat for chat in ids if chat})

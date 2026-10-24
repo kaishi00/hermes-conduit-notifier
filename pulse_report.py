@@ -466,12 +466,15 @@ def later_lines(home: Path, items: Sequence[dict], *, home_chat_id: str, zone: t
         return ""
     out, used = [], 0
     for item in followed:
-        theirs = [row for row in rows if row["chat_id"] != item["chat_id"]]
-        found = evidence.related(theirs, f"{item['text']} {item['evidence']}", after=float(item["valid_from"]),
-                                 budget=evidence.PER_ROW + 60)
-        if not found:
+        try:
+            own = hermes.chain_ids(home, item["chat_id"]) if item["chat_id"] else set()
+        except hermes.HermesUnreadable:
+            return ""
+        theirs = [row for row in rows if row["chat_id"] not in own]
+        found = evidence.closest(theirs, f"{item['text']} {item['evidence']}", after=float(item["valid_from"]))
+        if found is None:
             continue
-        line = f"#{item['id']}: " + _clip(evidence.lines(found[-1:], zone)[0], LATER_PER_ITEM)
+        line = f"#{item['id']}: " + _clip(evidence.lines([found], zone)[0], LATER_PER_ITEM)
         if used + len(line) > LATER_BUDGET:
             break
         out.append(line)

@@ -766,6 +766,17 @@ def test_a_check_lists_what_runs_in_the_background(live):
     assert "gone.sh" not in section  # its process is gone
 
 
+def test_a_background_check_never_signals_on_windows_or_with_a_corrupt_pid(monkeypatch):
+    evidence = sys.modules["conduit_push.pulse_evidence"]
+    killed = []
+    monkeypatch.setattr(evidence.os, "kill", lambda *args: killed.append(args))
+    assert not evidence._alive({"pid": 2 ** 70, "pid_scope": "host"})  # os.kill would raise OverflowError
+    monkeypatch.setattr(evidence.os, "name", "nt")
+    monkeypatch.setattr(evidence, "_windows_pid_running", lambda pid: pid == 4242)
+    assert evidence._alive({"pid": 4242}) and not evidence._alive({"pid": 4243})
+    assert killed == []  # on Windows os.kill(pid, 0) would end the process
+
+
 def test_a_check_without_a_background_checkpoint_says_nothing_of_it(live):
     promise(live)
     (live.home / "processes.json").write_text("{not json")

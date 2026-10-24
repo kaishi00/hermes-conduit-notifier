@@ -35,6 +35,8 @@ PER_ROW = 600
 MIN_SHARED = 2
 LATER_BUDGET = 3_000
 MAX_PROCESSES = 12
+# Largest pid os.kill takes; a bigger one is a corrupt checkpoint.
+MAX_PID = 2**31 - 1
 
 _QUOTES = str.maketrans("‘’“”", "''\"\"")
 _WORD = re.compile(r"[a-z0-9][a-z0-9'.-]{2,}")
@@ -71,10 +73,9 @@ def later_rows(home: Path, *, after: float, exclude: Iterable[str], limit: int =
     return hermes.later_messages(home, after=after, exclude=exclude, max_chars=PER_ROW, limit=limit)
 
 
-def related(rows: Sequence[Any], subject: str, *, after: float, budget: int = LATER_BUDGET) -> list[Any]:
-    """The rows after ``after`` that share at least MIN_SHARED words with
-    ``subject``: the closest first, then the newest, as many as ``budget``
-    characters hold; oldest first."""
+def _scored(rows: Sequence[Any], subject: str, after: float) -> list[Any]:
+    """The rows after ``after`` sharing at least MIN_SHARED words with
+    ``subject``, the closest first, then the newest."""
     wanted = words(subject)
     if len(wanted) < MIN_SHARED:
         return []
@@ -86,8 +87,21 @@ def related(rows: Sequence[Any], subject: str, *, after: float, budget: int = LA
         if shared >= MIN_SHARED:
             scored.append((shared, row))
     scored.sort(key=lambda pair: (-pair[0], -pair[1]["timestamp"]))
+    return [row for _, row in scored]
+
+
+def closest(rows: Sequence[Any], subject: str, *, after: float) -> Any:
+    """The row closest to ``subject`` after ``after``, or None."""
+    found = _scored(rows, subject, after)
+    return found[0] if found else None
+
+
+def related(rows: Sequence[Any], subject: str, *, after: float, budget: int = LATER_BUDGET) -> list[Any]:
+    """The rows after ``after`` that share at least MIN_SHARED words with
+    ``subject``: the closest first, then the newest, as many as ``budget``
+    characters hold; oldest first."""
     kept, used = [], 0
-    for _, row in scored:
+    for row in _scored(rows, subject, after):
         size = min(len(row["content"] or ""), PER_ROW) + 60
         if used + size > budget:
             continue
@@ -116,13 +130,32 @@ def later_section(home: Path, subject: str, *, after: float, exclude: Iterable[s
             "(Matched by shared words, so some may be about something else.)\n" + "\n".join(lines(found, zone)))
 
 
+def _windows_pid_running(pid: int) -> bool:
+    """Windows has no signal 0: os.kill(pid, 0) there terminates the process.
+    Open it for a query instead; one this process may not open counts as
+    running."""
+    import ctypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return ctypes.get_last_error() != 87  # ERROR_INVALID_PARAMETER: no such process
+    try:
+        code = ctypes.c_ulong()
+        return not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)) or code.value == 259  # STILL_ACTIVE
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def _alive(entry: dict) -> bool:
     """False only for a host process that is surely gone; a sandboxed one,
     or one this process can't signal, counts as running."""
     pid = entry.get("pid")
-    if entry.get("pid_scope") not in (None, "", "host") or not isinstance(pid, int) or isinstance(pid, bool) \
-            or pid <= 0:
+    if entry.get("pid_scope") not in (None, "", "host") or not isinstance(pid, int) or isinstance(pid, bool):
         return True
+    if not 0 < pid <= MAX_PID:
+        return False
+    if os.name == "nt":
+        return _windows_pid_running(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
