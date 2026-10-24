@@ -10,7 +10,7 @@ from typing import Any
 
 # Keep in sync with plugin.yaml. Reported on every event so the relay can
 # expose per-gateway compatibility state to the app (Settings > Notifications).
-PLUGIN_VERSION = "0.70.3"
+PLUGIN_VERSION = "0.70.4"
 PLUGIN_CAPABILITIES = [
     "approval-decisions",
     "clarify-loop",
@@ -597,36 +597,59 @@ _UNDERSCORE_EMPHASIS = re.compile(r"(?<![\w_])_(?=\S)([^_]+?)(?<=\S)_(?![\w_])")
 _STRIKE = re.compile(r"~~(?=\S)(.+?)(?<=\S)~~")
 
 
-# Hermes' MEDIA tag, read the way its gateway reads it (extract_media): a
-# quoted path, a spaced path up to a known extension, or one word.
-_MEDIA_EXTENSIONS = ("png|jpe?g|gif|webp|heic|svg|mp4|mov|avi|mkv|webm|ogg|opus|mp3|wav|m4a|aac|flac|"
-                     "pdf|txt|md|csv|json|html?|docx?|xlsx?|pptx?|key|numbers|pages|zip|epub|ics|vcf")
+# Hermes' MEDIA tag as its gateway reads it (extract_media): a quoted path,
+# a path with spaces up to a file extension artifacts_index knows, or a path
+# without spaces. Only uppercase MEDIA: followed by a path counts, so "social
+# media: report" stays prose.
+# artifacts_index's file extensions and trailing punctuation, repeated so
+# events stays import-free (tests/test_turn_end_pushes.py keeps them equal).
+_WRITTEN = frozenset(
+    "png jpg jpeg gif webp heic heif bmp svg tif tiff mp4 mov m4v webm mkv avi mp3 m4a wav ogg opus flac aac "
+    "caf html htm xhtml pdf txt md markdown csv tsv json xml yaml yml rtf doc docx xls xlsx ppt pptx key "
+    "numbers pages odt ods odp epub ics vcf gpx kml kmz zip tar gz tgz 7z".split())
+_TRAILING = ".,;:!?)]}*_"
+_PATH_START = r"(?:~/|/|[A-Za-z]:[/\\])"
+_PATH_WORD = r"[^\s`\"'<>]"
+_PATH_EXTENSION = (r"\.(?i:" + "|".join(sorted(_WRITTEN, key=len, reverse=True))
+                   + r")(?=[\s`\"',;:!?)\]}*_~]|$)")
 _MEDIA_TAG = re.compile(
     r"""[`"']?MEDIA:[^\S\n]*(?P<path>`[^`\n]+`|"[^"\n]+"|'[^'\n]+'"""
-    r"""|(?:~/|/)\S+(?:[^\S\n]+\S+)*?\.(?:""" + _MEDIA_EXTENSIONS + r""")(?=[\s`"',;:)\]}]|$)|\S+)[`"']?""",
-    re.IGNORECASE)
+    # A path without spaces up to its extension, then one with spaces, then
+    # one without an extension: its words, and any next words that are
+    # still folders (they hold a slash).
+    + "|" + _PATH_START + _PATH_WORD + "*?" + _PATH_EXTENSION
+    + "|" + _PATH_START + r"\S+(?:[^\S\n]+\S+)*?" + _PATH_EXTENSION
+    + "|" + _PATH_START + _PATH_WORD + r"+(?:[^\S\n]+" + _PATH_WORD + "*/" + _PATH_WORD + "*)*"
+    + r""")[`"']?""")
 _MEDIA_DIRECTIVE = re.compile(r"\[\[(?:audio_as_voice|as_document)\]\]")
-# Hermes' document cache prefixes the original name (doc_<12 hex>_report.pdf).
-_CACHE_PREFIX = re.compile(r"^(?:doc|img|audio|video)_[0-9a-f]{8,32}_", re.IGNORECASE)
+# Hermes' caches name a file img_<12 hex>.png (images, audio) or
+# doc_<12 hex>_<original name> (documents).
+_CACHE_NAME = re.compile(r"^(?:img|audio|video|doc)_[0-9a-f]{12}(?:_(?P<name>.+))?$", re.IGNORECASE)
 _HASH_NAME = re.compile(r"^[0-9a-f-]{16,}$", re.IGNORECASE)
 
 
 def _attachment(match: re.Match) -> str:
     """A MEDIA tag as a push shows it: a paperclip and the file's name, or
     its type when the name is only a hash, never the host's path."""
-    path = match.group("path").strip().strip("`\"'").rstrip(".,;:)}]")
-    name = _CACHE_PREFIX.sub("", re.split(r"[/\\]", path.rstrip("/\\"))[-1])
+    quoted = match.group("path").strip()
+    path = quoted.strip("`\"'").rstrip(_TRAILING + "~")
+    # Punctuation or emphasis after a bare path is the sentence's, not the file's.
+    tail = "" if quoted[0] in "`\"'" else quoted[len(path):]
+    name = re.split(r"[/\\]", path.rstrip("/\\"))[-1]
     stem, dot, ext = name.rpartition(".")
     if not dot:
         stem, ext = name, ""
-    if not stem or _HASH_NAME.match(stem):
+    cached = _CACHE_NAME.match(name) or _CACHE_NAME.match(stem)
+    if cached:
+        name = cached.group("name") or ""
+    if not name or (not cached and _HASH_NAME.match(stem)):
         name = ext.upper()
-    return f"📎 {name}".rstrip()
+    return f"📎 {name}".rstrip() + tail
 
 
 def media_free(value: str) -> str:
-    """Text with each MEDIA tag shown as its attachment, and Hermes' delivery
-    directives gone."""
+    """One line with each MEDIA tag shown as its attachment, and Hermes'
+    delivery directives gone."""
     return _MEDIA_TAG.sub(_attachment, _MEDIA_DIRECTIVE.sub("", value))
 
 
@@ -637,7 +660,6 @@ def plain_text(value: Any) -> str:
     stays, it is the content."""
     if not isinstance(value, str):
         return ""
-    value = media_free(value)
     lines: list[str] = []
     fenced = False
     for line in value.splitlines():
@@ -647,7 +669,7 @@ def plain_text(value: Any) -> str:
         if fenced:
             lines.append(line)
             continue
-        line = _QUOTE.sub("", line)
+        line = media_free(_QUOTE.sub("", line))
         if _RULE.match(line) or _TABLE_RULE.match(line):
             continue
         line = _HEADING.sub("", line)
