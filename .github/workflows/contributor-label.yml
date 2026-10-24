@@ -27,9 +27,10 @@ jobs:
         github.event.comment.user.login == github.event.issue.user.login &&
         contains(github.event.issue.labels.*.name, 'waiting on contributor'))
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Both labels already exist in the repository.
     permissions:
       issues: write
-      pull-requests: write
     steps:
       - env:
           GH_TOKEN: ${{ github.token }}
@@ -41,6 +42,6 @@ jobs:
           if [ "$RELABEL" = true ]; then
             gh api -X DELETE "$labels/waiting%20on%20Eric" >/dev/null 2>&1 || true
           else
-            gh api -X DELETE "$labels/waiting%20on%20contributor" >/dev/null 2>&1 || true
             gh api "$labels" -f 'labels[]=waiting on Eric' >/dev/null
+            gh api -X DELETE "$labels/waiting%20on%20contributor" >/dev/null 2>&1 || true
           fi
