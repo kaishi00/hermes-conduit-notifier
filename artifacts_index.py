@@ -218,7 +218,8 @@ def tool_call_items(raw: Any) -> Iterable[tuple]:
 
 
 def tool_result_items(tool_name: Any, content: Any) -> Iterable[tuple]:
-    """Files a producer tool reports it saved (``{"file_path": …}``)."""
+    """Files a producer tool reports it saved (``{"file_path": …}``), and a
+    picture ``image_generate`` reports by URL, as an image link."""
     if not isinstance(tool_name, str) or not _PRODUCER_TOOL_RE.search(tool_name):
         return
     payload = _json(content)
@@ -231,9 +232,10 @@ def tool_result_items(tool_name: Any, content: Any) -> Iterable[tuple]:
                 path = _unquote(value)
                 if _is_local_path(path) and _extension(path) in _WRITTEN:
                     yield ("written", kind_for(path), path, "")
-                elif key == "image" and path.startswith(("https://", "http://")):
-                    # image_generate reports a hosted picture by its URL.
-                    yield ("link", "image", path, "")
+                elif key == "image" and value.strip().startswith(("https://", "http://")):
+                    # image_generate reports a hosted picture by its URL: a
+                    # whole JSON value, so no sentence punctuation to trim.
+                    yield ("link", "image", value.strip(), "")
 
 
 def _number(value: Any) -> float:

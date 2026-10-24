@@ -330,15 +330,17 @@ def test_image_generate_pictures_are_listed(tmp_path, monkeypatch):
     conn = _db(tmp_path, [
         ("s1", "tool", json.dumps({"success": True, "image": "/root/.hermes/cache/images/cat.png",
                                    "model": "gpt-image-2", "prompt": "a cat"}), None, "image_generate"),
-        ("s1", "tool", json.dumps({"success": True, "image": "https://fal.media/files/dog.webp",
+        ("s1", "tool", json.dumps({"success": True, "image": "https://fal.media/files/dog_",
                                    "model": "flux"}), None, "image_generate"),
         ("s1", "tool", json.dumps({"success": False, "image": None, "error": "no provider"}), None,
          "image_generate"),
     ])
     items = {i.get("path") or i.get("url"): i for i in _list(conn)["items"]}
-    assert set(items) == {"/root/.hermes/cache/images/cat.png", "https://fal.media/files/dog.webp"}
+    assert set(items) == {"/root/.hermes/cache/images/cat.png", "https://fal.media/files/dog_"}
     assert items["/root/.hermes/cache/images/cat.png"]["kind"] == "image"
-    assert items["https://fal.media/files/dog.webp"]["kind"] == "image"
+    assert items["https://fal.media/files/dog_"]["kind"] == "image"
+    assert items["/root/.hermes/cache/images/cat.png"]["source"] == "written"
+    assert items["https://fal.media/files/dog_"]["source"] == "link"
 
 
 def test_one_message_cannot_overflow_the_page(tmp_path, monkeypatch):
