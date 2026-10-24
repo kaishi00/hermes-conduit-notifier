@@ -15,6 +15,12 @@ issue time, thread token, compression flag, clarify request id), so the
 relay can neither read the content nor move, retype or re-thread a valid
 ciphertext. Request ids and question ids bind clarify answers the same way.
 
+Keys rotate: the phone hands over a new secret every KEY_MAX_AGE_S, or when
+`hermes conduit-push e2e rotate` asks for one. Pushes are always sealed with
+the newest key; the one it replaced stays as `e2e_previous` for
+PREVIOUS_KEY_GRACE_S, only to open clarify answers the phone sealed before
+it learned of the new one.
+
 Pure functions; the only dependency is `cryptography`, which Hermes already
 pins as a core dependency. `available()` reports whether it can be used.
 """
@@ -52,6 +58,12 @@ MAX_CT_CHARS = 2600
 # relay because it routes on it.
 INNER_FIELDS = ("title", "body", "session_id", "profile", "gateway", "stored_session_id", "decision", "call",
                 "locate", "maps", "title_label", "session_title", "count")
+
+# The phone rotates a key this old on its next dashboard connect.
+KEY_MAX_AGE_S = 30 * 24 * 3600
+# How long the key a rotation replaced still opens answers.
+PREVIOUS_KEY_GRACE_S = 7 * 24 * 3600
+KEY_TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 KID_PATTERN = re.compile(r"^[0-9a-f]{32}\Z")
 _B64URL_PATTERN = re.compile(r"^[A-Za-z0-9_-]*\Z")
@@ -121,6 +133,56 @@ def keys_from_state(state: dict[str, Any]) -> Keys | None:
     if not isinstance(record, dict) or not record:
         raise E2EError("the stored key is malformed")
     return derive_keys(str(record.get("kid") or ""), unb64u(str(record.get("secret") or "")))
+
+
+def key_time(value: Any) -> float | None:
+    """A key record's created_at or retired_at as a Unix time, or None."""
+    from datetime import datetime, timezone
+
+    try:
+        return datetime.strptime(str(value), KEY_TIME_FORMAT).replace(tzinfo=timezone.utc).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def previous_key_record(state: dict[str, Any], now: float | None = None) -> dict[str, Any] | None:
+    """The key the last rotation replaced, while it still opens answers."""
+    record = state.get("e2e_previous")
+    if not isinstance(record, dict) or not valid_kid(record.get("kid")):
+        return None
+    retired = key_time(record.get("retired_at"))
+    if retired is None or (now if now is not None else time.time()) >= retired + PREVIOUS_KEY_GRACE_S:
+        return None
+    return record
+
+
+def answer_keys(state: dict[str, Any], now: float | None = None) -> list[Keys]:
+    """The keys a clarify answer may be sealed with: the pairing's key, and
+    during the grace period the one it replaced. Raises E2EError like
+    keys_from_state when the current key is unusable."""
+    current = keys_from_state(state)
+    if current is None:
+        return []
+    keys = [current]
+    previous = previous_key_record(state, now)
+    if previous is not None:
+        try:
+            keys.append(derive_keys(str(previous["kid"]), unb64u(str(previous.get("secret") or ""))))
+        except E2EError:
+            pass  # a broken old key only means old answers no longer open
+    return keys
+
+
+def rotation_due(state: dict[str, Any], now: float | None = None) -> bool:
+    """Whether the phone should hand over a new key: asked for, or the key
+    is older than KEY_MAX_AGE_S (or has no usable created_at)."""
+    record = state.get("e2e")
+    if not isinstance(record, dict):
+        return False
+    if state.get("rotate_requested_at"):
+        return True
+    created = key_time(record.get("created_at"))
+    return created is None or (now if now is not None else time.time()) >= created + KEY_MAX_AGE_S
 
 
 def keyed_event_id(keys: Keys, event_id: str) -> str:
@@ -316,6 +378,17 @@ def seal_answer(answer: str, keys: Keys, *, installation_id: str, gateway_id: st
                      request_id=request_id, question_id=question_id)
     ct = _aead(keys.answer).encrypt(nonce, answer.encode("utf-8"), aad)
     return f"{ANSWER_PREFIX}{keys.kid}.{b64u(nonce)}.{b64u(ct)}"
+
+
+def open_answer_any(sealed: Any, keys: list[Keys], *, installation_id: str, gateway_id: str,
+                    request_id: str, question_id: str = "") -> str:
+    """open_answer with whichever of ``keys`` the answer names."""
+    kid = sealed[len(ANSWER_PREFIX):].split(".", 1)[0] if isinstance(sealed, str) and sealed.startswith(ANSWER_PREFIX) else ""
+    chosen = next((key for key in keys if key.kid == kid), keys[0] if keys else None)
+    if chosen is None:
+        raise E2EError("this pairing has no key")
+    return open_answer(sealed, chosen, installation_id=installation_id, gateway_id=gateway_id,
+                       request_id=request_id, question_id=question_id)
 
 
 def open_answer(sealed: Any, keys: Keys, *, installation_id: str, gateway_id: str,
