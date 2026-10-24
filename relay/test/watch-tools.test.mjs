@@ -200,6 +200,25 @@ test('a full relay answers watch_grant_capacity and warns, rather than failing a
   assert.deepEqual(warnings, [{ message: 'watch tool grants at capacity', grants: 1 }]);
 });
 
+test('a gateway revoked while its grant request was read opens no grant', async () => {
+  const clock = { now: 1_000_000 };
+  const grants = grantsAt(clock);
+  const route = watchToolRoutes({
+    grants,
+    // The revocation lands while the body is read.
+    readJson: async (request) => { request.gateway = undefined; return request.body; },
+    enforceRateLimit: () => {},
+    enforceCallBudget: () => {},
+    authenticateGateway: (request) => request.gateway,
+    clientAddress: () => '203.0.113.1',
+  });
+  const response = new FakeResponse();
+  const request = { method: 'POST', gateway: { installationId: 'i', gatewayId: 'g' }, body: grantBody(), headers: {} };
+  assert.equal(await route(request, response, new URL('/v1/watch-tools/grants', 'https://relay.example')), true);
+  assert.equal(response.status, 401);
+  assert.equal(grants.size, 0);
+});
+
 test('a host poll without wait_ms, or with an empty one, waits the default', async (t) => {
   const clock = { now: 1_000_000 };
   const grants = grantsAt(clock, { hostPollWaitMs: 600_000 });
