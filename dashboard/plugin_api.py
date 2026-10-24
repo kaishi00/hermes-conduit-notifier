@@ -7144,7 +7144,7 @@ async def post_call_waiting_answer(request: Request, response: Response,
     if "answer_id" not in result:
         return result
     try:
-        return await _approval_delivered_async(stores[0], result)
+        return {"ok": True, **(await _approval_delivered_async(stores[0], result))}
     except Exception as exc:
         raise _unexpected("answer", exc, feature="Calls")
 

@@ -315,7 +315,8 @@ def test_an_approval_answered_through_the_route_says_whether_hermes_took_it(pair
     store.note_waiting("rt-1", "approval", description="Clear the build cache", command="rm -rf build")
     hermes_takes(False)
     response = http.post(f"{BASE}/calls/waiting/answer", json={"session_id": "rt-1", "choice": "deny"})
-    assert response.json()["status"] == "too_late" and "nothing was denied" in response.json()["message"]
+    assert response.json()["ok"] is True and response.json()["status"] == "too_late"
+    assert "nothing was denied" in response.json()["message"]
 
 
 @pytest.mark.parametrize("body", [{"answer": "1"}, {"session_id": "rt-1"}, []])
