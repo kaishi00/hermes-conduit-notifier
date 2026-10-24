@@ -10102,7 +10102,8 @@ class _WatchJobs:
                 "request_id": text("request_id", 128),
                 "server_request_id": server_request_id,
                 "command": shown_command,
-                "cut": shown_command != command,
+                # No command to show is never shown whole: it can only be denied.
+                "cut": not command or shown_command != command,
                 "description": text("description", 500) or "Approval required",
             }
             job.approval["fingerprint"] = _watch_approval_fingerprint(job.approval, command)
@@ -10611,7 +10612,7 @@ class _WatchJobs:
             # The Watch showed only part of the command: approving it would
             # approve what the user never saw.
             return {"ok": False, "status": 400,
-                    "detail": "The command was too long to show whole, so it can only be denied"}
+                    "detail": "The command could not be shown whole, so it can only be denied"}
         params: Dict[str, Any] = {"session_id": job.session_id, "choice": choice}
         if approval["request_id"]:
             params["request_id"] = approval["request_id"]
@@ -12118,7 +12119,7 @@ class _WatchCallChat:
                     "id": secrets.token_hex(8), "request_id": text("request_id", 128), "at": time.monotonic(),
                     "server_request_id": text("server_request_id", 128),
                     "command": command[:LOCAL_LIVE_WATCH_APPROVAL_COMMAND_CHARS],
-                    "cut": len(command) > LOCAL_LIVE_WATCH_APPROVAL_COMMAND_CHARS,
+                    "cut": not command or len(command) > LOCAL_LIVE_WATCH_APPROVAL_COMMAND_CHARS,
                     "description": text("description", 500) or "Approval required",
                 })
             return True
