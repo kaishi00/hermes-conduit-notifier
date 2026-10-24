@@ -364,3 +364,20 @@ def test_the_gateway_restart_skips_interrupt_when_it_cannot_be_passed_by_name(mo
     _fake_hermes(monkeypatch, spawn)
     _, restart_gateway = api._hermes_update_steps()
     assert restart_gateway() == 0 and calls == [(None, False)]
+
+
+def test_the_corrected_push_isnt_a_duplicate_of_the_failed_one(monkeypatch):
+    # The relay drops a repeated event id, so the done push for a job the
+    # dying dashboard reported as failed needs an id of its own.
+    sent = []
+    events = types.ModuleType("fake_conduit_pkg.events")
+    events.event_id = lambda prefix, *parts: f"{prefix}:{'|'.join(str(p) for p in parts)}"
+    events.push_event = lambda kind, identifier, **fields: {"identifier": identifier, **fields}
+    monkeypatch.setitem(sys.modules, "fake_conduit_pkg.events", events)
+    client = types.SimpleNamespace(__package__="fake_conduit_pkg", load_state=lambda: True, send_now=sent.append)
+    monkeypatch.setattr(api, "_plugin_client", lambda: client)
+    monkeypatch.setattr(api, "_profile_scope", lambda profile: __import__("contextlib").nullcontext())
+    api._notify_self_update({"id": "j1", "step": "failed", "detail": "gateway"})
+    api._notify_self_update({"id": "j1", "step": "done", "loaded_version": "0.69.1"})
+    assert len(sent) == 2 and sent[0]["identifier"] != sent[1]["identifier"]
+    assert sent[1]["title"] == "Conduit plugin updated"

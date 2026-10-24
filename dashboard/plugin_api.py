@@ -15254,7 +15254,9 @@ def _notify_self_update(job: Dict[str, Any]) -> None:
             if not client.load_state():
                 return
             events = sys.modules[f"{client.__package__}.events"]
-            event = events.push_event("background_task.finished", identifier=events.event_id("plugin-update", job["id"]),
+            # Per outcome: a failure the restarted dashboard corrects isn't a
+            # duplicate of the push the dying one sent.
+            event = events.push_event("background_task.finished", identifier=events.event_id("plugin-update", job["id"], job.get("step")),
                                       profile=profile or "default", title=title, body=body)
             client.send_now(event)
     except Exception as exc:  # noqa: BLE001 — a notification is a courtesy; the job file has the outcome
