@@ -153,6 +153,18 @@ MAX_WAITING_ANSWER_CHARS = 2000
 # words' limit, and a cut list would reach Hermes as broken JSON.
 MAX_WAITING_KEPT_ANSWER_CHARS = MAX_WAITING_ANSWER_CHARS + MAX_WAITING_CHOICES * (2 * MAX_WAITING_CHOICE_CHARS + 4)
 APPROVAL_CHOICES = ("once", "deny")
+# How a call's answer to an approval fared, so the call says so: sent (on
+# its way), claimed (the agent's process is passing it on), resolved (Hermes
+# took it), missed (no pending request was the one the call read out:
+# answered on its card, or timed out), withdrawn (nothing picked it up in
+# time, so it was taken back and the user answers in Conduit).
+DELIVERY_STATES = ("sent", "claimed", "resolved", "missed", "withdrawn")
+DELIVERY_TTL_S = 10 * 60
+MAX_DELIVERED = 32
+# How long a call waits to hear how its approval answer fared: longer than
+# the agent's process takes to pass it on (calls.APPROVAL_ANSWER_POLL_S and
+# APPROVAL_MATCH_TRIES), well within the Watch relay's wait.
+APPROVAL_DELIVERY_WAIT_S = 10.0
 RECOMMENDED_LABEL = "(Recommended)"
 # Words a spoken answer is read with, as Conduit reads them
 # (HermesCallWaiting.pickedChoices): the two move together.
@@ -448,7 +460,9 @@ class CallStore:
         approval takes ``choice`` (once or deny) and, for a deny, ``reason``.
         The agent's process passes it on (``take_answers``,
         ``take_approval``): ``{"status": "answered", ...}`` says it's on
-        its way, with the batch's next question to ask, if any."""
+        its way, with the batch's next question to ask, if any. An
+        approval's answer also carries ``answer_id``: whether Hermes took it
+        is ``approval_delivery``'s to say."""
         if not isinstance(session_id, str) or not _session_key(session_id.strip()):
             raise ValueError("session_id must be a session id")
         session_id = session_id.strip()
@@ -471,10 +485,13 @@ class CallStore:
                             "message": "Hermes didn't say which command it wants to run, so it can only be denied "
                                        "here. The user can approve it in Conduit."}
                 if item["choice"] is not None:
-                    return {"status": "answered", "choice": item["choice"]}
+                    return {"status": "answered", "choice": item["choice"], "answer_id": item["answer_id"]}
                 item["choice"] = picked
                 item["reason"] = _waiting_text(reason, MAX_WAITING_ANSWER_CHARS) if picked == "deny" else ""
-                return {"status": "answered", "choice": picked}
+                item["answer_id"] = secrets.token_hex(12)
+                state["delivered"] = [*state["delivered"],
+                                      {"id": item["answer_id"], "state": "sent", "at": self.clock()}][-MAX_DELIVERED:]
+                return {"status": "answered", "choice": picked, "answer_id": item["answer_id"]}
             if not isinstance(answer, str) or not answer.strip():
                 raise ValueError("answer must be the user's answer")
             open_numbers = [index for index, entry in enumerate(item["questions"]) if entry["answer"] is None]
@@ -523,8 +540,10 @@ class CallStore:
 
     def take_approval(self, session_id: Any, *, keep: bool = False) -> dict[str, Any] | None:
         """An approval in ``session_id`` answered from a call: its
-        ``choice``, ``reason`` and ``command_sha``, taken (only read with
-        ``keep``). None while unanswered or gone."""
+        ``choice``, ``reason``, ``command_sha`` and ``answer_id``, taken
+        (with ``keep``, kept and claimed: the agent's process is passing it
+        on, and settles it with ``settle_approval``). None while unanswered
+        or gone."""
         if not isinstance(session_id, str) or not session_id.strip() or not self.path.exists():
             return None
         session_id = session_id.strip()
@@ -540,7 +559,84 @@ class CallStore:
                 return None
             if not keep:
                 state["waiting"] = [entry for entry in state["waiting"] if entry is not item]
-            return {"choice": item["choice"], "reason": item["reason"], "command_sha": item["command_sha"]}
+            else:
+                for delivery in state["delivered"]:
+                    if delivery["id"] == item["answer_id"] and delivery["state"] == "sent":
+                        delivery["state"] = "claimed"
+            return {"choice": item["choice"], "reason": item["reason"], "command_sha": item["command_sha"],
+                    "answer_id": item["answer_id"]}
+
+    def settle_approval(self, answer_id: Any, resolved: bool) -> None:
+        """The agent's process passed a call's approval answer to Hermes
+        (``resolved``) or found no pending request it was for: the call
+        hears which (``approval_delivery``), and the answer is taken."""
+        if not isinstance(answer_id, str) or not answer_id:
+            return
+        with self._locked() as state:
+            state["waiting"] = [entry for entry in state["waiting"]
+                                if not (entry["kind"] == "approval" and entry["answer_id"] == answer_id)]
+            for delivery in state["delivered"]:
+                if delivery["id"] == answer_id:
+                    delivery["state"] = "resolved" if resolved else "missed"
+
+    def approval_delivery(self, answer_id: Any, *, wait_s: float = APPROVAL_DELIVERY_WAIT_S, poll_s: float = 0.2,
+                          sleep: Callable[[float], None] = time.sleep) -> str:
+        """How a call's approval answer (``answer_waiting``'s ``answer_id``)
+        fared, waiting up to ``wait_s`` to hear: resolved, missed, or
+        withdrawn. One nothing picked up in time is taken back, so it can't
+        land after the call said it didn't; one being passed on that still
+        isn't settled stays claimed. Only resolved means Hermes took it."""
+        if not isinstance(answer_id, str) or not answer_id:
+            return "missed"
+        deadline = time.monotonic() + wait_s
+        while True:
+            fared = self.approval_fared(answer_id)
+            if fared is not None:
+                return fared
+            if time.monotonic() >= deadline:
+                return self._withdraw(answer_id, "withdrawn")
+            sleep(poll_s)
+
+    def approval_fared(self, answer_id: Any) -> str | None:
+        """``approval_delivery`` without the wait: how the answer fared, or
+        None while it's still on its way."""
+        if not isinstance(answer_id, str) or not answer_id:
+            return "missed"
+        fared, kept = self._delivery(answer_id)
+        if fared in ("resolved", "missed", "withdrawn"):
+            return fared
+        if fared == "sent" and not kept:
+            # Answered on its card (or timed out) before anything took it.
+            return self._withdraw(answer_id, "missed")
+        if fared is None and not kept:
+            # Its record is gone (a burst of answers outlived it): how it
+            # fared can't be told.
+            return "claimed"
+        return None
+
+    def _delivery(self, answer_id: str) -> tuple[str | None, bool]:
+        """An answer's delivery state, and whether its wait still holds it:
+        one read."""
+        if not self.path.exists():
+            return None, False
+        state = self._load()
+        return (next((entry["state"] for entry in state["delivered"] if entry["id"] == answer_id), None),
+                any(entry["kind"] == "approval" and entry["answer_id"] == answer_id for entry in state["waiting"]))
+
+    def _withdraw(self, answer_id: str, fared: str) -> str:
+        """Takes back an answer nothing has claimed: ``fared`` it is. One
+        claimed or settled meanwhile keeps its own state."""
+        with self._locked() as state:
+            delivery = next((entry for entry in state["delivered"] if entry["id"] == answer_id), None)
+            if delivery is not None and delivery["state"] != "sent":
+                return delivery["state"]
+            if delivery is not None:
+                delivery["state"] = fared
+            for entry in state["waiting"]:
+                if entry["kind"] == "approval" and entry["answer_id"] == answer_id:
+                    # Still waiting: the user can answer it again.
+                    entry.update(choice=None, reason="", answer_id="")
+            return fared
 
     def has_waiting(self, session_id: Any, kind: str) -> bool:
         if not isinstance(session_id, str) or not session_id.strip() or not self.path.exists():
@@ -915,9 +1011,16 @@ def _normalized(raw: Any, now: float) -> dict[str, Any]:
         kept = _waiting_entry(entry, now) if isinstance(entry, dict) else None
         if kept is not None:
             waiting.append(kept)
+    delivered = []
+    for entry in raw.get("delivered") if isinstance(raw.get("delivered"), list) else []:
+        if (isinstance(entry, dict) and isinstance(entry.get("id"), str) and _WATCH_ID.match(entry["id"])
+                and entry.get("state") in DELIVERY_STATES and isinstance(entry.get("at"), (int, float))
+                and not isinstance(entry.get("at"), bool) and now - entry["at"] < DELIVERY_TTL_S):
+            delivered.append({"id": entry["id"], "state": entry["state"], "at": float(entry["at"])})
     return {"v": VERSION, "settings": settings, "watches": watches, "history": history,
             "ends": ends[-MAX_RECENT_ENDS:], "seeded": seeded[-MAX_SEEDED:], "presence_until": presence_until,
-            "outcomes": outcomes[-MAX_OUTCOMES:], "told": told[-MAX_TOLD:], "waiting": waiting[-MAX_WAITING:]}
+            "outcomes": outcomes[-MAX_OUTCOMES:], "told": told[-MAX_TOLD:], "waiting": waiting[-MAX_WAITING:],
+            "delivered": delivered[-MAX_DELIVERED:]}
 
 
 def _waiting_text(value: Any, limit: int) -> str:
@@ -944,7 +1047,10 @@ def _waiting_entry(raw: dict[str, Any], now: float) -> dict[str, Any] | None:
         description = _waiting_text(raw.get("description"), MAX_WAITING_TEXT_CHARS)
         if not description:
             return None
-        choice = raw.get("choice")
+        answer_id = raw.get("answer_id")
+        answer_id = answer_id if isinstance(answer_id, str) and _WATCH_ID.match(answer_id) else ""
+        # An answer is followed by its id: one without (a plugin before) reads as unanswered.
+        choice = raw.get("choice") if answer_id else None
         sha = raw.get("command_sha")
         entry.update({
             "description": description,
@@ -953,6 +1059,7 @@ def _waiting_entry(raw: dict[str, Any], now: float) -> dict[str, Any] | None:
             "cut": raw.get("cut") is True,
             "choice": choice if choice in APPROVAL_CHOICES else None,
             "reason": _waiting_text(raw.get("reason"), MAX_WAITING_ANSWER_CHARS),
+            "answer_id": answer_id if choice in APPROVAL_CHOICES else "",
         })
         return entry
     request_id = raw.get("request_id")

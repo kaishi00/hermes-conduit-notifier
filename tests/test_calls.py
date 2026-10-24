@@ -1056,9 +1056,11 @@ def test_an_approval_answered_on_a_call_resolves_only_the_request_it_read_out(ho
                                  command="rm -rf build", turn_id="t1")
     store = calls._store(home)
     assert store.waiting_for("rt-1")["command"] == "rm -rf build"
-    assert store.answer_waiting("sk-1", choice="deny", reason="Before I choose: why?")["status"] == "answered"
+    answered = store.answer_waiting("sk-1", choice="deny", reason="Before I choose: why?")
+    assert answered["status"] == "answered"
     assert resolved.wait(5)
     assert seen == {"key": "sk-1", "choice": "deny", "reason": "Before I choose: why?", "request_id": "r-1"}
+    assert store.approval_delivery(answered["answer_id"], wait_s=2, poll_s=0.01) == "resolved"
     deadline = _time.monotonic() + 2
     while store.waiting_for("sk-1") is not None and _time.monotonic() < deadline:
         _time.sleep(0.01)
@@ -1094,6 +1096,24 @@ def test_a_call_answer_waits_for_hermes_to_list_its_approval(home, fake, monkeyp
     assert store.answer_waiting("sk-1", choice="once")["status"] == "answered"
     assert resolved.wait(5), "resolved once Hermes listed it, with no reason it can't take"
     assert listed["calls"] >= 3
+
+
+def test_a_call_answer_no_pending_approval_takes_is_said_not_to_have_gone(home, fake, monkeypatch):
+    # Answered on its card, or timed out, before the call's answer reached
+    # Hermes: the call hears it didn't go, instead of "approved".
+    approval = types.ModuleType("tools.approval")
+    approval.list_gateway_approvals = lambda key: []
+    approval.resolve_gateway_approval = lambda *args, **kwargs: pytest.fail("nothing to resolve")
+    monkeypatch.setitem(sys.modules, "tools.approval", approval)
+    monkeypatch.setattr(calls, "APPROVAL_ANSWER_POLL_S", 0.01)
+    monkeypatch.setattr(calls, "alert", lambda *args, **kwargs: None)
+    _settings(home, alerts=True)
+    plugin._pre_approval_request(session_key="sk-1", session_id="rt-1", description="Delete the build",
+                                 command="rm -rf build", turn_id="t1")
+    store = calls._store(home)
+    answer_id = store.answer_waiting("sk-1", choice="once")["answer_id"]
+    assert store.approval_delivery(answer_id, wait_s=5, poll_s=0.01) == "missed"
+    assert store.waiting_for("sk-1") is None
 
 
 def test_a_call_answer_resolves_nothing_when_two_pending_approvals_share_its_command(monkeypatch):

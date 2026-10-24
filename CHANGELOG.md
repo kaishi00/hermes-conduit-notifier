@@ -30,6 +30,14 @@ checks it). The format is fixed, because Conduit reads it:
   rotate`). The old key still opens your answers for 7 days, so nothing in
   flight is lost.
 
+## 0.70.1 (2026-10-24)
+
+### Fixes
+- Answering an approval by voice on the Apple Watch could say "approved"
+  when nothing ran, because the request had just been answered elsewhere or
+  timed out. The call now says so instead, and says "approved" only once
+  Hermes has taken the answer.
+
 ## 0.70.0 (2026-10-24)
 
 ### New and improved
