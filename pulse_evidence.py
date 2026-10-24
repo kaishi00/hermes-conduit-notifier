@@ -18,6 +18,7 @@ Two lookups, both read-only:
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -29,7 +30,7 @@ from . import pulse_hermes as hermes
 
 PROCESSES = "processes.json"
 # Rows read per lookup, newest first, each cut to PER_ROW characters.
-MAX_ROWS = 2000
+MAX_ROWS = 5000
 PER_ROW = 600
 # Shared words a row needs to count as on the same subject.
 MIN_SHARED = 2
@@ -53,10 +54,16 @@ can't isn't aren't wasn't
 """.split())
 
 
-def words(text: Any) -> set[str]:
+def words(text: Any) -> frozenset[str]:
     """The words of ``text`` that can tie two messages together."""
-    raw = re.sub(r"\s+", " ", (text if isinstance(text, str) else "").translate(_QUOTES)).casefold()
-    return {word.strip(".-'") for word in _WORD.findall(raw)} - _COMMON - {""}
+    return _words(text if isinstance(text, str) else "")
+
+
+@functools.lru_cache(maxsize=MAX_ROWS)
+def _words(text: str) -> frozenset[str]:
+    # Cached: the report scores the same rows against every item.
+    raw = re.sub(r"\s+", " ", text.translate(_QUOTES)).casefold()
+    return frozenset({word.strip(".-'") for word in _WORD.findall(raw)} - _COMMON - {""})
 
 
 def _local(epoch: float, zone: tzinfo) -> str:
