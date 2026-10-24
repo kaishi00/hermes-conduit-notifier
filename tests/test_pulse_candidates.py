@@ -211,6 +211,26 @@ def test_the_list_reads_the_report_context_with_chat_keys(live):
     assert "(cut here: no room in this report)" in cut.text and cut.shown == []  # cut off: not shown to the model
 
 
+def test_the_report_shows_what_later_chats_said_about_an_item_and_what_runs(live):
+    now = time.time()
+    first = commitment(live, "The user will add iPad and Duo support in the patch after the 2.0 release.",
+                       words="duo/ipad support didn't make it into the 2.0 release, it'll be in the patch after that",
+                       said_at=now - 7 * 86400)
+    live.store.set("memory", True)
+    live.db.session(sid="ship", title="Conduit Build", pinned=0)
+    live.db.message("assistant", "Version 2.2.1 is uploaded, with iPad and Duo support in this patch.", sid="ship",
+                    at=now - 3600)
+    live.db.message("assistant", "The 2.0 release and its iPad and Duo patch are still open.", at=now - 60)
+    (live.home / "processes.json").write_text(
+        '[{"session_id": "proc_1", "command": "watch-bridge.sh", "started_at": %f}]' % (now - 300))
+    text = report.gather(live.home, live.store, home_chat_id=SID, now=now, room=candidates.CONTEXT_BUDGET,
+                         keyed=True).text
+    later = text.split("## Later on the same subject", 1)[1].split("\n\n", 1)[0]
+    assert f"#{first}: " in later and "2.2.1 is uploaded" in later and "still open" not in later
+    assert "## Running in the background now\n- watch-bridge.sh, since " in text
+    assert text.index(report.REMEMBERED_TITLE) < text.index("## Later on the same subject")
+
+
 # The report, made from the list ------------------------------------------------------
 
 class Llm:

@@ -13,6 +13,16 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.70.1 (2026-10-24)
+
+### Fixes
+- Pulse no longer asks about something you finished later in another chat or
+  a cron run, or that a newer release moved past: a follow-up and the report
+  now read later chats on the same subject, follow a long chat into its
+  continuation, and see what Hermes is still running in the background.
+- A week-old follow-up checks once more before asking whether you still want
+  it, so a finished one closes instead.
+
 ## 0.70.0 (2026-10-24)
 
 ### New and improved
