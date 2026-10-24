@@ -6996,13 +6996,18 @@ def answer_call_waiting(body: Any) -> Dict[str, Any]:
     if not isinstance(body, dict):
         raise TokenError(400, "Expected a JSON object")
     store = _calls_store().CallStore(_calls_home())
+    return _approval_delivered(store, _answer_waiting(store, body))
+
+
+def _answer_waiting(store: Any, body: Any) -> Dict[str, Any]:
+    if not isinstance(body, dict):
+        raise TokenError(400, "Expected a JSON object")
     try:
-        result = store.answer_waiting(
+        return store.answer_waiting(
             body.get("session_id"), answer=body.get("answer"), choice=body.get("choice"),
             question=body.get("question"), reason=body.get("reason"))
     except ValueError as exc:
         raise TokenError(400, str(exc))
-    return _approval_delivered(store, result)
 
 
 # How a call's approval answer fared, for the call to say (calls_store
@@ -7018,9 +7023,12 @@ _APPROVAL_NOT_DELIVERED = {
 }
 
 
-# Calls waiting at once to hear how their approval answer fared: each holds a
-# worker of a shared pool for up to calls_store.APPROVAL_DELIVERY_WAIT_S.
-_APPROVAL_DELIVERY_WAITS = threading.BoundedSemaphore(4)
+# Watch calls waiting at once to hear how their approval answer fared: each
+# holds a worker (the Watch tools' pool, or its Local Live call's own) for up
+# to calls_store.APPROVAL_DELIVERY_WAIT_S. One user's Watch answers one at a
+# time; the bound only keeps a burst from taking the pool. The HTTP route
+# waits on the event loop instead (_approval_delivered_async).
+_APPROVAL_DELIVERY_WAITS = threading.BoundedSemaphore(2)
 
 
 def _approval_delivered(store: Any, result: Dict[str, Any]) -> Dict[str, Any]:
@@ -7038,6 +7046,29 @@ def _approval_delivered(store: Any, result: Dict[str, Any]) -> Dict[str, Any]:
         # Too many waiting already: no wait, so an answer nothing took yet
         # is taken back and the user answers in Conduit.
         fared = store.approval_delivery(answer_id, wait_s=0)
+    return _approval_outcome(result, fared)
+
+
+async def _approval_delivered_async(store: Any, result: Dict[str, Any]) -> Dict[str, Any]:
+    """_approval_delivered for a route: it waits on the event loop, holding
+    no worker meanwhile."""
+    answer_id = result.pop("answer_id", None)
+    if answer_id is None or result.get("status") != "answered":
+        return result
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _calls_store().APPROVAL_DELIVERY_WAIT_S
+    while True:
+        fared = await asyncio.to_thread(store.approval_fared, answer_id)
+        if fared is not None:
+            break
+        if loop.time() >= deadline:
+            fared = await asyncio.to_thread(store.approval_delivery, answer_id, wait_s=0)
+            break
+        await asyncio.sleep(0.2)
+    return _approval_outcome(result, fared)
+
+
+def _approval_outcome(result: Dict[str, Any], fared: str) -> Dict[str, Any]:
     if fared == "resolved":
         return result
     status, message = _APPROVAL_NOT_DELIVERED.get(fared, _APPROVAL_NOT_DELIVERED["missed"])
@@ -7103,7 +7134,19 @@ async def get_call_waiting(response: Response, session_id: Optional[str] = None,
 async def post_call_waiting_answer(request: Request, response: Response,
                                    profile: Optional[str] = None) -> Dict[str, Any]:
     body = await _read_json_body(request, CALLS_MAX_BODY_BYTES)
-    return await _calls_route(profile, response, lambda: answer_call_waiting(body), "answer")
+    stores: list = []
+
+    def answer() -> Dict[str, Any]:
+        stores.append(_calls_store().CallStore(_calls_home()))
+        return _answer_waiting(stores[0], body)
+
+    result = await _calls_route(profile, response, answer, "answer")
+    if "answer_id" not in result:
+        return result
+    try:
+        return await _approval_delivered_async(stores[0], result)
+    except Exception as exc:
+        raise _unexpected("answer", exc, feature="Calls")
 
 
 @router.post("/calls/outcomes")
@@ -12757,6 +12800,8 @@ def _local_live_undelivered(result: Dict[str, Any]) -> Optional[str]:
         return "That didn't go through, so nothing changed. Answer it in Conduit on your iPhone."
     if result.get("status") == "unconfirmed":
         return "Hermes hasn't confirmed it yet. Check the chat in Conduit."
+    if result.get("status") == "refused":
+        return "I can't approve that one by voice. Say no to deny it, or approve it in Conduit on your iPhone."
     return result.get("message") or None
 
 

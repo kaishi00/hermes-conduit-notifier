@@ -873,3 +873,6 @@ def test_local_live_on_the_watch_answers_the_call_from_hermes_with_the_users_wor
     _hermes_takes(store, "st-1", resolved=False)
     assert api._local_live_call_answer(voice, "yes") == \
         "That didn't go through: Hermes wasn't waiting on it any more. Check the chat in Conduit."
+    store.note_waiting("st-1", "approval", description="Run a long script", command="x" * 2000)
+    assert api._local_live_call_answer(voice, "yes") == \
+        "I can't approve that one by voice. Say no to deny it, or approve it in Conduit on your iPhone."

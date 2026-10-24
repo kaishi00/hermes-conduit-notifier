@@ -590,15 +590,29 @@ class CallStore:
             return "missed"
         deadline = time.monotonic() + wait_s
         while True:
-            fared, kept = self._delivery(answer_id)
-            if fared in ("resolved", "missed", "withdrawn"):
+            fared = self.approval_fared(answer_id)
+            if fared is not None:
                 return fared
-            if fared == "sent" and not kept:
-                # Answered on its card (or timed out) before anything took it.
-                return self._withdraw(answer_id, "missed")
             if time.monotonic() >= deadline:
                 return self._withdraw(answer_id, "withdrawn")
             sleep(poll_s)
+
+    def approval_fared(self, answer_id: Any) -> str | None:
+        """``approval_delivery`` without the wait: how the answer fared, or
+        None while it's still on its way."""
+        if not isinstance(answer_id, str) or not answer_id:
+            return "missed"
+        fared, kept = self._delivery(answer_id)
+        if fared in ("resolved", "missed", "withdrawn"):
+            return fared
+        if fared == "sent" and not kept:
+            # Answered on its card (or timed out) before anything took it.
+            return self._withdraw(answer_id, "missed")
+        if fared is None and not kept:
+            # Its record is gone (a burst of answers outlived it): how it
+            # fared can't be told.
+            return "claimed"
+        return None
 
     def _delivery(self, answer_id: str) -> tuple[str | None, bool]:
         """An answer's delivery state, and whether its wait still holds it:
