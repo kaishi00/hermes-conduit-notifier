@@ -88,10 +88,10 @@ def parse(body: Any) -> Report:
     if not isinstance(digest, str) or not _SHA256.fullmatch(digest):
         raise ValueError("text_sha256 must be the lowercase hex SHA-256 of the message's text")
     surface = body.get("surface")
-    if surface not in SURFACES:
+    if not isinstance(surface, str) or surface not in SURFACES:
         raise ValueError(f"surface must be one of {', '.join(SURFACES)}")
     entry = body.get("input")
-    if entry is not None and entry not in INPUTS:
+    if entry is not None and (not isinstance(entry, str) or entry not in INPUTS):
         raise ValueError(f"input must be one of {', '.join(INPUTS)}, or left out")
     return Report(session_id.strip(), digest, surface, entry)
 
