@@ -884,6 +884,10 @@ test('a paired Watch rings too, and whichever device answers stops the other', a
       { status: 200, json: { seq: 2, muted: true, ended: false, by: 'watch' } });
     assert.deepEqual(await watching, { status: 200, json: { seq: 2, muted: true, ended: false, by: 'watch' } }, 'the waiting read gets the mute at once');
     assert.deepEqual(await api(base, `${control}?after=2`, { credential: ring.token }), { status: 204, json: null }, 'nothing new');
+    const lost = `/v1/rings/${'L'.repeat(22)}/control`;
+    assert.deepEqual(await api(base, lost, { method: 'POST', body: { token: 'l'.repeat(43), by: 'watch', muted: true } }), { status: 404, json: { error: 'unknown_ring' } });
+    assert.deepEqual(await api(base, lost, { method: 'POST', body: { token: 'l'.repeat(43), by: 'watch', muted: true, adopt: true } }),
+      { status: 200, json: { seq: 1, muted: true, ended: false, by: 'watch' } }, 'a ring a restart dropped comes back as its control');
 
     assert.equal((await send('call:000000000000000000000032')).status, 202);
     const second = captured()[3].notification.payload.conduit.ring;

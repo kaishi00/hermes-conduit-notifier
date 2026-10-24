@@ -2,7 +2,7 @@ import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 
 import {
-  RING_CONTROL_MAX_MS, RING_CONTROL_ROUTE, RING_ROUTE, RING_SESSION_MAX_CHARS, RING_SESSION_ROUTE, RING_SESSION_TTL_MS,
+  RING_ADOPTED_MAX, RING_CONTROL_MAX_MS, RING_CONTROL_ROUTE, RING_ROUTE, RING_SESSION_MAX_CHARS, RING_SESSION_ROUTE, RING_SESSION_TTL_MS,
   RING_START_MAX_CHARS, RING_TTL_MS, Rings, ringBearer, validControl, validSessionStore, validSettle,
 } from '../src/rings.mjs';
 
@@ -245,6 +245,8 @@ test('a control write is a mute, an end or both, from the phone or the Watch', (
   const id = 'a'.repeat(22);
   assert.deepEqual(validControl(id, { token, by: 'watch', muted: true }), { token, by: 'watch', muted: true });
   assert.deepEqual(validControl(id, { token, by: 'phone', ended: true, muted: false }), { token, by: 'phone', muted: false, ended: true });
+  assert.deepEqual(validControl(id, { token, by: 'phone', muted: true, adopt: true }), { token, by: 'phone', muted: true, adopt: true });
+  assert.equal(validControl(id, { token, by: 'phone', muted: true, adopt: 'yes' }), null);
   assert.equal(validControl(id, { token, by: 'phone' }), null, 'nothing to change');
   assert.equal(validControl(id, { token, by: 'phone', ended: false }), null, 'an end is only ever true');
   assert.equal(validControl(id, { token, by: 'phone', muted: 1 }), null);
@@ -253,4 +255,38 @@ test('a control write is a mute, an end or both, from the phone or the Watch', (
   assert.equal(validControl('a'.repeat(21), { token, by: 'phone', muted: true }), null);
   assert.equal(RING_CONTROL_ROUTE.exec(`/v1/rings/${id}/control`)[1], id);
   assert.equal(RING_CONTROL_ROUTE.exec('/v1/rings/abc/control'), null);
+});
+
+test('after a restart a control write adopts the ring, and both devices carry on through it', async () => {
+  const before = ringsAt({ now: 1_000 });
+  const ring = before.create('install-1');
+  before.settle(ring.id, ring.token, 'watch', 'answered');
+  before.setControl(ring.id, ring.token, 'phone', { muted: true });
+
+  const rings = ringsAt({ now: 2_000 });
+  assert.deepEqual(await rings.readControl(ring.id, ring.token), { status: 'unknown' }, 'the restart dropped it');
+  assert.equal(rings.setControl(ring.id, ring.token, 'watch', { muted: true }), 'unknown', 'only a write that asks adopts');
+  assert.deepEqual(rings.setControl(ring.id, ring.token, 'watch', { muted: true, adopt: true }), { control: { seq: 1, muted: true, ended: false, by: 'watch' } });
+  assert.deepEqual(rings.setControl(ring.id, ring.token, 'phone', { muted: true, adopt: true }).control, { seq: 2, muted: true, ended: false, by: 'phone' }, 'the other device finds it');
+  assert.equal(rings.setControl(ring.id, 'x'.repeat(43), 'phone', { ended: true, adopt: true }), 'unknown', 'never with another token');
+  assert.deepEqual(await rings.readControl(ring.id, ring.token), { status: 'control', control: { seq: 2, muted: true, ended: false, by: 'phone' } });
+  assert.deepEqual(rings.settle(ring.id, ring.token, 'phone', 'answered'), { settled: { by: 'watch', outcome: 'answered' } }, 'an adopted ring settles nothing');
+  assert.equal(rings.adopted, 1);
+  rings.forget(ring.id);
+  assert.equal(rings.adopted, 0);
+});
+
+test('adopted rings are capped apart and never push out a ringing call', () => {
+  const rings = ringsAt({ now: 1_000 }, { maxRings: 3, maxAdopted: 2 });
+  const id = (n) => String(n).padStart(22, 'a');
+  const token = 'c'.repeat(43);
+  const real = rings.create('install-1');
+  for (const n of [1, 2, 3]) rings.setControl(id(n), token, 'watch', { muted: false, adopt: true });
+  assert.equal(rings.adopted, 2, 'the oldest adopted went');
+  assert.equal(rings.setControl(id(1), token, 'watch', { muted: false }), 'unknown');
+  assert.equal(rings.size, 3);
+  rings.create('install-1');
+  assert.equal(rings.setControl(id(4), token, 'watch', { muted: false, adopt: true }).control.seq, 1, 'room made among adopted rings');
+  assert.notEqual(rings.rings.get(real.id), undefined, 'the real ring stays');
+  assert.equal(RING_ADOPTED_MAX, 1_000);
 });

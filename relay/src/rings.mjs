@@ -25,7 +25,11 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 // Mute and End. The two keep each other's controls through here, since the
 // phone's call keeps their link down: either posts the call's mute or its end
 // to the ring's control, and each long-polls it for the other's. The control
-// holds no words, only the two flags.
+// holds no words, only the two flags. A restart drops it with the rings, so a
+// write may adopt a ring the relay doesn't know (`adopt`): it comes back as a
+// control alone, for whoever holds the token, and both devices write their
+// state again to pick up where they were. Adopted rings are capped apart, so
+// they can't push out real ones.
 
 // Long enough for a push that reached the device late (the phone rings one up
 // to 90 s late) to be answered (45 s of ringing), with room to spare.
@@ -47,6 +51,8 @@ export const RING_CONTROL_WAIT_MAX_MS = 20_000;
 // A call on the phone's headset outlasts its ring: each control read or write
 // keeps the ring another RING_TTL_MS, up to this long after it rang.
 export const RING_CONTROL_MAX_MS = 4 * 60 * 60 * 1000;
+// The most rings a control write adopts at once.
+export const RING_ADOPTED_MAX = 1_000;
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{22}$/;
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
@@ -64,6 +70,7 @@ export class Rings {
     maxWaitersPerRing = 2,
     maxControlWaitersPerRing = 4,
     controlMaxMs = RING_CONTROL_MAX_MS,
+    maxAdopted = RING_ADOPTED_MAX,
     now = Date.now,
   } = {}) {
     if (!Number.isSafeInteger(maxRings) || maxRings < 1) throw new RangeError('maxRings must be a positive integer');
@@ -74,6 +81,8 @@ export class Rings {
     this.maxWaitersPerRing = maxWaitersPerRing;
     this.maxControlWaitersPerRing = maxControlWaitersPerRing;
     this.controlMaxMs = controlMaxMs;
+    this.maxAdopted = maxAdopted;
+    this.adopted = 0;
     this.now = now;
     this.rings = new Map();
     // The stored sessions' size, held to maxSessionChars.
@@ -84,12 +93,12 @@ export class Rings {
     return this.rings.size;
   }
 
-  // A new ring for this installation: what both pushes carry. The oldest
-  // ring goes when the relay holds its maximum (that call only loses the
-  // "stop the other device" step).
+  // A new ring for this installation: what both pushes carry. When the relay
+  // holds its maximum the oldest adopted ring goes, else the oldest ring (that
+  // call only loses the "stop the other device" step).
   create(installationId) {
     this.sweep();
-    while (this.rings.size >= this.maxRings) this.drop(this.rings.values().next().value);
+    while (this.rings.size >= this.maxRings) this.drop(this.oldest((ring) => ring.adopted) ?? this.rings.values().next().value);
     const id = randomBytes(16).toString('base64url');
     const token = randomBytes(32).toString('base64url');
     const now = this.now();
@@ -167,9 +176,11 @@ export class Rings {
   // The phone or the Watch sets the call's mute or ends it, for a ring the
   // Watch answered: { control } with the call's whole control after the
   // change, or 'unknown' and 'not_answered' as for a session store. A call
-  // once ended stays ended.
-  setControl(id, token, by, { muted, ended } = {}) {
-    const ring = this.find(id, token);
+  // once ended stays ended. `adopt`: a ring the relay doesn't know (it
+  // restarted) comes back as a control alone, the Watch's answer taken as
+  // given: only the call's two devices hold its token.
+  setControl(id, token, by, { muted, ended, adopt = false } = {}) {
+    const ring = this.find(id, token) ?? (adopt ? this.adopt(id, token) : undefined);
     if (!ring) return 'unknown';
     if (!answeredOnWatch(ring)) return 'not_answered';
     const control = ring.control ?? { seq: 0, muted: false, ended: false };
@@ -209,6 +220,27 @@ export class Rings {
       signal?.addEventListener('abort', ended, { once: true });
       ring.controlWaiters.add(done);
     });
+  }
+
+  // A ring known only by its control, after a restart: undefined when the id
+  // is another ring's. The oldest adopted ring goes at the cap, and a full
+  // relay makes room among adopted rings only, never a ringing call's.
+  adopt(id, token) {
+    if (this.rings.has(id)) return undefined;
+    while (this.adopted >= this.maxAdopted || (this.adopted > 0 && this.rings.size >= this.maxRings)) {
+      this.drop(this.oldest((ring) => ring.adopted));
+    }
+    if (this.rings.size >= this.maxRings) return undefined;
+    const now = this.now();
+    const ring = { id, installationId: null, tokenHash: digest(token), createdAt: now, aliveAt: now, settled: { by: 'watch', outcome: 'answered' }, adopted: true };
+    this.rings.set(id, ring);
+    this.adopted += 1;
+    return ring;
+  }
+
+  oldest(matches) {
+    for (const ring of this.rings.values()) if (matches(ring)) return ring;
+    return undefined;
   }
 
   // A control in use keeps its ring another `ttlMs`, moved to the map's end
@@ -254,6 +286,7 @@ export class Rings {
   // Gone: fetches still waiting on it end without a session.
   drop(ring) {
     this.dropSession(ring);
+    if (ring.adopted && this.rings.get(ring.id) === ring) this.adopted -= 1;
     this.rings.delete(ring.id);
     for (const wake of [...(ring.waiters ?? [])]) wake(null);
     for (const wake of [...(ring.controlWaiters ?? [])]) wake(null);
@@ -285,13 +318,14 @@ export function validSessionStore(id, body) {
 // both, from the phone or the Watch.
 export function validControl(id, body) {
   if (!ID_PATTERN.test(id) || !body || typeof body !== 'object') return null;
-  const { token, by, muted, ended } = body;
+  const { token, by, muted, ended, adopt } = body;
   if (typeof token !== 'string' || !TOKEN_PATTERN.test(token)) return null;
   if (!RING_SETTLED_BY.has(by)) return null;
   if (muted !== undefined && typeof muted !== 'boolean') return null;
   if (ended !== undefined && ended !== true) return null;
+  if (adopt !== undefined && typeof adopt !== 'boolean') return null;
   if (muted === undefined && ended === undefined) return null;
-  return { token, by, ...(muted !== undefined ? { muted } : {}), ...(ended ? { ended } : {}) };
+  return { token, by, ...(muted !== undefined ? { muted } : {}), ...(ended ? { ended } : {}), ...(adopt ? { adopt } : {}) };
 }
 
 // The ring token a session fetch carries as its bearer, or null.
