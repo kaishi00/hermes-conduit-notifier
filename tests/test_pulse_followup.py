@@ -750,10 +750,21 @@ def test_a_check_follows_the_chat_into_its_compressed_continuation(live):
     assert "## Later in other chats" not in text  # its own continuation isn't "another chat"
 
 
-def test_a_check_lists_what_runs_in_the_background(live):
+def fake_redactor(monkeypatch):
+    """Hermes's agent.redact, masking anything that looks like a token."""
+    agent = types.ModuleType("agent")
+    redact = types.ModuleType("agent.redact")
+    redact.redact_sensitive_text = lambda text, force=False, **_: re.sub(r"sk-\w+", "sk-***", text)
+    agent.redact = redact
+    monkeypatch.setitem(sys.modules, "agent", agent)
+    monkeypatch.setitem(sys.modules, "agent.redact", redact)
+
+
+def test_a_check_lists_what_runs_in_the_background(live, monkeypatch):
+    fake_redactor(monkeypatch)
     promise(live, "Hermes will finish the Proton Bridge password rotation.")
     (live.home / "processes.json").write_text(json.dumps([
-        {"session_id": "proc_1", "command": "watch-proton-bridge.sh --until-unlocked", "pid": None,
+        {"session_id": "proc_1", "command": "watch-proton-bridge.sh --until-unlocked --key sk-abc123", "pid": None,
          "started_at": time.time() - 900, "parent_session_id": CHAT, "watch_patterns": ["unlocked"]},
         {"session_id": "proc_2", "command": "gone.sh", "pid": 2 ** 22 + 12345, "pid_scope": "host"},
         {"session_id": "proc_3", "command": "odd-parent.sh", "parent_session_id": 7, "started_at": float("inf")},
@@ -762,7 +773,8 @@ def test_a_check_lists_what_runs_in_the_background(live):
     check_now(live, llm, now=time.time() + followup.FIRST_CHECK_S + 1)
     [text] = llm.calls
     section = text.split("## Running in the background now\n", 1)[1]
-    assert "watch-proton-bridge.sh --until-unlocked" in section and "started in \"Deploy\"" in section
+    assert "watch-proton-bridge.sh --until-unlocked --key sk-***" in section and "started in \"Deploy\"" in section
+    assert "abc123" not in section
     assert "watching for unlocked" in section
     assert "gone.sh" not in section  # its process is gone
     assert "- odd-parent.sh\n" in section + "\n"  # a parent that isn't a chat id is left out
@@ -777,6 +789,17 @@ def test_a_background_check_never_signals_on_windows_or_with_a_corrupt_pid(monke
     monkeypatch.setattr(evidence, "_windows_pid_running", lambda pid: pid == 4242)
     assert evidence._alive({"pid": 4242}) and not evidence._alive({"pid": 4243})
     assert killed == []  # on Windows os.kill(pid, 0) would end the process
+
+
+def test_without_hermes_redactor_a_background_command_isnt_shown(live, monkeypatch):
+    monkeypatch.setitem(sys.modules, "agent", None)  # import fails
+    promise(live)
+    (live.home / "processes.json").write_text(json.dumps([{"session_id": "p", "command": "curl -H 'Bearer sk-x'",
+                                                            "watch_patterns": ["done"]}]))
+    llm = llm_saying(decision="wait")
+    check_now(live, llm, now=time.time() + followup.FIRST_CHECK_S + 1)
+    section = llm.calls[0].split("## Running in the background now\n", 1)[1]
+    assert section.startswith("- a background process") and "curl" not in section and "watching" not in section
 
 
 def test_a_check_without_a_background_checkpoint_says_nothing_of_it(live):

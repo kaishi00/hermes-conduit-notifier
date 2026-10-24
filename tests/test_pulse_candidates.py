@@ -12,7 +12,7 @@ import types
 import pytest
 
 from test_pulse import ROOT, SID, _load, cli, host, pulse, pulse_store, report, store  # noqa: F401
-from test_pulse_followup import CHAT, commitment, live  # noqa: F401
+from test_pulse_followup import CHAT, commitment, fake_redactor, live  # noqa: F401
 
 candidates = _load("conduit_push.pulse_candidates", ROOT / "pulse_candidates.py")
 learning = _load("conduit_push.pulse_learning", ROOT / "pulse_learning.py")
@@ -211,7 +211,8 @@ def test_the_list_reads_the_report_context_with_chat_keys(live):
     assert "(cut here: no room in this report)" in cut.text and cut.shown == []  # cut off: not shown to the model
 
 
-def test_the_report_shows_what_later_chats_said_about_an_item_and_what_runs(live):
+def test_the_report_shows_what_later_chats_said_about_an_item_and_what_runs(live, monkeypatch):
+    fake_redactor(monkeypatch)
     now = time.time()
     first = commitment(live, "The user will add iPad and Duo support in the patch after the 2.0 release.",
                        words="duo/ipad support didn't make it into the 2.0 release, it'll be in the patch after that",

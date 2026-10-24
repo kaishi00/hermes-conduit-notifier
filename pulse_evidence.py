@@ -191,11 +191,23 @@ def processes(home: Path) -> list[dict]:
     return sorted(running, key=_started)
 
 
+def _redact(text: str) -> str:
+    """``text`` with secrets taken out by Hermes's own redactor, again on read
+    in case an older Hermes wrote the checkpoint without it; "" when the
+    redactor can't be loaded, so nothing unredacted leaves the host."""
+    try:
+        from agent.redact import redact_sensitive_text
+        return redact_sensitive_text(text, force=True)
+    except Exception:  # noqa: BLE001 - no redactor, no text
+        return ""
+
+
 def background(home: Path, zone: tzinfo) -> str:
     """The "running in the background" section: each process's command, when
     it started and the chat that started it; "" when nothing runs. The text
-    goes to the model and into the report turn; Hermes redacts secrets from
-    each command before it writes the checkpoint."""
+    goes to the model and into the report turn, so each command and pattern
+    passes Hermes's redactor first; without it, a process shows as "a
+    background process"."""
     running = processes(home)
     if not running:
         return ""
@@ -213,8 +225,9 @@ def background(home: Path, zone: tzinfo) -> str:
         title = titles.get(parent(entry), "")
         source = f", started in \"{_clip(title, 60)}\"" if title else ""
         watching = entry.get("watch_patterns")
-        watch = (f", watching for {', '.join(_clip(p, 40) for p in watching[:3])}"
-                 if isinstance(watching, list) and watching else "")
-        out.append(f"- {_clip(entry.get('command'), 160)}{when}{source}{watch}")
+        patterns = [_redact(_clip(p, 40)) for p in watching[:3]] if isinstance(watching, list) else []
+        watch = f", watching for {', '.join(p for p in patterns if p)}" if any(patterns) else ""
+        command = _redact(_clip(entry.get("command"), 160)) or "a background process"
+        out.append(f"- {command}{when}{source}{watch}")
     more = f"\n(and {len(running) - MAX_PROCESSES} more)" if len(running) > MAX_PROCESSES else ""
     return "## Running in the background now\n" + "\n".join(out) + more
