@@ -10,10 +10,11 @@ it needs isn't there, so the caller can tell "Hermes has no row" from
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 STATE_DB = "state.db"
 # Hermes writes this display kind on the assistant row of a turn that failed
@@ -187,3 +188,64 @@ def user_text_after(home: Path, *, session_id: str, tag: str) -> list[str]:
             break
         text.append(row["content"] if isinstance(row["content"], str) else "")
     return text
+
+
+# Every session but the ones in the json list (each id's whole compression
+# chain, up and down), and no hidden chats or hidden rows. Cron runs count:
+# a job's output is often where the work got done.
+_LATER = (
+    "WITH RECURSIVE seed(id) AS (SELECT value FROM json_each(?)), "
+    "up(id, parent) AS (SELECT s.id, s.parent_session_id FROM sessions s JOIN seed ON s.id = seed.id "
+    "UNION SELECT s.id, s.parent_session_id FROM sessions s JOIN up ON s.id = up.parent), "
+    "excluded(id) AS (SELECT id FROM seed UNION SELECT id FROM up "
+    "UNION SELECT s.id FROM sessions s JOIN excluded e ON s.parent_session_id = e.id) "
+    "SELECT s.id AS chat_id, s.title, s.source, m.role, substr(m.content, 1, ?) AS content, m.timestamp, m.id "
+    "FROM messages m JOIN sessions s ON s.id = m.session_id "
+    "WHERE m.timestamp > ? AND m.role IN ('user', 'assistant') AND m.active = 1 AND m.display_kind IS NULL "
+    "AND s.hidden = 0 AND s.id NOT IN (SELECT id FROM excluded) "
+    "ORDER BY m.timestamp DESC, m.id DESC LIMIT ?")
+
+
+def later_messages(home: Path, *, after: float, exclude: Iterable[str], max_chars: int,
+                   limit: int) -> list[sqlite3.Row]:
+    """Visible user and assistant rows written after ``after`` in any chat
+    or cron run but the ones in ``exclude`` and their compression chains,
+    newest first, each cut to ``max_chars``, with the chat's id, title and
+    source."""
+    ids = json.dumps([chat for chat in exclude if chat])
+    return _run(home, _LATER, (ids, max_chars, after, limit))
+
+
+def chain_ids(home: Path, chat_id: str) -> set[str]:
+    """``chat_id`` and the chats in its compression chain, up and down."""
+    rows = _run(home, (
+        "WITH RECURSIVE up(id, parent) AS (SELECT id, parent_session_id FROM sessions WHERE id = ? "
+        "UNION SELECT s.id, s.parent_session_id FROM sessions s JOIN up ON s.id = up.parent), "
+        "chain(id) AS (SELECT id FROM up UNION SELECT s.id FROM sessions s JOIN chain c ON s.parent_session_id = c.id) "
+        "SELECT id FROM chain"), (chat_id,))
+    return {row["id"] for row in rows} | {chat_id}
+
+
+def chat_titles(home: Path, ids: Iterable[str]) -> dict[str, str]:
+    """Titles of the chats in ``ids``."""
+    wanted = sorted({chat for chat in ids if chat})
+    if not wanted:
+        return {}
+    rows = _run(home, "SELECT id, title FROM sessions WHERE id IN (SELECT value FROM json_each(?))",
+                (json.dumps(wanted),))
+    return {row["id"]: row["title"] or "" for row in rows}
+
+
+def chain_messages(home: Path, *, chat_id: str, after_id: int, max_chars: int, limit: int) -> list[sqlite3.Row]:
+    """``chat_messages`` with ``newest``, through the chat and the sessions
+    it continued into (compression, branches): the last ``limit`` visible
+    user and assistant rows after row ``after_id``, oldest first."""
+    rows = _run(home, (
+        "WITH RECURSIVE chain(id) AS (SELECT ? UNION SELECT s.id FROM sessions s JOIN chain c "
+        "ON s.parent_session_id = c.id) "
+        "SELECT id, role, substr(content, 1, ?) AS content, timestamp FROM messages "
+        "WHERE session_id IN (SELECT id FROM chain) AND id > ? AND role IN ('user', 'assistant') "
+        "AND active = 1 AND display_kind IS NULL ORDER BY id DESC LIMIT ?"
+    ), (chat_id, max_chars, after_id, limit))
+    return rows[::-1]
+

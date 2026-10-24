@@ -217,10 +217,21 @@ def test_a_promise_open_for_a_week_is_never_dropped_silently(live):
     check_now(live, llm, now=now)
     assert len(llm.calls) == 1  # an old promise (a backfill finds them) is read once first
     check_now(live, llm, now=now + followup.BACKOFF_S[0] + 1)
-    assert len(llm.calls) == 1
+    assert len(llm.calls) == 2  # read once more before asking: it may have been done elsewhere since
     [row] = live.store.followups()
-    assert row["decision"] == "tell" and row["news"] == followup.STALE_NEWS and row["checks"] == 1
+    assert row["decision"] == "tell" and row["news"] == followup.STALE_NEWS and row["checks"] == 2
     assert live.store.item(item_id)["status"] == "open"
+
+
+def test_a_week_old_promise_done_elsewhere_closes_instead_of_asking(live):
+    item_id = promise(live, said_at=time.time() - followup.GIVE_UP_S - 60)
+    now = time.time() + followup.FIRST_CHECK_S + 1
+    check_now(live, llm_saying(decision="wait"), now=now)
+    check_now(live, llm_saying(decision="done", why="another chat shows it finished"),
+              now=now + followup.BACKOFF_S[0] + 1)
+    [row] = live.store.followups()
+    assert row["decision"] == "done" and row["news"] == ""
+    assert live.store.item(item_id)["status"] == "done"
 
 
 def test_a_closed_promise_stops_being_checked(live):
@@ -451,7 +462,7 @@ def test_a_chat_that_cant_be_read_isnt_judged(live, monkeypatch):
     def unreadable(*args, **kwargs):
         raise followup.hermes.HermesUnreadable("locked")
 
-    monkeypatch.setattr(followup.hermes, "chat_messages", unreadable)
+    monkeypatch.setattr(followup.hermes, "chain_messages", unreadable)
     llm = llm_saying(decision="tell", news="x")
     check_now(live, llm, now=time.time() + followup.FIRST_CHECK_S + 1)
     assert llm.calls == [] and live.store.followups()[0]["decision"] == followup.CHECK_FAILED
@@ -704,3 +715,96 @@ def test_the_nudge_level_sets_reminders_pace_budget_and_the_reports_bar(live, ca
     capsys.readouterr()
     run("status")
     assert "Nudging: gentle" in capsys.readouterr().out
+
+
+def test_a_check_reads_later_chats_and_cron_runs_on_the_same_subject(live):
+    promise(live, "Hermes will send the App Store Connect key recipe once ZCode dumps it.")
+    later = time.time() - 600
+    live.db.session(sid="build", title="Conduit Build", pinned=0)
+    live.db.message("assistant", "ZCode dumped the recipe; the App Store Connect keys are swapped in on the Mac.",
+                    sid="build", at=later)
+    live.db.session(sid="nightly", title="Nightly build", pinned=0, source="cron")
+    live.db.message("assistant", "Uploaded with the new App Store Connect key.", sid="nightly", at=later)
+    live.db.session(sid="other", title="Dinner", pinned=0)
+    live.db.message("user", "What should we cook tonight?", sid="other", at=later)
+    # Pulse's own chat says the item is open: never evidence.
+    live.db.message("assistant", "The App Store Connect key recipe from ZCode is still open.", at=later)
+    llm = llm_saying(decision="done", why="the build chat shows the keys swapped")
+    check_now(live, llm, now=time.time() + followup.FIRST_CHECK_S + 1)
+    [text] = llm.calls
+    section = text.split("## Later in other chats and cron runs, on the same subject\n", 1)[1]
+    assert "chat \"Conduit Build\"" in section and "keys are swapped in" in section
+    assert "cron run \"Nightly build\"" in section
+    assert "cook tonight" not in section and "still open" not in section
+
+
+def test_a_check_follows_the_chat_into_its_compressed_continuation(live):
+    promise(live)
+    live.db.session(sid="work-2", title="Deploy", pinned=0, parent=CHAT)
+    live.db.message("assistant", "The deploy finished at noon.", sid="work-2", at=time.time() - 60)
+    llm = llm_saying(decision="tell", news="The deploy finished at noon.")
+    check_now(live, llm, now=time.time() + followup.FIRST_CHECK_S + 1)
+    [text] = llm.calls
+    said = text.split("## Said in that chat since\n", 1)[1]
+    assert "The deploy finished at noon." in said.split("##", 1)[0]
+    assert "## Later in other chats" not in text  # its own continuation isn't "another chat"
+
+
+def fake_redactor(monkeypatch):
+    """Hermes's agent.redact, masking anything that looks like a token."""
+    agent = types.ModuleType("agent")
+    redact = types.ModuleType("agent.redact")
+    redact.redact_sensitive_text = lambda text, force=False, **_: re.sub(r"sk-\w+", "sk-***", text)
+    agent.redact = redact
+    monkeypatch.setitem(sys.modules, "agent", agent)
+    monkeypatch.setitem(sys.modules, "agent.redact", redact)
+
+
+def test_a_check_lists_what_runs_in_the_background(live, monkeypatch):
+    fake_redactor(monkeypatch)
+    promise(live, "Hermes will finish the Proton Bridge password rotation.")
+    (live.home / "processes.json").write_text(json.dumps([
+        {"session_id": "proc_1", "command": "watch-proton-bridge.sh --until-unlocked --key sk-abc123", "pid": None,
+         "started_at": time.time() - 900, "parent_session_id": CHAT, "watch_patterns": ["unlocked"]},
+        {"session_id": "proc_2", "command": "gone.sh", "pid": 2 ** 22 + 12345, "pid_scope": "host"},
+        {"session_id": "proc_3", "command": "odd-parent.sh", "parent_session_id": 7, "started_at": float("inf")},
+        "not an entry"]))
+    llm = llm_saying(decision="wait")
+    check_now(live, llm, now=time.time() + followup.FIRST_CHECK_S + 1)
+    [text] = llm.calls
+    section = text.split("## Running in the background now\n", 1)[1]
+    assert "watch-proton-bridge.sh --until-unlocked --key sk-***" in section and "started in \"Deploy\"" in section
+    assert "abc123" not in section
+    assert "watching for unlocked" in section
+    assert "gone.sh" not in section  # its process is gone
+    assert "- odd-parent.sh\n" in section + "\n"  # a parent that isn't a chat id is left out
+
+
+def test_a_background_check_never_signals_on_windows_or_with_a_corrupt_pid(monkeypatch):
+    evidence = sys.modules["conduit_push.pulse_evidence"]
+    killed = []
+    monkeypatch.setattr(evidence.os, "kill", lambda *args: killed.append(args))
+    assert not evidence._alive({"pid": 2 ** 70, "pid_scope": "host"})  # os.kill would raise OverflowError
+    monkeypatch.setattr(evidence.os, "name", "nt")
+    monkeypatch.setattr(evidence, "_windows_pid_running", lambda pid: pid == 4242)
+    assert evidence._alive({"pid": 4242}) and not evidence._alive({"pid": 4243})
+    assert killed == []  # on Windows os.kill(pid, 0) would end the process
+
+
+def test_without_hermes_redactor_a_background_command_isnt_shown(live, monkeypatch):
+    monkeypatch.setitem(sys.modules, "agent", None)  # import fails
+    promise(live)
+    (live.home / "processes.json").write_text(json.dumps([{"session_id": "p", "command": "curl -H 'Bearer sk-x'",
+                                                            "watch_patterns": ["done"]}]))
+    llm = llm_saying(decision="wait")
+    check_now(live, llm, now=time.time() + followup.FIRST_CHECK_S + 1)
+    section = llm.calls[0].split("## Running in the background now\n", 1)[1]
+    assert section.startswith("- a background process") and "curl" not in section and "watching" not in section
+
+
+def test_a_check_without_a_background_checkpoint_says_nothing_of_it(live):
+    promise(live)
+    (live.home / "processes.json").write_text("{not json")
+    llm = llm_saying(decision="wait")
+    check_now(live, llm, now=time.time() + followup.FIRST_CHECK_S + 1)
+    assert "Running in the background" not in llm.calls[0]
