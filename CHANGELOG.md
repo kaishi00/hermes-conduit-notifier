@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.70.0 (2026-10-24)
+
+### New and improved
+- Qwen Live is a separate voice provider on iPhone and Apple Watch.
+  The host supplies temporary credentials; call audio connects directly to
+  Alibaba Cloud, without going through the Conduit relay or the Hermes host.
+
 ## 0.69.0 (2026-10-24)
 
 ### New and improved

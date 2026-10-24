@@ -541,6 +541,46 @@ fairness boundary.
 
 ## Gemini Live tokens
 
+### Qwen Live: independently selectable direct voice
+
+Qwen Live is a separate provider alongside Gemini Live in the phone, Watch
+and CarPlay pickers. Both can be configured at once; switching in Conduit
+requires no environment-variable change or gateway restart.
+
+Set these in the profile's `.env`:
+
+```dotenv
+DASHSCOPE_API_KEY=your-bailian-key
+CONDUIT_QWEN_LIVE_WORKSPACE=your-workspace-id
+CONDUIT_QWEN_LIVE_REGION=cn-beijing
+CONDUIT_QWEN_LIVE_MODEL=qwen3.8-omni-flash-realtime
+CONDUIT_QWEN_LIVE_VOICE=Tina
+```
+
+Singapore uses `ap-southeast-1`; the key/workspace must match the region.
+The host voice is a default; Conduit's Qwen settings can override it without
+changing Gemini's voice. Gemini keeps its existing key and endpoints.
+
+`GET /api/plugins/conduit_push/qwen-live/status` checks Qwen configuration.
+`POST /api/plugins/conduit_push/qwen-live/token` returns a short-lived key,
+model, voice and provider address. These routes use profile-scoped dashboard
+authentication and no-store responses. A mint failure never falls back to
+Google or returns the permanent key. There is no host-wide provider selector.
+
+Phone and Watch audio connect directly to Alibaba Cloud. Encrypted Watch
+grants may carry tools and reconnect credentials, not audio. The grant tools
+`live_token` and `qwen_live_token` are authorized independently and cannot
+mint each other's credentials. Qwen calls use the `qwen-live` history and
+phone-data permission identity; Gemini keeps `gemini-live`.
+
+The app asks for separate Alibaba Cloud consent. Tools, audio controllers,
+CarPlay and incoming calls share infrastructure while selecting independent
+provider clients. Qwen uses Hermes web search instead of incompatible native
+search plus tools. Live credentials and Apple-device behavior still require
+maintainer testing as described in the companion app PR.
+
+### Google Gemini credentials
+
 Conduit's Gemini Live voice mode talks to Google directly from the phone, but
 the Gemini API key stays on your Hermes host. The plugin adds two routes to the
 Hermes dashboard, behind the dashboard's normal auth:
