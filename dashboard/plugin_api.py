@@ -8215,7 +8215,10 @@ async def post_phone_wipe(request: Request, response: Response, profile: Optiona
 #
 # A grant can also carry answer_call: on a call from Hermes about a question
 # or an approval, the user's spoken answer to it (answer_call_waiting), for
-# the chat the grant names in answer_sessions and no other.
+# the chat the grant names in answer_sessions and no other. It approves or
+# denies only with answer_approvals: the user lets the Watch answer
+# approvals by voice. A Local Live call on the grant answers it with the
+# user's words on the host (_local_live_call_answer).
 #
 # A grant can also carry find_chat and read_chat: the user's earlier chats on
 # the grant's profile, found by Hermes' own session search and read as the
@@ -8410,6 +8413,9 @@ class _WatchGrant:
         # The chat a call from Hermes is about, by the ids its session goes
         # by: the only one answer_call answers.
         self.answer_sessions: Tuple[str, ...] = ()
+        # Whether answer_call may approve or deny there: the user lets the
+        # Watch answer approvals by voice.
+        self.answer_approvals = False
         self.seen: set = set()
         self.lock = threading.Lock()
         self.closed = threading.Event()
@@ -8519,7 +8525,12 @@ def _watch_answer_sessions(value: Any) -> Tuple[str, ...]:
 
 def answer_watch_hermes_call(grant: _WatchGrant, args: Dict[str, Any]) -> Dict[str, Any]:
     """answer_call: the user's spoken answer to what Hermes waits on in the
-    grant's call from Hermes (answer_call_waiting), never another chat's."""
+    grant's call from Hermes (answer_call_waiting), never another chat's.
+    An approval only when the user lets the Watch answer them by voice."""
+    if "choice" in args and not grant.answer_approvals:
+        return {"status": "refused",
+                "message": "Approvals aren't answered by voice on this Watch call. "
+                           "The user can answer it in Conduit on their iPhone."}
     result: Dict[str, Any] = {"status": "not_waiting",
                               "message": "Hermes isn't waiting on the user in that chat any more."}
     for session_id in grant.answer_sessions:
@@ -9354,6 +9365,7 @@ def open_watch_grant(body: Any, *, profile: Optional[str], ticket_home: Optional
                         credential=credential, expires_at=time.monotonic() + ttl, max_calls=max_calls)
     if WATCH_CALL_ANSWER in tools:
         grant.answer_sessions = answer_sessions
+        grant.answer_approvals = body.get("answer_approvals") is True
     if audio:
         if response.get("audio") is not True:
             # A relay from before Watch audio opened a grant without it.
@@ -12363,6 +12375,10 @@ class _LocalLiveWatchTurns:
         # (once a reply) and keeps the turn open for what Hermes says after.
         self.watch_approvals = False
         self.approval_told = False
+        # A call from Hermes about a question or approval in its chat (the
+        # grant's answer_sessions): while Hermes waits there, the user's
+        # words answer it, and this returns what the call says.
+        self.answer_call: Optional[Callable[[str], Optional[str]]] = None
 
     def start(self, turn_id: str, text: str, deliver: Callable[[str, str], None]) -> None:
         with self.lock:
@@ -12411,6 +12427,16 @@ class _LocalLiveWatchTurns:
             with self.lock:
                 self._finish(turn_id)
             return
+        if self.answer_call is not None:
+            try:
+                line = self.answer_call(words)
+            except Exception as exc:  # noqa: BLE001 — named; the message can carry the answer
+                logger.info("A Watch Local Live call's answer didn't reach Hermes: %s", type(exc).__name__)
+                line = LOCAL_LIVE_WATCH_FAILURE_LINE
+            if line:
+                with self.lock:
+                    self._say(line, turn_id, generation)
+                return
         following: Optional[_LocalLiveWatchReply] = None
         try:
             with self.lock:
@@ -12574,6 +12600,99 @@ class _LocalLiveWatchTurns:
         self.spoken = _SpokenText()
         self.turn = None
         deliver("done", "")
+
+
+_LOCAL_LIVE_YES = frozenset({
+    "yes", "yeah", "yep", "yup", "sure", "ok", "okay", "go ahead", "do it", "approve", "approve it",
+    "allow it", "run it", "yes please", "yes go ahead", "yes do it", "yes run it", "yes allow it",
+})
+_LOCAL_LIVE_NO = frozenset({
+    "no", "nope", "nah", "deny", "deny it", "don't", "do not", "don't run it", "don't do it", "no thanks",
+    "no thank you", "no don't", "stop", "cancel", "no deny it",
+})
+_LOCAL_LIVE_ASKS = frozenset({
+    "what", "why", "how", "which", "who", "when", "where", "is", "are", "does", "do", "can", "could",
+    "will", "would", "should", "explain", "tell",
+})
+
+
+def _local_live_yes_no(words: str) -> Optional[bool]:
+    """A plain spoken yes (True) or no (False) to an approval; None for
+    anything else, which approves nothing."""
+    plain = " ".join(re.sub(r"[^\w\s']", " ", words.lower()).split())
+    if plain in _LOCAL_LIVE_YES:
+        return True
+    if plain in _LOCAL_LIVE_NO:
+        return False
+    return None
+
+
+def _local_live_asks(words: str) -> bool:
+    """Words that ask about the choice rather than make it."""
+    first = words.lower().split()[0].strip(",.!?") if words.split() else ""
+    return words.rstrip().endswith("?") or first in _LOCAL_LIVE_ASKS
+
+
+def _local_live_question_line(question: Dict[str, Any]) -> str:
+    choices = question.get("choices") or []
+    line = f"Next: {question.get('question', '')}"
+    if choices:
+        line += " " + " ".join(f"{number}: {choice}." for number, choice in enumerate(choices, 1))
+        line += " Say the number of your choice, or answer in your own words."
+    else:
+        line += " Answer in your own words."
+    return line
+
+
+def _local_live_call_answer(grant: _WatchGrant, words: str) -> Optional[str]:
+    """A Watch Local Live call that answers a call from Hermes: the user's
+    words answer what Hermes waits on in the call's chat (answer_call_waiting,
+    as answer_call does for the other modes), and this is what the call says
+    after. A question takes any words, by number, label or "the recommended
+    one", and words that ask go as a request to explain first. An approval
+    takes only a plain yes or no, and only when the user lets the Watch
+    answer approvals by voice; a question about it denies it with the
+    question, so Hermes explains and asks again. None: nothing waits, or the
+    words don't answer it, and they go to the call's own chat."""
+    store_module = _calls_store()
+    with _profile_scope(grant.profile):
+        store = store_module.CallStore(_calls_home())
+        for session_id in grant.answer_sessions:
+            waiting = store.waiting_for(session_id)
+            if not waiting:
+                continue
+            if waiting["kind"] == "question":
+                if all(question["answered"] for question in waiting["questions"]):
+                    continue
+                lead = store_module.ASKS_FIRST_LEAD
+                answer = f"{lead} {words}" if _local_live_asks(words) and not words.startswith(lead) else words
+                result = store.answer_waiting(session_id, answer=answer)
+                if result.get("status") != "answered" or "answer" not in result:
+                    return result.get("message") or None
+                if answer.startswith(lead):
+                    return "I've asked Hermes. It will explain, then ask again."
+                line = f"Got it: {result['answer']}. Hermes has your answer."
+                if isinstance(result.get("next"), dict):
+                    line += " " + _local_live_question_line(result["next"])
+                return line
+            if waiting.get("answered"):
+                continue
+            said = _local_live_yes_no(words)
+            asks = said is None and _local_live_asks(words)
+            if said is None and not asks:
+                return None
+            if not grant.answer_approvals:
+                return "Hermes is waiting on your approval in that chat. Answer it in Conduit on your iPhone."
+            if asks:
+                result = store.answer_waiting(session_id, choice="deny",
+                                              reason=f"{store_module.ASKS_FIRST_LEAD} {words}")
+                return ("I've asked Hermes. It will explain, then ask again."
+                        if result.get("status") == "answered" else result.get("message") or None)
+            result = store.answer_waiting(session_id, choice="once" if said else "deny")
+            if result.get("status") != "answered":
+                return result.get("message") or None
+            return "Approved once. Hermes runs it now." if result.get("choice") == "once" else "Denied. Hermes won't run it."
+    return None
 
 
 class _LocalLiveWatchCall:
@@ -12750,6 +12869,9 @@ class _LocalLiveWatchSession(_WatchAudioSession):
             chat, resumed = await self._chat(server)
             runner = self.runner = _LocalLiveWatchTurns(chat)
             self.chat = chat
+            grant = self.bridge.grant
+            if getattr(grant, "answer_sessions", ()):
+                runner.answer_call = lambda words: _local_live_call_answer(grant, words)
             if self.watch_approvals:
                 with contextlib.suppress(Exception):
                     self.approval_timeout = await asyncio.wait_for(

@@ -20,6 +20,8 @@ checks it). The format is fixed, because Conduit reads it:
   Apple Watch, even with your iPhone out of reach: the Watch reads out the
   choices (and which one Hermes recommends) or the command, and your spoken
   answer goes to Hermes. Needs approval, question and failure calls on.
+- With the Watch on Local Live, a call from Hermes rings it too, and what
+  you say answers what Hermes asked.
 
 ## 0.69.1 (2026-10-24)
 

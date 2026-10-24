@@ -1481,7 +1481,9 @@ and the dashboard routes under one file lock, so they survive restarts:
   batch's choices, or an approval's description and command (up to 600
   characters). A call answered with no chat open, the Apple Watch's, reads it
   from `/calls/waiting` and sends the user's spoken answer to
-  `/calls/waiting/answer` (or `answer_call` on its Watch grant). A question
+  `/calls/waiting/answer` (or `answer_call` on its Watch grant, which
+  approves or denies only with `answer_approvals: true`; on Local Live the
+  host takes the user's words itself, a plain yes or no for an approval). A question
   takes `answer`, a choice's number or label, "the recommended one", or the
   user's own words, for `question` (its number in the batch; the first
   unanswered by default), and answers the next one with `next`. The clarify
