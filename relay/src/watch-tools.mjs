@@ -271,6 +271,9 @@ export function watchToolRoutes({
       if (!gateway) return answered(response, 401, { error: 'unauthorized' });
       enforceRateLimit(`watch-grant:${gateway.gatewayId}`, 12, 60_000);
       const body = await readJson(request);
+      // The gateway may have been revoked while the body was read; its
+      // revocation closed the grants it had, so it opens none after it.
+      if (!authenticateGateway(request)) return answered(response, 401, { error: 'unauthorized' });
       const ttlS = body.ttl_s;
       const maxCalls = body.max_calls;
       if (typeof body.watch_key_sha256 !== 'string' || !KEY_HASH_PATTERN.test(body.watch_key_sha256)

@@ -179,7 +179,7 @@ ASKS_FIRST_LEAD = "Before I choose:"
 SESSION_KEY_MAX_BYTES = 512
 _SESSION_KEY_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 # The shape the call event carries (events.sanitize_call).
-_WATCH_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+_WATCH_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}\Z")
 _thread_lock = threading.Lock()
 
 
@@ -465,6 +465,11 @@ class CallStore:
                     return {"status": "refused",
                             "message": "The command is too long to read out whole, so it can only be denied here. "
                                        "The user can approve it in Conduit."}
+                if picked == "once" and not item["command"]:
+                    # Never approve what wasn't shown (as the Watch's job cards).
+                    return {"status": "refused",
+                            "message": "Hermes didn't say which command it wants to run, so it can only be denied "
+                                       "here. The user can approve it in Conduit."}
                 if item["choice"] is not None:
                     return {"status": "answered", "choice": item["choice"]}
                 item["choice"] = picked

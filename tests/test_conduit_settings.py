@@ -472,3 +472,9 @@ def test_an_unreadable_store_is_not_overwritten(store, monkeypatch):
         _sync(store)
     monkeypatch.undo()
     assert store.path.read_text(encoding="utf-8") == saved
+
+
+@pytest.mark.parametrize("pattern, valid", [("_KEY", "voice.mode"), ("_INSTALLATION", "a" * 8), ("_REQUEST_ID", "a" * 8)])
+def test_ids_with_a_trailing_newline_are_refused(pattern, valid):
+    assert getattr(store_module, pattern).match(valid)
+    assert getattr(store_module, pattern).match(valid + "\n") is None

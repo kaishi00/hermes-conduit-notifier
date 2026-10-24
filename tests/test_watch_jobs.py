@@ -1039,6 +1039,20 @@ def test_a_command_not_shown_whole_can_only_be_denied(command):
     assert denied["status"] == "denied"
 
 
+@pytest.mark.parametrize("command", ["", "   ", None, ["rm", "-rf", "build"]])
+def test_an_approval_with_no_command_to_show_can_only_be_denied(command):
+    grant = make_jobs()
+    start(grant)
+    server = grant.jobs.server
+    server.ask_approval("rt-1", command=command)
+    [item] = news(grant)["news"]
+    assert item["approval"]["cut"] is True
+    answer = api.run_watch_job_call(grant, "answer_approval",
+                                    {"job_id": "watch-1", "request_id": "appr-1", "choice": "once"})
+    assert (answer["ok"], answer["status"]) == (False, 400)
+    assert server.methods("approval.respond") == []
+
+
 @pytest.mark.parametrize("choice", ["session", "always", "", "yes"])
 def test_the_watch_can_only_approve_once_or_deny(choice):
     grant = make_jobs()
@@ -1715,3 +1729,12 @@ def test_a_chattering_session_still_settles_a_held_end_in_the_end(monkeypatch):
     server.emit("rt-1", "status.update", {"status": "working"})
     [item] = news(grant)["news"]
     assert item["result"] == "Step one done."
+
+
+@pytest.mark.parametrize("pattern, valid", [
+    ("_CALL_WATCH_ID", "0" * 24), ("_WATCH_ID", "a" * 22), ("_WATCH_NONCE", "a" * 16),
+    ("_WATCH_CT", "a" * 22), ("_ROOM_IMAGE_ID", "room-1"),
+])
+def test_ids_with_a_trailing_newline_are_refused(pattern, valid):
+    assert getattr(api, pattern).match(valid)
+    assert getattr(api, pattern).match(valid + "\n") is None

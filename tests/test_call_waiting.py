@@ -114,3 +114,9 @@ def test_a_wait_is_forgotten_once_answered_elsewhere_or_old(store):
     assert store.waiting_for("s1")["kind"] == "question"
     store.clock_state["now"] += store_module.WAITING_TTL_S + 1
     assert store.waiting_for("s1") is None
+
+
+def test_an_approval_with_no_command_can_only_be_denied(store):
+    store.note_waiting("s1", "approval", description="Clean up", command="")
+    assert store.answer_waiting("s1", choice="once")["status"] == "refused"
+    assert store.answer_waiting("s1", choice="deny")["status"] == "answered"
