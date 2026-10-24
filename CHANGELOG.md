@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.70.3 (2026-10-24)
+
+### Fixes
+- A reply that sends you a file no longer shows the file's path on the
+  host in its notification (MEDIA:/opt/data/cache/…). The notification
+  shows a paperclip and the file's name, or its type when the name is only
+  a code.
+
 ## 0.70.2 (2026-10-24)
 
 ### Fixes

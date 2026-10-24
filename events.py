@@ -10,7 +10,7 @@ from typing import Any
 
 # Keep in sync with plugin.yaml. Reported on every event so the relay can
 # expose per-gateway compatibility state to the app (Settings > Notifications).
-PLUGIN_VERSION = "0.70.2"
+PLUGIN_VERSION = "0.70.3"
 PLUGIN_CAPABILITIES = [
     "approval-decisions",
     "clarify-loop",
@@ -597,12 +597,47 @@ _UNDERSCORE_EMPHASIS = re.compile(r"(?<![\w_])_(?=\S)([^_]+?)(?<=\S)_(?![\w_])")
 _STRIKE = re.compile(r"~~(?=\S)(.+?)(?<=\S)~~")
 
 
+# Hermes' MEDIA tag, read the way its gateway reads it (extract_media): a
+# quoted path, a spaced path up to a known extension, or one word.
+_MEDIA_EXTENSIONS = ("png|jpe?g|gif|webp|heic|svg|mp4|mov|avi|mkv|webm|ogg|opus|mp3|wav|m4a|aac|flac|"
+                     "pdf|txt|md|csv|json|html?|docx?|xlsx?|pptx?|key|numbers|pages|zip|epub|ics|vcf")
+_MEDIA_TAG = re.compile(
+    r"""[`"']?MEDIA:[^\S\n]*(?P<path>`[^`\n]+`|"[^"\n]+"|'[^'\n]+'"""
+    r"""|(?:~/|/)\S+(?:[^\S\n]+\S+)*?\.(?:""" + _MEDIA_EXTENSIONS + r""")(?=[\s`"',;:)\]}]|$)|\S+)[`"']?""",
+    re.IGNORECASE)
+_MEDIA_DIRECTIVE = re.compile(r"\[\[(?:audio_as_voice|as_document)\]\]")
+# Hermes' document cache prefixes the original name (doc_<12 hex>_report.pdf).
+_CACHE_PREFIX = re.compile(r"^(?:doc|img|audio|video)_[0-9a-f]{8,32}_", re.IGNORECASE)
+_HASH_NAME = re.compile(r"^[0-9a-f-]{16,}$", re.IGNORECASE)
+
+
+def _attachment(match: re.Match) -> str:
+    """A MEDIA tag as a push shows it: a paperclip and the file's name, or
+    its type when the name is only a hash, never the host's path."""
+    path = match.group("path").strip().strip("`\"'").rstrip(".,;:)}]")
+    name = _CACHE_PREFIX.sub("", re.split(r"[/\\]", path.rstrip("/\\"))[-1])
+    stem, dot, ext = name.rpartition(".")
+    if not dot:
+        stem, ext = name, ""
+    if not stem or _HASH_NAME.match(stem):
+        name = ext.upper()
+    return f"📎 {name}".rstrip()
+
+
+def media_free(value: str) -> str:
+    """Text with each MEDIA tag shown as its attachment, and Hermes' delivery
+    directives gone."""
+    return _MEDIA_TAG.sub(_attachment, _MEDIA_DIRECTIVE.sub("", value))
+
+
 def plain_text(value: Any) -> str:
     """A Markdown reply as a notification shows it: the words without the
-    markup (fences, emphasis, headings, link targets, table rules). Code
-    inside a fence stays, it is the content."""
+    markup (fences, emphasis, headings, link targets, table rules), and a
+    file Hermes attached as its name, not its path. Code inside a fence
+    stays, it is the content."""
     if not isinstance(value, str):
         return ""
+    value = media_free(value)
     lines: list[str] = []
     fenced = False
     for line in value.splitlines():

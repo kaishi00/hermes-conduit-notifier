@@ -442,6 +442,14 @@ def test_a_nested_subagent_under_a_compacted_child_sends_nothing(pushed, session
     ("_em_ and snake_case_name", "em and snake_case_name"),
     ("2 * 3 * 4 = 24 in file_name_here", "2 * 3 * 4 = 24 in file_name_here"),
     ("![chart](a.png) *nice*", "chart nice"),
+    ("Deck ready: MEDIA:/opt/data/cache/documents/dbdb29c1e72a6b48fa49002c4eab1ae1.pptx",
+     "Deck ready: 📎 PPTX"),
+    ("Here: MEDIA:/opt/data/cache/documents/doc_0123456789ab_Voice AI deck.pptx and more",
+     "Here: 📎 Voice AI deck.pptx and more"),
+    ("[[audio_as_voice]]\nMEDIA:/tmp/tts/reply.ogg", "📎 reply.ogg"),
+    ("See `MEDIA:/tmp/out/report final.pdf`.", "See 📎 report final.pdf."),
+    ('Saved MEDIA:"/a b/notes.key", done', "Saved 📎 notes.key, done"),
+    ("MEDIA: ~/out/chart.png then MEDIA:/tmp/plain", "📎 chart.png then 📎 plain"),
     (None, ""),
 ])
 def test_plain_text(markdown, plain):
