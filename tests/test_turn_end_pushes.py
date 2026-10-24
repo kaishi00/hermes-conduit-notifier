@@ -526,3 +526,8 @@ def test_a_turn_without_its_id_keeps_the_end_on_session_end_reports(pushed, lock
     reporter.flush()
     assert _ends(posts) == ["failed"]
     assert plugin._unnamed_ends == {}
+
+
+def test_a_call_id_with_a_trailing_newline_is_refused():
+    assert events._CALL_ID.match("a" * 8)
+    assert events._CALL_ID.match("a" * 8 + "\n") is None

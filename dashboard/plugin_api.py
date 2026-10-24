@@ -6857,7 +6857,7 @@ async def put_chat_on_screen(request: Request, response: Response, profile: Opti
 CALLS_LIMIT = 30
 CALLS_WINDOW_S = 60.0
 CALLS_MAX_BODY_BYTES = 4096
-_CALL_WATCH_ID = re.compile(r"^[0-9a-f]{24}$")
+_CALL_WATCH_ID = re.compile(r"^[0-9a-f]{24}\Z")
 _calls_limiter = _MintLimiter(CALLS_LIMIT, CALLS_WINDOW_S, message="Too many call requests; try again shortly")
 _calls_store_module: Any = None
 _calls_store_lock = threading.Lock()
@@ -8217,9 +8217,9 @@ _WATCH_INFO = {
     "result": b"conduit-watch-tools-v1 result host-to-watch",
 }
 _WATCH_AAD_TAG = "conduit-watch-tools/1"
-_WATCH_ID = re.compile(r"^[A-Za-z0-9_-]{22}$")
-_WATCH_NONCE = re.compile(r"^[A-Za-z0-9_-]{16}$")
-_WATCH_CT = re.compile(r"^[A-Za-z0-9_-]{22,}$")
+_WATCH_ID = re.compile(r"^[A-Za-z0-9_-]{22}\Z")
+_WATCH_NONCE = re.compile(r"^[A-Za-z0-9_-]{16}\Z")
+_WATCH_CT = re.compile(r"^[A-Za-z0-9_-]{22,}\Z")
 # The relay keys travel to it: HTTPS only (tests widen this for a local relay).
 _WATCH_RELAY_SCHEMES: Tuple[str, ...] = ("https://",)
 _watch_grant_limiter = _MintLimiter(WATCH_GRANT_LIMIT, WATCH_GRANT_WINDOW_S,
@@ -14208,7 +14208,7 @@ ROOM_IMAGE_LIMIT = 60
 ROOM_IMAGE_WINDOW_S = 600.0
 _room_image_limiter = _MintLimiter(ROOM_IMAGE_LIMIT, ROOM_IMAGE_WINDOW_S,
                                    message="Too many picture changes; try again shortly")
-_ROOM_IMAGE_ID = re.compile(r"^[A-Za-z0-9._:-]{1,200}$")
+_ROOM_IMAGE_ID = re.compile(r"^[A-Za-z0-9._:-]{1,200}\Z")
 _room_image_lock = threading.Lock()
 # Writes wait on one another (the locks below), so they get their own threads
 # rather than the default pool other routes share.

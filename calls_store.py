@@ -137,7 +137,7 @@ MAX_TOLD = 64
 SESSION_KEY_MAX_BYTES = 512
 _SESSION_KEY_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 # The shape the call event carries (events.sanitize_call).
-_WATCH_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+_WATCH_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}\Z")
 _thread_lock = threading.Lock()
 
 

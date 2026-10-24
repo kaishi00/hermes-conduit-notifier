@@ -1729,3 +1729,12 @@ def test_a_chattering_session_still_settles_a_held_end_in_the_end(monkeypatch):
     server.emit("rt-1", "status.update", {"status": "working"})
     [item] = news(grant)["news"]
     assert item["result"] == "Step one done."
+
+
+@pytest.mark.parametrize("pattern, valid", [
+    ("_CALL_WATCH_ID", "0" * 24), ("_WATCH_ID", "a" * 22), ("_WATCH_NONCE", "a" * 16),
+    ("_WATCH_CT", "a" * 22), ("_ROOM_IMAGE_ID", "room-1"),
+])
+def test_ids_with_a_trailing_newline_are_refused(pattern, valid):
+    assert getattr(api, pattern).match(valid)
+    assert getattr(api, pattern).match(valid + "\n") is None
