@@ -227,6 +227,8 @@ def card_entry(card: dict, done: Optional[dict] = None) -> dict[str, Any]:
 DONE_BY = "user: done on the Pulse screen"
 # Pulse marked it, having read the chat get it done after Do it (pulse_followup).
 ACT_DONE_BY = "pulse: done in the chat after Do it"
+# Pulse marked it, having read it get done while the card waited for the brief.
+HELD_DONE_BY = "pulse: done before the morning brief"
 
 
 def followup_card(pulse_store: store.PulseStore, card_id: Any) -> dict:
@@ -247,7 +249,7 @@ def done(pulse_store: store.PulseStore, card_id: Any, is_done: Any, *, now: floa
         raise Invalid("done")
     if is_done:
         return pulse_store.mark_done(card["id"], card["item_id"], closed_by=DONE_BY, now=now)
-    return pulse_store.unmark_done(card["id"], card["item_id"], closed_by=(DONE_BY, ACT_DONE_BY), now=now)
+    return pulse_store.unmark_done(card["id"], card["item_id"], closed_by=(DONE_BY, ACT_DONE_BY, HELD_DONE_BY), now=now)
 
 
 # Not now ----------------------------------------------------------------------

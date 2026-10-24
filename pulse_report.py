@@ -61,7 +61,7 @@ ITEMS_BUDGET = 3_500
 # What other chats said later about the promises and commitments listed.
 LATER_BUDGET = 2_000
 LATER_PER_ITEM = 220
-LATER_KINDS = ("promise", "commitment")
+LATER_KINDS = ("promise", "commitment", "watch", "intention")
 MAX_REPORT_ITEMS = 40
 EVENTS_DAYS = 2
 MAX_EVENTS = 25
@@ -453,28 +453,41 @@ def remembered_lines(items: Sequence[dict], zone: tzinfo) -> tuple[str, list[dic
 
 
 def later_lines(home: Path, items: Sequence[dict], *, home_chat_id: str, zone: tzinfo) -> str:
-    """For each promise or commitment in ``items``, the closest later row on
-    the same subject in another chat or cron run, so the report can tell one
-    done or moved past from one still open; "" when none has one."""
-    followed = [item for item in items if item["kind"] in LATER_KINDS and not item["profile"]]
+    """For each promise, commitment, watch or intention in ``items``, the
+    closest later row on the same subject in another chat or cron run of its
+    profile, so the report can tell one done or moved past from one still
+    open; "" when none has one."""
+    followed = [item for item in items if item["kind"] in LATER_KINDS]
     if not followed:
         return ""
-    try:
-        rows = evidence.later_rows(home, after=min(float(item["valid_from"]) for item in followed),
-                                   exclude=(home_chat_id,))
-    except hermes.HermesUnreadable:
-        return ""
-    out, used = [], 0
-    for item in followed:
+    homes = {"": (Path(home), home_chat_id)}
+    if any(item["profile"] for item in followed):
+        homes.update({name: (path, their_home_chat(path)) for name, path in profile_homes(home)})
+    found_for: dict[int, Any] = {}
+    for profile in dict.fromkeys(item["profile"] for item in followed):
+        if profile not in homes:
+            continue
+        where, home_chat = homes[profile]
+        theirs_items = [item for item in followed if item["profile"] == profile]
         try:
-            own = hermes.chain_ids(home, item["chat_id"]) if item["chat_id"] else set()
+            rows = evidence.later_rows(where, after=min(float(item["valid_from"]) for item in theirs_items),
+                                       exclude=(home_chat,))
         except hermes.HermesUnreadable:
             continue
-        theirs = [row for row in rows if row["chat_id"] not in own]
-        found = evidence.closest(theirs, f"{item['text']} {item['evidence']}", after=float(item["valid_from"]))
-        if found is None:
+        for item in theirs_items:
+            try:
+                own = hermes.chain_ids(where, item["chat_id"]) if item["chat_id"] else set()
+            except hermes.HermesUnreadable:
+                continue
+            found = evidence.closest([row for row in rows if row["chat_id"] not in own],
+                                     f"{item['text']} {item['evidence']}", after=float(item["valid_from"]))
+            if found is not None:
+                found_for[item["id"]] = found
+    out, used = [], 0
+    for item in followed:  # in the remembered list's order
+        if item["id"] not in found_for:
             continue
-        line = f"#{item['id']}: " + _clip(evidence.lines([found], zone)[0], LATER_PER_ITEM)
+        line = f"#{item['id']}: " + _clip(evidence.lines([found_for[item["id"]]], zone)[0], LATER_PER_ITEM)
         if used + len(line) > LATER_BUDGET:
             continue
         out.append(line)
