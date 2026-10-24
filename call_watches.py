@@ -733,8 +733,13 @@ def _report(args: dict[str, Any], session_id: Any, task_id: Any = None) -> dict[
     # a full queue (which clears soon) tries again; anything else lasting
     # would post the same message every run, so this run's reply tells the
     # user once instead.
+    if not isinstance(session_id, str) or not session_id:
+        # A run known only by its task id: no turn end would match a call
+        # keyed to it, so the user would never be rung.
+        return {"ok": True, "status": "not_called", "note": (
+            "It's time to call, but the call couldn't be set up. End with what you found in a few short lines.")}
     try:
-        calls.tool_watch(str(session_id), saw, asked=True)
+        calls.tool_watch(session_id, saw, asked=True)
     except Exception as error:  # noqa: BLE001 — the run still tells the user in its reply
         if isinstance(error, ValueError) and str(error) == "calls_off":
             return {"ok": True, "status": "calls_off", "note": (
