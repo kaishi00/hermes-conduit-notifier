@@ -413,6 +413,13 @@ def follow_approval(session_key: str, command: str) -> None:
             except Exception:  # noqa: BLE001
                 logger.warning("Conduit could not settle a call's approval answer", exc_info=True)
             return
+        if claimed:
+            # Unloaded (or out of time) mid-answer: the call hears it didn't
+            # go, rather than waiting on an answer nothing will settle.
+            try:
+                store.settle_approval(claimed, False)
+            except Exception:  # noqa: BLE001
+                logger.warning("Conduit could not settle a call's approval answer", exc_info=True)
 
     # A thread of its own, not _spawn: it waits as long as the approval does.
     try:

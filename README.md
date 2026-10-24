@@ -2164,7 +2164,7 @@ seals the answers back. This host opens no inbound route of its own.
   `start_job`, `list_jobs` and `cancel_job` (granted with the Watch app's
   own `job_news` and `answer_approval`). A grant lasts at most 30
   minutes, holds one profile, and ends when the call does.
-- **`answer_call`** (plugin 0.70.0) answers what Hermes waits on in a call
+- **`answer_call`** (plugin 0.70.0; its approvals confirmed from 0.70.1) answers what Hermes waits on in a call
   from Hermes: granted only with `answer_sessions`, the call's chats, and
   bound to them. It answers a question with the user's words or the number
   of their choice, and approves or denies only with `answer_approvals: true`

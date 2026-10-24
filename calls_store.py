@@ -614,11 +614,10 @@ class CallStore:
         claimed or settled meanwhile keeps its own state."""
         with self._locked() as state:
             delivery = next((entry for entry in state["delivered"] if entry["id"] == answer_id), None)
-            if delivery is None:
-                return "missed"
-            if delivery["state"] != "sent":
+            if delivery is not None and delivery["state"] != "sent":
                 return delivery["state"]
-            delivery["state"] = fared
+            if delivery is not None:
+                delivery["state"] = fared
             for entry in state["waiting"]:
                 if entry["kind"] == "approval" and entry["answer_id"] == answer_id:
                     # Still waiting: the user can answer it again.

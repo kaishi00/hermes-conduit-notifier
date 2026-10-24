@@ -163,3 +163,13 @@ def test_an_approval_answer_from_a_plugin_before_delivery_reads_as_unanswered(st
     store.path.write_text(json.dumps(state))
     assert store.waiting_for("s1")["answered"] is False
     assert store.take_approval("s1") is None
+
+
+def test_an_answer_whose_delivery_record_is_gone_is_still_taken_back(store):
+    store.note_waiting("s1", "approval", description="Deploy", command="make deploy")
+    answer_id = store.answer_waiting("s1", choice="once")["answer_id"]
+    state = json.loads(store.path.read_text())
+    state["delivered"] = []
+    store.path.write_text(json.dumps(state))
+    assert store.approval_delivery(answer_id, wait_s=0) == "withdrawn"
+    assert store.waiting_for("s1")["answered"] is False
