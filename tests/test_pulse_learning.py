@@ -822,6 +822,48 @@ def test_do_it_not_done_looks_again_then_stops(live):
     assert live.store.done_marks([card["id"]]) == {}
 
 
+def test_do_it_done_in_another_chat_marks_the_card_done(live):
+    card = told_card(live, news="The deploy note for the release still needs sending.")
+    acted_at = time.time()
+    control.acted(live.store, card["id"], now=acted_at)
+    live.db.session(sid="other", title="Release", pinned=0)
+    live.db.message("assistant", "Sent the release deploy note to the team.", sid="other", at=acted_at + 60)
+    said = llm_saying(done=True, why="sent in the Release chat")
+    run_acts(live, said, acted_at + followup.ACT_FIRST_S)
+    [text] = said.calls  # the Do it chat never answered, but another chat did it
+    assert "Sent the release deploy note" in text
+    assert live.store.act(card["id"])["outcome"] == "done"
+
+
+def run_held(live, llm, now):
+    done = {}
+    followup.check_held(live.store, live.home, llm, zone=pulse.report.zone_for("UTC"), now=now,
+                        still_leader=lambda: True, budget=10_000, done=done)
+    return done
+
+
+def test_a_card_held_for_the_brief_done_meanwhile_is_left_out_of_it(live):
+    item_id = promise(live)
+    card_id = learning.add_card(live.store, kind="followup", item=live.store.item(item_id), level_name="brief",
+                                news="The deploy finished and the release notes still need sending.", why="",
+                                chat_title="Deploy", now=time.time() - 3600)
+    live.db.session(sid="other", title="Release", pinned=0)
+    live.db.message("assistant", "Sent the release notes for the deploy.", sid="other", at=time.time() - 60)
+    said = llm_saying(stale=True, why="the notes were sent in Release")
+    now = time.time()
+    run_held(live, said, now)
+    [text] = said.calls
+    assert "Sent the release notes" in text and "release notes still need sending" in text
+    assert live.store.held_cards(12) == [] and live.store.done_marks([card_id])
+    # Read again at most every few hours; Undo puts it back in the brief.
+    run_held(live, said, now + 60)
+    assert len(said.calls) == 1
+    assert control.done(live.store, card_id, False) is True
+    assert [card["id"] for card in live.store.held_cards(12)] == [card_id]
+    run_held(live, llm_saying(stale=False, why="still stands"), now + followup.HELD_EVERY_S)
+    assert [card["id"] for card in live.store.held_cards(12)] == [card_id]
+
+
 def test_do_it_left_unsent_gives_up_without_a_model_call(live):
     card = told_card(live)
     acted_at = time.time()

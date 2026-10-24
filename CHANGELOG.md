@@ -13,6 +13,19 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.70.3 (2026-10-24)
+
+### Fixes
+- A Pulse reminder held back for a free slot no longer goes out the next
+  day for something you did while it waited: it's checked again first.
+- The morning brief leaves out news that got done or went out of date
+  while it waited for the brief. Undo on the card puts it back.
+- Pulse checks see the calendar and open reminders on your phone, so
+  something you already planned there isn't nagged about.
+- The report also looks at later chats for things you asked Pulse to watch
+  and things you wanted to start, and for items from your other profiles.
+- After Do it, Pulse also notices when you got it done in another chat.
+
 ## 0.70.2 (2026-10-24)
 
 ### Fixes
