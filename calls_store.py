@@ -516,10 +516,10 @@ class CallStore:
             state["waiting"] = [entry for entry in state["waiting"] if entry is not item]
             return {entry["qid"]: entry["answer"] for entry in item["questions"]}
 
-    def take_approval(self, session_id: Any) -> dict[str, Any] | None:
+    def take_approval(self, session_id: Any, *, keep: bool = False) -> dict[str, Any] | None:
         """An approval in ``session_id`` answered from a call: its
-        ``choice``, ``reason`` and ``command_sha``, taken. None while
-        unanswered or gone."""
+        ``choice``, ``reason`` and ``command_sha``, taken (only read with
+        ``keep``). None while unanswered or gone."""
         if not isinstance(session_id, str) or not session_id.strip() or not self.path.exists():
             return None
         session_id = session_id.strip()
@@ -533,7 +533,8 @@ class CallStore:
             item = next((entry for entry in state["waiting"] if answered(entry)), None)
             if item is None:
                 return None
-            state["waiting"] = [entry for entry in state["waiting"] if entry is not item]
+            if not keep:
+                state["waiting"] = [entry for entry in state["waiting"] if entry is not item]
             return {"choice": item["choice"], "reason": item["reason"], "command_sha": item["command_sha"]}
 
     def has_waiting(self, session_id: Any, kind: str) -> bool:

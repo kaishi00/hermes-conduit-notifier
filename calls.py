@@ -318,6 +318,8 @@ def has_call_answers(request_id: str) -> bool:
 # and for how long at most (Hermes' own approval timeout ends it sooner).
 APPROVAL_ANSWER_POLL_S = 1.0
 APPROVAL_ANSWER_MAX_S = 2 * 3600.0
+# Polls a call's answer may find no matching pending approval before it's dropped.
+APPROVAL_MATCH_TRIES = 5
 
 
 def follow_approval(session_key: str, command: str) -> None:
@@ -337,11 +339,13 @@ def follow_approval(session_key: str, command: str) -> None:
         store = _store(home)
         deadline = time.monotonic() + APPROVAL_ANSWER_MAX_S
         # Its own wait, not _sleep: the plugin's unload ends it at once.
+        misses = 0
         while time.monotonic() < deadline and not _stopped.wait(APPROVAL_ANSWER_POLL_S):
             try:
                 if not store.has_waiting(session_key, "approval"):
                     return
-                answer = store.take_approval(session_key)
+                # Read, not taken: it stays until a pending request takes it.
+                answer = store.take_approval(session_key, keep=True)
             except Exception:  # noqa: BLE001
                 logger.warning("Conduit could not read a call's approval answer", exc_info=True)
                 return
@@ -351,13 +355,21 @@ def follow_approval(session_key: str, command: str) -> None:
                 resolved = _resolve_approval(session_key, command, answer)
             except Exception:  # noqa: BLE001
                 logger.warning("Conduit could not pass a call's approval answer to Hermes", exc_info=True)
-                return
+                resolved = 0
             if not resolved:
+                misses += 1
+                if misses < APPROVAL_MATCH_TRIES:
+                    # Hermes may list the request a moment late: try again.
+                    continue
                 # Answered on its card meanwhile, or not the request the call
-                # read out: the user's answer stays theirs to give there.
+                # read out: the user answers it there.
                 logger.warning("Conduit found no pending approval for a call's answer (%s)", answer["choice"])
-                return
-            logger.info("Conduit passed a call's approval answer (%s): %s resolved", answer["choice"], resolved)
+            else:
+                logger.info("Conduit passed a call's approval answer (%s): %s resolved", answer["choice"], resolved)
+            try:
+                store.take_approval(session_key)
+            except Exception:  # noqa: BLE001
+                logger.warning("Conduit could not clear a call's approval answer", exc_info=True)
             return
 
     if _stopped.is_set():
@@ -390,13 +402,21 @@ def _resolve_approval(session_key: str, command: str, answer: dict[str, Any]) ->
         return 0
     kwargs: dict[str, Any] = {"request_id": request_id} if request_id else {}
     reason = answer.get("reason") or None
-    try:
-        return resolve_gateway_approval(session_key, answer["choice"], reason=reason, **kwargs)
-    except TypeError as error:
-        # A Hermes before /deny reasons; any other TypeError is a real one.
-        if "reason" not in str(error):
-            raise
+    if not _takes_reason(resolve_gateway_approval):
+        # A Hermes before /deny reasons.
         return resolve_gateway_approval(session_key, answer["choice"], **kwargs)
+    return resolve_gateway_approval(session_key, answer["choice"], reason=reason, **kwargs)
+
+
+def _takes_reason(function: Any) -> bool:
+    import inspect
+
+    try:
+        parameters = inspect.signature(function).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(parameter.name == "reason" or parameter.kind is inspect.Parameter.VAR_KEYWORD
+               for parameter in parameters)
 
 
 def failed_turn(session_id: str, *, profile: str, fallback: dict[str, Any] | None, turn_id: Any = None) -> bool:

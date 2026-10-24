@@ -1063,3 +1063,34 @@ def test_an_approval_answered_on_a_call_resolves_only_the_request_it_read_out(ho
     while store.waiting_for("sk-1") is not None and _time.monotonic() < deadline:
         _time.sleep(0.01)
     assert store.waiting_for("sk-1") is None
+
+
+def test_a_call_answer_waits_for_hermes_to_list_its_approval(home, fake, monkeypatch):
+    # The answer is kept until a pending request takes it: one Hermes lists
+    # a moment late still gets it.
+    import threading
+
+    resolved = threading.Event()
+    listed = {"calls": 0}
+    approval = types.ModuleType("tools.approval")
+
+    def pending(key):
+        listed["calls"] += 1
+        return [] if listed["calls"] < 3 else [{"request_id": "r-1", "command": "rm -rf build"}]
+
+    def resolve(key, choice, request_id=None):
+        resolved.set()
+        return 1
+
+    approval.list_gateway_approvals = pending
+    approval.resolve_gateway_approval = resolve
+    monkeypatch.setitem(sys.modules, "tools.approval", approval)
+    monkeypatch.setattr(calls, "APPROVAL_ANSWER_POLL_S", 0.01)
+    monkeypatch.setattr(calls, "alert", lambda *args, **kwargs: None)
+    _settings(home, alerts=True)
+    plugin._pre_approval_request(session_key="sk-1", session_id="rt-1", description="Delete the build",
+                                 command="rm -rf build", turn_id="t1")
+    store = calls._store(home)
+    assert store.answer_waiting("sk-1", choice="once")["status"] == "answered"
+    assert resolved.wait(5), "resolved once Hermes listed it, with no reason it can't take"
+    assert listed["calls"] >= 3
