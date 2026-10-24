@@ -12666,11 +12666,11 @@ def _local_live_call_answer(grant: _WatchGrant, words: str) -> Optional[str]:
                 if all(question["answered"] for question in waiting["questions"]):
                     continue
                 lead = store_module.ASKS_FIRST_LEAD
-                answer = f"{lead} {words}" if _local_live_asks(words) and not words.startswith(lead) else words
+                answer = f"{lead} {words}" if _local_live_asks(words) and not words.casefold().startswith(lead.casefold()) else words
                 result = store.answer_waiting(session_id, answer=answer)
                 if result.get("status") != "answered" or "answer" not in result:
                     return result.get("message") or None
-                if answer.startswith(lead):
+                if answer.casefold().startswith(lead.casefold()):
                     return "I've asked Hermes. It will explain, then ask again."
                 line = f"Got it: {result['answer']}. Hermes has your answer."
                 if isinstance(result.get("next"), dict):
