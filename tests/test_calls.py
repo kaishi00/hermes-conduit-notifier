@@ -1094,3 +1094,14 @@ def test_a_call_answer_waits_for_hermes_to_list_its_approval(home, fake, monkeyp
     assert store.answer_waiting("sk-1", choice="once")["status"] == "answered"
     assert resolved.wait(5), "resolved once Hermes listed it, with no reason it can't take"
     assert listed["calls"] >= 3
+
+
+def test_a_call_answer_resolves_nothing_when_two_pending_approvals_share_its_command(monkeypatch):
+    approval = types.ModuleType("tools.approval")
+    approval.list_gateway_approvals = lambda key: [
+        {"request_id": "r-1", "command": "make clean"},
+        {"request_id": "r-2", "command": "make clean"},
+    ]
+    approval.resolve_gateway_approval = lambda *args, **kwargs: pytest.fail("resolved a request the user can't be told")
+    monkeypatch.setitem(sys.modules, "tools.approval", approval)
+    assert calls._resolve_approval("sk-1", "make clean", {"choice": "once", "reason": "", "command_sha": ""}) == 0

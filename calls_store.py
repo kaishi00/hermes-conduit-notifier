@@ -1001,7 +1001,7 @@ def map_answer(answer: str, choices: list[str], multi_select: bool) -> tuple[str
     user's own words. Conduit's own mapping is HermesCallWaiting.answerValue
     (Conduit/Voice/HermesCallWaiting.swift): the two move together."""
     text = " ".join(answer.split())
-    if not choices or text.lower().startswith("before i choose"):
+    if not choices or text.casefold().startswith(ASKS_FIRST_LEAD.rstrip(":").casefold()):
         return text, []
     picked = _picked_choices(text, choices, multi_select)
     if not picked:

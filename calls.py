@@ -322,6 +322,11 @@ APPROVAL_ANSWER_MAX_S = 2 * 3600.0
 APPROVAL_MATCH_TRIES = 5
 
 
+# The chats whose approval a follower watches for a call's answer.
+_followed: set[tuple[Any, str]] = set()
+_followed_lock = threading.Lock()
+
+
 def follow_approval(session_key: str, command: str) -> None:
     """An approval waits on the user in ``session_key`` and a call may
     answer it (``note_waiting`` kept it): until it's answered or gone,
@@ -335,7 +340,23 @@ def follow_approval(session_key: str, command: str) -> None:
         logger.warning("Conduit could not follow an approval for a call", exc_info=True)
         return
 
+    if _stopped.is_set():
+        return
+    with _followed_lock:
+        # A replayed hook finds its follower running: one per chat; it reads
+        # the newest wait's command from the store.
+        if (home, session_key) in _followed:
+            return
+        _followed.add((home, session_key))
+
     def follow() -> None:
+        try:
+            follow_answer()
+        finally:
+            with _followed_lock:
+                _followed.discard((home, session_key))
+
+    def follow_answer() -> None:
         store = _store(home)
         deadline = time.monotonic() + APPROVAL_ANSWER_MAX_S
         # Its own wait, not _sleep: the plugin's unload ends it at once.
@@ -372,8 +393,6 @@ def follow_approval(session_key: str, command: str) -> None:
                 logger.warning("Conduit could not clear a call's approval answer", exc_info=True)
             return
 
-    if _stopped.is_set():
-        return
     # A thread of its own, not _spawn: it waits as long as the approval does.
     try:
         threading.Thread(target=contextvars.copy_context().run, args=(follow,), name="conduit-call-approval",
@@ -381,6 +400,8 @@ def follow_approval(session_key: str, command: str) -> None:
     except RuntimeError:
         # A hook never raises: the user answers on the card instead.
         logger.warning("Conduit could not follow an approval for a call", exc_info=True)
+        with _followed_lock:
+            _followed.discard((home, session_key))
 
 
 def _resolve_approval(session_key: str, command: str, answer: dict[str, Any]) -> int:
@@ -394,7 +415,8 @@ def _resolve_approval(session_key: str, command: str, answer: dict[str, Any]) ->
     pending = list_gateway_approvals(session_key)
     matches = [entry for entry in pending
                if hashlib.sha256(str(entry.get("command") or "").encode("utf-8")).hexdigest() == wanted]
-    if not matches:
+    if len(matches) != 1:
+        # None, or two the same: which one the user heard can't be told.
         return 0
     request_id = str(matches[0].get("request_id") or "")
     if not request_id and len(pending) != 1:
