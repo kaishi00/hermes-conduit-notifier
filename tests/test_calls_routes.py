@@ -288,6 +288,37 @@ def test_a_call_reads_and_answers_what_hermes_waits_on(paired):
     assert http.post(f"{BASE}/calls/waiting/answer", json={"session_id": "rt-1", "answer": "1"}).json()["status"] == "not_waiting"
 
 
+def test_an_approval_answered_through_the_route_says_whether_hermes_took_it(paired):
+    import threading
+    import time
+
+    http = _http()
+    assert http.put(f"{BASE}/calls", json={"settings": {"enabled": True, "alerts": True}}).status_code == 200
+    store = api._calls_store().CallStore(paired)
+
+    def hermes_takes(resolved):
+        def follow():
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                answer = store.take_approval("rt-1", keep=True)
+                if answer is not None:
+                    store.settle_approval(answer["answer_id"], resolved)
+                    return
+                time.sleep(0.01)
+        threading.Thread(target=follow, daemon=True).start()
+
+    store.note_waiting("rt-1", "approval", description="Clear the build cache", command="rm -rf build")
+    hermes_takes(True)
+    response = http.post(f"{BASE}/calls/waiting/answer", json={"session_id": "rt-1", "choice": "once"})
+    assert response.json() == {"ok": True, "status": "answered", "choice": "once"}
+
+    store.note_waiting("rt-1", "approval", description="Clear the build cache", command="rm -rf build")
+    hermes_takes(False)
+    response = http.post(f"{BASE}/calls/waiting/answer", json={"session_id": "rt-1", "choice": "deny"})
+    assert response.json()["ok"] is True and response.json()["status"] == "too_late"
+    assert "nothing was denied" in response.json()["message"]
+
+
 @pytest.mark.parametrize("body", [{"answer": "1"}, {"session_id": "rt-1"}, []])
 def test_a_malformed_call_answer_is_refused(paired, body):
     http = _http()

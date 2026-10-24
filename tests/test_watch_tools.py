@@ -776,6 +776,23 @@ def test_answer_call_answers_only_the_chat_its_grant_names(tmp_path, monkeypatch
     assert api.run_watch_tool(grant, {"tool": "answer_call", "args": {"answer": "1"}})["status"] == "not_waiting"
 
 
+def _hermes_takes(store, session_id, resolved=True):
+    """The agent's process (calls.follow_approval) claims the call's
+    approval answer and settles it, as Hermes took it or not."""
+    def follow():
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            answer = store.take_approval(session_id, keep=True)
+            if answer is not None:
+                store.settle_approval(answer["answer_id"], resolved)
+                return
+            time.sleep(0.01)
+
+    thread = threading.Thread(target=follow, daemon=True)
+    thread.start()
+    return thread
+
+
 def test_answer_call_approves_only_when_the_watch_answers_approvals_by_voice(tmp_path, monkeypatch):
     monkeypatch.setattr(api, "_calls_home", lambda: tmp_path)
     monkeypatch.setattr(api, "_profile_scope", lambda profile: contextlib.nullcontext())
@@ -795,7 +812,35 @@ def test_answer_call_approves_only_when_the_watch_answers_approvals_by_voice(tmp
                          profile=None, path=write_pairing(tmp_path), relay=FakeRelay(), start=lambda g: None)
     voice = api._watch_grants.all()[-1]
     assert voice.answer_approvals
+    _hermes_takes(store, "st-1")
     assert api.run_watch_tool(voice, {"tool": "answer_call", "args": {"choice": "once"}})["status"] == "answered"
+
+
+def test_answer_call_says_an_approval_answer_didnt_go_when_hermes_didnt_take_it(tmp_path, monkeypatch):
+    monkeypatch.setattr(api, "_calls_home", lambda: tmp_path)
+    monkeypatch.setattr(api, "_profile_scope", lambda profile: contextlib.nullcontext())
+    store = api._calls_store().CallStore(tmp_path)
+    store.update_settings({"enabled": True, "alerts": True})
+    grant = types.SimpleNamespace(profile=None, answer_sessions=("st-1",), answer_approvals=True)
+
+    # Answered on its card, or timed out, before the call's answer reached it.
+    store.note_waiting("st-1", "approval", description="Clear the build cache", command="rm -rf build")
+    _hermes_takes(store, "st-1", resolved=False)
+    missed = api.answer_watch_hermes_call(grant, {"choice": "once"})
+    assert missed["status"] == "too_late" and "nothing was approved" in missed["message"]
+    assert store.waiting_for("st-1") is None
+
+    # Nothing picks it up in time: taken back, so it can't land after the
+    # call said it didn't, and the user can answer again.
+    store.note_waiting("st-1", "approval", description="Clear the build cache", command="rm -rf build")
+    call_store = api._calls_store().CallStore
+    waits = call_store.approval_delivery
+    monkeypatch.setattr(call_store, "approval_delivery",
+                        lambda self, answer_id: waits(self, answer_id, wait_s=0.2, poll_s=0.01))
+    withdrawn = api.answer_watch_hermes_call(grant, {"choice": "deny"})
+    assert withdrawn["status"] == "failed" and "nothing was denied" in withdrawn["message"]
+    assert store.waiting_for("st-1")["answered"] is False
+    assert store.take_approval("st-1") is None
 
 
 def test_local_live_on_the_watch_answers_the_call_from_hermes_with_the_users_words(tmp_path, monkeypatch):
@@ -822,5 +867,12 @@ def test_local_live_on_the_watch_answers_the_call_from_hermes_with_the_users_wor
     assert "in Conduit on your iPhone" in api._local_live_call_answer(grant, "yes")
     assert api._local_live_call_answer(grant, "play some music") is None
     voice = types.SimpleNamespace(profile=None, answer_sessions=("st-1",), answer_approvals=True)
+    _hermes_takes(store, "st-1")
     assert api._local_live_call_answer(voice, "Yes, go ahead.") == "Approved once. Hermes runs it now."
-    assert store.take_approval("st-1")["choice"] == "once"
+    store.note_waiting("st-1", "approval", description="Clear the build cache", command="rm -rf build")
+    _hermes_takes(store, "st-1", resolved=False)
+    assert api._local_live_call_answer(voice, "yes") == \
+        "That didn't go through: Hermes wasn't waiting on it any more. Check the chat in Conduit."
+    store.note_waiting("st-1", "approval", description="Run a long script", command="x" * 2000)
+    assert api._local_live_call_answer(voice, "yes") == \
+        "I can't approve that one by voice. Say no to deny it, or approve it in Conduit on your iPhone."

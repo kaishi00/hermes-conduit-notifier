@@ -373,17 +373,24 @@ def follow_approval(session_key: str, command: str) -> None:
         deadline = time.monotonic() + APPROVAL_ANSWER_MAX_S
         # Its own wait, not _sleep: the plugin's unload ends it at once.
         misses = 0
+        claimed = ""
         while time.monotonic() < deadline and not _stopped.wait(APPROVAL_ANSWER_POLL_S):
             try:
                 if not store.has_waiting(session_key, "approval"):
+                    if claimed:
+                        # Answered on its card meanwhile: the call says the
+                        # user's answer didn't go.
+                        store.settle_approval(claimed, False)
                     return
-                # Read, not taken: it stays until a pending request takes it.
+                # Read and claimed, not taken: it stays until a pending
+                # request takes it.
                 answer = store.take_approval(session_key, keep=True)
             except Exception:  # noqa: BLE001
                 logger.warning("Conduit could not read a call's approval answer", exc_info=True)
                 return
             if answer is None:
                 continue
+            claimed = answer["answer_id"]
             try:
                 resolved = _resolve_approval(session_key, command, answer)
             except Exception:  # noqa: BLE001
@@ -395,15 +402,24 @@ def follow_approval(session_key: str, command: str) -> None:
                     # Hermes may list the request a moment late: try again.
                     continue
                 # Answered on its card meanwhile, or not the request the call
-                # read out: the user answers it there.
+                # read out: the call says it didn't go, and the user answers
+                # it there.
                 logger.warning("Conduit found no pending approval for a call's answer (%s)", answer["choice"])
             else:
                 logger.info("Conduit passed a call's approval answer (%s): %s resolved", answer["choice"], resolved)
             try:
-                store.take_approval(session_key)
+                # The call hears which: it says it went only when it did.
+                store.settle_approval(answer["answer_id"], bool(resolved))
             except Exception:  # noqa: BLE001
-                logger.warning("Conduit could not clear a call's approval answer", exc_info=True)
+                logger.warning("Conduit could not settle a call's approval answer", exc_info=True)
             return
+        if claimed:
+            # Unloaded (or out of time) mid-answer: the call hears it didn't
+            # go, rather than waiting on an answer nothing will settle.
+            try:
+                store.settle_approval(claimed, False)
+            except Exception:  # noqa: BLE001
+                logger.warning("Conduit could not settle a call's approval answer", exc_info=True)
 
     # A thread of its own, not _spawn: it waits as long as the approval does.
     try:
