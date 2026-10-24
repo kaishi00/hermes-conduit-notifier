@@ -8534,10 +8534,19 @@ def answer_watch_hermes_call(grant: _WatchGrant, args: Dict[str, Any]) -> Dict[s
                            "The user can answer it in Conduit on their iPhone."}
     result: Dict[str, Any] = {"status": "not_waiting",
                               "message": "Hermes isn't waiting on the user in that chat any more."}
+    refused: Optional[TokenError] = None
     for session_id in grant.answer_sessions:
-        result = answer_call_waiting({**args, "session_id": session_id})
+        try:
+            result = answer_call_waiting({**args, "session_id": session_id})
+        except TokenError as error:
+            # This chat waits on the other kind (an approval, not a
+            # question): another of the call's chats may be the one.
+            refused = error
+            continue
         if result.get("status") != "not_waiting":
-            break
+            return result
+    if refused is not None:
+        raise refused
     return result
 
 
