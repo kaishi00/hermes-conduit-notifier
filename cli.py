@@ -225,7 +225,10 @@ def dispatch(args: argparse.Namespace) -> int:
             return 1
         print("Asked Conduit for a new encryption key. It hands one over the next time it connects to this "
               "dashboard; until then notifications stay sealed with the current key.")
-        if args.now:
+        if not args.now:
+            print("The current key still opens answers for 7 days after the new one arrives, so nothing in "
+                  "flight is lost. For a key that may have leaked, use `--now`.")
+        else:
             print("The current key stops working as soon as the new one arrives, with no overlap. Until Conduit "
                   "connects it still seals notifications; to cut it off right away, run `hermes conduit-push unpair`.")
         return 0

@@ -411,7 +411,7 @@ def test_status_reports_the_pairing_without_a_key(state_file):
     response = _http().get(f"{BASE}/e2e")
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
-    assert response.json() == {"ok": True, "paired": True, "installation_id": INSTALLATION, "gateway_id": GATEWAY, "e2e": None, "previous_kid": None, "rotate": False, "rotate_suites": [], "crypto": True, "relay_rejected": False, "relay_blocked": False}
+    assert response.json() == {"ok": True, "paired": True, "installation_id": INSTALLATION, "gateway_id": GATEWAY, "e2e": None, "previous_kid": None, "rotate": False, "rotate_without_overlap": False, "rotate_suites": [], "crypto": True, "relay_rejected": False, "relay_blocked": False}
 
 
 def test_provisioning_stores_the_key_owner_only_and_never_returns_it(state_file):
@@ -491,6 +491,8 @@ def test_the_title_label_and_chat_title_ride_inside_the_envelope():
 NEW_KID = "fedcba9876543210fedcba9876543210"
 NEW_SECRET = bytes(range(32, 64))
 ROTATION_VECTOR = "3e1d41576dbc23aae71465d40df6185ddc2dedef720e3f6da49a767b2f89b1fd"
+THIRD_KID = "00112233445566778899aabbccddeeff"
+THIRD_SECRET = bytes(range(64, 96))
 
 
 def _new_keys():
@@ -585,10 +587,31 @@ def test_a_rotation_without_overlap_drops_the_old_key(state_file, client_state):
     http.post(f"{BASE}/e2e", json=_body(kid=NEW_KID, secret=e2e.b64u(NEW_SECRET)))
     assert client.request_key_rotation(without_overlap=True) is True
     assert "e2e_previous" not in json.loads(state_file.read_text())
-    http.post(f"{BASE}/e2e", json=_body())
+    assert http.get(f"{BASE}/e2e").json()["rotate_without_overlap"] is True
+    http.post(f"{BASE}/e2e", json=_body(kid=THIRD_KID, secret=e2e.b64u(THIRD_SECRET)))
     stored = json.loads(state_file.read_text())
-    assert stored["e2e"]["kid"] == KID and "e2e_previous" not in stored
+    assert stored["e2e"]["kid"] == THIRD_KID and "e2e_previous" not in stored
     assert "rotate_without_overlap" not in stored
+    assert http.get(f"{BASE}/e2e").json()["rotate_without_overlap"] is False
+
+
+def test_a_rotation_cannot_bring_back_the_key_it_replaced(state_file):
+    http = _http()
+    http.post(f"{BASE}/e2e", json=_body())
+    http.post(f"{BASE}/e2e", json=_body(kid=NEW_KID, secret=e2e.b64u(NEW_SECRET)))
+    # A delayed retry of the old key's handover.
+    assert http.post(f"{BASE}/e2e", json=_body()).status_code == 409
+    stored = json.loads(state_file.read_text())
+    assert stored["e2e"]["kid"] == NEW_KID and stored["e2e_previous"]["kid"] == KID
+
+
+def test_status_deletes_a_replaced_key_after_its_overlap(state_file):
+    state = json.loads(state_file.read_text())
+    state["e2e"] = {"kid": NEW_KID, "secret": e2e.b64u(NEW_SECRET), "created_at": "2026-10-01T00:00:00Z"}
+    state["e2e_previous"] = {"kid": KID, "secret": e2e.b64u(SECRET), "retired_at": "2020-01-01T00:00:00Z"}
+    state_file.write_text(json.dumps(state))
+    assert _http().get(f"{BASE}/e2e").json()["previous_kid"] is None
+    assert "e2e_previous" not in json.loads(state_file.read_text())
 
 
 def test_a_rotation_needs_a_key(state_file, client_state):
