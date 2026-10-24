@@ -62,9 +62,17 @@ def test_answering_a_question_already_answered_or_gone(store):
     assert store.answer_waiting("s1", answer="1", question=1)["status"] == "answered"
     assert store.take_answers("conduit-push-a") == {"q0": "prod"}
     assert store.answer_waiting("s1", answer="1")["status"] == "not_waiting"
+    store.note_waiting("s1", "question", request_id="conduit-push-b", questions=BATCH)
     with pytest.raises(ValueError):
-        store.note_waiting("s1", "question", request_id="conduit-push-b", questions=BATCH)
         store.answer_waiting("s1", answer="1", question=5)
+
+
+def test_a_long_multi_select_answer_survives_a_reload(store):
+    choices = [f"choice {number} " + "x" * 190 for number in range(12)]
+    store.note_waiting("s1", "question", request_id="conduit-push-c",
+                       questions=[{"qid": "q0", "question": "Which?", "choices": choices, "multi_select": True}])
+    store.answer_waiting("s1", answer=", ".join(str(number) for number in range(1, 13)))
+    assert json.loads(store.take_answers("conduit-push-c")["q0"]) == choices
 
 
 def test_an_answer_hermes_should_hear_in_the_users_words(store):

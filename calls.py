@@ -343,7 +343,16 @@ def follow_approval(session_key: str, command: str) -> None:
                 return
             if answer is None:
                 continue
-            resolved = _resolve_approval(session_key, command, answer)
+            try:
+                resolved = _resolve_approval(session_key, command, answer)
+            except Exception:  # noqa: BLE001
+                logger.warning("Conduit could not pass a call's approval answer to Hermes", exc_info=True)
+                return
+            if not resolved:
+                # Answered on its card meanwhile, or not the request the call
+                # read out: the user's answer stays theirs to give there.
+                logger.warning("Conduit found no pending approval for a call's answer (%s)", answer["choice"])
+                return
             logger.info("Conduit passed a call's approval answer (%s): %s resolved", answer["choice"], resolved)
             return
 
@@ -375,8 +384,10 @@ def _resolve_approval(session_key: str, command: str, answer: dict[str, Any]) ->
     reason = answer.get("reason") or None
     try:
         return resolve_gateway_approval(session_key, answer["choice"], reason=reason, **kwargs)
-    except TypeError:
-        # A Hermes before /deny reasons.
+    except TypeError as error:
+        # A Hermes before /deny reasons; any other TypeError is a real one.
+        if "reason" not in str(error):
+            raise
         return resolve_gateway_approval(session_key, answer["choice"], **kwargs)
 
 

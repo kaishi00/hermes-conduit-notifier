@@ -2151,7 +2151,7 @@ seals the answers back. This host opens no inbound route of its own.
 
 | Method | Route | Returns |
 | --- | --- | --- |
-| POST | `/api/plugins/conduit_push/watch-tools/grant` with `{tools, max_jobs?, job_options?, job_profiles?, carry_jobs_from?, audio?}` | `{ok, grant_id, relay_url, key, watch_key, expires_at, tools, max_calls, max_jobs, job_profiles?, jobs_carried_from?, audio?}` |
+| POST | `/api/plugins/conduit_push/watch-tools/grant` with `{tools, max_jobs?, job_options?, job_profiles?, carry_jobs_from?, audio?, answer_sessions?, answer_approvals?}` | `{ok, grant_id, relay_url, key, watch_key, expires_at, tools, max_calls, max_jobs, job_profiles?, jobs_carried_from?, audio?}` |
 | POST | `/api/plugins/conduit_push/watch-tools/revoke` with `{grant_id}` | `{ok, revoked}` |
 
 - `tools` names what the call may run: `web_search` and `recall_memory`
@@ -2159,6 +2159,12 @@ seals the answers back. This host opens no inbound route of its own.
   `start_job`, `list_jobs` and `cancel_job` (granted with the Watch app's
   own `job_news` and `answer_approval`). A grant lasts at most 30
   minutes, holds one profile, and ends when the call does.
+- **`answer_call`** (plugin 0.70.0) answers what Hermes waits on in a call
+  from Hermes: granted only with `answer_sessions`, the call's chats, and
+  bound to them. It answers a question with the user's words or the number
+  of their choice, and approves or denies only with `answer_approvals: true`
+  (the Watch's "Tap or voice" setting). On Local Live the host passes the
+  user's words to it itself.
 - **Jobs** start an ordinary Hermes chat on the grant's profile through
   Hermes' own session API in the dashboard process, filed under Voice Jobs in
   Conduit like a job started from the phone; `job_options` carries the

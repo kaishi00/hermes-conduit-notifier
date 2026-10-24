@@ -149,6 +149,9 @@ MAX_WAITING_TEXT_CHARS = 600
 MAX_WAITING_CHOICE_CHARS = 200
 MAX_WAITING_COMMAND_CHARS = 600
 MAX_WAITING_ANSWER_CHARS = 2000
+# A kept answer: a multi-select's JSON list of choices can outgrow the
+# words' limit, and a cut list would reach Hermes as broken JSON.
+MAX_WAITING_KEPT_ANSWER_CHARS = MAX_WAITING_ANSWER_CHARS + MAX_WAITING_CHOICES * (2 * MAX_WAITING_CHOICE_CHARS + 4)
 APPROVAL_CHOICES = ("once", "deny")
 RECOMMENDED_LABEL = "(Recommended)"
 # Words a spoken answer is read with, as Conduit reads them
@@ -962,7 +965,7 @@ def _waiting_entry(raw: dict[str, Any], now: float) -> dict[str, Any] | None:
         answer = item.get("answer")
         questions.append({
             "qid": qid, "question": text, "choices": choices, "multi_select": item.get("multi_select") is True,
-            "answer": answer[:MAX_WAITING_ANSWER_CHARS] if isinstance(answer, str) else None,
+            "answer": answer[:MAX_WAITING_KEPT_ANSWER_CHARS] if isinstance(answer, str) else None,
         })
     if not questions:
         return None
@@ -1038,10 +1041,10 @@ def _picked_choices(text: str, choices: list[str], multi_select: bool) -> list[i
     # "one" after another word ("the second one") stands for a choice.
     counted = [index for index, word in enumerate(said)
                if word != "one" or index == 0 or said[index - 1] in _ONE_LEADS]
-    numbers = [_NUMBER_WORDS.get(said[index]) or (int(said[index]) if said[index].isdigit() else None)
+    numbers = [_NUMBER_WORDS.get(said[index]) or (int(said[index]) if said[index].isdecimal() else None)
                for index in counted]
     numbers = [number for number in numbers if number is not None]
-    filler = all(word in _NUMBER_WORDS or word.isdigit() or word in _NUMBER_FILLER for word in said)
+    filler = all(word in _NUMBER_WORDS or word.isdecimal() or word in _NUMBER_FILLER for word in said)
     if filler and numbers:
         seen = list(dict.fromkeys(numbers))
         if not all(1 <= number <= len(choices) for number in seen):
