@@ -51,4 +51,5 @@ push to main. To run them locally:
 A PR labeled `waiting on contributor` is waiting on its author. Push or comment
 on the PR when you've answered it, and a workflow swaps the label for
 `waiting on Eric`, so the maintainer knows it's his turn again. Putting
-`waiting on contributor` back on takes `waiting on Eric` off.
+`waiting on contributor` back on takes `waiting on Eric` off. A reply inside a
+review thread doesn't count, so also comment on the PR itself or push.
