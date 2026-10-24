@@ -7037,7 +7037,8 @@ def _approval_delivered(store: Any, result: Dict[str, Any]) -> Dict[str, Any]:
     answer_id = result.pop("answer_id", None)
     if answer_id is None or result.get("status") != "answered":
         return result
-    if _APPROVAL_DELIVERY_WAITS.acquire(blocking=False):
+    # A moment for a slot first: a fresh answer is taken back only past that.
+    if _APPROVAL_DELIVERY_WAITS.acquire(timeout=1.0):
         try:
             fared = store.approval_delivery(answer_id)
         finally:
