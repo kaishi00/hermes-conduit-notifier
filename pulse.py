@@ -723,7 +723,9 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
         # Do it is the user's own ask: its chat is read whatever follow-ups'
         # switch or budget (at most a few reads per tap, MAX_CHECKS a run).
         acts = bool(pulse_store.due_acts(now))
-        # Cards held for the morning brief are read again before it, on the follow-up budget.
+        # Cards held for the morning brief are read again before it, on the
+        # follow-up budget, whatever follow-ups' switch: they hold report
+        # cards too, and a stale card shouldn't reach the brief either way.
         holds = follow_used < follow_cap and bool(pulse_store.held_cards(1))
         if used >= cap and not follows and not acts and not holds:
             return  # `pulse status` says so

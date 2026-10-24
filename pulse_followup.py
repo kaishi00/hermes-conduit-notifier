@@ -425,6 +425,8 @@ def check_acts(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzi
 # the brief doesn't tell what got done (or went out of date) while it waited.
 HELD_EVERY_S = 6 * 3600.0
 HELD_CHECKED = "held_checked_at"
+# pulse_brief.PENDING: the brief on its way and its cards.
+BRIEF_PENDING = "brief_cards"
 HELD_MAX = 12
 
 HELD_INSTRUCTIONS = """You check whether news is still worth telling. Pulse, the part of Hermes (an AI assistant) that speaks up on its own, is holding news for the user's morning brief, because the user asked for this kind of news there instead of as it happens.
@@ -477,10 +479,15 @@ def check_held(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzi
     HELD_EVERY_S, and marks done the ones that no longer need telling, so
     the brief leaves them out (Undo puts them back)."""
     checked = pulse_store.get(HELD_CHECKED)
-    checked = {key: value for key, value in checked.items() if isinstance(value, (int, float))} \
+    checked = {key: value for key, value in checked.items()
+               if isinstance(value, (int, float)) and not isinstance(value, bool)} \
         if isinstance(checked, dict) else {}
+    # A brief on its way already has its cards: leave them to it.
+    pending = pulse_store.get(BRIEF_PENDING)
+    sending = set(pending.get("ids") or []) if isinstance(pending, dict) else set()
     cards = [card for card in pulse_store.held_cards(HELD_MAX)
-             if card["item_id"] is not None and now - checked.get(str(card["id"]), 0.0) >= HELD_EVERY_S]
+             if card["item_id"] is not None and card["id"] not in sending
+             and now - checked.get(str(card["id"]), 0.0) >= HELD_EVERY_S]
     for card in cards:
         if not still_leader() or done.get("tokens", 0) >= budget or \
                 done.get("checks", 0) + done.get("failed", 0) >= MAX_CHECKS:

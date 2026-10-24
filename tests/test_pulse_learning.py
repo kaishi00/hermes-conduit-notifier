@@ -890,6 +890,16 @@ def test_a_failed_held_check_tries_again_next_run(live):
     assert len(said.calls) == 1
 
 
+def test_a_held_check_leaves_the_cards_of_a_brief_on_its_way(live):
+    item_id = promise(live)
+    card_id = learning.add_card(live.store, kind="followup", item=live.store.item(item_id), level_name="brief",
+                                news="Waiting on the deploy.", why="", chat_title="Deploy", now=time.time() - 3600)
+    live.store.set(followup.BRIEF_PENDING, {"item_id": "x-brief", "ids": [card_id]})
+    said = llm_saying(stale=True, why="")
+    run_held(live, said, time.time())
+    assert said.calls == []
+
+
 def test_do_it_left_unsent_gives_up_without_a_model_call(live):
     card = told_card(live)
     acted_at = time.time()
