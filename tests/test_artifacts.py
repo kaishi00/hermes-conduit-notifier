@@ -323,6 +323,26 @@ def test_tool_results_under_every_producer_key_are_read(tmp_path, monkeypatch):
     assert sorted(i["name"] for i in _list(conn)["items"]) == ["a.png", "b.wav", "c.pdf"]
 
 
+def test_image_generate_pictures_are_listed(tmp_path, monkeypatch):
+    # image_generate reports its picture under "image": a cached file, or a
+    # hosted URL from a provider that doesn't download it.
+    _no_gateway(monkeypatch)
+    conn = _db(tmp_path, [
+        ("s1", "tool", json.dumps({"success": True, "image": "/root/.hermes/cache/images/cat.png",
+                                   "model": "gpt-image-2", "prompt": "a cat"}), None, "image_generate"),
+        ("s1", "tool", json.dumps({"success": True, "image": "https://fal.media/files/dog_",
+                                   "model": "flux"}), None, "image_generate"),
+        ("s1", "tool", json.dumps({"success": False, "image": None, "error": "no provider"}), None,
+         "image_generate"),
+    ])
+    items = {i.get("path") or i.get("url"): i for i in _list(conn)["items"]}
+    assert set(items) == {"/root/.hermes/cache/images/cat.png", "https://fal.media/files/dog_"}
+    assert items["/root/.hermes/cache/images/cat.png"]["kind"] == "image"
+    assert items["https://fal.media/files/dog_"]["kind"] == "image"
+    assert items["/root/.hermes/cache/images/cat.png"]["source"] == "written"
+    assert items["https://fal.media/files/dog_"]["source"] == "link"
+
+
 def test_one_message_cannot_overflow_the_page(tmp_path, monkeypatch):
     _no_gateway(monkeypatch)
     links = " ".join(f"https://example.com/{n}" for n in range(5000))

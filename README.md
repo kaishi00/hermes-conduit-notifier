@@ -1408,7 +1408,9 @@ Conduit's Artifacts screens list what a profile's chats produced:
 `{"ok": true, "items": [...], "next_before": 1234}`. Each item has a `kind`
 (`image`, `video`, `audio`, `page`, `document`, `file` or `link`), a `source`
 (`delivered` for a `MEDIA:` file, `preview` for a `::preview` page, `written`
-for a document or media file a tool wrote, `attached` for a file the user sent
+for a document or media file a tool wrote, including a picture
+`image_generate` saved (plugin 0.71.1+; a picture it reports by URL has source
+`link` and kind `image`), `attached` for a file the user sent
 with `@file:`, `link` for a web link in a reply), a `name`, the chat's
 `session_id` and `session_title`, the `message_id` it came from and its
 `timestamp`; a file has its `path`, whether it still `exists` and its `size`,
