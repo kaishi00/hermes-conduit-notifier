@@ -513,6 +513,26 @@ def test_poll_answers_that_are_never_objects_fall_back_after_grace_window():
     assert len(fake.cancelled_ids) == 1, "the parked decision is released"
 
 
+def test_a_batch_answers_map_that_is_not_an_object_is_tolerated_until_answered():
+    # A string or a list answers map is unproductive like a body that isn't
+    # an object (#165), not a TypeError that leaves the decision parked.
+    for answers in ("q0", ["q0"]):
+        fake = _FakeState([
+            {"status": "answered", "answers": answers, "remaining": []},
+            {"status": "answered", "answers": {"q0": "staging"}, "remaining": []},
+        ])
+        _install(fake)
+        original, release = _blocking_original("never used")
+        try:
+            result = loop.middleware(**_kwargs(original, {
+                "questions": [{"question": "Which environment?", "choices": ["staging", "prod"]}],
+            }))
+        finally:
+            release.set()
+        assert json.loads(result)["responses"][0]["user_response"] == "staging", answers
+        assert len(fake.poll_ids) == 2, answers
+
+
 def test_persistent_transport_errors_stop_after_grace_window():
     # A persistently unreachable relay must not poll the full budget: errors
     # count against the same grace as unknowns.
@@ -785,7 +805,7 @@ def test_user_agent_derives_from_the_plugin_version():
     # One source of truth: bumping PLUGIN_VERSION updates the relay UA
     # automatically instead of leaving a stale hand-written constant.
     assert loop.client.USER_AGENT == f"Hermes-Conduit-Notifier/{loop.client.PLUGIN_VERSION}"
-    assert loop.client.PLUGIN_VERSION == "0.70.0"
+    assert loop.client.PLUGIN_VERSION == "0.71.0"
 
 
 def test_send_now_redacts_only_when_the_profile_opts_in(monkeypatch, tmp_path):
@@ -1038,3 +1058,38 @@ def test_a_legacy_scalar_answer_maps_a_cut_label_back_too():
     finally:
         release.set()
     assert json.loads(result)["user_response"] == LONG_CHOICE
+
+
+def test_a_call_answer_wins_and_formats_like_a_device_answer(monkeypatch):
+    # Answered on a call from Hermes with no chat open (the Watch): the
+    # batch's answers come from the calls store, and the parked decision is
+    # released as after a native answer.
+    fake = _FakeState([{"status": "pending"}] * 5)
+    _install(fake)
+    noted = []
+    taken = iter([None, {"q0": "staging", "q1": json.dumps(["unit", "ui"])}])
+    monkeypatch.setattr(loop.calls, "note_waiting", lambda *args, **kwargs: noted.append((args, kwargs)) or True)
+    monkeypatch.setattr(loop.calls, "taken_answers", lambda request_id: next(taken, None))
+    monkeypatch.setattr(loop.calls, "has_call_answers", lambda request_id: True)
+    original, release = _blocking_original("never used")
+    try:
+        result = loop.middleware(**_kwargs(original, _batch_args()))
+    finally:
+        release.set()
+    parsed = json.loads(result)
+    assert [row["user_response"] for row in parsed["responses"]] == ["staging", ["unit", "ui"]]
+    request_id = fake.enqueued[0]["decision"]["request_id"]
+    (args, kwargs), = noted
+    assert args == ("sess-1", "question") and kwargs["request_id"] == request_id
+    assert [entry["question"] for entry in kwargs["questions"]] == ["Which environment?", "Which tests should run?"]
+    deadline = time.monotonic() + 2
+    while request_id not in fake.cancelled_ids and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert fake.cancelled_ids == [request_id]
+
+
+def test_a_calls_pick_of_a_choice_longer_than_the_store_keeps_answers_with_the_full_choice():
+    long_choice = "Deploy to staging and " + "run every integration suite " * 12
+    offered = [long_choice, "prod"]
+    assert loop._full_choice(long_choice[:200], offered) == long_choice
+    assert loop._full_choice("Deploy", offered) == "Deploy", "a short prefix names no choice"

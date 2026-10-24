@@ -27,6 +27,13 @@ A call the user declines, or that goes unanswered, comes back from Conduit
 as an outcome on the call's sessions; the next turn of one of them takes it,
 so Hermes hears it once (``calls.outcome_note``).
 
+While an alert can call, what Hermes waits on is kept too: a question
+batch's choices, or an approval's command and description. A call answered
+on the Apple Watch, with no chat open, reads them from here and leaves the
+user's spoken answer, which the agent's process passes on to the waiting
+clarify loop or approval (``answer_waiting``, ``take_answers``,
+``take_approval``).
+
 State lives in the profile's ``conduit-calls.json`` beside the pairing state,
 so watches survive gateway and dashboard restarts. The hooks (agent process)
 and the dashboard routes (dashboard process) both use this module: the
@@ -130,6 +137,41 @@ MAX_OUTCOMES = 20
 # Calls whose outcome a turn has taken, so a late retry of the report isn't
 # heard twice: kept as long as an outcome could still arrive.
 MAX_TOLD = 64
+# What Hermes waits on in a chat while an alert can call about it, so a call
+# answered on the Apple Watch, with no chat open, can read the choices or the
+# command and answer them (hermes-conduit designs/hermes-call-clarify.md).
+# Kept only while alert calls are on, and gone once answered elsewhere.
+WAITING_TTL_S = 2 * 3600
+MAX_WAITING = 10
+MAX_WAITING_QUESTIONS = 8
+MAX_WAITING_CHOICES = 12
+MAX_WAITING_TEXT_CHARS = 600
+MAX_WAITING_CHOICE_CHARS = 200
+MAX_WAITING_COMMAND_CHARS = 600
+MAX_WAITING_ANSWER_CHARS = 2000
+# A kept answer: a multi-select's JSON list of choices can outgrow the
+# words' limit, and a cut list would reach Hermes as broken JSON.
+MAX_WAITING_KEPT_ANSWER_CHARS = MAX_WAITING_ANSWER_CHARS + MAX_WAITING_CHOICES * (2 * MAX_WAITING_CHOICE_CHARS + 4)
+APPROVAL_CHOICES = ("once", "deny")
+RECOMMENDED_LABEL = "(Recommended)"
+# Words a spoken answer is read with, as Conduit reads them
+# (HermesCallWaiting.pickedChoices): the two move together.
+_NEGATIONS = frozenset({"not", "no", "don", "dont", "never", "without", "except", "neither", "nor", "instead"})
+_NUMBER_WORDS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    "first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5, "sixth": 6, "seventh": 7, "eighth": 8,
+    "ninth": 9, "tenth": 10,
+    "1st": 1, "2nd": 2, "3rd": 3, "4th": 4, "5th": 5, "6th": 6, "7th": 7, "8th": 8, "9th": 9, "10th": 10,
+}
+# Words that may stand around choice numbers ("option 2, please").
+_NUMBER_FILLER = frozenset({"the", "a", "an", "and", "or", "option", "options", "choice", "choices", "number",
+                            "numbers", "please", "pick", "choose", "go", "with", "take", "i", "ll", "d", "want",
+                            "that", "this", "both"})
+# The words after which "one" is still a number ("option one").
+_ONE_LEADS = frozenset({"option", "choice", "number", "and", "or", "with", "take", "pick", "choose"})
+# A spoken request for Hermes to say more before the user chooses: sent as
+# the answer, so Hermes explains and asks again.
+ASKS_FIRST_LEAD = "Before I choose:"
 
 # A Hermes session key, kept whole: one with a control character or over this
 # many UTF-8 bytes is dropped, never cut. The same rule as the plugin's
@@ -137,7 +179,7 @@ MAX_TOLD = 64
 SESSION_KEY_MAX_BYTES = 512
 _SESSION_KEY_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 # The shape the call event carries (events.sanitize_call).
-_WATCH_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+_WATCH_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}\Z")
 _thread_lock = threading.Lock()
 
 
@@ -330,6 +372,181 @@ class CallStore:
             result = _decide(state, watch, kind, now, self.place_blocked)
             state["seeded"] = [*state["seeded"], {"id": watch["id"], "status": result["status"], "at": now}][-MAX_SEEDED:]
             return result
+
+    # --- What Hermes waits on -----------------------------------------------
+
+    def note_waiting(self, session_id: str | list[str], kind: str, *, request_id: str = "",
+                     questions: Any = None, description: Any = "", command: Any = "") -> bool:
+        """Hermes waits on the user in ``session_id`` (or the ids its session
+        goes by): a question batch (``request_id``, the clarify loop's own
+        decision id, and ``questions``) or an approval (``description`` and
+        ``command``). Kept so a call about it can read and answer it with no
+        chat open. Only with alert calls on (False otherwise: nothing is
+        written). A newer wait of the same kind in the session replaces the
+        older one."""
+        if kind not in ALERT_KINDS:
+            raise ValueError(f"unknown wait {kind}")
+        named = session_id if isinstance(session_id, list) else [session_id]
+        try:
+            ids = _session_ids([value for value in named if isinstance(value, str) and _session_key(value.strip())])
+        except ValueError:
+            return False
+        settings = self.settings()
+        if not settings["enabled"] or not settings["alerts"]:
+            return False
+        entry = _waiting_entry({
+            "id": secrets.token_hex(12), "session_ids": ids, "kind": kind, "at": self.clock(),
+            "request_id": request_id, "questions": questions, "description": description,
+            "command": command if isinstance(command, str) else "",
+            "command_sha": hashlib.sha256(command.encode("utf-8")).hexdigest() if isinstance(command, str) and command else "",
+            "cut": isinstance(command, str) and len(command) > MAX_WAITING_COMMAND_CHARS,
+        }, self.clock())
+        if entry is None:
+            return False
+        with self._locked() as state:
+            if not state["settings"]["enabled"] or not state["settings"]["alerts"]:
+                return False
+            kept = [item for item in state["waiting"]
+                    if not (item["kind"] == kind and set(item["session_ids"]) & set(ids))]
+            state["waiting"] = [*kept, entry][-MAX_WAITING:]
+            return True
+
+    def forget_waiting(self, session_id: Any, kind: str | None = None) -> int:
+        """The wait ended (answered anywhere, or the turn moved on): how many
+        were dropped."""
+        if not isinstance(session_id, str) or not session_id.strip() or not self.path.exists():
+            return 0
+        session_id = session_id.strip()
+
+        def ended(item: dict[str, Any]) -> bool:
+            return session_id in item["session_ids"] and (kind is None or item["kind"] == kind)
+
+        if not any(ended(item) for item in self._load()["waiting"]):
+            return 0
+        with self._locked() as state:
+            kept = [item for item in state["waiting"] if not ended(item)]
+            removed = len(state["waiting"]) - len(kept)
+            state["waiting"] = kept
+            return removed
+
+    def waiting_for(self, session_id: Any) -> dict[str, Any] | None:
+        """What Hermes waits on in ``session_id``, as a call reads it: the
+        newest wait, with its questions numbered and the ones answered from a
+        call marked. None when nothing waits."""
+        if not isinstance(session_id, str) or not session_id.strip() or not self.path.exists():
+            return None
+        session_id = session_id.strip()
+        found = [item for item in self._load()["waiting"] if session_id in item["session_ids"]]
+        return _public_waiting(max(found, key=lambda item: item["at"])) if found else None
+
+    def answer_waiting(self, session_id: Any, *, answer: Any = None, choice: Any = None,
+                       question: Any = None, reason: Any = None) -> dict[str, Any]:
+        """The user's spoken answer, from a call, to what Hermes waits on in
+        ``session_id``. A question takes ``answer`` (a choice's number or
+        label, "the recommended one", or their own words) for ``question``
+        (its number in the batch; the first unanswered one by default). An
+        approval takes ``choice`` (once or deny) and, for a deny, ``reason``.
+        The agent's process passes it on (``take_answers``,
+        ``take_approval``): ``{"status": "answered", ...}`` says it's on
+        its way, with the batch's next question to ask, if any."""
+        if not isinstance(session_id, str) or not _session_key(session_id.strip()):
+            raise ValueError("session_id must be a session id")
+        session_id = session_id.strip()
+        with self._locked() as state:
+            found = [item for item in state["waiting"] if session_id in item["session_ids"]]
+            if not found:
+                return {"status": "not_waiting", "message": "Hermes isn't waiting on the user in that chat any more."}
+            item = max(found, key=lambda entry: entry["at"])
+            if item["kind"] == "approval":
+                picked = choice.strip().lower() if isinstance(choice, str) else ""
+                if picked not in APPROVAL_CHOICES:
+                    raise ValueError("choice must be once or deny")
+                if picked == "once" and item["cut"]:
+                    return {"status": "refused",
+                            "message": "The command is too long to read out whole, so it can only be denied here. "
+                                       "The user can approve it in Conduit."}
+                if picked == "once" and not item["command"]:
+                    # Never approve what wasn't shown (as the Watch's job cards).
+                    return {"status": "refused",
+                            "message": "Hermes didn't say which command it wants to run, so it can only be denied "
+                                       "here. The user can approve it in Conduit."}
+                if item["choice"] is not None:
+                    return {"status": "answered", "choice": item["choice"]}
+                item["choice"] = picked
+                item["reason"] = _waiting_text(reason, MAX_WAITING_ANSWER_CHARS) if picked == "deny" else ""
+                return {"status": "answered", "choice": picked}
+            if not isinstance(answer, str) or not answer.strip():
+                raise ValueError("answer must be the user's answer")
+            open_numbers = [index for index, entry in enumerate(item["questions"]) if entry["answer"] is None]
+            if not open_numbers:
+                return {"status": "answered", "message": "Every question is answered already."}
+            if question is None:
+                index = open_numbers[0]
+            elif isinstance(question, int) and not isinstance(question, bool) and 1 <= question <= len(item["questions"]):
+                index = question - 1
+            else:
+                raise ValueError(f"question must be a number from 1 to {len(item['questions'])}")
+            entry = item["questions"][index]
+            if entry["answer"] is not None:
+                return {"status": "answered", "message": f"Question {index + 1} is answered already."}
+            value, labels = map_answer(answer[:MAX_WAITING_ANSWER_CHARS], entry["choices"], entry["multi_select"])
+            entry["answer"] = value
+            result: dict[str, Any] = {"status": "answered", "question": index + 1,
+                                      "answer": ", ".join(labels) if labels else value}
+            following = next((number for number in open_numbers if number != index), None)
+            if following is not None:
+                result["next"] = _public_question(item["questions"][following], following)
+            return result
+
+    def answers_ready(self, request_id: Any) -> bool:
+        """Whether a call has answered every question of the clarify loop's
+        batch ``request_id``. Reads only."""
+        if not isinstance(request_id, str) or not request_id or not self.path.exists():
+            return False
+        return any(_complete(item, request_id) for item in self._load()["waiting"])
+
+    def take_answers(self, request_id: Any) -> dict[str, str] | None:
+        """The clarify loop's question batch ``request_id``, once every
+        question has an answer from a call: ``{qid: answer}``, taken."""
+        if not self.answers_ready(request_id):
+            return None
+
+        def complete(item: dict[str, Any]) -> bool:
+            return _complete(item, request_id)
+
+        with self._locked() as state:
+            item = next((entry for entry in state["waiting"] if complete(entry)), None)
+            if item is None:
+                return None
+            state["waiting"] = [entry for entry in state["waiting"] if entry is not item]
+            return {entry["qid"]: entry["answer"] for entry in item["questions"]}
+
+    def take_approval(self, session_id: Any, *, keep: bool = False) -> dict[str, Any] | None:
+        """An approval in ``session_id`` answered from a call: its
+        ``choice``, ``reason`` and ``command_sha``, taken (only read with
+        ``keep``). None while unanswered or gone."""
+        if not isinstance(session_id, str) or not session_id.strip() or not self.path.exists():
+            return None
+        session_id = session_id.strip()
+
+        def answered(item: dict[str, Any]) -> bool:
+            return item["kind"] == "approval" and session_id in item["session_ids"] and item["choice"] is not None
+
+        if not any(answered(item) for item in self._load()["waiting"]):
+            return None
+        with self._locked() as state:
+            item = next((entry for entry in state["waiting"] if answered(entry)), None)
+            if item is None:
+                return None
+            if not keep:
+                state["waiting"] = [entry for entry in state["waiting"] if entry is not item]
+            return {"choice": item["choice"], "reason": item["reason"], "command_sha": item["command_sha"]}
+
+    def has_waiting(self, session_id: Any, kind: str) -> bool:
+        if not isinstance(session_id, str) or not session_id.strip() or not self.path.exists():
+            return False
+        return any(item["kind"] == kind and session_id.strip() in item["session_ids"]
+                   for item in self._load()["waiting"])
 
     # --- Presence -----------------------------------------------------------
 
@@ -693,10 +910,164 @@ def _normalized(raw: Any, now: float) -> dict[str, Any]:
             told.append({"id": entry["id"], "at": float(entry["at"])})
     presence = raw.get("presence_until", 0.0)
     presence_until = float(presence) if isinstance(presence, (int, float)) and not isinstance(presence, bool) and presence > now else 0.0
+    waiting = []
+    for entry in raw.get("waiting") if isinstance(raw.get("waiting"), list) else []:
+        kept = _waiting_entry(entry, now) if isinstance(entry, dict) else None
+        if kept is not None:
+            waiting.append(kept)
     return {"v": VERSION, "settings": settings, "watches": watches, "history": history,
             "ends": ends[-MAX_RECENT_ENDS:], "seeded": seeded[-MAX_SEEDED:], "presence_until": presence_until,
-            "outcomes": outcomes[-MAX_OUTCOMES:], "told": told[-MAX_TOLD:]}
+            "outcomes": outcomes[-MAX_OUTCOMES:], "told": told[-MAX_TOLD:], "waiting": waiting[-MAX_WAITING:]}
 
+
+def _waiting_text(value: Any, limit: int) -> str:
+    text = value.strip() if isinstance(value, str) else ""
+    text = "".join(char for char in text if char.isprintable() or char == "\n")
+    return text[:limit]
+
+
+def _waiting_entry(raw: dict[str, Any], now: float) -> dict[str, Any] | None:
+    """A well-formed wait from ``raw``, or None when it is malformed or
+    older than WAITING_TTL_S."""
+    try:
+        at = raw["at"]
+        if not isinstance(at, (int, float)) or isinstance(at, bool) or now - at >= WAITING_TTL_S:
+            return None
+        kind = raw["kind"]
+        if kind not in ALERT_KINDS or not _WATCH_ID.match(str(raw["id"])):
+            return None
+        entry: dict[str, Any] = {"id": str(raw["id"]), "session_ids": _session_ids(raw["session_ids"]),
+                                 "kind": kind, "at": float(at)}
+    except (KeyError, TypeError, ValueError):
+        return None
+    if kind == "approval":
+        description = _waiting_text(raw.get("description"), MAX_WAITING_TEXT_CHARS)
+        if not description:
+            return None
+        choice = raw.get("choice")
+        sha = raw.get("command_sha")
+        entry.update({
+            "description": description,
+            "command": _waiting_text(raw.get("command"), MAX_WAITING_COMMAND_CHARS),
+            "command_sha": sha if isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{64}", sha) else "",
+            "cut": raw.get("cut") is True,
+            "choice": choice if choice in APPROVAL_CHOICES else None,
+            "reason": _waiting_text(raw.get("reason"), MAX_WAITING_ANSWER_CHARS),
+        })
+        return entry
+    request_id = raw.get("request_id")
+    if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", request_id):
+        return None
+    questions = []
+    for item in raw.get("questions") if isinstance(raw.get("questions"), list) else []:
+        if not isinstance(item, dict) or len(questions) >= MAX_WAITING_QUESTIONS:
+            continue
+        qid = item.get("qid")
+        text = _waiting_text(item.get("question"), MAX_WAITING_TEXT_CHARS)
+        if not isinstance(qid, str) or not qid or len(qid) > 128 or not text:
+            continue
+        choices = [_waiting_text(choice, MAX_WAITING_CHOICE_CHARS) for choice in item.get("choices") or []
+                   if isinstance(choice, str) and choice.strip()][:MAX_WAITING_CHOICES]
+        answer = item.get("answer")
+        questions.append({
+            "qid": qid, "question": text, "choices": choices, "multi_select": item.get("multi_select") is True,
+            "answer": answer[:MAX_WAITING_KEPT_ANSWER_CHARS] if isinstance(answer, str) else None,
+        })
+    if not questions:
+        return None
+    entry.update({"request_id": request_id, "questions": questions})
+    return entry
+
+
+def _complete(item: dict[str, Any], request_id: str) -> bool:
+    return (item["kind"] == "question" and item["request_id"] == request_id and bool(item["questions"])
+            and all(entry["answer"] is not None for entry in item["questions"]))
+
+
+def _public_question(entry: dict[str, Any], index: int) -> dict[str, Any]:
+    return {"number": index + 1, "question": entry["question"], "choices": list(entry["choices"]),
+            "multi_select": entry["multi_select"], "answered": entry["answer"] is not None}
+
+
+def _public_waiting(item: dict[str, Any]) -> dict[str, Any]:
+    if item["kind"] == "approval":
+        return {"kind": "approval", "description": item["description"], "command": item["command"],
+                "command_cut": item["cut"], "answered": item["choice"] is not None}
+    return {"kind": "question",
+            "questions": [_public_question(entry, index) for index, entry in enumerate(item["questions"])]}
+
+
+def map_answer(answer: str, choices: list[str], multi_select: bool) -> tuple[str, list[str]]:
+    """The value a spoken answer sends for a question with ``choices``, and
+    the labels it picked: a choice's number or ordinal ("two", "the second
+    one", "1 and 3" for several), its label as written, or "the recommended
+    one" pick choices, as the card's tap would. Anything else, and an answer
+    that asks Hermes to say more first (``ASKS_FIRST_LEAD``), goes as the
+    user's own words. Conduit's own mapping is HermesCallWaiting.answerValue
+    (Conduit/Voice/HermesCallWaiting.swift): the two move together."""
+    text = " ".join(answer.split())
+    if not choices or text.casefold().startswith(ASKS_FIRST_LEAD.rstrip(":").casefold()):
+        return text, []
+    picked = _picked_choices(text, choices, multi_select)
+    if not picked:
+        return text, []
+    labels = [_without_recommended(choices[index]) for index in picked]
+    if multi_select:
+        return json.dumps([choices[index] for index in picked], ensure_ascii=False), labels
+    return choices[picked[0]], labels
+
+
+def _without_recommended(choice: str) -> str:
+    stripped = choice.strip()
+    if stripped.casefold().endswith(RECOMMENDED_LABEL.casefold()):
+        return stripped[: -len(RECOMMENDED_LABEL)].strip()
+    return stripped
+
+
+def _words(text: str) -> list[str]:
+    return re.findall(r"[^\W_]+", text.lower())
+
+
+def _picked_choices(text: str, choices: list[str], multi_select: bool) -> list[int]:
+    said = _words(text)
+    if not said:
+        return []
+    labels = [_words(_without_recommended(choice)) for choice in choices]
+    # The whole answer is one choice's label.
+    if labels.count(said) == 1:
+        return [labels.index(said)]
+    # Never past a negation: "not the recommended one".
+    if any(word in _NEGATIONS for word in said):
+        return []
+    if any(word.startswith("recommend") or word == "suggested" for word in said):
+        marked = [index for index, choice in enumerate(choices) if choice.strip().lower().endswith(RECOMMENDED_LABEL.lower())]
+        if len(marked) == 1:
+            return marked
+    # Numbers, when the words are only numbers and the words around them;
+    # "one" after another word ("the second one") stands for a choice.
+    counted = [index for index, word in enumerate(said)
+               if word != "one" or index == 0 or said[index - 1] in _ONE_LEADS]
+    numbers = [_NUMBER_WORDS.get(said[index]) or (int(said[index]) if said[index].isdecimal() else None)
+               for index in counted]
+    numbers = [number for number in numbers if number is not None]
+    filler = all(word in _NUMBER_WORDS or word.isdecimal() or word in _NUMBER_FILLER for word in said)
+    if filler and numbers:
+        seen = list(dict.fromkeys(numbers))
+        if not all(1 <= number <= len(choices) for number in seen):
+            return []
+        if not multi_select and len(seen) != 1:
+            return []
+        return [number - 1 for number in seen]
+    # A label said within a few more words ("staging, please").
+    contained = [index for index, label in enumerate(labels)
+                 if label and len(" ".join(label)) >= 3 and len(said) <= len(label) + 4 and _contains(said, label)]
+    if len(contained) == 1 or (multi_select and contained):
+        return contained
+    return []
+
+
+def _contains(words: list[str], part: list[str]) -> bool:
+    return any(words[start:start + len(part)] == part for start in range(len(words) - len(part) + 1))
 
 def _session_ids(value: Any) -> list[str]:
     if not isinstance(value, list):

@@ -4,7 +4,7 @@ Hermes Conduit Notifier is the open-source Hermes plugin that connects a Hermes 
 
 - **Notifications and calls**: approval, input, reply, failure and background-task notifications, Hermes calling you (CallKit on the phone and Watch), and Lock Screen progress while a turn runs, all delivered through the Conduit push relay in [`relay/`](relay/), end-to-end encrypted where APNs allows.
 - **Live voice**: single-use Gemini Live tokens, GPT-Live sessions on the host's ChatGPT subscription or API key, Grok Live relayed with the host's xAI sign-in, Local Live and Classic voice through your own speech server, voice web lookups, memory and personality for voice, and saved call transcripts.
-- **Apple Watch**: short-lived grants that let a Watch call run lookups and Hermes jobs, and stream GPT-Live, Grok and Local Live audio, through the relay, sealed end to end.
+- **Apple Watch**: short-lived grants that let a Watch call run lookups and Hermes jobs, answer what Hermes waits on in a call from Hermes, and stream GPT-Live, Grok and Local Live audio, through the relay, sealed end to end.
 - **Phone data the user opts into**: Apple Health, location, maps, calendar, reminders, Focus, phone status, contacts and alarms, sent by the phone straight to this host and sealed end to end, with the `conduit_health`, `conduit_location`, `conduit_maps`, `conduit_calendar`, `conduit_phone` and `conduit_contacts` tools for the agent.
 - **Conduit extras**: rich cards and on-screen cards during calls, Artifacts, group pictures, chat takeover, cron notification settings, Conduit settings the agent can change, and one-tap pairing and updates from the app.
 
@@ -105,7 +105,7 @@ The iOS app controls which categories are enabled, whether notification previews
 - The health, location, maps, calendar, phone, contacts, calls and display tools refuse delegated subagents, including one whose session id a compaction replaced (`compression.in_place: false`): the plugin asks Hermes' delegation flag (Hermes 0.22+) and follows the compaction links in Hermes' session store back to the subagent it was (plugin 0.51.6+).
 - Event titles and bodies are length-limited before delivery.
 - Lock Screen previews are disabled by default in Hermes Conduit.
-- **End-to-end encryption** (plugin 0.5+, relay 0.5+, a Conduit build with encrypted notifications): Conduit creates a secret for each pairing on the phone and hands it to this profile over your Hermes dashboard connection, so it never passes through the relay. From then on every notification's title, body, profile, session and decision card is sealed with it (ChaCha20-Poly1305, keys derived with HKDF-SHA256), the phone decrypts it in a Notification Service Extension, and clarify answers come back sealed for this profile. The relay and APNs see only routing data: the event type, opaque ids, a keyed thread token and timing. A pairing that has a key never sends plaintext content again, and only accepts clarify answers sealed by the phone. `hermes conduit-push status` shows whether it's on; Conduit turns it on by itself when it connects to this host. Run `hermes conduit-push test --corrupt` to check that the phone shows only generic text for a push it can't verify. The secret is only as private in transit as your dashboard connection (HTTPS or a private tunnel is recommended). Keys rotate (plugin 0.70+ and a Conduit build that rotates): Conduit hands over a new secret when the key is 30 days old, when you tap Rotate in Conduit's Settings > Notifications, or after `hermes conduit-push e2e rotate` on this host, the next time it connects to the dashboard. Pushes are sealed with the new key at once; the old one still opens clarify answers for 7 days, so nothing in flight is lost. For a key that may have leaked, `hermes conduit-push e2e rotate --now` skips that overlap; the current key still seals notifications until Conduit next connects, so `hermes conduit-push unpair` is the way to cut it off at once. A key copied from a backup then stops opening new notifications, though it can still open ones captured while it was in use.
+- **End-to-end encryption** (plugin 0.5+, relay 0.5+, a Conduit build with encrypted notifications): Conduit creates a secret for each pairing on the phone and hands it to this profile over your Hermes dashboard connection, so it never passes through the relay. From then on every notification's title, body, profile, session and decision card is sealed with it (ChaCha20-Poly1305, keys derived with HKDF-SHA256), the phone decrypts it in a Notification Service Extension, and clarify answers come back sealed for this profile. The relay and APNs see only routing data: the event type, opaque ids, a keyed thread token and timing. A pairing that has a key never sends plaintext content again, and only accepts clarify answers sealed by the phone. `hermes conduit-push status` shows whether it's on; Conduit turns it on by itself when it connects to this host. Run `hermes conduit-push test --corrupt` to check that the phone shows only generic text for a push it can't verify. The secret is only as private in transit as your dashboard connection (HTTPS or a private tunnel is recommended). Keys rotate (plugin 0.71+ and a Conduit build that rotates): Conduit hands over a new secret when the key is 30 days old, when you tap Rotate in Conduit's Settings > Notifications, or after `hermes conduit-push e2e rotate` on this host, the next time it connects to the dashboard. Pushes are sealed with the new key at once; the old one still opens clarify answers for 7 days, so nothing in flight is lost. For a key that may have leaked, `hermes conduit-push e2e rotate --now` skips that overlap; the current key still seals notifications until Conduit next connects, so `hermes conduit-push unpair` is the way to cut it off at once. A key copied from a backup then stops opening new notifications, though it can still open ones captured while it was in use.
 - `hermes conduit-push redact on` keeps chat content from leaving the gateway: events carry no title or body text, approval cards say "Hermes needs your approval. Open Conduit for details.", and clarify cards replace question text with generic copy. The fields needed to answer stay (session key or request id, question ids, choice labels), so cards raised while the app is backgrounded remain recoverable and answerable. Clarify choice labels still transit the relay because the answer is one of them. `status` shows the current setting; `redact off` restores full content, including for events still waiting in the local delivery queue.
 
 - Besides notifications, the relay carries call pushes (sealed like notifications, except the "stopped ringing" notice), Lock Screen progress (phase, a tool category from a fixed list, tool count and context percentage, never chat text; `redact on` drops the category), Apple Watch grants and audio (sealed per call), the one-time codes that prove a phone holds its APNs token, and short-lived Apple Maps tokens for the host maps engine (the relay never sees the lookups). Health, location, calendar, phone and contacts data never pass through it.
@@ -1474,7 +1474,24 @@ and the dashboard routes under one file lock, so they survive restarts:
 | DELETE | `/api/plugins/conduit_push/calls/watches/{id}?profile=` | | `{ok, removed}` |
 | PUT | `/api/plugins/conduit_push/calls/presence?profile=` (0.14+) | `{hold_s}` (0 releases) | `{ok, status: "present"}` or `{ok, status: "away"}` |
 | POST | `/api/plugins/conduit_push/calls/outcomes?profile=` (0.15+) | `{call_id, session_ids: [...], outcome: "declined" or "missed", kind?, title?, reason?, age_s?}` | `{ok, status: "recorded"}` |
+| GET | `/api/plugins/conduit_push/calls/waiting?session_id=&profile=` (0.70+) | | `{ok, waiting}`: null, `{kind: "question", questions: [{number, question, choices, multi_select, answered}]}` or `{kind: "approval", description, command, command_cut, answered}` |
+| POST | `/api/plugins/conduit_push/calls/waiting/answer?profile=` (0.70+) | `{session_id, answer?, question?, choice?, reason?}` | `{ok, status: "answered", ...}`, `{ok, status: "not_waiting"}` or `{ok, status: "refused", message}` |
 
+- With alert calls on, what Hermes waits on is kept too (0.70+): a question
+  batch's choices, or an approval's description and command (up to 600
+  characters). A call answered with no chat open, the Apple Watch's, reads it
+  from `/calls/waiting` and sends the user's spoken answer to
+  `/calls/waiting/answer` (or `answer_call` on its Watch grant, which
+  approves or denies only with `answer_approvals: true`; on Local Live the
+  host takes the user's words itself, a plain yes or no for an approval). A question
+  takes `answer`, a choice's number or label, "the recommended one", or the
+  user's own words, for `question` (its number in the batch; the first
+  unanswered by default), and answers the next one with `next`. The clarify
+  loop takes the batch once every question has an answer. An approval takes
+  `choice` (`once` or `deny`, with `reason` for a deny): the agent's process
+  resolves the request with that command, never another one queued beside
+  it, and a command too long to read out whole can only be denied. Gone once
+  answered anywhere, and after 2 hours.
 - A watch names up to 4 session ids (the job's runtime and stored ids) and a
   title of up to 120 characters. It fires once, on the first turn end of any
   of them: `done` (the turn finished), `failed`, or `stopped` (interrupted).
@@ -2134,7 +2151,7 @@ seals the answers back. This host opens no inbound route of its own.
 
 | Method | Route | Returns |
 | --- | --- | --- |
-| POST | `/api/plugins/conduit_push/watch-tools/grant` with `{tools, max_jobs?, job_options?, job_profiles?, carry_jobs_from?, audio?}` | `{ok, grant_id, relay_url, key, watch_key, expires_at, tools, max_calls, max_jobs, job_profiles?, jobs_carried_from?, audio?}` |
+| POST | `/api/plugins/conduit_push/watch-tools/grant` with `{tools, max_jobs?, job_options?, job_profiles?, carry_jobs_from?, audio?, answer_sessions?, answer_approvals?}` | `{ok, grant_id, relay_url, key, watch_key, expires_at, tools, max_calls, max_jobs, job_profiles?, jobs_carried_from?, audio?}` |
 | POST | `/api/plugins/conduit_push/watch-tools/revoke` with `{grant_id}` | `{ok, revoked}` |
 
 - `tools` names what the call may run: `web_search` and `recall_memory`
@@ -2142,6 +2159,12 @@ seals the answers back. This host opens no inbound route of its own.
   `start_job`, `list_jobs` and `cancel_job` (granted with the Watch app's
   own `job_news` and `answer_approval`). A grant lasts at most 30
   minutes, holds one profile, and ends when the call does.
+- **`answer_call`** (plugin 0.70.0) answers what Hermes waits on in a call
+  from Hermes: granted only with `answer_sessions`, the call's chats, and
+  bound to them. It answers a question with the user's words or the number
+  of their choice, and approves or denies only with `answer_approvals: true`
+  (the Watch's "Tap or voice" setting). On Local Live the host passes the
+  user's words to it itself.
 - **Jobs** start an ordinary Hermes chat on the grant's profile through
   Hermes' own session API in the dashboard process, filed under Voice Jobs in
   Conduit like a job started from the phone; `job_options` carries the

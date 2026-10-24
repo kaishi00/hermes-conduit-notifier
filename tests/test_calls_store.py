@@ -751,3 +751,8 @@ def test_an_unreadable_store_is_not_overwritten(tmp_path, monkeypatch):
         store.update_settings({"when_asked": False})
     monkeypatch.undo()
     assert store.path.read_text(encoding="utf-8") == saved
+
+
+def test_a_watch_id_with_a_trailing_newline_is_refused():
+    assert calls_store._WATCH_ID.match("a" * 8)
+    assert calls_store._WATCH_ID.match("a" * 8 + "\n") is None

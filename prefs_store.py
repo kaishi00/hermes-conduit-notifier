@@ -57,8 +57,8 @@ MAX_DEVICE_NAME_CHARS = 60
 # 2100-01-01: later (or inf) is a corrupt time.
 MAX_AT = 4_102_444_800
 
-_KEY = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
-_INSTALLATION = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+_KEY = re.compile(r"^[a-z][a-z0-9_.-]{0,63}\Z")
+_INSTALLATION = re.compile(r"^[A-Za-z0-9_-]{8,64}\Z")
 
 _thread_lock = threading.Lock()
 

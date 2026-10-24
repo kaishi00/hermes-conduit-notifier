@@ -920,6 +920,15 @@ def test_with_two_pending_or_a_cut_command_the_card_offers_deny_only(call):
     _run(scenario())
 
 
+@pytest.mark.parametrize("command", ["", "   ", None])
+def test_a_local_live_approval_with_no_command_to_show_can_only_be_denied(command):
+    chat = types.SimpleNamespace(approvals=[], approvals_lock=threading.Lock())
+    assert api._WatchCallChat._track_approval(chat, "approval.request", {"command": command, "request_id": "r1"})
+    [approval] = chat.approvals
+    assert approval["cut"] is True
+    assert api._LocalLiveWatchSession._approval_choices(None, chat.approvals) == ("deny",)
+
+
 def test_a_rejoining_watch_is_shown_the_approval_still_pending(call):
     async def scenario():
         bridge, socket, watch = await _approvals_call(call)

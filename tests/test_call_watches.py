@@ -514,6 +514,14 @@ def test_a_call_that_fails_to_set_up_still_ends_with_the_news_once(home, hermes,
     assert _report(job_id, True)["status"] == "already_called"
 
 
+def test_a_run_known_only_by_its_task_id_says_it_could_not_call(home, hermes, clock):
+    job_id = _homelab(hermes, for_minutes=0)
+    answer = json.loads(watches.report({"happening": True, "saw": "Down."}, session_id=None,
+                                       task_id=f"cron:{job_id}:20261011_120000"))
+    assert answer["ok"] is True and answer["status"] == "not_called" and "reply" not in answer
+    assert _rang(home) == [], "no call keyed to a session no turn end names"
+
+
 def test_minutes_written_as_decimal_text(home, hermes):
     answer = _setup({"action": "set", "watch": {**HOMELAB, "for_minutes": "10.0"}})
     assert answer["ok"] is True and answer["watch"]["calls_after_minutes"] == 10

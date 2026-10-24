@@ -1,3 +1,4 @@
+import contextlib
 """Watch tool grants: wrist-down lookups for a Conduit Watch call through the relay."""
 
 import base64
@@ -744,3 +745,82 @@ def test_chats_are_granted_only_where_hermes_can_search_sessions(tmp_path):
 
 def test_capabilities_name_watch_chats():
     assert "watch-chats" in api.ROUTE_CAPABILITIES
+
+
+# --- Answering a call from Hermes ------------------------------------------------
+
+def test_answer_call_answers_only_the_chat_its_grant_names(tmp_path, monkeypatch):
+    monkeypatch.setattr(api, "_calls_home", lambda: tmp_path)
+    monkeypatch.setattr(api, "_profile_scope", lambda profile: contextlib.nullcontext())
+    store = api._calls_store().CallStore(tmp_path)
+    store.update_settings({"enabled": True, "alerts": True})
+    batch = [{"qid": "q0", "question": "Which environment?", "choices": ["staging (Recommended)", "prod"],
+              "multi_select": False}]
+    store.note_waiting(["rt-1", "st-1"], "question", request_id="conduit-push-a", questions=batch)
+    store.note_waiting("other", "question", request_id="conduit-push-b", questions=batch)
+
+    with pytest.raises(api.TokenError) as err:
+        api.open_watch_grant({"tools": ["answer_call"]}, profile=None, path=write_pairing(tmp_path),
+                             relay=FakeRelay(), start=lambda g: None)
+    assert err.value.status == 400
+    opened = api.open_watch_grant({"tools": ["web_search", "answer_call"], "answer_sessions": ["st-1", "rt-1"]},
+                                  profile=None, path=write_pairing(tmp_path), relay=FakeRelay(),
+                                  start=lambda g: None)
+    assert opened["tools"] == ["web_search", "answer_call"]
+    grant = api._watch_grants.all()[0]
+    answer = api.run_watch_tool(grant, {"tool": "answer_call",
+                                        "args": {"answer": "the recommended one", "session_id": "other"}})
+    assert answer == {"ok": True, "status": "answered", "question": 1, "answer": "staging"}
+    assert store.take_answers("conduit-push-a") == {"q0": "staging (Recommended)"}
+    assert store.take_answers("conduit-push-b") is None, "never another chat's question"
+    assert api.run_watch_tool(grant, {"tool": "answer_call", "args": {"answer": "1"}})["status"] == "not_waiting"
+
+
+def test_answer_call_approves_only_when_the_watch_answers_approvals_by_voice(tmp_path, monkeypatch):
+    monkeypatch.setattr(api, "_calls_home", lambda: tmp_path)
+    monkeypatch.setattr(api, "_profile_scope", lambda profile: contextlib.nullcontext())
+    store = api._calls_store().CallStore(tmp_path)
+    store.update_settings({"enabled": True, "alerts": True})
+    store.note_waiting("st-1", "approval", description="Clear the build cache", command="rm -rf build")
+
+    api.open_watch_grant({"tools": ["web_search", "answer_call"], "answer_sessions": ["st-1"]},
+                         profile=None, path=write_pairing(tmp_path), relay=FakeRelay(), start=lambda g: None)
+    taps = api._watch_grants.all()[-1]
+    refused = api.run_watch_tool(taps, {"tool": "answer_call", "args": {"choice": "once"}})
+    assert refused["status"] == "refused"
+    assert store.take_approval("st-1") is None
+
+    api.open_watch_grant({"tools": ["web_search", "answer_call"], "answer_sessions": ["st-1"],
+                          "answer_approvals": True},
+                         profile=None, path=write_pairing(tmp_path), relay=FakeRelay(), start=lambda g: None)
+    voice = api._watch_grants.all()[-1]
+    assert voice.answer_approvals
+    assert api.run_watch_tool(voice, {"tool": "answer_call", "args": {"choice": "once"}})["status"] == "answered"
+
+
+def test_local_live_on_the_watch_answers_the_call_from_hermes_with_the_users_words(tmp_path, monkeypatch):
+    monkeypatch.setattr(api, "_calls_home", lambda: tmp_path)
+    monkeypatch.setattr(api, "_profile_scope", lambda profile: contextlib.nullcontext())
+    store = api._calls_store().CallStore(tmp_path)
+    store.update_settings({"enabled": True, "alerts": True})
+    batch = [{"qid": "q0", "question": "Which environment?", "choices": ["staging (Recommended)", "prod"],
+              "multi_select": False},
+             {"qid": "q1", "question": "Which tests?", "choices": ["unit", "ui"], "multi_select": True}]
+    store.note_waiting("st-1", "question", request_id="conduit-push-a", questions=batch)
+    grant = types.SimpleNamespace(profile=None, answer_sessions=("st-1",), answer_approvals=False)
+
+    line = api._local_live_call_answer(grant, "the recommended one")
+    assert line.startswith("Got it: staging.")
+    assert "Next: Which tests? 1: unit. 2: ui." in line
+    assert api._local_live_call_answer(grant, "which one is faster?") == \
+        "I've asked Hermes. It will explain, then ask again."
+    assert store.take_answers("conduit-push-a") == {"q0": "staging (Recommended)",
+                                                    "q1": "Before I choose: which one is faster?"}
+    assert api._local_live_call_answer(grant, "what's the weather") is None, "nothing waits: the call's own chat"
+
+    store.note_waiting("st-1", "approval", description="Clear the build cache", command="rm -rf build")
+    assert "in Conduit on your iPhone" in api._local_live_call_answer(grant, "yes")
+    assert api._local_live_call_answer(grant, "play some music") is None
+    voice = types.SimpleNamespace(profile=None, answer_sessions=("st-1",), answer_approvals=True)
+    assert api._local_live_call_answer(voice, "Yes, go ahead.") == "Approved once. Hermes runs it now."
+    assert store.take_approval("st-1")["choice"] == "once"
