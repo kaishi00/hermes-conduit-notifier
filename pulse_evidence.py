@@ -135,12 +135,17 @@ def _windows_pid_running(pid: int) -> bool:
     Open it for a query instead; one this process may not open counts as
     running."""
     import ctypes
+    from ctypes import wintypes
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
     handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
     if not handle:
         return ctypes.get_last_error() != 87  # ERROR_INVALID_PARAMETER: no such process
     try:
-        code = ctypes.c_ulong()
+        code = wintypes.DWORD()
         return not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)) or code.value == 259  # STILL_ACTIVE
     finally:
         kernel32.CloseHandle(handle)
@@ -165,6 +170,14 @@ def _alive(entry: dict) -> bool:
     return True
 
 
+def _started(entry: dict) -> float:
+    """When the process started; 0 when the checkpoint has no sane time."""
+    value = entry.get("started_at")
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or not 0 < value < 1e11:
+        return 0.0  # NaN fails the range test too
+    return float(value)
+
+
 def processes(home: Path) -> list[dict]:
     """Background processes Hermes is running now, oldest first. A missing
     or unreadable checkpoint is none."""
@@ -175,10 +188,7 @@ def processes(home: Path) -> list[dict]:
     entries = [entry for entry in data if isinstance(entry, dict)] if isinstance(data, list) else []
     running = [entry for entry in entries if _alive(entry)]
 
-    def started(entry: dict) -> float:
-        value = entry.get("started_at")
-        return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
-    return sorted(running, key=started)
+    return sorted(running, key=_started)
 
 
 def background(home: Path, zone: tzinfo) -> str:
@@ -196,9 +206,8 @@ def background(home: Path, zone: tzinfo) -> str:
         titles = {}
     out = []
     for entry in running[:MAX_PROCESSES]:
-        started = entry.get("started_at")
-        when = (f", since {_local(started, zone)}"
-                if isinstance(started, (int, float)) and not isinstance(started, bool) and started > 0 else "")
+        started = _started(entry)
+        when = f", since {_local(started, zone)}" if started else ""
         title = titles.get(parent(entry), "")
         source = f", started in \"{_clip(title, 60)}\"" if title else ""
         watching = entry.get("watch_patterns")
