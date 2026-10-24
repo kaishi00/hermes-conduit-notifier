@@ -45,7 +45,7 @@ jobs:
           # is fine; a failed add is a misconfiguration and fails the run.
           current=$(gh api "$labels?per_page=100" --jq '.[].name')
           if [ "$RELABEL" = true ]; then
-            if grep -qx 'waiting on Eric' <<<"$current"; then
+            if grep -qx 'waiting on Eric' <<<"$current" && grep -qx 'waiting on contributor' <<<"$current"; then
               gh api -X DELETE "$labels/waiting%20on%20Eric" >/dev/null || true
             fi
           elif grep -qx 'waiting on contributor' <<<"$current"; then
