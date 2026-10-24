@@ -6405,7 +6405,9 @@ def provision_e2e(body: Any, path: Any = None) -> Dict[str, Any]:
     are sealed seconds after the push they answer, so none is lost in
     practice. While its overlap lasts, the replaced key can't come back: a
     delayed retry of its handover must not roll the pairing back. After that
-    the host no longer knows it, and the phone never sends a retired key.
+    (or after a rotation without overlap, or a second one inside it) the host
+    no longer knows the key; the phone never sends a key it retired, and
+    every POST already needs the dashboard sign-in, so no tombstones are kept.
     """
     if not isinstance(body, dict):
         raise TokenError(400, "Expected a JSON object")

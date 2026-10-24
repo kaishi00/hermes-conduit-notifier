@@ -171,7 +171,11 @@ def _keep_provisioned_key(value: dict[str, Any], path: Path) -> None:
         or current.get("gateway_id") != value.get("gateway_id")
     ):
         return
-    if "e2e" not in value or _key_created_at(current["e2e"]) > _key_created_at(value["e2e"]):
+    # A tie (two keys stored in the same second) goes to the file: only the
+    # dashboard stores keys, so the file's is the newer one.
+    if "e2e" not in value or (
+        current["e2e"] != value["e2e"] and _key_created_at(current["e2e"]) >= _key_created_at(value["e2e"])
+    ):
         value["e2e"] = current["e2e"]
         # The rotation that stored it came with these: the key it replaced
         # and the cleared request.
