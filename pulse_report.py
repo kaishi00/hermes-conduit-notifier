@@ -476,7 +476,7 @@ def later_lines(home: Path, items: Sequence[dict], *, home_chat_id: str, zone: t
             continue
         line = f"#{item['id']}: " + _clip(evidence.lines([found], zone)[0], LATER_PER_ITEM)
         if used + len(line) > LATER_BUDGET:
-            break
+            continue
         out.append(line)
         used += len(line) + 1
     if not out:
