@@ -575,3 +575,18 @@ def test_redact_event_drops_a_hand_built_malformed_title_label():
     event = {"event_id": "approval:1", "type": "approval.needed", "title_label": "approval.needed\nINJECTED"}
     assert "title_label" not in redact_event(event)
     assert "session_title" not in push_event("approval.needed", identifier="approval:1", session_title=5)
+
+
+def test_no_push_shows_a_media_path():
+    from events import plain_text
+    question = push_event("input.needed", identifier="q", title="Send MEDIA:/opt/data/x/report.pdf?",
+                          body="Send this?\nMEDIA:/opt/data/cache/documents/doc_0123456789ab_Plan.pdf")
+    assert question["title"] == "Send 📎 report.pdf?"
+    assert question["body"] == "Send this? 📎 Plan.pdf"
+    approval = push_event("approval.needed", identifier="a", body="Upload MEDIA:/tmp/out/chart.png to the web")
+    assert approval["body"] == "Upload 📎 chart.png to the web"
+    # Code keeps its text, whether a push reads it here or plain_text did.
+    fenced = "Run:\n```\ncat MEDIA:/tmp/a.png\n```"
+    assert push_event("approval.needed", identifier="f", body=fenced)["body"] == "Run: ``` cat MEDIA:/tmp/a.png ```"
+    reply = push_event("response.ready", identifier="r", body=plain_text(fenced))
+    assert reply["body"] == "Run: cat MEDIA:/tmp/a.png"

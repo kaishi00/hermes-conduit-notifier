@@ -99,10 +99,13 @@ def push_event(
         event["session_id"] = session_id
     if profile:
         event["profile"] = profile[:80]
+    # No push shows a host path: a MEDIA tag in a question, an approval, a
+    # call, an update or a phone change reads as its attachment too. A reply
+    # comes through plain_text, which already did this and kept fenced code.
     if title:
-        event["title"] = _clean(title, 120)
+        event["title"] = _clean(_shown(title), 120)
     if body:
-        event["body"] = _clean(body, 500)
+        event["body"] = _clean(_shown(body), 500)
     # Conduit writes the title in its own language (#1144): `title_label`
     # names which one (an event type, or `phone.<kind>`), and the chat's
     # title rides on its own instead of glued into `title`. `title` stays for
@@ -653,6 +656,22 @@ def media_free(value: str) -> str:
     return _MEDIA_TAG.sub(_attachment, _MEDIA_DIRECTIVE.sub("", value))
 
 
+class _Plain(str):
+    """Text plain_text made: its MEDIA tags are read, fenced code kept."""
+
+
+def _shown(value: Any) -> Any:
+    """``value`` with its MEDIA tags read, unless plain_text already did."""
+    if not isinstance(value, str) or isinstance(value, _Plain):
+        return value
+    lines, fenced = [], False
+    for line in value.splitlines():
+        if _FENCE.match(line):
+            fenced = not fenced
+        lines.append(line if fenced or _FENCE.match(line) else media_free(line))
+    return "\n".join(lines)
+
+
 def plain_text(value: Any) -> str:
     """A Markdown reply as a notification shows it: the words without the
     markup (fences, emphasis, headings, link targets, table rules), and a
@@ -680,7 +699,7 @@ def plain_text(value: Any) -> str:
         line = _STRONG.sub(r"\2", line)
         line = _STRIKE.sub(r"\1", _UNDERSCORE_EMPHASIS.sub(r"\1", _EMPHASIS.sub(r"\1", line)))
         lines.append(line.replace("`", ""))
-    return "\n".join(lines).strip()
+    return _Plain("\n".join(lines).strip())
 
 
 def card_choice_labels(choice: Any) -> set[str]:

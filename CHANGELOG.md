@@ -16,10 +16,10 @@ checks it). The format is fixed, because Conduit reads it:
 ## 0.70.4 (2026-10-24)
 
 ### Fixes
-- A reply that sends you a file no longer shows the file's path on the
-  host in its notification (MEDIA:/opt/data/cache/…). The notification
-  shows a paperclip and the file's name, or its type when the name is only
-  a code.
+- A notification no longer shows a file's path on the host
+  (MEDIA:/opt/data/cache/…): replies, questions, approvals, calls, updates
+  and phone changes show a paperclip and the file's name, or its type when
+  the name is only a code.
 
 ## 0.70.2 (2026-10-24)
 
