@@ -13,13 +13,20 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.77.2 (2026-10-25)
+## 0.77.3 (2026-10-25)
 
 ### Fixes
 - A group room could stop answering altogether once one of its threads
   passed about 24 messages. Hermes could no longer plan the room's next
   turn, so no member replied again, in that thread or any other, and nothing
   said why. Rooms now keep answering however long their threads get.
+
+## 0.77.2 (2026-10-25)
+
+### Fixes
+- Preparing GPT-Live for the Watch failed every time with "No module named
+  '_cffi_backend'" on current Hermes, because the install borrowed packages
+  from Hermes instead of adding its own. Tap Prepare again after updating.
 
 ## 0.77.1 (2026-10-25)
 

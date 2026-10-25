@@ -1481,7 +1481,7 @@ naming what's missing. If Hermes' session store (`state.db`) can't be read
 when the plugin needs it to tell whether a session is a room, the plugin logs
 a warning and treats that session as an ordinary chat.
 
-## Long group room threads (plugin 0.77.2+)
+## Long group room threads (plugin 0.77.3+)
 
 Hermes plans a gateway-hosted room's next turn from the last 24 messages of
 each thread. Before planning, it matches each member reply among them to the
@@ -2434,7 +2434,9 @@ relay key. The host still opens no inbound route.
   sign-in never enters the helper. On any Hermes install, `prepare` makes the
   plugin's own environment for it: `python -m venv` from the Python Hermes
   runs, or `uv` where that Python has no venv or pip, then
-  `pip install aiortc==1.15.0` (about 150 MB). It goes in
+  `pip install aiortc==1.15.0` (about 150 MB), run isolated and without
+  Hermes' `PYTHONPATH` so it installs everything aiortc needs rather than
+  counting on packages Hermes already has. It goes in
   `~/.hermes/conduit_push/watch-audio-env` (under `HERMES_HOME` when that's
   set, or `CONDUIT_WATCH_AUDIO_ENV`). Nothing is installed into Hermes' own
   Python; if that Python already has `aiortc`, it's used as it is.

@@ -11921,8 +11921,12 @@ class _WatchAudioRuntime:
             self.failure = failure
 
     def _step(self, command: list, timeout: float, what: str) -> str:
+        # Hermes points PYTHONPATH at its own site-packages, so pip (and uv)
+        # would count Hermes' cffi and cryptography as installed and leave
+        # them out of an environment the helper runs isolated (#340).
+        env = {name: value for name, value in os.environ.items() if name != "PYTHONPATH"}
         try:
-            done = self._run(command, capture_output=True, text=True, timeout=timeout)
+            done = self._run(command, capture_output=True, text=True, timeout=timeout, env=env)
         except subprocess.TimeoutExpired:
             raise _RuntimeBuildFailed(f"{what} timed out")
         except OSError as exc:
@@ -11944,7 +11948,7 @@ class _WatchAudioRuntime:
         uv = self._which("uv")
         try:
             self._step([self._base_python, "-m", "venv", env_dir], WATCH_AUDIO_VENV_TIMEOUT_S, "Making the environment")
-            self._step([python, "-m", "pip", "install", "--disable-pip-version-check", "--no-input",
+            self._step([python, "-I", "-m", "pip", "install", "--disable-pip-version-check", "--no-input",
                         "--no-warn-script-location", WATCH_AUDIO_AIORTC], WATCH_AUDIO_PIP_TIMEOUT_S, "Installing aiortc")
         except _RuntimeBuildFailed as first:
             # A Python without venv or pip (a distribution's own, say): uv
