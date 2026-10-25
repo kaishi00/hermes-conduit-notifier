@@ -10704,6 +10704,9 @@ class _WatchJobs:
         # The job whose chat the call's later ordinary requests run in: its
         # first ordinary one that started (#1250).
         self.call_chat: Optional[_WatchJob] = None
+        # The first ordinary request while its chat is still being made: one
+        # that starts meanwhile waits for that chat rather than making its own.
+        self.call_chat_claim: Optional[_WatchJob] = None
 
     # Hermes' session API
 
@@ -10765,7 +10768,8 @@ class _WatchJobs:
         if not sid:
             return None
         # The call's chat carries one request at a time (#1250): its frames
-        # are the running one's, never a settled earlier one's.
+        # are the running one's, never a settled earlier one's. Late frames
+        # with no running owner go to the earliest, whose handlers drop them.
         owners = [job for job in self.jobs.values() if sid in (job.session_id, job.stored_session_id)]
         return next((job for job in owners if job.active or job.cancelling), owners[0] if owners else None)
 
@@ -10929,7 +10933,12 @@ class _WatchJobs:
             # The Watch says whether the user asked to keep it apart; a job on
             # another profile always is.
             job.joins_call = args.get("joins_call") is True and profile is None
-            chat = self.call_chat if job.joins_call else None
+            chat: Optional[_WatchJob] = None
+            if job.joins_call:
+                claim = self.call_chat_claim if self.call_chat_claim is not None and self.call_chat_claim.active else None
+                chat = self.call_chat or claim
+                if chat is None:
+                    self.call_chat_claim = job
             self.jobs[job.job_id] = job
         done = threading.Event()
 
@@ -11051,6 +11060,8 @@ class _WatchJobs:
             cancelled = job.status == "cancelled"
             if not cancelled and job.joins_call and job.profile is None and self.call_chat is None:
                 self.call_chat = job
+            if self.call_chat_claim is job:
+                self.call_chat_claim = None
             self.changed.notify_all()
         if cancelled:
             self._close_session(job)
@@ -11064,6 +11075,13 @@ class _WatchJobs:
                 "message": f"The job is running on Hermes{where}. Its result will arrive later as a message; "
                            "don't wait for it."}
 
+    def _chat_waits(self, chat: _WatchJob, job: _WatchJob) -> bool:
+        """Whether a request waits on in the call's chat: for the chat to be
+        made, or for the request running there. Called with the lock held."""
+        if self.call_chat is not chat:
+            return chat.active and self.call_chat_claim is chat
+        return self._chat_busy(chat, job)
+
     def _chat_busy(self, chat: _WatchJob, job: _WatchJob) -> bool:
         """Whether another request still runs in the call's chat. Called with
         the lock held."""
@@ -11075,11 +11093,16 @@ class _WatchJobs:
         nothing else runs there, as the phone sends a call's requests to its
         chat; the start's answer."""
         with self.changed:
-            while not self.ended and job.status == "starting" and self._chat_busy(chat, job):
+            while not self.ended and job.status == "starting" and self._chat_waits(chat, job):
                 self.changed.wait(WATCH_JOB_CHAT_WAIT_S)
             ended, cancelled = self.ended, job.status == "cancelled"
-            if not ended and not cancelled:
+            # The first request's chat never got made: this one makes the
+            # call's chat instead.
+            own = not ended and not cancelled and self.call_chat is not chat
+            if not ended and not cancelled and not own:
                 job.session_id, job.stored_session_id = chat.session_id, chat.stored_session_id
+        if own:
+            return self._start_session(job, instructions)
         if cancelled:
             return {"ok": True, "status": "not_started", "title": job.title,
                     "message": f"{job.title} was cancelled before it started."}
@@ -11088,11 +11111,25 @@ class _WatchJobs:
                 if job.active:
                     job.status, job.error = "failed", "The call ended before Hermes took it"
                 self.changed.notify_all()
+            # It was the last thing holding the call's transport open.
+            self._close_transport_if_idle()
             return {"ok": True, "status": "not_started", "title": job.title,
                     "message": "The call ended before Hermes could take this request."}
         try:
-            self.rpc("prompt.submit", {"session_id": job.session_id,
-                                       "text": WATCH_JOB_NEXT_PROMPT.format(instructions=instructions)})
+            with self.lock:
+                cancelled = job.status == "cancelled"
+            if not cancelled:
+                self.rpc("prompt.submit", {"session_id": job.session_id,
+                                           "text": WATCH_JOB_NEXT_PROMPT.format(instructions=instructions)})
+                with self.lock:
+                    cancelled = job.status == "cancelled"
+                if cancelled:
+                    # Cancelled while its prompt went in: stop that turn, as
+                    # _start_session does. Nothing else ran in the chat.
+                    try:
+                        self.rpc("session.interrupt", {"session_id": job.session_id})
+                    except WatchJobError as exc:
+                        logger.info("Cancelling a starting Watch job failed: %s", exc)
         except Exception as exc:  # noqa: BLE001 — the request didn't go; the model is told
             with self.changed:
                 if job.active:
@@ -11101,7 +11138,10 @@ class _WatchJobs:
                 self.changed.notify_all()
             if not isinstance(exc, WatchJobError):
                 _log_watch_failure("Continuing a Watch call's chat failed", exc)
-            # The chat stays open: it is the call's, and its earlier jobs'.
+            # The chat stays open while the call runs: it is the call's, and
+            # its earlier jobs'.
+            if self.ended:
+                self._close_session(job)
             return {"ok": True, "status": "not_started", "title": job.title,
                     "message": f"Hermes couldn't take the request: {job.error}"}
         with self.changed:

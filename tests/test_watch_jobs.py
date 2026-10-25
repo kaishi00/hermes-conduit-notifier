@@ -1844,3 +1844,80 @@ def test_a_request_waiting_for_the_calls_chat_can_be_cancelled():
     time.sleep(0.1)
     assert len(server.methods("prompt.submit")) == 1, "the cancelled request never goes in"
     assert server.methods("session.interrupt") == []
+
+
+def test_a_request_cancelled_while_it_goes_into_the_calls_chat_is_stopped():
+    grant = make_jobs()
+    server = grant.jobs.server
+    start_joining(grant, "plan the trip")
+    server.emit("rt-1", "message.complete", {"text": "Plan", "status": "complete"})
+
+    def submitted(params):
+        if len(server.methods("prompt.submit")) == 2:
+            # cancel_job got there while the prompt went in.
+            grant.jobs.jobs["watch-2"].status = "cancelled"
+        return {"status": "started"}
+
+    server.results["prompt.submit"] = submitted
+    answer = start_joining(grant, "and book the hotel")
+    assert answer["status"] == "not_started"
+    assert server.methods("session.interrupt") == [{"session_id": "rt-1"}]
+
+
+def test_a_request_started_while_the_calls_chat_is_made_waits_for_that_chat():
+    grant = make_jobs()
+    server = grant.jobs.server
+    answers = []
+    worker = threading.Thread(target=lambda: answers.append(start_joining(grant, "and book the hotel")))
+    server.on_create = lambda: None if worker.is_alive() or answers else worker.start()
+    original = api.WATCH_JOB_START_ANSWER_S
+    api.WATCH_JOB_START_ANSWER_S = 0.2
+    try:
+        assert start_joining(grant, "plan the trip")["session_id"] == "st-1"
+        worker.join(1)
+    finally:
+        api.WATCH_JOB_START_ANSWER_S = original
+    assert answers[0]["status"] == "accepted", "it waits for the first request"
+    server.emit("rt-1", "message.complete", {"text": "Plan", "status": "complete"})
+    wait_for(lambda: len(server.methods("prompt.submit")) == 2)
+    assert len(server.methods("session.create")) == 1, "one chat for both"
+    assert [p["session_id"] for p in server.methods("prompt.submit")] == ["rt-1", "rt-1"]
+
+
+def test_a_request_whose_first_chat_never_got_made_makes_its_own():
+    grant = make_jobs()
+    server = grant.jobs.server
+    answers = []
+    worker = threading.Thread(target=lambda: answers.append(start_joining(grant, "and book the hotel")))
+
+    def created():
+        if worker.is_alive() or answers:
+            return
+        # The first request is cancelled while its chat is made.
+        grant.jobs.jobs["watch-1"].status = "cancelled"
+        worker.start()
+
+    server.on_create = created
+    assert start_joining(grant, "plan the trip")["status"] == "not_started"
+    worker.join(2)
+    assert answers[0]["status"] == "started"
+    assert answers[0]["session_id"] == "st-2"
+    assert grant.jobs.call_chat is grant.jobs.jobs["watch-2"]
+
+
+def test_the_transport_closes_when_the_call_ends_while_a_request_waits():
+    grant = make_jobs()
+    server = grant.jobs.server
+    start_joining(grant, "plan the trip")
+    original = api.WATCH_JOB_START_ANSWER_S
+    api.WATCH_JOB_START_ANSWER_S = 0.1
+    try:
+        assert start_joining(grant, "and book the hotel")["status"] == "accepted"
+    finally:
+        api.WATCH_JOB_START_ANSWER_S = original
+    grant.jobs.end()
+    wait_for(lambda: grant.jobs.jobs["watch-2"].status == "failed")
+    server.emit("rt-1", "message.complete", {"text": "Plan", "status": "complete"})
+    wait_for(lambda: grant.jobs.transport._closed)
+    assert server.methods("session.close") == [{"session_id": "rt-1"}]
+    assert len(server.methods("prompt.submit")) == 1
