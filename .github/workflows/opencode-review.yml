@@ -172,7 +172,8 @@ jobs:
               a tool, a route or a push the app uses, including what a tool's
               description or result tells the models. The map isn't in this
               checkout: don't try to list the app's siblings, only check that
-              an entry or a hermes-conduit PR is named.
+              an entry or a hermes-conduit PR is named. A refactor that
+              changes no behavior has no siblings and needs neither.
 
             If you find no issues, say so explicitly. Do NOT summarize what you did
             or describe your process. Output only the review.

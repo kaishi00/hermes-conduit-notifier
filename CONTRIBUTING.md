@@ -20,7 +20,8 @@ entry current.
 - In the PR, fill in Siblings: name the entry, or the hermes-conduit PR that
   adds or updates it, then for each sibling say done, not needed (and why),
   or a gap left open. "No mapped feature" is only for a change with no
-  siblings in the app.
+  siblings in the app. A refactor that changes no behavior has none and
+  needs no entry.
 - When the change alters an entry, update it in hermes-conduit. A feature
   with siblings in the app and no entry gets one there, and a fix that brings
   a sibling in line with an earlier change it missed adds that sibling to the
