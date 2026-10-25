@@ -1,4 +1,5 @@
 """Each owner's choices for their agent in a Linked Room (designs/cross-owner-agents, decision 9)."""
+import argparse
 import importlib.util
 import json
 import pathlib
@@ -213,3 +214,42 @@ def test_routes_refuse_a_bad_room_id_on_read(client):
 
 def test_room_rules_is_a_listed_capability(client):
     assert "room-rules" in client.get(f"{BASE}/capabilities").json()["capabilities"]
+
+
+# --- CLI ------------------------------------------------------------------------
+
+
+def _rooms_args(action, room="", **changes):
+    values = {"tools": None, "tool": None, "share": None, "search": None, "takes_part": None, "limit": None,
+              "note": None, **changes}
+    return argparse.Namespace(conduit_push_action="rooms", rooms_action=action, room=room, **values)
+
+
+def test_cli_shows_and_sets_room_choices(tmp_path, monkeypatch, capsys):
+    cli = _load("conduit_push.cli", ROOT / "cli.py")
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path)
+    assert cli.dispatch(_rooms_args("set", ROOM, tools="custom", tool=["terminal", "read_file"], search="on",
+                                    limit=10, note="No work talk")) == 0
+    saved = ChoicesStore(tmp_path).get(ROOM)
+    assert (saved.tools, saved.custom_tools, saved.search_chats, saved.daily_limit, saved.note) == (
+        "custom", ("terminal", "read_file"), True, 10, "No work talk")
+    assert cli.dispatch(_rooms_args("set", share="nothing", takes_part="asked")) == 0
+    assert ChoicesStore(tmp_path).defaults() == RoomChoices(share="nothing", takes_part="asked")
+    capsys.readouterr()
+
+    assert cli.dispatch(_rooms_args("show")) == 0
+    shown = capsys.readouterr().out
+    assert "Defaults" in shown and f"Room {ROOM}" in shown and "terminal, read_file" in shown
+    assert cli.dispatch(_rooms_args("show", OTHER)) == 0
+    assert "the defaults" in capsys.readouterr().out
+
+
+def test_cli_refuses_choices_the_store_wont_keep(tmp_path, monkeypatch, capsys):
+    cli = _load("conduit_push.cli", ROOT / "cli.py")
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path)
+    assert cli.dispatch(_rooms_args("set", ROOM, tools="custom", tool=["memory"])) == 1
+    assert "never allowed" in capsys.readouterr().out
+    assert cli.dispatch(_rooms_args("set", ROOM, limit=0)) == 1
+    assert cli.dispatch(_rooms_args("set", ROOM)) == 2
+    assert cli.dispatch(_rooms_args("show", "../x")) == 1
+    assert not (tmp_path / choices_module.FILE_NAME).exists()
