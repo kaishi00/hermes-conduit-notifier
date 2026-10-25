@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.77.2 (2026-10-25)
+
+### Fixes
+- A group room could stop answering altogether once one of its threads
+  passed about 24 messages. Hermes could no longer plan the room's next
+  turn, so no member replied again, in that thread or any other, and nothing
+  said why. Rooms now keep answering however long their threads get.
+
 ## 0.77.1 (2026-10-25)
 
 ### Fixes

@@ -1481,6 +1481,25 @@ naming what's missing. If Hermes' session store (`state.db`) can't be read
 when the plugin needs it to tell whether a session is a room, the plugin logs
 a warning and treats that session as an ordinary chat.
 
+## Long group room threads (plugin 0.77.2+)
+
+Hermes plans a gateway-hosted room's next turn from the last 24 messages of
+each thread. Before planning, it matches each member reply among them to the
+user message the reply answered. Once the oldest of those messages is a reply
+whose user message was left out, the match fails on every attempt, so the room
+gets no more turns, in that thread or any other, and Hermes logs nothing. The
+plugin fills in each left-out user message for that match: its place in the
+room log is the seq the reply's turn id starts with (Hermes builds turn ids
+from it), so the planner plans the same turns it would with the whole thread.
+The plugin's gateway load guards the planner there, and its dashboard routes
+guard it in a dashboard that runs as its own process and hosts rooms itself
+(with `plugins.isolation: host` the routes load in a plugin host process
+instead, so they don't guard that dashboard's rooms). Anything else wrong with
+a thread still fails the way Hermes fails it. The plugin logs once, at info
+level, the first time it fills a message in, and leaves the planner alone,
+saying so at info level, when Hermes' planner has no
+`_derive_member_watermarks`.
+
 ## Artifacts (plugin 0.40+)
 
 Conduit's Artifacts screens list what a profile's chats produced:
