@@ -1551,6 +1551,11 @@ def test_only_a_do_it_cards_reminder_sent_after_it_counts_as_handed_on(live):
     live.store.add_card({"kind": "followup", "level": "push", "news": "Call Sam.", "created_at": DAY})  # too short
     live.store.add_card({"kind": "brief", "level": "push", "news": "A calm day: renew the parking permit online.",
                          "created_at": DAY})  # no Do it on a brief
+    # Do it leaves a card's news, or its title when it has none: a title with news is never handed on.
+    live.store.add_card({"kind": "followup", "level": "push", "title": "Book the dentist for a cleaning",
+                         "news": "You said you'd book the dentist this week.", "created_at": DAY})
+    live.store.add_card({"kind": "noticed", "level": "screen", "title": "Passport renewals open on Monday",
+                         "news": "", "created_at": DAY})
     texts = memory.handoff_texts(live.store)
     rows = [_row(1, "user", "call sam about the friday dinner booking.", DAY - 60),  # before the card
             _row(2, "assistant", "Sure.", DAY - 50),
@@ -1558,8 +1563,12 @@ def test_only_a_do_it_cards_reminder_sent_after_it_counts_as_handed_on(live):
                  DAY + 60),
             _row(4, "assistant", "Calling now.", DAY + 70), _row(5, "assistant", "Done, booked for 8.", DAY + 80),
             _row(6, "user", "Call Sam.", DAY + 90), _row(7, "assistant", "Again?", DAY + 100),
-            _row(8, "user", "Renew the parking permit online.", DAY + 110)]
-    assert memory.handoff_rows(rows, texts) == {3, 4, 5}
+            _row(8, "user", "Renew the parking permit online.", DAY + 110),
+            _row(9, "user", "I need to book the dentist for a cleaning soon", DAY + 120),
+            _row(10, "assistant", "I'll find you a slot tomorrow.", DAY + 130),
+            _row(11, "user", "Pulse reminded me: Passport renewals open on Monday", DAY + 140),
+            _row(12, "assistant", "I'll book you a slot.", DAY + 150)]
+    assert memory.handoff_rows(rows, texts) == {3, 4, 5, 11, 12}
     text = memory.render(rows[2:6], UTC, handoffs={3, 4, 5})
     assert "User (Pulse's reminder): Pulse reminded me" in text
     assert "Hermes (answering Pulse's reminder): Calling now." in text and "User: Call Sam." in text
@@ -1593,6 +1602,22 @@ def test_a_reminder_sent_on_with_do_it_and_its_answer_close_items_but_never_add_
     assert [item["text"] for item in remembering.store.open_items()] == ["The user will renew their passport."]
     closed = remembering.store.item(prune)
     assert closed["status"] == "done" and "both backups were shredded" in closed["closed_by"]
+
+
+def test_a_reminder_sent_on_at_the_end_of_one_chunk_still_marks_the_answer_in_the_next(remembering, db):
+    news = "The few weeks are up and the relay.json backup is still there. Say the word and it's gone."
+    remembering.store.add_card({"kind": "followup", "level": "push", "news": news, "created_at": DAY})
+    # Sent just before midnight and answered just after: the date change splits the chunks.
+    db.message("user", f"Pulse reminded me: {news}\n\nLet's take care of it now.", sid="work", at=DAY + 86400 - 30)
+    db.message("assistant", "Already done. If that reminder job keeps replaying completed items, say the word and "
+               "I'll inspect its cron config.", sid="work", at=DAY + 86400 + 30)
+    model = FakeModel({"items": []}, {"items": [
+        {"kind": "promise", "text": "Hermes will inspect the Pulse reminder job's cron config.",
+         "evidence": "say the word and I'll inspect its cron config", "line": 1, "explicit": True}]})
+    _remember(remembering, model, DAY + 86400 + 30 + memory.IDLE_S)
+    assert len(model.shown) == 2
+    assert "Hermes (answering Pulse's reminder):" in model.shown[1].split("<<<chat")[1]
+    assert remembering.store.open_items() == []
 
 
 def _open(n, kind, text, evidence, chat="work", at=DAY, due=""):

@@ -272,14 +272,16 @@ def render(chunk: Sequence[Any], zone: tzinfo, outcomes: Sequence[dict] = (),
 
 def handoff_texts(pulse_store: store.PulseStore) -> list[tuple[float, str]]:
     """The reminders Do it can hand on, as (when the card was made, the
-    reminder as handoff_rows compares it), from the newest cards Do it is on."""
+    reminder as handoff_rows compares it), from the newest cards Do it is on:
+    the text Do it leaves in the composer, its news or else its title (the
+    app's PulseCard.actionMessage), and nothing else on the card."""
     texts = []
     for card in pulse_store.cards(HANDOFF_CARDS):
         if card["kind"] not in HANDOFF_KINDS:
             continue
-        for text in dict.fromkeys(_norm(_text(value)) for value in (card["news"], card["title"])):
-            if len(text) >= HANDOFF_MIN:
-                texts.append((float(card["created_at"]), text))
+        text = _norm(_text(card["news"] or card["title"]))
+        if len(text) >= HANDOFF_MIN:
+            texts.append((float(card["created_at"]), text))
     return texts
 
 
@@ -526,6 +528,9 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
                 raise
             continue
         read_to = chat.read_to
+        # Over all of it, so a reminder at the end of one chunk still marks
+        # the answer that starts the next.
+        handed_on = handoff_rows(rows, handoffs)
         for chunk in chunks(rows, zone, now):
             if calls >= MAX_CHUNKS or done["tokens"] >= budget or not still_leader() \
                     or (chat.until is not None and not current()):
@@ -539,8 +544,7 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
             calls += 1
             remembered = candidates(pulse_store.open_items(profile=chat.profile, limit=MAX_OPEN), chunk, chat.chat_id)
             try:
-                items, closed, tokens = extract(llm, chunk, zone, outcomes, remembered,
-                                                handoff_rows(chunk, handoffs), now=now)
+                items, closed, tokens = extract(llm, chunk, zone, outcomes, remembered, handed_on, now=now)
             except ChunkFailed as error:  # waits for a retry
                 done["tokens"] += error.tokens
                 if not still_leader() or (chat.until is not None and not current()):
@@ -570,7 +574,7 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
             chat = replace(chat, after_id=last["id"], read_to=last["timestamp"])
             read_to = last["timestamp"]
             done["chunks"] += 1
-            done["items"] += sum(1 for item in items if not item["same_as"])
+            done["items"] += sum(1 for item in items if not item["same_as"] and not item["late"])
     if backfill and current() and sorted(unreadable) != pulse_store.get("memory_backfill_unreadable"):
         pulse_store.set("memory_backfill_unreadable", sorted(unreadable))
         if unreadable:

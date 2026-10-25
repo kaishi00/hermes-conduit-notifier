@@ -346,9 +346,9 @@ def material(pulse_store: store.PulseStore, home: Path, item: dict, *, zone: tzi
                                      max_chars=PER_MESSAGE, limit=CHAT_ROWS)
     except hermes.HermesUnreadable as error:
         raise ChatUnreadable(str(error)) from None
-    said, earlier = said_since(rows, f"{item['text']} {item['evidence']}", after=float(item["valid_from"]),
-                               zone=zone)
-    parts.append("## Said in that chat since\n" + (said or "Nothing."))
+    newest, earlier = said_since(rows, f"{item['text']} {item['evidence']}", after=float(item["valid_from"]),
+                                 zone=zone)
+    parts.append("## Said in that chat since\n" + (newest or "Nothing."))
     if earlier:
         parts.append(EARLIER_TITLE.format(chat="that chat") + "\n" + earlier)
     if not item["profile"]:
