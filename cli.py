@@ -355,6 +355,11 @@ def _pulse(args: argparse.Namespace) -> int:
               + datetime.fromtimestamp(upcoming, zone).strftime("%a %d %b %H:%M"))
     else:
         print("Shadow reports: off")
+    zone = pulse.report_zone(pulse_store, home)
+    brief_time = pulse_store.get("brief_time") or pulse.brief.DEFAULT_TIME
+    upcoming = pulse.report.next_time(time.time(), zone, brief_time)
+    print(f"Morning brief at {pulse.report.clock_text(brief_time)} ({zone}); next "
+          + datetime.fromtimestamp(upcoming, zone).strftime("%a %d %b %H:%M"))
     if pulse_store.get("report_profiles") == "all":
         others = [name for name, _ in pulse.report.profile_homes(home)]
         if others:

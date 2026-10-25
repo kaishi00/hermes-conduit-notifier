@@ -10,7 +10,7 @@ from datetime import datetime
 
 import pytest
 
-from test_pulse import SID, StateDB, FIXTURE_SCHEMA, FakeHost, ROOT, _load, cli, host, plugin, pulse, store
+from test_pulse import SID, StateDB, brief_off_the_clock, FIXTURE_SCHEMA, FakeHost, ROOT, _load, cli, host, plugin, pulse, store
 
 followup = _load("conduit_push.pulse_followup", ROOT / "pulse_followup.py")
 CHAT = "work"
@@ -34,6 +34,7 @@ def live(tmp_path, monkeypatch):
     pulse_store.set("daily_report", False)
     pulse_store.set("memory", False)
     pulse_store.set("enabled", True)
+    brief_off_the_clock(pulse_store, tmp_path)
     db = StateDB(tmp_path, FIXTURE_SCHEMA)
     db.session()
     db.session(sid=CHAT, title="Deploy", pinned=0)

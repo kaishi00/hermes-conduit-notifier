@@ -1,16 +1,20 @@
-"""Pulse's morning brief: what was held for it, once a day (pulse_learning).
+"""Pulse's morning brief: every day at the brief time (08:00 in the
+report's time zone by default), one Pulse turn in the home chat sums up
+what's still outstanding, with a push: open promises and things the user
+said they'd do, today's calendar and reminders, and what was held for it.
 
 A kind rated down to ``brief`` on the loudness ladder doesn't speak up when
-its news comes in; its cards wait, and at the brief time (08:00 in the
-report's time zone by default) one Pulse turn in the home chat brings them
-together, with a push. Delivered, the cards are stamped ``briefed_at``; a
-brief that didn't get through after a few tries leaves them for tomorrow.
+its news comes in; its cards wait and come with the brief. Delivered, they
+are stamped ``briefed_at``; a brief that didn't get through after a few
+tries leaves them for tomorrow.
 """
 
 from __future__ import annotations
 
 import re
 import secrets
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 from . import pulse_report as report
@@ -26,15 +30,18 @@ MAX_CARDS = 12
 LINE_LIMIT = 400
 PENDING = "brief_cards"
 
+HELD_TITLE = "## Held for this morning"
 TEXT = """Pulse morning brief {tag}.
-What Pulse held for this morning:
-{lines}"""
-NOTE = ("This turn was started by Pulse, the part of Hermes that speaks up on its own. The message lists news the "
-        "user asked to get in a morning brief instead of as it happened. Each item is already shown to them as its "
-        "own card under your reply, so don't list them again: open their morning brief in one or two short, "
-        "friendly sentences that sum up what's in it, the one that needs them most first. Your reply is also "
-        "the notification, so keep it under 200 characters. Only pass on what the message says. Don't use any "
-        "tools.")
+{context}"""
+NOTE = ("This turn was started by Pulse, the part of Hermes that speaks up on its own, for the user's morning "
+        "brief: one card that sums up what's still outstanding for them. Start with one short, friendly sentence "
+        "under 200 characters that sums up their day (it's also the notification). Then, as short lines starting "
+        "with \"- \", at most 8 of what still needs them, the most pressing first: what's due or on the calendar "
+        "today, then open promises Hermes made and things the user said they'd do. Leave out anything the "
+        "\"Later on the same subject\" lines or the reminders show done or moved past, and anything not worth "
+        "their morning. News under \"Held for this morning\" is already shown as its own card under your reply: "
+        "give it a few words at most. When nothing is outstanding, say so in the one sentence and stop. Only pass "
+        "on what the message says. Don't use any tools.")
 
 
 def _clip(text: Any, limit: int) -> str:
@@ -47,9 +54,32 @@ def line(card: dict) -> str:
     return "- " + _clip(f"{card['news']}{where}", LINE_LIMIT)
 
 
-def text_for(cards: list[dict]) -> Callable[[str], str]:
-    lines = "\n".join(line(card) for card in cards)
-    return lambda tag: TEXT.format(tag=tag, lines=lines)
+def context(home: Path, pulse_store: store.PulseStore, cards: list[dict], *, home_chat_id: str, now: float,
+            zone: Any) -> str:
+    """What the brief reads: the time, what was held for it, what Pulse
+    memory keeps open and what happened since on the same subject, and the
+    phone's calendar and reminders, every section that has something in it."""
+    sections = [f"## Now\n{datetime.fromtimestamp(now, zone).strftime('%A %d %B %Y, %H:%M')}"]
+    if cards:
+        sections.append(HELD_TITLE + "\n" + "\n".join(line(card) for card in cards))
+    if pulse_store.get("memory"):
+        listed, shown = report.remembered_lines(report.remembered_items(pulse_store, now)[0], zone)
+        sections += [listed, report.later_lines(home, shown, home_chat_id=home_chat_id, zone=zone) if shown else ""]
+    sections.append(report.phone_context(home, now)[0])
+    sections = [section for section in sections if section]
+    if len(sections) == 1:
+        sections.append("Nothing open: Pulse holds nothing for the brief, remembers no open items, and the phone "
+                        "shares no calendar or reminders.")
+    return "\n\n".join(sections)
+
+
+def text_for(context_text: str) -> Callable[[str], str]:
+    return lambda tag: TEXT.format(tag=tag, context=context_text)
+
+
+def summary_line(reply: str) -> str:
+    """The brief's first line, for its push: the rest is for its card."""
+    return next((text.strip() for text in reply.splitlines() if text.strip()), "")
 
 
 def next_attempt(pulse_store: store.PulseStore, now: float, zone: Any, time_value: Any) -> Optional[tuple[str, int]]:

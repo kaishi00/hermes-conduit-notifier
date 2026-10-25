@@ -257,16 +257,41 @@ def test_held_cards_go_out_in_the_morning_brief_once(live):
     assert len(live.sent()) == 1
 
 
-def test_no_brief_without_held_cards_or_before_its_time(live):
-    brief_due_now(live)
-    pulse.tick()
-    assert live.sent() == []
+def test_the_brief_comes_every_morning_with_nothing_held_but_not_before_its_time(live):
     from datetime import datetime, timezone
+    live.store.set("time_zone", "UTC")
     live.store.set("brief_time", datetime.fromtimestamp(time.time() + 3600, timezone.utc).strftime("%H:%M"))
     control.set_level(live.store, "followup", "brief")
     tell(live)
     pulse.tick()
     assert live.sent() == [] and len(live.store.held_cards(10)) == 1
+    live.store.set("followups", False)
+    control.done(live.store, live.store.held_cards(10)[0]["id"], True)
+    brief_due_now(live)
+    pulse.tick()
+    [text] = live.sent()  # nothing held, and the brief still comes
+    assert text.startswith("Pulse morning brief ") and "Nothing open" in text
+    assert followup_or_brief_kinds(live) == ["brief"]
+    [attempt] = live.store.in_flight()
+    live.store.update_attempt(attempt["attempt_id"], state=store.DELIVERED)
+    pulse.tick()
+    assert len(live.sent()) == 1  # once a day
+
+
+def followup_or_brief_kinds(live):
+    return [row["kind"] for row in live.store.in_flight()]
+
+
+def test_the_brief_sums_up_what_is_open_and_what_happened_since(live):
+    live.store.set("memory", True)
+    promise(live, "Hermes will send the release notes once the deploy is out.")
+    live.db.session(sid="other", title="Release", pinned=0)
+    live.db.message("assistant", "Sent the release notes for the deploy.", sid="other", at=time.time() - 60)
+    brief_due_now(live)
+    pulse.tick()
+    [text] = live.sent()
+    assert "send the release notes" in text and "## Later on the same subject" in text
+    assert "Sent the release notes" in text and pulse.brief.HELD_TITLE not in text
 
 
 def test_a_brief_turn_pushes(live):
@@ -281,6 +306,9 @@ def test_a_brief_turn_pushes(live):
     assert pulse.pushes(SID, "turn-b") is True
     assert pulse.push_copy(SID, "turn-b", "Two things waited.") == {
         "title_label": "pulse.brief", "title": "Your morning brief", "body": "Two things waited."}
+    # The summary line is the push; the lines under it are for the card.
+    assert pulse.push_copy(SID, "turn-b", "\nA calm day, two things open.\n- Send the notes\n- Call Sam")["body"] \
+        == "A calm day, two things open."
 
 
 def test_a_failed_push_becomes_a_card_once_follow_ups_go_quiet(live):
@@ -984,7 +1012,8 @@ def test_a_held_card_swiped_away_stays_out_of_the_brief(live):
     assert live.store.held_cards(10) == [] and live.store.held_count() == 0
     brief_due_now(live)
     pulse.tick()
-    assert live.sent() == []
+    [text] = live.sent()
+    assert pulse.brief.HELD_TITLE not in text and "everything is green" not in text
 
 
 def test_a_remembered_thing_swiped_away_rests_a_week(live):

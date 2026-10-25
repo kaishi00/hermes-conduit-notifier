@@ -541,7 +541,15 @@ def live(tmp_path, monkeypatch):
     # The daily report runs on the clock; its own tests turn it on.
     pulse_store.set("daily_report", False)
     pulse_store.set("memory", False)  # likewise memory, which needs a model
+    brief_off_the_clock(pulse_store, tmp_path)
     return types.SimpleNamespace(ctx=ctx, fake=fake, sent=sent, store=pulse_store)
+
+
+def brief_off_the_clock(pulse_store, home):
+    """The morning brief goes out every day on the clock; its own tests set
+    its time. Ten hours ahead, its last slot is always too old to send."""
+    zone = pulse.report_zone(pulse_store, home)
+    pulse_store.set("brief_time", datetime.fromtimestamp(time.time() + 10 * 3600, zone).strftime("%H:%M"))
 
 
 def test_nothing_is_sent_while_pulse_is_off(live, db):

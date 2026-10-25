@@ -267,7 +267,7 @@ def push_copy(session_id: str, turn_id: Any, response: Any) -> dict[str, Any]:
             copy.update(title=f"Pulse noticed {len(lines)} things", count=len(lines))
         return copy
     label, title = PUSH_TITLES.get(kind, ("response.ready", "Pulse"))
-    return {"title_label": label, "title": title, "body": response}
+    return {"title_label": label, "title": title, "body": brief.summary_line(response) if kind == BRIEF else response}
 
 
 def pre_tool_call(session_id: str, turn_id: Any) -> Optional[dict[str, str]]:
@@ -378,7 +378,7 @@ def tick(now: Optional[float] = None) -> None:
 # Why a report or brief card is on the Pulse screen.
 TURN_WHY = {
     REPORT: "Your Pulse report: what Hermes saw in your chats since the last one.",
-    BRIEF: "Your morning brief: the news you asked Pulse to hold for the morning.",
+    BRIEF: "Your morning brief: what's still outstanding, and the news you asked Pulse to hold for the morning.",
 }
 
 
@@ -652,10 +652,7 @@ def _maybe_followup(pulse_store: store.PulseStore, home: Path, now: float) -> bo
 
 
 def _maybe_brief(pulse_store: store.PulseStore, home: Path, now: float) -> bool:
-    """Sends the morning brief when it's time and cards are held for it; True when it went."""
-    cards = pulse_store.held_cards(brief.MAX_CARDS)
-    if not cards:
-        return False
+    """Sends the morning brief when it's time, with what's held for it; True when it went."""
     zone = report_zone(pulse_store, home, now)
     planned = brief.next_attempt(pulse_store, now, zone, pulse_store.get("brief_time"))
     if planned is None:
@@ -665,9 +662,11 @@ def _maybe_brief(pulse_store: store.PulseStore, home: Path, now: float) -> bool:
     if chat is None:
         return False
     item_id, attempt = planned
+    cards = pulse_store.held_cards(brief.MAX_CARDS)
+    context = brief.context(home, pulse_store, cards, home_chat_id=chat.chat_id, now=now, zone=zone)
     pulse_store.set(brief.PENDING, {"item_id": item_id, "ids": [card["id"] for card in cards]})
     delivery.submit(pulse_store, _sender(pulse_store), kind=BRIEF,
-                    chat_id=chat.chat_id, text=brief.text_for(cards), item_id=item_id, attempt=attempt)
+                    chat_id=chat.chat_id, text=brief.text_for(context), item_id=item_id, attempt=attempt)
     return True
 
 
