@@ -2036,3 +2036,25 @@ def test_a_cancelled_turns_end_after_the_next_request_went_in_is_not_that_reques
     assert not grant.jobs.jobs["watch-1"].turn_open
     server.emit("rt-1", "message.complete", {"text": "Booked", "status": "complete"})
     assert grant.jobs.jobs["watch-2"].result == "Booked"
+
+
+def test_the_next_request_settles_when_a_cancelled_turns_end_never_comes(monkeypatch):
+    monkeypatch.setattr(api, "WATCH_JOB_INTERRUPT_END_S", 0.0)
+    monkeypatch.setattr(api, "WATCH_JOB_CHAT_WAIT_S", 0.05)
+    grant = make_jobs()
+    server = grant.jobs.server
+    start_joining(grant, "plan the trip")
+    original = api.WATCH_JOB_START_ANSWER_S
+    api.WATCH_JOB_START_ANSWER_S = 0.1
+    try:
+        start_joining(grant, "and book the hotel")
+    finally:
+        api.WATCH_JOB_START_ANSWER_S = original
+    api.run_watch_job_call(grant, "cancel_job", {"job_id": "watch-1"})
+    wait_for(lambda: grant.jobs.jobs["watch-2"].status == "running")
+
+    # No end for the interrupted turn: the next one's own frames come.
+    server.emit("rt-1", "message.delta", {"text": "Book"})
+    server.emit("rt-1", "message.complete", {"text": "Booked", "status": "complete"})
+    assert grant.jobs.jobs["watch-2"].status == "finished"
+    assert grant.jobs.jobs["watch-2"].result == "Booked"
