@@ -145,26 +145,35 @@ def _owner_turn_running(turn_marker: Any, home: Any, entry: dict[str, Any], alia
 # bot's message (message_agent) is delivered this way, into the bot's Bot Chat,
 # and keeps it until its reply ends. No claim can be dropped for it: the route
 # answers busy, so Conduit waits and sends once the row closes.
-# Another bot's row first, so it's named even beside other queued work.
-_LEDGER_ADMISSIONS_SQL = ("SELECT status, request_id, principal_id FROM session_admissions"
-                          " WHERE target_session_id IN ({ids}) AND status != 'terminal'"
-                          " ORDER BY CASE WHEN request_id LIKE 'bot:%' OR principal_id LIKE 'automation:agent:%'"
-                          " THEN 0 ELSE 1 END LIMIT 1")
-_LEDGER_ADMISSION_STATUS_SQL = ("SELECT status FROM session_admissions"
-                                " WHERE target_session_id IN ({ids}) AND status != 'terminal' LIMIT 1")
-_LEDGER_WORKERS_SQL = ("SELECT status FROM worker_executions"
-                       " WHERE session_id IN ({ids}) AND status != 'terminal' LIMIT 1")
+#
+# The tables, columns and the 'terminal' status are Hermes' own refusal query
+# (_CANONICAL_PENDING_SQL, read at Hermes 9e01b44): a row this reads as open
+# is one that refuses the send. Bot deliveries carry request_id "bot:<id>" and
+# principal_id "automation:agent:<bot>:…" (tools/bot_mode_dm.py).
+_LEDGER_TABLES = (("session_admissions", "target_session_id"), ("worker_executions", "session_id"))
+_BOT_MARKS = (("request_id", "bot:%"), ("principal_id", "automation:agent:%"))
 
 
-def _ledger_rows(db: sqlite3.Connection, sql: str, ids: list) -> Optional[tuple[Any, ...]]:
-    """The first open row, or None when there's none or this Hermes has no
-    such table or column (it then keeps no ledger to refuse with)."""
-    try:
-        return db.execute(sql.format(ids=",".join("?" * len(ids))), ids).fetchone()
-    except sqlite3.OperationalError as exc:
-        if "no such table" in str(exc) or "no such column" in str(exc):
-            return None
-        raise
+def _columns(db: sqlite3.Connection, table: str) -> set:
+    return {str(row[1]) for row in db.execute(f"PRAGMA table_info({table})")}
+
+
+def _ledger_owner(db: sqlite3.Connection, ids: list) -> Optional[str]:
+    marks = ",".join("?" * len(ids))
+    for table, key in _LEDGER_TABLES:
+        columns = _columns(db, table)
+        if not {key, "status"} <= columns:
+            continue  # this Hermes keeps no such ledger
+        bot = [f"{column} LIKE ?" for column, _ in _BOT_MARKS if column in columns]
+        patterns = [pattern for column, pattern in _BOT_MARKS if column in columns]
+        # Another bot's row first, so it's named even beside other queued work.
+        is_bot = f"({' OR '.join(bot)})" if bot else "NULL"
+        order = f" ORDER BY {is_bot} DESC" if bot else ""
+        row = db.execute(f"SELECT {is_bot} FROM {table} WHERE {key} IN ({marks}) AND status != 'terminal'{order}"
+                         " LIMIT 1", patterns + ids + patterns).fetchone()
+        if row is not None:
+            return "bot" if row[0] else "gateway"
+    return None
 
 
 def gateway_queue_owner(home: Any, session_ids: list) -> Optional[str]:
@@ -175,21 +184,16 @@ def gateway_queue_owner(home: Any, session_ids: list) -> Optional[str]:
     ids = [str(value) for value in session_ids if str(value)]
     if not ids or home is None:
         return None
-    path = os.path.join(os.fspath(home), "state.db")
-    if not os.path.isfile(path):
-        return None
     try:
-        db = sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True, timeout=2.0)
-    except sqlite3.Error as exc:
+        path = Path(os.fspath(home), "state.db").resolve()
+        if not path.is_file():
+            return None
+        db = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=2.0)
+    except (OSError, sqlite3.Error) as exc:
         logger.debug("Chat takeover: state.db unreadable: %s", exc)
         return None
     try:
-        row = _ledger_rows(db, _LEDGER_ADMISSIONS_SQL, ids)
-        if row is None:
-            row = _ledger_rows(db, _LEDGER_ADMISSION_STATUS_SQL, ids) or _ledger_rows(db, _LEDGER_WORKERS_SQL, ids)
-            return None if row is None else "gateway"
-        request_id, principal = str(row[1] or ""), str(row[2] or "")
-        return "bot" if request_id.startswith("bot:") or principal.startswith("automation:agent:") else "gateway"
+        return _ledger_owner(db, ids)
     except sqlite3.Error as exc:
         logger.debug("Chat takeover: gateway ledger unreadable: %s", exc)
         return None
