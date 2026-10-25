@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.77.4 (2026-10-25)
+
+### Fixes
+- Turning "Self-improvement updates" off, or on, didn't reach chats that
+  were already open: they kept showing the updates the way they did when
+  they opened, until Hermes restarted. Each update now follows the setting
+  as it is when it's made.
+
 ## 0.77.3 (2026-10-25)
 
 ### Fixes
