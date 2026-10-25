@@ -13,12 +13,20 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.77.5 (2026-10-25)
+## 0.77.6 (2026-10-25)
 
 ### Fixes
 - A Bot Chat kept saying it was open in another Hermes window while the bot
   answered a message from another bot, and Take over never cleared it.
   Conduit now says the bot is busy and sends your message when it finishes.
+
+## 0.77.5 (2026-10-25)
+
+### Fixes
+- A group room could stop answering altogether once one of its threads
+  passed about 24 messages. Hermes could no longer plan the room's next
+  turn, so no member replied again, in that thread or any other, and nothing
+  said why. Rooms now keep answering however long their threads get.
 
 ## 0.77.4 (2026-10-25)
 

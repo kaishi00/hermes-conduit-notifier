@@ -15576,6 +15576,34 @@ async def delete_room_image(room_id: str, response: Response) -> Dict[str, Any]:
     return {"ok": True, "removed": removed}
 
 
+# --- Room planner ------------------------------------------------------------
+#
+# A dashboard run as its own process plans the turns of the group rooms it
+# hosts, and it imports these routes before it starts them. room_planner.py
+# beside this folder keeps a long thread getting turns there, as the plugin's
+# own load does in the gateway.
+
+_room_planner_module: Any = None
+
+
+def _guard_room_planner() -> None:
+    global _room_planner_module
+    try:
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "room_planner.py")
+        spec = importlib.util.spec_from_file_location("conduit_push_dashboard_room_planner", path)
+        if spec is None or spec.loader is None:
+            raise ImportError("This plugin install is missing room_planner.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module.install()
+        _room_planner_module = module
+    except Exception:  # noqa: BLE001 — group rooms only, never the routes
+        logger.warning("Conduit plugin: couldn't guard Hermes' group room planner", exc_info=True)
+
+
+_guard_room_planner()
+
+
 # --- Artifacts ---------------------------------------------------------------
 #
 # GET /artifacts lists what a profile's chats produced (artifacts_index.py
