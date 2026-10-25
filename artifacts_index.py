@@ -13,6 +13,10 @@ open again:
 - ``attached``: a file the user sent, as its ``@file:`` reference;
 - ``link``: a web link in one of Hermes' replies.
 
+Hidden chats (group rooms, Pulse) are left out of the profile's list, but a
+bot's Bot Chat, a hidden session titled "Bot Chat", is listed, and a chat
+asked for by id is read whether hidden or not.
+
 The list is read from the profile's ``state.db`` (read only), newest message
 first, a bounded window of rows per request: ``before`` pages back from the
 message id the previous page stopped at. Within a page one path or URL is
@@ -399,6 +403,22 @@ def lineage(conn: sqlite3.Connection, session_ids: Iterable[str]) -> list:
     return list(known)
 
 
+# The title Hermes gives a bot's one Bot Chat (Desktop's hermes-bots plugin
+# and Conduit both find the chat by it).
+BOT_CHAT_TITLE = "Bot Chat"
+
+
+def bot_chat_lineage(conn: sqlite3.Connection, session_columns: Optional[set] = None) -> list:
+    """The profile's hidden Bot Chat sessions, with the sessions that
+    continue them."""
+    columns = _columns(conn, "sessions") if session_columns is None else session_columns
+    if not {"hidden", "title"} <= columns:
+        return []
+    ids = [str(row[0]) for row in conn.execute(
+        "SELECT id FROM sessions WHERE hidden = 1 AND title = ? LIMIT ?", (BOT_CHAT_TITLE, MAX_LINEAGE))]
+    return lineage(conn, ids) if ids else []
+
+
 def _titles(conn: sqlite3.Connection, has_parent: bool) -> Callable[[str, Any], str]:
     """A session's title, else the nearest titled session it continues."""
     cache: dict = {}
@@ -451,11 +471,10 @@ def list_artifacts(conn: sqlite3.Connection, *, before: Optional[int] = None,
     tool_calls = "m.tool_calls" if "tool_calls" in message_columns else "NULL"
     tool_name = "m.tool_name" if "tool_name" in message_columns else "NULL"
     title = "s.title" if "title" in session_columns else "NULL"
-    hidden = " AND COALESCE(s.hidden, 0) = 0" if "hidden" in session_columns else ""
     select = (f"SELECT m.id, m.session_id, m.role, m.content, {tool_calls} AS tool_calls, "
               f"{tool_name} AS tool_name, m.timestamp, {title} AS title "
               "FROM messages m LEFT JOIN sessions s ON s.id = m.session_id ")
-    candidate = f"{hidden} AND {_candidate_sql(message_columns)}"
+    candidate = f" AND {_candidate_sql(message_columns)}"
     title_for = _titles(conn, "parent_session_id" in session_columns and "title" in session_columns)
 
     bounds = conn.execute("SELECT MIN(id), MAX(id) FROM messages").fetchone()
@@ -496,6 +515,8 @@ def list_artifacts(conn: sqlite3.Connection, *, before: Optional[int] = None,
         chat = lineage(conn, wanted)
         if not chat:
             return {"items": items, "next_before": None}
+        # A chat asked for by id is listed even when Hermes hides it: a
+        # bot's Bot Chat is a hidden session of its profile.
         sql = (select + f"WHERE m.session_id IN ({','.join('?' * len(chat))}) AND m.id < ?{candidate} "
                "ORDER BY m.id DESC LIMIT ?")
         scanned = 0
@@ -507,13 +528,20 @@ def list_artifacts(conn: sqlite3.Connection, *, before: Optional[int] = None,
                 return {"items": items, "next_before": int(row["id"]) if row["id"] > lowest else None}
         return {"items": items, "next_before": None}
 
+    bot_chats: list = []
+    if "hidden" in session_columns:
+        # Hidden chats (group rooms, Pulse, a room's memory) stay out, but a
+        # bot's Bot Chat, hidden too, is the bot's own chat and is listed.
+        bot_chats = bot_chat_lineage(conn, session_columns)
+        listed = f" OR m.session_id IN ({','.join('?' * len(bot_chats))})" if bot_chats else ""
+        candidate = f" AND (COALESCE(s.hidden, 0) = 0{listed}){candidate}"
     sql = select + f"WHERE m.id >= ? AND m.id < ?{candidate} ORDER BY m.id DESC"
     scanned = 0
     next_before: Optional[int] = None
     while top > lowest:
         bottom = max(top - window_rows, lowest)
         stopped_at: Optional[int] = None
-        for row in conn.execute(sql, [bottom, top]):
+        for row in conn.execute(sql, [bottom, top, *bot_chats]):
             if take(row):
                 stopped_at = int(row["id"])
                 break

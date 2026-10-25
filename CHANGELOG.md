@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.78.1 (2026-10-25)
+
+### Fixes
+- A bot's Bot Chat now shows what it made in Artifacts, both in the chat's
+  own list and on the Artifacts page. Before, pictures and files a bot sent
+  in its Bot Chat never appeared there.
+
 ## 0.78.0 (2026-10-25)
 
 ### New and improved
