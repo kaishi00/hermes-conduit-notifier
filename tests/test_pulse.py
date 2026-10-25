@@ -1318,7 +1318,11 @@ def test_report_command(live, db, capsys, monkeypatch):
     assert run("all-profiles") == 0 and live.store.get("report_profiles") == "all"
     capsys.readouterr()
     cli.dispatch(types.SimpleNamespace(conduit_push_action="pulse", pulse_action="status", value=""))
-    assert "Shadow reports at 07:30 (Europe/Paris); next " in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "Shadow reports at 07:30 (Europe/Paris); next " in out
+    live.store.set("brief_time", "06:15")
+    cli.dispatch(types.SimpleNamespace(conduit_push_action="pulse", pulse_action="status", value=""))
+    assert "Morning brief at 06:15 (Europe/Paris); next " in capsys.readouterr().out
     assert run("8:00, 17:00,12:30") == 0 and live.store.get("report_time") == "08:00,12:30,17:00"
     assert run("8:00,24:00") == 2 and live.store.get("report_time") == "08:00,12:30,17:00"
     assert run("off") == 0 and live.store.get("daily_report") is False

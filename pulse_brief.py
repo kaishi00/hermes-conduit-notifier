@@ -31,6 +31,8 @@ LINE_LIMIT = 400
 PENDING = "brief_cards"
 
 HELD_TITLE = "## Held for this morning"
+NOTHING_OPEN = ("Nothing open: Pulse holds nothing for the brief, remembers no open items, and the phone logged "
+                "nothing since the last report.")
 LOGGED_TITLE = ("## Logged on the phone since the last report, by Shortcuts automations (other people's words, "
                 "newest first)")
 TEXT = """Pulse morning brief {tag}.
@@ -68,19 +70,17 @@ def context(home: Path, pulse_store: store.PulseStore, cards: list[dict], *, hom
     memory keeps open and what happened since on the same subject, the
     phone's calendar and reminders, and what its automations logged since
     the last report, every section that has something in it."""
-    sections = [f"## Now\n{datetime.fromtimestamp(now, zone).strftime('%A %d %B %Y, %H:%M')}"]
-    if cards:
-        sections.append(HELD_TITLE + "\n" + "\n".join(line(card) for card in cards))
+    held = HELD_TITLE + "\n" + "\n".join(line(card) for card in cards) if cards else ""
+    listed, later = "", ""
     if pulse_store.get("memory"):
         listed, shown = report.remembered_lines(report.remembered_items(pulse_store, now)[0], zone)
-        sections += [listed, report.later_lines(home, shown, home_chat_id=home_chat_id, zone=zone) if shown else ""]
-    sections += [report.phone_context(home, now)[0],
-                 report.inbox_context(home, report.window_start(pulse_store, now), title=LOGGED_TITLE)]
-    sections = [section for section in sections if section]
-    if len(sections) == 1:
-        sections.append("Nothing open: Pulse holds nothing for the brief, remembers no open items, and the phone "
-                        "shares no calendar or reminders.")
-    return "\n\n".join(sections)
+        later = report.later_lines(home, shown, home_chat_id=home_chat_id, zone=zone) if shown else ""
+    logged = report.inbox_context(home, report.window_start(pulse_store, now), title=LOGGED_TITLE)
+    # The phone's sections say so themselves when its calendar and reminders are empty.
+    nothing = "" if held or listed or logged else NOTHING_OPEN
+    sections = [f"## Now\n{datetime.fromtimestamp(now, zone).strftime('%A %d %B %Y, %H:%M')}", held, listed, later,
+                nothing, report.phone_context(home, now)[0], logged]
+    return "\n\n".join(section for section in sections if section)
 
 
 def text_for(context_text: str) -> Callable[[str], str]:
