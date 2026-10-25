@@ -1,0 +1,215 @@
+"""Each owner's choices for their agent in a Linked Room (designs/cross-owner-agents, decision 9)."""
+import importlib.util
+import json
+import pathlib
+import sys
+import tempfile
+import types
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+BASE = "/api/plugins/conduit_push"
+
+if "hermes_constants" not in sys.modules:
+    _hermes_constants = types.ModuleType("hermes_constants")
+    _hermes_constants.get_hermes_home = lambda: pathlib.Path(tempfile.gettempdir())
+    sys.modules["hermes_constants"] = _hermes_constants
+if "conduit_push" not in sys.modules:
+    _pkg = types.ModuleType("conduit_push")
+    _pkg.__path__ = [str(ROOT)]
+    sys.modules["conduit_push"] = _pkg
+
+
+def _load(name, path):
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+choices_module = _load("conduit_push.room_choices", ROOT / "room_choices.py")
+_api_spec = importlib.util.spec_from_file_location("conduit_plugin_api_room_choices", ROOT / "dashboard" / "plugin_api.py")
+api = importlib.util.module_from_spec(_api_spec)
+_api_spec.loader.exec_module(api)
+
+ChoicesStore = choices_module.ChoicesStore
+ChoicesError = choices_module.ChoicesError
+RoomChoices = choices_module.RoomChoices
+
+ROOM = "room-1"
+OTHER = "room-2"
+
+
+class Clock:
+    def __init__(self, now=1_000.0):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+
+def test_a_room_without_choices_gets_the_defaults(tmp_path):
+    choices = ChoicesStore(tmp_path).get(ROOM)
+    assert choices == RoomChoices()
+    assert choices.as_dict() == {
+        "tools": "talk", "custom_tools": [], "share": "ask", "search_chats": False, "takes_part": "joins",
+        "daily_limit": 40, "note": ""}
+    # Reading writes nothing.
+    assert not (tmp_path / choices_module.FILE_NAME).exists()
+
+
+def test_choices_set_for_a_room_are_kept_for_that_room_only(tmp_path):
+    store = ChoicesStore(tmp_path)
+    saved = store.set(ROOM, {"tools": "look", "search_chats": True, "note": "Don't mention the party"})
+    assert saved.tools == "look" and saved.search_chats and saved.note == "Don't mention the party"
+    assert ChoicesStore(tmp_path).get(ROOM) == saved
+    assert ChoicesStore(tmp_path).get(OTHER) == RoomChoices()
+
+
+def test_a_partial_change_keeps_the_other_choices(tmp_path):
+    store = ChoicesStore(tmp_path)
+    store.set(ROOM, {"tools": "custom", "custom_tools": ["terminal", "read_file", "terminal"]})
+    after = store.set(ROOM, {"daily_limit": 10})
+    assert after.tools == "custom"
+    # Kept once each, in the order given.
+    assert after.custom_tools == ("terminal", "read_file")
+    assert after.daily_limit == 10
+
+
+def test_saved_defaults_fill_rooms_that_have_none(tmp_path):
+    store = ChoicesStore(tmp_path)
+    store.set(ROOM, {"tools": "look"})
+    store.set_defaults({"share": "nothing", "daily_limit": 5})
+    assert store.defaults() == RoomChoices(share="nothing", daily_limit=5)
+    assert store.get(OTHER) == RoomChoices(share="nothing", daily_limit=5)
+    # A room with its own choices keeps them.
+    assert store.get(ROOM).tools == "look" and store.get(ROOM).share == "ask"
+
+
+def test_view_lists_the_defaults_and_each_room(tmp_path):
+    store = ChoicesStore(tmp_path, clock=Clock(2_000.0))
+    store.set(ROOM, {"tools": "look"})
+    view = store.view()
+    assert view["defaults"] == RoomChoices().as_dict()
+    assert view["rooms"] == {ROOM: {"choices": {**RoomChoices().as_dict(), "tools": "look"}, "at": 2_000.0}}
+
+
+@pytest.mark.parametrize("change", [
+    {"tools": "admin"}, {"tools": None}, {"custom_tools": "terminal"}, {"custom_tools": [3]},
+    {"custom_tools": ["bad name"]}, {"custom_tools": ["x" * 129]}, {"custom_tools": [f"t{n}" for n in range(65)]},
+    {"custom_tools": ["memory"]}, {"custom_tools": ["skill_manage"]}, {"custom_tools": ["delegate_task"]},
+    {"share": "everything"}, {"search_chats": "yes"}, {"search_chats": 1}, {"takes_part": "sometimes"},
+    {"daily_limit": 0}, {"daily_limit": 501}, {"daily_limit": True}, {"daily_limit": "5"}, {"daily_limit": 2.5},
+    {"note": 3}, {"note": "x" * 1001}, {"approve": True}, [], "talk",
+])
+def test_bad_choices_are_refused_and_nothing_is_kept(tmp_path, change):
+    store = ChoicesStore(tmp_path)
+    with pytest.raises(ChoicesError):
+        store.set(ROOM, change)
+    with pytest.raises(ChoicesError):
+        store.set_defaults(change)
+    assert not (tmp_path / choices_module.FILE_NAME).exists()
+
+
+@pytest.mark.parametrize("room_id", ["", " ", "../etc", "-room", "a" * 129, "room\n", 3, None])
+def test_bad_room_ids_are_refused(tmp_path, room_id):
+    store = ChoicesStore(tmp_path)
+    with pytest.raises(ChoicesError):
+        store.set(room_id, {"tools": "look"})
+    with pytest.raises(ChoicesError):
+        store.get(room_id)
+
+
+def test_a_note_keeps_its_lines_but_not_control_characters(tmp_path):
+    saved = ChoicesStore(tmp_path).set(ROOM, {"note": "  Line one\nLine\x00 two\x1b[31m  "})
+    assert saved.note == "Line one\nLine two[31m"
+
+
+def test_a_corrupt_file_reads_as_defaults(tmp_path):
+    (tmp_path / choices_module.FILE_NAME).write_text("{not json", encoding="utf-8")
+    store = ChoicesStore(tmp_path)
+    assert store.get(ROOM) == RoomChoices()
+    assert store.defaults() == RoomChoices()
+    # A room entry a hand edit broke falls back to the defaults on its own.
+    (tmp_path / choices_module.FILE_NAME).write_text(json.dumps({
+        "version": 1, "defaults": {"tools": "nonsense"},
+        "rooms": {ROOM: {"choices": {"tools": "look", "daily_limit": -3}, "at": 1.0},
+                  OTHER: {"choices": {"tools": "look"}, "at": 1.0}}}), encoding="utf-8")
+    assert store.defaults() == RoomChoices()
+    assert store.get(ROOM) == RoomChoices()
+    assert store.get(OTHER).tools == "look"
+
+
+def test_the_oldest_rooms_go_past_the_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr(choices_module, "MAX_ROOMS", 3)
+    clock = Clock()
+    store = ChoicesStore(tmp_path, clock=clock)
+    for number in range(4):
+        clock.now += 1
+        store.set(f"room-{number}", {"tools": "look"})
+    assert set(store.view()["rooms"]) == {"room-1", "room-2", "room-3"}
+
+
+def test_the_file_is_private(tmp_path):
+    store = ChoicesStore(tmp_path)
+    store.set(ROOM, {"tools": "look"})
+    assert store.path.stat().st_mode & 0o777 == 0o600
+
+
+# --- Routes ---------------------------------------------------------------------
+
+
+@pytest.fixture
+def client(tmp_path, monkeypatch):
+    monkeypatch.setattr(api, "_calls_home", lambda: tmp_path)
+    app = FastAPI()
+    app.include_router(api.router, prefix=BASE)
+    return TestClient(app)
+
+
+def test_routes_read_and_change_a_rooms_choices(client, tmp_path):
+    fresh = client.get(f"{BASE}/rooms/choices", params={"room_id": ROOM})
+    assert fresh.status_code == 200
+    assert fresh.headers["cache-control"] == "no-store"
+    assert fresh.json() == {"ok": True, "room_id": ROOM, "choices": RoomChoices().as_dict(), "saved": False}
+
+    put = client.put(f"{BASE}/rooms/choices", json={"room_id": ROOM, "choices": {"tools": "look"}})
+    assert put.status_code == 200
+    assert put.json()["choices"]["tools"] == "look"
+    assert client.get(f"{BASE}/rooms/choices", params={"room_id": ROOM}).json()["saved"] is True
+    assert ChoicesStore(tmp_path).get(ROOM).tools == "look"
+
+    listed = client.get(f"{BASE}/rooms/choices").json()
+    assert set(listed["rooms"]) == {ROOM}
+
+
+def test_routes_read_and_change_the_defaults(client, tmp_path):
+    assert client.get(f"{BASE}/rooms/defaults").json() == {"ok": True, "choices": RoomChoices().as_dict()}
+    put = client.put(f"{BASE}/rooms/defaults", json={"choices": {"share": "nothing"}})
+    assert put.status_code == 200 and put.json()["choices"]["share"] == "nothing"
+    assert ChoicesStore(tmp_path).defaults().share == "nothing"
+
+
+@pytest.mark.parametrize("body", [
+    {}, {"room_id": ROOM}, {"room_id": ROOM, "choices": "look"}, {"room_id": "../x", "choices": {}},
+    {"room_id": ROOM, "choices": {"tools": "admin"}}, {"room_id": ROOM, "choices": {"custom_tools": ["memory"]}},
+    [],
+])
+def test_routes_refuse_bad_choices(client, body):
+    response = client.put(f"{BASE}/rooms/choices", json=body)
+    assert response.status_code == 400
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_routes_refuse_a_bad_room_id_on_read(client):
+    assert client.get(f"{BASE}/rooms/choices", params={"room_id": "../x"}).status_code == 400
+
+
+def test_room_rules_is_a_listed_capability(client):
+    assert "room-rules" in client.get(f"{BASE}/capabilities").json()["capabilities"]

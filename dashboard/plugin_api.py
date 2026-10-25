@@ -7689,6 +7689,111 @@ async def post_conduit_prefs_import(request: Request, response: Response, profil
     return await _prefs_route(profile, lambda: conduit_prefs("import", body, replace=replace))
 
 
+# --- Linked Rooms: your agent's choices in each room ----------------------------
+#
+# What each of this profile's agents may do in a room with other people's
+# agents (room_choices.py), enforced on this host by the plugin's hooks
+# (room_rules.py). Conduit shows them in the room's info and when the agent
+# joins a room.
+
+ROOM_CHOICES_LIMIT = 60
+ROOM_CHOICES_WINDOW_S = 60.0
+ROOM_CHOICES_MAX_BODY_BYTES = 16 * 1024
+
+_room_choices_limiter = _MintLimiter(ROOM_CHOICES_LIMIT, ROOM_CHOICES_WINDOW_S,
+                                     message="Too many room choice changes; try again shortly")
+_room_choices_module: Any = None
+
+
+def _room_choices() -> Any:
+    """room_choices.py beside this folder, loaded once."""
+    global _room_choices_module
+    with _calls_store_lock:
+        if _room_choices_module is None:
+            path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "room_choices.py")
+            name = "conduit_push_dashboard_room_choices"
+            spec = importlib.util.spec_from_file_location(name, path)
+            if spec is None or spec.loader is None:
+                raise TokenError(501, "This plugin install is missing room_choices.py; update the plugin")
+            module = importlib.util.module_from_spec(spec)
+            # Its dataclasses look their module up by name while they're made.
+            sys.modules[name] = module
+            try:
+                spec.loader.exec_module(module)
+            except BaseException:
+                sys.modules.pop(name, None)
+                raise
+            _room_choices_module = module
+        return _room_choices_module
+
+
+def room_choices(action: str, room_id: Any = None, choices: Any = None) -> Dict[str, Any]:
+    module = _room_choices()
+    store = module.ChoicesStore(_calls_home())
+    try:
+        if action == "defaults":
+            return {"choices": store.defaults().as_dict()}
+        if action == "set_defaults":
+            return {"choices": store.set_defaults(choices).as_dict()}
+        if action == "set":
+            return {"room_id": room_id, "choices": store.set(room_id, choices).as_dict()}
+        if room_id is None:
+            return store.view()
+        return {"room_id": room_id, "choices": store.get(room_id).as_dict(), "saved": store.saved(room_id)}
+    except module.ChoicesError as exc:
+        raise TokenError(400, str(exc))
+
+
+async def _room_choices_route(profile: Optional[str], run: Callable[[], Dict[str, Any]]) -> Dict[str, Any]:
+    try:
+        return {"ok": True, **(await _run_scoped(profile, _limited(_room_choices_limiter, profile, run)))}
+    except TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
+        raise
+    except Exception as exc:
+        raise _unexpected("room choices", exc, feature="Linked Rooms")
+
+
+def _room_choices_body(body: Any, *, room: bool) -> tuple[Any, Any]:
+    if not isinstance(body, dict) or "choices" not in body or (room and "room_id" not in body):
+        raise HTTPException(status_code=400, headers={"Cache-Control": "no-store"},
+                            detail="Expected {\"room_id\": ..., \"choices\": {...}}" if room
+                            else "Expected {\"choices\": {...}}")
+    return body.get("room_id"), body["choices"]
+
+
+@router.get("/rooms/choices")
+async def get_room_choices(response: Response, room_id: Optional[str] = None,
+                           profile: Optional[str] = None) -> Dict[str, Any]:
+    """One room's choices (``saved`` false: the defaults, since it has none),
+    or every room's with the defaults when no room is named."""
+    response.headers["Cache-Control"] = "no-store"
+    return await _room_choices_route(profile, lambda: room_choices("get", room_id))
+
+
+@router.put("/rooms/choices")
+async def put_room_choices(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    """Changes the choices the body names for one room; the others stay."""
+    response.headers["Cache-Control"] = "no-store"
+    room_id, choices = _room_choices_body(await _read_json_body(request, ROOM_CHOICES_MAX_BODY_BYTES), room=True)
+    return await _room_choices_route(profile, lambda: room_choices("set", room_id, choices))
+
+
+@router.get("/rooms/defaults")
+async def get_room_defaults(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    return await _room_choices_route(profile, lambda: room_choices("defaults"))
+
+
+@router.put("/rooms/defaults")
+async def put_room_defaults(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    _, choices = _room_choices_body(await _read_json_body(request, ROOM_CHOICES_MAX_BODY_BYTES), room=False)
+    return await _room_choices_route(profile, lambda: room_choices("set_defaults", choices=choices))
+
+
 # --- Pulse settings ------------------------------------------------------------
 #
 # Conduit's Settings > Pulse page (TestFlight builds): Pulse's state and the
@@ -16019,6 +16124,9 @@ ROUTE_CAPABILITIES = (
     "local-live-agent",
     "artifacts",
     "local-live",
+    # GET/PUT /rooms/choices and /rooms/defaults: an agent's choices in rooms
+    # with other people's agents, enforced on this host (Linked Rooms).
+    "room-rules",
 )
 
 
