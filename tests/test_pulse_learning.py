@@ -270,12 +270,25 @@ def test_the_brief_comes_every_morning_with_nothing_held_but_not_before_its_time
     brief_due_now(live)
     pulse.tick()
     [text] = live.sent()  # nothing held, and the brief still comes
-    assert text.startswith("Pulse morning brief ") and "Nothing open" in text
+    assert text.startswith("Pulse morning brief ") and "Pulse holds no news for this brief" in text
     assert followup_or_brief_kinds(live) == ["brief"]
     [attempt] = live.store.in_flight()
     live.store.update_attempt(attempt["attempt_id"], state=store.DELIVERED)
     pulse.tick()
     assert len(live.sent()) == 1  # once a day
+
+
+def test_a_brief_with_nothing_kept_still_reads_the_calendar(live, monkeypatch):
+    monkeypatch.setattr(pulse.report, "phone_context",
+                        lambda home, now: ("## Calendar, the next 2 days (phone synced 5 min ago)\n- Dentist (09:30)",
+                                           None))
+    brief_due_now(live)
+    pulse.tick()
+    [text] = live.sent()
+    # What Pulse keeps is empty, and the calendar is still what's on.
+    assert "remembers nothing still open" in text and "only the calendar and reminders below" in text
+    assert text.index("remembers nothing still open") < text.index("- Dentist (09:30)")
+    assert "Nothing open" not in text
 
 
 def followup_or_brief_kinds(live):
@@ -304,7 +317,8 @@ def test_the_brief_reads_what_the_phone_logged_since_the_last_report_fenced(live
     pulse.tick()
     [text] = live.sent()
     assert "Your parcel is out for delivery" in text and "Rent paid" not in text  # since the last report only
-    assert "other people's words" in text
+    assert "## Logged on the phone since " in text and "other people's words" in text
+    assert "Pulse holds no news" not in text  # it logged something
     fence = text.split("<<<context ", 1)[1].split("\n", 1)[0]
     assert text.rstrip().endswith(f"context {fence}>>>")
 
