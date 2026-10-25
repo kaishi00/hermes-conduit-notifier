@@ -85,6 +85,33 @@ def chat_by_id(home: Path, chat_id: str) -> Optional[HomeChat]:
     return HomeChat(rows[0]["id"], rows[0]["title"] or "", bool(rows[0]["pinned"])) if rows else None
 
 
+# What Hermes reads a chat's model back from when it reopens it.
+MODEL_COLUMNS = ("id", "title", "hidden", "model", "model_config", "billing_provider", "billing_base_url",
+                 "billing_mode")
+# A chat and the sessions it continued into, as Hermes reopens it along them:
+# children that aren't a branch, a subagent's run, a reset or a tool's
+# session. Continuations inherit model_config, so a marker only makes a fork
+# when it names the child's own parent (hermes_state_common.py).
+_CONTINUED = (
+    "WITH RECURSIVE chain(id) AS (SELECT ? UNION SELECT s.id FROM sessions s JOIN chain c "
+    "ON s.parent_session_id = c.id WHERE COALESCE(s.source, '') != 'tool'"
+    + "".join(f" AND COALESCE(json_extract(CASE WHEN json_valid(s.model_config) THEN s.model_config ELSE '{{}}' END, "
+              f"'$.{marker}'), '') != c.id" for marker in ("_branched_from", "_delegate_from", "_reset_from"))
+    + ") ")
+
+
+def chat_model_row(home: Path, chat_id: str) -> Optional[dict]:
+    """The ``MODEL_COLUMNS`` of the session the chat continues in now, the
+    one Hermes reads its model back from, or None when that names no model:
+    the chat runs on Hermes's main model."""
+    rows = _run(home, _CONTINUED + (
+        f"SELECT {', '.join(MODEL_COLUMNS)} FROM sessions WHERE id IN (SELECT id FROM chain) "
+        "ORDER BY started_at DESC, id DESC LIMIT 1"), (chat_id,))
+    if not rows or not (rows[0]["model"] or rows[0]["model_config"]):
+        return None
+    return dict(rows[0])
+
+
 def find_turn(home: Path, *, chat_id: str, tag: str, since: float) -> Optional[TurnRows]:
     """The user row carrying ``tag`` in the chat or the sessions it continued
     into (compression, branches), written at or after ``since``, and the rows

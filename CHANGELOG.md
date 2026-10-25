@@ -13,6 +13,18 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.77.7 (2026-10-25)
+
+### Fixes
+- With Settings > Pulse > Model on "Same as the Pulse chat", Pulse's memory,
+  report lists and follow-up checks ran on Hermes's main model instead of the
+  Pulse chat's, so they failed whenever the main model was busy and reports
+  went out without their list. They now run on the Pulse chat's model,
+  unless Hermes's "Pulse memory" model is set to another.
+
+### New and improved
+- `hermes conduit-push pulse status` says which model Pulse runs on.
+
 ## 0.77.6 (2026-10-25)
 
 ### Fixes

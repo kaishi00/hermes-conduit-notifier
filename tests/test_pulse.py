@@ -15,6 +15,7 @@ checks the copy is current.
 import contextlib
 import importlib.util
 import json
+import logging
 import os
 import pathlib
 import re
@@ -84,7 +85,8 @@ FIXTURE_SCHEMA = """
 CREATE TABLE sessions (
     id TEXT PRIMARY KEY, source TEXT NOT NULL, session_key TEXT, parent_session_id TEXT,
     started_at REAL NOT NULL, last_activity_at REAL, title TEXT, archived INTEGER NOT NULL DEFAULT 0,
-    pinned INTEGER NOT NULL DEFAULT 0, hidden INTEGER NOT NULL DEFAULT 0
+    pinned INTEGER NOT NULL DEFAULT 0, hidden INTEGER NOT NULL DEFAULT 0, model TEXT, model_config TEXT,
+    billing_provider TEXT, billing_base_url TEXT, billing_mode TEXT
 );
 CREATE TABLE messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT,
@@ -149,6 +151,11 @@ class StateDB:
         self._exec("INSERT INTO sessions(id, source, session_key, parent_session_id, started_at, last_activity_at, "
                    "title, pinned, archived, hidden) VALUES(?,?,?,?,?,?,?,?,?,?)",
                    (sid, source, None, parent, started, started, title, pinned, archived, hidden))
+
+    def model(self, sid=SID, *, model, config=None, billing=None):
+        # A chat's model as Hermes keeps it: the model column, the route in model_config, the provider billed.
+        self._exec("UPDATE sessions SET model=?, model_config=?, billing_provider=? WHERE id=?",
+                   (model, None if config is None else json.dumps(config), billing, sid))
 
     def message(self, role, content, *, sid=SID, display_kind=None, active=1, at=None):
         return self._exec("INSERT INTO messages(session_id, role, content, timestamp, display_kind, active, compacted) "
@@ -385,6 +392,47 @@ class FakeHost:
         }
         monkeypatch.setitem(sys.modules, "tui_gateway.server", server)
         return self
+
+
+class Routes:
+    """Hermes's side of a chat's model: the session host's reader of the
+    route a chat was left on (tui_gateway.server's
+    _stored_session_runtime_overrides; a provider in ``dropped`` is no longer
+    set up, so it comes back as None, as Hermes drops it), and the binding
+    that lends a model to auxiliary calls (agent.auxiliary_client's
+    scoped_runtime_main), in ``bound`` while it holds. Needs FakeHost."""
+
+    def __init__(self, monkeypatch, dropped=()):
+        self.read, self.bound, self.dropped = [], [], set(dropped)
+        monkeypatch.setattr(sys.modules["tui_gateway.server"], "_stored_session_runtime_overrides", self.read_back,
+                            raising=False)
+        auxiliary = types.ModuleType("agent.auxiliary_client")
+        auxiliary.scoped_runtime_main = self.scoped_runtime_main
+        monkeypatch.setitem(sys.modules, "agent", sys.modules.get("agent") or types.ModuleType("agent"))
+        monkeypatch.setitem(sys.modules, "agent.auxiliary_client", auxiliary)
+
+    def read_back(self, row):
+        self.read.append(dict(row))
+        config = json.loads(row.get("model_config") or "{}")
+        provider = config.get("provider") or row.get("billing_provider")
+        if provider in self.dropped:
+            provider, config = None, {}
+        return {"model_override": {"model": row["model"], "provider": provider, "base_url": config.get("base_url"),
+                                   "api_mode": config.get("api_mode")}} if row.get("model") else {}
+
+    @contextlib.contextmanager
+    def scoped_runtime_main(self, runtime):
+        self.bound.append(runtime)
+        try:
+            yield runtime
+        finally:
+            self.bound.pop()
+
+
+# The Pulse chat as Eric's host had it, pinned to Volcengine while Hermes's main model ran on zai.
+VOLCENGINE = {"provider": "volcengine", "model": "deepseek-v4-1-flash-261017",
+              "base_url": "https://ark.cn-beijing.volces.com/api/coding/v3", "api_mode": "chat_completions"}
+VOLCENGINE_CONFIG = {key: VOLCENGINE[key] for key in ("provider", "base_url", "api_mode")}
 
 
 def test_send_reopens_the_chat_and_submits_a_hidden_queued_turn(monkeypatch):
@@ -2038,6 +2086,139 @@ def test_model_calls_run_in_this_profiles_secret_scope(remembering, monkeypatch)
     remembering.ctx.llm = Llm()
     assert pulse._memory_llm("instructions", "text", purpose="pulse follow-up") == ({"items": []}, 5)
     assert scope == [None, "left"]
+
+
+def test_the_chats_model_is_read_where_hermes_reads_it(db, tmp_path):
+    db.session()
+    assert hermes.chat_model_row(tmp_path, SID) is None  # on Hermes's main model
+    db.model(model="glm-5.3-flash", config={"provider": "zai"})
+    db.session("next", started=2000.0, parent=SID)  # compressed into
+    db.model("next", model=VOLCENGINE["model"], config=VOLCENGINE_CONFIG, billing="volcengine")
+    db.session("branch", started=3000.0, parent="next")
+    db.model("branch", model="gpt-5.5", config={"provider": "openai", "_branched_from": "next"})
+    db.session("helper", started=3000.0, parent="next", source="tool")  # a subagent's run
+    db.model("helper", model="gpt-5.5", config={"provider": "openai"})
+    row = hermes.chat_model_row(tmp_path, SID)
+    assert (row["id"], row["model"], row["billing_provider"]) == ("next", VOLCENGINE["model"], "volcengine")
+    assert set(row) == set(hermes.MODEL_COLUMNS)
+    assert pulse.chat_model(tmp_path, SID) == {"provider": "volcengine", "model": VOLCENGINE["model"]}
+    # A continuation carries its parent's markers: one naming another session makes no fork.
+    db.session("last", started=4000.0, parent="next")
+    db.model("last", model="kimi-k2.6", config={"_branched_from": "elsewhere"}, billing="custom")
+    assert hermes.chat_model_row(tmp_path, SID)["id"] == "last"
+    assert pulse.chat_model(tmp_path, SID) == {"provider": "", "model": "kimi-k2.6"}  # "custom" names none
+    db.model("last", model="kimi-k2.6", config={"provider": "custom:ark", "gateway_runtime": {"provider": "volcengine"}})
+    assert pulse.chat_model(tmp_path, SID) == {"provider": "volcengine", "model": "kimi-k2.6"}
+
+
+def test_pulses_model_calls_run_on_the_pulse_chats_model(remembering, db, tmp_path, monkeypatch):
+    # Settings > Pulse's "Same as the Pulse chat" leaves Hermes's "Pulse memory" slot on "auto", which
+    # meant Hermes's main model until the Pulse chat's model was lent to the call (Eric, 2026-10-25:
+    # report lists and follow-up checks failed while the main model was out of capacity).
+    routes = Routes(monkeypatch)
+    seen = []
+
+    class Llm:
+        def complete_structured(self, **kwargs):
+            seen.append(list(routes.bound))
+            return types.SimpleNamespace(parsed={"items": []}, usage=types.SimpleNamespace(total_tokens=5))
+
+    remembering.ctx.llm = Llm()
+    db.model(model=VOLCENGINE["model"], config=VOLCENGINE_CONFIG)
+    route = pulse.chat_route(tmp_path, SID)
+    assert route == VOLCENGINE and [row["id"] for row in routes.read] == [SID]
+    assert pulse._memory_llm("instructions", "text", route=route) == ({"items": []}, 5)
+    assert seen == [[VOLCENGINE]] and routes.bound == []  # lent for the call, and only for it
+    assert pulse._memory_llm("instructions", "text") == ({"items": []}, 5)
+    assert seen[-1] == []
+    # What Hermes leaves out of the chat's route stays out, as it does when it reopens the chat.
+    db.model(model=VOLCENGINE["model"], config={"provider": "volcengine"})
+    assert pulse.chat_route(tmp_path, SID) == {"provider": "volcengine", "model": VOLCENGINE["model"]}
+
+
+def test_pulse_stays_on_hermess_main_model_when_the_chat_has_no_model_to_lend(remembering, db, tmp_path,
+                                                                                monkeypatch, caplog):
+    routes = Routes(monkeypatch, dropped={"volcengine"})
+    assert pulse.chat_route(tmp_path, SID) is None and routes.read == []  # no model of its own: nothing to read
+    db.model(model=VOLCENGINE["model"], config=VOLCENGINE_CONFIG)
+    assert pulse.chat_route(tmp_path, SID) is None  # its provider is gone: Hermes's main one, as "auto" is
+    routes.dropped.clear()
+    assert pulse.chat_route(tmp_path, "") is None
+    server = sys.modules["tui_gateway.server"]
+    monkeypatch.setattr(server, "_stored_session_runtime_overrides", lambda row: 1 / 0)
+    with caplog.at_level(logging.WARNING, logger=pulse.logger.name):
+        assert pulse.chat_route(tmp_path, SID) is None  # a reader that fails, which the log says
+    assert "Pulse couldn't read its chat's model" in caplog.text
+    monkeypatch.delattr(server, "_stored_session_runtime_overrides")
+    assert pulse.chat_route(tmp_path, SID) is None  # a Hermes without the reader
+    monkeypatch.delitem(sys.modules, "tui_gateway.server")
+    assert pulse.chat_route(tmp_path, SID) is None  # outside the process hosting the chat
+    # A Hermes without the binding: the call still goes, on Hermes's main model.
+    monkeypatch.setitem(sys.modules, "agent.auxiliary_client", types.ModuleType("agent.auxiliary_client"))
+    remembering.ctx.llm = types.SimpleNamespace(complete_structured=lambda **kwargs: types.SimpleNamespace(
+        parsed={"items": []}, usage=types.SimpleNamespace(total_tokens=3)))
+    assert pulse._memory_llm("instructions", "text", route=VOLCENGINE) == ({"items": []}, 3)
+
+
+def test_memory_and_follow_ups_run_on_the_pulse_chats_model(remembering, monkeypatch):
+    store_ = remembering.store
+    store_.set("enabled", True)
+    store_.set("memory", True)
+    monkeypatch.setattr(pulse, "chat_route", lambda home, chat_id: VOLCENGINE if chat_id == SID else None)
+    asked = []
+
+    def memory_llm(instructions, text, purpose="pulse memory", route=None):
+        asked.append((purpose, route))
+        return {"items": []}, 1
+
+    monkeypatch.setattr(pulse, "_memory_llm", memory_llm)
+    monkeypatch.setattr(pulse.memory, "run", lambda pulse_store, sources, ask, **kwargs: ask("i", "t"))
+    monkeypatch.setattr(pulse.followup, "run", lambda pulse_store, home, ask, **kwargs: ask("i", "t"))
+    pulse._memory_run(store_.path.parent, SID, time.time(), threading.Event())
+    assert asked == [("pulse memory", VOLCENGINE), ("pulse follow-up", VOLCENGINE)]
+    # A model the user gave Hermes's "Pulse memory" slot runs them, with nothing lent.
+    hermes_config = types.ModuleType("hermes_cli.config")
+    hermes_config.load_config = lambda: {"auxiliary": {memory.TASK: {"provider": "openrouter", "model": "google/gemini-flash"}}}
+    monkeypatch.setitem(sys.modules, "hermes_cli", sys.modules.get("hermes_cli") or types.ModuleType("hermes_cli"))
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", hermes_config)
+    asked.clear()
+    pulse._memory_run(store_.path.parent, SID, time.time(), threading.Event())
+    assert asked == [("pulse memory", None), ("pulse follow-up", None)]
+
+
+def test_pulse_status_says_which_model_pulse_runs_on(live, db, capsys, monkeypatch):
+    db.session()
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", pulse.get_hermes_home)
+    config = {"auxiliary": {memory.TASK: {"provider": "auto", "model": ""}}}
+    hermes_config = types.ModuleType("hermes_cli.config")
+    hermes_config.load_config = lambda: config
+    monkeypatch.setitem(sys.modules, "hermes_cli", sys.modules.get("hermes_cli") or types.ModuleType("hermes_cli"))
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", hermes_config)
+    live.store.set("enabled", True)
+
+    def status():
+        cli.dispatch(types.SimpleNamespace(conduit_push_action="pulse", pulse_action="status", value=""))
+        return [line for line in capsys.readouterr().out.splitlines() if line.startswith("Model: ")]
+
+    every = "for its turns, memory, report lists and follow-up checks"
+    assert status() == [f"Model: Hermes's main model, {every}"]
+    db.model(model="local-model", billing="custom")  # names no provider, so it lends Pulse none
+    assert status() == ["Model: local-model, the Pulse chat's own, for its turns; memory, report lists and "
+                        "follow-up checks run on Hermes's main model"]
+    db.model(model=VOLCENGINE["model"], config=VOLCENGINE_CONFIG)
+    assert status() == [f"Model: {VOLCENGINE['model']} on volcengine, the Pulse chat's own, {every}"]
+    config["auxiliary"][memory.TASK] = {"provider": "openrouter", "model": "google/gemini-flash"}
+    assert status() == [f"Model: {VOLCENGINE['model']} on volcengine, the Pulse chat's own, for its turns; memory, "
+                        "report lists and follow-up checks run on google/gemini-flash on openrouter, "
+                        "Hermes's \"Pulse memory\" model"]
+    live.store.set(pulse.MODEL, {"provider": "openrouter", "model": "google/gemini-flash"})
+    assert status() == [f"Model: google/gemini-flash on openrouter, from Settings > Pulse, {every}"]
+    config["auxiliary"][memory.TASK] = {"provider": "nous", "model": ""}
+    assert status()[0].endswith("run on nous's default model, Hermes's \"Pulse memory\" model")
+    config["auxiliary"][memory.TASK] = {"provider": "openrouter", "model": {"name": "x"}}  # hand-edited
+    assert status() == [f"Model: google/gemini-flash on openrouter, from Settings > Pulse, {every}"]
+    hermes_config.load_config = lambda: 1 / 0
+    assert status() == [f"Model: google/gemini-flash on openrouter, from Settings > Pulse, {every}"]
 
 
 def test_the_loop_runs_memory_on_its_own_thread(remembering, db, monkeypatch):
