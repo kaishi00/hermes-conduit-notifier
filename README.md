@@ -316,8 +316,9 @@ flags go through. A control exists only for a ring the Watch answered (409
 otherwise); a call once ended stays ended, and a ring takes four waiting reads
 at a time. Each read or write keeps the ring another 10 minutes, up to 4 hours
 after it rang. A restart drops rings, so a write with `adopt: true` brings an
-unknown ring back as a control alone, with the token of the first write. Only
-the call's two devices know a ring's id, which the relay's logs leave out. Each device
+unknown ring back as a control alone, with the token of the first write: the
+id is what an adoption trusts. Only the call's two devices know a ring's id,
+which the relay's logs leave out. Each device
 whose read comes back 404 writes its state again with it and reads on, and a
 change made while the relay was down is retried. Adopted rings are capped at
 1,000, apart from ringing calls, which they never push out. On a relay older

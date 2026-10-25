@@ -98,7 +98,7 @@ export class Rings {
   // holds its maximum the oldest adopted ring goes, else the oldest ring (that
   // call only loses the "stop the other device" step).
   create(installationId) {
-    this.sweep();
+    this.sweep(this.rings.size >= this.maxRings);
     while (this.rings.size >= this.maxRings) this.drop(this.oldest((ring) => ring.adopted) ?? this.rings.values().next().value);
     const id = randomBytes(16).toString('base64url');
     const token = randomBytes(32).toString('base64url');
@@ -229,6 +229,7 @@ export class Rings {
   // relay makes room among adopted rings only, never a ringing call's.
   adopt(id, token) {
     if (this.rings.has(id)) return undefined;
+    this.sweep(this.adopted >= this.maxAdopted || this.rings.size >= this.maxRings);
     while (this.adopted >= this.maxAdopted || (this.adopted > 0 && this.rings.size >= this.maxRings)) {
       this.drop(this.oldest((ring) => ring.adopted));
     }
@@ -257,11 +258,14 @@ export class Rings {
     this.rings.set(ring.id, ring);
   }
 
-  sweep() {
+  // Rings out of their time, from the map's oldest end. A control at its
+  // limit can sit behind younger rings, so a full relay looks at every ring
+  // (`all`) before it pushes one out.
+  sweep(all = false) {
     const cutoff = this.now() - this.ttlMs;
     for (const ring of this.rings.values()) {
-      if (ring.aliveAt > cutoff) break;
-      this.drop(ring);
+      if (ring.aliveAt <= cutoff) this.drop(ring);
+      else if (!all) break;
     }
   }
 

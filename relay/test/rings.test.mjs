@@ -236,6 +236,36 @@ test('a control in use keeps its ring past the ring\'s time, up to its limit', a
   assert.deepEqual(await rings.readControl(ring.id, ring.token), { status: 'unknown' }, 'and not a moment past it');
 });
 
+test('a full relay drops a control past its limit before a live ring', async () => {
+  const clock = { now: 1_000 };
+  const rings = ringsAt(clock, { maxRings: 3 });
+  const answered = () => {
+    const ring = rings.create('install-1');
+    rings.settle(ring.id, ring.token, 'watch', 'answered');
+    rings.setControl(ring.id, ring.token, 'phone', { muted: false });
+    return ring;
+  };
+  const capped = answered();
+  const latest = 1_000 + RING_CONTROL_MAX_MS - RING_TTL_MS;
+  while (clock.now + RING_TTL_MS / 2 < latest) {
+    clock.now += RING_TTL_MS / 2;
+    await rings.readControl(capped.id, capped.token);
+  }
+  clock.now = latest - RING_TTL_MS / 4;
+  const live = answered();
+  clock.now = latest + RING_TTL_MS / 8;
+  await rings.readControl(live.id, live.token);
+  clock.now = latest + RING_TTL_MS / 4;
+  await rings.readControl(capped.id, capped.token);
+  // The capped control now sits behind the live one, and runs out first.
+  clock.now = latest + RING_TTL_MS + 1;
+  const ringing = rings.create('install-1');
+  rings.create('install-1');
+  assert.equal((await rings.readControl(live.id, live.token)).status, 'control', 'the live control stays');
+  assert.ok(rings.settle(ringing.id, ringing.token, 'phone', 'answered').ring, 'and the ringing call');
+  assert.deepEqual(await rings.readControl(capped.id, capped.token), { status: 'unknown' });
+});
+
 test('a control read waits a while, takes four at a time and ends when the ring goes', async () => {
   const rings = ringsAt({ now: 1_000 });
   const ring = rings.create('install-1');
