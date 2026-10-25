@@ -217,6 +217,16 @@ def test_a_bots_hidden_bot_chat_is_listed(tmp_path, monkeypatch):
     assert [i["name"] for i in _list(conn, session_ids=["bot"])["items"]] == ["later.png", "wallpaper.png"]
 
 
+def test_a_bot_chat_doesnt_bring_in_the_hidden_chat_it_came_from(tmp_path, monkeypatch):
+    # Only what continues a Bot Chat is listed with it; a hidden room it
+    # somehow descends from stays out. The title is matched trimmed.
+    _no_gateway(monkeypatch)
+    conn = _db(tmp_path, [("room", "assistant", "MEDIA:/root/room.png"),
+                          ("bot", "assistant", "MEDIA:/root/bot.png")],
+               sessions=[("room", "Group: Council", 1), ("bot", " Bot Chat\n", 1, "room")])
+    assert [i["name"] for i in _list(conn)["items"]] == ["bot.png"]
+
+
 def test_a_file_on_disk_reports_its_size(tmp_path, monkeypatch):
     _no_gateway(monkeypatch)
     target = tmp_path / "out" / "photo.jpg"

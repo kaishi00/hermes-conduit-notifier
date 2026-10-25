@@ -368,10 +368,11 @@ MAX_LINEAGE = 256
 MAX_TITLE_HOPS = 16
 
 
-def lineage(conn: sqlite3.Connection, session_ids: Iterable[str]) -> list:
+def lineage(conn: sqlite3.Connection, session_ids: Iterable[str], *, ancestors: bool = True) -> list:
     """The chats' sessions with the ones they continue from and the ones
     that continue them (a compression's continuation, a subagent's run),
-    since Hermes keeps one chat's history across them."""
+    since Hermes keeps one chat's history across them. Without
+    ``ancestors``, only the ones that continue them."""
     found = [sid for sid in dict.fromkeys(str(s) for s in session_ids if s)][:MAX_LINEAGE]
     if not found or "parent_session_id" not in _columns(conn, "sessions"):
         return found
@@ -380,7 +381,7 @@ def lineage(conn: sqlite3.Connection, session_ids: Iterable[str]) -> list:
     for sid in found:
         current, chain = sid, {sid}
         # One budget for every chain, so the ids stay a bounded IN (...).
-        while len(known) < MAX_LINEAGE:
+        while ancestors and len(known) < MAX_LINEAGE:
             row = conn.execute("SELECT parent_session_id FROM sessions WHERE id = ?", (current,)).fetchone()
             parent = str(row[0]) if row and row[0] else ""
             if not parent or parent in chain:
@@ -404,19 +405,23 @@ def lineage(conn: sqlite3.Connection, session_ids: Iterable[str]) -> list:
 
 
 # The title Hermes gives a bot's one Bot Chat (Desktop's hermes-bots plugin
-# and Conduit both find the chat by it).
+# and Conduit both find the chat by it, trimmed; a compression's
+# continuation is titled "Bot Chat #2" and is found through its parent).
 BOT_CHAT_TITLE = "Bot Chat"
 
 
 def bot_chat_lineage(conn: sqlite3.Connection, session_columns: Optional[set] = None) -> list:
     """The profile's hidden Bot Chat sessions, with the sessions that
-    continue them."""
+    continue them (never the ones they came from: a hidden room stays
+    hidden). A profile has one Bot Chat; the same id budget as ``lineage``
+    bounds a profile that somehow has more."""
     columns = _columns(conn, "sessions") if session_columns is None else session_columns
     if not {"hidden", "title"} <= columns:
         return []
     ids = [str(row[0]) for row in conn.execute(
-        "SELECT id FROM sessions WHERE hidden = 1 AND title = ? LIMIT ?", (BOT_CHAT_TITLE, MAX_LINEAGE))]
-    return lineage(conn, ids) if ids else []
+        "SELECT id FROM sessions WHERE hidden = 1 AND TRIM(title, char(32, 9, 10, 13)) = ? LIMIT ?",
+        (BOT_CHAT_TITLE, MAX_LINEAGE))]
+    return lineage(conn, ids, ancestors=False) if ids else []
 
 
 def _titles(conn: sqlite3.Connection, has_parent: bool) -> Callable[[str, Any], str]:
