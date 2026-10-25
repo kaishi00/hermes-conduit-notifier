@@ -10343,6 +10343,9 @@ WATCH_JOB_NEXT_PROMPT = ("[The next request from the same Conduit voice conversa
 # How often a request waiting for the call's chat checks it again, besides
 # being woken when a job settles.
 WATCH_JOB_CHAT_WAIT_S = 2.0
+# How long the call's chat waits for a cancelled request's turn to end
+# before the next request goes in.
+WATCH_JOB_INTERRUPT_END_S = 5.0
 # Job ids are unique in this process, not per grant: a renewed grant's jobs
 # never share an id with the last grant's, so a cancel can't hit the wrong
 # job.
@@ -10595,6 +10598,10 @@ class _WatchJob:
         # kept in case Hermes refuses the interrupt (cancel).
         self.cancelling = False
         self.held_end: Optional[Tuple[str, Dict[str, Any]]] = None
+        # Its prompt went in and Hermes hasn't ended that turn yet; after a
+        # cancel, the call's chat waits for that end until quiet_by (#1250).
+        self.turn_open = False
+        self.quiet_by = 0.0
         # A follow-up going into the running turn (interrupt_job): None,
         # "sending", "accepted" (Hermes took it into the turn) or "queued"
         # (Hermes runs it as the next turn). Until the turn carries on, an
@@ -10776,7 +10783,8 @@ class _WatchJobs:
         # are the running one's, never a settled earlier one's. Late frames
         # with no running owner go to the earliest, whose handlers drop them.
         owners = [job for job in self.jobs.values() if sid in (job.session_id, job.stored_session_id)]
-        return next((job for job in owners if job.active or job.cancelling), owners[0] if owners else None)
+        return next((job for job in owners if job.active or job.cancelling),
+                    next((job for job in owners if job.turn_open), owners[0] if owners else None))
 
     def _event(self, kind: str, sid: str, payload: Dict[str, Any]) -> None:
         settled = False
@@ -10784,6 +10792,10 @@ class _WatchJobs:
             job = self._job_for(sid)
             if job is None:
                 return
+            if kind in ("message.complete", "error") and job.turn_open:
+                # Its turn is over: the call's chat can take the next one.
+                job.turn_open = False
+                self.changed.notify_all()
             if job.held_completion is not None and kind not in ("message.complete", "error"):
                 # Hermes is still at work on the session: the end it held
                 # waits on, so a quiet stretch isn't read as no turn coming.
@@ -10984,6 +10996,8 @@ class _WatchJobs:
             with self.changed:
                 self.jobs.pop(job.job_id, None)
                 self.started -= 1
+                if self.call_chat_claim is job:
+                    self.call_chat_claim = None
                 self.changed.notify_all()
             return {"ok": True, "status": "not_started", "title": job.title,
                     "message": "Hermes couldn't start the job: the host is too busy right now."}
@@ -11034,6 +11048,7 @@ class _WatchJobs:
             if not cancelled:
                 self.rpc("prompt.submit", {"session_id": sid, "text": WATCH_JOB_PROMPT.format(instructions=instructions)})
                 with self.lock:
+                    job.turn_open = True
                     cancelled = job.status == "cancelled"
                 if cancelled:
                     # Cancelled while its prompt went in: stop that turn.
@@ -11093,7 +11108,9 @@ class _WatchJobs:
     def _chat_busy(self, chat: _WatchJob, job: _WatchJob) -> bool:
         """Whether another request still runs in the call's chat. Called with
         the lock held."""
-        return any(other is not job and (other.active or other.cancelling) and other.session_id == chat.session_id
+        now = time.monotonic()
+        return any(other is not job and other.session_id == chat.session_id
+                   and (other.active or other.cancelling or (other.turn_open and now < other.quiet_by))
                    for other in self.jobs.values())
 
     def _continue_session(self, job: "_WatchJob", instructions: str, chat: "_WatchJob") -> Dict[str, Any]:
@@ -11139,6 +11156,7 @@ class _WatchJobs:
                 self.rpc("prompt.submit", {"session_id": job.session_id,
                                            "text": WATCH_JOB_NEXT_PROMPT.format(instructions=instructions)})
                 with self.lock:
+                    job.turn_open = True
                     cancelled = job.status == "cancelled"
                 if cancelled:
                     # Cancelled while its prompt went in: stop that turn, as
@@ -11231,7 +11249,9 @@ class _WatchJobs:
             else:
                 with self.changed:
                     job.cancelling, job.held_end = False, None
-                    # A request waiting for the call's chat may go now.
+                    # Hermes ends the interrupted turn on its own time: the
+                    # call's chat waits a little for that end.
+                    job.quiet_by = time.monotonic() + WATCH_JOB_INTERRUPT_END_S
                     self.changed.notify_all()
         cancelled = [job for job in targets if job not in failed]
         undelivered = _watch_undelivered.get()

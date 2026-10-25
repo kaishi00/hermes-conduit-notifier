@@ -1970,3 +1970,41 @@ def test_two_requests_waiting_on_a_chat_never_made_share_the_one_made_next():
     server.emit("rt-2", "message.complete", {"text": "Booked", "status": "complete"})
     wait_for(lambda: len(server.methods("prompt.submit")) == 2)
     assert [p["session_id"] for p in server.methods("prompt.submit")] == ["rt-2", "rt-2"]
+
+
+def test_the_next_request_waits_for_a_cancelled_requests_turn_to_end():
+    grant = make_jobs()
+    server = grant.jobs.server
+    start_joining(grant, "plan the trip")
+    original = api.WATCH_JOB_START_ANSWER_S
+    api.WATCH_JOB_START_ANSWER_S = 0.1
+    try:
+        assert start_joining(grant, "and book the hotel")["status"] == "accepted"
+    finally:
+        api.WATCH_JOB_START_ANSWER_S = original
+    api.run_watch_job_call(grant, "cancel_job", {"job_id": "watch-1"})
+    time.sleep(0.1)
+    assert len(server.methods("prompt.submit")) == 1, "the interrupted turn hasn't ended yet"
+
+    # Hermes ends the interrupted turn: that end is the cancelled request's.
+    server.emit("rt-1", "message.complete", {"text": "", "status": "interrupted"})
+    wait_for(lambda: len(server.methods("prompt.submit")) == 2)
+    assert grant.jobs.jobs["watch-2"].status == "running"
+    server.emit("rt-1", "message.complete", {"text": "Booked", "status": "complete"})
+    assert grant.jobs.jobs["watch-2"].result == "Booked"
+
+
+def test_a_cancelled_turn_that_never_ends_holds_the_chat_only_briefly(monkeypatch):
+    monkeypatch.setattr(api, "WATCH_JOB_INTERRUPT_END_S", 0.2)
+    monkeypatch.setattr(api, "WATCH_JOB_CHAT_WAIT_S", 0.05)
+    grant = make_jobs()
+    server = grant.jobs.server
+    start_joining(grant, "plan the trip")
+    original = api.WATCH_JOB_START_ANSWER_S
+    api.WATCH_JOB_START_ANSWER_S = 0.1
+    try:
+        start_joining(grant, "and book the hotel")
+    finally:
+        api.WATCH_JOB_START_ANSWER_S = original
+    api.run_watch_job_call(grant, "cancel_job", {"job_id": "watch-1"})
+    wait_for(lambda: len(server.methods("prompt.submit")) == 2)
