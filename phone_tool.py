@@ -538,6 +538,7 @@ def _nudge(change: dict[str, Any], profile: str) -> None:
         else:
             label = "phone.change"
         client.enqueue(push_event("phone.changes", identifier=f"phone:{change['id']}", profile=profile,
+                                  profile_name=session_titles.bot_name(),
                                   title=title, title_label=label, body=change["summary"],
                                   mode="background" if auto else "alert"))
     except Exception:  # noqa: BLE001

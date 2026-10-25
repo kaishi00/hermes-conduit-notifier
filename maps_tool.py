@@ -33,7 +33,7 @@ from urllib.parse import urlencode
 
 from hermes_constants import get_hermes_home
 
-from . import client, location_profiles, location_tool, maps_host
+from . import client, location_profiles, location_tool, maps_host, session_titles
 from .events import push_event
 from .location_store import TRUSTED_BACKGROUND_S, TRUSTED_TALKING_S, LocationError, LocationStore, sharing_paused
 from .present_store import NAVIGATE_FEATURE, PresentError, PresentStore
@@ -483,6 +483,7 @@ def _navigate(store: LocationStore, view: dict[str, Any] | None, args: dict[str,
     location_tool._log(store, "maps navigate", session, reader)
     try:
         client.enqueue(push_event("phone.changes", identifier=f"present:{prompt['id']}", profile=profile,
+                                  profile_name=session_titles.bot_name(),
                                   title=prompt["title"], body="Tap Go to open Apple Maps.", mode="alert"))
     except Exception:  # noqa: BLE001
         logger.warning("conduit_push: could not wake the phone for navigate", exc_info=True)

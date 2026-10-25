@@ -16,7 +16,7 @@ from hermes_constants import get_hermes_home
 from . import (call_tool, call_watches, calls, chat_on_screen, clarify_loop, client, conduit_first, cron_runs,
                desktop_selected, health_tool, inbox_tool, live_activity, location_tool, maps_tool, phone_tool,
                present_tool, pulse, reply_sources, room_memory, settings_tool, show_tool, turn_surface, voice_archive)
-from .session_titles import title as _session_title, titled as _titled
+from .session_titles import bot_name as _bot_name, title as _session_title, titled as _titled
 from .client import enqueue
 from .events import approval_decision, clarification_text, event_id, is_silent_response, plain_text, push_event
 
@@ -175,6 +175,7 @@ def _pre_tool_call(**kwargs: Any) -> dict[str, str] | None:
         identifier=event_id("input", kwargs.get("turn_id"), kwargs.get("tool_call_id")),
         session_id=_text(kwargs.get("session_id")),
         profile=_profile,
+        profile_name=_bot_name(),
         title=_titled("Input needed", kwargs.get("session_id")),
         title_label="input.needed",
         session_title=_session_title(kwargs.get("session_id")),
@@ -222,6 +223,7 @@ def _post_llm_call(**kwargs: Any) -> None:
         identifier=event_id("response", kwargs.get("turn_id"), session_id),
         session_id=session_id,
         profile=_profile,
+        profile_name=_bot_name(),
         title=copy["title"],
         title_label=copy["title_label"],
         session_title=chat_title,
@@ -448,6 +450,7 @@ def _on_session_end(**kwargs: Any) -> None:
         identifier=event_id("failure", kwargs.get("turn_id"), session_id),
         session_id=session_id,
         profile=_profile,
+        profile_name=_bot_name(),
         title=_titled("Turn failed", session_id),
         title_label="turn.failed",
         session_title=_session_title(session_id),
@@ -481,6 +484,7 @@ def _pre_approval_request(**kwargs: Any) -> None:
         identifier=event_id("approval", session_id, turn_id, kwargs.get("pattern_key"), kwargs.get("command")),
         session_id=session_id,
         profile=_profile,
+        profile_name=_bot_name(),
         title=_titled("Approval needed", session_id),
         title_label="approval.needed",
         session_title=_session_title(session_id),
@@ -594,6 +598,7 @@ def _subagent_stop(**kwargs: Any) -> None:
         identifier=event_id("subagent", kwargs.get("parent_turn_id"), child, status),
         session_id=parent,
         profile=_profile,
+        profile_name=_bot_name(),
         title=_titled("Task finished", parent),
         title_label="background_task.finished" if finished else "",
         session_title=_session_title(parent),

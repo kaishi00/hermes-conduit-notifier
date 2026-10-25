@@ -61,7 +61,7 @@ SECRET_BYTES = 32
 MAX_CT_CHARS = 2600
 # Fields that carry content. Everything else on an event stays visible to the
 # relay because it routes on it.
-INNER_FIELDS = ("title", "body", "session_id", "profile", "gateway", "stored_session_id", "decision", "call",
+INNER_FIELDS = ("title", "body", "session_id", "profile", "profile_name", "gateway", "stored_session_id", "decision", "call",
                 "locate", "maps", "title_label", "session_title", "count")
 
 # The phone rotates a key this old (inline, or by a handover) on its next

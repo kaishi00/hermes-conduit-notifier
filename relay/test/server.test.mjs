@@ -176,6 +176,19 @@ test('validateEvent passes a bounded decision through', () => {
   assert.deepEqual(event.decision.choices, ['once', 'deny'], 'unknown choice strings are filtered');
 });
 
+test('a push names the bot by its name, not its profile id', () => {
+  const event = validateEvent({ type: 'response.ready', event_id: 'ready:12345678', session_id: 'sess-1', profile: 'default', profile_name: ' Nova ' });
+  const { payload } = notificationFor(event, { show_previews: false, completion_sound: false });
+  assert.equal(payload.aps.alert.body, 'Hermes has finished responding.\nProfile: Nova · Session: sess-1');
+  assert.equal(payload.conduit.profile, 'default', 'routing keeps the profile id');
+  assert.equal(payload.conduit.profile_name, 'Nova');
+  assert.equal(payload.body.conduit.profile_name, 'Nova');
+  const unnamed = notificationFor(validateEvent({ type: 'response.ready', event_id: 'ready:12345679', session_id: 'sess-1', profile: 'default' }),
+    { show_previews: false, completion_sound: false });
+  assert.equal(unnamed.payload.aps.alert.body, 'Hermes has finished responding.\nProfile: default · Session: sess-1');
+  assert.equal('profile_name' in unnamed.payload.conduit, false);
+});
+
 // Gateway session keys built by Hermes' build_session_key carry whatever
 // the platform's ids hold: Matrix rooms and users (`!room:server`,
 // `@user:server`), WhatsApp group JIDs (`…@g.us`), a profile named `main`
