@@ -10810,8 +10810,9 @@ class _WatchJobs:
                 # The call's chat (#1250): a session's turns run in order. An
                 # end before the next request's turn shows any sign of life is
                 # the cancelled turn's: however it ended while the next one
-                # waits, and only as an interrupt once the next went in after
-                # the hold, when its own end can come first (an early error).
+                # waits, and only as an interrupted completion once the next
+                # went in after the hold, when its own end can come first (an
+                # early error).
                 # Anything else means that turn is over and its end isn't coming.
                 if kind in ("message.complete", "error") and (
                         not job.turn_open or self._reads_as_interrupt(kind, payload)):
@@ -10883,11 +10884,10 @@ class _WatchJobs:
 
     @staticmethod
     def _reads_as_interrupt(kind: str, payload: Dict[str, Any]) -> bool:
-        """An end that says its turn was interrupted."""
-        if kind == "error":
-            message = payload.get("message")
-            return isinstance(message, str) and "interrupt" in message.lower()
-        return payload.get("status") == "interrupted"
+        """An end that says its turn was interrupted: Hermes ends an
+        interrupted turn with a completion marked so (as _settle reads it),
+        while an error is a turn failing, so it is the running one's."""
+        return kind == "message.complete" and payload.get("status") == "interrupted"
 
     @staticmethod
     def _settle(job: _WatchJob, kind: str, payload: Dict[str, Any]) -> None:

@@ -2012,7 +2012,7 @@ def test_a_cancelled_turn_that_never_ends_holds_the_chat_only_briefly(monkeypatc
 
 @pytest.mark.parametrize("kind,payload", [
     ("message.complete", {"text": "", "status": "interrupted"}),
-    ("error", {"message": "Interrupted"}),
+    ("message.complete", {"text": "Half a plan", "status": "interrupted"}),
 ])
 def test_a_cancelled_turns_end_after_the_next_request_went_in_is_not_that_requests(monkeypatch, kind, payload):
     monkeypatch.setattr(api, "WATCH_JOB_INTERRUPT_END_S", 0.0)
