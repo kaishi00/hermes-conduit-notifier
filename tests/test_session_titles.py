@@ -88,6 +88,7 @@ def sent(monkeypatch):
     monkeypatch.setattr(plugin, "enqueue", events.append)
     FakeSessionDB.opened.clear()
     titles._cache.clear()
+    titles._names.clear()
     return events
 
 
@@ -205,13 +206,16 @@ def test_a_bot_chat_push_is_titled_with_the_name_the_bots_list_shows(sent, monke
     assert titles.title("bot") == "Nova Prime"
     assert titles.bot_name() == "Nova Prime"
     titles._cache.clear()
+    titles._names.clear()
     meta.write_text("display_name: Main\nui_meta:\n  hermes-bots:\n    color: red\n", encoding="utf-8")
     assert titles.title("bot") == "Main"
     titles._cache.clear()
+    titles._names.clear()
     meta.write_text("description: x\n", encoding="utf-8")
     assert titles.title("bot") == "default"
     assert titles.bot_name() == "", "an unnamed bot sends no name"
     titles._cache.clear()
+    titles._names.clear()
     meta.write_text(": not yaml [", encoding="utf-8")
     assert titles.title("bot") == "default"
     # A chat that isn't a Bot Chat keeps its own title.

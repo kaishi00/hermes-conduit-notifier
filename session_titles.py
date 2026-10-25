@@ -22,6 +22,8 @@ CACHE_SECONDS = 30.0
 MAX_CACHED = 256
 
 _cache: dict[tuple[str, str], tuple[float, str]] = {}
+# Bot names by profile home; one entry per profile, so no cap is needed.
+_names: dict[str, tuple[float, str]] = {}
 
 # Conduit's Bot Mode finds each bot's one chat by this exact title, so every
 # bot's chat carries it and can't be renamed. A push from one is titled with
@@ -67,9 +69,21 @@ def titled(prefix: str, key: Any) -> str:
 
 def bot_name() -> str:
     """The name this profile's bot has in Hermes, as the Bots list shows it,
-    or "" when it has none (the Bots list shows its profile id)."""
+    or "" when it has none (the Bots list shows its profile id). Cached like
+    titles, so a turn's several pushes read profile.yaml once."""
     home = _home()
-    return _given_name(home) if home is not None else ""
+    if home is None:
+        return ""
+    entry = str(home)
+    now = time.monotonic()
+    with _cache_lock:
+        hit = _names.get(entry)
+        if hit and now - hit[0] < CACHE_SECONDS:
+            return hit[1]
+    value = _given_name(home)
+    with _cache_lock:
+        _names[entry] = (time.monotonic(), value)
+    return value
 
 
 def _bot_name(home: Any) -> str:

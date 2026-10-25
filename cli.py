@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from . import e2e
+from . import e2e, session_titles
 from .client import DEFAULT_RELAY_URL, RelayRejected, UnpairedLocally, build_outgoing, claim_pairing, e2e_status, load_state, post_event, record_relay_accepted, record_relay_refusal, request_key_rotation, send_now, set_redact_content, state_path, unpair
 from .relay_urls import check_request_url
 from .events import event_id, plugin_hello, push_event
@@ -174,6 +174,7 @@ def dispatch(args: argparse.Namespace) -> int:
             "response.ready",
             identifier=event_id("test"),
             profile=_profile_name(),
+            profile_name=session_titles.bot_name(),
             title="Hermes Conduit",
             body="Push notifications are connected.",
         )

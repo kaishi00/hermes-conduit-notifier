@@ -16366,10 +16366,20 @@ def _notify_self_update(job: Dict[str, Any]) -> None:
             # Per outcome: a failure the restarted dashboard corrects isn't a
             # duplicate of the push the dying one sent.
             event = events.push_event("background_task.finished", identifier=events.event_id("plugin-update", job["id"], job.get("step")),
-                                      profile=profile or "default", title=title, body=body)
+                                      profile=profile or "default", profile_name=_bot_name(client), title=title, body=body)
             client.send_now(event)
     except Exception as exc:  # noqa: BLE001 — a notification is a courtesy; the job file has the outcome
         logger.warning("Conduit plugin: couldn't send the update notification (%s)", type(exc).__name__)
+
+
+def _bot_name(client: Any) -> str:
+    """The profile's bot name for a push (session_titles.bot_name); "" when it
+    can't be read, so the push still goes out with the profile id."""
+    try:
+        return importlib.import_module(f"{client.__package__}.session_titles").bot_name()
+    except Exception:  # noqa: BLE001 — a name is never worth the notification
+        logger.debug("Conduit plugin: no bot name for the update notification", exc_info=True)
+        return ""
 
 
 @router.post("/self/update")
