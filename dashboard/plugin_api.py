@@ -23,6 +23,11 @@ Conduit can instead ask for a session billed to this host's OpenAI API key
 (``billing: "api"``), only when the profile turns that on; the two never
 stand in for each other.
 
+Qwen Live: like Gemini Live, Conduit talks to Alibaba Cloud (DashScope)
+directly from the phone or Watch, and the DASHSCOPE_API_KEY stays on this
+host. Conduit asks for a short-lived temporary key per connection; a failed
+mint never falls back to the permanent key or to Gemini.
+
 Grok Live: relays Conduit's realtime socket to xAI, adding this host's
 SuperGrok sign-in (or XAI_API_KEY) on the way. The bearer stays on the host.
 
@@ -245,6 +250,80 @@ def gemini_live_status(get_env: Optional[Callable[[str], Optional[str]]] = None)
     return {"available": True, "model": model}
 
 
+# Direct Live shares Conduit's phone/Watch call shell. Only credentials pass
+# through this host; audio connects directly to Google or Alibaba Cloud.
+QWEN_DEFAULT_MODEL = "qwen3.8-omni-flash-realtime"
+QWEN_DEFAULT_VOICE = "Tina"
+
+
+def qwen_live_settings(get_env: Optional[Callable[[str], Optional[str]]] = None) -> Dict[str, str]:
+    get_env = get_env or _env_value
+    region = str(get_env("CONDUIT_QWEN_LIVE_REGION") or "cn-beijing").strip()
+    domains = {"cn-beijing": "dashscope.aliyuncs.com", "ap-southeast-1": "dashscope-intl.aliyuncs.com"}
+    if region not in domains:
+        raise TokenError(503, "Qwen Live region must be cn-beijing or ap-southeast-1")
+    workspace = str(get_env("CONDUIT_QWEN_LIVE_WORKSPACE") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", workspace):
+        raise TokenError(503, "Set CONDUIT_QWEN_LIVE_WORKSPACE to the Alibaba Cloud workspace ID")
+    model = str(get_env("CONDUIT_QWEN_LIVE_MODEL") or QWEN_DEFAULT_MODEL).strip()
+    if not re.fullmatch(r"qwen[A-Za-z0-9._-]*realtime[A-Za-z0-9._-]*", model):
+        raise TokenError(503, "Set a Qwen Realtime model in CONDUIT_QWEN_LIVE_MODEL")
+    # Bounded like the others: it goes back to the device and on to Alibaba Cloud.
+    voice = str(get_env("CONDUIT_QWEN_LIVE_VOICE") or "").strip() or QWEN_DEFAULT_VOICE
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", voice):
+        raise TokenError(503, "Set a Qwen voice name (letters, digits, - or _) in CONDUIT_QWEN_LIVE_VOICE")
+    return {"model": model, "token_url": f"https://{domains[region]}/api/v1/tokens?expire_in_seconds=120",
+            "websocket_url": f"wss://{workspace}.{region}.maas.aliyuncs.com/api-ws/v1/realtime?"
+                             + urllib.parse.urlencode({"model": model}),
+            "voice": voice}
+
+
+def qwen_live_status(get_env: Optional[Callable[[str], Optional[str]]] = None) -> Dict[str, Any]:
+    get_env = get_env or _env_value
+    try:
+        settings = qwen_live_settings(get_env)
+    except TokenError as exc:
+        return {"provider": "qwen", "available": False, "reason": str(exc), "model": QWEN_DEFAULT_MODEL}
+    if not str(get_env("DASHSCOPE_API_KEY") or "").strip():
+        # The same reason code as /gemini-live/status; Conduit words it.
+        return {"provider": "qwen", "available": False, "reason": "no_api_key", "model": settings["model"]}
+    return {"provider": "qwen", "available": True, "model": settings["model"]}
+
+
+def mint_qwen_live_token(get_env: Optional[Callable[[str], Optional[str]]] = None,
+                         post: Optional[Callable[[urllib.request.Request], Any]] = None,
+                         limiter_key: Optional[str] = None) -> Dict[str, Any]:
+    """A DashScope temporary API key (POST /api/v1/tokens: top-level `token`,
+    `expires_at` in Unix seconds) for one Qwen Live connection."""
+    get_env = get_env or _env_value
+    settings = qwen_live_settings(get_env)
+    key = str(get_env("DASHSCOPE_API_KEY") or "").strip()
+    if not key:
+        raise TokenError(503, "Set DASHSCOPE_API_KEY on the Hermes host")
+    if limiter_key is not None:
+        _qwen_mint_limiter.acquire(limiter_key)
+    request = urllib.request.Request(settings["token_url"], data=b"", method="POST",
+                                     headers={"Authorization": f"Bearer {key}"})
+    try:
+        if post is not None:
+            result = post(request)
+        else:
+            with _opener.open(request, timeout=REQUEST_TIMEOUT_S) as response:
+                result = json.loads(response.read(64 * 1024))
+    except urllib.error.HTTPError as exc:
+        raise TokenError(502, f"Alibaba Cloud rejected the temporary token request (HTTP {exc.code})") from None
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        raise TokenError(502, "Could not obtain a Qwen Live temporary token") from None
+    token = result.get("token") if isinstance(result, dict) else None
+    expiry = result.get("expires_at") if isinstance(result, dict) else None
+    if not isinstance(token, str) or not token.startswith("st-") or not isinstance(expiry, (int, float)) \
+            or not math.isfinite(expiry) or not time.time() < expiry <= time.time() + 1800:
+        raise TokenError(502, "Alibaba Cloud returned an invalid temporary token")
+    # Never substitute the permanent key when minting is unsupported or fails.
+    return {"provider": "qwen", "token": token, "expires_at": _timestamp(datetime.fromtimestamp(expiry, timezone.utc)),
+            "model": settings["model"], "websocket_url": settings["websocket_url"], "voice": settings["voice"]}
+
+
 def _hermes_web_search(query: str, limit: int) -> str:
     from tools.web_tools import web_search_tool
 
@@ -446,6 +525,7 @@ class _MintLimiter:
 
 
 _mint_limiter = _MintLimiter(MINT_LIMIT, MINT_WINDOW_S)
+_qwen_mint_limiter = _MintLimiter(MINT_LIMIT, MINT_WINDOW_S, message="Too many Qwen Live token requests; try again shortly")
 _search_limiter = _MintLimiter(SEARCH_LIMIT, SEARCH_WINDOW_S, message="Too many web searches; try again shortly")
 
 
@@ -583,6 +663,39 @@ async def create_gemini_live_token(response: Response, profile: Optional[str] = 
         raise
     except Exception as exc:
         raise _unexpected("token", exc)
+    return {"ok": True, **result}
+
+
+@router.get("/qwen-live/status")
+async def get_qwen_live_status(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return {"ok": True, **await _run_scoped(profile, qwen_live_status)}
+    except TokenError as exc:
+        raise HTTPException(exc.status, str(exc), headers={"Cache-Control": "no-store"})
+    except HTTPException as exc:
+        # Hermes' own 400/404 for a bad or unknown profile
+        exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
+        raise
+    except Exception as exc:
+        raise _unexpected("status", exc, feature="Qwen Live")
+
+
+@router.post("/qwen-live/token")
+async def create_qwen_live_token(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    # The body is a usable credential: keep it out of any cache on the way.
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    try:
+        result = await _run_scoped(profile, lambda: mint_qwen_live_token(limiter_key=_limiter_key(profile)))
+    except TokenError as exc:
+        logger.warning("Qwen Live token request failed: %s", exc)
+        raise HTTPException(exc.status, str(exc), headers={"Cache-Control": "no-store"})
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
+        raise
+    except Exception as exc:
+        raise _unexpected("token", exc, feature="Qwen Live")
     return {"ok": True, **result}
 
 
@@ -4939,7 +5052,7 @@ VOICE_SESSION_SOURCE = "desktop"
 VOICE_END_REASON = "conduit_voice"
 VOICE_TAG_KINDS = frozenset({"call", "classic", "job"})
 # Local Live calls (the user's own speech server) save like the others.
-VOICE_ENGINES = frozenset({"gemini-live", "gpt-live", "grok-live", "local-live", "classic"})
+VOICE_ENGINES = frozenset({"gemini-live", "gpt-live", "grok-live", "qwen-live", "local-live", "classic"})
 VOICE_TAGS_KEY = "conduit.voice.tags"
 VOICE_CALLS_KEY = "conduit.voice.calls:{session_id}"
 VOICE_CREATED_KEY = "conduit.voice.created"
@@ -8757,7 +8870,9 @@ async def post_phone_wipe(request: Request, response: Response, profile: Optiona
 # minted as /gemini-live/token mints one, for a Watch whose Gemini session
 # broke and can't be resumed while the iPhone is out of reach. It travels
 # sealed like any answer, so the relay never sees it; the Gemini key stays
-# here.
+# here. A Qwen Live call asks for qwen_live_token instead: a DashScope
+# temporary key, minted as /qwen-live/token mints one. Each tool mints only
+# its own provider's credential.
 
 WATCH_CHAT_TOOLS = ("find_chat", "read_chat")
 # The user's spoken answer to what Hermes waits on in the chat a call from
@@ -8765,6 +8880,7 @@ WATCH_CHAT_TOOLS = ("find_chat", "read_chat")
 WATCH_CALL_ANSWER = "answer_call"
 WATCH_TOOLS = ("web_search", "recall_memory") + WATCH_CHAT_TOOLS + (WATCH_CALL_ANSWER,)
 WATCH_LIVE_TOKEN = "live_token"
+WATCH_QWEN_LIVE_TOKEN = "qwen_live_token"
 # Tokens one grant may mint: a few fresh sessions per call, never a stream.
 # A renewal, which only the iPhone can ask for, counts its own.
 WATCH_LIVE_TOKENS_PER_GRANT = 6
@@ -9098,8 +9214,8 @@ def run_watch_tool(grant: _WatchGrant, request: Dict[str, Any]) -> Dict[str, Any
         return {"ok": False, "status": 403, "detail": "This tool isn't available to the Watch"}
     if tool in WATCH_JOB_TOOLS or tool in WATCH_JOB_CALLS or tool == WATCH_JOB_FOLLOW_UP:
         return run_watch_job_call(grant, tool, args)
-    if tool == WATCH_LIVE_TOKEN:
-        return run_watch_live_token(grant)
+    if tool in (WATCH_LIVE_TOKEN, WATCH_QWEN_LIVE_TOKEN):
+        return run_watch_live_token(grant, provider="qwen" if tool == WATCH_QWEN_LIVE_TOKEN else "gemini")
     if tool == WATCH_CALL_ANSWER:
         try:
             return {"ok": True, **_scoped_call(grant.profile, lambda: answer_watch_hermes_call(grant, args))}
@@ -9602,17 +9718,21 @@ def _run_watch_chat_tool(grant: _WatchGrant, feature: str, timeout: float,
 
 
 def run_watch_live_token(grant: _WatchGrant,
-                         mint: Optional[Callable[..., Dict[str, Any]]] = None) -> Dict[str, Any]:
-    """A fresh single-use Gemini Live token for the grant's call, as
-    /gemini-live/token answers. A mint that fails, or whose answer never
-    reaches the relay, doesn't count against the grant's tokens; the token
-    itself is never logged."""
-    mint = mint or mint_gemini_live_token
-    if WATCH_LIVE_TOKEN not in grant.tools:
+                         mint: Optional[Callable[..., Dict[str, Any]]] = None, *, provider: str = "gemini") -> Dict[str, Any]:
+    """A fresh Live token for the grant's call, as /gemini-live/token (or,
+    for provider "qwen", /qwen-live/token) answers. A mint that fails, or
+    whose answer never reaches the relay, doesn't count against the grant's
+    tokens; the token itself is never logged. One grant serves one call with
+    one provider, so the two tools share the per-grant count."""
+    qwen = provider == "qwen"
+    label = "Qwen Live" if qwen else "Gemini Live"
+    mint = mint or (mint_qwen_live_token if qwen else mint_gemini_live_token)
+    required = WATCH_QWEN_LIVE_TOKEN if qwen else WATCH_LIVE_TOKEN
+    if required not in grant.tools:
         return {"ok": False, "status": 403, "detail": "This tool isn't available to the Watch"}
     with grant.lock:
         if grant.live_tokens >= WATCH_LIVE_TOKENS_PER_GRANT:
-            return {"ok": False, "status": 429, "detail": "This call has used all its Gemini Live tokens"}
+            return {"ok": False, "status": 429, "detail": f"This call has used all its {label} tokens"}
         grant.live_tokens += 1
 
     def give_back() -> None:
@@ -9623,15 +9743,15 @@ def run_watch_live_token(grant: _WatchGrant,
         token = _scoped_call(grant.profile, lambda: mint(limiter_key=grant.limiter_key))
     except TokenError as exc:
         give_back()
-        logger.warning("Gemini Live token for a Conduit Watch failed: %s", exc)
+        logger.warning("%s token for a Conduit Watch failed: %s", label, exc)
         return {"ok": False, "status": exc.status, "detail": str(exc)}
     except HTTPException as exc:
         give_back()
         return {"ok": False, "status": exc.status_code, "detail": str(exc.detail)}
     except Exception as exc:  # noqa: BLE001 — named only
         give_back()
-        _log_watch_failure("Gemini Live token for a Conduit Watch failed", exc)
-        return {"ok": False, "status": 500, "detail": f"Minting a Gemini Live token failed on the host ({type(exc).__name__})"}
+        _log_watch_failure(f"{label} token for a Conduit Watch failed", exc)
+        return {"ok": False, "status": 500, "detail": f"Minting a {label} token failed on the host ({type(exc).__name__})"}
     undelivered = _watch_undelivered.get()
     if undelivered is not None:
         undelivered.append(give_back)
@@ -9817,7 +9937,7 @@ def open_watch_grant(body: Any, *, profile: Optional[str], ticket_home: Optional
     if not isinstance(requested, list) or not requested or not all(isinstance(t, str) for t in requested):
         raise TokenError(400, "tools must be a non-empty list")
     # interrupt_job comes with jobs; named, it's taken rather than refused.
-    grantable = WATCH_TOOLS + WATCH_JOB_TOOLS + (WATCH_JOB_FOLLOW_UP, WATCH_LIVE_TOKEN)
+    grantable = WATCH_TOOLS + WATCH_JOB_TOOLS + (WATCH_JOB_FOLLOW_UP, WATCH_LIVE_TOKEN, WATCH_QWEN_LIVE_TOKEN)
     if any(tool not in grantable for tool in requested):
         raise TokenError(400, f"The Watch can only be granted {', '.join(grantable)}")
     max_jobs = _watch_max_jobs(body.get("max_jobs"))
@@ -9855,9 +9975,13 @@ def open_watch_grant(body: Any, *, profile: Optional[str], ticket_home: Optional
         # stop them: a grant that only lists jobs doesn't get them unasked.
         if WATCH_JOB_FOLLOW_UP in requested or any(tool in WATCH_JOB_WRITE_TOOLS for tool in requested):
             tools += (WATCH_JOB_FOLLOW_UP,)
+    if WATCH_QWEN_LIVE_TOKEN in requested and qwen_live_status()["available"]:
+        tools += (WATCH_QWEN_LIVE_TOKEN,)
     if WATCH_LIVE_TOKEN in requested and live_key() is not None:
         tools += (WATCH_LIVE_TOKEN,)
     if not tools:
+        if WATCH_QWEN_LIVE_TOKEN in requested:
+            raise TokenError(503, "Qwen Live is not configured on this Hermes profile")
         if WATCH_LIVE_TOKEN in requested and not any(tool in WATCH_JOB_TOOLS for tool in requested):
             raise TokenError(503, "GEMINI_API_KEY is not set on this Hermes host")
         if all(tool in WATCH_CHAT_TOOLS for tool in requested):
@@ -15576,6 +15700,7 @@ async def get_artifacts(response: Response, profile: Optional[str] = None, befor
 
 ROUTE_CAPABILITIES = (
     "gemini-live",
+    "qwen-live",
     "web-search",
     "memory",
     "personality",

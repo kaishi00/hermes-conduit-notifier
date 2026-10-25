@@ -43,7 +43,7 @@ def test_every_capability_names_a_served_route_family():
     # A capability is a promise Conduit acts on: each one must match a route.
     paths = {route.path for route in api.router.routes}
     prefixes = {
-        "gemini-live": "/gemini-live/", "web-search": "/web-search", "memory": "/memory/",
+        "gemini-live": "/gemini-live/", "qwen-live": "/qwen-live/", "web-search": "/web-search", "memory": "/memory/",
         "personality": "/personality", "gpt-live": "/gpt-live/", "grok-live": "/grok-live/",
         "voice-sessions": "/voice/sessions", "voice-tags": "/voice/tags", "voice-summary": "/voice/summary",
         "voice-chat-calls": "/voice/chat-calls",

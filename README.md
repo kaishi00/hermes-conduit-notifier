@@ -3,7 +3,7 @@
 Hermes Conduit Notifier is the open-source Hermes plugin that connects a Hermes host to the [Hermes Conduit](https://github.com/kaishi00/hermes-conduit) iPhone, iPad and Apple Watch app. It started as the notification sender and now carries most of what Conduit needs from the host:
 
 - **Notifications and calls**: approval, input, reply, failure and background-task notifications, Hermes calling you (CallKit on the phone and Watch), and Lock Screen progress while a turn runs, all delivered through the Conduit push relay in [`relay/`](relay/), end-to-end encrypted where APNs allows.
-- **Live voice**: single-use Gemini Live tokens, GPT-Live sessions on the host's ChatGPT subscription or API key, Grok Live relayed with the host's xAI sign-in, Local Live and Classic voice through your own speech server, voice web lookups, memory and personality for voice, and saved call transcripts.
+- **Live voice**: single-use Gemini Live tokens, temporary Qwen Live credentials, GPT-Live sessions on the host's ChatGPT subscription or API key, Grok Live relayed with the host's xAI sign-in, Local Live and Classic voice through your own speech server, voice web lookups, memory and personality for voice, and saved call transcripts.
 - **Apple Watch**: short-lived grants that let a Watch call run lookups and Hermes jobs, answer what Hermes waits on in a call from Hermes, and stream GPT-Live, Grok and Local Live audio, through the relay, sealed end to end.
 - **Phone data the user opts into**: Apple Health, location, maps, calendar, reminders, Focus, phone status, contacts and alarms, sent by the phone straight to this host and sealed end to end, with the `conduit_health`, `conduit_location`, `conduit_maps`, `conduit_calendar`, `conduit_phone` and `conduit_contacts` tools for the agent, and events from the user's Shortcuts automations through `conduit_inbox`.
 - **Conduit extras**: rich cards and on-screen cards during calls, Artifacts, group pictures, chat takeover, cron notification settings, Conduit settings the agent can change, and one-tap pairing and updates from the app.
@@ -682,6 +682,46 @@ hook sees Hermes' voice-live note on that turn and adds one line to the user
 message: keep the usual personality through word choice and tone, but write
 only words meant to be spoken, with no stage directions or narrated actions,
 no sound effects, no emoji, and no markdown. Other turns are left alone.
+
+## Qwen Live tokens (plugin 0.75+)
+
+Qwen Live is a separate provider beside Gemini Live in Conduit's phone, Watch
+and CarPlay pickers. Both can be set up at once, and switching between them in
+Conduit needs no environment change or gateway restart. Like Gemini Live,
+call audio goes from the device straight to Alibaba Cloud (DashScope), and the
+DashScope API key stays on your Hermes host.
+
+Set these in the profile's `.env`:
+
+```dotenv
+DASHSCOPE_API_KEY=your-model-studio-key
+CONDUIT_QWEN_LIVE_WORKSPACE=your-workspace-id
+CONDUIT_QWEN_LIVE_REGION=cn-beijing          # or ap-southeast-1 (Singapore)
+CONDUIT_QWEN_LIVE_MODEL=qwen3.8-omni-flash-realtime
+CONDUIT_QWEN_LIVE_VOICE=Tina
+```
+
+The key and workspace must belong to the region. The model must be a Qwen
+Realtime model, and the voice a plain voice name (letters, digits, `-`, `_`,
+up to 64 characters); the host voice is only a default that Conduit's Qwen
+settings can override without touching Gemini's voice.
+
+| Method | Path | Returns |
+|---|---|---|
+| `GET` | `/api/plugins/conduit_push/qwen-live/status` | `{ok, provider: "qwen", available, model, reason?}`; `reason` is `no_api_key` without `DASHSCOPE_API_KEY`, or says which setting is wrong |
+| `POST` | `/api/plugins/conduit_push/qwen-live/token` | `{ok, provider: "qwen", token, expires_at, model, websocket_url, voice}` |
+
+Each token is a DashScope temporary API key (`POST /api/v1/tokens`, valid for
+2 minutes) for one connection; Conduit sends it in the WebSocket upgrade
+header, never in the URL. Both routes take `?profile=` like the Gemini ones,
+answer `no-store`, and are rate limited per profile separately from Gemini. A
+mint that fails is an error: it never falls back to Gemini or returns the
+permanent key. There is no host-wide provider switch.
+
+On the Watch, a grant asks for `qwen_live_token` instead of `live_token` (see
+Apple Watch lookups and jobs). Saved Qwen calls use the `qwen-live` engine;
+Gemini calls keep `gemini-live`. Conduit asks for consent to Alibaba Cloud
+separately from Google, and Qwen calls use Hermes web search for lookups.
 
 ## GPT-Live on a ChatGPT subscription
 
@@ -2230,7 +2270,7 @@ Limits: 4 devices per profile, 5,000 items and 4 MiB per batch, 50 alarms and
 200 contacts per device, 120 uploads and 60 exchanges a minute per profile,
 64 KiB per exchange.
 
-## Apple Watch lookups and jobs (plugin 0.6+, jobs 0.7+, Gemini tokens 0.8+)
+## Apple Watch lookups and jobs (plugin 0.6+, jobs 0.7+, Gemini tokens 0.8+, Qwen tokens 0.75+)
 
 With the wrist down, a Conduit Watch call can't reach Conduit on the iPhone,
 but it can reach the push relay over its own internet. For each call Conduit
@@ -2313,6 +2353,12 @@ seals the answers back. This host opens no inbound route of its own.
   the iPhone can ask for, counts its own; a mint that fails, or whose answer
   never reaches the relay, doesn't count. A request for
   `live_token` alone on a profile without a key is refused (503).
+- **Qwen Live tokens** (plugin 0.75): `qwen_live_token` does the same for a
+  Qwen Live call, minted as `/qwen-live/token` mints one, only where this
+  profile has Qwen Live set up. Each tool mints only its own provider's
+  credential, and the two share the grant's 6. A request for
+  `qwen_live_token` with nothing else grantable on a profile without Qwen
+  Live is refused (503).
 - **Chats** (plugin 0.18): `find_chat` (`{query}`) and `read_chat`
   (`{number}`) let a call find one of the user's earlier chats on the
   grant's profile and talk about it, as a phone call does. `find_chat` runs

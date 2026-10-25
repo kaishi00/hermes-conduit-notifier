@@ -733,7 +733,7 @@ def _log(store: LocationStore, action: str, session: str, profile: str = "") -> 
         logger.warning("conduit_push: could not log a location read", exc_info=True)
 
 
-_VOICE_TITLES = {"gemini-live": "Gemini Live call", "grok-live": "Grok Live call", "gpt-live": "GPT-Live call",
+_VOICE_TITLES = {"qwen-live": "Qwen Live call", "gemini-live": "Gemini Live call", "grok-live": "Grok Live call", "gpt-live": "GPT-Live call",
                  "local-live": "Local Live call"}
 
 
