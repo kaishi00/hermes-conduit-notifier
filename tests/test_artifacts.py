@@ -202,6 +202,43 @@ def test_hidden_chats_are_left_out_and_older_stores_still_read(tmp_path, monkeyp
     assert [i["name"] for i in _list(old)["items"]] == ["a.png"]
 
 
+def test_a_bots_hidden_bot_chat_is_listed(tmp_path, monkeypatch):
+    # Bot Mode keeps a bot's Bot Chat as a hidden session titled "Bot Chat";
+    # other hidden chats (a group room member's turns) stay out of the
+    # profile list.
+    _no_gateway(monkeypatch)
+    conn = _db(tmp_path, [("bot", "assistant", "MEDIA:/root/.hermes/cache/images/wallpaper.png"),
+                          ("room", "assistant", "MEDIA:/root/room.png"),
+                          ("more", "assistant", "MEDIA:/root/later.png"),
+                          ("s1", "assistant", "MEDIA:/root/a.png")],
+               sessions=[("bot", "Bot Chat", 1), ("room", "Group: Council", 1), ("more", "", 1, "bot"),
+                         ("s1", "Shown", 0)])
+    assert [i["name"] for i in _list(conn)["items"]] == ["a.png", "later.png", "wallpaper.png"]
+    # Its own sheet asks for it by id.
+    assert [i["name"] for i in _list(conn, session_ids=["bot"])["items"]] == ["later.png", "wallpaper.png"]
+
+
+def test_a_chat_branched_off_a_hidden_room_doesnt_list_the_room(tmp_path, monkeypatch):
+    # A chat's own list follows its lineage, but a hidden chat it was
+    # branched from stays out; the chat named by id is read though hidden.
+    _no_gateway(monkeypatch)
+    conn = _db(tmp_path, [("room", "assistant", "MEDIA:/root/room.png"),
+                          ("branch", "assistant", "MEDIA:/root/branch.png")],
+               sessions=[("room", "Group: Council", 1), ("branch", "Notes", 0, "room")])
+    assert [i["name"] for i in _list(conn, session_ids=["branch"])["items"]] == ["branch.png"]
+    assert [i["name"] for i in _list(conn, session_ids=["room"])["items"]] == ["branch.png", "room.png"]
+
+
+def test_a_bot_chat_doesnt_bring_in_the_hidden_chat_it_came_from(tmp_path, monkeypatch):
+    # Only what continues a Bot Chat is listed with it; a hidden room it
+    # somehow descends from stays out. The title is matched trimmed.
+    _no_gateway(monkeypatch)
+    conn = _db(tmp_path, [("room", "assistant", "MEDIA:/root/room.png"),
+                          ("bot", "assistant", "MEDIA:/root/bot.png")],
+               sessions=[("room", "Group: Council", 1), ("bot", " Bot Chat\n", 1, "room")])
+    assert [i["name"] for i in _list(conn)["items"]] == ["bot.png"]
+
+
 def test_a_file_on_disk_reports_its_size(tmp_path, monkeypatch):
     _no_gateway(monkeypatch)
     target = tmp_path / "out" / "photo.jpg"

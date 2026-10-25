@@ -25,6 +25,13 @@ checks it). The format is fixed, because Conduit reads it:
   Past-chat search no longer finds those rooms. Rooms of only your own agents
   work as before.
 
+## 0.78.1 (2026-10-25)
+
+### Fixes
+- A bot's Bot Chat now shows what it made in Artifacts, both in the chat's
+  own list and on the Artifacts page. Before, pictures and files a bot sent
+  in its Bot Chat never appeared there.
+
 ## 0.78.0 (2026-10-25)
 
 ### New and improved

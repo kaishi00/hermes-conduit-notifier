@@ -13,6 +13,10 @@ open again:
 - ``attached``: a file the user sent, as its ``@file:`` reference;
 - ``link``: a web link in one of Hermes' replies.
 
+Hidden chats (a group room member's turns, say) are left out of the
+profile's list, but a bot's Bot Chat, a hidden session titled "Bot Chat", is
+listed, and a chat asked for by id is read whether hidden or not.
+
 The list is read from the profile's ``state.db`` (read only), newest message
 first, a bounded window of rows per request: ``before`` pages back from the
 message id the previous page stopped at. Within a page one path or URL is
@@ -364,10 +368,11 @@ MAX_LINEAGE = 256
 MAX_TITLE_HOPS = 16
 
 
-def lineage(conn: sqlite3.Connection, session_ids: Iterable[str]) -> list:
+def lineage(conn: sqlite3.Connection, session_ids: Iterable[str], *, ancestors: bool = True) -> list:
     """The chats' sessions with the ones they continue from and the ones
     that continue them (a compression's continuation, a subagent's run),
-    since Hermes keeps one chat's history across them."""
+    since Hermes keeps one chat's history across them. Without
+    ``ancestors``, only the ones that continue them."""
     found = [sid for sid in dict.fromkeys(str(s) for s in session_ids if s)][:MAX_LINEAGE]
     if not found or "parent_session_id" not in _columns(conn, "sessions"):
         return found
@@ -376,7 +381,7 @@ def lineage(conn: sqlite3.Connection, session_ids: Iterable[str]) -> list:
     for sid in found:
         current, chain = sid, {sid}
         # One budget for every chain, so the ids stay a bounded IN (...).
-        while len(known) < MAX_LINEAGE:
+        while ancestors and len(known) < MAX_LINEAGE:
             row = conn.execute("SELECT parent_session_id FROM sessions WHERE id = ?", (current,)).fetchone()
             parent = str(row[0]) if row and row[0] else ""
             if not parent or parent in chain:
@@ -397,6 +402,26 @@ def lineage(conn: sqlite3.Connection, session_ids: Iterable[str]) -> list:
         frontier = [c for c in frontier if c in known] + [c for c in frontier if c not in known][:room]
         known.update(frontier)
     return list(known)
+
+
+# The title Hermes gives a bot's one Bot Chat (Desktop's hermes-bots plugin
+# and Conduit both find the chat by it, trimmed; a compression's
+# continuation is titled "Bot Chat #2" and is found through its parent).
+BOT_CHAT_TITLE = "Bot Chat"
+
+
+def bot_chat_lineage(conn: sqlite3.Connection, session_columns: Optional[set] = None) -> list:
+    """The profile's hidden Bot Chat sessions, with the sessions that
+    continue them (never the ones they came from: a hidden room stays
+    hidden). A profile has one Bot Chat; the same id budget as ``lineage``
+    bounds a profile that somehow has more."""
+    columns = _columns(conn, "sessions") if session_columns is None else session_columns
+    if not {"hidden", "title"} <= columns:
+        return []
+    ids = [str(row[0]) for row in conn.execute(
+        "SELECT id FROM sessions WHERE hidden = 1 AND TRIM(title, char(32, 9, 10, 13)) = ? LIMIT ?",
+        (BOT_CHAT_TITLE, MAX_LINEAGE))]
+    return lineage(conn, ids, ancestors=False) if ids else []
 
 
 def _titles(conn: sqlite3.Connection, has_parent: bool) -> Callable[[str, Any], str]:
@@ -451,11 +476,10 @@ def list_artifacts(conn: sqlite3.Connection, *, before: Optional[int] = None,
     tool_calls = "m.tool_calls" if "tool_calls" in message_columns else "NULL"
     tool_name = "m.tool_name" if "tool_name" in message_columns else "NULL"
     title = "s.title" if "title" in session_columns else "NULL"
-    hidden = " AND COALESCE(s.hidden, 0) = 0" if "hidden" in session_columns else ""
     select = (f"SELECT m.id, m.session_id, m.role, m.content, {tool_calls} AS tool_calls, "
               f"{tool_name} AS tool_name, m.timestamp, {title} AS title "
               "FROM messages m LEFT JOIN sessions s ON s.id = m.session_id ")
-    candidate = f"{hidden} AND {_candidate_sql(message_columns)}"
+    candidate = f" AND {_candidate_sql(message_columns)}"
     title_for = _titles(conn, "parent_session_id" in session_columns and "title" in session_columns)
 
     bounds = conn.execute("SELECT MIN(id), MAX(id) FROM messages").fetchone()
@@ -488,6 +512,16 @@ def list_artifacts(conn: sqlite3.Connection, *, before: Optional[int] = None,
         return len(items) >= limit
 
     wanted = [*([session_id] if session_id else []), *session_ids]
+    # Hidden chats stay out (a group room member's turns, and the room a
+    # chat was branched from), but a bot's Bot Chat, hidden too, is the
+    # bot's own chat and is listed with what continues it, and a chat asked
+    # for by id is read whether hidden or not.
+    shown: list = []
+    hidden = ""
+    if "hidden" in session_columns:
+        shown = list(dict.fromkeys([*(str(sid) for sid in wanted if sid), *bot_chat_lineage(conn, session_columns)]))
+        listed = f" OR m.session_id IN ({','.join('?' * len(shown))})" if shown else ""
+        hidden = f" AND (COALESCE(s.hidden, 0) = 0{listed})"
     if wanted:
         # One chat reads its own rows through Hermes' session index, not
         # the profile's history window by window: on a profile full of cron
@@ -496,10 +530,10 @@ def list_artifacts(conn: sqlite3.Connection, *, before: Optional[int] = None,
         chat = lineage(conn, wanted)
         if not chat:
             return {"items": items, "next_before": None}
-        sql = (select + f"WHERE m.session_id IN ({','.join('?' * len(chat))}) AND m.id < ?{candidate} "
+        sql = (select + f"WHERE m.session_id IN ({','.join('?' * len(chat))}) AND m.id < ?{hidden}{candidate} "
                "ORDER BY m.id DESC LIMIT ?")
         scanned = 0
-        for row in conn.execute(sql, [*chat, top, max_scan_rows]):
+        for row in conn.execute(sql, [*chat, top, *shown, max_scan_rows]):
             scanned += 1
             if take(row):
                 return {"items": items, "next_before": int(row["id"]) if row["id"] > lowest else None}
@@ -507,13 +541,13 @@ def list_artifacts(conn: sqlite3.Connection, *, before: Optional[int] = None,
                 return {"items": items, "next_before": int(row["id"]) if row["id"] > lowest else None}
         return {"items": items, "next_before": None}
 
-    sql = select + f"WHERE m.id >= ? AND m.id < ?{candidate} ORDER BY m.id DESC"
+    sql = select + f"WHERE m.id >= ? AND m.id < ?{hidden}{candidate} ORDER BY m.id DESC"
     scanned = 0
     next_before: Optional[int] = None
     while top > lowest:
         bottom = max(top - window_rows, lowest)
         stopped_at: Optional[int] = None
-        for row in conn.execute(sql, [bottom, top]):
+        for row in conn.execute(sql, [bottom, top, *shown]):
             if take(row):
                 stopped_at = int(row["id"])
                 break
