@@ -910,6 +910,22 @@ def test_an_open_promise_pulse_saw_done_after_do_it_closes_and_undo_reopens_it(l
     assert live.store.item(item_id)["status"] == "open"
 
 
+def test_a_do_it_check_reads_where_a_long_chat_got_it_done(live):
+    card = told_card(live, news="The deploy note for the release still needs sending.")
+    acted_at = time.time() - 600
+    control.acted(live.store, card["id"], now=acted_at)
+    live.db.message("assistant", "Sent the deploy note for the release.", sid=CHAT, at=acted_at + 10)
+    for n in range(followup.MAX_MESSAGES):  # then the chat moved on
+        live.db.message("user" if n % 2 else "assistant", f"Step {n} of the migration is green.", sid=CHAT,
+                        at=acted_at + 20 + n)
+    said = llm_saying(done=True, why="the note was sent")
+    run_acts(live, said, time.time() + followup.ACT_FIRST_S)
+    [text] = said.calls
+    earlier = text.split("## Earlier lines from that chat on the same subject\n", 1)[1]
+    assert "Sent the deploy note for the release." in earlier and "migration" not in earlier
+    assert live.store.done_marks([card["id"]])
+
+
 def test_do_it_not_done_looks_again_then_stops(live):
     card = told_card(live)
     acted_at = time.time()
@@ -1050,6 +1066,21 @@ def test_a_held_card_check_follows_its_chat_into_the_continuation(live):
     said = llm_saying(stale=True, why="it went live")
     run_held(live, said, time.time())
     assert "Approval came through" in said.calls[0] and live.store.done_marks([card_id])
+
+
+def test_a_held_card_check_reads_where_a_long_chat_got_it_done(live):
+    item_id = promise(live)
+    card_id = learning.add_card(live.store, kind="followup", item=live.store.item(item_id), level_name="brief",
+                                news="The release notes for the deploy still need sending.", why="",
+                                chat_title="Deploy", now=time.time() - 3600)
+    live.db.message("assistant", "Sent the release notes for the deploy.", sid=CHAT, at=time.time() - 3000)
+    for n in range(followup.MAX_MESSAGES):
+        live.db.message("user" if n % 2 else "assistant", f"Step {n} of the migration is green.", sid=CHAT,
+                        at=time.time() - 2000 + n)
+    said = llm_saying(stale=True, why="the notes were sent")
+    run_held(live, said, time.time())
+    earlier = said.calls[0].split("## Earlier lines from its chat on the same subject\n", 1)[1]
+    assert "Sent the release notes for the deploy." in earlier and live.store.done_marks([card_id])
 
 
 def test_a_held_card_check_reads_the_scheduled_jobs(live):

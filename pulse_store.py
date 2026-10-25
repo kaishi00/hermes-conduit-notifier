@@ -297,6 +297,8 @@ def _check_marks(marks: str) -> None:
 
 # A report's item on its own card (pulse_learning.add_noticed_cards).
 NOTICED = "noticed"
+# Why an item memory learned after its time had passed is closed (pulse_memory.LATE_S).
+LATE_BY = "expiry: learned after its time had passed"
 # The report attempts split into such cards, newest last: their typed
 # ratings aren't read, so an item isn't counted twice.
 SPLIT_REPORTS = "split_reports"
@@ -633,7 +635,8 @@ class PulseStore:
         due date it lacked) up to date; one with ``replaces`` supersedes the
         old item, which is kept with when and by what it stopped being true.
         Nothing is deleted. ``marks`` names the table that says where the
-        chat was read to (MARKS), and ``window`` the backfill window's start."""
+        chat was read to (MARKS), and ``window`` the backfill window's start.
+        A new item marked ``late`` (pulse_memory.LATE_S) is kept as expired."""
         _check_marks(marks)
         columns = ("profile", "chat_id", "message_id", "kind", "text", "evidence", "explicit", "due", "due_at",
                    "mentioned_at", "recorded_at", "valid_from")
@@ -665,6 +668,9 @@ class PulseStore:
                     f"INSERT INTO items({', '.join(columns)}) VALUES({','.join('?' * len(columns))})",
                     tuple(row[column] for column in columns)).lastrowid
                 ids.append(new_id)
+                if item.get("late"):  # learned after its time had passed: too late to remind
+                    conn.execute("UPDATE items SET status='expired', closed_by=?, closed_at=? WHERE id=?",
+                                 (LATE_BY, now, new_id))
                 # Already replaced (by an earlier chunk): replace its successor.
                 target = _current(conn, item["replaces"], profile) if item.get("replaces") else None
                 if target is not None and target != new_id:

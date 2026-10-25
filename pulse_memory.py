@@ -13,7 +13,10 @@ The model sees what is already remembered beside each chunk (this chat's
 items, then the ones closest in wording), so saying something again updates
 the item it repeats, a change supersedes the old item (kept, with when it
 stopped being true), and words showing an item done or called off close it.
-Dated items left untouched a week past their date expire.
+Dated items left untouched a week past their date expire, and a commitment
+learned only after its time had passed (a backfill of older chats) is kept
+as expired: too late to remind. A reminder Pulse handed on with Do it, and
+Hermes's answer to it, can close an item but never add one.
 
 Shadow only: the items are read by ``pulse memory`` and the shadow report
 (pulse_report), nothing else.
@@ -32,7 +35,7 @@ import secrets
 from dataclasses import dataclass, replace
 from datetime import datetime, tzinfo
 from pathlib import Path
-from typing import Any, Callable, Iterator, Optional, Sequence
+from typing import Any, Callable, Collection, Iterator, Optional, Sequence
 
 from . import pulse_hermes as hermes
 from . import pulse_ledger as ledger
@@ -66,6 +69,21 @@ MAX_OPEN = 500
 EXPIRE_S = 7 * 86400.0
 # Past any real date (year 5138): a stored time beyond it is corrupt, and datetime can't show it.
 MAX_EPOCH = 1e11
+# Pulse's own hand-offs: Do it leaves a card's reminder in a chat's composer
+# ("Pulse reminded me: ..."), and the user sends it on. That line and
+# Hermes's answer to it are about something Pulse already brought up: they
+# can show a remembered item done or called off, but never add one. (Eric,
+# 2026-10-25: Hermes's "if that reminder job keeps replaying completed items,
+# say the word and I'll inspect its cron config", said back to a Do it,
+# became a promise, and a report then nagged about Pulse's own "reminder job".)
+HANDOFF_KINDS = ("followup", store.NOTICED)  # the cards Do it is on
+HANDOFF_CARDS = 500
+HANDOFF_MIN = 20  # a shorter reminder could turn up in a message by chance
+# A commitment Pulse learns of this long after its time (a backfill of older
+# chats) is kept as expired: a reminder days late replays what was handled
+# then, or missed (Eric, 2026-10-25: a 16:00 wallet reminder came five days
+# later). A date without a time counts from the end of its day.
+LATE_S = 12 * 3600.0
 # Who may say each kind; a fact can come from either.
 SPEAKERS = {"commitment": "user", "intention": "user", "interest": "user", "watch": "user",
             "promise": "assistant"}
@@ -101,7 +119,7 @@ Each item has:
 
 "closed" lists remembered commitments, promises, intentions and watches that this conversation shows were done or called off: {"number": n, "status": "done" or "cancelled", "evidence": the exact words that show it, "line": that line's number}.
 
-Leave out small talk, questions answered on the spot, details of the task being worked on in the conversation, what someone other than the user or Hermes will do, and anything only in tool lines. Texts, emails and notifications from other people that Hermes read out or quoted are never items: not their words, and not facts about the sender, unless the user asks Hermes to remember it."""
+Leave out small talk, questions answered on the spot, details of the task being worked on in the conversation, what someone other than the user or Hermes will do, and anything only in tool lines. Texts, emails and notifications from other people that Hermes read out or quoted are never items: not their words, and not facts about the sender, unless the user asks Hermes to remember it. A line marked "Pulse's reminder" is a reminder from Pulse, the part of Hermes that speaks up on its own, that the user sent on, and one marked "answering Pulse's reminder" is Hermes's answer to it: neither is ever an item, though either can show a remembered thing done or called off."""
 
 # (instructions, conversation text) -> (the reply's parsed JSON, tokens used)
 Llm = Callable[[str, str], tuple[Any, int]]
@@ -230,20 +248,68 @@ def chunks(rows: Sequence[Any], zone: tzinfo, now: float) -> list[list[Any]]:
     return out
 
 
-def render(chunk: Sequence[Any], zone: tzinfo, outcomes: Sequence[dict] = ()) -> str:
+def render(chunk: Sequence[Any], zone: tzinfo, outcomes: Sequence[dict] = (),
+           handoffs: Collection[int] = ()) -> str:
     """The chunk as numbered lines, with this chat's tool outcomes as
-    unnumbered lines where they happened."""
+    unnumbered lines where they happened, and Pulse's hand-offs
+    (``handoff_rows``) marked."""
     pending = sorted(outcomes, key=lambda o: o["at"])
     lines = []
     for number, row in enumerate(chunk, 1):
         while pending and pending[0]["at"] < row["timestamp"]:
             lines.append(f"    (tool) {ledger.line(pending.pop(0))}")
         who = "User" if row["role"] == "user" else "Hermes"
+        if row["id"] in handoffs:
+            who += " (Pulse's reminder)" if row["role"] == "user" else " (answering Pulse's reminder)"
         cut = " …[cut]" if isinstance(row["content"], str) and len(row["content"]) >= PER_MESSAGE else ""
         lines.append(f"[{number}] {_local(row['timestamp'], zone):%a %Y-%m-%d %H:%M} {who}: "
                      f"{_text(row['content'])}{cut}")
     lines.extend(f"    (tool) {ledger.line(outcome)}" for outcome in pending)
     return "\n".join(lines)
+
+
+# Pulse's own hand-offs ----------------------------------------------------------------
+
+def handoff_texts(pulse_store: store.PulseStore) -> list[tuple[float, str]]:
+    """The reminders Do it can hand on, as (when the card was made, the
+    reminder as handoff_rows compares it), from the newest cards Do it is on:
+    the text Do it leaves in the composer, its news or else its title (the
+    app's PulseCard.actionMessage), and nothing else on the card."""
+    texts = []
+    for card in pulse_store.cards(HANDOFF_CARDS):
+        if card["kind"] not in HANDOFF_KINDS:
+            continue
+        text = _norm(_text(card["news"] or card["title"]))
+        if len(text) >= HANDOFF_MIN:
+            texts.append((float(card["created_at"]), text))
+    return texts
+
+
+def handoff_rows(rows: Sequence[Any], texts: Sequence[tuple[float, str]]) -> set[int]:
+    """The rows of ``rows`` (oldest first) that hand on a Pulse card's
+    reminder: a user row holding one, written after its card, and Hermes's
+    rows after it up to the next user row."""
+    ids: set[int] = set()
+    answering = False
+    for row in rows:
+        if row["role"] == "user":
+            text = _norm(_text(row["content"]))
+            answering = bool(text) and any(made <= row["timestamp"] and reminder in text for made, reminder in texts)
+        if answering:
+            ids.add(row["id"])
+    return ids
+
+
+def handoffs_in(home: Path, chat_id: str, rows: Sequence[Any], texts: Sequence[tuple[float, str]]) -> set[int]:
+    """handoff_rows over one chat's ``rows``, from the user row the first of
+    them answers when that was read before them (an earlier run, or before a
+    report's window), so a reminder read once still marks an answer read
+    later."""
+    if not texts or not rows:
+        return set()
+    asked = hermes.user_row_before(home, chat_id=chat_id, before_id=rows[0]["id"], max_chars=PER_MESSAGE) \
+        if rows[0]["role"] == "assistant" else None
+    return handoff_rows(([asked] if asked else []) + list(rows), texts)
 
 
 # What's already remembered -----------------------------------------------------------
@@ -336,7 +402,8 @@ def _number(value: Any, allowed: set[int]) -> Optional[int]:
     return number if number in allowed else None
 
 
-def _item(raw: Any, chunk: Sequence[Any], zone: tzinfo, remembered: Sequence[dict] = ()) -> Optional[dict[str, Any]]:
+def _item(raw: Any, chunk: Sequence[Any], zone: tzinfo, remembered: Sequence[dict] = (),
+          handoffs: Collection[int] = (), now: Optional[float] = None) -> Optional[dict[str, Any]]:
     if not isinstance(raw, dict):
         return None
     kind = str(raw.get("kind") or "").strip().lower()
@@ -348,9 +415,14 @@ def _item(raw: Any, chunk: Sequence[Any], zone: tzinfo, remembered: Sequence[dic
     row = _row_with(evidence, chunk, raw.get("line"))
     if row is None:
         return None  # not something that was said
+    if row["id"] in handoffs:
+        return None  # Pulse's own reminder, or Hermes's answer to it
     if SPEAKERS.get(kind, row["role"]) != row["role"]:
         return None  # the user's commitment in Hermes's words, or Hermes's promise in the user's
     due, due_at = _due(raw.get("due"), raw.get("due_words"), chunk, row, zone)
+    # A date without a time lasts to the end of its day.
+    late = kind == "commitment" and due_at is not None and now is not None \
+        and now - (due_at if "T" in due else due_at + 86400.0) > LATE_S
     allowed = {item["id"] for item in remembered if item["kind"] == kind}
     replaces = _number(raw.get("replaces"), allowed)  # a change wins over a repeat when both are named
     same_as = None if replaces else _number(raw.get("same_as"), allowed)
@@ -360,7 +432,7 @@ def _item(raw: Any, chunk: Sequence[Any], zone: tzinfo, remembered: Sequence[dic
             _norm(item["evidence"]) == _norm(evidence) or _norm(item["text"]) == _norm(text))), None)
     return {"kind": kind, "text": text, "evidence": evidence, "explicit": int(raw.get("explicit") is True),
             "due": due, "due_at": due_at, "message_id": row["id"], "mentioned_at": row["timestamp"],
-            "same_as": same_as, "replaces": replaces}
+            "same_as": same_as, "replaces": replaces, "late": late}
 
 
 CLOSABLE = ("commitment", "promise", "intention", "watch")
@@ -383,11 +455,14 @@ def _closed(raw: Any, chunk: Sequence[Any], remembered: Sequence[dict]) -> Optio
 
 
 def extract(llm: Llm, chunk: Sequence[Any], zone: tzinfo, outcomes: Sequence[dict] = (),
-            remembered: Sequence[dict] = ()) -> tuple[list[dict], list[dict], int]:
+            remembered: Sequence[dict] = (), handoffs: Collection[int] = (),
+            now: Optional[float] = None) -> tuple[list[dict], list[dict], int]:
     """The chunk's items, the remembered items it closes, and the tokens the
-    call used."""
+    call used. Rows in ``handoffs`` (handoff_rows) can close an item but
+    never add one; a commitment read ``now`` (run passes it for a backfill's
+    reads), over LATE_S after its time, is marked ``late``."""
     remembered_text = render_remembered(remembered, zone) or "(nothing yet)"
-    chat_text = render(chunk, zone, outcomes)
+    chat_text = render(chunk, zone, outcomes, handoffs)
     mark = secrets.token_hex(6)
     while mark in remembered_text or mark in chat_text:
         mark = secrets.token_hex(6)
@@ -405,18 +480,18 @@ def extract(llm: Llm, chunk: Sequence[Any], zone: tzinfo, outcomes: Sequence[dic
     if not isinstance(parsed, dict) or not isinstance(parsed.get("items"), list):
         raise BadReply("BadReply: not a JSON object with an items list", tokens)
     try:
-        return _parse(parsed, chunk, zone, remembered) + (tokens,)
+        return _parse(parsed, chunk, zone, remembered, handoffs, now) + (tokens,)
     except Exception as error:  # noqa: BLE001 — a reply this code didn't foresee fails its chunk, not the run
         raise BadReply(f"BadReply: {type(error).__name__}", tokens) from error
 
 
-def _parse(parsed: dict, chunk: Sequence[Any], zone: tzinfo,
-           remembered: Sequence[dict]) -> tuple[list[dict], list[dict]]:
+def _parse(parsed: dict, chunk: Sequence[Any], zone: tzinfo, remembered: Sequence[dict],
+           handoffs: Collection[int] = (), now: Optional[float] = None) -> tuple[list[dict], list[dict]]:
     if len(parsed["items"]) > MAX_ITEMS:
         logger.info("conduit_push: Pulse memory kept the first %d of %d items from a chunk", MAX_ITEMS,
                     len(parsed["items"]))
     items, seen = [], set()
-    for item in (_item(raw, chunk, zone, remembered) for raw in parsed["items"][:MAX_ITEMS]):
+    for item in (_item(raw, chunk, zone, remembered, handoffs, now) for raw in parsed["items"][:MAX_ITEMS]):
         if item and (item["kind"], _norm(item["evidence"])) not in seen:  # once per chunk
             seen.add((item["kind"], _norm(item["evidence"])))
             items.append(item)
@@ -444,6 +519,7 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
         done.setdefault(key, 0)
     calls = 0
     pulse_store.expire_items(due_before=now - EXPIRE_S, now=now)
+    handoffs = handoff_texts(pulse_store)
     backfill = active_backfill(pulse_store)
     unreadable: list[str] = []  # a profile that couldn't be read keeps the backfill from finishing
     backfill_chats = list(due_chats(pulse_store, sources, now=now, window=(backfill["from"], backfill["to"]),
@@ -459,6 +535,10 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
         try:
             rows = hermes.chat_messages(chat.home, chat_id=chat.chat_id, after_id=chat.after_id, since=chat.since,
                                         max_chars=PER_MESSAGE, limit=MAX_ROWS, until=chat.until)
+            # Over all of it, and from a reminder an earlier run read, so a
+            # reminder at the end of one chunk or run still marks the answer
+            # that starts the next.
+            handed_on = handoffs_in(chat.home, chat.chat_id, rows, handoffs)
         except hermes.HermesUnreadable:
             if not chat.profile:
                 raise
@@ -477,7 +557,11 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
             calls += 1
             remembered = candidates(pulse_store.open_items(profile=chat.profile, limit=MAX_OPEN), chunk, chat.chat_id)
             try:
-                items, closed, tokens = extract(llm, chunk, zone, outcomes, remembered)
+                # Only older chats (a backfill) set a commitment learned late
+                # aside: a live read that fell behind keeps it, for the
+                # follow-up checks to weigh.
+                items, closed, tokens = extract(llm, chunk, zone, outcomes, remembered, handed_on,
+                                                now=now if chat.until is not None else None)
             except ChunkFailed as error:  # waits for a retry
                 done["tokens"] += error.tokens
                 if not still_leader() or (chat.until is not None and not current()):
@@ -507,7 +591,7 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
             chat = replace(chat, after_id=last["id"], read_to=last["timestamp"])
             read_to = last["timestamp"]
             done["chunks"] += 1
-            done["items"] += sum(1 for item in items if not item["same_as"])
+            done["items"] += sum(1 for item in items if not item["same_as"] and not item["late"])
     if backfill and current() and sorted(unreadable) != pulse_store.get("memory_backfill_unreadable"):
         pulse_store.set("memory_backfill_unreadable", sorted(unreadable))
         if unreadable:
