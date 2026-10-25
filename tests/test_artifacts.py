@@ -204,7 +204,8 @@ def test_hidden_chats_are_left_out_and_older_stores_still_read(tmp_path, monkeyp
 
 def test_a_bots_hidden_bot_chat_is_listed(tmp_path, monkeypatch):
     # Bot Mode keeps a bot's Bot Chat as a hidden session titled "Bot Chat";
-    # other hidden chats (a group room, Pulse) stay out of the profile list.
+    # other hidden chats (a group room member's turns) stay out of the
+    # profile list.
     _no_gateway(monkeypatch)
     conn = _db(tmp_path, [("bot", "assistant", "MEDIA:/root/.hermes/cache/images/wallpaper.png"),
                           ("room", "assistant", "MEDIA:/root/room.png"),

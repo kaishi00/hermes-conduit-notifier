@@ -1537,10 +1537,11 @@ run past `limit`); the rest of a message naming more than that isn't listed. Wit
 of other chats, cron runs say, lists in one request. `missing=hide` (plugin
 0.51.8+) leaves out files no longer on the host, so a history of deleted files
 doesn't leave pages mostly empty; links always stay, and an older plugin
-ignores it and lists them. Hidden chats (group rooms, Pulse) aren't listed,
-except a bot's Bot Chat, the hidden session titled "Bot Chat" in its profile,
-and a chat asked for by `session_id` is read even when hidden (plugin 0.78.1+;
-before, a Bot Chat listed nothing). Capability `artifacts`.
+ignores it and lists them. Hidden chats (a group room member's turns, say)
+aren't listed, except a bot's Bot Chat, the hidden session titled "Bot Chat"
+in its profile, and the sessions continuing it; a chat asked for by
+`session_id` is read even when hidden (plugin 0.78.1+; before, a Bot Chat
+listed nothing). Capability `artifacts`.
 
 ## Hermes calls you (plugin 0.13+)
 

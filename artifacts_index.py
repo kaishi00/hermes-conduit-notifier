@@ -13,9 +13,9 @@ open again:
 - ``attached``: a file the user sent, as its ``@file:`` reference;
 - ``link``: a web link in one of Hermes' replies.
 
-Hidden chats (group rooms, Pulse) are left out of the profile's list, but a
-bot's Bot Chat, a hidden session titled "Bot Chat", is listed, and a chat
-asked for by id is read whether hidden or not.
+Hidden chats (a group room member's turns, say) are left out of the
+profile's list, but a bot's Bot Chat, a hidden session titled "Bot Chat", is
+listed, and a chat asked for by id is read whether hidden or not.
 
 The list is read from the profile's ``state.db`` (read only), newest message
 first, a bounded window of rows per request: ``before`` pages back from the
@@ -535,8 +535,8 @@ def list_artifacts(conn: sqlite3.Connection, *, before: Optional[int] = None,
 
     bot_chats: list = []
     if "hidden" in session_columns:
-        # Hidden chats (group rooms, Pulse, a room's memory) stay out, but a
-        # bot's Bot Chat, hidden too, is the bot's own chat and is listed.
+        # Hidden chats (a group room member's turns) stay out, but a bot's
+        # Bot Chat, hidden too, is the bot's own chat and is listed.
         bot_chats = bot_chat_lineage(conn, session_columns)
         listed = f" OR m.session_id IN ({','.join('?' * len(bot_chats))})" if bot_chats else ""
         candidate = f" AND (COALESCE(s.hidden, 0) = 0{listed}){candidate}"
