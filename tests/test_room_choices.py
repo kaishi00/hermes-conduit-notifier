@@ -105,6 +105,8 @@ def test_view_lists_the_defaults_and_each_room(tmp_path):
     {"tools": "admin"}, {"tools": None}, {"custom_tools": "terminal"}, {"custom_tools": [3]},
     {"custom_tools": ["bad name"]}, {"custom_tools": ["x" * 129]}, {"custom_tools": [f"t{n}" for n in range(65)]},
     {"custom_tools": ["memory"]}, {"custom_tools": ["skill_manage"]}, {"custom_tools": ["delegate_task"]},
+    {"custom_tools": ["execute_code"]}, {"custom_tools": ["message_agent"]}, {"custom_tools": ["react_to_message"]},
+    {"custom_tools": ["kanban_create"]},
     {"share": "everything"}, {"search_chats": "yes"}, {"search_chats": 1}, {"takes_part": "sometimes"},
     {"daily_limit": 0}, {"daily_limit": 501}, {"daily_limit": True}, {"daily_limit": "5"}, {"daily_limit": 2.5},
     {"note": 3}, {"note": "x" * 1001}, {"approve": True}, [], "talk",

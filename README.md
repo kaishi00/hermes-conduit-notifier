@@ -2500,11 +2500,16 @@ for rooms with none of their own:
   (`web_search`, `web_extract`, `x_search`, `vision_analyze`), Use my data
   (lookups plus the room-safe data tools you pick; there are none yet) or
   Custom (only the tools you pick). Always within the profile's own toolsets.
-  Memory and skill writes, delegation, messaging, scheduled jobs and Conduit's
-  calls and settings (`memory`, `skill_manage`, `delegate_task`,
-  `send_message`, `cronjob_manage`, `conduit_call_user`, `conduit_call_watch`,
+  Memory and skill writes, delegation, messaging, scheduled jobs, running code
+  and Conduit's calls and settings (`memory`, `skill_manage`, `delegate_task`,
+  `kanban_create`, `send_message`, `message_agent`, `react_to_message`,
+  `cronjob_manage`, `execute_code`, `conduit_call_user`, `conduit_call_watch`,
   `conduit_settings`) are never allowed, and that holds for the background
   memory and skill review too, since its calls carry the room session's id.
+  `execute_code` is never allowed because its script calls tools without the
+  room session's id, so these rules wouldn't see those calls. What you pick
+  for Custom is yours to judge: a pick like `write_file`, or a memory
+  provider's own tools, can still save what's said in the room.
 - **Search my past chats**: off by default; `session_search` is blocked
   unless it's on.
 - **What it may share**: what helps, ask you first (the default) or nothing
@@ -2524,10 +2529,18 @@ the hidden sessions of rooms with other people's agents, and a direct read of
 one answers "session_id not found".
 
 If the room's roster or the choices can't be read, that turn gets no tools. If
-the session store itself can't be read, the plugin logs a warning and treats
-the session as an ordinary chat (a `room_<digest>` session still counts as a
-room). A Hermes without `transform_llm_output` or `transform_tool_result`
-logs a warning, and replies or searches then go out unchecked.
+the session store itself can't be read, or the room is in no room store
+(disbanded, or kept where the plugin doesn't look), the plugin logs a warning
+and the turn runs as Hermes alone would run it (a `room_<digest>` session
+still counts as a room). A `session_search` result that mentions group rooms
+in a shape the plugin can't read goes to the agent as a failed search. A
+Hermes without `transform_llm_output` or `transform_tool_result` logs a
+warning, and replies or searches then go out unchecked.
+
+These rules work through Hermes' tool hooks, so they hold only where those
+run. A profile on the Codex app-server runtime runs Codex's own tools outside
+them: don't put one in a room with other people's agents (a later release
+refuses it there).
 
 ```bash
 hermes conduit-push rooms show                  # defaults, then each room

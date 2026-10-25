@@ -225,16 +225,16 @@ def _room_tool_block(kwargs: dict[str, Any]) -> dict[str, str] | None:
     try:
         turn = room_rules.room_turn(session_id, home)
     except room_rules.RoomStoreError:
-        logger.warning("conduit_push: couldn't read the room session %s is in; its tools are off this turn",
-                       session_id, exc_info=True)
+        room_rules.warn_often("room store", "conduit_push: couldn't read the room session %s is in; its tools "
+                              "are off this turn", session_id)
         return {"action": "block", "message": room_rules.UNKNOWN_ROOM_BLOCK}
     if turn is None or not turn.with_others:
         return None
     try:
         choices = room_rules.choices_for(turn, home)
     except Exception:  # noqa: BLE001
-        logger.warning("conduit_push: couldn't read the room choices for session %s; its tools are off this turn",
-                       session_id, exc_info=True)
+        room_rules.warn_often("room choices", "conduit_push: couldn't read the room choices for session %s; its "
+                              "tools are off this turn", session_id)
         return {"action": "block", "message": room_rules.UNREADABLE_CHOICES_BLOCK}
     message = room_rules.tool_block(kwargs.get("tool_name"), choices)
     return {"action": "block", "message": message} if message else None
@@ -764,9 +764,9 @@ def _transform_tool_result(**kwargs: Any) -> str | None:
     try:
         return room_rules.filter_search(result, home, profile)
     except Exception:  # noqa: BLE001 — never let a room's session through unchecked
-        logger.warning("conduit_push: couldn't check a past-chat search for group rooms", exc_info=True)
+        room_rules.warn_often("search check", "conduit_push: couldn't check a past-chat search for group rooms")
         if isinstance(result, str) and (room_rules.ROOM_SOURCE in result or room_rules.ROOM_SESSION_ID.search(result)):
-            return json.dumps({"success": False, "error": "Past-chat search failed; try again."})
+            return json.dumps({"success": False, "error": room_rules.SEARCH_FAILED})
         return None
 
 

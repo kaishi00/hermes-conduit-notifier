@@ -50,9 +50,12 @@ MAX_AT = 4_102_444_800
 # Never allowed in a turn of a room with other people, whatever the owner
 # picks (decision 9): memory and skill writes (the background review's
 # included, since its calls carry the room session's id), delegation,
-# messaging, scheduled jobs, and Conduit's own settings and calls.
+# messaging, scheduled jobs, and Conduit's own settings and calls. The rules
+# see a tool call only when it carries the room session's id, so a tool that
+# calls other tools without it (execute_code's script) is never allowed either.
 NEVER = frozenset({
-    "memory", "skill_manage", "delegate_task", "send_message", "cronjob", "cronjob_manage",
+    "memory", "skill_manage", "delegate_task", "kanban_create", "execute_code",
+    "send_message", "message_agent", "react_to_message", "cronjob", "cronjob_manage",
     "conduit_call_user", "conduit_call_watch", "conduit_settings",
 })
 

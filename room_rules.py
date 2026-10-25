@@ -76,6 +76,7 @@ LEARNING_BLOCK = (f"{_RULES}: nothing from a room with other people's agents is 
 NEVER_BLOCK = f"{_RULES}: {{tool}} is never used in a room with other people's agents."
 UNKNOWN_ROOM_BLOCK = ("Blocked: the room this turn is in couldn't be read, so your owner's rules for it couldn't "
                       "be checked. Answer without tools this time.")
+SEARCH_FAILED = "Past-chat search failed; try again."
 UNREADABLE_CHOICES_BLOCK = ("Blocked: your owner's choices for this room couldn't be read. Answer without tools "
                             "this time.")
 
@@ -148,14 +149,16 @@ class RoomTurn:
 _lock = threading.Lock()
 _remembered: "OrderedDict[tuple[str, str], Optional[RoomTurn]]" = OrderedDict()
 _MISSING = object()
-_unread_count = 0
+_warned: dict[str, int] = {}
 
 
 def room_turn(session_id: Any, home: Any = None) -> Optional[RoomTurn]:
     """The room this session's turns are in, or None for any other session.
     A session store that can't be read counts as no room (logged); a room
     store that can't be read raises RoomStoreError. Answers are remembered
-    per session: a room's members never change once it starts."""
+    per session, since a room's members never change once it starts; a room
+    session not titled yet, or whose room no store has (logged), is read
+    again next time."""
     value = str(session_id or "")
     if not value:
         return None
@@ -248,37 +251,49 @@ def scrub(text: str) -> str:
 
 def filter_search(result: Any, home: Any, profile: Any = None) -> Optional[str]:
     """A session_search result with the sessions of rooms with other people's
-    agents taken out, or None when it has none (or is nothing this reads).
-    A read of one of those sessions comes back as Hermes' own "not found".
+    agents taken out, or None when it has none. A read of one of those
+    sessions comes back as Hermes' own "not found", and a result that
+    mentions rooms in a shape this doesn't know as a failed search.
     ``profile``: the profile whose sessions were searched, when not this one."""
     if not isinstance(result, str) or ROOM_SOURCE not in result and not ROOM_SESSION_ID.search(result):
         return None
     try:
         payload = json.loads(result)
     except (ValueError, RecursionError):
-        return None
-    if not isinstance(payload, dict) or payload.get("success") is not True:
-        return None
+        return _unknown_search()
+    if not isinstance(payload, dict):
+        return _unknown_search()
+    if payload.get("success") is not True:
+        # Hermes' own error, passed on as it is.
+        return None if "error" in payload else _unknown_search()
     searched = _profile_home(Path(home), profile) if home is not None else None
     mode = payload.get("mode")
     if mode in ("read", "scroll"):
-        session_id = str(payload.get("session_id") or "")
+        session_id = payload.get("session_id")
+        if not isinstance(session_id, str) or not session_id:
+            return _unknown_search()
         meta = payload.get("session_meta") if isinstance(payload.get("session_meta"), dict) else {}
         if not _hidden_from_search((session_id,), meta.get("source"), searched):
             return None
         return json.dumps({"success": False, "error": f"session_id not found: {session_id}"}, ensure_ascii=False)
     results = payload.get("results")
-    if not isinstance(results, list):
-        return None
-    kept = [entry for entry in results if not (isinstance(entry, dict) and _hidden_from_search(
+    if not isinstance(results, list) or not all(isinstance(entry, dict) for entry in results):
+        return _unknown_search()
+    kept = [entry for entry in results if not _hidden_from_search(
         (str(entry.get("session_id") or ""), str(entry.get("parent_session_id") or "")), entry.get("source"),
-        searched))]
+        searched)]
     if len(kept) == len(results):
         return None
     payload["results"] = kept
     if "count" in payload:
         payload["count"] = len(kept)
     return json.dumps(payload, ensure_ascii=False)
+
+
+def _unknown_search() -> str:
+    warn_often("search shape", "conduit_push: couldn't read a past-chat search result that mentions group rooms, "
+               "so it went to the agent as a failed search", exc_info=False)
+    return json.dumps({"success": False, "error": SEARCH_FAILED})
 
 
 def _hidden_from_search(session_ids: tuple[str, ...], source: Any, home: Optional[Path]) -> bool:
@@ -312,6 +327,19 @@ def forget() -> None:
     """Drops what room_turn remembers (tests, the plugin unloading)."""
     with _lock:
         _remembered.clear()
+        _warned.clear()
+
+
+def warn_often(kind: str, message: str, *args: Any, exc_info: bool = True) -> None:
+    """Logs ``message`` as a warning the first time for ``kind`` and every
+    100th time after, at debug otherwise: a store that stays unreadable shows
+    in the log without filling it."""
+    with _lock:
+        count = _warned[kind] = _warned.get(kind, 0) + 1
+    if count % 100 == 1:
+        logger.warning(f"{message} (%d times so far)", *args, count, exc_info=exc_info)
+    else:
+        logger.debug(message, *args, exc_info=exc_info)
 
 
 def _find(session_id: str, home: Optional[Path]) -> tuple[Optional[RoomTurn], bool]:
@@ -334,10 +362,23 @@ def _find(session_id: str, home: Optional[Path]) -> tuple[Optional[RoomTurn], bo
     in_room = [hop for hop in lineage if hop[1] == ROOM_SOURCE or ROOM_SESSION_ID.fullmatch(hop[0])]
     if not in_room:
         return None, True
-    room_id = _room_id(lineage[-1][2])
+    title = lineage[-1][2]
+    room_id = _room_id(title)
+    # Hermes titles a room's session in a second write: until then its room
+    # isn't known, so the answer is read again.
+    titled = bool(title.strip())
     if any(ROOM_SESSION_ID.fullmatch(hop[0]) for hop in lineage):
-        return RoomTurn(room_id=room_id, side="member", with_others=True, session_id=session_id), True
-    members = _room_members(room_id, home) if room_id else None
+        return RoomTurn(room_id=room_id, side="member", with_others=True, session_id=session_id), titled
+    if not room_id:
+        # Untitled yet, or a legacy Desktop group's title (its display name).
+        return RoomTurn(room_id="", side="home", with_others=False, session_id=session_id), titled
+    members = _room_members(room_id, home)
+    if members is None:
+        # Disbanded, or kept where this plugin doesn't look: as Hermes alone
+        # would run it, read again next time.
+        warn_often("room not found", "conduit_push: couldn't find room %s in any room store, so its turns run "
+                   "without the owner's room rules", room_id, exc_info=False)
+        return RoomTurn(room_id=room_id, side="home", with_others=False, session_id=session_id), False
     others = _others(members)
     return RoomTurn(room_id=room_id, side="home", with_others=bool(others), session_id=session_id,
                     others=others), True
@@ -423,7 +464,8 @@ def _members_in(path: Path, room_id: str) -> Optional[list[Any]]:
         try:
             row = conn.execute("SELECT members_json FROM hosted_rooms WHERE room_id = ?", (room_id,)).fetchone()
         except sqlite3.OperationalError as error:
-            if "no such table" in str(error).lower():
+            # A store without rooms, or with another Hermes' shape of them.
+            if any(missing in str(error).lower() for missing in ("no such table", "no such column")):
                 return None
             raise
         if row is None:
@@ -464,17 +506,10 @@ def _read(read: Callable[[], _Read]) -> _Read:
 
 
 def _store_unread(session_id: str) -> None:
-    """Warns on the first failure and every 100th after: the session then
-    counts as an ordinary chat, so if it is a room's its turns get no room
-    rules, and an operator should see that."""
-    global _unread_count
-    _unread_count += 1
-    if _unread_count % 100 == 1:
-        logger.warning("conduit_push: couldn't read the session store to tell whether session %s is a group "
-                       "room's (%d times so far); if it is, its turns run without the owner's room rules",
-                       session_id, _unread_count, exc_info=True)
-    else:
-        logger.debug("conduit_push: couldn't tell whether session %s is a group room's", session_id, exc_info=True)
+    """The session then counts as an ordinary chat, so if it is a room's its
+    turns get no room rules, and an operator should see that."""
+    warn_often("session store", "conduit_push: couldn't read the session store to tell whether session %s is a "
+               "group room's; if it is, its turns run without the owner's room rules", session_id)
 
 
 def _hermes_home() -> Optional[Path]:

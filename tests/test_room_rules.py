@@ -110,6 +110,13 @@ def _end(home, session_id, reason):
     conn.close()
 
 
+def _title(home, session_id, title):
+    conn = sqlite3.connect(home / "state.db")
+    conn.execute("UPDATE sessions SET title = ? WHERE id = ?", (title, session_id))
+    conn.commit()
+    conn.close()
+
+
 def _room(path, room_id, members):
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
@@ -182,6 +189,25 @@ def test_a_compacted_room_session_keeps_its_room(tmp_path):
     assert rules.room_turn("s-branch", home) is None
 
 
+def test_a_room_session_is_read_again_until_it_has_its_title(tmp_path):
+    home = tmp_path / "hermes"
+    _room(home / "state.db", "room-b", [FURINA, LAIFU])
+    # Hermes writes a local member's row, then titles it in a second write.
+    _session(home, "s-home", source="bot_room")
+    _session(home, REMOTE, source="bot_room")
+    assert not rules.room_turn("s-home", home).with_others
+    assert rules.room_turn(REMOTE, home).room_id == ""
+    _title(home, "s-home", "Group: room-b")
+    _title(home, REMOTE, "Group: room-a")
+    assert rules.room_turn("s-home", home) == rules.RoomTurn(
+        room_id="room-b", side="home", with_others=True, session_id="s-home", others=("laifu",))
+    assert rules.room_turn(REMOTE, home).room_id == "room-a"
+    # A legacy Desktop group's title carries its display name: no room, so no others.
+    _session(home, "s-desktop", source="bot_room", title="Group: Family chat")
+    assert rules.room_turn("s-desktop", home) == rules.RoomTurn(
+        room_id="", side="home", with_others=False, session_id="s-desktop")
+
+
 def test_room_turns_are_remembered_per_session(tmp_path):
     home = tmp_path / "hermes"
     _room(home / "state.db", "room-b", [FURINA, LAIFU])
@@ -200,6 +226,25 @@ def test_a_room_store_that_cant_be_read_is_an_error_not_a_guess(tmp_path):
     # Not remembered: the next turn reads again.
     (home / "shared-state.db").unlink()
     _room(home / "shared-state.db", "room-b", [FURINA, LAIFU])
+    assert rules.room_turn("s-home", home).with_others
+
+
+def test_a_room_in_no_store_is_read_again_and_logged_once(tmp_path, caplog):
+    home = tmp_path / "hermes"
+    _room_session(home, "s-home", "room-b")
+    # The legacy store's hosted_rooms has another shape: it doesn't have the room either.
+    conn = sqlite3.connect(home / "shared-state.db")
+    conn.execute("CREATE TABLE hosted_rooms (room_id TEXT PRIMARY KEY)")
+    conn.execute("INSERT INTO hosted_rooms VALUES ('room-b')")
+    conn.commit()
+    conn.close()
+    with caplog.at_level(logging.WARNING):
+        for _ in range(3):
+            turn = rules.room_turn("s-home", home)
+            assert (turn.room_id, turn.with_others) == ("room-b", False)
+    assert caplog.text.count("in any room store") == 1
+    # Not remembered: once the room is there, its others are found.
+    _room(home / "state.db", "room-b", [FURINA, LAIFU])
     assert rules.room_turn("s-home", home).with_others
 
 
@@ -298,6 +343,17 @@ def test_custom_allows_its_tools_but_never_memory_or_delegation(host):
     assert rules.allowed_tools(picked) == {"terminal"}
 
 
+def test_tools_that_get_around_the_rules_are_never_allowed(host):
+    # execute_code's script calls tools without the room session's id, so the
+    # rules never see those calls; message_agent, react_to_message and
+    # kanban_create reach agents and chats outside the room.
+    names = ("execute_code", "message_agent", "react_to_message", "kanban_create")
+    picked = room_choices.RoomChoices(tools="custom", custom_tools=names + ("terminal",))
+    for tool_name in names:
+        assert rules.tool_block(tool_name, picked) == rules.NEVER_BLOCK.format(tool=tool_name), tool_name
+    assert rules.allowed_tools(picked) == {"terminal"}
+
+
 @pytest.mark.parametrize("tools, picks", [("talk", []), ("look", []), ("data", []),
                                           ("custom", ["skill_view", "skills_list", "terminal"])])
 def test_background_review_cannot_write_memory_or_skills_in_a_room(host, monkeypatch, tools, picks):
@@ -343,6 +399,20 @@ def test_a_store_error_in_a_room_turn_blocks_the_tool(host, monkeypatch):
     assert _blocked(_tool("s-home", "web_search"))
     # A room of this host's own agents doesn't read the choices at all.
     assert _tool("s-local", "terminal") is None
+
+
+def test_a_store_that_stays_unreadable_is_logged_once_not_on_every_call(host, monkeypatch, caplog):
+    _room_session(host, "s-unread", "room-unread")
+    (host / "shared-state.db").write_bytes(b"this is not a database" * 64)
+    def unreadable(self, room_id):
+        raise OSError("disk gone")
+    monkeypatch.setattr(room_choices.ChoicesStore, "get", unreadable)
+    with caplog.at_level(logging.WARNING):
+        for _ in range(3):
+            assert _blocked(_tool("s-unread", "terminal"))
+            assert _blocked(_tool("s-home", "web_search"))
+    assert caplog.text.count("couldn't read the room session") == 1
+    assert caplog.text.count("couldn't read the room choices") == 1
 
 
 def test_an_unreadable_session_store_lets_ordinary_chats_use_their_tools(host):
@@ -543,6 +613,37 @@ def test_session_search_hides_a_room_session_it_cant_check(host):
     found = {"success": True, "mode": "discover", "results": [_entry("s-unread", "bot_room", "Group: room-unread"),
                                                               _entry("s-chat", "tui", "Bike plans")], "count": 2}
     assert [entry["session_id"] for entry in json.loads(_search(found, query="x"))["results"]] == ["s-chat"]
+
+
+def test_a_search_result_it_cant_read_is_withheld_when_it_mentions_rooms(host, caplog):
+    # Shapes this plugin doesn't know (a newer Hermes, say) can't be checked.
+    room = _entry("s-home", "bot_room", "Group: room-b")
+    unknown = [{"success": True, "mode": "timeline", "sessions": [room]},
+               {"success": True, "mode": "read", "messages": room["messages"], "session_meta": {"source": "bot_room"}},
+               {"success": True, "mode": "discover", "results": [json.dumps(room)]},
+               {"mode": "discover", "results": [room]},
+               [room]]
+    with caplog.at_level(logging.WARNING):
+        for result in unknown:
+            assert json.loads(_search(result)) == {"success": False, "error": "Past-chat search failed; try again."}
+        assert json.loads(plugin._transform_tool_result(
+            tool_name="session_search", args={}, result="bot_room " + REMOTE, session_id="s-chat"))["success"] is False
+    assert caplog.text.count("couldn't read a past-chat search") == 1
+    # Hermes' own errors are passed on as they are.
+    assert _search({"success": False, "error": f"session_id not found: {REMOTE}"}) is None
+    assert _search({"error": f"Error executing session_search for {REMOTE}"}) is None
+
+
+def test_a_search_check_that_fails_withholds_room_results_and_logs_once(host, monkeypatch, caplog):
+    def broken(*args, **kwargs):
+        raise RuntimeError("bug")
+    monkeypatch.setattr(rules, "filter_search", broken)
+    found = {"success": True, "mode": "discover", "results": [_entry("s-home", "bot_room", "Group: room-b")]}
+    with caplog.at_level(logging.WARNING):
+        for _ in range(3):
+            assert json.loads(_search(found)) == {"success": False, "error": "Past-chat search failed; try again."}
+    assert caplog.text.count("couldn't check a past-chat search") == 1
+    assert _search({"success": True, "mode": "discover", "results": [_entry("s-chat", "tui", "Bike")]}) is None
 
 
 def test_other_tools_and_unreadable_results_pass_through(host):
