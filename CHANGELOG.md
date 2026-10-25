@@ -23,7 +23,7 @@ checks it). The format is fixed, because Conduit reads it:
   it came from somewhere else, like your calendar or reminders. Pulse then
   reads what came of it and marks the card done by itself once it's taken
   care of.
-- Done tells Pulse an item is handled, so the next report leaves it out.
+- Done tells Pulse an item is handled, and the next report knows it's done.
 
 ## 0.76.0 (2026-10-25)
 
