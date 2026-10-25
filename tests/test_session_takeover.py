@@ -535,3 +535,15 @@ def test_a_state_db_without_a_ledger_is_ignored(tmp_path):
     import sqlite3
     sqlite3.connect(tmp_path / "state.db").close()
     assert _take(tmp_path, ["chat"]) == {"status": "free"}
+
+
+def test_another_bots_message_is_named_beside_other_queued_work(tmp_path):
+    _ledger(tmp_path, [("chat", "queued", "req-1", "uid:0"),
+                       ("chat", "started", "bot:5bd49571", "automation:agent:nahida:local:dm:chat")])
+    assert _take(tmp_path, ["chat"]) == {"status": "busy", "surface": "bot"}
+
+
+def test_an_unreadable_state_db_falls_through_to_the_claims(tmp_path):
+    (tmp_path / "state.db").write_bytes(b"not a database" * 100)
+    _seed(tmp_path, [_entry("chat")])
+    assert _take(tmp_path, ["chat"])["status"] == "taken_over"

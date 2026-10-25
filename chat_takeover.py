@@ -145,15 +145,18 @@ def _owner_turn_running(turn_marker: Any, home: Any, entry: dict[str, Any], alia
 # bot's message (message_agent) is delivered this way, into the bot's Bot Chat,
 # and keeps it until its reply ends. No claim can be dropped for it: the route
 # answers busy, so Conduit waits and sends once the row closes.
+# Another bot's row first, so it's named even beside other queued work.
 _LEDGER_ADMISSIONS_SQL = ("SELECT status, request_id, principal_id FROM session_admissions"
-                          " WHERE target_session_id IN ({ids}) AND status != 'terminal' LIMIT 1")
+                          " WHERE target_session_id IN ({ids}) AND status != 'terminal'"
+                          " ORDER BY CASE WHEN request_id LIKE 'bot:%' OR principal_id LIKE 'automation:agent:%'"
+                          " THEN 0 ELSE 1 END LIMIT 1")
 _LEDGER_ADMISSION_STATUS_SQL = ("SELECT status FROM session_admissions"
                                 " WHERE target_session_id IN ({ids}) AND status != 'terminal' LIMIT 1")
 _LEDGER_WORKERS_SQL = ("SELECT status FROM worker_executions"
                        " WHERE session_id IN ({ids}) AND status != 'terminal' LIMIT 1")
 
 
-def _ledger_rows(db: sqlite3.Connection, sql: str, ids: list) -> Optional[tuple]:
+def _ledger_rows(db: sqlite3.Connection, sql: str, ids: list) -> Optional[tuple[Any, ...]]:
     """The first open row, or None when there's none or this Hermes has no
     such table or column (it then keeps no ledger to refuse with)."""
     try:
