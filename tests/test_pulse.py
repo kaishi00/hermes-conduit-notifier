@@ -545,9 +545,15 @@ def live(tmp_path, monkeypatch):
     return types.SimpleNamespace(ctx=ctx, fake=fake, sent=sent, store=pulse_store)
 
 
+# For a test that ticks at set UTC hours from 07:00 to 20:00: brief_off_the_clock
+# keys off the real time, so its brief could fall due at one of them.
+BRIEF_OUT_OF_REACH = "21:00"
+
+
 def brief_off_the_clock(pulse_store, home):
     """The morning brief goes out every day on the clock; its own tests set
-    its time. Ten hours ahead, its last slot is always too old to send."""
+    its time. Ten hours ahead, its last slot is always too old to send at
+    the real time (BRIEF_OUT_OF_REACH for ticks at set hours)."""
     zone = pulse.report_zone(pulse_store, home)
     pulse_store.set("brief_time", datetime.fromtimestamp(time.time() + 10 * 3600, zone).strftime("%H:%M"))
 
@@ -1218,6 +1224,7 @@ def test_a_report_long_past_its_time_waits_for_the_next_one(live, db):
     _due_report(live)
     evening = time.time() - time.time() % 86400 + 20 * 3600  # 20:00 UTC, 12 h after 08:00
     live.store.set("report_time", "08:00")
+    live.store.set("brief_time", BRIEF_OUT_OF_REACH)  # these ticks are at set hours, not now
     pulse.tick(now=evening)
     assert live.sent() == []
     pulse.tick(now=evening - 12 * 3600 + pulse.REPORT_WINDOW_S - 60)  # inside the window
@@ -1356,6 +1363,7 @@ def test_each_report_time_sends_once(live, db):
     _due_report(live)
     midnight = time.time() - time.time() % 86400
     live.store.set("report_time", "08:00,13:00,18:00")
+    live.store.set("brief_time", BRIEF_OUT_OF_REACH)  # these ticks are at set hours, not now
 
     def deliver_at(hour):
         pulse.tick(now=midnight + hour * 3600)
