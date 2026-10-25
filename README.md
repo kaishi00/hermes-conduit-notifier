@@ -77,7 +77,7 @@ The plugin currently emits notifications for:
 - calendar and reminder changes Hermes asks your phone to make (see [Calendar, Reminders, Focus and phone status](#calendar-reminders-focus-and-phone-status-from-conduit-plugin-027)): a notification to approve, or a silent wake for adds you let Hermes make without asking
 - call requests: a job you asked to be called about has ended, Hermes asked to call you, or (alert calls) Hermes has waited a minute on your approval or answer, or a turn failed (see [Hermes calls you](#hermes-calls-you-plugin-013))
 
-An exact `[Silent]` assistant response does not emit a completion notification. Reply and task bodies are sent as plain text: Markdown fences, emphasis, headings, link targets and table rules are dropped (plugin 0.35+).
+An exact `[Silent]` assistant response does not emit a completion notification. Reply and task bodies are sent as plain text: Markdown fences, emphasis, headings, link targets and table rules are dropped (plugin 0.35+). No notification shows a file's path on the host (plugin 0.71.2+): a `MEDIA:` tag in a reply, a question, an approval, a call or a phone change, and in the answer card or call screen that comes with it, reads as 📎 and the file's name, or its type (`📎 PPTX`) when the name is only a hash, and `[[audio_as_voice]]` and `[[as_document]]` are dropped. Code in a reply's fenced block stays as written.
 
 ### Cron runs (plugin 0.33+)
 
@@ -242,6 +242,8 @@ gateway-bound inactive records still require separately reviewed maintenance.
 | POST | `/v1/rings/:id/settled` | The phone or the Watch answered or declined a call that rings on both (0.10+; the ring's token from the call push) |
 | PUT | `/v1/rings/:id/session` | The phone stores the sealed session of a call the Watch answered (0.11+; the ring's token) |
 | GET | `/v1/rings/:id/session` | The Watch fetches it, waiting up to `?wait=20` seconds (0.11+; the ring's token as the bearer) |
+| POST | `/v1/rings/:id/control` | The phone or the Watch mutes, unmutes or ends a call the Watch answered that stays on the phone's headset (0.17+; the ring's token) |
+| GET | `/v1/rings/:id/control` | Either reads the other's change past `?after=` its last seq, waiting up to `?wait=20` seconds (0.17+; the ring's token as the bearer) |
 
 Watch tool grants carry an Apple Watch call's lookups while the Watch can't
 reach Conduit on the iPhone. Calls and answers are sealed with a per-call key
@@ -302,6 +304,26 @@ otherwise), lasts 2 minutes in memory, and is at most 96 KB; the relay holds
 32 MB of them at most, dropping the oldest first, and a ring takes two waiting
 fetches at a time. An older relay ignores `start`, and the Watch then starts
 the call over its link to the iPhone, as before.
+
+A call the Watch answers while the phone has a headset on (AirPods) stays on
+the phone, so its voice plays there as a phone call's does, and the Watch's
+call screen keeps Mute and End. The phone answers its own ring, says so in the
+session it stores (`callOnPhone`), and the two share the call's mute and end
+through `/v1/rings/:id/control`: either posts `{token, by, muted?, ended?}`,
+and each long-polls `GET ?after=<seq>&wait=20` for the other's (200 with
+`{seq, muted, ended, by}`, or 204 when nothing changed in time). Only those
+flags go through. A control exists only for a ring the Watch answered (409
+otherwise); a call once ended stays ended, and a ring takes four waiting reads
+at a time. Each read or write keeps the ring another 10 minutes, up to 4 hours
+after it rang. A restart drops rings, so a write with `adopt: true` brings an
+unknown ring back as a control alone, with the token of the first write: the
+id is what an adoption trusts. Only the call's two devices know a ring's id,
+which the relay's logs leave out. Each device
+whose read comes back 404 writes its state again with it and reads on from
+`after=0` (an adopted ring counts from 1 again), and a
+change made while the relay was down is retried. Adopted rings are capped at
+1,000, apart from ringing calls, which they never push out. On a relay older
+than 0.17 the control is 404, and the Watch takes the call as before.
 
 ### Registration proof
 

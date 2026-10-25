@@ -9,7 +9,7 @@ import { SWEEP_INTERVAL_MS } from './event-ledger.mjs';
 import { limitsFromEnv } from './limits.mjs';
 import { LIVE_ACTIVITIES_CAPABILITY, LiveActivities, validateRegistration, validateReport, validateToken } from './live-activities.mjs';
 import { MAPS_TOKEN_ROUTE, MAPS_TOKENS_CAPABILITY, mapsTokensFromEnv } from './maps-tokens.mjs';
-import { RING_ROUTE, RING_SESSION_MAX_CHARS, RING_SESSION_ROUTE, RING_SESSION_WAIT_MAX_MS, Rings, ringBearer, validSessionStore, validSettle } from './rings.mjs';
+import { RING_CONTROL_ROUTE, RING_CONTROL_WAIT_MAX_MS, RING_ROUTE, RING_SESSION_MAX_CHARS, RING_SESSION_ROUTE, RING_SESSION_WAIT_MAX_MS, Rings, ringBearer, validControl, validSessionStore, validSettle } from './rings.mjs';
 import { normalizeDashboardId, RelayStore, sanitizeBatchQuestions } from './store.mjs';
 import { TOKEN_PROOF_CAPABILITY, TokenChallenges, tokenChallengePush, tokenProofModeFromEnv } from './token-proof.mjs';
 import { CLOSE_GRANT_CLOSED, WATCH_AUDIO_CAPABILITY, WatchAudioBridges, watchAudioUpgrade } from './watch-audio.mjs';
@@ -17,12 +17,13 @@ import { WATCH_TOOLS_CAPABILITY, WatchToolGrants, watchToolRoutes } from './watc
 
 // Self-reported relay version/capabilities, surfaced via GET /v1/meta so the
 // app can show compatibility state (keep the version in sync with package.json).
+const RELAY_CAPABILITIES = ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls', 'voip-calls', 'watch-calls', 'ring-sessions', 'ring-controls', 'location-push', 'phone-changes', MAPS_TOKENS_CAPABILITY, LIVE_ACTIVITIES_CAPABILITY, TOKEN_PROOF_CAPABILITY];
 const RELAY_INFO = (() => {
   try {
     const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-    return { version: String(pkg.version || 'unknown'), capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls', 'voip-calls', 'watch-calls', 'ring-sessions', 'location-push', 'phone-changes', MAPS_TOKENS_CAPABILITY, LIVE_ACTIVITIES_CAPABILITY, TOKEN_PROOF_CAPABILITY] };
+    return { version: String(pkg.version || 'unknown'), capabilities: RELAY_CAPABILITIES };
   } catch {
-    return { version: 'unknown', capabilities: ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls', 'voip-calls', 'watch-calls', 'ring-sessions', 'location-push', 'phone-changes', MAPS_TOKENS_CAPABILITY, LIVE_ACTIVITIES_CAPABILITY, TOKEN_PROOF_CAPABILITY] };
+    return { version: 'unknown', capabilities: RELAY_CAPABILITIES };
   }
 })();
 
@@ -539,6 +540,38 @@ async function route(request, response) {
       return;
     }
     return sendJson(response, 200, { sealed: taken.sealed });
+  }
+
+  // A call the Watch answered that stays on the phone's headset: the two
+  // keep its mute and its end here (rings.mjs).
+  const controlMatch = url.pathname.match(RING_CONTROL_ROUTE);
+  if (controlMatch && request.method === 'POST') {
+    enforceRateLimit(`ring-control:${client}`, 60, 60_000);
+    const change = validControl(controlMatch[1], await readJson(request));
+    if (!change) return sendJson(response, 400, { error: 'invalid_control' });
+    const result = rings.setControl(controlMatch[1], change.token, change.by, change);
+    if (result === 'unknown') return sendJson(response, 404, { error: 'unknown_ring' });
+    if (result === 'not_answered') return sendJson(response, 409, { error: 'not_answered_on_watch' });
+    return sendJson(response, 200, result.control);
+  }
+  if (controlMatch && request.method === 'GET') {
+    enforceRateLimit(`ring-control-read:${client}`, 120, 60_000);
+    const token = ringBearer(request.headers.authorization);
+    if (!token) return sendJson(response, 401, { error: 'unauthorized' });
+    const after = Number(url.searchParams.get('after') ?? 0);
+    const waitSeconds = Number(url.searchParams.get('wait') ?? 0);
+    const waitMs = Number.isFinite(waitSeconds) ? Math.min(Math.max(waitSeconds, 0) * 1000, RING_CONTROL_WAIT_MAX_MS) : 0;
+    const gone = new AbortController();
+    response.on('close', () => gone.abort());
+    const read = await rings.readControl(controlMatch[1], token, { after: Number.isSafeInteger(after) ? after : 0, waitMs, signal: gone.signal });
+    if (read.status === 'unknown') return sendJson(response, 404, { error: 'unknown_ring' });
+    if (read.status === 'not_answered') return sendJson(response, 409, { error: 'not_answered_on_watch' });
+    if (read.status === 'busy') return sendJson(response, 429, { error: 'too_many_fetches' });
+    if (read.status === 'pending') {
+      response.writeHead(204, { 'cache-control': 'no-store' }).end();
+      return;
+    }
+    return sendJson(response, 200, read.control);
   }
 
   const pairingMatch = url.pathname.match(/^\/v1\/installations\/([0-9a-f-]+)\/pairings$/i);
@@ -1758,8 +1791,9 @@ function httpError(status, code) {
   return error;
 }
 
+// A ring's id is half of what adopts it after a restart, so logs leave it out.
 function safePath(value) {
-  try { return new URL(value ?? '/', config.publicUrl).pathname; } catch { return '/invalid'; }
+  try { return new URL(value ?? '/', config.publicUrl).pathname.replace(/^\/v1\/rings\/[^/]+/, '/v1/rings/:id'); } catch { return '/invalid'; }
 }
 
 function readConfig() {

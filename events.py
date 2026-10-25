@@ -99,10 +99,13 @@ def push_event(
         event["session_id"] = session_id
     if profile:
         event["profile"] = profile[:80]
+    # No push shows a host path: a MEDIA tag in a question, an approval, a
+    # call, an update or a phone change reads as its attachment too. A reply
+    # comes through plain_text, which already did this and kept fenced code.
     if title:
-        event["title"] = _clean(title, 120)
+        event["title"] = _shown_clean(title, 120)
     if body:
-        event["body"] = _clean(body, 500)
+        event["body"] = _shown_clean(body, 500)
     # Conduit writes the title in its own language (#1144): `title_label`
     # names which one (an event type, or `phone.<kind>`), and the chat's
     # title rides on its own instead of glued into `title`. `title` stays for
@@ -190,10 +193,10 @@ def sanitize_call(value: Any) -> dict[str, Any] | None:
     if value.get("origin") == "alert":
         # Hermes called on its own about a failed turn (alert calls).
         call["origin"] = "alert"
-    title = _clean(value.get("title") if isinstance(value.get("title"), str) else "", 120)
+    title = _shown_clean(value.get("title") if isinstance(value.get("title"), str) else "", 120)
     if title:
         call["title"] = title
-    reason = _clean(value.get("reason") if isinstance(value.get("reason"), str) else "", 200)
+    reason = _shown_clean(value.get("reason") if isinstance(value.get("reason"), str) else "", 200)
     if reason:
         call["reason"] = reason
     return call
@@ -477,7 +480,7 @@ def sanitize_decision(decision: dict[str, Any]) -> dict[str, Any]:
         key = session_key(decision.get("session_key"))
         if key:
             sanitized["session_key"] = key
-        description = _clean(decision.get("description", ""), 500)
+        description = _shown_clean(decision.get("description", ""), 500)
         if description:
             sanitized["description"] = description
         choices = decision.get("choices")
@@ -494,13 +497,16 @@ def sanitize_decision(decision: dict[str, Any]) -> dict[str, Any]:
         return sanitized
     if kind == "clarify":
         sanitized: dict[str, Any] = {"kind": "clarify"}
-        for key in ("request_id", "question"):
-            value = _clean(decision.get(key, ""), 500)
-            if value:
-                sanitized[key] = value
+        request_id = _clean(decision.get("request_id", ""), 500)
+        if request_id:
+            sanitized["request_id"] = request_id
+        question_text = _shown_clean(decision.get("question", ""), 500)
+        if question_text:
+            sanitized["question"] = question_text
         choices = decision.get("choices")
         if isinstance(choices, list):
-            cleaned = [value for value in (_clean(choice, 80) for choice in choices) if value]
+            # Shown as card_choice_labels reads them, so a tapped label maps back.
+            cleaned = [value for value in (_shown_clean(choice, 80) for choice in choices) if value]
             if cleaned:
                 sanitized["choices"] = cleaned[:MAX_BATCH_CHOICES]
         # Batch form: the full question set rides alongside the collapsed
@@ -521,7 +527,7 @@ def sanitize_decision(decision: dict[str, Any]) -> dict[str, Any]:
                 # shrink a batch this plugin emits.
                 if not _QID_PATTERN.fullmatch(qid) or qid in _QID_RESERVED or qid in seen_qids:
                     continue
-                text = _clean(entry.get("question", ""), 500)
+                text = _shown_clean(entry.get("question", ""), 500)
                 if not text:
                     continue
                 question: dict[str, Any] = {"qid": qid, "question": text}
@@ -529,7 +535,7 @@ def sanitize_decision(decision: dict[str, Any]) -> dict[str, Any]:
                 if isinstance(labels, list):
                     cleaned_labels: list[str] = []
                     for label in labels[:MAX_BATCH_CHOICES]:
-                        cleaned = _clean(label, 80)
+                        cleaned = _shown_clean(label, 80)
                         if cleaned and cleaned not in cleaned_labels:
                             cleaned_labels.append(cleaned)
                     if cleaned_labels:
@@ -597,10 +603,83 @@ _UNDERSCORE_EMPHASIS = re.compile(r"(?<![\w_])_(?=\S)([^_]+?)(?<=\S)_(?![\w_])")
 _STRIKE = re.compile(r"~~(?=\S)(.+?)(?<=\S)~~")
 
 
+# Hermes' MEDIA tag as its gateway reads it (extract_media): a quoted path,
+# a path with spaces up to a file extension artifacts_index knows, or a path
+# without spaces. Only uppercase MEDIA: followed by a path counts, so "social
+# media: report" stays prose.
+# artifacts_index's file extensions and trailing punctuation, repeated so
+# events stays import-free (tests/test_turn_end_pushes.py keeps them equal).
+_WRITTEN = frozenset(
+    "png jpg jpeg gif webp heic heif bmp svg tif tiff mp4 mov m4v webm mkv avi mp3 m4a wav ogg opus flac aac "
+    "caf html htm xhtml pdf txt md markdown csv tsv json xml yaml yml rtf doc docx xls xlsx ppt pptx key "
+    "numbers pages odt ods odp epub ics vcf gpx kml kmz zip tar gz tgz 7z".split())
+_TRAILING = ".,;:!?)]}*_"
+_PATH_START = r"(?:~/|/|[A-Za-z]:[/\\])"
+_PATH_WORD = r"[^\s`\"'<>]"
+_PATH_EXTENSION = (r"\.(?i:" + "|".join(sorted(_WRITTEN, key=len, reverse=True))
+                   + r")(?=[\s`\"',;:!?)\]}*_~]|$)")
+_MEDIA_TAG = re.compile(
+    r"""[`"']?MEDIA:[^\S\n]*(?P<path>`[^`\n]+`|"[^"\n]+"|'[^'\n]+'"""
+    # A path without spaces up to its extension, then one with spaces, then
+    # one without an extension: its words, and any next words that are
+    # still folders (they hold a slash).
+    + "|" + _PATH_START + _PATH_WORD + "*?" + _PATH_EXTENSION
+    + "|" + _PATH_START + r"\S+(?:[^\S\n]+\S+)*?" + _PATH_EXTENSION
+    + "|" + _PATH_START + _PATH_WORD + r"+(?:[^\S\n]+" + _PATH_WORD + "*/" + _PATH_WORD + "*)*"
+    + r""")[`"']?""")
+_MEDIA_DIRECTIVE = re.compile(r"\[\[(?:audio_as_voice|as_document)\]\]")
+# Hermes' caches name a file img_<12 hex>.png (images, audio) or
+# doc_<12 hex>_<original name> (documents).
+_CACHE_NAME = re.compile(r"^(?:img|audio|video|doc)_[0-9a-f]{12}(?:_(?P<name>.+))?$", re.IGNORECASE)
+_HASH_NAME = re.compile(r"^[0-9a-f-]{16,}$", re.IGNORECASE)
+
+
+def _attachment(match: re.Match) -> str:
+    """A MEDIA tag as a push shows it: a paperclip and the file's name, or
+    its type when the name is only a hash, never the host's path."""
+    quoted = match.group("path").strip()
+    path = quoted.strip("`\"'").rstrip(_TRAILING + "~")
+    # Punctuation or emphasis after a bare path is the sentence's, not the file's.
+    tail = "" if quoted[0] in "`\"'" else quoted[len(path):]
+    name = re.split(r"[/\\]", path.rstrip("/\\"))[-1]
+    stem, dot, ext = name.rpartition(".")
+    if not dot:
+        stem, ext = name, ""
+    cached = _CACHE_NAME.match(name) or _CACHE_NAME.match(stem)
+    if cached:
+        name = cached.group("name") or ""
+    if not name or (not cached and _HASH_NAME.match(stem)):
+        name = ext.upper()
+    return f"📎 {name}".rstrip() + tail
+
+
+def media_free(value: str) -> str:
+    """One line with each MEDIA tag shown as its attachment, and Hermes'
+    delivery directives gone."""
+    return _MEDIA_TAG.sub(_attachment, _MEDIA_DIRECTIVE.sub("", value))
+
+
+class _Plain(str):
+    """Text plain_text made: its MEDIA tags are read, fenced code kept."""
+
+
+def _shown(value: Any) -> Any:
+    """``value`` with its MEDIA tags read, unless plain_text already did."""
+    if not isinstance(value, str) or isinstance(value, _Plain):
+        return value
+    lines, fenced = [], False
+    for line in value.splitlines():
+        if _FENCE.match(line):
+            fenced = not fenced
+        lines.append(line if fenced or _FENCE.match(line) else media_free(line))
+    return "\n".join(lines)
+
+
 def plain_text(value: Any) -> str:
     """A Markdown reply as a notification shows it: the words without the
-    markup (fences, emphasis, headings, link targets, table rules). Code
-    inside a fence stays, it is the content."""
+    markup (fences, emphasis, headings, link targets, table rules), and a
+    file Hermes attached as its name, not its path. Code inside a fence
+    stays, it is the content."""
     if not isinstance(value, str):
         return ""
     lines: list[str] = []
@@ -612,7 +691,7 @@ def plain_text(value: Any) -> str:
         if fenced:
             lines.append(line)
             continue
-        line = _QUOTE.sub("", line)
+        line = media_free(_QUOTE.sub("", line))
         if _RULE.match(line) or _TABLE_RULE.match(line):
             continue
         line = _HEADING.sub("", line)
@@ -623,7 +702,7 @@ def plain_text(value: Any) -> str:
         line = _STRONG.sub(r"\2", line)
         line = _STRIKE.sub(r"\1", _UNDERSCORE_EMPHASIS.sub(r"\1", _EMPHASIS.sub(r"\1", line)))
         lines.append(line.replace("`", ""))
-    return "\n".join(lines).strip()
+    return _Plain("\n".join(lines).strip())
 
 
 def card_choice_labels(choice: Any) -> set[str]:
@@ -631,11 +710,17 @@ def card_choice_labels(choice: Any) -> set[str]:
     (``sanitize_decision``: whitespace collapsed, 80 code points) and the
     relay's on a plaintext pairing (``cleanText``: 80 UTF-16 units), so an
     answer made from a cut label can be mapped back to the full choice."""
-    label = _clean(choice, 80)
+    label = _shown_clean(choice, 80)
     if not label:
         return set()
     units = label.encode("utf-16-le", "surrogatepass")[:160]
     return {label, units.decode("utf-16-le", "surrogatepass").strip()}
+
+
+def _shown_clean(value: Any, maximum: int) -> str:
+    """``_clean`` for text a card or the call screen shows: MEDIA tags read
+    as their attachments first."""
+    return _clean(_shown(value), maximum)
 
 
 def _clean(value: str, maximum: int) -> str:

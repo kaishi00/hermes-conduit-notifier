@@ -871,6 +871,26 @@ test('a paired Watch rings too, and whichever device answers stops the other', a
     assert.deepEqual(await waiting, { status: 200, json: { sealed } }, 'the waiting fetch gets it at once');
     assert.deepEqual(await api(base, session(ring), { credential: ring.token }), { status: 200, json: { sealed } });
 
+    // Kept on the phone's headset: the two keep its mute and end here.
+    assert.ok(meta.json.capabilities.includes('ring-controls'));
+    const control = `/v1/rings/${ring.id}/control`;
+    assert.deepEqual(await api(base, control, { method: 'POST', body: { token: ring.token, by: 'phone', muted: 'yes' } }), { status: 400, json: { error: 'invalid_control' } });
+    assert.deepEqual(await api(base, `${control}?wait=1`), { status: 401, json: { error: 'unauthorized' } });
+    assert.deepEqual(await api(base, control, { method: 'POST', body: { token: ring.token, by: 'phone', muted: false } }),
+      { status: 200, json: { seq: 1, muted: false, ended: false, by: 'phone' } }, 'the phone says it has the call');
+    const watching = api(base, `${control}?after=1&wait=10`, { credential: ring.token });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.deepEqual(await api(base, control, { method: 'POST', body: { token: ring.token, by: 'watch', muted: true } }),
+      { status: 200, json: { seq: 2, muted: true, ended: false, by: 'watch' } });
+    assert.deepEqual(await watching, { status: 200, json: { seq: 2, muted: true, ended: false, by: 'watch' } }, 'the waiting read gets the mute at once');
+    assert.deepEqual(await api(base, `${control}?after=2`, { credential: ring.token }), { status: 204, json: null }, 'nothing new');
+    const lost = `/v1/rings/${'L'.repeat(22)}/control`;
+    assert.deepEqual(await api(base, lost, { method: 'POST', body: { token: 'l'.repeat(43), by: 'watch', muted: true } }), { status: 404, json: { error: 'unknown_ring' } });
+    assert.deepEqual(await api(base, lost, { method: 'POST', body: { token: 'l'.repeat(43), by: 'watch', muted: true, adopt: true } }),
+      { status: 200, json: { seq: 1, muted: true, ended: false, by: 'watch' } }, 'a ring a restart dropped comes back as its control');
+    await waitFor(() => child.logs.some((line) => line.path === '/v1/rings/:id/control'), 'control requests are logged');
+    assert.ok(!child.logs.some((line) => JSON.stringify(line).includes(ring.id) || JSON.stringify(line).includes('L'.repeat(22))), 'without the ring id');
+
     assert.equal((await send('call:000000000000000000000032')).status, 202);
     const second = captured()[3].notification.payload.conduit.ring;
     assert.notEqual(second.id, ring.id, 'every call has its own ring');
@@ -881,6 +901,8 @@ test('a paired Watch rings too, and whichever device answers stops the other', a
     assert.equal(watchStop.notification.payload.conduit.ring.settled, 'declined');
     assert.deepEqual(await api(base, session(second), { credential: second.token }), { status: 409, json: { error: 'not_answered_on_watch' } },
       'a call the phone has has no session for the Watch');
+    assert.deepEqual(await api(base, `/v1/rings/${second.id}/control`, { method: 'POST', body: { token: second.token, by: 'phone', ended: true } }),
+      { status: 409, json: { error: 'not_answered_on_watch' } }, 'nor a control');
 
     assert.equal((await register(null)).json.installation.watch_voip, false, 'null stops the Watch ringing');
     assert.equal((await send('call:000000000000000000000033')).status, 202);

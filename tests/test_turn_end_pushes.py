@@ -442,10 +442,32 @@ def test_a_nested_subagent_under_a_compacted_child_sends_nothing(pushed, session
     ("_em_ and snake_case_name", "em and snake_case_name"),
     ("2 * 3 * 4 = 24 in file_name_here", "2 * 3 * 4 = 24 in file_name_here"),
     ("![chart](a.png) *nice*", "chart nice"),
+    ("Deck ready: MEDIA:/opt/data/cache/documents/dbdb29c1e72a6b48fa49002c4eab1ae1.pptx",
+     "Deck ready: 📎 PPTX"),
+    ("Here: MEDIA:/opt/data/cache/documents/doc_0123456789ab_Voice AI deck.pptx and more",
+     "Here: 📎 Voice AI deck.pptx and more"),
+    ("[[audio_as_voice]]\nMEDIA:/tmp/tts/reply.ogg", "📎 reply.ogg"),
+    ("See `MEDIA:/tmp/out/report final.pdf`.", "See 📎 report final.pdf."),
+    ('Saved MEDIA:"/a b/notes.key", done', "Saved 📎 notes.key, done"),
+    ("MEDIA: ~/out/chart.png then MEDIA:/tmp/plain", "📎 chart.png then 📎 plain"),
+    ("MEDIA:/Users/John Doe/Desktop/Final Report.tiff done", "📎 Final Report.tiff done"),
+    ("MEDIA:/Users/John Doe/Desktop/notes now", "📎 notes now"),
+    ("MEDIA:/opt/data/cache/images/img_0123456789ab.png", "📎 PNG"),
+    ("MEDIA:/tmp/dbdb29c1e72a6b48fa49002c4eab1ae1", "📎"),
+    ("Look **MEDIA:/a/b.png** and MEDIA:/a/c.png! ok?", "Look 📎 b.png and 📎 c.png! ok?"),
+    # Prose and code aren't attachments.
+    ("social media: report, see the MEDIA: section", "social media: report, see the MEDIA: section"),
+    ("```\nMEDIA:/tmp/a.png\n[[audio_as_voice]]\n```", "MEDIA:/tmp/a.png\n[[audio_as_voice]]"),
     (None, ""),
 ])
 def test_plain_text(markdown, plain):
     assert events.plain_text(markdown) == plain
+
+
+def test_a_push_reads_media_paths_like_the_artifacts_list():
+    artifacts = _load("conduit_push.artifacts_index", ROOT / "artifacts_index.py")
+    assert events._WRITTEN == artifacts._WRITTEN
+    assert events._TRAILING == artifacts._TRAILING
 
 
 @pytest.fixture

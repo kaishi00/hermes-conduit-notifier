@@ -575,3 +575,39 @@ def test_redact_event_drops_a_hand_built_malformed_title_label():
     event = {"event_id": "approval:1", "type": "approval.needed", "title_label": "approval.needed\nINJECTED"}
     assert "title_label" not in redact_event(event)
     assert "session_title" not in push_event("approval.needed", identifier="approval:1", session_title=5)
+
+
+def test_no_push_shows_a_media_path():
+    from events import plain_text
+    question = push_event("input.needed", identifier="q", title="Send MEDIA:/opt/data/x/report.pdf?",
+                          body="Send this?\nMEDIA:/opt/data/cache/documents/doc_0123456789ab_Plan.pdf")
+    assert question["title"] == "Send 📎 report.pdf?"
+    assert question["body"] == "Send this? 📎 Plan.pdf"
+    approval = push_event("approval.needed", identifier="a", body="Upload MEDIA:/tmp/out/chart.png to the web")
+    assert approval["body"] == "Upload 📎 chart.png to the web"
+    # Code keeps its text, whether a push reads it here or plain_text did.
+    fenced = "Run:\n```\ncat MEDIA:/tmp/a.png\n```"
+    assert push_event("approval.needed", identifier="f", body=fenced)["body"] == "Run: ``` cat MEDIA:/tmp/a.png ```"
+    reply = push_event("response.ready", identifier="r", body=plain_text(fenced))
+    assert reply["body"] == "Run: cat MEDIA:/tmp/a.png"
+
+
+def test_cards_and_the_call_screen_show_no_media_path():
+    from events import card_choice_labels
+    approval = sanitize_decision({"kind": "approval", "session_key": "agent:main:abc",
+                                  "description": "Upload MEDIA:/tmp/out/chart.png", "choices": ["once", "deny"]})
+    assert approval["description"] == "Upload 📎 chart.png"
+    clarify = sanitize_decision({
+        "kind": "clarify", "request_id": "r1", "question": "Which one? MEDIA:/tmp/a/plan.pdf",
+        "choices": ["MEDIA:/tmp/a/b.png", "Neither"],
+        "questions": [{"qid": "q1", "question": "Send MEDIA:/tmp/a/plan.pdf?", "choices": ["MEDIA:/tmp/a/c.key"]}]})
+    assert clarify["question"] == "Which one? 📎 plan.pdf"
+    assert clarify["choices"] == ["📎 b.png", "Neither"]
+    assert clarify["questions"][0] == {"qid": "q1", "question": "Send 📎 plan.pdf?", "choices": ["📎 c.key"]}
+    # A tapped card label maps back to the choice Hermes offered.
+    assert "📎 b.png" in card_choice_labels("MEDIA:/tmp/a/b.png")
+    call = sanitize_call({**CALL,
+                          "title": "Deck MEDIA:/opt/data/cache/documents/doc_0123456789ab_Q4.pptx",
+                          "reason": "Send MEDIA:/tmp/x/notes.txt?"})
+    assert call["title"] == "Deck 📎 Q4.pptx"
+    assert call["reason"] == "Send 📎 notes.txt?"

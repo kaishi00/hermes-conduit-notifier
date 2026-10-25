@@ -22,6 +22,15 @@ checks it). The format is fixed, because Conduit reads it:
   with X25519): a recording of today's traffic can't open later
   notifications, even with a future quantum computer.
 
+## 0.71.2 (2026-10-24)
+
+### Fixes
+- A notification no longer shows a file's path on the host
+  (MEDIA:/opt/data/cache/…): replies, questions, approvals, calls, updates
+  and phone changes show a paperclip and the file's name, or its type when
+  the name is only a code. So do the answer card under a question or an
+  approval, and the call screen.
+
 ## 0.71.1 (2026-10-24)
 
 ### Fixes
