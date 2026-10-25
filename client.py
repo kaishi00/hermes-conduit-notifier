@@ -31,7 +31,7 @@ except ImportError:  # everything but Windows
 
 from hermes_constants import get_hermes_home
 
-from . import e2e
+from . import e2e, link_status
 from .events import PLUGIN_VERSION, redact_event
 from .relay_urls import check_claim_base, check_request_url, is_https, paired_relay_url
 
@@ -325,8 +325,13 @@ def send_now(event: dict[str, Any], timeout: float = 15.0) -> dict[str, Any]:
         # accepted test ends one.
         if error.status in (401, 403):
             record_relay_refusal(state, error)
+        _note_push(False, error)
+        raise
+    except Exception as error:
+        _note_push(False, error)
         raise
     record_relay_accepted(state)
+    _note_push(True)
     return answer
 
 
@@ -842,12 +847,38 @@ def _deliver(event: dict[str, Any], *, sleep: Callable[[float], None] = _pause,
                 sleep(delay)
                 continue
             logger.warning("Conduit notification delivery failed for %s: %s", event.get("type", "event"), error)
+            _note_push(False, error)
             if isinstance(error, RelayRejected) and error.status in (401, 403):
                 _refused(state, error, clock(), generation)
             return False
         record_relay_accepted(state)
+        _note_push(True)
         return True
     return False  # not reached: the last attempt has no delay
+
+
+def _note_push(ok: bool, error: Exception | None = None) -> None:
+    """For the dashboard's Conduit card (link_status.py); never fails a delivery."""
+    try:
+        link_status.push_result(get_hermes_home(), ok, "" if ok else push_failure_reason(error))
+    except Exception:  # noqa: BLE001
+        logger.debug("Conduit could not record the last push for the dashboard", exc_info=True)
+
+
+def push_failure_reason(error: Exception | None) -> str:
+    """A short, host-free reason for the card: never the error's own text,
+    which can carry URLs and addresses."""
+    if isinstance(error, RelayRejected):
+        if error.status == 401 and error.from_relay:
+            return "The relay no longer knows this host. Pair Conduit again."
+        if error.edge_blocked:
+            return "Something in front of the relay is blocking this host (403)."
+        return f"The relay answered {error.status}."
+    if isinstance(error, urllib.error.URLError) and isinstance(error.reason, ssl.SSLCertVerificationError):
+        return "The relay's certificate didn't verify."
+    if isinstance(error, (urllib.error.URLError, TimeoutError, ConnectionError, socket.timeout)):
+        return "Couldn't reach the relay."
+    return "The delivery failed."
 
 
 def _worth_retrying(error: Exception) -> bool:

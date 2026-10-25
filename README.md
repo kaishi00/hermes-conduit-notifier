@@ -65,6 +65,25 @@ The dashboard imports the plugin's routes once, so restart the dashboard as
 well (or let Conduit do it: Settings > Conduit plugin > Update runs Hermes' own
 plugin update, the gateway restart and [the dashboard restart](#updating-from-conduit-plugin-024)).
 
+### On the Hermes dashboard (plugin 0.74+)
+
+The dashboard's Sessions page shows a Conduit card at the top, once Conduit
+has used this host. Hermes' own Connected Platforms card lists only the
+gateway's messaging adapters (Matrix, the API server), and Conduit talks to
+the dashboard instead, so it gets its own card:
+
+- **App**: Connected while a Conduit gateway socket that opened a chat is
+  open, or within 5 minutes of Conduit's last request to this plugin; Idle
+  after that, with when it was last seen.
+- **Push notifications**: Delivering (with the last push's time), Failing
+  (with a short reason: the relay unreachable, its answer, a certificate),
+  Refused or Blocked (the same marks `status` reports), Paired with nothing
+  sent yet, or Not paired.
+
+It reads `GET /api/plugins/conduit_push/link-status` every 30 seconds. The
+times live in `conduit-link-status.json` in the profile's Hermes home, written
+at most once a minute each; it holds no credential or relay address.
+
 ## Events
 
 The plugin currently emits notifications for:

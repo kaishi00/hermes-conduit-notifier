@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.74.0 (2026-10-25)
+## 0.75.0 (2026-10-25)
 
 ### New and improved
 - Pulse's morning brief now comes every day at its time: one card that sums
@@ -24,6 +24,14 @@ checks it). The format is fixed, because Conduit reads it:
 - The morning brief's default time is now 07:00, an hour before the first
   report, so the two don't arrive together. A time you picked stays.
 - `hermes conduit-push pulse status` shows the morning brief's time.
+
+## 0.74.0 (2026-10-25)
+
+### New and improved
+- The Hermes dashboard's Sessions page shows a Conduit card: whether the
+  app is reaching this host (connected, or when it was last seen), and
+  whether its notifications get through the relay, with the reason when
+  they don't.
 
 ## 0.73.0 (2026-10-25)
 

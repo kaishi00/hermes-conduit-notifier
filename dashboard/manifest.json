@@ -3,8 +3,9 @@
   "label": "Conduit",
   "description": "Routes the Hermes Conduit iOS app calls on this host (Gemini Live tokens, GPT-Live subscription sessions, the Grok Live relay, voice lookups, memory and personality, voice call transcripts).",
   "icon": "Puzzle",
-  "version": "0.74.0",
+  "version": "0.75.0",
   "tab": { "path": "/conduit", "hidden": true },
+  "slots": ["sessions:top"],
   "entry": "dist/index.js",
   "api": "plugin_api.py"
 }
