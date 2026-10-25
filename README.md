@@ -2415,7 +2415,9 @@ relay key. The host still opens no inbound route.
   sign-in never enters the helper. On any Hermes install, `prepare` makes the
   plugin's own environment for it: `python -m venv` from the Python Hermes
   runs, or `uv` where that Python has no venv or pip, then
-  `pip install aiortc==1.15.0` (about 150 MB). It goes in
+  `pip install aiortc==1.15.0` (about 150 MB), run isolated and without
+  Hermes' `PYTHONPATH` so it installs everything aiortc needs rather than
+  counting on packages Hermes already has. It goes in
   `~/.hermes/conduit_push/watch-audio-env` (under `HERMES_HOME` when that's
   set, or `CONDUIT_WATCH_AUDIO_ENV`). Nothing is installed into Hermes' own
   Python; if that Python already has `aiortc`, it's used as it is.
