@@ -93,6 +93,26 @@ def unloaded_plugin(tmp_path, monkeypatch, client):
     calls.start()
 
 
+@pytest.fixture
+def room_planner(monkeypatch):
+    """Hermes' room planner, as far as the plugin's guard touches it."""
+    planner = types.ModuleType("gateway.hosted_room_discussion")
+    planner._derive_member_watermarks = lambda events: {}
+    gateway = types.ModuleType("gateway")
+    gateway.__path__ = []
+    monkeypatch.setitem(sys.modules, "gateway", gateway)
+    monkeypatch.setitem(sys.modules, "gateway.hosted_room_discussion", planner)
+    return planner
+
+
+def test_the_room_planner_guard_comes_off_with_the_plugin(room_planner, unloaded_plugin):
+    own = room_planner._derive_member_watermarks.__wrapped__
+
+    unloaded_plugin()
+
+    assert room_planner._derive_member_watermarks is own
+
+
 def test_a_reply_held_for_its_turns_end_is_dropped_with_its_timer(unloaded_plugin, monkeypatch):
     sent = []
     monkeypatch.setattr(plugin, "READY_GRACE_S", 0.2)
