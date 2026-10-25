@@ -763,6 +763,36 @@ def test_a_check_follows_the_chat_into_its_compressed_continuation(live):
     assert "## Later in other chats" not in text  # its own continuation isn't "another chat"
 
 
+def test_a_check_reads_where_a_long_chat_settled_it_before_its_newest_lines(live):
+    promise(live, "Hermes will swap the fresh App Store Connect keys in once ZCode's recipe arrives.")
+    start = time.time() - 3000
+    live.db.message("user", "Here's ZCode's recipe and where the App Store Connect keys live.", sid=CHAT, at=start)
+    live.db.message("assistant", "Swapped the fresh App Store Connect keys in; the recipe checks out.", sid=CHAT,
+                    at=start + 10)
+    # The chat went on about other things for longer than a check's newest lines hold.
+    for n in range(followup.MAX_MESSAGES):
+        live.db.message("assistant" if n % 2 else "user", f"Build {n}: the scroll fix landed.", sid=CHAT,
+                        at=start + 100 + n)
+    llm = llm_saying(decision="done", why="the chat shows the keys swapped")
+    check_now(live, llm, now=time.time() + followup.FIRST_CHECK_S + 1)
+    [text] = llm.calls
+    said = text.split("## Said in that chat since\n", 1)[1].split("\n\n## ", 1)[0]
+    earlier = text.split("## Earlier lines from that chat on the same subject\n", 1)[1].split("\n\n## ", 1)[0]
+    assert "Build 59" in said and "Build 0:" in said and "Swapped" not in said
+    assert "User: Here's ZCode's recipe" in earlier and "Hermes: Swapped the fresh App Store Connect keys" in earlier
+    assert "scroll fix" not in earlier  # another subject
+    assert earlier.index("Here's ZCode's recipe") < earlier.index("Swapped")  # oldest first
+
+
+def test_a_short_chat_has_no_earlier_lines(live):
+    promise(live)
+    live.db.message("assistant", "Deploy finished: all green.", sid=CHAT, at=time.time() - 60)
+    llm = llm_saying(decision="done", why="it finished")
+    check_now(live, llm, now=time.time() + followup.FIRST_CHECK_S + 1)
+    [text] = llm.calls
+    assert "Deploy finished: all green." in text and "## Earlier lines from" not in text
+
+
 def fake_redactor(monkeypatch):
     """Hermes's agent.redact, masking anything that looks like a token."""
     agent = types.ModuleType("agent")

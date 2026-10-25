@@ -1545,6 +1545,56 @@ def test_each_kind_comes_from_its_own_speaker():
     assert [(i["kind"], i["message_id"]) for i in items] == [("commitment", 1), ("fact", 1), ("fact", 2)]
 
 
+def test_only_a_do_it_cards_reminder_sent_after_it_counts_as_handed_on(live):
+    live.store.add_card({"kind": "followup", "level": "push", "news": "Call Sam about the Friday dinner booking.",
+                         "created_at": DAY})
+    live.store.add_card({"kind": "followup", "level": "push", "news": "Call Sam.", "created_at": DAY})  # too short
+    live.store.add_card({"kind": "brief", "level": "push", "news": "A calm day: renew the parking permit online.",
+                         "created_at": DAY})  # no Do it on a brief
+    texts = memory.handoff_texts(live.store)
+    rows = [_row(1, "user", "call sam about the friday dinner booking.", DAY - 60),  # before the card
+            _row(2, "assistant", "Sure.", DAY - 50),
+            _row(3, "user", "Pulse reminded me: Call Sam about the Friday  dinner booking.\n\nLet's take care of it now.",
+                 DAY + 60),
+            _row(4, "assistant", "Calling now.", DAY + 70), _row(5, "assistant", "Done, booked for 8.", DAY + 80),
+            _row(6, "user", "Call Sam.", DAY + 90), _row(7, "assistant", "Again?", DAY + 100),
+            _row(8, "user", "Renew the parking permit online.", DAY + 110)]
+    assert memory.handoff_rows(rows, texts) == {3, 4, 5}
+    text = memory.render(rows[2:6], UTC, handoffs={3, 4, 5})
+    assert "User (Pulse's reminder): Pulse reminded me" in text
+    assert "Hermes (answering Pulse's reminder): Calling now." in text and "User: Call Sam." in text
+
+
+def test_a_reminder_sent_on_with_do_it_and_its_answer_close_items_but_never_add_one(remembering, db):
+    news = "The few weeks are up and the relay.json backup is still there. Say the word and it's gone."
+    remembering.store.add_card({"kind": "followup", "level": "push", "news": news, "created_at": DAY})
+    [prune] = remembering.store.advance("", "work", message_id=0, at=DAY, items=[
+        {"kind": "promise", "text": "Hermes will prune the August backup if the user says so.",
+         "evidence": "say the word if you want the Aug 15 one pruned too", "explicit": 1, "due": "",
+         "due_at": None, "message_id": 0, "mentioned_at": DAY - 86400}])
+    db.message("user", f"Pulse reminded me: {news}\n\nLet's take care of it now.", sid="work", at=DAY + 60)
+    db.message("assistant", "Already done: both backups were shredded, the August one too. If that reminder job "
+               "keeps replaying completed items, say the word and I'll inspect its cron config.", sid="work",
+               at=DAY + 70)
+    db.message("user", "Thanks. I'll renew my passport on Friday.", sid="work", at=DAY + 80)
+    db.message("assistant", "Noted.", sid="work", at=DAY + 90)
+    model = FakeModel({"items": [
+        {"kind": "commitment", "text": "The user will take care of the backup now.",
+         "evidence": "Let's take care of it now.", "line": 1, "explicit": True},
+        {"kind": "promise", "text": "Hermes will inspect the Pulse reminder job's cron config.",
+         "evidence": "say the word and I'll inspect its cron config", "line": 2, "explicit": True},
+        {"kind": "commitment", "text": "The user will renew their passport.", "evidence": "I'll renew my passport",
+         "line": 3, "explicit": True}],
+        "closed": [{"number": prune, "status": "done", "evidence": "both backups were shredded, the August one too",
+                    "line": 2}]})
+    _remember(remembering, model, DAY + 90 + memory.IDLE_S)
+    chat = model.shown[0].split("<<<chat")[1]
+    assert "User (Pulse's reminder): Pulse reminded me" in chat and "Hermes (answering Pulse's reminder):" in chat
+    assert [item["text"] for item in remembering.store.open_items()] == ["The user will renew their passport."]
+    closed = remembering.store.item(prune)
+    assert closed["status"] == "done" and "both backups were shredded" in closed["closed_by"]
+
+
 def _open(n, kind, text, evidence, chat="work", at=DAY, due=""):
     return {"id": n, "kind": kind, "text": text, "evidence": evidence, "chat_id": chat, "mentioned_at": at,
             "due": due, "due_at": None}
@@ -1739,6 +1789,31 @@ def test_items_long_past_their_due_date_expire(remembering, db):
     assert len(remembering.store.open_items()) == 2
     _remember(remembering, FakeModel(), DAY + memory.EXPIRE_S + 60)
     assert [i["kind"] for i in remembering.store.open_items()] == ["fact"]
+
+
+def test_a_commitment_learned_after_its_time_is_kept_as_expired(remembering, db):
+    db.message("user", "Remind me at 16:00 today to repair my wallet", sid="work", at=DAY + 5 * 3600)
+    db.message("assistant", "I'll set a reminder for 4:00 PM.", sid="work", at=DAY + 5 * 3600 + 10)
+    db.message("user", "I'll file the expense report by Saturday", sid="work", at=DAY + 5 * 3600 + 20)
+    db.message("assistant", "Noted. I'll check the build tomorrow at 9 too.", sid="work", at=DAY + 5 * 3600 + 30)
+    model = FakeModel({"items": [
+        {"kind": "commitment", "text": "The user wants a reminder at 16:00 to repair their wallet.",
+         "evidence": "Remind me at 16:00 today to repair my wallet", "line": 1, "due": "2026-10-20T16:00",
+         "due_words": "16:00 today"},
+        {"kind": "commitment", "text": "The user will file the expense report.", "evidence": "file the expense report",
+         "line": 3, "due": "2026-10-24", "due_words": "by Saturday"},
+        {"kind": "promise", "text": "Hermes will check the build.", "evidence": "I'll check the build tomorrow at 9",
+         "line": 4, "due": "2026-10-21T09:00", "due_words": "tomorrow at 9"}]})
+    # Read five days on, as a backfill of older chats would: Sunday 05:00.
+    now = DAY + 5 * 86400 + 5 * 3600
+    _remember(remembering, model, now)
+    # Saturday's lasts to its end, five hours ago; a promise past its time is still Hermes's to keep.
+    assert sorted(item["kind"] for item in remembering.store.open_items()) == ["commitment", "promise"]
+    with remembering.store._connect() as conn:
+        wallet = dict(conn.execute("SELECT * FROM items WHERE evidence LIKE '%wallet%'").fetchone())
+    assert (wallet["status"], wallet["closed_by"]) == ("expired", store.LATE_BY)
+    pulse.followup.schedule(remembering.store, now)
+    assert wallet["id"] not in {row["item_id"] for row in remembering.store.followups(-1)}  # never reminded
 
 
 def test_a_chunk_two_processes_read_is_kept_once(remembering, db):

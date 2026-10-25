@@ -632,7 +632,10 @@ def _send_report(pulse_store: store.PulseStore, home: Path, run: dict, chat_id: 
 def _send_turn_report(pulse_store: store.PulseStore, home: Path, chat_id: str, now: float) -> dict:
     """The report as it was before candidate lists: one turn that reads the
     day and picks its items itself; its attempt."""
-    context, since = report.build(home, pulse_store, home_chat_id=chat_id, now=now)
+    # What Pulse brought up lately, as the candidate list reads it: the turn
+    # sees the Pulse chat, but its earlier turns are no evidence of what's true now.
+    recent = candidates.recent_section(pulse_store, report_zone(pulse_store, home, now), now)
+    context, since = report.build(home, pulse_store, home_chat_id=chat_id, now=now, extra=recent)
     return _send(pulse_store, kind=REPORT, chat_id=chat_id, text=lambda tag: report.report_text(tag, context, since,
                                                                                     learning.nudge(pulse_store)))
 

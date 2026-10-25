@@ -51,7 +51,32 @@ def test_what_pulse_brought_up_lately_includes_the_morning_brief(live):
 
 
 def test_the_report_leaves_out_what_the_morning_brief_brought_up():
-    assert "an earlier report or morning brief in this chat already brought up" in report.REPORT_TEXT
+    assert '"What Pulse brought up lately"' in report.REPORT_TEXT
+    assert "an earlier report or morning brief in this chat" in report.REPORT_TEXT
+
+
+def test_the_report_says_only_what_its_context_shows():
+    # Its turn runs in Pulse's chat, whose earlier turns are no evidence of what's true now
+    # (Eric, 2026-10-25: a report blamed a "reminder job" its context never mentioned).
+    assert "never repeat something only an earlier turn in this chat says" in report.REPORT_TEXT
+    assert "Tell the user only what the message contains" in report.REPORT_NOTE
+    assert "and this chat's earlier reports" not in report.REPORT_NOTE
+    assert "Say only what the context shows" in candidates.INSTRUCTIONS
+
+
+def test_the_report_marks_a_reminder_sent_on_with_do_it(live):
+    now = time.time()
+    news = "The relay.json backup is still on the server. Say the word and it's gone."
+    live.store.add_card({"kind": "followup", "level": "push", "news": news, "created_at": now - 3600})
+    live.db.message("user", f"Pulse reminded me: {news}\n\nLet's take care of it now.", sid=CHAT, at=now - 600)
+    live.db.message("assistant", "Already shredded yesterday. If that reminder job keeps replaying, say the word.",
+                    sid=CHAT, at=now - 590)
+    live.db.message("user", "And what's the weather?", sid=CHAT, at=now - 500)
+    text = report.gather(live.home, live.store, home_chat_id=SID, now=now).text
+    chat = text.split("### Deploy\n", 1)[1]
+    assert "] User (Pulse's reminder): Pulse reminded me: The relay.json backup" in chat
+    assert "] Hermes (answering Pulse's reminder): Already shredded yesterday." in chat
+    assert "] User: And what's the weather?" in chat
 
 
 # Asking ----------------------------------------------------------------------
@@ -409,6 +434,19 @@ def test_a_list_that_picks_nothing_says_so_and_makes_no_card(reporting):
     pulse.tick(time.time() + 1)
     assert live.store.cards() == []
     assert [row["decision"] for row in live.store.run_candidates(run["id"])] == [candidates.NOT_PICKED]
+
+
+def test_the_report_as_it_was_reads_what_pulse_brought_up_lately(reporting):
+    live = reporting
+    live.store.add_card({"kind": store.NOTICED, "level": "push", "topic": "date", "news": "Ana lands at 18:00",
+                         "created_at": time.time() - 3600})
+    live.llm.replies.append(RuntimeError("the model is down"))
+    assert listed(live)["state"] == pulse.RUN_FAILED
+    pulse.tick()
+    [sent] = live.sent()
+    # What the list reads too, so the turn needn't go by Pulse's chat for what was said.
+    recent = sent.split(candidates.RECENT_TITLE + "\n", 1)[1]
+    assert recent.startswith("- ") and "[date] Ana lands at 18:00" in recent.split("\n\n", 1)[0]
 
 
 @pytest.mark.parametrize("reply", [RuntimeError("the model is down"), None, {"items": []}])
