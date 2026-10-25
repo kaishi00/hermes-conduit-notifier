@@ -30,6 +30,7 @@ backoff. A watch asks if it's still wanted after WATCH_GIVE_UP_S.
 
 from __future__ import annotations
 
+import functools
 import logging
 import re
 import secrets
@@ -461,8 +462,8 @@ def check_acts(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzi
             return
         card = pulse_store.card(row["card_id"])
 
-        def decide(**fields: Any) -> None:
-            pulse_store.decide_act(row["card_id"], acted_at=row["acted_at"], **fields)
+        # Bound now: a closure over `row` would read whichever row is current.
+        decide = functools.partial(pulse_store.decide_act, row["card_id"], acted_at=row["acted_at"])
 
         if card is None or pulse_store.done_marks([card["id"]]):
             decide(check_at=None, checks=row["checks"], outcome="closed", why="")
@@ -678,7 +679,7 @@ def run(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzinfo, no
             # or the background: ask if it's still wanted.
             pulse_store.set("followup_stale_at", now)
             due = isinstance(item.get("due_at"), (int, float)) and not isinstance(item.get("due_at"), bool)
-            why = (f"still open a month after it was asked with nothing showing it happened" if item["kind"] == WATCH
+            why = ("still open a month after it was asked with nothing showing it happened" if item["kind"] == WATCH
                    else f"still open a week after it was {'due' if due else 'said'} with nothing showing it happened")
             if item["kind"] == COMMITMENT:
                 _tell_reminder(pulse_store, item["id"], news=STALE_NEWS, why=why, checks=checks, now=now)

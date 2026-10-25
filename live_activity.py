@@ -451,18 +451,20 @@ def _post_to_relay(payload: dict[str, Any]) -> dict[str, Any]:
     except client.RelayRejected as error:
         # The same "pair again" / "blocked" signals notifications raise (and
         # clear), for a host whose only relay traffic is Live Activities.
-        _mark_refused(lambda: client.record_relay_refusal(state, error))
+        _mark_refused(client.record_relay_refusal, state, error)
         raise
     # Also ends a notification pause: the relay takes this pairing again.
-    _mark_refused(lambda: client.record_relay_accepted(state))
+    _mark_refused(client.record_relay_accepted, state)
     return answer
 
 
-def _mark_refused(mark: Any) -> None:
+def _mark_refused(mark: Any, *args: Any) -> None:
     # A failure here must not replace the relay's answer: that would turn a
     # refusal into a per-turn retry, or a delivered update into a resend.
+    # The arguments come in bound, not closed over: Python unbinds an
+    # `except ... as error` name when the block ends.
     try:
-        mark()
+        mark(*args)
     except Exception:  # noqa: BLE001
         logger.warning("Conduit could not record the relay's refusal", exc_info=True)
 
