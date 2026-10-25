@@ -520,6 +520,18 @@ def test_push_event_names_its_title_and_sends_the_chat_title_on_its_own():
         "phone.auto.add_event")
 
 
+def test_push_event_carries_the_bots_name_beside_its_profile_id():
+    event = push_event("call.requested", identifier="call:1", profile="default", profile_name=" Nova\n" + "x" * 80)
+    assert event["profile"] == "default"
+    assert event["profile_name"].startswith("Nova x") and len(event["profile_name"]) == 64
+    for name in ("", "  ", None, 5):
+        assert "profile_name" not in push_event("call.requested", identifier="call:1", profile_name=name)
+    # The name is content: sealed with the rest, and gone from a redacted copy.
+    from e2e import INNER_FIELDS
+    assert "profile_name" in INNER_FIELDS
+    assert "profile_name" not in redact_event(event)
+
+
 def test_a_pulse_push_says_how_many_things_it_brings():
     event = push_event("response.ready", identifier="response:1", title_label="pulse.noticed", count=3)
     assert event["title_label"] == "pulse.noticed" and event["count"] == 3

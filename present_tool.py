@@ -19,7 +19,7 @@ from typing import Any, Callable
 
 from hermes_constants import get_hermes_home
 
-from . import client
+from . import client, session_titles
 from .events import push_event
 from .present_store import (DEFAULT_TTL_MINUTES, MAX_ACTION_LABEL_CHARS, MAX_PREVIEW_CHARS, MAX_SPOKEN_YES,
                             MAX_SPOKEN_YES_CHARS, MAX_TITLE_CHARS, MAX_TTL_MINUTES, PresentError, PresentStore,
@@ -227,6 +227,7 @@ def _nudge(prompt: dict[str, Any], preview: Any, profile: str) -> None:
     try:
         body = first_line(preview if isinstance(preview, str) else "")
         client.enqueue(push_event("phone.changes", identifier=f"present:{prompt['id']}", profile=profile,
+                                  profile_name=session_titles.bot_name(),
                                   title=prompt["title"], body=body, mode="alert"))
     except Exception:  # noqa: BLE001
         logger.warning("conduit_push: could not wake the phone for a confirm prompt", exc_info=True)

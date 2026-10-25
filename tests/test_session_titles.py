@@ -88,6 +88,7 @@ def sent(monkeypatch):
     monkeypatch.setattr(plugin, "enqueue", events.append)
     FakeSessionDB.opened.clear()
     titles._cache.clear()
+    titles._names.clear()
     return events
 
 
@@ -194,3 +195,39 @@ def test_a_bot_chat_push_is_titled_with_its_bot(sent, monkeypatch):
     monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: next(homes))
     assert titles.title("bot") == "scout"
     assert titles.title("bot") == "default"
+
+
+def test_a_bot_chat_push_is_titled_with_the_name_the_bots_list_shows(sent, monkeypatch, tmp_path):
+    monkeypatch.setitem(FakeSessionDB.titles, "bot", "Bot Chat")
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path)
+    meta = tmp_path / "profile.yaml"
+    # The default profile, named in Hermes: its Bot Mode title wins, as on Desktop and in Conduit's Bots list.
+    meta.write_text("display_name: Main\nui_meta:\n  hermes-bots:\n    title: '  Nova  Prime '\n", encoding="utf-8")
+    assert titles.title("bot") == "Nova Prime"
+    assert titles.bot_name() == "Nova Prime"
+    titles._cache.clear()
+    titles._names.clear()
+    meta.write_text("display_name: Main\nui_meta:\n  hermes-bots:\n    color: red\n", encoding="utf-8")
+    assert titles.title("bot") == "Main"
+    titles._cache.clear()
+    titles._names.clear()
+    meta.write_text("description: x\n", encoding="utf-8")
+    assert titles.title("bot") == "default"
+    assert titles.bot_name() == "", "an unnamed bot sends no name"
+    titles._cache.clear()
+    titles._names.clear()
+    meta.write_text(": not yaml [", encoding="utf-8")
+    assert titles.title("bot") == "default"
+    # A chat that isn't a Bot Chat keeps its own title.
+    assert titles.title("s1") == "Infra"
+
+
+def test_a_reply_and_its_call_carry_the_bots_name(sent, monkeypatch, tmp_path):
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path)
+    (tmp_path / "profile.yaml").write_text("display_name: Nova\n", encoding="utf-8")
+    _reply(session_id="s1", turn_id="t9", assistant_response="Deployed.")
+    assert sent[0]["profile_name"] == "Nova"
+    calls = _load("conduit_push.calls", ROOT / "calls.py")
+    event = calls.call_event({"id": "w" * 12, "title": "Deploy", "session_ids": ["s1"]}, "done", session_id="s1", profile="default")
+    assert event["profile"] == "default"
+    assert event["profile_name"] == "Nova"

@@ -34,7 +34,7 @@ from typing import Any, Callable
 
 from hermes_constants import get_hermes_home
 
-from . import client, location_profiles
+from . import client, location_profiles, session_titles
 from .calls_store import CallStore
 from .location_store import LocationStore
 from .events import push_event
@@ -573,6 +573,7 @@ def call_event(watch: dict[str, Any], outcome: str, *, session_id: str, profile:
         identifier=f"call:{watch['id']}",
         session_id=session_id,
         profile=profile,
+        profile_name=session_titles.bot_name(),
         title=CALL_TITLE,
         title_label="call.requested",
         body=body,

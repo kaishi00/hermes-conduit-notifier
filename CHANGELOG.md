@@ -13,13 +13,28 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.77.3 (2026-10-25)
+## 0.77.5 (2026-10-25)
 
 ### Fixes
 - A group room could stop answering altogether once one of its threads
   passed about 24 messages. Hermes could no longer plan the room's next
   turn, so no member replied again, in that thread or any other, and nothing
   said why. Rooms now keep answering however long their threads get.
+
+## 0.77.4 (2026-10-25)
+
+### Fixes
+- Turning "Self-improvement updates" off, or on, didn't reach chats that
+  were already open: they kept showing the updates the way they did when
+  they opened, until Hermes restarted. Each update now follows the setting
+  as it is when it's made.
+
+## 0.77.3 (2026-10-25)
+
+### Fixes
+- Notifications from a bot's chat said its profile, like "default", instead
+  of the bot's name. They now use the name the Bots list shows, and so does a
+  call from that bot.
 
 ## 0.77.2 (2026-10-25)
 

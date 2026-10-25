@@ -96,6 +96,7 @@ def push_event(
     identifier: str,
     session_id: str = "",
     profile: str = "default",
+    profile_name: str = "",
     title: str = "",
     body: str = "",
     title_label: str = "",
@@ -117,6 +118,11 @@ def push_event(
         event["session_id"] = session_id
     if profile:
         event["profile"] = profile[:80]
+    # The bot's name as the Bots list shows it (session_titles.bot_name), so
+    # a call screen or the relay's plain copy says "Atlas", not "default".
+    shown_profile = _clean(profile_name, 64) if isinstance(profile_name, str) else ""
+    if shown_profile:
+        event["profile_name"] = shown_profile
     # No push shows a host path: a MEDIA tag in a question, an approval, a
     # call, an update or a phone change reads as its attachment too. A reply
     # comes through plain_text, which already did this and kept fenced code.

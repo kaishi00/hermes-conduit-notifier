@@ -27,7 +27,7 @@ import uuid
 from typing import Any, Callable
 
 from . import calls, client
-from .session_titles import title as chat_title, titled
+from .session_titles import bot_name, title as chat_title, titled
 from .events import (
     card_choice_labels,
     clarify_decision,
@@ -127,6 +127,7 @@ def middleware(is_child_session: Callable[[str], bool] | None = None, **kwargs: 
         identifier=event_id("input", kwargs.get("turn_id"), kwargs.get("tool_call_id"), request_id),
         session_id=session_id,
         profile=profile,
+        profile_name=bot_name(),
         title=titled("Input needed", session_id),
         title_label="input.needed",
         session_title=chat_title(session_id),
