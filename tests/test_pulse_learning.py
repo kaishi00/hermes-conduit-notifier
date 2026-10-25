@@ -665,8 +665,8 @@ def test_a_report_becomes_one_card_per_item(live, monkeypatch):
     assert item_id in pulse.report.rated_not_useful(live.store)
     assert control.done(live.store, owed["id"]) is True
     assert live.store.item(item_id)["status"] == "done"
-    with pytest.raises(control.Refused):
-        control.done(live.store, date["id"])  # nothing remembered behind it
+    # Nothing remembered behind it: Done marks the card alone.
+    assert control.done(live.store, date["id"]) is True and live.store.done_marks([date["id"]])
     # A reason has nothing to move on an item's card.
     with pytest.raises(control.Refused):
         control.rate(live.store, odd["id"], "down", "too_late")
@@ -828,9 +828,12 @@ def test_a_done_card_leaves_the_morning_brief(live):
     assert live.store.held_count() == 0 and live.store.held_cards(10) == []
 
 
-def test_done_refuses_what_isnt_a_follow_up_card(live):
+def test_done_refuses_what_isnt_a_follow_up_or_report_item_card(live):
     card = told_card(live)
+    report_card = live.store.add_card({"kind": "report", "level": "screen", "news": "Here's your report.",
+                                       "created_at": time.time()})
     for card_id, value, field in ((999, True, "card"), ("1", True, "card"), (True, True, "card"),
+                                  (report_card, True, "card"),
                                   (card["id"], "yes", "done"), (card["id"], 1, "done"),
                                   (card["id"], None, "done")):
         with pytest.raises(control.Refused) as refused:
@@ -936,6 +939,61 @@ def test_do_it_done_in_another_chat_marks_the_card_done(live):
     [text] = said.calls  # the Do it chat never answered, but another chat did it
     assert "Sent the release deploy note" in text
     assert live.store.act(card["id"])["outcome"] == "done"
+
+
+def found_card(live, *, chat_id=SID, news="The dentist is Friday at 9 (calendar).", topic="date"):
+    """A report item Pulse found on its own, nothing remembered behind it:
+    by default from no chat, so it points at the report in Pulse's chat."""
+    return live.store.add_card({"kind": "noticed", "level": "screen", "topic": topic, "title": news, "news": news,
+                                "chat_id": chat_id, "created_at": time.time()})
+
+
+def test_done_marks_a_report_item_found_on_its_own_and_the_next_report_reads_it(live):
+    card_id = found_card(live)
+    assert control.done(live.store, card_id) is True
+    assert control.done(live.store, card_id) is False  # already
+    [entry] = [card for card in control.feed(live.store)["cards"] if card["id"] == card_id]
+    assert entry["done_at"] is not None and entry["done_by"] == "user" and entry["seen_at"] is not None
+    assert learning.learned(live.store) == []
+    recent = pulse.candidates.recent_section(live.store, pulse.report.zone_for("UTC"), time.time())
+    assert "The dentist is Friday at 9 (calendar). (done)" in recent
+    assert control.done(live.store, card_id, False) is True
+    assert live.store.done_marks([card_id]) == {}
+
+
+def test_do_it_on_a_report_item_found_in_a_chat_reads_that_chat(live):
+    card_id = found_card(live, chat_id=CHAT, news="Look at the flaky deploy (you asked in Deploy)", topic="follow-up")
+    acted_at = time.time()
+    assert control.acted(live.store, card_id, now=acted_at) is True
+    live.db.message("user", "Pulse reminded me: the flaky deploy. Let's take care of it now.", sid=CHAT, at=acted_at + 5)
+    live.db.message("assistant", "Fixed the flaky deploy test.", sid=CHAT, at=acted_at + 30)
+    said = llm_saying(done=True, why="fixed")
+    run_acts(live, said, acted_at + followup.ACT_FIRST_S)
+    [text] = said.calls
+    assert "Fixed the flaky deploy test." in text
+    assert live.store.done_marks([card_id])[card_id]["done_by"] == "pulse"
+    assert control.done(live.store, card_id, False) is True
+
+
+def test_do_it_on_a_report_item_from_no_chat_reads_the_new_chat_not_pulses_own(live):
+    card_id = found_card(live)
+    acted_at = time.time()
+    assert control.acted(live.store, card_id, now=acted_at) is True
+    live.db.message("assistant", "Your Pulse report: the dentist is Friday at 9.", sid=SID, at=acted_at + 10)
+    said = llm_saying(done=True, why="the reminder is set")
+    # Pulse's own chat moving is no answer, and nothing else was said yet.
+    run_acts(live, said, acted_at + followup.ACT_FIRST_S)
+    assert said.calls == [] and live.store.act(card_id)["outcome"] == ""
+    live.db.session(sid="new", title="New conversation", pinned=0)
+    live.db.message("user", "Pulse reminded me: The dentist is Friday at 9 (calendar).\n\nLet's take care of it now.",
+                    sid="new", at=acted_at + 700)
+    live.db.message("assistant", "Set a reminder for the dentist on Friday, from your calendar.", sid="new",
+                    at=acted_at + 720)
+    run_acts(live, said, acted_at + 2 * followup.ACT_FIRST_S)
+    [text] = said.calls
+    assert "Set a reminder for the dentist" in text and "came from no chat" in text
+    assert "Your Pulse report" not in text
+    assert live.store.done_marks([card_id])[card_id]["done_by"] == "pulse"
 
 
 def run_held(live, llm, now):

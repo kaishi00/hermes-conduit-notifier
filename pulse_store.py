@@ -221,9 +221,9 @@ CREATE TABLE IF NOT EXISTS lessons (
     created_at REAL NOT NULL,
     undone_at REAL
 );
--- Follow-up cards the user marked done on the Pulse screen
--- (pulse_learning.done), with what the item and its checks were before, so
--- Undo puts them back.
+-- Cards the user marked done on the Pulse screen (pulse_learning.done),
+-- with what the item and its checks were before, if one is behind the card,
+-- so Undo puts them back.
 CREATE TABLE IF NOT EXISTS card_done (
     card_id INTEGER PRIMARY KEY,
     done_at REAL NOT NULL,
@@ -231,8 +231,8 @@ CREATE TABLE IF NOT EXISTS card_done (
     done_by TEXT NOT NULL DEFAULT 'user',
     prior_json TEXT NOT NULL DEFAULT '{}'
 );
--- Do it on a follow-up card (pulse_followup.check_acts): once the chat has
--- answered, Pulse reads it and marks the card done if it got done.
+-- Do it on a card (pulse_followup.check_acts): once the chat has answered,
+-- Pulse reads it and marks the card done if it got done.
 CREATE TABLE IF NOT EXISTS card_acts (
     card_id INTEGER PRIMARY KEY,
     acted_at REAL NOT NULL,
@@ -930,32 +930,38 @@ class PulseStore:
                                 "ORDER BY created_at, id LIMIT ?", (limit,)).fetchall()
         return [dict(row) for row in rows]
 
-    def mark_done(self, card_id: int, item_id: int, *, closed_by: str, now: float, by: str = "user") -> bool:
-        """Marks a follow-up card done in one transaction: keeps what its item
-        and checks were (for Undo), closes an open, reminded or expired item
-        as done by ``closed_by``, stops its checks and marks the card seen.
-        False when it was marked already."""
+    def mark_done(self, card_id: int, item_id: Optional[int], *, closed_by: str, now: float,
+                  by: str = "user") -> bool:
+        """Marks a card done in one transaction: keeps what its item and
+        checks were (for Undo), closes an open, reminded or expired item as
+        done by ``closed_by``, stops its checks and marks the card seen. A
+        card with no item (a report item Pulse found on its own) is only
+        marked. False when it was marked already."""
         with _lock, self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             if conn.execute("SELECT 1 FROM card_done WHERE card_id=?", (card_id,)).fetchone():
                 conn.execute("ROLLBACK")
                 return False
-            item = conn.execute("SELECT status, closed_by, closed_at FROM items WHERE id=?", (item_id,)).fetchone()
-            check = conn.execute("SELECT decision, next_check_at FROM followups WHERE item_id=?", (item_id,)).fetchone()
+            item = check = None
+            if item_id is not None:
+                item = conn.execute("SELECT status, closed_by, closed_at FROM items WHERE id=?", (item_id,)).fetchone()
+                check = conn.execute("SELECT decision, next_check_at FROM followups WHERE item_id=?",
+                                     (item_id,)).fetchone()
             prior = {**(dict(item) if item else {}), **(dict(check) if check else {})}
             conn.execute("INSERT INTO card_done(card_id, done_at, done_by, prior_json) VALUES(?,?,?,?)",
                          (card_id, now, by, json.dumps(prior)))
             conn.execute("UPDATE card_acts SET check_at=NULL WHERE card_id=?", (card_id,))
-            conn.execute("UPDATE items SET status='done', closed_by=?, closed_at=? WHERE id=? "
-                         "AND status IN ('open', 'reminded', 'expired') AND superseded_at IS NULL",
-                         (closed_by, now, item_id))
-            conn.execute("UPDATE followups SET next_check_at=NULL, decision='closed', updated_at=? "
-                         "WHERE item_id=? AND next_check_at IS NOT NULL", (now, item_id))
+            if item_id is not None:
+                conn.execute("UPDATE items SET status='done', closed_by=?, closed_at=? WHERE id=? "
+                             "AND status IN ('open', 'reminded', 'expired') AND superseded_at IS NULL",
+                             (closed_by, now, item_id))
+                conn.execute("UPDATE followups SET next_check_at=NULL, decision='closed', updated_at=? "
+                             "WHERE item_id=? AND next_check_at IS NOT NULL", (now, item_id))
             conn.execute("UPDATE cards SET seen_at=COALESCE(seen_at, ?) WHERE id=?", (now, card_id))
             conn.execute("COMMIT")
         return True
 
-    def unmark_done(self, card_id: int, item_id: int, *, closed_by: Sequence[str], now: float) -> bool:
+    def unmark_done(self, card_id: int, item_id: Optional[int], *, closed_by: Sequence[str], now: float) -> bool:
         """Undo, in one transaction: takes the mark off and puts the item
         back as it was while one of ``closed_by`` still holds it closed, and its
         checks back where the mark stopped them. False with no mark."""

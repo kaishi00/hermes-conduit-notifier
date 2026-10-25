@@ -2247,6 +2247,13 @@ def test_pulse_routes(remembering, db, monkeypatch):
     assert http.put(f"{base}/levels", json={"kind": "followup", "level": "loud"}).status_code == 400
     assert "pulse" in api.ROUTE_CAPABILITIES and "pulse_feed" in api.ROUTE_CAPABILITIES
     assert "pulse_daily_brief" in api.ROUTE_CAPABILITIES  # Settings > Pulse says the brief comes every day
+    # A report item Pulse found on its own takes Do it and Done too.
+    assert "pulse_found_actions" in api.ROUTE_CAPABILITIES
+    found = store_.add_card({"kind": "noticed", "level": "screen", "topic": "date", "news": "Dentist Friday",
+                             "created_at": DAY})
+    assert http.post(f"{base}/acted", json={"card": found}).json()["booked"] is True
+    assert http.post(f"{base}/done", json={"card": found, "done": True}).json()["changed"] is True
+    assert http.post(f"{base}/acted", json={"card": found}).json()["booked"] is False  # done already
     # A host that never turned Pulse on is answered without a file left behind.
     fresh = home / "fresh"
     fresh.mkdir()

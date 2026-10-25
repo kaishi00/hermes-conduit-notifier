@@ -320,6 +320,13 @@ def lines(picked: Sequence[dict]) -> list[tuple[str, str, Optional[int]]]:
     return [(pick["kind"], pick["text"], pick["item_id"]) for pick in picked]
 
 
+def found_in(picked: Sequence[dict]) -> list[tuple[str, str]]:
+    """The chat each pick came from, as (profile, chat id), ("", "") when it
+    came from none (the calendar, reminders, notes, jobs, tools or the
+    inbox): pulse_learning.add_noticed_cards's ``found_in``."""
+    return [(pick["profile"], pick["chat_id"]) for pick in picked]
+
+
 def describe(row: dict) -> str:
     """One journaled candidate, for `pulse candidates`."""
     value = f" v{row['value']}" if row["value"] else ""

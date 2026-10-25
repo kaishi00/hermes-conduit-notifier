@@ -13,6 +13,18 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.77.0 (2026-10-25)
+
+### New and improved
+- Every item in Pulse's report now gets Do it and Done, dates and things
+  worth knowing that Pulse found on its own included. Before, only items
+  about something Pulse remembers had them.
+- Do it on one of those opens the chat Pulse found it in, or a new chat when
+  it came from somewhere else, like your calendar or reminders. Pulse then
+  reads what came of it and marks the card done by itself once it's taken
+  care of.
+- Done tells Pulse an item is handled, so the next report leaves it out.
+
 ## 0.76.0 (2026-10-25)
 
 ### New and improved

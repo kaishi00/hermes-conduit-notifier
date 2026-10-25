@@ -188,16 +188,21 @@ def report_lines(reply: Optional[str]) -> list[tuple[str, str, Optional[int]]]:
 def add_noticed_cards(pulse_store: store.PulseStore, *, turn: Any, lines: list[tuple[str, str, Optional[int]]],
                       chat_id: str, chat_title: str, shown: set[int], kinds: tuple[str, ...],
                       item_chat_title: Callable[[dict], str], now: float, attempt: str = "",
-                      marks: tuple[str, ...] = (), keep: int = 50, links: Sequence[int] = ()) -> list[int]:
+                      marks: tuple[str, ...] = (), keep: int = 50, links: Sequence[int] = (),
+                      found_in: Sequence[tuple[str, str]] = ()) -> list[int]:
     """A delivered report's items (``report_lines``) as cards, one each, all
     at once, marked as ``add_cards`` marks them. An item drawn from a
     remembered thing (its "#n", shown in the report; what replaced it since,
-    if anything) points at the chat that thing came from, so Do it and Done
-    work on it; the rest point at the report in the Pulse chat."""
+    if anything) points at the chat that thing came from; one the report
+    found in a chat (``found_in``: each line's profile and chat, "" for none)
+    points at that chat; the rest point at the report in the Pulse chat.
+    Done and Do it work on all of them (``action_card``).
+    ``item_chat_title`` gives a chat's title from its profile and chat_id."""
     rows = []
-    for kind, text, ref in lines:
+    for n, (kind, text, ref) in enumerate(lines):
         current = pulse_store.current_item(ref) if ref is not None and ref in shown else None
         item = pulse_store.item(current) if current is not None else None
+        profile, found = found_in[n] if n < len(found_in) else ("", "")
         row: dict[str, Any] = {
             "kind": NOTICED, "level": "screen", "topic": kind if kind in kinds else "other",
             "news": _clip(text, NOTICED_NEWS_LIMIT), "why": NOTICED_WHY, "created_at": now}
@@ -205,6 +210,9 @@ def add_noticed_cards(pulse_store: store.PulseStore, *, turn: Any, lines: list[t
             row.update(item_id=item["id"], title=_clip(item["text"], 300), quote=_clip(item["evidence"], 300),
                        profile=item["profile"], chat_id=item["chat_id"], message_id=item["message_id"],
                        chat_title=_clip(item_chat_title(item), 120))
+        elif found:
+            row.update(item_id=None, title=_clip(text, 300), profile=profile, chat_id=found,
+                       chat_title=_clip(item_chat_title({"profile": profile, "chat_id": found}), 120))
         else:
             row.update(item_id=None, title=_clip(text, 300), chat_id=turn.session_id or chat_id,
                        message_id=turn.reply_id, chat_title=_clip(chat_title, 120))
@@ -231,20 +239,24 @@ ACT_DONE_BY = "pulse: done in the chat after Do it"
 HELD_DONE_BY = "pulse: done before the morning brief"
 
 
-def followup_card(pulse_store: store.PulseStore, card_id: Any) -> dict:
-    """The follow-up card ``card_id`` names, or Invalid("card")."""
+def action_card(pulse_store: store.PulseStore, card_id: Any) -> dict:
+    """The card ``card_id`` names, if Done and Do it take it (a follow-up or
+    a report item, whether or not something remembered is behind it), or
+    Invalid("card")."""
     card = pulse_store.card(card_id) if isinstance(card_id, int) and not isinstance(card_id, bool) else None
-    if card is None or card["kind"] not in ("followup", NOTICED) or card["item_id"] is None:
+    if card is None or card["kind"] not in ("followup", NOTICED):
         raise Invalid("card")
     return card
 
 
 def done(pulse_store: store.PulseStore, card_id: Any, is_done: Any, *, now: float) -> bool:
-    """Marks a follow-up card done, or takes the mark off (Undo); whether it
-    changed. Done closes its promise as done and stops its checks, without a
-    rating: Pulse was right to bring it up, the user just hadn't said. Undo
-    puts the promise and its checks back as they were."""
-    card = followup_card(pulse_store, card_id)
+    """Marks a card done, or takes the mark off (Undo); whether it changed.
+    Done closes the promise behind it as done and stops its checks, without
+    a rating: Pulse was right to bring it up, the user just hadn't said. A
+    report item Pulse found on its own has nothing behind it: Done marks the
+    card, which the next report reads (pulse_candidates.recent_section).
+    Undo puts the promise and its checks back as they were."""
+    card = action_card(pulse_store, card_id)
     if not isinstance(is_done, bool):
         raise Invalid("done")
     if is_done:

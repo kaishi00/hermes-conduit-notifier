@@ -329,8 +329,8 @@ def rate(pulse_store: Any, card_id: Any, rating: Any, reason: Any = "", now: Opt
 
 
 def done(pulse_store: Any, card_id: Any, is_done: Any = True, now: Optional[float] = None) -> bool:
-    """Marks a follow-up card done (its promise closes, no rating), or Undo
-    with False; whether it changed."""
+    """Marks a follow-up or report item card done (a promise behind it
+    closes, no rating), or Undo with False; whether it changed."""
     return _learning(lambda: pulse_learning.done(pulse_store, card_id, is_done,
                                                  now=time.time() if now is None else now))
 
@@ -343,8 +343,9 @@ def dismiss(pulse_store: Any, card_id: Any, dismissed: Any = True, now: Optional
 
 
 def acted(pulse_store: Any, card_id: Any, now: Optional[float] = None) -> bool:
-    """Do it on a follow-up card: Pulse reads that chat once it has answered
-    and marks the card done if it got done; whether a check was booked."""
+    """Do it on a follow-up or report item card: Pulse reads the chat Do it
+    opened once it has answered and marks the card done if it got done;
+    whether a check was booked."""
     return _learning(lambda: pulse_followup.act(pulse_store, card_id, now=time.time() if now is None else now))
 
 

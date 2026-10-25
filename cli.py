@@ -640,7 +640,7 @@ def _pulse_learning(pulse_store: Any, action: str, value: str, extra: str) -> in
                 print("Usage: hermes conduit-push pulse done <card> [undo]")
                 return 2
             changed = pulse_control.done(pulse_store, int(value), extra != "undo")
-            print(("Marked done: Pulse stops checking on it." if extra != "undo" else "Back as it was.") if changed
+            print(("Marked done: Pulse stops bringing it up." if extra != "undo" else "Back as it was.") if changed
                   else "Nothing changed.")
             return 0
         if value == "undo":

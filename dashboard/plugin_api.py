@@ -7843,8 +7843,9 @@ async def post_pulse_rate(request: Request, response: Response) -> Dict[str, Any
 
 @router.post("/pulse/done")
 async def post_pulse_done(request: Request, response: Response) -> Dict[str, Any]:
-    """{"card": n, "done": true|false}: marks a follow-up card done (its
-    promise closes, no rating) or takes the mark off: {"changed": bool}."""
+    """{"card": n, "done": true|false}: marks a follow-up or report item
+    card done (a promise behind it closes, no rating) or takes the mark off:
+    {"changed": bool}."""
     response.headers["Cache-Control"] = "no-store"
     body = await _read_json_body(request, PULSE_MAX_BODY_BYTES)
     body = body if isinstance(body, dict) else {}
@@ -7867,8 +7868,10 @@ async def post_pulse_dismiss(request: Request, response: Response) -> Dict[str, 
 
 @router.post("/pulse/acted")
 async def post_pulse_acted(request: Request, response: Response) -> Dict[str, Any]:
-    """{"card": n}: Do it on a follow-up card. Pulse reads that chat once it
-    has answered and marks the card done if it got done: {"booked": bool}."""
+    """{"card": n}: Do it on a follow-up or report item card. Pulse reads
+    the chat Do it opened once it has answered (for a report item from no
+    chat, the other chats on its subject) and marks the card done if it got
+    done: {"booked": bool}."""
     response.headers["Cache-Control"] = "no-store"
     body = await _read_json_body(request, PULSE_MAX_BODY_BYTES)
     body = body if isinstance(body, dict) else {}
@@ -15746,6 +15749,9 @@ ROUTE_CAPABILITIES = (
     "pulse_dismiss",
     # The morning brief at PUT /pulse's brief_time comes every day with what's still open.
     "pulse_daily_brief",
+    # /pulse/done and /acted take every report item, one Pulse found on its
+    # own included, and one it found in a chat points at that chat.
+    "pulse_found_actions",
     "present-v1",
     "health-sync",
     "voice-tools",

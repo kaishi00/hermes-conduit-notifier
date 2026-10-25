@@ -382,8 +382,10 @@ def test_a_report_lists_its_candidates_then_says_what_code_picked(reporting):
     deliver(live, sent, reply)
     pulse.tick(now + 2)
     found, remembered = sorted(live.store.cards(), key=lambda card: card["id"])
-    assert (found["kind"], found["topic"], found["news"], found["item_id"], found["chat_id"]) == (
-        store.NOTICED, "follow-up", "Look at the flaky deploy (you asked in Deploy)", None, SID)
+    # Found in a chat on its own: it points at that chat, so Do it opens it.
+    assert (found["kind"], found["topic"], found["news"], found["item_id"], found["chat_id"], found["chat_title"],
+            found["message_id"]) == (store.NOTICED, "follow-up", "Look at the flaky deploy (you asked in Deploy)",
+                                     None, CHAT, "Deploy", None)
     assert (remembered["item_id"], remembered["chat_id"], remembered["chat_title"], remembered["topic"]) == (
         item_id, CHAT, "Deploy", "commitment")
     assert [(row["decision"], row["card_id"]) for row in live.store.run_candidates(run["id"])] == [
