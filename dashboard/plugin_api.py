@@ -10809,9 +10809,12 @@ class _WatchJobs:
             if superseded is not None:
                 # The call's chat (#1250): a session's turns run in order. An
                 # end before the next request's turn shows any sign of life is
-                # the cancelled turn's, however it ended; anything else means
-                # that turn is over and its end isn't coming.
-                if kind in ("message.complete", "error"):
+                # the cancelled turn's: however it ended while the next one
+                # waits, and only as an interrupt once the next went in after
+                # the hold, when its own end can come first (an early error).
+                # Anything else means that turn is over and its end isn't coming.
+                if kind in ("message.complete", "error") and (
+                        not job.turn_open or self._reads_as_interrupt(kind, payload)):
                     job = superseded
                 else:
                     superseded.turn_open = False
@@ -10879,6 +10882,14 @@ class _WatchJobs:
         return payload.get("status") == "interrupted"
 
     @staticmethod
+    def _reads_as_interrupt(kind: str, payload: Dict[str, Any]) -> bool:
+        """An end that says its turn was interrupted."""
+        if kind == "error":
+            message = payload.get("message")
+            return isinstance(message, str) and "interrupt" in message.lower()
+        return payload.get("status") == "interrupted"
+
+    @staticmethod
     def _settle(job: _WatchJob, kind: str, payload: Dict[str, Any]) -> None:
         """The job's turn ended: ``message.complete`` or ``error``."""
         job.approval = None
@@ -10918,9 +10929,9 @@ class _WatchJobs:
             job = self._job_for(sid)
             if job is None or not job.active:
                 return
-            if self._superseded_turn(job, sid) is not None:
+            if not job.turn_open and self._superseded_turn(job, sid) is not None:
                 # The call's chat (#1250): the cancelled turn is still going
-                # and the next request's hasn't begun, so the ask is the
+                # and the next request hasn't gone in, so the ask is the
                 # cancelled one's, which its interrupt ends.
                 return
             if job.held_completion is not None:

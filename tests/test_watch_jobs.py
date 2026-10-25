@@ -2012,7 +2012,6 @@ def test_a_cancelled_turn_that_never_ends_holds_the_chat_only_briefly(monkeypatc
 
 @pytest.mark.parametrize("kind,payload", [
     ("message.complete", {"text": "", "status": "interrupted"}),
-    ("message.complete", {"text": "Half a plan", "status": "complete"}),
     ("error", {"message": "Interrupted"}),
 ])
 def test_a_cancelled_turns_end_after_the_next_request_went_in_is_not_that_requests(monkeypatch, kind, payload):
@@ -2066,7 +2065,6 @@ def test_the_next_request_settles_when_a_cancelled_turns_end_never_comes(monkeyp
 ])
 def test_the_next_requests_own_end_settles_it_once_a_cancelled_turns_end_is_overdue(monkeypatch, kind, payload, status):
     monkeypatch.setattr(api, "WATCH_JOB_INTERRUPT_END_S", 0.0)
-    monkeypatch.setattr(api, "WATCH_JOB_LATE_END_S", 0.0)
     monkeypatch.setattr(api, "WATCH_JOB_CHAT_WAIT_S", 0.05)
     grant = make_jobs()
     server = grant.jobs.server
@@ -2085,8 +2083,7 @@ def test_the_next_requests_own_end_settles_it_once_a_cancelled_turns_end_is_over
     assert grant.jobs.jobs["watch-2"].status == status
 
 
-def test_an_approval_from_a_cancelled_turn_isnt_the_next_requests(monkeypatch):
-    monkeypatch.setattr(api, "WATCH_JOB_INTERRUPT_END_S", 0.0)
+def test_an_approval_from_a_cancelled_turn_isnt_the_waiting_requests(monkeypatch):
     monkeypatch.setattr(api, "WATCH_JOB_CHAT_WAIT_S", 0.05)
     grant = make_jobs()
     server = grant.jobs.server
@@ -2098,9 +2095,10 @@ def test_an_approval_from_a_cancelled_turn_isnt_the_next_requests(monkeypatch):
     finally:
         api.WATCH_JOB_START_ANSWER_S = original
     api.run_watch_job_call(grant, "cancel_job", {"job_id": "watch-1"})
-    wait_for(lambda: len(server.methods("prompt.submit")) == 2)
 
+    # The interrupted turn asks before its end: the next request still waits.
     server.emit("rt-1", "approval.request", {"request_id": "appr-late", "command": "rm -rf /var/log/old",
                                               "description": "Delete old logs"})
-    assert grant.jobs.jobs["watch-2"].status == "running"
+    assert len(server.methods("prompt.submit")) == 1
+    assert grant.jobs.jobs["watch-2"].status == "starting"
     assert grant.jobs.jobs["watch-2"].approval is None
