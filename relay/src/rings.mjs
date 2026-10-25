@@ -27,8 +27,9 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 // to the ring's control, and each long-polls it for the other's. The control
 // holds no words, only the two flags. A restart drops it with the rings, so a
 // write may adopt a ring the relay doesn't know (`adopt`): it comes back as a
-// control alone, for whoever holds the token, and both devices write their
-// state again to pick up where they were. Adopted rings are capped apart, so
+// control alone, with the token of its first write (the id is what an
+// adoption trusts), and both devices write their state again to pick up
+// where they were. It never holds a session. Adopted rings are capped apart, so
 // they can't push out real ones.
 
 // Long enough for a push that reached the device late (the phone rings one up
@@ -134,7 +135,9 @@ export class Rings {
   // go first when the relay holds its maximum.
   storeSession(id, token, sealed) {
     const ring = this.find(id, token);
-    if (!ring) return 'unknown';
+    // An adopted ring is a control alone: its call's session went with the
+    // restart, and none is stored for it.
+    if (!ring || ring.adopted) return 'unknown';
     if (!answeredOnWatch(ring)) return 'not_answered';
     this.dropSession(ring);
     for (const other of this.rings.values()) {

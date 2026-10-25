@@ -311,6 +311,7 @@ test('after a restart a control write adopts the ring, and both devices carry on
   assert.deepEqual(await rings.readControl(ring.id, ring.token), { status: 'control', control: { seq: 2, muted: true, ended: false, by: 'phone' } });
   assert.deepEqual(rings.settle(ring.id, ring.token, 'phone', 'answered'), { settled: { by: 'watch', outcome: 'answered' } }, 'an adopted ring settles nothing');
   assert.equal(rings.adopted, 1);
+  assert.equal(rings.storeSession(ring.id, ring.token, 'A'.repeat(100)), 'unknown', 'an adopted ring holds no session');
   rings.forget(ring.id);
   assert.equal(rings.adopted, 0);
 });
