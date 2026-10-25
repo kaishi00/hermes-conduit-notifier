@@ -192,7 +192,9 @@ def test_plugin_hello_is_a_non_notifying_version_announcement():
 
 def test_plugin_version_constant_matches_manifest():
     # PLUGIN_VERSION misreporting compatibility is the failure this feature
-    # exists to prevent; keep the constant and the manifest in lockstep.
+    # exists to prevent; events.py reads it from plugin.yaml, so a bump edits
+    # only plugin.yaml (and dashboard/manifest.json, checked in
+    # test_capabilities.py).
     import pathlib
     import re
 

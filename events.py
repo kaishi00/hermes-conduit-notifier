@@ -4,13 +4,31 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import uuid
 from typing import Any
 
-# Keep in sync with plugin.yaml. Reported on every event so the relay can
-# expose per-gateway compatibility state to the app (Settings > Notifications).
-PLUGIN_VERSION = "0.77.0"
+
+
+def _manifest_version() -> str:
+    """The version in plugin.yaml beside this file, the one place a bump
+    edits (with dashboard/manifest.json and CHANGELOG.md). Read the way the
+    dashboard's /capabilities reads it."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plugin.yaml")
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            key, _, value = line.partition(":")
+            if key.strip() == "version":
+                return value.strip().strip("\"'")
+    raise RuntimeError("plugin.yaml declares no version")
+
+
+# Reported on every event so the relay can expose per-gateway compatibility
+# state to the app (Settings > Notifications). Read once at import: after
+# `hermes plugins update` this keeps reporting the code that is running until
+# the gateway restarts.
+PLUGIN_VERSION = _manifest_version()
 PLUGIN_CAPABILITIES = [
     "approval-decisions",
     "clarify-loop",
