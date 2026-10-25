@@ -15,8 +15,8 @@ from hermes_constants import get_hermes_home
 
 from . import (call_tool, call_watches, calls, chat_on_screen, clarify_loop, client, conduit_first, cron_runs,
                desktop_selected, health_tool, inbox_tool, live_activity, location_tool, maps_tool, phone_tool,
-               present_tool, pulse, reply_sources, review_notices, room_memory, room_planner, settings_tool,
-               show_tool, turn_surface, voice_archive)
+               present_tool, pulse, reply_sources, review_notices, room_memory, room_planner, room_rules,
+               settings_tool, show_tool, turn_surface, voice_archive)
 from .session_titles import bot_name as _bot_name, title as _session_title, titled as _titled
 from .client import enqueue
 from .events import approval_decision, clarification_text, event_id, is_silent_response, plain_text, push_event
@@ -162,6 +162,12 @@ def register(ctx: Any) -> None:
 
 
 def _pre_tool_call(**kwargs: Any) -> dict[str, str] | None:
+    # The owner's rules for a room with other people's agents come first: they
+    # hold for every call a room turn makes, the background review's and a
+    # delegated child's included. Fails closed, so outside _quietly.
+    block = _room_tool_block(kwargs)
+    if block is not None:
+        return block
     if _is_child(kwargs.get("session_id")):
         return None
     # A Pulse turn gets no tools. Fails closed: Hermes blocks the call when
@@ -187,6 +193,35 @@ def _pre_tool_call(**kwargs: Any) -> dict[str, str] | None:
         session_title=_session_title(kwargs.get("session_id")),
         body=clarification_text(kwargs.get("args")),
     ))
+
+
+def _room_tool_block(kwargs: dict[str, Any]) -> dict[str, str] | None:
+    """A block for a tool call the owner's room rules don't allow
+    (room_rules.py), else None. A room whose roster or choices can't be read
+    gets no tools; a session store that can't be read counts as no room."""
+    session_id = _text(kwargs.get("session_id"))
+    if not session_id:
+        return None
+    try:
+        home = get_hermes_home()
+    except Exception:  # noqa: BLE001 — a remote room's session is still told apart by its id
+        home = None
+    try:
+        turn = room_rules.room_turn(session_id, home)
+    except room_rules.RoomStoreError:
+        logger.warning("conduit_push: couldn't read the room session %s is in; its tools are off this turn",
+                       session_id, exc_info=True)
+        return {"action": "block", "message": room_rules.UNKNOWN_ROOM_BLOCK}
+    if turn is None or not turn.with_others:
+        return None
+    try:
+        choices = room_rules.choices_for(turn, home)
+    except Exception:  # noqa: BLE001
+        logger.warning("conduit_push: couldn't read the room choices for session %s; its tools are off this turn",
+                       session_id, exc_info=True)
+        return {"action": "block", "message": room_rules.UNREADABLE_CHOICES_BLOCK}
+    message = room_rules.tool_block(kwargs.get("tool_name"), choices)
+    return {"action": "block", "message": message} if message else None
 
 
 _ledger_warned = False
@@ -678,6 +713,11 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
             voice_archive.bring_back(get_hermes_home(), session_id)
         except Exception:  # noqa: BLE001 — a hook must never break the turn
             logger.debug("conduit_push: voice chat un-archive check failed", exc_info=True)
+    # A room with other people's agents gets its owner's rules and nothing
+    # else: the notes below carry the owner's own data and calls.
+    room_framing = _room_framing(session_id)
+    if room_framing:
+        return {"context": room_framing}
     notes = [
         None if child else calls.outcome_note(session_id),
         None if child else _turn_surface_note(kwargs.get("platform"), kwargs.get("user_message")),
@@ -687,6 +727,32 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
     ]
     context = "\n\n".join(note for note in notes if note)
     return {"context": context} if context else None
+
+
+def _room_framing(session_id: str) -> str | None:
+    """Who's asking and what the owner allows, for a turn in a room with
+    other people's agents (room_rules.py); None for any other turn."""
+    if not session_id:
+        return None
+    try:
+        home = get_hermes_home()
+    except Exception:  # noqa: BLE001
+        home = None
+    try:
+        turn = room_rules.room_turn(session_id, home)
+    except room_rules.RoomStoreError:
+        # Unknown who's in it: framed as a room with others, under the defaults.
+        return room_rules.framing(None, room_rules.RoomChoices())
+    except Exception:  # noqa: BLE001 — a hook must never break the turn
+        logger.debug("conduit_push: couldn't tell whether session %s is a group room's", session_id, exc_info=True)
+        return None
+    if turn is None or not turn.with_others:
+        return None
+    try:
+        choices = room_rules.choices_for(turn, home)
+    except Exception:  # noqa: BLE001 — the tools stay blocked; the careful defaults frame the turn
+        choices = room_rules.RoomChoices()
+    return room_rules.framing(turn, choices)
 
 
 def _turn_surface_note(platform: Any, message: Any) -> str | None:

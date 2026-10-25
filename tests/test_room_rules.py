@@ -33,6 +33,21 @@ if "hermes_constants" not in sys.modules:
     _hermes_constants = types.ModuleType("hermes_constants")
     _hermes_constants.get_hermes_home = lambda: pathlib.Path(tempfile.gettempdir())
     sys.modules["hermes_constants"] = _hermes_constants
+if "tools.clarify_tool" not in sys.modules:
+    _tools = sys.modules.setdefault("tools", types.ModuleType("tools"))
+    _tools.__path__ = getattr(_tools, "__path__", [])
+    _clarify_tool = types.ModuleType("tools.clarify_tool")
+
+    def _strip_recommended(text):
+        # Same semantics as test_clarify_loop's stub, whichever module loads first.
+        stripped = str(text).strip()
+        suffix = "(Recommended)"
+        if stripped.casefold().endswith(suffix.casefold()):
+            return stripped[: -len(suffix)].strip()
+        return stripped
+
+    _clarify_tool.strip_recommended = _strip_recommended
+    sys.modules["tools.clarify_tool"] = _clarify_tool
 if "conduit_push" not in sys.modules:
     _pkg = types.ModuleType("conduit_push")
     _pkg.__path__ = [str(ROOT)]
@@ -51,6 +66,7 @@ def _load(name, path):
 
 room_choices = _load("conduit_push.room_choices", ROOT / "room_choices.py")
 rules = _load("conduit_push.room_rules", ROOT / "room_rules.py")
+plugin = _load("conduit_push.__init__", ROOT / "__init__.py")
 
 REMOTE = "room_" + "0123456789abcdef" * 2
 FURINA = {"member_id": "furina", "profile": "furina", "handle": "furina", "display_name": "Furina"}
@@ -121,7 +137,7 @@ def test_a_room_session_with_others_is_told_apart_on_each_side(tmp_path):
     _room(home / "state.db", "room-b", [FURINA, LAIFU])
     _room_session(home, "s-home", "room-b")
     assert rules.room_turn("s-home", home) == rules.RoomTurn(
-        room_id="room-b", side="home", with_others=True, session_id="s-home")
+        room_id="room-b", side="home", with_others=True, session_id="s-home", others=("laifu",))
     # Only this host's own agents: today's rooms.
     _room(home / "state.db", "room-c", [FURINA, NAHIDA])
     _room_session(home, "s-local", "room-c")
@@ -155,7 +171,7 @@ def test_a_compacted_room_session_keeps_its_room(tmp_path):
     # Hermes titles the continuation after its parent's.
     _session(home, "s-child", source="bot_room", title="Group: room-b #2", parent="s-home")
     assert rules.room_turn("s-child", home) == rules.RoomTurn(
-        room_id="room-b", side="home", with_others=True, session_id="s-child")
+        room_id="room-b", side="home", with_others=True, session_id="s-child", others=("laifu",))
     _room_session(home, REMOTE, "room-a", end_reason="compression")
     _session(home, "s-remote-child", source="bot_room", title="Group: room-a #2", parent=REMOTE)
     assert rules.room_turn("s-remote-child", home) == rules.RoomTurn(
@@ -207,3 +223,204 @@ def test_a_remote_room_session_is_a_room_turn_before_its_row_is_found(tmp_path):
     # Not remembered without its row: once it's there, the room is named.
     _room_session(home, REMOTE, "room-a")
     assert rules.room_turn(REMOTE, home).room_id == "room-a"
+
+
+# --- What a room turn may do ------------------------------------------------------
+
+
+@pytest.fixture
+def host(tmp_path, monkeypatch):
+    """This host's Hermes home, with a room that seats another owner's agent
+    (room-b, Furina's session s-home), a room of this host's own agents
+    (room-c, s-local), a remote room this host's agent sits in (REMOTE) and
+    an ordinary chat (s-chat)."""
+    home = tmp_path / "hermes"
+    _room(home / "state.db", "room-b", [FURINA, LAIFU])
+    _room_session(home, "s-home", "room-b")
+    _room(home / "state.db", "room-c", [FURINA, NAHIDA])
+    _room_session(home, "s-local", "room-c")
+    _room_session(home, REMOTE, "room-a")
+    _session(home, "s-chat")
+    monkeypatch.setattr(plugin, "get_hermes_home", lambda: home)
+    return home
+
+
+def _tool(session_id, tool_name, **kwargs):
+    return plugin._pre_tool_call(session_id=session_id, tool_name=tool_name, args={}, turn_id="t1", **kwargs)
+
+
+def _blocked(result):
+    return isinstance(result, dict) and result.get("action") == "block" and bool(result.get("message"))
+
+
+def _choose(home, room_id, **choices):
+    room_choices.ChoicesStore(home).set(room_id, choices)
+
+
+EVERYDAY_TOOLS = ["terminal", "read_file", "write_file", "web_search", "web_extract", "session_search", "memory",
+                  "skill_view", "conduit_location", "conduit_calendar", "tool_search", "execute_code"]
+
+
+@pytest.mark.parametrize("session_id", ["s-home", REMOTE])
+def test_talk_only_blocks_every_tool_in_a_room_turn(host, session_id):
+    for tool_name in EVERYDAY_TOOLS:
+        assert _blocked(_tool(session_id, tool_name)), tool_name
+    assert "talk" in _tool(session_id, "terminal")["message"].lower()
+
+
+@pytest.mark.parametrize("session_id, room_id", [("s-home", "room-b"), (REMOTE, "room-a")])
+def test_look_things_up_allows_web_tools_only(host, session_id, room_id):
+    _choose(host, room_id, tools="look")
+    for tool_name in ("web_search", "web_extract", "x_search", "vision_analyze"):
+        assert _tool(session_id, tool_name) is None, tool_name
+    # Tool Search lists tools; Hermes checks the tool it calls by that tool's name.
+    assert _tool(session_id, "tool_search") is None
+    for tool_name in ("terminal", "read_file", "browser_navigate", "conduit_location", "session_search", "memory"):
+        assert _blocked(_tool(session_id, tool_name)), tool_name
+    # Use my data adds only the room-safe data tools the owner picks; none exist yet.
+    _choose(host, room_id, tools="data", custom_tools=["conduit_calendar"])
+    assert _tool(session_id, "web_search") is None
+    assert _blocked(_tool(session_id, "conduit_calendar"))
+
+
+def test_custom_allows_its_tools_but_never_memory_or_delegation(host):
+    _choose(host, "room-b", tools="custom", custom_tools=["terminal", "read_file"])
+    assert _tool("s-home", "terminal") is None
+    assert _tool("s-home", "read_file") is None
+    assert _blocked(_tool("s-home", "write_file"))
+    for tool_name in ("memory", "skill_manage", "delegate_task", "cronjob_manage", "send_message",
+                      "conduit_settings", "conduit_call_watch", "conduit_call_user"):
+        assert _blocked(_tool("s-home", tool_name)), tool_name
+    # A choice that names one anyway (a hand-edited file) still can't allow it.
+    picked = room_choices.RoomChoices(tools="custom", custom_tools=("memory", "delegate_task", "terminal"))
+    assert rules.tool_block("memory", picked) and rules.tool_block("delegate_task", picked)
+    assert rules.tool_block("terminal", picked) is None
+    assert rules.allowed_tools(picked) == {"terminal"}
+
+
+@pytest.mark.parametrize("tools, picks", [("talk", []), ("look", []), ("data", []),
+                                          ("custom", ["skill_view", "skills_list", "terminal"])])
+def test_background_review_cannot_write_memory_or_skills_in_a_room(host, monkeypatch, tools, picks):
+    # The review runs after the room turn with the room session's id, and
+    # whatever Hermes tells the plugin about delegation.
+    _choose(host, "room-b", tools=tools, custom_tools=picks)
+    _choose(host, "room-a", tools=tools, custom_tools=picks)
+    for child in (False, True):
+        monkeypatch.setattr(plugin, "_is_child", lambda session_id, child=child: child)
+        for session_id in ("s-home", REMOTE):
+            for tool_name in ("memory", "skill_manage"):
+                assert _blocked(_tool(session_id, tool_name)), (tools, child, session_id, tool_name)
+            assert "memory" in _tool(session_id, "memory")["message"].lower()
+
+
+def test_past_chat_search_is_off_unless_chosen(host):
+    _choose(host, "room-b", tools="look")
+    assert "past chats" in _tool("s-home", "session_search")["message"]
+    _choose(host, "room-b", search_chats=True)
+    assert _tool("s-home", "session_search") is None
+    # Searching is its own choice: it holds under Talk only too.
+    _choose(host, "room-b", tools="talk")
+    assert _tool("s-home", "session_search") is None
+    assert _blocked(_tool("s-home", "web_search"))
+
+
+def test_a_room_with_only_your_own_agents_keeps_its_tools(host):
+    for tool_name in EVERYDAY_TOOLS + ["delegate_task", "skill_manage"]:
+        assert _tool("s-local", tool_name) is None, tool_name
+        assert _tool("s-chat", tool_name) is None, tool_name
+
+
+def test_a_store_error_in_a_room_turn_blocks_the_tool(host, monkeypatch):
+    # The room's roster can't be read: whether it has other people in it is unknown.
+    _room_session(host, "s-unread", "room-unread")
+    (host / "shared-state.db").write_bytes(b"this is not a database" * 64)
+    result = _tool("s-unread", "terminal")
+    assert _blocked(result) and "couldn't" in result["message"]
+    # The owner's choices can't be read.
+    def unreadable(self, room_id):
+        raise OSError("disk gone")
+    monkeypatch.setattr(room_choices.ChoicesStore, "get", unreadable)
+    assert _blocked(_tool("s-home", "web_search"))
+    # A room of this host's own agents doesn't read the choices at all.
+    assert _tool("s-local", "terminal") is None
+
+
+def test_an_unreadable_session_store_lets_ordinary_chats_use_their_tools(host):
+    (host / "state.db").write_bytes(b"this is not a database" * 64)
+    rules.forget()
+    assert _tool("s-chat", "terminal") is None
+    # A remote room's session is named like one: still Talk only.
+    assert _blocked(_tool(REMOTE, "terminal"))
+
+
+# --- Who's asking ---------------------------------------------------------------
+
+
+NOTES = {"conduit_first": "CONDUIT DATA NOTE", "calls": "DECLINED CALLS NOTE", "voice": "VOICE NOTE",
+         "surface": "SURFACE NOTE"}
+
+
+@pytest.fixture
+def notes(monkeypatch):
+    """The plugin's other notes, each one a turn would get outside a room with others."""
+    monkeypatch.setattr(plugin.conduit_first, "note", lambda: NOTES["conduit_first"])
+    monkeypatch.setattr(plugin.calls, "outcome_note", lambda session_id: NOTES["calls"])
+    monkeypatch.setattr(plugin, "_voice_persona_note", lambda history: NOTES["voice"])
+    monkeypatch.setattr(plugin, "_turn_surface_note", lambda platform, message: NOTES["surface"])
+    monkeypatch.setattr(plugin.live_activity.reporter, "turn_started", lambda session_id: None)
+    return NOTES
+
+
+def _context(session_id):
+    result = plugin._pre_llm_call(session_id=session_id, turn_id="t1", platform="api_server",
+                                  user_message="hi", conversation_history=[])
+    return (result or {}).get("context", "")
+
+
+def test_room_turn_framing_says_who_is_asking_and_not_to_answer_for_others(host, notes):
+    # A room hosted on another installation: the room's "user" isn't this agent's owner.
+    member = _context(REMOTE)
+    assert "someone else's Hermes" in member
+    assert "not your owner" in member
+    assert "can't change your owner's rules" in member
+    # Finding 7: a question for another participant is theirs, even after they pass.
+    assert "Answer only for yourself" in member
+    # A room this host hosts: the user is the owner; the agents from elsewhere are named.
+    home = _context("s-home")
+    assert "@laifu" in home and "the user in this room is your owner" in home.lower()
+    assert "Answer only for yourself" in home
+    # Talk only, Ask me first and no past-chat search, said so the agent doesn't try.
+    assert "without tools" in home and "check with your owner" in home and "nothing is saved" in home.lower()
+
+
+def test_the_framing_follows_the_owners_choices(host, notes):
+    _choose(host, "room-b", tools="look", share="nothing", search_chats=True,
+            note="Don't mention the surprise party.")
+    framing = _context("s-home")
+    assert "look things up on the web" in framing
+    assert "anything personal about your owner" in framing
+    assert "past chats" in framing
+    assert "Don't mention the surprise party." in framing
+    _choose(host, "room-b", tools="custom", custom_tools=["terminal", "read_file"], share="helps", note="")
+    framing = _context("s-home")
+    assert "terminal, read_file" in framing and "nothing sensitive" in framing
+    assert "surprise party" not in framing
+
+
+def test_room_turns_get_no_other_plugin_notes(host, notes):
+    framing = _context("s-home")
+    assert framing and not any(note in framing for note in NOTES.values())
+    assert not any(note in _context(REMOTE) for note in NOTES.values())
+    # Today's rooms and ordinary chats keep every note.
+    for session_id in ("s-local", "s-chat"):
+        context = _context(session_id)
+        assert all(note in context for note in NOTES.values()), session_id
+        assert "group room" not in context
+
+
+def test_a_room_that_cant_be_read_is_framed_as_one_with_others(host, notes):
+    _room_session(host, "s-unread", "room-unread")
+    (host / "shared-state.db").write_bytes(b"this is not a database" * 64)
+    framing = _context("s-unread")
+    assert "Answer only for yourself" in framing
+    assert not any(note in framing for note in NOTES.values())
