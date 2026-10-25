@@ -2010,13 +2010,13 @@ Wallet payment, an NFC tag, a sound the phone heard) on this host, for the
 agent to look up later with `conduit_inbox` ("what did the bank send me
 today?"). Logging starts no chat, sends no push and works with Pulse off.
 
-With Pulse on, its report reads what was logged since the last one, and the
-user's watches (things they asked to be told about, which Pulse memory keeps)
-are checked against new events as they arrive: a run starts at most every
-15 minutes, and later arrivals ride the next one. A watch still open after a
-month asks if it's still wanted. A report item or a watch's message may
-quote an event, but Pulse memory never keeps other people's messages or
-facts about who sent them unless the user asks.
+With Pulse on, its report and its morning brief read what was logged since
+the last report, and the user's watches (things they asked to be told about,
+which Pulse memory keeps) are checked against new events as they arrive: a
+run starts at most every 15 minutes, and later arrivals ride the next one. A
+watch still open after a month asks if it's still wanted. A report item, the
+brief or a watch's message may quote an event, but Pulse memory never keeps
+other people's messages or facts about who sent them unless the user asks.
 
 - **Straight to this host, sealed end to end.** The phone posts to
   `POST /api/plugins/conduit_push/inbox/ingest` over your dashboard
