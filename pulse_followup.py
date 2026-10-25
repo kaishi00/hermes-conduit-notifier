@@ -406,13 +406,17 @@ def act_material(home: Path, card: dict, acted_at: float, *, zone: tzinfo,
     """What an act check reads, when the chat last moved, whether Hermes
     has answered since Do it, and whether other chats said something on the
     same subject since (it may have been done there instead). A report item
-    found outside the chats points at the report in Pulse's own chat, which
-    stays out: Do it opened a new chat, read with the other chats."""
+    found outside the chats points at the report's turn in Pulse's own chat
+    (a message there, nothing remembered behind it), which stays out even
+    when that chat can't be named now or has moved on: Do it opened a new
+    chat, found with the other chats by its subject, since the reminder Do it
+    leaves in it shares the card's words."""
     where = home_for(home, card["profile"])
     if where is None:
         raise ChatUnreadable(f"no profile named {card['profile']!r} any more")
     home_chat = report.their_home_chat(where)
-    own = card["chat_id"] if card["chat_id"] != home_chat else ""
+    from_report = card["item_id"] is None and card["message_id"] is not None
+    own = "" if from_report or card["chat_id"] == home_chat else card["chat_id"]
     try:
         # Through the chat's compression chain, like a follow-up check.
         rows = [row for row in hermes.chain_messages(where, chat_id=own, after_id=0,
@@ -433,10 +437,10 @@ def act_material(home: Path, card: dict, acted_at: float, *, zone: tzinfo,
             break
         kept.append(line)
         size += len(line) + 1
+    said = ("\n".join(reversed(kept)) or "Nothing.") if own else \
+        "It came from no chat, so Do it opened a new one: look for it below."
     parts = [f"Now: {_local(now, zone)}", f"Pulse reminded them of: {_clip(card['title'], 300)}",
-             f"What Pulse said: {_clip(card['news'], NEWS_LIMIT)}",
-             "## Said in that chat since Do it\n" + ("\n".join(reversed(kept)) or "Nothing.") if own else
-             "## Said in that chat since Do it\nIt came from no chat, so Do it opened a new one: look for it below."]
+             f"What Pulse said: {_clip(card['news'], NEWS_LIMIT)}", "## Said in that chat since Do it\n" + said]
     try:
         later = evidence.later_section(where, f"{card['title']} {card['news']}", after=acted_at - 60.0,
                                        exclude=(card["chat_id"], home_chat), zone=zone)

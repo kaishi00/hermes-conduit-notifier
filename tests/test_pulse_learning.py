@@ -943,9 +943,11 @@ def test_do_it_done_in_another_chat_marks_the_card_done(live):
 
 def found_card(live, *, chat_id=SID, news="The dentist is Friday at 9 (calendar).", topic="date"):
     """A report item Pulse found on its own, nothing remembered behind it:
-    by default from no chat, so it points at the report in Pulse's chat."""
+    by default from no chat, so it points at the report's turn in Pulse's
+    chat (pulse_learning.add_noticed_cards)."""
     return live.store.add_card({"kind": "noticed", "level": "screen", "topic": topic, "title": news, "news": news,
-                                "chat_id": chat_id, "created_at": time.time()})
+                                "chat_id": chat_id, "message_id": 1 if chat_id == SID else None,
+                                "created_at": time.time()})
 
 
 def test_done_marks_a_report_item_found_on_its_own_and_the_next_report_reads_it(live):
@@ -995,6 +997,18 @@ def test_do_it_on_a_report_item_from_no_chat_reads_the_new_chat_not_pulses_own(l
     assert "Set a reminder for the dentist" in text and "came from no chat" in text
     assert "Your Pulse report" not in text
     assert live.store.done_marks([card_id])[card_id]["done_by"] == "pulse"
+
+
+def test_do_it_on_a_report_item_from_no_chat_leaves_pulses_chat_out_after_pulse_moves(live):
+    card_id = found_card(live)
+    live.store.set("home_session_key", "another")  # Pulse reports in another chat now
+    acted_at = time.time()
+    assert control.acted(live.store, card_id, now=acted_at) is True
+    live.db.message("assistant", "Your Pulse report: the dentist is Friday at 9.", sid=SID, at=acted_at + 10)
+    said = llm_saying(done=True, why="the reminder is set")
+    run_acts(live, said, acted_at + followup.ACT_FIRST_S)
+    # The chat the card points at was Pulse's, not one Do it opened.
+    assert said.calls == [] and live.store.act(card_id)["outcome"] == ""
 
 
 def run_held(live, llm, now):
