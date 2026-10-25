@@ -1921,3 +1921,52 @@ def test_the_transport_closes_when_the_call_ends_while_a_request_waits():
     wait_for(lambda: grant.jobs.transport._closed)
     assert server.methods("session.close") == [{"session_id": "rt-1"}]
     assert len(server.methods("prompt.submit")) == 1
+
+
+def test_joins_call_survives_the_sealed_watch_route():
+    grant = make_jobs()
+    server = grant.jobs.server
+    relay = FakeRelay()
+    for n, instructions in ((1, "plan the trip"), (2, "and book the hotel")):
+        rid, call = sealed(grant, "start_job", {"instructions": instructions, "joins_call": True}, n)
+        assert api.answer_watch_call(grant, call, relay=relay) == "answered"
+        if n == 1:
+            server.emit("rt-1", "message.complete", {"text": "Plan", "status": "complete"})
+    assert len(server.methods("session.create")) == 1, "the second request went to the call's chat"
+    assert [p["session_id"] for p in server.methods("prompt.submit")] == ["rt-1", "rt-1"]
+
+
+def test_two_requests_waiting_on_a_chat_never_made_share_the_one_made_next():
+    grant = make_jobs()
+    server = grant.jobs.server
+    answers = []
+    workers = [threading.Thread(target=lambda text=text: answers.append(start_joining(grant, text)))
+               for text in ("and book the hotel", "and the car")]
+    started = []
+
+    def created():
+        if started:
+            return
+        started.append(True)
+        # The first request is cancelled while its chat is made, with two
+        # more waiting for that chat.
+        for worker in workers:
+            worker.start()
+        wait_for(lambda: len(grant.jobs.jobs) == 3)
+        grant.jobs.jobs["watch-1"].status = "cancelled"
+
+    server.on_create = created
+    original = api.WATCH_JOB_START_ANSWER_S
+    api.WATCH_JOB_START_ANSWER_S = 0.3
+    try:
+        assert start_joining(grant, "plan the trip")["status"] == "not_started"
+        for worker in workers:
+            worker.join(2)
+    finally:
+        api.WATCH_JOB_START_ANSWER_S = original
+    assert len(server.methods("session.create")) == 2, "one chat for the two waiting requests"
+    made = grant.jobs.call_chat
+    assert made is not None and made.session_id == "rt-2"
+    server.emit("rt-2", "message.complete", {"text": "Booked", "status": "complete"})
+    wait_for(lambda: len(server.methods("prompt.submit")) == 2)
+    assert [p["session_id"] for p in server.methods("prompt.submit")] == ["rt-2", "rt-2"]

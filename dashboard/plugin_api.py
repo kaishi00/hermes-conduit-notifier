@@ -9198,11 +9198,16 @@ def answer_watch_hermes_call(grant: _WatchGrant, args: Dict[str, Any]) -> Dict[s
     return result
 
 
+# The only flag a Watch call sends: start_job's (#1250).
+WATCH_ARG_FLAGS = frozenset({"joins_call"})
+
+
 def _clean_watch_args(value: Any) -> Dict[str, Any]:
     if not isinstance(value, dict):
         return {}
     return {k: v for k, v in value.items()
-            if isinstance(k, str) and (isinstance(v, str) or (isinstance(v, int) and not isinstance(v, bool)))}
+            if isinstance(k, str) and (isinstance(v, str) or (isinstance(v, int) and not isinstance(v, bool))
+                                       or (k in WATCH_ARG_FLAGS and isinstance(v, bool)))}
 
 
 def run_watch_tool(grant: _WatchGrant, request: Dict[str, Any]) -> Dict[str, Any]:
@@ -10957,6 +10962,9 @@ class _WatchJobs:
                         job.status, job.error = "failed", type(exc).__name__
             with self.changed:
                 job.answer_pending = False
+                if self.call_chat_claim is job:
+                    # Made the call's chat, or never will.
+                    self.call_chat_claim = None
                 if answer.get("status") == "not_started":
                     # Nothing ran: it doesn't spend one of the call's jobs.
                     self.started -= 1
@@ -11093,12 +11101,21 @@ class _WatchJobs:
         nothing else runs there, as the phone sends a call's requests to its
         chat; the start's answer."""
         with self.changed:
-            while not self.ended and job.status == "starting" and self._chat_waits(chat, job):
-                self.changed.wait(WATCH_JOB_CHAT_WAIT_S)
-            ended, cancelled = self.ended, job.status == "cancelled"
-            # The first request's chat never got made: this one makes the
-            # call's chat instead.
-            own = not ended and not cancelled and self.call_chat is not chat
+            own = False
+            while True:
+                while not self.ended and job.status == "starting" and self._chat_waits(chat, job):
+                    self.changed.wait(WATCH_JOB_CHAT_WAIT_S)
+                ended, cancelled = self.ended, job.status == "cancelled"
+                if ended or cancelled or self.call_chat is chat:
+                    break
+                # The chat waited for never got made: wait for the one made
+                # since, or for another request making one, or make it.
+                claim = self.call_chat_claim if self.call_chat_claim is not None and self.call_chat_claim.active else None
+                if self.call_chat is not None or (claim is not None and claim is not job):
+                    chat = self.call_chat or claim
+                    continue
+                self.call_chat_claim, own = job, True
+                break
             if not ended and not cancelled and not own:
                 job.session_id, job.stored_session_id = chat.session_id, chat.stored_session_id
         if own:

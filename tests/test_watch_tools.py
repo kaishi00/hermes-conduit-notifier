@@ -430,9 +430,11 @@ def test_memory_recall_runs_the_same_code_as_the_dashboard_route(monkeypatch):
     assert queries == ["drinks"]
 
 
-def test_watch_args_keep_text_and_whole_numbers_only():
+def test_watch_args_keep_text_whole_numbers_and_known_flags_only():
     assert api._clean_watch_args({"query": "q", "limit": 3, "flag": True, "ratio": 0.5, 4: "x"}) == {
         "query": "q", "limit": 3}
+    assert api._clean_watch_args({"instructions": "go", "joins_call": True}) == {"instructions": "go", "joins_call": True}
+    assert api._clean_watch_args({"joins_call": "yes"}) == {"joins_call": "yes"}, "text stays text"
     assert api._clean_watch_args(["query"]) == {}
 
 
