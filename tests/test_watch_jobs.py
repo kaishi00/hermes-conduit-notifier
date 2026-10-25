@@ -2058,3 +2058,49 @@ def test_the_next_request_settles_when_a_cancelled_turns_end_never_comes(monkeyp
     server.emit("rt-1", "message.complete", {"text": "Booked", "status": "complete"})
     assert grant.jobs.jobs["watch-2"].status == "finished"
     assert grant.jobs.jobs["watch-2"].result == "Booked"
+
+
+@pytest.mark.parametrize("kind,payload,status", [
+    ("message.complete", {"text": "Booked", "status": "complete"}, "finished"),
+    ("error", {"message": "Provider down"}, "failed"),
+])
+def test_the_next_requests_own_end_settles_it_once_a_cancelled_turns_end_is_overdue(monkeypatch, kind, payload, status):
+    monkeypatch.setattr(api, "WATCH_JOB_INTERRUPT_END_S", 0.0)
+    monkeypatch.setattr(api, "WATCH_JOB_LATE_END_S", 0.0)
+    monkeypatch.setattr(api, "WATCH_JOB_CHAT_WAIT_S", 0.05)
+    grant = make_jobs()
+    server = grant.jobs.server
+    start_joining(grant, "plan the trip")
+    original = api.WATCH_JOB_START_ANSWER_S
+    api.WATCH_JOB_START_ANSWER_S = 0.1
+    try:
+        start_joining(grant, "and book the hotel")
+    finally:
+        api.WATCH_JOB_START_ANSWER_S = original
+    api.run_watch_job_call(grant, "cancel_job", {"job_id": "watch-1"})
+    wait_for(lambda: len(server.methods("prompt.submit")) == 2)
+
+    # The interrupted turn never ends, and the next one's end is its only frame.
+    server.emit("rt-1", kind, payload)
+    assert grant.jobs.jobs["watch-2"].status == status
+
+
+def test_an_approval_from_a_cancelled_turn_isnt_the_next_requests(monkeypatch):
+    monkeypatch.setattr(api, "WATCH_JOB_INTERRUPT_END_S", 0.0)
+    monkeypatch.setattr(api, "WATCH_JOB_CHAT_WAIT_S", 0.05)
+    grant = make_jobs()
+    server = grant.jobs.server
+    start_joining(grant, "clean the logs")
+    original = api.WATCH_JOB_START_ANSWER_S
+    api.WATCH_JOB_START_ANSWER_S = 0.1
+    try:
+        start_joining(grant, "and the caches")
+    finally:
+        api.WATCH_JOB_START_ANSWER_S = original
+    api.run_watch_job_call(grant, "cancel_job", {"job_id": "watch-1"})
+    wait_for(lambda: len(server.methods("prompt.submit")) == 2)
+
+    server.emit("rt-1", "approval.request", {"request_id": "appr-late", "command": "rm -rf /var/log/old",
+                                              "description": "Delete old logs"})
+    assert grant.jobs.jobs["watch-2"].status == "running"
+    assert grant.jobs.jobs["watch-2"].approval is None

@@ -10340,6 +10340,9 @@ WATCH_JOB_CHAT_WAIT_S = 2.0
 # How long the call's chat waits for a cancelled request's turn to end
 # before the next request goes in.
 WATCH_JOB_INTERRUPT_END_S = 5.0
+# How long after that a cancelled request's end may still come, and is
+# told apart from the next request's own. Past it, an end is the next one's.
+WATCH_JOB_LATE_END_S = 10.0
 # Job ids are unique in this process, not per grant: a renewed grant's jobs
 # never share an id with the last grant's, so a cancel can't hit the wrong
 # job.
@@ -10780,15 +10783,29 @@ class _WatchJobs:
         return next((job for job in owners if job.active or job.cancelling),
                     next((job for job in owners if job.turn_open), owners[0] if owners else None))
 
+    def _superseded_turn(self, job: _WatchJob, sid: str) -> Optional[_WatchJob]:
+        """The call's chat (#1250): a cancelled turn on the running job's
+        session whose end may still come. Once that end is overdue, the
+        turn is taken as over and the frames are the running job's."""
+        if not job.active:
+            return None
+        now = time.monotonic()
+        for other in self.jobs.values():
+            if (other is job or not other.turn_open or other.status != "cancelled"
+                    or sid not in (other.session_id, other.stored_session_id)):
+                continue
+            if now < other.quiet_by + WATCH_JOB_LATE_END_S:
+                return other
+            other.turn_open = False
+        return None
+
     def _event(self, kind: str, sid: str, payload: Dict[str, Any]) -> None:
         settled = False
         with self.changed:
             job = self._job_for(sid)
             if job is None:
                 return
-            superseded = next((other for other in self.jobs.values()
-                               if other is not job and other.turn_open and other.status == "cancelled"
-                               and sid in (other.session_id, other.stored_session_id)), None) if job.active else None
+            superseded = self._superseded_turn(job, sid)
             if superseded is not None:
                 # The call's chat (#1250): a session's turns run in order. An
                 # end before the next request's turn shows any sign of life is
@@ -10900,6 +10917,11 @@ class _WatchJobs:
         with self.changed:
             job = self._job_for(sid)
             if job is None or not job.active:
+                return
+            if self._superseded_turn(job, sid) is not None:
+                # The call's chat (#1250): the cancelled turn is still going
+                # and the next request's hasn't begun, so the ask is the
+                # cancelled one's, which its interrupt ends.
                 return
             if job.held_completion is not None:
                 # Still at work, as any frame for the session says.
