@@ -50,10 +50,10 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
              "next connects to this dashboard; `hermes conduit-push unpair` cuts it off now",
     )
     pulse = commands.add_parser("pulse", help="Pulse, the proactivity experiment: on, off, status, probe, report, home, outcomes, memory, followups, "
-                                                 "cards, rate, done, learned, nudge, budget, candidates")
+                                                 "cards, rate, done, learned, nudge, budget, candidates, note")
     pulse.add_argument("pulse_action", choices=["on", "off", "status", "probe", "report", "home", "outcomes", "memory",
                                                 "followups", "cards", "rate", "done", "learned", "nudge", "budget",
-                                                "candidates"])
+                                                "candidates", "note"])
     pulse.add_argument("value", nargs="?", default="",
                        help="for home: the id of the chat to use, or 'auto' to find it by title; "
                             "for outcomes: how many to show, or a chat id; "
@@ -66,7 +66,8 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
                             "for learned: 'undo' and a lesson number, or a kind and a loudness to set; "
                             "for nudge: gentle, balanced or eager; "
                             "for budget: memory or followups; "
-                            "for candidates: how many reports to show")
+                            "for candidates: how many reports to show; "
+                            "for note: what you want from Pulse, in your own words, or 'clear'")
     pulse.add_argument("extra", nargs="?", default="",
                        help="for memory forget: the item number; for memory backfill: how many days back "
                             "(it shows what that costs), 'start', 'stop' or 'cancel'; "
@@ -292,6 +293,7 @@ def _pulse(args: argparse.Namespace) -> int:
     listing = action in ("followups", "cards", "rate", "done", "learned", "candidates") \
         or (action == "memory" and (args.value or "").strip() not in ("on", "off")) \
         or (action == "nudge" and not (args.value or "").strip()) \
+        or (action == "note" and not (args.value or "").strip()) \
         or (action == "budget" and not str(getattr(args, "extra", "") or "").strip())
     if (action in ("status", "probe", "off", "outcomes") or listing) and not (Path(home) / pulse_delivery.store.DB_NAME).exists():
         # Never turned on: say so without leaving a file behind.
@@ -336,6 +338,8 @@ def _pulse(args: argparse.Namespace) -> int:
     if action in ("cards", "rate", "done", "learned"):
         return _pulse_learning(pulse_store, action, (args.value or "").strip(),
                                str(getattr(args, "extra", "") or "").strip())
+    if action == "note":
+        return _pulse_note(pulse_store, (args.value or "").strip())
     if action == "nudge":
         return _pulse_nudge(pulse_store, (args.value or "").strip())
     if action == "candidates":
@@ -436,6 +440,9 @@ def _pulse(args: argparse.Namespace) -> int:
     else:
         print("Follow-ups: off")
     print(f"Nudging: {pulse_learning.nudge(pulse_store)} (`hermes conduit-push pulse nudge gentle|balanced|eager`)")
+    note = " ".join(pulse.report.note(pulse_store).split())
+    print(f"Note to Pulse: {_printable(note)}" if note
+          else "No note to Pulse (`hermes conduit-push pulse note \"what you want from it\"`)")
     learning_lines = _learning_status(pulse_store)
     if learning_lines:
         print(learning_lines)
@@ -555,6 +562,26 @@ def _pulse_nudge(pulse_store: Any, value: str) -> int:
     print(f"Pulse nudges: {level} ({NUDGE_TEXT[level]}).")
     if value:
         print("Checks already booked keep their time and take the new pace from their next check.")
+    return 0
+
+
+def _pulse_note(pulse_store: Any, value: str) -> int:
+    """Shows, sets or clears the user's note to Pulse, which every report,
+    brief and check reads (pulse_report.note)."""
+    from . import pulse_control, pulse_report
+    if value:
+        try:
+            pulse_control.update(pulse_store, {"note": "" if value == "clear" else value})
+        except pulse_control.Refused:
+            print(f"The note can be at most {pulse_control.NOTE_LIMIT} characters.")
+            return 2
+    note = " ".join(pulse_report.note(pulse_store).split())
+    if note:
+        print(f"Note to Pulse: {_printable(note)}")
+        print("Its reports, morning brief and reminders read it before they pick what to say.")
+    else:
+        print("No note to Pulse. `hermes conduit-push pulse note \"what you want from it\"` sets one, in your own "
+              "words: what to always bring up, what to leave out.")
     return 0
 
 

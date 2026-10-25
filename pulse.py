@@ -664,7 +664,7 @@ def _report_run(home: Path, chat_id: str, run: dict) -> None:
         route = lent_route(home, chat_id)
         rows, tokens = candidates.ask(lambda instructions, text: _memory_llm(
             instructions, text, purpose="pulse report", max_tokens=candidates.REPLY_TOKENS, route=route), gathered,
-            nudge=learning.nudge(pulse_store))
+            nudge=learning.nudge(pulse_store), note=report.note(pulse_store))
         candidates.decide(pulse_store, rows, now=now)
         ready = {**run, "state": RUN_READY, "since": gathered.since, "tokens": tokens}
         if not pulse_store.finish_run(REPORT_RUN, run, rows, ready, now=now):
@@ -724,7 +724,8 @@ def _send_turn_report(pulse_store: store.PulseStore, home: Path, chat_id: str, n
     recent = candidates.recent_section(pulse_store, report_zone(pulse_store, home, now), now)
     context, since = report.build(home, pulse_store, home_chat_id=chat_id, now=now, extra=recent)
     return _send(pulse_store, kind=REPORT, chat_id=chat_id, text=lambda tag: report.report_text(tag, context, since,
-                                                                                    learning.nudge(pulse_store)))
+                                                                                    learning.nudge(pulse_store),
+                                                                                    report.note(pulse_store)))
 
 
 def _maybe_followup(pulse_store: store.PulseStore, home: Path, now: float) -> bool:
@@ -762,7 +763,8 @@ def _maybe_brief(pulse_store: store.PulseStore, home: Path, now: float) -> bool:
     context = brief.context(home, pulse_store, cards, home_chat_id=chat.chat_id, now=now, zone=zone)
     pulse_store.set(brief.PENDING, {"item_id": item_id, "ids": [card["id"] for card in cards]})
     delivery.submit(pulse_store, _sender(pulse_store), kind=BRIEF,
-                    chat_id=chat.chat_id, text=brief.text_for(context), item_id=item_id, attempt=attempt)
+                    chat_id=chat.chat_id, text=brief.text_for(context, report.note(pulse_store)), item_id=item_id,
+                    attempt=attempt)
     return True
 
 

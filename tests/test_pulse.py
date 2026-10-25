@@ -2490,17 +2490,31 @@ def test_pulse_state_and_settings_as_data(remembering, db):
     state = control.state(store_, home, now=DAY)
     assert state["enabled"] and state["report_times"] == ["09:00", "17:30"] and state["report_profiles"] == "this"
     assert state["time_zone"] == "Europe/Paris" and state["next_report_at"] > DAY
+    assert state["note"] == ""
+    control.update(store_, {"note": "  Never bring up the gym.\nAlways tell me when a build finishes.  "})
+    assert control.state(store_, home, now=DAY)["note"] == "Never bring up the gym.\nAlways tell me when a build finishes."
     for bad in ({"enabled": "yes"}, {"report_times": ["25:00"]}, {"report_times": []}, {"report_profiles": "some"},
-                {"time_zone": "Mars/Base"}, {"memory": 1, "enabled": False}, {"report_time": "08:00"}, []):
+                {"time_zone": "Mars/Base"}, {"memory": 1, "enabled": False}, {"report_time": "08:00"}, [],
+                {"note": 5}, {"note": "x" * (control.NOTE_LIMIT + 1)}):
         with pytest.raises(control.Refused) as refused:
             control.update(store_, bad)
         assert refused.value.code == "invalid"
     assert store_.get("enabled") is True  # a refused change changes nothing
+    assert store_.get("note").startswith("Never bring up the gym.")
+    control.update(store_, {"note": ""})
+    assert control.state(store_, home, now=DAY)["note"] == ""
     control.request_report(store_)
     assert store_.get("report_requested") is True
     store_.set("enabled", False)
     with pytest.raises(control.Refused, match="pulse_off"):
         control.request_report(store_)
+
+
+def test_the_report_turn_carries_the_users_note():
+    text = report.report_text("pabc-1", "ctx", "Mon 20 Oct 08:00", note=" Never bring up the gym. ")
+    assert f"and stop.\n\n{report.NOTE_TITLE}\nNever bring up the gym.\n\nEverything between the context markers" in text
+    assert report.NOTE_TITLE not in report.report_text("pabc-1", "ctx", "Mon 20 Oct 08:00")
+    assert report.note_block("") == "" and report.note_block(None) == ""
 
 
 def test_pulse_backfill_steps_as_data(remembering, db):

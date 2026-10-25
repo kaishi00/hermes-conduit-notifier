@@ -578,6 +578,7 @@ def test_a_commitment_is_checked_on_its_day_or_a_day_after_it_was_said(live):
 
 def test_a_commitment_check_reads_as_the_users_and_reminds_them(live):
     item_id = commitment(live, said_at=time.time() - 2 * 86400)
+    live.store.set("note", "Never bring up the gym.")
     seen = []
 
     def llm(instructions, text):
@@ -587,6 +588,8 @@ def test_a_commitment_check_reads_as_the_users_and_reminds_them(live):
     check_now(live, llm, now=time.time() + followup.FIRST_CHECK_S + 1)
     [(instructions, text)] = seen
     assert instructions.startswith(followup.COMMITMENT_INSTRUCTIONS)
+    # The user's note to Pulse closes every check's instructions.
+    assert instructions.endswith(f"\n\n{followup.report.NOTE_TITLE}\nNever bring up the gym.")
     assert "What the user said they'd do: The user will renew their passport." in text
     assert "The user's words: \"I need to renew my passport\"" in text
     pulse.tick()

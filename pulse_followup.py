@@ -379,7 +379,8 @@ def material(pulse_store: store.PulseStore, home: Path, item: dict, *, zone: tzi
     return "\n\n".join(parts)
 
 
-def check(llm: Llm, text: str, *, skip_seen: bool = False, kind: str = PROMISE) -> tuple[dict[str, Any], int]:
+def check(llm: Llm, text: str, *, skip_seen: bool = False, kind: str = PROMISE,
+          note: str = "") -> tuple[dict[str, Any], int]:
     """One check: the decision, news, why and wait hint, or a ``wait`` with
     the reason when the reply is unusable."""
     mark = secrets.token_hex(4)
@@ -387,8 +388,8 @@ def check(llm: Llm, text: str, *, skip_seen: bool = False, kind: str = PROMISE) 
         mark = secrets.token_hex(4)
     instructions = {COMMITMENT: COMMITMENT_INSTRUCTIONS, WATCH: WATCH_INSTRUCTIONS}.get(kind, INSTRUCTIONS)
     # "Already knew" is about news: a reminder is meant to repeat.
-    parsed, tokens = llm(instructions + (SEEN_INSTRUCTION if skip_seen and kind != COMMITMENT else ""),
-                         f"<<<check {mark}\n{text}\ncheck {mark}>>>")
+    parsed, tokens = llm(instructions + (SEEN_INSTRUCTION if skip_seen and kind != COMMITMENT else "")
+                         + report.note_block(note), f"<<<check {mark}\n{text}\ncheck {mark}>>>")
     if not isinstance(parsed, dict) or parsed.get("decision") not in DECISIONS:
         return {"decision": "wait", "news": "", "why": "the check's reply was unusable", "hint": None}, tokens
     news = _clip(parsed.get("news"), NEWS_LIMIT)
@@ -607,7 +608,8 @@ def check_held(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzi
             mark = secrets.token_hex(4)
             while mark in text:
                 mark = secrets.token_hex(4)
-            parsed, tokens = llm(HELD_INSTRUCTIONS, f"<<<held {mark}\n{text}\nheld {mark}>>>")
+            parsed, tokens = llm(HELD_INSTRUCTIONS + report.note_block(report.note(pulse_store)),
+                                 f"<<<held {mark}\n{text}\nheld {mark}>>>")
         except Exception:  # noqa: BLE001 — the brief tells it as it was
             logger.warning("conduit_push: Pulse held card check failed", exc_info=True)
             checked[str(card["id"])] = now - HELD_EVERY_S + HELD_RETRY_S  # a failed check tries again soon
@@ -661,7 +663,7 @@ def run(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzinfo, no
         text = ""
         try:
             text = material(pulse_store, home, item, zone=zone, now=now)
-            outcome, tokens = check(llm, text, skip_seen=skip_seen, kind=item["kind"])
+            outcome, tokens = check(llm, text, skip_seen=skip_seen, kind=item["kind"], note=report.note(pulse_store))
         except Exception as error:  # noqa: BLE001 — a failed check waits for the next
             logger.warning("conduit_push: Pulse follow-up check failed", exc_info=True)
             # A call that failed may still have been billed: count its input

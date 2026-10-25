@@ -96,6 +96,10 @@ def test_the_list_call_fences_its_context_and_names_the_bar():
     assert seen["text"].startswith(f"Pulse report list. It covers {SINCE} onward.")
     assert report.BARS["gentle"] in seen["instructions"] and "At most 5 in all." in seen["instructions"]
     assert ", ".join(report.KINDS) in seen["instructions"]
+    # The user's note to Pulse closes the instructions, when there is one.
+    assert report.NOTE_TITLE not in seen["instructions"]
+    candidates.ask(llm, context, nudge="gentle", note=" Never bring up the gym. ")
+    assert seen["instructions"].endswith(f"\n\n{report.NOTE_TITLE}\nNever bring up the gym.")
 
 
 @pytest.mark.parametrize("reply", [None, [], {"items": []}, "text", {"remembered": "all of them"}])

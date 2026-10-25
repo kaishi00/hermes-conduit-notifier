@@ -144,7 +144,7 @@ def recent_section(pulse_store: store.PulseStore, zone: tzinfo, now: float) -> s
     return RECENT_TITLE + "\n" + "\n".join(lines) if lines else ""
 
 
-def ask(llm: Llm, gathered: report.Gathered, *, nudge: str) -> tuple[list[dict], int]:
+def ask(llm: Llm, gathered: report.Gathered, *, nudge: str, note: str = "") -> tuple[list[dict], int]:
     """A report's candidates (``parse``), from one model call on what
     ``gathered`` holds; and the tokens it used. BadReply when the answer
     isn't a list."""
@@ -154,7 +154,8 @@ def ask(llm: Llm, gathered: report.Gathered, *, nudge: str) -> tuple[list[dict],
         fence = secrets.token_hex(6)
     instructions = INSTRUCTIONS.format(bar=report.BARS.get(nudge, report.BARS["balanced"]), limit=MAX_ITEMS,
                                        found=MAX_FOUND, kinds=", ".join(report.KINDS), areas=", ".join(AREAS))
-    reply, tokens = llm(instructions, TEXT.format(since=gathered.since, fence=fence, context=gathered.text))
+    reply, tokens = llm(instructions + report.note_block(note),
+                        TEXT.format(since=gathered.since, fence=fence, context=gathered.text))
     if not isinstance(reply, dict) or not any(isinstance(reply.get(key), list) for key in ("remembered", "found")):
         raise BadReply(f"no candidate list in the reply ({type(reply).__name__})")
     return parse(reply, gathered), tokens

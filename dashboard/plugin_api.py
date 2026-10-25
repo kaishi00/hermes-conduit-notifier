@@ -15993,6 +15993,9 @@ ROUTE_CAPABILITIES = (
     # /pulse/done and /acted take every report item, one Pulse found on its
     # own included, and one it found in a chat points at that chat.
     "pulse_found_actions",
+    # PUT /pulse takes "note", the user's note to Pulse, which its reports,
+    # brief and checks read.
+    "pulse_note",
     "present-v1",
     "health-sync",
     "voice-tools",

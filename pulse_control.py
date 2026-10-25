@@ -172,10 +172,13 @@ def backfill_start(pulse_store: Any, home: Path, days: Optional[int] = None,
 
 
 SETTINGS = ("enabled", "memory", "followups", "daily_report", "report_profiles", "report_times", "time_zone",
-            "brief_time", "model", "nudge", "memory_daily_tokens", "followup_daily_tokens")
+            "brief_time", "model", "nudge", "memory_daily_tokens", "followup_daily_tokens", "note")
 # What a daily token budget may be set to.
 MIN_DAILY_TOKENS = 10_000
 MAX_DAILY_TOKENS = 5_000_000
+# How long the user's note to Pulse may be: a few paragraphs, and a bounded
+# share of every prompt it goes into.
+NOTE_LIMIT = 1_500
 
 
 def update(pulse_store: Any, body: Any) -> None:
@@ -187,7 +190,9 @@ def update(pulse_store: Any, body: Any) -> None:
     "model" (the model Pulse's turns run on), or null for the chat's own;
     "gentle", "balanced" or "eager" for "nudge"; a whole number of tokens,
     MIN_DAILY_TOKENS to MAX_DAILY_TOKENS, for "memory_daily_tokens" and
-    "followup_daily_tokens" (null for follow-ups: the nudge level's)."""
+    "followup_daily_tokens" (null for follow-ups: the nudge level's); a
+    string of at most NOTE_LIMIT characters for "note", what the user asked
+    of Pulse in their own words ("" clears it)."""
     if not isinstance(body, dict):
         raise Refused("invalid", field="")
     for field in body:
@@ -237,6 +242,11 @@ def update(pulse_store: Any, body: Any) -> None:
                 changes[field] = value
             else:
                 raise Refused("invalid", field=field)
+    if "note" in body:
+        value = body["note"]
+        if not isinstance(value, str) or len(value) > NOTE_LIMIT:
+            raise Refused("invalid", field="note")
+        changes["note"] = value.strip()
     for key, value in changes.items():
         pulse_store.set(key, value)
 
@@ -415,6 +425,7 @@ def state(pulse_store: Any, home: Path, now: Optional[float] = None) -> dict[str
         # Whether the budget was set, or comes with the nudge level.
         "followup_daily_tokens_set": _number(pulse_store.get("followup_daily_tokens")),
         "nudge": pulse_learning.nudge(pulse_store),
+        "note": pulse.report.note(pulse_store),
         "levels": pulse_learning.levels(pulse_store),
         "unseen_cards": pulse_store.unseen_cards(),
         "brief_time": pulse.report.clock_text(pulse_store.get("brief_time") or pulse.brief.DEFAULT_TIME),

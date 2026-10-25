@@ -222,13 +222,30 @@ def test_cli_rates_and_lists_what_was_learned(live, monkeypatch, capsys):
     assert run("learned", "followup") == 2
 
 
+def test_cli_sets_shows_and_clears_the_note_to_pulse(live, monkeypatch, capsys):
+    import sys
+    import types
+    monkeypatch.setitem(sys.modules, "hermes_constants", types.SimpleNamespace(get_hermes_home=lambda: live.home))
+    run = lambda *argv: cli._pulse(types.SimpleNamespace(pulse_action=argv[0], value=argv[1] if len(argv) > 1 else "",
+                                                        extra=argv[2] if len(argv) > 2 else ""))
+    assert run("note") == 0 and "No note to Pulse" in capsys.readouterr().out
+    assert run("note", " Never bring up the gym.\nAlways tell me when a build finishes. ") == 0
+    assert "Note to Pulse: Never bring up the gym. Always tell me when a build finishes." in capsys.readouterr().out
+    assert live.store.get("note") == "Never bring up the gym.\nAlways tell me when a build finishes."
+    assert run("status") == 0 and "Note to Pulse: Never bring up the gym." in capsys.readouterr().out
+    assert run("note", "x" * (control.NOTE_LIMIT + 1)) == 2 and "at most" in capsys.readouterr().out
+    assert live.store.get("note").startswith("Never bring up the gym.")
+    assert run("note", "clear") == 0 and "No note to Pulse" in capsys.readouterr().out
+    assert live.store.get("note") == ""
+
+
 def test_cli_on_a_host_that_never_turned_pulse_on_leaves_no_file(tmp_path, monkeypatch, capsys):
     import sys
     import types
     monkeypatch.setitem(sys.modules, "hermes_constants", types.SimpleNamespace(get_hermes_home=lambda: tmp_path))
     run = lambda *argv: cli._pulse(types.SimpleNamespace(pulse_action=argv[0], value=argv[1] if len(argv) > 1 else "",
                                                         extra=argv[2] if len(argv) > 2 else ""))
-    assert run("cards") == 0 and run("learned") == 0 and run("rate", "1", "up") == 1
+    assert run("cards") == 0 and run("learned") == 0 and run("rate", "1", "up") == 1 and run("note") == 0
     assert not (tmp_path / store.DB_NAME).exists()
 
 
@@ -313,11 +330,14 @@ def test_the_brief_sums_up_what_is_open_and_what_happened_since(live):
     promise(live, "Hermes will send the release notes once the deploy is out.")
     live.db.session(sid="other", title="Release", pinned=0)
     live.db.message("assistant", "Sent the release notes for the deploy.", sid="other", at=time.time() - 60)
+    live.store.set("note", "Never bring up the gym.")
     brief_due_now(live)
     pulse.tick()
     [text] = live.sent()
     assert "send the release notes" in text and "## Later on the same subject" in text
     assert "Sent the release notes" in text and pulse.brief.HELD_TITLE not in text
+    # The user's note to Pulse goes with the brief, before its context.
+    assert text.index(f"{pulse.report.NOTE_TITLE}\nNever bring up the gym.") < text.index("<<<context ")
 
 
 def test_the_brief_reads_what_the_phone_logged_since_the_last_report_fenced(live):
