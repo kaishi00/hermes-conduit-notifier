@@ -12,7 +12,8 @@ from datetime import datetime
 
 import pytest
 
-from test_pulse import FIXTURE_SCHEMA, ROOT, SID, StateDB, _load, cli, host, pulse, pulse_store, report, store  # noqa: F401
+from test_pulse import (FIXTURE_SCHEMA, ROOT, SID, VOLCENGINE, VOLCENGINE_CONFIG, Routes, StateDB, _load, cli,  # noqa: F401
+                        host, pulse, pulse_store, report, store)
 from test_pulse_followup import CHAT, commitment, fake_redactor, live  # noqa: F401
 
 candidates = _load("conduit_push.pulse_candidates", ROOT / "pulse_candidates.py")
@@ -366,6 +367,23 @@ def deliver(live, text, reply):
 
 FOUND = {"kind": "follow-up", "bring_up": True, "value": 4, "skip": "", "actionable": True,
          "line": "Look at the flaky deploy (you asked in Deploy)", "source": "chat", "chat": "c1", "area": "work"}
+
+
+@pytest.mark.parametrize("slot", [None, {"provider": "openrouter", "model": "google/gemini-flash"}])
+def test_the_list_runs_on_the_pulse_chats_model(reporting, monkeypatch, slot):
+    # With Settings > Pulse on "Same as the Pulse chat" (Eric, 2026-10-25: lists failed on Hermes's main
+    # model, out of capacity, while the Pulse chat ran on Volcengine). A model the user gave Hermes's
+    # "Pulse memory" slot runs it instead, with nothing lent.
+    live = reporting
+    routes = Routes(monkeypatch)
+    monkeypatch.setattr(pulse, "memory_slot", lambda: slot)
+    live.db.model(model=VOLCENGINE["model"], config=VOLCENGINE_CONFIG)
+    seen = []
+    call = live.llm.complete_structured
+    monkeypatch.setattr(live.llm, "complete_structured",
+                        lambda **kwargs: (seen.append(list(routes.bound)), call(**kwargs))[1])
+    assert listed(live)["state"] == pulse.RUN_READY
+    assert seen == [[] if slot else [VOLCENGINE]] and routes.bound == []
 
 
 def test_a_report_lists_its_candidates_then_says_what_code_picked(reporting):

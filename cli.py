@@ -260,6 +260,28 @@ def dispatch(args: argparse.Namespace) -> int:
     return 2
 
 
+def _pulse_model_line(pulse: Any, pulse_store: Any, home: Path, chat_id: str) -> str:
+    """The model Pulse's turns run on, and whether its memory, report lists and
+    follow-up checks run on it too or on a model Hermes's "Pulse memory" slot
+    names."""
+    def named(model: dict) -> str:
+        return model["model"] + (f" on {model['provider']}" if model["provider"] else "") if model["model"] \
+            else f"{model['provider']}'s default model"
+
+    picked = pulse.turn_model(pulse_store)
+    own = None if picked else pulse.chat_model(home, chat_id)
+    turns = (f"{named(picked)}, from Settings > Pulse" if picked else f"{named(own)}, the Pulse chat's own" if own
+             else "Hermes's main model")
+    slot = pulse.memory_slot()
+    if slot is None and own and not own["provider"]:
+        # A chat that names no provider lends Pulse none (pulse.chat_route).
+        return f"Model: {turns}, for its turns; memory, report lists and follow-up checks run on Hermes's main model"
+    if slot is None or slot == (picked or own):
+        return f"Model: {turns}, for its turns, memory, report lists and follow-up checks"
+    return (f"Model: {turns}, for its turns; memory, report lists and follow-up checks run on {named(slot)}, "
+            "Hermes's \"Pulse memory\" model")
+
+
 def _pulse(args: argparse.Namespace) -> int:
     from hermes_constants import get_hermes_home
 
@@ -327,6 +349,7 @@ def _pulse(args: argparse.Namespace) -> int:
     if chat is not None:
         print(f"Home chat: {_printable(chat.title)} ({_printable(chat.chat_id)})"
               f"{'' if chat.pinned else ', not pinned'}")
+        print(_printable(_pulse_model_line(pulse, pulse_store, home, chat.chat_id)))
     if problem:
         print(f"Warning: {_printable(problem)}")
     print(f"Delivery check every {pulse_store.get('probe_interval_hours')} hours")

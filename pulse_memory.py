@@ -23,7 +23,8 @@ Shadow only: the items are read by ``pulse memory`` and the shadow report
 
 One structured call per chunk, through the plugin's own Hermes auxiliary
 task (``pulse_memory``), so its model is picked in Hermes's settings like
-any other auxiliary model.
+any other auxiliary model. Left on "auto", it is the Pulse chat's model
+(pulse.lent_route).
 """
 
 from __future__ import annotations
@@ -45,8 +46,9 @@ logger = logging.getLogger(__name__)
 
 TASK = "pulse_memory"
 TASK_NAME = "Pulse memory"
-TASK_DESCRIPTION = ("Reads chats once they go quiet and keeps what Pulse should remember: what you'll do, "
-                    "what Hermes promised, dates and lasting facts.")
+TASK_DESCRIPTION = ("Reads chats once they go quiet and keeps what Pulse should remember (what you'll do, "
+                    "what Hermes promised, dates and lasting facts), lists what its reports could bring up and "
+                    "checks follow-ups. Auto uses the Pulse chat's model.")
 KINDS = ("commitment", "promise", "intention", "interest", "fact", "watch")
 # A chat is read once it has been quiet this long.
 IDLE_S = 1200.0

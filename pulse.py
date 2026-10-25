@@ -15,7 +15,10 @@ A few times a day it also sends the report (pulse_report): what Hermes would
 bring up since the last one, each item its own card on the Pulse screen. A
 model call lists the report's candidates first, on a thread of its own, and
 code picks what goes in (pulse_candidates); without model access, or when the
-list fails, the report turn picks its items itself, as it always did.
+list fails, the report turn picks its items itself, as it always did. Those
+model calls, memory's and follow-ups' too, run on the model the Pulse chat
+runs on unless the user gave Hermes's "Pulse memory" slot one of its own
+(``lent_route``).
 
 While Pulse is on, every tool call in the profile also gets a row in the
 outcome ledger (pulse_ledger), the record later slices check claims against,
@@ -36,6 +39,7 @@ import os
 import secrets
 import socket
 import sqlite3
+import sys
 import threading
 import time
 from contextlib import nullcontext
@@ -478,6 +482,88 @@ def turn_model(pulse_store: Any) -> Optional[dict[str, str]]:
     return {"provider": provider, "model": name}
 
 
+def chat_route(home: Path, chat_id: str) -> Optional[dict[str, str]]:
+    """The model and provider the Pulse chat's turns run on, as Hermes reads
+    them back off the chat when it reopens it (a provider no longer set up is
+    healed or dropped there, the same here): {"provider", "model"}, with
+    "base_url" and "api_mode" when Hermes has them. None when the chat runs on
+    Hermes's main model, or outside the process that hosts the chat, which
+    can't tell."""
+    server = sys.modules.get("tui_gateway.server")
+    read_back = getattr(server, "_stored_session_runtime_overrides", None)
+    if not chat_id or not callable(read_back):
+        return None
+    try:
+        row = hermes.chat_model_row(home, chat_id)
+        with _own_profile_scope():
+            overrides = read_back(row) if row else {}
+    except Exception:  # noqa: BLE001 — Pulse's model calls stay on Hermes's main model
+        logger.warning("conduit_push: Pulse couldn't read its chat's model; its memory, report lists and "
+                       "follow-up checks stay on Hermes's main model", exc_info=True)
+        return None
+    picked = overrides.get("model_override") if isinstance(overrides, dict) else None
+    if not isinstance(picked, dict):
+        return None
+    model, provider = str(picked.get("model") or "").strip(), str(picked.get("provider") or "").strip()
+    if not model or not provider:
+        return None  # a dropped provider: the chat is on Hermes's main one, as "auto" is
+    route = {"provider": provider, "model": model, "base_url": str(picked.get("base_url") or "").strip(),
+             "api_mode": str(picked.get("api_mode") or "").strip()}
+    return {key: value for key, value in route.items() if value}
+
+
+def lent_route(home: Path, chat_id: str) -> Optional[dict[str, str]]:
+    """The route Pulse's calls outside its chat borrow: the Pulse chat's
+    (``chat_route``), unless Hermes's "Pulse memory" slot names a model of its
+    own, which then runs them without one."""
+    return None if memory_slot() else chat_route(home, chat_id)
+
+
+def chat_model(home: Path, chat_id: str) -> Optional[dict[str, str]]:
+    """The model the Pulse chat is set to, as stored: {"provider", "model"}.
+    None when it runs on Hermes's main model, or state.db can't say."""
+    try:
+        row = hermes.chat_model_row(home, chat_id)
+    except hermes.HermesUnreadable:
+        return None
+    if not row:
+        return None
+    try:
+        config = json.loads(row.get("model_config") or "{}")
+    except (TypeError, ValueError):
+        config = {}
+    config = config if isinstance(config, dict) else {}
+    runtime = config.get("gateway_runtime") if isinstance(config.get("gateway_runtime"), dict) else {}
+    billed = str(row.get("billing_provider") or "").strip()
+    model = str(row.get("model") or config.get("model") or "").strip()
+    # Where Hermes reads the provider from, in its order; "auto" and "custom" there name none.
+    provider = str(runtime.get("provider") or config.get("provider")
+                   or (billed if billed.lower() not in ("auto", "custom") else "")).strip()
+    return {"provider": provider, "model": model} if model else None
+
+
+def memory_slot() -> Optional[dict[str, str]]:
+    """The model the user gave Hermes's "Pulse memory" slot: {"provider",
+    "model"}. None while it's on "auto", which is the Pulse chat's model, or
+    the config can't be read."""
+    try:
+        from hermes_cli.config import load_config
+        config = load_config()
+    except Exception:  # noqa: BLE001 — can't tell: "auto", as it starts out
+        return None
+    auxiliary = config.get("auxiliary") if isinstance(config, dict) else None
+    slot = auxiliary.get(memory.TASK) if isinstance(auxiliary, dict) else None
+    if not isinstance(slot, dict):
+        return None
+    provider, model = slot.get("provider") or "", slot.get("model") or ""
+    if not isinstance(provider, str) or not isinstance(model, str):
+        return None  # hand-edited into something Hermes can't route either
+    provider, model = provider.strip(), model.strip()
+    if not provider or provider.lower() == "auto":
+        return None
+    return {"provider": provider, "model": model}
+
+
 def _sender(pulse_store: store.PulseStore) -> Callable[[str, str], host.Sent]:
     """Sends a Pulse turn on this profile, on the model Settings > Pulse picked."""
     profile = str(getattr(_ctx, "profile_name", "") or "")
@@ -575,8 +661,9 @@ def _report_run(home: Path, chat_id: str, run: dict) -> None:
         zone = report_zone(pulse_store, home, now)
         gathered = report.gather(home, pulse_store, home_chat_id=chat_id, now=now, room=candidates.CONTEXT_BUDGET,
                                  extra=candidates.recent_section(pulse_store, zone, now), keyed=True)
+        route = lent_route(home, chat_id)
         rows, tokens = candidates.ask(lambda instructions, text: _memory_llm(
-            instructions, text, purpose="pulse report", max_tokens=candidates.REPLY_TOKENS), gathered,
+            instructions, text, purpose="pulse report", max_tokens=candidates.REPLY_TOKENS, route=route), gathered,
             nudge=learning.nudge(pulse_store))
         candidates.decide(pulse_store, rows, now=now)
         ready = {**run, "state": RUN_READY, "since": gathered.since, "tokens": tokens}
@@ -739,13 +826,18 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
             return  # `pulse status` says so
         profiles = pulse_store.get("report_profiles")
         sources = memory_sources(pulse_store, home, home_chat_id, profiles)
+        route = lent_route(home, home_chat_id)
+
+        def ask(instructions: str, text: str, purpose: str = "pulse memory") -> tuple[Any, int]:
+            return _memory_llm(instructions, text, purpose=purpose, route=route)
+
         done: dict[str, int] = {}
         checked: dict[str, int] = {}
         acted: dict[str, int] = {}
         try:
             try:
                 if used < cap:
-                    memory.run(pulse_store, sources, _memory_llm, zone=zone, now=now,
+                    memory.run(pulse_store, sources, ask, zone=zone, now=now,
                                reads="all" if profiles == "all" else "this",
                                still_leader=lambda: not stopped.is_set() and _leads(pulse_store), budget=cap - used,
                                done=done)
@@ -753,7 +845,7 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
                 logger.warning("conduit_push: Pulse memory run failed", exc_info=True)
             if acts:
                 try:
-                    followup.check_acts(pulse_store, home, lambda instructions, text: _memory_llm(
+                    followup.check_acts(pulse_store, home, lambda instructions, text: ask(
                                             instructions, text, purpose="pulse follow-up"), zone=zone,
                                         now=max(now, time.time()),
                                         still_leader=lambda: not stopped.is_set() and _leads(pulse_store),
@@ -762,7 +854,7 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
                     _count_checks(pulse_store, acted)  # in the totals, not the follow-up day's budget
             if holds:
                 try:
-                    followup.check_held(pulse_store, home, lambda instructions, text: _memory_llm(
+                    followup.check_held(pulse_store, home, lambda instructions, text: ask(
                                             instructions, text, purpose="pulse follow-up"), zone=zone,
                                         now=max(now, time.time()),
                                         still_leader=lambda: not stopped.is_set() and _leads(pulse_store),
@@ -782,7 +874,7 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
                 followup.check_all_now(pulse_store, now)
                 followup.check_watches_now(pulse_store, now)
                 try:
-                    followup.run(pulse_store, home, lambda instructions, text: _memory_llm(
+                    followup.run(pulse_store, home, lambda instructions, text: ask(
                                      instructions, text, purpose="pulse follow-up"), zone=zone, now=now,
                                  still_leader=lambda: (not stopped.is_set() and _leads(pulse_store)
                                                        and bool(pulse_store.get("followups"))),
@@ -835,17 +927,34 @@ def _leads(pulse_store: store.PulseStore) -> bool:
 
 
 def _memory_llm(instructions: str, text: str, purpose: str = "pulse memory",
-                max_tokens: int = memory.MAX_TOKENS) -> tuple[Any, int]:
+                max_tokens: int = memory.MAX_TOKENS, route: Optional[dict[str, str]] = None) -> tuple[Any, int]:
+    """One Pulse model call, on Hermes's "Pulse memory" slot. ``route`` is
+    the Pulse chat's model (``lent_route``), which that slot left on "auto"
+    then means, as Settings > Pulse's "Same as the Pulse chat" says."""
     llm = getattr(_ctx, "llm", None)
     if llm is None:
         raise RuntimeError("this Hermes gives plugins no model access")
-    with _own_profile_scope():
+    with _own_profile_scope(), _on_route(route):
         result = llm.complete_structured(
             instructions=instructions, input=[{"type": "text", "text": text}], json_mode=True,
             task=memory.TASK if _memory_task else None, purpose=purpose, timeout=memory.CALL_TIMEOUT_S,
             max_tokens=max_tokens)
     usage = getattr(result, "usage", None)
     return getattr(result, "parsed", None), int(getattr(usage, "total_tokens", 0) or 0)
+
+
+def _on_route(route: Optional[dict[str, str]]) -> Any:
+    """Makes ``route`` the main model for one call, so a slot on "auto"
+    resolves to it, the way a chat's own side calls resolve to its model
+    (Hermes's llm.oneshot lends a chat's model the same way). No route, or a
+    Hermes without the binding, leaves Hermes's main model."""
+    if not route:
+        return nullcontext()
+    try:
+        from agent.auxiliary_client import scoped_runtime_main
+    except ImportError:
+        return nullcontext()
+    return scoped_runtime_main(route)
 
 
 def _own_profile_scope() -> Any:
