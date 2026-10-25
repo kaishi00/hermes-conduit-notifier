@@ -189,7 +189,7 @@ def gateway_queue_owner(home: Any, session_ids: list) -> Optional[str]:
         if not path.is_file():
             return None
         db = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=2.0)
-    except (OSError, sqlite3.Error) as exc:
+    except (OSError, TypeError, sqlite3.Error) as exc:
         logger.debug("Chat takeover: state.db unreadable: %s", exc)
         return None
     try:

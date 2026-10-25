@@ -553,6 +553,17 @@ def test_a_ledger_with_only_the_request_id_still_names_a_bot(tmp_path):
     assert _take(tmp_path, ["chat"]) == {"status": "busy", "surface": "bot"}
 
 
+def test_a_ledger_with_only_the_principal_still_names_a_bot(tmp_path):
+    import sqlite3
+    db = sqlite3.connect(tmp_path / "state.db")
+    db.execute("CREATE TABLE session_admissions (target_session_id TEXT, status TEXT, principal_id TEXT)")
+    db.executemany("INSERT INTO session_admissions VALUES (?, ?, ?)",
+                   [("chat", "queued", "uid:0"), ("chat", "started", "automation:agent:nahida:local:dm:chat")])
+    db.commit()
+    db.close()
+    assert _take(tmp_path, ["chat"]) == {"status": "busy", "surface": "bot"}
+
+
 def test_an_unreadable_state_db_falls_through_to_the_claims(tmp_path):
     (tmp_path / "state.db").write_bytes(b"not a database" * 100)
     _seed(tmp_path, [_entry("chat")])
