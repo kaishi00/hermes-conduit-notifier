@@ -1485,7 +1485,8 @@ and the provider's part of the summary before a compaction are skipped for
 them, also after a compaction moves the session to a new id. Recall still
 runs, and `MEMORY.md` and `USER.md` still load, so a member knows its owner
 in the room; it just doesn't learn from what others say there. The memory and
-skill tools work as before. If Hermes' memory manager lacks one of the
+skill tools work as before, except in a room with other people's agents (next
+section) where they're blocked. If Hermes' memory manager lacks one of the
 methods the plugin guards, the plugin guards the rest and logs a warning
 naming what's missing. If Hermes' session store (`state.db`) can't be read
 when the plugin needs it to tell whether a session is a room, the plugin logs
@@ -2477,6 +2478,70 @@ relay key. The host still opens no inbound route.
   it opens a grant with audio, calls through the real relay, plays a WAV
   question and records the answer. `--prepare` makes the GPT-Live runtime
   first.
+
+## Rooms with other people's agents (plugin 0.79+)
+
+A gateway-hosted room can seat an agent from another installation (a RoomLink
+peer member, `target.kind: "peer"`), so agents of different owners talk in
+one room (Linked Rooms, designs/cross-owner-agents). Each owner's rules for
+their own agent run on their own host, through this plugin's hooks, whichever
+host the room lives on. Rooms of only this host's own agents work as before.
+
+The plugin tells a room turn apart by its session: an agent sitting in a room
+hosted elsewhere runs in `room_<digest>`, and a local member runs in a hidden
+`bot_room` session titled `Group: <room id>` whose room, in the room store
+(this profile's `state.db`, the root's, the legacy `shared-state.db` or another
+profile's), seats a peer member. Compaction continuations keep their room.
+
+Each profile keeps its choices per room in `conduit-rooms.json`, plus defaults
+for rooms with none of their own:
+
+- **What it can do**: Talk only (no tools, the default), Look things up
+  (`web_search`, `web_extract`, `x_search`, `vision_analyze`), Use my data
+  (lookups plus the room-safe data tools you pick; there are none yet) or
+  Custom (only the tools you pick). Always within the profile's own toolsets.
+  Memory and skill writes, delegation, messaging, scheduled jobs and Conduit's
+  calls and settings (`memory`, `skill_manage`, `delegate_task`,
+  `send_message`, `cronjob_manage`, `conduit_call_user`, `conduit_call_watch`,
+  `conduit_settings`) are never allowed, and that holds for the background
+  memory and skill review too, since its calls carry the room session's id.
+- **Search my past chats**: off by default; `session_search` is blocked
+  unless it's on.
+- **What it may share**: what helps, ask you first (the default) or nothing
+  personal. The agent is told, every room turn, along with who's asking (in a
+  room hosted elsewhere, the room's "user" is that host's owner, not you),
+  that it answers only for itself, and your private note for the room.
+- **How it takes part** (joins in, only when asked, listens only) and **turns
+  a day** (40 by default) are kept for the room bridge, which enforces them
+  once it ships.
+
+A room turn with other people's agents gets only that framing from the
+plugin: none of its other notes (Conduit's data, voice hints, declined calls).
+Its reply leaves the host with credential-shaped text (API keys, GitHub and
+Slack tokens, AWS key ids, JWTs, bearer tokens, private key blocks) replaced
+by `[credential removed]`. In every chat, `session_search` no longer finds
+the hidden sessions of rooms with other people's agents, and a direct read of
+one answers "session_id not found".
+
+If the room's roster or the choices can't be read, that turn gets no tools. If
+the session store itself can't be read, the plugin logs a warning and treats
+the session as an ordinary chat (a `room_<digest>` session still counts as a
+room). A Hermes without `transform_llm_output` or `transform_tool_result`
+logs a warning, and replies or searches then go out unchecked.
+
+```bash
+hermes conduit-push rooms show                  # defaults, then each room
+hermes conduit-push rooms set --room <room id> --tools look --search on
+hermes conduit-push rooms set --room <room id> --tools custom --tool terminal --tool read_file
+hermes conduit-push rooms set --share nothing --limit 20   # the defaults
+```
+
+Conduit reads and changes them through `GET /rooms/choices?room_id=<id>`
+(`saved: false` when the room uses the defaults; without `room_id`, every
+room), `PUT /rooms/choices` with `{"room_id": ..., "choices": {...}}` (only
+the choices it names change), and `GET`/`PUT /rooms/defaults` with
+`{"choices": {...}}`, all with `?profile=`, behind the `room-rules`
+capability.
 
 ## Capabilities (plugin 0.4+)
 

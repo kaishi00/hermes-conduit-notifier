@@ -1,6 +1,6 @@
 name: conduit_push
 manifest_version: 1
-version: 0.78.0
+version: 0.79.0
 description: "Send Hermes lifecycle notifications to Conduit devices."
 author: Hermes Conduit
 kind: standalone
@@ -20,6 +20,8 @@ provides_hooks:
   - post_approval_response
   - pre_api_request
   - post_api_request
+  - transform_tool_result
+  - transform_llm_output
 provides_tools:
   - conduit_call_user
   - conduit_call_watch
