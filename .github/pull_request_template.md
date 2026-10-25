@@ -6,6 +6,7 @@
      one line per sibling: done, not needed (and why), or a gap left open. A
      sibling an earlier change missed goes in the entry too. "No mapped
      feature" is only for a change with no siblings in the app. A refactor
-     that changes no behavior has none. -->
+     that changes no behavior and no text a person or model reads has none,
+     and needs no new or updated entry. -->
 
 ## Testing
