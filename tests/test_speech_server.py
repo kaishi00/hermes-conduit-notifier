@@ -291,6 +291,8 @@ def test_test_without_a_server_says_why(client, hermes, server):
 
 def test_an_invalid_url_does_not_spend_a_rate_limit_slot(client, hermes, monkeypatch):
     monkeypatch.setattr(api, "_speech_server_limiter", api._MintLimiter(1, api.SPEECH_SERVER_WINDOW_S))
+    # The fake server stays silent; the slot is spent either way.
+    monkeypatch.setattr(api, "SPEECH_SERVER_TEST_FIRST_EVENT_S", 0.05)
     _settings(hermes, url="ws://voice.example.com")
     for _ in range(3):
         assert "needs wss://" in client.post(f"{BASE}/speech-server/test").json()["reason"]
