@@ -5,9 +5,12 @@ The home chat is a Conduit (Desktop-source) chat, reached through the
 dashboard's session host; the host is faked here with its two methods.
 
 The Hermes reads run against two databases: a fixture with only the columns
-Pulse reads, and, when a Hermes checkout or install is available, one built
-from Hermes's own schema (set HERMES_AGENT_SRC to a checkout). The second is
-the contract test: it fails when Hermes renames what Pulse depends on.
+Pulse reads, and one built from Hermes's own schema. The second is the
+contract test: it fails when Hermes renames what Pulse depends on. It reads
+the schema from Hermes when a checkout or install is available (set
+HERMES_AGENT_SRC to a checkout), and otherwise from the copy in
+hermes_state_schema.sql, so CI runs it too; with Hermes available, a test
+checks the copy is current.
 """
 import contextlib
 import importlib.util
@@ -106,7 +109,19 @@ def _hermes_schema():
     return result.stdout if result.returncode == 0 and "CREATE TABLE IF NOT EXISTS messages" in result.stdout else None
 
 
-HERMES_SCHEMA = _hermes_schema()
+SCHEMA_COPY = ROOT / "tests" / "hermes_state_schema.sql"
+LIVE_HERMES_SCHEMA = _hermes_schema()
+HERMES_SCHEMA = LIVE_HERMES_SCHEMA or SCHEMA_COPY.read_text()
+
+
+def _without_comments(sql):
+    return [line.rstrip() for line in sql.splitlines() if line.strip() and not line.lstrip().startswith("--")]
+
+
+@pytest.mark.skipif(LIVE_HERMES_SCHEMA is None, reason="no Hermes to read the schema from")
+def test_the_schema_copy_matches_hermes():
+    assert _without_comments(SCHEMA_COPY.read_text()) == _without_comments(LIVE_HERMES_SCHEMA), \
+        "Hermes changed SCHEMA_SQL: refresh tests/hermes_state_schema.sql from hermes_state_common.SCHEMA_SQL"
 
 
 class StateDB:
@@ -143,8 +158,7 @@ class StateDB:
 
 
 SCHEMAS = [pytest.param(FIXTURE_SCHEMA, id="fixture"),
-           pytest.param(HERMES_SCHEMA, id="hermes",
-                        marks=pytest.mark.skipif(HERMES_SCHEMA is None, reason="no Hermes to read the schema from"))]
+           pytest.param(HERMES_SCHEMA, id="hermes")]
 
 
 @pytest.fixture(autouse=True)
