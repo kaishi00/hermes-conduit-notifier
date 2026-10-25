@@ -242,10 +242,12 @@ def test_sent_events_leave_the_bound():
 class FakeRun:
     def __init__(self, fail=()):
         self.commands = []
+        self.envs = []
         self.fail = fail
 
     def __call__(self, command, **kwargs):
         self.commands.append(command)
+        self.envs.append(kwargs.get("env"))
         name = " ".join(str(part) for part in command)
         if any(text in name for text in self.fail):
             return types.SimpleNamespace(returncode=1, stdout="", stderr="Error: ensurepip is not available\n")
@@ -319,7 +321,7 @@ def test_preparing_makes_a_private_environment_with_venv_and_pip(tmp_path):
     assert status == {"runtime": "ready", "source": "plugin", "reason": None}
     env = tmp_path / "env"
     assert run.commands[0] == ["/usr/bin/python3", "-m", "venv", str(env)]
-    assert run.commands[1][:4] == [str(env / "bin" / "python"), "-m", "pip", "install"]
+    assert run.commands[1][:5] == [str(env / "bin" / "python"), "-I", "-m", "pip", "install"]
     assert run.commands[1][-1] == "aiortc==1.15.0"
     assert json.loads((env / "conduit-watch-audio.json").read_text()) == {"aiortc": "1.15.0", "requirement": "aiortc==1.15.0"}
     python, _, flags, source = runtime.python()
@@ -331,6 +333,20 @@ def test_a_python_without_venv_falls_back_to_uv(tmp_path):
     runtime = _runtime(tmp_path, run=run, which=lambda name: "/opt/uv" if name == "uv" else None)
     assert runtime.prepare(start=lambda target: target())["runtime"] == "ready"
     assert [command[:2] for command in run.commands[1:3]] == [["/opt/uv", "venv"], ["/opt/uv", "pip"]]
+
+
+@pytest.mark.parametrize("uv", [False, True])
+def test_preparing_leaves_out_hermes_import_path(tmp_path, monkeypatch, uv):
+    # Hermes' PYTHONPATH made pip skip cffi and cryptography, so the
+    # isolated check failed on _cffi_backend (#340).
+    monkeypatch.setenv("PYTHONPATH", "/hermes/venv/lib/python3.14/site-packages")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy:3128")
+    run = FakeRun(fail=("-m venv",) if uv else ())
+    runtime = _runtime(tmp_path, run=run, which=lambda name: "/opt/uv" if uv else None)
+    assert runtime.prepare(start=lambda target: target())["runtime"] == "ready"
+    assert all(env is not None and "PYTHONPATH" not in env for env in run.envs)
+    # Everything else, a proxy pip needs say, still gets through.
+    assert all(env["HTTPS_PROXY"] == "http://proxy:3128" for env in run.envs)
 
 
 def test_a_failed_prepare_says_why_and_can_be_asked_again(tmp_path):
