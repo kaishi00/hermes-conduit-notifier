@@ -22,7 +22,8 @@ entry current.
   or a gap left open. "No mapped feature" is only for a change with no
   siblings in the app. A refactor that changes no behavior and no text a
   person or model reads (tool descriptions and results included) has none,
-  and needs no new or updated entry.
+  and needs no new entry; if it moves a file the map lists, update that
+  path in hermes-conduit.
 - When the change alters an entry, update it in hermes-conduit. A feature
   with siblings in the app and no entry gets one there, and a fix that brings
   a sibling in line with an earlier change it missed adds that sibling to the

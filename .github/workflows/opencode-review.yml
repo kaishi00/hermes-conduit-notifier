@@ -175,7 +175,8 @@ jobs:
               an entry or a hermes-conduit PR is named. A refactor that
               changes no behavior and no text a person or model reads (tool
               descriptions and results included) has no siblings, and needs
-              neither.
+              neither, unless it moves a file the map lists: then it names the
+              hermes-conduit PR that updates that path.
 
             If you find no issues, say so explicitly. Do NOT summarize what you did
             or describe your process. Output only the review.

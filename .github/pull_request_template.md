@@ -7,6 +7,7 @@
      sibling an earlier change missed goes in the entry too. "No mapped
      feature" is only for a change with no siblings in the app. A refactor
      that changes no behavior and no text a person or model reads has none,
-     and needs no new or updated entry. -->
+     and needs no new entry; if it moves a file the map lists, update that
+     path in hermes-conduit. -->
 
 ## Testing
