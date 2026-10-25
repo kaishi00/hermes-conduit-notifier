@@ -482,3 +482,56 @@ def test_this_dashboards_own_claim_beside_a_live_worker_claim_reports_same_host(
     _seed(tmp_path, entries)
     assert _take(tmp_path, ["runtime-id", "chat"]) == {"status": "same_host", "surface": "tui"}
     assert _entries(tmp_path) == entries
+
+
+def _ledger(home: Path, admissions=(), workers=(), columns=True):
+    import sqlite3
+    db = sqlite3.connect(home / "state.db")
+    if columns:
+        db.execute("CREATE TABLE session_admissions (target_session_id TEXT, status TEXT, request_id TEXT,"
+                   " principal_id TEXT)")
+        db.executemany("INSERT INTO session_admissions VALUES (?, ?, ?, ?)", admissions)
+    else:
+        db.execute("CREATE TABLE session_admissions (target_session_id TEXT, status TEXT)")
+        db.executemany("INSERT INTO session_admissions VALUES (?, ?)", [row[:2] for row in admissions])
+    db.execute("CREATE TABLE worker_executions (session_id TEXT, status TEXT)")
+    db.executemany("INSERT INTO worker_executions VALUES (?, ?)", workers)
+    db.commit()
+    db.close()
+
+
+def test_another_bots_message_in_the_ledger_answers_busy(tmp_path):
+    # Another bot's message (message_agent) runs in this bot's Bot Chat
+    # through the gateway's ledger, with no claim in the registry.
+    _ledger(tmp_path, [("chat", "started", "bot:5bd49571", "automation:agent:nahida:local:dm:chat")])
+    assert _take(tmp_path, ["runtime-id", "chat"]) == {"status": "busy", "surface": "bot"}
+
+
+def test_ledger_work_keeps_any_claim(tmp_path):
+    _seed(tmp_path, [_entry("chat")])
+    _ledger(tmp_path, [("chat", "queued", "req-1", "uid:0")])
+    assert _take(tmp_path, ["chat"]) == {"status": "busy", "surface": "gateway"}
+    assert _entries(tmp_path) == [_entry("chat")]
+
+
+def test_an_open_worker_execution_answers_busy(tmp_path):
+    _ledger(tmp_path, workers=[("chat", "running")])
+    assert _take(tmp_path, ["chat"]) == {"status": "busy", "surface": "gateway"}
+
+
+def test_settled_ledger_rows_and_other_chats_do_not_block(tmp_path):
+    _seed(tmp_path, [_entry("chat")])
+    _ledger(tmp_path, [("chat", "terminal", "bot:1", "automation:agent:x"), ("other", "started", "bot:2", "")],
+            [("chat", "terminal")])
+    assert _take(tmp_path, ["chat"])["status"] == "taken_over"
+
+
+def test_a_ledger_without_the_bot_columns_still_answers_busy(tmp_path):
+    _ledger(tmp_path, [("chat", "started", "", "")], columns=False)
+    assert _take(tmp_path, ["chat"]) == {"status": "busy", "surface": "gateway"}
+
+
+def test_a_state_db_without_a_ledger_is_ignored(tmp_path):
+    import sqlite3
+    sqlite3.connect(tmp_path / "state.db").close()
+    assert _take(tmp_path, ["chat"]) == {"status": "free"}

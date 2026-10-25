@@ -13,8 +13,10 @@ from __future__ import annotations
 import inspect
 import logging
 import os
+import sqlite3
 import sys
 import threading
+from pathlib import Path
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -136,6 +138,62 @@ def _owner_turn_running(turn_marker: Any, home: Any, entry: dict[str, Any], alia
     return False
 
 
+# Hermes' gateway admits work into a durable ledger in the profile's state.db
+# and refuses every other surface's turn on that chat while a row is open
+# (tui_gateway.session_lifecycle._canonical_ledger_refusal), with the same
+# SESSION_NOT_OWNED as a claim but no claim in active_sessions.json. Another
+# bot's message (message_agent) is delivered this way, into the bot's Bot Chat,
+# and keeps it until its reply ends. No claim can be dropped for it: the route
+# answers busy, so Conduit waits and sends once the row closes.
+_LEDGER_ADMISSIONS_SQL = ("SELECT status, request_id, principal_id FROM session_admissions"
+                          " WHERE target_session_id IN ({ids}) AND status != 'terminal' LIMIT 1")
+_LEDGER_ADMISSION_STATUS_SQL = ("SELECT status FROM session_admissions"
+                                " WHERE target_session_id IN ({ids}) AND status != 'terminal' LIMIT 1")
+_LEDGER_WORKERS_SQL = ("SELECT status FROM worker_executions"
+                       " WHERE session_id IN ({ids}) AND status != 'terminal' LIMIT 1")
+
+
+def _ledger_rows(db: sqlite3.Connection, sql: str, ids: list) -> Optional[tuple]:
+    """The first open row, or None when there's none or this Hermes has no
+    such table or column (it then keeps no ledger to refuse with)."""
+    try:
+        return db.execute(sql.format(ids=",".join("?" * len(ids))), ids).fetchone()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc) or "no such column" in str(exc):
+            return None
+        raise
+
+
+def gateway_queue_owner(home: Any, session_ids: list) -> Optional[str]:
+    """The surface holding the chat through the gateway's ledger: ``bot``
+    for another bot's message, ``gateway`` for other queued work, None when
+    nothing is open. A ledger that can't be read says nothing (the claim
+    rules still apply); Hermes refuses the send itself if it can't read it."""
+    ids = [str(value) for value in session_ids if str(value)]
+    if not ids or home is None:
+        return None
+    path = os.path.join(os.fspath(home), "state.db")
+    if not os.path.isfile(path):
+        return None
+    try:
+        db = sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True, timeout=2.0)
+    except sqlite3.Error as exc:
+        logger.debug("Chat takeover: state.db unreadable: %s", exc)
+        return None
+    try:
+        row = _ledger_rows(db, _LEDGER_ADMISSIONS_SQL, ids)
+        if row is None:
+            row = _ledger_rows(db, _LEDGER_ADMISSION_STATUS_SQL, ids) or _ledger_rows(db, _LEDGER_WORKERS_SQL, ids)
+            return None if row is None else "gateway"
+        request_id, principal = str(row[1] or ""), str(row[2] or "")
+        return "bot" if request_id.startswith("bot:") or principal.startswith("automation:agent:") else "gateway"
+    except sqlite3.Error as exc:
+        logger.debug("Chat takeover: gateway ledger unreadable: %s", exc)
+        return None
+    finally:
+        db.close()
+
+
 def _owner_alive(registry: Any, entry: dict[str, Any]) -> Optional[bool]:
     """Hermes' pid + start-time liveness; an error is unknown, which counts as live."""
     try:
@@ -152,9 +210,10 @@ def take_over_session(session_ids: list, *, registry: Any, turn_marker: Any, hom
     them makes the whole request busy. Statuses:
 
     ``free``: nobody else holds it (send again); ``taken_over``: the claims
-    were dropped (send again); ``busy``: an owner is mid-turn, or a live
-    claim whose surface writes no turn marker holds the chat (ask again
-    shortly); ``same_host``: this dashboard process still holds one of the
+    were dropped (send again); ``busy``: an owner is mid-turn, a live
+    claim whose surface writes no turn marker holds the chat, or the
+    gateway's ledger holds work on it (surface ``bot`` for another bot's
+    message, ``gateway`` otherwise; ask again shortly); ``same_host``: this dashboard process still holds one of the
     ids, which this route never touches (other processes' claims may have
     been dropped). Marker reads happen under the registry lock on purpose:
     the decision and the write must be atomic against other claimers; the
@@ -166,6 +225,11 @@ def take_over_session(session_ids: list, *, registry: Any, turn_marker: Any, hom
     """
     own_pid = os.getpid() if own_pid is None else own_pid
     wanted = set(session_ids)
+    # The gateway's ledger refuses the send whoever holds a claim, so no
+    # claim is dropped while it holds the chat.
+    queued = gateway_queue_owner(home, session_ids)
+    if queued is not None:
+        return {"status": "busy", "surface": queued}
     state_path, lock_path = registry._lease_paths(registry_home=home)
     def check_abandoned() -> None:
         if abandoned is not None and abandoned.is_set():

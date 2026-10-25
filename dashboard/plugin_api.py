@@ -6107,6 +6107,13 @@ def _enqueue_voice_call_end(profile: Optional[str], session_id: str, engine: str
 # its claim. That turn keeps running in the owner (nothing is interrupted);
 # it is the same exposure as the known limit that the owner isn't told.
 #
+# Hermes' gateway also holds a chat through its durable ledger in the
+# profile's state.db: another bot's message (message_agent) runs in the bot's
+# Bot Chat that way, and every other surface's send is refused until its reply
+# ends, with no claim to drop. The route answers "busy" (surface "bot", or
+# "gateway" for other queued work) without touching the registry, and Conduit
+# sends once the ledger lets go.
+#
 # Only Desktop and TUI turns write a turn marker. A live claim from any other
 # surface (a CLI or kanban worker, a gateway, or a blank one) has no marker
 # to read, so it could look idle mid-turn: it is never dropped and answers
