@@ -180,12 +180,19 @@ def recent_chats(home: Path, *, home_chat_id: str, since: float, zone: tzinfo,
     filled in as key -> (profile, chat id), so a model can say where
     something came from. A reminder from Pulse the user sent on with Do it,
     and Hermes's answer to it, are marked as memory marks them
-    (pulse_memory.handoff_rows over ``handoffs``)."""
+    (pulse_memory.handoffs_in over ``handoffs``)."""
     chats: dict[tuple[str, str], dict[str, Any]] = {}
     sources = [("", home, home_chat_id)] + [(name, path, their_home_chat(path)) for name, path in others]
     for profile, path, exclude in sources:
         try:
             rows = hermes.recent_messages(path, exclude_chat=exclude, since=since)
+            by_chat: dict[str, list[Any]] = {}
+            for row in rows:
+                by_chat.setdefault(row["chat_id"], []).append(row)
+            # Over every row, memory's too, so an answer left in keeps the
+            # mark of a reminder left out.
+            marks = {chat_id: pulse_memory.handoffs_in(path, chat_id, chat_rows, handoffs)
+                     for chat_id, chat_rows in by_chat.items()}
         except hermes.HermesUnreadable:
             if not profile:
                 raise
@@ -195,10 +202,11 @@ def recent_chats(home: Path, *, home_chat_id: str, since: float, zone: tzinfo,
                 continue  # memory read it (or gave up on it after failed reads): out of the report
             title = row["title"] or "Untitled chat"
             chat = chats.setdefault((profile, row["chat_id"]), {
-                "title": f"[{profile}] {title}" if profile else title, "rows": [], "lines": [], "last": 0.0})
+                "title": f"[{profile}] {title}" if profile else title, "rows": [], "lines": [], "last": 0.0,
+                "marked": marks[row["chat_id"]]})
             chat["rows"].append(row)
     for chat in chats.values():
-        marked = pulse_memory.handoff_rows(chat["rows"], handoffs) if handoffs else set()
+        marked = chat["marked"]
         for row in chat["rows"]:
             text = _clip(row["content"], PER_MESSAGE)
             if not text:

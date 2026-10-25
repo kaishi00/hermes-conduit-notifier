@@ -20,11 +20,12 @@ checks it). The format is fixed, because Conduit reads it:
   because it read only that chat's last messages. It now also reads what the
   chat said on the same subject before them.
 - Reading your older chats, Pulse could remind you of something days after
-  its time, like a 4 PM reminder five days late. A reminder it learns of more
-  than half a day after its time is now set aside, not sent.
+  its time, like a 4 PM reminder five days late. One it finds there more than
+  half a day after its time is now set aside, not sent.
 - What you send with Do it, and Hermes's answer to it, no longer become new
-  things for Pulse to follow up on. An offer in Hermes's answer could turn
-  into a promise, and Pulse would then nag about it.
+  things for Pulse to follow up on, even when Hermes answers much later. An
+  offer in Hermes's answer could turn into a promise, and Pulse would then nag
+  about it.
 - Pulse's report now says only what it was given. It could repeat what it
   had said in earlier turns as if it were news, and blame a reminder job
   that doesn't exist.

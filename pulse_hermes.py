@@ -174,6 +174,17 @@ def chat_messages(home: Path, *, chat_id: str, after_id: int, since: float, max_
     return rows[::-1] if newest else rows
 
 
+def user_row_before(home: Path, *, chat_id: str, before_id: int, max_chars: int) -> Optional[sqlite3.Row]:
+    """One chat's last visible user row before row ``before_id``, cut to
+    ``max_chars``: the one Hermes's rows from there on answer."""
+    rows = _run(home, (
+        "SELECT id, role, substr(content, 1, ?) AS content, timestamp FROM messages "
+        "WHERE session_id = ? AND id < ? AND role = 'user' AND active = 1 AND display_kind IS NULL "
+        "ORDER BY id DESC LIMIT 1"
+    ), (max_chars, chat_id, before_id))
+    return rows[0] if rows else None
+
+
 def user_text_after(home: Path, *, session_id: str, tag: str) -> list[str]:
     """What the user wrote after the user row carrying ``tag``, up to the
     next hidden (Pulse) row."""

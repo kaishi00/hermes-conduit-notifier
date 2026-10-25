@@ -1620,6 +1620,42 @@ def test_a_reminder_sent_on_at_the_end_of_one_chunk_still_marks_the_answer_in_th
     assert remembering.store.open_items() == []
 
 
+def test_a_reminder_one_run_read_still_marks_the_answer_a_later_run_reads(remembering, db):
+    news = "The few weeks are up and the relay.json backup is still there. Say the word and it's gone."
+    remembering.store.add_card({"kind": "followup", "level": "push", "news": news, "created_at": DAY})
+    db.message("user", f"Pulse reminded me: {news}\n\nLet's take care of it now.", sid="work", at=DAY + 60)
+    db.message("assistant", "Checking the server now.", sid="work", at=DAY + 70)
+    # The chat goes quiet while Hermes works, so a run reads it this far.
+    _remember(remembering, FakeModel(), DAY + 70 + memory.IDLE_S)
+    answer = DAY + 70 + 2 * memory.IDLE_S
+    db.message("assistant", "Already done. If that reminder job keeps replaying completed items, say the word and "
+               "I'll inspect its cron config.", sid="work", at=answer)
+    model = FakeModel({"items": [
+        {"kind": "promise", "text": "Hermes will inspect the Pulse reminder job's cron config.",
+         "evidence": "say the word and I'll inspect its cron config", "line": 1, "explicit": True}]})
+    _remember(remembering, model, answer + memory.IDLE_S)
+    chat = model.shown[0].split("<<<chat")[1]
+    assert "Pulse reminded me" not in chat and "Hermes (answering Pulse's reminder): Already done." in chat
+    assert remembering.store.open_items() == []
+
+
+def test_the_report_marks_an_answer_whose_reminder_it_leaves_out(remembering, db):
+    news = "The few weeks are up and the relay.json backup is still there. Say the word and it's gone."
+    remembering.store.add_card({"kind": "followup", "level": "push", "news": news, "created_at": DAY})
+    asked = db.message("user", f"Pulse reminded me: {news}\n\nLet's take care of it now.", sid="work", at=DAY + 60)
+    db.message("assistant", "Already done. If that reminder job keeps replaying completed items, say the word and "
+               "I'll inspect its cron config.", sid="work", at=DAY + 3600)
+    home, texts = remembering.store.path.parent, memory.handoff_texts(remembering.store)
+    marked = "] Hermes (answering Pulse's reminder): Already done."
+    # Memory read the reminder but not the answer yet.
+    chats = report.recent_chats(home, home_chat_id=SID, since=DAY, zone=UTC, read={("", "work"): asked},
+                                read_since=DAY, handoffs=texts)
+    assert "Pulse reminded me" not in chats and marked in chats
+    # The report's window starts after the reminder.
+    chats = report.recent_chats(home, home_chat_id=SID, since=DAY + 600, zone=UTC, handoffs=texts)
+    assert "Pulse reminded me" not in chats and marked in chats
+
+
 def _open(n, kind, text, evidence, chat="work", at=DAY, due=""):
     return {"id": n, "kind": kind, "text": text, "evidence": evidence, "chat_id": chat, "mentioned_at": at,
             "due": due, "due_at": None}
@@ -1829,7 +1865,9 @@ def test_a_commitment_learned_after_its_time_is_kept_as_expired(remembering, db)
          "line": 3, "due": "2026-10-24", "due_words": "by Saturday"},
         {"kind": "promise", "text": "Hermes will check the build.", "evidence": "I'll check the build tomorrow at 9",
          "line": 4, "due": "2026-10-21T09:00", "due_words": "tomorrow at 9"}]})
-    # Read five days on, as a backfill of older chats would: Sunday 05:00.
+    # Memory started the day after, so a backfill of older chats reads it, five days on: Sunday 05:00.
+    remembering.store.set("memory_since", DAY + 86400)
+    remembering.store.set("memory_backfill", {"from": DAY - 86400, "to": DAY + 86400, "active": True, "done": False})
     now = DAY + 5 * 86400 + 5 * 3600
     _remember(remembering, model, now)
     # Saturday's lasts to its end, five hours ago; a promise past its time is still Hermes's to keep.
@@ -1839,6 +1877,18 @@ def test_a_commitment_learned_after_its_time_is_kept_as_expired(remembering, db)
     assert (wallet["status"], wallet["closed_by"]) == ("expired", store.LATE_BY)
     pulse.followup.schedule(remembering.store, now)
     assert wallet["id"] not in {row["item_id"] for row in remembering.store.followups(-1)}  # never reminded
+
+
+def test_a_commitment_a_live_read_learns_of_late_is_left_to_the_followup_checks(remembering, db):
+    db.message("user", "Remind me at 16:00 today to repair my wallet", sid="work", at=DAY + 5 * 3600)
+    db.message("assistant", "I'll set a reminder for 4:00 PM.", sid="work", at=DAY + 5 * 3600 + 10)
+    model = FakeModel({"items": [
+        {"kind": "commitment", "text": "The user wants a reminder at 16:00 to repair their wallet.",
+         "evidence": "Remind me at 16:00 today to repair my wallet", "line": 1, "due": "2026-10-20T16:00",
+         "due_words": "16:00 today"}]})
+    # Memory fell behind (its daily budget ran out, or the host was off) and reads it the next morning.
+    _remember(remembering, model, DAY + 86400 + 9 * 3600)
+    assert [item["kind"] for item in remembering.store.open_items()] == ["commitment"]
 
 
 def test_a_chunk_two_processes_read_is_kept_once(remembering, db):

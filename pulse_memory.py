@@ -300,6 +300,18 @@ def handoff_rows(rows: Sequence[Any], texts: Sequence[tuple[float, str]]) -> set
     return ids
 
 
+def handoffs_in(home: Path, chat_id: str, rows: Sequence[Any], texts: Sequence[tuple[float, str]]) -> set[int]:
+    """handoff_rows over one chat's ``rows``, from the user row the first of
+    them answers when that was read before them (an earlier run, or before a
+    report's window), so a reminder read once still marks an answer read
+    later."""
+    if not texts or not rows:
+        return set()
+    asked = hermes.user_row_before(home, chat_id=chat_id, before_id=rows[0]["id"], max_chars=PER_MESSAGE) \
+        if rows[0]["role"] == "assistant" else None
+    return handoff_rows(([asked] if asked else []) + list(rows), texts)
+
+
 # What's already remembered -----------------------------------------------------------
 
 _WORD = re.compile(r"[a-z0-9][a-z0-9'-]{3,}")
@@ -447,8 +459,8 @@ def extract(llm: Llm, chunk: Sequence[Any], zone: tzinfo, outcomes: Sequence[dic
             now: Optional[float] = None) -> tuple[list[dict], list[dict], int]:
     """The chunk's items, the remembered items it closes, and the tokens the
     call used. Rows in ``handoffs`` (handoff_rows) can close an item but
-    never add one; a commitment read ``now``, over LATE_S after its time, is
-    marked ``late``."""
+    never add one; a commitment read ``now`` (run passes it for a backfill's
+    reads), over LATE_S after its time, is marked ``late``."""
     remembered_text = render_remembered(remembered, zone) or "(nothing yet)"
     chat_text = render(chunk, zone, outcomes, handoffs)
     mark = secrets.token_hex(6)
@@ -523,14 +535,15 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
         try:
             rows = hermes.chat_messages(chat.home, chat_id=chat.chat_id, after_id=chat.after_id, since=chat.since,
                                         max_chars=PER_MESSAGE, limit=MAX_ROWS, until=chat.until)
+            # Over all of it, and from a reminder an earlier run read, so a
+            # reminder at the end of one chunk or run still marks the answer
+            # that starts the next.
+            handed_on = handoffs_in(chat.home, chat.chat_id, rows, handoffs)
         except hermes.HermesUnreadable:
             if not chat.profile:
                 raise
             continue
         read_to = chat.read_to
-        # Over all of it, so a reminder at the end of one chunk still marks
-        # the answer that starts the next.
-        handed_on = handoff_rows(rows, handoffs)
         for chunk in chunks(rows, zone, now):
             if calls >= MAX_CHUNKS or done["tokens"] >= budget or not still_leader() \
                     or (chat.until is not None and not current()):
@@ -544,7 +557,11 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
             calls += 1
             remembered = candidates(pulse_store.open_items(profile=chat.profile, limit=MAX_OPEN), chunk, chat.chat_id)
             try:
-                items, closed, tokens = extract(llm, chunk, zone, outcomes, remembered, handed_on, now=now)
+                # Only older chats (a backfill) set a commitment learned late
+                # aside: a live read that fell behind keeps it, for the
+                # follow-up checks to weigh.
+                items, closed, tokens = extract(llm, chunk, zone, outcomes, remembered, handed_on,
+                                                now=now if chat.until is not None else None)
             except ChunkFailed as error:  # waits for a retry
                 done["tokens"] += error.tokens
                 if not still_leader() or (chat.until is not None and not current()):
