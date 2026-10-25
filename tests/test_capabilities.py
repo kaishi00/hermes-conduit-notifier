@@ -75,6 +75,7 @@ def test_every_capability_names_a_served_route_family():
         "pulse_done": "/pulse/done",
         "pulse_acted": "/pulse/acted",
         "pulse_dismiss": "/pulse/dismiss",
+        "pulse_daily_brief": "/pulse",
         "present-v1": "/present/",
         "health-sync": "/health/",
         "shortcut-inbox": "/inbox/",

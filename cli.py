@@ -348,18 +348,20 @@ def _pulse(args: argparse.Namespace) -> int:
         print("Latest:")
         for row in recent:
             print("  " + _printable(pulse_delivery.describe(row)))
+    zone = pulse.report_zone(pulse_store, home)
     if pulse_store.get("daily_report"):
-        zone = pulse.report_zone(pulse_store, home)
         upcoming = pulse.report.next_time(time.time(), zone, pulse_store.get("report_time"))
         print(f"Shadow reports at {pulse.report.clock_text(pulse_store.get('report_time'))} ({zone}); next "
               + datetime.fromtimestamp(upcoming, zone).strftime("%a %d %b %H:%M"))
     else:
         print("Shadow reports: off")
-    zone = pulse.report_zone(pulse_store, home)
-    brief_time = pulse_store.get("brief_time") or pulse.brief.DEFAULT_TIME
-    upcoming = pulse.report.next_time(time.time(), zone, brief_time)
-    print(f"Morning brief at {pulse.report.clock_text(brief_time)} ({zone}); next "
-          + datetime.fromtimestamp(upcoming, zone).strftime("%a %d %b %H:%M"))
+    if pulse_store.get("enabled"):
+        brief_time = pulse_store.get("brief_time") or pulse.brief.DEFAULT_TIME
+        upcoming = pulse.report.next_time(time.time(), zone, brief_time)
+        print(f"Morning brief at {pulse.report.clock_text(brief_time)} ({zone}); next "
+              + datetime.fromtimestamp(upcoming, zone).strftime("%a %d %b %H:%M"))
+    else:
+        print("Morning brief: off while Pulse is")
     if pulse_store.get("report_profiles") == "all":
         others = [name for name, _ in pulse.report.profile_homes(home)]
         if others:

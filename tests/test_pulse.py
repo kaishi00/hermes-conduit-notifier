@@ -1323,6 +1323,10 @@ def test_report_command(live, db, capsys, monkeypatch):
     live.store.set("brief_time", "06:15")
     cli.dispatch(types.SimpleNamespace(conduit_push_action="pulse", pulse_action="status", value=""))
     assert "Morning brief at 06:15 (Europe/Paris); next " in capsys.readouterr().out
+    live.store.set("enabled", False)
+    cli.dispatch(types.SimpleNamespace(conduit_push_action="pulse", pulse_action="status", value=""))
+    assert "Morning brief: off while Pulse is" in capsys.readouterr().out
+    live.store.set("enabled", True)
     assert run("8:00, 17:00,12:30") == 0 and live.store.get("report_time") == "08:00,12:30,17:00"
     assert run("8:00,24:00") == 2 and live.store.get("report_time") == "08:00,12:30,17:00"
     assert run("off") == 0 and live.store.get("daily_report") is False
@@ -2234,6 +2238,7 @@ def test_pulse_routes(remembering, db, monkeypatch):
         "followup": "screen"}
     assert http.put(f"{base}/levels", json={"kind": "followup", "level": "loud"}).status_code == 400
     assert "pulse" in api.ROUTE_CAPABILITIES and "pulse_feed" in api.ROUTE_CAPABILITIES
+    assert "pulse_daily_brief" in api.ROUTE_CAPABILITIES  # Settings > Pulse says the brief comes every day
     # A host that never turned Pulse on is answered without a file left behind.
     fresh = home / "fresh"
     fresh.mkdir()
