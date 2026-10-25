@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.78.0 (2026-10-25)
+
+### New and improved
+- On an Apple Watch call, your requests now stay in one Hermes chat: the
+  first one starts it, and later ones continue it, so Hermes remembers what
+  you asked before. Work you ask for in the background, quick requests and
+  requests for another profile still get their own chat.
+
 ## 0.77.1 (2026-10-25)
 
 ### Fixes

@@ -10331,6 +10331,13 @@ WATCH_APPROVAL_CHOICES = ("once", "deny")
 WATCH_JOB_PROMPT = ("[Background job started from a Conduit voice conversation. Nobody is watching this chat live, "
                     "so work on it on your own. When you are done, end your final message with a plain-language "
                     "summary that can be read aloud: what you found or did, with the key details.]\n\n{instructions}")
+# A later ordinary request of the call, sent into the chat its first one
+# made (#1250).
+WATCH_JOB_NEXT_PROMPT = ("[The next request from the same Conduit voice conversation. As before, end your final message "
+                         "with a plain-language summary that can be read aloud.]\n\n{instructions}")
+# How often a request waiting for the call's chat checks it again, besides
+# being woken when a job settles.
+WATCH_JOB_CHAT_WAIT_S = 2.0
 # Job ids are unique in this process, not per grant: a renewed grant's jobs
 # never share an id with the last grant's, so a cancel can't hit the wrong
 # job.
@@ -10593,6 +10600,9 @@ class _WatchJob:
         self.held_since = 0.0
         # Follow-ups to one job go one at a time, in the order they came.
         self.follow_up_lock = threading.Lock()
+        # An ordinary request (not background, quick or another profile's):
+        # the call's first one makes the chat its later ones go to (#1250).
+        self.joins_call = False
 
     @property
     def active(self) -> bool:
@@ -10691,6 +10701,9 @@ class _WatchJobs:
         # reaper keeps watching while any is in flight.
         self.follow_ups_in_flight = 0
         self.reaping = False
+        # The job whose chat the call's later ordinary requests run in: its
+        # first ordinary one that started (#1250).
+        self.call_chat: Optional[_WatchJob] = None
 
     # Hermes' session API
 
@@ -10751,7 +10764,10 @@ class _WatchJobs:
     def _job_for(self, sid: str) -> Optional[_WatchJob]:
         if not sid:
             return None
-        return next((job for job in self.jobs.values() if sid in (job.session_id, job.stored_session_id)), None)
+        # The call's chat carries one request at a time (#1250): its frames
+        # are the running one's, never a settled earlier one's.
+        owners = [job for job in self.jobs.values() if sid in (job.session_id, job.stored_session_id)]
+        return next((job for job in owners if job.active or job.cancelling), owners[0] if owners else None)
 
     def _event(self, kind: str, sid: str, payload: Dict[str, Any]) -> None:
         settled = False
@@ -10910,12 +10926,19 @@ class _WatchJobs:
                                    "starting another."}
             self.started += 1
             job = _WatchJob(f"watch-{next(_watch_job_numbers)}", watch_job_title(instructions), profile)
+            # The Watch says whether the user asked to keep it apart; a job on
+            # another profile always is.
+            job.joins_call = args.get("joins_call") is True and profile is None
+            chat = self.call_chat if job.joins_call else None
             self.jobs[job.job_id] = job
         done = threading.Event()
 
         def run() -> None:
             try:
-                answer = self._start_session(job, instructions)
+                if chat is not None:
+                    answer = self._continue_session(job, instructions, chat)
+                else:
+                    answer = self._start_session(job, instructions)
             except Exception as exc:  # noqa: BLE001 — _start_session catches its own
                 _log_watch_failure("Starting a Watch job failed", exc)
                 answer = {"ok": True, "status": "not_started", "title": job.title,
@@ -11026,6 +11049,8 @@ class _WatchJobs:
             # A cancel between the prompt and here interrupted the turn
             # itself and told the Watch.
             cancelled = job.status == "cancelled"
+            if not cancelled and job.joins_call and job.profile is None and self.call_chat is None:
+                self.call_chat = job
             self.changed.notify_all()
         if cancelled:
             self._close_session(job)
@@ -11038,6 +11063,59 @@ class _WatchJobs:
                 **({"profile": job.profile} if job.profile else {}),
                 "message": f"The job is running on Hermes{where}. Its result will arrive later as a message; "
                            "don't wait for it."}
+
+    def _chat_busy(self, chat: _WatchJob, job: _WatchJob) -> bool:
+        """Whether another request still runs in the call's chat. Called with
+        the lock held."""
+        return any(other is not job and (other.active or other.cancelling) and other.session_id == chat.session_id
+                   for other in self.jobs.values())
+
+    def _continue_session(self, job: "_WatchJob", instructions: str, chat: "_WatchJob") -> Dict[str, Any]:
+        """Sends the task as the next turn of the call's chat (#1250), once
+        nothing else runs there, as the phone sends a call's requests to its
+        chat; the start's answer."""
+        with self.changed:
+            while not self.ended and job.status == "starting" and self._chat_busy(chat, job):
+                self.changed.wait(WATCH_JOB_CHAT_WAIT_S)
+            ended, cancelled = self.ended, job.status == "cancelled"
+            if not ended and not cancelled:
+                job.session_id, job.stored_session_id = chat.session_id, chat.stored_session_id
+        if cancelled:
+            return {"ok": True, "status": "not_started", "title": job.title,
+                    "message": f"{job.title} was cancelled before it started."}
+        if ended:
+            with self.changed:
+                if job.active:
+                    job.status, job.error = "failed", "The call ended before Hermes took it"
+                self.changed.notify_all()
+            return {"ok": True, "status": "not_started", "title": job.title,
+                    "message": "The call ended before Hermes could take this request."}
+        try:
+            self.rpc("prompt.submit", {"session_id": job.session_id,
+                                       "text": WATCH_JOB_NEXT_PROMPT.format(instructions=instructions)})
+        except Exception as exc:  # noqa: BLE001 — the request didn't go; the model is told
+            with self.changed:
+                if job.active:
+                    job.status = "failed"
+                    job.error = str(exc)[:300] if isinstance(exc, WatchJobError) else type(exc).__name__
+                self.changed.notify_all()
+            if not isinstance(exc, WatchJobError):
+                _log_watch_failure("Continuing a Watch call's chat failed", exc)
+            # The chat stays open: it is the call's, and its earlier jobs'.
+            return {"ok": True, "status": "not_started", "title": job.title,
+                    "message": f"Hermes couldn't take the request: {job.error}"}
+        with self.changed:
+            if job.status == "starting":
+                job.status = "running"
+            cancelled = job.status == "cancelled"
+            self.changed.notify_all()
+        if cancelled:
+            return {"ok": True, "status": "not_started", "title": job.title,
+                    "message": f"{job.title} was cancelled before it started."}
+        return {"ok": True, "status": "started", "job_id": job.job_id, "title": job.title,
+                "session_id": job.stored_session_id or job.session_id,
+                "message": "Hermes is working on this in the call's chat, after the earlier requests there. "
+                           "Its result will arrive later as a message; don't wait for it."}
 
     def list(self) -> Dict[str, Any]:
         """Mirrors the phone's list_jobs answer (GeminiLiveToolBridge.listResult)."""
@@ -11481,6 +11559,12 @@ class _WatchJobs:
         with self.lock:
             if job.closed or not job.session_id:
                 return
+            # The call's chat closes once the last request in it is done.
+            sharing = [other for other in self.jobs.values() if other.session_id == job.session_id]
+            if any(other.active or other.cancelling for other in sharing if other is not job):
+                return
+            for other in sharing:
+                other.closed = True
             job.closed = True
         record = self.server._sessions.get(job.session_id)
         if isinstance(record, dict) and record.get("transport") is self.transport:

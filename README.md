@@ -2316,6 +2316,17 @@ seals the answers back. This host opens no inbound route of its own.
   about, listing and cancelling them past a renewal, and the job limit
   counts per call. A renewal that leaves out `max_jobs`, `job_options` or
   `job_profiles` keeps the call's.
+- **The call's chat** (plugin 0.78): a `start_job` with `joins_call: true`
+  is ordinary work, not asked for in the background, in a separate chat or
+  quickly, and not for another profile (the Watch decides, as the phone's
+  calls do). The call's first such job that starts makes its chat. Each later
+  one is still a job of its own, with its own id and news, but runs as that
+  chat's next turn, once nothing else runs there, so Hermes keeps the
+  earlier requests. A request waiting its turn is answered `accepted` after
+  18 s, can be cancelled without touching the running one, and is answered
+  `not_started` if the call ends first. The chat closes after its last
+  request settles once the call has ended. Without `joins_call`, or from an
+  older Watch app, each job gets a chat of its own, as before.
 - **Jobs on another profile** (plugin 0.11): `job_profiles` lists the user's
   other profiles (at most 32 names) a call's jobs may run on, as the phone's
   "for Fam, …" jobs do. A `start_job` with `profile` naming one of them runs

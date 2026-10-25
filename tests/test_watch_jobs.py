@@ -1738,3 +1738,109 @@ def test_a_chattering_session_still_settles_a_held_end_in_the_end(monkeypatch):
 def test_ids_with_a_trailing_newline_are_refused(pattern, valid):
     assert getattr(api, pattern).match(valid)
     assert getattr(api, pattern).match(valid + "\n") is None
+
+
+# --- The call's chat (#1250) ---------------------------------------------------
+
+def start_joining(grant, instructions):
+    return api.run_watch_job_call(grant, "start_job", {"instructions": instructions, "joins_call": True})
+
+
+def test_a_calls_later_ordinary_requests_run_in_the_chat_its_first_one_made():
+    grant = make_jobs()
+    server = grant.jobs.server
+    first = start_joining(grant, "plan the trip to Lisbon")
+    assert first["status"] == "started" and first["session_id"] == "st-1"
+    server.emit("rt-1", "message.complete", {"text": "Here's the plan", "status": "complete"})
+
+    second = start_joining(grant, "and book the hotel")
+    assert second["status"] == "started"
+    assert second["session_id"] == "st-1"
+    assert second["message"].startswith("Hermes is working on this in the call's chat")
+    assert len(server.methods("session.create")) == 1, "no second chat"
+    prompts = server.methods("prompt.submit")
+    assert [p["session_id"] for p in prompts] == ["rt-1", "rt-1"]
+    assert prompts[1]["text"].endswith("\n\nand book the hotel")
+    assert prompts[1]["text"].startswith("[The next request from the same Conduit voice conversation.")
+
+    # The chat's frames are the running request's, not the settled first one's.
+    server.emit("rt-1", "message.complete", {"text": "Booked", "status": "complete"})
+    items = {item["title"]: item for item in news(grant)["news"]}
+    assert items["plan the trip to Lisbon"]["status"] == "finished"
+    assert items["and book the hotel"]["status"] == "finished"
+    assert grant.jobs.jobs["watch-1"].result == "Here's the plan"
+    assert grant.jobs.jobs["watch-2"].result == "Booked"
+
+
+def test_a_request_for_the_calls_chat_waits_while_the_first_one_runs():
+    grant = make_jobs()
+    server = grant.jobs.server
+    start_joining(grant, "plan the trip")
+    answers = []
+    worker = threading.Thread(target=lambda: answers.append(start_joining(grant, "and book the hotel")))
+    original = api.WATCH_JOB_START_ANSWER_S
+    api.WATCH_JOB_START_ANSWER_S = 0.2
+    try:
+        worker.start()
+        worker.join(1)
+    finally:
+        api.WATCH_JOB_START_ANSWER_S = original
+    assert answers[0]["status"] == "accepted", "answered while it waits its turn"
+    assert len(server.methods("prompt.submit")) == 1, "nothing goes in while the first request runs"
+
+    server.emit("rt-1", "message.complete", {"text": "Plan", "status": "complete"})
+    for _ in range(100):
+        if len(server.methods("prompt.submit")) == 2:
+            break
+        time.sleep(0.01)
+    assert [p["session_id"] for p in server.methods("prompt.submit")] == ["rt-1", "rt-1"]
+
+
+def test_work_kept_apart_gets_a_chat_of_its_own():
+    grant = make_jobs()
+    grant.jobs.profiles = ("Fam",)
+    server = grant.jobs.server
+    # Not joining: background, quick, or a plugin before the Watch said so.
+    assert start(grant, "research flights")["session_id"] == "st-1"
+    assert start_joining(grant, "plan the trip")["session_id"] == "st-2"
+    assert api.run_watch_job_call(grant, "start_job", {"instructions": "check the lights", "profile": "Fam",
+                                                       "joins_call": True})["session_id"] == "st-3"
+    assert len(server.methods("session.create")) == 3
+    # The first joining one is the call's chat.
+    server.emit("rt-2", "message.complete", {"text": "Plan", "status": "complete"})
+    assert start_joining(grant, "and book the hotel")["session_id"] == "st-2"
+
+
+def test_the_calls_chat_closes_after_its_last_request():
+    grant = make_jobs()
+    server = grant.jobs.server
+    start_joining(grant, "plan the trip")
+    server.emit("rt-1", "message.complete", {"text": "Plan", "status": "complete"})
+    start_joining(grant, "and book the hotel")
+    grant.jobs.end()
+    time.sleep(0.05)
+    assert server.methods("session.close") == [], "the second request still runs there"
+    server.emit("rt-1", "message.complete", {"text": "Booked", "status": "complete"})
+    for _ in range(100):
+        if server.methods("session.close"):
+            break
+        time.sleep(0.01)
+    assert server.methods("session.close") == [{"session_id": "rt-1"}]
+
+
+def test_a_request_waiting_for_the_calls_chat_can_be_cancelled():
+    grant = make_jobs()
+    server = grant.jobs.server
+    start_joining(grant, "plan the trip")
+    original = api.WATCH_JOB_START_ANSWER_S
+    api.WATCH_JOB_START_ANSWER_S = 0.1
+    try:
+        assert start_joining(grant, "and book the hotel")["status"] == "accepted"
+    finally:
+        api.WATCH_JOB_START_ANSWER_S = original
+    cancelled = api.run_watch_job_call(grant, "cancel_job", {"job_id": "watch-2"})
+    assert "cancel" in cancelled["message"].lower()
+    server.emit("rt-1", "message.complete", {"text": "Plan", "status": "complete"})
+    time.sleep(0.1)
+    assert len(server.methods("prompt.submit")) == 1, "the cancelled request never goes in"
+    assert server.methods("session.interrupt") == []
