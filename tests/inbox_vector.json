@@ -1,0 +1,19 @@
+{
+  "host_private": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+  "host_public": "j0DFrbaPJWJK5bIU6nZ6bslNgp09e14a0bpvPiE4KF8",
+  "device_private": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8",
+  "device_public": "NYBy1jZYgNGu6jKa35EhODhR7SGijjt16WXQ0s0WYlQ",
+  "device_id": "device-vector-1",
+  "batch_id": "batch-vector-1",
+  "kid": "75c510988e6efbb936358b0888484b4e",
+  "key": "d888cf89cbd1b02260accf0953290c544cfb884a67467208a6748b5d9952f97b",
+  "aad": "conduit-inbox/1\ningest\nkid=75c510988e6efbb936358b0888484b4e\ndev=device-vector-1\nbatch=batch-vector-1",
+  "nonce": "AAAAAAAAAAAAAAAA",
+  "plaintext": "{\"batch_id\":\"batch-vector-1\"}",
+  "ct": "WYzqHIN89Jlkn_pcNRgJchZ31aO3JaXbL_e5-an_ib5yvEdsOnUjoPqgYL_7",
+  "request_id": "request-vector-1",
+  "answer_key": "00da256af8fb67ae658b3c495436a9f103a02ca41933f1f305c5de3e5f875257",
+  "list_aad": "conduit-inbox/1\nlist\nkid=75c510988e6efbb936358b0888484b4e\ndev=device-vector-1\nreq=request-vector-1",
+  "answer_plaintext": "{\"request_id\":\"request-vector-1\",\"events\":[{\"id\":\"evt-1\",\"kind\":\"email\",\"at\":\"2026-10-14T09:15:00-04:00\",\"title\":\"Your order shipped\"}],\"next\":null}",
+  "answer_ct": "d6j8jwhtiMNt38XcZlCYKzaftuH2vl5PDqphYvyfIBQobShtnWSM9CkbN_cPwBloKxK2oUB7zEfb2vrpzd78_NwfX_Pwn7H6invv-8Jk-cbOiAU796IQqwu7eCdqYj36rrvN2aHvEji0MQaaXTbJQDs-hwleqlc3bJuWlxcAi1pwG2mo3a01fwrvb9WMVp_by1h-qKZ4Ydmn5JV_Wk6pptHKZsM"
+}

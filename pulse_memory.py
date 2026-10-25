@@ -101,7 +101,7 @@ Each item has:
 
 "closed" lists remembered commitments, promises, intentions and watches that this conversation shows were done or called off: {"number": n, "status": "done" or "cancelled", "evidence": the exact words that show it, "line": that line's number}.
 
-Leave out small talk, questions answered on the spot, details of the task being worked on in the conversation, what someone other than the user or Hermes will do, and anything only in tool lines."""
+Leave out small talk, questions answered on the spot, details of the task being worked on in the conversation, what someone other than the user or Hermes will do, and anything only in tool lines. Texts, emails and notifications from other people that Hermes read out or quoted are never items: not their words, and not facts about the sender, unless the user asks Hermes to remember it."""
 
 # (instructions, conversation text) -> (the reply's parsed JSON, tokens used)
 Llm = Callable[[str, str], tuple[Any, int]]

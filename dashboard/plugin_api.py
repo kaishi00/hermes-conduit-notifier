@@ -8351,6 +8351,188 @@ async def post_location_ingest(request: Request, response: Response,
     return await _location_route(response, profile, lambda: _location_ingest(body), "upload")
 
 
+# --- Shortcuts inbox ---------------------------------------------------------
+#
+# The user's iPhone Shortcuts automations (a notification from an app they
+# pick, a message, an email, a Wallet payment, an NFC tag, a sound) end in
+# Conduit's Log to Hermes action, which posts each run here as a sealed event
+# (/inbox/ingest) after agreeing a key once (/inbox/key), straight over the
+# dashboard connection, never through the push relay. No chat turn and no
+# push: the conduit_inbox tool reads them (inbox_store.py,
+# conduit-inbox.sqlite3), and Pulse, when it's on, reads them in its report
+# and checks the user's watches when new ones arrive. Status reports counts
+# only. Conduit's Settings page reads a device's own events back sealed for
+# it (/inbox/list), deletes the ones the user picks (/inbox/delete), and
+# wipe deletes a device's or everything.
+
+INBOX_KEY_LIMIT = 10
+INBOX_KEY_WINDOW_S = 60.0
+INBOX_WIPE_LIMIT = 5
+INBOX_WIPE_WINDOW_S = 60.0
+# A burst of notifications can each run an automation.
+INBOX_INGEST_LIMIT = 120
+INBOX_INGEST_WINDOW_S = 60.0
+INBOX_MAX_KEY_BODY_BYTES = 4 * 1024
+# The largest batch the store keeps whole: inbox_store.MAX_EVENTS_PER_BATCH
+# events whose fields are at their MAX_*_CHARS (source 120, title 200, text
+# 4000, amount 40, trigger 40; Conduit cuts to these), at up to 4 UTF-8
+# bytes a character plus id and JSON, sealed and base64url. Kept in step
+# with inbox_store by tests/test_inbox.py. The store still cuts a longer
+# field rather than refuse it, but a batch of such fields from a client
+# that doesn't cut may be refused here (413) instead.
+INBOX_MAX_INGEST_BODY_BYTES = (50 * (4 * (120 + 200 + 4000 + 40 + 40) + 512)) * 4 // 3 + 4096
+# inbox_store.MAX_DELETE ids of MAX_EVENT_ID_CHARS, each quoted with a
+# comma, plus the device id, kid and JSON around them (the same test).
+INBOX_MAX_DELETE_BODY_BYTES = 100 * (80 + 3) + 1024
+
+_inbox_key_limiter = _MintLimiter(INBOX_KEY_LIMIT, INBOX_KEY_WINDOW_S,
+                                  message="Too many inbox key requests; try again shortly")
+_inbox_ingest_limiter = _MintLimiter(INBOX_INGEST_LIMIT, INBOX_INGEST_WINDOW_S,
+                                     message="Too many inbox events; try again shortly")
+_inbox_wipe_limiter = _MintLimiter(INBOX_WIPE_LIMIT, INBOX_WIPE_WINDOW_S,
+                                   message="Too many inbox delete requests; try again shortly")
+INBOX_LIST_LIMIT = 60
+INBOX_LIST_WINDOW_S = 60.0
+_inbox_list_limiter = _MintLimiter(INBOX_LIST_LIMIT, INBOX_LIST_WINDOW_S,
+                                   message="Too many inbox requests; try again shortly")
+INBOX_DELETE_LIMIT = 30
+INBOX_DELETE_WINDOW_S = 60.0
+_inbox_delete_limiter = _MintLimiter(INBOX_DELETE_LIMIT, INBOX_DELETE_WINDOW_S,
+                                     message="Too many inbox delete requests; try again shortly")
+_inbox_store_module: Any = None
+
+
+def _inbox_store() -> Any:
+    """inbox_store.py beside this folder, loaded once."""
+    global _inbox_store_module
+    if _inbox_store_module is None:
+        _inbox_store_module = _plugin_package_module("inbox_store")
+    return _inbox_store_module
+
+
+def _inbox_call(fn: Callable[[Any], Dict[str, Any]]) -> Dict[str, Any]:
+    module = _inbox_store()
+    try:
+        return fn(module.InboxStore(_calls_home()))
+    except module.InboxError as exc:
+        raise TokenError(exc.status, str(exc), exc.code)
+    except sqlite3.DatabaseError:
+        logger.warning("conduit_push: inbox store unreadable", exc_info=True)
+        raise TokenError(503, "The inbox on this host can't be read")
+
+
+async def _inbox_route(response: Response, profile: Optional[str], fn: Callable[[], Dict[str, Any]],
+                       name: str) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return {"ok": True, **(await _run_scoped(profile, fn))}
+    except TokenError as exc:
+        return _store_refusal(exc)
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
+        raise
+    except Exception as exc:
+        raise _unexpected(name, exc, feature="Shortcuts inbox")
+
+
+@router.get("/inbox/status")
+async def get_inbox_status(response: Response, profile: Optional[str] = None,
+                           device_id: Optional[str] = None) -> Dict[str, Any]:
+    return await _inbox_route(response, profile, lambda: _inbox_call(lambda store: {
+        **store.status(device_id), "crypto": _inbox_store().crypto_available()}), "status")
+
+
+@router.post("/inbox/key")
+async def post_inbox_key(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    await _scoped_acquire(_inbox_key_limiter, profile)
+    body = await _read_json_body(request, INBOX_MAX_KEY_BODY_BYTES)
+    return await _inbox_route(response, profile, lambda: _inbox_call(lambda store: store.register_key(body)), "key")
+
+
+@router.post("/inbox/ingest")
+async def post_inbox_ingest(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    await _scoped_acquire(_inbox_ingest_limiter, profile)
+    body = await _read_json_body(request, INBOX_MAX_INGEST_BODY_BYTES)
+    return await _inbox_route(response, profile, lambda: _inbox_ingest(body), "upload")
+
+
+def _inbox_ingest(body: Any) -> Dict[str, Any]:
+    result = _inbox_call(lambda store: store.ingest(body))
+    if result.get("stored"):
+        _inbox_tell_pulse()
+    return result
+
+
+def _inbox_tell_pulse() -> None:
+    """New events in: Pulse checks the user's open watches against them
+    (pulse_followup.inbox_arrived). Only where Pulse runs, on this home;
+    the events are stored whatever happens here."""
+    try:
+        pulse_store = _plugin_package_module("pulse_store")
+        followup = _plugin_package_module("pulse_followup")
+        home = Path(_calls_home())
+        if not (home / pulse_store.DB_NAME).exists():
+            return  # Pulse never turned on: leave no file behind
+        if followup.inbox_arrived(pulse_store.open_store(home), time.time()):
+            _wake_running_pulse()
+    except Exception:  # noqa: BLE001 — logging an event never fails on Pulse
+        logger.warning("conduit_push: inbox couldn't tell Pulse about new events", exc_info=True)
+
+
+def _wake_running_pulse() -> int:
+    """Wakes the Pulse loop running in this process: the copy Hermes loaded
+    with the plugin (pulse.register started its thread), not an import of
+    the dashboard's own, whose wake event no loop waits on. A loop in
+    another process finds the marker inbox_arrived left on its next tick
+    (pulse.TICK_S). How many loops it woke."""
+    woken = 0
+    for name, module in list(sys.modules.items()):
+        if module is None or name.rsplit(".", 1)[-1] != "pulse":
+            continue
+        thread, wake = getattr(module, "_thread", None), getattr(module, "wake", None)
+        if callable(wake) and isinstance(thread, threading.Thread) and thread.is_alive():
+            wake()
+            woken += 1
+    return woken
+
+
+@router.post("/inbox/list")
+async def post_inbox_list(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    await _scoped_acquire(_inbox_list_limiter, profile)
+    body = await _read_json_body(request, INBOX_MAX_KEY_BODY_BYTES)
+    return await _inbox_route(response, profile, lambda: _inbox_call(lambda store: store.list_sealed(body)), "list")
+
+
+@router.post("/inbox/delete")
+async def post_inbox_delete(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    await _scoped_acquire(_inbox_delete_limiter, profile)
+    body = await _read_json_body(request, INBOX_MAX_DELETE_BODY_BYTES)
+    return await _inbox_route(response, profile, lambda: _inbox_call(lambda store: store.delete_events(body)),
+                              "delete")
+
+
+@router.post("/inbox/wipe")
+async def post_inbox_wipe(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    await _scoped_acquire(_inbox_wipe_limiter, profile)
+    body = await _read_json_body(request, INBOX_MAX_KEY_BODY_BYTES)
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Expected a JSON object", headers={"Cache-Control": "no-store"})
+    # Everything only when asked for by name; a device id alone deletes that device's events.
+    if body.get("all") is True and body.get("device_id") is not None:
+        raise HTTPException(status_code=400, detail="Name a device_id or all: true, not both",
+                            headers={"Cache-Control": "no-store"})
+    device_id = None if body.get("all") is True else body.get("device_id")
+    if device_id is None and body.get("all") is not True:
+        raise HTTPException(status_code=400, detail="Name a device_id, or all: true",
+                            headers={"Cache-Control": "no-store"})
+    return await _inbox_route(response, profile, lambda: _inbox_call(lambda store: store.wipe(device_id)), "delete")
+
+
 # A maps lookup the agent asked the phone for (conduit_maps): the phone,
 # woken by a location push, fetches the lookup sealed for it alone and posts
 # its Apple Maps answer sealed back. Neither passes through the relay.
@@ -15255,6 +15437,8 @@ ROUTE_CAPABILITIES = (
     # sharing.other_profiles: the host's other profiles paired with the
     # same iPhone read the location (location_profiles).
     "location-profiles",
+    # /inbox: events the user's Shortcuts automations log (Log to Hermes).
+    "shortcut-inbox",
     "pairing",
     "self-restart",
     # POST /self/update runs the whole update on the host and notifies.

@@ -2,8 +2,8 @@
 
 A few times a day Pulse gathers what Hermes can already see (what Pulse
 memory kept, chats since the last report that memory hasn't read, the
-phone's calendar and reminders, Hermes's memory files, and tool calls that
-failed) and sends it into the home chat as one hidden turn. The home chat's
+phone's calendar and reminders, what the phone's Shortcuts automations
+logged, Hermes's memory files, and tool calls that failed) and sends it into the home chat as one hidden turn. The home chat's
 own model answers with a few numbered items, or nothing. Each item becomes
 its own card on the Pulse screen (pulse_learning.add_noticed_cards).
 
@@ -68,6 +68,10 @@ MAX_EVENTS = 25
 MAX_REMINDERS = 25
 MAX_FAILURES = 10
 MAX_JOBS = 25
+# What the phone's Shortcuts automations logged (inbox_store), newest first.
+INBOX_BUDGET = 2_000
+INBOX_PER_EVENT = 200
+MAX_INBOX = 30
 
 # The report's bar for an item, by how much the user wants Pulse to nudge
 # (pulse_learning.NUDGES).
@@ -254,6 +258,39 @@ def phone_context(home: Path, now: float) -> tuple[str, Optional[str]]:
     except Exception as error:  # noqa: BLE001 — the report goes out without the phone
         parts.append(f"## Phone\nCouldn't read the phone sync ({type(error).__name__}).")
     return "\n\n".join(parts), zone_name
+
+
+def inbox_context(home: Path, since: float, *, title: str = "", query: Optional[str] = None,
+                  budget: int = INBOX_BUDGET) -> str:
+    """What the phone's Shortcuts automations logged since ``since``
+    (a notification, a message, an email, a payment...), newest first, in at
+    most ``budget`` characters. Empty when nothing was logged. Other
+    people's words: the report's fence already marks them as data."""
+    try:
+        from .inbox_store import InboxStore
+    except Exception:  # noqa: BLE001 — no inbox in this build
+        return ""
+    inbox = InboxStore(home)
+    if not inbox.exists():
+        return ""
+    try:
+        events, more = inbox.events(since=since, query=query, limit=MAX_INBOX)
+    except Exception as error:  # noqa: BLE001 — the report goes out without it
+        return f"## Logged on the phone\nCouldn't read the inbox ({type(error).__name__})."
+    if not events:
+        return ""
+    heading = title or "## Logged on the phone by Shortcuts automations (newest first)"
+    lines, size = [], len(heading)
+    for event in events:
+        parts = [event.get("source"), event.get("title"), event.get("text"), event.get("amount")]
+        what = _clip(" · ".join(str(part) for part in parts if part), INBOX_PER_EVENT)
+        line = f"- [{event.get('at', '')}] {event['kind']}: {what}"
+        if size + len(line) + 1 > budget:
+            more = True
+            break
+        lines.append(line)
+        size += len(line) + 1
+    return heading + "\n" + "\n".join(lines) + ("\n(and more)" if more else "")
 
 
 def _ago(epoch: Any, now: float) -> str:
@@ -551,7 +588,8 @@ def gather(home: Path, pulse_store: store.PulseStore, *, home_chat_id: str, now:
         items, resting = remembered_items(pulse_store, now)
         listed, shown = remembered_lines(items, zone)
     later = later_lines(home, shown, home_chat_id=home_chat_id, zone=zone) if shown else ""
-    sections = [header, ratings_section(pulse_store), listed, later, extra, phone, evidence.background(home, zone),
+    sections = [header, ratings_section(pulse_store), listed, later, extra, phone, inbox_context(home, since),
+                evidence.background(home, zone),
                 cron_jobs(home, others), failed_calls(pulse_store, since, zone), memory_files(home, others)]
     sections = [section for section in sections if section]
     # With memory on, chats it has already read show only as what it kept from them

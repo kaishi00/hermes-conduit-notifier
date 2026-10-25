@@ -830,3 +830,104 @@ def test_a_check_without_a_background_checkpoint_says_nothing_of_it(live):
     llm = llm_saying(decision="wait")
     check_now(live, llm, now=time.time() + followup.FIRST_CHECK_S + 1)
     assert "Running in the background" not in llm.calls[0]
+
+
+inbox_store = _load("conduit_push.inbox_store", ROOT / "inbox_store.py")
+
+
+def watch(live, text="Tell the user when the bank confirms the transfer to Marc.", *, said_at=None,
+          words="Let me know when the bank confirms the transfer to Marc"):
+    said_at = time.time() - 3600 if said_at is None else said_at
+    message_id = live.db.message("user", words, sid=CHAT, at=said_at)
+    mark = live.store.watermark("", CHAT)
+    [item_id] = live.store.advance("", CHAT, message_id=message_id, at=said_at,
+                                   after_id=mark["message_id"] if mark else 0, items=[{
+        "kind": "watch", "text": text, "evidence": words, "explicit": 1,
+        "due": "", "due_at": None, "message_id": message_id, "mentioned_at": said_at}])
+    return item_id
+
+
+def logged(home, *events):
+    """Events the phone's Shortcuts automations logged, as inbox_store keeps them."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
+
+    inbox = inbox_store.InboxStore(home)
+    private = X25519PrivateKey.generate()
+    public = private.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    answer = inbox.register_key({"device_id": "phone-installation-1", "public_key": inbox_store.b64u(public)})
+    host_public = inbox_store.unb64u(answer["host_public_key"])
+    key = inbox_store.derive_key(private.exchange(X25519PublicKey.from_public_bytes(host_public)),
+                                 "phone-installation-1", public, host_public)
+    batch = {"batch_id": "batch-0001", "device": {"name": "iPhone", "time_zone": "UTC"}, "events": list(events)}
+    nonce, ct = inbox_store.seal(key, json.dumps(batch).encode(),
+                                 inbox_store.ingest_aad(answer["kid"], "phone-installation-1", "batch-0001"))
+    return inbox.ingest({"v": 1, "device_id": "phone-installation-1", "kid": answer["kid"], "batch_id": "batch-0001",
+                         "nonce": nonce, "ct": ct})
+
+
+def _iso(epoch):
+    return datetime.fromtimestamp(epoch).astimezone().isoformat(timespec="seconds")
+
+
+def test_a_watch_is_checked_against_what_the_phone_logged_since(live):
+    item_id = watch(live)
+    logged(live.home,
+           {"id": "old", "kind": "notification", "at": _iso(time.time() - 7200), "source": "Desjardins",
+            "text": "Transfer to Paul sent"},
+           {"id": "new", "kind": "notification", "at": _iso(time.time() - 60), "source": "Desjardins",
+            "title": "Interac", "text": "Your transfer to Marc was deposited"})
+    llm = llm_saying(decision="tell", news="Desjardins says your transfer to Marc was deposited.", why="the bank said so")
+    check_now(live, llm, now=time.time() + followup.FIRST_CHECK_S + 1)
+    [text] = llm.calls
+    assert "What the user asked to be told: Tell the user when the bank confirms" in text
+    assert "Your transfer to Marc was deposited" in text and "Transfer to Paul" not in text  # only since it was asked
+    assert "other people's words" in text
+    [row] = live.store.followups()
+    assert row["item_id"] == item_id and row["decision"] == "tell"
+
+
+def test_a_watch_follow_up_says_what_the_user_asked_for(live):
+    item_id = watch(live)
+    item = live.store.item(item_id)
+    text = followup.text_for(item, {"news": "The bank confirmed it."}, title="Money", zone=pulse.report.zone_for("UTC"))
+    assert text("t1").startswith("Pulse watch t1.\nIn the chat \"Money\"")
+    assert "the user asked to be told: \"Let me know when the bank confirms" in text("t1")
+
+
+def test_new_inbox_events_bring_open_watches_forward(live):
+    live.store.set("followups", True)
+    live.store.set("memory", True)
+    now = time.time()
+    assert not followup.inbox_arrived(live.store, now)  # no open watch: nothing to do
+    watch(live, said_at=now - 60)
+    promised = promise(live, said_at=now - 60)
+    followup.schedule(live.store, now)
+    assert followup.inbox_arrived(live.store, now) and live.store.get("memory_requested") is True
+    live.store.set("memory_requested", False)
+    assert not followup.inbox_arrived(live.store, now + 60)  # within ARRIVAL_EVERY_S: rides the next run
+    assert live.store.get("memory_requested") is False and live.store.get(followup.INBOX_ARRIVED) == now + 60
+    followup.check_watches_now(live.store, now + 60)
+    rows = {row["item_id"]: row for row in live.store.followups()}
+    assert rows[promised]["next_check_at"] > now + 60  # a promise keeps its schedule
+    assert [row["next_check_at"] for item, row in rows.items() if item != promised] == [now + 60]
+    assert live.store.get(followup.INBOX_ARRIVED) is None
+
+
+def test_a_watch_asks_if_still_wanted_after_a_month_not_a_week(live):
+    now = time.time()
+    watch(live, said_at=now - 10 * 86400)
+    llm = llm_saying(decision="wait", why="nothing yet")
+    check_now(live, llm, now=now + followup.FIRST_CHECK_S + 1)
+    assert live.store.followups()[0]["decision"] == "wait"
+    check_now(live, llm, now=now + 21 * 86400)
+    row = live.store.followups()[0]
+    assert row["decision"] == "tell" and "a month" in row["why"]
+
+
+def test_the_report_lists_what_the_phone_logged(live):
+    logged(live.home, {"id": "e1", "kind": "email", "at": _iso(time.time() - 600), "source": "Air Canada",
+                       "title": "Your flight AC 870 is delayed", "amount": None})
+    gathered = pulse.report.gather(live.home, live.store, home_chat_id=SID, now=time.time())
+    assert "## Logged on the phone by Shortcuts automations" in gathered.text
+    assert "email: Air Canada · Your flight AC 870 is delayed" in gathered.text

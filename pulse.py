@@ -165,6 +165,11 @@ def stop(timeout: float = 1.0) -> None:
         thread.join(timeout)
 
 
+def wake() -> None:
+    """Runs the next tick now instead of after TICK_S (new inbox events)."""
+    _wake.set()
+
+
 def open_store(home: Optional[Path] = None) -> store.PulseStore:
     return store.open_store(home or get_hermes_home())
 
@@ -771,6 +776,7 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
                 pulse_store.expire_items(due_before=now - memory.EXPIRE_S, now=now)
                 followup.schedule(pulse_store, now)
                 followup.check_all_now(pulse_store, now)
+                followup.check_watches_now(pulse_store, now)
                 try:
                     followup.run(pulse_store, home, lambda instructions, text: _memory_llm(
                                      instructions, text, purpose="pulse follow-up"), zone=zone, now=now,

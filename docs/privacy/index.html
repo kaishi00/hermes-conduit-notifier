@@ -103,6 +103,18 @@
       <li>You can turn sharing off at any time and delete the copy on your gateway from Conduit's Calendar &amp; phone settings.</li>
     </ul>
 
+    <h2>Optional events from Shortcuts automations</h2>
+    <p>Conduit's Log to Hermes action lets a Shortcuts automation you set up send an event to your Hermes gateway, so your agent can look it up later: for example a notification from an app you pick, a message, an email, a Wallet payment, an NFC tag or a sound the phone hears. Nothing is sent until you add the action to an automation, and an event carries only what that automation passes to it (who it's from, a title, details, an amount and what triggered it). Because these can be other people's notifications, messages and emails, they may contain other people's words.</p>
+    <ul>
+      <li>Events go from your device directly to the Hermes gateway you configured, over your dashboard connection, encrypted end to end with a key your device and your gateway agree on. They never pass through the Conduit notification relay or any server operated by Conduit, and Conduit's developer never receives them.</li>
+      <li>Anything that looks like a sign-in code or sign-in link is dropped, on your device and again on your gateway.</li>
+      <li>When your gateway can't be reached, events wait on your device for the next run or until Conduit connects, in a file excluded from backups.</li>
+      <li>Your gateway keeps each event for 30 days and at most 5,000 per device, oldest out first.</li>
+      <li>Your agent and, if you use it, Pulse can read these events when they answer you or check on something you asked to be told about, which means they are sent to the AI model provider your Hermes agent uses (and, for a hosted agent, to its host). Their privacy terms apply to what they receive.</li>
+      <li>Events are not used for advertising, marketing or data mining and are not sold.</li>
+      <li>You can see and delete what your device logged, one event or everything, from Conduit's Settings &gt; Shortcuts inbox, and stop logging by removing the action from your automations.</li>
+    </ul>
+
     <h2>Other connections</h2>
     <ul>
       <li>To tell you when a Conduit plugin update is available, Conduit reads the plugin's public version file from GitHub (<code>raw.githubusercontent.com</code>) at most once an hour.</li>

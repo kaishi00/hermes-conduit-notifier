@@ -77,6 +77,7 @@ def test_every_capability_names_a_served_route_family():
         "pulse_dismiss": "/pulse/dismiss",
         "present-v1": "/present/",
         "health-sync": "/health/",
+        "shortcut-inbox": "/inbox/",
         "voice-tools": "/voice-tools",
         "location-sync": "/location/",
         # A fresh lookup is the location status route's `locate` answer.

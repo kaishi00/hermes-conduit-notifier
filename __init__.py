@@ -14,8 +14,8 @@ from typing import Any
 from hermes_constants import get_hermes_home
 
 from . import (call_tool, call_watches, calls, chat_on_screen, clarify_loop, client, conduit_first, cron_runs,
-               desktop_selected, health_tool, live_activity, location_tool, maps_tool, phone_tool, present_tool, pulse,
-               reply_sources, room_memory, settings_tool, show_tool, turn_surface, voice_archive)
+               desktop_selected, health_tool, inbox_tool, live_activity, location_tool, maps_tool, phone_tool,
+               present_tool, pulse, reply_sources, room_memory, settings_tool, show_tool, turn_surface, voice_archive)
 from .session_titles import title as _session_title, titled as _titled
 from .client import enqueue
 from .events import approval_decision, clarification_text, event_id, is_silent_response, plain_text, push_event
@@ -100,6 +100,9 @@ def register(ctx: Any) -> None:
     # Health data Conduit shares from Apple Health, read-only, with its skill.
     health_tool.register(ctx, is_child=_is_child,
                          skill_path=Path(__file__).resolve().parent / "skills" / health_tool.SKILL_NAME / "SKILL.md")
+    # What the user's Shortcuts automations logged through Conduit's Log to
+    # Hermes action (notifications, messages, emails, payments...), read-only.
+    inbox_tool.register(ctx, is_child=_is_child)
     # Where the user is, as Conduit shares it, with place rules and its skill.
     location_tool.register(ctx, is_child=_is_child, profile=lambda: _profile,
                            skill_path=Path(__file__).resolve().parent / "skills" / location_tool.SKILL_NAME / "SKILL.md")

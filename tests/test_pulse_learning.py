@@ -7,7 +7,7 @@ import time
 import pytest
 
 from test_pulse import ROOT, SID, _load, cli, control, pulse, store
-from test_pulse_followup import CHAT, check_now, followup, live, llm_saying, promise, tell  # noqa: F401
+from test_pulse_followup import CHAT, _iso, check_now, followup, live, llm_saying, logged, promise, tell  # noqa: F401
 
 learning = _load("conduit_push.pulse_learning", ROOT / "pulse_learning.py")
 
@@ -292,6 +292,27 @@ def test_the_brief_sums_up_what_is_open_and_what_happened_since(live):
     [text] = live.sent()
     assert "send the release notes" in text and "## Later on the same subject" in text
     assert "Sent the release notes" in text and pulse.brief.HELD_TITLE not in text
+
+
+def test_the_brief_reads_what_the_phone_logged_since_the_last_report_fenced(live):
+    logged(live.home,
+           {"id": "old", "kind": "notification", "at": _iso(time.time() - 3 * 86400), "source": "Desjardins",
+            "text": "Rent paid"},
+           {"id": "new", "kind": "notification", "at": _iso(time.time() - 3600), "source": "UPS",
+            "text": "Your parcel is out for delivery"})
+    brief_due_now(live)
+    pulse.tick()
+    [text] = live.sent()
+    assert "Your parcel is out for delivery" in text and "Rent paid" not in text  # since the last report only
+    assert "other people's words" in text
+    fence = text.split("<<<context ", 1)[1].split("\n", 1)[0]
+    assert text.rstrip().endswith(f"context {fence}>>>")
+
+
+def test_a_long_brief_is_cut_to_the_reports_budget(live, monkeypatch):
+    monkeypatch.setenv(pulse.report.LCM_THRESHOLD, "6000")
+    text = pulse.brief.text_for("x" * 20_000)("t1")
+    assert len(text) <= pulse.report.report_budget() and text.rstrip().endswith(">>>")
 
 
 def test_a_brief_turn_pushes(live):

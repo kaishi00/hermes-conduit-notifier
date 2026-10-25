@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.73.0 (2026-10-25)
+## 0.74.0 (2026-10-25)
 
 ### New and improved
 - Pulse's morning brief now comes every day at its time: one card that sums
@@ -21,6 +21,20 @@ checks it). The format is fixed, because Conduit reads it:
   news you asked to hold for the morning. Before, it only came when news had
   been held for it, so most mornings it never showed up.
 - `hermes conduit-push pulse status` shows the morning brief's time.
+
+## 0.73.0 (2026-10-25)
+
+### New and improved
+- Shortcuts automations can log to Hermes. End an automation (a notification
+  from an app you pick, a message, an email, a Wallet payment, an NFC tag, a
+  sound the phone hears) with Conduit's Log to Hermes action, and Hermes can
+  look it up later ("what did my bank send today?") without a reply or a
+  push each time. Sign-in codes are never kept, and events go after 30 days.
+- With Pulse on, its reports read what your automations logged, and when
+  you ask Hermes to tell you when something happens ("let me know when the
+  bank confirms the transfer"), Pulse checks as soon as a new event comes in.
+- Conduit's Settings can show what was logged from your iPhone and delete
+  any of it.
 
 ## 0.72.0 (2026-10-24)
 
