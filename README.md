@@ -1254,11 +1254,21 @@ lock, and Conduit's next send claims the chat.
 | POST | `/api/plugins/conduit_push/sessions/takeover` with `{session_ids: [..]}` | `{ok, status, surface?}` |
 
 - `status` is `taken_over` (send again), `free` (nobody else holds it),
-  `busy` (the other app is running a turn on it, or it's a live worker or
-  gateway whose turns can't be seen; ask again shortly, nothing
+  `busy` (the other app is running a turn on it, it's a live worker or
+  gateway whose turns can't be seen, or the gateway's ledger holds work on
+  it; ask again shortly, nothing
   is interrupted; a marker that can't be read counts as running, and only a marker whose writer is provably dead, or a gone owner's marker that names no writer, is ignored) or
   `same_host` (this dashboard process still holds it, for example Conduit on
   another device; that claim is left alone).
+- Hermes' gateway can also hold a chat with no claim at all: work it queued
+  in its durable ledger (`session_admissions` and `worker_executions` in the
+  profile's state.db), such as another bot's message (message_agent) running
+  in a bot's Bot Chat. Hermes refuses every other send to that chat until the
+  work ends, so the route answers `busy` without dropping anything, with
+  `surface` `bot` for another bot's message and `gateway` for other work.
+  Conduit says the bot is answering another bot and sends once it's done
+  (plugin 0.77.5+). A ledger that can't be read is skipped (logged as a
+  warning) and the claim rules apply.
 - The other app writes its turn marker without the registry lock, so a turn
   it starts in the instant between the check and the takeover still loses
   its claim. That turn keeps running there; nothing is interrupted.

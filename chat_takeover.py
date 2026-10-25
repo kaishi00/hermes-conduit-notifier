@@ -190,12 +190,12 @@ def gateway_queue_owner(home: Any, session_ids: list) -> Optional[str]:
             return None
         db = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=2.0)
     except (OSError, TypeError, sqlite3.Error) as exc:
-        logger.debug("Chat takeover: state.db unreadable: %s", exc)
+        logger.warning("Chat takeover: state.db unreadable, so the gateway ledger isn't checked: %s", exc)
         return None
     try:
         return _ledger_owner(db, ids)
     except sqlite3.Error as exc:
-        logger.debug("Chat takeover: gateway ledger unreadable: %s", exc)
+        logger.warning("Chat takeover: gateway ledger unreadable, so it isn't checked: %s", exc)
         return None
     finally:
         db.close()

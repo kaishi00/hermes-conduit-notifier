@@ -568,3 +568,26 @@ def test_an_unreadable_state_db_falls_through_to_the_claims(tmp_path):
     (tmp_path / "state.db").write_bytes(b"not a database" * 100)
     _seed(tmp_path, [_entry("chat")])
     assert _take(tmp_path, ["chat"])["status"] == "taken_over"
+
+
+def test_hermes_real_ledger_schema(tmp_path):
+    # The schema copy test_pulse keeps in sync with Hermes: the names and the
+    # settled word the probe reads are Hermes' own.
+    import sqlite3
+    db = sqlite3.connect(tmp_path / "state.db")
+    db.executescript((ROOT / "tests" / "hermes_state_schema.sql").read_text())
+    db.execute("INSERT INTO session_admissions (admission_id, request_id, principal_id, target_session_id,"
+               " lineage_json, payload_json, payload_digest, intent, status, owner_epoch, generation)"
+               " VALUES ('a1', 'bot:5bd4', 'automation:agent:nahida:local:dm:chat', 'chat', '[]', '{}', 'd',"
+               " 'queue', 'started', 39, 1)")
+    db.commit()
+    assert _take(tmp_path, ["chat"]) == {"status": "busy", "surface": "bot"}
+    db.execute("UPDATE session_admissions SET status = 'terminal'")
+    db.execute("INSERT INTO worker_executions (execution_id, session_id, kind, owner_epoch, generation, status,"
+               " adoption_digest) VALUES ('w1', 'chat', 'child', 39, 1, 'running', 'd')")
+    db.commit()
+    assert _take(tmp_path, ["chat"]) == {"status": "busy", "surface": "gateway"}
+    db.execute("UPDATE worker_executions SET status = 'terminal'")
+    db.commit()
+    db.close()
+    assert _take(tmp_path, ["chat"]) == {"status": "free"}
