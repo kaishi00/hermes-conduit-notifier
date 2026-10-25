@@ -34,22 +34,22 @@ in its next exchange.
 
 Every body is sealed end to end, on top of whatever TLS the dashboard has.
 Each device agrees its own key with this profile (``/phone/key``, X25519),
-then HKDF-SHA256 and ChaCha20-Poly1305 as in health_store.py, with this
+then HKDF-SHA256 and ChaCha20-Poly1305 (sealing.py, shared with health,
+location and the inbox), with this
 feature's own labels: one key for ingest and one per direction for the
 exchange. Wiping this feature never touches health or location.
 
 State lives in the profile's ``conduit-phone.sqlite3`` (owner-only). The
 dashboard routes (dashboard process) write it and the ``conduit_calendar`` /
 ``conduit_phone`` tools (agent process) read it and add changes: the
-dashboard loads this file by path, so it imports nothing from the plugin
-package.
+dashboard loads this file as a private package
+(``conduit_push_dashboard_pkg``), so it imports nothing from the plugin but
+sealing.py.
 """
 
 from __future__ import annotations
 
-import base64
 import contextlib
-import hashlib
 import json
 import logging
 import math
@@ -62,6 +62,8 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
+
+from . import sealing
 
 try:
     import fcntl
@@ -182,7 +184,6 @@ _ITEM_ID = re.compile(r"^[A-Za-z0-9:_-]{1,80}\Z")
 _BATCH_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}\Z")
 _CHANGE_ID = re.compile(r"^ch_[A-Za-z0-9_-]{8,64}\Z")
 _KID = re.compile(r"^[0-9a-f]{32}\Z")
-_B64URL = re.compile(r"^[A-Za-z0-9_-]*\Z")
 _DATE = re.compile(r"^\d{4}-\d{2}-\d{2}\Z")
 _CLOCK = re.compile(r"^([01]\d|2[0-3]):[0-5]\d\Z")
 # A birthday: YYYY-MM-DD, or --MM-DD when the year isn't known.
@@ -242,61 +243,32 @@ class PhoneError(ValueError):
 
 
 def b64u(value: bytes) -> str:
-    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+    return sealing.b64u(value)
 
 
 def unb64u(value: Any) -> bytes:
-    if not isinstance(value, str) or not _B64URL.match(value) or len(value) % 4 == 1:
-        raise PhoneError("malformed", "malformed base64url")
-    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+    return sealing.unb64u(value, PhoneError)
 
 
 def crypto_available() -> bool:
-    try:
-        from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey  # noqa: F401
-        from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305  # noqa: F401
-        from cryptography.hazmat.primitives.kdf.hkdf import HKDF  # noqa: F401
-    except Exception:
-        return False
-    return True
+    return sealing.crypto_available()
 
 
 def key_id(device_public: bytes, host_public: bytes) -> str:
-    return hashlib.sha256(KID_TAG + device_public + host_public).hexdigest()[:32]
+    return sealing.key_id(KID_TAG, device_public, host_public)
 
 
 def derive_key(shared: bytes, device_id: str, device_public: bytes, host_public: bytes,
                purpose: bytes = INFO_INGEST) -> bytes:
-    from cryptography.hazmat.primitives import hashes
-    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-
-    info = purpose + b"\n" + device_id.encode("ascii") + b"\n" + device_public + host_public
-    return HKDF(algorithm=hashes.SHA256(), length=KEY_BYTES, salt=SALT, info=info).derive(shared)
+    return sealing.derive_key(shared, SALT, purpose, device_id, device_public, host_public)
 
 
 def agree(host_private: bytes, device_public: bytes) -> bytes:
-    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
-
-    try:
-        shared = X25519PrivateKey.from_private_bytes(host_private).exchange(
-            X25519PublicKey.from_public_bytes(device_public))
-    except ValueError:  # OpenSSL refuses an all-zero result itself
-        shared = bytes(32)
-    if shared == bytes(32):
-        raise PhoneError("bad_key", "That public key can't be used")
-    return shared
+    return sealing.agree(host_private, device_public, PhoneError)
 
 
 def new_host_keypair() -> tuple[bytes, bytes]:
-    from cryptography.hazmat.primitives import serialization
-    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
-
-    private = X25519PrivateKey.generate()
-    raw = serialization.Encoding.Raw
-    return (
-        private.private_bytes(raw, serialization.PrivateFormat.Raw, serialization.NoEncryption()),
-        private.public_key().public_bytes(raw, serialization.PublicFormat.Raw),
-    )
+    return sealing.new_host_keypair()
 
 
 def ingest_aad(kid: str, device_id: str, batch_id: str) -> bytes:
@@ -312,27 +284,11 @@ def exchange_aad(direction: str, op: str, kid: str, device_id: str, call_id: str
 def seal(key: bytes, plaintext: bytes, aad: bytes, nonce: bytes | None = None) -> tuple[str, str]:
     """Seals one body; the host's side of an exchange answer, and the phone's
     side in tests."""
-    from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
-
-    nonce = nonce if nonce is not None else secrets.token_bytes(NONCE_BYTES)
-    return b64u(nonce), b64u(ChaCha20Poly1305(key).encrypt(nonce, plaintext, aad))
+    return sealing.seal(key, plaintext, aad, nonce)
 
 
 def open_sealed(key: bytes, nonce: Any, ciphertext: Any, aad: bytes) -> bytes:
-    from cryptography.exceptions import InvalidTag
-    from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
-
-    raw_nonce = unb64u(nonce)
-    if len(raw_nonce) != NONCE_BYTES:
-        raise PhoneError("malformed", "nonce must be 12 bytes")
-    raw_ciphertext = unb64u(ciphertext)
-    if len(raw_ciphertext) < 16:
-        raise PhoneError("malformed", "ct is shorter than its tag")
-    try:
-        return ChaCha20Poly1305(key).decrypt(raw_nonce, raw_ciphertext, aad)
-    except InvalidTag:
-        raise PhoneError("bad_seal", "The body didn't open with this device's key; set up calendar sharing again",
-                         status=409) from None
+    return sealing.open_sealed(key, nonce, ciphertext, aad, PhoneError, 'set up calendar sharing again')
 
 
 # --- Parsing helpers -------------------------------------------------------------

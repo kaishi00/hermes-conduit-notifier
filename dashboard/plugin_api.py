@@ -8335,18 +8335,12 @@ _location_store_module: Any = None
 
 
 def _location_store() -> Any:
-    """location_store.py beside this folder, loaded once."""
+    """location_store.py beside this folder, loaded once (with sealing.py, as
+    part of the private package)."""
     global _location_store_module
-    with _calls_store_lock:
-        if _location_store_module is None:
-            path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "location_store.py")
-            spec = importlib.util.spec_from_file_location("conduit_push_dashboard_location_store", path)
-            if spec is None or spec.loader is None:
-                raise TokenError(501, "This plugin install is missing location_store.py; update the plugin")
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            _location_store_module = module
-        return _location_store_module
+    if _location_store_module is None:
+        _location_store_module = _plugin_package_module("location_store")
+    return _location_store_module
 
 
 def _location_call(fn: Callable[[Any], Dict[str, Any]]) -> Dict[str, Any]:
