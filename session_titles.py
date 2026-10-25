@@ -35,7 +35,8 @@ _cache_lock = threading.Lock()
 
 
 def title(key: Any) -> str:
-    """The session's title (by session id, else by gateway session key), or ""."""
+    """The session's title (by session id, else by gateway session key), or "".
+    A Bot Chat's title is its bot's name instead."""
     key = key.strip() if isinstance(key, str) else ""
     if not key:
         return ""
