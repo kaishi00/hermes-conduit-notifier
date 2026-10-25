@@ -57,7 +57,10 @@ RECENT_S = 3 * 86400.0
 RECENT_CARDS = 60
 RECENT_BUDGET = 2_000
 RECENT_TITLE = "## What Pulse brought up lately"
-RECENT_KINDS = (store.NOTICED, "followup")
+# The morning brief too: what it summed up isn't raised again an hour later.
+RECENT_KINDS = (store.NOTICED, "followup", "brief")
+# A brief's card is its summary and its lines, so it keeps more of them.
+RECENT_CLIP, RECENT_BRIEF_CLIP = 200, 600
 
 Llm = Callable[[str, str], tuple[Any, int]]
 
@@ -119,8 +122,9 @@ def _local(epoch: float, zone: tzinfo) -> str:
 # Asking ----------------------------------------------------------------------
 
 def recent_section(pulse_store: store.PulseStore, zone: tzinfo, now: float) -> str:
-    """What Pulse brought up in the last RECENT_S (report items and
-    follow-ups), newest first, and what the user did with each."""
+    """What Pulse brought up in the last RECENT_S (report items,
+    follow-ups and morning briefs), newest first, and what the user did with
+    each."""
     cards = [card for card in pulse_store.cards(RECENT_CARDS)
              if card["kind"] in RECENT_KINDS and card["created_at"] >= now - RECENT_S]
     marks = pulse_store.done_marks([card["id"] for card in cards])
@@ -131,7 +135,8 @@ def recent_section(pulse_store: store.PulseStore, zone: tzinfo, now: float) -> s
         did += " (done)" if card["id"] in marks else " (put away)" if card["dismissed_at"] else ""
         ref = f" (remembered #{card['item_id']})" if card["item_id"] is not None else ""
         line = (f"- {_local(card['created_at'], zone)} [{card['topic'] or card['kind']}] "
-                f"{_clip(card['news'] or card['title'], 200)}{ref}{did}")
+                f"{_clip(card['news'] or card['title'], RECENT_BRIEF_CLIP if card['kind'] == 'brief' else RECENT_CLIP)}"
+                f"{ref}{did}")
         if used + len(line) > RECENT_BUDGET:
             break
         lines.append(line)

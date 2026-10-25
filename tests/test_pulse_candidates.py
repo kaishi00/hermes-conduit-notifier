@@ -37,6 +37,23 @@ def candidate(origin=candidates.MODEL, value=3, bring_up=True, skip="", due_at=N
             "text": "x", **more}
 
 
+def test_what_pulse_brought_up_lately_includes_the_morning_brief(live):
+    now = time.time()
+    live.store.add_card({"kind": "brief", "level": "push", "brief": "b1", "created_at": now - 3600,
+                         "news": "A calm day, two things open.\n- Send the release notes\n- Call Sam about Friday"})
+    live.store.add_card({"kind": store.NOTICED, "level": "push", "topic": "date", "news": "Dentist moved",
+                         "created_at": now - 60})
+    section = candidates.recent_section(live.store, report.zone_for("UTC"), now)
+    # So the next report leaves out what the brief just summed up.
+    assert section.startswith(candidates.RECENT_TITLE)
+    assert "[brief] A calm day, two things open. - Send the release notes - Call Sam about Friday" in section
+    assert section.index("Dentist moved") < section.index("[brief]")  # newest first
+
+
+def test_the_report_leaves_out_what_the_morning_brief_brought_up():
+    assert "an earlier report or morning brief in this chat already brought up" in report.REPORT_TEXT
+
+
 # Asking ----------------------------------------------------------------------
 
 def test_the_list_call_fences_its_context_and_names_the_bar():

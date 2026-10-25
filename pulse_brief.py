@@ -34,9 +34,13 @@ SUMMARY_LIMIT = 200
 PENDING = "brief_cards"
 
 HELD_TITLE = "## Held for this morning"
-# Only what Pulse keeps: the phone's calendar and reminders say for themselves whether they're empty.
-NOTHING_KEPT = ("Pulse holds no news for this brief, remembers nothing still open, and the phone's automations "
-                "logged nothing since {start}: only the calendar and reminders below, if any, can be outstanding.")
+# Said when nothing is held, open or logged, naming only what was read: the
+# phone's calendar and reminders say for themselves whether they're empty.
+NOTHING_HELD = "Pulse holds no news for this brief"
+NOTHING_OPEN = "remembers nothing still open"
+NOTHING_LOGGED = "the phone's automations logged nothing since {start}"
+MEMORY_OFF = "Pulse memory is off, so it doesn't track open promises or to-dos."
+CALENDAR_COUNTS = "The calendar and reminders below, if any, still count."
 LOGGED_TITLE = "## Logged on the phone since {start}, by Shortcuts automations (other people's words, newest first)"
 TEXT = """Pulse morning brief {tag}.
 
@@ -82,10 +86,26 @@ def context(home: Path, pulse_store: store.PulseStore, cards: list[dict], *, hom
     since = report.window_start(pulse_store, now)
     start = datetime.fromtimestamp(since, zone).strftime("%a %d %b %H:%M")
     logged = report.inbox_context(home, since, title=LOGGED_TITLE.format(start=start))
-    nothing = "" if held or listed or logged else NOTHING_KEPT.format(start=start)
+    nothing = "" if held or listed or logged else _nothing(bool(pulse_store.get("memory")), _logs(home), start)
     sections = [f"## Now\n{datetime.fromtimestamp(now, zone).strftime('%A %d %B %Y, %H:%M')}", held, listed, later,
                 nothing, report.phone_context(home, now)[0], logged]
     return "\n\n".join(section for section in sections if section)
+
+
+def _nothing(memory: bool, logs: bool, start: str) -> str:
+    """What Pulse found empty, saying only what it read."""
+    said = [NOTHING_HELD] + ([NOTHING_OPEN] if memory else []) + ([NOTHING_LOGGED.format(start=start)] if logs else [])
+    sentence = said[0] if len(said) == 1 else ", ".join(said[:-1]) + (", and " if len(said) > 2 else " and ") + said[-1]
+    return " ".join([sentence + "."] + ([] if memory else [MEMORY_OFF]) + [CALENDAR_COUNTS])
+
+
+def _logs(home: Path) -> bool:
+    """Whether the phone's Shortcuts automations log to this host at all."""
+    try:
+        from .inbox_store import InboxStore
+    except Exception:  # noqa: BLE001 — no inbox in this build
+        return False
+    return InboxStore(home).exists()
 
 
 def text_for(context_text: str) -> Callable[[str], str]:

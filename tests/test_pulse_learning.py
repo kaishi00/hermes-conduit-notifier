@@ -271,6 +271,7 @@ def test_the_brief_comes_every_morning_with_nothing_held_but_not_before_its_time
     pulse.tick()
     [text] = live.sent()  # nothing held, and the brief still comes
     assert text.startswith("Pulse morning brief ") and "Pulse holds no news for this brief" in text
+    assert pulse.brief.MEMORY_OFF in text  # memory is off here: no claim that nothing is open
     assert followup_or_brief_kinds(live) == ["brief"]
     [attempt] = live.store.in_flight()
     live.store.update_attempt(attempt["attempt_id"], state=store.DELIVERED)
@@ -279,6 +280,7 @@ def test_the_brief_comes_every_morning_with_nothing_held_but_not_before_its_time
 
 
 def test_a_brief_with_nothing_kept_still_reads_the_calendar(live, monkeypatch):
+    live.store.set("memory", True)
     monkeypatch.setattr(pulse.report, "phone_context",
                         lambda home, now: ("## Calendar, the next 2 days (phone synced 5 min ago)\n- Dentist (09:30)",
                                            None))
@@ -286,9 +288,20 @@ def test_a_brief_with_nothing_kept_still_reads_the_calendar(live, monkeypatch):
     pulse.tick()
     [text] = live.sent()
     # What Pulse keeps is empty, and the calendar is still what's on.
-    assert "remembers nothing still open" in text and "only the calendar and reminders below" in text
-    assert text.index("remembers nothing still open") < text.index("- Dentist (09:30)")
-    assert "Nothing open" not in text
+    assert "Pulse holds no news for this brief and remembers nothing still open." in text
+    assert text.index(pulse.brief.CALENDAR_COUNTS) < text.index("- Dentist (09:30)")
+    assert "Nothing open" not in text and pulse.brief.MEMORY_OFF not in text
+
+
+def test_the_empty_brief_names_only_what_pulse_read():
+    nothing = pulse.brief._nothing
+    assert nothing(True, True, "Sat 24 Oct 18:00") == (
+        "Pulse holds no news for this brief, remembers nothing still open, and the phone's automations logged "
+        "nothing since Sat 24 Oct 18:00. The calendar and reminders below, if any, still count.")
+    # Memory off, no Shortcuts inbox: it claims nothing about either.
+    off = nothing(False, False, "Sat 24 Oct 18:00")
+    assert off == ("Pulse holds no news for this brief. Pulse memory is off, so it doesn't track open promises or "
+                   "to-dos. The calendar and reminders below, if any, still count.")
 
 
 def followup_or_brief_kinds(live):
