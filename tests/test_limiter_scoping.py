@@ -63,6 +63,7 @@ def test_a_full_limiter_turns_new_keys_away():
     ("post", "/location/key", "_location_key_limiter"),
     ("get", "/voice-tools", "_voice_tools_limiter"),
     ("post", "/e2e", "_e2e_limiter"),
+    ("post", "/e2e/rotate", "_e2e_limiter"),
 ])
 def test_an_unknown_profile_gets_no_rate_limit_bucket(client, hermes_scope, monkeypatch, method, path, limiter):
     fresh = api._MintLimiter(1000, 60)

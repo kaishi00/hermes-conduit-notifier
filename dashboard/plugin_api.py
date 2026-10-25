@@ -6210,6 +6210,9 @@ _E2E_B64URL = re.compile(r"^[A-Za-z0-9_-]{43}\Z")  # 32 bytes, unpadded
 # opens answers this long.
 E2E_KEY_MAX_AGE_S = 7 * 24 * 3600
 E2E_PREVIOUS_KEY_GRACE_S = 7 * 24 * 3600
+# Earlier rotation attempts sealed with a replaced key that are remembered
+# (as digests) and refused if they arrive again.
+E2E_ROTATE_RETRIES_KEPT = 16
 _E2E_TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 _e2e_limiter = _MintLimiter(E2E_LIMIT, E2E_WINDOW_S, message="Too many encryption key requests; try again shortly")
 _e2e_lock = threading.Lock()
@@ -6490,13 +6493,26 @@ def _e2e_module() -> Any:
 
 
 def _e2e_rotate_suites() -> List[str]:
+    """The suites this host can run. Only a successful probe is cached: a
+    transient failure (e2e.py unreadable mid-update) is tried again on the
+    next (rate-limited) request instead of turning inline rotation off until
+    a restart."""
     global _e2e_suites_value
     if _e2e_suites_value is None:
         try:
             _e2e_suites_value = list(_e2e_module().rotate_suites())
         except Exception:
-            _e2e_suites_value = []
+            return []
     return _e2e_suites_value
+
+
+def _e2e_rotate_request_digest(body: Dict[str, Any]) -> str:
+    """Fingerprint of one rotation request: its key ids, suite and sealed
+    content (which carries kid_new and the phone's fresh shares). A resend of
+    the same request matches; a new attempt sealed with the same key doesn't."""
+    material = json.dumps([body.get("kid"), body.get("suite"), body.get("sealed")],
+                          sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 def rotate_e2e(body: Any, path: Any = None) -> Dict[str, Any]:
@@ -6504,8 +6520,16 @@ def rotate_e2e(body: Any, path: Any = None) -> Dict[str, Any]:
     carries its half of a key exchange (X25519, and ML-KEM-768 on iOS 26+);
     the new secret mixes the exchange with the old secret, so it never
     crosses the dashboard connection. The old key stays as e2e_previous for
-    E2E_PREVIOUS_KEY_GRACE_S. A retry of a rotation that already happened
-    gets the same reply."""
+    E2E_PREVIOUS_KEY_GRACE_S.
+
+    A resend of the request that made the current key (same kid, suite and
+    sealed content) gets the same reply, so a lost reply loses nothing. A
+    different request sealed with that replaced key (a phone that lost its
+    pending exchange, e.g. after a restart, and starts over) is answered as a
+    fresh rotation from the replaced key: the key it never received is
+    dropped. An earlier attempt that was already answered, and any other
+    request sealed with a replaced key, is refused with 409. A rotation without overlap (`rotate --now`) keeps nothing to resend:
+    its retry is refused with 409 and the phone hands over a new key."""
     if not isinstance(body, dict):
         raise TokenError(400, "Expected a JSON object")
     installation_id, gateway_id = body.get("installation_id"), body.get("gateway_id")
@@ -6522,24 +6546,53 @@ def rotate_e2e(body: Any, path: Any = None) -> Dict[str, Any]:
         if state.get("installation_id") != installation_id or state.get("gateway_id") != gateway_id:
             raise TokenError(409, "This Hermes profile is paired with a different device")
         current, previous = state.get("e2e"), state.get("e2e_previous")
-        if isinstance(previous, dict) and previous.get("kid") == body.get("kid") \
-                and isinstance(current, dict) and isinstance(previous.get("rotate_reply"), dict) \
-                and previous["rotate_reply"].get("kid_new") == current.get("kid"):
-            return {"rotation": previous["rotate_reply"]}  # the phone missed our answer
         if not isinstance(current, dict):
             raise TokenError(409, "This pairing has no key to rotate yet")
+        digest = _e2e_rotate_request_digest(body)
+        # The key being rotated: the current one, or (for a phone that never
+        # got the reply of the rotation that replaced it) the replaced one.
+        base = current
+        if isinstance(previous, dict) and isinstance(body.get("kid"), str) and previous.get("kid") == body["kid"]:
+            reply = previous.get("rotate_reply")
+            made_current = isinstance(reply, dict) and reply.get("kid_new") == current.get("kid")
+            if made_current and isinstance(previous.get("rotate_request"), str) \
+                    and hmac.compare_digest(previous["rotate_request"], digest):
+                return {"rotation": reply}  # the phone missed our answer
+            if not made_current or _e2e_live_previous(state, time.time()) is None:
+                raise TokenError(409, "This key was replaced; send a new one")
+            answered = previous.get("rotate_requests_before")
+            if isinstance(answered, list) and digest in answered:
+                # An earlier attempt, delivered late or replayed: rotating
+                # again would drop the key the phone took since.
+                raise TokenError(409, "This rotation request was already answered")
+            # Same old key, another request: the phone started over without
+            # the key we answered with, so it never holds it.
+            base = previous
         try:
-            keys = module.keys_from_state(state)
-            rotation = module.answer_rotation(body, keys, module.unb64u(str(current.get("secret") or "")),
+            keys = module.derive_keys(str(base.get("kid") or ""), module.unb64u(str(base.get("secret") or "")))
+            rotation = module.answer_rotation(body, keys, module.unb64u(str(base.get("secret") or "")),
                                               installation_id=installation_id, gateway_id=gateway_id)
         except module.E2EError as exc:
             raise TokenError(409, f"The rotation request was refused: {exc}")
+        if base is previous and rotation.kid_new == current.get("kid"):
+            # The new key id must name one secret only.
+            raise TokenError(409, "This key id is already in use with a different secret")
         now = datetime.now(timezone.utc).strftime(_E2E_TIME_FORMAT)
         if state.get("rotate_without_overlap"):
             state.pop("e2e_previous", None)
         else:
-            state["e2e_previous"] = {"kid": current["kid"], "secret": current["secret"], "retired_at": now,
-                                     "rotate_reply": rotation.reply}
+            # Starting over from the replaced key keeps its first retirement
+            # time, so retries never stretch its overlap.
+            retired_at = base.get("retired_at") if base is previous else now
+            record = {"kid": base["kid"], "secret": base["secret"], "retired_at": retired_at or now,
+                      "rotate_reply": rotation.reply, "rotate_request": digest}
+            if base is previous:
+                before = previous.get("rotate_requests_before")
+                before = [d for d in before if isinstance(d, str)] if isinstance(before, list) else []
+                if isinstance(previous.get("rotate_request"), str):
+                    before.append(previous["rotate_request"])
+                record["rotate_requests_before"] = before[-E2E_ROTATE_RETRIES_KEPT:]
+            state["e2e_previous"] = record
         state["e2e"] = {"kid": rotation.kid_new, "secret": module.b64u(rotation.secret), "created_at": now,
                         "suite": rotation.suite}
         state.pop("rotate_requested_at", None)

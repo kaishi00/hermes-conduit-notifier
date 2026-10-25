@@ -1,0 +1,29 @@
+{
+  "_comment": "Classical (X25519-only) inline rotation made by answer_rotation, as an iOS 17-25 phone sees it. Shared with ConduitTests/NotificationE2ETests.swift.",
+  "kid": "0123456789abcdef0123456789abcdef",
+  "secret": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+  "installation_id": "11111111-2222-3333-4444-555555555555",
+  "gateway_id": "gw-1",
+  "kid_new": "fedcba9876543210fedcba9876543210",
+  "device_x25519_private": "QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl8",
+  "request": {
+    "kid": "0123456789abcdef0123456789abcdef",
+    "suite": "x25519",
+    "installation_id": "11111111-2222-3333-4444-555555555555",
+    "gateway_id": "gw-1",
+    "sealed": {
+      "n": "G1bbJOSYgHDLmk24",
+      "ct": "frWCv8aycNJd8WKC3xj-tDboB5FYtHvuz1uckJvrnslmY-uVYmIelIm0O3KSlm_veDbks2zaE6LijvhaROO0EQJMxHIG3hQK_tF57D_jThoB7Ok7-CqiAQ7bXyJorxoX_WItM7jsjemXM9K8hLOoAMXTHo9IgxQUUdITQhUEYSWngUR7"
+    }
+  },
+  "reply": {
+    "kid": "0123456789abcdef0123456789abcdef",
+    "kid_new": "fedcba9876543210fedcba9876543210",
+    "suite": "x25519",
+    "sealed": {
+      "n": "NfqplFqJzYGbbg4Q",
+      "ct": "gZzIeKHVc67cbdJwbY7DuTj7pa1v0Qy3UAnW4R57DQNG-Ao_uTauSxRZEljpIYkLBVA-dnVf0mC1-Hs4pBj3th6k3kLwaLfoJGSkCIRrUi5TxbUSOaBUtSlWgo0k7sM0GYWR7gb1akaW0ueO-wzEWtY3V-72Uv01fwT6skEzhe-a85e3ziiXb-o"
+    }
+  },
+  "new_secret": "2DFqSXVOCpSVMZq_GdnfcMhJS-s-JJmdgKbJHulcM38"
+}

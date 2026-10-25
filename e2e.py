@@ -567,6 +567,10 @@ def start_rotation(keys: Keys, *, installation_id: str, gateway_id: str, suite: 
                    kid_new: str) -> tuple[dict[str, Any], Any]:
     """Device-side mirror (Conduit does this on the phone); tests use it.
     Returns the request and the private state finish_rotation needs."""
+    if suite not in (SUITE_PQ, SUITE_CLASSICAL):
+        raise E2EError("unknown rotation suite")
+    if not valid_kid(kid_new) or kid_new == keys.kid:
+        raise E2EError("kid_new must be a new key id")
     from cryptography.hazmat.primitives.asymmetric import x25519
 
     x_priv = x25519.X25519PrivateKey.generate()
