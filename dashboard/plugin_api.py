@@ -6527,9 +6527,12 @@ def rotate_e2e(body: Any, path: Any = None) -> Dict[str, Any]:
     different request sealed with that replaced key (a phone that lost its
     pending exchange, e.g. after a restart, and starts over) is answered as a
     fresh rotation from the replaced key: the key it never received is
-    dropped. An earlier attempt that was already answered, and any other
-    request sealed with a replaced key, is refused with 409. A rotation without overlap (`rotate --now`) keeps nothing to resend:
-    its retry is refused with 409 and the phone hands over a new key."""
+    dropped. An earlier attempt that was already answered (the last
+    E2E_ROTATE_RETRIES_KEPT), and any other request sealed with a replaced
+    key, is refused with 409.
+
+    A rotation without overlap (`rotate --now`) keeps nothing to resend: its
+    retry is refused with 409 and the phone hands over a new key."""
     if not isinstance(body, dict):
         raise TokenError(400, "Expected a JSON object")
     installation_id, gateway_id = body.get("installation_id"), body.get("gateway_id")
@@ -6555,8 +6558,9 @@ def rotate_e2e(body: Any, path: Any = None) -> Dict[str, Any]:
         if isinstance(previous, dict) and isinstance(body.get("kid"), str) and previous.get("kid") == body["kid"]:
             reply = previous.get("rotate_reply")
             made_current = isinstance(reply, dict) and reply.get("kid_new") == current.get("kid")
-            if made_current and isinstance(previous.get("rotate_request"), str) \
-                    and hmac.compare_digest(previous["rotate_request"], digest):
+            # A digest of public request fields, not a secret: a plain
+            # compare also survives a hand-edited, non-ASCII state file.
+            if made_current and previous.get("rotate_request") == digest:
                 return {"rotation": reply}  # the phone missed our answer
             if not made_current or _e2e_live_previous(state, time.time()) is None:
                 raise TokenError(409, "This key was replaced; send a new one")

@@ -756,6 +756,16 @@ def test_starting_over_cannot_reuse_the_key_id_it_replaces(state_file):
     assert json.loads(state_file.read_text())["e2e"]["kid"] == NEW_KID
 
 
+def test_a_hand_edited_request_digest_is_not_a_server_error(state_file):
+    http = _http()
+    http.post(f"{BASE}/e2e", json=_body())
+    request, _, _ = _rotate(http, e2e.SUITE_CLASSICAL)
+    state = json.loads(state_file.read_text())
+    state["e2e_previous"]["rotate_request"] = "é"
+    state_file.write_text(json.dumps(state))
+    assert http.post(f"{BASE}/e2e/rotate", json=request).status_code == 409
+
+
 def test_a_request_sealed_with_an_expired_replaced_key_is_refused(state_file):
     http = _http()
     http.post(f"{BASE}/e2e", json=_body())
