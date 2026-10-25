@@ -81,6 +81,20 @@ UNREADABLE_CHOICES_BLOCK = ("Blocked: your owner's choices for this room couldn'
 
 _Read = TypeVar("_Read")
 
+# Credential-shaped text kept out of a room reply: it leaves this host for
+# everyone in the room. Shapes with a fixed prefix only, so ordinary words
+# and ids stay as they are.
+REDACTED = "[credential removed]"
+_CREDENTIALS = (
+    re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\Z)"),
+    re.compile(r"\bsk-(?:[A-Za-z0-9]+-){0,3}[A-Za-z0-9_-]{16,}"),
+    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}|\bgithub_pat_[A-Za-z0-9_]{20,}"),
+    re.compile(r"\bxox[abposr]-[A-Za-z0-9-]{10,}"),
+    re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
+    re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
+)
+_BEARER = re.compile(r"\b(Bearer\s+)[A-Za-z0-9._~+/-]{16,}=*", re.IGNORECASE)
+
 # What a room turn with other people's agents is told, on top of Hermes' own
 # room prompt (which says only "with @others and the user").
 FRAMING_HEAD = "[Conduit: your owner's rules for this group room]"
@@ -223,6 +237,75 @@ def framing(turn: Optional[RoomTurn], choices: RoomChoices) -> str:
     if choices.note:
         lines.append(f"- {NOTE_LINE.format(note=choices.note)}")
     return "\n".join([FRAMING_HEAD, *lines])
+
+
+def scrub(text: str) -> str:
+    """``text`` with credential-shaped strings replaced."""
+    for pattern in _CREDENTIALS:
+        text = pattern.sub(REDACTED, text)
+    return _BEARER.sub(lambda match: match.group(1) + REDACTED, text)
+
+
+def filter_search(result: Any, home: Any, profile: Any = None) -> Optional[str]:
+    """A session_search result with the sessions of rooms with other people's
+    agents taken out, or None when it has none (or is nothing this reads).
+    A read of one of those sessions comes back as Hermes' own "not found".
+    ``profile``: the profile whose sessions were searched, when not this one."""
+    if not isinstance(result, str) or ROOM_SOURCE not in result and not ROOM_SESSION_ID.search(result):
+        return None
+    try:
+        payload = json.loads(result)
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(payload, dict) or payload.get("success") is not True:
+        return None
+    searched = _profile_home(Path(home), profile) if home is not None else None
+    mode = payload.get("mode")
+    if mode in ("read", "scroll"):
+        session_id = str(payload.get("session_id") or "")
+        meta = payload.get("session_meta") if isinstance(payload.get("session_meta"), dict) else {}
+        if not _hidden_from_search((session_id,), meta.get("source"), searched):
+            return None
+        return json.dumps({"success": False, "error": f"session_id not found: {session_id}"}, ensure_ascii=False)
+    results = payload.get("results")
+    if not isinstance(results, list):
+        return None
+    kept = [entry for entry in results if not (isinstance(entry, dict) and _hidden_from_search(
+        (str(entry.get("session_id") or ""), str(entry.get("parent_session_id") or "")), entry.get("source"),
+        searched))]
+    if len(kept) == len(results):
+        return None
+    payload["results"] = kept
+    if "count" in payload:
+        payload["count"] = len(kept)
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _hidden_from_search(session_ids: tuple[str, ...], source: Any, home: Optional[Path]) -> bool:
+    """Whether a search hit belongs to a room with other people's agents; a
+    room session that can't be checked is hidden too."""
+    if str(source or "").strip().lower() != ROOM_SOURCE and not any(
+            ROOM_SESSION_ID.fullmatch(session_id) for session_id in session_ids):
+        return False
+    for session_id in session_ids:
+        if not session_id:
+            continue
+        try:
+            turn = room_turn(session_id, home)
+        except RoomStoreError:
+            return True
+        if turn is not None:
+            return turn.with_others
+    # A room session this host has no row for.
+    return True
+
+
+def _profile_home(home: Path, profile: Any) -> Path:
+    name = str(profile or "").strip()
+    if not name or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", name):
+        return home
+    root = home.parent.parent if home.parent.name == "profiles" else home
+    return root if name == "default" else root / "profiles" / name
 
 
 def forget() -> None:

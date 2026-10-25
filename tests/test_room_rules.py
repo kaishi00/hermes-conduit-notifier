@@ -424,3 +424,130 @@ def test_a_room_that_cant_be_read_is_framed_as_one_with_others(host, notes):
     framing = _context("s-unread")
     assert "Answer only for yourself" in framing
     assert not any(note in framing for note in NOTES.values())
+
+
+# --- What leaves the host --------------------------------------------------------
+
+CREDENTIALS = {
+    "openai": "sk-proj-" + "A1b2C3d4E5f6G7h8I9j0K1l2",
+    "anthropic": "sk-ant-api03-" + "abcdefghijklmnopqrstuvwx_yz",
+    "github": "ghp_" + "abcdefghijklmnopqrstuvwxyz0123456789",
+    "github_pat": "github_pat_" + "11ABCDEFG0123456789_abcdefghijklmnop",
+    "slack": "xoxb-" + "123456789012-1234567890123-abcdefghijkl",
+    "aws": "AKIA" + "IOSFODNN7EXAMPLE",
+    "jwt": "eyJhbGciOiJIUzI1NiJ9." + "eyJzdWIiOiIxMjM0NTY3ODkwIn0." + "dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
+    "private_key": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\nQyNTUxOQAAACD\n"
+                   "-----END OPENSSH PRIVATE KEY-----",
+}
+
+
+def _reply(session_id, text):
+    return plugin._transform_llm_output(response_text=text, session_id=session_id, model="m", platform="api_server",
+                                        turn_id="t1")
+
+
+@pytest.mark.parametrize("session_id", ["s-home", REMOTE])
+def test_credentials_are_scrubbed_from_room_replies(host, session_id):
+    for name, secret in CREDENTIALS.items():
+        scrubbed = _reply(session_id, f"Sure, here it is: {secret} — anything else?")
+        assert isinstance(scrubbed, str), name
+        assert secret not in scrubbed and "[credential removed]" in scrubbed, name
+        assert scrubbed.startswith("Sure, here it is: ") and scrubbed.endswith(" — anything else?"), name
+    token = "abcDEF123ghiJKL456mnoPQR789"
+    scrubbed = _reply(session_id, f"curl -H 'Authorization: Bearer {token}' https://example.com")
+    assert token not in scrubbed and "Bearer [credential removed]" in scrubbed
+
+
+def test_ordinary_text_is_left_alone(host):
+    for text in ("A risk-free plan: ask-me-first, task-list and desk-1234567890123456789 are fine.",
+                 "She's the Bearer of good news.", "Call AKIA tomorrow; it's sk-8 rated.",
+                 "Version eyJ is not a token.", "ghp_ alone is just a prefix."):
+        assert _reply("s-home", text) is None, text
+    # Only rooms with other people's agents: this host's own rooms and chats say what they said.
+    for session_id in ("s-local", "s-chat"):
+        assert _reply(session_id, f"key {CREDENTIALS['openai']}") is None, session_id
+
+
+# --- Past-chat search -------------------------------------------------------------
+
+
+def _entry(session_id, source, title, **extra):
+    """A session_search discovery entry (tools/session_search_tool._discovery_entry)."""
+    return {"session_id": session_id, "when": "2026-10-25 12:00", "source": source, "model": "m", "title": title,
+            "matched_role": "user", "match_message_id": 7, "snippet": "otter-42", "bookend_start": [],
+            "messages": [{"id": 7, "role": "user", "content": "my code word is otter-42"}], "bookend_end": [],
+            "messages_before": 0, "messages_after": 0, "detail": "compact",
+            "link": f"@session:default/{session_id}", **extra}
+
+
+def _search(result, session_id="s-chat", **args):
+    return plugin._transform_tool_result(tool_name="session_search", args=args, result=json.dumps(result),
+                                         session_id=session_id, task_id="", tool_call_id="c1", turn_id="t1",
+                                         api_request_id="", duration_ms=3, status="ok", error_type=None,
+                                         error_message=None)
+
+
+def test_session_search_drops_sessions_of_rooms_with_others(host):
+    _session(host, "s-home-2", source="bot_room", title="Group: room-b #2", parent="s-home")
+    _end(host, "s-home", "compression")
+    found = {"success": True, "mode": "discover", "query": "otter", "detail": "adaptive", "results": [
+        _entry("s-home", "bot_room", "Group: room-b"), _entry("s-local", "bot_room", "Group: room-c"),
+        _entry("s-chat", "tui", "Bike plans"), _entry(REMOTE, "bot_room", "Group: room-a"),
+        _entry("s-home-2", "bot_room", "Group: room-b #2", parent_session_id="s-home")],
+        "count": 5, "sessions_searched": 5, "link_hint": "..."}
+    kept = json.loads(_search(found, query="otter"))
+    assert [entry["session_id"] for entry in kept["results"]] == ["s-local", "s-chat"]
+    assert kept["count"] == 2 and kept["mode"] == "discover" and kept["link_hint"] == "..."
+    # Browsing recent sessions, the same.
+    browsed = {"success": True, "mode": "browse", "count": 3, "message": "Showing 3 most recent sessions.",
+               "results": [{"session_id": sid, "link": f"@session:default/{sid}", "title": title, "source": source,
+                            "started_at": 1.0, "last_active": 1.0, "message_count": 2, "preview": "hi"}
+                           for sid, source, title in (("s-chat", "tui", "Bike plans"),
+                                                      (REMOTE, "bot_room", "Group: room-a"),
+                                                      ("s-home", "bot_room", "Group: room-b"))]}
+    assert [entry["session_id"] for entry in json.loads(_search(browsed))["results"]] == ["s-chat"]
+    # A search that found none of them is passed on as Hermes wrote it.
+    plain = {**found, "results": [_entry("s-chat", "tui", "Bike plans")], "count": 1}
+    assert _search(plain, query="otter") is None
+
+
+def test_session_search_cant_read_a_room_session_with_others_directly(host):
+    for mode, session_id in (("read", "s-home"), ("scroll", REMOTE)):
+        read = {"success": True, "mode": mode, "session_id": session_id, "link": f"@session:default/{session_id}",
+                "session_meta": {"when": "2026-10-25 12:00", "source": "bot_room", "model": "m", "title": "Group: x"},
+                "messages": [{"id": 1, "role": "user", "content": "my code word is otter-42"}]}
+        refused = json.loads(_search(read, session_id=session_id))
+        assert refused["success"] is False and "otter" not in json.dumps(refused)
+        assert f"session_id not found: {session_id}" in refused["error"]
+    local = {"success": True, "mode": "read", "session_id": "s-local",
+             "session_meta": {"source": "bot_room", "title": "Group: room-c"}, "messages": []}
+    assert _search(local, session_id="s-local") is None
+
+
+def test_session_search_of_another_profile_reads_that_profiles_rooms(host):
+    nahida = host / "profiles" / "nahida"
+    _room_session(nahida, "s-nahida", "room-b")
+    found = {"success": True, "mode": "discover", "results": [_entry("s-nahida", "bot_room", "Group: room-b")],
+             "count": 1}
+    assert json.loads(_search(found, query="otter", profile="nahida"))["results"] == []
+    assert json.loads(_search(found, query="otter", session_id="nahida/s-nahida"))["results"] == []
+    # That profile's own rooms are read from its store: a room of this host's agents stays findable.
+    _room_session(nahida, "s-nahida-local", "room-c")
+    local = {**found, "results": [_entry("s-nahida-local", "bot_room", "Group: room-c")]}
+    assert _search(local, query="otter", profile="nahida") is None
+
+
+def test_session_search_hides_a_room_session_it_cant_check(host):
+    _room_session(host, "s-unread", "room-unread")
+    (host / "shared-state.db").write_bytes(b"this is not a database" * 64)
+    found = {"success": True, "mode": "discover", "results": [_entry("s-unread", "bot_room", "Group: room-unread"),
+                                                              _entry("s-chat", "tui", "Bike plans")], "count": 2}
+    assert [entry["session_id"] for entry in json.loads(_search(found, query="x"))["results"]] == ["s-chat"]
+
+
+def test_other_tools_and_unreadable_results_pass_through(host):
+    assert plugin._transform_tool_result(tool_name="web_search", args={}, result='{"results": []}',
+                                         session_id="s-chat") is None
+    for result in ("not json", '["a"]', '{"success": false, "error": "x"}'):
+        assert plugin._transform_tool_result(tool_name="session_search", args={}, result=result,
+                                             session_id="s-chat") is None

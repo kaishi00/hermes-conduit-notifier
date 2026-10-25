@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextvars
 import functools
+import json
 import logging
 import threading
 import time
@@ -123,6 +124,21 @@ def register(ctx: Any) -> None:
         ctx.register_hook("post_approval_response", _post_approval_response)
     except Exception:  # noqa: BLE001
         logger.warning("conduit_push: post_approval_response hook unavailable", exc_info=True)
+    # Sessions of rooms with other people's agents stay out of past-chat
+    # search, in every chat (room_rules). Without the hook, search finds them.
+    try:
+        ctx.register_hook("transform_tool_result", _transform_tool_result)
+    except Exception:  # noqa: BLE001
+        logger.warning("conduit_push: transform_tool_result hook unavailable; past-chat search can find group "
+                       "rooms with other people's agents", exc_info=True)
+    # A reply in a room with other people's agents leaves this host: no
+    # credential-shaped text goes with it (room_rules). A Hermes without the
+    # hook sends replies as the model wrote them.
+    try:
+        ctx.register_hook("transform_llm_output", _transform_llm_output)
+    except Exception:  # noqa: BLE001
+        logger.warning("conduit_push: transform_llm_output hook unavailable; group room replies aren't checked "
+                       "for credentials", exc_info=True)
     # The voice hint and the note on calls the user declined or missed are
     # extras: a Hermes that refuses the hook must not take the
     # notifications down with it.
@@ -727,6 +743,60 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
     ]
     context = "\n\n".join(note for note in notes if note)
     return {"context": context} if context else None
+
+
+def _transform_tool_result(**kwargs: Any) -> str | None:
+    """session_search's result without the sessions of rooms with other
+    people's agents (room_rules); None leaves any other result as it is."""
+    if kwargs.get("tool_name") != room_rules.SEARCH_TOOL:
+        return None
+    result = kwargs.get("result")
+    args = kwargs.get("args") if isinstance(kwargs.get("args"), dict) else {}
+    profile = args.get("profile")
+    session_arg = args.get("session_id")
+    if not str(profile or "").strip() and isinstance(session_arg, str) and "/" in session_arg:
+        # Hermes reads a raw @session:<profile>/<id> link the same way.
+        profile = session_arg.partition("/")[0]
+    try:
+        home = get_hermes_home()
+    except Exception:  # noqa: BLE001
+        home = None
+    try:
+        return room_rules.filter_search(result, home, profile)
+    except Exception:  # noqa: BLE001 — never let a room's session through unchecked
+        logger.warning("conduit_push: couldn't check a past-chat search for group rooms", exc_info=True)
+        if isinstance(result, str) and (room_rules.ROOM_SOURCE in result or room_rules.ROOM_SESSION_ID.search(result)):
+            return json.dumps({"success": False, "error": "Past-chat search failed; try again."})
+        return None
+
+
+def _transform_llm_output(**kwargs: Any) -> str | None:
+    """A room reply with credential-shaped text replaced; None leaves the
+    reply as it is (every other turn, and a reply with none)."""
+    text = kwargs.get("response_text")
+    if not isinstance(text, str) or not text or not _in_room_with_others(_text(kwargs.get("session_id"))):
+        return None
+    scrubbed = room_rules.scrub(text)
+    return scrubbed if scrubbed != text else None
+
+
+def _in_room_with_others(session_id: str) -> bool:
+    """Whether the session is a turn in a room with other people's agents; a
+    room whose roster can't be read counts as one."""
+    if not session_id:
+        return False
+    try:
+        home = get_hermes_home()
+    except Exception:  # noqa: BLE001
+        home = None
+    try:
+        turn = room_rules.room_turn(session_id, home)
+    except room_rules.RoomStoreError:
+        return True
+    except Exception:  # noqa: BLE001 — a hook must never break the turn
+        logger.debug("conduit_push: couldn't tell whether session %s is a group room's", session_id, exc_info=True)
+        return False
+    return turn is not None and turn.with_others
 
 
 def _room_framing(session_id: str) -> str | None:
