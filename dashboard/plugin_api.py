@@ -10792,6 +10792,14 @@ class _WatchJobs:
             job = self._job_for(sid)
             if job is None:
                 return
+            if kind == "message.complete" and payload.get("status") == "interrupted" and job.active:
+                # The call's chat (#1250): an interrupt's end that comes after
+                # the next request went in is the cancelled turn's, not this one's.
+                superseded = next((other for other in self.jobs.values()
+                                   if other is not job and other.turn_open and other.status == "cancelled"
+                                   and sid in (other.session_id, other.stored_session_id)), None)
+                if superseded is not None:
+                    job = superseded
             if kind in ("message.complete", "error") and job.turn_open:
                 # Its turn is over: the call's chat can take the next one.
                 job.turn_open = False
