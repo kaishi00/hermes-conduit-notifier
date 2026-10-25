@@ -319,7 +319,8 @@ after it rang. A restart drops rings, so a write with `adopt: true` brings an
 unknown ring back as a control alone, with the token of the first write: the
 id is what an adoption trusts. Only the call's two devices know a ring's id,
 which the relay's logs leave out. Each device
-whose read comes back 404 writes its state again with it and reads on, and a
+whose read comes back 404 writes its state again with it and reads on from
+`after=0` (an adopted ring counts from 1 again), and a
 change made while the relay was down is retried. Adopted rings are capped at
 1,000, apart from ringing calls, which they never push out. On a relay older
 than 0.17 the control is 404, and the Watch takes the call as before.
