@@ -11214,6 +11214,8 @@ class _WatchJobs:
             else:
                 with self.changed:
                     job.cancelling, job.held_end = False, None
+                    # A request waiting for the call's chat may go now.
+                    self.changed.notify_all()
         cancelled = [job for job in targets if job not in failed]
         undelivered = _watch_undelivered.get()
         if undelivered is not None and cancelled:
