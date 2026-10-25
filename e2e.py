@@ -15,11 +15,16 @@ issue time, thread token, compression flag, clarify request id), so the
 relay can neither read the content nor move, retype or re-thread a valid
 ciphertext. Request ids and question ids bind clarify answers the same way.
 
-Keys rotate: the phone hands over a new secret every KEY_MAX_AGE_S, or when
-`hermes conduit-push e2e rotate` asks for one. Pushes are always sealed with
-the newest key; the one it replaced stays as `e2e_previous` for
-PREVIOUS_KEY_GRACE_S, only to open clarify answers the phone sealed before
-it learned of the new one.
+Keys rotate every KEY_MAX_AGE_S, or when `hermes conduit-push e2e rotate`
+asks for one. From plugin 0.72 the new secret is derived inline (a key
+exchange sealed with the current key, see answer_rotation), so it never
+crosses the dashboard connection; an app or host without inline rotation
+hands a new secret over as before. Pushes are always sealed with the newest
+key; the one it replaced stays as `e2e_previous` for PREVIOUS_KEY_GRACE_S,
+to open clarify answers the phone sealed before it learned of the new one,
+and (only after an inline rotation) to start the rotation over when the
+phone never got its reply. That second use adds nothing over dashboard
+access: a handover through POST /e2e can replace the key too.
 
 Pure functions; the only dependency is `cryptography`, which Hermes already
 pins as a core dependency. `available()` reports whether it can be used.
@@ -59,7 +64,8 @@ MAX_CT_CHARS = 2600
 INNER_FIELDS = ("title", "body", "session_id", "profile", "gateway", "stored_session_id", "decision", "call",
                 "locate", "maps", "title_label", "session_title", "count")
 
-# The phone rotates a key this old on its next dashboard connect.
+# The phone rotates a key this old (inline, or by a handover) on its next
+# dashboard connect.
 KEY_MAX_AGE_S = 7 * 24 * 3600
 # How long the key a rotation replaced still opens answers.
 PREVIOUS_KEY_GRACE_S = 7 * 24 * 3600

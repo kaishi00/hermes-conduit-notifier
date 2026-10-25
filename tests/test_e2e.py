@@ -671,7 +671,22 @@ def _rotate(http, suite, keys=None, kid_new=NEW_KID):
     return request, pending, http.post(f"{BASE}/e2e/rotate", json=request)
 
 
-@pytest.mark.parametrize("suite", [e2e.SUITE_PQ, e2e.SUITE_CLASSICAL])
+_PQ = pytest.param(e2e.SUITE_PQ, marks=pytest.mark.skipif(
+    e2e.SUITE_PQ not in e2e.rotate_suites(), reason="this cryptography build has no ML-KEM"))
+
+
+def test_a_host_without_ml_kem_offers_x25519_only(state_file, monkeypatch):
+    monkeypatch.setattr(api, "_e2e_suites_value", None)
+    monkeypatch.setattr(e2e, "rotate_suites", lambda: [e2e.SUITE_CLASSICAL])
+    monkeypatch.setattr(api, "_e2e_module", lambda: e2e)
+    http = _http()
+    http.post(f"{BASE}/e2e", json=_body())
+    assert http.get(f"{BASE}/e2e").json()["rotate_suites"] == [e2e.SUITE_CLASSICAL]
+    assert _rotate(http, e2e.SUITE_PQ)[2].status_code == 400
+    assert _rotate(http, e2e.SUITE_CLASSICAL)[2].status_code == 200
+
+
+@pytest.mark.parametrize("suite", [_PQ, e2e.SUITE_CLASSICAL])
 def test_an_inline_rotation_derives_the_same_secret_on_both_sides(state_file, suite):
     http = _http()
     http.post(f"{BASE}/e2e", json=_body())
@@ -753,6 +768,17 @@ def test_starting_over_cannot_reuse_the_key_id_it_replaces(state_file):
     # Same kid_new, fresh shares: one key id would name two secrets.
     response = _rotate(http, e2e.SUITE_CLASSICAL)[2]
     assert response.status_code == 409
+    assert json.loads(state_file.read_text())["e2e"]["kid"] == NEW_KID
+
+
+def test_a_rotation_cannot_reuse_the_retired_keys_id(state_file):
+    http = _http()
+    http.post(f"{BASE}/e2e", json=_body())
+    _rotate(http, e2e.SUITE_CLASSICAL)
+    keys = e2e.derive_keys(NEW_KID, e2e.unb64u(json.loads(state_file.read_text())["e2e"]["secret"]))
+    # start_rotation only refuses the current kid; the host also guards the
+    # retired one, whose answers may still be in flight.
+    assert _rotate(http, e2e.SUITE_CLASSICAL, keys=keys, kid_new=KID)[2].status_code == 409
     assert json.loads(state_file.read_text())["e2e"]["kid"] == NEW_KID
 
 

@@ -6527,7 +6527,9 @@ def rotate_e2e(body: Any, path: Any = None) -> Dict[str, Any]:
     different request sealed with that replaced key (a phone that lost its
     pending exchange, e.g. after a restart, and starts over) is answered as a
     fresh rotation from the replaced key: the key it never received is
-    dropped. An earlier attempt that was already answered (the last
+    dropped. During its overlap the replaced key can thus roll the pairing
+    forward, which adds nothing over dashboard access (POST /e2e can
+    replace the key too). An earlier attempt that was already answered (the last
     E2E_ROTATE_RETRIES_KEPT), and any other request sealed with a replaced
     key, is refused with 409.
 
@@ -6578,8 +6580,9 @@ def rotate_e2e(body: Any, path: Any = None) -> Dict[str, Any]:
                                               installation_id=installation_id, gateway_id=gateway_id)
         except module.E2EError as exc:
             raise TokenError(409, f"The rotation request was refused: {exc}")
-        if base is previous and rotation.kid_new == current.get("kid"):
-            # The new key id must name one secret only.
+        if rotation.kid_new in (current.get("kid"), previous.get("kid") if isinstance(previous, dict) else None):
+            # The new key id must name one secret only, while either key
+            # still opens answers.
             raise TokenError(409, "This key id is already in use with a different secret")
         now = datetime.now(timezone.utc).strftime(_E2E_TIME_FORMAT)
         if state.get("rotate_without_overlap"):
