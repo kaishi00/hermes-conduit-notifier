@@ -657,7 +657,7 @@ def _maybe_followup(pulse_store: store.PulseStore, home: Path, now: float) -> bo
 
 
 def _maybe_brief(pulse_store: store.PulseStore, home: Path, now: float) -> bool:
-    """Sends the morning brief when it's time, with what's held for it; True when it went."""
+    """Sends the morning brief when it's time, with what's still open and what's held for it; True when it went."""
     zone = report_zone(pulse_store, home, now)
     planned = brief.next_attempt(pulse_store, now, zone, pulse_store.get("brief_time"))
     if planned is None:

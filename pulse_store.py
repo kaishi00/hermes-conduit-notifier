@@ -62,8 +62,9 @@ DEFAULTS: dict[str, Any] = {
     # Follow-ups (pulse_followup): Pulse checks on what Hermes promised and
     # brings the news to the home chat. On while Pulse and memory are.
     "followups": True,
-    # The morning brief (pulse_brief): when cards held for it go out, local time.
-    "brief_time": "08:00",
+    # The morning brief (pulse_brief): every day at this local time, an hour
+    # before the first report by default so the two don't arrive together.
+    "brief_time": "07:00",
     "memory_since": None,
     "memory_run_at": 0.0,
     "memory_requested": False,

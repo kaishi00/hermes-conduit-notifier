@@ -17,9 +17,12 @@ checks it). The format is fixed, because Conduit reads it:
 
 ### New and improved
 - Pulse's morning brief now comes every day at its time: one card that sums
-  up what's still open for you, with today's calendar and reminders and any
-  news you asked to hold for the morning. Before, it only came when news had
-  been held for it, so most mornings it never showed up.
+  up what's still open for you, with today's calendar and reminders, what
+  your Shortcuts automations logged, and any news you asked to hold for the
+  morning. Before, it only came when news had been held for it, so most
+  mornings it never showed up.
+- The morning brief's default time is now 07:00, an hour before the first
+  report, so the two don't arrive together. A time you picked stays.
 - `hermes conduit-push pulse status` shows the morning brief's time.
 
 ## 0.73.0 (2026-10-25)

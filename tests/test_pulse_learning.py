@@ -330,6 +330,9 @@ def test_a_brief_turn_pushes(live):
     # The summary line is the push; the lines under it are for the card.
     assert pulse.push_copy(SID, "turn-b", "\nA calm day, two things open.\n- Send the notes\n- Call Sam")["body"] \
         == "A calm day, two things open."
+    # A first line that runs on is cut to what a push should carry.
+    body = pulse.push_copy(SID, "turn-b", "A long day. " * 40 + "\n- Send the notes")["body"]
+    assert len(body) == pulse.brief.SUMMARY_LIMIT and body.endswith("…")
 
 
 def test_a_failed_push_becomes_a_card_once_follow_ups_go_quiet(live):
@@ -380,6 +383,9 @@ def test_a_card_put_away_while_its_brief_is_out_waits_for_the_next(live):
 
 
 def test_brief_time_setting(live):
+    # By default the brief comes an hour before the first report, never with it.
+    assert pulse.brief.DEFAULT_TIME == store.DEFAULTS["brief_time"] == "07:00"
+    assert store.DEFAULTS["brief_time"] not in store.DEFAULTS["report_time"].split(",")
     control.update(live.store, {"brief_time": "7:30"})
     assert live.store.get("brief_time") == "07:30"
     for bad in ("7:30,9:00", "noon", 7):

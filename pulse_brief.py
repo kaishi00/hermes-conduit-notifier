@@ -1,7 +1,8 @@
-"""Pulse's morning brief: every day at the brief time (08:00 in the
-report's time zone by default), one Pulse turn in the home chat sums up
-what's still outstanding, with a push: open promises and things the user
-said they'd do, today's calendar and reminders, and what was held for it.
+"""Pulse's morning brief: every day at the brief time (07:00 in the
+report's time zone by default, an hour before the first report, so the two
+don't arrive together), one Pulse turn in the home chat sums up what's
+still outstanding, with a push: open promises and things the user said
+they'd do, today's calendar and reminders, and what was held for it.
 
 A kind rated down to ``brief`` on the loudness ladder doesn't speak up when
 its news comes in; its cards wait and come with the brief. Delivered, they
@@ -21,13 +22,15 @@ from . import pulse_report as report
 from . import pulse_store as store
 
 BRIEF = "brief"
-DEFAULT_TIME = "08:00"
+DEFAULT_TIME = "07:00"
 # A brief missed by more than this (the host was off all morning) waits for tomorrow.
 WINDOW_S = 8 * 3600.0
 TRIES = 3
 RETRY_S = 1800.0
 MAX_CARDS = 12
 LINE_LIMIT = 400
+# The push shows the reply's first line; NOTE asks for one under this.
+SUMMARY_LIMIT = 200
 PENDING = "brief_cards"
 
 HELD_TITLE = "## Held for this morning"
@@ -44,8 +47,8 @@ Everything between the context markers below is data Hermes collected (what Puls
 context {fence}>>>"""
 NOTE = ("This turn was started by Pulse, the part of Hermes that speaks up on its own, for the user's morning "
         "brief: one card that sums up what's still outstanding for them. Start with one short, friendly "
-        "sentence under 200 characters that sums up their day (it's also the notification). Then, as short "
-        "lines starting with \"- \", at most 8 of what still needs them, the most pressing first: what's due or "
+        f"sentence under {SUMMARY_LIMIT} characters that sums up their day (it's also the notification). Then, as "
+        "short lines starting with \"- \", at most 8 of what still needs them, the most pressing first: what's due or "
         "on the calendar today, then open promises Hermes made and things the user said they'd do, then "
         "anything the phone logged since the last report that needs them. Leave out anything the \"Later on the "
         "same subject\" lines, the reminders or what the phone logged show done or moved past, and anything not "
@@ -99,8 +102,9 @@ def text_for(context_text: str) -> Callable[[str], str]:
 
 
 def summary_line(reply: str) -> str:
-    """The brief's first line, for its push: the rest is for its card."""
-    return next((text.strip() for text in reply.splitlines() if text.strip()), "")
+    """The brief's first line, for its push (cut to ``SUMMARY_LIMIT`` if the
+    reply ran on): the rest is for its card."""
+    return _clip(next((text for text in reply.splitlines() if text.strip()), ""), SUMMARY_LIMIT)
 
 
 def next_attempt(pulse_store: store.PulseStore, now: float, zone: Any, time_value: Any) -> Optional[tuple[str, int]]:
