@@ -512,6 +512,16 @@ def list_artifacts(conn: sqlite3.Connection, *, before: Optional[int] = None,
         return len(items) >= limit
 
     wanted = [*([session_id] if session_id else []), *session_ids]
+    # Hidden chats stay out (a group room member's turns, and the room a
+    # chat was branched from), but a bot's Bot Chat, hidden too, is the
+    # bot's own chat and is listed with what continues it, and a chat asked
+    # for by id is read whether hidden or not.
+    shown: list = []
+    hidden = ""
+    if "hidden" in session_columns:
+        shown = list(dict.fromkeys([*(str(sid) for sid in wanted if sid), *bot_chat_lineage(conn, session_columns)]))
+        listed = f" OR m.session_id IN ({','.join('?' * len(shown))})" if shown else ""
+        hidden = f" AND (COALESCE(s.hidden, 0) = 0{listed})"
     if wanted:
         # One chat reads its own rows through Hermes' session index, not
         # the profile's history window by window: on a profile full of cron
@@ -520,12 +530,10 @@ def list_artifacts(conn: sqlite3.Connection, *, before: Optional[int] = None,
         chat = lineage(conn, wanted)
         if not chat:
             return {"items": items, "next_before": None}
-        # A chat asked for by id is listed even when Hermes hides it: a
-        # bot's Bot Chat is a hidden session of its profile.
-        sql = (select + f"WHERE m.session_id IN ({','.join('?' * len(chat))}) AND m.id < ?{candidate} "
+        sql = (select + f"WHERE m.session_id IN ({','.join('?' * len(chat))}) AND m.id < ?{hidden}{candidate} "
                "ORDER BY m.id DESC LIMIT ?")
         scanned = 0
-        for row in conn.execute(sql, [*chat, top, max_scan_rows]):
+        for row in conn.execute(sql, [*chat, top, *shown, max_scan_rows]):
             scanned += 1
             if take(row):
                 return {"items": items, "next_before": int(row["id"]) if row["id"] > lowest else None}
@@ -533,20 +541,13 @@ def list_artifacts(conn: sqlite3.Connection, *, before: Optional[int] = None,
                 return {"items": items, "next_before": int(row["id"]) if row["id"] > lowest else None}
         return {"items": items, "next_before": None}
 
-    bot_chats: list = []
-    if "hidden" in session_columns:
-        # Hidden chats (a group room member's turns) stay out, but a bot's
-        # Bot Chat, hidden too, is the bot's own chat and is listed.
-        bot_chats = bot_chat_lineage(conn, session_columns)
-        listed = f" OR m.session_id IN ({','.join('?' * len(bot_chats))})" if bot_chats else ""
-        candidate = f" AND (COALESCE(s.hidden, 0) = 0{listed}){candidate}"
-    sql = select + f"WHERE m.id >= ? AND m.id < ?{candidate} ORDER BY m.id DESC"
+    sql = select + f"WHERE m.id >= ? AND m.id < ?{hidden}{candidate} ORDER BY m.id DESC"
     scanned = 0
     next_before: Optional[int] = None
     while top > lowest:
         bottom = max(top - window_rows, lowest)
         stopped_at: Optional[int] = None
-        for row in conn.execute(sql, [bottom, top, *bot_chats]):
+        for row in conn.execute(sql, [bottom, top, *shown]):
             if take(row):
                 stopped_at = int(row["id"])
                 break
