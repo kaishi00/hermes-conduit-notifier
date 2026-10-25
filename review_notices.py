@@ -5,9 +5,10 @@ Conduit's "Self-improvement updates" setting is Hermes' own
 they build a chat's agent, and keep that agent while the gateway runs, so a
 chat already open went on showing (or hiding) the "💾 Self-improvement
 review" notices after the setting changed, until the gateway restarted.
-Before each background review of a dashboard chat, the plugin reads the
-setting again from that chat's profile and puts it on the agent. Chats on
-messaging platforms read it every turn already and are left alone.
+Before each background review of a dashboard chat (Conduit's chats, Bot
+Chat and group rooms all are), the plugin reads the setting again from that
+chat's profile and puts it on the agent. Chats on messaging platforms read it
+every turn already and are left alone.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ _lock = threading.Lock()
 # The module this load wrapped, and (Hermes' own function, this load's wrapper)
 _wrapped_module: Any = None
 _wrapped: Optional[tuple[Callable[..., Any], Callable[..., Any]]] = None
+_unread_count = 0
 
 
 def _mode(display: Any) -> str:
@@ -47,6 +49,7 @@ def _session_home(agent: Any) -> tuple[bool, Optional[str]]:
     sessions = getattr(server, "_sessions", None)
     if not isinstance(sessions, dict):
         return False, None
+    # Hermes' lock is reentrant, and the review runs on a thread of its own.
     with getattr(server, "_sessions_lock", None) or contextlib.nullcontext():
         records = list(sessions.values())
     for record in records:
@@ -58,13 +61,25 @@ def _session_home(agent: Any) -> tuple[bool, Optional[str]]:
 
 def live_mode(agent: Any) -> Optional[str]:
     """The setting as the chat's profile has it now, or None when ``agent``
-    isn't a dashboard chat's or the config can't be read."""
+    isn't a dashboard chat's. Raises when the config can't be read."""
     found, home = _session_home(agent)
     if not found or not home:
         return None
     from hermes_cli.config_effective import load_user_config_effective
 
     return _mode(load_user_config_effective(Path(home) / "config.yaml").get("display"))
+
+
+def _setting_unread() -> None:
+    """Warns on the first failure and every 100th after: the chat then keeps
+    the setting it opened with, and an operator should see that."""
+    global _unread_count
+    _unread_count += 1
+    if _unread_count % 100 == 1:
+        logger.warning("conduit_push: couldn't read the self-improvement updates setting (%d times so far); "
+                       "open chats keep the one they started with", _unread_count, exc_info=True)
+    else:
+        logger.debug("conduit_push: couldn't read the self-improvement updates setting", exc_info=True)
 
 
 def _run_review(original: Callable[..., Any]) -> Callable[..., Any]:
@@ -76,7 +91,7 @@ def _run_review(original: Callable[..., Any]) -> Callable[..., Any]:
             if mode is not None:
                 agent.memory_notifications = mode
         except Exception:  # noqa: BLE001 - the review runs with what the agent has
-            logger.debug("conduit_push: couldn't read the self-improvement updates setting", exc_info=True)
+            _setting_unread()
         return original(agent, *args, **kwargs)
 
     functools.update_wrapper(run_review_in_thread, original)

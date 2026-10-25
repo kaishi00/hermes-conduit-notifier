@@ -108,6 +108,15 @@ def test_reads_it_the_way_hermes_does(hermes, text, expected):
     assert hermes.seen == [expected]
 
 
+def test_bot_chat_reads_it_too(hermes):
+    # Bot Chat is a dashboard session that follows its profile's config.
+    agent = Agent("on")
+    hermes.server._sessions["bot"] = {"agent": agent, "profile_home": None, "follow_profile_config": True}
+    _write(hermes.launch, "display:\n  memory_notifications: off\n")
+    _run(hermes, agent)
+    assert hermes.seen == ["off"]
+
+
 def test_other_agents_keep_their_own(hermes):
     # A messaging platform's agent, which Hermes sets every turn.
     _write(hermes.launch, "display:\n  memory_notifications: off\n")
@@ -116,15 +125,19 @@ def test_other_agents_keep_their_own(hermes):
     assert hermes.seen == ["verbose"]
 
 
-def test_an_unreadable_config_keeps_the_review_going(hermes, monkeypatch):
+def test_an_unreadable_config_keeps_the_review_going(hermes, monkeypatch, caplog):
     def broken(path):
         raise OSError("unreadable")
 
     monkeypatch.setattr(sys.modules["hermes_cli.config_effective"], "load_user_config_effective", broken)
     agent = Agent("on")
     hermes.server._sessions["sid"] = {"agent": agent, "profile_home": None}
-    _run(hermes, agent)
-    assert hermes.seen == ["on"]
+    with caplog.at_level("DEBUG"):
+        _run(hermes, agent)
+        _run(hermes, agent)
+    assert hermes.seen == ["on", "on"]
+    # Warned once, not on every review.
+    assert [r.levelname for r in caplog.records if "self-improvement" in r.getMessage()] == ["WARNING", "DEBUG"]
 
 
 def test_no_dashboard_in_this_process(hermes, monkeypatch):
