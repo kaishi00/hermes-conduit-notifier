@@ -148,13 +148,13 @@ def _owner_turn_running(turn_marker: Any, home: Any, entry: dict[str, Any], alia
 #
 # The tables, columns and the 'terminal' status are Hermes' own refusal query
 # (_CANONICAL_PENDING_SQL, read at Hermes 9e01b44): a row this reads as open
-# is one that refuses the send. Bot deliveries carry request_id "bot:<id>" and
+# is one that refuses the send (a NULL status reads settled in both). Bot deliveries carry request_id "bot:<id>" and
 # principal_id "automation:agent:<bot>:…" (tools/bot_mode_dm.py).
 _LEDGER_TABLES = (("session_admissions", "target_session_id"), ("worker_executions", "session_id"))
 _BOT_MARKS = (("request_id", "bot:%"), ("principal_id", "automation:agent:%"))
 
 
-def _columns(db: sqlite3.Connection, table: str) -> set:
+def _columns(db: sqlite3.Connection, table: str) -> set[str]:
     return {str(row[1]) for row in db.execute(f"PRAGMA table_info({table})")}
 
 
@@ -220,9 +220,9 @@ def take_over_session(session_ids: list, *, registry: Any, turn_marker: Any, hom
     were dropped (send again); ``busy``: an owner is mid-turn, a live
     claim whose surface writes no turn marker holds the chat, or the
     gateway's ledger holds work on it (surface ``bot`` for another bot's
-    message, ``gateway`` otherwise; ask again shortly); ``same_host``: this dashboard process still holds one of the
-    ids, which this route never touches (other processes' claims may have
-    been dropped). Marker reads happen under the registry lock on purpose:
+    message, ``gateway`` otherwise; ask again shortly); ``same_host``:
+    this dashboard process still holds one of the ids, which this route
+    never touches (other processes' claims may have been dropped). Marker reads happen under the registry lock on purpose:
     the decision and the write must be atomic against other claimers; the
     reads are bounded by the caller's ids (at most TAKEOVER_MAX_IDS) per owner.
 
@@ -236,6 +236,8 @@ def take_over_session(session_ids: list, *, registry: Any, turn_marker: Any, hom
     # claim is dropped while it holds the chat.
     queued = gateway_queue_owner(home, session_ids)
     if queued is not None:
+        logger.info("Chat takeover: Hermes' gateway ledger holds chat %r (surface %r); nothing dropped",
+                    session_ids, queued)
         return {"status": "busy", "surface": queued}
     state_path, lock_path = registry._lease_paths(registry_home=home)
     def check_abandoned() -> None:
