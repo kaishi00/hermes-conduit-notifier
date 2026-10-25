@@ -957,6 +957,7 @@ def test_done_marks_a_report_item_found_on_its_own_and_the_next_report_reads_it(
     assert learning.learned(live.store) == []
     recent = pulse.candidates.recent_section(live.store, pulse.report.zone_for("UTC"), time.time())
     assert "The dentist is Friday at 9 (calendar). (done)" in recent
+    assert "marked (done) in what Pulse brought up lately" in pulse.candidates.INSTRUCTIONS  # so it stays out
     assert control.done(live.store, card_id, False) is True
     assert live.store.done_marks([card_id]) == {}
 
