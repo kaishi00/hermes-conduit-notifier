@@ -342,6 +342,26 @@ def test_a_long_brief_is_cut_to_the_reports_budget(live, monkeypatch):
     assert len(text) <= pulse.report.report_budget() and text.rstrip().endswith(">>>")
 
 
+def test_a_busy_brief_keeps_the_calendar_and_lets_the_held_news_go(live, monkeypatch):
+    from datetime import timezone
+    monkeypatch.delenv(pulse.report.LCM_THRESHOLD, raising=False)
+    live.store.set("memory", True)
+    phone = ("## Calendar, the next 2 days (phone synced 5 min ago)\n"
+             + "\n".join(f"- Meeting {n} {'m' * 95} (2026-10-25 {n % 24:02d}:00)" for n in range(25))
+             + "\n\n## Open reminders\n" + "\n".join(f"- Reminder {n} {'r' * 95} (due 2026-10-26)" for n in range(25)))
+    monkeypatch.setattr(pulse.report, "phone_context", lambda home, now: (phone, None))
+    monkeypatch.setattr(pulse.report, "remembered_lines",
+                        lambda items, zone: (pulse.report.REMEMBERED_TITLE + "\n" + "o" * 3_400, []))
+    monkeypatch.setattr(pulse.report, "inbox_context", lambda home, since, title="": title + "\n" + "i" * 2_000)
+    cards = [{"news": f"Held {n} " + "h" * 390, "chat_title": "Deploy"} for n in range(pulse.brief.MAX_CARDS)]
+    context = pulse.brief.context(live.home, live.store, cards, home_chat_id="home", now=time.time(),
+                                  zone=timezone.utc)
+    text = pulse.brief.text_for(context)("t1")
+    # Over the budget, the cut takes the held news (each shows as its own card), never the day's calendar.
+    assert len(context) > pulse.report.report_budget() and len(text) <= pulse.report.report_budget()
+    assert phone in text and f"- Held {pulse.brief.MAX_CARDS - 1} " not in text
+
+
 def test_a_brief_turn_pushes(live):
     brief_later(live)
     control.set_level(live.store, "followup", "brief")

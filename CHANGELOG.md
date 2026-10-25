@@ -23,6 +23,9 @@ checks it). The format is fixed, because Conduit reads it:
   mornings it never showed up.
 - The morning brief's default time is now 07:00, an hour before the first
   report, so the two don't arrive together. A time you picked stays.
+- The report after the morning brief leaves out what the brief already
+  brought up, unless something about it changed. On a busy morning the
+  brief keeps your calendar and reminders before anything else.
 - `hermes conduit-push pulse status` shows the morning brief's time.
 
 ## 0.75.0 (2026-10-25)

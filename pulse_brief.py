@@ -73,11 +73,13 @@ def line(card: dict) -> str:
 
 def context(home: Path, pulse_store: store.PulseStore, cards: list[dict], *, home_chat_id: str, now: float,
             zone: Any) -> str:
-    """What the brief reads: the time, what was held for it, what Pulse
-    memory keeps open and what happened since on the same subject, the
-    phone's calendar and reminders, and what its automations logged since
-    the report's look back starts (the last report, 4 to 24 hours ago),
-    every section that has something in it."""
+    """What the brief reads, every section that has something in it: the
+    time, the phone's calendar and reminders, what Pulse memory keeps open
+    and what happened since on the same subject, what the phone's
+    automations logged since the report's look back starts (the last
+    report, 4 to 24 hours ago), and what was held for it. In that order, so
+    a long brief cut at the end (text_for) loses the held news first: it
+    shows as its own cards anyway."""
     held = HELD_TITLE + "\n" + "\n".join(line(card) for card in cards) if cards else ""
     listed, later = "", ""
     if pulse_store.get("memory"):
@@ -87,8 +89,8 @@ def context(home: Path, pulse_store: store.PulseStore, cards: list[dict], *, hom
     start = datetime.fromtimestamp(since, zone).strftime("%a %d %b %H:%M")
     logged = report.inbox_context(home, since, title=LOGGED_TITLE.format(start=start))
     nothing = "" if held or listed or logged else _nothing(bool(pulse_store.get("memory")), _logs(home), start)
-    sections = [f"## Now\n{datetime.fromtimestamp(now, zone).strftime('%A %d %B %Y, %H:%M')}", held, listed, later,
-                nothing, report.phone_context(home, now)[0], logged]
+    sections = [f"## Now\n{datetime.fromtimestamp(now, zone).strftime('%A %d %B %Y, %H:%M')}", nothing,
+                report.phone_context(home, now)[0], listed, later, logged, held]
     return "\n\n".join(section for section in sections if section)
 
 
