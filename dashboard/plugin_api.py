@@ -8335,18 +8335,12 @@ _location_store_module: Any = None
 
 
 def _location_store() -> Any:
-    """location_store.py beside this folder, loaded once."""
+    """location_store.py beside this folder, loaded once (with sealing.py, as
+    part of the private package)."""
     global _location_store_module
-    with _calls_store_lock:
-        if _location_store_module is None:
-            path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "location_store.py")
-            spec = importlib.util.spec_from_file_location("conduit_push_dashboard_location_store", path)
-            if spec is None or spec.loader is None:
-                raise TokenError(501, "This plugin install is missing location_store.py; update the plugin")
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            _location_store_module = module
-        return _location_store_module
+    if _location_store_module is None:
+        _location_store_module = _plugin_package_module("location_store")
+    return _location_store_module
 
 
 def _location_call(fn: Callable[[Any], Dict[str, Any]]) -> Dict[str, Any]:
@@ -12102,8 +12096,12 @@ class _WatchAudioRuntime:
             self.failure = failure
 
     def _step(self, command: list, timeout: float, what: str) -> str:
+        # Hermes points PYTHONPATH at its own site-packages, so pip (and uv)
+        # would count Hermes' cffi and cryptography as installed and leave
+        # them out of an environment the helper runs isolated (#340).
+        env = {name: value for name, value in os.environ.items() if name != "PYTHONPATH"}
         try:
-            done = self._run(command, capture_output=True, text=True, timeout=timeout)
+            done = self._run(command, capture_output=True, text=True, timeout=timeout, env=env)
         except subprocess.TimeoutExpired:
             raise _RuntimeBuildFailed(f"{what} timed out")
         except OSError as exc:
@@ -12125,7 +12123,7 @@ class _WatchAudioRuntime:
         uv = self._which("uv")
         try:
             self._step([self._base_python, "-m", "venv", env_dir], WATCH_AUDIO_VENV_TIMEOUT_S, "Making the environment")
-            self._step([python, "-m", "pip", "install", "--disable-pip-version-check", "--no-input",
+            self._step([python, "-I", "-m", "pip", "install", "--disable-pip-version-check", "--no-input",
                         "--no-warn-script-location", WATCH_AUDIO_AIORTC], WATCH_AUDIO_PIP_TIMEOUT_S, "Installing aiortc")
         except _RuntimeBuildFailed as first:
             # A Python without venv or pip (a distribution's own, say): uv
@@ -16543,10 +16541,20 @@ def _notify_self_update(job: Dict[str, Any]) -> None:
             # Per outcome: a failure the restarted dashboard corrects isn't a
             # duplicate of the push the dying one sent.
             event = events.push_event("background_task.finished", identifier=events.event_id("plugin-update", job["id"], job.get("step")),
-                                      profile=profile or "default", title=title, body=body)
+                                      profile=profile or "default", profile_name=_bot_name(client), title=title, body=body)
             client.send_now(event)
     except Exception as exc:  # noqa: BLE001 — a notification is a courtesy; the job file has the outcome
         logger.warning("Conduit plugin: couldn't send the update notification (%s)", type(exc).__name__)
+
+
+def _bot_name(client: Any) -> str:
+    """The profile's bot name for a push (session_titles.bot_name); "" when it
+    can't be read, so the push still goes out with the profile id."""
+    try:
+        return importlib.import_module(f"{client.__package__}.session_titles").bot_name()
+    except Exception:  # noqa: BLE001 — a name is never worth the notification
+        logger.debug("Conduit plugin: no bot name for the update notification", exc_info=True)
+        return ""
 
 
 @router.post("/self/update")

@@ -1078,6 +1078,7 @@ function notificationFor(event, preferences, gateway = undefined) {
     type: event.type,
     session_id: event.sessionId,
     profile: event.profile,
+    ...(event.profileName ? { profile_name: event.profileName } : {}),
     gateway: event.gateway,
     ...(gatewayId ? { gateway_id: gatewayId } : {}),
     ...(dashboardId ? { dashboard_id: dashboardId } : {}),
@@ -1395,7 +1396,7 @@ function encryptedNotificationFor(event, preferences, { gatewayId, dashboardId, 
 }
 
 function notificationContext(message, event) {
-  const profile = String(event.profile ?? '').trim();
+  const profile = String(event.profileName || event.profile || '').trim();
   const sessionId = String(event.sessionId ?? '').trim();
   const details = [profile && `Profile: ${profile}`, sessionId && `Session: ${shortSessionId(sessionId)}`].filter(Boolean);
   return details.length ? `${message}\n${details.join(' · ')}` : message;
@@ -1457,6 +1458,8 @@ function validateEvent(body) {
     body: cleanText(body.body, 500),
     sessionId: cleanSessionKey(body.session_id),
     profile: cleanText(body.profile, 80),
+    // The bot's name as Conduit's Bots list shows it, when Hermes gave it one.
+    profileName: cleanText(body.profile_name, 64),
     gateway: cleanIdentifier(body.gateway, 80),
     pluginVersion: cleanIdentifier(body.plugin_version, 40),
     pluginCapabilities: validCapabilities(body.plugin_capabilities),

@@ -12,7 +12,7 @@ VERSION = re.compile(r"^version:\s*[\"']?([0-9]+(?:\.[0-9]+)*)", re.MULTILINE)
 HEADING = re.compile(r"^## ([0-9]+\.[0-9]+\.[0-9]+) \((\d{4}-\d{2}-\d{2})\)$")
 SECTIONS = ["Security", "Fixes", "New and improved"]
 # A version bump changes these together, with a new entry on top of CHANGELOG.md.
-VERSION_FILES = "plugin.yaml, events.py, dashboard/manifest.json and tests/test_clarify_loop.py"
+VERSION_FILES = "plugin.yaml and dashboard/manifest.json"
 
 
 def _parts(version):

@@ -21,6 +21,28 @@ checks it). The format is fixed, because Conduit reads it:
   you asked before. Work you ask for in the background, quick requests and
   requests for another profile still get their own chat.
 
+## 0.77.4 (2026-10-25)
+
+### Fixes
+- Turning "Self-improvement updates" off, or on, didn't reach chats that
+  were already open: they kept showing the updates the way they did when
+  they opened, until Hermes restarted. Each update now follows the setting
+  as it is when it's made.
+
+## 0.77.3 (2026-10-25)
+
+### Fixes
+- Notifications from a bot's chat said its profile, like "default", instead
+  of the bot's name. They now use the name the Bots list shows, and so does a
+  call from that bot.
+
+## 0.77.2 (2026-10-25)
+
+### Fixes
+- Preparing GPT-Live for the Watch failed every time with "No module named
+  '_cffi_backend'" on current Hermes, because the install borrowed packages
+  from Hermes instead of adding its own. Tap Prepare again after updating.
+
 ## 0.77.1 (2026-10-25)
 
 ### Fixes

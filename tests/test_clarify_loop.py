@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import pathlib
+import re
 import sys
 import tempfile
 import threading
@@ -309,6 +310,20 @@ def _blocking_original(unused_value="unused"):
     return original, release
 
 
+def _original_answered_once_released(fake, value):
+    """Hermes' own prompt, answered as soon as the loop gives the relay up
+    and releases the parked decision, so a test of a path that falls back
+    doesn't wait out _blocking_original's 5 s."""
+
+    def original(args):
+        deadline = time.monotonic() + 5
+        while not fake.cancelled_ids and time.monotonic() < deadline:
+            time.sleep(0.005)
+        return value
+
+    return original
+
+
 def test_poll_transport_errors_are_tolerated_until_answered():
     fake = _FakeState([
         RuntimeError("network down"),
@@ -387,11 +402,8 @@ def test_polling_stops_when_relay_expires_the_decision():
     # original path instead of hammering a request that can never succeed.
     fake = _FakeState([{"status": "pending"}, {"status": "unknown"}, {"status": "pending"}])
     _install(fake)
-    original, release = _blocking_original("late original result")
-    try:
-        result = loop.middleware(**_kwargs(original, {"question": "Q?"}))
-    finally:
-        release.set()
+    original = _original_answered_once_released(fake, "late original result")
+    result = loop.middleware(**_kwargs(original, {"question": "Q?"}))
     assert result == "late original result"
     assert len(fake.poll_ids) == 2, "polling must stop after unknown-following-pending"
 
@@ -429,11 +441,8 @@ def test_polling_stops_when_no_card_was_delivered():
     # can answer by id, so the first poll result ends the polling.
     fake = _FakeState([{"status": "pending", "deliverable": False}, {"status": "pending"}])
     _install(fake)
-    original, release = _blocking_original("original result")
-    try:
-        result = loop.middleware(**_kwargs(original, {"question": "Q?"}))
-    finally:
-        release.set()
+    original = _original_answered_once_released(fake, "original result")
+    result = loop.middleware(**_kwargs(original, {"question": "Q?"}))
     assert result == "original result"
     assert len(fake.poll_ids) == 1
 
@@ -443,11 +452,8 @@ def test_a_rejected_answer_hands_the_question_back_to_hermes():
     # never become the tool result, and the decision is released.
     fake = _FakeState([{"status": "rejected"}, {"status": "answered", "answer": "forged"}])
     _install(fake)
-    original, release = _blocking_original("original result")
-    try:
-        result = loop.middleware(**_kwargs(original, {"question": "Q?"}))
-    finally:
-        release.set()
+    original = _original_answered_once_released(fake, "original result")
+    result = loop.middleware(**_kwargs(original, {"question": "Q?"}))
     assert result == "original result"
     assert len(fake.poll_ids) == 1
     deadline = time.monotonic() + 5
@@ -462,14 +468,13 @@ def test_consecutive_unknown_polls_stop_after_grace_window():
     # entire budget. The later "answered" must never be reached.
     fake = _FakeState([{"status": "unknown"}] * 5 + [{"status": "answered", "answer": "late"}])
     _install(fake)
-    original, release = _blocking_original("original result")
+    original = _original_answered_once_released(fake, "original result")
     old_grace = loop.UNKNOWN_POLL_GRACE
     loop.UNKNOWN_POLL_GRACE = 3
     try:
         result = loop.middleware(**_kwargs(original, {"question": "Q?"}))
     finally:
         loop.UNKNOWN_POLL_GRACE = old_grace
-        release.set()
     assert result == "original result"
     assert len(fake.poll_ids) == 3, "polling must stop at the grace boundary"
 
@@ -538,14 +543,13 @@ def test_persistent_transport_errors_stop_after_grace_window():
     # count against the same grace as unknowns.
     fake = _FakeState([RuntimeError("relay down")] * 5)
     _install(fake)
-    original, release = _blocking_original("original result")
+    original = _original_answered_once_released(fake, "original result")
     old_grace = loop.UNKNOWN_POLL_GRACE
     loop.UNKNOWN_POLL_GRACE = 3
     try:
         result = loop.middleware(**_kwargs(original, {"question": "Q?"}))
     finally:
         loop.UNKNOWN_POLL_GRACE = old_grace
-        release.set()
     assert result == "original result"
     assert len(fake.poll_ids) == 3
 
@@ -805,7 +809,8 @@ def test_user_agent_derives_from_the_plugin_version():
     # One source of truth: bumping PLUGIN_VERSION updates the relay UA
     # automatically instead of leaving a stale hand-written constant.
     assert loop.client.USER_AGENT == f"Hermes-Conduit-Notifier/{loop.client.PLUGIN_VERSION}"
-    assert loop.client.PLUGIN_VERSION == "0.78.0"
+    manifest = re.search(r"^version:\s*(\S+)", (ROOT / "plugin.yaml").read_text(), re.M).group(1)
+    assert loop.client.PLUGIN_VERSION == manifest
 
 
 def test_send_now_redacts_only_when_the_profile_opts_in(monkeypatch, tmp_path):

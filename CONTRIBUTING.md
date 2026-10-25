@@ -30,9 +30,10 @@ entry current.
 
 ## Plugin version
 
-A version bump changes five files together: `plugin.yaml`, `events.py`,
-`dashboard/manifest.json`, `tests/test_clarify_loop.py`, and a new entry on
-top of `CHANGELOG.md` (Conduit shows it as the update notice). Parallel PRs
+A version bump changes `plugin.yaml` and `dashboard/manifest.json` together
+and adds a new entry on top of `CHANGELOG.md` (Conduit shows it as the update
+notice). `events.py` reads its version from `plugin.yaml`, and the tests check
+that the manifest and the changelog agree with it. Parallel PRs
 often pick the same next number, so take the next free version on main right
 before merging. CI fails a PR whose version main already has.
 

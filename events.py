@@ -4,13 +4,31 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import uuid
 from typing import Any
 
-# Keep in sync with plugin.yaml. Reported on every event so the relay can
-# expose per-gateway compatibility state to the app (Settings > Notifications).
-PLUGIN_VERSION = "0.78.0"
+
+
+def _manifest_version() -> str:
+    """The version in plugin.yaml beside this file, the one place a bump
+    edits (with dashboard/manifest.json and CHANGELOG.md). Read the way the
+    dashboard's /capabilities reads it."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plugin.yaml")
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            key, _, value = line.partition(":")
+            if key.strip() == "version":
+                return value.strip().strip("\"'")
+    raise RuntimeError("plugin.yaml declares no version")
+
+
+# Reported on every event so the relay can expose per-gateway compatibility
+# state to the app (Settings > Notifications). Read once at import: after
+# `hermes plugins update` this keeps reporting the code that is running until
+# the gateway restarts.
+PLUGIN_VERSION = _manifest_version()
 PLUGIN_CAPABILITIES = [
     "approval-decisions",
     "clarify-loop",
@@ -78,6 +96,7 @@ def push_event(
     identifier: str,
     session_id: str = "",
     profile: str = "default",
+    profile_name: str = "",
     title: str = "",
     body: str = "",
     title_label: str = "",
@@ -99,6 +118,11 @@ def push_event(
         event["session_id"] = session_id
     if profile:
         event["profile"] = profile[:80]
+    # The bot's name as the Bots list shows it (session_titles.bot_name), so
+    # a call screen or the relay's plain copy says "Atlas", not "default".
+    shown_profile = _clean(profile_name, 64) if isinstance(profile_name, str) else ""
+    if shown_profile:
+        event["profile_name"] = shown_profile
     # No push shows a host path: a MEDIA tag in a question, an approval, a
     # call, an update or a phone change reads as its attachment too. A reply
     # comes through plain_text, which already did this and kept fenced code.
