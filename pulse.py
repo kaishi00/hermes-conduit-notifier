@@ -151,11 +151,13 @@ def _owner_gone(owner: Any) -> bool:
     hostname, _, pid = str(owner).rpartition(":")
     if os.name == "nt" or hostname != socket.gethostname() or not pid.isdigit():
         return False
+    if not 0 < int(pid) <= 2**31 - 1:
+        return False
     try:
         os.kill(int(pid), 0)
     except ProcessLookupError:
         return True
-    except OSError:
+    except (OSError, OverflowError):
         return False
     return False
 
