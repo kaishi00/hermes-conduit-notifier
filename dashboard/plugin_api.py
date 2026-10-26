@@ -16420,6 +16420,31 @@ def _guard_room_cutoff() -> None:
 _guard_room_cutoff()
 
 
+# room_wakeups.py beside this folder keeps a room's pass that ends from
+# keeping every room's pass going, as the plugin's own load does in the
+# gateway.
+
+_room_wakeups_module: Any = None
+
+
+def _guard_room_wakeups() -> None:
+    global _room_wakeups_module
+    try:
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "room_wakeups.py")
+        spec = importlib.util.spec_from_file_location("conduit_push_dashboard_room_wakeups", path)
+        if spec is None or spec.loader is None:
+            raise ImportError("This plugin install is missing room_wakeups.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module.install()
+        _room_wakeups_module = module
+    except Exception:  # noqa: BLE001 — group rooms only, never the routes
+        logger.warning("Conduit plugin: couldn't guard Hermes' group room wakeups", exc_info=True)
+
+
+_guard_room_wakeups()
+
+
 # room_cleanup.py beside this folder deletes the hidden chats of a disbanded
 # room's agents on this host, as the plugin's own load does in the gateway.
 # It reads the room stores through room_rules.py, so it loads as part of the
