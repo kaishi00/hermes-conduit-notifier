@@ -343,6 +343,57 @@ def test_a_waiting_fetch_wakes_when_an_envelope_arrives(mailbox_url, eric):
 
 
 @needs_node
+def test_a_read_says_how_long_each_envelope_waited_at_the_mailbox(mailbox_url, eric):
+    inbox = mailbox_module.Mailbox(mailbox_url, eric)
+    inbox.register()
+    token = mailbox_module.new_token()
+    inbox.put_sender("l-mona", token)
+    mailbox_module.send(mailbox_url, eric.inbox, token, b"just now", idempotency_key="m-age")
+
+    [delivered], _ = inbox.fetch(after=0)
+
+    assert delivered.age is not None and 0 <= delivered.age <= 2
+
+
+def _answering_a_read(date):
+    """A mailbox whose every read answers with one envelope it took at 10:00:00 on 26 October 2026, dated
+    ``date`` (None: with no Date)."""
+    body = json.dumps({"envelopes": [{"seq": 1, "sender": "l-mona", "received_at": 1793008800, "body": "aGk="}],
+                       "next": 1}).encode()
+
+    class Answering(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response_only(200)
+            if date is not None:
+                self.send_header("Date", date)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    return _serve(Answering)
+
+
+@pytest.mark.parametrize("date, age", [("Mon, 26 Oct 2026 10:00:40 GMT", 40), (None, None)])
+def test_how_long_an_envelope_waited_is_the_mailboxs_clock_alone(eric, date, age):
+    # The read's Date less when the mailbox took it: both the mailbox's, so
+    # this host's clock hours off changes nothing.
+    server = _answering_a_read(date)
+    try:
+        inbox = mailbox_module.Mailbox(f"http://127.0.0.1:{server.server_port}", eric,
+                                       clock=lambda: time.time() + 5 * 3600)
+        [delivered], _ = inbox.fetch(after=0)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert delivered.body == b"hi" and delivered.age == age
+
+
+@needs_node
 def test_a_removed_sender_can_no_longer_send(mailbox_url, eric):
     inbox = mailbox_module.Mailbox(mailbox_url, eric)
     inbox.register()
