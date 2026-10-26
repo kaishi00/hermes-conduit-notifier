@@ -62,6 +62,7 @@ TOOLSETS = [
 ]
 BUILTIN = {"web", "terminal", "vision", "x_search", "stt", "session_search", "discord"}
 KEY = "k" * 64
+GATEWAY = (4242, 1792000000.5)  # the gateway's pid and start time
 
 
 def _yaml(path):
@@ -109,11 +110,12 @@ class FakeHermes:
 
     def serve(self, port=8642, state="connected", live=True, error=None):
         """The root's gateway, as its gateway_state.json records it."""
-        platform = {"state": state, "listener_base": f"http://127.0.0.1:{port}"}
+        platform = {"state": state, "listener_base": f"http://127.0.0.1:{port}",
+                    "writer_pid": GATEWAY[0], "writer_start_time": GATEWAY[1]}
         if error:
             platform["error_message"] = error
         self.status = {"live": live, "gateway_state": "running" if live else "stopped",
-                       "platforms": {"api_server": platform}}
+                       "pid": GATEWAY[0], "start_time": GATEWAY[1], "platforms": {"api_server": platform}}
 
     def save_env(self, home, key, value):
         self.env_writes.append((home, key))
@@ -322,8 +324,9 @@ def test_a_taken_port_moves_the_api_server(hermes):
 
 
 def test_a_taken_port_moves_an_api_server_whose_key_is_in_config_yaml(hermes):
-    # Hermes binds config.yaml's port, else API_SERVER_PORT, whichever file
-    # has the key (api_server.listen_address).
+    # Wherever the key is, Hermes binds config.yaml's port, else the
+    # environment's API_SERVER_PORT, which the gateway loads from the root
+    # .env (api_server.listen_address).
     _write(hermes.root / "config.yaml", {"platforms": {"api_server": {"enabled": True, "key": KEY}}})
     hermes.ports.taken.add(8642)
     after = _apply(hermes)
@@ -403,11 +406,69 @@ def test_a_gateway_record_with_a_broken_listener_reads_as_configured(hermes):
     assert setup.local_api_url(hermes.adapter(), hermes.root, "default") == "http://127.0.0.1:8642"
 
 
+@pytest.mark.parametrize("listener", ["http://0.0.0.0:8642", "http://[::]:8642"])
+def test_a_wildcard_listener_is_reached_on_loopback(hermes, listener):
+    (hermes.root / ".env").write_text(f"API_SERVER_KEY={KEY}\n", encoding="utf-8")
+    hermes.serve()
+    hermes.status["platforms"]["api_server"]["listener_base"] = listener
+    assert setup.local_api_url(hermes.adapter(), hermes.root, "default") == "http://127.0.0.1:8642"
+
+
 def test_a_stopped_gateway_that_served_the_api_server_isnt_given_a_new_key(hermes):
     hermes.serve(state="disconnected", live=False)
     after = _apply(hermes)
     assert "API_SERVER_KEY" not in _env(hermes.root / ".env")
     assert after["needs"] == ["restart"]
+
+
+def _by_an_earlier_gateway(hermes):
+    """The API server's entry as a gateway before the record's left it, which
+    Hermes keeps across a restart."""
+    hermes.status["platforms"]["api_server"].update(writer_pid=GATEWAY[0] - 1, writer_start_time=GATEWAY[1] - 60)
+
+
+def test_an_earlier_gateways_entry_isnt_taken_as_running(hermes):
+    (hermes.root / ".env").write_text(f"API_SERVER_KEY={KEY}\n", encoding="utf-8")
+    hermes.serve(port=8650)
+    _by_an_earlier_gateway(hermes)
+    state = _state(hermes)
+    assert not state["api_server"]["running"] and "restart" in state["needs"]
+    assert setup.local_api_url(hermes.adapter(), hermes.root, "default") == "http://127.0.0.1:8642"
+    hermes.serve(state="fatal", error="[Errno 98] address already in use")
+    _by_an_earlier_gateway(hermes)
+    assert _state(hermes)["api_server"]["error"] is None
+
+
+@pytest.mark.parametrize("live", [True, False])
+def test_an_earlier_gateways_entry_doesnt_stand_for_a_key(hermes, live):
+    # The record's gateway didn't serve the API server, so its environment
+    # has no key for it.
+    hermes.serve(state="disconnected", live=live)
+    _by_an_earlier_gateway(hermes)
+    after = _apply(hermes)
+    assert len(_env(hermes.root / ".env")["API_SERVER_KEY"]) == 64
+    assert "api_server_key" in after["changed"]
+
+
+def test_a_gateway_still_starting_keeps_an_earlier_entrys_key(hermes):
+    hermes.serve(state="disconnected")
+    _by_an_earlier_gateway(hermes)
+    hermes.status["gateway_state"] = "starting"
+    _apply(hermes)
+    assert "API_SERVER_KEY" not in _env(hermes.root / ".env")
+
+
+@pytest.mark.parametrize("live", [True, False])
+def test_a_gateway_that_refused_a_missing_key_gets_one(hermes, live):
+    # Hermes starts an API server config.yaml turns on without a key, and its
+    # startup guard refuses it; a gateway with nothing else to run exits.
+    _write(hermes.root / "config.yaml", {"platforms": {"api_server": {"enabled": True}}})
+    hermes.serve(state="fatal", live=live, error="API_SERVER_KEY was rejected by the startup guard")
+    hermes.status["platforms"]["api_server"]["error_code"] = "api_server_key_invalid"
+    hermes.status["gateway_state"] = "running" if live else "startup_failed"
+    after = _apply(hermes)
+    assert len(_env(hermes.root / ".env")["API_SERVER_KEY"]) == 64
+    assert "api_server_key" in after["changed"]
 
 
 def test_restart_is_needed_only_while_the_api_server_isnt_running(hermes):
@@ -630,6 +691,7 @@ def test_a_named_profile_gets_its_own_ceiling_and_the_roots_api_server(hermes):
     assert after["api_server"]["profile_key_set"] is True
     assert after["profile"] == "laifu" and after["policy"]["target_profile"] == "laifu"
     assert setup.local_api_url(hermes.adapter(), hermes.home("laifu"), "laifu") == "http://127.0.0.1:8642/p/laifu"
+    assert setup.local_api_url(hermes.adapter(), hermes.home("laifu"), "a b#c").endswith("/p/a%20b%23c")
     assert setup.local_api_url(hermes.adapter(), hermes.root, "default") == "http://127.0.0.1:8642"
 
 
@@ -952,9 +1014,11 @@ def test_the_setup_route_refuses_with_a_code(client, hermes, payload, code):
     assert hermes.config_writes == [] and hermes.env_writes == []
 
 
-def test_the_setup_route_refuses_what_isnt_an_object(client):
-    response = client.post(f"{BASE}/rooms/setup", json=["web"])
-    assert response.status_code == 400
+@pytest.mark.parametrize("raw", ['["web"]', "null", '"web"', "3"])
+def test_the_setup_route_refuses_what_isnt_an_object(client, hermes, raw):
+    response = client.post(f"{BASE}/rooms/setup", content=raw, headers={"Content-Type": "application/json"})
+    assert response.status_code == 400 and response.json()["code"] == "bad_request"
+    assert hermes.config_writes == [] and hermes.env_writes == []
 
 
 def test_the_setup_route_refuses_yolo_with_409(client, hermes, monkeypatch):

@@ -38,7 +38,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Optional
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from . import room_choices, room_identity
 
@@ -64,15 +64,14 @@ PORT_ENV = "API_SERVER_PORT"
 HOST_ENV = "API_SERVER_HOST"
 YOLO_ENV = "HERMES_YOLO_MODE"
 STATUS_FILE = "gateway_state.json"
+# The record's code for an API server its startup guard refused for its key
+# (api_server._api_key_passes_startup_guard).
+KEY_REFUSED = "api_server_key_invalid"
 LOCK_NAME = ".setup.lock"
 # --detach: with no service manager, the new gateway starts in the
 # background instead of in the terminal that asked (930e5ed and later).
 RESTART_ARGS = ("-p", "default", "gateway", "restart", "--detach")
 
-# What a POST would do, in this order: turn the API server on (a key, an
-# explicit disable, a port), save the ceiling, keep toolsets added later out,
-# make approvals manual, restart the gateway to start the API server.
-NEEDS = ("api_server", "ceiling", "plugin_tools", "approvals", "restart")
 # Where the gateway reads the API server's settings, merged in this order,
 # the later winning (gateway.config_loader.merge_platform_sections).
 BLOCKS = (("gateway", "platforms", PLATFORM), ("platforms", PLATFORM), ("gateway", PLATFORM))
@@ -230,9 +229,12 @@ class _Server:
 
     @property
     def url(self) -> str:
-        if self.listener:
+        # Hermes stamps its record's listener with a wildcard host as
+        # 127.0.0.1 (shared_ingress.listener_base_url); one that wasn't gets
+        # the same here.
+        if self.listener and (urlsplit(self.listener).hostname or "") not in _WILDCARD_HOSTS:
             return self.listener.rstrip("/")
-        host = DEFAULT_HOST if self.host.strip() in _WILDCARD_HOSTS else self.host
+        host = DEFAULT_HOST if self.listener or self.host.strip() in _WILDCARD_HOSTS else self.host
         host = f"[{host}]" if ":" in host and not host.startswith("[") else host
         return f"http://{host}:{self.port}"
 
@@ -305,9 +307,12 @@ def _server(hermes: Hermes, root: Path, config: dict, env: Mapping[str, str]) ->
             live = bool(hermes.gateway_live(record))
         except Exception as exc:  # noqa: BLE001
             logger.warning("Linked Rooms setup couldn't tell whether the gateway runs (%s)", type(exc).__name__)
-    running = live and platform.get("state") == "connected"
-    # Hermes stamps it with a wildcard host as 127.0.0.1
-    # (shared_ingress.listener_base_url).
+    # Hermes keeps an earlier gateway's entry across a restart: only the one
+    # the record's own gateway wrote counts (web_server_gateway's
+    # _owned_profile_platforms).
+    own = platform is not None and (platform.get("writer_pid"), platform.get("writer_start_time")) == (
+        record.get("pid"), record.get("start_time"))
+    running = live and own and platform.get("state") == "connected"
     listener = platform.get("listener_base") if running else None
     listener = listener if isinstance(listener, str) and listener.startswith("http") else None
     listener_port = None
@@ -316,7 +321,7 @@ def _server(hermes: Hermes, root: Path, config: dict, env: Mapping[str, str]) ->
             listener_port = urlsplit(listener).port
         except ValueError:  # a record this can't read: the API server is where config.yaml and the .env put it
             listener = None
-    error = platform.get("error_message") if live and not running else None
+    error = platform.get("error_message") if live and own and not running else None
 
     env_key = env.get(KEY_ENV)
     env_usable = hermes.usable_key(env_key)
@@ -329,8 +334,12 @@ def _server(hermes: Hermes, root: Path, config: dict, env: Mapping[str, str]) ->
             settings["host"] = env[HOST_ENV]
     key_usable = hermes.usable_key(settings.get("key"))
     # A gateway that ran it had a key: one the root .env doesn't set comes
-    # from its environment, which this can't read (a service file).
-    unseen = platform is not None and KEY_ENV not in env and not key_usable
+    # from its environment, which this can't read (a service file). One
+    # still starting hasn't written its entry yet, and one whose startup
+    # guard refused the key (missing or too weak) had none.
+    starting = platform is not None and record.get("gateway_state") == "starting"
+    refused = platform is not None and platform.get("error_code") == KEY_REFUSED
+    unseen = (own or starting) and not refused and KEY_ENV not in env and not key_usable
     flag = _coerce_bool(top.get("enabled"), False)
     from_env = env_usable or unseen
     enabled = running or ((flag or (from_env and not explicit)) and (key_usable or unseen))
@@ -466,7 +475,9 @@ def _plan(hermes: Hermes, home: Path, profile: str, ceiling: Any) -> _Plan:
             f"again with `hermes -p {profile} gateway start`, then set it up.")})
     # Hermes reads it once, in the gateway process (tools.approval's
     # _YOLO_MODE_FROZEN), from its environment and the root .env; the host
-    # gateway never loads a named profile's .env into its environment.
+    # gateway never loads a named profile's .env into its environment. One
+    # set only in a service's environment, which this can't read, Hermes
+    # refuses rooms for itself (hosted_room_peer: approvals off).
     if _truthy(os.environ.get(YOLO_ENV)) or _truthy(env.get(YOLO_ENV)):
         blockers.append({"code": "yolo", "message": (
             f"{YOLO_ENV} is on for this Hermes, which turns approvals off for every turn, and rooms refuse that. Take "
@@ -524,13 +535,14 @@ def _plan(hermes: Hermes, home: Path, profile: str, ceiling: Any) -> _Plan:
     if approvals == "off":
         profile_writes["approvals.mode"] = "manual"
 
+    # An administrator's pins (managed_scope's config and .env, in
+    # HERMES_MANAGED_DIR or /etc/hermes) and a managed install are the
+    # installation's, whichever profile asks.
     for dotted in [*profile_writes, *root_writes]:
         if hermes.key_managed(dotted):
             blockers.append({"code": "managed", "message": (
                 f"An administrator pinned {dotted} on this Hermes, so the setup can't change it. Ask them to change "
                 "it, or set Linked Rooms up where it isn't pinned.")})
-    # Both of Hermes' .env locks (a managed install, an administrator's
-    # managed .env) are the installation's, whichever profile asks.
     for key, writing in ((PORT_ENV, new_port is not None), (KEY_ENV, new_key or new_profile_key)):
         refusal = hermes.env_refusal(key) if writing else None
         if refusal:
@@ -543,6 +555,9 @@ def _plan(hermes: Hermes, home: Path, profile: str, ceiling: Any) -> _Plan:
         ("plugin_tools", f"known_plugin_toolsets.{PLATFORM}" in profile_writes
          or f"known_builtin_toolsets.{PLATFORM}" in profile_writes),
         ("approvals", "approvals.mode" in profile_writes)) if done]
+    # What a POST would do, in this order: turn the API server on (a key, an
+    # explicit disable, a port), save the ceiling, keep toolsets added later
+    # out, make approvals manual, restart the gateway to start the API server.
     needs = []
     if new_key or new_profile_key or new_port is not None or root_writes:
         needs.append("api_server")
@@ -637,7 +652,9 @@ def apply(hermes: Hermes, home: Path, profile: str, ceiling: Any = None) -> dict
 def _save_env(hermes: Hermes, home: Path, key: str, value: str) -> None:
     """Writes the value to the home's .env, and only there: Hermes also puts
     it in this process's environment, where a profile's key would read as
-    the API server's own and pass to a gateway this process restarts."""
+    the API server's own and pass to a gateway this process restarts. Under
+    the dashboard's scope for a named profile, Hermes puts it only in that
+    scope; in the CLI nothing else runs while it's there."""
     before = os.environ.get(key)
     try:
         hermes.save_env(home, key, value)
@@ -669,7 +686,7 @@ def local_api_url(hermes: Hermes, home: Path, profile: str) -> str:
     with ``/p/<profile>`` for a named profile."""
     root = room_identity.root_home(Path(home))
     server = _server(hermes, root, hermes.read_config(root / "config.yaml"), dict(hermes.read_env(root / ".env")))
-    return server.url if profile == "default" else f"{server.url}/p/{profile}"
+    return server.url if profile == "default" else f"{server.url}/p/{quote(profile, safe='')}"
 
 
 def profile_name(home: Path) -> str:

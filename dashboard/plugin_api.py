@@ -8269,7 +8269,10 @@ def _restart_room_gateway(interrupt: bool) -> Dict[str, Any]:
     return {"started": False, "busy": False, "error": _ROOM_SETUP_CANT_RESTART}
 
 
-def room_setup(profile: Optional[str], body: Any = None) -> Dict[str, Any]:
+_ROOM_SETUP_READ = object()  # GET's: a POST's body is read as JSON, and null is refused
+
+
+def room_setup(profile: Optional[str], body: Any = _ROOM_SETUP_READ) -> Dict[str, Any]:
     """The setup state for ``profile`` (the dashboard's own without one),
     or with ``body`` the setup done, and the restart when it needs one."""
     module = _room_setup()
@@ -8277,14 +8280,15 @@ def room_setup(profile: Optional[str], body: Any = None) -> Dict[str, Any]:
     name = (profile or "").strip()
     if not name or name.lower() == "current":
         name = module.profile_name(home)
-    if body is not None:
+    read = body is _ROOM_SETUP_READ
+    if not read:
         if not isinstance(body, dict):
             raise TokenError(400, 'Expected {"ceiling": [...], "interrupt": false}', "bad_request")
         if not isinstance(body.get("interrupt", False), bool):
             raise TokenError(400, "interrupt is true or false", "bad_request")
     try:
         hermes = _room_setup_hermes(module)
-        if body is None:
+        if read:
             return module.state(hermes, home, name)
         answer = module.apply(hermes, home, name, ceiling=body.get("ceiling"))
     except module.SetupError as exc:
