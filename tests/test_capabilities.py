@@ -112,6 +112,7 @@ def test_every_capability_names_a_served_route_family():
         "artifacts": "/artifacts",
         "room-rules": "/rooms/",
         "room-forget": "/rooms/sessions",
+        "room-links": "/rooms/links",
     }
     assert set(prefixes) == set(api.ROUTE_CAPABILITIES)
     for capability, prefix in prefixes.items():

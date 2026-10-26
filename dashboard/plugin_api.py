@@ -8052,6 +8052,133 @@ async def delete_room_sessions(response: Response, room_id: Optional[str] = None
                                      route="room chats")
 
 
+# Links between installations (room_links.py): invites, the Links they make
+# and the loop that reads this installation's inbox at the rooms mailbox.
+# Links belong to the installation, in its root home, so these routes take no
+# profile. The loop runs in the process serving the dashboard (decision 3):
+# it starts when this module loads there, and from any links route, which
+# also wakes it, so a new invite or Link is read at once.
+
+# As many as room choices allow: a screen waiting on a Link's confirmation
+# asks for the list every few seconds.
+ROOM_LINKS_LIMIT = 60
+ROOM_LINKS_MAX_BODY_BYTES = 8 * 1024
+_room_links_limiter = _MintLimiter(ROOM_LINKS_LIMIT, ROOM_CHOICES_WINDOW_S,
+                                   message="Too many link requests; try again shortly")
+
+
+def _room_links_root() -> Path:
+    return _plugin_package_module("room_identity").root_home(_calls_home())
+
+
+def _start_room_links() -> None:
+    if "hermes_cli.web_server" not in sys.modules:
+        return  # not the dashboard (tests, a plugin host process): a links route starts it
+    try:
+        _plugin_package_module("room_links").start(_room_links_root())
+    except Exception:  # noqa: BLE001 - Linked Rooms only, never the routes
+        logger.warning("Conduit plugin: couldn't start Linked Rooms' mailbox loop; a links route tries again",
+                       exc_info=True)
+
+
+def room_links(action: Callable[[Any], Dict[str, Any]]) -> Dict[str, Any]:
+    module = _plugin_package_module("room_links")
+    root = _room_links_root()
+    try:
+        loop = module.start(root)
+    except Exception:  # noqa: BLE001 - the route still answers; the next one tries again
+        logger.warning("Conduit plugin: couldn't start Linked Rooms' mailbox loop", exc_info=True)
+        loop = None
+    try:
+        answer = action(module.Links(root))
+    except module.LinkError as exc:
+        raise TokenError(exc.status, str(exc), exc.code)
+    if loop is not None:
+        loop.wake()
+    return answer
+
+
+async def _room_links_route(action: Callable[[Any], Dict[str, Any]], route: str) -> Any:
+    try:
+        return {"ok": True, **(await _run_scoped(None, _limited(_room_links_limiter, None,
+                                                                lambda: room_links(action))))}
+    except TokenError as exc:
+        # ``code`` is room_links' word for the refusal (bad_invite, expired,
+        # invite_used, already_linked, clock_off…), so Conduit can say it.
+        return _store_refusal(exc)
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
+        raise
+    except Exception as exc:
+        raise _unexpected(route, exc, feature="Linked Rooms")
+
+
+def _room_links_body(body: Any, expected: str) -> Dict[str, Any]:
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail=f"Expected {expected}", headers={"Cache-Control": "no-store"})
+    return body
+
+
+@router.get("/rooms/identity")
+async def get_room_identity(response: Response) -> Any:
+    """This installation's four fingerprint words, for two people to compare
+    in person: ``words`` is null until its first invite or accept makes its
+    keys, and ``crypto`` false on a Hermes without the cryptography package."""
+    response.headers["Cache-Control"] = "no-store"
+    return await _room_links_route(lambda links: links.words(), "identity")
+
+
+@router.post("/rooms/links/invites")
+async def post_room_link_invite(request: Request, response: Response) -> Any:
+    """A new invite, from ``name`` (who the other person sees it's from): its
+    ``conduit://link/`` URL, also the QR code's payload, for one accept within
+    24 hours."""
+    response.headers["Cache-Control"] = "no-store"
+    body = _room_links_body(await _read_json_body(request, ROOM_LINKS_MAX_BODY_BYTES), '{"name": ...}')
+    return await _room_links_route(lambda links: links.invite(body.get("name")), "invite")
+
+
+@router.post("/rooms/links/preview")
+async def post_room_link_preview(request: Request, response: Response) -> Any:
+    """Who an invite is from and their words, whether it ran out, whether
+    it's this Hermes' own, and the Link this Hermes already has with them."""
+    response.headers["Cache-Control"] = "no-store"
+    body = _room_links_body(await _read_json_body(request, ROOM_LINKS_MAX_BODY_BYTES), '{"url": ...}')
+    return await _room_links_route(lambda links: links.preview(body.get("url")), "preview")
+
+
+@router.post("/rooms/links")
+async def post_room_link(request: Request, response: Response) -> Any:
+    """Accepts an invite, as ``name``: the Link, waiting until the inviter's
+    Hermes confirms it."""
+    response.headers["Cache-Control"] = "no-store"
+    body = _room_links_body(await _read_json_body(request, ROOM_LINKS_MAX_BODY_BYTES),
+                            '{"url": ..., "name": ...}')
+    return await _room_links_route(lambda links: links.accept(body.get("url"), body.get("name")), "accept")
+
+
+@router.get("/rooms/links")
+async def get_room_links(response: Response) -> Any:
+    """The Links, the invites still waiting, and the mailbox: ``reading`` is
+    false while nothing on this Hermes reads it."""
+    response.headers["Cache-Control"] = "no-store"
+    return await _room_links_route(lambda links: links.view(), "list")
+
+
+@router.delete("/rooms/links")
+async def delete_room_link(response: Response, link_id: Optional[str] = None) -> Any:
+    """Unlinks; the other side's Hermes drops the Link when it reads why."""
+    response.headers["Cache-Control"] = "no-store"
+    return await _room_links_route(lambda links: links.remove(link_id), "unlink")
+
+
+@router.delete("/rooms/links/invites")
+async def delete_room_link_invite(response: Response, invite_id: Optional[str] = None) -> Any:
+    """Takes an invite back before it's used."""
+    response.headers["Cache-Control"] = "no-store"
+    return await _room_links_route(lambda links: links.cancel(invite_id), "cancel")
+
+
 # --- Pulse settings ------------------------------------------------------------
 #
 # Conduit's Settings > Pulse page (TestFlight builds): Pulse's state and the
@@ -16231,6 +16358,9 @@ def _guard_room_cleanup() -> None:
 
 
 _guard_room_cleanup()
+# Reads this installation's inbox while it has invites or Links, in the
+# process serving the dashboard (Linked Rooms, room_links.py).
+_start_room_links()
 
 
 # --- Artifacts ---------------------------------------------------------------
@@ -16464,6 +16594,9 @@ ROUTE_CAPABILITIES = (
     "room-rules",
     # DELETE /rooms/sessions: this profile's hidden chats for a room.
     "room-forget",
+    # /rooms/identity and /rooms/links: Links between this installation and
+    # other people's, for Linked Rooms (no profile: they're the installation's).
+    "room-links",
 )
 
 

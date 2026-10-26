@@ -1,0 +1,1087 @@
+"""Links between installations, for Linked Rooms (designs/cross-owner-agents, layer 1).
+
+A Link is two Hermes installations that know each other's keys and can leave
+envelopes in each other's inbox at the rooms mailbox (room_mailbox.py). One
+person makes an invite (``Links.invite``): a ``conduit://link/`` URL, also the
+QR code's payload, with the inviter's name, keys and mailbox and a token good
+for one accept within 24 hours. The other person's Conduit shows the name and
+the fingerprint words from it (``preview``), and accepting it (``accept``)
+leaves a sealed link.accept in the inviter's inbox with a send token for the
+acceptor's own. The inviter's Hermes answers with a link.confirm carrying a
+send token for its inbox, and both sides are linked. Either side can unlink,
+and the other side's Hermes drops it when its link.remove arrives.
+
+One loop an installation reads the inbox (``LinkLoop``): whichever process
+holds ``conduit-rooms/.lease``. Everything a Link needs is in
+``conduit-rooms/links.json`` beside the identity, owner only; its tokens never
+leave it. No mailbox call happens under its lock: what's to be done is
+recorded first and the mailbox calls follow, each safe to make again, so a
+crash between them only means they're made on the next pass. Envelopes of
+other kinds go to the handlers registered with ``handles``; one of a kind
+nothing here handles is dropped.
+"""
+
+from __future__ import annotations
+
+import hmac
+import json
+import logging
+import os
+import re
+import secrets
+import tempfile
+import threading
+import time
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable, Iterator, Optional
+
+try:
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None  # type: ignore[assignment]
+try:
+    import msvcrt
+except ImportError:  # everything but Windows
+    msvcrt = None  # type: ignore[assignment]
+
+from . import room_envelope, room_identity, room_mailbox, sealing
+
+logger = logging.getLogger(__name__)
+
+DIRECTORY = room_identity.DIRECTORY
+FILE_NAME = "links.json"
+LEASE_NAME = ".lease"
+VERSION = 1
+URL_PREFIX = "conduit://link/"
+ENV_URL = "CONDUIT_ROOMS_MAILBOX_URL"
+ENV_REGISTRATION = "CONDUIT_ROOMS_MAILBOX_REGISTRATION"
+
+INVITE_TTL_S = 24 * 3600
+# What the mailbox holds an envelope for. A Link still waiting a day past it
+# was never answered: its accept or its confirm expired there.
+HOLD_S = 7 * 86400
+UNANSWERED_S = HOLD_S + 86400
+# The mailbox takes 64 senders an inbox: one a Link, one a waiting invite.
+MAX_INVITES = 10
+MAX_LINKS = 50
+NAME_MAX = 64
+# Message ids remembered a Link, for an envelope sent again after it was read.
+MAX_SEEN = 512
+# While nothing is waiting, how often the loop looks at links.json, so it
+# soon sees an invite the CLI made; and the longest it waits after a failed
+# pass.
+IDLE_S = 2
+MAX_BACKOFF_S = 300
+MAX_PAGES = 20
+# A handler that fails is tried on this many passes, then the envelope is dropped.
+HANDLER_TRIES = 3
+
+ACCEPT, CONFIRM, REMOVE = "link.accept", "link.confirm", "link.remove"
+
+_ID = re.compile(r"^[A-Za-z0-9_-]{1,48}\Z")
+_KEY = re.compile(r"^[A-Za-z0-9_-]{43}\Z")
+_INVITE_FIELDS = frozenset({"v", "name", "sign", "seal", "mailbox", "invite", "token", "exp"})
+_ACCEPT_FIELDS = frozenset({"sign", "seal", "name", "mailbox", "token", "invite", "invite_token"})
+_thread_lock = threading.Lock()
+_warned_url: set[tuple[str, str]] = set()
+
+# kind -> handler(Received); the bridge and rooms register theirs with ``handles``.
+HANDLERS: dict[str, Callable[["Received"], None]] = {}
+
+
+class LinkError(Exception):
+    def __init__(self, code: str, message: str, status: int = 400) -> None:
+        super().__init__(message)
+        self.code = code
+        self.status = status
+
+
+@dataclass(frozen=True)
+class Invite:
+    """What an invite URL holds."""
+
+    name: str
+    sign: bytes
+    seal: bytes
+    mailbox: str
+    id: str
+    token: str = field(repr=False)
+    expires_at: int
+
+    @property
+    def words(self) -> tuple[str, ...]:
+        return room_identity.fingerprint_words(self.sign, self.seal)
+
+
+@dataclass(frozen=True)
+class Received:
+    """An envelope from a linked installation, for its kind's handler."""
+
+    link_id: str
+    kind: str
+    message_id: str
+    at: int
+    body: dict
+
+
+def handles(kind: str) -> Callable[[Callable[[Received], None]], Callable[[Received], None]]:
+    """Registers a handler for envelopes of ``kind``. Handling one twice must
+    be harmless: an envelope can come again after a crash."""
+    if not isinstance(kind, str) or not room_envelope.KIND.match(kind) or kind.startswith("link."):
+        raise ValueError(f"{kind!r} isn't a kind a handler can take")
+
+    def register(handler: Callable[[Received], None]) -> Callable[[Received], None]:
+        HANDLERS[kind] = handler
+        return handler
+
+    return register
+
+
+def parse_invite(url: Any) -> Invite:
+    """The invite in a ``conduit://link/`` URL. Raises LinkError("bad_invite")
+    for anything else."""
+    refused = LinkError("bad_invite", "That isn't a Conduit link invite")
+    if not isinstance(url, str):
+        raise refused
+    url = url.strip()
+    if len(url) > 2048 or not url.startswith(URL_PREFIX):
+        raise refused
+    try:
+        fields = json.loads(sealing.unb64u(url[len(URL_PREFIX):], LinkError))
+    except (LinkError, ValueError, RecursionError):  # bytes that aren't UTF-8 included
+        raise refused from None
+    if not isinstance(fields, dict) or set(fields) != _INVITE_FIELDS or type(fields["v"]) is not int \
+            or fields["v"] != VERSION:
+        raise refused
+    name, sign, seal = _checked_name(fields["name"]), _public_key(fields["sign"]), _public_key(fields["seal"])
+    mailbox = _canonical_mailbox(fields["mailbox"])
+    invite_id, token, expires_at = fields["invite"], fields["token"], fields["exp"]
+    if name is None or sign is None or seal is None or mailbox is None or not _is_id(invite_id) \
+            or not _is_token(token) or not _whole(expires_at):
+        raise refused
+    return Invite(name=name, sign=sign, seal=seal, mailbox=mailbox, id=invite_id, token=token,
+                  expires_at=expires_at)
+
+
+class Links:
+    """This installation's Links, kept in ``<root>/conduit-rooms/links.json``.
+    ``clock`` dates invites and Links; the mailbox's requests carry the real
+    time, which its signatures need."""
+
+    def __init__(self, root: Any, *, clock: Callable[[], float] = time.time) -> None:
+        self.root = Path(root)
+        self.clock = clock
+        self._store = _Store(self.root)
+
+    # --- What the routes and the CLI call --------------------------------------
+
+    def invite(self, name: Any) -> dict[str, Any]:
+        """A new invite: ``{url, invite: {id, name, expires_at}}``. ``name``
+        is who the other person sees it's from."""
+        name = _name(name)
+        identity = self._identity()
+        now = int(self.clock())
+        invite_id, token = _new_id(9), room_mailbox.new_token()
+        with self._store.update() as state:
+            if sum(1 for invite in state["invites"].values() if invite["expires_at"] > now) >= MAX_INVITES:
+                raise LinkError("too_many_invites", f"{MAX_INVITES} invites are already waiting; cancel one, or "
+                                                    "wait for one to be used or run out", 409)
+            if len(state["links"]) >= MAX_LINKS:
+                raise _too_many_links()
+            url = self._mailbox_url(state)
+            state["invites"][invite_id] = {"name": name, "token": token, "created_at": now,
+                                           "expires_at": now + INVITE_TTL_S}
+        try:
+            mailbox = self._mailbox(identity, url)
+            self._registered(mailbox)
+            self._owner_call(mailbox, lambda: mailbox.put_sender(_invite_sender(invite_id), token))
+        except (room_mailbox.MailboxError, LinkError) as exc:
+            with self._store.update() as state:
+                state["invites"].pop(invite_id, None)
+            raise _link_error(exc) from None
+        expires_at = now + INVITE_TTL_S
+        payload = {"v": VERSION, "name": name, "sign": sealing.b64u(identity.signing_public),
+                   "seal": sealing.b64u(identity.sealing_public), "mailbox": mailbox.url, "invite": invite_id,
+                   "token": token, "exp": expires_at}
+        encoded = sealing.b64u(json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+        return {"url": URL_PREFIX + encoded, "invite": {"id": invite_id, "name": name, "expires_at": expires_at}}
+
+    def words(self) -> dict[str, Any]:
+        """This installation's fingerprint words, or None before its first
+        invite or accept makes its keys."""
+        try:
+            identity = room_identity.load(self.root)
+        except room_identity.IdentityError as exc:
+            raise _link_error(exc) from None
+        return {"words": None if identity is None else list(identity.fingerprint),
+                "crypto": sealing.crypto_available()}
+
+    def preview(self, url: Any) -> dict[str, Any]:
+        """What an invite says, before it's accepted: who it's from and their
+        fingerprint words, whether it ran out, whether it's this Hermes' own,
+        and the Link this Hermes already has with them, if any."""
+        invite = parse_invite(url)
+        try:
+            identity = room_identity.load(self.root)
+        except room_identity.IdentityError as exc:
+            raise _link_error(exc) from None
+        now = int(self.clock())
+        state = self._store.read()
+        return {"name": invite.name, "words": list(invite.words), "expires_at": invite.expires_at,
+                "expired": invite.expires_at <= now,
+                "own": identity is not None and identity.signing_public == invite.sign,
+                "linked_as": _linked_with(state, invite.sign, now)}
+
+    def accept(self, url: Any, name: Any) -> dict[str, Any]:
+        """Accepts an invite, as ``name``: ``{link}``, waiting until the
+        inviter's Hermes confirms it."""
+        invite = parse_invite(url)
+        name = _name(name)
+        identity = self._identity()
+        now = int(self.clock())
+        if identity.signing_public == invite.sign:
+            raise LinkError("own_invite", "That invite is from this Hermes: it's for the person you're linking with")
+        if invite.expires_at <= now:
+            raise LinkError("expired", "That invite has run out; ask for a new one", 410)
+        link_id, my_token = _new_id(12), room_mailbox.new_token()
+        with self._store.update() as state:
+            url_mine = self._mailbox_url(state)
+            if _peer_mailbox(invite.mailbox, url_mine) is None:
+                raise LinkError("bad_invite", "That invite names a mailbox on its own computer, which this Hermes "
+                                              "can't reach")
+            for other_id, other in list(state["links"].items()):
+                if _key_of(other, "sign") == invite.sign:
+                    if _status(other, now) != "unanswered":
+                        raise LinkError("already_linked", f"This Hermes is already linked with {other['name']}; "
+                                                          "unlink first to link again", 409)
+                    _forget(state, other_id, now)
+            if len(state["links"]) >= MAX_LINKS:
+                raise _too_many_links()
+            state["links"][link_id] = {
+                "name": invite.name, "sign": sealing.b64u(invite.sign), "seal": sealing.b64u(invite.seal),
+                "inbox": room_identity.inbox_id(invite.sign), "mailbox": invite.mailbox, "status": "waiting",
+                "role": "acceptor", "send_token": "", "my_token": my_token, "sender_up": False,
+                "created_at": now, "invite": invite.id, "seen": {},
+            }
+        try:
+            mailbox = self._mailbox(identity, url_mine)
+            self._registered(mailbox)
+            # Up before the accept goes, so the confirm has somewhere to land.
+            self._owner_call(mailbox, lambda: mailbox.put_sender(_link_sender(link_id), my_token))
+            self._mark_sender_up(link_id)
+            data = room_envelope.seal(identity, link=link_id, recipient_sign=invite.sign,
+                                      recipient_seal=invite.seal, message_id=f"accept.{link_id}", kind=ACCEPT,
+                                      body={"sign": sealing.b64u(identity.signing_public),
+                                            "seal": sealing.b64u(identity.sealing_public), "name": name,
+                                            "mailbox": mailbox.url, "token": my_token, "invite": invite.id,
+                                            "invite_token": invite.token},
+                                      clock=self.clock)
+        except (room_mailbox.MailboxError, room_envelope.EnvelopeError, LinkError) as exc:
+            self._take_back(link_id)
+            raise _link_error(exc) from None
+        try:
+            room_mailbox.send(invite.mailbox, room_identity.inbox_id(invite.sign), invite.token, data,
+                              idempotency_key=f"accept.{link_id}")
+        except room_mailbox.MailboxError as exc:
+            self._take_back(link_id)
+            if exc.code == "unauthorized":
+                # The invite's sender is gone at the inviter's mailbox: used or cancelled.
+                raise LinkError("invite_used", "That invite has been used or cancelled; ask for a new one",
+                                410) from None
+            raise _link_error(exc) from None
+        return {"link": self.get(link_id)}
+
+    def view(self) -> dict[str, Any]:
+        """The Links and the invites still waiting, with no token or key."""
+        state = self._store.read()
+        now = int(self.clock())
+        links = sorted((_shown(link_id, link, now) for link_id, link in state["links"].items()),
+                       key=lambda link: (link["name"].casefold(), link["id"]))
+        invites = sorted(({"id": invite_id, "name": invite["name"], "expires_at": invite["expires_at"]}
+                          for invite_id, invite in state["invites"].items() if invite["expires_at"] > now),
+                         key=lambda invite: (invite["expires_at"], invite["id"]))
+        try:
+            url = self._mailbox_url(state)
+        except LinkError:  # a setting that isn't a mailbox's URL, shown as it is
+            url = self._configured_url()
+        return {"links": links, "invites": invites, "mailbox": {"url": url, "reading": reading(self.root)}}
+
+    def get(self, link_id: Any) -> Optional[dict[str, Any]]:
+        """One Link as ``view`` shows it, or None."""
+        link = self._store.read()["links"].get(link_id) if isinstance(link_id, str) else None
+        return None if link is None else _shown(link_id, link, int(self.clock()))
+
+    def remove(self, link_id: Any) -> dict[str, bool]:
+        """Unlinks: the Link goes here at once, and the other side's Hermes
+        drops it when the link.remove arrives (sent later if it can't go now)."""
+        if not isinstance(link_id, str):
+            return {"removed": False}
+        now = int(self.clock())
+        with self._store.update() as state:
+            link = state["links"].get(link_id)
+            if link is None:
+                return {"removed": False}
+            _forget(state, link_id, now)
+            # An acceptor still waiting has no token for the other side's
+            # inbox; the inviter's refused confirm tells it instead.
+            if link["send_token"]:
+                state["outbox"].append(_outgoing(REMOVE, link_id, link, {}, now))
+        self._flush_quietly()
+        return {"removed": True}
+
+    def cancel(self, invite_id: Any) -> dict[str, bool]:
+        """Takes an invite back before it's used."""
+        if not isinstance(invite_id, str):
+            return {"cancelled": False}
+        with self._store.update() as state:
+            if state["invites"].pop(invite_id, None) is None:
+                return {"cancelled": False}
+            _clean_up(state, _invite_sender(invite_id), int(self.clock()))
+        self._flush_quietly()
+        return {"cancelled": True}
+
+    def send(self, link_id: str, kind: str, body: dict, message_id: Optional[str] = None) -> str:
+        """Leaves an envelope of ``kind`` for the other side of a Link: its
+        message id. The same message id again while the first waits stores no
+        copy, and the other side handles it once."""
+        link = self._store.read()["links"].get(link_id) if isinstance(link_id, str) else None
+        if link is None or link["status"] != "linked":
+            raise LinkError("not_linked", "This Hermes isn't linked with that one", 404)
+        if not isinstance(kind, str) or not room_envelope.KIND.match(kind) or kind.startswith("link."):
+            raise LinkError("bad_kind", "That isn't a kind of envelope a Link carries")
+        message_id = message_id or room_envelope.new_message_id()
+        try:
+            data = room_envelope.seal(self._identity(), link=link_id, recipient_sign=_key_of(link, "sign"),
+                                      recipient_seal=_key_of(link, "seal"), message_id=message_id, kind=kind,
+                                      body=body, clock=self.clock)
+            room_mailbox.send(link["mailbox"], link["inbox"], link["send_token"], data, idempotency_key=message_id)
+        except (room_mailbox.MailboxError, room_envelope.EnvelopeError) as exc:
+            raise _link_error(exc) from None
+        return message_id
+
+    def mailbox(self) -> room_mailbox.Mailbox:
+        """This installation's own inbox."""
+        return self._mailbox(self._identity(), self._mailbox_url(self._store.read()))
+
+    # --- The mailbox calls the store says are waiting ---------------------------
+
+    def flush(self) -> None:
+        """Makes the mailbox calls the store has waiting: senders to put for
+        new Links, envelopes to send, senders to delete. What fails stays for
+        the next time, up to the mailbox's 7-day hold."""
+        state = self._store.read()
+        pending = [link_id for link_id, link in state["links"].items() if not link.get("sender_up")]
+        if not (pending or state["outbox"] or state["cleanup"]):
+            return
+        identity = self._identity()
+        mailbox = self._mailbox(identity, self._mailbox_url(state))
+        for link_id in pending:
+            token = state["links"][link_id]["my_token"]
+            self._owner_call(mailbox, lambda: mailbox.put_sender(_link_sender(link_id), token))
+            self._mark_sender_up(link_id)
+        for item in self._store.read()["outbox"]:
+            self._deliver(identity, item)
+        for item in self._store.read()["cleanup"]:
+            try:
+                mailbox.delete_sender(item["sender"])
+            except room_mailbox.MailboxError as exc:
+                # Unauthorized: the inbox is gone, and its senders with it.
+                if exc.code != "unauthorized" and int(self.clock()) < item["until"]:
+                    logger.info("Linked Rooms will remove a sender from its inbox later (%s)", exc.code)
+                    continue
+            with self._store.update() as state:
+                state["cleanup"] = [other for other in state["cleanup"] if other["sender"] != item["sender"]]
+
+    def _deliver(self, identity: room_identity.Identity, item: dict[str, Any]) -> None:
+        now = int(self.clock())
+        if item["kind"] == CONFIRM:
+            link = self._store.read()["links"].get(item["link"])
+            if link is None:
+                self._drop_outgoing(item)
+                return
+            if not link.get("sender_up"):
+                return  # the confirm hands out a token for a sender that isn't up yet
+        try:
+            data = room_envelope.seal(identity, link=item["link"], recipient_sign=_key_of(item, "sign"),
+                                      recipient_seal=_key_of(item, "seal"), message_id=item["id"],
+                                      kind=item["kind"], body=item["body"], clock=self.clock)
+            room_mailbox.send(item["mailbox"], item["inbox"], item["token"], data, idempotency_key=item["id"])
+        except room_mailbox.MailboxError as exc:
+            if exc.code != "unauthorized" and now < item["until"]:
+                logger.info("Linked Rooms will send a %s for Link %s later (%s)", item["kind"], item["link"],
+                            exc.code)
+                return
+            with self._store.update() as state:
+                state["outbox"] = [other for other in state["outbox"] if other["id"] != item["id"]]
+                if item["kind"] == CONFIRM and item["link"] in state["links"]:
+                    # Refused: the acceptor took its side back before this
+                    # Hermes answered. Or it never could be sent.
+                    _forget(state, item["link"], now)
+            logger.info("Linked Rooms dropped a %s for Link %s (%s)", item["kind"], item["link"], exc.code)
+            return
+        with self._store.update() as state:
+            state["outbox"] = [other for other in state["outbox"] if other["id"] != item["id"]]
+            link = state["links"].get(item["link"])
+            if item["kind"] == CONFIRM and link is not None:
+                link["status"] = "linked"
+
+    def _drop_outgoing(self, item: dict[str, Any]) -> None:
+        with self._store.update() as state:
+            state["outbox"] = [other for other in state["outbox"] if other["id"] != item["id"]]
+
+    def _flush_quietly(self) -> None:
+        try:
+            self.flush()
+        except (room_mailbox.MailboxError, room_identity.IdentityError, LinkError) as exc:
+            logger.info("Linked Rooms will finish with the mailbox later (%s)", getattr(exc, "code", exc))
+
+    # --- Helpers ----------------------------------------------------------------
+
+    def _identity(self) -> room_identity.Identity:
+        try:
+            return room_identity.load_or_create(self.root)
+        except room_identity.IdentityError as exc:
+            raise _link_error(exc) from None
+
+    def _configured_url(self) -> str:
+        return (os.environ.get(ENV_URL) or "").strip() or room_mailbox.DEFAULT_URL
+
+    def _mailbox_url(self, state: dict[str, Any]) -> str:
+        # Every Link and invite names this installation's mailbox, and the
+        # senders still to delete are there, so while any is left the mailbox
+        # they were made with stays.
+        stored = state["mailbox"].get("url")
+        configured = self._configured_url()
+        if stored and (state["links"] or state["invites"] or state["cleanup"]):
+            if configured != stored and (str(self.root), configured) not in _warned_url:
+                _warned_url.add((str(self.root), configured))
+                logger.warning("Linked Rooms keeps the mailbox at %s, which this installation's Links name; %s "
+                               "takes effect only with no Links or invites", stored, ENV_URL)
+            return stored
+        try:
+            return room_mailbox.base_url(configured)
+        except room_mailbox.MailboxError:
+            raise LinkError("bad_mailbox", f"{ENV_URL} isn't a mailbox's URL (https://, with nothing after its "
+                                           "host name)", 500) from None
+
+    def _mailbox(self, identity: room_identity.Identity, url: str) -> room_mailbox.Mailbox:
+        try:
+            return room_mailbox.Mailbox(url, identity,
+                                        registration_token=(os.environ.get(ENV_REGISTRATION) or "").strip() or None)
+        except room_mailbox.MailboxError as exc:
+            raise _link_error(exc) from None
+
+    def _registered(self, mailbox: room_mailbox.Mailbox, *, force: bool = False) -> None:
+        """Makes this installation's inbox, or confirms it, the first time
+        the store doesn't know it, and again after one went (90 idle days, a
+        reset): then every sender this Hermes gave out goes back in, and the
+        inbox is read from the start."""
+        state = self._store.read()
+        known = state["mailbox"]
+        if not force and known.get("url") == mailbox.url and known.get("inbox") == mailbox.identity.inbox:
+            return
+        mailbox.register()
+        senders = _senders(state, int(self.clock()))
+        for sender, token in senders:
+            mailbox.put_sender(sender, token)
+        put = {sender for sender, _ in senders}
+        with self._store.update() as state:
+            state["mailbox"] = {"url": mailbox.url, "inbox": mailbox.identity.inbox, "after": 0}
+            for link_id, link in state["links"].items():
+                if _link_sender(link_id) in put:
+                    link["sender_up"] = True
+
+    def _owner_call(self, mailbox: room_mailbox.Mailbox, call: Callable[[], Any]) -> Any:
+        try:
+            return call()
+        except room_mailbox.MailboxError as exc:
+            if exc.code != "unauthorized":
+                raise
+        # The inbox isn't there any more: made again, with its senders.
+        self._registered(mailbox, force=True)
+        return call()
+
+    def _mark_sender_up(self, link_id: str) -> None:
+        with self._store.update() as state:
+            link = state["links"].get(link_id)
+            if link is not None:
+                link["sender_up"] = True
+
+    def _take_back(self, link_id: str) -> None:
+        with self._store.update() as state:
+            if link_id in state["links"]:
+                _forget(state, link_id, int(self.clock()))
+        self._flush_quietly()
+
+
+class LinkLoop:
+    """Reads this installation's inbox and makes the mailbox calls waiting in
+    links.json. Only the process holding the lease reads; ``start`` runs it
+    in a daemon thread, the tests call ``poll_once``."""
+
+    def __init__(self, root: Any, *, clock: Callable[[], float] = time.time) -> None:
+        self.root = Path(root)
+        self.clock = clock
+        self.links = Links(self.root, clock=clock)
+        self._lock = threading.Lock()
+        self._lease: Any = None
+        self._stopped = threading.Event()
+        self._woken = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._failures: dict[str, int] = {}
+        self._looked: Optional[tuple[int, int]] = None
+        self._idle = True
+
+    def lease(self) -> bool:
+        """Takes the installation's lease, or keeps it: False while another
+        loop, in this process or another, has it."""
+        with self._lock:
+            if self._lease is not None:
+                return True
+            directory = self.root / DIRECTORY
+            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            handle = open(directory / LEASE_NAME, "a+b")
+            if not _try_lock(handle):
+                handle.close()
+                return False
+            self._lease = handle
+            return True
+
+    @property
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive() and not self._stopped.is_set()
+
+    def wake(self) -> None:
+        """Looks at links.json now rather than after its rest: a route that
+        made an invite or a Link calls it."""
+        self._woken.set()
+
+    def stop(self) -> None:
+        self._stopped.set()
+        self._woken.set()
+        with self._lock:
+            if self._lease is not None:
+                _unlock(self._lease)
+                self._lease.close()
+                self._lease = None
+
+    def start(self) -> "LinkLoop":
+        with self._lock:
+            if self._thread is None or not self._thread.is_alive():
+                self._stopped.clear()
+                self._thread = threading.Thread(target=self._run, name="conduit-room-links", daemon=True)
+                self._thread.start()
+        return self
+
+    def poll_once(self, wait: int = 0) -> bool:
+        """One pass: reads what's in the inbox, oldest first, then makes the
+        mailbox calls waiting in the store. False when another loop holds the
+        lease."""
+        if not self.lease():
+            return False
+        links = self.links
+        state = links._store.read()
+        if not _has_work(state):
+            return True
+        identity = links._identity()
+        mailbox = links._mailbox(identity, links._mailbox_url(state))
+        links._registered(mailbox)
+        drained = self._read(identity, mailbox, wait)
+        links.flush()
+        if drained and self._expire_invites():
+            links.flush()
+        return True
+
+    def _run(self) -> None:
+        backoff = 0
+        while not self._stopped.is_set():
+            try:
+                if self._nothing_waiting() or not self.lease():
+                    self._rest(IDLE_S)
+                    continue
+                self.poll_once(wait=room_mailbox.MAX_WAIT_S)
+                backoff = 0
+            except Exception as exc:  # noqa: BLE001 - the loop outlives any one pass
+                backoff = min(MAX_BACKOFF_S, max(5, backoff * 2))
+                logger.warning("Linked Rooms couldn't finish reading the mailbox (%s); trying again in %d s",
+                               getattr(exc, "code", type(exc).__name__), backoff)
+                self._rest(backoff)
+
+    def _rest(self, seconds: float) -> None:
+        self._woken.wait(seconds)
+        self._woken.clear()
+
+    def _nothing_waiting(self) -> bool:
+        # Only links.json's size and time are read while it says nothing waits.
+        try:
+            stat = self.links._store.path.stat()
+        except FileNotFoundError:
+            return True
+        looked = (stat.st_mtime_ns, stat.st_size)
+        if looked != self._looked:
+            self._looked, self._idle = looked, not _has_work(self.links._store.read())
+        return self._idle
+
+    def _read(self, identity: room_identity.Identity, mailbox: room_mailbox.Mailbox, wait: int) -> bool:
+        """Reads the inbox a page at a time: True once a read found it empty."""
+        store = self.links._store
+        after = store.read()["mailbox"].get("after", 0)
+        for page_number in range(MAX_PAGES):
+            try:
+                page, _ = mailbox.fetch(after=after, wait=wait if page_number == 0 else 0)
+            except room_mailbox.MailboxError as exc:
+                if exc.code != "unauthorized":
+                    raise
+                # The inbox is gone (90 idle days, or the mailbox was reset).
+                self.links._registered(mailbox, force=True)
+                after = 0
+                page, _ = mailbox.fetch(after=after)
+            if not page:
+                return True
+            last = after
+            for delivered in page:
+                if not self._handle(identity, delivered):
+                    break
+                last = delivered.seq
+            if last != after:
+                mailbox.ack(through=last)
+                with store.update() as state:
+                    if state["mailbox"].get("inbox") == identity.inbox:
+                        state["mailbox"]["after"] = last
+                after = last
+            if last != page[-1].seq:
+                return False
+        return False
+
+    def _handle(self, identity: room_identity.Identity, delivered: room_mailbox.Delivered) -> bool:
+        """Handles one envelope: False to read it again on the next pass."""
+        try:
+            header = room_envelope.peek(delivered.body)
+        except room_envelope.EnvelopeError as exc:
+            logger.info("Linked Rooms dropped something in its inbox that isn't an envelope (%s)", exc.code)
+            return True
+        if delivered.sender.startswith("i-"):
+            self._on_accept(identity, delivered, header)
+            return True
+        if delivered.sender == _link_sender(header.link):
+            return self._on_link(identity, delivered, header)
+        logger.info("Linked Rooms dropped an envelope whose Link isn't its sender's")
+        return True
+
+    def _on_accept(self, identity: room_identity.Identity, delivered: room_mailbox.Delivered,
+                   header: room_envelope.Header) -> None:
+        invite_id = delivered.sender[2:]
+        if header.kind != ACCEPT:
+            logger.info("Linked Rooms dropped a %s sent with an invite", header.kind)
+            return
+        try:
+            opened = room_envelope.open_envelope(identity, delivered.body)
+        except room_envelope.EnvelopeError as exc:
+            logger.info("Linked Rooms dropped an accept that didn't check (%s)", exc.code)
+            return
+        accept = _accept_fields(opened.body)
+        if accept is None or accept["invite"] != invite_id:
+            logger.info("Linked Rooms dropped an accept that isn't one")
+            return
+        now, link_id = int(self.clock()), header.link
+        with self.links._store.update() as state:
+            link = state["links"].get(link_id)
+            if link is not None:
+                # Read again after a crash: what it asked for is already done.
+                if link.get("invite") != invite_id or _key_of(link, "sign") != accept["sign"]:
+                    logger.info("Linked Rooms dropped an accept for a Link id it already has")
+                return
+            invite = state["invites"].get(invite_id)
+            if invite is None:
+                logger.info("Linked Rooms dropped an accept for an invite that's been used or taken back")
+                return
+            if not hmac.compare_digest(accept["invite_token"].encode("utf-8"), invite["token"].encode("utf-8")):
+                logger.info("Linked Rooms dropped an accept without its invite's token")
+                return
+            # The mailbox's time, not this host's: an inviter whose Hermes was
+            # off still answers an accept that came in time.
+            if delivered.received_at > invite["expires_at"]:
+                logger.info("Linked Rooms dropped an accept that came after its invite ran out")
+                return
+            mailbox_url = _peer_mailbox(accept["mailbox"], self.links._mailbox_url(state))
+            if mailbox_url is None:
+                logger.info("Linked Rooms dropped an accept naming a mailbox it can't reach")
+                return
+            # Someone already linked from that Hermes lost their side, or took
+            # it back, and linked again: this Link replaces theirs.
+            for other_id, other in list(state["links"].items()):
+                if _key_of(other, "sign") == accept["sign"]:
+                    _forget(state, other_id, now)
+            if len(state["links"]) >= MAX_LINKS:
+                logger.warning("Linked Rooms dropped an accept: this Hermes has %d Links", MAX_LINKS)
+                return
+            my_token = room_mailbox.new_token()
+            link = state["links"][link_id] = {
+                "name": accept["name"], "sign": sealing.b64u(accept["sign"]), "seal": sealing.b64u(accept["seal"]),
+                "inbox": room_identity.inbox_id(accept["sign"]), "mailbox": mailbox_url, "status": "waiting",
+                "role": "inviter", "send_token": accept["token"], "my_token": my_token, "sender_up": False,
+                "created_at": now, "invite": invite_id, "seen": {},
+            }
+            del state["invites"][invite_id]
+            # In this order: the Link's own sender is put first (flush), then
+            # the confirm, then the invite's sender goes with anything else
+            # left with it.
+            state["outbox"].append(_outgoing(CONFIRM, link_id, link, {"token": my_token}, now))
+            _clean_up(state, _invite_sender(invite_id), now)
+
+    def _on_link(self, identity: room_identity.Identity, delivered: room_mailbox.Delivered,
+                 header: room_envelope.Header) -> bool:
+        store, link_id = self.links._store, header.link
+        link = store.read()["links"].get(link_id)
+        if link is None:
+            logger.info("Linked Rooms dropped an envelope for a Link this Hermes doesn't have")
+            return True
+        try:
+            opened = room_envelope.open_envelope(identity, delivered.body, sender_sign=_key_of(link, "sign"))
+        except room_envelope.EnvelopeError as exc:
+            logger.info("Linked Rooms dropped an envelope for Link %s that didn't check (%s)", link_id, exc.code)
+            return True
+        now, kind = int(self.clock()), header.kind
+        if kind == CONFIRM:
+            token = opened.body.get("token")
+            with store.update() as state:
+                link = state["links"].get(link_id)
+                if link is not None and link["role"] == "acceptor" and link["status"] == "waiting" \
+                        and _is_token(token):
+                    link.update(status="linked", send_token=token)
+            return True
+        if kind == REMOVE:
+            with store.update() as state:
+                if link_id in state["links"]:
+                    _forget(state, link_id, now)
+            return True
+        handler = HANDLERS.get(kind)
+        if link["status"] != "linked":
+            logger.info("Linked Rooms dropped a %s envelope for Link %s, which isn't confirmed", kind, link_id)
+            return True
+        if handler is None:
+            logger.info("Linked Rooms dropped a %s envelope: nothing on this Hermes handles that kind", kind)
+            return True
+        if header.id in link.get("seen", {}):
+            return True
+        key = f"{link_id}/{header.id}"
+        try:
+            handler(Received(link_id=link_id, kind=kind, message_id=header.id, at=header.at, body=opened.body))
+        except Exception:  # noqa: BLE001 - one handler's failure doesn't stop the inbox
+            tries = self._failures.get(key, 0) + 1
+            if tries < HANDLER_TRIES:
+                self._failures[key] = tries
+                logger.warning("Linked Rooms' handler for %s failed; it tries again on the next pass", kind,
+                               exc_info=True)
+                return False
+            logger.warning("Linked Rooms' handler for %s failed %d times; the envelope is dropped", kind, tries,
+                           exc_info=True)
+        self._failures.pop(key, None)
+        with store.update() as state:
+            link = state["links"].get(link_id)
+            if link is not None:
+                seen = {message_id: at for message_id, at in link.get("seen", {}).items() if at > now - HOLD_S}
+                seen[header.id] = now
+                link["seen"] = dict(sorted(seen.items(), key=lambda item: item[1])[-MAX_SEEN:])
+        return True
+
+    def _expire_invites(self) -> bool:
+        # Only once a read found the inbox empty: an accept still waiting there
+        # would go with its invite's sender.
+        now = int(self.clock())
+        with self.links._store.update() as state:
+            expired = [invite_id for invite_id, invite in state["invites"].items() if invite["expires_at"] <= now]
+            for invite_id in expired:
+                del state["invites"][invite_id]
+                _clean_up(state, _invite_sender(invite_id), now)
+        return bool(expired)
+
+
+_loops: dict[str, LinkLoop] = {}
+_loops_lock = threading.Lock()
+
+
+def start(root: Any) -> LinkLoop:
+    """This process's loop for the installation at ``root``, started."""
+    key = str(Path(root))
+    with _loops_lock:
+        loop = _loops.get(key)
+        if loop is None:
+            loop = _loops[key] = LinkLoop(root)
+    return loop.start()
+
+
+def reading(root: Any) -> bool:
+    """Whether a loop reads this installation's inbox: one running in this
+    process, or whichever holds the lease in another."""
+    loop = _loops.get(str(Path(root)))
+    return (loop is not None and loop.running) or lease_held(root)
+
+
+def lease_held(root: Any) -> bool:
+    """Whether a loop, in any process, reads this installation's inbox now."""
+    try:
+        handle = open(Path(root) / DIRECTORY / LEASE_NAME, "rb")
+    except OSError:
+        return False
+    with handle:
+        if not _try_lock(handle):
+            return True
+        _unlock(handle)
+    return False
+
+
+# --- The store ----------------------------------------------------------------------
+
+
+class _Store:
+    def __init__(self, root: Path) -> None:
+        self.directory = root / DIRECTORY
+        self.path = self.directory / FILE_NAME
+
+    def read(self) -> dict[str, Any]:
+        try:
+            raw = self.path.read_bytes()
+        except FileNotFoundError:
+            return _empty()
+        except OSError as exc:
+            raise LinkError("unreadable", f"Couldn't read {self.path} ({exc.strerror or exc}), so Linked Rooms "
+                                          "can't use its Links until it can", 500) from None
+        try:
+            state = json.loads(raw)
+        except (ValueError, RecursionError):
+            state = None
+        if not _well_formed(state):
+            raise LinkError("unreadable", f"{self.path} isn't a links file this plugin wrote, so Linked Rooms "
+                                          "can't use its Links. Moving it aside ends them on this side: each "
+                                          "person links again", 500)
+        return state
+
+    @contextmanager
+    def update(self) -> Iterator[dict[str, Any]]:
+        """The state to change, saved when the block ends without raising."""
+        self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.directory.chmod(0o700)
+        lock_path = self.directory / f".{FILE_NAME}.lock"
+        with _thread_lock, open(lock_path, "a+b") as handle, room_identity._exclusive(handle):
+            state = self.read()
+            before = json.dumps(state, sort_keys=True)
+            yield state
+            if json.dumps(state, sort_keys=True) != before:
+                self._save(state)
+
+    def _save(self, state: dict[str, Any]) -> None:
+        encoded = json.dumps(state, separators=(",", ":"), sort_keys=True, ensure_ascii=False) + "\n"
+        # A fresh, unguessable file (mkstemp opens it O_EXCL, mode 0600).
+        descriptor, name = tempfile.mkstemp(prefix=f".{FILE_NAME}.", suffix=".tmp", dir=self.directory)
+        temporary = Path(name)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            temporary.replace(self.path)
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+        self.path.chmod(0o600)
+        room_identity._sync_directory(self.directory)
+
+
+def _empty() -> dict[str, Any]:
+    return {"version": VERSION, "mailbox": {}, "invites": {}, "links": {}, "outbox": [], "cleanup": []}
+
+
+def _well_formed(state: Any) -> bool:
+    if not isinstance(state, dict) or state.get("version") != VERSION:
+        return False
+    if not all(isinstance(state.get(name), kind) for name, kind in (
+            ("mailbox", dict), ("invites", dict), ("links", dict), ("outbox", list), ("cleanup", list))):
+        return False
+    return all(isinstance(link, dict) and all(isinstance(link.get(name), str) for name in (
+        "name", "sign", "seal", "inbox", "mailbox", "status", "role", "send_token", "my_token"))
+        and isinstance(link.get("created_at"), int) and isinstance(link.get("seen", {}), dict)
+        for link in state["links"].values()) \
+        and all(isinstance(invite, dict) and isinstance(invite.get("token"), str)
+                and isinstance(invite.get("name"), str) and isinstance(invite.get("expires_at"), int)
+                for invite in state["invites"].values()) \
+        and all(isinstance(item, dict) and isinstance(item.get("id"), str) and isinstance(item.get("until"), int)
+                for item in state["outbox"]) \
+        and all(isinstance(item, dict) and isinstance(item.get("sender"), str)
+                and isinstance(item.get("until"), int) for item in state["cleanup"])
+
+
+def _has_work(state: dict[str, Any]) -> bool:
+    return bool(state["invites"] or state["links"] or state["outbox"] or state["cleanup"])
+
+
+def _forget(state: dict[str, Any], link_id: str, now: int) -> None:
+    """Drops a Link here, and its sender at this installation's inbox with
+    whatever it left there."""
+    state["links"].pop(link_id, None)
+    state["outbox"] = [item for item in state["outbox"] if not (item["kind"] == CONFIRM and item["link"] == link_id)]
+    _clean_up(state, _link_sender(link_id), now)
+
+
+def _clean_up(state: dict[str, Any], sender: str, now: int) -> None:
+    if all(item["sender"] != sender for item in state["cleanup"]):
+        state["cleanup"].append({"sender": sender, "until": now + HOLD_S})
+
+
+def _outgoing(kind: str, link_id: str, link: dict[str, Any], body: dict[str, Any], now: int) -> dict[str, Any]:
+    # Everything the envelope needs, so it can go after the Link is gone.
+    return {"id": f"{kind.split('.')[-1]}.{link_id}", "kind": kind, "link": link_id, "mailbox": link["mailbox"],
+            "inbox": link["inbox"], "sign": link["sign"], "seal": link["seal"], "token": link["send_token"],
+            "body": body, "until": now + HOLD_S}
+
+
+def _senders(state: dict[str, Any], now: int) -> list[tuple[str, str]]:
+    senders = [(_link_sender(link_id), link["my_token"]) for link_id, link in state["links"].items()]
+    senders += [(_invite_sender(invite_id), invite["token"]) for invite_id, invite in state["invites"].items()
+                if invite["expires_at"] > now]
+    return senders
+
+
+def _shown(link_id: str, link: dict[str, Any], now: int) -> dict[str, Any]:
+    return {"id": link_id, "name": link["name"], "status": _status(link, now),
+            "words": list(room_identity.fingerprint_words(_key_of(link, "sign"), _key_of(link, "seal"))),
+            "created_at": link["created_at"]}
+
+
+def _status(link: dict[str, Any], now: int) -> str:
+    if link["status"] == "linked":
+        return "linked"
+    return "unanswered" if now - link["created_at"] > UNANSWERED_S else "waiting"
+
+
+def _linked_with(state: dict[str, Any], sign: bytes, now: int) -> Optional[str]:
+    for link_id, link in state["links"].items():
+        if _key_of(link, "sign") == sign and _status(link, now) != "unanswered":
+            return link_id
+    return None
+
+
+def _accept_fields(body: dict) -> Optional[dict[str, Any]]:
+    if set(body) != _ACCEPT_FIELDS:
+        return None
+    name, sign, seal = _checked_name(body["name"]), _public_key(body["sign"]), _public_key(body["seal"])
+    if name is None or sign is None or seal is None or not _is_token(body["token"]) \
+            or not _is_id(body["invite"]) or not isinstance(body["invite_token"], str) \
+            or not isinstance(body["mailbox"], str):
+        return None
+    return {"name": name, "sign": sign, "seal": seal, "token": body["token"], "invite": body["invite"],
+            "invite_token": body["invite_token"], "mailbox": body["mailbox"]}
+
+
+def _canonical_mailbox(value: Any) -> Optional[str]:
+    try:
+        url = room_mailbox.base_url(value)
+    except room_mailbox.MailboxError:
+        return None
+    return url if url == value else None
+
+
+def _peer_mailbox(value: Any, mine: str) -> Optional[str]:
+    """The other side's mailbox URL, when this Hermes may reach it: http only
+    for a mailbox on this host, and only when this Hermes' own is too (tests,
+    a mailbox beside Hermes), so nobody can point it at a service of its own
+    computer's."""
+    url = _canonical_mailbox(value)
+    if url is None or (url.startswith("http://") and not mine.startswith("http://")):
+        return None
+    return url
+
+
+def _key_of(entry: dict[str, Any], name: str) -> bytes:
+    return sealing.unb64u(entry[name], LinkError)
+
+
+def _public_key(value: Any) -> Optional[bytes]:
+    if not isinstance(value, str) or not _KEY.match(value):
+        return None
+    raw = sealing.unb64u(value, LinkError)
+    return raw if len(raw) == room_identity.KEY_BYTES and sealing.b64u(raw) == value else None
+
+
+def _checked_name(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    name = value.strip()
+    return name if 1 <= len(name) <= NAME_MAX and name.isprintable() else None
+
+
+def _name(value: Any) -> str:
+    name = _checked_name(value)
+    if name is None:
+        raise LinkError("bad_name", f"A name is 1 to {NAME_MAX} characters, on one line")
+    return name
+
+
+def _is_id(value: Any) -> bool:
+    return isinstance(value, str) and bool(_ID.match(value))
+
+
+def _is_token(value: Any) -> bool:
+    return isinstance(value, str) and bool(room_mailbox.SEND_TOKEN.match(value))
+
+
+def _whole(value: Any) -> bool:
+    return type(value) is int and value >= 0
+
+
+def _new_id(size: int) -> str:
+    return sealing.b64u(secrets.token_bytes(size))
+
+
+def _invite_sender(invite_id: str) -> str:
+    return f"i-{invite_id}"
+
+
+def _link_sender(link_id: str) -> str:
+    return f"l-{link_id}"
+
+
+def _too_many_links() -> LinkError:
+    return LinkError("too_many_links", f"This Hermes has {MAX_LINKS} Links, as many as it keeps; unlink one first",
+                     409)
+
+
+def _link_error(exc: Exception) -> LinkError:
+    if isinstance(exc, LinkError):
+        return exc
+    if isinstance(exc, room_mailbox.MailboxError):
+        return LinkError(exc.code, str(exc), 503 if exc.retryable else 502)
+    if isinstance(exc, room_envelope.EnvelopeError):
+        return LinkError(exc.code, str(exc), exc.status)
+    if isinstance(exc, room_identity.IdentityError):
+        return LinkError(exc.code, str(exc), 503)
+    raise exc
+
+
+def _try_lock(handle: Any) -> bool:
+    if fcntl is not None:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return False
+        return True
+    if msvcrt is not None:
+        try:
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError:
+            return False
+    return True
+
+
+def _unlock(handle: Any) -> None:
+    try:
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        elif msvcrt is not None:
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    except OSError:
+        pass

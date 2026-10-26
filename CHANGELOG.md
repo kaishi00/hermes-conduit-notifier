@@ -13,6 +13,16 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.82.0 (2026-10-26)
+
+### New and improved
+- Your Hermes can link with someone else's, the first step to rooms where
+  your agents and theirs talk: `hermes conduit-push links invite --name
+  <you>` makes an invite for one accept within a day, and they accept it
+  with `hermes conduit-push links accept`. Both Hermes show four words to
+  compare in person, and `links list` and `links remove` show and end Links.
+  Links go through the rooms mailbox; nothing travels over them yet.
+
 ## 0.81.1 (2026-10-26)
 
 ### New and improved
