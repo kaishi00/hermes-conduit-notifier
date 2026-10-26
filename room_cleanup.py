@@ -457,15 +457,18 @@ def install() -> bool:
         _stop = threading.Event()
         _sweeper = None
         if not getattr(rooms, _SWEPT_FLAG, False):
-            setattr(rooms, _SWEPT_FLAG, True)
-            sweeper = threading.Thread(target=_sweep_later, args=(_stop,), name="conduit-room-sweep", daemon=True)
             try:
+                sweeper = threading.Thread(target=_sweep_later, args=(_stop,), name="conduit-room-sweep",
+                                           daemon=True)
                 sweeper.start()
             except Exception:  # noqa: BLE001 - disbands are still guarded
-                setattr(rooms, _SWEPT_FLAG, False)
                 logger.warning("conduit_push: couldn't start deleting the hidden chats of group rooms disbanded on "
                                "this host; the plugin tries again when it next loads", exc_info=True)
             else:
+                # Marked only once it runs, so the plugin's other copy (they
+                # meet on Hermes' module) sweeps if this one couldn't. Both
+                # sweeping is harmless: a chat is deleted once.
+                setattr(rooms, _SWEPT_FLAG, True)
                 _sweeper = sweeper
         return True
 

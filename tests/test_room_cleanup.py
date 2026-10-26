@@ -760,21 +760,23 @@ def test_the_load_sweep_runs_once_a_load_off_the_start_path(hermes, monkeypatch)
             sys.modules.pop(name)
 
 
-def test_a_sweep_that_cant_start_is_left_to_the_next_load(hermes, monkeypatch, caplog):
+@pytest.mark.parametrize("step", ["__init__", "start"])
+def test_a_sweep_that_cant_start_is_left_to_the_next_load(hermes, monkeypatch, caplog, step):
     furina = _home(hermes, "furina")
     _room(hermes.root / "state.db", "long-gone", [FURINA, LAIFU], disbanded_at=2.0)
     _room_session(furina, "f-gone", "long-gone")
     own = hermes.rooms.disband_room
 
-    def no_thread(self):
+    def no_thread(self, *args, **kwargs):
         raise RuntimeError("can't start new thread")
 
     with monkeypatch.context() as threads, caplog.at_level(logging.WARNING, logger=cleanup.__name__):
-        threads.setattr(threading.Thread, "start", no_thread)
+        threads.setattr(threading.Thread, step, no_thread)
         # The plugin still loads, and disbands are still guarded.
         assert cleanup.install()
     assert hermes.rooms.disband_room.__wrapped__ is own
     assert cleanup._sweeper is None
+    assert not getattr(hermes.rooms, cleanup._SWEPT_FLAG, False)
     assert "couldn't start" in caplog.text and "next loads" in caplog.text
 
     # The dashboard's copy, loaded in the same process after it, sweeps.
