@@ -2554,7 +2554,8 @@ doesn't look) runs as Hermes alone would run it, with a warning: its tools, and
 its sessions in past-chat search (a `room_<digest>` session still counts as a
 room). A disbanded room keeps its rules: its sessions keep what other people's
 agents said. A `session_search` result that mentions group rooms in a shape the
-plugin can't read goes to the agent as a failed search. A Hermes without
+plugin can't read, or from a profile whose name isn't of the shape Hermes gives
+one, goes to the agent as a failed search. A Hermes without
 `transform_llm_output` or `transform_tool_result` logs a warning, and replies
 or searches then go out unchecked.
 

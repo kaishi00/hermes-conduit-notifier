@@ -331,6 +331,13 @@ def filter_search(result: Any, home: Any, profile: Any = None) -> Optional[str]:
         # Hermes' own error, passed on as it is.
         return None if "error" in payload else unknown()
     searched = _profile_home(Path(home), profile) if home is not None else None
+    if home is not None and searched is None:
+        # Hermes gives no profile such a name today, and refuses a search of
+        # one: which store holds that profile's rooms can't be told.
+        warn_often("search profile", "conduit_push: past-chat search read profile %r, a name the plugin can't "
+                   "place, so a result that names group rooms went to the agent as a failed search",
+                   str(profile)[:64], exc_info=False)
+        return json.dumps({"success": False, "error": SEARCH_FAILED}) if mentions_rooms(result) else None
     mode = payload.get("mode")
     if mode in ("read", "scroll"):
         session_id = payload.get("session_id")
@@ -381,11 +388,15 @@ def _hidden_from_search(session_ids: tuple[str, ...], source: Any, home: Optiona
             or any(ROOM_SESSION_ID.fullmatch(session_id) for session_id in session_ids))
 
 
-def _profile_home(home: Path, profile: Any) -> Path:
+def _profile_home(home: Path, profile: Any) -> Optional[Path]:
+    """The home of the profile a search read, or None for a name not of the
+    shape Hermes gives a profile."""
     # As Hermes reads a profile name (hermes_cli.profiles.normalize_profile_name).
     name = str(profile or "").strip().lower()
-    if not name or not _PROFILE.fullmatch(name):
+    if not name:
         return home
+    if not _PROFILE.fullmatch(name):
+        return None
     root = home.parent.parent if home.parent.name == "profiles" else home
     return root if name == "default" else root / "profiles" / name
 

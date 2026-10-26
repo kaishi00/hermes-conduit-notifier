@@ -846,9 +846,10 @@ def _entry(session_id, source, title, **extra):
             "link": f"@session:default/{session_id}", **extra}
 
 
-def _search(result, session_id="s-chat", **args):
+def _search(result, chat="s-chat", **args):
+    """The plugin's look at a session_search result; ``args`` are the search's own."""
     return plugin._transform_tool_result(tool_name="session_search", args=args, result=json.dumps(result),
-                                         session_id=session_id, task_id="", tool_call_id="c1", turn_id="t1",
+                                         session_id=chat, task_id="", tool_call_id="c1", turn_id="t1",
                                          api_request_id="", duration_ms=3, status="ok", error_type=None,
                                          error_message=None)
 
@@ -896,7 +897,6 @@ def test_session_search_of_another_profile_reads_that_profiles_rooms(host):
     found = {"success": True, "mode": "discover", "results": [_entry("s-nahida", "bot_room", "Group: room-b")],
              "count": 1}
     assert json.loads(_search(found, query="otter", profile="nahida"))["results"] == []
-    assert json.loads(_search(found, query="otter", session_id="nahida/s-nahida"))["results"] == []
     # Hermes reads a profile name as its lowercase id.
     _room_session(nahida, "s-nahida-c", "room-c")
     mixed = {**found, "results": [_entry("s-nahida-c", "bot_room", "Group: room-c")]}
@@ -905,6 +905,29 @@ def test_session_search_of_another_profile_reads_that_profiles_rooms(host):
     _room_session(nahida, "s-nahida-local", "room-c")
     local = {**found, "results": [_entry("s-nahida-local", "bot_room", "Group: room-c")]}
     assert _search(local, query="otter", profile="nahida") is None
+    # A read through a <profile>/<id> link reads that profile's store too.
+    for session_id, hidden in (("s-nahida", True), ("s-nahida-local", False)):
+        read = {"success": True, "mode": "read", "session_id": session_id,
+                "session_meta": {"source": "bot_room", "title": "Group: x"}, "messages": []}
+        assert (_search(read, session_id=f"nahida/{session_id}") is not None) == hidden, session_id
+
+
+def test_session_search_of_a_profile_the_plugin_cant_place_fails_when_it_names_rooms(host, caplog):
+    # Hermes' profile ids have no dots today, and it refuses a search of one with an error. Should Hermes
+    # come to search a profile of another shape, the plugin can't tell which store to check.
+    found = {"success": True, "mode": "discover", "results": [_entry("s-other", "bot_room", "Group: room-b")],
+             "count": 1}
+    with caplog.at_level(logging.WARNING):
+        assert json.loads(_search(found, query="otter", profile="team.alpha")) == {
+            "success": False, "error": rules.SEARCH_FAILED}
+        assert json.loads(_search(found, query="otter", session_id="team.alpha/s-other")) == {
+            "success": False, "error": rules.SEARCH_FAILED}
+    assert "'team.alpha'" in caplog.text
+    # A result that names no room goes as it is, and so does Hermes' own refusal of that profile.
+    plain = {"success": True, "mode": "discover", "results": [_entry("s-other", "tui", "Bike plans")], "count": 1}
+    assert _search(plain, query="otter", profile="team.alpha") is None
+    assert _search({"success": False, "error": "Unknown profile 'team.alpha'"}, query="otter",
+                   profile="team.alpha") is None
 
 
 def test_session_search_reads_a_compacted_room_session_through_its_continuation(host):
