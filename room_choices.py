@@ -223,7 +223,21 @@ class ChoicesStore:
                 raise
             self._unreadable("can't be read")
             raw = None
-        return _normalized(raw)
+        dropped: list[str] = []
+        state = _normalized(raw, dropped)
+        if dropped:
+            self._left_out(len(dropped))
+        return state
+
+    def _left_out(self, rooms: int) -> None:
+        # A hand edit's: Conduit and the CLI refuse such an id. Its choices
+        # could never be any room's, and the next save drops them.
+        key = f"{self.path}:left out"
+        with _counts_lock:
+            count = _unreadable_counts[key] = _unreadable_counts.get(key, 0) + 1
+        level = logging.WARNING if count % 100 == 1 else logging.DEBUG
+        logger.log(level, "conduit_push: the room choices in %s name %d room(s) by an id no room has; their "
+                   "choices are left out (%d times so far)", self.path, rooms, count)
 
     def _unreadable(self, why: str, who: str = "its rooms get") -> None:
         key = str(self.path)
@@ -250,10 +264,10 @@ class ChoicesStore:
 
     def _save(self, encoded: str) -> None:
         temporary = self.path.with_name(f".{self.path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(encoded)
         try:
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(encoded)
             temporary.chmod(0o600)
             temporary.replace(self.path)
         except BaseException:
@@ -295,7 +309,9 @@ def _note(value: Any) -> str:
     return text
 
 
-def _normalized(raw: Any) -> dict[str, Any]:
+def _normalized(raw: Any, dropped: Optional[list[str]] = None) -> dict[str, Any]:
+    """The file's state in the shape the store keeps; ``dropped`` gets the
+    room keys that aren't room ids."""
     state: dict[str, Any] = {"version": VERSION, "defaults": None, "rooms": {}}
     if not isinstance(raw, dict):
         return state
@@ -305,6 +321,8 @@ def _normalized(raw: Any) -> dict[str, Any]:
     if isinstance(rooms, dict):
         for room_id, entry in rooms.items():
             if not isinstance(room_id, str) or not _ROOM_ID.fullmatch(room_id):
+                if dropped is not None:
+                    dropped.append(str(room_id))
                 continue
             # An entry a hand edit broke is kept, so its room gets the careful
             # choices rather than the defaults.

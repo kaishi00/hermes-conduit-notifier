@@ -330,14 +330,24 @@ def filter_search(result: Any, home: Any, profile: Any = None) -> Optional[str]:
     if payload.get("success") is not True:
         # Hermes' own error, passed on as it is.
         return None if "error" in payload else unknown()
-    searched = _profile_home(Path(home), profile) if home is not None else None
-    if home is not None and searched is None:
+    if home is None:
+        # Never in a running Hermes: without a home the room stores can't be
+        # read, so a room's helper can't be told from any other chat.
+        if not mentions_rooms(result):
+            return None
+        warn_often("search home", "conduit_push: past-chat search ran with no Hermes home to check it in, so a "
+                   "result that names group rooms went to the agent as a failed search", exc_info=False)
+        return json.dumps({"success": False, "error": SEARCH_FAILED})
+    searched = _profile_home(Path(home), profile)
+    if searched is None:
         # Hermes gives no profile such a name today, and refuses a search of
         # one: which store holds that profile's rooms can't be told.
+        if not mentions_rooms(result):
+            return None
         warn_often("search profile", "conduit_push: past-chat search read profile %r, a name the plugin can't "
                    "place, so a result that names group rooms went to the agent as a failed search",
                    str(profile)[:64], exc_info=False)
-        return json.dumps({"success": False, "error": SEARCH_FAILED}) if mentions_rooms(result) else None
+        return json.dumps({"success": False, "error": SEARCH_FAILED})
     mode = payload.get("mode")
     if mode in ("read", "scroll"):
         session_id = payload.get("session_id")
@@ -559,7 +569,7 @@ def _room_id(title: str) -> str:
     return room_id if _ROOM_ID.fullmatch(room_id) else ""
 
 
-def _room_stores(home: Path) -> list[Path]:
+def room_stores(home: Path) -> list[Path]:
     """Where a room can be: this profile's store, the root's, the legacy
     service's, then each profile's (a canonical room lives in its owner's)."""
     root = home.parent.parent if home.parent.name == "profiles" else home
@@ -580,7 +590,7 @@ def _room_members(room_id: str, home: Path) -> Optional[list[Any]]:
     """The room's roster, None when no store has the room. A store that
     can't be read only matters when no other store has the room."""
     unreadable: list[Path] = []
-    for path in _room_stores(home):
+    for path in room_stores(home):
         try:
             members = _read(lambda: _members_in(path, room_id))
         except Exception:  # noqa: BLE001

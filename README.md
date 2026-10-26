@@ -2585,12 +2585,15 @@ a warning; a turn on Hermes' room platform still gets the room's framing and
 has its reply checked. A room that no room store has (kept where the plugin
 doesn't look) runs as Hermes alone would run it, with a warning: its tools, and
 its sessions in past-chat search (a `room_<digest>` session still counts as a
-room). A disbanded room keeps its rules: its sessions keep what other people's
-agents said. A `session_search` result that mentions group rooms in a shape the
-plugin can't read, or from a profile whose name isn't of the shape Hermes gives
-one, goes to the agent as a failed search. A Hermes without
-`transform_llm_output` or `transform_tool_result` logs a warning, and replies
-or searches then go out unchecked.
+room). So does a turn on a host where the plugin can't find the Hermes home,
+with a warning (the first time and every 100th): blocking there would block
+every chat on that host. A disbanded room's sessions that stay (a member host
+keeps its agent's, below) keep its rules: they hold what other people's agents
+said. A `session_search` result that mentions group rooms in a shape the
+plugin can't read, from a profile whose name isn't of the shape Hermes gives
+one, or with no Hermes home to check it in, goes to the agent as a failed
+search. A Hermes without `transform_llm_output` or `transform_tool_result`
+logs a warning, and replies or searches then go out unchecked.
 
 These rules work through Hermes' tool hooks, so they hold only where those
 run. A profile on the Codex app-server runtime runs Codex's own tools outside
@@ -2610,6 +2613,68 @@ room), `PUT /rooms/choices` with `{"room_id": ..., "choices": {...}}` (only
 the choices it names change), and `GET`/`PUT /rooms/defaults` with
 `{"choices": {...}}`, all with `?profile=`, behind the `room-rules`
 capability.
+
+## A member cut off from a room (plugin 0.81+)
+
+When a room's home sends a turn to a member on another installation and that
+host refuses it because the room's grant was revoked or has run out, Hermes
+records the member's route as needing reauthorization and puts the turn back
+in the queue, trying again every 30 s at most, forever, so the room waits on
+that member. The plugin fails that member's next queued turn before it's sent,
+with the reason "cut off: <member>'s Hermes no longer accepts this room" (a
+`turn.failed` in the room's log, with reason code `unknown`: Hermes' failure
+codes have none for this), the way Hermes fails a turn whose member has no
+destination, so the discussion goes on without them. Hermes marks the route
+ready again each time it sets up a retry, so the plugin reads the route before
+Hermes sets the turn up. Linking the member again stores its route as ready,
+and its turns go through again. A member that's only offline is retried as
+Hermes retries it, and a turn being stopped or recovered goes to Hermes as
+before. A Hermes whose room driver has no `_transport_for` logs one line and
+keeps its own behaviour.
+
+## Disbanding a room ends its hidden chats (plugin 0.81+)
+
+Each agent in a gateway-hosted room keeps a hidden session for it (source
+`bot_room`, titled `Group: <room id>`), and Hermes keeps those after the room
+is disbanded, though Conduit's warning says disbanding ends them. When a room
+this host hosts is disbanded (from Conduit, through either room service's
+`groups.disband`), the plugin deletes this host's own agents' hidden sessions
+for it, in every room, rooms of only your own agents too (Eric, 2026-10-26):
+each with its compressed history and its helpers' chats, the way Hermes' own
+delete takes one. A branch made from one stays, as a chat of its own. The
+disband answers before the delete is done, and never fails because of it. A
+session a turn is still finishing in, or one Hermes' delete fails on, is tried
+again 30 s later, then a minute after the plugin next loads (Hermes starts, or
+reloads the plugin), which also deletes what rooms disbanded before this
+version left behind (the newest 512 disbanded rooms of each room store; one
+it can't read is logged as a warning and read again at the next load). An
+agent placed by `hosted_rooms.profiles` is found in the home that names. A room
+whose members the plugin can't read (its store was locked as it was disbanded,
+or its roster is damaged) is looked for in every agent's home on this host.
+Agents on other people's Hermes keep their sessions for the room: someone who
+leaves keeps their agent's session, and a revoke can't tell leaving from
+disbanding. A Hermes without `disband_room`, or whose session delete can't
+take a compression chain, logs one line and deletes nothing.
+
+Your agent's hidden session for a room hosted elsewhere stays until you
+delete it:
+
+```bash
+hermes conduit-push rooms forget --room <room id>         # says what it deletes, then asks
+hermes conduit-push rooms forget --room <room id> --yes   # without asking
+```
+
+It deletes this profile's hidden sessions for that room, with the same delete,
+whichever side they're on. If the room is still going on someone else's
+Hermes, your agent starts over there in a fresh session on its next turn. A
+room hosted here and still going is refused: disbanding it ends its chats.
+Conduit does the same through `DELETE /rooms/sessions?room_id=<id>&profile=`,
+behind the `room-forget` capability: `{"ok": true, "room_id": ..., "deleted":
+1, "kept": 0}`, where `kept` counts sessions a turn is still finishing in (try
+again in a minute), with 409 for a room still going here, 503 when Hermes'
+session store is busy or won't open, or its delete fails on one (try again
+shortly), 501 on a Hermes whose session delete can't take a compression chain
+(update Hermes), and 400 for anything that isn't a room id.
 
 ## Capabilities (plugin 0.4+)
 

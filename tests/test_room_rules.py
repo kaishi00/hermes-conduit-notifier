@@ -609,6 +609,38 @@ def test_a_chat_that_cant_be_checked_for_want_of_a_hermes_home_is_logged(host, m
     assert len(warnings) == 1 and "s-home" in warnings[0]
 
 
+def test_a_search_with_no_hermes_home_fails_when_it_names_rooms(host, monkeypatch):
+    # Without a home the room stores can't be read, so a helper a room's
+    # session delegated to can't be told from any other chat.
+    def no_home():
+        raise RuntimeError("no Hermes home")
+
+    monkeypatch.setattr(plugin, "get_hermes_home", no_home)
+    monkeypatch.setattr(rules, "_hermes_home", lambda: None)
+    found = {"success": True, "mode": "discover", "query": "otter", "detail": "adaptive", "results": [
+        _entry("s-child", "subagent", "Subagent: look it up"), _entry("s-home", "bot_room", "Group: room-b")]}
+    assert json.loads(_search(found)) == {"success": False, "error": rules.SEARCH_FAILED}
+    plain = {"success": True, "mode": "discover", "query": "otter", "detail": "adaptive",
+             "results": [_entry("s-chat", "tui", "Otters")]}
+    assert _search(plain) is None
+
+
+def test_a_search_it_cant_check_is_logged_only_when_it_names_rooms(host, monkeypatch, caplog):
+    plain = {"success": True, "mode": "discover", "query": "otter", "detail": "adaptive",
+             "results": [_entry("s-chat", "tui", "Otters")]}
+    with caplog.at_level(logging.DEBUG, logger=rules.__name__):
+        # A result that names no room goes as it is, whichever store the search read.
+        assert _search(plain, query="otter", profile="team.alpha") is None
+
+        def no_home():
+            raise RuntimeError("no Hermes home")
+
+        monkeypatch.setattr(plugin, "get_hermes_home", no_home)
+        monkeypatch.setattr(rules, "_hermes_home", lambda: None)
+        assert _search(plain) is None
+    assert "past-chat search" not in caplog.text
+
+
 def test_a_room_session_not_titled_yet_gets_no_tools_and_the_careful_framing(host, notes):
     _session(host, "s-untitled", source="bot_room")
     assert _blocked(_tool("s-untitled", "terminal"))

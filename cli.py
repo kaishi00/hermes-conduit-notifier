@@ -7,6 +7,7 @@ import http.client
 import json
 import os
 import socket
+import sqlite3
 import time
 from datetime import datetime
 from pathlib import Path
@@ -88,11 +89,14 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
                        help="for import: drop the preferences the file doesn't list, instead of keeping them")
     rooms = commands.add_parser(
         "rooms",
-        help="What this profile's agent may do in group rooms with other people's agents: show or set it",
+        help="What this profile's agent may do in group rooms with other people's agents: show or set it, "
+             "or delete its hidden chat for a room (forget)",
     )
-    rooms.add_argument("rooms_action", choices=["show", "set"])
+    rooms.add_argument("rooms_action", choices=["show", "set", "forget"])
     rooms.add_argument("--room", default="",
-                       help="the room's id; without one, the defaults for rooms with no choices of their own")
+                       help="the room's id; without one, show and set use the defaults for rooms with no choices "
+                            "of their own (forget needs one)")
+    rooms.add_argument("--yes", action="store_true", help="for forget: delete without asking first")
     rooms.add_argument("--tools", choices=["talk", "look", "data", "custom"],
                        help="talk: no tools; look: web lookups; data: lookups and the data tools you pick; "
                             "custom: only the tools you pick")
@@ -553,8 +557,10 @@ def _rooms(args: argparse.Namespace) -> int:
 
     from . import room_choices
 
-    store = room_choices.ChoicesStore(Path(get_hermes_home()))
     room = str(getattr(args, "room", "") or "").strip()
+    if args.rooms_action == "forget":
+        return _forget_room(room, Path(get_hermes_home()), bool(getattr(args, "yes", False)))
+    store = room_choices.ChoicesStore(Path(get_hermes_home()))
     try:
         if args.rooms_action == "show":
             if room:
@@ -581,6 +587,46 @@ def _rooms(args: argparse.Namespace) -> int:
         print(f"Couldn't {'set' if args.rooms_action == 'set' else 'show'} that: {error}")
         return 1
     _print_room_choices(f"Room {room}" if room else "Defaults for rooms with no choices of their own", saved)
+    return 0
+
+
+def _forget_room(room: str, home: Path, yes: bool) -> int:
+    """Deletes this profile's hidden chat for a room (room_cleanup), as
+    `hermes sessions delete` deletes one, after saying what that does."""
+    from . import room_cleanup
+
+    if not room:
+        print("Name the room: hermes conduit-push rooms forget --room <id>")
+        return 2
+    try:
+        room_cleanup.check_room_id(room)
+    except room_cleanup.CleanupError as error:
+        print(f"Couldn't delete it: {error}")
+        return 1
+    print(f"This deletes your agent's hidden chat for room {room} on this profile, with its earlier history and "
+          "its helpers' chats. If the room is still going on someone else's Hermes, your agent starts over "
+          "there without it on its next turn.")
+    if not yes:
+        try:
+            answer = input("Delete it? [y/N] ")
+        except EOFError:
+            answer = ""
+        if answer.strip().lower() not in ("y", "yes"):
+            print("Cancelled.")
+            return 0
+    try:
+        result = room_cleanup.forget_room(room, home)
+    except (room_cleanup.CleanupError, OSError, sqlite3.Error) as error:
+        print(f"Couldn't delete it: {error}")
+        return 1
+    deleted, kept = result["deleted"], result["kept"]
+    if deleted:
+        print(f"Deleted {deleted} hidden chat{'' if deleted == 1 else 's'} for room {room}.")
+    elif not kept:
+        print(f"This profile has no hidden chat for room {room}.")
+    if kept:
+        print(f"Kept {kept}: a turn in it is still finishing. Try again in a minute.")
+        return 1
     return 0
 
 

@@ -7973,16 +7973,17 @@ def room_choices(action: str, room_id: Any = None, choices: Any = None) -> Dict[
         raise TokenError(400, str(exc))
 
 
-async def _room_choices_route(profile: Optional[str], run: Callable[[], Dict[str, Any]]) -> Dict[str, Any]:
+async def _room_choices_route(profile: Optional[str], run: Callable[[], Dict[str, Any]], *,
+                              limiter: Optional["_MintLimiter"] = None, route: str = "room choices") -> Dict[str, Any]:
     try:
-        return {"ok": True, **(await _run_scoped(profile, _limited(_room_choices_limiter, profile, run)))}
+        return {"ok": True, **(await _run_scoped(profile, _limited(limiter or _room_choices_limiter, profile, run)))}
     except TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
     except HTTPException as exc:
         exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
         raise
     except Exception as exc:
-        raise _unexpected("room choices", exc, feature="Linked Rooms")
+        raise _unexpected(route, exc, feature="Linked Rooms")
 
 
 def _room_choices_body(body: Any, *, room: bool) -> tuple[Any, Any]:
@@ -8021,6 +8022,34 @@ async def put_room_defaults(request: Request, response: Response, profile: Optio
     response.headers["Cache-Control"] = "no-store"
     _, choices = _room_choices_body(await _read_json_body(request, ROOM_CHOICES_MAX_BODY_BYTES), room=False)
     return await _room_choices_route(profile, lambda: room_choices("set_defaults", choices=choices))
+
+
+# Deleting this profile's hidden chats for one room (room_cleanup.py): the
+# home deletes its own agents' when a room is disbanded, and a member host's
+# owner deletes theirs here, from an ended room hosted elsewhere.
+
+ROOM_FORGET_LIMIT = 10
+_room_forget_limiter = _MintLimiter(ROOM_FORGET_LIMIT, ROOM_CHOICES_WINDOW_S,
+                                    message="Too many room chat deletes; try again shortly")
+
+
+def room_forget(room_id: Any) -> Dict[str, Any]:
+    module = _plugin_package_module("room_cleanup")
+    try:
+        return module.forget_room(room_id, Path(_calls_home()))
+    except module.CleanupError as exc:
+        raise TokenError(exc.status, str(exc))
+
+
+@router.delete("/rooms/sessions")
+async def delete_room_sessions(response: Response, room_id: Optional[str] = None,
+                               profile: Optional[str] = None) -> Dict[str, Any]:
+    """Deletes this profile's hidden chats for a room, with their earlier
+    history; ``kept`` counts any a turn is still finishing in. A room still
+    going here is refused (409): disbanding it ends them."""
+    response.headers["Cache-Control"] = "no-store"
+    return await _room_choices_route(profile, lambda: room_forget(room_id), limiter=_room_forget_limiter,
+                                     route="room chats")
 
 
 # --- Pulse settings ------------------------------------------------------------
@@ -16156,6 +16185,52 @@ def _guard_room_planner() -> None:
 _guard_room_planner()
 
 
+# room_cutoff.py beside this folder fails the turn of a member whose Hermes
+# no longer accepts the room once, instead of the room retrying it forever,
+# as the plugin's own load does in the gateway.
+
+_room_cutoff_module: Any = None
+
+
+def _guard_room_cutoff() -> None:
+    global _room_cutoff_module
+    try:
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "room_cutoff.py")
+        spec = importlib.util.spec_from_file_location("conduit_push_dashboard_room_cutoff", path)
+        if spec is None or spec.loader is None:
+            raise ImportError("This plugin install is missing room_cutoff.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module.install()
+        _room_cutoff_module = module
+    except Exception:  # noqa: BLE001 — group rooms only, never the routes
+        logger.warning("Conduit plugin: couldn't guard Hermes' group room driver", exc_info=True)
+
+
+_guard_room_cutoff()
+
+
+# room_cleanup.py beside this folder deletes the hidden chats of a disbanded
+# room's agents on this host, as the plugin's own load does in the gateway.
+# It reads the room stores through room_rules.py, so it loads as part of the
+# plugin's private package.
+
+_room_cleanup_module: Any = None
+
+
+def _guard_room_cleanup() -> None:
+    global _room_cleanup_module
+    try:
+        module = _plugin_package_module("room_cleanup")
+        module.install()
+        _room_cleanup_module = module
+    except Exception:  # noqa: BLE001 — group rooms only, never the routes
+        logger.warning("Conduit plugin: couldn't guard Hermes' group room disband", exc_info=True)
+
+
+_guard_room_cleanup()
+
+
 # --- Artifacts ---------------------------------------------------------------
 #
 # GET /artifacts lists what a profile's chats produced (artifacts_index.py
@@ -16385,6 +16460,8 @@ ROUTE_CAPABILITIES = (
     # GET/PUT /rooms/choices and /rooms/defaults: an agent's choices in rooms
     # with other people's agents, enforced on this host (Linked Rooms).
     "room-rules",
+    # DELETE /rooms/sessions: this profile's hidden chats for a room.
+    "room-forget",
 )
 
 
