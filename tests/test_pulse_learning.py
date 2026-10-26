@@ -1916,7 +1916,8 @@ def test_a_card_put_off_again_meanwhile_keeps_its_new_rest(live):
     assert control.dismiss(live.store, card_id, True, now=now, until="later_today") is True
     first = live.store.card(card_id)["rest_until"]
     assert control.dismiss(live.store, card_id, False) is True
-    assert control.dismiss(live.store, card_id, True, now=now, until="tomorrow") is True
+    # Next week: late in the evening, later today is tomorrow.
+    assert control.dismiss(live.store, card_id, True, now=now, until="next_week") is True
     second = live.store.card(card_id)["rest_until"]
     # A return or an end of rest read before the new Not now changes nothing.
     assert live.store.return_card(card_id, now, first) is False and live.store.end_rest(card_id, first) is False
