@@ -427,10 +427,11 @@ def _missing(what: str) -> None:
 
 def install() -> bool:
     """Guards Hermes' disband_room, once per process, and sweeps a minute
-    after the first load since the plugin last unloaded. Imports it, since
-    the plugin can load before the gateway or the dashboard starts its
-    rooms; both room services look it up on the module when they disband.
-    False when this Hermes has no rooms, or can't delete a chat whole."""
+    after the first load since the plugin last unloaded (a load whose sweep
+    can't start leaves it to the next). Imports it, since the plugin can
+    load before the gateway or the dashboard starts its rooms; both room
+    services look it up on the module when they disband. False when this
+    Hermes has no rooms, or can't delete a chat whole."""
     global _guarded, _stop, _sweeper
     with _lock:
         if _guarded is not None:
@@ -457,8 +458,15 @@ def install() -> bool:
         _sweeper = None
         if not getattr(rooms, _SWEPT_FLAG, False):
             setattr(rooms, _SWEPT_FLAG, True)
-            _sweeper = threading.Thread(target=_sweep_later, args=(_stop,), name="conduit-room-sweep", daemon=True)
-            _sweeper.start()
+            sweeper = threading.Thread(target=_sweep_later, args=(_stop,), name="conduit-room-sweep", daemon=True)
+            try:
+                sweeper.start()
+            except Exception:  # noqa: BLE001 - disbands are still guarded
+                setattr(rooms, _SWEPT_FLAG, False)
+                logger.warning("conduit_push: couldn't start deleting the hidden chats of group rooms disbanded on "
+                               "this host; the plugin tries again when it next loads", exc_info=True)
+            else:
+                _sweeper = sweeper
         return True
 
 

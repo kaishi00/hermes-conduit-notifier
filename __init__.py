@@ -409,11 +409,11 @@ def _finish_ready(session_id: str, ready: dict[str, Any] | None, send: bool) -> 
 def _unload() -> None:
     """Hermes unloads the plugin: replies held for a turn's end are
     dropped with their timers, held calls stay stored for the next load, the
-    group room memory and planner guards and the self-improvement
-    setting's live read come off, the room turns it remembers are
-    forgotten, and the delivery and Live Activity threads end (waiting about
-    a second for a send in progress). Nothing more goes to the relay from
-    this load."""
+    group room guards (memory, planner, cut-off and disband cleanup, with a
+    sweep that hasn't run yet) and the self-improvement setting's live read
+    come off, the room turns it remembers are forgotten, and the delivery
+    and Live Activity threads end (waiting about a second for a send in
+    progress). Nothing more goes to the relay from this load."""
     with _pending_lock:
         held = list(_pending_ready.values())
         _pending_ready.clear()
