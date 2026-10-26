@@ -224,7 +224,8 @@ def card_entry(card: dict, done: Optional[dict] = None) -> dict[str, Any]:
     """``done``: its done mark, as ``done_marks`` gives it."""
     entry = {key: card[key] for key in ("id", "kind", "item_id", "level", "title", "quote", "news", "why", "profile",
                                         "chat_id", "chat_title", "message_id", "topic", "created_at", "seen_at",
-                                        "briefed_at", "brief", "dismissed_at", "rating", "reason", "rated_at")}
+                                        "briefed_at", "brief", "dismissed_at", "rest_until", "rating", "reason",
+                                        "rated_at")}
     return {**entry, "done_at": done["done_at"] if done else None, "done_by": done["done_by"] if done else ""}
 
 
@@ -237,6 +238,7 @@ DONE_BY = "user: done on the Pulse screen"
 ACT_DONE_BY = "pulse: done in the chat after Do it"
 # Pulse marked it, having read it get done while the card waited for the brief.
 HELD_DONE_BY = "pulse: done before the morning brief"
+RESTED_DONE_BY = "pulse: done before it came back from Not now"
 
 
 def action_card(pulse_store: store.PulseStore, card_id: Any) -> dict:
@@ -261,23 +263,28 @@ def done(pulse_store: store.PulseStore, card_id: Any, is_done: Any, *, now: floa
         raise Invalid("done")
     if is_done:
         return pulse_store.mark_done(card["id"], card["item_id"], closed_by=DONE_BY, now=now)
-    return pulse_store.unmark_done(card["id"], card["item_id"], closed_by=(DONE_BY, ACT_DONE_BY, HELD_DONE_BY), now=now)
+    return pulse_store.unmark_done(card["id"], card["item_id"],
+                                   closed_by=(DONE_BY, ACT_DONE_BY, HELD_DONE_BY, RESTED_DONE_BY), now=now)
 
 
 # Not now ----------------------------------------------------------------------
 
-def dismiss(pulse_store: store.PulseStore, card_id: Any, dismissed: Any, *, now: float) -> bool:
+def dismiss(pulse_store: store.PulseStore, card_id: Any, dismissed: Any, *, now: float,
+            rest_until: Optional[float] = None) -> bool:
     """Swipes a card away ("Not now"), or puts it back; whether it changed.
     Nothing is learned: the kind keeps its loudness and no rating counts.
-    A held card swiped away stays out of the morning brief, and a
-    remembered thing behind one rests a week
-    (pulse_report.DISMISS_REST_S)."""
+    With ``rest_until`` (pulse_followup.rest_time: later today, tomorrow or
+    next week) the card comes back as new at that time, its chat read first
+    (pulse_followup.return_rested, check_rested), and the remembered thing
+    behind it rests until then; without one it stays away, and the thing
+    rests a week (pulse_report.DISMISS_REST_S). A held card swiped away
+    stays out of the morning brief while it's away."""
     card = pulse_store.card(card_id) if isinstance(card_id, int) and not isinstance(card_id, bool) else None
     if card is None:
         raise Invalid("card")
     if not isinstance(dismissed, bool):
         raise Invalid("dismissed")
-    return pulse_store.dismiss_card(card["id"], dismissed, now)
+    return pulse_store.dismiss_card(card["id"], dismissed, now, rest_until if dismissed else None)
 
 
 # Rating -----------------------------------------------------------------------

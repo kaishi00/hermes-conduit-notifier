@@ -454,8 +454,9 @@ def rated_not_useful(pulse_store: store.PulseStore) -> dict[int, float]:
     return {memory: at for memory, (at, useful) in latest.items() if not useful}
 
 
-# How long a remembered thing whose card was swiped away ("Not now") stays
-# out of the report, unless it comes up in a chat again.
+# How long a remembered thing whose card was swiped away ("Not now") with no
+# time stays out of the report, unless it comes up in a chat again. With a
+# time (later today, tomorrow, next week) it rests until then.
 DISMISS_REST_S = 7 * 86400.0
 
 
@@ -467,11 +468,11 @@ PUT_AWAY = "put away"
 def remembered_items(pulse_store: store.PulseStore, now: float) -> tuple[list[dict], list[tuple[dict, str]]]:
     """Pulse memory's open items, dated ones soonest first, then by kind
     and how recently they came up; and the ones resting, with why: rated
-    "no" (RATED), or swiped away with Not now this week (PUT_AWAY), until the
-    user brings one up again."""
+    "no" (RATED), or swiped away with Not now and resting still (PUT_AWAY),
+    until the user brings one up again."""
     rated = rated_not_useful(pulse_store)
     # Swiped away lately: it rests a while, like a "no" that wears off.
-    put_away = pulse_store.dismissed_items(now - DISMISS_REST_S)
+    put_away = pulse_store.resting_items(now, DISMISS_REST_S)
     items, resting = [], []
     # Not what memory's next run expires either.
     for item in pulse_store.open_items(limit=MAX_REPORT_ITEMS * 3 + len(rated) + len(put_away), soonest=True,
@@ -821,6 +822,12 @@ def last_slot(now: float, zone: tzinfo, value: Any) -> tuple[float, float]:
 
 def next_time(now: float, zone: tzinfo, value: Any) -> float:
     return next(at for at in _slots(now, zone, value, range(0, 2)) if at > now)
+
+
+def slot_on(now: float, zone: tzinfo, value: Any, day: int) -> float:
+    """The first of ``value``'s times (a time or a list, like the brief's or
+    the report's) ``day`` days from today."""
+    return _slots(now, zone, value, range(day, day + 1))[0]
 
 
 def phone_zone(home: Path) -> Optional[str]:

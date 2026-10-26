@@ -374,6 +374,9 @@ def tick(now: Optional[float] = None) -> None:
     # Even with follow-ups turned off: one already sent still lands.
     followup.settle(pulse_store, now, home)
     brief.settle(pulse_store, now)
+    # Not now until a time that has come: the card comes back as new (one
+    # about something still open after its chat is read, in _memory_run).
+    followup.return_rested(pulse_store, now)
     learning.drop_empty_reports(pulse_store)
     pulse_store.prune_cards(CARDS_KEEP, held_before=now - HELD_DAYS * 86400.0)
     pulse_store.prune_candidates(now - candidates.JOURNAL_DAYS * 86400.0)
@@ -824,7 +827,10 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
         # follow-up budget, whatever follow-ups' switch: they hold report
         # cards too, and a stale card shouldn't reach the brief either way.
         holds = follow_used < follow_cap and bool(pulse_store.held_cards(1))
-        if used >= cap and not follows and not acts and not holds:
+        # Likewise a card swiped away until now, about something still open:
+        # with the budget spent it comes back unread rather than late.
+        rests = any(card["item_id"] is not None for card in pulse_store.rested_cards(now))
+        if used >= cap and not follows and not acts and not holds and not rests:
             return  # `pulse status` says so
         profiles = pulse_store.get("report_profiles")
         sources = memory_sources(pulse_store, home, home_chat_id, profiles)
@@ -854,15 +860,22 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
                                         budget=float("inf"), done=acted)
                 finally:
                     _count_checks(pulse_store, acted)  # in the totals, not the follow-up day's budget
-            if holds:
+            if holds or rests:
                 try:
-                    followup.check_held(pulse_store, home, lambda instructions, text: ask(
-                                            instructions, text, purpose="pulse follow-up"), zone=zone,
-                                        now=max(now, time.time()),
-                                        still_leader=lambda: not stopped.is_set() and _leads(pulse_store),
-                                        budget=follow_cap - follow_used, done=checked)
-                except Exception:  # noqa: BLE001 — the brief tells them as they were
-                    logger.warning("conduit_push: Pulse held card checks failed", exc_info=True)
+                    if holds:
+                        followup.check_held(pulse_store, home, lambda instructions, text: ask(
+                                                instructions, text, purpose="pulse follow-up"), zone=zone,
+                                            now=max(now, time.time()),
+                                            still_leader=lambda: not stopped.is_set() and _leads(pulse_store),
+                                            budget=follow_cap - follow_used, done=checked)
+                    if rests:
+                        followup.check_rested(pulse_store, home, lambda instructions, text: ask(
+                                                  instructions, text, purpose="pulse follow-up"), zone=zone,
+                                              now=max(now, time.time()),
+                                              still_leader=lambda: not stopped.is_set() and _leads(pulse_store),
+                                              budget=follow_cap - follow_used, done=checked)
+                except Exception:  # noqa: BLE001 — the brief tells them as they were; a rested card waits
+                    logger.warning("conduit_push: Pulse held or rested card checks failed", exc_info=True)
                 finally:
                     if not follows:
                         _count_checks(pulse_store, checked)  # else the follow-up run counts them with its own

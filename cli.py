@@ -359,7 +359,7 @@ def _pulse(args: argparse.Namespace) -> int:
         return _pulse_followups(pulse_store, home, (args.value or "").strip())
     if action in ("cards", "rate", "done", "learned"):
         return _pulse_learning(pulse_store, action, (args.value or "").strip(),
-                               str(getattr(args, "extra", "") or "").strip())
+                               str(getattr(args, "extra", "") or "").strip(), home)
     if action == "note":
         # An unquoted two-word note is still the whole note.
         words = ((args.value or "").strip(), str(getattr(args, "extra", "") or "").strip())
@@ -742,9 +742,10 @@ def _learning_status(pulse_store: Any) -> str:
     return ("Pulse screen: " + "; ".join(parts)) if parts else ""
 
 
-def _pulse_learning(pulse_store: Any, action: str, value: str, extra: str) -> int:
-    from . import pulse_control, pulse_learning
+def _pulse_learning(pulse_store: Any, action: str, value: str, extra: str, home: Any = None) -> int:
+    from . import pulse, pulse_control, pulse_learning
     if action == "cards":
+        zone = pulse.report_zone(pulse_store, Path(home) if home else Path("."))  # the user's, as `pulse status`
         cards = pulse_store.cards(MEMORY_LIST)
         if not cards:
             print("No cards yet: Pulse hasn't brought you anything.")
@@ -752,7 +753,10 @@ def _pulse_learning(pulse_store: Any, action: str, value: str, extra: str) -> in
         for card in cards:
             rated = f" (rated {card['rating']}{', ' + card['reason'] if card['reason'] else ''})" if card["rating"] else ""
             finished = " (done)" if card["id"] in marks else ""
-            finished += " (put away)" if card.get("dismissed_at") else ""
+            if card.get("dismissed_at"):
+                back = card.get("rest_until")
+                finished += f" (put away, back {datetime.fromtimestamp(back, zone).strftime('%a %H:%M')})" if back \
+                    else " (put away)"
             topic = f" [{card['topic']}]" if card["topic"] else ""
             print(_printable(f"#{card['id']} [{card['level']}]{topic} {card['title']}: {card['news']}{rated}{finished}"))
         return 0

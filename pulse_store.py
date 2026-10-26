@@ -199,6 +199,9 @@ CREATE TABLE IF NOT EXISTS cards (
     brief TEXT NOT NULL DEFAULT '',
     -- Swiped away ("Not now"): off the list, nothing learned.
     dismissed_at REAL,
+    -- Not now until a time (later today, tomorrow, next week): when the card
+    -- comes back as new (pulse_followup.return_rested).
+    rest_until REAL,
     created_at REAL NOT NULL,
     seen_at REAL,
     briefed_at REAL,
@@ -309,7 +312,7 @@ CARD_COLUMNS = ("kind", "item_id", "level", "title", "quote", "news", "why", "pr
                 "message_id", "topic", "brief", "created_at")
 # Card columns added after the first build, oldest first, with their types.
 _ADDED_CARD_COLUMNS = (("topic", "TEXT NOT NULL DEFAULT ''"), ("brief", "TEXT NOT NULL DEFAULT ''"),
-                       ("dismissed_at", "REAL"))
+                       ("dismissed_at", "REAL"), ("rest_until", "REAL"))
 LESSON_COLUMNS = ("kind", "what", "value", "profile", "chat_id", "card_id", "cause", "created_at")
 CANDIDATE_COLUMNS = ("origin", "item_id", "kind", "profile", "chat_id", "source", "area", "due_at", "actionable",
                      "value", "bring_up", "skip", "text", "decision", "rank")
@@ -1044,20 +1047,53 @@ class PulseStore:
                          f"AND id NOT IN (SELECT card_id FROM card_done) "
                          f"AND id IN ({','.join('?' * len(ids))})", (now, brief, *ids))
 
-    def dismiss_card(self, card_id: int, dismissed: bool, now: float) -> bool:
-        """Swipes a card away (and marks it seen), or puts it back; whether it changed."""
+    def dismiss_card(self, card_id: int, dismissed: bool, now: float, rest_until: Optional[float] = None) -> bool:
+        """Swipes a card away (and marks it seen), until ``rest_until`` when
+        one is given, or puts it back; whether it changed."""
         with _lock, self._connect() as conn:
             if dismissed:
-                return conn.execute("UPDATE cards SET dismissed_at=?, seen_at=COALESCE(seen_at, ?) "
-                                    "WHERE id=? AND dismissed_at IS NULL", (now, now, card_id)).rowcount > 0
-            return conn.execute("UPDATE cards SET dismissed_at=NULL WHERE id=? AND dismissed_at IS NOT NULL",
-                                (card_id,)).rowcount > 0
+                return conn.execute("UPDATE cards SET dismissed_at=?, rest_until=?, seen_at=COALESCE(seen_at, ?) "
+                                    "WHERE id=? AND dismissed_at IS NULL", (now, rest_until, now, card_id)).rowcount > 0
+            return conn.execute("UPDATE cards SET dismissed_at=NULL, rest_until=NULL "
+                                "WHERE id=? AND dismissed_at IS NOT NULL", (card_id,)).rowcount > 0
 
-    def dismissed_items(self, since: float) -> dict[int, float]:
-        """Remembered items a card of was swiped away since ``since``, and when (the latest)."""
+    def rested_cards(self, now: float) -> list[dict]:
+        """Cards swiped away until a time that has come, the earliest first."""
+        with self._connect() as conn:
+            rows = conn.execute("SELECT * FROM cards WHERE dismissed_at IS NOT NULL AND rest_until IS NOT NULL "
+                                "AND rest_until <= ? ORDER BY rest_until, id", (now,)).fetchall()
+        return [dict(row) for row in rows]
+
+    def return_card(self, card_id: int, now: float, rest_until: Optional[float]) -> bool:
+        """A card swiped away comes back as new, at the top of the list;
+        whether it did. Only while ``rest_until`` is still its time: one put
+        back and swiped away again meanwhile keeps its new rest. Never one
+        marked done meanwhile: end_rest brings that one back as it is."""
+        with _lock, self._connect() as conn:
+            return conn.execute("UPDATE cards SET dismissed_at=NULL, rest_until=NULL, seen_at=NULL, created_at=? "
+                                "WHERE id=? AND dismissed_at IS NOT NULL AND rest_until IS ? "
+                                "AND id NOT IN (SELECT card_id FROM card_done)",
+                                (now, card_id, rest_until)).rowcount > 0
+
+    def end_rest(self, card_id: int, rest_until: Optional[float]) -> bool:
+        """A card swiped away until a time is back on the list as it was
+        (for one marked done meanwhile); whether it changed. Only while
+        ``rest_until`` is still its time, as return_card."""
+        with _lock, self._connect() as conn:
+            return conn.execute("UPDATE cards SET dismissed_at=NULL, rest_until=NULL "
+                                "WHERE id=? AND dismissed_at IS NOT NULL AND rest_until IS ?",
+                                (card_id, rest_until)).rowcount > 0
+
+    def resting_items(self, now: float, rest_s: float) -> dict[int, float]:
+        """Remembered items a card of was swiped away and still rests: while
+        the card is away until a time (it comes back as new at that time,
+        or, its chat read first, a little after: return_card, end_rest), or
+        for ``rest_s`` after a Not now with no time; and when it was swiped
+        away (the latest)."""
         with self._connect() as conn:
             rows = conn.execute("SELECT item_id, MAX(dismissed_at) AS at FROM cards WHERE item_id IS NOT NULL "
-                                "AND dismissed_at >= ? GROUP BY item_id", (since,)).fetchall()
+                                "AND dismissed_at IS NOT NULL AND ((rest_until IS NULL AND dismissed_at >= ?) "
+                                "OR rest_until IS NOT NULL) GROUP BY item_id", (now - rest_s,)).fetchall()
         return {int(row["item_id"]): float(row["at"]) for row in rows}
 
     def turn_cards(self, kind: str) -> list[dict]:

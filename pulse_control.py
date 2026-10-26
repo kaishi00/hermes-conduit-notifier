@@ -356,11 +356,22 @@ def done(pulse_store: Any, card_id: Any, is_done: Any = True, now: Optional[floa
                                                  now=time.time() if now is None else now))
 
 
-def dismiss(pulse_store: Any, card_id: Any, dismissed: Any = True, now: Optional[float] = None) -> bool:
-    """Swipes a card away ("Not now", nothing learned), or puts it back
-    with False; whether it changed."""
-    return _learning(lambda: pulse_learning.dismiss(pulse_store, card_id, dismissed,
-                                                    now=time.time() if now is None else now))
+def dismiss(pulse_store: Any, card_id: Any, dismissed: Any = True, now: Optional[float] = None,
+            until: Any = None, home: Any = None) -> bool:
+    """Swipes a card away ("Not now", nothing learned) until later today,
+    tomorrow or next week (``until``, pulse_followup.RESTS: it comes back
+    as new then) or for good, or puts it back with False; whether it
+    changed. ``home`` gives the user's time zone (pulse.report_zone)."""
+    now = time.time() if now is None else now
+    rest_until = None
+    if until is not None and dismissed is True:
+        if not isinstance(until, str) or until not in pulse_followup.RESTS:
+            raise Refused("invalid", field="until")
+        if not isinstance(card_id, int) or isinstance(card_id, bool) or pulse_store.card(card_id) is None:
+            raise Refused("invalid", field="card")  # before the zone is read for a card that isn't there
+        zone = pulse.report_zone(pulse_store, Path(home) if home else Path("."), now)
+        rest_until = pulse_followup.rest_time(until, now, zone, pulse_store)
+    return _learning(lambda: pulse_learning.dismiss(pulse_store, card_id, dismissed, now=now, rest_until=rest_until))
 
 
 def acted(pulse_store: Any, card_id: Any, now: Optional[float] = None) -> bool:

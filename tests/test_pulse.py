@@ -2640,6 +2640,20 @@ def test_pulse_routes(remembering, db, monkeypatch):
     assert http.post(f"{base}/acted", json={"card": found}).json()["booked"] is True
     assert http.post(f"{base}/done", json={"card": found, "done": True}).json()["changed"] is True
     assert http.post(f"{base}/acted", json={"card": found}).json()["booked"] is False  # done already
+    # Not now until later today, tomorrow or next week: the card comes back then.
+    assert "pulse_rest" in api.ROUTE_CAPABILITIES
+    rested = store_.add_card({"kind": "noticed", "level": "screen", "topic": "date", "news": "Dentist Friday",
+                              "created_at": DAY})
+    put_off = http.post(f"{base}/dismiss", json={"card": rested, "dismissed": True, "until": "tomorrow"}).json()
+    assert put_off["changed"] is True and put_off["rest_until"] > time.time()
+    [entry] = [card for card in http.get(f"{base}/feed").json()["cards"] if card["id"] == rested]
+    assert entry["rest_until"] == put_off["rest_until"]  # the cleared row says when it comes back
+    assert http.post(f"{base}/dismiss", json={"card": rested, "dismissed": True, "until": "tomorrow"}).json() == {
+        "ok": True, "changed": False, "rest_until": put_off["rest_until"]}
+    never = http.post(f"{base}/dismiss", json={"card": rested, "dismissed": True, "until": "never"})
+    assert never.status_code == 400 and never.json()["detail"] == {"code": "invalid", "field": "until"}
+    assert http.post(f"{base}/dismiss", json={"card": rested, "dismissed": False}).json() == {
+        "ok": True, "changed": True, "rest_until": None}
     # A host that never turned Pulse on is answered without a file left behind.
     fresh = home / "fresh"
     fresh.mkdir()
