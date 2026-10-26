@@ -568,6 +568,30 @@ def test_the_two_thumb_steps_from_before_learning_are_retired_once(live):
     assert [lesson["cause"] for lesson in learning.learned(again)] == ["set"]
 
 
+def test_what_a_process_from_before_signals_writes_is_taken_in_at_the_next_open(live):
+    # One still running after an update (a dashboard not restarted yet) keeps no signals: the next open
+    # of the store takes in its ratings, Do its and Dones, and takes back its Undos.
+    rated, done, undone, acted, marked = (found_card(live, news=f"Thing {n} (calendar).") for n in range(5))
+    now = time.time()
+    assert control.done(live.store, undone) is True
+    live.store.act_on_card(marked, now=now, check_at=now + 1800)
+    assert live.store.mark_done(marked, None, closed_by=learning.ACT_DONE_BY, now=now, by="pulse")
+    live.store.decide_act(marked, acted_at=now, check_at=None, checks=1, outcome="done", why="",
+                          stage=prefs.ACT_DONE)
+    with sqlite3.connect(live.store.path) as conn:  # as such a process writes them
+        conn.execute("UPDATE cards SET rating='down', rated_at=? WHERE id=?", (now, rated))
+        conn.execute("INSERT INTO card_done(card_id, done_at, done_by) VALUES(?, ?, 'user')", (done, now))
+        conn.execute("INSERT INTO card_acts(card_id, acted_at) VALUES(?, ?)", (acted, now))
+        conn.execute("DELETE FROM card_done WHERE card_id IN (?, ?)", (undone, marked))
+    reopened = store.open_store(live.home)
+    assert {(row["card_id"], row["what"]): (row["useful"], row["weight"]) for row in reopened.signals()} == {
+        (rated, "thumb"): (0.0, 1.0), (done, "done"): (1.0, prefs.DONE_WEIGHT),
+        (acted, "act"): (1.0, prefs.ACT_OPENED), (marked, "act"): (1.0, prefs.ACT_SENT)}
+    with sqlite3.connect(live.store.path) as conn:  # in line now: the next open writes nothing
+        conn.row_factory = sqlite3.Row
+        assert not any(store._signal_gaps(conn, now - prefs.KEEP_S).values())
+
+
 def test_a_rating_is_a_signal_and_a_new_rating_replaces_it(live):
     card = told_card(live)
     control.rate(live.store, card["id"], "down")
@@ -614,10 +638,12 @@ def test_a_report_cards_later_signals_keep_where_it_came_from_once_the_journal_d
     assert control.done(live.store, card_id) is True
     assert {(row["what"], row["kind"], row["place"], row["band"]) for row in live.store.signals()} == {
         ("thumb", "date", place, band), ("done", "date", place, band)}
-    # One whose first signal comes after: its chat when it was found in one, none when it points at Pulse's turn.
+    # One whose first signal comes after: its chat when it was found in one, none when it points at
+    # Pulse's turn; and so for a "not relevant" rule.
     in_chat, own = found_card(live, chat_id=CHAT), found_card(live)
-    control.rate(live.store, in_chat, "down")
-    control.rate(live.store, own, "down")
+    [rule] = control.rate(live.store, in_chat, "down", "not_relevant")
+    assert (rule["what"], rule["chat_id"]) == ("rule", CHAT)
+    assert control.rate(live.store, own, "down", "not_relevant") == []
     places = {row["card_id"]: row["place"] for row in live.store.signals()}
     assert (places[in_chat], places[own]) == (place, "")
 

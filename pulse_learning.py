@@ -375,14 +375,17 @@ def lesson_kind(card: dict) -> str:
 def source_chat(pulse_store: store.PulseStore, card: dict) -> Optional[tuple[str, str]]:
     """The chat a card's thing came from, as (profile, chat id): a
     follow-up's, a report item's candidate's (none when it came from the
-    calendar, reminders or notes), or for one journaled before, the chat of
-    the remembered thing behind it. None when there's no chat."""
+    calendar, reminders or notes), or once the journal no longer has it, the
+    chat of the remembered thing behind it or the one it was found in (the
+    card points there, with no message of Pulse's turn). None when there's
+    no chat."""
     if card["kind"] != NOTICED:
         return (card["profile"], card["chat_id"]) if card["chat_id"] else None
     found = pulse_store.card_candidate(card["id"])
     if found is not None:
         return (found["profile"], found["chat_id"]) if found["chat_id"] else None
-    return (card["profile"], card["chat_id"]) if card["item_id"] is not None and card["chat_id"] else None
+    in_chat = card["item_id"] is not None or card["message_id"] is None
+    return (card["profile"], card["chat_id"]) if in_chat and card["chat_id"] else None
 
 
 def rate(pulse_store: store.PulseStore, card_id: Any, rating: Any, reason: Any = "", *,

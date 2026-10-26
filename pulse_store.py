@@ -367,12 +367,12 @@ LESSON_COLUMNS = ("kind", "what", "value", "profile", "chat_id", "card_id", "cau
 CANDIDATE_COLUMNS = ("origin", "item_id", "kind", "profile", "chat_id", "source", "area", "due_at", "actionable",
                      "value", "bring_up", "skip", "text", "why", "decision", "rank", "asked", "band", "place",
                      "score", "factor", "floor", "level")
-# The setting that says a store's signals were filled in from the ratings,
-# Do its and Dones it had before signals were kept, and its two-thumb steps
-# retired: before learning, two net thumbs moved a kind a step along the
-# loudness ladder as a lesson with one of STEPPED_CAUSES; those thumbs are
-# signals now, so the steps are undone once, and the old running score
-# (OLD_SCORES) goes.
+# The setting that says a store's signals were first filled in from the
+# ratings, Do its and Dones it had before signals were kept (_sync_signals),
+# and its two-thumb steps retired: before learning, two net thumbs moved a
+# kind a step along the loudness ladder as a lesson with one of
+# STEPPED_CAUSES; those thumbs are signals now, so the steps are undone
+# once, and the old running score (OLD_SCORES) goes.
 SIGNALS_BACKFILLED = "signals_backfilled"
 STEPPED_CAUSES = ("2 thumbs up", "2 thumbs down")
 OLD_SCORES = "rating_scores"
@@ -439,13 +439,17 @@ class PulseStore:
                 except BaseException:
                     conn.execute("ROLLBACK")
                     raise
-            # Signals from before they were kept: each card's rating, Do it and Done,
-            # once, so what Pulse learns starts from what the store already knows.
-            if conn.execute("SELECT 1 FROM settings WHERE key=?", (SIGNALS_BACKFILLED,)).fetchone() is None:
+            # Signals as the cards say: each card's rating, Do it and Done, so what Pulse
+            # learns starts from what the store already knows, and takes in (or back) what
+            # a process from before signals, still running, wrote without them. The
+            # two-thumb steps retire once.
+            since = time.time() - prefs.KEEP_S
+            first = conn.execute("SELECT 1 FROM settings WHERE key=?", (SIGNALS_BACKFILLED,)).fetchone() is None
+            if first or any(_signal_gaps(conn, since).values()):
                 conn.execute("BEGIN IMMEDIATE")
                 try:
+                    _sync_signals(conn, _signal_gaps(conn, since))
                     if conn.execute("SELECT 1 FROM settings WHERE key=?", (SIGNALS_BACKFILLED,)).fetchone() is None:
-                        _backfill_signals(conn)
                         conn.execute(f"UPDATE lessons SET undone_at=? WHERE what='level' AND undone_at IS NULL "
                                      f"AND cause IN ({', '.join('?' * len(STEPPED_CAUSES))})",
                                      (time.time(), *STEPPED_CAUSES))
@@ -1074,20 +1078,19 @@ class PulseStore:
         """Undo, in one transaction: takes the mark off and puts the item
         back as it was while one of ``closed_by`` still holds it closed, and its
         checks back where the mark stopped them. What the mark taught goes
-        with it: the user's Done signal, or, for a done Pulse saw after Do it,
-        its Do it back to something sent (all the check saw before it). False
-        with no mark."""
+        with it: the user's Done signal, and a Do it Pulse saw done goes back
+        to something sent (all the check saw before it). False with no
+        mark."""
         with _lock, self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute("SELECT done_by, prior_json FROM card_done WHERE card_id=?", (card_id,)).fetchone()
+            row = conn.execute("SELECT prior_json FROM card_done WHERE card_id=?", (card_id,)).fetchone()
             if row is None:
                 conn.execute("ROLLBACK")
                 return False
             conn.execute("DELETE FROM card_done WHERE card_id=?", (card_id,))
             conn.execute("DELETE FROM signals WHERE card_id=? AND what=?", (card_id, prefs.DONE))
-            if row["done_by"] != USER:
-                conn.execute("UPDATE signals SET weight=MIN(weight, ?) WHERE card_id=? AND what=?",
-                             (prefs.ACT_SENT, card_id, prefs.ACT))
+            conn.execute("UPDATE signals SET weight=MIN(weight, ?) WHERE card_id=? AND what=?",
+                         (prefs.ACT_SENT, card_id, prefs.ACT))
             try:
                 prior = json.loads(row["prior_json"])
             except ValueError:
@@ -1452,23 +1455,68 @@ def _put_signal(conn: sqlite3.Connection, card_id: int, what: str, *, at: float,
                  (card_id, what, at, useful, weight, attrs["kind"], attrs["place"], attrs["band"], attrs["pushed"]))
 
 
-def _backfill_signals(conn: sqlite3.Connection) -> None:
-    """The signals a store had before they were kept: every rated card's
-    thumb, every Do it by how far its check got, every Done the user gave.
-    A done Pulse saw counts while its mark stands: one the user undid is
-    something sent, as Undo makes it now (``unmark_done``)."""
-    for card in conn.execute("SELECT id, rating, rated_at, created_at FROM cards WHERE rating IN ('up', 'down') "
-                             "AND kind IN ('followup', ?)", (NOTICED,)).fetchall():
-        _put_signal(conn, card["id"], prefs.THUMB, at=float(card["rated_at"] or card["created_at"]),
+def _signal_gaps(conn: sqlite3.Connection, since: float) -> dict[str, list[sqlite3.Row]]:
+    """Where the signals of the cards the store still has differ from what
+    the cards say, from ``since`` on: a store from before signals were kept,
+    or a process from before still running, writes ratings, Do its, Dones
+    and Undos without them. "thumb": cards rated without their thumb (or
+    with the other one); "act": Do its without theirs; "done": the user's
+    Dones without theirs; "undone": Done signals whose Done was undone;
+    "unmarked": Do its kept as done, though the mark Pulse made of it was
+    undone. Only cards that take signals (follow-ups and report items)."""
+    kinds = ("followup", NOTICED)
+    return {
+        "thumb": conn.execute(
+            "SELECT c.id, c.rating, COALESCE(c.rated_at, c.created_at) AS at FROM cards c "
+            "LEFT JOIN signals s ON s.card_id=c.id AND s.what=? WHERE c.kind IN (?, ?) "
+            "AND c.rating IN ('up', 'down') AND COALESCE(c.rated_at, c.created_at) >= ? "
+            "AND (s.card_id IS NULL OR s.useful != (CASE c.rating WHEN 'up' THEN 1.0 ELSE 0.0 END))",
+            (prefs.THUMB, *kinds, since)).fetchall(),
+        "act": conn.execute(
+            "SELECT a.* FROM card_acts a JOIN cards c ON c.id=a.card_id "
+            "LEFT JOIN signals s ON s.card_id=a.card_id AND s.what=? "
+            "WHERE c.kind IN (?, ?) AND a.acted_at >= ? AND s.card_id IS NULL",
+            (prefs.ACT, *kinds, since)).fetchall(),
+        "done": conn.execute(
+            "SELECT d.card_id, d.done_at FROM card_done d JOIN cards c ON c.id=d.card_id "
+            "LEFT JOIN signals s ON s.card_id=d.card_id AND s.what=? "
+            "WHERE d.done_by=? AND c.kind IN (?, ?) AND d.done_at >= ? AND s.card_id IS NULL",
+            (prefs.DONE, USER, *kinds, since)).fetchall(),
+        "undone": conn.execute(
+            "SELECT s.card_id FROM signals s JOIN cards c ON c.id=s.card_id WHERE s.what=? "
+            "AND NOT EXISTS (SELECT 1 FROM card_done d WHERE d.card_id=s.card_id AND d.done_by=?)",
+            (prefs.DONE, USER)).fetchall(),
+        "unmarked": conn.execute(
+            "SELECT s.card_id FROM signals s JOIN card_acts a ON a.card_id=s.card_id "
+            "WHERE s.what=? AND s.weight > ? AND a.outcome='done' "
+            "AND NOT EXISTS (SELECT 1 FROM card_done d WHERE d.card_id=s.card_id)",
+            (prefs.ACT, prefs.ACT_SENT)).fetchall(),
+    }
+
+
+def _sync_signals(conn: sqlite3.Connection, gaps: dict[str, list[sqlite3.Row]]) -> None:
+    """Closes ``_signal_gaps``: a rating, Do it or Done without its signal
+    gets it, as it would have then; an undone Done's signal goes, and a Do
+    it Pulse saw done whose mark was undone goes back to something sent, as
+    Undo does now (``unmark_done``). A Do it counts by how far its check got:
+    done while Pulse's mark of it stands, something sent once a check ran or
+    the chat kept going, else opened."""
+    for card in gaps["thumb"]:
+        _put_signal(conn, card["id"], prefs.THUMB, at=float(card["at"]),
                     useful=1.0 if card["rating"] == "up" else 0.0, weight=1.0)
     marked = {row["card_id"] for row in conn.execute("SELECT card_id FROM card_done WHERE done_by != ?", (USER,))}
-    for act in conn.execute("SELECT * FROM card_acts").fetchall():
+    for act in gaps["act"]:
         stage = (prefs.ACT_DONE if act["outcome"] == "done" and act["card_id"] in marked
                  else prefs.ACT_SENT if act["checks"] or act["why"] == "the chat kept going" else prefs.ACT_OPENED)
         _put_signal(conn, act["card_id"], prefs.ACT, at=float(act["acted_at"]), useful=1.0, weight=stage)
-    for done in conn.execute("SELECT card_id, done_at FROM card_done WHERE done_by=?", (USER,)).fetchall():
+    for done in gaps["done"]:
         _put_signal(conn, done["card_id"], prefs.DONE, at=float(done["done_at"]), useful=1.0,
                     weight=prefs.DONE_WEIGHT)
+    for row in gaps["undone"]:
+        conn.execute("DELETE FROM signals WHERE card_id=? AND what=?", (row["card_id"], prefs.DONE))
+    for row in gaps["unmarked"]:
+        conn.execute("UPDATE signals SET weight=? WHERE card_id=? AND what=?",
+                     (prefs.ACT_SENT, row["card_id"], prefs.ACT))
 
 
 def _insert_candidates(conn: sqlite3.Connection, run_id: str, rows: Sequence[dict[str, Any]], now: float) -> list[int]:
