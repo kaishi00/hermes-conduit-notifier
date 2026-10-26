@@ -144,6 +144,31 @@ _build = build_stamp()
 _said_stale = False
 
 
+def _owner_gone(owner: Any) -> bool:
+    """Whether the process a lease names has exited: one on this host whose
+    pid no longer runs. Unknown (another host, Windows, where signal 0 would
+    end the process) counts as still there."""
+    hostname, _, pid = str(owner).rpartition(":")
+    if os.name == "nt" or hostname != socket.gethostname() or not pid.isdigit():
+        return False
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def lease_on_older_build(lease: Any) -> bool:
+    """Whether the loop's lease is held by a process running an older build
+    than the one installed. A process that has exited, as the dashboard a
+    plugin update restarted has, holds nothing: the new one takes over at
+    its next tick."""
+    return (isinstance(lease, dict) and lease.get("build") != build_stamp()
+            and not _owner_gone(lease.get("owner")))
+
+
 def register(ctx: Any) -> None:
     """Starts the Pulse loop for this load. It only acts in a process that
     hosts Conduit's chats, and only while Pulse is on."""

@@ -399,7 +399,7 @@ def _pulse(args: argparse.Namespace) -> int:
         else:
             print(f"Dashboard last checked: {max(0, int(now - ticked))} s ago")
             lease = pulse_store.get(pulse_delivery.store.LEADER)
-            if isinstance(lease, dict) and lease.get("build") != pulse.build_stamp():
+            if pulse.lease_on_older_build(lease):
                 print(f"Warning: Pulse is run by process {_printable(str(lease.get('owner')))}, which loaded an older build of the "
                       "plugin. Restart it (or the app that started it) so the new build takes over.")
     counts = pulse_store.counts(pulse.PROBE)

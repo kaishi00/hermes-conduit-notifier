@@ -529,8 +529,14 @@ class PulseStore:
 
     def claim_leader(self, owner: str, ttl_s: float, now: float, build: str = "") -> bool:
         """Whether ``owner`` runs the loop until ``now + ttl_s``: the lease is
-        its own, free, or expired. Two processes hosting sessions for the
-        same Hermes home never both send."""
+        its own, free, expired, or held on another build. Two processes
+        hosting sessions for the same Hermes home never both send.
+
+        A process stops running the loop once a newer build is installed over
+        it (pulse.tick), so a lease stamped with another build than the
+        claimer's is left by a process that no longer ticks: the dashboard a
+        plugin update restarted takes over at once, rather than reading as
+        an older copy until that lease runs out."""
         with _lock, self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute("SELECT value_json FROM settings WHERE key=?", (LEADER,)).fetchone()
@@ -539,7 +545,9 @@ class PulseStore:
             except ValueError:
                 lease = None
             held = (isinstance(lease, dict) and lease.get("owner") != owner
-                    and isinstance(lease.get("until"), (int, float)) and lease["until"] > now)
+                    and isinstance(lease.get("until"), (int, float)) and lease["until"] > now
+                    and not (build and isinstance(lease.get("build"), str) and lease["build"]
+                             and lease["build"] != build))
             if not held:
                 conn.execute(
                     "INSERT INTO settings(key, value_json) VALUES(?, ?) "
