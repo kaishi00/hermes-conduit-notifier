@@ -625,13 +625,16 @@ export class RelayStore {
     return true;
   }
 
-  wouldRespondPendingDecision(installationId, gatewayId, id, questionId = '') {
+  wouldRespondPendingDecision(installationId, gatewayId, id, questionId = '', answer = undefined) {
     const decision = this.data.pendingDecisions[RelayStore.decisionKey(installationId, gatewayId, id)];
     const createdAt = Number(decision?.createdAt);
     if (!decision || !Number.isFinite(createdAt) || createdAt < Date.now() - 2 * 60 * 60_000) return false;
     if (decision.cancelledAt || decision.answer !== undefined) return false;
+    // A blank leaves one named question of a batch blank, never a whole
+    // decision (respondPendingDecision).
+    if (answer === '' && !questionId) return false;
     const batchQuestions = decisionQuestions(decision);
-    if (!batchQuestions.length) return true;
+    if (!batchQuestions.length) return answer !== '';
     const target = questionId || batchQuestions[0].qid;
     if (!batchQuestions.some((question) => question.qid === target)) return false;
     const answers = decision.answers ?? {};
@@ -649,6 +652,9 @@ export class RelayStore {
     // have answerable questions.
     if (decision.cancelledAt) return { outcome: 'released' };
     if (decision.answer !== undefined) return { outcome: 'already_answered' };
+    // A blank answer leaves one named question of a batch blank: never the
+    // first question by default, nor a decision with no batch.
+    if (answer === '' && !questionId) return { outcome: 'invalid_answer' };
     const batchQuestions = decisionQuestions(decision);
     if (batchQuestions.length) {
       decision.answers ??= Object.create(null);
@@ -672,6 +678,9 @@ export class RelayStore {
       this.save();
       return { outcome: 'answered', remaining };
     }
+    // A blank answer leaves one question of a batch blank; a decision with
+    // no batch has nothing to leave blank.
+    if (answer === '') return { outcome: 'invalid_answer' };
     decision.answer = boundedAnswer(answer);
     decision.answeredAt = Date.now();
     this.save();

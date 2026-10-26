@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.82.0 (2026-10-26)
+## 0.83.0 (2026-10-26)
 
 ### New and improved
 - Your Hermes can link with someone else's, the first step to rooms where
@@ -22,6 +22,11 @@ checks it). The format is fixed, because Conduit reads it:
   with `hermes conduit-push links accept`. Both Hermes show four words to
   compare in person, and `links list` and `links remove` show and end Links.
   Links go through the rooms mailbox; nothing travels over them yet.
+
+## 0.82.0 (2026-10-26)
+
+### New and improved
+- When Hermes needs several details only you can give, like where you leave from and your budget for a trip, it can ask them all at once, and Conduit shows them as a form: fill in what you know, leave the rest blank, and send it once. On a call from Hermes, say "skip" to leave one blank.
 
 ## 0.81.3 (2026-10-26)
 

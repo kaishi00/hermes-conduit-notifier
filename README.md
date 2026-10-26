@@ -501,6 +501,12 @@ the FULL batch to Conduit instead of collapsing it to the first question:
   legacy whole-decision body (`{"answer": "…"}`) still works for
   single-question cards, and on a batch it counts as the collapsed first
   question only.
+- A question can be left blank, as Conduit's form leaves a field the user
+  didn't fill: a blank `answer` with its `question_id` locks that question
+  with an empty answer, which Hermes reads as skipped (relay 0.18,
+  capability `clarify-skip`; an encrypted pairing seals the empty answer
+  like any other). A blank answer without a question, or for a decision
+  with no `questions[]`, is `400 invalid_answer`.
 - Duplicate qid answers and released decisions are distinct outcomes:
   `409 already_answered` settles only that qid as answered elsewhere,
   while `410 decision_released` (the native Desktop/TUI path resolved the
@@ -1424,6 +1430,9 @@ or said it to CarPlay while driving. Just before Conduit sends a message it
 tells the plugin the surface and how the message was entered, and that
 message's turn gets one line of context, for example
 `[Conduit: this message came from CarPlay in the user's car, spoken. They are likely driving: …]`.
+A message typed on an iPhone, iPad, Mac or Vision Pro adds that several
+details only the user can give go in one clarify call with open questions,
+which Conduit shows as a form they may leave partly blank (0.82+).
 
 - `POST /api/plugins/conduit_push/turn-surface` with
   `{"session_id": "<runtime session id>", "text_sha256": "<hex>", "surface": "carplay", "input": "spoken"}`
@@ -1625,7 +1634,7 @@ and the dashboard routes under one file lock, so they survive restarts:
 | DELETE | `/api/plugins/conduit_push/calls/watches/{id}?profile=` | | `{ok, removed}` |
 | PUT | `/api/plugins/conduit_push/calls/presence?profile=` (0.14+) | `{hold_s}` (0 releases) | `{ok, status: "present"}` or `{ok, status: "away"}` |
 | POST | `/api/plugins/conduit_push/calls/outcomes?profile=` (0.15+) | `{call_id, session_ids: [...], outcome: "declined" or "missed", kind?, title?, reason?, age_s?}` | `{ok, status: "recorded"}` |
-| GET | `/api/plugins/conduit_push/calls/waiting?session_id=&profile=` (0.70+) | | `{ok, waiting}`: null, `{kind: "question", questions: [{number, question, choices, multi_select, answered}]}` or `{kind: "approval", description, command, command_cut, answered}` |
+| GET | `/api/plugins/conduit_push/calls/waiting?session_id=&profile=` (0.70+) | | `{ok, waiting}`: null, `{kind: "question", questions: [{number, question, choices, multi_select, answered, may_leave_blank}]}` (`may_leave_blank` 0.82+) or `{kind: "approval", description, command, command_cut, answered}` |
 | POST | `/api/plugins/conduit_push/calls/waiting/answer?profile=` (0.70+) | `{session_id, answer?, question?, choice?, reason?}` | `{ok, status: "answered", ...}`, `{ok, status: "not_waiting"}`, `{ok, status: "refused", message}`, or for an approval Hermes didn't take (0.70.1+) `{ok, status: "too_late" or "failed" or "unconfirmed", message}` |
 
 - With alert calls on, what Hermes waits on is kept too (0.70+): a question
@@ -1637,7 +1646,13 @@ and the dashboard routes under one file lock, so they survive restarts:
   host takes the user's words itself, a plain yes or no for an approval). A question
   takes `answer`, a choice's number or label, "the recommended one", or the
   user's own words, for `question` (its number in the batch; the first
-  unanswered by default), and answers the next one with `next`. The clarify
+  unanswered by default), and answers the next one with `next`. A batch
+  Conduit shows as a form (several questions, at least one with no choices)
+  marks each question `may_leave_blank` (0.82+): "skip", "leave it blank"
+  and the like in the app's languages leave it blank, as the form's field
+  left empty, and Hermes reads it as skipped (`answer: "left blank"`,
+  `skipped: true`); a choice named whole by the words ("Pass") still picks
+  the choice. The clarify
   loop takes the batch once every question has an answer. An approval takes
   `choice` (`once` or `deny`, with `reason` for a deny): the agent's process
   resolves the request with that command, never another one queued beside
@@ -2362,7 +2377,7 @@ seals the answers back. This host opens no inbound route of its own.
 - **`answer_call`** (plugin 0.70.0; its approvals confirmed from 0.70.1) answers what Hermes waits on in a call
   from Hermes: granted only with `answer_sessions`, the call's chats, and
   bound to them. It answers a question with the user's words or the number
-  of their choice, and approves or denies only with `answer_approvals: true`
+  of their choice (or "skip" for one of a form, 0.82+), and approves or denies only with `answer_approvals: true`
   (the Watch's "Tap or voice" setting), saying it went only once Hermes
   took it. On Local Live the host passes the user's words to it itself.
 - **Jobs** start an ordinary Hermes chat on the grant's profile through

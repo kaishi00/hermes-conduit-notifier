@@ -49,6 +49,7 @@ import re
 import secrets
 import threading
 import time
+import unicodedata
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -184,6 +185,88 @@ _ONE_LEADS = frozenset({"option", "choice", "number", "and", "or", "with", "take
 # A spoken request for Hermes to say more before the user chooses: sent as
 # the answer, so Hermes explains and asks again.
 ASKS_FIRST_LEAD = "Before I choose:"
+# A question of a batch Conduit shows as a form may be left blank, as the
+# form's fields may: by these words, as Conduit reads them
+# (HermesCallWaiting.isSkip), in the app's languages. The two move together.
+# What the call says back for one left blank.
+SKIPPED_ANSWER = "left blank"
+# Words that leave it blank on their own ("skip", "I'll pass").
+_SKIP_WORDS = frozenset({
+    "skip", "skipped", "skipping", "pass",
+    "überspringen", "überspring", "überspringe", "überspringt", "auslassen", "weglassen", "passe",
+    "saltar", "salta", "sáltalo", "sáltala", "sáltate", "saltemos", "salto", "omitir", "omite", "omítelo", "omítela",
+    "saltarla", "saltarlo", "paso",
+    "passer", "passons", "passez", "sauter", "saute", "sautons", "sautez",
+    "lewati", "lewatkan", "lewat", "lompati", "lompat", "kosongkan",
+    "saltare", "saltala", "saltalo", "saltiamo", "passo", "passa",
+    "pomiń", "pomin", "pomijam", "pominąć", "pomińmy",
+    "pular", "pula", "pulá", "pule", "pulo", "pulamos",
+    "пропустить", "пропусти", "пропустите", "пропустим", "пропускаю", "пропуск", "пас",
+    "atla", "atlayalım", "atlıyorum", "atlayın", "geçelim", "geçiyorum",
+})
+# Words that leave it blank only with a word that leaves ("leave it
+# blank"): alone, "blanco" is a colour.
+_BLANK_WORDS = frozenset({
+    "blank", "empty", "leer", "frei", "vacío", "vacía", "blanco", "vide", "blanc", "kosong", "vuoto", "vuota", "bianco",
+    "puste", "pusty", "pusta", "vazio", "vazia", "branco", "пустым", "пустой", "пустое", "пусто", "пустую", "пустая",
+    "boş",
+})
+_LEAVE_WORDS = frozenset({
+    "leave", "keep", "left", "lass", "lassen", "lasse", "lasst", "deja", "déjalo", "déjala", "dejar", "dejarlo",
+    "dejarla", "déjelo", "dejo", "laisse", "laisser", "laissez", "laissons", "biarkan", "biar", "dibiarkan", "lascia",
+    "lascialo", "lasciala", "lasciare", "lasciamo", "zostaw", "zostawić", "zostawmy", "deixa", "deixe", "deixar",
+    "deixo", "deixamos", "оставь", "оставить", "оставьте", "оставим", "оставляю", "bırak", "bırakalım", "bırakın",
+    "bırakıyorum", "geç",
+})
+# Words that may stand around them ("skip this one, please"). Never a
+# negation: "don't skip it" is an answer.
+_SKIP_FILLER = frozenset({
+    "i", "ll", "d", "let", "lets", "s", "we", "it", "this", "that", "one", "question", "field", "please", "just",
+    "for", "now", "the", "a", "ok", "okay", "and", "then", "can", "you", "on", "go", "ahead",
+    "ich", "es", "das", "die", "den", "diese", "dieses", "diesen", "frage", "feld", "bitte", "einfach", "mal", "wir",
+    "hier", "jetzt", "erstmal", "und", "dann", "du", "sie", "lieber",
+    "lo", "la", "le", "esto", "esta", "este", "eso", "esa", "ese", "pregunta", "campo", "por", "favor", "solo", "sólo",
+    "en", "yo", "me", "mejor", "vamos", "vale", "y", "entonces", "de", "momento", "puedes", "podemos",
+    "je", "les", "l", "ça", "ca", "cette", "ce", "champ", "il", "te", "vous", "plaît", "plait", "stp", "svp",
+    "juste", "pour", "instant", "maintenant", "accord", "et", "alors", "tu", "peux", "va", "celle", "ci",
+    "aku", "saya", "ini", "itu", "pertanyaan", "kolom", "tolong", "saja", "aja", "dulu", "ya", "kita", "deh", "dong",
+    "oke", "yang",
+    "questa", "questo", "domanda", "per", "favore", "in", "io", "bene", "e", "allora", "pure",
+    "to", "tę", "pytanie", "pole", "proszę", "prosze", "po", "prostu", "ja", "dobra", "tylko", "teraz", "na", "razie",
+    "essa", "esse", "isso", "isto", "pergunta", "só", "em", "eu", "o", "pode", "então", "agora",
+    "это", "этот", "эту", "вопрос", "поле", "пожалуйста", "просто", "я", "его", "её", "ее", "ок", "давай", "давайте",
+    "пока", "можно", "и", "тогда", "лучше",
+    "bunu", "bu", "soruyu", "soru", "alanı", "lütfen", "sadece", "ben", "şimdilik", "tamam", "ve", "zaman", "onu",
+    # On to the next one ("skip to the next question").
+    "next", "nächste", "nächsten", "nächstes", "zur", "zum", "weiter", "siguiente", "próxima", "próximo", "al", "à",
+    "suivante", "suivant", "prochaine", "prochain", "berikutnya", "selanjutnya", "lanjut", "ke", "alla", "prossima",
+    "prossimo", "successiva", "następne", "następnego", "następny", "kolejne", "kolejnego", "do", "dalej", "pra",
+    "para", "seguinte", "ao", "следующий", "следующему", "следующая", "следующую", "следующее", "дальше", "к",
+    "sonraki", "sonrakine",
+})
+_SKIP_KNOWN = _SKIP_WORDS | _BLANK_WORDS | _LEAVE_WORDS | _SKIP_FILLER
+SKIP_MAX_WORDS = 6
+# Japanese, Chinese and Korean, read with no word breaks: a skip word with
+# only these before it ("这个跳过") and after it ("スキップでお願いします").
+_CJK_SKIP = ("スキップ", "パス", "飛ばす", "飛ばして", "飛ばします", "とばす", "とばして", "空欄", "空白", "未記入",
+             "跳过", "跳過", "略过", "略過", "不填", "空着", "空著", "留空", "下一题", "下一題", "下一个问题", "下一個問題",
+             "건너뛰기", "건너뛰어", "건너뛰자", "건너뛸게", "건너뛸래", "넘어가", "넘어가자", "넘어갈게", "넘겨", "넘기자",
+             "넘길게", "패스", "스킵", "비워", "비워둬", "빈칸", "빈칸으로", "공란", "공란으로", "skip", "pass")
+_CJK_SKIP_LEADS = ("この質問は", "この質問", "これは", "ここは", "それは", "今回は", "とりあえず", "じゃあ", "じゃ", "では",
+                   "えっと", "这个问题", "這個問題", "这一题", "這一題", "这个", "這個", "这题", "這題", "那就", "我们",
+                   "我們", "直接", "还是", "還是", "那", "就", "请", "請", "先", "我", "이질문은", "이질문", "질문은",
+                   "이거는", "이건", "이거", "그건", "그거", "그냥", "일단", "저는", "나는", "다음질문으로", "다음으로")
+_CJK_SKIP_TAILS = ("お願いします", "お願い", "ください", "しておいて", "しといて", "しましょう", "します", "して", "しよう",
+                   "にして", "にします", "のまま", "でいい", "で大丈夫", "です", "で", "ね", "よ", "吧", "了", "啊", "呀",
+                   "一下", "就好", "就行", "就可以", "即可", "好了", "掉", "谢谢", "謝謝", "这个问题", "這個問題", "这一题",
+                   "這一題", "这个", "這個", "这题", "這題", "해주세요", "해줘요", "해줘", "해요", "할게요", "할게",
+                   "합시다", "하자", "할래요", "할래", "해", "주세요", "줘요", "줘", "두세요", "둬요", "둬", "둘게요",
+                   "둘게", "놔", "요", "次へ", "次に", "次の質問へ", "次の質問に", "次の質問", "次に行って", "次に進んで",
+                   "下一题", "下一題", "下一个", "下一個", "下一个问题", "下一個問題", "다음", "다음질문", "다음질문으로",
+                   "다음으로")
+_CJK_SKIP_LEADS_LONGEST_FIRST = sorted(_CJK_SKIP_LEADS, key=len, reverse=True)
+_CJK_SKIP_TAILS_LONGEST_FIRST = sorted(_CJK_SKIP_TAILS, key=len, reverse=True)
+_CJK = re.compile("[ᄀ-ᇿ぀-ヿ㄰-㆏㐀-䶿一-鿿가-힯豈-﫿]")
 
 # A Hermes session key, kept whole: one with a control character or over this
 # many UTF-8 bytes is dropped, never cut. The same rule as the plugin's
@@ -456,7 +539,8 @@ class CallStore:
         """The user's spoken answer, from a call, to what Hermes waits on in
         ``session_id``. A question takes ``answer`` (a choice's number or
         label, "the recommended one", or their own words) for ``question``
-        (its number in the batch; the first unanswered one by default). An
+        (its number in the batch; the first unanswered one by default); one
+        of a form (``may_leave_blank``) is left blank by "skip". An
         approval takes ``choice`` (once or deny) and, for a deny, ``reason``.
         The agent's process passes it on (``take_answers``,
         ``take_approval``): ``{"status": "answered", ...}`` says it's on
@@ -506,13 +590,22 @@ class CallStore:
             entry = item["questions"][index]
             if entry["answer"] is not None:
                 return {"status": "answered", "message": f"Question {index + 1} is answered already."}
-            value, labels = map_answer(answer[:MAX_WAITING_ANSWER_CHARS], entry["choices"], entry["multi_select"])
-            entry["answer"] = value
-            result: dict[str, Any] = {"status": "answered", "question": index + 1,
-                                      "answer": ", ".join(labels) if labels else value}
+            form = may_leave_blank(item["questions"])
+            result: dict[str, Any] = {"status": "answered", "question": index + 1}
+            # A choice named whole ("Pass") is picked; other words that
+            # leave it blank do, even with a choice's name in them ("leave
+            # it blank" beside a choice called Blank).
+            if form and is_skip(answer) and not names_one_choice(answer, entry["choices"]):
+                # Blank, as a form's field left empty: Hermes reads it as skipped.
+                entry["answer"] = ""
+                result.update(answer=SKIPPED_ANSWER, skipped=True)
+            else:
+                value, labels = map_answer(answer[:MAX_WAITING_ANSWER_CHARS], entry["choices"], entry["multi_select"])
+                entry["answer"] = value
+                result["answer"] = ", ".join(labels) if labels else value
             following = next((number for number in open_numbers if number != index), None)
             if following is not None:
-                result["next"] = _public_question(item["questions"][following], following)
+                result["next"] = _public_question(item["questions"][following], following, form)
             return result
 
     def answers_ready(self, request_id: Any) -> bool:
@@ -1091,17 +1184,26 @@ def _complete(item: dict[str, Any], request_id: str) -> bool:
             and all(entry["answer"] is not None for entry in item["questions"]))
 
 
-def _public_question(entry: dict[str, Any], index: int) -> dict[str, Any]:
+def may_leave_blank(questions: list[dict[str, Any]]) -> bool:
+    """Whether Conduit shows the batch as a form, whose fields may be left
+    blank: several questions, at least one with no choices
+    (ClarifyActivity.isForm). Each of its questions may then be skipped."""
+    return len(questions) > 1 and any(not entry["choices"] for entry in questions)
+
+
+def _public_question(entry: dict[str, Any], index: int, form: bool) -> dict[str, Any]:
     return {"number": index + 1, "question": entry["question"], "choices": list(entry["choices"]),
-            "multi_select": entry["multi_select"], "answered": entry["answer"] is not None}
+            "multi_select": entry["multi_select"], "answered": entry["answer"] is not None,
+            "may_leave_blank": form}
 
 
 def _public_waiting(item: dict[str, Any]) -> dict[str, Any]:
     if item["kind"] == "approval":
         return {"kind": "approval", "description": item["description"], "command": item["command"],
                 "command_cut": item["cut"], "answered": item["choice"] is not None}
+    form = may_leave_blank(item["questions"])
     return {"kind": "question",
-            "questions": [_public_question(entry, index) for index, entry in enumerate(item["questions"])]}
+            "questions": [_public_question(entry, index, form) for index, entry in enumerate(item["questions"])]}
 
 
 def map_answer(answer: str, choices: list[str], multi_select: bool) -> tuple[str, list[str]]:
@@ -1124,6 +1226,47 @@ def map_answer(answer: str, choices: list[str], multi_select: bool) -> tuple[str
     return choices[picked[0]], labels
 
 
+def is_skip(answer: Any) -> bool:
+    """Whether a spoken answer leaves its question blank: "skip", "I'll
+    pass", "leave it blank", "überspringen", "跳过", in the app's languages,
+    with at most words like "this one, please" around it. Never a question
+    or a negation. Conduit's own is HermesCallWaiting.isSkip
+    (Conduit/Voice/HermesCallWaiting.swift): the two move together."""
+    if not isinstance(answer, str):
+        return False
+    text = unicodedata.normalize("NFC", answer).lower()
+    if "?" in text or "？" in text:
+        return False
+    if _CJK.search(text):
+        return _cjk_skip("".join(char for char in text if char.isalnum()))
+    words = _words(text)
+    if not words or len(words) > SKIP_MAX_WORDS or any(word not in _SKIP_KNOWN for word in words):
+        return False
+    return any(word in _SKIP_WORDS for word in words) or (
+        any(word in _BLANK_WORDS for word in words) and any(word in _LEAVE_WORDS for word in words))
+
+
+def _cjk_skip(text: str) -> bool:
+    # Leads go one at a time, the longest first: "这个问题" before "这个".
+    while text:
+        if any(text.startswith(word) and _only_cjk_tails(text[len(word):]) for word in _CJK_SKIP):
+            return True
+        lead = next((lead for lead in _CJK_SKIP_LEADS_LONGEST_FIRST if text.startswith(lead)), None)
+        if lead is None:
+            return False
+        text = text[len(lead):]
+    return False
+
+
+def _only_cjk_tails(text: str) -> bool:
+    while text:
+        tail = next((tail for tail in _CJK_SKIP_TAILS_LONGEST_FIRST if text.startswith(tail)), None)
+        if tail is None:
+            return False
+        text = text[len(tail):]
+    return True
+
+
 def _without_recommended(choice: str) -> str:
     stripped = choice.strip()
     if stripped.casefold().endswith(RECOMMENDED_LABEL.casefold()):
@@ -1133,6 +1276,14 @@ def _without_recommended(choice: str) -> str:
 
 def _words(text: str) -> list[str]:
     return re.findall(r"[^\W_]+", text.lower())
+
+
+def names_one_choice(text: str, choices: list[str]) -> bool:
+    """Whether the whole answer is one choice's label, as written ("Pass").
+    Conduit's own is HermesCallWaiting.namesOneChoice: the two move
+    together."""
+    said = _words(text)
+    return bool(said) and [_words(_without_recommended(choice)) for choice in choices].count(said) == 1
 
 
 def _picked_choices(text: str, choices: list[str], multi_select: bool) -> list[int]:

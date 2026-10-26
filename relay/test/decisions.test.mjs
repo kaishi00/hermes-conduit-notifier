@@ -460,6 +460,38 @@ test('batch decisions accumulate per-question answers and complete on the last q
   assert.deepEqual(done.remaining, []);
 });
 
+test('a blank answer leaves one question of a batch blank, never a whole decision', () => {
+  const relay = store();
+  relay.savePendingDecision({
+    id: 'conduit-push-blank1',
+    installationId: 'inst-1',
+    gatewayId: 'gw-1',
+    question: 'Leaving from?',
+    questions: [
+      { qid: 'q0', question: 'Leaving from?', choices: [], multi_select: false },
+      { qid: 'q1', question: 'When?', choices: [], multi_select: false },
+    ],
+  });
+  // A blank names its question: never the first one by default.
+  assert.equal(relay.wouldRespondPendingDecision('inst-1', 'gw-1', 'conduit-push-blank1', '', ''), false);
+  assert.equal(relay.respondPendingDecision('inst-1', 'gw-1', 'conduit-push-blank1', '').outcome, 'invalid_answer');
+  assert.equal(relay.wouldRespondPendingDecision('inst-1', 'gw-1', 'conduit-push-blank1', 'q1', ''), true);
+  assert.deepEqual(relay.respondPendingDecision('inst-1', 'gw-1', 'conduit-push-blank1', '', 'q1'),
+    { outcome: 'answered', remaining: ['q0'] });
+  // A blank locks its question like any answer: first answer wins.
+  assert.equal(relay.respondPendingDecision('inst-1', 'gw-1', 'conduit-push-blank1', 'Toronto', 'q1').outcome, 'already_answered');
+  assert.equal(relay.respondPendingDecision('inst-1', 'gw-1', 'conduit-push-blank1', 'Toronto', 'q0').outcome, 'answered');
+  const done = relay.pendingDecisionStatus('inst-1', 'gw-1', 'conduit-push-blank1');
+  assert.equal(done.status, 'answered');
+  assert.deepEqual({ ...done.answers }, { q0: 'Toronto', q1: '' });
+
+  // A single-question decision has nothing to leave blank.
+  relay.savePendingDecision({ id: 'conduit-push-blank2', installationId: 'inst-1', gatewayId: 'gw-1', question: 'One?', choices: ['a'] });
+  assert.equal(relay.wouldRespondPendingDecision('inst-1', 'gw-1', 'conduit-push-blank2', 'q0', ''), false);
+  assert.equal(relay.respondPendingDecision('inst-1', 'gw-1', 'conduit-push-blank2', '', 'q0').outcome, 'invalid_answer');
+  assert.equal(relay.pendingDecisionStatus('inst-1', 'gw-1', 'conduit-push-blank2').status, 'pending');
+});
+
 test('an unknown qid and cross-installation answers never resolve a batch', () => {
   const relay = store();
   relay.savePendingDecision({

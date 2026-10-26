@@ -126,9 +126,23 @@ def test_the_line_names_the_surface_and_how_it_was_entered():
     assert surfaces.line("watch", "spoken") == (
         "[Conduit: this message came from the user's Apple Watch, spoken. "
         "Its screen is small: keep the answer short, with no tables.]")
-    assert surfaces.line("ipad", "typed") == "[Conduit: this message came from the user's iPad, typed.]"
+    assert surfaces.line("ipad", "typed") == (
+        "[Conduit: this message came from the user's iPad, typed. When you need several details only the user can "
+        "give (like dates or a budget), ask them in one clarify call with open questions: Conduit shows it as a "
+        "form, and they may leave some blank.]")
     assert surfaces.line("siri") == "[Conduit: this message came from Siri or a Shortcut.]"
     assert "likely driving" in surfaces.line("carplay", "spoken")
+
+
+def test_a_typed_message_on_a_screen_hears_that_open_questions_show_as_a_form():
+    for surface in ("iphone", "ipad", "mac", "vision"):
+        assert surfaces.FORM_HINT in surfaces.line(surface, "typed")
+        # Spoken, it's read out one question at a time; and only a message
+        # Conduit says was typed hears it.
+        assert surfaces.FORM_HINT not in surfaces.line(surface, "spoken")
+        assert surfaces.FORM_HINT not in surfaces.line(surface)
+    for surface in ("watch", "carplay", "siri"):
+        assert surfaces.FORM_HINT not in surfaces.line(surface, "typed")
 
 
 @pytest.mark.parametrize("body", [

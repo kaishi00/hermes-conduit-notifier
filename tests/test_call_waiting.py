@@ -15,10 +15,18 @@ sys.modules[_spec.name] = store_module
 _spec.loader.exec_module(store_module)
 CallStore = store_module.CallStore
 map_answer = store_module.map_answer
+is_skip = store_module.is_skip
 
 BATCH = [
     {"qid": "q0", "question": "Which environment?", "choices": ["staging (Recommended)", "prod"], "multi_select": False},
     {"qid": "q1", "question": "Which tests should run?", "choices": ["unit", "ui", "smoke"], "multi_select": True},
+]
+
+# A batch Conduit shows as a form: several questions, some with no choices.
+FORM = [
+    {"qid": "q0", "question": "Leaving from?", "choices": [], "multi_select": False},
+    {"qid": "q1", "question": "Your kind of escape?", "choices": ["Beach", "City", "Pass"], "multi_select": False},
+    {"qid": "q2", "question": "Total trip budget?", "choices": [], "multi_select": False},
 ]
 
 
@@ -54,6 +62,78 @@ def test_a_call_reads_the_batch_and_answers_it_one_question_at_a_time(store):
     assert store.answers_ready("conduit-push-a")
     assert store.take_answers("conduit-push-a") == {"q0": "staging (Recommended)", "q1": json.dumps(["unit", "smoke"])}
     assert store.waiting_for("s1") is None, "taken once"
+
+
+def test_a_forms_questions_may_be_left_blank_by_saying_skip(store):
+    store.note_waiting("s1", "question", request_id="conduit-push-f", questions=FORM)
+    waiting = store.waiting_for("s1")
+    assert [question["may_leave_blank"] for question in waiting["questions"]] == [True, True, True]
+
+    first = store.answer_waiting("s1", answer="Toronto")
+    assert first["answer"] == "Toronto" and first["next"]["may_leave_blank"] is True
+    # A choice it names comes first: "pass" picks the choice called Pass.
+    assert store.answer_waiting("s1", answer="pass", question=2)["answer"] == "Pass"
+    skipped = store.answer_waiting("s1", answer="Leave it blank, please.")
+    assert skipped == {"status": "answered", "question": 3, "answer": "left blank", "skipped": True}
+    assert store.take_answers("conduit-push-f") == {"q0": "Toronto", "q1": "Pass", "q2": ""}
+
+
+def test_words_that_leave_it_blank_win_over_a_choice_named_inside_them(store):
+    # Only a choice named whole is picked over them: "leave it blank" beside
+    # a choice called Blank, or "I'll pass" beside Pass, leaves it blank.
+    form = [
+        {"qid": "q0", "question": "Anything to add?", "choices": [], "multi_select": False},
+        {"qid": "q1", "question": "Which cushion?", "choices": ["Blank", "Striped"], "multi_select": False},
+        {"qid": "q2", "question": "Your kind of escape?", "choices": ["Beach", "Pass"], "multi_select": False},
+    ]
+    store.note_waiting("s1", "question", request_id="conduit-push-g", questions=form)
+    assert store.answer_waiting("s1", answer="leave it blank", question=2)["skipped"] is True
+    assert store.answer_waiting("s1", answer="I'll pass", question=3)["skipped"] is True
+    assert store.answer_waiting("s1", answer="blank")["answer"] == "blank", "not a skip: the words go as they are"
+    assert store.take_answers("conduit-push-g") == {"q0": "blank", "q1": "", "q2": ""}
+
+
+def test_skip_is_only_an_answer_where_nothing_may_be_left_blank(store):
+    # A batch of choices only, and a question on its own, show as today's
+    # card, which has no blank: "skip" goes to Hermes as their words.
+    store.note_waiting("s1", "question", request_id="conduit-push-a", questions=BATCH)
+    assert [question["may_leave_blank"] for question in store.waiting_for("s1")["questions"]] == [False, False]
+    assert store.answer_waiting("s1", answer="skip")["answer"] == "skip"
+    store.note_waiting("s2", "question", request_id="conduit-push-b", questions=FORM[:1])
+    assert store.waiting_for("s2")["questions"][0]["may_leave_blank"] is False
+    assert store.answer_waiting("s2", answer="skip")["answer"] == "skip"
+    assert store.take_answers("conduit-push-b") == {"q0": "skip"}
+
+
+# Conduit reads the same words the same way (HermesCallWaitingTests'
+# testSkipIsReadTheSameWayAsThePlugin): the two lists move together.
+SKIPS = [
+    "skip", "Skip it.", "skip this one, please", "I'll pass", "leave it blank", "Leave that empty",
+    "go ahead and skip it please", "Überspringen", "lass es leer", "ich passe", "sáltala", "déjalo en blanco",
+    "je passe", "laisse-le vide", "lewati saja", "biarkan kosong", "salta questa domanda", "lascialo in bianco",
+    "pomiń to pytanie", "pode pular", "deixa em branco", "Пропусти этот вопрос", "оставь пустым", "bunu atla",
+    "boş bırak", "スキップ", "スキップでお願いします", "飛ばしてください", "空欄のままでお願いします", "跳过", "这个问题跳过吧",
+    "留空", "스킵해 주세요", "비워 두세요", "이건 패스할게요", "skip to the next question", "Skip to the next one.",
+    "überspringen, nächste Frage", "salta a la siguiente pregunta", "passons à la suivante",
+    "lewati, lanjut ke berikutnya", "salta alla prossima domanda", "pomiń, następne pytanie", "pula pra próxima",
+    "пропусти, следующий вопрос", "atla, sonraki soru", "スキップして次の質問へ", "跳过，下一题", "跳過，下一個",
+    "건너뛰어, 다음 질문으로", "다음으로 넘어가",
+]
+NOT_SKIPS = [
+    "", "Toronto", "not sure yet", "next week", "don't skip it", "skip the hotel", "skip?", "blanco", "leer",
+    "go ahead and skip it now please", "nicht überspringen", "no lo saltes", "不要跳过", "跳过吗", "スキップしないで",
+    "건너뛰지 마세요", "the next one", "next question", "nächste Woche", "la siguiente", "次の質問", "下一个", "다음",
+]
+
+
+@pytest.mark.parametrize("words", SKIPS)
+def test_skip_words_in_the_apps_languages(words):
+    assert is_skip(words)
+
+
+@pytest.mark.parametrize("words", NOT_SKIPS)
+def test_words_that_are_an_answer_not_a_skip(words):
+    assert not is_skip(words)
 
 
 def test_answering_a_question_already_answered_or_gone(store):

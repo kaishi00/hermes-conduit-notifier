@@ -17,7 +17,7 @@ import { WATCH_TOOLS_CAPABILITY, WatchToolGrants, watchToolRoutes } from './watc
 
 // Self-reported relay version/capabilities, surfaced via GET /v1/meta so the
 // app can show compatibility state (keep the version in sync with package.json).
-const RELAY_CAPABILITIES = ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls', 'voip-calls', 'watch-calls', 'ring-sessions', 'ring-controls', 'location-push', 'phone-changes', MAPS_TOKENS_CAPABILITY, LIVE_ACTIVITIES_CAPABILITY, TOKEN_PROOF_CAPABILITY];
+const RELAY_CAPABILITIES = ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls', 'voip-calls', 'watch-calls', 'ring-sessions', 'ring-controls', 'location-push', 'phone-changes', MAPS_TOKENS_CAPABILITY, LIVE_ACTIVITIES_CAPABILITY, TOKEN_PROOF_CAPABILITY, 'clarify-skip'];
 const RELAY_INFO = (() => {
   try {
     const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
@@ -816,11 +816,17 @@ async function route(request, response) {
     if (!installation) return sendJson(response, 401, { error: 'unauthorized' });
     enforceRateLimit(`decision-respond:${installation.id}`, 30, 60_000);
     const body = await readJson(request);
-    const answer = validAnswer(body.answer);
     // question_id scopes the answer to ONE question of a batch decision
     // (first-answer-wins per qid, other qids stay open); its absence keeps
     // the legacy whole-decision shape for single-question cards.
     const questionId = cleanText(body.question_id, 40);
+    // A blank answer leaves one question of a batch blank, as a form field
+    // the user didn't fill (Hermes reads it as skipped): only for a
+    // question, never for a whole decision. The relay can't tell a form
+    // from other batches and doesn't try: which questions may be left
+    // blank is Conduit's to say (ClarifyActivity.isForm), and a blank
+    // anywhere else still reads as skipped.
+    const answer = validAnswer(body.answer, { blank: Boolean(questionId) });
     // gateway_id is the relay decision-routing discriminator: two gateways
     // on one installation can park SAME-id decisions, so the device names
     // the gateway it is answering (the id comes from the push's routing
@@ -830,13 +836,13 @@ async function route(request, response) {
     let result;
     const responseGatewayId = cleanIdentifier(body.gateway_id, 80);
     if (responseGatewayId) {
-      if (store.wouldRespondPendingDecision(installation.id, responseGatewayId, id, questionId)) enforceDecisionBudget();
+      if (store.wouldRespondPendingDecision(installation.id, responseGatewayId, id, questionId, answer)) enforceDecisionBudget();
       result = store.respondPendingDecision(installation.id, responseGatewayId, id, answer, questionId);
     } else {
       // Legacy: resolve {installation, request id} without a discriminator.
       const legacy = store.resolveLegacyRespond(installation.id, id);
       if (legacy.resolution === 'unique') {
-        if (store.wouldRespondPendingDecision(installation.id, legacy.gatewayId, id, questionId)) enforceDecisionBudget();
+        if (store.wouldRespondPendingDecision(installation.id, legacy.gatewayId, id, questionId, answer)) enforceDecisionBudget();
         result = store.respondPendingDecision(installation.id, legacy.gatewayId, id, answer, questionId);
       } else if (legacy.resolution === 'ambiguous') {
         return sendJson(response, 400, { error: 'ambiguous_decision' });
@@ -852,6 +858,8 @@ async function route(request, response) {
     // Distinct from 404: the decision is live but the sender addressed a qid
     // it does not contain — the request is malformed, not the decision gone.
     if (result.outcome === 'invalid_question') return sendJson(response, 400, { error: 'invalid_question_id' });
+    // A blank answer for a decision that isn't a batch: nothing to leave blank.
+    if (result.outcome === 'invalid_answer') return sendJson(response, 400, { error: 'invalid_answer' });
     // Distinct device-facing outcomes: a duplicate qid settles only that
     // question as answered elsewhere (409), while a RELEASED decision means
     // Hermes resolved through another surface and the whole pushed card must
@@ -1651,8 +1659,9 @@ function validatedToken(value, error) {
 // - Anything else, including plaintext that merely starts like one, is an
 //   ordinary answer (the plugin of an encrypted pairing rejects it): control
 //   characters become spaces and it is trimmed; over MAX_ANSWER_CHARS it is
-//   `413 answer_too_large`.
-function validAnswer(value) {
+//   `413 answer_too_large`. Empty once trimmed, it is `400 invalid_answer`,
+//   unless `blank` allows it: one question of a batch left blank.
+function validAnswer(value, { blank = false } = {}) {
   if (typeof value !== 'string') throw httpError(400, 'invalid_answer');
   if (E2E_ANSWER_SHAPE.test(value)) {
     if (E2E_ANSWER_PATTERN.test(value) && value.length <= E2E_MAX_ANSWER_CHARS) return value;
@@ -1661,7 +1670,10 @@ function validAnswer(value) {
     throw tooShort ? httpError(400, 'invalid_answer') : httpError(413, 'answer_too_large');
   }
   const answer = value.replace(/[\u0000-\u001f]/g, ' ').trim();
-  if (!answer) throw httpError(400, 'invalid_answer');
+  if (!answer) {
+    if (blank) return '';
+    throw httpError(400, 'invalid_answer');
+  }
   if (answer.length > MAX_ANSWER_CHARS) throw httpError(413, 'answer_too_large');
   return answer;
 }
