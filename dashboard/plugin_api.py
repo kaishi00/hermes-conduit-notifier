@@ -7866,14 +7866,21 @@ async def post_pulse_done(request: Request, response: Response) -> Dict[str, Any
 
 @router.post("/pulse/dismiss")
 async def post_pulse_dismiss(request: Request, response: Response) -> Dict[str, Any]:
-    """{"card": n, "dismissed": true|false}: swipes a card away ("Not now":
-    off the list, nothing learned) or puts it back: {"changed": bool}."""
+    """{"card": n, "dismissed": true|false, "until": "later_today"|"tomorrow"|"next_week"}:
+    swipes a card away ("Not now": off the list, nothing learned) until
+    then, when it comes back as new, or for good without "until"; or puts
+    it back: {"changed": bool, "rest_until": epoch seconds or null}."""
     response.headers["Cache-Control"] = "no-store"
     body = await _read_json_body(request, PULSE_MAX_BODY_BYTES)
     body = body if isinstance(body, dict) else {}
-    # "dismissed" is required: a body without it changes nothing.
-    return await _pulse_route("dismiss", lambda control, store, home: {"changed": control.dismiss(
-        store, body.get("card"), body.get("dismissed"))}, reads_only=True)
+
+    def action(control: Any, store: Any, home: Any) -> Dict[str, Any]:
+        # "dismissed" is required: a body without it changes nothing.
+        changed = control.dismiss(store, body.get("card"), body.get("dismissed"), until=body.get("until"), home=home)
+        card = store.card(body["card"])  # a card that isn't there was refused above
+        return {"changed": changed, "rest_until": card.get("rest_until") if card else None}
+
+    return await _pulse_route("dismiss", action, reads_only=True)
 
 
 @router.post("/pulse/acted")
@@ -15999,6 +16006,9 @@ ROUTE_CAPABILITIES = (
     # PUT /pulse takes "note", the user's note to Pulse, which its reports,
     # brief and checks read.
     "pulse_note",
+    # /pulse/dismiss takes "until" (later today, tomorrow, next week): the
+    # card comes back as new then.
+    "pulse_rest",
     "present-v1",
     "health-sync",
     "voice-tools",
