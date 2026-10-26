@@ -458,7 +458,7 @@ def state(pulse_store: Any, home: Path, now: Optional[float] = None) -> dict[str
     return {
         "enabled": bool(pulse_store.get("enabled")),
         "running": bool(running),
-        "stale_build": bool(running and isinstance(lease, dict) and lease.get("build") != pulse.build_stamp()),
+        "stale_build": bool(running and pulse.lease_on_older_build(lease)),
         "home_chat": {"id": chat.chat_id, "title": chat.title, "pinned": bool(chat.pinned)} if chat else None,
         "home_problem": problem,
         "home_title": pulse_store.get("home_title") or "Pulse",

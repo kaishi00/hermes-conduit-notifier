@@ -18,6 +18,11 @@ checks it). The format is fixed, because Conduit reads it:
 ### New and improved
 - When Hermes needs several details only you can give, like where you leave from and your budget for a trip, it can ask them all at once, and Conduit shows them as a form: fill in what you know, leave the rest blank, and send it once. On a call from Hermes, say "skip" to leave one blank.
 
+## 0.81.3 (2026-10-26)
+
+### Fixes
+- After a plugin update, Pulse no longer says the dashboard is running an older copy when it isn't. The update restarts the dashboard, but the new one waited up to two minutes for the old one's hold on Pulse to run out, and Settings > Pulse and `pulse status` meanwhile read that hold as old code still running. The restarted dashboard now takes Pulse over at once.
+
 ## 0.81.2 (2026-10-26)
 
 ### Fixes

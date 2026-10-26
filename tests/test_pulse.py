@@ -19,6 +19,7 @@ import logging
 import os
 import pathlib
 import re
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -220,6 +221,18 @@ def test_one_process_holds_the_loop(pulse_store):
     assert not pulse_store.claim_leader("b", 120, now=1060)
     assert pulse_store.claim_leader("a", 120, now=1060)  # renewed
     assert pulse_store.claim_leader("b", 120, now=1200)  # a's lease ran out
+
+
+def test_a_lease_on_another_build_is_left_to_the_new_one(pulse_store):
+    assert pulse_store.claim_leader("a", 120, now=1000, build="old")
+    assert not pulse_store.claim_leader("b", 120, now=1010, build="old")  # same build: a still runs it
+    assert not pulse_store.claim_leader("b", 120, now=1010)  # no stamp to compare: wait it out
+    assert pulse_store.claim_leader("b", 120, now=1010, build="new")  # a stopped when "new" landed
+    assert not pulse_store.claim_leader("c", 120, now=1020, build="new")
+    # Another host has its own install, so its own stamp: its lease is waited out.
+    assert pulse_store.claim_leader("other:1", 120, now=2000, build="theirs")
+    assert not pulse_store.claim_leader("here:2", 120, now=2010, build="ours")
+    assert pulse_store.claim_leader("here:2", 120, now=2200, build="ours")
 
 
 # Hermes reads ----------------------------------------------------------------
@@ -679,6 +692,22 @@ def test_a_process_with_an_older_build_leaves_the_loop(live, db, monkeypatch, ca
     assert len(live.sent()) == 1 and live.store.get(store.LEADER)["build"] == "newer"
 
 
+def test_a_restarted_dashboard_takes_over_from_an_older_build_at_once(live, db, capsys, monkeypatch):
+    # The dashboard a plugin update restarted has a new pid; the one it
+    # replaced stamped the lease with the old build and no longer ticks.
+    db.session()
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", pulse.get_hermes_home)
+    live.store.set("enabled", True)
+    live.store.set("probe_requested", True)
+    live.store.claim_leader(f"{socket.gethostname()}:16293", pulse.LEADER_TTL_S, time.time(), build="older")
+    pulse.tick()
+    assert len(live.sent()) == 1
+    lease = live.store.get(store.LEADER)
+    assert lease["owner"] == pulse._owner and lease["build"] == pulse.build_stamp()
+    cli.dispatch(types.SimpleNamespace(conduit_push_action="pulse", pulse_action="status", value=""))
+    assert "older build" not in capsys.readouterr().out
+
+
 def test_status_names_a_loop_on_an_older_build(live, db, capsys, monkeypatch):
     db.session()
     monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", pulse.get_hermes_home)
@@ -691,6 +720,17 @@ def test_status_names_a_loop_on_an_older_build(live, db, capsys, monkeypatch):
     live.store.claim_leader("Hermes:16293", pulse.LEADER_TTL_S, time.time(), build=pulse.build_stamp())
     status()
     assert "older build" not in capsys.readouterr().out
+    if os.name == "nt":
+        return  # no signal-0 probe there: a gone owner still reads as running
+    # The dashboard a plugin update restarted: the old process is gone and
+    # its lease, still unexpired, no longer reads as an older copy running.
+    gone = subprocess.Popen([sys.executable, "-c", "pass"])
+    gone.wait()
+    live.store.set(store.LEADER, {"owner": f"{socket.gethostname()}:{gone.pid}", "until": time.time() + 60,
+                                  "build": "older"})
+    status()
+    assert "older build" not in capsys.readouterr().out
+    assert not pulse.lease_on_older_build(live.store.get(store.LEADER))
 
 
 def test_no_home_chat_means_no_probe(live, db):
