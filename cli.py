@@ -1033,7 +1033,7 @@ def _pulse_learning(pulse_store: Any, action: str, value: str, extra: str, home:
             print("Undone." if pulse_control.undo(pulse_store, int(extra)) else "Nothing to undo with that number.")
             return 0
         if value == "reset":
-            found = _resettable(pulse_control.learned(pulse_store)["preferences"])
+            found = _resettable(pulse_control.learned(pulse_store, home)["preferences"])
             if extra == "everything":
                 scope, about = "everything", ""
             elif extra.isdecimal() and len(extra) <= 3 and 1 <= int(extra) <= len(found):
@@ -1042,7 +1042,7 @@ def _pulse_learning(pulse_store: Any, action: str, value: str, extra: str, home:
                 print("Usage: hermes conduit-push pulse learned reset <preference number>|everything "
                       "(the numbers `pulse learned` lists)")
                 return 2
-            lesson = pulse_control.reset(pulse_store, scope, about)
+            lesson = pulse_control.reset(pulse_store, scope, about, home=home)
             print(_printable(f"{lesson['text']}. `hermes conduit-push pulse learned undo {lesson['id']}` takes it back."))
             return 0
         if value:
@@ -1059,7 +1059,7 @@ def _pulse_learning(pulse_store: Any, action: str, value: str, extra: str, home:
             return 1
         print(f"Pulse doesn't take that {refused.data.get('field', 'value')}.")
         return 2
-    shown = pulse_control.learned(pulse_store)
+    shown = pulse_control.learned(pulse_store, home)
     for kind, level in shown["levels"].items():
         print(f"{pulse_learning.KIND_NAMES.get(kind, kind)}: {pulse_learning.LEVEL_NAMES.get(level, level)}")
     if not shown["lessons"]:

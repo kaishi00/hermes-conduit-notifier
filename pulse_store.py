@@ -1404,19 +1404,20 @@ class PulseStore:
                                (card_id,)).fetchone()
         return dict(row) if row else None
 
-    def left_out(self, since: float, limit: int) -> list[dict]:
+    def left_out(self, since: float, limit: int, on_the_way: str = "") -> list[dict]:
         """The candidates journaled from ``since`` on that didn't come up,
         newest first, each with the thing it is about (``things``) as
-        ``thing``, whether that thing came up (``_came_up_rows``) in the same
-        run or later as ``later``, and as ``card_id`` the card it was brought
-        up as (``bring_up``), or another candidate about the same thing was,
+        ``thing``, whether that thing came up (``_came_up_rows``, with what
+        report run ``on_the_way`` picked) in the same run or later as
+        ``later``, and as ``card_id`` the card it was brought up as
+        (``bring_up``), or another candidate about the same thing was,
         however long ago (``_brought_rows``). A card that has been pruned
         isn't named, since bringing the thing up would make another."""
         with self._connect() as conn:
             rows = [dict(row) for row in conn.execute(
                 "SELECT * FROM candidates WHERE created_at >= ? AND decision!='surfaced' "
                 "ORDER BY created_at DESC, id LIMIT ?", (since, limit))]
-            came = _came_up_rows(conn, since)
+            came = _came_up_rows(conn, since, on_the_way)
             held = _brought_rows(conn)
         thing = things([*rows, *came, *held])
         came_up = _came_up(came, thing)
@@ -1443,7 +1444,8 @@ class PulseStore:
             row = conn.execute("SELECT * FROM candidates WHERE id=?", (candidate_id,)).fetchone()
         return dict(row) if row else None
 
-    def bring_up(self, candidate_id: int, row: dict[str, Any], since: float) -> Optional[int]:
+    def bring_up(self, candidate_id: int, row: dict[str, Any], since: float,
+                 on_the_way: str = "") -> Optional[int]:
         """Makes a card of a candidate that didn't come up (``row``, its
         columns) and notes it on the candidate, in one write: its signals
         carry the candidate's kind, place and band. The card it already has,
@@ -1451,8 +1453,8 @@ class PulseStore:
         candidate about the same thing was brought up as, however long ago,
         which ``left_out`` names; None when the journal no longer has the
         candidate, or the thing came up meanwhile, read as ``left_out``
-        reads it from ``since``: it hides what came up, but a list read
-        before still offers it."""
+        reads it from ``since`` (and ``on_the_way``): it hides what came up,
+        but a list read before still offers it."""
         _check_columns(row, CARD_COLUMNS)
         with _lock, self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -1463,7 +1465,7 @@ class PulseStore:
                 if found is None or (found["card_id"] is not None and found["kept"]):
                     conn.execute("ROLLBACK")
                     return None if found is None else int(found["card_id"])
-                came_up, made = _thing_since(conn, found, since)
+                came_up, made = _thing_since(conn, found, since, on_the_way)
                 if came_up or made is not None:
                     conn.execute("ROLLBACK")
                     return made
@@ -1709,12 +1711,15 @@ def _came_up(came: Sequence[Any], thing: Callable[[Any], Optional[tuple[str, Any
     return came_up
 
 
-def _came_up_rows(conn: sqlite3.Connection, since: float) -> list[Any]:
+def _came_up_rows(conn: sqlite3.Connection, since: float, on_the_way: str) -> list[Any]:
     """What came up from ``since`` on, as rows ``things`` reads: the
-    candidates reports brought up, and the cards no candidate made (a report
-    sent without its candidate list, a follow-up), by their item and words."""
+    candidates reports brought up as cards, and those report run
+    ``on_the_way`` picked, whose cards are on their way (what a report that
+    was dropped, or that Hermes refused, picked never came up), and the
+    cards no candidate made (a report sent without its candidate list, a
+    follow-up), by their item and words."""
     return [*conn.execute("SELECT item_id, text, created_at FROM candidates WHERE created_at >= ? "
-                          "AND decision='surfaced'", (since,)),
+                          "AND decision='surfaced' AND (card_id IS NOT NULL OR run_id=?)", (since, on_the_way)),
             *conn.execute("SELECT item_id, news AS text, created_at FROM cards WHERE created_at >= ? AND id NOT IN "
                           "(SELECT card_id FROM candidates WHERE card_id IS NOT NULL)", (since,))]
 
@@ -1728,7 +1733,8 @@ def _brought_rows(conn: sqlite3.Connection) -> list[Any]:
                         "AND card_id IN (SELECT id FROM cards) ORDER BY created_at DESC, id").fetchall()
 
 
-def _thing_since(conn: sqlite3.Connection, found: Any, since: float) -> tuple[bool, Optional[int]]:
+def _thing_since(conn: sqlite3.Connection, found: Any, since: float,
+                 on_the_way: str) -> tuple[bool, Optional[int]]:
     """For the thing candidate ``found`` is about, read from ``since`` (or
     from ``found``, if older) as ``left_out`` reads it: whether it came up in
     ``found``'s own run or later, which ``left_out`` leaves out as ``later``,
@@ -1737,7 +1743,7 @@ def _thing_since(conn: sqlite3.Connection, found: Any, since: float) -> tuple[bo
     since = min(since, found["created_at"])
     rows = conn.execute("SELECT item_id, text FROM candidates WHERE created_at >= ? AND decision!='surfaced'",
                         (since,)).fetchall()
-    came = _came_up_rows(conn, since)
+    came = _came_up_rows(conn, since, on_the_way)
     held = _brought_rows(conn)
     thing = things([*rows, *came, *held, found])
     key = thing(found)

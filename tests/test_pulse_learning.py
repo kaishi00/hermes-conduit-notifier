@@ -295,6 +295,19 @@ def test_a_reset_forgets_what_thumbs_taught_about_a_chat_and_undo_counts_them_ag
     assert len(live.sent()) == sent + 1 and live.store.cards()[0]["level"] == "brief"
 
 
+def test_what_pulse_learned_names_a_chat_no_card_is_left_from_as_hermes_does(live):
+    """Once Pulse has let go of every card from a chat it learned about, the
+    chat goes by Hermes's title, as What Pulse left out names it, and so
+    does a reset about it."""
+    rated_down_twice(live)
+    live.store.drop_cards([card["id"] for card in live.store.cards()])
+    [chat] = [entry for entry in control.learned(live.store, live.home)["preferences"] if entry["scope"] == "place"]
+    assert (chat["chat_id"], chat["chat_title"]) == (CHAT, "Deploy")
+    lesson = control.reset(live.store, "place", chat["value"], home=live.home)
+    assert (lesson["chat_title"], lesson["text"]) == ("Deploy", "Forgot what was learned about things from Deploy")
+    assert control.learned(live.store, live.home)["lessons"] == [lesson]
+
+
 def test_a_reset_of_everything_forgets_every_signal_until_then(live):
     rated_down_twice(live)
     lesson = control.reset(live.store, "everything")

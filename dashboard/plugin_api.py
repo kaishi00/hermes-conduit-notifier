@@ -8414,7 +8414,7 @@ async def post_pulse_acted(request: Request, response: Response) -> Dict[str, An
 async def get_pulse_learned(response: Response) -> Dict[str, Any]:
     """What ratings taught Pulse, newest first, and each kind's loudness."""
     response.headers["Cache-Control"] = "no-store"
-    return await _pulse_route("learned", lambda control, store, home: control.learned(store), reads_only=True)
+    return await _pulse_route("learned", lambda control, store, home: control.learned(store, home), reads_only=True)
 
 
 @router.post("/pulse/learned/undo")
@@ -8425,7 +8425,7 @@ async def post_pulse_undo(request: Request, response: Response) -> Dict[str, Any
     lesson_id = body.get("id") if isinstance(body, dict) else None
 
     def action(control: Any, store: Any, home: Any) -> Dict[str, Any]:
-        return {"undone": control.undo(store, lesson_id), **control.learned(store)}
+        return {"undone": control.undo(store, lesson_id), **control.learned(store, home)}
 
     return await _pulse_route("undo", action, reads_only=True)
 
@@ -8441,8 +8441,8 @@ async def post_pulse_reset(request: Request, response: Response) -> Dict[str, An
     body = body if isinstance(body, dict) else {}
 
     def action(control: Any, store: Any, home: Any) -> Dict[str, Any]:
-        lesson = control.reset(store, body.get("scope"), body.get("value", ""))
-        return {"reset": lesson, **control.learned(store)}
+        lesson = control.reset(store, body.get("scope"), body.get("value", ""), home=home)
+        return {"reset": lesson, **control.learned(store, home)}
 
     return await _pulse_route("reset", action, reads_only=True)
 

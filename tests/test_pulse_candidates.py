@@ -716,10 +716,17 @@ def test_candidates_command(reporting, capsys, monkeypatch):
 
 # What Pulse left out (pulse_control.left_out, bring_up) ---------------------------
 
-def journal(live, run_id, rows, at):
-    """A run's candidates, journaled at ``at``: left out unless a row says otherwise."""
-    return live.store.add_candidates(run_id, [{**candidate(), "decision": candidates.NOT_PICKED, "rank": None, **row}
-                                              for row in rows], now=at)
+def journal(live, run_id, rows, at, sent=True):
+    """A run's candidates, journaled at ``at``: left out unless a row says
+    otherwise. What it picked is on the Pulse screen as its report's cards,
+    unless the report never went out (``sent`` False)."""
+    rows = [{**candidate(), "decision": candidates.NOT_PICKED, "rank": None, **row} for row in rows]
+    ids = live.store.add_candidates(run_id, rows, now=at)
+    picked = [(n, row) for n, row in zip(ids, rows) if row["decision"] == candidates.SURFACED]
+    if sent and picked:
+        live.store.add_cards([{"kind": store.NOTICED, "level": "screen", "news": row["text"], "created_at": at}
+                              for _, row in picked], links=[n for n, _ in picked])
+    return ids
 
 
 QUIETED_BY = {"scope": "place", "value": prefs.place("", CHAT), "effect": -0.8, "useful": 0.0, "votes": 3.0}
@@ -780,12 +787,13 @@ def test_bringing_up_what_pulse_left_out_makes_a_card_once(live):
         {"text": "Call Sam", "decision": candidates.SURFACED, "rank": 1}, {"text": ""},
         {"text": "Dentist Friday at 9", "kind": "date", "source": "calendar", "place": "source:calendar",
          "band": prefs.DAYS}], now - 600)
+    [report_card] = live.store.cards()  # Call Sam, as the report brought it up
     card = control.bring_up(live.store, left, live.home, now=now)
     assert (card["kind"], card["level"], card["topic"], card["news"], card["why"]) == (
         store.NOTICED, "screen", "watch", "The gym at 7", "You go on Tuesdays.")
     assert (card["chat_id"], card["chat_title"], card["item_id"], card["learned"]) == (CHAT, "Deploy", None, QUIETED_BY)
     assert control.bring_up(live.store, left, live.home, now=now + 60)["id"] == card["id"]
-    assert len(live.store.cards()) == 1
+    assert {each["id"] for each in live.store.cards()} == {report_card["id"], card["id"]}
     [entry] = [entry for entry in control.left_out(live.store, live.home, now=now) if entry["id"] == left]
     assert entry["card_id"] == card["id"]
     control.rate(live.store, card["id"], "up")
@@ -843,11 +851,12 @@ def test_bringing_up_something_a_later_report_brought_up_is_refused(live):
         {"text": "Renew the passport by Friday", "origin": candidates.MEMORY, "item_id": 7,
          "decision": candidates.SURFACED, "rank": 2}], now - 3600)
     assert control.left_out(live.store, live.home, now=now) == []
+    made = live.store.cards()  # the later report's
     for stale in (by_text, by_item):
         with pytest.raises(control.Refused) as refused:
             control.bring_up(live.store, stale, live.home, now=now)
         assert refused.value.code == "invalid" and refused.value.data == {"field": "id"}
-    assert live.store.cards() == []
+    assert live.store.cards() == made
 
 
 def test_a_thing_is_one_thing_however_the_reports_joined_its_names(live):
@@ -862,11 +871,12 @@ def test_a_thing_is_one_thing_however_the_reports_joined_its_names(live):
     journal(live, "r3", [{"text": "renew the passport  by Friday", "decision": candidates.SURFACED, "rank": 1}],
             now - 1800)
     assert control.left_out(live.store, live.home, now=now) == []
+    made = live.store.cards()  # the later report's
     for stale in (old, new):
         with pytest.raises(control.Refused) as refused:
             control.bring_up(live.store, stale, live.home, now=now)
         assert refused.value.code == "invalid"
-    assert live.store.cards() == []
+    assert live.store.cards() == made
 
 
 def test_what_came_up_without_a_candidate_list_came_up(live):
@@ -935,6 +945,28 @@ def test_a_thing_brought_up_from_an_older_list_is_still_that_card(live):
     assert control.bring_up(live.store, again, live.home, now=now)["id"] != card["id"]
 
 
+def test_what_a_report_that_never_went_out_picked_didnt_come_up(live):
+    """A report dropped once Pulse went quiet, or one Hermes refused,
+    brought up nothing: an older list's candidate about what it picked
+    still lists, and can be brought up. While a report is on its way, what
+    it picked has come up, though its cards haven't landed yet."""
+    now = time.time()
+    [older] = journal(live, "r1", [{"text": "Pay the rent", "value": 3}], now - 7200)
+    journal(live, "r2", [{"text": "pay the  rent", "decision": candidates.SURFACED, "rank": 1}], now - 3600,
+            sent=False)
+    for going in (pulse.RUN_READY, pulse.RUN_SENT):
+        live.store.set(pulse.REPORT_RUN, {"id": "r2", "state": going})
+        assert control.left_out(live.store, live.home, now=now) == []
+        with pytest.raises(control.Refused) as refused:
+            control.bring_up(live.store, older, live.home, now=now)
+        assert refused.value.code == "invalid"
+    for gone in ({"id": "r2", "state": pulse.RUN_DROPPED}, {"id": "r2", "state": pulse.RUN_SENT, "refused": "busy"},
+                 {"id": "r3", "state": pulse.RUN_WORKING}):
+        live.store.set(pulse.REPORT_RUN, gone)
+        assert [entry["id"] for entry in control.left_out(live.store, live.home, now=now)] == [older]
+    assert control.bring_up(live.store, older, live.home, now=now)["news"] == "Pay the rent"
+
+
 def test_what_pulse_left_out_names_a_chat_as_what_pulse_learned_does(live):
     """By the title the chat's newest card gave it, so a chat Hermes no
     longer has keeps its name, and by Hermes's for a chat no card came from
@@ -969,9 +1001,9 @@ def test_candidates_command_brings_one_up(live, monkeypatch, capsys):
     [left, came_up] = journal(live, "r1", [
         {"text": "The gym at 7"}, {"text": "Call Sam", "decision": candidates.SURFACED, "rank": 1}], time.time())
     assert run("bring", str(left)) == 0
-    [card] = live.store.cards()
+    [card] = [card for card in live.store.cards() if card["news"] == "The gym at 7"]
     assert capsys.readouterr().out == f"On the Pulse screen as card #{card['id']}: The gym at 7\n"
-    assert run("bring", f"#{left}") == 0 and len(live.store.cards()) == 1
+    assert run("bring", f"#{left}") == 0 and len(live.store.cards()) == 2  # with Call Sam's, from the report
     capsys.readouterr()
     for bad in ("", "x", "9" * 19):
         assert run("bring", bad) == 2 and "Usage:" in capsys.readouterr().out
