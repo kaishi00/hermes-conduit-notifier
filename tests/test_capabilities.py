@@ -108,6 +108,7 @@ def test_every_capability_names_a_served_route_family():
         "local-live-agent": "/local-live/v1/tools",
         "artifacts": "/artifacts",
         "room-rules": "/rooms/",
+        "room-forget": "/rooms/sessions",
     }
     assert set(prefixes) == set(api.ROUTE_CAPABILITIES)
     for capability, prefix in prefixes.items():

@@ -138,6 +138,42 @@ def test_the_room_cutoff_guard_comes_off_with_the_plugin(room_driver, unloaded_p
     assert room_driver._transport_for is own
 
 
+@pytest.fixture
+def hosted_rooms(monkeypatch):
+    """Hermes' group rooms and session delete, as far as the plugin's
+    disband cleanup touches them."""
+    rooms = types.ModuleType("gateway.hosted_rooms")
+    rooms.disband_room = lambda db_path, *, room_id, expected_gateway_id, expected_epoch, now=None: {}
+    gateway = types.ModuleType("gateway")
+    gateway.__path__ = []
+    monkeypatch.setitem(sys.modules, "gateway", gateway)
+    monkeypatch.setitem(sys.modules, "gateway.hosted_rooms", rooms)
+
+    class SessionDB:
+        def delete_sessions(self, session_ids, sessions_dir=None, exclude_active_write_guards=False,
+                            skipped_ids=None, include_compression_chain=False):
+            return 0
+
+    state = types.ModuleType("hermes_state")
+    state.SessionDB = SessionDB
+    registry = types.ModuleType("hermes_state_registry")
+    registry.acquire, registry.release_or_close = lambda db_path=None: SessionDB(), lambda db: None
+    monkeypatch.setitem(sys.modules, "hermes_state", state)
+    monkeypatch.setitem(sys.modules, "hermes_state_registry", registry)
+    return rooms
+
+
+def test_the_room_cleanup_guard_and_its_sweep_come_off_with_the_plugin(hosted_rooms, unloaded_plugin):
+    own = hosted_rooms.disband_room.__wrapped__
+    sweeper = plugin.room_cleanup._sweeper
+
+    unloaded_plugin()
+
+    assert hosted_rooms.disband_room is own
+    sweeper.join(2.0)
+    assert not sweeper.is_alive()
+
+
 def test_a_reply_held_for_its_turns_end_is_dropped_with_its_timer(unloaded_plugin, monkeypatch):
     sent = []
     monkeypatch.setattr(plugin, "READY_GRACE_S", 0.2)

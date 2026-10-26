@@ -190,6 +190,43 @@ def test_a_save_that_fails_leaves_no_temporary_file(tmp_path, monkeypatch):
     assert ChoicesStore(tmp_path).get(ROOM).tools == "look"
 
 
+def test_a_save_that_fails_while_writing_leaves_no_temporary_file(tmp_path, monkeypatch):
+    store = ChoicesStore(tmp_path)
+    store.set(ROOM, {"tools": "look"})
+    real_fdopen = choices_module.os.fdopen
+
+    class Full:
+        def __init__(self, handle):
+            self.handle = handle
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.handle.close()
+
+        def write(self, text):
+            raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(choices_module.os, "fdopen", lambda *args, **kwargs: Full(real_fdopen(*args, **kwargs)))
+    with pytest.raises(OSError):
+        store.set(ROOM, {"tools": "talk"})
+    assert sorted(path.name for path in tmp_path.iterdir() if path.name.endswith(".tmp")) == []
+    monkeypatch.undo()
+    assert ChoicesStore(tmp_path).get(ROOM).tools == "look"
+
+
+def test_a_room_named_by_an_id_no_room_has_is_left_out_and_logged(tmp_path, caplog):
+    # Only a hand edit writes one: Conduit and the CLI refuse such an id.
+    (tmp_path / choices_module.FILE_NAME).write_text(json.dumps({"version": 1, "defaults": None, "rooms": {
+        "my room": {"choices": {"tools": "look"}, "at": 1.0},
+        ROOM: {"choices": {"tools": "look"}, "at": 1.0}}}), encoding="utf-8")
+    with caplog.at_level(logging.WARNING):
+        assert ChoicesStore(tmp_path).get(ROOM).tools == "look"
+    assert "an id no room has" in caplog.text
+    assert set(ChoicesStore(tmp_path).view()["rooms"]) == {ROOM}
+
+
 def test_the_oldest_rooms_go_past_the_limit(tmp_path, monkeypatch):
     monkeypatch.setattr(choices_module, "MAX_ROOMS", 3)
     clock = Clock()

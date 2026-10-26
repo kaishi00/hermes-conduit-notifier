@@ -13,6 +13,19 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.81.0 (2026-10-26)
+
+### Fixes
+- In a group room with another Hermes's agent, a member whose Hermes no
+  longer accepts the room (its access was revoked or ran out) no longer holds
+  the room up: its turn fails once with a reason, and the others carry on.
+- Disbanding a group room now deletes your agents' hidden chats for it on
+  your host, as Conduit's warning says. Before, they stayed.
+
+### New and improved
+- `hermes conduit-push rooms forget --room <id>` deletes your agent's hidden
+  chat for a room someone else hosted, once you no longer want it.
+
 ## 0.80.1 (2026-10-26)
 
 ### New and improved
