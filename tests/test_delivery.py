@@ -539,6 +539,6 @@ def test_a_process_that_exits_right_after_queueing_still_sends_it(paired, tmp_pa
 
 def test_the_wait_at_exit_is_bounded(paired, tmp_path):
     started = time.monotonic()
-    relay = _exit_right_after_enqueue(paired, tmp_path, 3.0, drain=0.3)
-    assert time.monotonic() - started < 2.5
+    relay = _exit_right_after_enqueue(paired, tmp_path, 4.0, drain=1.0)
+    assert time.monotonic() - started < 3.5
     assert len(relay.event_ids) == 1  # it got there; the answer never came back in time

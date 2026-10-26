@@ -544,6 +544,52 @@ def test_an_unloaded_plugin_does_not_wait_on_a_call(home, monkeypatch):
     assert slow.sent == []
 
 
+def test_the_exit_waits_for_a_call_still_on_its_way_and_its_fallback(home, monkeypatch):
+    # Past the turn end's wait, the worker's exit waits for the retries and,
+    # when they all fail, the usual push they fall back to.
+    class Down(SlowClient):
+        def send_now(self, event):
+            self.release.wait(self.delay)
+            self.sent.append(event)
+            raise OSError("relay unreachable")
+    down = Down(0.1)
+    monkeypatch.setattr(calls, "client", down)
+    monkeypatch.setattr(calls, "DELIVERY_WAIT_S", 0.01)
+    monkeypatch.setattr(calls, "_sleep", lambda seconds, wake=None: time.sleep(0.01))
+    _threads(monkeypatch)
+    _watch(home, "rt-1")
+    assert calls.turn_ended("rt-1", "done", profile="default", fallback=READY) is True
+    assert down.enqueued == []
+    calls._wait_at_exit()
+    assert len(down.sent) == len(calls.DELIVERY_DELAYS_S)
+    assert down.enqueued == [READY]
+    assert calls._in_flight == set()
+
+
+def test_held_calls_swept_at_a_turn_end_share_one_wait(home, monkeypatch):
+    slow = SlowClient(None)
+    monkeypatch.setattr(calls, "client", slow)
+    monkeypatch.setattr(calls, "DELIVERY_WAIT_S", 0.2)
+    _threads(monkeypatch)
+    due = [{"status": "call", "outcome": "done", "session_id": session,
+            "watch": {"id": str(n) * 24, "title": "Job", "session_ids": [session]}}
+           for n, session in enumerate(["a", "b", "c"], start=1)]
+    started = time.monotonic()
+    calls._send_due(due, "default")
+    assert time.monotonic() - started < 0.5
+    slow.release.set()
+    calls._wait_at_exit()
+    assert sorted(event["session_id"] for event in slow.sent) == ["a", "b", "c"]
+
+
+def test_a_plugin_unloaded_as_the_call_starts_does_not_wait(home, monkeypatch):
+    monkeypatch.setattr(calls, "_spawn", lambda work: False)
+    started = time.monotonic()
+    calls._deliver_waited({"type": "call.requested"}, None)
+    assert time.monotonic() - started < 1
+    assert calls._in_flight == set()
+
+
 # --- Calls Hermes asks for, and alert calls ----------------------------------
 
 call_tool = sys.modules["conduit_push.call_tool"]

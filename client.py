@@ -695,15 +695,12 @@ def _request(
 
 
 def _start_worker() -> None:
-    global _worker_started, _worker, _drain_registered
+    global _worker_started, _worker
     if _worker_started:
         return
     with _worker_lock:
         if _worker_started or _stopped.is_set():
             return
-        if not _drain_registered:
-            atexit.register(_drain_at_exit)
-            _drain_registered = True
         _worker = threading.Thread(target=_delivery_worker, args=(_generation,), name="conduit-push", daemon=True)
         _worker.start()
         _worker_started = True
@@ -819,14 +816,14 @@ def _delivery_worker(generation: int = 0) -> None:
 # job's worker process exits right after its turn, and the delivery thread
 # dies with it (#388).
 EXIT_DRAIN_S = 3.0
-_drain_registered = False
 
 
 def _drain_at_exit() -> None:
     """At interpreter exit: waits up to EXIT_DRAIN_S for the queue to empty and
     the send in progress to end. Daemon threads still run while atexit does."""
-    if _stopped.is_set() or not _worker_started:
-        return
+    with _worker_lock:
+        if _stopped.is_set() or not _worker_started:
+            return
     deadline = time.monotonic() + EXIT_DRAIN_S
     with _events.all_tasks_done:
         while _events.unfinished_tasks:
@@ -835,6 +832,11 @@ def _drain_at_exit() -> None:
                 logger.info("Conduit left %d notification(s) unsent at exit", _events.unfinished_tasks)
                 return
             _events.all_tasks_done.wait(left)
+
+
+# At import, so it runs after calls' wait at exit (atexit runs last in, first
+# out) and sends a fallback push that wait queued.
+atexit.register(_drain_at_exit)
 
 
 def _requeue(item: Any) -> None:
