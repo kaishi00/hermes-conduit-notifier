@@ -5,6 +5,7 @@ import http.server
 import importlib.util
 import io
 import json
+import logging
 import os
 import pathlib
 import re
@@ -462,3 +463,15 @@ def test_a_mailbox_that_isnt_there_is_unreachable(eric):
         inbox.info()
     assert refused.value.code == "unreachable"
     assert refused.value.retryable
+
+
+def test_why_a_mailbox_couldnt_be_reached_goes_to_the_log_not_the_error(eric, caplog):
+    # The reason can name proxies or hosts: the log keeps it, and an answer
+    # made from the error doesn't carry it.
+    inbox = mailbox_module.Mailbox(f"http://127.0.0.1:{_free_port()}", eric)
+
+    with caplog.at_level(logging.INFO), pytest.raises(mailbox_module.MailboxError) as refused:
+        inbox.info()
+    assert str(refused.value).startswith("Couldn't reach the mailbox at 127.0.0.1")
+    assert "(" not in str(refused.value)
+    assert "Connection refused" in caplog.text

@@ -22,6 +22,7 @@ import hashlib
 import http.client
 import ipaddress
 import json
+import logging
 import re
 import secrets
 import time
@@ -32,6 +33,8 @@ from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Optional
 
 from . import room_identity, sealing
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_URL = "https://rooms.milim.dev"
 # How far an owner request's time may be from the mailbox's (mailbox/src/auth.mjs).
@@ -309,8 +312,9 @@ def _request(url: str, method: str, data: Optional[bytes], headers: dict[str, st
     except urllib.error.HTTPError as error:
         raise _refusal(error, host) from None
     except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError) as error:
-        reason = getattr(error, "reason", None) or error
-        raise MailboxError("unreachable", f"Couldn't reach the mailbox at {host} ({reason})") from None
+        # The reason can name proxies or hosts: the log keeps it, not the error.
+        logger.info("Couldn't reach the rooms mailbox at %s (%s)", host, getattr(error, "reason", None) or error)
+        raise MailboxError("unreachable", f"Couldn't reach the mailbox at {host}") from None
     if len(raw) > MAX_ANSWER_BYTES:
         raise MailboxError("bad_answer", f"The mailbox at {host} answered with more than this plugin reads")
     if not raw:

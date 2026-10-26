@@ -8065,6 +8065,14 @@ ROOM_LINKS_LIMIT = 60
 ROOM_LINKS_MAX_BODY_BYTES = 8 * 1024
 _room_links_limiter = _MintLimiter(ROOM_LINKS_LIMIT, ROOM_CHOICES_WINDOW_S,
                                    message="Too many link requests; try again shortly")
+# Inviting, accepting, unlinking and cancelling wait on the rooms mailbox, up
+# to 15 s a call. They get their own small pool, so a mailbox that doesn't
+# answer holds at most this many threads and never starves the dashboard's
+# shared executor, and an answer within the time below; a call still running
+# then finishes on its own.
+ROOM_LINKS_WORKERS = 4
+ROOM_LINKS_TIMEOUT_S = 50.0
+_room_links_executor = ThreadPoolExecutor(max_workers=ROOM_LINKS_WORKERS, thread_name_prefix="conduit-room-links")
 
 
 def _room_links_root() -> Path:
@@ -8098,10 +8106,17 @@ def room_links(action: Callable[[Any], Dict[str, Any]]) -> Dict[str, Any]:
     return answer
 
 
-async def _room_links_route(action: Callable[[Any], Dict[str, Any]], route: str) -> Any:
+async def _room_links_route(action: Callable[[Any], Dict[str, Any]], route: str, *, mailbox: bool = False) -> Any:
+    """``mailbox``: the action waits on the rooms mailbox, so it runs in the
+    links pool, for up to ROOM_LINKS_TIMEOUT_S."""
     try:
-        return {"ok": True, **(await _run_scoped(None, _limited(_room_links_limiter, None,
-                                                                lambda: room_links(action))))}
+        run = _run_scoped(None, _limited(_room_links_limiter, None, lambda: room_links(action)),
+                          _room_links_executor if mailbox else None)
+        return {"ok": True, **(await (asyncio.wait_for(run, timeout=ROOM_LINKS_TIMEOUT_S) if mailbox else run))}
+    except asyncio.TimeoutError:
+        logger.warning("Linked Rooms' %s for Conduit timed out after %ss", route, ROOM_LINKS_TIMEOUT_S)
+        return _store_refusal(TokenError(504, "The rooms mailbox didn't answer in time; look at the Links again in "
+                                              "a minute", "timed_out"))
     except TokenError as exc:
         # ``code`` is room_links' word for the refusal (bad_invite, expired,
         # invite_used, already_linked, clock_off…), so Conduit can say it.
@@ -8135,7 +8150,7 @@ async def post_room_link_invite(request: Request, response: Response) -> Any:
     24 hours."""
     response.headers["Cache-Control"] = "no-store"
     body = _room_links_body(await _read_json_body(request, ROOM_LINKS_MAX_BODY_BYTES), '{"name": ...}')
-    return await _room_links_route(lambda links: links.invite(body.get("name")), "invite")
+    return await _room_links_route(lambda links: links.invite(body.get("name")), "invite", mailbox=True)
 
 
 @router.post("/rooms/links/preview")
@@ -8154,7 +8169,8 @@ async def post_room_link(request: Request, response: Response) -> Any:
     response.headers["Cache-Control"] = "no-store"
     body = _room_links_body(await _read_json_body(request, ROOM_LINKS_MAX_BODY_BYTES),
                             '{"url": ..., "name": ...}')
-    return await _room_links_route(lambda links: links.accept(body.get("url"), body.get("name")), "accept")
+    return await _room_links_route(lambda links: links.accept(body.get("url"), body.get("name")), "accept",
+                                   mailbox=True)
 
 
 @router.get("/rooms/links")
@@ -8169,14 +8185,14 @@ async def get_room_links(response: Response) -> Any:
 async def delete_room_link(response: Response, link_id: Optional[str] = None) -> Any:
     """Unlinks; the other side's Hermes drops the Link when it reads why."""
     response.headers["Cache-Control"] = "no-store"
-    return await _room_links_route(lambda links: links.remove(link_id), "unlink")
+    return await _room_links_route(lambda links: links.remove(link_id), "unlink", mailbox=True)
 
 
 @router.delete("/rooms/links/invites")
 async def delete_room_link_invite(response: Response, invite_id: Optional[str] = None) -> Any:
     """Takes an invite back before it's used."""
     response.headers["Cache-Control"] = "no-store"
-    return await _room_links_route(lambda links: links.cancel(invite_id), "cancel")
+    return await _room_links_route(lambda links: links.cancel(invite_id), "cancel", mailbox=True)
 
 
 # --- Pulse settings ------------------------------------------------------------

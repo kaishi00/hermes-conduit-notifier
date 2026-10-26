@@ -2704,11 +2704,13 @@ hermes conduit-push links cancel <invite id>             # takes an invite back
 
 A Link waits until the inviter's Hermes confirms it, and one still waiting
 after 8 days reads as unanswered (its accept or confirm ran out at the
-mailbox). Unlinking ends a Link here at once, and the other Hermes drops it
-when it next reads its inbox. To link again, unlink first: a new accept from
-the same Hermes then replaces the inviter's old Link, as it does after
-someone loses their side. This Hermes keeps up to 50 Links and 10 waiting
-invites. Everything a Link needs, its send tokens included, stays in
+mailbox). An accept the mailbox didn't answer stays with its Link, and goes
+when the mailbox answers, while the invite lasts; accepting the same invite
+again is the same accept. Unlinking ends a Link here at once, and the other
+Hermes drops it when it next reads its inbox. To link again, unlink first: a
+new accept from the same Hermes then replaces the inviter's old Link, as it
+does after someone loses their side. This Hermes keeps up to 50 Links and 10
+waiting invites. Everything a Link needs, its send tokens included, stays in
 `conduit-rooms/links.json` (owner only), never in a log or a route's answer.
 
 The dashboard's process reads the inbox: one loop for the installation,
@@ -2750,10 +2752,12 @@ capability, with no `?profile=` (Links are the installation's):
 A refusal carries `detail` and a `code`: `bad_name` and `bad_invite` (400),
 `own_invite` (400, the invite is this Hermes'), `expired` and `invite_used`
 (410), `already_linked`, `too_many_links` and `too_many_invites` (409),
-`no_crypto` (503), and the mailbox's own, such as `clock_off` (503) when this
-host's clock is far from the mailbox's. A mailbox that can't be reached is
-503, one that answers what it shouldn't is 502. The routes answer 60 requests
-a minute between them.
+`no_crypto` and `no_word_list` (503, a plugin install missing its word list),
+and the mailbox's own, such as `clock_off` (503) when this host's clock is far
+from the mailbox's. A mailbox that can't be reached is 503, one that answers
+what it shouldn't is 502. A route that waits on the mailbox answers within
+50 s, or with `timed_out` (504) while the call finishes on its own. The routes
+answer 60 requests a minute between them.
 
 ## Capabilities (plugin 0.4+)
 
