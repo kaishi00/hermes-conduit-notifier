@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import contextvars
 import hashlib
 import hmac
@@ -694,12 +695,15 @@ def _request(
 
 
 def _start_worker() -> None:
-    global _worker_started, _worker
+    global _worker_started, _worker, _drain_registered
     if _worker_started:
         return
     with _worker_lock:
         if _worker_started or _stopped.is_set():
             return
+        if not _drain_registered:
+            atexit.register(_drain_at_exit)
+            _drain_registered = True
         _worker = threading.Thread(target=_delivery_worker, args=(_generation,), name="conduit-push", daemon=True)
         _worker.start()
         _worker_started = True
@@ -809,6 +813,28 @@ def _delivery_worker(generation: int = 0) -> None:
             logger.warning("Conduit notification delivery failed for %s: %s", event.get("type", "event"), error)
         finally:
             _events.task_done()
+
+
+# How long the process's exit waits for queued notifications to go out. A cron
+# job's worker process exits right after its turn, and the delivery thread
+# dies with it (#388).
+EXIT_DRAIN_S = 3.0
+_drain_registered = False
+
+
+def _drain_at_exit() -> None:
+    """At interpreter exit: waits up to EXIT_DRAIN_S for the queue to empty and
+    the send in progress to end. Daemon threads still run while atexit does."""
+    if _stopped.is_set() or not _worker_started:
+        return
+    deadline = time.monotonic() + EXIT_DRAIN_S
+    with _events.all_tasks_done:
+        while _events.unfinished_tasks:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                logger.info("Conduit left %d notification(s) unsent at exit", _events.unfinished_tasks)
+                return
+            _events.all_tasks_done.wait(left)
 
 
 def _requeue(item: Any) -> None:

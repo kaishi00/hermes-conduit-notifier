@@ -44,6 +44,10 @@ logger = logging.getLogger("hermes.plugins.conduit_push")
 CALL_TITLE = "Hermes wants to talk"
 # Seconds to wait before each delivery attempt.
 DELIVERY_DELAYS_S = (0.0, 2.0, 4.0)
+# How long a turn's end waits for its call request to reach the relay. A cron
+# job's worker process exits right after its turn, taking a delivery thread
+# with it mid-send (#388); the bound keeps a slow relay from holding the turn.
+DELIVERY_WAIT_S = 3.0
 # The relay's errors for an event it took but Apple didn't (relay/src/server.mjs).
 APNS_FAILURES = frozenset({"apns_rejected", "apns_unreachable"})
 
@@ -53,6 +57,22 @@ def _spawn(work: Callable[[], None]) -> None:
         return
     # Under the profile that started the work (see client.enqueue).
     threading.Thread(target=contextvars.copy_context().run, args=(work,), name="conduit-call", daemon=True).start()
+
+
+def _deliver_waited(event: dict[str, Any], fallback: dict[str, Any] | None) -> None:
+    """Delivers ``event`` on its own thread, returning once it's done or after
+    DELIVERY_WAIT_S, whichever comes first (retries go on past the wait)."""
+    if _stopped.is_set():
+        return
+    done = threading.Event()
+
+    def work() -> None:
+        try:
+            deliver(event, fallback)
+        finally:
+            done.set()
+    _spawn(work)
+    done.wait(DELIVERY_WAIT_S)
 
 
 # Homes with a waiter thread running, so a burst of held turn ends starts one,
@@ -155,7 +175,7 @@ def turn_ended(session_id: str, outcome: str, *, profile: str, fallback: dict[st
         return False
     try:
         event = call_event(result["watch"], outcome, session_id=session_id, profile=profile)
-        _spawn(lambda: deliver(event, fallback))
+        _deliver_waited(event, fallback)
     except Exception:  # noqa: BLE001 — the caller sends its usual push
         logger.warning("Conduit could not send a call request", exc_info=True)
         return False
@@ -172,7 +192,7 @@ def _send_due(results: list[dict[str, Any]], profile: str) -> None:
         # One that can't go out never stops the rest: they're consumed too.
         try:
             event = call_event(result["watch"], result["outcome"], session_id=result["session_id"], profile=profile)
-            _spawn(lambda event=event: deliver(event, None))
+            _deliver_waited(event, None)
         except Exception:  # noqa: BLE001
             logger.warning("Conduit could not send a held call", exc_info=True)
 
@@ -488,7 +508,7 @@ def failed_turn(session_id: str, *, profile: str, fallback: dict[str, Any] | Non
         return False
     try:
         event = call_event(result["watch"], "failed", session_id=session_id, profile=profile)
-        _spawn(lambda: deliver(event, fallback))
+        _deliver_waited(event, fallback)
     except Exception:  # noqa: BLE001 — the caller sends its usual push
         logger.warning("Conduit could not send a call request", exc_info=True)
         return False

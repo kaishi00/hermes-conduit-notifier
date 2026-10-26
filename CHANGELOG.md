@@ -13,6 +13,11 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.81.2 (2026-10-26)
+
+### Fixes
+- A call Hermes places from a scheduled (cron) job now rings. Hermes runs those jobs in a worker that exits as soon as the job ends, and that cut off the call request on its way to the relay, so nothing rang and no missed call was reported. The same could drop a job's ordinary notification.
+
 ## 0.81.1 (2026-10-26)
 
 ### New and improved
