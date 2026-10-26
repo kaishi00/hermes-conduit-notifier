@@ -63,6 +63,9 @@ ENV_URL = "CONDUIT_ROOMS_MAILBOX_URL"
 ENV_REGISTRATION = "CONDUIT_ROOMS_MAILBOX_REGISTRATION"
 
 INVITE_TTL_S = 24 * 3600
+# Past this, with a day's slack for its maker's clock, an invite can't be one
+# this plugin made.
+LONGEST_INVITE_S = 2 * INVITE_TTL_S
 # What the mailbox holds an envelope for. A Link still waiting a day past it
 # was never answered: its accept or its confirm expired there.
 HOLD_S = 7 * 86400
@@ -140,9 +143,10 @@ def handles(kind: str) -> Callable[[Callable[[Received], None]], Callable[[Recei
     return register
 
 
-def parse_invite(url: Any) -> Invite:
+def parse_invite(url: Any, now: Optional[int] = None) -> Invite:
     """The invite in a ``conduit://link/`` URL. Raises LinkError("bad_invite")
-    for anything else."""
+    for anything else, and, given ``now``, for one that says it lasts longer
+    than invites do."""
     refused = LinkError("bad_invite", "That isn't a Conduit link invite")
     if not isinstance(url, str):
         raise refused
@@ -162,6 +166,9 @@ def parse_invite(url: Any) -> Invite:
     if name is None or sign is None or seal is None or mailbox is None or not _is_id(invite_id) \
             or not _is_token(token) or not _whole(expires_at):
         raise refused
+    if now is not None and expires_at > now + LONGEST_INVITE_S:
+        raise LinkError("bad_invite", "That invite says it lasts longer than invites do; the clock where it was "
+                                      "made may be wrong")
     return Invite(name=name, sign=sign, seal=seal, mailbox=mailbox, id=invite_id, token=token,
                   expires_at=expires_at)
 
@@ -209,6 +216,11 @@ class Links:
                 if called:
                     # The mailbox may have put its sender without answering.
                     _clean_up(state, _invite_sender(invite_id), int(self.clock()))
+            if isinstance(exc, room_mailbox.MailboxError) and not exc.retryable:
+                # It answered, so the senders still to go go now, as after a
+                # refused accept: an inbox with as many as the mailbox keeps
+                # takes this one when it's asked again.
+                self._flush_quietly()
             raise _link_error(exc) from None
         expires_at = now + INVITE_TTL_S
         payload = {"v": VERSION, "name": name, "sign": sealing.b64u(identity.signing_public),
@@ -234,12 +246,12 @@ class Links:
         out, whether it's this Hermes' own, and the Link this Hermes already
         has with them, if any. An invite whose mailbox this Hermes won't
         call is refused, as accepting it would be."""
-        invite = parse_invite(url)
+        now = int(self.clock())
+        invite = parse_invite(url, now)
         try:
             identity = room_identity.load(self.root)
         except room_identity.IdentityError as exc:
             raise _link_error(exc) from None
-        now = int(self.clock())
         state = self._store.read()
         if _peer_mailbox(invite.mailbox, self._mailbox_url(state)) is None:
             raise _mailbox_refused()
@@ -255,12 +267,12 @@ class Links:
         waits, is the same accept, sent now if it hasn't gone. An accept the
         mailbox didn't answer stays with its Link, and goes on a later pass
         while the invite lasts."""
-        invite = parse_invite(url)
+        now = int(self.clock())
+        invite = parse_invite(url, now)
         name = _name(name)
         identity = self._identity()
         # First, so a plugin install that can't show the Link makes no accept.
         _words(invite.sign, invite.seal)
-        now = int(self.clock())
         if identity.signing_public == invite.sign:
             raise LinkError("own_invite", "That invite is from this Hermes: it's for the person you're linking with")
         if invite.expires_at <= now:
@@ -303,12 +315,13 @@ class Links:
             self._registered(mailbox)
             self._send_accept(identity, mailbox, link_id)
         except (room_mailbox.MailboxError, room_envelope.EnvelopeError, LinkError) as exc:
-            # A refusal takes back an accept this call recorded. One the
-            # mailbox didn't answer may have reached it, so it stays for the
-            # loop, as one recorded before does, unless the invite is used.
+            # A refusal takes back an accept that can't have reached the
+            # inviter: never sent, or refused each time. One the mailbox
+            # didn't answer may have, so it stays for the loop, unless the
+            # invite is used.
             used = getattr(exc, "code", "") == "invite_used"
             waits = isinstance(exc, room_mailbox.MailboxError) and exc.retryable
-            if used or (again is None and not waits):
+            if used or (not waits and not _accept_went(self._store.read(), link_id)):
                 self._take_back(link_id)
             elif waits:
                 raise LinkError(exc.code, f"{exc}. This Hermes keeps the accept and sends it when the mailbox "
@@ -473,11 +486,10 @@ class Links:
 
     def _deliver(self, identity: room_identity.Identity, item: dict[str, Any]) -> None:
         now = int(self.clock())
-        # An accept tried before may have reached the inviter, whose Hermes
-        # then used the invite answering it, so its Link waits for the confirm
-        # (and reads unanswered after 8 days without one). Refused on its
-        # first try, or never sent, it can't have: the invite was used,
-        # cancelled or ran out.
+        # An accept tried before without an answer may have reached the
+        # inviter, whose Hermes then used the invite answering it, so its Link
+        # waits for the confirm (and reads unanswered after 8 days without
+        # one). Never sent, or refused each time it went, it can't have.
         earlier = bool(item.get("tried"))
         if item["kind"] in (ACCEPT, CONFIRM):
             link = self._store.read()["links"].get(item["link"])
@@ -516,7 +528,8 @@ class Links:
         data = room_envelope.seal(identity, link=item["link"], recipient_sign=_key_of(item, "sign"),
                                   recipient_seal=_key_of(item, "seal"), message_id=item["id"],
                                   kind=item["kind"], body=item["body"], clock=self.clock)
-        if item["kind"] == ACCEPT and not item.get("tried"):
+        first = item["kind"] == ACCEPT and not item.get("tried")
+        if first:
             # From here it may reach the inviter's mailbox. Unlinked before
             # it was tried, it's gone, and it never goes.
             with self._store.update() as state:
@@ -524,7 +537,17 @@ class Links:
                 if queued is None:
                     return
                 queued["tried"] = True
-        room_mailbox.send(item["mailbox"], item["inbox"], item["token"], data, idempotency_key=item["id"])
+        try:
+            room_mailbox.send(item["mailbox"], item["inbox"], item["token"], data, idempotency_key=item["id"])
+        except room_mailbox.MailboxError as exc:
+            if first and exc.code not in ("unreachable", "bad_answer"):
+                # The mailbox said it didn't take it, so it's still untried:
+                # the inviter can't have it.
+                with self._store.update() as state:
+                    for queued in state["outbox"]:
+                        if queued["id"] == item["id"]:
+                            queued.pop("tried", None)
+            raise
 
     def _give_up(self, item: dict[str, Any], now: int, why: str, *, keep_link: bool = False) -> None:
         with self._store.update() as state:
@@ -778,11 +801,18 @@ class LinkLoop:
         except room_envelope.EnvelopeError as exc:
             logger.info("Linked Rooms dropped something in its inbox that isn't an envelope (%s)", exc.code)
             return True
-        if delivered.sender.startswith("i-"):
-            self._on_accept(identity, delivered, header)
+        try:
+            if delivered.sender.startswith("i-"):
+                self._on_accept(identity, delivered, header)
+                return True
+            if delivered.sender == _link_sender(header.link):
+                return self._on_link(identity, delivered, header)
+        except (ValueError, TypeError, LookupError, AttributeError) as exc:
+            # Something in it this plugin didn't expect: it goes, rather than
+            # hold up everything behind it. Only the error's type is logged,
+            # as its message can quote the envelope.
+            logger.warning("Linked Rooms dropped a %s it couldn't handle (%s)", header.kind, type(exc).__name__)
             return True
-        if delivered.sender == _link_sender(header.link):
-            return self._on_link(identity, delivered, header)
         logger.info("Linked Rooms dropped an envelope whose Link isn't its sender's")
         return True
 
@@ -841,9 +871,9 @@ class LinkLoop:
                 "created_at": now, "invite": invite_id, "seen": {},
             }
             del state["invites"][invite_id]
-            # In this order: the Link's own sender is put first (flush), then
-            # the confirm, then the invite's sender goes with anything else
-            # left with it.
+            # The flush deletes the invite's sender, with anything else left
+            # with it (this accept is acked by then), then puts the Link's
+            # own and sends the confirm.
             state["outbox"].append(_outgoing(CONFIRM, link_id, link, {"token": my_token}, now))
             _clean_up(state, _invite_sender(invite_id), now)
 
@@ -1100,8 +1130,8 @@ def _linked_with(state: dict[str, Any], sign: bytes, now: int) -> Optional[str]:
 
 
 def _accept_went(state: dict[str, Any], link_id: str) -> bool:
-    """Whether a waiting Link's accept may have reached the inviter: it was
-    tried, or it's gone from the outbox, sent."""
+    """Whether a waiting Link's accept may have reached the inviter: tried
+    without an answer, or gone from the outbox, sent."""
     item = next((item for item in state["outbox"] if item["id"] == f"accept.{link_id}"), None)
     return item is None or bool(item.get("tried"))
 
@@ -1111,7 +1141,7 @@ def _accept_fields(body: dict) -> Optional[dict[str, Any]]:
         return None
     name, sign, seal = _checked_name(body["name"]), _public_key(body["sign"]), _public_key(body["seal"])
     if name is None or sign is None or seal is None or not _is_token(body["token"]) \
-            or not _is_id(body["invite"]) or not isinstance(body["invite_token"], str) \
+            or not _is_id(body["invite"]) or not _is_token(body["invite_token"]) \
             or not isinstance(body["mailbox"], str):
         return None
     return {"name": name, "sign": sign, "seal": seal, "token": body["token"], "invite": body["invite"],

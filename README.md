@@ -2710,10 +2710,14 @@ mailbox). An accept the mailbox didn't answer stays with its Link, and goes
 when the mailbox answers, while the invite lasts; accepting the same invite
 again is the same accept. Unlinking ends a Link here at once, and the other
 Hermes drops it when it next reads its inbox; one unlinked while it waits for
-its confirm is answered with the unlink when the confirm comes. An unlink,
-accept or confirm the mailbox can't take now goes later, up to its 7-day hold
-(an accept, while its invite lasts), and one it refuses as it is (too large,
-say) doesn't. To link again, unlink first: a new accept from the same Hermes
+its confirm is answered with the unlink when the confirm comes. A confirm that
+runs out at the mailbox before the acceptor's Hermes reads it (off for more
+than 7 days) leaves the inviter's side linked until its owner unlinks it. An
+unlink, accept or confirm the mailbox can't take now goes later, up to its
+7-day hold (an accept, while its invite lasts), and one it refuses as it is
+(too large, say) doesn't. An invite that says it lasts more than two days
+isn't taken: the clock where it was made is wrong, or someone made it by
+hand. To link again, unlink first: a new accept from the same Hermes
 then replaces the inviter's old Link, as it does after someone loses their
 side. This Hermes keeps up to 50 Links and 10 waiting invites. Everything a
 Link needs, its send tokens included, stays in `conduit-rooms/links.json`

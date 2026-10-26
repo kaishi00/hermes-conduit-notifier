@@ -542,6 +542,48 @@ def test_an_accept_without_the_invite_token_is_dropped(home):
 
 
 @needs_node
+def test_an_accept_whose_invite_token_isnt_one_is_dropped_and_the_next_still_links(home, monkeypatch):
+    # "\ud800" in its JSON reads as half a character, which nothing can compare.
+    eric, mallory, mona = home("eric"), home("mallory"), home("mona")
+    url = eric.invite("Eric")["url"]
+    escaped = types.SimpleNamespace(
+        loads=json.loads, dumps=lambda value, **options: json.dumps(value, **dict(options, ensure_ascii=True)))
+    with monkeypatch.context() as patched:
+        patched.setattr(envelope, "json", escaped)
+        _forged_accept(url, mallory, invite_token="\ud800")
+    mona.accept(url, "Mona")
+
+    _run(eric, mona)
+
+    assert [link["name"] for link in eric.view()["links"]] == ["Mona"]
+    assert [link["status"] for link in mona.view()["links"]] == ["linked"]
+    assert eric.mailbox().info()["pending"] == 0
+
+
+@needs_node
+def test_an_envelope_that_trips_up_its_handling_is_dropped_and_the_next_ones_go(home, monkeypatch, caplog):
+    eric, mona, lisa = home("eric"), home("mona"), home("lisa")
+    mona.accept(eric.invite("Eric")["url"], "Mona")
+    lisa.accept(eric.invite("Eric")["url"], "Lisa")
+    real_fields = links_module._accept_fields
+
+    def trips(body):
+        if body["name"] == "Mona":
+            raise TypeError("something this plugin didn't expect")
+        return real_fields(body)
+
+    monkeypatch.setattr(links_module, "_accept_fields", trips)
+    with caplog.at_level(logging.WARNING):
+        _run(eric, mona, lisa)
+
+    assert [link["name"] for link in eric.view()["links"]] == ["Lisa"]
+    assert [link["status"] for link in lisa.view()["links"]] == ["linked"]
+    assert eric.mailbox().info()["pending"] == 0
+    assert "Linked Rooms dropped a link.accept it couldn't handle (TypeError)" in caplog.text
+    assert "didn't expect" not in caplog.text  # what's in an envelope stays out of the log
+
+
+@needs_node
 def test_an_accept_that_arrived_after_the_invite_expired_is_dropped(home):
     eric, mona = home("eric", Clock(time.time() - 2 * DAY)), home("mona", Clock(time.time() - 2 * DAY))
     url = eric.invite("Eric")["url"]
@@ -810,6 +852,35 @@ def test_an_invite_whose_sender_wasnt_answered_takes_the_sender_back(home, monke
     assert eric.mailbox().senders() == []
 
 
+@needs_node
+def test_an_invite_the_mailbox_refused_removes_the_senders_still_to_go(home, monkeypatch):
+    # An inbox with as many senders as the mailbox keeps takes the next one
+    # once those have gone, as it does after a refused accept.
+    eric = home("eric")
+    old = eric.invite("Eric")["invite"]["id"]
+
+    def unreachable(*args, **kwargs):
+        raise mailbox_module.MailboxError("unreachable", "Couldn't reach the mailbox")
+
+    def full(self, sender, token):
+        raise mailbox_module.MailboxError("too_many_senders", "This inbox has as many links as the mailbox allows",
+                                          409)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(mailbox_module.Mailbox, "delete_sender", unreachable)
+        eric.cancel(old)
+    assert [item["sender"] for item in eric._store.read()["cleanup"]] == [f"i-{old}"]
+    with monkeypatch.context() as patched:
+        patched.setattr(mailbox_module.Mailbox, "put_sender", full)
+        with pytest.raises(links_module.LinkError) as refused:
+            eric.invite("Eric")
+
+    assert refused.value.code == "too_many_senders"
+    assert eric._store.read()["cleanup"] == []
+    assert eric.mailbox().senders() == []
+    assert eric.invite("Eric")["invite"]["id"]
+
+
 class _CutOff(BaseException):
     """A process stopping mid-call: nothing handles it, as nothing handles a kill."""
 
@@ -1016,6 +1087,46 @@ def test_an_accept_refused_on_its_first_try_takes_its_link_back(home, monkeypatc
 
 
 @needs_node
+def test_accepting_again_an_accept_refused_on_its_first_try_takes_its_link_back(home, monkeypatch):
+    eric, mona = home("eric"), home("mona")
+    url = eric.invite("Eric")["url"]
+    _accept_cut_off(mona, url, monkeypatch)  # recorded, never sent
+
+    def refused_send(*args, **kwargs):
+        raise mailbox_module.MailboxError("bad_request", "The mailbox didn't take that", 400)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(mailbox_module, "send", refused_send)
+        with pytest.raises(links_module.LinkError) as refused:
+            mona.accept(url, "Mona")
+
+    assert refused.value.code == "bad_request"
+    assert mona.view()["links"] == []
+    assert json.loads((mona.root / "conduit-rooms" / "links.json").read_text())["outbox"] == []
+
+
+@needs_node
+def test_an_accept_the_mailbox_refused_each_time_goes_when_its_invite_runs_out(home, monkeypatch):
+    # Refused, it never reached the inviter, so its Link doesn't wait for a confirm.
+    clock = Clock()
+    eric, mona = home("eric"), home("mona", clock=clock)
+    _accept_cut_off(mona, eric.invite("Eric")["url"], monkeypatch)
+
+    def not_found(*args, **kwargs):
+        raise mailbox_module.MailboxError("not_found", "The mailbox doesn't have that", 404)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(mailbox_module, "send", not_found)
+        _run(mona, passes=1)
+        assert [link["status"] for link in mona.view()["links"]] == ["waiting"]
+        clock.now += DAY + 60
+        _run(mona, passes=1)
+
+    assert mona.view()["links"] == []
+    assert json.loads((mona.root / "conduit-rooms" / "links.json").read_text())["outbox"] == []
+
+
+@needs_node
 def test_an_accept_and_the_loop_never_both_send_it(home, monkeypatch):
     eric, mona = home("eric"), home("mona")
     url = eric.invite("Eric")["url"]
@@ -1093,10 +1204,10 @@ def test_an_accept_isnt_made_without_its_words(home, monkeypatch):
     assert eric.view()["links"] == [] and [invite["id"] for invite in eric.view()["invites"]] == [made["invite"]["id"]]
 
 
-def _invite_naming(url, mailbox):
-    """The invite in ``url``, naming another mailbox."""
+def _invite_with(url, **changes):
+    """The invite in ``url``, with some of its fields changed."""
     fields = json.loads(links_module.sealing.unb64u(url[len(links_module.URL_PREFIX):], ValueError))
-    fields["mailbox"] = mailbox
+    fields.update(changes)
     return links_module.URL_PREFIX + links_module.sealing.b64u(json.dumps(fields).encode("utf-8"))
 
 
@@ -1106,7 +1217,7 @@ def _invite_naming(url, mailbox):
                                      "https://[fd00::5]", "https://rooms.localhost"])
 def test_an_invite_naming_a_mailbox_on_a_private_network_is_refused(home, mailbox):
     # Accepting it would have this Hermes call a service there.
-    url = _invite_naming(home("eric").invite("Eric")["url"], mailbox)
+    url = _invite_with(home("eric").invite("Eric")["url"], mailbox=mailbox)
     mona = home("mona")
 
     for call in (lambda: mona.preview(url), lambda: mona.accept(url, "Mona")):
@@ -1114,6 +1225,21 @@ def test_an_invite_naming_a_mailbox_on_a_private_network_is_refused(home, mailbo
             call()
         assert refused.value.code == "bad_invite"
     assert mona.view()["links"] == []
+
+
+@needs_node
+@pytest.mark.parametrize("lasts", [2 * DAY + 60, 10 ** 12])
+def test_an_invite_that_says_it_lasts_longer_than_invites_do_is_refused(home, lasts):
+    # 10 ** 12 is past any date this computer can show.
+    url = home("eric").invite("Eric")["url"]
+    url = _invite_with(url, exp=int(time.time()) + lasts)
+    mona = home("mona")
+
+    for call in (lambda: mona.preview(url), lambda: mona.accept(url, "Mona")):
+        with pytest.raises(links_module.LinkError) as refused:
+            call()
+        assert refused.value.code == "bad_invite"
+    assert mona._store.read()["links"] == {} and mona._store.read()["outbox"] == []
 
 
 def test_an_invite_naming_this_hermes_own_private_mailbox_is_fine(tmp_path, monkeypatch):
