@@ -81,6 +81,8 @@ _WILDCARD_HOSTS = frozenset({"", "0.0.0.0", "::", "[::]", "*"})
 _TRUE = frozenset({"1", "true", "yes", "on"})
 _FALSE = frozenset({"0", "false", "no", "off"})
 _REFERENCE = re.compile(r"^\$\{(?:env:)?([A-Za-z_][A-Za-z0-9_]*)\}$")
+# A terminal escape sequence: a CSI one, or ESC and the character after it.
+_ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|.)", re.DOTALL)
 _thread_lock = threading.Lock()
 
 
@@ -304,8 +306,16 @@ def _server(hermes: Hermes, root: Path, config: dict, env: Mapping[str, str]) ->
         except Exception as exc:  # noqa: BLE001
             logger.warning("Linked Rooms setup couldn't tell whether the gateway runs (%s)", type(exc).__name__)
     running = live and platform.get("state") == "connected"
+    # Hermes stamps it with a wildcard host as 127.0.0.1
+    # (shared_ingress.listener_base_url).
     listener = platform.get("listener_base") if running else None
     listener = listener if isinstance(listener, str) and listener.startswith("http") else None
+    listener_port = None
+    if listener:
+        try:
+            listener_port = urlsplit(listener).port
+        except ValueError:  # a record this can't read: the API server is where config.yaml and the .env put it
+            listener = None
     error = platform.get("error_message") if live and not running else None
 
     env_key = env.get(KEY_ENV)
@@ -330,12 +340,18 @@ def _server(hermes: Hermes, root: Path, config: dict, env: Mapping[str, str]) ->
     raw_port = settings.get("port")
     port_set = raw_port is not None or bool(str(env.get(PORT_ENV) or "").strip())
     port = _port(raw_port if raw_port is not None else (env.get(PORT_ENV) or DEFAULT_PORT), DEFAULT_PORT)
-    if listener:
-        port = urlsplit(listener).port or port
+    port = listener_port or port
     return _Server(enabled=enabled, key_set=key_usable or unseen, host=host, port=port, port_set=port_set,
-                   running=running, ran=platform is not None, error=str(error) if error else None,
+                   running=running, ran=platform is not None, error=_plain(error) if error else None,
                    listener=listener, key_usable=key_usable, unseen=unseen, env_key=from_env, explicit=explicit,
                    flag=flag)
+
+
+def _plain(text: Any) -> Optional[str]:
+    """Hermes' words for why the API server didn't start, without terminal
+    escapes or control characters, which the app would show as they are."""
+    plain = " ".join("".join(c if c.isprintable() else " " for c in _ESCAPE.sub("", str(text))).split())
+    return plain or None
 
 
 def _answers(host: str, port: int) -> bool:
@@ -448,6 +464,9 @@ def _plan(hermes: Hermes, home: Path, profile: str, ceiling: Any) -> _Plan:
         blockers.append({"code": "parked_profile", "message": (
             f"The host gateway isn't serving profile {profile}: `hermes -p {profile} gateway stop` parked it. Start it "
             f"again with `hermes -p {profile} gateway start`, then set it up.")})
+    # Hermes reads it once, in the gateway process (tools.approval's
+    # _YOLO_MODE_FROZEN), from its environment and the root .env; the host
+    # gateway never loads a named profile's .env into its environment.
     if _truthy(os.environ.get(YOLO_ENV)) or _truthy(env.get(YOLO_ENV)):
         blockers.append({"code": "yolo", "message": (
             f"{YOLO_ENV} is on for this Hermes, which turns approvals off for every turn, and rooms refuse that. Take "
@@ -510,6 +529,8 @@ def _plan(hermes: Hermes, home: Path, profile: str, ceiling: Any) -> _Plan:
             blockers.append({"code": "managed", "message": (
                 f"An administrator pinned {dotted} on this Hermes, so the setup can't change it. Ask them to change "
                 "it, or set Linked Rooms up where it isn't pinned.")})
+    # Both of Hermes' .env locks (a managed install, an administrator's
+    # managed .env) are the installation's, whichever profile asks.
     for key, writing in ((PORT_ENV, new_port is not None), (KEY_ENV, new_key or new_profile_key)):
         refusal = hermes.env_refusal(key) if writing else None
         if refusal:
@@ -605,7 +626,9 @@ def apply(hermes: Hermes, home: Path, profile: str, ceiling: Any = None) -> dict
             _save_env(hermes, root, KEY_ENV, secrets.token_hex(32))
         if plan.new_profile_key:
             _save_env(hermes, home, KEY_ENV, secrets.token_hex(32))
-        after = _plan(hermes, home, profile, plan.ceiling)
+        # With the ceiling asked for: a saved one kept may name a toolset
+        # this Hermes no longer has, which isn't this setup's to refuse.
+        after = _plan(hermes, home, profile, ceiling)
     if plan.changed:
         logger.info("Linked Rooms setup for profile %s changed: %s", profile, ", ".join(plan.changed))
     return {**_view(hermes, home, profile, after), "changed": list(plan.changed)}

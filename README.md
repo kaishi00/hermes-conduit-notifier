@@ -2867,8 +2867,12 @@ It changes only what needs it:
   If the API server was already on, for Open WebUI say, the ceiling is also
   all that other apps using it get, and the command says so. Change the
   ceiling here, not in `hermes tools`, whose save takes `no_mcp` out and so
-  lets MCP servers in. With no toolsets at all, Hermes' log says once that
-  the API server has no valid toolsets: that's the empty ceiling.
+  lets MCP servers in. A room holds each member's agent to the tools it had
+  when the room started, so after a change the agent stops answering in
+  rooms already started with other people's agents, and the command says so
+  before it saves; new rooms use the new ceiling. With no toolsets at all,
+  Hermes' log says once that the API server has no valid toolsets: that's
+  the empty ceiling.
 - **Approvals**: off becomes manual, since rooms refuse a profile that runs
   tools without asking.
 - **The gateway** restarts when the API server isn't running, to start it:

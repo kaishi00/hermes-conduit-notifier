@@ -321,6 +321,16 @@ def test_a_taken_port_moves_the_api_server(hermes):
     assert "api_server_port" in after["changed"]
 
 
+def test_a_taken_port_moves_an_api_server_whose_key_is_in_config_yaml(hermes):
+    # Hermes binds config.yaml's port, else API_SERVER_PORT, whichever file
+    # has the key (api_server.listen_address).
+    _write(hermes.root / "config.yaml", {"platforms": {"api_server": {"enabled": True, "key": KEY}}})
+    hermes.ports.taken.add(8642)
+    after = _apply(hermes)
+    assert _env(hermes.root / ".env")["API_SERVER_PORT"] == "8643"
+    assert after["api_server"]["address"] == "127.0.0.1:8643"
+
+
 def test_a_port_already_set_is_kept_even_when_taken(hermes):
     (hermes.root / ".env").write_text("API_SERVER_PORT=8642\n", encoding="utf-8")
     hermes.ports.taken.add(8642)
@@ -377,6 +387,20 @@ def test_a_running_api_server_keeps_a_key_set_outside_hermes_files(hermes):
     _apply(hermes)
     assert "API_SERVER_KEY" not in _env(hermes.root / ".env")
     assert setup.local_api_url(hermes.adapter(), hermes.root, "default") == "http://127.0.0.1:9177"
+
+
+def test_the_api_servers_error_reads_without_control_characters(hermes):
+    (hermes.root / ".env").write_text(f"API_SERVER_KEY={KEY}\n", encoding="utf-8")
+    hermes.serve(state="fatal", error="Port 8642 already in use\x1b[2J\nRetry later\x07")
+    assert _state(hermes)["api_server"]["error"] == "Port 8642 already in use Retry later"
+
+
+def test_a_gateway_record_with_a_broken_listener_reads_as_configured(hermes):
+    (hermes.root / ".env").write_text(f"API_SERVER_KEY={KEY}\n", encoding="utf-8")
+    hermes.serve(port="86a")
+    state = _state(hermes)
+    assert state["api_server"]["running"] and state["api_server"]["address"] == "127.0.0.1:8642"
+    assert setup.local_api_url(hermes.adapter(), hermes.root, "default") == "http://127.0.0.1:8642"
 
 
 def test_a_stopped_gateway_that_served_the_api_server_isnt_given_a_new_key(hermes):
@@ -441,6 +465,19 @@ def test_a_saved_ceiling_stays_when_none_is_given(hermes):
     after = _apply(hermes)
     assert _ceiling(hermes) == ["no_mcp", "web"]
     assert "ceiling" not in after["changed"]
+
+
+def test_a_saved_ceiling_naming_a_toolset_hermes_no_longer_has_is_kept(hermes):
+    _apply(hermes, ceiling=["web", "a2a"])
+    hermes.plugins.discard("a2a")    # its plugin uninstalled
+    hermes.toolsets = [row for row in hermes.toolsets if row[0] != "a2a"]
+    approvals = _yaml(hermes.root / "config.yaml")
+    approvals["approvals"] = {"mode": "off"}
+    _write(hermes.root / "config.yaml", approvals)
+
+    after = _apply(hermes)
+    assert after["changed"] == ["approvals"]
+    assert _ceiling(hermes) == ["a2a", "no_mcp", "web"]
 
 
 def test_a_ceiling_saved_by_hand_is_replaced_by_the_default(hermes):
@@ -867,6 +904,16 @@ def test_a_hermes_that_cant_restart_from_here_says_so(client, hermes, monkeypatc
     assert "API_SERVER_KEY" in _env(hermes.root / ".env")
 
 
+def test_a_restart_that_fails_says_so_without_its_error(client, hermes, monkeypatch):
+    def fails(profile, *, what, label):
+        raise RuntimeError(f"can't start {hermes.root}/hermes-agent/venv/bin/python")
+
+    monkeypatch.setattr(sys.modules["hermes_cli.web_server_gateway"], "_restart_gateway_after", fails)
+    response = client.post(f"{BASE}/rooms/setup", json={})
+    assert response.json()["restart"] == {"started": False, "busy": False, "error": api._ROOM_SETUP_RESTART_FAILED}
+    assert "hermes-agent" not in response.text
+
+
 def test_the_setup_route_takes_a_profile(client, hermes, monkeypatch):
     seen = []
     real = api._profile_scope
@@ -1011,6 +1058,24 @@ def test_cli_setup_when_its_already_set_up(cli, hermes, capsys):
     assert "already set up" in capsys.readouterr().out
 
 
+def test_cli_setup_says_a_changed_ceiling_stops_the_agent_in_rooms_already_started(cli, hermes, capsys):
+    (hermes.root / ".env").write_text(f"API_SERVER_KEY={KEY}\n", encoding="utf-8")
+    hermes.serve()
+    assert cli.dispatch(_setup_args(ceiling="web,vision", yes=True)) == 0
+    assert "already started" not in capsys.readouterr().out    # no room had a ceiling of the setup's yet
+
+    assert cli.dispatch(_setup_args(ceiling="web", yes=True)) == 0
+    said = capsys.readouterr().out
+    assert ("then stops answering in rooms already started with other people's agents, which hold it to the "
+            "tools it had when they started. New rooms use these.") in said
+    assert said.index("already started") < said.index("Saved.")
+    assert _ceiling(hermes) == ["no_mcp", "web"]
+
+    hermes.serve(live=False)
+    assert cli.dispatch(_setup_args(ceiling="web,vision", yes=True, no_restart=True)) == 0
+    assert "already started" in capsys.readouterr().out    # the gateway down doesn't change what rooms hold
+
+
 def test_cli_setup_names_what_blocks_it(cli, hermes, monkeypatch, capsys):
     monkeypatch.setenv("HERMES_YOLO_MODE", "1")
     assert cli.dispatch(_setup_args(yes=True)) == 1
@@ -1082,6 +1147,8 @@ def test_the_restart_runs_in_the_background_where_hermes_can(monkeypatch):
 def test_a_hermes_without_a_background_restart_isnt_restarted_from_the_cli(monkeypatch):
     _hermes_cli_modules(monkeypatch, detach=False)
     assert setup.restart_command() is None
+
+
 def test_cli_setup_gives_a_named_profile_its_own_key(cli, hermes, monkeypatch, capsys):
     (hermes.root / ".env").write_text(f"API_SERVER_KEY={KEY}\n", encoding="utf-8")
     hermes.serve()

@@ -8215,6 +8215,8 @@ _room_setup_limiter = _MintLimiter(ROOM_SETUP_LIMIT, ROOM_SETUP_WINDOW_S,
 _room_setup_read_limiter = _MintLimiter(ROOM_SETUP_READ_LIMIT, ROOM_CHOICES_WINDOW_S,
                                         message="Too many setup checks; try again shortly")
 _ROOM_SETUP_CANT_RESTART = "This Hermes can't restart its gateway from here; restart it on the host (hermes gateway restart)"
+_ROOM_SETUP_RESTART_FAILED = ("The gateway didn't restart (this Hermes' log says why); restart it on the host "
+                              "(hermes gateway restart)")
 
 
 def _room_setup() -> Any:
@@ -8261,8 +8263,9 @@ def _restart_room_gateway(interrupt: bool) -> Dict[str, Any]:
             spawn("default")
             return {"started": True, "busy": False, "error": None}
     except Exception as exc:  # noqa: BLE001 - the save stays; the answer says the restart didn't start
+        # Its text stays in the log: it can name this host's paths.
         logger.warning("Linked Rooms setup couldn't restart the gateway (%s)", type(exc).__name__, exc_info=True)
-        return {"started": False, "busy": False, "error": str(exc) or _ROOM_SETUP_CANT_RESTART}
+        return {"started": False, "busy": False, "error": _ROOM_SETUP_RESTART_FAILED}
     return {"started": False, "busy": False, "error": _ROOM_SETUP_CANT_RESTART}
 
 

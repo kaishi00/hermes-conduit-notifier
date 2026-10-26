@@ -707,6 +707,12 @@ def _setup_rooms(args: argparse.Namespace, home: Path) -> int:
     others = [_printable(choice["label"]) for choice in state["choices"] if choice["id"] not in state["ceiling"]]
     if others:
         print(f"  Others you can add with --ceiling: {', '.join(others)}.")
+    if ceiling is not None and "ceiling" in changes \
+            and "ceiling" not in room_setup.state(hermes, home, profile)["changes"]:
+        # A ceiling the setup saved before: each room pins its members'
+        # tools when it starts (designs/cross-owner-agents, decision 13).
+        print(f"- Profile {profile}'s agent then stops answering in rooms already started with other people's "
+              "agents, which hold it to the tools it had when they started. New rooms use these.")
     print("- Tools added later (a plugin, an MCP server, a Hermes update) stay out of rooms until you add them here.")
     if "approvals" in state["needs"]:
         print("- Approvals: off becomes manual, since rooms need manual or smart approvals.")
