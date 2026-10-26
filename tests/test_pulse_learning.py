@@ -11,6 +11,7 @@ from test_pulse import ROOT, SID, _load, cli, control, pulse, store
 from test_pulse_followup import CHAT, _iso, check_now, followup, live, llm_saying, logged, promise, tell  # noqa: F401
 
 learning = _load("conduit_push.pulse_learning", ROOT / "pulse_learning.py")
+prefs = _load("conduit_push.pulse_prefs", ROOT / "pulse_prefs.py")
 
 
 def brief_later(live):
@@ -50,16 +51,25 @@ def test_a_delivered_follow_up_becomes_a_card_linked_to_its_chat(live):
         live.store.add_card({"kind": "followup", "level": "push", "created_at": 1, "rating) VALUES(1); --": 1})
 
 
-def test_two_thumbs_down_move_follow_ups_to_the_screen_and_two_up_bring_them_back(live):
+def test_thumbs_teach_without_setting_a_level(live):
+    """Thumbs are signals (pulse_prefs), not steps on the ladder: two down
+    on a chat's follow-ups leave the level the user set, but that chat's
+    next one waits for the morning brief instead of a push. Turned up, the
+    next one is a push again: a new rating replaces the old one's signal."""
+    brief_later(live)
     first, second = told_card(live), told_card(live, "The build failed.")
     assert control.rate(live.store, first["id"], "down") == []
-    [lesson] = control.rate(live.store, second["id"], "down")
-    assert lesson["what"] == "level" and lesson["value"] == "screen" and "2 thumbs down" in lesson["text"]
-    assert learning.level(live.store, "followup") == "screen"
-    # Changing a rating counts only the change: down to up on the same card is +2.
-    [back] = control.rate(live.store, second["id"], "up")
-    assert back["value"] == "push"
-    assert learning.level(live.store, "followup") == "push"
+    assert control.rate(live.store, second["id"], "down") == []
+    assert learning.level(live.store, "followup") == "push" and learning.learned(live.store) == []
+    sent = len(live.sent())
+    tell(live, "The tests passed.")
+    pulse.tick()
+    assert len(live.sent()) == sent and live.store.cards()[0]["level"] == "brief"
+    control.rate(live.store, first["id"], "up")
+    control.rate(live.store, second["id"], "up")
+    tell(live, "The release is out.")
+    pulse.tick()
+    assert len(live.sent()) == sent + 1
 
 
 def test_rating_the_same_way_again_counts_once(live):
@@ -487,8 +497,7 @@ def test_held_cards_older_than_a_month_can_be_pruned(live):
 def test_two_not_relevant_ratings_from_one_chat_make_one_rule(live):
     first, second = told_card(live), told_card(live, "Another one.")
     control.rate(live.store, first["id"], "down", "not_relevant")
-    made = control.rate(live.store, second["id"], "down", "not_relevant")
-    assert [lesson["what"] for lesson in made] == ["level"]  # two downs step the ladder; no second rule
+    assert control.rate(live.store, second["id"], "down", "not_relevant") == []  # the chat has its rule
     assert len(learning.rules(live.store, "followup")) == 1
 
 
@@ -510,29 +519,67 @@ def test_a_level_already_in_force_adds_no_second_lesson_even_past_the_early_chec
     assert live.store.add_lesson(dict(row, value="push"), changes_from="push")
     assert live.store.add_lesson(dict(row, value="push"), changes_from="push") is None
     assert [lesson["value"] for lesson in live.store.lessons("followup", learning.LEVEL)] == ["screen", "push"]
-    # A step worked out from "push" isn't laid over a move to "brief" made meanwhile.
-    assert live.store.add_lesson(dict(row, value="brief"), changes_from="push")
-    assert live.store.add_lesson(dict(row, value="screen"), changes_from="push", expect="push") is None
-    assert learning.level(live.store, "followup") == "brief"
+    assert learning.level(live.store, "followup") == "push"
 
 
-def test_a_step_refused_over_a_move_made_meanwhile_steps_from_the_new_level(live, monkeypatch):
-    first, second = told_card(live), told_card(live, "Another one.")
+def test_the_two_thumb_steps_from_before_learning_are_retired_once(live):
+    """Before learning, two net thumbs moved a kind a step along the ladder
+    as a lesson. Those thumbs are signals now, so a store from before has
+    its steps undone once, as its ratings become signals, and the old
+    running score goes; a level the user set stays."""
+    first, second = told_card(live), told_card(live, "The build failed.")
     control.rate(live.store, first["id"], "down")
-    real = live.store.swap
-    row = {"kind": "followup", "what": learning.LEVEL, "value": "screen", "profile": "", "chat_id": "",
-           "card_id": None, "cause": "set", "created_at": 2.0}
+    control.rate(live.store, second["id"], "down")
+    user = {"kind": "followup", "what": learning.LEVEL, "value": "screen", "profile": "", "chat_id": "",
+            "card_id": None, "cause": "set", "created_at": time.time() - 60}
+    assert live.store.add_lesson(user)
+    assert live.store.add_lesson(dict(user, value="brief", card_id=second["id"], cause="2 thumbs down",
+                                      created_at=time.time()))
+    live.store.set(store.OLD_SCORES, {"followup": -2})
+    with sqlite3.connect(live.store.path) as conn:  # as the store was before signals
+        conn.execute("DELETE FROM signals")
+        conn.execute("DELETE FROM settings WHERE key=?", (store.SIGNALS_BACKFILLED,))
+    reopened = store.open_store(live.home)
+    assert learning.level(reopened, "followup") == "screen"
+    assert [lesson["cause"] for lesson in learning.learned(reopened)] == ["set"]
+    assert reopened.get(store.OLD_SCORES) is None
+    assert sorted((row["card_id"], row["what"], row["useful"]) for row in reopened.signals()) == [
+        (first["id"], "thumb", 0.0), (second["id"], "thumb", 0.0)]
+    # Once: opening it again changes nothing.
+    control.set_level(reopened, "followup", "push")
+    again = store.open_store(live.home)
+    assert learning.level(again, "followup") == "push" and len(again.signals()) == 2
 
-    def swap(key, old, new):  # another writer moves the level just as the thumbs are spent
-        if key == learning.SCORES:
-            monkeypatch.setattr(live.store, "swap", real)
-            assert live.store.add_lesson(row)
-        return real(key, old, new)
 
-    monkeypatch.setattr(live.store, "swap", swap)
-    made = control.rate(live.store, second["id"], "down")
-    assert learning.level(live.store, "followup") == "brief"
-    assert [lesson["what"] for lesson in made] == ["level"]
+def test_a_rating_is_a_signal_and_a_new_rating_replaces_it(live):
+    card = told_card(live)
+    control.rate(live.store, card["id"], "down")
+    [row] = live.store.signals()
+    assert (row["card_id"], row["what"], row["useful"], row["weight"]) == (card["id"], "thumb", 0.0, 1.0)
+    assert (row["kind"], row["place"], row["band"]) == ("followup", "chat::work", "undated")
+    assert row["pushed"] == card["created_at"]  # it came up as a push
+    control.rate(live.store, card["id"], "up")
+    assert [(row["what"], row["useful"]) for row in live.store.signals()] == [("thumb", 1.0)]
+
+
+def test_do_it_and_done_are_signals_by_how_far_they_got(live):
+    card = told_card(live)
+    now = time.time()
+    live.store.act_on_card(card["id"], now=now, check_at=now + 1800)
+    assert [(row["what"], row["weight"]) for row in live.store.signals()] == [("act", prefs.ACT_OPENED)]
+    live.store.decide_act(card["id"], acted_at=now, check_at=None, checks=1, outcome="not done", why="",
+                          stage=prefs.ACT_SENT)
+    live.store.act_on_card(card["id"], now=now + 60, check_at=now + 1860)  # again: it keeps how far it got
+    [act] = live.store.signals()
+    assert (act["weight"], act["at"]) == (prefs.ACT_SENT, now)
+    assert control.done(live.store, card["id"]) is True
+    assert {row["what"]: row["weight"] for row in live.store.signals()} == {"act": prefs.ACT_SENT,
+                                                                          "done": prefs.DONE_WEIGHT}
+    [vote] = prefs.votes(live.store.signals())  # of Do it and Done, only the stronger counts
+    assert (vote.useful, vote.weight) == (prefs.ACT_SENT, prefs.ACT_SENT)
+    # Undo takes Done's signal back.
+    assert control.done(live.store, card["id"], False) is True
+    assert [row["what"] for row in live.store.signals()] == ["act"]
 
 
 def test_ratings_are_refused_while_pulse_is_off(live):
@@ -688,7 +735,7 @@ def test_a_report_becomes_one_card_per_item(live, monkeypatch):
     assert len(live.store.cards()) == 3  # once
     entry = next(c for c in control.feed(live.store)["cards"] if c["id"] == owed["id"])
     assert entry["topic"] == "promise"
-    # Thumbs on an item: no ladder, but the report counts it, and a remembered
+    # Thumbs on an item are signals the report counts too, and a remembered
     # thing rated down stays out of later reports.
     assert control.rate(live.store, date["id"], "up") == []
     assert control.rate(live.store, owed["id"], "down") == []
@@ -698,18 +745,19 @@ def test_a_report_becomes_one_card_per_item(live, monkeypatch):
     assert live.store.item(item_id)["status"] == "done"
     # Nothing remembered behind it: Done marks the card alone.
     assert control.done(live.store, date["id"]) is True and live.store.done_marks([date["id"]])
-    # A reason has nothing to move on an item's card.
-    with pytest.raises(control.Refused):
-        control.rate(live.store, odd["id"], "down", "too_late")
+    # A reason on an item's card teaches its kind, as one on a follow-up does.
+    [sooner] = control.rate(live.store, odd["id"], "down", "too_late")
+    assert (sooner["what"], sooner["kind"]) == ("sooner", "other")
     # Typed ratings of a split report aren't read: an item counts once.
+    counts = {"date": (1, 0), "promise": (0, 1), "other": (0, 1)}
     assert live.store.get(store.SPLIT_REPORTS) == [attempt["attempt_id"]]
     live.db.message("user", "2 yes")
     monkeypatch.setattr(pulse, "_last_ratings", 0.0)
     pulse._collect_ratings(live.store, live.home, time.time())
-    assert pulse.report.rating_counts(live.store) == {"date": (1, 0), "promise": (0, 1)}
+    assert pulse.report.rating_counts(live.store) == counts
     # Even a rating typed before the cards landed doesn't count again.
     live.store.set_ratings(attempt["attempt_id"], "[]", '[[2, "promise", true]]')
-    assert pulse.report.rating_counts(live.store) == {"date": (1, 0), "promise": (0, 1)}
+    assert pulse.report.rating_counts(live.store) == counts
 
 
 def test_report_item_cards_and_their_mark_land_together(live, monkeypatch):
@@ -922,6 +970,8 @@ def test_do_it_marks_the_card_done_once_the_chat_shows_it_got_done(live):
     [entry] = [c for c in control.feed(live.store)["cards"] if c["id"] == card["id"]]
     assert entry["done_at"] is not None and entry["done_by"] == "pulse"
     assert live.store.act(card["id"])["outcome"] == "done"
+    # What Pulse learns: Do it got it done (Pulse's mark is no Done from the user).
+    assert {row["what"]: row["weight"] for row in live.store.signals()} == {"act": prefs.ACT_DONE}
     # Undo works on what Pulse marked too.
     assert control.done(live.store, card["id"], False) is True
     assert live.store.done_marks([card["id"]]) == {}
@@ -1271,6 +1321,7 @@ def test_do_it_left_unsent_gives_up_without_a_model_call(live):
     said = llm_saying(done=True, why="")
     run_acts(live, said, acted_at + followup.ACT_GIVE_UP_S + 1)
     assert said.calls == [] and live.store.act(card["id"])["outcome"] == "no answer"
+    assert [row["weight"] for row in live.store.signals()] == [prefs.ACT_OPENED]  # opened, nothing sent
 
 
 def test_do_it_on_a_done_card_books_nothing_and_done_stops_a_booked_check(live):

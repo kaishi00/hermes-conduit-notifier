@@ -16349,6 +16349,10 @@ ROUTE_CAPABILITIES = (
     # PUT /pulse takes "quiet_days" and "quiet_until" (quiet times: weekends,
     # a vacation, quiet for today), and the state and feed say when it's quiet.
     "pulse_quiet",
+    # Pulse learns from thumbs, Do it and Done what to bring up and how
+    # loudly (pulse_prefs); a kind's level is the loudest it gets, and
+    # thumbs no longer move it.
+    "pulse_learns",
     "present-v1",
     "health-sync",
     "voice-tools",

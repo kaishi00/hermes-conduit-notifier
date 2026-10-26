@@ -585,6 +585,7 @@ class Gathered:
     shown: list[dict]  # the remembered items it lists, in order
     resting: list[tuple[dict, str]]  # the remembered items it keeps out, and why
     chats: dict[str, tuple[str, str]]  # with ``keyed``: chat key ("c1") -> (profile, chat id)
+    zone: Optional[tzinfo] = None  # the user's time zone, for dates the model gives
 
 
 def build(home: Path, pulse_store: store.PulseStore, *, home_chat_id: str, now: float,
@@ -596,11 +597,12 @@ def build(home: Path, pulse_store: store.PulseStore, *, home_chat_id: str, now: 
 
 
 def gather(home: Path, pulse_store: store.PulseStore, *, home_chat_id: str, now: float, room: Optional[int] = None,
-           extra: str = "", keyed: bool = False) -> Gathered:
+           extra: str = "", keyed: bool = False, ratings: bool = True) -> Gathered:
     """What a report reads, in at most ``room`` characters (by default what
     the report turn's message leaves its context). ``extra`` is one more
     section, after what Pulse remembers; ``keyed`` gives each chat a key
-    (recent_chats)."""
+    (recent_chats). Without ``ratings`` it leaves out how the user rated
+    earlier reports: the candidate list weighs those in code."""
     room = report_room(note(pulse_store)) if room is None else room
     since = window_start(pulse_store, now)
     phone, zone_name = phone_context(home, now)
@@ -615,7 +617,8 @@ def gather(home: Path, pulse_store: store.PulseStore, *, home_chat_id: str, now:
         items, resting = remembered_items(pulse_store, now)
         listed, shown = remembered_lines(items, zone)
     later = later_lines(home, shown, home_chat_id=home_chat_id, zone=zone) if shown else ""
-    sections = [header, ratings_section(pulse_store), listed, later, extra, phone, inbox_context(home, since),
+    sections = [header, ratings_section(pulse_store) if ratings else "", listed, later, extra, phone,
+                inbox_context(home, since),
                 evidence.background(home, zone),
                 cron_jobs(home, others), failed_calls(pulse_store, since, zone), memory_files(home, others)]
     sections = [section for section in sections if section]
@@ -644,7 +647,7 @@ def gather(home: Path, pulse_store: store.PulseStore, *, home_chat_id: str, now:
     if len(rest) > room:
         rest = rest[:max(0, room - 40)] + "\n(cut here: no room in this report)"
         shown = [item for item in shown if f"\n#{item['id']} [" in rest]  # a cut can take the last of them
-    return Gathered(rest + "\n\n" + chats, start, shown, resting, keys or {})
+    return Gathered(rest + "\n\n" + chats, start, shown, resting, keys or {}, zone)
 
 
 def report_room(note: str = "") -> int:

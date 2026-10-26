@@ -301,6 +301,32 @@ def test_a_failed_follow_up_is_tried_again_then_marked_undelivered(live, monkeyp
     assert live.store.item(item_id)["status"] == "expired"
 
 
+def test_a_follow_up_is_as_loud_as_what_was_learned_allows():
+    prefs = _load("conduit_push.pulse_prefs", ROOT / "pulse_prefs.py")
+    now = 1_792_454_400.0
+
+    def thumb(card, at, useful, chat):
+        return {"card_id": card, "what": prefs.THUMB, "at": at, "useful": useful, "weight": 1.0,
+                "kind": followup.FOLLOWUP, "place": prefs.place("", chat), "band": prefs.UNDATED, "pushed": None}
+
+    def level(learned, nudge="balanced", ceiling="push", kind=followup.PROMISE, due=None, chat="c1"):
+        item = {"kind": kind, "profile": "", "chat_id": chat, "due_at": due}
+        return followup.item_level(item, learned, nudge=nudge, ceiling=ceiling, now=now)
+
+    # Nothing learned: it's news now, so it pushes at every nudge level, as follow-ups did before.
+    assert [level(prefs.EMPTY, nudge) for nudge in ("gentle", "balanced", "eager")] == ["push"] * 3
+    # What the user set is the loudest it gets.
+    assert (level(prefs.EMPTY, ceiling="screen"), level(prefs.EMPTY, ceiling="brief")) == ("screen", "brief")
+    # Three thumbs down in a row on follow-ups from one chat, after a month of thumbs up on others:
+    # that chat's wait for the morning brief, unless one is due (a floor: the screen at least).
+    learned = prefs.learn([thumb(100 + n, now - (30 - n) * 86400, 1.0, f"other{n % 3}") for n in range(12)]
+                          + [thumb(n, now - (3 - n) * 3600, 0.0, "c1") for n in range(3)], now)
+    assert level(learned) == "brief"
+    assert level(learned, due=now - 60) == "screen"
+    assert level(learned, kind=followup.COMMITMENT, due=now + 3600) == "screen"
+    assert level(learned, nudge="gentle", chat="c2") == "push"
+
+
 def test_follow_ups_off_sends_nothing(live):
     tell(live)
     live.store.set("followups", False)

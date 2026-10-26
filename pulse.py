@@ -58,6 +58,7 @@ from . import pulse_host as host
 from . import pulse_learning as learning
 from . import pulse_ledger as ledger
 from . import pulse_memory as memory
+from . import pulse_prefs as prefs
 from . import pulse_quiet as quiet
 from . import pulse_report as report
 from . import pulse_store as store
@@ -232,27 +233,32 @@ def _run_picks(pulse_store: store.PulseStore, attempt: dict) -> Optional[list[di
     return candidates.picks(rows) if rows else None
 
 
-def _report_lines(attempt: dict, response: Any) -> list[tuple[str, str, Optional[int]]]:
-    """A report turn's items: its candidate list's picks, else its reply's lines."""
+def _pushed_lines(attempt: dict, response: Any) -> list[tuple[str, str, Optional[int]]]:
+    """A report turn's items that go to the phone: its candidate list's picks
+    that came up as a push (pulse_candidates.levels; one journaled before
+    levels were counts as one, as every item rode its report's push then),
+    else its reply's lines, all of them, as before."""
     try:
         picked = _run_picks(open_store(), attempt)
     except Exception:  # noqa: BLE001 — the reply still says them
         logger.debug("conduit_push: Pulse couldn't read the report's picks", exc_info=True)
         picked = None
     if picked is not None:
-        return candidates.lines(picked)
+        return candidates.lines([pick for pick, level in zip(picked, candidates.levels(picked))
+                                 if level in ("push", "")])
     return learning.report_lines(response if isinstance(response, str) else "")
 
 
 def pushes(session_id: str, turn_id: Any, response: Any = None) -> bool:
     """Whether a Pulse turn's reply goes to the phone like any reply: a
     follow-up or the morning brief does (it's news for the user), and so
-    does a report that brought something up (its picks, or ``response``'s
-    items, becoming cards); a probe doesn't."""
+    does a report with something that came up as a push (``_pushed_lines``:
+    a report whose picks all came up quieter lands as cards only); a probe
+    doesn't."""
     attempt = _turn_attempt(session_id, turn_id)
     kind = attempt["kind"] if attempt else ""
     if kind == REPORT:
-        return bool(_report_lines(attempt, response))
+        return bool(_pushed_lines(attempt, response))
     return kind in (FOLLOWUP, BRIEF)
 
 
@@ -263,13 +269,14 @@ PUSH_TITLES = {FOLLOWUP: ("pulse.followup", "Pulse · Follow-up"), BRIEF: ("puls
 
 def push_copy(session_id: str, turn_id: Any, response: Any) -> dict[str, Any]:
     """What a Pulse turn's push says, as push_event takes it: titled by
-    what it is, not by Pulse's hidden chat. A report's body is its items,
-    one after another, without the numbers, kinds and remembered-item refs
-    that are for the cards, and ``count`` says how many there are (two or more)."""
+    what it is, not by Pulse's hidden chat. A report's body is its items
+    that came up as a push (``_pushed_lines``), one after another, without
+    the numbers, kinds and remembered-item refs that are for the cards, and
+    ``count`` says how many there are (two or more)."""
     attempt = _turn_attempt(session_id, turn_id)
     kind = attempt["kind"] if attempt else ""
     response = response if isinstance(response, str) else ""
-    lines = _report_lines(attempt, response) if kind == REPORT else []
+    lines = _pushed_lines(attempt, response) if kind == REPORT else []
     if lines:
         copy = {"title_label": "pulse.noticed", "title": "Pulse noticed something",
                 "body": " · ".join(" ".join(text.split()) for _, text, _ in lines)}
@@ -381,6 +388,7 @@ def tick(now: Optional[float] = None) -> None:
     learning.drop_empty_reports(pulse_store)
     pulse_store.prune_cards(CARDS_KEEP, held_before=now - HELD_DAYS * 86400.0)
     pulse_store.prune_candidates(now - candidates.JOURNAL_DAYS * 86400.0)
+    pulse_store.prune_signals(now - prefs.KEEP_S)
     _maybe_memory(pulse_store, home, now)
     # One new turn per tick: a probe first, then a follow-up, the brief, then the report.
     if not _maybe_probe(pulse_store, home, now) and not _maybe_followup(pulse_store, home, now) \
@@ -439,7 +447,8 @@ def _turn_cards(pulse_store: store.PulseStore, home: Path, changed: list[dict], 
                         kinds=report.KINDS, item_chat_title=lambda item: followup.chat_title(home, item), now=now,
                         attempt=str(attempt), marks=(TURN_CARDS_DONE, store.SPLIT_REPORTS),
                         keep=TURN_CARDS_DONE_KEEP, links=[pick["id"] for pick in picked],
-                        found_in=candidates.found_in(picked), whys=candidates.whys(picked))
+                        found_in=candidates.found_in(picked), whys=candidates.whys(picked),
+                        levels=candidates.levels(picked))
                 else:
                     _mark_turn_card(pulse_store, attempt)
                 continue
@@ -682,12 +691,15 @@ def _report_run(home: Path, chat_id: str, run: dict) -> None:
         pulse_store = open_store(home)
         now = float(run["started_at"])
         zone = report_zone(pulse_store, home, now)
+        # Ratings reach the list through learning (pulse_prefs, in decide), not as text.
         gathered = report.gather(home, pulse_store, home_chat_id=chat_id, now=now, room=candidates.CONTEXT_BUDGET,
-                                 extra=candidates.recent_section(pulse_store, zone, now), keyed=True)
+                                 extra=candidates.recent_section(pulse_store, zone, now), keyed=True, ratings=False)
         route = lent_route(home, chat_id)
+        lessons = candidates.lessons_block(seen=learning.report_lessons(pulse_store, learning.SEEN),
+                                           sooner=learning.report_lessons(pulse_store, learning.SOONER_LESSON))
         rows, tokens = candidates.ask(lambda instructions, text: _memory_llm(
             instructions, text, purpose="pulse report", max_tokens=candidates.REPLY_TOKENS, route=route), gathered,
-            nudge=learning.nudge(pulse_store), note=report.note(pulse_store))
+            nudge=learning.nudge(pulse_store), note=report.note(pulse_store), lessons=lessons)
         candidates.decide(pulse_store, rows, now=now)
         ready = {**run, "state": RUN_READY, "since": gathered.since, "tokens": tokens}
         if not pulse_store.finish_run(REPORT_RUN, run, rows, ready, now=now):

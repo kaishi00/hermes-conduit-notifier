@@ -18,6 +18,8 @@ import time
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
+from . import pulse_prefs as prefs
+
 DB_NAME = "conduit-pulse.db"
 # How long the store waits on another process's write before giving up.
 BUSY_TIMEOUT_S = 5.0
@@ -289,10 +291,39 @@ CREATE TABLE IF NOT EXISTS candidates (
     why TEXT NOT NULL DEFAULT '',
     decision TEXT NOT NULL,
     rank INTEGER,
-    card_id INTEGER
+    card_id INTEGER,
+    -- The user asked to be reminded of it (a found candidate's flag).
+    asked INTEGER,
+    -- How the router saw it (pulse_candidates.route): how soon it was due
+    -- (pulse_prefs.band), where it came from (pulse_prefs.place), its score,
+    -- the biggest part learning played in it (JSON, "" for none), whether it
+    -- was a floor, and the loudness it came up at ("" when it didn't).
+    band TEXT NOT NULL DEFAULT '',
+    place TEXT NOT NULL DEFAULT '',
+    score REAL,
+    factor TEXT NOT NULL DEFAULT '',
+    floor INTEGER NOT NULL DEFAULT 0,
+    level TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS candidates_run ON candidates(run_id);
 CREATE INDEX IF NOT EXISTS candidates_created ON candidates(created_at);
+-- What the user did with cards (pulse_prefs): one row per card and kind of
+-- signal (a thumb, Do it by how far it got, Done), with the card's kind,
+-- place and band as it came up, and when it was pushed if it was. Pulse's
+-- learning is recomputed from these, so taking one back is exact.
+CREATE TABLE IF NOT EXISTS signals (
+    card_id INTEGER NOT NULL,
+    what TEXT NOT NULL,
+    at REAL NOT NULL,
+    useful REAL NOT NULL DEFAULT 0,
+    weight REAL NOT NULL DEFAULT 0,
+    kind TEXT NOT NULL DEFAULT '',
+    place TEXT NOT NULL DEFAULT '',
+    band TEXT NOT NULL DEFAULT '',
+    pushed REAL,
+    PRIMARY KEY (card_id, what)
+);
+CREATE INDEX IF NOT EXISTS signals_at ON signals(at);
 """
 # Where memory has read each chat to: ``watermarks`` for chats as they
 # happen, ``backfill_marks`` for a backfill of older history (same shape, plus
@@ -321,7 +352,11 @@ CARD_COLUMNS = ("kind", "item_id", "level", "title", "quote", "news", "why", "pr
 # Columns a table gained after stores existed, added to a store from before.
 _ADDED_COLUMNS = (("cards", "topic", "TEXT NOT NULL DEFAULT ''"), ("cards", "brief", "TEXT NOT NULL DEFAULT ''"),
                   ("cards", "dismissed_at", "REAL"), ("cards", "rest_until", "REAL"),
-                  ("candidates", "why", "TEXT NOT NULL DEFAULT ''"))
+                  ("candidates", "why", "TEXT NOT NULL DEFAULT ''"), ("candidates", "asked", "INTEGER"),
+                  ("candidates", "band", "TEXT NOT NULL DEFAULT ''"), ("candidates", "place", "TEXT NOT NULL DEFAULT ''"),
+                  ("candidates", "score", "REAL"), ("candidates", "factor", "TEXT NOT NULL DEFAULT ''"),
+                  ("candidates", "floor", "INTEGER NOT NULL DEFAULT 0"),
+                  ("candidates", "level", "TEXT NOT NULL DEFAULT ''"))
 # What report cards said for Why? before a candidate's reason did (an item's card,
 # never shown; a whole report's card), and the setting that says a store has
 # cleared them.
@@ -330,7 +365,19 @@ _STOCK_REPORT_WHY = "Your Pulse report: what Hermes saw in your chats since the 
 STOCK_WHY_CLEARED = "stock_noticed_why_cleared"
 LESSON_COLUMNS = ("kind", "what", "value", "profile", "chat_id", "card_id", "cause", "created_at")
 CANDIDATE_COLUMNS = ("origin", "item_id", "kind", "profile", "chat_id", "source", "area", "due_at", "actionable",
-                     "value", "bring_up", "skip", "text", "why", "decision", "rank")
+                     "value", "bring_up", "skip", "text", "why", "decision", "rank", "asked", "band", "place",
+                     "score", "factor", "floor", "level")
+# The setting that says a store's signals were filled in from the ratings,
+# Do its and Dones it had before signals were kept, and its two-thumb steps
+# retired: before learning, two net thumbs moved a kind a step along the
+# loudness ladder as a lesson with one of STEPPED_CAUSES; those thumbs are
+# signals now, so the steps are undone once, and the old running score
+# (OLD_SCORES) goes.
+SIGNALS_BACKFILLED = "signals_backfilled"
+STEPPED_CAUSES = ("2 thumbs up", "2 thumbs down")
+OLD_SCORES = "rating_scores"
+# Who closed a card's item when the user marked it Done (pulse_learning.DONE_BY's "user").
+USER = "user"
 
 
 def _listed(conn: Any, key: str) -> list[str]:
@@ -388,6 +435,22 @@ class PulseStore:
                         conn.execute("UPDATE cards SET why='' WHERE kind=? AND why=?", (NOTICED, _STOCK_NOTICED_WHY))
                         conn.execute("UPDATE cards SET why='' WHERE kind='report' AND why=?", (_STOCK_REPORT_WHY,))
                         conn.execute("INSERT INTO settings(key, value_json) VALUES(?, 'true')", (STOCK_WHY_CLEARED,))
+                    conn.execute("COMMIT")
+                except BaseException:
+                    conn.execute("ROLLBACK")
+                    raise
+            # Signals from before they were kept: each card's rating, Do it and Done,
+            # once, so what Pulse learns starts from what the store already knows.
+            if conn.execute("SELECT 1 FROM settings WHERE key=?", (SIGNALS_BACKFILLED,)).fetchone() is None:
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    if conn.execute("SELECT 1 FROM settings WHERE key=?", (SIGNALS_BACKFILLED,)).fetchone() is None:
+                        _backfill_signals(conn)
+                        conn.execute(f"UPDATE lessons SET undone_at=? WHERE what='level' AND undone_at IS NULL "
+                                     f"AND cause IN ({', '.join('?' * len(STEPPED_CAUSES))})",
+                                     (time.time(), *STEPPED_CAUSES))
+                        conn.execute("DELETE FROM settings WHERE key=?", (OLD_SCORES,))
+                        conn.execute("INSERT INTO settings(key, value_json) VALUES(?, 'true')", (SIGNALS_BACKFILLED,))
                     conn.execute("COMMIT")
                 except BaseException:
                     conn.execute("ROLLBACK")
@@ -1002,6 +1065,8 @@ class PulseStore:
                 conn.execute("UPDATE followups SET next_check_at=NULL, decision='closed', updated_at=? "
                              "WHERE item_id=? AND next_check_at IS NOT NULL", (now, item_id))
             conn.execute("UPDATE cards SET seen_at=COALESCE(seen_at, ?) WHERE id=?", (now, card_id))
+            if by == USER:
+                _put_signal(conn, card_id, prefs.DONE, at=now, useful=1.0, weight=prefs.DONE_WEIGHT)
             conn.execute("COMMIT")
         return True
 
@@ -1016,6 +1081,7 @@ class PulseStore:
                 conn.execute("ROLLBACK")
                 return False
             conn.execute("DELETE FROM card_done WHERE card_id=?", (card_id,))
+            conn.execute("DELETE FROM signals WHERE card_id=? AND what=?", (card_id, prefs.DONE))
             try:
                 prior = json.loads(row["prior_json"])
             except ValueError:
@@ -1047,11 +1113,19 @@ class PulseStore:
 
     def act_on_card(self, card_id: int, *, now: float, check_at: float) -> None:
         """Do it on a card: a check of its chat at ``check_at`` (a second Do it
-        starts over)."""
+        starts over), and its signal, opened (one that got further keeps
+        how far it got)."""
         with _lock, self._connect() as conn:
-            conn.execute("INSERT INTO card_acts(card_id, acted_at, check_at) VALUES(?,?,?) "
-                         "ON CONFLICT(card_id) DO UPDATE SET acted_at=excluded.acted_at, check_at=excluded.check_at, "
-                         "checks=0, outcome='', why=''", (card_id, now, check_at))
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                conn.execute("INSERT INTO card_acts(card_id, acted_at, check_at) VALUES(?,?,?) "
+                             "ON CONFLICT(card_id) DO UPDATE SET acted_at=excluded.acted_at, "
+                             "check_at=excluded.check_at, checks=0, outcome='', why=''", (card_id, now, check_at))
+                _put_signal(conn, card_id, prefs.ACT, at=now, useful=1.0, weight=prefs.ACT_OPENED)
+                conn.execute("COMMIT")
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
 
     def due_acts(self, now: float) -> list[dict]:
         with self._connect() as conn:
@@ -1065,11 +1139,22 @@ class PulseStore:
         return dict(row) if row else None
 
     def decide_act(self, card_id: int, *, acted_at: float, check_at: Optional[float], checks: int, outcome: str,
-                   why: str) -> None:
-        """Only while the act is the one read (a new Do it meanwhile starts over)."""
+                   why: str, stage: Optional[float] = None) -> None:
+        """Only while the act is the one read (a new Do it meanwhile starts
+        over). ``stage``: how far Do it got (pulse_prefs.ACT_SENT, ACT_DONE),
+        raised on its signal, never lowered."""
         with _lock, self._connect() as conn:
-            conn.execute("UPDATE card_acts SET check_at=?, checks=?, outcome=?, why=? WHERE card_id=? AND acted_at=?",
-                         (check_at, checks, outcome, why, card_id, acted_at))
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                changed = conn.execute("UPDATE card_acts SET check_at=?, checks=?, outcome=?, why=? "
+                                       "WHERE card_id=? AND acted_at=?",
+                                       (check_at, checks, outcome, why, card_id, acted_at)).rowcount
+                if changed and stage is not None:
+                    _put_signal(conn, card_id, prefs.ACT, at=acted_at, useful=1.0, weight=stage)
+                conn.execute("COMMIT")
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
 
     def brief_cards(self, ids: list[int], now: float, brief: str = "") -> None:
         """Stamps held cards as gone out in the brief ``brief``; one put away
@@ -1160,21 +1245,30 @@ class PulseStore:
 
     def rate_card(self, card: dict, *, rating: str, reason: str, now: float) -> bool:
         """Rates ``card`` only if its rating is still the one read (another
-        process may have rated it since); whether it did."""
+        process may have rated it since), with its thumb signal in the same
+        write; whether it did."""
         with _lock, self._connect() as conn:
-            return bool(conn.execute(
-                "UPDATE cards SET rating=?, reason=?, rated_at=?, seen_at=COALESCE(seen_at, ?) "
-                "WHERE id=? AND rating=? AND reason=?",
-                (rating, reason, now, now, card["id"], card["rating"], card["reason"])).rowcount)
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                rated = bool(conn.execute(
+                    "UPDATE cards SET rating=?, reason=?, rated_at=?, seen_at=COALESCE(seen_at, ?) "
+                    "WHERE id=? AND rating=? AND reason=?",
+                    (rating, reason, now, now, card["id"], card["rating"], card["reason"])).rowcount)
+                if rated:
+                    _put_signal(conn, card["id"], prefs.THUMB, at=now, useful=1.0 if rating == "up" else 0.0,
+                                weight=1.0)
+                conn.execute("COMMIT")
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+        return rated
 
     def add_lesson(self, row: dict[str, Any], *, unless: Sequence[str] = (), limit: int = 0,
-                   changes_from: Optional[str] = None, expect: Optional[str] = None) -> Optional[int]:
+                   changes_from: Optional[str] = None) -> Optional[int]:
         """Adds a lesson; with ``limit``, only while fewer than that many in
         force match its kind, what and the ``unless`` columns; with
         ``changes_from`` (the value when none is in force), only when the
-        newest in force of its kind and what has another value (and, with
-        ``expect``, has that one: a step from it isn't laid over a move
-        made meanwhile). All are
+        newest in force of its kind and what has another value. All are
         checked in the same transaction, so two writers at once can't both
         add one."""
         _check_columns(row, LESSON_COLUMNS)
@@ -1193,7 +1287,7 @@ class PulseStore:
                 newest = conn.execute("SELECT value FROM lessons WHERE undone_at IS NULL AND kind=? AND what=? "
                                       "ORDER BY id DESC LIMIT 1", (row["kind"], row["what"])).fetchone()
                 current = newest["value"] if newest else changes_from
-                if current == row["value"] or (expect is not None and current != expect):
+                if current == row["value"]:
                     conn.execute("ROLLBACK")
                     return None
             columns = ", ".join(row)
@@ -1260,6 +1354,14 @@ class PulseStore:
                 raise
         return True
 
+    def card_candidate(self, card_id: int) -> Optional[dict]:
+        """The journaled candidate a report card came from, while the journal
+        keeps it; None for one from before candidate lists, or pruned."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM candidates WHERE card_id=? ORDER BY id DESC LIMIT 1",
+                               (card_id,)).fetchone()
+        return dict(row) if row else None
+
     def run_candidates(self, run_id: str) -> list[dict]:
         """A run's candidates: its picks in their order, then the rest as listed."""
         with self._connect() as conn:
@@ -1272,6 +1374,31 @@ class PulseStore:
             return [row["run_id"] for row in conn.execute(
                 "SELECT run_id FROM candidates GROUP BY run_id ORDER BY MAX(id) DESC LIMIT ?", (limit,))]
 
+    # What the user did with cards (pulse_prefs) ------------------------------
+
+    def signals(self, since: float = 0.0) -> list[dict]:
+        """The signals from ``since`` on, oldest first."""
+        with self._connect() as conn:
+            return [dict(row) for row in conn.execute("SELECT * FROM signals WHERE at >= ? ORDER BY at, card_id, what",
+                                                      (since,))]
+
+    def forget_signals(self, scope: str, value: str) -> int:
+        """Drops the signals whose ``scope`` (kind, place or band) is
+        ``value``, or every one for scope "all": what Pulse learned from
+        them goes. How many went."""
+        if scope == "all":
+            query, args = "DELETE FROM signals", ()
+        elif scope in prefs.STORED:
+            query, args = f"DELETE FROM signals WHERE {scope}=?", (value,)  # a name from FEATURES
+        else:
+            raise ValueError(f"unknown scope {scope!r}")
+        with _lock, self._connect() as conn:
+            return conn.execute(query, args).rowcount
+
+    def prune_signals(self, before: float) -> int:
+        with _lock, self._connect() as conn:
+            return conn.execute("DELETE FROM signals WHERE at < ?", (before,)).rowcount
+
     def prune_candidates(self, before: float) -> int:
         """Drops the candidates journaled before ``before``; how many went."""
         with _lock, self._connect() as conn:
@@ -1282,6 +1409,62 @@ class PulseStore:
             rows = conn.execute("SELECT kind, COUNT(*) AS n FROM items WHERE status='open' AND superseded_at IS NULL "
                                 "GROUP BY kind").fetchall()
         return {row["kind"]: row["n"] for row in rows}
+
+
+def _signal_attrs(conn: sqlite3.Connection, card_id: int) -> Optional[dict[str, Any]]:
+    """What a card's signals carry: its kind, place and band as it came up
+    (from its candidate when the journal still has it), and when it was
+    pushed, if it was. None for a card that takes none (a report or brief
+    as a whole)."""
+    card = conn.execute("SELECT * FROM cards WHERE id=?", (card_id,)).fetchone()
+    if card is None or card["kind"] not in ("followup", NOTICED):
+        return None
+    pushed = float(card["created_at"]) if card["level"] == "push" else None
+    found = conn.execute("SELECT * FROM candidates WHERE card_id=? ORDER BY id DESC LIMIT 1", (card_id,)).fetchone()
+    if found is not None:
+        return {"kind": found["kind"], "pushed": pushed,
+                "place": found["place"] or prefs.place(found["profile"], found["chat_id"], found["area"], found["source"]),
+                "band": found["band"] or prefs.band(found["due_at"], float(found["created_at"]))}
+    item = conn.execute("SELECT due_at FROM items WHERE id=?", (card["item_id"],)).fetchone() \
+        if card["item_id"] is not None else None
+    band = prefs.band(item["due_at"], float(card["created_at"])) if item is not None else ""
+    if card["kind"] == "followup":
+        return {"kind": "followup", "place": prefs.place(card["profile"], card["chat_id"]), "band": band,
+                "pushed": pushed}
+    # A report item from before candidate lists: its chat only when it's about something remembered.
+    return {"kind": card["topic"] or "other", "band": band, "pushed": pushed,
+            "place": prefs.place(card["profile"], card["chat_id"]) if card["item_id"] is not None else ""}
+
+
+def _put_signal(conn: sqlite3.Connection, card_id: int, what: str, *, at: float, useful: float,
+                weight: float) -> None:
+    """Keeps a card's signal of one kind: a thumb or Done replaces the one
+    before; Do it keeps the furthest it got and when it was first done.
+    Nothing for a card that takes none."""
+    attrs = _signal_attrs(conn, card_id)
+    if attrs is None:
+        return
+    keep = ("at=MIN(at, excluded.at), weight=MAX(weight, excluded.weight)" if what == prefs.ACT
+            else "at=excluded.at, useful=excluded.useful, weight=excluded.weight")
+    conn.execute("INSERT INTO signals(card_id, what, at, useful, weight, kind, place, band, pushed) "
+                 f"VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(card_id, what) DO UPDATE SET {keep}",
+                 (card_id, what, at, useful, weight, attrs["kind"], attrs["place"], attrs["band"], attrs["pushed"]))
+
+
+def _backfill_signals(conn: sqlite3.Connection) -> None:
+    """The signals a store had before they were kept: every rated card's
+    thumb, every Do it by how far its check got, every Done the user gave."""
+    for card in conn.execute("SELECT id, rating, rated_at, created_at FROM cards WHERE rating IN ('up', 'down') "
+                             "AND kind IN ('followup', ?)", (NOTICED,)).fetchall():
+        _put_signal(conn, card["id"], prefs.THUMB, at=float(card["rated_at"] or card["created_at"]),
+                    useful=1.0 if card["rating"] == "up" else 0.0, weight=1.0)
+    for act in conn.execute("SELECT * FROM card_acts").fetchall():
+        stage = (prefs.ACT_DONE if act["outcome"] == "done"
+                 else prefs.ACT_SENT if act["checks"] or act["why"] == "the chat kept going" else prefs.ACT_OPENED)
+        _put_signal(conn, act["card_id"], prefs.ACT, at=float(act["acted_at"]), useful=1.0, weight=stage)
+    for done in conn.execute("SELECT card_id, done_at FROM card_done WHERE done_by=?", (USER,)).fetchall():
+        _put_signal(conn, done["card_id"], prefs.DONE, at=float(done["done_at"]), useful=1.0,
+                    weight=prefs.DONE_WEIGHT)
 
 
 def _insert_candidates(conn: sqlite3.Connection, run_id: str, rows: Sequence[dict[str, Any]], now: float) -> list[int]:

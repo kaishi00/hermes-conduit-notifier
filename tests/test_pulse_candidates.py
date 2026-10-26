@@ -18,6 +18,7 @@ from test_pulse_followup import CHAT, commitment, fake_redactor, live  # noqa: F
 
 candidates = _load("conduit_push.pulse_candidates", ROOT / "pulse_candidates.py")
 learning = _load("conduit_push.pulse_learning", ROOT / "pulse_learning.py")
+prefs = _load("conduit_push.pulse_prefs", ROOT / "pulse_prefs.py")
 
 DAY = 1_792_454_400.0  # 2026-10-20 00:00 UTC
 SINCE = "Mon 19 Oct 08:00"
@@ -123,7 +124,7 @@ def test_every_remembered_item_shown_is_answered_for_or_marked_unanswered():
     owed, covered, _, rested = rows
     assert owed == {"origin": "memory", "item_id": 2, "kind": "promise", "profile": "", "chat_id": CHAT,
                     "source": "chat", "area": "", "due_at": DAY, "actionable": True, "value": 4, "bring_up": True,
-                    "skip": "", "text": "I still owe you the build check", "why": ""}
+                    "skip": "", "text": "I still owe you the build check", "why": "", "asked": None}
     assert (covered["skip"], covered["value"], covered["text"]) == ("covered", 2, "The user will do thing 1.")
     assert rested["skip"] == report.RATED
 
@@ -182,10 +183,57 @@ def test_the_router_keeps_the_models_picks_most_useful_first_up_to_five():
             candidate(value=2), candidate(value=1),
             candidate(origin="memory", value=5, item_id=9, decision=candidates.RESTING)]
     assert candidates.route(rows) is rows
+    # A pick the model gave no value counts as a 3.
     assert [(row["decision"], row["rank"]) for row in rows] == [
         ("surfaced", 4), ("skipped", None), ("not_picked", None), ("surfaced", 3), ("surfaced", 2),
-        ("surfaced", 1), ("over_limit", None), ("surfaced", 5), ("over_limit", None), ("resting", None)]
-    assert [row["value"] for row in candidates.picks(rows)] == [4, 4, 4, 3, 2]
+        ("surfaced", 1), ("surfaced", 5), ("over_limit", None), ("over_limit", None), ("resting", None)]
+    assert [row["value"] for row in candidates.picks(rows)] == [4, 4, 4, 3, None]
+
+
+def _thumb(card, at, useful, chat):
+    return {"card_id": card, "what": prefs.THUMB, "at": at, "useful": useful, "weight": 1.0, "kind": "other",
+            "place": prefs.place("", chat), "band": prefs.UNDATED, "pushed": None}
+
+
+def _learned():
+    """A month of thumbs up on three chats, then three thumbs down in a row on the "noisy" chat."""
+    return prefs.learn([_thumb(100 + n, DAY - (30 - n) * 86400, 1.0, f"chat{n % 3}") for n in range(12)]
+                       + [_thumb(n, DAY - (3 - n) * 3600, 0.0, "noisy") for n in range(3)], DAY)
+
+
+def test_the_router_follows_what_was_learned_within_floors_and_ceilings():
+    rows = [candidate(chat_id="noisy"), candidate(chat_id="noisy", value=4), candidate(chat_id="calm"),
+            candidate(chat_id="noisy", due_at=DAY + 3600),
+            candidate(kind="commitment", chat_id="noisy", due_at=DAY + 3600),
+            candidate(kind="date", chat_id="calm", value=5), candidate(kind="watch", chat_id="calm", value=5),
+            candidate(chat_id="muted", value=5)]
+    ceilings = {"date": "screen", "watch": "off"}
+    candidates.route(rows, now=DAY, learned=_learned(), ceiling=lambda kind: ceilings.get(kind, "push"),
+                     muted=lambda row: row["chat_id"] == "muted")
+    assert [(row["decision"], row["level"] or None, row["rank"]) for row in rows] == [
+        # The noisy chat's routine pick stays out; one the model rates higher comes up, quieter.
+        (candidates.QUIETED, None, None), (candidates.SURFACED, "screen", 4),
+        (candidates.SURFACED, "push", 2),
+        # Due within the hour: urgency makes what comes up louder, it doesn't bring this back.
+        (candidates.QUIETED, None, None),
+        # A commitment due within the hour comes up whatever was learned (a floor), on the screen at least.
+        (candidates.SURFACED, "screen", 3),
+        # What the user set is the loudest a kind gets, and off is off.
+        (candidates.SURFACED, "screen", 1), (candidates.OFF, None, None),
+        (candidates.MUTED, None, None)]
+    assert rows[4]["floor"] and rows[4]["score"] < prefs.SURFACE_AT
+    assert rows[0]["factor"] and '"scope": "place"' in rows[0]["factor"]
+
+
+def test_floors_come_up_past_the_five():
+    rows = [candidate(value=4) for _ in range(6)]
+    # Overdue promises from the chat the user turned down, the model's least valued: last in line.
+    rows += [candidate(origin="memory", item_id=n, kind="promise", chat_id="noisy", value=1, due_at=DAY - 60)
+             for n in (1, 2)]
+    candidates.route(rows, now=DAY, learned=_learned())
+    assert [row["decision"] for row in rows] == [candidates.SURFACED] * 5 + [candidates.OVER_LIMIT] + \
+        [candidates.SURFACED] * 2
+    assert [row["rank"] for row in rows[6:]] == [6, 7] and all(row["level"] for row in rows[6:])
 
 
 def test_a_remembered_item_rated_no_meanwhile_rests_whatever_the_model_said(live):
@@ -432,22 +480,24 @@ def test_a_report_lists_its_candidates_then_says_what_code_picked(reporting):
     assert f"#{item_id} [commitment]" in asked and "### Deploy (c1)" in asked and "flaky deploy" in asked
     pulse.tick(now + 1)
     [sent] = live.sent()
+    # The loudest first: the passport, due in three days, ties with the undated deploy the model
+    # valued higher, and what has a date goes first.
     assert sent.splitlines()[4:6] == [
-        "1. [follow-up] Look at the flaky deploy (you asked in Deploy)",
-        f"2. [commitment] Renew your passport before the trip (you said so in Deploy) #{item_id}"]
+        f"1. [commitment] Renew your passport before the trip (you said so in Deploy) #{item_id}",
+        "2. [follow-up] Look at the flaky deploy (you asked in Deploy)"]
     [attempt] = live.store.in_flight()
     assert attempt["item_id"] == run["id"] and live.store.get(pulse.REPORT_RUN)["state"] == pulse.RUN_SENT
     assert pulse.pre_llm_call(SID, "t1", sent) == report.REPORT_NOTE
-    reply = f"1. [follow-up] The deploy, reworded\n2. [commitment] The passport #{item_id}"
+    reply = f"1. [commitment] The passport #{item_id}\n2. [follow-up] The deploy, reworded"
     # The push and the cards say the list's lines, whatever the turn made of them.
     assert pulse.pushes(SID, "t1", reply)
     assert pulse.push_copy(SID, "t1", reply) == {
         "title_label": "pulse.noticed", "title": "Pulse noticed 2 things", "count": 2,
-        "body": "Look at the flaky deploy (you asked in Deploy) · "
-                "Renew your passport before the trip (you said so in Deploy)"}
+        "body": "Renew your passport before the trip (you said so in Deploy) · "
+                "Look at the flaky deploy (you asked in Deploy)"}
     deliver(live, sent, reply)
     pulse.tick(now + 2)
-    found, remembered = sorted(live.store.cards(), key=lambda card: card["id"])
+    remembered, found = sorted(live.store.cards(), key=lambda card: card["id"])
     # Found in a chat on its own: it points at that chat, so Do it opens it.
     assert (found["kind"], found["topic"], found["news"], found["item_id"], found["chat_id"], found["chat_title"],
             found["message_id"]) == (store.NOTICED, "follow-up", "Look at the flaky deploy (you asked in Deploy)",
@@ -456,9 +506,9 @@ def test_a_report_lists_its_candidates_then_says_what_code_picked(reporting):
         item_id, CHAT, "Deploy", "commitment")
     # Each card's Why? is its candidate's reason, journaled with it.
     assert (found["why"], remembered["why"]) == ("You asked about it in Deploy and nothing has been done since.", "You promised it in Deploy and the trip is in three days.")
-    assert [row["why"] for row in live.store.run_candidates(run["id"])][:2] == [found["why"], remembered["why"]]
+    assert [row["why"] for row in live.store.run_candidates(run["id"])][:2] == [remembered["why"], found["why"]]
     assert [(row["decision"], row["card_id"]) for row in live.store.run_candidates(run["id"])] == [
-        (candidates.SURFACED, found["id"]), (candidates.SURFACED, remembered["id"]), (candidates.SKIPPED, None)]
+        (candidates.SURFACED, remembered["id"]), (candidates.SURFACED, found["id"]), (candidates.SKIPPED, None)]
     pulse.tick(now + 3)
     assert len(live.store.cards()) == 2  # landed once
     pulse.tick(now + candidates.JOURNAL_DAYS * 86400 + 60)
@@ -626,10 +676,11 @@ def test_candidates_command(reporting, capsys, monkeypatch):
     assert run("3") == 0
     out = capsys.readouterr().out.splitlines()
     assert out[0] == "Latest list: ready to send, 321 tokens" and out[1].endswith(": 1 picked of 2")
-    # Each with its reason, when it has one: "why that?" as the card's Why? says it.
-    assert out[2:] == ["  picked     [follow-up] v4 (chat) Look at the flaky deploy (you asked in Deploy) "
-                       "(why: You asked about it in Deploy and nothing has been done since.)",
-                       "  skipped    [follow-up] v4 (chat) The dentist (covered)"]
+    # Each with its reason, when it has one ("why that?" as the card's Why? says it), how loud
+    # a pick came up, and its score.
+    assert out[2:] == ["  picked     [follow-up] v4 (chat) [push] Look at the flaky deploy (you asked in Deploy) "
+                       "(why: You asked about it in Deploy and nothing has been done since.) score 3.00",
+                       "  skipped    [follow-up] v4 (chat) The dentist (covered) score 3.00"]
     assert run("lots") == 2
     capsys.readouterr()
     live.store.set(pulse.REPORT_RUN, {**live.store.get(pulse.REPORT_RUN), "state": "sent", "error": "BadReply"})

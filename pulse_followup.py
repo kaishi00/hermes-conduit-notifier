@@ -42,6 +42,7 @@ from . import pulse_evidence as evidence
 from . import pulse_hermes as hermes
 from . import pulse_learning as learning
 from . import pulse_ledger as ledger
+from . import pulse_prefs as prefs
 from . import pulse_report as report
 from . import pulse_store as store
 
@@ -490,11 +491,15 @@ def check_acts(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzi
         text = ""
         try:
             text, last, answered, elsewhere = act_material(home, card, row["acted_at"], zone=zone, now=now)
+            # How far Do it got, for what Pulse learns (pulse_prefs): something
+            # was sent once the chat answered (or, for a card from no chat,
+            # once the chat Do it opened turned up).
+            sent = prefs.ACT_SENT if answered or elsewhere else None
             if not elsewhere and (not answered or now - last < ACT_QUIET_S):
                 # Not answered yet, or still going: look again, unless Do it was left unsent.
                 if now - row["acted_at"] >= ACT_GIVE_UP_S:
                     decide(check_at=None, checks=row["checks"], outcome="no answer",
-                           why="the chat kept going" if answered else "nothing sent after Do it")
+                           why="the chat kept going" if answered else "nothing sent after Do it", stage=sent)
                 else:
                     decide(check_at=now + ACT_FIRST_S, checks=row["checks"], outcome="", why="")
                 continue
@@ -517,10 +522,11 @@ def check_acts(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzi
         why = _clip(parsed.get("why") if isinstance(parsed, dict) else "", WHY_LIMIT)
         if isinstance(parsed, dict) and parsed.get("done") is True:
             pulse_store.mark_done(card["id"], card["item_id"], closed_by=learning.ACT_DONE_BY, now=now, by="pulse")
-            decide(check_at=None, checks=checks, outcome="done", why=why)
+            decide(check_at=None, checks=checks, outcome="done", why=why, stage=prefs.ACT_DONE)
             continue
         again = ACT_AGAIN_S[checks - 1] if checks <= len(ACT_AGAIN_S) else None
-        decide(check_at=now + again if again else None, checks=checks, outcome="" if again else "not done", why=why)
+        decide(check_at=now + again if again else None, checks=checks, outcome="" if again else "not done", why=why,
+               stage=sent)
 
 
 # A card held for the morning brief is read again at most this often, so
@@ -913,15 +919,16 @@ def next_send(pulse_store: store.PulseStore, now: float, home: Optional[Path] = 
               ) -> Optional[tuple[dict, dict, int]]:
     """The follow-up to send now, its item and the attempt number: the
     oldest ``tell`` whose last attempt failed long enough ago, or none.
-    Below "push" on the loudness ladder nothing is sent: each ``tell``
-    becomes a card in the Pulse screen (or waits for the brief) instead,
-    and so does a push due while it's ``quiet`` (pulse_quiet): held for
-    the first brief after."""
-    loudness = learning.level(pulse_store, FOLLOWUP)
-    if loudness == "off":
+    Each ``tell`` comes up at its own level (``item_level``: what the user
+    did with earlier follow-ups, within the level they set); below "push"
+    nothing is sent: it becomes a card in the Pulse screen (or waits for
+    the brief) instead, and so does a push due while it's ``quiet``
+    (pulse_quiet): held for the first brief after."""
+    ceiling = learning.level(pulse_store, FOLLOWUP)
+    if ceiling == "off":
         return None
-    if quiet and loudness == "push":
-        loudness = "brief"
+    learned = prefs.learn(pulse_store.signals(now - prefs.KEEP_S), now)
+    nudge = learning.nudge(pulse_store)
     for followup in pulse_store.followups_to_tell():
         item = pulse_store.item(followup["item_id"])
         attempts = attempts_of(pulse_store, followup["item_id"])
@@ -938,6 +945,9 @@ def next_send(pulse_store: store.PulseStore, now: float, home: Optional[Path] = 
             continue  # settle() closes it
         if mute(pulse_store, item, followup, now):
             continue
+        loudness = item_level(item, learned, nudge=nudge, ceiling=ceiling, now=now)
+        if quiet and loudness == "push":
+            loudness = "brief"
         if loudness != "push":  # a push that failed earlier becomes a card instead of trying again
             _told(pulse_store, item, followup, now, loudness, home)
             continue
@@ -947,6 +957,31 @@ def next_send(pulse_store: store.PulseStore, now: float, home: Optional[Path] = 
             continue
         return item, followup, len(attempts) + 1
     return None
+
+
+# A follow-up is a floor (it comes up at least on the Pulse screen, whatever
+# learning says) when it's a promise Hermes made that's overdue, or a
+# commitment due within FLOOR_S either side of now.
+FLOOR_S = 86400.0
+
+
+def item_level(item: dict, learned: prefs.Learned, *, nudge: str, ceiling: str, now: float) -> str:
+    """How loudly a follow-up the check decided to tell comes up: its score
+    (pulse_prefs.score: what learning adds for follow-ups from its chat and
+    of its timing, as a pick) gives push, the screen or the brief
+    (``FLOOR_S``: a floor never goes below the screen), at most
+    ``ceiling``, the level the user set. It's news now, so it's as loud as
+    something due soon whatever its due date, which counts for what's
+    learned about timing: with nothing learned it pushes at every nudge
+    level, as follow-ups did before learning."""
+    due = item.get("due_at") if isinstance(item.get("due_at"), (int, float)) and \
+        not isinstance(item.get("due_at"), bool) else None
+    attrs = prefs.attributes(FOLLOWUP, prefs.place(item["profile"], item["chat_id"]), prefs.band(due, now))
+    floor = due is not None and (due < now if item["kind"] == PROMISE
+                                 else item["kind"] == COMMITMENT and abs(due - now) <= FLOOR_S)
+    level = prefs.level(prefs.score(learned, attrs), prefs.SOON, loud=learned.loudness(FOLLOWUP), nudge=nudge,
+                        floor=floor, lowest="brief")
+    return prefs.quieter(level, ceiling)
 
 
 def _told(pulse_store: store.PulseStore, item: dict, followup: dict, now: float, loudness: str,
