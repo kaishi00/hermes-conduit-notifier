@@ -810,6 +810,19 @@ def test_the_sweep_looks_in_every_home_for_rooms_whose_roster_it_cant_read(herme
     assert _ids(nahida) == set()
 
 
+def test_a_store_the_sweep_cant_read_is_a_warning_and_the_others_are_swept(hermes, caplog):
+    furina = _home(hermes, "furina")
+    _room(hermes.root / "state.db", "gone", [FURINA, LAIFU], disbanded_at=2.0)
+    _room_session(furina, "f-gone", "gone")
+    (hermes.root / "shared-state.db").write_bytes(b"not a database " * 100)
+
+    with caplog.at_level(logging.WARNING, logger=cleanup.__name__):
+        assert cleanup.sweep() == 1
+    assert _ids(furina) == set()
+    assert "couldn't read the disbanded rooms in" in caplog.text and "shared-state.db" in caplog.text
+    assert "next loads" in caplog.text
+
+
 def test_the_sweep_looks_rooms_up_in_batches(hermes, monkeypatch):
     monkeypatch.setattr(cleanup, "ROOMS_PER_QUERY", 2)
     furina = _home(hermes, "furina")

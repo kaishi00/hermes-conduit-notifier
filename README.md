@@ -2646,7 +2646,8 @@ disband answers before the delete is done, and never fails because of it. A
 session a turn is still finishing in, or one Hermes' delete fails on, is tried
 again 30 s later, then a minute after the plugin next loads (Hermes starts, or
 reloads the plugin), which also deletes what rooms disbanded before this
-version left behind (the newest 512 disbanded rooms of each room store). An
+version left behind (the newest 512 disbanded rooms of each room store; one
+it can't read is logged as a warning and read again at the next load). An
 agent placed by `hosted_rooms.profiles` is found in the home that names. A room
 whose members the plugin can't read (its store was locked as it was disbanded,
 or its roster is damaged) is looked for in every agent's home on this host.
@@ -2672,7 +2673,8 @@ behind the `room-forget` capability: `{"ok": true, "room_id": ..., "deleted":
 1, "kept": 0}`, where `kept` counts sessions a turn is still finishing in (try
 again in a minute), with 409 for a room still going here, 503 when Hermes'
 session store is busy or won't open, or its delete fails on one (try again
-shortly), and 400 for anything that isn't a room id.
+shortly), 501 on a Hermes whose session delete can't take a compression chain
+(update Hermes), and 400 for anything that isn't a room id.
 
 ## Capabilities (plugin 0.4+)
 

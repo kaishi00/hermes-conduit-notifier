@@ -118,7 +118,8 @@ def sweep(home: Optional[Path] = None) -> int:
         try:
             rooms = _disbanded(store)
         except Exception:  # noqa: BLE001 - another store may still be read
-            logger.debug("conduit_push: couldn't read the disbanded rooms in %s", store, exc_info=True)
+            logger.warning("conduit_push: couldn't read the disbanded rooms in %s; the plugin tries again when it "
+                           "next loads", store, exc_info=True)
             continue
         homes = _homes({profile for _, profiles in rooms for profile in profiles}, store)
         for room_id, profiles in rooms:
