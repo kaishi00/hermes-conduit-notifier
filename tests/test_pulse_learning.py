@@ -1163,6 +1163,9 @@ def test_cli_marks_a_card_done_and_undoes_it(live, monkeypatch, capsys):
     assert run("done", str(card["id"])) == 0 and "Marked done" in capsys.readouterr().out
     assert run("cards") == 0 and "(done)" in capsys.readouterr().out
     assert run("done", str(card["id"]), "undo") == 0 and "Back as it was" in capsys.readouterr().out
+    live.store.mark_done(card["id"], card["item_id"], closed_by=learning.HELD_DONE_BY, now=time.time(), by="pulse")
+    assert run("cards") == 0 and "(done, seen in a chat)" in capsys.readouterr().out
+    assert run("done", str(card["id"]), "undo") == 0 and "Back as it was" in capsys.readouterr().out
     assert run("done", "x") == 2 and run("done", str(card["id"]), "maybe") == 2
     live.store.dismiss_card(card["id"], True, 5)
     assert run("cards") == 0 and "(put away)" in capsys.readouterr().out
@@ -1376,8 +1379,11 @@ def test_a_card_held_for_the_brief_done_meanwhile_is_left_out_of_it(live):
     assert len(said.calls) == 1
     assert control.done(live.store, card_id, False) is True
     assert [card["id"] for card in live.store.held_cards(12)] == [card_id]
-    run_held(live, llm_saying(stale=False, why="still stands"), now + followup.HELD_EVERY_S)
-    assert [card["id"] for card in live.store.held_cards(12)] == [card_id]
+    # Put back by the user, it isn't read and marked again from the same chat.
+    again = llm_saying(stale=True, why="the notes were sent in Release")
+    run_held(live, again, now + 300)
+    run_held(live, again, now + followup.HELD_EVERY_S)
+    assert again.calls == [] and [card["id"] for card in live.store.held_cards(12)] == [card_id]
 
 
 def test_the_held_card_check_reads_the_note_to_pulse(live):
@@ -1580,6 +1586,161 @@ def test_a_card_marked_done_while_its_brief_was_out_comes_back_with_undo(live):
     live.store.brief_cards([card_id], time.time(), "x-brief")
     control.done(live.store, card_id, False)
     assert [card["id"] for card in live.store.held_cards(12)] == [card_id]
+
+
+def run_found(live, llm, now):
+    done = {}
+    followup.check_found(live.store, live.home, llm, zone=pulse.report.zone_for("UTC"), now=now,
+                         still_leader=lambda: True, budget=10_000, done=done)
+    return done
+
+
+def test_a_report_item_found_on_its_own_and_done_elsewhere_goes_to_done_a_day_later(live):
+    card_id = found_card(live, chat_id=CHAT, news="The release notes still need sending (Deploy)", topic="follow-up")
+    came = live.store.card(card_id)["created_at"]
+    live.db.session(sid="other", title="Release", pinned=0)
+    live.db.message("assistant", "Sent the release notes for the deploy.", sid="other", at=came + 600)
+    said = llm_saying(stale=True, why="the notes were sent in Release")
+    run_found(live, said, came + 3600)
+    assert said.calls == []  # the report has just read the chats
+    run_found(live, said, came + followup.FOUND_EVERY_S)
+    [text] = said.calls
+    assert "Sent the release notes for the deploy." in text and "release notes still need sending" in text
+    assert live.store.done_marks([card_id])[card_id]["done_by"] == "pulse"
+    # Undo keeps the user's word: it isn't read again.
+    assert control.done(live.store, card_id, False) is True
+    run_found(live, said, came + 2 * followup.FOUND_EVERY_S)
+    assert len(said.calls) == 1 and live.store.done_marks([card_id]) == {}
+
+
+def test_a_report_item_found_on_its_own_is_read_once_a_day_while_its_new(live):
+    card_id = found_card(live, chat_id=CHAT, news="Look at the flaky deploy")
+    came = live.store.card(card_id)["created_at"]
+    still = llm_saying(stale=False, why="still open")
+    for day in (1, 2):
+        run_found(live, still, came + day * followup.FOUND_EVERY_S)
+        run_found(live, still, came + day * followup.FOUND_EVERY_S + 300)
+    assert len(still.calls) == 2 and live.store.done_marks([card_id]) == {}
+    run_found(live, still, came + followup.FOUND_FOR_S + 1)
+    assert len(still.calls) == 2  # past its first days
+
+
+def test_found_card_checks_read_cards_on_the_screen_three_a_run(live):
+    came = time.time()
+    cards = [found_card(live, chat_id=CHAT, news=f"Look at thing {n}") for n in range(8)]
+    held = live.store.add_card({"kind": "noticed", "level": "brief", "title": "Held thing", "news": "Held thing",
+                                "chat_id": CHAT, "created_at": came})
+    remembered = live.store.add_card({"kind": "noticed", "item_id": promise(live), "level": "screen",
+                                      "title": "The deploy", "news": "The deploy", "created_at": came})
+    control.dismiss(live.store, cards[0], True)
+    control.rate(live.store, cards[1], "down", "not_relevant")
+    control.done(live.store, cards[2])
+    assert control.acted(live.store, cards[7], now=came) is True  # Do it's check reads its chat
+    # Wrong time is only about when: back on the screen, it's read like any other.
+    control.rate(live.store, cards[3], "down", "wrong_time", home=live.home)
+    assert live.store.return_card(cards[3], came, live.store.card(cards[3])["rest_until"])
+    now = came + followup.FOUND_EVERY_S + 60
+    due = [card["id"] for card in followup.found_due(live.store, now)]
+    assert sorted(due) == cards[3:7] and held not in due and remembered not in due
+    said = llm_saying(stale=False, why="still stands")
+    assert run_found(live, said, now)["checks"] == followup.FOUND_MAX
+    assert set(live.store.get(followup.FOUND_CHECKED)) == {str(card) for card in due[:followup.FOUND_MAX]}
+    run_found(live, said, now + 300)
+    assert len(said.calls) == len(due)
+    assert sorted(int(key) for key in live.store.get(followup.FOUND_CHECKED)) == cards[3:7]
+
+
+def test_a_failed_found_card_check_tries_again_after_a_while(live):
+    card_id = found_card(live, chat_id=CHAT, news="Look at the flaky deploy")
+    now = live.store.card(card_id)["created_at"] + followup.FOUND_EVERY_S
+
+    def broken(instructions, text):
+        raise RuntimeError("model down")
+    assert run_found(live, broken, now)["failed"] == 1
+    said = llm_saying(stale=False, why="still open")
+    run_found(live, said, now + 60)
+    assert said.calls == []
+    run_found(live, said, now + followup.HELD_RETRY_S)
+    assert len(said.calls) == 1
+
+
+def test_the_found_card_check_reads_the_note_to_pulse(live):
+    card_id = found_card(live, chat_id=CHAT, news="Look at the flaky deploy")
+    live.store.set("note", "Never bring up the gym.")
+    seen = []
+
+    def llm(instructions, text):
+        seen.append(instructions)
+        return {"stale": False, "why": "still stands"}, 7
+
+    run_found(live, llm, live.store.card(card_id)["created_at"] + followup.FOUND_EVERY_S)
+    [instructions] = seen
+    assert instructions.startswith(followup.FOUND_INSTRUCTIONS)
+    assert instructions.endswith(f"\n\n{followup.report.NOTE_TITLE}\nNever bring up the gym.")
+
+
+def test_a_report_item_found_on_its_own_and_held_for_the_brief_is_read_before_it(live):
+    card_id = live.store.add_card({"kind": "noticed", "level": "brief", "topic": "follow-up",
+                                   "title": "The release notes still need sending",
+                                   "news": "The release notes still need sending", "chat_id": CHAT,
+                                   "created_at": time.time() - 3600})
+    assert followup.found_due(live.store, time.time() + followup.FOUND_EVERY_S) == []  # the held check reads it
+    live.db.message("assistant", "Sent the release notes.", sid=CHAT, at=time.time() - 60)
+    said = llm_saying(stale=True, why="the notes were sent")
+    run_held(live, said, time.time())
+    [text] = said.calls
+    assert "Sent the release notes." in text
+    assert live.store.held_cards(12) == [] and live.store.done_marks([card_id])[card_id]["done_by"] == "pulse"
+
+
+def test_a_report_item_found_on_its_own_and_put_off_is_read_before_it_comes_back(live):
+    live.store.set("memory", True)
+    now = time.time()
+    card_id = found_card(live, chat_id=CHAT, news="The release notes still need sending", topic="follow-up")
+    assert control.dismiss(live.store, card_id, True, now=now, until="tomorrow") is True
+    back_at = live.store.card(card_id)["rest_until"]
+    assert followup.return_rested(live.store, back_at + 1) == []  # waits for its read
+    live.db.message("assistant", "Sent the release notes.", sid=CHAT, at=now + 60)
+    stale = llm_saying(stale=True, why="the notes were sent")
+    followup.check_rested(live.store, live.home, stale, zone=pulse.report.zone_for("UTC"), now=back_at + 1,
+                          still_leader=lambda: True, budget=10_000, done={})
+    assert len(stale.calls) == 1 and live.store.done_marks([card_id])[card_id]["done_by"] == "pulse"
+    assert live.store.card(card_id)["dismissed_at"] is None  # in Done, not put away
+    # A morning brief put off comes back at once: there's no chat to read for it.
+    brief_card = live.store.add_card({"kind": "brief", "level": "push", "news": "Your morning brief.",
+                                      "created_at": now})
+    assert control.dismiss(live.store, brief_card, True, now=now, until="tomorrow") is True
+    assert followup.return_rested(live.store, live.store.card(brief_card)["rest_until"] + 1) == [brief_card]
+
+
+def test_found_card_checks_run_last_on_what_the_follow_ups_leave(live, monkeypatch):
+    live.store.set("memory", True)
+    live.store.set("followups", True)
+    card_id = found_card(live, chat_id=CHAT, news="Look at the flaky deploy")
+    now = live.store.card(card_id)["created_at"] + followup.FOUND_EVERY_S
+    ran = []
+    monkeypatch.setattr(pulse.memory, "run", lambda *args, **kwargs: ran.append("memory"))
+
+    def checks(*args, budget, done, **kwargs):
+        ran.append(("followups", budget))
+        done.update(tokens=900, checks=2)
+
+    def found(*args, budget, done, **kwargs):
+        ran.append(("found", budget))
+        done.update(tokens=40, checks=1)
+
+    monkeypatch.setattr(followup, "run", checks)
+    monkeypatch.setattr(followup, "check_found", found)
+    pulse._memory_run(live.home, SID, now, threading.Event())
+    cap = learning.NUDGES["balanced"]["followup_tokens"]
+    assert ran == ["memory", ("followups", cap), ("found", cap - 900)]
+    assert live.store.get("followup_today")["tokens"] == 940
+    assert live.store.get("followup_usage") == {"checks": 3, "tokens": 940, "failed": 0}
+    # Whatever follow-ups' switch, as the held cards: they're report items.
+    live.store.set("followups", False)
+    ran.clear()
+    pulse._memory_run(live.home, SID, now, threading.Event())
+    assert ran == ["memory", ("found", cap - 940)]
 
 
 def test_do_it_left_unsent_gives_up_without_a_model_call(live):
