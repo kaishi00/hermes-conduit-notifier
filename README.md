@@ -2758,9 +2758,11 @@ the other's accept, you're linked twice, the same on both sides; unlink
 either. This Hermes keeps up to 50 Links, each invite still waiting holding a
 place for one, and up to 10 waiting invites. An invite that ran out, and a
 Link unlinked while it waited, keep their place until Hermes' dashboard has
-read the mailbox for them, and a refusal for the count says how many. Everything a
-Link needs, its send tokens included, stays in `conduit-rooms/links.json`
-(owner only), never in a log or a route's answer.
+read the mailbox for them (for an invite, from 5 minutes after it ran out,
+since the mailbox's clock may be that far behind this host's), and a refusal
+for the count says how many. Everything a Link needs, its send tokens
+included, stays in `conduit-rooms/links.json` (owner only), never in a log or
+a route's answer.
 
 The dashboard's process reads the inbox: one loop for the installation,
 whichever process holds `conduit-rooms/.lease`. While nothing waits it only
@@ -2808,12 +2810,19 @@ network address, which this Hermes calls only when it's its own mailbox
 too), `own_invite` (400, the invite is this Hermes'), `expired` and `invite_used`
 (410), `already_linked`, `too_many_links` and `too_many_invites` (409),
 `no_crypto` and `no_word_list` (503, a plugin install missing its word list),
-and the mailbox's own, such as `clock_off` (503) when this host's clock is far
+`busy` (503) when this Hermes' other mailbox calls kept it waiting too long (an
+accept it couldn't send yet is kept, and goes on the loop's pass), and the
+mailbox's own, such as `clock_off` (503) when this host's clock is far
 from the mailbox's. A mailbox that can't be reached is 503, one that answers
-what it shouldn't is 502. A route that waits on the mailbox answers within
-50 s, or with `timed_out` (504) while the call finishes on its own. The routes
-answer 60 requests a minute between them, one still waiting for a thread
-included.
+what it shouldn't is 502. A mailbox the other side names by a host name is
+looked up when this Hermes sends to it, and refused with `bad_url` (502) when
+the name points at this computer or a private network: accepting an invite
+that names one leaves no Link, and the inviter's Hermes drops a Link whose
+confirm would go to one. This Hermes' own mailbox is never looked up, and a
+send through a proxy from the host's settings leaves the lookup to the proxy.
+A route that waits on the mailbox answers within 50 s, or with `timed_out`
+(504) while the call finishes on its own. The routes answer 60 requests a
+minute between them, one still waiting for a thread included.
 
 ## Capabilities (plugin 0.4+)
 

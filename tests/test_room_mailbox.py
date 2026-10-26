@@ -475,3 +475,131 @@ def test_why_a_mailbox_couldnt_be_reached_goes_to_the_log_not_the_error(eric, ca
     assert str(refused.value).startswith("Couldn't reach the mailbox at 127.0.0.1")
     assert "(" not in str(refused.value)
     assert "Connection refused" in caplog.text
+
+
+# --- A mailbox someone else named ---------------------------------------------------
+
+
+class _Taken(io.BytesIO):
+    status = 201
+
+
+class _Opener:
+    """Takes every send as a mailbox would, keeping the URLs it was asked to
+    reach, with the proxies given, as the host's settings would give them."""
+
+    def __init__(self, proxies=None):
+        self.handlers = [urllib.request.ProxyHandler(proxies or {})]
+        self.reached = []
+
+    def open(self, request, timeout):
+        self.reached.append(request.full_url)
+        return _Taken(b'{"expires_at": 1}')
+
+
+def _resolving(monkeypatch, *addresses):
+    """Every host name resolves to ``addresses``: the names asked for."""
+    asked = []
+
+    def lookup(name, port, *args, **kwargs):
+        asked.append((name, port))
+        return [(socket.AF_INET6, socket.SOCK_STREAM, 6, "", (address, port, 0, 0)) if ":" in address
+                else (socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, port)) for address in addresses]
+
+    monkeypatch.setattr(mailbox_module, "_lookup", lookup)
+    return asked
+
+
+def _send(url, own=None):
+    return mailbox_module.send(url, "A" * 43, "a-send-token", b"{}", own=own)
+
+
+@pytest.mark.parametrize("addresses", [
+    ["127.0.0.1"], ["10.1.2.3"], ["192.168.1.20"], ["169.254.169.254"], ["100.64.0.1"], ["0.0.0.0"], ["::1"],
+    ["fd00::5"], ["fe80::1%eth0"], ["::ffff:10.0.0.1"], ["93.184.216.34", "10.1.2.3"],
+], ids=["loopback", "private-10", "private-192", "link-local", "shared", "unspecified", "loopback-v6", "unique-local",
+        "link-local-v6", "mapped-private", "one-of-two"])
+def test_a_mailbox_someone_else_named_whose_name_points_inside_this_network_is_refused(monkeypatch, addresses):
+    # A name, unlike an address, isn't known to point there until it's looked up.
+    opener = _Opener()
+    monkeypatch.setattr(mailbox_module, "_opener", opener)
+    asked = _resolving(monkeypatch, *addresses)
+
+    with pytest.raises(mailbox_module.MailboxError) as refused:
+        _send("https://rooms.example.net:8443", own="https://rooms.milim.dev")
+    assert (refused.value.code, refused.value.retryable) == ("bad_url", False)
+    assert asked == [("rooms.example.net", 8443)]
+    assert opener.reached == []
+
+
+def test_a_mailbox_someone_else_named_on_public_addresses_is_sent_to(monkeypatch):
+    opener = _Opener()
+    monkeypatch.setattr(mailbox_module, "_opener", opener)
+    asked = _resolving(monkeypatch, "93.184.216.34", "2606:2800:220:1:248:1893:25c8:1946")
+
+    assert _send("https://rooms.example.net", own="https://rooms.milim.dev") == 1
+    assert asked == [("rooms.example.net", 443)]
+    assert opener.reached == [f"https://rooms.example.net/v1/inboxes/{'A' * 43}/envelopes"]
+
+
+def test_a_mailbox_whose_name_doesnt_resolve_is_unreachable(monkeypatch, caplog):
+    opener = _Opener()
+    monkeypatch.setattr(mailbox_module, "_opener", opener)
+
+    def lookup(*args, **kwargs):
+        raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+
+    monkeypatch.setattr(mailbox_module, "_lookup", lookup)
+    with caplog.at_level(logging.INFO), pytest.raises(mailbox_module.MailboxError) as refused:
+        _send("https://rooms.example.net")
+    assert (refused.value.code, refused.value.retryable) == ("unreachable", True)
+    assert str(refused.value) == "Couldn't reach the mailbox at rooms.example.net"
+    assert "Name or service not known" in caplog.text
+    assert opener.reached == []
+
+
+def test_this_hermes_own_mailbox_is_never_looked_up(monkeypatch):
+    # So a mailbox on a home network that both Hermes use links them.
+    opener = _Opener()
+    monkeypatch.setattr(mailbox_module, "_opener", opener)
+    asked = _resolving(monkeypatch, "192.168.1.20")
+
+    _send("https://mailbox.home.arpa", own="https://mailbox.home.arpa")
+    assert asked == [] and len(opener.reached) == 1
+
+
+def test_proxy_settings_it_cant_read_leave_the_lookup_here(monkeypatch):
+    # proxy_bypass reads the platform's own settings (macOS, the Windows
+    # registry), which can fail: the name is then looked up as without a proxy.
+    for name in ("no_proxy", "NO_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+    opener = _Opener({"https": "http://proxy.example:3128"})
+    monkeypatch.setattr(mailbox_module, "_opener", opener)
+    asked = _resolving(monkeypatch, "10.1.2.3")
+
+    def unreadable(host):
+        raise OSError("System Configuration didn't answer")
+
+    monkeypatch.setattr(mailbox_module.urllib.request, "proxy_bypass", unreadable)
+    with pytest.raises(mailbox_module.MailboxError) as refused:
+        _send("https://rooms.example.net")
+    assert refused.value.code == "bad_url"
+    assert asked == [("rooms.example.net", 443)] and opener.reached == []
+
+
+def test_a_send_through_a_proxy_leaves_the_lookup_to_the_proxy(monkeypatch):
+    # The proxy looks the name up and connects; this host may not even resolve it.
+    for name in ("no_proxy", "NO_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+    opener = _Opener({"https": "http://proxy.example:3128"})
+    monkeypatch.setattr(mailbox_module, "_opener", opener)
+    asked = _resolving(monkeypatch, "10.1.2.3")
+
+    _send("https://rooms.example.net")
+    assert asked == [] and len(opener.reached) == 1
+
+    monkeypatch.setenv("no_proxy", "rooms.example.net")  # this one goes straight there
+    with pytest.raises(mailbox_module.MailboxError) as refused:
+        _send("https://rooms.example.net")
+    assert refused.value.code == "bad_url"
+    assert asked == [("rooms.example.net", 443)] and len(opener.reached) == 1

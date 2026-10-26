@@ -13,6 +13,23 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.84.2 (2026-10-26)
+
+### Security
+- Someone's invite or accept can't point your Hermes at a service on your
+  computer or network by naming the mailbox with a host name that leads
+  there: the name is looked up before anything is sent, and refused as such
+  an address already was.
+
+### Fixes
+- An accept that reached the mailbox in time is answered even when its
+  invite ran out while Hermes was busy with the mailbox, or by a mailbox
+  clock a few minutes behind yours. Before, the invite could be cleared
+  first and the accept lost with it, leaving the other person waiting.
+- Cancelling an invite as it was being made, or unlinking while Hermes set
+  its inbox up again, no longer leaves a leftover at the mailbox taking one
+  of the inbox's 64 places.
+
 ## 0.84.1 (2026-10-26)
 
 ### Fixes

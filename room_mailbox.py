@@ -6,6 +6,8 @@ the send token that installation gave it (``send``). The mailbox holds only
 sealed envelopes (room_envelope.py). Requests go out with urllib through the
 host's proxy settings, as the push relay's do, and never follow a redirect:
 a signature is for one host and path, and a send token is for one mailbox.
+A send to a mailbox someone else named looks its host name up first, and
+one that points at this computer or a private network is refused.
 
 A refused owner request whose answer is dated far from this host's clock is
 reported as the clock (``clock_off``), not as a dead link (review focus 3).
@@ -25,6 +27,7 @@ import json
 import logging
 import re
 import secrets
+import socket
 import time
 import urllib.error
 import urllib.parse
@@ -268,11 +271,13 @@ class Mailbox:
 
 
 def send(url: str, inbox: str, token: str, body: bytes, idempotency_key: Optional[str] = None, *,
-         timeout: float = TIMEOUT_S) -> int:
+         own: Optional[str] = None, timeout: float = TIMEOUT_S) -> int:
     """Leaves ``body`` in a linked installation's inbox with the send token
     it gave this one: when the mailbox drops it if it isn't read. Sending
     again with the same ``idempotency_key`` while the first is waiting
-    stores no copy."""
+    stores no copy. A mailbox other than ``own``, this installation's, is
+    one someone else named: refused (``bad_url``) when its host name points
+    at this computer or a private network."""
     base = base_url(url)
     if not isinstance(inbox, str) or not INBOX_ID.match(inbox):
         raise MailboxError("bad_request", "an inbox id is 43 base64url characters")
@@ -284,6 +289,8 @@ def send(url: str, inbox: str, token: str, body: bytes, idempotency_key: Optiona
             raise MailboxError("bad_request", "an idempotency key is 1 to 128 letters, digits, _ . : or -")
         headers["Idempotency-Key"] = idempotency_key
     host = url_host(base)
+    if base != own:
+        _check_public(base, host)
     expires_at = _request(f"{base}/v1/inboxes/{inbox}/envelopes", "POST", bytes(body), headers, timeout,
                           host)[1].get("expires_at")
     if not _whole(expires_at):
@@ -300,6 +307,52 @@ class _NoRedirects(urllib.request.HTTPRedirectHandler):
 
 
 _opener = urllib.request.build_opener(_NoRedirects)
+_lookup = socket.getaddrinfo
+
+
+def _check_public(url: str, host: str) -> None:
+    """Refuses a mailbox whose host name points at this computer or a
+    private network, as room_links refuses one named by such an address.
+    The name is looked up as the send goes, since what it points at can
+    change. urllib looks it up again to connect, so a name changed to point
+    there in between still meets TLS for that name and the mailbox's fixed
+    paths. Over http, which base_url allows only on this host, or through a
+    proxy from the host's settings, which looks the name up itself, nothing
+    is looked up here."""
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme != "https" or _proxied(parts.scheme, host):
+        return
+    try:
+        found = _lookup(parts.hostname, parts.port or 443, type=socket.SOCK_STREAM)
+    except (OSError, UnicodeError) as error:
+        logger.info("Couldn't reach the rooms mailbox at %s (%s)", host, error)
+        raise MailboxError("unreachable", f"Couldn't reach the mailbox at {host}") from None
+    if not all(_global(info[4][0]) for info in found):
+        raise MailboxError("bad_url", f"The mailbox at {host} is on someone's own computer or a private network, "
+                                      "which this Hermes calls only when it's its own mailbox")
+
+
+def _proxied(scheme: str, host: str) -> bool:
+    # As urllib decides for each request: the proxies it read when this
+    # module loaded, less the hosts no_proxy names.
+    for handler in _opener.handlers:
+        if isinstance(handler, urllib.request.ProxyHandler):
+            if scheme not in handler.proxies:
+                return False
+            try:
+                return not urllib.request.proxy_bypass(host)
+            except Exception:  # noqa: BLE001 - platform settings it can't read: the name is looked up here
+                return False
+    return False
+
+
+def _global(address: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(address.split("%", 1)[0])
+    except ValueError:
+        return False
+    # An IPv6 address that only carries an IPv4 one is that address.
+    return (getattr(ip, "ipv4_mapped", None) or ip).is_global
 
 
 def _request(url: str, method: str, data: Optional[bytes], headers: dict[str, str], timeout: float,

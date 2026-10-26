@@ -2,6 +2,8 @@
 import argparse
 import base64
 import concurrent.futures
+import contextlib
+import errno
 import importlib.util
 import json
 import logging
@@ -11,6 +13,7 @@ import tempfile
 import threading
 import time
 import types
+import urllib.request
 
 import pytest
 from fastapi import FastAPI
@@ -43,7 +46,7 @@ envelope = _load("conduit_push.room_envelope", ROOT / "room_envelope.py")
 mailbox_module = _load("conduit_push.room_mailbox", ROOT / "room_mailbox.py")
 links_module = _load("conduit_push.room_links", ROOT / "room_links.py")
 
-from test_room_mailbox import mailbox_url, needs_node  # noqa: E402,F401
+from test_room_mailbox import _resolving, mailbox_url, needs_node  # noqa: E402,F401
 
 _api_spec = importlib.util.spec_from_file_location("conduit_plugin_api_room_links", ROOT / "dashboard" / "plugin_api.py")
 api = importlib.util.module_from_spec(_api_spec)
@@ -470,6 +473,8 @@ def test_an_inviter_offline_for_days_answers_when_back(home):
 
 @needs_node
 def test_an_invite_that_ran_out_is_swept_with_its_sender(home):
+    # Once a read that began after it ran out by the mailbox's clock too, which can be a few minutes
+    # behind this host's, has found nothing more for it.
     clock = Clock()
     eric = home("eric", clock)
     eric.invite("Eric")
@@ -477,10 +482,42 @@ def test_an_invite_that_ran_out_is_swept_with_its_sender(home):
 
     clock.now += links_module.INVITE_TTL_S + 60
     _run(eric, passes=1)
+    assert len(eric._store.read()["invites"]) == 1
+    clock.now += mailbox_module.SIGNATURE_WINDOW_S
+    _run(eric, passes=1)
 
     stored = json.loads((eric.root / "conduit-rooms" / "links.json").read_text())
     assert stored["invites"] == {} and stored["cleanup"] == []
     assert eric.mailbox().senders() == []
+
+
+@needs_node
+@pytest.mark.parametrize("before_read, during_pass", [
+    (0, links_module.INVITE_TTL_S + 3600), (links_module.INVITE_TTL_S + 200, 0),
+], ids=["a-pass-that-runs-past-it", "a-mailbox-clock-minutes-behind"])
+def test_an_accept_that_comes_in_time_after_a_pass_read_the_inbox_is_answered(home, monkeypatch, before_read,
+                                                                               during_pass):
+    # It comes while the pass makes its mailbox calls, which can take minutes, in time by the mailbox's
+    # clock, which can be a few minutes behind this host's: the next pass reads it.
+    clock = Clock()
+    eric, mona = home("eric", clock), home("mona")
+    url = eric.invite("Eric")["url"]
+    clock.now += before_read
+    real_flush, coming = links_module.Links.flush, [True]
+
+    def flush(self):
+        if self.root == eric.root and coming:
+            coming.clear()
+            mona.accept(url, "Mona")
+            clock.now += during_pass
+        real_flush(self)
+
+    monkeypatch.setattr(links_module.Links, "flush", flush)
+    _run(eric, passes=1)
+    _run(eric, mona)
+
+    assert [(link["name"], link["status"]) for link in eric.view()["links"]] == [("Mona", "linked")]
+    assert [link["status"] for link in mona.view()["links"]] == ["linked"]
 
 
 @needs_node
@@ -552,13 +589,13 @@ def test_a_handler_that_keeps_failing_gives_the_envelope_up(home, monkeypatch):
     assert mona.mailbox().info()["pending"] == 0
 
 
-def _forged_accept(eric_url, acceptor, *, invite_token=None, link_id="forged1"):
+def _forged_accept(eric_url, acceptor, *, invite_token=None, link_id="forged1", mailbox=None):
     """A link.accept as the acceptor's Hermes would seal it, with its fields as given."""
     invite = links_module.parse_invite(eric_url)
     me = identity_module.load_or_create(acceptor.root)
     body = {"sign": base64.urlsafe_b64encode(me.signing_public).decode().rstrip("="),
             "seal": base64.urlsafe_b64encode(me.sealing_public).decode().rstrip("="),
-            "name": "Mallory", "mailbox": invite.mailbox, "token": mailbox_module.new_token(),
+            "name": "Mallory", "mailbox": mailbox or invite.mailbox, "token": mailbox_module.new_token(),
             "invite": invite.id, "invite_token": invite.token if invite_token is None else invite_token}
     data = envelope.seal(me, link=link_id, recipient_sign=invite.sign, recipient_seal=invite.seal,
                          message_id=f"accept.{link_id}", kind="link.accept", body=body)
@@ -711,7 +748,7 @@ def test_an_accept_unlinked_just_before_it_goes_doesnt_go(home, monkeypatch):
     sent = _sends(monkeypatch)
 
     mona.remove(link_id)
-    mona._send_outgoing(identity_module.load(mona.root), item)
+    mona._send_outgoing(identity_module.load(mona.root), item, mona.mailbox().url)
 
     assert sent == []
 
@@ -1324,6 +1361,96 @@ def test_an_accept_and_the_loop_never_both_send_it(home, monkeypatch):
     assert len([key for key in sent if key.startswith("accept.")]) == 1
 
 
+@contextlib.contextmanager
+def _held_elsewhere(self):
+    # The send lock a long pass holds, which Windows gives up on after a minute.
+    raise OSError(errno.EDEADLK, "Resource deadlock avoided")
+    yield
+
+
+@needs_node
+def test_an_invite_that_cant_take_the_send_lock_leaves_no_invite(home, monkeypatch):
+    eric = home("eric")
+    monkeypatch.setattr(links_module.Links, "_sending", _held_elsewhere)
+
+    with pytest.raises(links_module.LinkError) as refused:
+        eric.invite("Eric")
+
+    assert (refused.value.code, refused.value.status) == ("busy", 503)
+    assert eric.view()["invites"] == []
+
+
+@needs_node
+def test_an_accept_that_cant_take_the_send_lock_waits_for_the_loop(home, monkeypatch):
+    # The pass holding it may be sending this very accept, so the Link stays.
+    eric, mona = home("eric"), home("mona")
+    url = eric.invite("Eric")["url"]
+
+    with monkeypatch.context() as patched:
+        patched.setattr(links_module.Links, "_sending", _held_elsewhere)
+        with pytest.raises(links_module.LinkError) as refused:
+            mona.accept(url, "Mona")
+    assert (refused.value.code, refused.value.status) == ("busy", 503)
+    assert "while the invite lasts" in str(refused.value) and "deadlock" not in str(refused.value)
+    assert [link["status"] for link in mona.view()["links"]] == ["waiting"]
+
+    _run(eric, mona)
+
+    assert [link["status"] for link in eric.view()["links"]] == ["linked"]
+    assert [link["status"] for link in mona.view()["links"]] == ["linked"]
+
+
+@needs_node
+def test_an_invite_cancelled_as_its_sender_goes_in_leaves_none_at_the_mailbox(home, monkeypatch):
+    # The cancel's delete waits for the put, so it can't come first and leave the sender there.
+    eric = home("eric")
+    first = eric.invite("Eric")["invite"]["id"]
+    real_put = mailbox_module.Mailbox.put_sender
+    cancelling, waited = [], []
+
+    def put_sender(self, sender, token):
+        if sender.startswith("i-") and sender != f"i-{first}" and not cancelling:
+            cancelling.append(threading.Thread(target=eric.cancel, args=(sender[2:],)))
+            cancelling[0].start()
+            cancelling[0].join(0.5)
+            waited.append(cancelling[0].is_alive())
+        real_put(self, sender, token)
+
+    monkeypatch.setattr(mailbox_module.Mailbox, "put_sender", put_sender)
+    eric.invite("Eric")
+    cancelling[0].join(10)
+
+    assert waited == [True]
+    assert [row["sender"] for row in eric.mailbox().senders()] == [f"i-{first}"]
+    assert [invite["id"] for invite in eric.view()["invites"]] == [first]
+
+
+@needs_node
+def test_a_link_unlinked_as_its_lost_inbox_is_made_again_leaves_no_sender(home, monkeypatch):
+    # The unlink's delete waits for the senders the inbox gets back, so it can't come first and leave one.
+    eric, mona, link_id = _linked(home)
+    eric.mailbox().delete()  # as the mailbox does after 90 idle days
+    real_put = mailbox_module.Mailbox.put_sender
+    unlinking, waited = [], []
+
+    def put_sender(self, sender, token):
+        if sender == f"l-{link_id}" and not unlinking:
+            unlinking.append(threading.Thread(target=eric.remove, args=(link_id,)))
+            unlinking[0].start()
+            unlinking[0].join(0.5)
+            waited.append(unlinking[0].is_alive())
+        real_put(self, sender, token)
+
+    monkeypatch.setattr(mailbox_module.Mailbox, "put_sender", put_sender)
+    _run(eric, passes=1)  # it finds the inbox gone and makes it again, with its senders
+    unlinking[0].join(10)
+
+    assert waited == [True]
+    assert eric.mailbox().senders() == []
+    _run(eric, mona)
+    assert mona.view()["links"] == []
+
+
 @needs_node
 def test_a_word_list_that_cant_be_read_is_refused_with_its_code(home, monkeypatch):
     eric, mona, link_id = _linked(home)
@@ -1392,6 +1519,60 @@ def test_an_invite_naming_a_mailbox_on_a_private_network_is_refused(home, mailbo
             call()
         assert refused.value.code == "bad_invite"
     assert mona.view()["links"] == []
+
+
+def _resolving_here(monkeypatch, *addresses):
+    """Host names point at ``addresses``, and requests go straight out, as on
+    a host with no proxy, so names are looked up here: the names asked for."""
+    monkeypatch.setattr(mailbox_module, "_opener",
+                        urllib.request.build_opener(urllib.request.ProxyHandler({}), mailbox_module._NoRedirects))
+    return _resolving(monkeypatch, *addresses)
+
+
+@needs_node
+def test_an_invite_whose_mailbox_name_points_inside_this_network_isnt_accepted(home, monkeypatch):
+    # A name passes for anyone's mailbox until it's looked up, as the accept goes.
+    asked = _resolving_here(monkeypatch, "10.0.0.5")
+    url = _invite_with(home("eric").invite("Eric")["url"], mailbox="https://rooms.example.net")
+    mona = home("mona")
+
+    with pytest.raises(links_module.LinkError) as refused:
+        mona.accept(url, "Mona")
+    assert (refused.value.code, refused.value.status) == ("bad_url", 502)
+    assert asked == [("rooms.example.net", 443)]
+    assert mona._store.read()["links"] == {} and mona._store.read()["outbox"] == []
+
+
+@needs_node
+def test_an_accept_naming_a_mailbox_whose_name_points_inside_this_network_gets_no_link(home, monkeypatch):
+    # Its confirm would go there.
+    asked = _resolving_here(monkeypatch, "127.0.0.1")
+    eric, mallory = home("eric"), home("mallory")
+    _forged_accept(eric.invite("Eric")["url"], mallory, mailbox="https://rooms.example.net")
+
+    _run(eric)
+
+    assert eric.view()["links"] == [] and eric._store.read()["outbox"] == []
+    assert asked == [("rooms.example.net", 443)]
+
+
+@needs_node
+def test_sends_tell_the_mailbox_client_which_mailbox_is_this_hermes_own(home, monkeypatch):
+    # It looks up only a mailbox someone else named, so one on a home network that both Hermes use links
+    # them: an accept, a confirm, an envelope and a remove.
+    calls = []
+    real_send = mailbox_module.send
+
+    def send(url, *args, **kwargs):
+        calls.append((url, kwargs.get("own")))
+        return real_send(url, *args, **kwargs)
+
+    monkeypatch.setattr(mailbox_module, "send", send)
+    eric, mona, link_id = _linked(home)
+    mona.send(link_id, "test.echo", {"text": "hi"})
+    mona.remove(link_id)
+
+    assert len(calls) == 4 and all(url == own for url, own in calls)
 
 
 @needs_node
