@@ -258,6 +258,8 @@ class Links:
         invite = parse_invite(url)
         name = _name(name)
         identity = self._identity()
+        # First, so a plugin install that can't show the Link makes no accept.
+        _words(invite.sign, invite.seal)
         now = int(self.clock())
         if identity.signing_public == invite.sign:
             raise LinkError("own_invite", "That invite is from this Hermes: it's for the person you're linking with")
@@ -489,6 +491,11 @@ class Links:
                 return
         try:
             self._send_outgoing(identity, item)
+        except (LinkError, room_envelope.EnvelopeError) as exc:
+            # What's stored for it can't make an envelope (links.json edited
+            # by hand), and never will. The rest still go.
+            self._give_up(item, now, exc.code, keep_link=item["kind"] == ACCEPT and earlier)
+            return
         except room_mailbox.MailboxError as exc:
             # Unauthorized: the other side took its sender back, or lost its
             # inbox. One the mailbox lost (not_found) is made again by its

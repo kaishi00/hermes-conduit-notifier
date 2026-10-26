@@ -729,6 +729,26 @@ def test_only_a_sender_that_can_go_later_is_deleted_again(home, monkeypatch, cod
 
 
 @needs_node
+@pytest.mark.parametrize("seal", ["not a key!", "AAAA"])
+def test_an_envelope_that_cant_be_made_is_dropped_and_the_rest_go(home, seal):
+    # A hand-edited links.json: one Link's key can't make an envelope.
+    eric, mona, link_id = _linked(home)
+    lisa = home("lisa")
+    lisa_link = lisa.accept(eric.invite("Eric")["url"], "Lisa")["link"]["id"]
+    _run(eric, lisa)
+    with eric._store.update() as state:
+        state["links"][link_id]["seal"] = seal
+
+    eric.remove(link_id)
+    eric.remove(lisa_link)
+    _run(eric, mona, lisa)
+
+    assert eric._store.read()["outbox"] == []
+    assert lisa.view()["links"] == []
+    assert [link["status"] for link in mona.view()["links"]] == ["linked"]  # its unlink couldn't be made
+
+
+@needs_node
 @pytest.mark.parametrize("error", [envelope.EnvelopeError("bad_key", "A key that can't seal"), OSError("disk")])
 def test_an_unlink_whose_envelope_cant_go_now_still_unlinks(home, monkeypatch, error):
     eric, mona, link_id = _linked(home)
@@ -1055,6 +1075,22 @@ def test_an_invite_isnt_made_without_its_words(home, monkeypatch):
 
     assert (refused.value.code, refused.value.status) == ("no_word_list", 503)
     assert venti._store.read()["invites"] == {}
+
+
+@needs_node
+def test_an_accept_isnt_made_without_its_words(home, monkeypatch):
+    eric, mona = home("eric"), home("mona")
+    made = eric.invite("Eric")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(identity_module, "fingerprint_words", _no_word_list)
+        with pytest.raises(links_module.LinkError) as refused:
+            mona.accept(made["url"], "Mona")
+    _run(eric, mona)
+
+    assert (refused.value.code, refused.value.status) == ("no_word_list", 503)
+    assert mona._store.read()["links"] == {} and mona._store.read()["outbox"] == []
+    assert eric.view()["links"] == [] and [invite["id"] for invite in eric.view()["invites"]] == [made["invite"]["id"]]
 
 
 def _invite_naming(url, mailbox):
