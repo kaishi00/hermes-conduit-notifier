@@ -74,9 +74,21 @@ def test_thumbs_teach_without_setting_a_level(live):
 
 def test_rating_the_same_way_again_counts_once(live):
     card = told_card(live)
-    control.rate(live.store, card["id"], "down")
-    assert control.rate(live.store, card["id"], "down") == []
+    now = time.time()
+    control.rate(live.store, card["id"], "down", now=now)
+    assert control.rate(live.store, card["id"], "down", now=now + 3600) == []
     assert learning.level(live.store, "followup") == "push"
+    # The vote fades from when it was given, however often it's given again, a reason added included.
+    control.rate(live.store, card["id"], "down", "already_knew", now=now + 7200)
+    assert [(row["what"], row["at"]) for row in live.store.signals()] == [("thumb", now)]
+
+
+def test_follow_ups_fit_what_pulse_learned_only_once_one_is_to_be_told(live, monkeypatch):
+    def fitted(*args, **kwargs):
+        raise AssertionError("fitted with no follow-up to tell")
+
+    monkeypatch.setattr(followup.prefs, "learn", fitted)
+    assert followup.next_send(live.store, time.time()) is None
 
 
 def test_at_screen_level_news_becomes_a_card_without_a_turn(live):
@@ -582,9 +594,9 @@ def test_do_it_and_done_are_signals_by_how_far_they_got(live):
                                                                           "done": prefs.DONE_WEIGHT}
     [vote] = prefs.votes(live.store.signals())  # of Do it and Done, only the stronger counts
     assert (vote.useful, vote.weight) == (prefs.ACT_SENT, prefs.ACT_SENT)
-    # Undo takes Done's signal back.
+    # Undo takes Done's signal back, and leaves Do it as far as it got.
     assert control.done(live.store, card["id"], False) is True
-    assert [row["what"] for row in live.store.signals()] == ["act"]
+    assert [(row["what"], row["weight"]) for row in live.store.signals()] == [("act", prefs.ACT_SENT)]
 
 
 def test_ratings_are_refused_while_pulse_is_off(live):
@@ -977,9 +989,10 @@ def test_do_it_marks_the_card_done_once_the_chat_shows_it_got_done(live):
     assert live.store.act(card["id"])["outcome"] == "done"
     # What Pulse learns: Do it got it done (Pulse's mark is no Done from the user).
     assert {row["what"]: row["weight"] for row in live.store.signals()} == {"act": prefs.ACT_DONE}
-    # Undo works on what Pulse marked too.
+    # Undo works on what Pulse marked too, and takes back what the mark taught: Do it sent something.
     assert control.done(live.store, card["id"], False) is True
     assert live.store.done_marks([card["id"]]) == {}
+    assert {row["what"]: row["weight"] for row in live.store.signals()} == {"act": prefs.ACT_SENT}
 
 
 def test_an_open_promise_pulse_saw_done_after_do_it_closes_and_undo_reopens_it(live):

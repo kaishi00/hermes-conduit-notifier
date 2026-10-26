@@ -16,7 +16,7 @@ checks it). The format is fixed, because Conduit reads it:
 ## 0.80.3 (2026-10-26)
 
 ### New and improved
-- Pulse learns from what you do with its cards, not only from thumbs: Do it counts by how far it got (opened, sent, done), and Done counts too. It learns which chats, kinds of things and timing you find useful, so a chat you keep turning down goes quiet after a few thumbs down in a row, a thumbs up brings it back, and what's due or overdue still comes up. A push you act on within the hour makes that kind louder. Thumbs no longer move a whole kind between a push, the Pulse screen and the brief: the level you set is the loudest Pulse gets, and levels two thumbs set before go back to yours, those thumbs teaching Pulse instead. Conduit from the `pulse` branch says so under What Pulse learned.
+- Pulse learns from what you do with its cards, not only from thumbs: Do it counts by how far it got (opened, sent, done), and Done counts too. It learns which chats, kinds of things and timing you find useful, so a chat you keep turning down goes quiet after a few thumbs down in a row, a thumbs up brings it back, and what's due or overdue still comes up. A push you act on within the hour makes that kind louder. Thumbs no longer move a whole kind between a push, the Pulse screen and the brief: the level you set is the loudest Pulse gets, and levels two thumbs set before go back to yours, those thumbs teaching Pulse instead. A thumbs down on a report card can say why too, and the reason acts at once for that kind of thing. Conduit from the `pulse` branch asks for it there and says what changed under What Pulse learned.
 
 ## 0.80.2 (2026-10-26)
 

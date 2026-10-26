@@ -1073,15 +1073,21 @@ class PulseStore:
     def unmark_done(self, card_id: int, item_id: Optional[int], *, closed_by: Sequence[str], now: float) -> bool:
         """Undo, in one transaction: takes the mark off and puts the item
         back as it was while one of ``closed_by`` still holds it closed, and its
-        checks back where the mark stopped them. False with no mark."""
+        checks back where the mark stopped them. What the mark taught goes
+        with it: the user's Done signal, or, for a done Pulse saw after Do it,
+        its Do it back to something sent (all the check saw before it). False
+        with no mark."""
         with _lock, self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute("SELECT prior_json FROM card_done WHERE card_id=?", (card_id,)).fetchone()
+            row = conn.execute("SELECT done_by, prior_json FROM card_done WHERE card_id=?", (card_id,)).fetchone()
             if row is None:
                 conn.execute("ROLLBACK")
                 return False
             conn.execute("DELETE FROM card_done WHERE card_id=?", (card_id,))
             conn.execute("DELETE FROM signals WHERE card_id=? AND what=?", (card_id, prefs.DONE))
+            if row["done_by"] != USER:
+                conn.execute("UPDATE signals SET weight=MIN(weight, ?) WHERE card_id=? AND what=?",
+                             (prefs.ACT_SENT, card_id, prefs.ACT))
             try:
                 prior = json.loads(row["prior_json"])
             except ValueError:
@@ -1246,7 +1252,9 @@ class PulseStore:
     def rate_card(self, card: dict, *, rating: str, reason: str, now: float) -> bool:
         """Rates ``card`` only if its rating is still the one read (another
         process may have rated it since), with its thumb signal in the same
-        write; whether it did."""
+        write; whether it did. The same thumb again (with or without a
+        reason) leaves the signal as it was, so the vote fades from when it
+        was first given."""
         with _lock, self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
@@ -1254,7 +1262,7 @@ class PulseStore:
                     "UPDATE cards SET rating=?, reason=?, rated_at=?, seen_at=COALESCE(seen_at, ?) "
                     "WHERE id=? AND rating=? AND reason=?",
                     (rating, reason, now, now, card["id"], card["rating"], card["reason"])).rowcount)
-                if rated:
+                if rated and rating != card["rating"]:
                     _put_signal(conn, card["id"], prefs.THUMB, at=now, useful=1.0 if rating == "up" else 0.0,
                                 weight=1.0)
                 conn.execute("COMMIT")
@@ -1381,19 +1389,6 @@ class PulseStore:
         with self._connect() as conn:
             return [dict(row) for row in conn.execute("SELECT * FROM signals WHERE at >= ? ORDER BY at, card_id, what",
                                                       (since,))]
-
-    def forget_signals(self, scope: str, value: str) -> int:
-        """Drops the signals whose ``scope`` (kind, place or band) is
-        ``value``, or every one for scope "all": what Pulse learned from
-        them goes. How many went."""
-        if scope == "all":
-            query, args = "DELETE FROM signals", ()
-        elif scope in prefs.STORED:
-            query, args = f"DELETE FROM signals WHERE {scope}=?", (value,)  # a name from FEATURES
-        else:
-            raise ValueError(f"unknown scope {scope!r}")
-        with _lock, self._connect() as conn:
-            return conn.execute(query, args).rowcount
 
     def prune_signals(self, before: float) -> int:
         with _lock, self._connect() as conn:

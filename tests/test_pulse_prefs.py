@@ -116,7 +116,8 @@ def test_a_push_acted_on_within_the_hour_makes_its_kind_louder():
     pushed = NOW - 2 * 3600
     rows = [signal(1, pushed + 600, 1.0, what="act", weight=prefs.ACT_OPENED, pushed=pushed),
             signal(2, pushed + 2 * 3600, 1.0, what="done", weight=prefs.DONE_WEIGHT, pushed=pushed),  # too late
-            signal(3, pushed + 60, 1.0, what="act", weight=prefs.ACT_OPENED, kind="date")]  # never pushed
+            signal(3, pushed + 60, 1.0, what="act", weight=prefs.ACT_OPENED, kind="date"),  # never pushed
+            signal(4, pushed - 60, 1.0, what="act", weight=prefs.ACT_OPENED, kind="date", pushed=pushed)]  # before it
     learned = learn(rows)
     assert learned.loudness("interest") == pytest.approx(prefs.QUICK_STEP * 0.5 ** ((NOW - pushed - 600) / prefs.LONG_S))
     assert learned.loudness("date") == 0
@@ -152,3 +153,9 @@ def test_why_names_the_biggest_part_and_the_votes_behind_it():
     assert prefs.EMPTY.factor(attrs) is None
     assert prefs.factor_words({"scope": "kind", "value": "promise", "effect": 0.4, "useful": 5, "votes": 6}) == \
         "more of promise items: useful 5 of 6 times"
+    # Timing too: thumbs down on what's due today, from all over, is about its timing.
+    today = [signal(200 + n, NOW - n * DAY, band="today", kind=("promise", "date", "interest")[n % 3],
+                    place=f"chat::t{n}") for n in range(6)]
+    timely = learn(history() + today).factor(prefs.attributes("commitment", "chat::new", "today"))
+    assert (timely["scope"], timely["value"], timely["votes"]) == ("timely", "yes", 6.0)
+    assert prefs.factor_words(timely).startswith("less of things due within the day or overdue: useful")

@@ -927,7 +927,7 @@ def next_send(pulse_store: store.PulseStore, now: float, home: Optional[Path] = 
     ceiling = learning.level(pulse_store, FOLLOWUP)
     if ceiling == "off":
         return None
-    learned = prefs.learn(pulse_store.signals(now - prefs.KEEP_S), now)
+    learned: Optional[prefs.Learned] = None  # fitted once a follow-up needs it, not every tick
     nudge = learning.nudge(pulse_store)
     for followup in pulse_store.followups_to_tell():
         item = pulse_store.item(followup["item_id"])
@@ -945,6 +945,8 @@ def next_send(pulse_store: store.PulseStore, now: float, home: Optional[Path] = 
             continue  # settle() closes it
         if mute(pulse_store, item, followup, now):
             continue
+        if learned is None:
+            learned = prefs.learn(pulse_store.signals(now - prefs.KEEP_S), now)
         loudness = item_level(item, learned, nudge=nudge, ceiling=ceiling, now=now)
         if quiet and loudness == "push":
             loudness = "brief"

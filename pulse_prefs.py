@@ -64,11 +64,11 @@ KEEP_S = 400 * 86400.0
 # The useful share at which learning changes nothing: a user who finds about
 # this share of what Pulse brings up useful gets what the model picks.
 PRIOR = 0.7
-# What a signal keeps of a card (pulse_store's signals columns), and the
-# attributes the model learns over: its kind, its place, and whether it was
-# timely (its band one of TIMELY), which pools what the user says about
-# everything due later or undated. How soon exactly is loudness (URGENCY).
-STORED = ("kind", "place", "band")
+# The attributes the model learns over, from what a signal keeps of a card
+# (pulse_store's signals: its kind, place and band): its kind, its place, and
+# whether it was timely (its band one of TIMELY), which pools what the user
+# says about everything due later or undated. How soon exactly is loudness
+# (URGENCY).
 FEATURES = ("kind", "place", "timely")
 # Prior strength, in votes, per attribute (the overall lean, then each
 # attribute), toward nothing learned; and a place's, toward the long
@@ -258,7 +258,7 @@ class Learned:
             return None
         parts = [("all", "", self.short.bias - logit(PRIOR))]
         parts += [(name, attrs[name], self.short.weights.get((name, attrs[name]), 0.0)) for name in FEATURES
-                  if attrs.get(name) and name != "timely"]
+                  if attrs.get(name)]
         scope, value, effect = max(parts, key=lambda part: part[2] if total > 0 else -part[2])
         if (effect > 0) != (total > 0) or abs(effect) < 0.1:
             return None
@@ -314,7 +314,7 @@ def loudness(signals: Iterable[dict], now: float) -> dict[str, float]:
     fading like the long memory, at most QUICK_MAX."""
     first: dict[int, tuple[float, float, str]] = {}
     for row in signals:
-        if row["what"] in (ACT, DONE) and row.get("pushed") is not None and row["at"] - row["pushed"] <= QUICK_S:
+        if row["what"] in (ACT, DONE) and row.get("pushed") is not None and 0 <= row["at"] - row["pushed"] <= QUICK_S:
             seen = first.get(row["card_id"])
             if seen is None or row["at"] < seen[0]:
                 first[row["card_id"]] = (row["at"], row["pushed"], row["kind"])
@@ -324,8 +324,7 @@ def loudness(signals: Iterable[dict], now: float) -> dict[str, float]:
     return {kind: min(QUICK_MAX, value) for kind, value in loud.items()}
 
 
-BAND_WORDS = {OVERDUE: "things already overdue", SOON: "things due within hours", TODAY: "things due within the day",
-              DAYS: "things due in the next few days", LATER: "things due later", UNDATED: "things with no date"}
+TIMELY_WORDS = {"yes": "things due within the day or overdue", "no": "things not due within the day"}
 
 
 def _number(value: float) -> str:
@@ -336,7 +335,8 @@ def factor_words(factor: dict) -> str:
     """A ``Learned.factor`` in words, for `pulse candidates`: "useful 5 of
     6 times: promise items"."""
     scope, value = factor.get("scope"), factor.get("value") or ""
-    what = {"all": "what Pulse brings up", "kind": f"{value} items", "band": BAND_WORDS.get(value, value)}.get(scope)
+    what = {"all": "what Pulse brings up", "kind": f"{value} items",
+            "timely": TIMELY_WORDS.get(value, value)}.get(scope)
     if scope == "place":
         what = ("things from that chat" if value.startswith("chat:")
                 else f"things about {value[5:]}" if value.startswith("area:")
