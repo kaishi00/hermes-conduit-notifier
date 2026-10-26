@@ -277,14 +277,18 @@ def update(pulse_store: Any, body: Any, home: Any = None) -> None:
 
 def _quiet_until(pulse_store: Any, value: Any, home: Any) -> Optional[float]:
     """When a quiet spell ends: None clears it; "today" is the end of
-    today; a day (YYYY-MM-DD) is its start; a number is epoch seconds. In
-    the user's zone, ahead of now by at most pulse_quiet.MAX_AHEAD_S."""
+    today, or the spell already set when that ends later (Quiet for today
+    never shortens a vacation); a day (YYYY-MM-DD) is its start; a number
+    is epoch seconds. In the user's zone, ahead of now by at most
+    pulse_quiet.MAX_AHEAD_S."""
     if value is None:
         return None
     now = time.time()
     zone = pulse.report_zone(pulse_store, Path(home) if home else Path("."), now)
     if value == "today":
-        return pulse_quiet.next_midnight(zone, now)
+        end = pulse_quiet.next_midnight(zone, now)
+        current = pulse_quiet.until(pulse_store)
+        return current if current is not None and current > end else end
     if isinstance(value, str):
         at = pulse_quiet.day_start(zone, value)
     else:

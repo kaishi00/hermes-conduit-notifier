@@ -51,6 +51,9 @@ def test_the_settings_take_quiet_days_and_a_spell_until_today_or_a_day(live):
     control.update(live.store, {"quiet_until": day}, live.home)
     assert live.store.get("quiet_until") == quiet.day_start(UTC, day) == datetime.strptime(day, "%Y-%m-%d").replace(
         tzinfo=UTC).timestamp()
+    # Quiet for today never shortens the longer spell already set.
+    control.update(live.store, {"quiet_until": "today"}, live.home)
+    assert live.store.get("quiet_until") == quiet.day_start(UTC, day)
     control.update(live.store, {"quiet_until": now + 7200}, live.home)
     assert live.store.get("quiet_until") == now + 7200
     today = datetime.fromtimestamp(now, UTC).strftime("%Y-%m-%d")
