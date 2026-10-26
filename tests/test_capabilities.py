@@ -80,6 +80,7 @@ def test_every_capability_names_a_served_route_family():
         # The note to Pulse is a setting on the /pulse control route.
         "pulse_note": "/pulse",
         "pulse_rest": "/pulse/dismiss",
+        "pulse_card_why": "/pulse/feed",
         "present-v1": "/present/",
         "health-sync": "/health/",
         "shortcut-inbox": "/inbox/",

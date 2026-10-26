@@ -123,7 +123,7 @@ def test_every_remembered_item_shown_is_answered_for_or_marked_unanswered():
     owed, covered, _, rested = rows
     assert owed == {"origin": "memory", "item_id": 2, "kind": "promise", "profile": "", "chat_id": CHAT,
                     "source": "chat", "area": "", "due_at": DAY, "actionable": True, "value": 4, "bring_up": True,
-                    "skip": "", "text": "I still owe you the build check"}
+                    "skip": "", "text": "I still owe you the build check", "why": ""}
     assert (covered["skip"], covered["value"], covered["text"]) == ("covered", 2, "The user will do thing 1.")
     assert rested["skip"] == report.RATED
 
@@ -131,17 +131,23 @@ def test_every_remembered_item_shown_is_answered_for_or_marked_unanswered():
 def test_found_candidates_need_a_line_and_say_where_they_came_from():
     def entry(**more):
         return {"kind": "date", "bring_up": True, "value": 4, "skip": "", "actionable": True,
-                "line": "Ana lands at 18:00 (calendar)", "source": "calendar", "area": "Social", **more}
+                "line": "Ana lands at 18:00 (calendar)", "why": "Her flight is in your calendar for today.",
+                "source": "calendar", "area": "Social", **more}
 
     reply = {"remembered": [], "found": [
-        entry(), entry(kind="weird", chat="C1", source="notes", line="- Your deploy is flaky (Deploy)"),
-        entry(line="  "), entry(chat="c9", source="radio", area="space", value=9, bring_up="yes", actionable=1)]
+        entry(), {key: value for key, value in entry(kind="weird", chat="C1", source="notes",
+                                                    line="- Your deploy is flaky (Deploy)").items() if key != "why"},
+        entry(line="  "), entry(chat="c9", source="radio", area="space", value=9, bring_up="yes", actionable=1,
+                                why="x" * 400)]
         + [entry(line=f"extra {n}") for n in range(20)]}
     rows = candidates.parse(reply, gathered(chats={"c1": ("nahida", CHAT)}))
     assert len(rows) == candidates.MAX_FOUND
     first, second, third = rows[:3]
     assert (first["origin"], first["kind"], first["source"], first["area"], first["chat_id"], first["item_id"]) == (
         "model", "date", "calendar", "social", "", None)
+    # Its reason (why now, where it came from) comes apart from its line: the card's Why?.
+    assert first["why"] == "Her flight is in your calendar for today." and second["why"] == ""
+    assert third["why"] == "x" * (candidates.WHY_LIMIT - 1) + "…"
     assert (second["kind"], second["source"], second["profile"], second["chat_id"], second["text"]) == (
         "other", "chat", "nahida", CHAT, "Your deploy is flaky (Deploy)")
     # An unknown chat key, source and area name nothing; a wild value, a pick or a flag that isn't one count as none.
@@ -199,6 +205,14 @@ def test_a_remembered_item_rated_no_meanwhile_rests_whatever_the_model_said(live
 
 # Saying ----------------------------------------------------------------------
 
+def test_the_list_asks_for_each_picks_reason_apart_from_its_line():
+    # Eric, 2026-10-25: report cards get Why? too. The line used to end with the reason in
+    # brackets; now the reason is its own field, shown behind Why? on the card.
+    assert '"line": "...", "why": "..."' in candidates.INSTRUCTIONS
+    assert '- "why": why now, and where it came from, in one line written to the user' in candidates.INSTRUCTIONS
+    assert "(why now" not in candidates.INSTRUCTIONS
+
+
 def test_the_report_turn_says_the_picks_as_report_lines():
     picked = [{"kind": "date", "text": "Ana lands at 18:00", "item_id": None},
               {"kind": "promise", "text": "I still owe you the build check", "item_id": 12}]
@@ -209,6 +223,9 @@ def test_the_report_turn_says_the_picks_as_report_lines():
     # Said back as asked, the reply splits into the same items the cards are made from.
     assert learning.report_lines(lines) == candidates.lines(picked) == [
         ("date", "Ana lands at 18:00", None), ("promise", "I still owe you the build check", 12)]
+    # The reasons go to the cards, not the report: none for picks journaled before candidates had one.
+    assert candidates.whys(picked) == ["", ""]
+    assert candidates.whys([{**picked[0], "why": "Her flight is today."}, picked[1]]) == ["Her flight is today.", ""]
     nothing = candidates.report_text("pab-1", [], SINCE)
     assert nothing.endswith("Reply with exactly: Nothing worth bringing up right now.")
     assert learning.empty_turn("report", "Nothing worth bringing up right now.")
@@ -370,7 +387,8 @@ def deliver(live, text, reply):
 
 
 FOUND = {"kind": "follow-up", "bring_up": True, "value": 4, "skip": "", "actionable": True,
-         "line": "Look at the flaky deploy (you asked in Deploy)", "source": "chat", "chat": "c1", "area": "work"}
+         "line": "Look at the flaky deploy (you asked in Deploy)",
+         "why": "You asked about it in Deploy and nothing has been done since.", "source": "chat", "chat": "c1", "area": "work"}
 
 
 @pytest.mark.parametrize("slot", [None, {"provider": "openrouter", "model": "google/gemini-flash"}])
@@ -398,7 +416,8 @@ def test_a_report_lists_its_candidates_then_says_what_code_picked(reporting):
     live.db.message("user", "Can you look at the flaky deploy tomorrow?", sid=CHAT, at=now - 600)
     live.llm.replies.append({
         "remembered": [{"ref": item_id, "bring_up": True, "value": 3, "skip": "", "actionable": True,
-                        "line": "Renew your passport before the trip (you said so in Deploy)"}],
+                        "line": "Renew your passport before the trip (you said so in Deploy)",
+                        "why": "You promised it in Deploy and the trip is in three days."}],
         "found": [FOUND, {**FOUND, "kind": "fact", "bring_up": False, "value": 1, "skip": "minor",
                           "line": "Your sister is Ana"}]})
     pulse.tick(now)
@@ -435,6 +454,9 @@ def test_a_report_lists_its_candidates_then_says_what_code_picked(reporting):
                                      None, CHAT, "Deploy", None)
     assert (remembered["item_id"], remembered["chat_id"], remembered["chat_title"], remembered["topic"]) == (
         item_id, CHAT, "Deploy", "commitment")
+    # Each card's Why? is its candidate's reason, journaled with it.
+    assert (found["why"], remembered["why"]) == ("You asked about it in Deploy and nothing has been done since.", "You promised it in Deploy and the trip is in three days.")
+    assert [row["why"] for row in live.store.run_candidates(run["id"])][:2] == [found["why"], remembered["why"]]
     assert [(row["decision"], row["card_id"]) for row in live.store.run_candidates(run["id"])] == [
         (candidates.SURFACED, found["id"]), (candidates.SURFACED, remembered["id"]), (candidates.SKIPPED, None)]
     pulse.tick(now + 3)

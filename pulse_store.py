@@ -280,6 +280,8 @@ CREATE TABLE IF NOT EXISTS candidates (
     skip TEXT NOT NULL DEFAULT '',
     -- What it would tell the user (or the remembered item's own text).
     text TEXT NOT NULL DEFAULT '',
+    -- Why now, and where it came from, in its words to the user: the card's Why?.
+    why TEXT NOT NULL DEFAULT '',
     decision TEXT NOT NULL,
     rank INTEGER,
     card_id INTEGER
@@ -311,11 +313,15 @@ SPLIT_ITEMS = '"split"'
 CARD_COLUMNS = ("kind", "item_id", "level", "title", "quote", "news", "why", "profile", "chat_id", "chat_title",
                 "message_id", "topic", "brief", "created_at")
 # Card columns added after the first build, oldest first, with their types.
-_ADDED_CARD_COLUMNS = (("topic", "TEXT NOT NULL DEFAULT ''"), ("brief", "TEXT NOT NULL DEFAULT ''"),
-                       ("dismissed_at", "REAL"), ("rest_until", "REAL"))
+# Columns a table gained after stores existed, added to a store from before.
+_ADDED_COLUMNS = (("cards", "topic", "TEXT NOT NULL DEFAULT ''"), ("cards", "brief", "TEXT NOT NULL DEFAULT ''"),
+                  ("cards", "dismissed_at", "REAL"), ("cards", "rest_until", "REAL"),
+                  ("candidates", "why", "TEXT NOT NULL DEFAULT ''"))
+# What report cards said for Why? before a candidate's reason did (never shown).
+_STOCK_NOTICED_WHY = "From your Pulse report: something Hermes noticed in your chats, calendar or notes."
 LESSON_COLUMNS = ("kind", "what", "value", "profile", "chat_id", "card_id", "cause", "created_at")
 CANDIDATE_COLUMNS = ("origin", "item_id", "kind", "profile", "chat_id", "source", "area", "due_at", "actionable",
-                     "value", "bring_up", "skip", "text", "decision", "rank")
+                     "value", "bring_up", "skip", "text", "why", "decision", "rank")
 
 
 def _listed(conn: Any, key: str) -> list[str]:
@@ -323,6 +329,10 @@ def _listed(conn: Any, key: str) -> list[str]:
     found = conn.execute("SELECT value_json FROM settings WHERE key=?", (key,)).fetchone()
     value = json.loads(found["value_json"]) if found else None
     return [str(entry) for entry in value] if isinstance(value, list) else []
+
+
+def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}  # a table _ADDED_COLUMNS names
 
 
 def _check_columns(row: dict, allowed: tuple) -> None:
@@ -347,16 +357,21 @@ class PulseStore:
         self.busy_timeout_s = busy_timeout_s
         with self._connect() as conn:
             conn.executescript(_SCHEMA)
-            # A store from before cards had these.
-            for column, kind in _ADDED_CARD_COLUMNS:
-                if column in {row[1] for row in conn.execute("PRAGMA table_info(cards)")}:
+            # A store from before a table had these.
+            for table, column, kind in _ADDED_COLUMNS:
+                if column in _columns(conn, table):
                     continue
                 try:
-                    conn.execute(f"ALTER TABLE cards ADD COLUMN {column} {kind}")
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
                 except sqlite3.OperationalError:
                     # Another process opening the same store added it first.
-                    if column not in {row[1] for row in conn.execute("PRAGMA table_info(cards)")}:
+                    if column not in _columns(conn, table):
                         raise
+                    continue
+                if (table, column) == ("candidates", "why"):
+                    # A report card's why is now its candidate's reason, or nothing: the
+                    # stock line from before would show behind Why? as if it were one.
+                    conn.execute("UPDATE cards SET why='' WHERE kind=? AND why=?", (NOTICED, _STOCK_NOTICED_WHY))
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.path), timeout=self.busy_timeout_s, isolation_level=None)

@@ -1126,6 +1126,43 @@ def test_the_rested_card_check_reads_the_note_to_pulse(live):
     assert live.store.card(card_id)["dismissed_at"] is None
 
 
+def test_a_report_card_carries_its_reason_and_one_written_without_a_list_has_none(live):
+    from types import SimpleNamespace
+    turn = SimpleNamespace(session_id=SID, reply_id=7)
+    report = followup.report
+    [with_why, without] = learning.add_noticed_cards(
+        live.store, turn=turn, lines=[("date", "Dentist Friday at 9", None), ("fact", "Ana is in town", None)],
+        chat_id=SID, chat_title="Pulse", shown=set(), kinds=report.KINDS, item_chat_title=lambda item: "",
+        now=time.time(), whys=["Your calendar has it for Friday and nothing else that morning."])
+    assert live.store.card(with_why)["why"] == "Your calendar has it for Friday and nothing else that morning."
+    assert live.store.card(without)["why"] == ""
+    # A report the turn wrote itself (no candidate list behind it) gives its cards no reason.
+    [plain] = learning.add_noticed_cards(
+        live.store, turn=turn, lines=[("date", "Dentist Friday at 9", None)], chat_id=SID, chat_title="Pulse",
+        shown=set(), kinds=report.KINDS, item_chat_title=lambda item: "", now=time.time() + 1)
+    assert live.store.card(plain)["why"] == ""
+    feed = {card["id"]: card for card in control.feed(live.store)["cards"]}
+    assert feed[with_why]["why"] and feed[plain]["why"] == ""
+
+
+def test_a_store_from_before_candidates_had_a_reason_gains_it_and_drops_the_stock_why(live):
+    noticed, kept = found_card(live), promise(live)
+    followup_card = learning.add_card(live.store, kind="followup", item=live.store.item(kept), level_name="push",
+                                      news="The deploy is still waiting.", why="You said you would check it.",
+                                      chat_title="Deploy", now=time.time())
+    with sqlite3.connect(live.store.path) as conn:
+        conn.execute("UPDATE cards SET why=? WHERE id=?", (store._STOCK_NOTICED_WHY, noticed))
+        conn.execute("ALTER TABLE candidates DROP COLUMN why")
+        assert "why" not in {row[1] for row in conn.execute("PRAGMA table_info(candidates)")}
+    reopened = store.PulseStore(live.store.path)
+    with sqlite3.connect(live.store.path) as conn:
+        assert "why" in {row[1] for row in conn.execute("PRAGMA table_info(candidates)")}
+    assert reopened.card(noticed)["why"] == "" and reopened.card(followup_card)["why"] == "You said you would check it."
+    # Opening it again changes nothing more.
+    store.PulseStore(live.store.path)
+    assert reopened.card(followup_card)["why"] == "You said you would check it."
+
+
 def test_a_held_card_check_follows_its_chat_into_the_continuation(live):
     item_id = promise(live)
     card_id = learning.add_card(live.store, kind="followup", item=live.store.item(item_id), level_name="brief",

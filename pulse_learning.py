@@ -164,7 +164,6 @@ def drop_empty_reports(pulse_store: store.PulseStore) -> int:
 # One item of a report, as its own card (the report's lines, split).
 NOTICED = store.NOTICED
 NOTICED_NEWS_LIMIT = 1200
-NOTICED_WHY = "From your Pulse report: something Hermes noticed in your chats, calendar or notes."
 # "1. [date] text #12", also bold or bulleted; the number, the kind, the rest.
 _REPORT_LINE = re.compile(r"^\s*(?:[-*]\s+)?(?:\*\*)?(\d{1,2})[.)](?:\*\*)?\s*\[([A-Za-z-]+)\]\s*(.+?)\s*$", re.MULTILINE)
 _LINE_REF = re.compile(r"\s*#(\d{1,9})\W*$")
@@ -189,14 +188,16 @@ def add_noticed_cards(pulse_store: store.PulseStore, *, turn: Any, lines: list[t
                       chat_id: str, chat_title: str, shown: set[int], kinds: tuple[str, ...],
                       item_chat_title: Callable[[dict], str], now: float, attempt: str = "",
                       marks: tuple[str, ...] = (), keep: int = 50, links: Sequence[int] = (),
-                      found_in: Sequence[tuple[str, str]] = ()) -> list[int]:
+                      found_in: Sequence[tuple[str, str]] = (), whys: Sequence[str] = ()) -> list[int]:
     """A delivered report's items (``report_lines``) as cards, one each, all
     at once, marked as ``add_cards`` marks them. An item drawn from a
     remembered thing (its "#n", shown in the report; what replaced it since,
     if anything) points at the chat that thing came from; one the report
     found in a chat (``found_in``: each line's profile and chat, "" for none)
     points at that chat; the rest point at the report in the Pulse chat.
-    Done and Do it work on all of them (``action_card``).
+    Done and Do it work on all of them (``action_card``). ``whys``: each
+    line's reason (why now, where it came from), the card's Why?; a report
+    written without a candidate list has none.
     ``item_chat_title`` gives a chat's title from its profile and chat_id."""
     rows = []
     for n, (kind, text, ref) in enumerate(lines):
@@ -205,7 +206,7 @@ def add_noticed_cards(pulse_store: store.PulseStore, *, turn: Any, lines: list[t
         profile, found = found_in[n] if n < len(found_in) else ("", "")
         row: dict[str, Any] = {
             "kind": NOTICED, "level": "screen", "topic": kind if kind in kinds else "other",
-            "news": _clip(text, NOTICED_NEWS_LIMIT), "why": NOTICED_WHY, "created_at": now}
+            "news": _clip(text, NOTICED_NEWS_LIMIT), "why": whys[n] if n < len(whys) else "", "created_at": now}
         if item is not None:
             row.update(item_id=item["id"], title=_clip(item["text"], 300), quote=_clip(item["evidence"], 300),
                        profile=item["profile"], chat_id=item["chat_id"], message_id=item["message_id"],

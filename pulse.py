@@ -436,7 +436,7 @@ def _turn_cards(pulse_store: store.PulseStore, home: Path, changed: list[dict], 
                         kinds=report.KINDS, item_chat_title=lambda item: followup.chat_title(home, item), now=now,
                         attempt=str(attempt), marks=(TURN_CARDS_DONE, store.SPLIT_REPORTS),
                         keep=TURN_CARDS_DONE_KEEP, links=[pick["id"] for pick in picked],
-                        found_in=candidates.found_in(picked))
+                        found_in=candidates.found_in(picked), whys=candidates.whys(picked))
                 else:
                     _mark_turn_card(pulse_store, attempt)
                 continue

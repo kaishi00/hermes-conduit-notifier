@@ -44,6 +44,8 @@ MEMORY, MODEL = "memory", "model"
 MAX_ITEMS = 5
 MAX_FOUND = 15
 TEXT_LIMIT = 600
+# A candidate's reason (why now, where it came from), the card's Why?.
+WHY_LIMIT = 300
 SKIPS = ("done", "covered", "raised", "rated", "minor")
 SOURCES = ("chat", "calendar", "reminders", "notes", "jobs", "tools")
 AREAS = ("work", "personal", "health", "home", "money", "social", "travel", "other")
@@ -76,16 +78,17 @@ Between the <<<context MARK and context MARK>>> lines, where MARK is a random wo
 Return a JSON object {{"remembered": [...], "found": [...]}}.
 
 "remembered" has one entry for every item under "What Pulse remembers", none left out:
-{{"ref": 12, "bring_up": false, "value": 2, "skip": "covered", "actionable": true, "line": ""}}
+{{"ref": 12, "bring_up": false, "value": 2, "skip": "covered", "actionable": true, "line": "", "why": ""}}
 
 "found" has whatever else is worth considering, from the chats, calendar, reminders, notes, jobs or failed tool calls, up to {found} entries, ones you'd leave out included:
-{{"kind": "date", "bring_up": true, "value": 4, "skip": "", "actionable": true, "line": "...", "source": "chat", "chat": "c2", "area": "work"}}
+{{"kind": "date", "bring_up": true, "value": 4, "skip": "", "actionable": true, "line": "...", "why": "...", "source": "chat", "chat": "c2", "area": "work"}}
 
 - "bring_up": true when it belongs in this report. {bar} At most {limit} in all.
 - "value": how useful hearing it now would be, from 1 (not at all) to 5 (they'd want it now).
 - "skip": when it should stay out, why, in one word: "done" (already done, in any chat or cron run, marked (done) in what Pulse brought up lately, or later work moved past it), "covered" (their calendar, reminders, Hermes's scheduled jobs or something running in the background cover it), "raised" (Pulse brought it up lately and nothing about it changed), "rated" (the user rated it "no" before) or "minor"; otherwise "".
 - "actionable": whether the user could do something about it.
-- "line": what to tell the user, one line written to them that makes sense on its own, then (why now, and where it came from). Every found entry needs one, and so does every remembered item you'd bring up. Say only what the context shows: never a cause, a history or a pattern it doesn't state.
+- "line": what to tell the user, one line written to them that makes sense on its own. Every found entry needs one, and so does every remembered item you'd bring up. Say only what the context shows: never a cause, a history or a pattern it doesn't state.
+- "why": why now, and where it came from, in one line written to the user: what makes it worth their attention now, and the chat, calendar entry, reminder, note, job or tool call it rests on. Every entry with a "line" has one, under the same rule: only what the context shows.
 - "kind" (found only): one of {kinds}.
 - "source" (found only): chat, calendar, reminders, notes, jobs or tools; "chat": the key of the chat it came from, when it did; "area": one of {areas}.
 
@@ -192,7 +195,8 @@ def _remembered(item: dict, entry: dict) -> dict:
             "chat_id": item["chat_id"], "source": "chat", "area": _choice(entry.get("area"), AREAS),
             "due_at": item["due_at"], "actionable": _flag(entry.get("actionable")), "value": _value(entry.get("value")),
             "bring_up": entry.get("bring_up") is True, "skip": _skip(entry.get("skip")),
-            "text": _line(entry.get("line"), ref=item["id"]) or _clip(item["text"], TEXT_LIMIT)}
+            "text": _line(entry.get("line"), ref=item["id"]) or _clip(item["text"], TEXT_LIMIT),
+            "why": _clip(entry.get("why"), WHY_LIMIT)}
 
 
 def _found(entry: dict, chats: dict[str, tuple[str, str]]) -> Optional[dict]:
@@ -206,7 +210,7 @@ def _found(entry: dict, chats: dict[str, tuple[str, str]]) -> Optional[dict]:
             "chat_id": chat_id, "source": "chat" if where else _choice(entry.get("source"), SOURCES),
             "area": _choice(entry.get("area"), AREAS), "due_at": None, "actionable": _flag(entry.get("actionable")),
             "value": _value(entry.get("value")), "bring_up": entry.get("bring_up") is True,
-            "skip": _skip(entry.get("skip")), "text": text}
+            "skip": _skip(entry.get("skip")), "text": text, "why": _clip(entry.get("why"), WHY_LIMIT)}
 
 
 def _ref(value: Any) -> Optional[int]:
@@ -319,6 +323,13 @@ def report_text(tag: str, picked: Sequence[dict], since: str) -> str:
 def lines(picked: Sequence[dict]) -> list[tuple[str, str, Optional[int]]]:
     """The picks as pulse_learning.add_noticed_cards takes a report's lines."""
     return [(pick["kind"], pick["text"], pick["item_id"]) for pick in picked]
+
+
+def whys(picked: Sequence[dict]) -> list[str]:
+    """Each pick's reason (why now, where it came from), the card's Why?:
+    pulse_learning.add_noticed_cards's ``whys``. "" for a pick without one
+    (a run journaled before candidates had a reason)."""
+    return [pick.get("why") or "" for pick in picked]
 
 
 def found_in(picked: Sequence[dict]) -> list[tuple[str, str]]:

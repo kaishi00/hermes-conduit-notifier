@@ -16009,6 +16009,9 @@ ROUTE_CAPABILITIES = (
     # /pulse/dismiss takes "until" (later today, tomorrow, next week): the
     # card comes back as new then.
     "pulse_rest",
+    # A report card's "why" is its reason (why now, where it came from),
+    # for Why? on the Pulse screen; "" when it has none.
+    "pulse_card_why",
     "present-v1",
     "health-sync",
     "voice-tools",
