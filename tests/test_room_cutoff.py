@@ -376,10 +376,18 @@ def _attempt(hermes, task, generation):
 
 
 def _runtime(hermes, route):
-    return hermes.driver.HostedRoomRuntime(
-        db_path=DB, rpc=_LOCAL,
-        transport_resolver=lambda binding, task: route if task["payload"]["target_member_id"] == route.member
-        else _LOCAL)
+    def resolve(binding, task):
+        if task["payload"]["target_member_id"] != route.member:
+            return _LOCAL
+        # Building the member's transport marks its stored route ready: Hermes'
+        # route status client counts the transport's own bind_room_scope call
+        # as an answer from the member's host (tui_gateway/hosted_room_service
+        # _RouteStatusPeerClient, c73cbcc4 and 9e01b44).
+        if (DB, ROOM, route.member) in hermes.links.stored:
+            hermes.links.stored[(DB, ROOM, route.member)] = "ready"
+        return route
+
+    return hermes.driver.HostedRoomRuntime(db_path=DB, rpc=_LOCAL, transport_resolver=resolve)
 
 
 def test_hermes_alone_retries_a_cut_off_member_forever(hermes):
@@ -407,6 +415,11 @@ def test_a_cut_off_member_fails_its_turn_instead_of_retrying(hermes, guard):
     assert route.submits == 1 and hermes.state.requeued == [1]
     assert hermes.state.settled == [(2, "failed", {"error": CUT_OFF})]
     assert runtime.ambiguous == []
+    # The member's route still says so, and its next turn fails at once.
+    assert hermes.links.stored[(DB, ROOM, "laifu")] == "needs_reauthorization"
+    later = _task(hermes)
+    runtime._execute_attempt(_binding(), later, _attempt(hermes, later, 3))
+    assert route.submits == 1 and hermes.state.settled[-1] == (3, "failed", {"error": CUT_OFF})
 
 
 def test_a_relinked_member_answers_again(hermes, guard):
@@ -446,12 +459,12 @@ def test_recovery_and_stop_paths_are_left_alone(hermes, guard):
     assert hermes.links.reads == []
 
 
-def test_the_home_hosts_own_agents_are_never_looked_up(hermes, guard):
+def test_the_home_hosts_own_agents_go_on_while_a_member_is_cut_off(hermes, guard):
+    hermes.links.stored[(DB, ROOM, "laifu")] = "needs_reauthorization"
     route = _PeerRoute(hermes)
-    runtime = _runtime(hermes, route)
+    runtime, task = _runtime(hermes, route), _task(hermes, member="furina")
 
-    assert runtime._transport_for(_binding(), _task(hermes, member="furina")) is _LOCAL
-    assert hermes.links.reads == []
+    assert runtime._transport_for(_binding(), task) is _LOCAL
 
 
 def test_a_store_it_cant_read_leaves_hermes_behaviour(hermes, guard, monkeypatch, caplog):

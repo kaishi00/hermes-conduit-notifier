@@ -5,9 +5,11 @@ queue when a peer member's host refuses it before admission, and tries again
 after a pause that grows to 30 s, forever. A revoked or expired grant is
 refused that way too: Hermes records the member's route as needing
 reauthorization (gateway/hosted_room_links), and the room waits on that member
-from then on. Until Hermes settles such a turn itself, the plugin fails the
-member's next queued turn before it's sent, with a reason, the way Hermes fails
-a turn whose member has no destination, so the discussion goes on without
+from then on. Hermes marks the route ready again as it sets up each retry, so
+the record holds only until then. Until Hermes settles such a turn itself, the
+plugin reads the record before Hermes sets up the member's next queued turn,
+and fails that turn before it's sent, with a reason, the way Hermes fails a
+turn whose member has no destination, so the discussion goes on without
 them. Linking the member again stores the route as ready, and its turns go
 through again. A member that's only offline is Hermes' to retry.
 """
@@ -75,15 +77,16 @@ def cut_off(db_path: Any, room_id: Any, member_id: str) -> bool:
 def _guard(original: Callable[..., Any]) -> Callable[..., Any]:
     # Takes whatever Hermes passes and hands it on as it came.
     def _transport_for(self: Any, binding: Any, task: Any, *args: Any, **kwargs: Any) -> Any:
-        transport = original(self, binding, task, *args, **kwargs)
-        # Only a turn about to be sent: recovering or stopping one needs its route.
-        if (not isinstance(task, Mapping) or task.get("status") != "queued"
-                or transport is getattr(self, "rpc", None)):
-            return transport
-        member = _member_id(task)
-        if member and cut_off(getattr(self, "db_path", None), getattr(binding, "room_id", None), member):
-            raise MemberCutOff(f"cut off: {member}'s Hermes no longer accepts this room")
-        return transport
+        # Only a turn about to be sent: recovering or stopping one needs its
+        # route. Read before Hermes builds the member's transport, which marks
+        # the route ready again (its route status client counts the
+        # transport's own bind_room_scope call as an answer from the member's
+        # host). The home's own agents have no stored route.
+        if isinstance(task, Mapping) and task.get("status") == "queued":
+            member = _member_id(task)
+            if member and cut_off(getattr(self, "db_path", None), getattr(binding, "room_id", None), member):
+                raise MemberCutOff(f"cut off: {member}'s Hermes no longer accepts this room")
+        return original(self, binding, task, *args, **kwargs)
 
     functools.update_wrapper(_transport_for, original)
     setattr(_transport_for, _GUARD_FLAG, True)
