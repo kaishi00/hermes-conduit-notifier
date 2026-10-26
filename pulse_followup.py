@@ -585,13 +585,17 @@ RESTS = (LATER_TODAY, TOMORROW, NEXT_WEEK)
 LATER_TODAY_S = 3 * 3600.0
 LATER_TODAY_END = (23, 0)  # "later today" is still today: at 23:00 at the latest
 MIN_REST_S = 30 * 60.0  # past 22:30, later today is tomorrow
+# Tomorrow and next week land this long before the morning brief: time for a
+# memory run (every pulse.MEMORY_EVERY_S) to read the card's chat, and for a
+# held card to be held again when the brief goes.
+BRIEF_LEAD_S = 10 * 60.0
 
 
 def rest_time(choice: str, now: float, zone: tzinfo, pulse_store: store.PulseStore) -> float:
     """When a card swiped away until ``choice`` (RESTS) comes back: in
-    three hours (by 23:00; past 22:30 tomorrow), tomorrow at the morning
-    brief's time, or a week from today at that time, so a card put off to
-    a day comes back with that day's brief."""
+    three hours (by 23:00; past 22:30 tomorrow), or tomorrow or a week
+    from today, BRIEF_LEAD_S before the morning brief, so a card put off to
+    a day comes back with that day's brief, its chat read first."""
     from . import pulse_brief as brief
     if choice not in RESTS:
         raise ValueError(f"not a rest: {choice!r}")
@@ -602,7 +606,8 @@ def rest_time(choice: str, now: float, zone: tzinfo, pulse_store: store.PulseSto
         if at - now >= MIN_REST_S:
             return at
         choice = TOMORROW
-    return report.slot_on(now, zone, pulse_store.get("brief_time") or brief.DEFAULT_TIME, 1 if choice == TOMORROW else 7)
+    return report.slot_on(now, zone, pulse_store.get("brief_time") or brief.DEFAULT_TIME,
+                          1 if choice == TOMORROW else 7) - BRIEF_LEAD_S
 
 
 RESTED_INSTRUCTIONS = """You check whether news is still worth telling. Pulse, the part of Hermes (an AI assistant) that speaks up on its own, brought the user news, and the user put it off ("Not now") until a time that has come: it's about to come back to them.
@@ -618,12 +623,19 @@ def return_rested(pulse_store: store.PulseStore, now: float) -> list[int]:
     """Cards swiped away until a time that has come, back as new (the ids):
     one about nothing Pulse remembers comes back at once; one about a
     remembered thing waits for check_rested to read its chat first, unless
-    memory is off and nothing reads chats."""
+    memory is off and nothing reads chats, or no run got to it within
+    BRIEF_LEAD_S (back unread, in time for the brief: better than late).
+    One marked done meanwhile ends its rest as it is: it's in Done."""
     returned = []
-    for card in pulse_store.rested_cards(now):
-        if card["item_id"] is not None and pulse_store.get("memory"):
+    cards = pulse_store.rested_cards(now)
+    marks = pulse_store.done_marks([card["id"] for card in cards]) if cards else {}
+    for card in cards:
+        if card["id"] in marks:
+            pulse_store.end_rest(card["id"], card["rest_until"])
             continue
-        if pulse_store.return_card(card["id"], now):
+        if card["item_id"] is not None and pulse_store.get("memory") and now - card["rest_until"] < BRIEF_LEAD_S:
+            continue
+        if pulse_store.return_card(card["id"], now, card["rest_until"]):
             returned.append(card["id"])
     return returned
 
@@ -636,11 +648,16 @@ def check_rested(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: t
     comes back as new. A check that fails lets the card come back
     unchecked: better than never."""
     cards = [card for card in pulse_store.rested_cards(now) if card["item_id"] is not None]
+    marks = pulse_store.done_marks([card["id"] for card in cards]) if cards else {}
+    cards = [card for card in cards if card["id"] not in marks]  # return_rested ends a done card's rest
     phone = report.phone_context(home, now)[0] if cards else ""  # the same for every card
     for card in cards:
-        if not still_leader() or done.get("tokens", 0) >= budget or \
-                done.get("checks", 0) + done.get("failed", 0) >= MAX_CHECKS:
-            break
+        if not still_leader():
+            break  # the process that leads now has its own loop
+        if done.get("tokens", 0) >= budget or done.get("checks", 0) + done.get("failed", 0) >= MAX_CHECKS:
+            # Nothing left for the read today: back unread rather than late.
+            pulse_store.return_card(card["id"], now, card["rest_until"])
+            continue
         text = ""
         try:
             text = held_material(pulse_store, home, card, zone=zone, now=now, phone=phone)
@@ -653,15 +670,17 @@ def check_rested(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: t
             logger.warning("conduit_push: Pulse rested card check failed", exc_info=True)
             done["tokens"] = done.get("tokens", 0) + len(text) // 4
             done["failed"] = done.get("failed", 0) + 1
-            pulse_store.return_card(card["id"], now)
+            pulse_store.return_card(card["id"], now, card["rest_until"])
             continue
         done["tokens"] = done.get("tokens", 0) + tokens
         done["checks"] = done.get("checks", 0) + 1
         if isinstance(parsed, dict) and parsed.get("stale") is True:
-            pulse_store.end_rest(card["id"])
-            pulse_store.mark_done(card["id"], card["item_id"], closed_by=learning.RESTED_DONE_BY, now=now, by="pulse")
+            # Unless the user put it back meanwhile: then it stays as they left it.
+            if pulse_store.end_rest(card["id"], card["rest_until"]):
+                pulse_store.mark_done(card["id"], card["item_id"], closed_by=learning.RESTED_DONE_BY, now=now,
+                                      by="pulse")
         else:
-            pulse_store.return_card(card["id"], now)
+            pulse_store.return_card(card["id"], now, card["rest_until"])
 
 
 def check_held(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzinfo, now: float,

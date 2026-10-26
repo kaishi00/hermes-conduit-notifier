@@ -2646,6 +2646,8 @@ def test_pulse_routes(remembering, db, monkeypatch):
                               "created_at": DAY})
     put_off = http.post(f"{base}/dismiss", json={"card": rested, "dismissed": True, "until": "tomorrow"}).json()
     assert put_off["changed"] is True and put_off["rest_until"] > time.time()
+    [entry] = [card for card in http.get(f"{base}/feed").json()["cards"] if card["id"] == rested]
+    assert entry["rest_until"] == put_off["rest_until"]  # the cleared row says when it comes back
     assert http.post(f"{base}/dismiss", json={"card": rested, "dismissed": True, "until": "tomorrow"}).json() == {
         "ok": True, "changed": False, "rest_until": put_off["rest_until"]}
     never = http.post(f"{base}/dismiss", json={"card": rested, "dismissed": True, "until": "never"})

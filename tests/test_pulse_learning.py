@@ -1286,12 +1286,12 @@ def test_not_now_until_a_time_is_when_the_card_comes_back(live):
     # Later today: in three hours, by 23:00; past 22:30 it's tomorrow.
     assert rest("later_today", tuesday) == at(27, 13)
     assert rest("later_today", at(27, 21)) == at(27, 23)
-    assert rest("later_today", at(27, 22, 45)) == at(28, 7)
-    # Tomorrow and next week come back with that morning's brief.
-    assert rest("tomorrow", tuesday) == at(28, 7)
-    assert rest("next_week", tuesday) == datetime(2026, 11, 3, 7, 0, tzinfo=utc).timestamp()
+    assert rest("later_today", at(27, 22, 45)) == at(28, 6, 50)
+    # Tomorrow and next week come back ten minutes before that morning's brief, in time for it.
+    assert rest("tomorrow", tuesday) == at(28, 6, 50)
+    assert rest("next_week", tuesday) == datetime(2026, 11, 3, 6, 50, tzinfo=utc).timestamp()
     live.store.set("brief_time", "06:30")
-    assert rest("tomorrow", at(27, 23, 30)) == at(28, 6, 30)
+    assert rest("tomorrow", at(27, 23, 30)) == at(28, 6, 20)
     with pytest.raises(ValueError):
         rest("never", tuesday)
 
@@ -1332,12 +1332,15 @@ def test_not_now_until_tomorrow_rests_the_thing_until_then_and_brings_the_card_b
 def test_a_card_about_nothing_remembered_comes_back_at_its_time_through_the_tick(live, capsys, monkeypatch):
     import sys
     import types
+    from datetime import datetime
     card_id = found_card(live)
     then = time.time() - 8 * 86400  # swiped away a week ago, until the next day
+    live.store.set("time_zone", "Asia/Tokyo")
     assert control.dismiss(live.store, card_id, True, now=then, until="tomorrow") is True
     monkeypatch.setitem(sys.modules, "hermes_constants", types.SimpleNamespace(get_hermes_home=lambda: live.home))
     cli._pulse(types.SimpleNamespace(pulse_action="cards", value="", extra=""))
-    assert "(put away, back " in capsys.readouterr().out
+    back = datetime.fromtimestamp(live.store.card(card_id)["rest_until"], pulse.report.zone_for("Asia/Tokyo"))
+    assert f"(put away, back {back.strftime('%a %H:%M')})" in capsys.readouterr().out  # the user's zone
     pulse.tick()
     card = live.store.card(card_id)
     assert card["dismissed_at"] is None and card["seen_at"] is None and card["created_at"] >= then + 86400
@@ -1390,7 +1393,8 @@ def test_a_card_about_something_open_has_its_chat_read_before_it_comes_back(live
     assert done["failed"] == 1 and live.store.card(card_id)["dismissed_at"] is None
 
 
-def test_a_held_card_put_off_to_tomorrow_comes_back_for_that_brief(live):
+def test_a_held_card_put_off_to_tomorrow_comes_back_for_that_brief(live, monkeypatch):
+    from datetime import timezone
     brief_later(live)
     control.set_level(live.store, "followup", "brief")
     tell(live)
@@ -1400,8 +1404,77 @@ def test_a_held_card_put_off_to_tomorrow_comes_back_for_that_brief(live):
     control.dismiss(live.store, held["id"], True, now=now, until="tomorrow")
     assert live.store.held_cards(10) == []
     back_at = live.store.card(held["id"])["rest_until"]
-    assert followup.return_rested(live.store, back_at) == [held["id"]]
+    brief_at = pulse.report.slot_on(now, timezone.utc, live.store.get("brief_time"), 1)
+    assert back_at == brief_at - followup.BRIEF_LEAD_S  # time for its chat to be read first
+    # With memory on (the default), the tick leaves it to the memory run, which reads its chat
+    # and holds it again for the brief.
+    live.store.set("memory", True)
+    monkeypatch.setattr(pulse, "_maybe_memory", lambda *args: None)  # run below, by hand
+    monkeypatch.setattr(pulse, "_maybe_probe", lambda *args: False)
+    pulse.tick(back_at)
+    assert live.store.card(held["id"])["dismissed_at"] is not None and live.sent() == []
+    followup.check_rested(live.store, live.home, llm_saying(stale=False, why="still open"), zone=timezone.utc,
+                          now=back_at + 1, still_leader=lambda: True, budget=10_000, done={})
     assert [card["id"] for card in live.store.held_cards(10)] == [held["id"]]
+    pulse.tick(brief_at + 1)
+    [text] = live.sent()
+    assert text.startswith("Pulse morning brief ") and "everything is green" in text
+
+
+def test_a_rested_card_no_run_got_to_comes_back_unread_in_time_for_the_brief(live):
+    live.store.set("memory", True)
+    item_id = promise(live)
+    now = time.time()
+    card_id = learning.add_card(live.store, kind="followup", item=live.store.item(item_id), level_name="brief",
+                                news="The deploy is still waiting on approval.", why="", chat_title="Deploy",
+                                now=now - 3600)
+    assert control.dismiss(live.store, card_id, True, now=now, until="tomorrow") is True
+    back_at = live.store.card(card_id)["rest_until"]
+    # Left to the memory run while there's time for it; at the brief's time, back as it is.
+    assert followup.return_rested(live.store, back_at + followup.BRIEF_LEAD_S - 1) == []
+    assert followup.return_rested(live.store, back_at + followup.BRIEF_LEAD_S) == [card_id]
+    assert [card["id"] for card in live.store.held_cards(10)] == [card_id]
+    # And with the follow-up budget spent, the run brings it back unread rather than late.
+    assert control.dismiss(live.store, card_id, True, now=now, until="later_today") is True
+    back_at = live.store.card(card_id)["rest_until"]
+    said = llm_saying(stale=False, why="x")
+    done = {"tokens": 5_000}
+    followup.check_rested(live.store, live.home, said, zone=pulse.report.zone_for("UTC"), now=back_at + 1,
+                          still_leader=lambda: True, budget=5_000, done=done)
+    assert said.calls == [] and live.store.card(card_id)["dismissed_at"] is None
+
+
+def test_a_rested_card_marked_done_meanwhile_ends_its_rest_without_a_read(live):
+    live.store.set("memory", True)
+    item_id = promise(live)
+    now = time.time()
+    card_id = learning.add_card(live.store, kind="followup", item=live.store.item(item_id), level_name="push",
+                                news="The deploy is still waiting on approval.", why="", chat_title="Deploy",
+                                now=now - 3600)
+    assert control.dismiss(live.store, card_id, True, now=now, until="later_today") is True
+    back_at = live.store.card(card_id)["rest_until"]
+    assert control.done(live.store, card_id) is True
+    said = llm_saying(stale=False, why="x")
+    followup.check_rested(live.store, live.home, said, zone=pulse.report.zone_for("UTC"), now=back_at + 1,
+                          still_leader=lambda: True, budget=10_000, done={})
+    assert said.calls == [] and live.store.card(card_id)["dismissed_at"] is not None
+    assert followup.return_rested(live.store, back_at + 1) == []  # not back as new: it's done
+    card = live.store.card(card_id)
+    assert card["dismissed_at"] is None and card["rest_until"] is None and card["seen_at"] is not None
+
+
+def test_a_card_put_off_again_meanwhile_keeps_its_new_rest(live):
+    card_id = found_card(live)
+    now = time.time()
+    assert control.dismiss(live.store, card_id, True, now=now, until="later_today") is True
+    first = live.store.card(card_id)["rest_until"]
+    assert control.dismiss(live.store, card_id, False) is True
+    assert control.dismiss(live.store, card_id, True, now=now, until="tomorrow") is True
+    second = live.store.card(card_id)["rest_until"]
+    # A return or an end of rest read before the new Not now changes nothing.
+    assert live.store.return_card(card_id, now, first) is False and live.store.end_rest(card_id, first) is False
+    assert live.store.card(card_id)["rest_until"] == second
+    assert live.store.return_card(card_id, now, second) is True
 
 
 def test_a_store_from_before_briefs_and_not_now_gets_their_columns(tmp_path):

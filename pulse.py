@@ -827,8 +827,9 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
         # follow-up budget, whatever follow-ups' switch: they hold report
         # cards too, and a stale card shouldn't reach the brief either way.
         holds = follow_used < follow_cap and bool(pulse_store.held_cards(1))
-        # Likewise a card swiped away until now, about something still open.
-        rests = follow_used < follow_cap and bool(pulse_store.rested_cards(now))
+        # Likewise a card swiped away until now, about something still open:
+        # with the budget spent it comes back unread rather than late.
+        rests = any(card["item_id"] is not None for card in pulse_store.rested_cards(now))
         if used >= cap and not follows and not acts and not holds and not rests:
             return  # `pulse status` says so
         profiles = pulse_store.get("report_profiles")

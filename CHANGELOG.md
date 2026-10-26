@@ -16,7 +16,7 @@ checks it). The format is fixed, because Conduit reads it:
 ## 0.78.3 (2026-10-26)
 
 ### New and improved
-- Not now asks until when: later today, tomorrow or next week. The card leaves the list and comes back as new at that time, at the top, unless the thing got done meanwhile: one about something Pulse remembers has its chat read first, and a thing that got done is marked done instead. Needs Conduit from the `pulse` branch; an older app keeps the plain Not now.
+- Not now asks until when: later today, tomorrow or next week (those two in time for that morning's brief). The card leaves the list and comes back as new at that time, at the top, unless the thing got done meanwhile: one about something Pulse remembers has its chat read first, and a thing that got done is marked done instead. Needs Conduit from the `pulse` branch; an older app keeps the plain Not now.
 
 ## 0.78.2 (2026-10-26)
 

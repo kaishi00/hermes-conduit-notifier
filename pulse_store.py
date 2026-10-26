@@ -1064,18 +1064,23 @@ class PulseStore:
                                 "AND rest_until <= ? ORDER BY rest_until, id", (now,)).fetchall()
         return [dict(row) for row in rows]
 
-    def return_card(self, card_id: int, now: float) -> bool:
-        """A card swiped away comes back as new, at the top of the list; whether it did."""
+    def return_card(self, card_id: int, now: float, rest_until: Optional[float]) -> bool:
+        """A card swiped away comes back as new, at the top of the list;
+        whether it did. Only while ``rest_until`` is still its time: one put
+        back and swiped away again meanwhile keeps its new rest."""
         with _lock, self._connect() as conn:
             return conn.execute("UPDATE cards SET dismissed_at=NULL, rest_until=NULL, seen_at=NULL, created_at=? "
-                                "WHERE id=? AND dismissed_at IS NOT NULL", (now, card_id)).rowcount > 0
+                                "WHERE id=? AND dismissed_at IS NOT NULL AND rest_until IS ?",
+                                (now, card_id, rest_until)).rowcount > 0
 
-    def end_rest(self, card_id: int) -> bool:
+    def end_rest(self, card_id: int, rest_until: Optional[float]) -> bool:
         """A card swiped away until a time is back on the list as it was
-        (for one marked done meanwhile); whether it changed."""
+        (for one marked done meanwhile); whether it changed. Only while
+        ``rest_until`` is still its time, as return_card."""
         with _lock, self._connect() as conn:
             return conn.execute("UPDATE cards SET dismissed_at=NULL, rest_until=NULL "
-                                "WHERE id=? AND dismissed_at IS NOT NULL", (card_id,)).rowcount > 0
+                                "WHERE id=? AND dismissed_at IS NOT NULL AND rest_until IS ?",
+                                (card_id, rest_until)).rowcount > 0
 
     def resting_items(self, now: float, rest_s: float) -> dict[int, float]:
         """Remembered items a card of was swiped away and still rests: until
