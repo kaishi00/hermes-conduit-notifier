@@ -1100,6 +1100,31 @@ def test_the_held_card_check_reads_the_note_to_pulse(live):
     assert instructions.endswith(f"\n\n{followup.report.NOTE_TITLE}\nNever bring up the gym.")
 
 
+def test_the_rested_card_check_reads_the_note_to_pulse(live):
+    from datetime import timezone
+    live.store.set("memory", True)
+    live.store.set("note", "Never bring up the gym.")
+    item_id = promise(live)
+    now = time.time()
+    card_id = learning.add_card(live.store, kind="followup", item=live.store.item(item_id), level_name="push",
+                                news="The deploy is still waiting on approval.", why="", chat_title="Deploy",
+                                now=now - 3600)
+    assert control.dismiss(live.store, card_id, True, now=now - 3600, until="later_today") is True
+    back_at = live.store.card(card_id)["rest_until"]
+    seen = []
+
+    def llm(instructions, text):
+        seen.append(instructions)
+        return {"stale": False, "why": "still stands"}, 7
+
+    followup.check_rested(live.store, live.home, llm, zone=timezone.utc, now=back_at + 1,
+                          still_leader=lambda: True, budget=10_000, done={})
+    [instructions] = seen
+    assert instructions.startswith(followup.RESTED_INSTRUCTIONS)
+    assert instructions.endswith(f"\n\n{followup.report.NOTE_TITLE}\nNever bring up the gym.")
+    assert live.store.card(card_id)["dismissed_at"] is None
+
+
 def test_a_held_card_check_follows_its_chat_into_the_continuation(live):
     item_id = promise(live)
     card_id = learning.add_card(live.store, kind="followup", item=live.store.item(item_id), level_name="brief",

@@ -647,7 +647,8 @@ def check_rested(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: t
             mark = secrets.token_hex(4)
             while mark in text:
                 mark = secrets.token_hex(4)
-            parsed, tokens = llm(RESTED_INSTRUCTIONS, f"<<<held {mark}\n{text}\nheld {mark}>>>")
+            parsed, tokens = llm(RESTED_INSTRUCTIONS + report.note_block(report.note(pulse_store)),
+                                 f"<<<held {mark}\n{text}\nheld {mark}>>>")
         except Exception:  # noqa: BLE001 — back unchecked
             logger.warning("conduit_push: Pulse rested card check failed", exc_info=True)
             done["tokens"] = done.get("tokens", 0) + len(text) // 4
