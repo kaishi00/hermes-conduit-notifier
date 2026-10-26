@@ -2693,7 +2693,7 @@ session store is busy or won't open, or its delete fails on one (try again
 shortly), 501 on a Hermes whose session delete can't take a compression chain
 (update Hermes), and 400 for anything that isn't a room id.
 
-## Linking with someone (plugin 0.82+)
+## Linking with someone (plugin 0.83+)
 
 Before one of your agents can sit in a room with someone else's, your Hermes
 and theirs link: each keeps the other's keys, and each can leave sealed
