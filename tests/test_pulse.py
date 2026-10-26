@@ -2587,6 +2587,13 @@ def test_pulse_routes(remembering, db, monkeypatch):
     over = http.put(base, json={"note": long_note + "記"})
     assert over.status_code == 400 and over.json()["detail"] == {"code": "invalid", "field": "note"}
     assert http.put(base, json={"note": " "}).json()["note"] == ""
+    assert http.put(base, json={"note": "n" * control.NOTE_LIMIT + " \n"}).json()["note"] == "n" * control.NOTE_LIMIT
+    for bad in ("a\x00b", "a\x1bb"):
+        assert http.put(base, json={"note": bad}).json()["detail"] == {"code": "invalid", "field": "note"}
+    lone = http.put(base, content=b'{"note": "a\\ud83db"}', headers={"content-type": "application/json"})
+    assert lone.json()["detail"] == {"code": "invalid", "field": "note"}
+    assert http.put(base, json={"note": "tabs\tand\nlines"}).json()["note"] == "tabs\tand\nlines"
+    assert http.put(base, json={"note": ""}).json()["note"] == ""
     stop = http.post(f"{base}/backfill", json={"action": "stop"})
     assert stop.status_code == 409 and stop.json()["detail"]["code"] == "not_running"
     assert http.post(f"{base}/backfill", json={"action": "estimate", "days": 0}).status_code == 400

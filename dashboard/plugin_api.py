@@ -7696,8 +7696,9 @@ async def post_conduit_prefs_import(request: Request, response: Response, profil
 # host, in the dashboard's own Hermes home, so these routes take no profile.
 
 # Room for the note to Pulse beside the other settings: pulse_control.NOTE_LIMIT
-# characters, each up to six bytes once JSON escapes it.
-PULSE_MAX_BODY_BYTES = 16 * 1024
+# characters, each up to twelve bytes once a client JSON-escapes it (a
+# surrogate pair for one outside the BMP).
+PULSE_MAX_BODY_BYTES = 32 * 1024
 PULSE_LIMIT = 60
 PULSE_WINDOW_S = 60.0
 

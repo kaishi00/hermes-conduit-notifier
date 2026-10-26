@@ -13,6 +13,11 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.78.2 (2026-10-26)
+
+### New and improved
+- A note to Pulse, in your own words: what to always bring up, what to leave out. Settings > Pulse has it (Conduit on the `pulse` branch, #1277), and so does `hermes conduit-push pulse note "…"`. Pulse reads it before every report, morning brief and reminder; where it says what to bring up or leave out, it comes before Pulse's own rules.
+
 ## 0.78.1 (2026-10-25)
 
 ### Fixes

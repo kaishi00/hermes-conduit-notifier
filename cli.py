@@ -73,7 +73,8 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
                             "(it shows what that costs), 'start', 'stop' or 'cancel'; "
                             "for rate: 'up', 'down', or a reason for a thumbs down (not_relevant, already_knew, "
                             "too_late, too_often); for done: 'undo' to take the mark off; for learned: the lesson number, or push, screen, brief or off; "
-                            "for budget: tokens a day, or 'auto' for follow-ups to go with the nudge level")
+                            "for budget: tokens a day, or 'auto' for follow-ups to go with the nudge level; "
+                            "for note: more words of the note (a quoted note needs none)")
     prefs = commands.add_parser(
         "prefs",
         help="Conduit's synced preferences: export them to a file, or import one from another host",

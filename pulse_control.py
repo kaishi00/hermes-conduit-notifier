@@ -181,6 +181,14 @@ MAX_DAILY_TOKENS = 5_000_000
 NOTE_LIMIT = 1_500
 
 
+def _encodes(text: str) -> bool:
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def update(pulse_store: Any, body: Any) -> None:
     """Applies the settings in ``body`` (any of SETTINGS). Every value is
     checked before any is written, so a bad one changes nothing; any other
@@ -243,10 +251,13 @@ def update(pulse_store: Any, body: Any) -> None:
             else:
                 raise Refused("invalid", field=field)
     if "note" in body:
-        value = body["note"]
-        if not isinstance(value, str) or len(value) > NOTE_LIMIT:
+        value = body["note"].strip() if isinstance(body["note"], str) else None
+        # Prose only: no control characters but line breaks and tabs, and
+        # nothing UTF-8 can't carry (an unpaired surrogate from JSON).
+        if value is None or len(value) > NOTE_LIMIT or any(ord(ch) < 32 and ch not in "\n\t" for ch in value) \
+                or not _encodes(value):
             raise Refused("invalid", field="note")
-        changes["note"] = value.strip()
+        changes["note"] = value
     for key, value in changes.items():
         pulse_store.set(key, value)
 
