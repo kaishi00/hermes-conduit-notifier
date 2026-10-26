@@ -2810,7 +2810,9 @@ network address, which this Hermes calls only when it's its own mailbox
 too), `own_invite` (400, the invite is this Hermes'), `expired` and `invite_used`
 (410), `already_linked`, `too_many_links` and `too_many_invites` (409),
 `no_crypto` and `no_word_list` (503, a plugin install missing its word list),
-and the mailbox's own, such as `clock_off` (503) when this host's clock is far
+`busy` (503) when this Hermes' other mailbox calls kept it waiting too long (an
+accept it couldn't send yet is kept, and goes on the loop's pass), and the
+mailbox's own, such as `clock_off` (503) when this host's clock is far
 from the mailbox's. A mailbox that can't be reached is 503, one that answers
 what it shouldn't is 502. A mailbox the other side names by a host name is
 looked up when this Hermes sends to it, and refused with `bad_url` (502) when

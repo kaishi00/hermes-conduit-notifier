@@ -568,6 +568,25 @@ def test_this_hermes_own_mailbox_is_never_looked_up(monkeypatch):
     assert asked == [] and len(opener.reached) == 1
 
 
+def test_proxy_settings_it_cant_read_leave_the_lookup_here(monkeypatch):
+    # proxy_bypass reads the platform's own settings (macOS, the Windows
+    # registry), which can fail: the name is then looked up as without a proxy.
+    for name in ("no_proxy", "NO_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+    opener = _Opener({"https": "http://proxy.example:3128"})
+    monkeypatch.setattr(mailbox_module, "_opener", opener)
+    asked = _resolving(monkeypatch, "10.1.2.3")
+
+    def unreadable(host):
+        raise OSError("System Configuration didn't answer")
+
+    monkeypatch.setattr(mailbox_module.urllib.request, "proxy_bypass", unreadable)
+    with pytest.raises(mailbox_module.MailboxError) as refused:
+        _send("https://rooms.example.net")
+    assert refused.value.code == "bad_url"
+    assert asked == [("rooms.example.net", 443)] and opener.reached == []
+
+
 def test_a_send_through_a_proxy_leaves_the_lookup_to_the_proxy(monkeypatch):
     # The proxy looks the name up and connects; this host may not even resolve it.
     for name in ("no_proxy", "NO_PROXY"):

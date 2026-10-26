@@ -2,6 +2,8 @@
 import argparse
 import base64
 import concurrent.futures
+import contextlib
+import errno
 import importlib.util
 import json
 import logging
@@ -1357,6 +1359,45 @@ def test_an_accept_and_the_loop_never_both_send_it(home, monkeypatch):
 
     assert waited
     assert len([key for key in sent if key.startswith("accept.")]) == 1
+
+
+@contextlib.contextmanager
+def _held_elsewhere(self):
+    # The send lock a long pass holds, which Windows gives up on after a minute.
+    raise OSError(errno.EDEADLK, "Resource deadlock avoided")
+    yield
+
+
+@needs_node
+def test_an_invite_that_cant_take_the_send_lock_leaves_no_invite(home, monkeypatch):
+    eric = home("eric")
+    monkeypatch.setattr(links_module.Links, "_sending", _held_elsewhere)
+
+    with pytest.raises(links_module.LinkError) as refused:
+        eric.invite("Eric")
+
+    assert (refused.value.code, refused.value.status) == ("busy", 503)
+    assert eric.view()["invites"] == []
+
+
+@needs_node
+def test_an_accept_that_cant_take_the_send_lock_waits_for_the_loop(home, monkeypatch):
+    # The pass holding it may be sending this very accept, so the Link stays.
+    eric, mona = home("eric"), home("mona")
+    url = eric.invite("Eric")["url"]
+
+    with monkeypatch.context() as patched:
+        patched.setattr(links_module.Links, "_sending", _held_elsewhere)
+        with pytest.raises(links_module.LinkError) as refused:
+            mona.accept(url, "Mona")
+    assert (refused.value.code, refused.value.status) == ("busy", 503)
+    assert "while the invite lasts" in str(refused.value) and "deadlock" not in str(refused.value)
+    assert [link["status"] for link in mona.view()["links"]] == ["waiting"]
+
+    _run(eric, mona)
+
+    assert [link["status"] for link in eric.view()["links"]] == ["linked"]
+    assert [link["status"] for link in mona.view()["links"]] == ["linked"]
 
 
 @needs_node

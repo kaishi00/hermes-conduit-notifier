@@ -223,7 +223,7 @@ class Links:
                 # Not once it's cancelled: the cancel's delete may have gone.
                 if invite_id in self._store.read()["invites"]:
                     self._owner_call(mailbox, lambda: mailbox.put_sender(_invite_sender(invite_id), token))
-        except (room_mailbox.MailboxError, LinkError) as exc:
+        except (room_mailbox.MailboxError, LinkError, OSError) as exc:
             with self._store.update() as state:
                 state["invites"].pop(invite_id, None)
                 if called:
@@ -327,19 +327,21 @@ class Links:
             mailbox = self._mailbox(identity, url_mine)
             self._registered(mailbox)
             self._send_accept(identity, mailbox, link_id)
-        except (room_mailbox.MailboxError, room_envelope.EnvelopeError, LinkError) as exc:
+        except (room_mailbox.MailboxError, room_envelope.EnvelopeError, LinkError, OSError) as exc:
             # A refusal takes back an accept that can't have reached the
             # inviter: never sent, or refused each time. One the mailbox
             # didn't answer may have, and one it couldn't take yet may go
             # later, as on the loop's pass, so those stay for the loop, unless
-            # the invite is used.
+            # the invite is used. So does one held up by the send lock: the
+            # pass that holds it may be sending it.
             used = getattr(exc, "code", "") == "invite_used"
-            waits = isinstance(exc, room_mailbox.MailboxError) and _goes_later(exc)
+            waits = isinstance(exc, OSError) or (isinstance(exc, room_mailbox.MailboxError) and _goes_later(exc))
             if used or (not waits and not _accept_went(self._store.read(), link_id)):
                 self._take_back(link_id)
             elif waits:
-                raise AcceptKept(exc.code, f"{exc}. This Hermes keeps the accept and tries it again while the "
-                                           "invite lasts", 503) from None
+                error = _link_error(exc)
+                raise AcceptKept(error.code, f"{error}. This Hermes keeps the accept and tries it again while the "
+                                             "invite lasts", 503) from None
             raise _link_error(exc) from None
         shown = self.get(link_id)
         if shown is None:  # a pass found the invite used while this waited
@@ -1366,6 +1368,10 @@ def _link_error(exc: Exception) -> LinkError:
         return LinkError(exc.code, str(exc), exc.status)
     if isinstance(exc, room_identity.IdentityError):
         return LinkError(exc.code, str(exc), 503)
+    if isinstance(exc, OSError):
+        # The send lock, which a long pass held past the wait for it, or the
+        # store; its text can name this host's paths.
+        return LinkError("busy", "This Hermes was busy with the rooms mailbox; try again in a minute", 503)
     raise exc
 
 

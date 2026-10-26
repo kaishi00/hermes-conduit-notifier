@@ -337,7 +337,12 @@ def _proxied(scheme: str, host: str) -> bool:
     # module loaded, less the hosts no_proxy names.
     for handler in _opener.handlers:
         if isinstance(handler, urllib.request.ProxyHandler):
-            return scheme in handler.proxies and not urllib.request.proxy_bypass(host)
+            if scheme not in handler.proxies:
+                return False
+            try:
+                return not urllib.request.proxy_bypass(host)
+            except Exception:  # noqa: BLE001 - platform settings it can't read: the name is looked up here
+                return False
     return False
 
 
