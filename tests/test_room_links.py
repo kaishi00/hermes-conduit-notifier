@@ -315,6 +315,24 @@ def test_an_invite_that_ran_out_keeps_its_links_place_until_its_accept_is_read(h
 
 
 @needs_node
+def test_a_refusal_for_the_link_count_says_how_many_places_the_list_doesnt_show(home, monkeypatch):
+    # An invite that ran out keeps its place until the loop has read what came for it, and a Link
+    # unlinked while it waited keeps its own until its confirm comes.
+    monkeypatch.setattr(links_module, "MAX_LINKS", 2)
+    clock = Clock()
+    eric, mona = home("eric", clock), home("mona", Clock(clock.now))
+    eric.invite("Eric")
+    eric.remove(eric.accept(mona.invite("Mona")["url"], "Eric")["link"]["id"])
+    clock.now += links_module.INVITE_TTL_S + 60
+    assert (eric.view()["links"], eric.view()["invites"]) == ([], [])
+
+    with pytest.raises(links_module.LinkError) as refused:
+        eric.invite("Eric")
+    assert refused.value.code == "too_many_links"
+    assert "2 places are held by invites that ran out or Links unlinked while they waited" in str(refused.value)
+
+
+@needs_node
 def test_an_inviter_who_unlinks_before_its_confirm_goes_ends_it_for_both(home, monkeypatch):
     eric, mona = home("eric"), home("mona")
     link_id = mona.accept(eric.invite("Eric")["url"], "Mona")["link"]["id"]
@@ -756,6 +774,24 @@ def test_a_crossing_accept_keeps_a_link_unlinked_while_it_waits_so_its_confirm_i
     assert eric_side == [(link["id"], link["status"]) for link in mona.view()["links"]]
     assert [status for _, status in eric_side] == ["linked"] and eric_side[0][0] != unlinked
     assert unlinked not in eric._store.read()["links"] and unlinked not in mona._store.read()["links"]
+
+
+@needs_node
+def test_the_acceptor_takes_the_inviters_mailbox_from_its_confirm(home, monkeypatch, mailbox_url):
+    # The invite's mailbox was changed on its way, which the words don't show, and that mailbox
+    # passed the accept on. The confirm, signed by the inviter's Hermes, says which is its own.
+    eric, mona = home("eric"), home("mona")
+    link_id = mona.accept(eric.invite("Eric")["url"], "Mona")["link"]["id"]
+    with mona._store.update() as state:
+        state["links"][link_id]["mailbox"] = "https://mailbox.example"
+    got = _received(monkeypatch)
+
+    _run(eric, mona)
+
+    assert mona._store.read()["links"][link_id]["mailbox"] == mailbox_url
+    mona.send(link_id, "test.echo", {"text": "through yours"})
+    _run(eric, passes=1)
+    assert [item.body["text"] for item in got] == ["through yours"]
 
 
 @needs_node
@@ -1426,6 +1462,23 @@ def test_a_links_file_with_a_link_whose_keys_arent_keys_is_refused(home, key):
     path = eric.root / "conduit-rooms" / "links.json"
     stored = json.loads(path.read_text())
     stored["links"][link_id][key] = "not a key"
+    path.write_text(json.dumps(stored))
+
+    for call in (eric.view, lambda: links_module.LinkLoop(eric.root).poll_once()):
+        with pytest.raises(links_module.LinkError) as refused:
+            call()
+        assert refused.value.code == "unreadable"
+
+
+@needs_node
+@pytest.mark.parametrize("field", ["kind", "link", "mailbox", "inbox", "sign", "seal", "token", "body"])
+def test_a_links_file_with_an_outbox_item_missing_what_it_needs_is_refused(home, monkeypatch, field):
+    eric, mona, link_id = _linked(home)
+    monkeypatch.setattr(links_module.Links, "_flush_quietly", lambda self: None)
+    eric.remove(link_id)  # its link.remove waits in the outbox
+    path = eric.root / "conduit-rooms" / "links.json"
+    stored = json.loads(path.read_text())
+    del stored["outbox"][0][field]
     path.write_text(json.dumps(stored))
 
     for call in (eric.view, lambda: links_module.LinkLoop(eric.root).poll_once()):

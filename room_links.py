@@ -205,7 +205,7 @@ class Links:
                 raise LinkError("too_many_invites", f"{MAX_INVITES} invites are already waiting; cancel one, or "
                                                     "wait for one to be used or run out", 409)
             if _places_held(state) >= MAX_LINKS:
-                raise _too_many_links()
+                raise _too_many_links(state, now)
             url = self._mailbox_url(state)
             state["invites"][invite_id] = {"name": name, "token": token, "created_at": now,
                                            "expires_at": now + INVITE_TTL_S}
@@ -300,7 +300,7 @@ class Links:
                                                               "unlink first to link again", 409)
                         _forget(state, other_id, now)
                 if _places_held(state) >= MAX_LINKS:
-                    raise _too_many_links()
+                    raise _too_many_links(state, now)
                 link = state["links"][link_id] = {
                     "name": invite.name, "sign": sealing.b64u(invite.sign), "seal": sealing.b64u(invite.seal),
                     "inbox": room_identity.inbox_id(invite.sign), "mailbox": invite.mailbox, "status": "waiting",
@@ -867,7 +867,8 @@ class LinkLoop:
             if delivered.received_at > invite["expires_at"]:
                 logger.info("Linked Rooms dropped an accept that came after its invite ran out")
                 return
-            mailbox_url = _peer_mailbox(accept["mailbox"], self.links._mailbox_url(state))
+            mine = self.links._mailbox_url(state)
+            mailbox_url = _peer_mailbox(accept["mailbox"], mine)
             if mailbox_url is None:
                 logger.info("Linked Rooms dropped an accept naming a mailbox on someone's own computer or network")
                 return
@@ -893,7 +894,9 @@ class LinkLoop:
             # The flush deletes the invite's sender, with anything else left
             # with it (this accept is acked by then), then puts the Link's
             # own and sends the confirm.
-            state["outbox"].append(_outgoing(CONFIRM, link_id, link, {"token": my_token}, now))
+            # With this Hermes' mailbox: the invite's could have been changed on
+            # its way, and the confirm is signed.
+            state["outbox"].append(_outgoing(CONFIRM, link_id, link, {"token": my_token, "mailbox": mine}, now))
             _clean_up(state, _invite_sender(invite_id), now)
 
     def _on_link(self, identity: room_identity.Identity, delivered: room_mailbox.Delivered,
@@ -916,6 +919,14 @@ class LinkLoop:
                 if link is not None and link["role"] == "acceptor" and link["status"] == "waiting" \
                         and _is_token(token):
                     link.update(status="linked", send_token=token)
+                    # The inviter's Hermes names its own mailbox, which the
+                    # invite only said.
+                    mailbox_url = _peer_mailbox(opened.body.get("mailbox"), self.links._mailbox_url(state))
+                    if mailbox_url is not None:
+                        link["mailbox"] = mailbox_url
+                    else:
+                        logger.info("Linked Rooms kept the invite's mailbox for Link %s: its confirm named none "
+                                    "this Hermes calls", link_id)
                     # A copy of the accept still to go is answered.
                     state["outbox"] = [item for item in state["outbox"] if item["id"] != f"accept.{link_id}"]
                     if link.pop("leaving", False):
@@ -1086,7 +1097,9 @@ def _well_formed(state: Any) -> bool:
         and all(isinstance(invite, dict) and isinstance(invite.get("token"), str)
                 and isinstance(invite.get("name"), str) and isinstance(invite.get("expires_at"), int)
                 for invite in state["invites"].values()) \
-        and all(isinstance(item, dict) and isinstance(item.get("id"), str) and isinstance(item.get("until"), int)
+        and all(isinstance(item, dict) and isinstance(item.get("until"), int) and isinstance(item.get("body"), dict)
+                and all(isinstance(item.get(name), str) for name in (
+                    "id", "kind", "link", "mailbox", "inbox", "sign", "seal", "token"))
                 for item in state["outbox"]) \
         and all(isinstance(item, dict) and isinstance(item.get("sender"), str)
                 and isinstance(item.get("until"), int) for item in state["cleanup"])
@@ -1284,10 +1297,19 @@ def _invite_used() -> LinkError:
     return LinkError("invite_used", "That invite has been used or cancelled; ask for a new one", 410)
 
 
-def _too_many_links() -> LinkError:
-    return LinkError("too_many_links", f"This Hermes keeps up to {MAX_LINKS} Links, each invite still waiting "
-                                       "holding a place for one, and has none left; unlink one or cancel an invite "
-                                       "first", 409)
+def _too_many_links(state: dict[str, Any], now: int) -> LinkError:
+    message = (f"This Hermes keeps up to {MAX_LINKS} Links, each invite still waiting holding a place for one, and "
+               "has none left; unlink one or cancel an invite first")
+    # Kept, and not listed, until the loop has read what came for them.
+    unlisted = sum(1 for link in state["links"].values() if link.get("leaving")) \
+        + len(state["invites"]) - _waiting_invites(state, now)
+    if unlisted == 1:
+        message += (". One place is held by an invite that ran out or a Link unlinked while it waited, which the "
+                    "list doesn't show, until Hermes' dashboard has read the mailbox for it")
+    elif unlisted:
+        message += (f". {unlisted} places are held by invites that ran out or Links unlinked while they waited, "
+                    "which the list doesn't show, until Hermes' dashboard has read the mailbox for them")
+    return LinkError("too_many_links", message, 409)
 
 
 def _waiting_invites(state: dict[str, Any], now: int) -> int:

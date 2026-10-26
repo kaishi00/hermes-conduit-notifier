@@ -2708,7 +2708,9 @@ payload, good for one accept within 24 hours. The other accepts it, giving the
 name you'll see. Their Hermes leaves the accept in yours, yours answers with a
 confirm, and you're linked. An invite shows four fingerprint words for each
 Hermes' keys: when you're together, check you both see the same four, so the
-invite is from who you think.
+invite is from who you think. The confirm, signed by the inviter's Hermes,
+names its mailbox, and the acceptor's Hermes uses that one from then on, so an
+invite whose mailbox was changed on its way can't send the Link elsewhere.
 
 ```bash
 hermes conduit-push links invite --name Eric             # the invite, and your Hermes' words
@@ -2737,7 +2739,9 @@ then replaces the inviter's old Link, as it does after someone loses their
 side. If you and they accept each other's invites before either Hermes reads
 the other's accept, you're linked twice, the same on both sides; unlink
 either. This Hermes keeps up to 50 Links, each invite still waiting holding a
-place for one, and up to 10 waiting invites. Everything a
+place for one, and up to 10 waiting invites. An invite that ran out, and a
+Link unlinked while it waited, keep their place until Hermes' dashboard has
+read the mailbox for them, and a refusal for the count says how many. Everything a
 Link needs, its send tokens included, stays in `conduit-rooms/links.json`
 (owner only), never in a log or a route's answer.
 
