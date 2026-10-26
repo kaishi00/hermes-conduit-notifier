@@ -236,6 +236,21 @@ def test_floors_come_up_past_the_five():
     assert [row["rank"] for row in rows[6:]] == [6, 7] and all(row["level"] for row in rows[6:])
 
 
+def test_a_floor_the_model_said_nothing_about_still_comes_up():
+    def unanswered(n, **more):
+        return candidate(origin="memory", item_id=n, value=None, bring_up=False, decision=candidates.UNANSWERED,
+                         **more)
+
+    rows = [unanswered(1, kind="promise", due_at=DAY - 60), unanswered(2, kind="commitment", due_at=DAY + 7 * 86400),
+            unanswered(3, kind="promise", due_at=DAY - 60, chat_id="muted"),
+            candidate(origin="memory", item_id=4, kind="promise", due_at=DAY - 60, decision=candidates.RESTING)]
+    candidates.route(rows, now=DAY, muted=lambda row: row["chat_id"] == "muted")
+    assert [(row["decision"], row["level"] or None, row["rank"]) for row in rows] == [
+        (candidates.SURFACED, "screen", 1),
+        # Anything else it said nothing about stays out, and so does a floor muted or resting.
+        (candidates.UNANSWERED, None, None), (candidates.MUTED, None, None), (candidates.RESTING, None, None)]
+
+
 def test_a_remembered_item_rated_no_meanwhile_rests_whatever_the_model_said(live):
     now = time.time()
     item_id = commitment(live)

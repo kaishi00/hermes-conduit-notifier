@@ -1452,13 +1452,16 @@ def _put_signal(conn: sqlite3.Connection, card_id: int, what: str, *, at: float,
 
 def _backfill_signals(conn: sqlite3.Connection) -> None:
     """The signals a store had before they were kept: every rated card's
-    thumb, every Do it by how far its check got, every Done the user gave."""
+    thumb, every Do it by how far its check got, every Done the user gave.
+    A done Pulse saw counts while its mark stands: one the user undid is
+    something sent, as Undo makes it now (``unmark_done``)."""
     for card in conn.execute("SELECT id, rating, rated_at, created_at FROM cards WHERE rating IN ('up', 'down') "
                              "AND kind IN ('followup', ?)", (NOTICED,)).fetchall():
         _put_signal(conn, card["id"], prefs.THUMB, at=float(card["rated_at"] or card["created_at"]),
                     useful=1.0 if card["rating"] == "up" else 0.0, weight=1.0)
+    marked = {row["card_id"] for row in conn.execute("SELECT card_id FROM card_done WHERE done_by != ?", (USER,))}
     for act in conn.execute("SELECT * FROM card_acts").fetchall():
-        stage = (prefs.ACT_DONE if act["outcome"] == "done"
+        stage = (prefs.ACT_DONE if act["outcome"] == "done" and act["card_id"] in marked
                  else prefs.ACT_SENT if act["checks"] or act["why"] == "the chat kept going" else prefs.ACT_OPENED)
         _put_signal(conn, act["card_id"], prefs.ACT, at=float(act["acted_at"]), useful=1.0, weight=stage)
     for done in conn.execute("SELECT card_id, done_at FROM card_done WHERE done_by=?", (USER,)).fetchall():

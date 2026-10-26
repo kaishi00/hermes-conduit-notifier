@@ -8206,7 +8206,9 @@ async def post_pulse_seen(request: Request, response: Response) -> Dict[str, Any
 async def post_pulse_rate(request: Request, response: Response) -> Dict[str, Any]:
     """{"card": n, "rating": "up"|"down", "reason": optional, for a down:
     "not_relevant"|"already_knew"|"too_late"|"too_often"}: {"learned": [...]},
-    the lessons it made. A report item's card ("noticed") takes no reason."""
+    the lessons it made. A report item's card ("noticed") takes a reason
+    too, for its topic (pulse_learning.lesson_kind); "not_relevant" makes a
+    rule only for one from a chat."""
     response.headers["Cache-Control"] = "no-store"
     body = await _read_json_body(request, PULSE_MAX_BODY_BYTES)
     body = body if isinstance(body, dict) else {}

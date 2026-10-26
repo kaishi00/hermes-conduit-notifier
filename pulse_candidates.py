@@ -363,15 +363,16 @@ def route(rows: list[dict], *, limit: int = MAX_ITEMS, now: Optional[float] = No
           learned: prefs.Learned = prefs.EMPTY, nudge: str = learning.DEFAULT_NUDGE,
           ceiling: Optional[Callable[[str], str]] = None, muted: Optional[Callable[[dict], bool]] = None,
           pace: Optional[Callable[[str], float]] = None) -> list[dict]:
-    """Decides each candidate not decided yet, in place, and notes its
-    band, place, score, factor, floor and level. One the model gave a reason
-    to leave out is SKIPPED, one whose chat has a "not relevant" rule MUTED,
-    one whose kind is off OFF. The rest score (pulse_prefs.score: learning,
-    value, pick): a floor or one scoring pulse_prefs.SURFACE_AT comes up at
-    its level (pulse_prefs.level, at most its kind's ``ceiling``), the
-    loudest first, at most ``limit`` besides the floors (the rest
-    OVER_LIMIT); one that doesn't is QUIETED if the model picked it, else
-    NOT_PICKED. Returns ``rows``."""
+    """Decides each candidate not decided yet, and a floor the model said
+    nothing about (UNANSWERED), in place, and notes its band, place, score,
+    factor, floor and level. One the model gave a reason to leave out is
+    SKIPPED, one whose chat has a "not relevant" rule MUTED, one whose kind
+    is off OFF. The rest score (pulse_prefs.score: learning, value, pick): a
+    floor or one scoring pulse_prefs.SURFACE_AT comes up at its level
+    (pulse_prefs.level, at most its kind's ``ceiling``), the loudest first,
+    at most ``limit`` besides the floors (the rest OVER_LIMIT); one that
+    doesn't is QUIETED if the model picked it, else NOT_PICKED. Returns
+    ``rows``."""
     now = 0.0 if now is None else now
     up = []
     for n, row in enumerate(rows):
@@ -383,7 +384,7 @@ def route(rows: list[dict], *, limit: int = MAX_ITEMS, now: Optional[float] = No
         row.setdefault("factor", "")
         row.setdefault("level", "")
         row["floor"] = floor(row, now)
-        if row.get("decision"):
+        if row.get("decision") and not (row["decision"] == UNANSWERED and row["floor"]):
             continue
         attrs = prefs.attributes(row["kind"], row["place"], row["band"])
         score = prefs.score(learned, attrs, value=row["value"], picked=row["bring_up"])

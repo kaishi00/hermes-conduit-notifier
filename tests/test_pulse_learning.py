@@ -1006,10 +1006,19 @@ def test_do_it_marks_the_card_done_once_the_chat_shows_it_got_done(live):
     assert live.store.act(card["id"])["outcome"] == "done"
     # What Pulse learns: Do it got it done (Pulse's mark is no Done from the user).
     assert {row["what"]: row["weight"] for row in live.store.signals()} == {"act": prefs.ACT_DONE}
+
+    def backfilled():
+        with sqlite3.connect(live.store.path) as conn:  # as a store from before signals
+            conn.execute("DELETE FROM signals")
+            conn.execute("DELETE FROM settings WHERE key=?", (store.SIGNALS_BACKFILLED,))
+        return {row["what"]: row["weight"] for row in store.open_store(live.home).signals()}
+
+    assert backfilled() == {"act": prefs.ACT_DONE}
     # Undo works on what Pulse marked too, and takes back what the mark taught: Do it sent something.
     assert control.done(live.store, card["id"], False) is True
     assert live.store.done_marks([card["id"]]) == {}
     assert {row["what"]: row["weight"] for row in live.store.signals()} == {"act": prefs.ACT_SENT}
+    assert backfilled() == {"act": prefs.ACT_SENT}  # a store that kept no signals learns the same
 
 
 def test_an_open_promise_pulse_saw_done_after_do_it_closes_and_undo_reopens_it(live):

@@ -91,7 +91,9 @@ SURFACE_AT = 1.25
 # pushes acted on quickly earned its kind, against the nudge level's
 # PUSH_AT: at or over it, a push; under it, the Pulse screen (or, for a
 # follow-up that scores under SURFACE_AT, the morning brief). With nothing
-# learned a pick pushes, as every report item did before.
+# learned every pick comes up, and pushes when it clears the bar: at the
+# balanced nudge one the model values 3 or more does, as every report item
+# did before; at gentle, mostly what's due within the day.
 PUSH_AT = {"gentle": 2.75, "balanced": 2.0, "eager": 1.5}
 LEVELS = ("push", "screen", "brief", "off")  # loudest first
 
@@ -236,8 +238,9 @@ def fit(data: Sequence[tuple[Vote, float]], center: Fit, strength: dict[str, flo
 @dataclass(frozen=True)
 class Learned:
     """What the signals add up to at a moment: the long and short fits,
-    the raw counts behind each attribute value (for "why"), and the
-    loudness each kind earned from pushes acted on quickly."""
+    the raw counts behind each attribute value (for "why": the last
+    2 * LONG_S's votes, or a place's last PLACE_LAST when it follows them),
+    and the loudness each kind earned from pushes acted on quickly."""
     long: Fit
     short: Fit
     counts: dict[tuple[str, str], tuple[float, float]]
@@ -288,6 +291,7 @@ def learn(signals: Sequence[dict], now: float) -> Learned:
     # waiting for its older ones to fade.
     seen: dict[str, int] = {}
     recent: list[tuple[Vote, float]] = []
+    last: dict[tuple[str, str], tuple[float, float]] = {}
     total: dict[str, int] = {}
     for vote in found:
         about = dict(vote.keys).get("place", "")
@@ -296,6 +300,8 @@ def learn(signals: Sequence[dict], now: float) -> Learned:
         about = dict(vote.keys).get("place", "")
         if about and seen.get(about, 0) < PLACE_LAST and total[about] > PLACE_LAST:
             recent.append((vote, vote.weight * fade * 0.5 ** (max(0.0, now - vote.at) / PLACE_S)))
+            useful, weight = last.get(("place", about), (0.0, 0.0))
+            last[("place", about)] = (useful + vote.useful, weight + vote.weight)
         seen[about] = seen.get(about, 0) + 1
     short = fit(recent, long, PLACE_STRENGTH, groups=("place",))
     counts: dict[tuple[str, str], tuple[float, float]] = {}
@@ -305,6 +311,7 @@ def learn(signals: Sequence[dict], now: float) -> Learned:
         for key in (("all", ""),) + vote.keys:
             useful, weight = counts.get(key, (0.0, 0.0))
             counts[key] = (useful + vote.useful, weight + vote.weight)
+    counts.update(last)
     return Learned(long, short, counts, loudness(signals, now), len(found))
 
 

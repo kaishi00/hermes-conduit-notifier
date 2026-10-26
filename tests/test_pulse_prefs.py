@@ -150,6 +150,9 @@ def test_why_names_the_biggest_part_and_the_votes_behind_it():
     assert (factor["scope"], factor["value"], factor["useful"], factor["votes"]) == ("place", "chat::x", 0.0, 3.0)
     assert factor["effect"] < 0
     assert prefs.factor_words(factor) == "less of things from that chat: useful 0 of 3 times"
+    # A chat that follows its last votes says those, not the older ones it liked.
+    changed = learn(history() + liked() + downs(3)).factor(attrs)
+    assert (changed["scope"], changed["useful"], changed["votes"]) == ("place", 0.0, 3.0) and changed["effect"] < 0
     assert prefs.EMPTY.factor(attrs) is None
     assert prefs.factor_words({"scope": "kind", "value": "promise", "effect": 0.4, "useful": 5, "votes": 6}) == \
         "more of promise items: useful 5 of 6 times"
