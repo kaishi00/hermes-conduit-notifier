@@ -121,9 +121,11 @@ def test_when_a_push_may_go(ps):
     # So does a push in a part of the day Wrong time closed for its kind.
     assert timing(at(27, 8), closed={"morning"}) == hours.Timing(hours.HOLD, until=at(27, 12), held_by="part:morning")
     assert timing(at(27, 18), closed={"evening"}) == hours.Timing(hours.BRIEF, held_by="part:evening")
-    # No night: any hour may push.
+    # No night: any hour may push, and news for the morning waits for it, checked again then.
     ps.set("night", [])
     assert timing(at(27, 23)) == hours.Timing(hours.NOW)
+    assert timing(at(27, 23), when=hours.MORNING) == hours.Timing(hours.HOLD, until=at(28, 7),
+                                                                  held_by="when:morning")
 
 
 def test_a_hold_lands_on_the_local_clock_across_a_time_change(ps):
@@ -442,12 +444,19 @@ def test_wrong_time_on_a_report_card_doesnt_keep_it_out_of_reports(live):
                                    "title": "Hermes owes the deploy note", "news": "Hermes owes the deploy note",
                                    "created_at": time.time()})
     control.rate(live.store, card_id, "down", "wrong_time", home=live.home)
-    # The timing was wrong, not the card: the report still offers it, and isn't told it was rated down.
+    # The timing was wrong, not the card: the report isn't told it was rated down.
     assert pulse.report.rating_counts(live.store) == {}
     assert item_id not in pulse.report.rated_not_useful(live.store)
     recent = candidates.recent_section(live.store, UTC, time.time())
     assert "Hermes owes the deploy note (remembered #%d) (the user said it came at the wrong time)" % item_id in recent
     assert "rated not useful" not in recent
+    # It rests while its card is away until a better time, and the report offers it again once the card is back.
+    offered = lambda: [(item["id"], why) for item, why in pulse.report.remembered_items(live.store, time.time())[1]]
+    assert offered() == [(item_id, pulse.report.PUT_AWAY)]
+    back = live.store.card(card_id)["rest_until"]
+    assert live.store.return_card(card_id, back, back)
+    items, resting = pulse.report.remembered_items(live.store, time.time())
+    assert [item["id"] for item in items] == [item_id] and resting == []
 
 
 def test_wrong_time_on_a_card_that_didnt_push_teaches_nothing(live):

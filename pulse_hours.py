@@ -241,7 +241,8 @@ def timing(pulse_store: Any, zone: tzinfo, now: float, *, brief_at: float, close
     name = part(names, zone, now)
     held_by = NIGHT if found is not None and name == NIGHT else f"part:{name}" if name in closed else f"when:{when}"
     # Nothing may go before a night ends: the brief brings it, if it comes soon after.
-    if target is None or (part(names, zone, target - 60) == NIGHT and brief_at <= target + BRIEF_NEAR_S):
+    if target is None or (found is not None and part(names, zone, target - 60) == NIGHT
+                          and brief_at <= target + BRIEF_NEAR_S):
         action, comes = BRIEF, brief_at
     else:
         action, comes = HOLD, target
@@ -295,7 +296,9 @@ def busy(home: Optional[Path], now: float) -> Optional[tuple[str, Optional[float
                     return DRIVING, None
                 # The phone sends its Focus as it turns on and as it ends (the
                 # filter runs with its defaults then), so the latest is current
-                # however old it is: a work or sleep Focus lasts for hours.
+                # however old it is: a work or sleep Focus lasts for hours. An
+                # end that never came (the phone died or couldn't reach Hermes)
+                # holds each push BUSY_MAX_S at most, then it shows without one.
                 if isinstance(focus, dict) and focus.get("active") is True and focus.get("hold_calls") is True:
                     return FOCUS, None
     except Exception:  # noqa: BLE001 — unreadable: not busy, as before
