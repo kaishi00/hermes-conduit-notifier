@@ -150,9 +150,9 @@ def _owner_gone(owner: Any) -> bool:
     end the process) counts as still there, as does a pid already reused:
     the status then waits out the lease, as it did before."""
     hostname, _, pid = str(owner).rpartition(":")
-    if os.name == "nt" or hostname != socket.gethostname() or not pid.isdigit():
+    if os.name == "nt" or hostname != socket.gethostname() or not (pid.isascii() and pid.isdigit()):
         return False
-    if not 0 < int(pid) <= 2**31 - 1:
+    if len(pid) > 10 or not 0 < int(pid) <= 2**31 - 1:
         return False
     try:
         os.kill(int(pid), 0)
