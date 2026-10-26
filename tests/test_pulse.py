@@ -628,9 +628,12 @@ BRIEF_OUT_OF_REACH = "21:00"
 def brief_off_the_clock(pulse_store, home):
     """The morning brief goes out every day on the clock; its own tests set
     its time. Ten hours ahead, its last slot is always too old to send at
-    the real time (BRIEF_OUT_OF_REACH for ticks at set hours)."""
+    the real time (BRIEF_OUT_OF_REACH for ticks at set hours). The night
+    (pulse_hours) is on the clock too: off, so a push goes whatever hour
+    the tests run; its own tests set one."""
     zone = pulse.report_zone(pulse_store, home)
     pulse_store.set("brief_time", datetime.fromtimestamp(time.time() + 10 * 3600, zone).strftime("%H:%M"))
+    pulse_store.set("night", [])
 
 
 def test_nothing_is_sent_while_pulse_is_off(live, db):
@@ -2727,6 +2730,19 @@ def test_pulse_routes(remembering, db, monkeypatch):
     assert never.status_code == 400 and never.json()["detail"] == {"code": "invalid", "field": "until"}
     assert http.post(f"{base}/dismiss", json={"card": rested, "dismissed": False}).json() == {
         "ok": True, "changed": True, "rest_until": None}
+    # The night: two times, or none. Wrong time puts a card away until a better time, and one that pushed
+    # closes that part of the day to pushes of its kind.
+    assert "pulse_hours" in api.ROUTE_CAPABILITIES
+    night = http.put(base, json={"night": ["22:30", "6:45"]}).json()
+    assert night["night"] == ["22:30", "06:45"] and isinstance(night["night_now"], bool)
+    assert http.get(f"{base}/feed").json()["night"] == ["22:30", "06:45"]
+    bad = http.put(base, json={"night": ["22:30"]})
+    assert bad.status_code == 400 and bad.json()["detail"] == {"code": "invalid", "field": "night"}
+    assert http.put(base, json={"night": []}).json()["night"] == []
+    pushed = store_.add_card({"kind": "followup", "item_id": item, "level": "push", "title": "t", "news": "n",
+                              "created_at": time.time()})
+    wrong = http.post(f"{base}/rate", json={"card": pushed, "rating": "down", "reason": "wrong_time"}).json()
+    assert wrong["rest_until"] > time.time() and [lesson["what"] for lesson in wrong["learned"]] == ["part"]
     # A host that never turned Pulse on is answered without a file left behind.
     fresh = home / "fresh"
     fresh.mkdir()

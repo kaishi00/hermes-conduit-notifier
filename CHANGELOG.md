@@ -13,6 +13,15 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.85.0 (2026-10-26)
+
+### New and improved
+- Pulse keeps a night, 22:00 to 07:00 unless you change it, and sends no pushes then. What would have pushed waits for the morning brief, unless it can't wait, like a reminder due before morning. A Focus that holds Hermes's calls holds Pulse's pushes too.
+- A follow-up waits until you're out of a calendar event or done driving, and shows in Pulse without a push if that takes over three hours.
+- A follow-up that needs an office open waits for office hours, and one for the morning or the evening waits for then. Pulse checks it again before it goes, and its Why? says what it waited for.
+- A new reason for a thumbs down, Wrong time: the card comes back at a better time, and Pulse stops pushing that kind at that time of day. What Pulse learned lists it, and Undo takes it back.
+- Not now's "later today" ends when your night starts.
+
 ## 0.84.2 (2026-10-26)
 
 ### Security

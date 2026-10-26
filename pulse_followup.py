@@ -1187,9 +1187,11 @@ def _told(pulse_store: store.PulseStore, item: dict, followup: dict, now: float,
     it?", stays open for one last check. ``timing``: what held it, for its
     Why? (``held_note``); the row's when not given."""
     attrs = item_attrs(item, now)
+    why = followup["why"].rstrip()
     note = held_note(followup_timing(followup) if timing is None else timing, loudness)
-    learning.add_card(pulse_store, kind=FOLLOWUP, item=item, level_name=loudness, news=followup["news"],
-                      why=f"{followup['why']} {note}".strip() if note else followup["why"],
+    if note:
+        why = f"{why}{'' if not why or why[-1] in '.!?…' else '.'} {note}".strip()
+    learning.add_card(pulse_store, kind=FOLLOWUP, item=item, level_name=loudness, news=followup["news"], why=why,
                       chat_title=chat_title(home, item) if home is not None else "", now=now,
                       learned=pulse_store.learned(now).factor(attrs), place=attrs["place"], band=attrs["band"])
     if followup["news"] == STALE_NEWS and item["status"] == "open" and item["superseded_at"] is None:

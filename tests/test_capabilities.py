@@ -86,6 +86,8 @@ def test_every_capability_names_a_served_route_family():
         "pulse_learns": "/pulse/learned",
         # What it learned can be reset there, and what it left out is listed at /pulse/left_out.
         "pulse_explains": "/pulse/left_out",
+        # The night is a setting on the /pulse control route; Wrong time a reason /pulse/rate takes.
+        "pulse_hours": "/pulse",
         "present-v1": "/present/",
         "health-sync": "/health/",
         "shortcut-inbox": "/inbox/",
