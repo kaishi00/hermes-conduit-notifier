@@ -1093,6 +1093,16 @@ def test_a_call_answer_wins_and_formats_like_a_device_answer(monkeypatch):
     assert fake.cancelled_ids == [request_id]
 
 
+def test_a_form_question_left_blank_on_a_call_comes_back_skipped():
+    # "Skip" on a call leaves a form's question blank (calls_store.is_skip):
+    # Hermes reads it as skipped, as a field left empty on the card.
+    batch = [{"qid": "q0", "question": "Leaving from?", "choices": [], "multi_select": False},
+             {"qid": "q1", "question": "Your kind of escape?", "choices": ["Beach", "City"], "multi_select": False}]
+    result = json.loads(loop._call_answer_result(batch, True, {"q0": "Toronto", "q1": ""}))
+    assert [(row["status"], row["user_response"]) for row in result["responses"]] == [
+        ("answered", "Toronto"), ("skipped", None)]
+
+
 def test_a_calls_pick_of_a_choice_longer_than_the_store_keeps_answers_with_the_full_choice():
     long_choice = "Deploy to staging and " + "run every integration suite " * 12
     offered = [long_choice, "prod"]

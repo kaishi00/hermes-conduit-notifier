@@ -13,6 +13,11 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.82.0 (2026-10-26)
+
+### New and improved
+- When Hermes needs several details only you can give, like where you leave from and your budget for a trip, it can ask them all at once, and Conduit shows them as a form: fill in what you know, leave the rest blank, and send it once. On a call from Hermes, say "skip" to leave one blank.
+
 ## 0.81.1 (2026-10-26)
 
 ### New and improved

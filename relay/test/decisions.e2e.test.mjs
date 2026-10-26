@@ -1673,7 +1673,7 @@ test('APNs rejection after parking flips a deliverable decision to undeliverable
   assert.deepEqual(poll.json.remaining, ['q0']);
 });
 
-test('unknown qid on a live batch decision is a bad request, not a missing decision', async () => {
+test('per-question answers: an unknown qid is a bad request, and a blank leaves one question of a form blank', async () => {
   const registered = await api(baseUrl, '/v1/installations', {
     method: 'POST',
     body: {
@@ -1717,6 +1717,45 @@ test('unknown qid on a live batch decision is a bad request, not a missing decis
   // The established meanings are untouched: the live decision still polls.
   const poll = await api(baseUrl, '/v1/decisions/conduit-push-qidcheck', { credential: gatewayCredential });
   assert.equal(poll.json.status, 'pending');
+
+  // A form's field left blank: Conduit sends it only to a relay that keeps it.
+  const meta = await api(baseUrl, '/v1/meta', { credential: deviceCredential });
+  assert.ok(meta.json.capabilities.includes('clarify-skip'));
+  const park = (requestId, eventId, decision) => api(baseUrl, '/v1/events', {
+    method: 'POST',
+    credential: gatewayCredential,
+    body: { type: 'input.needed', event_id: eventId, session_id: 'sess-qid', profile: 'default', decision: { kind: 'clarify', request_id: requestId, ...decision } },
+  });
+  await park('conduit-push-formblank', 'input:formblank0001', {
+    question: 'Leaving from?',
+    questions: [
+      { qid: 'q0', question: 'Leaving from?', choices: [], multi_select: false },
+      { qid: 'q1', question: 'When?', choices: [], multi_select: false },
+    ],
+  });
+  const respond = (requestId, body) => api(baseUrl, `/v1/decisions/${requestId}/respond`, { method: 'POST', credential: deviceCredential, body });
+  // Without a question, a blank is still no answer.
+  const whole = await respond('conduit-push-formblank', { answer: '  ' });
+  assert.equal(whole.status, 400);
+  assert.equal(whole.json.error, 'invalid_answer');
+  // For one question it leaves that question blank, and locks it.
+  const blank = await respond('conduit-push-formblank', { question_id: 'q1', answer: ' \n' });
+  assert.equal(blank.status, 200);
+  assert.deepEqual(blank.json, { status: 'answered', remaining: ['q0'] });
+  const again = await respond('conduit-push-formblank', { question_id: 'q1', answer: 'Next week' });
+  assert.equal(again.status, 409);
+  const filled = await respond('conduit-push-formblank', { question_id: 'q0', answer: 'Toronto' });
+  assert.deepEqual(filled.json, { status: 'answered', remaining: [] });
+  const done = await api(baseUrl, '/v1/decisions/conduit-push-formblank', { credential: gatewayCredential });
+  assert.equal(done.json.status, 'answered');
+  assert.deepEqual({ ...done.json.answers }, { q0: 'Toronto', q1: '' });
+  // A single-question decision has no question to leave blank.
+  await park('conduit-push-scalarblank', 'input:formblank0002', { question: 'One?', choices: ['a'] });
+  const scalar = await respond('conduit-push-scalarblank', { question_id: 'q0', answer: '' });
+  assert.equal(scalar.status, 400);
+  assert.equal(scalar.json.error, 'invalid_answer');
+  const stillOpen = await api(baseUrl, '/v1/decisions/conduit-push-scalarblank', { credential: gatewayCredential });
+  assert.equal(stillOpen.json.status, 'pending');
 });
 
 test('an ordinary multi-question batch is delivered with the full qid set (single structured copy)', async () => {

@@ -64,6 +64,11 @@ HINTS = {
                "with no tables, links or lists.",
     "watch": "Its screen is small: keep the answer short, with no tables.",
 }
+# Said for a typed message on a screen, where a clarify batch with open
+# questions shows as a form (hermes-conduit's ClarifyActivity.isForm).
+SCREENS = ("iphone", "ipad", "mac", "vision")
+FORM_HINT = ("When you need several details only the user can give (like dates or a budget), ask them in one "
+             "clarify call with open questions: Conduit shows it as a form, and they may leave some blank.")
 
 
 class Report:
@@ -152,7 +157,7 @@ def _message_text(message: Any) -> Optional[str]:
 
 def line(surface: str, entry: Optional[str] = None) -> str:
     where = SURFACES[surface] + (f", {entry}" if entry else "")
-    hint = HINTS.get(surface)
+    hint = FORM_HINT if surface in SCREENS and entry != "spoken" else HINTS.get(surface)
     return f"[Conduit: this message came from {where}.{' ' + hint if hint else ''}]"
 
 

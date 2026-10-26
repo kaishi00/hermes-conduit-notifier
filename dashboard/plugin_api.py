@@ -7599,8 +7599,9 @@ def call_waiting(session_id: Any) -> Dict[str, Any]:
 def answer_call_waiting(body: Any) -> Dict[str, Any]:
     """The user's spoken answer, on a call from Hermes, to what Hermes waits
     on in its chat: a question's ``answer`` (a choice's number or label, "the
-    recommended one", or their own words) for ``question`` (its number in the
-    batch), or an approval's ``choice`` (once or deny, with ``reason``). The
+    recommended one", their own words, or "skip" for one of a form) for
+    ``question`` (its number in the batch), or an approval's ``choice`` (once
+    or deny, with ``reason``). The
     agent's process passes it to Hermes within seconds. An approval's answer
     waits to hear that it did: "answered" only once Hermes took it."""
     if not isinstance(body, dict):
@@ -13896,6 +13897,8 @@ def _local_live_question_line(question: Dict[str, Any]) -> str:
         line += " Say the number of your choice, or answer in your own words."
     else:
         line += " Answer in your own words."
+    if question.get("may_leave_blank"):
+        line += " Or say skip to leave it blank."
     return line
 
 
@@ -13904,7 +13907,8 @@ def _local_live_call_answer(grant: _WatchGrant, words: str) -> Optional[str]:
     words answer what Hermes waits on in the call's chat (answer_call_waiting,
     as answer_call does for the other modes), and this is what the call says
     after. A question takes any words, by number, label or "the recommended
-    one", and words that ask go as a request to explain first. An approval
+    one", "skip" leaves one of a form blank, and words that ask go as a
+    request to explain first. An approval
     takes only a plain yes or no, and only when the user lets the Watch
     answer approvals by voice; a question about it denies it with the
     question, so Hermes explains and asks again. None: nothing waits, or the
