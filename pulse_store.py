@@ -1030,9 +1030,12 @@ class PulseStore:
             return ids
 
     def rated_cards(self, kind: str) -> list[dict]:
+        """``kind``'s cards the user rated useful or not: not "wrong time",
+        which rates when a card came, not the card."""
         with self._connect() as conn:
             return [dict(row) for row in conn.execute(
-                "SELECT item_id, topic, rating, rated_at FROM cards WHERE kind=? AND rating!=''", (kind,))]
+                "SELECT item_id, topic, rating, rated_at FROM cards WHERE kind=? AND rating!='' AND reason!=?",
+                (kind, WRONG_TIME))]
 
     def card(self, card_id: int) -> Optional[dict]:
         with self._connect() as conn:

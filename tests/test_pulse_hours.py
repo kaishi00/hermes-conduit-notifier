@@ -2,6 +2,7 @@
 night, the parts of the day, when news is useful, busy holds and Wrong
 time."""
 
+import json
 import sys
 import time
 import types
@@ -60,7 +61,7 @@ def test_the_night_is_from_22_to_7_unless_set(ps):
     (["22:00", "07:00"], ["22:00", "07:00"]), (["7:05", "23:00"], ["07:05", "23:00"]), ([], []),
     (["22:00", "22:00"], []), (["24:00", "07:00"], None), (["22:60", "07:00"], None), (["22:00"], None),
     (["22:00", "07:00", "08:00"], None), ("22:00-07:00", None), ([22, 7], None), (None, None),
-    (["22:00:00", "07:00"], None)])
+    (["22:00:00", "07:00"], None), (["+2:30", "07:00"], None)])
 def test_a_night_is_two_times_or_none(value, parsed):
     assert hours.parse_night(value) == parsed
 
@@ -146,6 +147,10 @@ def test_when_the_night_starts_and_a_day_ends(ps):
     assert hours.due_end(ps, UTC, at(27, 0), timed=False) == at(27, 22)
     assert hours.due_end(ps, UTC, at(27, 15), timed=True) == at(27, 15)
     ps.set("night", ["01:00", "08:00"])  # a night that starts after midnight: the day ends at midnight
+    assert hours.due_end(ps, UTC, at(27, 0), timed=False) == at(28, 0)
+    ps.set("night", ["02:00", "13:00"])  # a night over noon started that morning: the day ends at midnight
+    assert hours.due_end(ps, UTC, at(27, 0), timed=False) == at(28, 0)
+    ps.set("night", ["12:00", "20:00"])
     assert hours.due_end(ps, UTC, at(27, 0), timed=False) == at(28, 0)
     ps.set("night", [])
     assert hours.night_starts(ps, UTC, at(27, 20)) is None
@@ -326,6 +331,33 @@ def test_a_push_due_before_youre_free_or_urgent_goes_anyway(live, monkeypatch):
     assert item["id"] == item_id
 
 
+def test_a_push_that_goes_while_youre_busy_doesnt_say_it_waited(live, monkeypatch):
+    noon = next_at(12)
+    item_id = commitment(live, due="2026-10-27T15:00", due_at=noon + 1800, said_at=noon - 86400)
+    row = {"item_id": item_id, "news": "The call is at three.", "why": "due soon", "checks": 1,
+           "timing": json.dumps({"busy": hours.DRIVING, "busy_since": noon - 600})}
+    driving = [(hours.DRIVING, None)]
+    monkeypatch.setattr(followup.hours, "busy", lambda home, moment: driving[0])
+
+    def timed(now):
+        return followup._timed(live.store, live.store.item(item_id), row, now=now, zone=UTC, home=live.home)
+
+    # Due before you'd be free, it goes while you drive: its Why? doesn't say it waited.
+    loudness, timing = timed(noon)
+    assert loudness == "push" and "busy" not in timing and followup.held_note(timing, "push") == ""
+    # Nor when it can't wait for the morning.
+    nights(live)
+    row["timing"] = json.dumps({"urgent": True, "busy": hours.DRIVING, "busy_since": noon - 600})
+    loudness, timing = timed(noon + 11 * 3600)
+    assert loudness == "push" and followup.held_note(timing, "push") == \
+        "Sent at night: it couldn't wait for the morning."
+    # Once you're free, it says what it waited for.
+    driving[0] = None
+    row["timing"] = json.dumps({"busy": hours.DRIVING, "busy_since": noon - 600})
+    loudness, timing = timed(noon)
+    assert loudness == "push" and followup.held_note(timing, "push") == "Waited until you'd stopped driving."
+
+
 def test_held_notes():
     note = followup.held_note
     assert note({}, "push") == "" and note({"when": "any"}, "screen") == ""
@@ -401,6 +433,21 @@ def test_wrong_time_closes_that_part_of_the_day_for_the_kind_without_a_thumb(liv
     assert control.rate(live.store, card["id"], "down", "wrong_time", now=now + 1, home=live.home) == []
     assert learning.undo(live.store, lesson["id"], now + 2)
     assert learning.closed_parts(live.store, "followup") == set()
+
+
+def test_wrong_time_on_a_report_card_doesnt_keep_it_out_of_reports(live):
+    live.store.set("time_zone", "UTC")
+    item_id = promise(live)
+    card_id = live.store.add_card({"kind": "noticed", "item_id": item_id, "level": "push", "topic": "promise",
+                                   "title": "Hermes owes the deploy note", "news": "Hermes owes the deploy note",
+                                   "created_at": time.time()})
+    control.rate(live.store, card_id, "down", "wrong_time", home=live.home)
+    # The timing was wrong, not the card: the report still offers it, and isn't told it was rated down.
+    assert pulse.report.rating_counts(live.store) == {}
+    assert item_id not in pulse.report.rated_not_useful(live.store)
+    recent = candidates.recent_section(live.store, UTC, time.time())
+    assert "Hermes owes the deploy note (remembered #%d) (the user said it came at the wrong time)" % item_id in recent
+    assert "rated not useful" not in recent
 
 
 def test_wrong_time_on_a_card_that_didnt_push_teaches_nothing(live):

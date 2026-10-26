@@ -2735,7 +2735,8 @@ def test_pulse_routes(remembering, db, monkeypatch):
     assert "pulse_hours" in api.ROUTE_CAPABILITIES
     night = http.put(base, json={"night": ["22:30", "6:45"]}).json()
     assert night["night"] == ["22:30", "06:45"] and isinstance(night["night_now"], bool)
-    assert http.get(f"{base}/feed").json()["night"] == ["22:30", "06:45"]
+    feed = http.get(f"{base}/feed").json()
+    assert feed["night"] == ["22:30", "06:45"] and feed["brief_time"] == http.get(base).json()["brief_time"]
     bad = http.put(base, json={"night": ["22:30"]})
     assert bad.status_code == 400 and bad.json()["detail"] == {"code": "invalid", "field": "night"}
     assert http.put(base, json={"night": []}).json()["night"] == []

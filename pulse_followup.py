@@ -1060,25 +1060,26 @@ def _timed(pulse_store: store.PulseStore, item: dict, followup: dict, *, now: fl
                          urgent=timing.get("urgent") is True)
     if found.action == hours.BRIEF:
         return "brief", {**timing, "held": found.held_by}
+    # Unless it goes once the user is free, an earlier wait while busy isn't its Why?.
+    calm = {key: value for key, value in timing.items() if not key.startswith("busy")}
     if found.action == hours.HOLD:
         until = found.until if found.until is not None else now
-        timing = {key: value for key, value in timing.items() if not key.startswith("busy")}
-        timing.update(held=found.held_by, held_until=until,
-                      held_clock=datetime.fromtimestamp(until, zone).strftime("%H:%M"))
+        timing = {**calm, "held": found.held_by, "held_until": until,
+                  "held_clock": datetime.fromtimestamp(until, zone).strftime("%H:%M")}
         pulse_store.decide_followup(followup["item_id"], decision=TIMED, news=followup["news"], why=followup["why"],
                                     checks=followup["checks"], next_check_at=until, now=now, timing=timing)
         return None, timing
     if found.cant_wait:
-        timing = {key: value for key, value in timing.items() if key not in ("held_until", "held_clock")}
+        timing = {key: value for key, value in calm.items() if key not in ("held_until", "held_clock")}
         return "push", {**timing, "held": found.held_by, "cant_wait": True}
     if timing.get("urgent") is True:
-        return "push", timing
+        return "push", calm
     busy = hours.busy(home, now)
     if busy is None:
         return "push", timing
     what, until = busy
     if due_end is not None and now < due_end <= (now + hours.BUSY_MAX_S if until is None else until):
-        return "push", timing  # due before the user is free
+        return "push", calm  # due before the user is free
     since = timing.get("busy_since")
     since = float(since) if isinstance(since, (int, float)) and not isinstance(since, bool) else now
     if (until is not None and until - now > hours.BUSY_MAX_S) or now - since >= hours.BUSY_MAX_S:

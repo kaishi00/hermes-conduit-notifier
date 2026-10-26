@@ -372,9 +372,11 @@ def feed(pulse_store: Any, home: Optional[Path] = None, limit: int = pulse_learn
             # The screen says when Pulse is quiet (pulse_quiet) and until when.
             "quiet_now": pulse_quiet.why(pulse_store, zone, now),
             "quiet_ends_at": pulse_quiet.ends_at(pulse_store, zone, now),
-            # The night (pulse_hours): Not now's "later today" ends when it starts.
+            # The night (pulse_hours): Not now's "later today" ends when it starts,
+            # and at night it's just before the morning brief.
             "night": pulse_hours.night_text(pulse_store),
-            "night_now": pulse_hours.is_night(pulse_store, zone, now)}
+            "night_now": pulse_hours.is_night(pulse_store, zone, now),
+            "brief_time": pulse.report.clock_text(pulse_store.get("brief_time") or pulse.brief.DEFAULT_TIME)}
 
 
 def see(pulse_store: Any, ids: Any, now: Optional[float] = None) -> int:

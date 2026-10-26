@@ -29,6 +29,7 @@ report's picks may come up (pulse_candidates.route):
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, tzinfo
 from pathlib import Path
@@ -62,13 +63,11 @@ Bounds = tuple[tuple[int, int], tuple[int, int]]
 
 
 def clock(text: Any) -> Optional[tuple[int, int]]:
-    """"HH:MM" as (hour, minute), or None."""
-    if not isinstance(text, str) or len(text) > 5:
+    """"HH:MM" (or "H:MM") as (hour, minute), or None."""
+    found = re.fullmatch(r"([0-9]{1,2}):([0-9]{2})", text.strip()) if isinstance(text, str) else None
+    if found is None:
         return None
-    try:
-        hour, minute = (int(part) for part in text.strip().split(":", 1))
-    except ValueError:
-        return None
+    hour, minute = int(found[1]), int(found[2])
     return (hour, minute) if 0 <= hour < 24 and 0 <= minute < 60 else None
 
 
@@ -165,7 +164,12 @@ def due_end(pulse_store: Any, zone: tzinfo, due_at: float, *, timed: bool) -> fl
         return due_at
     start = datetime.fromtimestamp(due_at, zone).replace(hour=0, minute=0, second=0, microsecond=0)
     midnight = (start + timedelta(days=1)).timestamp()
-    starts = night_starts(pulse_store, zone, start.replace(hour=NOON // 60).timestamp())
+    noon = start.replace(hour=NOON // 60).timestamp()
+    found = night(pulse_store)
+    if found is not None and part(found, zone, noon) == NIGHT:
+        # A night over noon started that morning: the day's own night is the next one.
+        noon = next((edge for edge in _edges(found, zone, noon) if part(found, zone, edge) != NIGHT), midnight)
+    starts = night_starts(pulse_store, zone, noon)
     return min(midnight, starts) if starts is not None else midnight
 
 
@@ -285,10 +289,13 @@ def busy(home: Optional[Path], now: float) -> Optional[tuple[str, Optional[float
                 status, focus = state["status"], state["focus"]
                 status_at = state["status_at"]
                 if isinstance(status, dict) and isinstance(status_at, (int, float)) \
-                        and 0 <= now - status_at <= DRIVING_FRESH_S and (
+                        and not isinstance(status_at, bool) and 0 <= now - status_at <= DRIVING_FRESH_S and (
                         status.get("carplay") is True or (status.get("activity") == "automotive"
                                                           and status.get("activity_confidence") != "low")):
                     return DRIVING, None
+                # The phone sends its Focus as it turns on and as it ends (the
+                # filter runs with its defaults then), so the latest is current
+                # however old it is: a work or sleep Focus lasts for hours.
                 if isinstance(focus, dict) and focus.get("active") is True and focus.get("hold_calls") is True:
                     return FOCUS, None
     except Exception:  # noqa: BLE001 — unreadable: not busy, as before

@@ -157,8 +157,9 @@ def recent_section(pulse_store: store.PulseStore, zone: tzinfo, now: float) -> s
     marks = pulse_store.done_marks([card["id"] for card in cards])
     lines, used = [], 0
     for card in cards:
-        did = (" (rated useful)" if card["rating"] == "up" else " (rated not useful)" if card["rating"] == "down"
-               else "")
+        did = (" (rated useful)" if card["rating"] == "up"
+               else " (the user said it came at the wrong time)" if card["reason"] == store.WRONG_TIME
+               else " (rated not useful)" if card["rating"] == "down" else "")
         did += " (done)" if card["id"] in marks else " (put away)" if card["dismissed_at"] else ""
         ref = f" (remembered #{card['item_id']})" if card["item_id"] is not None else ""
         line = (f"- {_local(card['created_at'], zone)} [{card['topic'] or card['kind']}] "

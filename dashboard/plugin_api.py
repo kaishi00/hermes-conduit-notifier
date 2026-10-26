@@ -16680,8 +16680,9 @@ ROUTE_CAPABILITIES = (
     # "preferences" with /pulse/learned/reset.
     "pulse_explains",
     # PUT /pulse takes "night" (nothing pushes in it), the state and feed
-    # say it, and /pulse/rate takes "wrong_time": the card comes back at a
-    # better time, and that part of the day pushes no more for its kind.
+    # say it (the feed with the brief's time, for Not now at night), and
+    # /pulse/rate takes "wrong_time": the card comes back at a better time,
+    # and that part of the day pushes no more for its kind.
     "pulse_hours",
     "present-v1",
     "health-sync",
