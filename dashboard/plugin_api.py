@@ -8354,15 +8354,23 @@ async def post_pulse_seen(request: Request, response: Response) -> Dict[str, Any
 @router.post("/pulse/rate")
 async def post_pulse_rate(request: Request, response: Response) -> Dict[str, Any]:
     """{"card": n, "rating": "up"|"down", "reason": optional, for a down:
-    "not_relevant"|"already_knew"|"too_late"|"too_often"}: {"learned": [...]},
-    the lessons it made. A report item's card ("noticed") takes a reason
-    too, for its topic (pulse_learning.lesson_kind); "not_relevant" makes a
-    rule only for one from a chat."""
+    "not_relevant"|"already_knew"|"too_late"|"too_often"|"wrong_time"}:
+    {"learned": [...], "rest_until": epoch seconds or null}, the lessons it
+    made, and for "wrong_time" when the card, swiped away, comes back. A
+    report item's card ("noticed") takes a reason too, for its topic
+    (pulse_learning.lesson_kind); "not_relevant" makes a rule only for one
+    from a chat."""
     response.headers["Cache-Control"] = "no-store"
     body = await _read_json_body(request, PULSE_MAX_BODY_BYTES)
     body = body if isinstance(body, dict) else {}
-    return await _pulse_route("rate", lambda control, store, home: {"learned": control.rate(
-        store, body.get("card"), body.get("rating"), body.get("reason") or "")}, reads_only=True)
+
+    def action(control: Any, store: Any, home: Any) -> Dict[str, Any]:
+        reason = body.get("reason") or ""
+        learned = control.rate(store, body.get("card"), body.get("rating"), reason, home=home)
+        card = store.card(body["card"]) if reason == "wrong_time" else None  # a card that isn't there was refused
+        return {"learned": learned, "rest_until": card.get("rest_until") if card else None}
+
+    return await _pulse_route("rate", action, reads_only=True)
 
 
 @router.post("/pulse/done")
@@ -16671,6 +16679,10 @@ ROUTE_CAPABILITIES = (
     # and why) with /pulse/left_out/bring_up, and /pulse/learned's
     # "preferences" with /pulse/learned/reset.
     "pulse_explains",
+    # PUT /pulse takes "night" (nothing pushes in it), the state and feed
+    # say it, and /pulse/rate takes "wrong_time": the card comes back at a
+    # better time, and that part of the day pushes no more for its kind.
+    "pulse_hours",
     "present-v1",
     "health-sync",
     "voice-tools",

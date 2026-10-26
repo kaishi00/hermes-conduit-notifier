@@ -51,10 +51,10 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
              "next connects to this dashboard; `hermes conduit-push unpair` cuts it off now",
     )
     pulse = commands.add_parser("pulse", help="Pulse, the proactivity experiment: on, off, status, probe, report, home, outcomes, memory, followups, "
-                                                 "cards, rate, done, learned, nudge, budget, candidates, note, quiet")
+                                                 "cards, rate, done, learned, nudge, budget, candidates, note, quiet, night")
     pulse.add_argument("pulse_action", choices=["on", "off", "status", "probe", "report", "home", "outcomes", "memory",
                                                 "followups", "cards", "rate", "done", "learned", "nudge", "budget",
-                                                "candidates", "note", "quiet"])
+                                                "candidates", "note", "quiet", "night"])
     pulse.add_argument("value", nargs="?", default="",
                        help="for home: the id of the chat to use, or 'auto' to find it by title; "
                             "for outcomes: how many to show, or a chat id; "
@@ -72,12 +72,14 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
                             "(one a report left out comes up on the Pulse screen); "
                             "for note: what you want from Pulse, in your own words, or 'clear'; "
                             "for quiet: 'today', 'until' and a day, 'off', 'days' and weekdays like sat,sun "
-                            "(or none), or nothing to show the quiet times")
+                            "(or none), or nothing to show the quiet times; "
+                            "for night: when it starts, like 22:00, or 'off', or nothing to show it")
     pulse.add_argument("extra", nargs="?", default="",
                        help="for memory forget: the item number; for memory backfill: how many days back "
                             "(it shows what that costs), 'start', 'stop' or 'cancel'; "
                             "for rate: 'up', 'down', or a reason for a thumbs down (not_relevant, already_knew, "
-                            "too_late, too_often); for done: 'undo' to take the mark off; for learned: the lesson number, "
+                            "too_late, too_often, wrong_time); for done: 'undo' to take the mark off; "
+                            "for night: when it ends, like 07:00; for learned: the lesson number, "
                             "the preference number (or 'everything') to reset, or push, screen, brief or off; "
                             "for candidates bring: the candidate number; "
                             "for budget: tokens a day, or 'auto' for follow-ups to go with the nudge level; "
@@ -340,7 +342,7 @@ def _pulse(args: argparse.Namespace) -> int:
         or (action == "memory" and (args.value or "").strip() not in ("on", "off")) \
         or (action == "nudge" and not (args.value or "").strip()) \
         or (action == "note" and (args.value or "").strip() in ("", "clear")) \
-        or (action == "quiet" and not (args.value or "").strip()) \
+        or (action in ("quiet", "night") and not (args.value or "").strip()) \
         or (action == "budget" and not str(getattr(args, "extra", "") or "").strip())
     if (action in ("status", "probe", "off", "outcomes") or listing) and not (Path(home) / pulse_delivery.store.DB_NAME).exists():
         # Never turned on: say so without leaving a file behind.
@@ -388,6 +390,9 @@ def _pulse(args: argparse.Namespace) -> int:
                                str(getattr(args, "extra", "") or "").strip(), home)
     if action == "quiet":
         return _pulse_quiet(pulse_store, home, (args.value or "").strip(),
+                            str(getattr(args, "extra", "") or "").strip())
+    if action == "night":
+        return _pulse_night(pulse_store, home, (args.value or "").strip(),
                             str(getattr(args, "extra", "") or "").strip())
     if action == "note":
         # An unquoted two-word note is still the whole note.
@@ -448,6 +453,7 @@ def _pulse(args: argparse.Namespace) -> int:
     if len(quiet) > 1 or not quiet[0].endswith("none"):
         for line in quiet:
             print(line)
+    print(_night_line(pulse_store, zone, time.time()))
     if pulse_store.get("report_profiles") == "all":
         others = [name for name, _ in pulse.report.profile_homes(home)]
         if others:
@@ -893,6 +899,31 @@ def _pulse_quiet(pulse_store: Any, home: Any, value: str, extra: str) -> int:
     return 0
 
 
+def _night_line(pulse_store: Any, zone: Any, now: float) -> str:
+    """The night (pulse_hours), for `pulse night` and `pulse status`."""
+    from . import pulse_hours
+    night = pulse_hours.night_text(pulse_store)
+    if not night:
+        return "Night: none (Pulse may push at any hour)"
+    return (f"Night: {night[0]} to {night[1]} ({zone}): nothing pushes then; what would waits for the morning "
+            "brief, unless it can't wait" + (". It's night now." if pulse_hours.is_night(pulse_store, zone, now)
+                                             else "."))
+
+
+def _pulse_night(pulse_store: Any, home: Any, value: str, extra: str) -> int:
+    """Shows or sets the night (pulse_hours): `night 22:00 07:00`, or `night off`."""
+    from . import pulse, pulse_control
+    if value:
+        try:
+            pulse_control.update(pulse_store, {"night": [] if value == "off" and not extra else [value, extra]}, home)
+        except pulse_control.Refused:
+            print("Usage: hermes conduit-push pulse night [HH:MM HH:MM | off]: when the night starts and ends, "
+                  "like 22:00 07:00")
+            return 2
+    print(_night_line(pulse_store, pulse.report_zone(pulse_store, home), time.time()))
+    return 0
+
+
 def _pulse_note(pulse_store: Any, value: str) -> int:
     """Shows, sets or clears the user's note to Pulse, which every report,
     brief and check reads (pulse_report.note)."""
@@ -1012,11 +1043,17 @@ def _pulse_learning(pulse_store: Any, action: str, value: str, extra: str, home:
     try:
         if action == "rate":
             if not value.isdecimal() or len(value) > 18 or not extra:
-                print("Usage: hermes conduit-push pulse rate <card> up|down|not_relevant|already_knew|too_late|too_often")
+                print("Usage: hermes conduit-push pulse rate <card> "
+                      "up|down|not_relevant|already_knew|too_late|too_often|wrong_time")
                 return 2
             rating, reason = ("down", extra) if extra in pulse_learning.REASONS else (extra, "")
-            made = pulse_control.rate(pulse_store, int(value), rating, reason)
-            print("Rated." + "".join(f"\nPulse learned: {_printable(lesson['text'])}" for lesson in made))
+            made = pulse_control.rate(pulse_store, int(value), rating, reason, home=home)
+            card = pulse_store.card(int(value)) if reason == pulse_learning.WRONG_TIME else None
+            back = card.get("rest_until") if card else None
+            zone = pulse.report_zone(pulse_store, Path(home) if home else Path("."))
+            print("Rated." + (f" Put away until {datetime.fromtimestamp(back, zone).strftime('%a %H:%M')}."
+                              if back else "")
+                  + "".join(f"\nPulse learned: {_printable(lesson['text'])}" for lesson in made))
             return 0
         if action == "done":
             if not value.isdecimal() or len(value) > 18 or extra not in ("", "undo"):

@@ -33,6 +33,7 @@ import secrets
 from datetime import datetime, timezone, tzinfo
 from typing import Any, Callable, Optional, Sequence
 
+from . import pulse_hours as hours
 from . import pulse_learning as learning
 from . import pulse_prefs as prefs
 from . import pulse_report as report
@@ -328,11 +329,12 @@ def _line(value: Any, *, ref: Optional[int] = None) -> str:
 # Deciding ----------------------------------------------------------------------
 
 def decide(pulse_store: store.PulseStore, rows: list[dict], *, now: float, limit: int = MAX_ITEMS,
-           learned: Optional[prefs.Learned] = None) -> list[dict]:
+           learned: Optional[prefs.Learned] = None, zone: Optional[tzinfo] = None) -> list[dict]:
     """Decides every candidate, in place: a remembered item that rests
     (pulse_report.remembered_items) stays out, said something about or not,
     then ``route`` with what the store has learned (pulse_prefs), the nudge
-    level, each kind's level and the "not relevant" rules."""
+    level, each kind's level, the "not relevant" rules, and in ``zone``
+    the night and the parts of the day "wrong time" closed (``time_cap``)."""
     resting = {item["id"]: why for item, why in report.remembered_items(pulse_store, now)[1]}
     for row in rows:
         if row.get("decision") in (None, "", UNANSWERED) and row["origin"] == MEMORY and row["item_id"] in resting:
@@ -343,7 +345,27 @@ def decide(pulse_store: store.PulseStore, rows: list[dict], *, now: float, limit
     return route(rows, limit=limit, now=now, learned=learned, nudge=learning.nudge(pulse_store),
                  ceiling=functools.lru_cache(maxsize=None)(lambda kind: learning.level(pulse_store, kind)),
                  muted=lambda row: bool(row["chat_id"]) and (row["profile"], row["chat_id"]) in muted,
-                 pace=functools.lru_cache(maxsize=None)(lambda kind: learning.report_pace(pulse_store, kind)))
+                 pace=functools.lru_cache(maxsize=None)(lambda kind: learning.report_pace(pulse_store, kind)),
+                 cap=None if zone is None else time_cap(pulse_store, zone, now))
+
+
+def time_cap(pulse_store: store.PulseStore, zone: tzinfo, now: float) -> Callable[[dict], str]:
+    """The loudest each pick may come up now (pulse_hours.push_cap): no
+    push at night (held for the morning brief) or in a part of the day
+    "wrong time" closed for its kind (the Pulse screen), unless it's due
+    before it could push."""
+    from . import pulse_brief as brief
+    brief_at = report.next_time(now, zone, pulse_store.get("brief_time") or brief.DEFAULT_TIME)
+    closed = functools.lru_cache(maxsize=None)(lambda kind: frozenset(learning.closed_parts(pulse_store, kind)))
+
+    def cap(row: dict) -> str:
+        due = row.get("due_at")
+        if due is not None and row["origin"] == MEMORY and row["item_id"] is not None:
+            item = pulse_store.item(row["item_id"])
+            # A found one's day alone is due at its end already (_due).
+            due = hours.due_end(pulse_store, zone, due, timed=item is None or "T" in str(item.get("due") or ""))
+        return hours.push_cap(pulse_store, zone, now, brief_at=brief_at, closed=closed(row["kind"]), due_end=due)
+    return cap
 
 
 def floor(row: dict, now: float) -> bool:
@@ -362,17 +384,17 @@ def floor(row: dict, now: float) -> bool:
 def route(rows: list[dict], *, limit: int = MAX_ITEMS, now: Optional[float] = None,
           learned: prefs.Learned = prefs.EMPTY, nudge: str = learning.DEFAULT_NUDGE,
           ceiling: Optional[Callable[[str], str]] = None, muted: Optional[Callable[[dict], bool]] = None,
-          pace: Optional[Callable[[str], float]] = None) -> list[dict]:
+          pace: Optional[Callable[[str], float]] = None, cap: Optional[Callable[[dict], str]] = None) -> list[dict]:
     """Decides each candidate not decided yet, and a floor the model said
     nothing about (UNANSWERED), in place, and notes its band, place, score,
     factor, floor and level. One the model gave a reason to leave out is
     SKIPPED, one whose chat has a "not relevant" rule MUTED, one whose kind
     is off OFF. The rest score (pulse_prefs.score: learning, value, pick): a
     floor or one scoring pulse_prefs.SURFACE_AT comes up at its level
-    (pulse_prefs.level, at most its kind's ``ceiling``), the loudest first,
-    at most ``limit`` besides the floors (the rest OVER_LIMIT); one that
-    doesn't is QUIETED if the model picked it, else NOT_PICKED. Returns
-    ``rows``."""
+    (pulse_prefs.level, at most its kind's ``ceiling`` and the time's
+    ``cap``), the loudest first, at most ``limit`` besides the floors (the
+    rest OVER_LIMIT); one that doesn't is QUIETED if the model picked it,
+    else NOT_PICKED. Returns ``rows``."""
     now = 0.0 if now is None else now
     up = []
     for n, row in enumerate(rows):
@@ -402,6 +424,8 @@ def route(rows: list[dict], *, limit: int = MAX_ITEMS, now: Optional[float] = No
             row["decision"] = OFF
         elif level != "off":
             row["level"] = prefs.quieter(level, top)
+            if cap is not None and row["level"] == "push":
+                row["level"] = cap(row)
             up.append((n, row, score + prefs.URGENCY[row["band"]] + loud))
         else:
             row["decision"] = QUIETED if row["bring_up"] else NOT_PICKED

@@ -729,7 +729,7 @@ def _report_run(home: Path, chat_id: str, run: dict) -> None:
         rows, tokens = candidates.ask(lambda instructions, text: _memory_llm(
             instructions, text, purpose="pulse report", max_tokens=candidates.REPLY_TOKENS, route=route), gathered,
             nudge=learning.nudge(pulse_store), note=report.note(pulse_store), lessons=lessons)
-        candidates.decide(pulse_store, rows, now=now)
+        candidates.decide(pulse_store, rows, now=now, zone=zone)
         ready = {**run, "state": RUN_READY, "since": gathered.since, "tokens": tokens}
         if not pulse_store.finish_run(REPORT_RUN, run, rows, ready, now=now):
             logger.info("conduit_push: Pulse: the report's candidate list took too long; the report went without it")
@@ -797,7 +797,8 @@ def _maybe_followup(pulse_store: store.PulseStore, home: Path, now: float) -> bo
     one went."""
     if not pulse_store.get("followups"):
         return False
-    picked = followup.next_send(pulse_store, now, home, quiet=_quiet(pulse_store, home, now))
+    zone = report_zone(pulse_store, home, now)
+    picked = followup.next_send(pulse_store, now, home, quiet=_quiet(pulse_store, home, now), zone=zone)
     if picked is None:
         return False
     chat, problem = home_chat(pulse_store, home)
@@ -805,7 +806,6 @@ def _maybe_followup(pulse_store: store.PulseStore, home: Path, now: float) -> bo
     if chat is None:
         return False
     item, row, attempt = picked
-    zone = report_zone(pulse_store, home, now)
     text = followup.text_for(item, row, title=followup.chat_title(home, item), zone=zone)
     delivery.submit(pulse_store, _sender(pulse_store), kind=FOLLOWUP,
                     chat_id=chat.chat_id, text=text, item_id=followup.attempt_item_id(item["id"]), attempt=attempt)

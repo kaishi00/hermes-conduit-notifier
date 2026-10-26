@@ -73,6 +73,9 @@ DEFAULTS: dict[str, Any] = {
     # user's time zone.
     "quiet_days": [],
     "quiet_until": None,
+    # The night (pulse_hours): from and to, "HH:MM" in the user's time zone;
+    # nothing pushes in it unless it can't wait. [] for none.
+    "night": ["22:00", "07:00"],
     "memory_since": None,
     "memory_run_at": 0.0,
     "memory_requested": False,
@@ -181,7 +184,10 @@ CREATE TABLE IF NOT EXISTS followups (
     news TEXT NOT NULL DEFAULT '',
     why TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL,
-    updated_at REAL NOT NULL
+    updated_at REAL NOT NULL,
+    -- When its news may push (pulse_followup.followup_timing, JSON; "" for
+    -- nothing said): when it's useful, whether it's urgent, what held it.
+    timing TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS followups_due ON followups(next_check_at);
 -- What Pulse brought the user (pulse_learning), for Conduit's Pulse screen,
@@ -349,6 +355,9 @@ def _check_marks(marks: str) -> None:
 NOTICED = "noticed"
 # A lesson that forgets what learning holds about something (pulse_learning.reset).
 RESET = "reset"
+# A thumbs down's reason that says only the timing was wrong
+# (pulse_learning.WRONG_TIME): its card keeps no thumb signal.
+WRONG_TIME = "wrong_time"
 # Why an item memory learned after its time had passed is closed (pulse_memory.LATE_S).
 LATE_BY = "expiry: learned after its time had passed"
 # The report attempts split into such cards, newest last: their typed
@@ -369,7 +378,7 @@ _ADDED_COLUMNS = (("cards", "topic", "TEXT NOT NULL DEFAULT ''"), ("cards", "bri
                   ("candidates", "floor", "INTEGER NOT NULL DEFAULT 0"),
                   ("candidates", "level", "TEXT NOT NULL DEFAULT ''"),
                   ("cards", "learned", "TEXT NOT NULL DEFAULT ''"), ("cards", "place", "TEXT NOT NULL DEFAULT ''"),
-                  ("cards", "band", "TEXT NOT NULL DEFAULT ''"))
+                  ("cards", "band", "TEXT NOT NULL DEFAULT ''"), ("followups", "timing", "TEXT NOT NULL DEFAULT ''"))
 # What report cards said for Why? before a candidate's reason did (an item's card,
 # never shown; a whole report's card), and the setting that says a store has
 # cleared them.
@@ -942,12 +951,16 @@ class PulseStore:
         return [dict(row) for row in rows]
 
     def decide_followup(self, item_id: int, *, decision: str, news: str, why: str, checks: int,
-                        next_check_at: Optional[float], now: float, failures: int = 0) -> None:
-        """``failures``: checks failed in a row (any decision resets it)."""
+                        next_check_at: Optional[float], now: float, failures: int = 0,
+                        timing: Optional[dict[str, Any]] = None) -> None:
+        """``failures``: checks failed in a row (any decision resets it).
+        ``timing``: when its news may push (pulse_followup.followup_timing),
+        kept as given; None clears it."""
         with _lock, self._connect() as conn:
             conn.execute("UPDATE followups SET decision=?, news=?, why=?, checks=?, failures=?, next_check_at=?, "
-                         "updated_at=? WHERE item_id=?",
-                         (decision, news, why, checks, failures, next_check_at, now, item_id))
+                         "updated_at=?, timing=? WHERE item_id=?",
+                         (decision, news, why, checks, failures, next_check_at, now,
+                          json.dumps(timing, sort_keys=True) if timing else "", item_id))
 
     def followups_to_tell(self) -> list[dict]:
         with self._connect() as conn:
@@ -1288,7 +1301,10 @@ class PulseStore:
         process may have rated it since), with its thumb signal in the same
         write; whether it did. The same thumb again (with or without a
         reason) leaves the signal as it was, so the vote fades from when it
-        was first given."""
+        was first given. "Wrong time" says only the timing was wrong: no
+        thumb signal, and one the card had goes."""
+        counts = reason != WRONG_TIME
+        counted = card["rating"] in ("up", "down") and card["reason"] != WRONG_TIME
         with _lock, self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
@@ -1296,9 +1312,11 @@ class PulseStore:
                     "UPDATE cards SET rating=?, reason=?, rated_at=?, seen_at=COALESCE(seen_at, ?) "
                     "WHERE id=? AND rating=? AND reason=?",
                     (rating, reason, now, now, card["id"], card["rating"], card["reason"])).rowcount)
-                if rated and rating != card["rating"]:
+                if rated and counts and (rating != card["rating"] or not counted):
                     _put_signal(conn, card["id"], prefs.THUMB, at=now, useful=1.0 if rating == "up" else 0.0,
                                 weight=1.0)
+                elif rated and not counts and counted:
+                    conn.execute("DELETE FROM signals WHERE card_id=? AND what=?", (card["id"], prefs.THUMB))
                 conn.execute("COMMIT")
             except BaseException:
                 conn.execute("ROLLBACK")
@@ -1605,18 +1623,19 @@ def _signal_gaps(conn: sqlite3.Connection, since: float) -> dict[str, list[sqlit
     the cards say, from ``since`` on: a store from before signals were kept,
     or a process from before still running, writes ratings, Do its, Dones
     and Undos without them. "thumb": cards rated without their thumb (or
-    with the other one); "act": Do its without theirs; "done": the user's
-    Dones without theirs; "undone": Done signals whose Done was undone;
-    "unmarked": Do its kept as done, though the mark Pulse made of it was
-    undone. Only cards that take signals (follow-ups and report items)."""
+    with the other one), but for "wrong time", which keeps none; "act": Do
+    its without theirs; "done": the user's Dones without theirs; "undone":
+    Done signals whose Done was undone; "unmarked": Do its kept as done,
+    though the mark Pulse made of it was undone. Only cards that take
+    signals (follow-ups and report items)."""
     kinds = ("followup", NOTICED)
     return {
         "thumb": conn.execute(
             "SELECT c.id, c.rating, COALESCE(c.rated_at, c.created_at) AS at FROM cards c "
             "LEFT JOIN signals s ON s.card_id=c.id AND s.what=? WHERE c.kind IN (?, ?) "
-            "AND c.rating IN ('up', 'down') AND COALESCE(c.rated_at, c.created_at) >= ? "
+            "AND c.rating IN ('up', 'down') AND c.reason != ? AND COALESCE(c.rated_at, c.created_at) >= ? "
             "AND (s.card_id IS NULL OR s.useful != (CASE c.rating WHEN 'up' THEN 1.0 ELSE 0.0 END))",
-            (prefs.THUMB, *kinds, since)).fetchall(),
+            (prefs.THUMB, *kinds, WRONG_TIME, since)).fetchall(),
         "act": conn.execute(
             "SELECT a.* FROM card_acts a JOIN cards c ON c.id=a.card_id "
             "LEFT JOIN signals s ON s.card_id=a.card_id AND s.what=? "

@@ -24,7 +24,11 @@ code, not as a hint to a model:
   - ``too_late``: checks come sooner (half the wait, at most twice), and
     the report counts that kind as due sooner and is told to bring it up
     earlier;
-  - ``too_often``: the kind moves to the morning brief at once.
+  - ``too_often``: the kind moves to the morning brief at once;
+  - ``wrong_time``: the card comes back at a better time
+    (pulse_followup.wrong_time_rest), and one that pushed closes the part
+    of the day it came in for its kind (``closed_parts``: pulse_hours holds
+    its pushes then). It's no thumb: the timing was wrong, not the card.
 
 Each reason's change is a lesson row; the Pulse screen lists them and
 undoing one puts Pulse back the way it was for what comes next (promises a
@@ -40,13 +44,15 @@ import json
 import re
 from typing import Any, Callable, Optional, Sequence
 
+from . import pulse_hours as hours
 from . import pulse_prefs as prefs
 from . import pulse_store as store
 
 LEVELS = prefs.LEVELS
 DEFAULT_LEVELS = {"followup": "push"}
 RATINGS = ("up", "down")
-REASONS = ("not_relevant", "already_knew", "too_late", "too_often")
+WRONG_TIME = store.WRONG_TIME
+REASONS = ("not_relevant", "already_knew", "too_late", "too_often", WRONG_TIME)
 SOONER = 0.5
 MAX_SOONER = 2
 # The level lessons that set a ceiling: the user's own, and "too often".
@@ -55,6 +61,10 @@ MAX_SOONER = 2
 SET, TOO_OFTEN = "set", "too often"
 STEPPED = store.STEPPED_CAUSES
 LEVEL, RULE, SOONER_LESSON, SEEN = "level", "rule", "sooner", "seen"
+# "Wrong time": a part of the day (pulse_hours.PARTS, its value) closed for a kind's pushes.
+PART = "part"
+PART_WORDS = {hours.MORNING: "in the morning", hours.MIDDAY: "in the middle of the day",
+              hours.EVENING: "in the evening", hours.NIGHT: "at night"}
 # A reset: its kind is what it forgets (pulse_prefs.RESET_SCOPES), its
 # value which one ("" for everything).
 RESET = store.RESET
@@ -120,6 +130,11 @@ def report_lessons(pulse_store: store.PulseStore, what: str) -> list[str]:
 
 def skips_seen(pulse_store: store.PulseStore, kind: str) -> bool:
     return bool(pulse_store.lessons(kind, SEEN))
+
+
+def closed_parts(pulse_store: store.PulseStore, kind: str) -> set[str]:
+    """The parts of the day "wrong time" closed for the kind's pushes."""
+    return {lesson["value"] for lesson in pulse_store.lessons(kind, PART) if lesson["value"] in hours.PARTS}
 
 
 def rules(pulse_store: store.PulseStore, kind: str) -> list[dict]:
@@ -454,10 +469,13 @@ def source_chat(pulse_store: store.PulseStore, card: dict) -> Optional[tuple[str
 
 
 def rate(pulse_store: store.PulseStore, card_id: Any, rating: Any, reason: Any = "", *,
-         now: float) -> list[dict]:
+         now: float, zone: Any = None, rest_until: Optional[float] = None) -> list[dict]:
     """Records a rating (a signal pulse_prefs learns from, slowly) and acts
     on its reason at once; the lessons it made. Rating a card again replaces
-    its signal; lessons an earlier rating made stay until undone."""
+    its signal; lessons an earlier rating made stay until undone. "Wrong
+    time" swipes the card away until ``rest_until``
+    (pulse_followup.wrong_time_rest), and closes the part of the day it
+    pushed in, in ``zone``, for its kind."""
     card = pulse_store.card(card_id) if isinstance(card_id, int) and not isinstance(card_id, bool) else None
     if card is None:
         raise Invalid("card")
@@ -472,6 +490,8 @@ def rate(pulse_store: store.PulseStore, card_id: Any, rating: Any, reason: Any =
         card = pulse_store.card(card["id"])  # rated meanwhile: count from what it says now
         if card is None:
             raise Invalid("card")
+    if reason == WRONG_TIME and rest_until is not None:
+        pulse_store.dismiss_card(card["id"], True, now, rest_until)
     if card["rating"] == rating and card["reason"] == reason:
         return []
     kind = lesson_kind(card)
@@ -491,6 +511,10 @@ def rate(pulse_store: store.PulseStore, card_id: Any, rating: Any, reason: Any =
             pulse_store.sooner_followups(SOONER, now)
     elif reason == "too_often" and LEVELS.index(level(pulse_store, kind)) < LEVELS.index("brief"):
         made.append(set_level(pulse_store, kind, "brief", now, cause=TOO_OFTEN, card=card))
+    elif reason == WRONG_TIME and card["level"] == "push" and zone is not None:
+        # Only a push came at a time: a card on the screen or in the brief waited for the user.
+        made.append(_lesson(pulse_store, kind, PART, value=hours.part_of(pulse_store, zone, float(card["created_at"])),
+                            card=card, cause="wrong time", now=now, unless=("value",), limit=1))
     return made
 
 
@@ -547,6 +571,8 @@ def describe(lesson: dict) -> str:
         text = f"{kind}: check sooner"
     elif what == SEEN:
         text = f"{kind}: skip what you already saw in the chat"
+    elif what == PART:
+        text = f"{kind}: no pushes {PART_WORDS.get(lesson['value'], lesson['value'])}"
     elif what == RESET:
         return "Forgot everything learned before this" if lesson["kind"] == prefs.EVERYTHING \
             else f"Forgot what was learned about {preference_words(lesson['kind'], lesson['value'], lesson.get('chat_title'))}"

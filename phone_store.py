@@ -1063,6 +1063,15 @@ class PhoneStore:
                 merged.append((span_start, span_end))
         return merged
 
+    def event_ends(self, db: sqlite3.Connection, device: str, at: int) -> int | None:
+        """When the events on at ``at`` end, the latest of them: timed ones
+        that aren't free, cancelled or declined (Pulse holds a push until
+        then). None when none is on."""
+        row = db.execute("SELECT MAX(end_utc) FROM events WHERE device=? AND start_utc<=? AND end_utc>? AND all_day=0"
+                         " AND coalesce(status,'')!='canceled' AND coalesce(my_status,'')!='declined'"
+                         " AND coalesce(availability,'busy')!='free'", (device, at, at)).fetchone()
+        return int(row[0]) if row and row[0] is not None else None
+
     def reminders(self, db: sqlite3.Connection, device: str, *, list_name: str | None = None,
                   status: str = "open", due_by: tuple[str, int | None] | None = None,
                   limit: int = 200) -> tuple[list[dict[str, Any]], bool]:

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import pulse, pulse_candidates, pulse_delivery, pulse_followup, pulse_hermes, pulse_learning, pulse_memory
-from . import pulse_quiet
+from . import pulse_hours, pulse_quiet
 from . import pulse_host as host
 from . import pulse_report
 
@@ -175,7 +175,7 @@ def backfill_start(pulse_store: Any, home: Path, days: Optional[int] = None,
 
 SETTINGS = ("enabled", "memory", "followups", "daily_report", "report_profiles", "report_times", "time_zone",
             "brief_time", "model", "nudge", "memory_daily_tokens", "followup_daily_tokens", "note",
-            "quiet_days", "quiet_until")
+            "quiet_days", "quiet_until", "night")
 # What a daily token budget may be set to.
 MIN_DAILY_TOKENS = 10_000
 MAX_DAILY_TOKENS = 5_000_000
@@ -206,7 +206,9 @@ def update(pulse_store: Any, body: Any, home: Any = None) -> None:
     of Pulse in their own words ("" clears it); a list of weekdays (Monday
     0 to Sunday 6) for "quiet_days", when Pulse keeps to itself; null,
     "today", a day (YYYY-MM-DD) or epoch seconds for "quiet_until", when a
-    quiet spell ends, in the user's time zone (``home`` finds it)."""
+    quiet spell ends, in the user's time zone (``home`` finds it); two
+    "HH:MM" (from, to) for "night", when nothing pushes (pulse_hours), or
+    [] for none."""
     if not isinstance(body, dict):
         raise Refused("invalid", field="")
     for field in body:
@@ -273,6 +275,11 @@ def update(pulse_store: Any, body: Any, home: Any = None) -> None:
         changes["quiet_days"] = sorted(set(value))
     if "quiet_until" in body:
         changes["quiet_until"] = _quiet_until(pulse_store, body["quiet_until"], home)
+    if "night" in body:
+        night = pulse_hours.parse_night(body["night"])
+        if night is None:
+            raise Refused("invalid", field="night")
+        changes[pulse_hours.SETTING] = night
     for key, value in changes.items():
         pulse_store.set(key, value)
 
@@ -364,7 +371,10 @@ def feed(pulse_store: Any, home: Optional[Path] = None, limit: int = pulse_learn
             "home_chat_id": chat.chat_id if chat else "",
             # The screen says when Pulse is quiet (pulse_quiet) and until when.
             "quiet_now": pulse_quiet.why(pulse_store, zone, now),
-            "quiet_ends_at": pulse_quiet.ends_at(pulse_store, zone, now)}
+            "quiet_ends_at": pulse_quiet.ends_at(pulse_store, zone, now),
+            # The night (pulse_hours): Not now's "later today" ends when it starts.
+            "night": pulse_hours.night_text(pulse_store),
+            "night_now": pulse_hours.is_night(pulse_store, zone, now)}
 
 
 def see(pulse_store: Any, ids: Any, now: Optional[float] = None) -> int:
@@ -382,13 +392,21 @@ def _learning(action: Any) -> Any:
         raise Refused("invalid", field=error.field) from None
 
 
-def rate(pulse_store: Any, card_id: Any, rating: Any, reason: Any = "", now: Optional[float] = None) -> list[dict]:
+def rate(pulse_store: Any, card_id: Any, rating: Any, reason: Any = "", now: Optional[float] = None,
+         home: Any = None) -> list[dict]:
     """Rates a card; the lessons it made, as `learned` lists them. Refused
-    while Pulse is off, as setting a level is: a rating can move one."""
+    while Pulse is off, as setting a level is: a rating can move one.
+    "Wrong time" swipes the card away until a better time
+    (pulse_followup.wrong_time_rest) in the user's time zone (``home``
+    gives it: pulse.report_zone)."""
     if not pulse_store.get("enabled"):
         raise Refused("pulse_off")
     now = time.time() if now is None else now
-    made = _learning(lambda: pulse_learning.rate(pulse_store, card_id, rating, reason, now=now))
+    zone = pulse.report_zone(pulse_store, Path(home) if home else Path("."), now)
+    rest_until = pulse_followup.wrong_time_rest(pulse_store, zone, now) if reason == pulse_learning.WRONG_TIME \
+        else None
+    made = _learning(lambda: pulse_learning.rate(pulse_store, card_id, rating, reason, now=now, zone=zone,
+                                                 rest_until=rest_until))
     return [pulse_learning.lesson_entry(lesson) for lesson in made if lesson]
 
 
@@ -640,6 +658,9 @@ def state(pulse_store: Any, home: Path, now: Optional[float] = None) -> dict[str
         "quiet_until": pulse_quiet.until(pulse_store),
         "quiet_now": pulse_quiet.why(pulse_store, zone, now),
         "quiet_ends_at": pulse_quiet.ends_at(pulse_store, zone, now),
+        # The night (pulse_hours): ["22:00", "07:00"], or [] for none; and whether it's night now.
+        "night": pulse_hours.night_text(pulse_store),
+        "night_now": pulse_hours.is_night(pulse_store, zone, now),
         "held_cards": pulse_store.held_count(),
         "memory_chunks": int(usage.get("chunks", 0) or 0),
         "memory_tokens": int(usage.get("tokens", 0) or 0),
