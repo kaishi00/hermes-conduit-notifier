@@ -1482,8 +1482,9 @@ Hindsight and the like) with no author, so the provider would file everything
 said in the room as the owner's own words. The plugin keeps room sessions
 from saving into the provider: the per-turn sync, the session-end extraction
 and the provider's part of the summary before a compaction are skipped for
-them, also after a compaction moves the session to a new id. Recall still
-runs, and `MEMORY.md` and `USER.md` still load, so a member knows its owner
+them, also after a compaction moves the session to a new id, and for a helper
+agent the room's session delegated to (Hermes runs no memory provider in one
+today, so that's in case it ever does). Recall still runs, and `MEMORY.md` and `USER.md` still load, so a member knows its owner
 in the room; it just doesn't learn from what others say there. The memory and
 skill tools work as before, except in a room with other people's agents (next
 section) where they're blocked. If Hermes' memory manager lacks one of the

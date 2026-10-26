@@ -762,7 +762,10 @@ def _transform_tool_result(**kwargs: Any) -> str | None:
     profile = args.get("profile")
     session_arg = args.get("session_id")
     if not str(profile or "").strip() and isinstance(session_arg, str) and "/" in session_arg:
-        # Hermes reads a raw @session:<profile>/<id> link the same way.
+        # A <profile>/<id> link: Hermes takes what's before the slash as the
+        # profile, as here (tools/session_search_tool). With an "@session:"
+        # prefix left on, that profile fails Hermes' own check, and the search
+        # answers with an error before anything is read.
         profile = session_arg.partition("/")[0]
     try:
         home = get_hermes_home()

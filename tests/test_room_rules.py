@@ -241,15 +241,28 @@ def test_a_delegated_child_follows_the_rules_of_the_room_it_works_for(tmp_path):
     _room_session(home, "s-home", "room-b")
     _room_session(home, "s-local", "room-c")
     _session(home, "s-chat")
-    # Hermes marks a delegated child; one spawned under a gateway turn keeps the turn's source.
-    _session(home, "s-child", source="subagent", parent="s-home", model_config={"_delegate_from": "s-home"})
-    _session(home, "s-child-2", source="bot_room", parent="s-home", model_config={"_delegate_from": "s-home"})
-    _session(home, "s-grandchild", source="subagent", parent="s-child", model_config={"_delegate_from": "s-child"})
+    # Hermes marks a delegated child and titles it "Subagent: <goal>" (agent/title_generator); one spawned
+    # under a gateway turn keeps the turn's source.
+    _session(home, "s-child", source="subagent", title="Subagent: look it up", parent="s-home",
+             model_config={"_delegate_from": "s-home"})
+    _session(home, "s-child-2", source="bot_room", title="Weather in Paris", parent="s-home",
+             model_config={"_delegate_from": "s-home"})
+    _session(home, "s-grandchild", source="subagent", title="Subagent: check the forecast", parent="s-child",
+             model_config={"_delegate_from": "s-child"})
     for session_id in ("s-child", "s-child-2", "s-grandchild"):
         turn = rules.room_turn(session_id, home)
         assert (turn.room_id, turn.side, turn.with_others) == ("room-b", "home", True), session_id
+    # Once the room's session is compacted (its title moves on), and once a child is compacted itself.
+    _compact(home, "s-home", "s-home-2")
+    _compact(home, "s-child", "s-child-3", source="subagent")
+    rules.forget()
+    for session_id in ("s-child", "s-child-3", "s-child-2", "s-grandchild"):
+        turn = rules.room_turn(session_id, home)
+        assert (turn.room_id, turn.side, turn.with_others) == ("room-b", "home", True), session_id
     # A child in a room of this host's own agents, or in an ordinary chat, keeps working as it did.
-    _session(home, "s-local-child", source="bot_room", parent="s-local", model_config={"_delegate_from": "s-local"})
+    _session(home, "s-local-child", source="bot_room", title="Subagent: tidy up", parent="s-local",
+             model_config={"_delegate_from": "s-local"})
+    assert rules.room_turn("s-local-child", home).room_id == "room-c"
     assert not rules.room_turn("s-local-child", home).with_others
     _session(home, "s-chat-child", source="subagent", parent="s-chat", model_config={"_delegate_from": "s-chat"})
     assert rules.room_turn("s-chat-child", home) is None
@@ -579,6 +592,23 @@ def test_a_session_store_that_cant_be_read_turns_tools_off_for_that_call(host):
     assert _tool("s-chat", "terminal") is None
 
 
+def test_a_chat_that_cant_be_checked_for_want_of_a_hermes_home_is_logged(host, monkeypatch, caplog):
+    # Blocking every chat on a host whose home can't be found would break them
+    # all; a room's turn there runs as Hermes alone would, and the log says so.
+    def no_home():
+        raise RuntimeError("no Hermes home")
+
+    monkeypatch.setattr(plugin, "get_hermes_home", no_home)
+    monkeypatch.setattr(rules, "_hermes_home", lambda: None)  # it asks Hermes the same way
+    with caplog.at_level(logging.DEBUG):
+        assert _tool("s-home", "terminal") is None and _tool("s-home", "web_search") is None
+        # A room hosted elsewhere is still told apart by its session's id.
+        assert _blocked(_tool(REMOTE, "terminal"))
+    warnings = [record.getMessage() for record in caplog.records
+                if record.levelno == logging.WARNING and "Hermes home" in record.getMessage()]
+    assert len(warnings) == 1 and "s-home" in warnings[0]
+
+
 def test_a_room_session_not_titled_yet_gets_no_tools_and_the_careful_framing(host, notes):
     _session(host, "s-untitled", source="bot_room")
     assert _blocked(_tool("s-untitled", "terminal"))
@@ -590,18 +620,22 @@ def test_a_room_session_not_titled_yet_gets_no_tools_and_the_careful_framing(hos
 
 
 def test_a_delegated_childs_calls_follow_its_rooms_rules(host):
-    _session(host, "s-child", source="subagent", parent="s-home", model_config={"_delegate_from": "s-home"})
+    _session(host, "s-child", source="subagent", title="Subagent: look it up", parent="s-home",
+             model_config={"_delegate_from": "s-home"})
     for tool_name in ("memory", "skill_manage", "terminal", "send_message"):
         assert _blocked(_tool("s-child", tool_name)), tool_name
     _session(host, "s-local-child", source="bot_room", parent="s-local", model_config={"_delegate_from": "s-local"})
     assert _tool("s-local-child", "terminal") is None and _tool("s-local-child", "memory") is None
 
 
-def test_talk_with_past_chat_search_on_reaches_search_through_tool_search(host):
+def test_talk_with_past_chat_search_on_reaches_search_through_tool_search(host, notes):
     _choose(host, "room-b", tools="talk", search_chats=True)
     for tool_name in ("session_search", "tool_search", "tool_describe", "tool_call"):
         assert _tool("s-home", tool_name) is None, tool_name
-    assert _blocked(_tool("s-home", "terminal"))
+    # Told that search is the one tool here, not that there are none.
+    assert _tool("s-home", "terminal")["message"] == rules.TALK_SEARCH_BLOCK
+    framing = _context("s-home")
+    assert rules.TOOL_LINES["talk"] not in framing and rules.TALK_SEARCH_LINE in framing
     _choose(host, "room-b", tools="talk", search_chats=False)
     for tool_name in ("session_search", "tool_search", "tool_call"):
         assert _blocked(_tool("s-home", tool_name)), tool_name
@@ -627,7 +661,7 @@ def test_a_tool_call_the_hooks_see_is_checked_by_the_tools_it_names(host):
     assert bridged() is None and bridged(calls="not json") is None and bridged(name="tool_call") is None
     _choose(host, "room-b", tools="talk", search_chats=True)
     assert bridged(name="session_search", arguments={"query": "zoo"}) is None
-    assert bridged(name="web_search")["message"] == rules.TALK_ONLY_BLOCK
+    assert bridged(name="web_search")["message"] == rules.TALK_SEARCH_BLOCK
     # An ordinary chat's bridge is untouched.
     assert plugin._pre_tool_call(session_id="s-chat", tool_name="tool_call", args={"name": "terminal"},
                                  turn_id="t1") is None
@@ -900,13 +934,14 @@ def test_session_search_checks_a_hit_it_isnt_told_the_source_of(host):
 def test_session_search_checks_a_hit_whatever_source_it_gives(host):
     # A helper the room's session delegated to has Hermes' subagent source, and
     # a room session given under another source is still the room's.
-    _session(host, "s-helper", source="subagent", parent="s-home", model_config={"_delegate_from": "s-home"})
+    _session(host, "s-helper", source="subagent", title="Subagent: find it", parent="s-home",
+             model_config={"_delegate_from": "s-home"})
     found = {"success": True, "mode": "discover", "results": [
-        _entry("s-helper", "subagent", None), _entry("s-home", "api_server", "Group: room-b"),
+        _entry("s-helper", "subagent", "Subagent: find it"), _entry("s-home", "api_server", "Group: room-b"),
         _entry("s-chat", "tui", "Bike plans")], "count": 3}
     assert [entry["session_id"] for entry in json.loads(_search(found, query="x"))["results"]] == ["s-chat"]
     read = {"success": True, "mode": "read", "session_id": "s-helper",
-            "session_meta": {"source": "subagent", "title": None}, "messages": []}
+            "session_meta": {"source": "subagent", "title": "Subagent: find it"}, "messages": []}
     assert json.loads(_search(read))["success"] is False
 
 

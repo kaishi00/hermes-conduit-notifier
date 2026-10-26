@@ -16,6 +16,7 @@ from what others say there.
 from __future__ import annotations
 
 import functools
+import json
 import logging
 import re
 import sqlite3
@@ -32,7 +33,8 @@ ROOM_SOURCE = "bot_room"
 # (gateway/session_api.room_session_id); a local member's session has an
 # ordinary id, so its stored source decides.
 ROOM_SESSION_ID = re.compile(r"room_[0-9a-f]{32}")
-# Compaction continuations followed back to the room's own session.
+# Compaction continuations and delegated children followed back to the
+# room's own session.
 LINEAGE_HOPS = 32
 # Hermes' own budget for a read-only reader (hermes_state): a rollback-journal
 # store keeps readers waiting while another process commits, and a WAL
@@ -100,9 +102,12 @@ def _stored_room(path: Path, session_id: str) -> bool:
         return False
     conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=READ_TIMEOUT)
     try:
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(sessions)")}
+        config = "model_config" if "model_config" in columns else "NULL"
         current = session_id
         for _ in range(LINEAGE_HOPS):
-            row = conn.execute("SELECT source, parent_session_id FROM sessions WHERE id = ?", (current,)).fetchone()
+            row = conn.execute(f"SELECT source, parent_session_id, {config} FROM sessions WHERE id = ?",
+                               (current,)).fetchone()
             if row is None:
                 return False
             if str(row[0] or "").strip().lower() == ROOM_SOURCE or ROOM_SESSION_ID.fullmatch(current):
@@ -110,16 +115,31 @@ def _stored_room(path: Path, session_id: str) -> bool:
             parent = row[1]
             if not parent:
                 return False
-            # Only a compaction carries the room on; a branch or a delegation is
-            # a conversation of its own. Hermes ends the parent and writes the
-            # child in one transaction, so a child is never seen half-made.
-            ended = conn.execute("SELECT end_reason FROM sessions WHERE id = ?", (parent,)).fetchone()
-            if ended is None or ended[0] != "compression":
-                return False
+            # A compaction carries the room on, and so does a delegated child
+            # (it works for the room's turn, as room_rules counts it); a branch
+            # is a conversation of its own. Hermes ends the parent and writes
+            # the child in one transaction, so a child is never seen half-made.
+            if not _delegated(row[0], row[2]):
+                ended = conn.execute("SELECT end_reason FROM sessions WHERE id = ?", (parent,)).fetchone()
+                if ended is None or ended[0] != "compression":
+                    return False
             current = parent
         return False
     finally:
         conn.close()
+
+
+def _delegated(source: Any, config: Any) -> bool:
+    """Whether a session is a delegated child: Hermes marks one in its
+    model_config (tools/delegate_tool), and gives one its subagent source."""
+    try:
+        marks = json.loads(config) if isinstance(config, str) and config else {}
+    except (ValueError, RecursionError):
+        marks = {}
+    if not isinstance(marks, dict):
+        marks = {}
+    return not marks.get("_branched_from") and (
+        bool(marks.get("_delegate_from")) or str(source or "").strip().lower() == "subagent")
 
 
 def _hermes_home() -> Optional[Path]:

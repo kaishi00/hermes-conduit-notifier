@@ -85,6 +85,8 @@ _LEARNING_TOOLS = frozenset({"memory", "skill_manage"})
 _RULES = "Blocked by your owner's rules for this group room"
 TALK_ONLY_BLOCK = (f"{_RULES}: here you talk, without tools. Answer from what you know, or say you can't "
                    "look it up here.")
+TALK_SEARCH_BLOCK = (f"{_RULES}: here you talk, and searching your owner's past chats is the only tool allowed. "
+                     "Answer from what you know or find there, or say you can't look it up here.")
 TOOL_BLOCK = f"{_RULES}: {{tool}} isn't one of the tools allowed here."
 SEARCH_BLOCK = f"{_RULES}: searching your owner's past chats is off here."
 LEARNING_BLOCK = (f"{_RULES}: nothing from a room with other people's agents is saved to memory or skills. "
@@ -144,6 +146,7 @@ TOOL_LINES = {
     "talk": "Here you talk without tools: answer from what you know.",
     "look": "Here you can look things up on the web, and use no other tools.",
 }
+TALK_SEARCH_LINE = "Here you talk, and searching your owner's past chats is your only tool."
 CUSTOM_LINE = "Here you can use only these tools: {tools}."
 SEARCH_ON_LINE = "You may search your owner's past chats when it helps the room."
 LEARNING_LINE = "Nothing is saved from this room to your memory or skills."
@@ -242,7 +245,7 @@ def tool_block(tool_name: Any, choices: RoomChoices, args: Any = None) -> Option
     if name in allowed or (name in BRIDGE_TOOLS and allowed):
         return None
     if not allowed - {SEARCH_TOOL}:
-        return TALK_ONLY_BLOCK
+        return TALK_SEARCH_BLOCK if SEARCH_TOOL in allowed else TALK_ONLY_BLOCK
     return TOOL_BLOCK.format(tool=name or "That tool")
 
 
@@ -280,10 +283,12 @@ def framing(turn: Optional[RoomTurn], choices: RoomChoices) -> str:
     # The tier's own tools, then the owner's picks in the order they made them.
     tools = list(dict.fromkeys(name for name in [*sorted(TIERS.get(choices.tools, ())), *choices.custom_tools]
                                if name in allowed))
-    if choices.tools in TOOL_LINES and set(tools) <= TIERS[choices.tools]:
+    if not tools:
+        tool_line = TALK_SEARCH_LINE if choices.search_chats else TOOL_LINES["talk"]
+    elif choices.tools in TOOL_LINES and set(tools) <= TIERS[choices.tools]:
         tool_line = TOOL_LINES[choices.tools]
     else:
-        tool_line = CUSTOM_LINE.format(tools=", ".join(tools)) if tools else TOOL_LINES["talk"]
+        tool_line = CUSTOM_LINE.format(tools=", ".join(tools))
     lines = [opening, f"- {ANSWER_FOR_YOURSELF}", f"- {SHARE_LINES.get(choices.share, SHARE_LINES['ask'])}",
              f"- {tool_line}"]
     if choices.search_chats:
@@ -410,6 +415,10 @@ def _find(session_id: str, home: Optional[Path]) -> tuple[Optional[RoomTurn], bo
     remote = bool(ROOM_SESSION_ID.fullmatch(session_id))
     unnamed_member = RoomTurn(room_id="", side="member", with_others=True, session_id=session_id)
     if home is None:
+        if not remote:
+            warn_often("no home", "conduit_push: couldn't find this Hermes home to tell whether session %s is a "
+                       "group room's; if it is, its turns run without the owner's room rules", session_id,
+                       exc_info=False)
         return (unnamed_member if remote else None), False
     try:
         lineage, title = _read(lambda: _lineage(home / STATE_DB, session_id))
@@ -453,8 +462,9 @@ def _lineage(path: Path, session_id: str) -> tuple[list[tuple[str, str]], str]:
     """``(id, source)`` from the session back through the session a
     compaction continues and the one that delegated it, and the room title
     the nearest of them holds, else the title Hermes moved forward to a
-    compaction's continuation. Empty when the session has no row (or the
-    store keeps no sessions of the shape Hermes' rooms need)."""
+    compaction's continuation. A delegated child's own title (Hermes titles
+    one "Subagent: <goal>") is never the room's. Empty when the session has
+    no row (or the store keeps no sessions of the shape Hermes' rooms need)."""
     if not path.exists():
         return [], ""
     conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=READ_TIMEOUT)
@@ -464,21 +474,24 @@ def _lineage(path: Path, session_id: str) -> tuple[list[tuple[str, str]], str]:
             return [], ""
         extra = ", ".join(column if column in columns else "NULL" for column in _LINEAGE_COLUMNS)
         select = f"SELECT source, title, {extra} FROM sessions WHERE id = ?"
-        hops: list[tuple[str, str, str, str]] = []  # (id, source, title, end_reason)
+        hops: list[tuple[str, str, str, str, bool]] = []  # (id, source, title, end_reason, delegated)
         current, row = session_id, conn.execute(select, (session_id,)).fetchone()
         while row is not None:
             source, title, parent, end_reason, config = row
-            hops.append((current, str(source or "").strip().lower(), str(title or ""), str(end_reason or "")))
+            delegated = _delegated(source, config)
+            hops.append((current, str(source or "").strip().lower(), str(title or ""), str(end_reason or ""),
+                         delegated))
             if not parent or len(hops) >= LINEAGE_HOPS:
                 break
             parent_row = conn.execute(select, (parent,)).fetchone()
             # A branch is a conversation of its own.
-            if parent_row is None or not (parent_row[3] == "compression" or _delegated(source, config)):
+            if parent_row is None or not (parent_row[3] == "compression" or delegated):
                 break
             current, row = str(parent), parent_row
-        title = next((hop[2] for hop in hops if hop[2].strip()), "")
+        own = [hop for hop in hops if not hop[4]]
+        title = next((hop[2] for hop in own if hop[2].strip()), "")
         if not title and {"parent_session_id", "end_reason"} <= columns:
-            compacted = next((hop[0] for hop in hops if hop[3] == "compression"), None)
+            compacted = next((hop[0] for hop in own if hop[3] == "compression"), None)
             if compacted is not None:
                 title = _moved_title(conn, compacted, columns)
         return [(hop[0], hop[1]) for hop in hops], title

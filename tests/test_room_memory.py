@@ -1,5 +1,6 @@
 """Group room turns stay out of the memory provider (designs/cross-owner-agents)."""
 import importlib.util
+import json
 import logging
 import sqlite3
 import sys
@@ -165,6 +166,39 @@ def test_a_branch_off_a_room_is_a_chat_of_its_own(guard, hermes, tmp_path):
 
     manager.sync_all("Eric: notes for me", "Furina: noted", session_id="sess_branch")
     assert manager.saved == [("sync_all", "Eric: notes for me", "sess_branch")]
+
+
+def test_a_helper_a_room_session_delegated_to_is_guarded_too(guard, hermes, tmp_path):
+    # Hermes builds a delegated child without a memory provider (skip_memory in
+    # tools/delegate_tool), so this guards a provider that Hermes doesn't run
+    # there today. The child works for the room's turn, as room_rules counts it:
+    # Hermes marks it (_delegate_from) and gives it its own source and title.
+    conn = sqlite3.connect(tmp_path / "state.db")
+    conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, parent_session_id TEXT, end_reason TEXT, "
+                 "model_config TEXT)")
+    conn.executemany("INSERT INTO sessions VALUES (?, ?, ?, ?, ?)", [
+        ("sess_room", "bot_room", None, None, None),
+        ("sess_helper", "subagent", "sess_room", None, json.dumps({"_delegate_from": "sess_room"})),
+        ("sess_helper_2", "api_server", "sess_room", None, json.dumps({"_delegate_from": "sess_room"})),
+        ("sess_branch", "cli", "sess_room", None, json.dumps({"_branched_from": "sess_room"})),
+        # A branch off a helper keeps the helper's marks, and is still a chat of its own.
+        ("sess_helper_branch", "subagent", "sess_helper", None,
+         json.dumps({"_delegate_from": "sess_room", "_branched_from": "sess_helper"})),
+        ("sess_chat", "cli", None, None, None),
+        ("sess_chat_helper", "subagent", "sess_chat", None, json.dumps({"_delegate_from": "sess_chat"})),
+    ])
+    conn.commit()
+    conn.close()
+
+    for helper in ("sess_helper", "sess_helper_2"):
+        manager = _bound(hermes, helper, tmp_path)
+        assert _turn_end(manager, helper) == ""
+        assert manager.saved == [], helper
+    # Branches off the room or a helper, and a helper of an ordinary chat, are saved as before.
+    for chat in ("sess_branch", "sess_helper_branch", "sess_chat_helper"):
+        manager = _bound(hermes, chat, tmp_path)
+        manager.sync_all("Eric: notes for me", "Furina: noted", session_id=chat)
+        assert manager.saved == [("sync_all", "Eric: notes for me", chat)], chat
 
 
 def test_an_unreadable_session_store_counts_as_not_a_room(guard, hermes, tmp_path):

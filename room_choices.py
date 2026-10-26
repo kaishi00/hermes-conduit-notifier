@@ -165,11 +165,11 @@ class ChoicesStore:
             return updated
 
     def defaults(self) -> RoomChoices:
-        return _defaults(self._load())
+        return self._defaults(self._load())
 
     def set_defaults(self, choices: Any) -> RoomChoices:
         with self._locked() as state:
-            updated = choices_from(choices, _defaults(state))
+            updated = choices_from(choices, self._defaults(state))
             state["defaults"] = updated.as_dict()
             return updated
 
@@ -178,12 +178,23 @@ class ChoicesStore:
         state = self._load()
         rooms = {room_id: {"choices": self._choices(state, room_id)[0].as_dict(), "at": entry["at"]}
                  for room_id, entry in state["rooms"].items()}
-        return {"defaults": _defaults(state).as_dict(), "rooms": rooms}
+        return {"defaults": self._defaults(state).as_dict(), "rooms": rooms}
 
     # --- Storage -------------------------------------------------------------
 
+    def _defaults(self, state: dict[str, Any]) -> RoomChoices:
+        saved = state.get("defaults")
+        if saved is None:
+            return RoomChoices()
+        try:
+            return choices_from(saved)
+        except ChoicesError:
+            # A hand edit broke them: the careful choices, as for a room.
+            self._unreadable("keeps defaults in a shape it can't use", "rooms without their own choices get")
+            return RoomChoices()
+
     def _choices(self, state: dict[str, Any], room_id: str) -> tuple[RoomChoices, bool]:
-        defaults = _defaults(state)
+        defaults = self._defaults(state)
         entry = state["rooms"].get(room_id)
         if entry is None:
             return defaults, False
@@ -242,8 +253,12 @@ class ChoicesStore:
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             handle.write(encoded)
-        temporary.chmod(0o600)
-        temporary.replace(self.path)
+        try:
+            temporary.chmod(0o600)
+            temporary.replace(self.path)
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
         self.path.chmod(0o600)
 
 
@@ -278,16 +293,6 @@ def _note(value: Any) -> str:
     if len(text) > MAX_NOTE_CHARS:
         raise ChoicesError(f"note is at most {MAX_NOTE_CHARS} characters")
     return text
-
-
-def _defaults(state: dict[str, Any]) -> RoomChoices:
-    saved = state.get("defaults")
-    if saved is None:
-        return RoomChoices()
-    try:
-        return choices_from(saved)
-    except ChoicesError:
-        return RoomChoices()
 
 
 def _normalized(raw: Any) -> dict[str, Any]:

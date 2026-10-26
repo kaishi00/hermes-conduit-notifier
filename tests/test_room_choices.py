@@ -167,6 +167,29 @@ def test_a_room_entry_that_cant_be_used_gets_the_careful_choices_not_the_default
     assert ChoicesStore(tmp_path).get(OTHER) == RoomChoices(share="nothing")
 
 
+def test_defaults_that_cant_be_used_are_the_careful_ones_and_logged(tmp_path, caplog):
+    (tmp_path / choices_module.FILE_NAME).write_text(json.dumps({
+        "version": 1, "defaults": {"tools": "custom", "custom_tools": "terminal"}, "rooms": {}}), encoding="utf-8")
+    with caplog.at_level(logging.WARNING):
+        assert ChoicesStore(tmp_path).get(ROOM) == RoomChoices()
+    assert "couldn't read the room choices" in caplog.text and "defaults" in caplog.text
+
+
+def test_a_save_that_fails_leaves_no_temporary_file(tmp_path, monkeypatch):
+    store = ChoicesStore(tmp_path)
+    store.set(ROOM, {"tools": "look"})
+
+    def refused(self, target):
+        raise PermissionError("read-only")
+
+    monkeypatch.setattr(choices_module.Path, "replace", refused)
+    with pytest.raises(PermissionError):
+        store.set(ROOM, {"tools": "talk"})
+    assert sorted(path.name for path in tmp_path.iterdir() if path.name.endswith(".tmp")) == []
+    monkeypatch.undo()
+    assert ChoicesStore(tmp_path).get(ROOM).tools == "look"
+
+
 def test_the_oldest_rooms_go_past_the_limit(tmp_path, monkeypatch):
     monkeypatch.setattr(choices_module, "MAX_ROOMS", 3)
     clock = Clock()
