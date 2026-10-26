@@ -7800,7 +7800,10 @@ async def put_room_defaults(request: Request, response: Response, profile: Optio
 # settings a tester changes, as pulse_control.py has them. Pulse is one per
 # host, in the dashboard's own Hermes home, so these routes take no profile.
 
-PULSE_MAX_BODY_BYTES = 4 * 1024
+# Room for the note to Pulse beside the other settings: pulse_control.NOTE_LIMIT
+# characters, each up to twelve bytes once a client JSON-escapes it (a
+# surrogate pair for one outside the BMP).
+PULSE_MAX_BODY_BYTES = 32 * 1024
 PULSE_LIMIT = 60
 PULSE_WINDOW_S = 60.0
 
@@ -16098,6 +16101,9 @@ ROUTE_CAPABILITIES = (
     # /pulse/done and /acted take every report item, one Pulse found on its
     # own included, and one it found in a chat points at that chat.
     "pulse_found_actions",
+    # PUT /pulse takes "note", the user's note to Pulse, which its reports,
+    # brief and checks read.
+    "pulse_note",
     "present-v1",
     "health-sync",
     "voice-tools",
