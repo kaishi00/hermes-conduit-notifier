@@ -8084,7 +8084,7 @@ async def put_pulse(request: Request, response: Response) -> Dict[str, Any]:
     body = await _read_json_body(request, PULSE_MAX_BODY_BYTES)
 
     def action(control: Any, store: Any, home: Any) -> Dict[str, Any]:
-        control.update(store, body)
+        control.update(store, body, home)
         return control.state(store, home)
 
     return await _pulse_route("settings", action)
@@ -16346,6 +16346,9 @@ ROUTE_CAPABILITIES = (
     # A report card's "why" is its reason (why now, where it came from),
     # for Why? on the Pulse screen; "" when it has none.
     "pulse_card_why",
+    # PUT /pulse takes "quiet_days" and "quiet_until" (quiet times: weekends,
+    # a vacation, quiet for today), and the state and feed say when it's quiet.
+    "pulse_quiet",
     "present-v1",
     "health-sync",
     "voice-tools",

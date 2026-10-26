@@ -58,6 +58,7 @@ from . import pulse_host as host
 from . import pulse_learning as learning
 from . import pulse_ledger as ledger
 from . import pulse_memory as memory
+from . import pulse_quiet as quiet
 from . import pulse_report as report
 from . import pulse_store as store
 
@@ -581,10 +582,16 @@ def _send(pulse_store: store.PulseStore, *, kind: str, chat_id: str, text: Any) 
                            chat_id=chat_id, text=text)
 
 
+def _quiet(pulse_store: store.PulseStore, home: Path, now: float) -> bool:
+    """Whether Pulse keeps to itself now (pulse_quiet): nothing goes on its
+    own, only what the user asked for."""
+    return bool(quiet.why(pulse_store, report_zone(pulse_store, home, now), now))
+
+
 def _maybe_probe(pulse_store: store.PulseStore, home: Path, now: float) -> bool:
-    """Sends a probe if one was asked for or is due; True when one went."""
+    """Sends a probe if one was asked for or is due (not on a quiet day); True when one went."""
     asked = pulse_store.take_probe_request()
-    if not asked and not _probe_due(pulse_store, now):
+    if not asked and (_quiet(pulse_store, home, now) or not _probe_due(pulse_store, now)):
         return False
     if any(row["kind"] == PROBE for row in pulse_store.in_flight()):
         if asked:
@@ -621,8 +628,8 @@ def _maybe_report(pulse_store: store.PulseStore, home: Path, now: float) -> bool
         if pulse_store.swap(REPORT_RUN, stored, dropped):
             stored = dropped  # so a run asked for now starts from it
         pending = False
-    if not pending and not asked and not _report_due(pulse_store, home, now):
-        return False
+    if not pending and not asked and (_quiet(pulse_store, home, now) or not _report_due(pulse_store, home, now)):
+        return False  # a quiet day: the next scheduled one covers it
     if any(row["kind"] == REPORT for row in pulse_store.in_flight()):
         if asked:
             logger.info("conduit_push: Pulse: a report is already in flight; not sending another")
@@ -738,7 +745,7 @@ def _maybe_followup(pulse_store: store.PulseStore, home: Path, now: float) -> bo
     one went."""
     if not pulse_store.get("followups"):
         return False
-    picked = followup.next_send(pulse_store, now, home)
+    picked = followup.next_send(pulse_store, now, home, quiet=_quiet(pulse_store, home, now))
     if picked is None:
         return False
     chat, problem = home_chat(pulse_store, home)
@@ -754,8 +761,12 @@ def _maybe_followup(pulse_store: store.PulseStore, home: Path, now: float) -> bo
 
 
 def _maybe_brief(pulse_store: store.PulseStore, home: Path, now: float) -> bool:
-    """Sends the morning brief when it's time, with what's still open and what's held for it; True when it went."""
+    """Sends the morning brief when it's time (not on a quiet day: the first
+    one after carries what's held), with what's still open and what's held
+    for it; True when it went."""
     zone = report_zone(pulse_store, home, now)
+    if quiet.why(pulse_store, zone, now):
+        return False
     planned = brief.next_attempt(pulse_store, now, zone, pulse_store.get("brief_time"))
     if planned is None:
         return False

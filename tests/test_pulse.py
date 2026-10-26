@@ -2635,6 +2635,18 @@ def test_pulse_routes(remembering, db, monkeypatch):
     # A report item Pulse found on its own takes Do it and Done too.
     assert "pulse_found_actions" in api.ROUTE_CAPABILITIES
     assert "pulse_note" in api.ROUTE_CAPABILITIES  # Settings > Pulse shows the note to Pulse
+    # Quiet times: weekdays, and a spell until the end of today or a day.
+    assert "pulse_quiet" in api.ROUTE_CAPABILITIES
+    hushed = http.put(base, json={"quiet_days": [6, 5], "quiet_until": "today"}).json()
+    assert hushed["quiet_days"] == [5, 6] and hushed["quiet_until"] > time.time() and hushed["quiet_now"] == "until"
+    assert hushed["quiet_ends_at"] >= hushed["quiet_until"]
+    feed = http.get(f"{base}/feed").json()
+    assert feed["quiet_now"] == "until" and feed["quiet_ends_at"] == hushed["quiet_ends_at"]
+    never = http.put(base, json={"quiet_until": "never"})
+    assert never.status_code == 400 and never.json()["detail"] == {"code": "invalid", "field": "quiet_until"}
+    assert http.put(base, json={"quiet_days": [7]}).status_code == 400
+    calm = http.put(base, json={"quiet_days": [], "quiet_until": None}).json()
+    assert calm["quiet_days"] == [] and calm["quiet_until"] is None and calm["quiet_now"] == ""
     found = store_.add_card({"kind": "noticed", "level": "screen", "topic": "date", "news": "Dentist Friday",
                              "created_at": DAY})
     assert http.post(f"{base}/acted", json={"card": found}).json()["booked"] is True
