@@ -13,10 +13,23 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.78.4 (2026-10-26)
+## 0.79.1 (2026-10-26)
 
 ### New and improved
 - Why? on a card from your Pulse report now says why that thing came up now and where it came from: the chat, calendar entry, reminder, note or job it rests on. Before, every report card gave the same stock line, and those lines are cleared from earlier cards. The report itself is shorter, each line without the reason in brackets. Needs Conduit from the `pulse` branch to show it.
+
+## 0.79.0 (2026-10-26)
+
+### New and improved
+- In a group room that includes another Hermes's agent, your agent now
+  follows your rules for that room, on your own host: by default it talks
+  without tools, asks you before sharing anything personal, can't search your
+  past chats, and saves nothing from the room to its memory or skills. It's
+  told who's asking, so other people's requests can't change what it shares,
+  and anything in its replies that looks like a password or key is removed.
+  Past-chat search no longer finds those rooms. Rooms of only your own agents
+  work as before. If Hermes can't read its chat records for a moment, tool
+  calls are blocked until it can, so a room's rules are never skipped.
 
 ## 0.78.3 (2026-10-26)
 

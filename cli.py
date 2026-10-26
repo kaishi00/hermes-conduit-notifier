@@ -84,6 +84,25 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
                        help="for export: where to write (prints to the terminal without one); for import: the file to read")
     prefs.add_argument("--replace", action="store_true",
                        help="for import: drop the preferences the file doesn't list, instead of keeping them")
+    rooms = commands.add_parser(
+        "rooms",
+        help="What this profile's agent may do in group rooms with other people's agents: show or set it",
+    )
+    rooms.add_argument("rooms_action", choices=["show", "set"])
+    rooms.add_argument("--room", default="",
+                       help="the room's id; without one, the defaults for rooms with no choices of their own")
+    rooms.add_argument("--tools", choices=["talk", "look", "data", "custom"],
+                       help="talk: no tools; look: web lookups; data: lookups and the data tools you pick; "
+                            "custom: only the tools you pick")
+    rooms.add_argument("--tool", action="append", default=None, metavar="NAME",
+                       help="a tool to allow with --tools custom or data; repeat it for more (replaces the list)")
+    rooms.add_argument("--share", choices=["helps", "ask", "nothing"],
+                       help="what it may share about you: what helps, ask you first, or nothing personal")
+    rooms.add_argument("--search", choices=["on", "off"], help="whether it may search your past chats")
+    rooms.add_argument("--takes-part", dest="takes_part", choices=["joins", "asked", "listens"],
+                       help="joins in, only when asked, or listens only")
+    rooms.add_argument("--limit", type=int, help="its turns a day in the room")
+    rooms.add_argument("--note", help="a private note for your agent in the room; empty clears it")
     parser.set_defaults(func=dispatch)
 
 
@@ -258,7 +277,9 @@ def dispatch(args: argparse.Namespace) -> int:
         return _pulse(args)
     if action == "prefs":
         return _prefs(args)
-    print("Usage: hermes conduit-push {pair|status|test|redact|e2e|unpair|pulse|prefs}")
+    if action == "rooms":
+        return _rooms(args)
+    print("Usage: hermes conduit-push {pair|status|test|redact|e2e|unpair|pulse|prefs|rooms}")
     return 2
 
 
@@ -510,6 +531,61 @@ def _prefs(args: argparse.Namespace) -> int:
     print(f"Imported. This profile now syncs {len(imported['values'])} Conduit preferences; "
           "Conduit picks them up the next time it connects.")
     return 0
+
+
+_ROOM_TOOLS = {"talk": "Talk only", "look": "Look things up", "data": "Use my data", "custom": "Custom"}
+_ROOM_SHARE = {"helps": "what helps", "ask": "asks you first", "nothing": "nothing personal"}
+_ROOM_TAKES_PART = {"joins": "joins in", "asked": "when asked", "listens": "listens only"}
+
+
+def _rooms(args: argparse.Namespace) -> int:
+    from hermes_constants import get_hermes_home
+
+    from . import room_choices
+
+    store = room_choices.ChoicesStore(Path(get_hermes_home()))
+    room = str(getattr(args, "room", "") or "").strip()
+    try:
+        if args.rooms_action == "show":
+            if room:
+                own = store.saved(room)
+                _print_room_choices(f"Room {room}" + ("" if own else " (the defaults: no choices of its own)"),
+                                    store.get(room))
+                return 0
+            _print_room_choices("Defaults for rooms with no choices of their own", store.defaults())
+            for room_id in sorted(store.view()["rooms"]):
+                _print_room_choices(f"Room {room_id}", store.get(room_id))
+            return 0
+        changes: dict[str, Any] = {}
+        for field, value in (("tools", args.tools), ("custom_tools", args.tool), ("share", args.share),
+                             ("takes_part", args.takes_part), ("daily_limit", args.limit), ("note", args.note)):
+            if value is not None:
+                changes[field] = value
+        if args.search is not None:
+            changes["search_chats"] = args.search == "on"
+        if not changes:
+            print("Name a choice to set, for example: hermes conduit-push rooms set --room <id> --tools look")
+            return 2
+        saved = store.set(room, changes) if room else store.set_defaults(changes)
+    except (room_choices.ChoicesError, OSError) as error:
+        print(f"Couldn't {'set' if args.rooms_action == 'set' else 'show'} that: {error}")
+        return 1
+    _print_room_choices(f"Room {room}" if room else "Defaults for rooms with no choices of their own", saved)
+    return 0
+
+
+def _print_room_choices(label: str, choices: Any) -> None:
+    tools = _ROOM_TOOLS.get(choices.tools, choices.tools)
+    if choices.custom_tools and choices.tools in ("data", "custom"):
+        tools += f": {', '.join(choices.custom_tools)}"
+    print(f"{_printable(label)}:")
+    print(f"  Can do: {_printable(tools)}")
+    print(f"  Shares: {_ROOM_SHARE.get(choices.share, choices.share)}")
+    print(f"  Searches your past chats: {'yes' if choices.search_chats else 'no'}")
+    print(f"  Takes part: {_ROOM_TAKES_PART.get(choices.takes_part, choices.takes_part)}")
+    print(f"  Turns a day: {choices.daily_limit}")
+    if choices.note:
+        print(f"  Note: {_printable(choices.note.replace(chr(10), ' / '))}")
 
 
 def _pulse_report(pulse_store: Any, value: str) -> int:

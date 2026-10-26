@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextvars
 import functools
+import json
 import logging
 import threading
 import time
@@ -15,8 +16,8 @@ from hermes_constants import get_hermes_home
 
 from . import (call_tool, call_watches, calls, chat_on_screen, clarify_loop, client, conduit_first, cron_runs,
                desktop_selected, health_tool, inbox_tool, live_activity, location_tool, maps_tool, phone_tool,
-               present_tool, pulse, reply_sources, review_notices, room_memory, room_planner, settings_tool,
-               show_tool, turn_surface, voice_archive)
+               present_tool, pulse, reply_sources, review_notices, room_memory, room_planner, room_rules,
+               settings_tool, show_tool, turn_surface, voice_archive)
 from .session_titles import bot_name as _bot_name, title as _session_title, titled as _titled
 from .client import enqueue
 from .events import approval_decision, clarification_text, event_id, is_silent_response, plain_text, push_event
@@ -123,6 +124,21 @@ def register(ctx: Any) -> None:
         ctx.register_hook("post_approval_response", _post_approval_response)
     except Exception:  # noqa: BLE001
         logger.warning("conduit_push: post_approval_response hook unavailable", exc_info=True)
+    # Sessions of rooms with other people's agents stay out of past-chat
+    # search, in every chat (room_rules). Without the hook, search finds them.
+    try:
+        ctx.register_hook("transform_tool_result", _transform_tool_result)
+    except Exception:  # noqa: BLE001
+        logger.warning("conduit_push: transform_tool_result hook unavailable; past-chat search can find group "
+                       "rooms with other people's agents", exc_info=True)
+    # A reply in a room with other people's agents leaves this host: no
+    # credential-shaped text goes with it (room_rules). A Hermes without the
+    # hook sends replies as the model wrote them.
+    try:
+        ctx.register_hook("transform_llm_output", _transform_llm_output)
+    except Exception:  # noqa: BLE001
+        logger.warning("conduit_push: transform_llm_output hook unavailable; group room replies aren't checked "
+                       "for credentials", exc_info=True)
     # The voice hint and the note on calls the user declined or missed are
     # extras: a Hermes that refuses the hook must not take the
     # notifications down with it.
@@ -162,6 +178,13 @@ def register(ctx: Any) -> None:
 
 
 def _pre_tool_call(**kwargs: Any) -> dict[str, str] | None:
+    # The owner's rules for a room with other people's agents come first: they
+    # hold for every call a room turn makes, the background review's (it keeps
+    # the room session's id) and a delegated child's (room_rules follows it to
+    # the room it works for) included. Fails closed, so outside _quietly.
+    block = _room_tool_block(kwargs)
+    if block is not None:
+        return block
     if _is_child(kwargs.get("session_id")):
         return None
     # A Pulse turn gets no tools. Fails closed: Hermes blocks the call when
@@ -187,6 +210,39 @@ def _pre_tool_call(**kwargs: Any) -> dict[str, str] | None:
         session_title=_session_title(kwargs.get("session_id")),
         body=clarification_text(kwargs.get("args")),
     ))
+
+
+def _room_tool_block(kwargs: dict[str, Any]) -> dict[str, str] | None:
+    """A block for a tool call the owner's room rules don't allow
+    (room_rules.py), else None. A room whose roster or choices can't be read
+    gets no tools, and so does a call whose session can't be read (it may be
+    a room's)."""
+    session_id = _text(kwargs.get("session_id"))
+    if not session_id:
+        return None
+    try:
+        home = get_hermes_home()
+    except Exception:  # noqa: BLE001 — a remote room's session is still told apart by its id
+        home = None
+    try:
+        turn = room_rules.room_turn(session_id, home)
+    except room_rules.SessionStoreError:
+        # Logged by room_rules; read again on the next call.
+        return {"action": "block", "message": room_rules.SESSION_UNREAD_BLOCK}
+    except room_rules.RoomStoreError:
+        room_rules.warn_often("room store", "conduit_push: couldn't read the room session %s is in; its tools "
+                              "are off this turn", session_id)
+        return {"action": "block", "message": room_rules.UNKNOWN_ROOM_BLOCK}
+    if turn is None or not turn.with_others:
+        return None
+    try:
+        choices = room_rules.choices_for(turn, home)
+    except Exception:  # noqa: BLE001
+        room_rules.warn_often("room choices", "conduit_push: couldn't read the room choices for session %s; its "
+                              "tools are off this turn", session_id)
+        return {"action": "block", "message": room_rules.UNREADABLE_CHOICES_BLOCK}
+    message = room_rules.tool_block(kwargs.get("tool_name"), choices, kwargs.get("args"))
+    return {"action": "block", "message": message} if message else None
 
 
 _ledger_warned = False
@@ -349,9 +405,10 @@ def _unload() -> None:
     """Hermes unloads the plugin: replies held for a turn's end are
     dropped with their timers, held calls stay stored for the next load, the
     group room memory and planner guards and the self-improvement
-    setting's live read come off, and the delivery and Live Activity
-    threads end (waiting about a second for a send in progress). Nothing
-    more goes to the relay from this load."""
+    setting's live read come off, the room turns it remembers are
+    forgotten, and the delivery and Live Activity threads end (waiting about
+    a second for a send in progress). Nothing more goes to the relay from
+    this load."""
     with _pending_lock:
         held = list(_pending_ready.values())
         _pending_ready.clear()
@@ -365,6 +422,7 @@ def _unload() -> None:
     pulse.stop()
     room_memory.uninstall()
     room_planner.uninstall()
+    room_rules.forget()
     review_notices.uninstall()
     deadline = time.monotonic() + 1.0
     live_activity.reporter.stop(timeout=max(0.0, deadline - time.monotonic()))
@@ -678,6 +736,11 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
             voice_archive.bring_back(get_hermes_home(), session_id)
         except Exception:  # noqa: BLE001 — a hook must never break the turn
             logger.debug("conduit_push: voice chat un-archive check failed", exc_info=True)
+    # A room with other people's agents gets its owner's rules and nothing
+    # else: the notes below carry the owner's own data and calls.
+    room_framing = _room_framing(session_id, kwargs.get("platform"))
+    if room_framing:
+        return {"context": room_framing}
     notes = [
         None if child else calls.outcome_note(session_id),
         None if child else _turn_surface_note(kwargs.get("platform"), kwargs.get("user_message")),
@@ -687,6 +750,102 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
     ]
     context = "\n\n".join(note for note in notes if note)
     return {"context": context} if context else None
+
+
+def _transform_tool_result(**kwargs: Any) -> str | None:
+    """session_search's result without the sessions of rooms with other
+    people's agents (room_rules); None leaves any other result as it is."""
+    if kwargs.get("tool_name") != room_rules.SEARCH_TOOL:
+        return None
+    result = kwargs.get("result")
+    args = kwargs.get("args") if isinstance(kwargs.get("args"), dict) else {}
+    profile = args.get("profile")
+    session_arg = args.get("session_id")
+    if not str(profile or "").strip() and isinstance(session_arg, str) and "/" in session_arg:
+        # A <profile>/<id> link: Hermes takes what's before the slash as the
+        # profile, as here (tools/session_search_tool). With an "@session:"
+        # prefix left on, that profile fails Hermes' own check, and the search
+        # answers with an error before anything is read.
+        profile = session_arg.partition("/")[0]
+    try:
+        home = get_hermes_home()
+    except Exception:  # noqa: BLE001
+        home = None
+    try:
+        return room_rules.filter_search(result, home, profile)
+    except Exception:  # noqa: BLE001 — never let a room's session through unchecked
+        room_rules.warn_often("search check", "conduit_push: couldn't check a past-chat search for group rooms")
+        if room_rules.mentions_rooms(result):
+            return json.dumps({"success": False, "error": room_rules.SEARCH_FAILED})
+        return None
+
+
+def _transform_llm_output(**kwargs: Any) -> str | None:
+    """A room reply with credential-shaped text replaced; None leaves the
+    reply as it is (every other turn, and a reply with none)."""
+    text = kwargs.get("response_text")
+    if not isinstance(text, str) or not text or not _in_room_with_others(
+            _text(kwargs.get("session_id")), kwargs.get("platform")):
+        return None
+    scrubbed = room_rules.scrub(text)
+    return scrubbed if scrubbed != text else None
+
+
+def _in_room_with_others(session_id: str, platform: Any = None) -> bool:
+    """Whether the session is a turn in a room with other people's agents; a
+    room whose roster can't be read counts as one, and so does a turn on
+    Hermes' room platform whose session can't be read."""
+    if not session_id:
+        return False
+    try:
+        home = get_hermes_home()
+    except Exception:  # noqa: BLE001
+        home = None
+    try:
+        turn = room_rules.room_turn(session_id, home)
+    except room_rules.SessionStoreError:
+        return _room_platform(platform)
+    except room_rules.RoomStoreError:
+        return True
+    except Exception:  # noqa: BLE001 — a hook must never break the turn
+        logger.debug("conduit_push: couldn't tell whether session %s is a group room's", session_id, exc_info=True)
+        return False
+    return turn is not None and turn.with_others
+
+
+def _room_framing(session_id: str, platform: Any = None) -> str | None:
+    """Who's asking and what the owner allows, for a turn in a room with
+    other people's agents (room_rules.py); None for any other turn."""
+    if not session_id:
+        return None
+    try:
+        home = get_hermes_home()
+    except Exception:  # noqa: BLE001
+        home = None
+    try:
+        turn = room_rules.room_turn(session_id, home)
+    except room_rules.SessionStoreError:
+        # Whether it's a room's is unknown: a turn on Hermes' room platform is
+        # framed as one with others; any other keeps its usual notes.
+        return room_rules.framing(None, room_rules.RoomChoices()) if _room_platform(platform) else None
+    except room_rules.RoomStoreError:
+        # Unknown who's in it: framed as a room with others, under the defaults.
+        return room_rules.framing(None, room_rules.RoomChoices())
+    except Exception:  # noqa: BLE001 — a hook must never break the turn
+        logger.debug("conduit_push: couldn't tell whether session %s is a group room's", session_id, exc_info=True)
+        return None
+    if turn is None or not turn.with_others:
+        return None
+    try:
+        choices = room_rules.choices_for(turn, home)
+    except Exception:  # noqa: BLE001 — the tools stay blocked; the careful defaults frame the turn
+        choices = room_rules.RoomChoices()
+    return room_rules.framing(turn, choices)
+
+
+def _room_platform(platform: Any) -> bool:
+    """Whether Hermes runs this turn on its group room platform."""
+    return str(platform or "").strip().lower() == room_rules.ROOM_SOURCE
 
 
 def _turn_surface_note(platform: Any, message: Any) -> str | None:
