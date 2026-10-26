@@ -493,8 +493,9 @@ def left_out(pulse_store: Any, home: Optional[Path] = None, now: Optional[float]
     Pulse left out: each thing once (a remembered item, or the same text, by
     its newest decision), not one that came up in that report or later,
     learning's and the user's rules' first, then the rest, newest and most
-    valued first within each. One brought up since (``bring_up``) says
-    which card it became, whichever report's candidate was brought up."""
+    valued first within each. One brought up (``bring_up``) says which card
+    it became, whichever report's candidate was brought up, however long
+    ago."""
     seen: set[Any] = set()
     out = []
     for row in pulse_store.left_out(_left_out_since(pulse_store, time.time() if now is None else now), LEFT_OUT_ROWS):

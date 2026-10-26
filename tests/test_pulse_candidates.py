@@ -915,6 +915,26 @@ def test_a_thing_brought_up_is_that_card_whichever_report_left_it_out(live):
     assert remade["id"] != card["id"] and control.bring_up(live.store, first, live.home, now=now)["id"] == remade["id"]
 
 
+def test_a_thing_brought_up_from_an_older_list_is_still_that_card(live):
+    """What Pulse left out reads only the latest reports, but a thing
+    brought up from a list days old is still that card when the latest
+    report leaves it out again, in other words too, until Pulse lets the
+    card go."""
+    now = time.time()
+    [first] = journal(live, "r1", [{"text": "Renew the passport", "origin": candidates.MEMORY, "item_id": 7}],
+                      now - 3 * 86400)
+    card = control.bring_up(live.store, first, live.home, now=now - 3 * 86400 + 60)
+    [again] = journal(live, "r2", [{"text": "renew the  Passport", "decision": candidates.QUIETED}], now - 3600)
+    [entry] = control.left_out(live.store, live.home, now=now)
+    assert (entry["id"], entry["card_id"]) == (again, card["id"])
+    assert control.bring_up(live.store, again, live.home, now=now)["id"] == card["id"]
+    assert len(live.store.cards()) == 1
+    with sqlite3.connect(live.store.path) as conn:
+        conn.execute("DELETE FROM cards WHERE id=?", (card["id"],))
+    assert control.left_out(live.store, live.home, now=now)[0]["card_id"] is None
+    assert control.bring_up(live.store, again, live.home, now=now)["id"] != card["id"]
+
+
 def test_what_pulse_left_out_names_a_chat_as_what_pulse_learned_does(live):
     """By the title the chat's newest card gave it, so a chat Hermes no
     longer has keeps its name, and by Hermes's for a chat no card came from
