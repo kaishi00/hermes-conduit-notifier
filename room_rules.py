@@ -14,7 +14,9 @@ A room turn is told apart by its session. A member whose room lives on
 another installation runs in ``room_<digest>`` (gateway/session_api); a local
 member's session has an ordinary id, source ``bot_room`` and the title
 ``Group: <room id>``, and the room's roster, in the room store, says whether
-anyone in it is from another installation.
+anyone in it is from another installation. A compaction's continuation and a
+delegated child carry their session's room on; Hermes moves a compacted
+session's title to its continuation.
 """
 
 from __future__ import annotations
@@ -41,8 +43,18 @@ ROOM_SOURCE = "bot_room"
 ROOM_SESSION_ID = re.compile(r"room_[0-9a-f]{32}")
 ROOM_TITLE = "Group: "
 _ROOM_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
-# Compaction continuations followed back to the room's own session.
+# An older Hermes numbered a continuation's title ("Group: <room id> #2").
+_NUMBERED = re.compile(r"\s+#\d+$")
+# Hermes' rule for a room member's handle (hosted_rooms_common.IDENTIFIER_RE).
+_HANDLE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}")
+# Hermes' profile ids (hermes_constants.PROFILE_ID_RE).
+_PROFILE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
+# Sessions followed to find a session's room: back through compactions and
+# delegations, and forward to the continuation holding a compacted title.
 LINEAGE_HOPS = 32
+# Children of one session read when looking for its continuation.
+MAX_CHILDREN = 16
+_LINEAGE_COLUMNS = ("parent_session_id", "end_reason", "model_config")
 # Profiles whose stores are read for a room another profile owns.
 MAX_PROFILE_STORES = 64
 MAX_REMEMBERED = 4096
@@ -61,8 +73,9 @@ DATA_TOOLS: frozenset[str] = frozenset()
 TIERS: dict[str, frozenset[str]] = {
     "talk": frozenset(), "look": LOOK_TOOLS, "data": LOOK_TOOLS, "custom": frozenset()}
 SEARCH_TOOL = "session_search"
-# Tool Search's bridge lists tools and calls one by name; Hermes hands the
-# hooks the tool it calls by that tool's own name.
+# Tool Search's bridge lists tools and calls one by name. Hermes peels the
+# bridge before the hooks run (agent/tool_executor), so they see the tool it
+# calls by that tool's own name and check it like a direct call.
 BRIDGE_TOOLS = frozenset({"tool_search", "tool_describe", "tool_call"})
 _LEARNING_TOOLS = frozenset({"memory", "skill_manage"})
 
@@ -76,6 +89,8 @@ LEARNING_BLOCK = (f"{_RULES}: nothing from a room with other people's agents is 
 NEVER_BLOCK = f"{_RULES}: {{tool}} is never used in a room with other people's agents."
 UNKNOWN_ROOM_BLOCK = ("Blocked: the room this turn is in couldn't be read, so your owner's rules for it couldn't "
                       "be checked. Answer without tools this time.")
+SESSION_UNREAD_BLOCK = ("Blocked for now: this chat's record couldn't be read, so whether your owner's rules for "
+                        "group rooms apply couldn't be checked. Try the tool again in a moment.")
 SEARCH_FAILED = "Past-chat search failed; try again."
 UNREADABLE_CHOICES_BLOCK = ("Blocked: your owner's choices for this room couldn't be read. Answer without tools "
                             "this time.")
@@ -93,6 +108,8 @@ _CREDENTIALS = (
     re.compile(r"\bxox[abposr]-[A-Za-z0-9-]{10,}"),
     re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
     re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
+    re.compile(r"\bAIza[0-9A-Za-z_-]{35}"),
+    re.compile(r"\bxai-[A-Za-z0-9]{32,}"),
 )
 _BEARER = re.compile(r"\b(Bearer\s+)[A-Za-z0-9._~+/-]{16,}=*", re.IGNORECASE)
 
@@ -135,6 +152,11 @@ class RoomStoreError(RuntimeError):
     people's agents in it is unknown."""
 
 
+class SessionStoreError(RoomStoreError):
+    """A session's own record couldn't be read, so whether it's a room's at
+    all is unknown."""
+
+
 @dataclass(frozen=True)
 class RoomTurn:
     room_id: str
@@ -154,11 +176,11 @@ _warned: dict[str, int] = {}
 
 def room_turn(session_id: Any, home: Any = None) -> Optional[RoomTurn]:
     """The room this session's turns are in, or None for any other session.
-    A session store that can't be read counts as no room (logged); a room
-    store that can't be read raises RoomStoreError. Answers are remembered
-    per session, since a room's members never change once it starts; a room
-    session not titled yet, or whose room no store has (logged), is read
-    again next time."""
+    A session store that can't be read raises SessionStoreError (logged), and
+    a room store that can't be read, or a room session not titled with its
+    room yet, RoomStoreError. A room with other people's agents is remembered
+    per session; a room without them is read again each time (an agent from
+    elsewhere may join it), as is one no store has (logged)."""
     value = str(session_id or "")
     if not value:
         return None
@@ -207,7 +229,8 @@ def tool_block(tool_name: Any, choices: RoomChoices) -> Optional[str]:
     if name == SEARCH_TOOL and not choices.search_chats:
         return SEARCH_BLOCK
     allowed = allowed_tools(choices)
-    if name in allowed or (name in BRIDGE_TOOLS and allowed - {SEARCH_TOOL}):
+    # Tool Search's bridge reaches the allowed tools Hermes defers behind it.
+    if name in allowed or (name in BRIDGE_TOOLS and allowed):
         return None
     if not allowed - {SEARCH_TOOL}:
         return TALK_ONLY_BLOCK
@@ -223,7 +246,8 @@ def framing(turn: Optional[RoomTurn], choices: RoomChoices) -> str:
     elif turn.side == "member":
         opening = MEMBER_FRAMING
     else:
-        opening = HOME_FRAMING.format(others=", ".join(f"@{handle}" for handle in turn.others) or "others")
+        named = (f"@{handle}" if _HANDLE.fullmatch(handle) else handle for handle in turn.others)
+        opening = HOME_FRAMING.format(others=", ".join(named) or "others")
     allowed = allowed_tools(choices) - {SEARCH_TOOL}
     # The tier's own tools, then the owner's picks in the order they made them.
     tools = list(dict.fromkeys(name for name in [*sorted(TIERS.get(choices.tools, ())), *choices.custom_tools]
@@ -249,36 +273,43 @@ def scrub(text: str) -> str:
     return _BEARER.sub(lambda match: match.group(1) + REDACTED, text)
 
 
+def mentions_rooms(result: Any) -> bool:
+    """Whether a tool result's text names a group room's session."""
+    return isinstance(result, str) and (
+        ROOM_SOURCE in result or ROOM_TITLE in result or bool(ROOM_SESSION_ID.search(result)))
+
+
 def filter_search(result: Any, home: Any, profile: Any = None) -> Optional[str]:
     """A session_search result with the sessions of rooms with other people's
     agents taken out, or None when it has none. A read of one of those
     sessions comes back as Hermes' own "not found", and a result that
     mentions rooms in a shape this doesn't know as a failed search.
     ``profile``: the profile whose sessions were searched, when not this one."""
-    if not isinstance(result, str) or ROOM_SOURCE not in result and not ROOM_SESSION_ID.search(result):
+    if not isinstance(result, str):
         return None
+    unknown = _unknown_search if mentions_rooms(result) else (lambda: None)
     try:
         payload = json.loads(result)
     except (ValueError, RecursionError):
-        return _unknown_search()
+        return unknown()
     if not isinstance(payload, dict):
-        return _unknown_search()
+        return unknown()
     if payload.get("success") is not True:
         # Hermes' own error, passed on as it is.
-        return None if "error" in payload else _unknown_search()
+        return None if "error" in payload else unknown()
     searched = _profile_home(Path(home), profile) if home is not None else None
     mode = payload.get("mode")
     if mode in ("read", "scroll"):
         session_id = payload.get("session_id")
         if not isinstance(session_id, str) or not session_id:
-            return _unknown_search()
+            return unknown()
         meta = payload.get("session_meta") if isinstance(payload.get("session_meta"), dict) else {}
         if not _hidden_from_search((session_id,), meta.get("source"), searched):
             return None
         return json.dumps({"success": False, "error": f"session_id not found: {session_id}"}, ensure_ascii=False)
     results = payload.get("results")
     if not isinstance(results, list) or not all(isinstance(entry, dict) for entry in results):
-        return _unknown_search()
+        return unknown()
     kept = [entry for entry in results if not _hidden_from_search(
         (str(entry.get("session_id") or ""), str(entry.get("parent_session_id") or "")), entry.get("source"),
         searched)]
@@ -298,9 +329,11 @@ def _unknown_search() -> str:
 
 def _hidden_from_search(session_ids: tuple[str, ...], source: Any, home: Optional[Path]) -> bool:
     """Whether a search hit belongs to a room with other people's agents; a
-    room session that can't be checked is hidden too."""
-    if str(source or "").strip().lower() != ROOM_SOURCE and not any(
-            ROOM_SESSION_ID.fullmatch(session_id) for session_id in session_ids):
+    room session that can't be checked is hidden too. A hit whose source
+    isn't given is looked up."""
+    told = str(source or "").strip().lower()
+    named = any(ROOM_SESSION_ID.fullmatch(session_id) for session_id in session_ids)
+    if told not in ("", "unknown", ROOM_SOURCE) and not named:
         return False
     for session_id in session_ids:
         if not session_id:
@@ -311,13 +344,14 @@ def _hidden_from_search(session_ids: tuple[str, ...], source: Any, home: Optiona
             return True
         if turn is not None:
             return turn.with_others
-    # A room session this host has no row for.
-    return True
+    # No row here: hidden when it says it's a room's.
+    return told == ROOM_SOURCE or named
 
 
 def _profile_home(home: Path, profile: Any) -> Path:
-    name = str(profile or "").strip()
-    if not name or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", name):
+    # As Hermes reads a profile name (hermes_cli.profiles.normalize_profile_name).
+    name = str(profile or "").strip().lower()
+    if not name or not _PROFILE.fullmatch(name):
         return home
     root = home.parent.parent if home.parent.name == "profiles" else home
     return root if name == "default" else root / "profiles" / name
@@ -336,10 +370,11 @@ def warn_often(kind: str, message: str, *args: Any, exc_info: bool = True) -> No
     in the log without filling it."""
     with _lock:
         count = _warned[kind] = _warned.get(kind, 0) + 1
+    text = message % args if args else message
     if count % 100 == 1:
-        logger.warning(f"{message} (%d times so far)", *args, count, exc_info=exc_info)
+        logger.warning("%s (%d times so far)", text, count, exc_info=exc_info)
     else:
-        logger.debug(message, *args, exc_info=exc_info)
+        logger.debug("%s", text, exc_info=exc_info)
 
 
 def _find(session_id: str, home: Optional[Path]) -> tuple[Optional[RoomTurn], bool]:
@@ -349,74 +384,124 @@ def _find(session_id: str, home: Optional[Path]) -> tuple[Optional[RoomTurn], bo
     if home is None:
         return (unnamed_member if remote else None), False
     try:
-        lineage = _read(lambda: _lineage(home / STATE_DB, session_id))
-    except Exception:  # noqa: BLE001 - the agent starts whatever this finds
+        lineage, title = _read(lambda: _lineage(home / STATE_DB, session_id))
+    except Exception as error:  # noqa: BLE001 - the agent starts whatever this finds
         if remote:
             return unnamed_member, False
         _store_unread(session_id)
-        return None, False
+        raise SessionStoreError(f"couldn't read session {session_id}") from error
     if not lineage:
         # No row: a session Hermes doesn't keep, never a room's (a room's row
         # is written when it's admitted, before its first turn).
         return (unnamed_member, False) if remote else (None, True)
-    in_room = [hop for hop in lineage if hop[1] == ROOM_SOURCE or ROOM_SESSION_ID.fullmatch(hop[0])]
-    if not in_room:
+    if not any(source == ROOM_SOURCE or ROOM_SESSION_ID.fullmatch(hop) for hop, source in lineage):
         return None, True
-    title = lineage[-1][2]
     room_id = _room_id(title)
-    # Hermes titles a room's session in a second write: until then its room
-    # isn't known, so the answer is read again.
     titled = bool(title.strip())
-    if any(ROOM_SESSION_ID.fullmatch(hop[0]) for hop in lineage):
+    if any(ROOM_SESSION_ID.fullmatch(hop) for hop, _ in lineage):
         return RoomTurn(room_id=room_id, side="member", with_others=True, session_id=session_id), titled
+    if not titled:
+        # Hermes titles a local member's session in a second write, before
+        # its first turn: until then its room is unknown.
+        raise RoomStoreError(f"session {session_id} isn't titled with its room yet")
     if not room_id:
-        # Untitled yet, or a legacy Desktop group's title (its display name).
-        return RoomTurn(room_id="", side="home", with_others=False, session_id=session_id), titled
+        # A legacy Desktop group's title (its display name): only this host's agents.
+        return RoomTurn(room_id="", side="home", with_others=False, session_id=session_id), True
     members = _room_members(room_id, home)
     if members is None:
-        # Disbanded, or kept where this plugin doesn't look: as Hermes alone
-        # would run it, read again next time.
+        # Kept where this plugin doesn't look: as Hermes alone would run it,
+        # read again next time. (A disbanded room is still found: its
+        # sessions keep what other people's agents said.)
         warn_often("room not found", "conduit_push: couldn't find room %s in any room store, so its turns run "
                    "without the owner's room rules", room_id, exc_info=False)
         return RoomTurn(room_id=room_id, side="home", with_others=False, session_id=session_id), False
     others = _others(members)
+    # A room without other people's agents is read again, so one that joins counts.
     return RoomTurn(room_id=room_id, side="home", with_others=bool(others), session_id=session_id,
-                    others=others), True
+                    others=others), bool(others)
 
 
-def _lineage(path: Path, session_id: str) -> list[tuple[str, str, str]]:
-    """``(id, source, title)`` from the session back to the one it continues,
-    through compactions only; empty when the session has no row."""
+def _lineage(path: Path, session_id: str) -> tuple[list[tuple[str, str]], str]:
+    """``(id, source)`` from the session back through the session a
+    compaction continues and the one that delegated it, and the room title
+    the nearest of them holds, else the title Hermes moved forward to a
+    compaction's continuation. Empty when the session has no row (or the
+    store keeps no sessions of the shape Hermes' rooms need)."""
     if not path.exists():
-        return []
+        return [], ""
     conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=READ_TIMEOUT)
     try:
-        hops: list[tuple[str, str, str]] = []
-        current = session_id
-        for _ in range(LINEAGE_HOPS):
-            row = conn.execute("SELECT source, title, parent_session_id FROM sessions WHERE id = ?",
-                               (current,)).fetchone()
-            if row is None:
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(sessions)")}
+        if not {"id", "source", "title"} <= columns:
+            return [], ""
+        extra = ", ".join(column if column in columns else "NULL" for column in _LINEAGE_COLUMNS)
+        select = f"SELECT source, title, {extra} FROM sessions WHERE id = ?"
+        hops: list[tuple[str, str, str, str]] = []  # (id, source, title, end_reason)
+        current, row = session_id, conn.execute(select, (session_id,)).fetchone()
+        while row is not None:
+            source, title, parent, end_reason, config = row
+            hops.append((current, str(source or "").strip().lower(), str(title or ""), str(end_reason or "")))
+            if not parent or len(hops) >= LINEAGE_HOPS:
                 break
-            hops.append((current, str(row[0] or "").strip().lower(), str(row[1] or "")))
-            parent = row[2]
-            if not parent:
+            parent_row = conn.execute(select, (parent,)).fetchone()
+            # A branch is a conversation of its own.
+            if parent_row is None or not (parent_row[3] == "compression" or _delegated(source, config)):
                 break
-            # Only a compaction carries the room on; a branch or a delegation
-            # is a conversation of its own.
-            ended = conn.execute("SELECT end_reason FROM sessions WHERE id = ?", (parent,)).fetchone()
-            if ended is None or ended[0] != "compression":
-                break
-            current = parent
-        return hops
+            current, row = str(parent), parent_row
+        title = next((hop[2] for hop in hops if hop[2].strip()), "")
+        if not title and {"parent_session_id", "end_reason"} <= columns:
+            compacted = next((hop[0] for hop in hops if hop[3] == "compression"), None)
+            if compacted is not None:
+                title = _moved_title(conn, compacted, "model_config" in columns)
+        return [(hop[0], hop[1]) for hop in hops], title
     finally:
         conn.close()
+
+
+def _moved_title(conn: sqlite3.Connection, session_id: str, has_config: bool) -> str:
+    """The title of the continuation a compacted session's title moved to."""
+    config = "model_config" if has_config else "NULL"
+    current = session_id
+    for _ in range(LINEAGE_HOPS):
+        ended = conn.execute("SELECT end_reason FROM sessions WHERE id = ?", (current,)).fetchone()
+        if ended is None or ended[0] != "compression":
+            return ""
+        children = conn.execute(
+            f"SELECT id, title, {config} FROM sessions WHERE parent_session_id = ? ORDER BY started_at DESC LIMIT ?",
+            (current, MAX_CHILDREN)).fetchall()
+        # The continuation: a child that isn't a branch or a delegation.
+        child = next((row for row in children if not _marks(row[2]) & {"_branched_from", "_delegate_from"}), None)
+        if child is None:
+            return ""
+        if str(child[1] or "").strip():
+            return str(child[1])
+        current = str(child[0])
+    return ""
+
+
+def _delegated(source: Any, config: Any) -> bool:
+    """Whether a session is a delegated child (Hermes marks one in its
+    model_config; one spawned under a gateway turn keeps the turn's source)."""
+    marks = _marks(config)
+    return "_branched_from" not in marks and (
+        "_delegate_from" in marks or str(source or "").strip().lower() == "subagent")
+
+
+def _marks(config: Any) -> set[str]:
+    """The lineage markers set in a session's model_config."""
+    try:
+        parsed = json.loads(config) if isinstance(config, str) and config else {}
+    except (ValueError, RecursionError):
+        return set()
+    if not isinstance(parsed, dict):
+        return set()
+    return {key for key in ("_branched_from", "_delegate_from", "_reset_from") if parsed.get(key)}
 
 
 def _room_id(title: str) -> str:
     if not title.startswith(ROOM_TITLE):
         return ""
-    room_id = title[len(ROOM_TITLE):].strip()
+    room_id = _NUMBERED.sub("", title[len(ROOM_TITLE):].strip())
     # A legacy Desktop group's title carries its display name, not a room id.
     return room_id if _ROOM_ID.fullmatch(room_id) else ""
 
@@ -479,19 +564,16 @@ def _members_in(path: Path, room_id: str) -> Optional[list[Any]]:
 
 
 def _others(members: Optional[list[Any]]) -> tuple[str, ...]:
-    """The handles of the members another installation runs."""
+    """The handles of the members another installation runs. A handle is
+    the other host's text, so one not shaped like Hermes' handles is never
+    shown to the model."""
     handles: list[str] = []
     for member in members or ():
         target = member.get("target") if isinstance(member, dict) else None
         if isinstance(target, dict) and target.get("kind") == "peer":
             handle = str(member.get("handle") or member.get("member_id") or "").strip().lstrip("@")
-            handles.append(_one_line(handle, 64) or "another agent")
+            handles.append(handle if _HANDLE.fullmatch(handle) else "another agent")
     return tuple(handles)
-
-
-def _one_line(value: Any, limit: int) -> str:
-    text = " ".join("".join(char if char.isprintable() else " " for char in str(value or "")).split())
-    return text[:limit]
 
 
 def _read(read: Callable[[], _Read]) -> _Read:
@@ -506,10 +588,10 @@ def _read(read: Callable[[], _Read]) -> _Read:
 
 
 def _store_unread(session_id: str) -> None:
-    """The session then counts as an ordinary chat, so if it is a room's its
-    turns get no room rules, and an operator should see that."""
+    """Every call of the session's turn then gets the careful answer (no
+    tools), so an operator should see why."""
     warn_often("session store", "conduit_push: couldn't read the session store to tell whether session %s is a "
-               "group room's; if it is, its turns run without the owner's room rules", session_id)
+               "group room's; its tool calls are blocked until it can be read", session_id)
 
 
 def _hermes_home() -> Optional[Path]:

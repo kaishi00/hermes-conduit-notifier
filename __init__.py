@@ -179,8 +179,9 @@ def register(ctx: Any) -> None:
 
 def _pre_tool_call(**kwargs: Any) -> dict[str, str] | None:
     # The owner's rules for a room with other people's agents come first: they
-    # hold for every call a room turn makes, the background review's and a
-    # delegated child's included. Fails closed, so outside _quietly.
+    # hold for every call a room turn makes, the background review's (it keeps
+    # the room session's id) and a delegated child's (room_rules follows it to
+    # the room it works for) included. Fails closed, so outside _quietly.
     block = _room_tool_block(kwargs)
     if block is not None:
         return block
@@ -214,7 +215,8 @@ def _pre_tool_call(**kwargs: Any) -> dict[str, str] | None:
 def _room_tool_block(kwargs: dict[str, Any]) -> dict[str, str] | None:
     """A block for a tool call the owner's room rules don't allow
     (room_rules.py), else None. A room whose roster or choices can't be read
-    gets no tools; a session store that can't be read counts as no room."""
+    gets no tools, and so does a call whose session can't be read (it may be
+    a room's)."""
     session_id = _text(kwargs.get("session_id"))
     if not session_id:
         return None
@@ -224,6 +226,9 @@ def _room_tool_block(kwargs: dict[str, Any]) -> dict[str, str] | None:
         home = None
     try:
         turn = room_rules.room_turn(session_id, home)
+    except room_rules.SessionStoreError:
+        # Logged by room_rules; read again on the next call.
+        return {"action": "block", "message": room_rules.SESSION_UNREAD_BLOCK}
     except room_rules.RoomStoreError:
         room_rules.warn_often("room store", "conduit_push: couldn't read the room session %s is in; its tools "
                               "are off this turn", session_id)
@@ -400,9 +405,10 @@ def _unload() -> None:
     """Hermes unloads the plugin: replies held for a turn's end are
     dropped with their timers, held calls stay stored for the next load, the
     group room memory and planner guards and the self-improvement
-    setting's live read come off, and the delivery and Live Activity
-    threads end (waiting about a second for a send in progress). Nothing
-    more goes to the relay from this load."""
+    setting's live read come off, the room turns it remembers are
+    forgotten, and the delivery and Live Activity threads end (waiting about
+    a second for a send in progress). Nothing more goes to the relay from
+    this load."""
     with _pending_lock:
         held = list(_pending_ready.values())
         _pending_ready.clear()
@@ -416,6 +422,7 @@ def _unload() -> None:
     pulse.stop()
     room_memory.uninstall()
     room_planner.uninstall()
+    room_rules.forget()
     review_notices.uninstall()
     deadline = time.monotonic() + 1.0
     live_activity.reporter.stop(timeout=max(0.0, deadline - time.monotonic()))
@@ -731,7 +738,7 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
             logger.debug("conduit_push: voice chat un-archive check failed", exc_info=True)
     # A room with other people's agents gets its owner's rules and nothing
     # else: the notes below carry the owner's own data and calls.
-    room_framing = _room_framing(session_id)
+    room_framing = _room_framing(session_id, kwargs.get("platform"))
     if room_framing:
         return {"context": room_framing}
     notes = [
@@ -765,7 +772,7 @@ def _transform_tool_result(**kwargs: Any) -> str | None:
         return room_rules.filter_search(result, home, profile)
     except Exception:  # noqa: BLE001 — never let a room's session through unchecked
         room_rules.warn_often("search check", "conduit_push: couldn't check a past-chat search for group rooms")
-        if isinstance(result, str) and (room_rules.ROOM_SOURCE in result or room_rules.ROOM_SESSION_ID.search(result)):
+        if room_rules.mentions_rooms(result):
             return json.dumps({"success": False, "error": room_rules.SEARCH_FAILED})
         return None
 
@@ -774,15 +781,17 @@ def _transform_llm_output(**kwargs: Any) -> str | None:
     """A room reply with credential-shaped text replaced; None leaves the
     reply as it is (every other turn, and a reply with none)."""
     text = kwargs.get("response_text")
-    if not isinstance(text, str) or not text or not _in_room_with_others(_text(kwargs.get("session_id"))):
+    if not isinstance(text, str) or not text or not _in_room_with_others(
+            _text(kwargs.get("session_id")), kwargs.get("platform")):
         return None
     scrubbed = room_rules.scrub(text)
     return scrubbed if scrubbed != text else None
 
 
-def _in_room_with_others(session_id: str) -> bool:
+def _in_room_with_others(session_id: str, platform: Any = None) -> bool:
     """Whether the session is a turn in a room with other people's agents; a
-    room whose roster can't be read counts as one."""
+    room whose roster can't be read counts as one, and so does a turn on
+    Hermes' room platform whose session can't be read."""
     if not session_id:
         return False
     try:
@@ -791,6 +800,8 @@ def _in_room_with_others(session_id: str) -> bool:
         home = None
     try:
         turn = room_rules.room_turn(session_id, home)
+    except room_rules.SessionStoreError:
+        return _room_platform(platform)
     except room_rules.RoomStoreError:
         return True
     except Exception:  # noqa: BLE001 — a hook must never break the turn
@@ -799,7 +810,7 @@ def _in_room_with_others(session_id: str) -> bool:
     return turn is not None and turn.with_others
 
 
-def _room_framing(session_id: str) -> str | None:
+def _room_framing(session_id: str, platform: Any = None) -> str | None:
     """Who's asking and what the owner allows, for a turn in a room with
     other people's agents (room_rules.py); None for any other turn."""
     if not session_id:
@@ -810,6 +821,10 @@ def _room_framing(session_id: str) -> str | None:
         home = None
     try:
         turn = room_rules.room_turn(session_id, home)
+    except room_rules.SessionStoreError:
+        # Whether it's a room's is unknown: a turn on Hermes' room platform is
+        # framed as one with others; any other keeps its usual notes.
+        return room_rules.framing(None, room_rules.RoomChoices()) if _room_platform(platform) else None
     except room_rules.RoomStoreError:
         # Unknown who's in it: framed as a room with others, under the defaults.
         return room_rules.framing(None, room_rules.RoomChoices())
@@ -823,6 +838,11 @@ def _room_framing(session_id: str) -> str | None:
     except Exception:  # noqa: BLE001 — the tools stay blocked; the careful defaults frame the turn
         choices = room_rules.RoomChoices()
     return room_rules.framing(turn, choices)
+
+
+def _room_platform(platform: Any) -> bool:
+    """Whether Hermes runs this turn on its group room platform."""
+    return str(platform or "").strip().lower() == room_rules.ROOM_SOURCE
 
 
 def _turn_surface_note(platform: Any, message: Any) -> str | None:

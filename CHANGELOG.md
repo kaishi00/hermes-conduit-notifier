@@ -23,7 +23,8 @@ checks it). The format is fixed, because Conduit reads it:
   told who's asking, so other people's requests can't change what it shares,
   and anything in its replies that looks like a password or key is removed.
   Past-chat search no longer finds those rooms. Rooms of only your own agents
-  work as before.
+  work as before. If Hermes can't read its chat records for a moment, tool
+  calls are blocked until it can, so a room's rules are never skipped.
 
 ## 0.78.1 (2026-10-25)
 

@@ -2495,7 +2495,9 @@ The plugin tells a room turn apart by its session: an agent sitting in a room
 hosted elsewhere runs in `room_<digest>`, and a local member runs in a hidden
 `bot_room` session titled `Group: <room id>` whose room, in the room store
 (this profile's `state.db`, the root's, the legacy `shared-state.db` or another
-profile's), seats a peer member. Compaction continuations keep their room.
+profile's), seats a peer member. A compaction's continuation keeps its room
+(Hermes moves the session's title to it, and the plugin follows it there),
+and so does a helper agent the room's session delegated to.
 
 Each profile keeps its choices per room in `conduit-rooms.json`, plus defaults
 for rooms with none of their own:
@@ -2504,42 +2506,54 @@ for rooms with none of their own:
   (`web_search`, `web_extract`, `x_search`, `vision_analyze`), Use my data
   (lookups plus the room-safe data tools you pick; there are none yet) or
   Custom (only the tools you pick). Always within the profile's own toolsets.
+  Tool Search's own tools (`tool_search`, `tool_describe`, `tool_call`) work
+  whenever anything is allowed: Hermes runs the hooks on the tool `tool_call`
+  reaches, by that tool's own name, so it's checked like a direct call.
   Memory and skill writes, delegation, messaging, scheduled jobs, running code
   and Conduit's calls and settings (`memory`, `skill_manage`, `delegate_task`,
   `kanban_create`, `send_message`, `message_agent`, `react_to_message`,
-  `cronjob_manage`, `execute_code`, `conduit_call_user`, `conduit_call_watch`,
-  `conduit_settings`) are never allowed, and that holds for the background
-  memory and skill review too, since its calls carry the room session's id.
-  `execute_code` is never allowed because its script calls tools without the
-  room session's id, so these rules wouldn't see those calls. What you pick
-  for Custom is yours to judge: a pick like `write_file`, or a memory
-  provider's own tools, can still save what's said in the room.
+  `cronjob`, `cronjob_manage`, `execute_code`, `conduit_call_user`,
+  `conduit_call_watch`, `conduit_settings`) are never allowed, and that holds
+  for the background memory and skill review too, since its calls carry the
+  room session's id. `execute_code` is never allowed because its script calls
+  tools without the room session's id, so these rules wouldn't see those
+  calls. What you pick for Custom is yours to judge: a pick like
+  `write_file`, or a memory provider's own tools, can still save what's said
+  in the room.
 - **Search my past chats**: off by default; `session_search` is blocked
   unless it's on.
 - **What it may share**: what helps, ask you first (the default) or nothing
   personal. The agent is told, every room turn, along with who's asking (in a
   room hosted elsewhere, the room's "user" is that host's owner, not you),
-  that it answers only for itself, and your private note for the room.
+  that it answers only for itself, and your private note for the room. The
+  agents from elsewhere are named by their handles, or as "another agent"
+  when a handle isn't shaped like Hermes' own (the other host chose it).
 - **How it takes part** (joins in, only when asked, listens only) and **turns
   a day** (40 by default) are kept for the room bridge, which enforces them
   once it ships.
 
 A room turn with other people's agents gets only that framing from the
 plugin: none of its other notes (Conduit's data, voice hints, declined calls).
-Its reply leaves the host with credential-shaped text (API keys, GitHub and
-Slack tokens, AWS key ids, JWTs, bearer tokens, private key blocks) replaced
-by `[credential removed]`. In every chat, `session_search` no longer finds
-the hidden sessions of rooms with other people's agents, and a direct read of
-one answers "session_id not found".
+Its reply leaves the host with credential-shaped text (`sk-` API keys, Google
+and xAI API keys, GitHub and Slack tokens, AWS key ids, JWTs, bearer tokens,
+private key blocks) replaced by `[credential removed]`. In every chat,
+`session_search` no longer finds the hidden sessions of rooms with other
+people's agents, and a direct read of one answers "session_id not found".
 
-If the room's roster or the choices can't be read, that turn gets no tools. If
-the session store itself can't be read, or the room is in no room store
-(disbanded, or kept where the plugin doesn't look), the plugin logs a warning
-and the turn runs as Hermes alone would run it (a `room_<digest>` session
-still counts as a room). A `session_search` result that mentions group rooms
-in a shape the plugin can't read goes to the agent as a failed search. A
-Hermes without `transform_llm_output` or `transform_tool_result` logs a
-warning, and replies or searches then go out unchecked.
+If the room's roster or the choices can't be read, that turn gets no tools,
+with a warning in the log (the first time and every 100th), and so does a
+room session Hermes hasn't titled with its room yet. If the session store
+itself can't be read, the plugin can't tell a room's turn from another chat's,
+so it blocks each tool call it can't check, in any chat, with a note to the
+agent to try again in a moment, and logs a warning; a turn on Hermes' room
+platform still gets the room's framing and has its reply checked. A room that
+no room store has (kept where the plugin doesn't look) runs as Hermes alone
+would run it, with a warning (a `room_<digest>` session still counts as a
+room). A disbanded room keeps its rules: its sessions keep what other people's
+agents said. A `session_search` result that mentions group rooms in a shape
+the plugin can't read goes to the agent as a failed search. A Hermes without
+`transform_llm_output` or `transform_tool_result` logs a warning, and replies
+or searches then go out unchecked.
 
 These rules work through Hermes' tool hooks, so they hold only where those
 run. A profile on the Codex app-server runtime runs Codex's own tools outside

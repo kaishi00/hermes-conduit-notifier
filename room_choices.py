@@ -16,6 +16,7 @@ package.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import threading
@@ -65,6 +66,10 @@ _ROOM_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 _TOOL_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.:-]{0,127}")
 
 _thread_lock = threading.Lock()
+logger = logging.getLogger(__name__)
+# Per file: an unreadable one is logged the first time and every 100th.
+_unreadable_counts: dict[str, int] = {}
+_counts_lock = threading.Lock()
 
 
 class ChoicesError(ValueError):
@@ -192,15 +197,30 @@ class ChoicesStore:
     def _load(self, *, for_write: bool = False) -> dict[str, Any]:
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, ValueError, RecursionError):
+        except FileNotFoundError:
+            raw = None
+        except (ValueError, RecursionError):
+            # A hand edit broke it: the careful defaults (no tools), and a
+            # write starts it over.
+            self._unreadable("isn't valid JSON")
             raw = None
         except OSError:
             # Unreadable for now (not missing, not corrupt): a write would
             # replace the choices it couldn't read, so it fails instead.
             if for_write:
                 raise
+            self._unreadable("can't be read")
             raw = None
         return _normalized(raw)
+
+    def _unreadable(self, why: str) -> None:
+        key = str(self.path)
+        # Not _thread_lock: a write loads the file while holding it.
+        with _counts_lock:
+            count = _unreadable_counts[key] = _unreadable_counts.get(key, 0) + 1
+        level = logging.WARNING if count % 100 == 1 else logging.DEBUG
+        logger.log(level, "conduit_push: couldn't read the room choices in %s (it %s), so its rooms get the careful "
+                   "defaults: no tools (%d times so far)", self.path, why, count)
 
     @contextmanager
     def _locked(self) -> Iterator[dict[str, Any]]:
