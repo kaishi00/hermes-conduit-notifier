@@ -106,6 +106,11 @@ class LinkError(Exception):
         self.status = status
 
 
+class AcceptKept(LinkError):
+    """An accept the mailbox didn't take yet: its Link waits, and the loop
+    tries it again while the invite lasts."""
+
+
 @dataclass(frozen=True)
 class Invite:
     """What an invite URL holds."""
@@ -196,10 +201,10 @@ class Links:
         now = int(self.clock())
         invite_id, token = _new_id(9), room_mailbox.new_token()
         with self._store.update() as state:
-            if sum(1 for invite in state["invites"].values() if invite["expires_at"] > now) >= MAX_INVITES:
+            if _waiting_invites(state, now) >= MAX_INVITES:
                 raise LinkError("too_many_invites", f"{MAX_INVITES} invites are already waiting; cancel one, or "
                                                     "wait for one to be used or run out", 409)
-            if len(state["links"]) >= MAX_LINKS:
+            if _places_held(state) >= MAX_LINKS:
                 raise _too_many_links()
             url = self._mailbox_url(state)
             state["invites"][invite_id] = {"name": name, "token": token, "created_at": now,
@@ -265,8 +270,8 @@ class Links:
         """Accepts an invite, as ``name``: ``{link}``, waiting until the
         inviter's Hermes confirms it. The same invite again, while that Link
         waits, is the same accept, sent now if it hasn't gone. An accept the
-        mailbox didn't answer stays with its Link, and goes on a later pass
-        while the invite lasts."""
+        mailbox didn't answer, or couldn't take yet, stays with its Link, and
+        goes on a later pass while the invite lasts."""
         now = int(self.clock())
         invite = parse_invite(url, now)
         name = _name(name)
@@ -294,7 +299,7 @@ class Links:
                             raise LinkError("already_linked", f"This Hermes is already linked with {other['name']}; "
                                                               "unlink first to link again", 409)
                         _forget(state, other_id, now)
-                if len(state["links"]) >= MAX_LINKS:
+                if _places_held(state) >= MAX_LINKS:
                     raise _too_many_links()
                 link = state["links"][link_id] = {
                     "name": invite.name, "sign": sealing.b64u(invite.sign), "seal": sealing.b64u(invite.seal),
@@ -317,15 +322,16 @@ class Links:
         except (room_mailbox.MailboxError, room_envelope.EnvelopeError, LinkError) as exc:
             # A refusal takes back an accept that can't have reached the
             # inviter: never sent, or refused each time. One the mailbox
-            # didn't answer may have, so it stays for the loop, unless the
-            # invite is used.
+            # didn't answer may have, and one it couldn't take yet may go
+            # later, as on the loop's pass, so those stay for the loop, unless
+            # the invite is used.
             used = getattr(exc, "code", "") == "invite_used"
-            waits = isinstance(exc, room_mailbox.MailboxError) and exc.retryable
+            waits = isinstance(exc, room_mailbox.MailboxError) and _goes_later(exc)
             if used or (not waits and not _accept_went(self._store.read(), link_id)):
                 self._take_back(link_id)
             elif waits:
-                raise LinkError(exc.code, f"{exc}. This Hermes keeps the accept and sends it when the mailbox "
-                                          "answers, while the invite lasts", 503) from None
+                raise AcceptKept(exc.code, f"{exc}. This Hermes keeps the accept and tries it again while the "
+                                           "invite lasts", 503) from None
             raise _link_error(exc) from None
         shown = self.get(link_id)
         if shown is None:  # a pass found the invite used while this waited
@@ -427,12 +433,19 @@ class Links:
         mailbox = self._mailbox(identity, self._mailbox_url(state))
         with self._sending():
             state = self._store.read()  # what's left now no other pass can be sending it
+            # A mailbox that doesn't answer gets no more calls this pass: each
+            # waits out its timeout, with the send lock held.
+            down: set[str] = set()
             # Old senders go first: an inbox with as many as the mailbox keeps
             # takes a new one once they have.
             for item in state["cleanup"]:
+                if mailbox.url in down:
+                    break
                 try:
                     mailbox.delete_sender(item["sender"])
                 except room_mailbox.MailboxError as exc:
+                    if exc.code == "unreachable":
+                        down.add(mailbox.url)
                     # Unauthorized: the inbox is gone, and its senders with it.
                     if _goes_later(exc) and int(self.clock()) < item["until"]:
                         logger.info("Linked Rooms will remove a sender from its inbox later (%s)", exc.code)
@@ -440,11 +453,12 @@ class Links:
                 with self._store.update() as current:
                     current["cleanup"] = [other for other in current["cleanup"] if other["sender"] != item["sender"]]
             for link_id, link in state["links"].items():
-                if not link.get("sender_up"):
+                if not link.get("sender_up") and mailbox.url not in down:
                     self._owner_call(mailbox, lambda: mailbox.put_sender(_link_sender(link_id), link["my_token"]))
                     self._mark_sender_up(link_id)
             for item in state["outbox"]:
-                self._deliver(identity, item)
+                if item["mailbox"] not in down:
+                    self._deliver(identity, item, down)
 
     @contextmanager
     def _sending(self) -> Iterator[None]:
@@ -484,7 +498,7 @@ class Links:
                 return
             self._drop_outgoing(item)
 
-    def _deliver(self, identity: room_identity.Identity, item: dict[str, Any]) -> None:
+    def _deliver(self, identity: room_identity.Identity, item: dict[str, Any], down: set[str]) -> None:
         now = int(self.clock())
         # An accept tried before without an answer may have reached the
         # inviter, whose Hermes then used the invite answering it, so its Link
@@ -509,6 +523,8 @@ class Links:
             self._give_up(item, now, exc.code, keep_link=item["kind"] == ACCEPT and earlier)
             return
         except room_mailbox.MailboxError as exc:
+            if exc.code == "unreachable":
+                down.add(item["mailbox"])
             # Unauthorized: the other side took its sender back, or lost its
             # inbox. One the mailbox lost (not_found) is made again by its
             # Hermes, with the senders it gave out.
@@ -540,7 +556,7 @@ class Links:
         try:
             room_mailbox.send(item["mailbox"], item["inbox"], item["token"], data, idempotency_key=item["id"])
         except room_mailbox.MailboxError as exc:
-            if first and exc.code not in ("unreachable", "bad_answer"):
+            if first and _refused(exc):
                 # The mailbox said it didn't take it, so it's still untried:
                 # the inviter can't have it.
                 with self._store.update() as state:
@@ -856,9 +872,12 @@ class LinkLoop:
                 logger.info("Linked Rooms dropped an accept naming a mailbox on someone's own computer or network")
                 return
             # Someone already linked from that Hermes lost their side, or took
-            # it back, and linked again: this Link replaces theirs.
+            # it back, and linked again: this Link replaces theirs. One this
+            # Hermes waits on as the acceptor stays: their invite and this one
+            # crossed, and their Hermes keeps both Links too.
             for other_id, other in list(state["links"].items()):
-                if _key_of(other, "sign") == accept["sign"]:
+                if _key_of(other, "sign") == accept["sign"] \
+                        and not (other["role"] == "acceptor" and _status(other, now) == "waiting"):
                     _forget(state, other_id, now)
             if len(state["links"]) >= MAX_LINKS:
                 logger.warning("Linked Rooms dropped an accept: this Hermes has %d Links", MAX_LINKS)
@@ -1061,6 +1080,7 @@ def _well_formed(state: Any) -> bool:
         return False
     return all(isinstance(link, dict) and all(isinstance(link.get(name), str) for name in (
         "name", "sign", "seal", "inbox", "mailbox", "status", "role", "send_token", "my_token"))
+        and _public_key(link["sign"]) is not None and _public_key(link["seal"]) is not None
         and isinstance(link.get("created_at"), int) and isinstance(link.get("seen", {}), dict)
         for link in state["links"].values()) \
         and all(isinstance(invite, dict) and isinstance(invite.get("token"), str)
@@ -1183,6 +1203,13 @@ def _private_host(url: str) -> bool:
         return False
 
 
+def _refused(exc: room_mailbox.MailboxError) -> bool:
+    """Whether a send refused with ``exc`` didn't reach the mailbox's store:
+    not when it didn't answer, or answered with a server error, which can
+    come after it kept what was sent."""
+    return exc.status < 500 and exc.code not in ("unreachable", "bad_answer")
+
+
 def _goes_later(exc: room_mailbox.MailboxError) -> bool:
     """Whether a mailbox call refused with ``exc`` may go through later as it
     is: not once its token is refused, nor what the mailbox never takes."""
@@ -1258,8 +1285,20 @@ def _invite_used() -> LinkError:
 
 
 def _too_many_links() -> LinkError:
-    return LinkError("too_many_links", f"This Hermes has {MAX_LINKS} Links, as many as it keeps; unlink one first",
-                     409)
+    return LinkError("too_many_links", f"This Hermes keeps up to {MAX_LINKS} Links, each invite still waiting "
+                                       "holding a place for one, and has none left; unlink one or cancel an invite "
+                                       "first", 409)
+
+
+def _waiting_invites(state: dict[str, Any], now: int) -> int:
+    return sum(1 for invite in state["invites"].values() if invite["expires_at"] > now)
+
+
+def _places_held(state: dict[str, Any]) -> int:
+    # Each invite kept holds a place for its Link, so an accept for one always
+    # finds room: one that ran out is kept until the loop has read what came
+    # for it in time.
+    return len(state["links"]) + len(state["invites"])
 
 
 def _link_error(exc: Exception) -> LinkError:

@@ -700,7 +700,12 @@ def _links(args: argparse.Namespace) -> int:
             if shown["linked_as"]:
                 print(f"This Hermes is already linked with them (Link {shown['linked_as']}).")
         elif action == "accept":
-            link = links.accept(target, name)["link"]
+            try:
+                link = links.accept(target, name)["link"]
+            except room_links.AcceptKept as kept:
+                print(f"The accept didn't go yet: {kept}.")
+                _say_if_nothing_reads(room_links, root, "the accept waits here")
+                return 1
             print(f"Linked with {_printable(link['name'])} once their Hermes confirms it (Link {link['id']}).")
             _say_if_nothing_reads(room_links, root)
         elif action == "list":
@@ -750,12 +755,13 @@ def _remove_link(links: Any, link_id: str, yes: bool) -> int:
     return 0
 
 
-def _say_if_nothing_reads(room_links: Any, root: Path) -> None:
+def _say_if_nothing_reads(room_links: Any, root: Path,
+                          then: str = "the answer waits there, for up to 7 days,") -> None:
     deadline = time.monotonic() + LINKS_READING_WAIT_S
     while not room_links.reading(root):
         if time.monotonic() >= deadline:
-            print("Nothing on this Hermes reads its rooms mailbox right now, so the answer waits there, for up to "
-                  "7 days, until Hermes' dashboard runs with this plugin.")
+            print(f"Nothing on this Hermes reads its rooms mailbox right now, so {then} until Hermes' dashboard "
+                  "runs with this plugin.")
             return
         time.sleep(0.2)
 

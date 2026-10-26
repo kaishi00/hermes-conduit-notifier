@@ -2706,9 +2706,9 @@ hermes conduit-push links cancel <invite id>             # takes an invite back
 
 A Link waits until the inviter's Hermes confirms it, and one still waiting
 after 8 days reads as unanswered (its accept or confirm ran out at the
-mailbox). An accept the mailbox didn't answer stays with its Link, and goes
-when the mailbox answers, while the invite lasts; accepting the same invite
-again is the same accept. Unlinking ends a Link here at once, and the other
+mailbox). An accept the mailbox didn't answer, or couldn't take yet, stays
+with its Link and is tried again while the invite lasts; accepting the same
+invite again is the same accept. Unlinking ends a Link here at once, and the other
 Hermes drops it when it next reads its inbox; one unlinked while it waits for
 its confirm is answered with the unlink when the confirm comes. A confirm that
 runs out at the mailbox before the acceptor's Hermes reads it (off for more
@@ -2719,7 +2719,10 @@ unlink, accept or confirm the mailbox can't take now goes later, up to its
 isn't taken: the clock where it was made is wrong, or someone made it by
 hand. To link again, unlink first: a new accept from the same Hermes
 then replaces the inviter's old Link, as it does after someone loses their
-side. This Hermes keeps up to 50 Links and 10 waiting invites. Everything a
+side. If you and they accept each other's invites before either Hermes reads
+the other's accept, you're linked twice, the same on both sides; unlink
+either. This Hermes keeps up to 50 Links, each invite still waiting holding a
+place for one, and up to 10 waiting invites. Everything a
 Link needs, its send tokens included, stays in `conduit-rooms/links.json`
 (owner only), never in a log or a route's answer.
 
@@ -2728,7 +2731,8 @@ whichever process holds `conduit-rooms/.lease`. While nothing waits it only
 looks at `links.json` every 2 s, and it reads the mailbox once there's an
 invite, a Link or something to send. A command run while no dashboard runs
 makes its change, and says the answer waits at the mailbox, for up to 7 days,
-until the dashboard runs with this plugin.
+until the dashboard runs with this plugin (an accept the mailbox didn't take
+yet waits on this Hermes instead).
 
 The mailbox is rooms.milim.dev unless `CONDUIT_ROOMS_MAILBOX_URL` names
 another (`https://`, with nothing after its host name, or `http://` on this
@@ -2752,7 +2756,9 @@ capability, with no `?profile=` (Links are the installation's):
   is the host of the mailbox the invite names and `linked_as` the Link this
   Hermes already has with them, or null.
 - `POST /rooms/links` with `{"url": ..., "name": ...}`: `{"link": {"id",
-  "name", "status", "words", "created_at"}}`, its status `waiting`.
+  "name", "status", "words", "created_at"}}`, its status `waiting`. A 503
+  with one of the mailbox's codes says it didn't take the accept yet: the
+  Link stays, waiting, and its accept is tried again while the invite lasts.
 - `GET /rooms/links`: `{"links": [...], "invites": [...], "mailbox": {"url",
   "reading"}}`, statuses `waiting`, `linked` or `unanswered`, and `reading`
   false while nothing on this Hermes reads the mailbox.

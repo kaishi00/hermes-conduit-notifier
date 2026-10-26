@@ -275,24 +275,43 @@ def test_an_invite_naming_a_mailbox_on_its_own_computer_is_refused(home, monkeyp
 
 
 @needs_node
-def test_links_are_capped(home, monkeypatch, caplog):
+def test_links_are_capped_and_a_waiting_invite_keeps_its_links_place(home, monkeypatch):
+    # So an accept for one of this Hermes' invites always finds room.
     monkeypatch.setattr(links_module, "MAX_LINKS", 1)
     eric, mona, lumine = home("eric"), home("mona"), home("lumine")
-    first, second = eric.invite("Eric")["url"], eric.invite("Eric")["url"]
-    mona.accept(first, "Mona")
-    lumine.accept(second, "Lumine")  # an invite made before Eric had a Link
-
-    with caplog.at_level(logging.WARNING, logger=links_module.logger.name):
-        _run(eric, mona, lumine)
-
-    assert [link["name"] for link in eric.view()["links"]] == ["Mona"]
-    assert "dropped an accept" in caplog.text
-    assert [link["status"] for link in lumine.view()["links"]] == ["waiting"]
+    url = eric.invite("Eric")["url"]
     for refused_call in (lambda: eric.invite("Eric"),
-                         lambda: mona.accept(home("nahida").invite("Nahida")["url"], "Mona")):
+                         lambda: eric.accept(lumine.invite("Lumine")["url"], "Eric")):
         with pytest.raises(links_module.LinkError) as refused:
             refused_call()
         assert (refused.value.code, refused.value.status) == ("too_many_links", 409)
+    mona.accept(url, "Mona")
+
+    _run(eric, mona)
+
+    assert [link["name"] for link in eric.view()["links"]] == ["Mona"]
+    assert [link["status"] for link in mona.view()["links"]] == ["linked"]
+    with pytest.raises(links_module.LinkError) as refused:
+        mona.accept(home("nahida").invite("Nahida")["url"], "Mona")
+    assert (refused.value.code, refused.value.status) == ("too_many_links", 409)
+
+
+@needs_node
+def test_an_invite_that_ran_out_keeps_its_links_place_until_its_accept_is_read(home, monkeypatch):
+    # Its Hermes was off: an accept that came in time is still answered.
+    monkeypatch.setattr(links_module, "MAX_LINKS", 1)
+    clock = Clock()
+    eric, mona = home("eric", clock), home("mona")
+    mona.accept(eric.invite("Eric")["url"], "Mona")
+    clock.now += links_module.INVITE_TTL_S + 60
+
+    with pytest.raises(links_module.LinkError) as refused:
+        eric.accept(home("nahida", Clock(clock.now)).invite("Nahida")["url"], "Eric")
+    assert (refused.value.code, refused.value.status) == ("too_many_links", 409)
+    _run(eric, mona)
+
+    assert [(link["name"], link["status"]) for link in eric.view()["links"]] == [("Mona", "linked")]
+    assert [link["status"] for link in mona.view()["links"]] == ["linked"]
 
 
 @needs_node
@@ -708,6 +727,38 @@ def test_an_accept_from_someone_already_linked_replaces_the_old_link(home):
 
 
 @needs_node
+def test_invites_that_cross_leave_both_sides_with_the_same_links(home):
+    # Each accepts the other's invite before either Hermes reads its inbox.
+    eric, mona = home("eric"), home("mona")
+    eric_url, mona_url = eric.invite("Eric")["url"], mona.invite("Mona")["url"]
+    mona.accept(eric_url, "Mona")
+    eric.accept(mona_url, "Eric")
+
+    _run(eric, mona)
+
+    eric_side = sorted((link["id"], link["status"]) for link in eric.view()["links"])
+    mona_side = sorted((link["id"], link["status"]) for link in mona.view()["links"])
+    assert eric_side == mona_side
+    assert [status for _, status in eric_side] == ["linked", "linked"]
+
+
+@needs_node
+def test_a_crossing_accept_keeps_a_link_unlinked_while_it_waits_so_its_confirm_is_answered(home):
+    eric, mona = home("eric"), home("mona")
+    eric_url, mona_url = eric.invite("Eric")["url"], mona.invite("Mona")["url"]
+    unlinked = eric.accept(mona_url, "Eric")["link"]["id"]
+    mona.accept(eric_url, "Mona")
+    eric.remove(unlinked)
+
+    _run(eric, mona)
+
+    eric_side = [(link["id"], link["status"]) for link in eric.view()["links"]]
+    assert eric_side == [(link["id"], link["status"]) for link in mona.view()["links"]]
+    assert [status for _, status in eric_side] == ["linked"] and eric_side[0][0] != unlinked
+    assert unlinked not in eric._store.read()["links"] and unlinked not in mona._store.read()["links"]
+
+
+@needs_node
 def test_a_lost_inbox_is_made_again_with_its_senders(home, monkeypatch):
     eric, mona, link_id = _linked(home)
     got = _received(monkeypatch)
@@ -734,6 +785,34 @@ def test_a_remove_that_cant_go_now_goes_later(home, monkeypatch):
     _run(eric, mona)
 
     assert eric.view()["links"] == []
+
+
+@needs_node
+def test_a_mailbox_that_doesnt_answer_gets_one_call_a_pass(home, monkeypatch):
+    # Each call waits out its timeout while the send lock is held.
+    eric, mona, _ = _linked(home)
+    lisa = home("lisa")
+    lisa.accept(eric.invite("Eric")["url"], "Lisa")
+    _run(eric, lisa)
+    calls = []
+
+    def unreachable(*args, **kwargs):
+        calls.append(kwargs.get("idempotency_key"))
+        raise mailbox_module.MailboxError("unreachable", "Couldn't reach the mailbox")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(links_module.Links, "_flush_quietly", lambda self: None)
+        for link in eric.view()["links"]:
+            eric.remove(link["id"])
+    with monkeypatch.context() as patched:
+        patched.setattr(mailbox_module, "send", unreachable)
+        eric.flush()
+    assert len(calls) == 1
+    assert [item["kind"] for item in eric._store.read()["outbox"]] == ["link.remove", "link.remove"]
+
+    _run(eric, mona, lisa)
+
+    assert mona.view()["links"] == [] and lisa.view()["links"] == []
 
 
 @needs_node
@@ -772,17 +851,19 @@ def test_only_a_sender_that_can_go_later_is_deleted_again(home, monkeypatch, cod
 
 @needs_node
 @pytest.mark.parametrize("seal", ["not a key!", "AAAA"])
-def test_an_envelope_that_cant_be_made_is_dropped_and_the_rest_go(home, seal):
-    # A hand-edited links.json: one Link's key can't make an envelope.
+def test_an_envelope_that_cant_be_made_is_dropped_and_the_rest_go(home, monkeypatch, seal):
+    # A hand-edited links.json: the key an unlink was to go with can't make its envelope.
     eric, mona, link_id = _linked(home)
     lisa = home("lisa")
     lisa_link = lisa.accept(eric.invite("Eric")["url"], "Lisa")["link"]["id"]
     _run(eric, lisa)
+    with monkeypatch.context() as patched:
+        patched.setattr(links_module.Links, "_flush_quietly", lambda self: None)
+        eric.remove(link_id)
+        eric.remove(lisa_link)
     with eric._store.update() as state:
-        state["links"][link_id]["seal"] = seal
+        next(item for item in state["outbox"] if item["link"] == link_id)["seal"] = seal
 
-    eric.remove(link_id)
-    eric.remove(lisa_link)
     _run(eric, mona, lisa)
 
     assert eric._store.read()["outbox"] == []
@@ -1069,6 +1150,56 @@ def test_an_accept_the_mailbox_didnt_answer_waits_with_its_link(home, monkeypatc
 
 
 @needs_node
+@pytest.mark.parametrize("code,status", [("not_found", 404), ("internal_error", 500)])
+def test_an_accept_the_mailbox_couldnt_take_yet_waits_with_its_link(home, monkeypatch, code, status):
+    # As the loop's pass does: the inviter's inbox may be being made again.
+    eric, mona = home("eric"), home("mona")
+    url = eric.invite("Eric")["url"]
+
+    def refused_send(*args, **kwargs):
+        raise mailbox_module.MailboxError(code, "Refused", status)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(mailbox_module, "send", refused_send)
+        with pytest.raises(links_module.LinkError) as refused:
+            mona.accept(url, "Mona")
+    assert (refused.value.code, refused.value.status) == (code, 503)
+    assert "while the invite lasts" in str(refused.value)
+    assert [link["status"] for link in mona.view()["links"]] == ["waiting"]
+
+    _run(eric, mona)
+
+    assert [link["status"] for link in eric.view()["links"]] == ["linked"]
+    assert [link["status"] for link in mona.view()["links"]] == ["linked"]
+
+
+@needs_node
+def test_an_accept_the_mailbox_failed_on_may_have_gone_and_waits_past_its_invite(home, monkeypatch):
+    # A server error can come after the mailbox kept it.
+    clock = Clock()
+    eric, mona = home("eric"), home("mona", clock=clock)
+    url = eric.invite("Eric")["url"]
+    real_send = mailbox_module.send
+
+    def kept_then_failed(*args, **kwargs):
+        real_send(*args, **kwargs)
+        raise mailbox_module.MailboxError("internal_error", "The mailbox failed", 500)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(mailbox_module, "send", kept_then_failed)
+        with pytest.raises(links_module.LinkError):
+            mona.accept(url, "Mona")
+    clock.now += DAY + 60
+    _run(mona, passes=1)
+    assert [link["status"] for link in mona.view()["links"]] == ["waiting"]
+
+    _run(eric, mona)
+
+    assert [link["status"] for link in eric.view()["links"]] == ["linked"]
+    assert [link["status"] for link in mona.view()["links"]] == ["linked"]
+
+
+@needs_node
 def test_an_accept_refused_on_its_first_try_takes_its_link_back(home, monkeypatch):
     eric, mona = home("eric"), home("mona")
     url = eric.invite("Eric")["url"]
@@ -1284,6 +1415,23 @@ def test_the_store_is_owner_only(tmp_path, monkeypatch):
     path = tmp_path / "conduit-rooms" / "links.json"
     assert path.stat().st_mode & 0o777 == 0o600
     assert json.loads(path.read_text())["invites"] == {}
+
+
+@needs_node
+@pytest.mark.parametrize("key", ["sign", "seal"])
+def test_a_links_file_with_a_link_whose_keys_arent_keys_is_refused(home, key):
+    # Edited by hand: refused whole, as any file this plugin didn't write is,
+    # rather than failing on that Link wherever it's read.
+    eric, mona, link_id = _linked(home)
+    path = eric.root / "conduit-rooms" / "links.json"
+    stored = json.loads(path.read_text())
+    stored["links"][link_id][key] = "not a key"
+    path.write_text(json.dumps(stored))
+
+    for call in (eric.view, lambda: links_module.LinkLoop(eric.root).poll_once()):
+        with pytest.raises(links_module.LinkError) as refused:
+            call()
+        assert refused.value.code == "unreadable"
 
 
 # --- Routes -------------------------------------------------------------------
@@ -1598,6 +1746,25 @@ def test_cli_cancels_an_invite(cli, monkeypatch, mailbox_url, tmp_path, capsys):
     assert "Cancelled" in capsys.readouterr().out
     assert cli("eric", "cancel", invite_id) == 1
     assert links_module.Links(tmp_path / "eric").view()["invites"] == []
+
+
+@needs_node
+def test_cli_says_an_accept_the_mailbox_didnt_take_yet_waits_here(cli, monkeypatch, mailbox_url, tmp_path, capsys):
+    monkeypatch.setenv("CONDUIT_ROOMS_MAILBOX_URL", mailbox_url)
+    cli("eric", "invite", name="Eric")
+    url = _url_in(capsys.readouterr().out)
+
+    def unreachable(*args, **kwargs):
+        raise mailbox_module.MailboxError("unreachable", "Couldn't reach the mailbox at the inviter's")
+
+    monkeypatch.setattr(mailbox_module, "send", unreachable)
+    assert cli("mona", "accept", url, name="Mona") == 1
+
+    said = capsys.readouterr().out
+    assert said.startswith("The accept didn't go yet: Couldn't reach the mailbox at the inviter's.")
+    assert "tries it again while the invite lasts" in said and "Couldn't accept it" not in said
+    assert "so the accept waits here until Hermes' dashboard runs" in said
+    assert [link["status"] for link in links_module.Links(tmp_path / "mona").view()["links"]] == ["waiting"]
 
 
 def test_cli_says_what_it_couldnt_do(cli, capsys):
