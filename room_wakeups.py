@@ -56,7 +56,8 @@ def install() -> bool:
     """Guards Hermes' room driver, once per process. Imports it, since the
     plugin can load before the gateway or the dashboard starts its rooms;
     every room service in the process runs that one runtime class. False
-    when this Hermes has no such driver."""
+    when this Hermes has no such driver, or one the guard can't read, whose
+    rooms are then scheduled as Hermes schedules them."""
     global _guarded
     with _lock:
         if _guarded is not None:
@@ -66,21 +67,31 @@ def install() -> bool:
         except Exception:  # noqa: BLE001 - no Hermes rooms here (tests, an older Hermes)
             logger.debug("conduit_push: no Hermes room driver to guard", exc_info=True)
             return False
-        own = vars(runtime).get(METHOD)
-        # A guard an earlier load of the plugin left behind wraps Hermes' own.
-        while callable(own) and getattr(own, _GUARD_FLAG, False):
-            own = getattr(own, "__wrapped__", None)
-        room_pass = vars(runtime).get(PASS)
-        # The pass's own code, under anything that wraps it.
-        pass_code = getattr(inspect.unwrap(room_pass), "__code__", None) if callable(room_pass) else None
-        missing = METHOD if not callable(own) else PASS if pass_code is None else None
+        try:
+            own = vars(runtime).get(METHOD)
+            # A guard an earlier load of the plugin left behind wraps Hermes' own.
+            while callable(own) and getattr(own, _GUARD_FLAG, False):
+                own = getattr(own, "__wrapped__", None)
+            room_pass = vars(runtime).get(PASS)
+            # The pass's own code, under anything that wraps it.
+            pass_code = getattr(inspect.unwrap(room_pass), "__code__", None) if callable(room_pass) else None
+            missing = (f"no {METHOD}" if not callable(own) else f"no {PASS}" if pass_code is None
+                       # The pass asks for its room's next pass through wakeup.
+                       else f"a {PASS} that doesn't call {METHOD}" if METHOD not in pass_code.co_names
+                       else None)
+            if missing is None:
+                guard = _guard(own, pass_code)
+                setattr(runtime, METHOD, guard)
+        except Exception:  # noqa: BLE001 - a driver the guard can't read is left to Hermes
+            logger.info("conduit_push: couldn't read Hermes' room driver, so its group rooms are scheduled as "
+                        "Hermes schedules them", exc_info=True)
+            return False
         if missing:
-            logger.info("conduit_push: Hermes' room driver has no %s, so its group rooms are scheduled as Hermes "
+            logger.info("conduit_push: Hermes' room driver has %s, so its group rooms are scheduled as Hermes "
                         "schedules them", missing)
             return False
-        guard = _guard(own, pass_code)
-        setattr(runtime, METHOD, guard)
         _guarded = (runtime, own, guard)
+        logger.debug("conduit_push: guarding the wakeups of Hermes' room driver from %s", pass_code.co_name)
         return True
 
 

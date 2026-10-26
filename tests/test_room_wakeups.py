@@ -364,6 +364,23 @@ def test_rooms_go_quiet_once_a_change_has_been_looked_at(driver, guard):
         rooms.runtime.stop()
 
 
+def test_more_rooms_than_it_looks_at_at_once_go_quiet_too(driver, guard):
+    # As on the rig: 8 rooms, twice the four the driver looks at at once, so
+    # some wait for a pass to end before they're looked at.
+    rooms = Rooms(driver, 8)
+    rooms.runtime.start()
+    try:
+        assert rooms.quiet()
+        first = rooms.total
+        rooms.change_while_they_look()
+
+        assert rooms.quiet()
+        assert first + 4 <= rooms.total <= first + 64
+        assert rooms.runtime._rooms_needing_reschedule == set()
+    finally:
+        rooms.runtime.stop()
+
+
 def test_a_change_while_a_room_is_looked_at_still_brings_it_back(driver, guard):
     looking, go_on = threading.Event(), threading.Event()
 
@@ -436,6 +453,34 @@ def test_a_hermes_driver_without_what_it_guards_is_left_alone(driver, method, ca
     with caplog.at_level(logging.INFO):
         assert _load().install() is False
     assert " ".join(caplog.messages).count(method) == 1
+    assert dict(vars(driver.HostedRoomRuntime)) == before
+
+
+def test_a_pass_that_doesnt_wake_the_driver_is_left_alone(driver, caplog):
+    def _run_room_once(self, binding):
+        self._process_room(binding)
+
+    driver.HostedRoomRuntime._run_room_once = _run_room_once
+    before = dict(vars(driver.HostedRoomRuntime))
+
+    with caplog.at_level(logging.INFO):
+        assert _load().install() is False
+    assert "a _run_room_once that doesn't call wakeup" in caplog.text
+    assert dict(vars(driver.HostedRoomRuntime)) == before
+
+
+def test_a_driver_the_guard_cant_read_is_left_alone(driver, caplog):
+    def _run_room_once(self, binding):
+        self.wakeup()
+
+    _run_room_once.__wrapped__ = _run_room_once  # a wrapper that never ends
+    driver.HostedRoomRuntime._run_room_once = _run_room_once
+    before = dict(vars(driver.HostedRoomRuntime))
+
+    with caplog.at_level(logging.INFO):
+        assert _load().install() is False
+    assert caplog.messages == [
+        "conduit_push: couldn't read Hermes' room driver, so its group rooms are scheduled as Hermes schedules them"]
     assert dict(vars(driver.HostedRoomRuntime)) == before
 
 
