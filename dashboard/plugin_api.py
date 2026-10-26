@@ -16156,6 +16156,31 @@ def _guard_room_planner() -> None:
 _guard_room_planner()
 
 
+# room_cutoff.py beside this folder fails the turn of a member whose Hermes
+# no longer accepts the room once, instead of the room retrying it forever,
+# as the plugin's own load does in the gateway.
+
+_room_cutoff_module: Any = None
+
+
+def _guard_room_cutoff() -> None:
+    global _room_cutoff_module
+    try:
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "room_cutoff.py")
+        spec = importlib.util.spec_from_file_location("conduit_push_dashboard_room_cutoff", path)
+        if spec is None or spec.loader is None:
+            raise ImportError("This plugin install is missing room_cutoff.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module.install()
+        _room_cutoff_module = module
+    except Exception:  # noqa: BLE001 — group rooms only, never the routes
+        logger.warning("Conduit plugin: couldn't guard Hermes' group room driver", exc_info=True)
+
+
+_guard_room_cutoff()
+
+
 # --- Artifacts ---------------------------------------------------------------
 #
 # GET /artifacts lists what a profile's chats produced (artifacts_index.py

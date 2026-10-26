@@ -113,6 +113,31 @@ def test_the_room_planner_guard_comes_off_with_the_plugin(room_planner, unloaded
     assert room_planner._derive_member_watermarks is own
 
 
+@pytest.fixture
+def room_driver(monkeypatch):
+    """Hermes' room driver, as far as the plugin's cut-off guard touches it."""
+    driver = types.ModuleType("tui_gateway.hosted_room_driver")
+
+    class HostedRoomRuntime:
+        def _transport_for(self, binding, task):
+            return None
+
+    driver.HostedRoomRuntime = HostedRoomRuntime
+    tui_gateway = types.ModuleType("tui_gateway")
+    tui_gateway.__path__ = []
+    monkeypatch.setitem(sys.modules, "tui_gateway", tui_gateway)
+    monkeypatch.setitem(sys.modules, "tui_gateway.hosted_room_driver", driver)
+    return HostedRoomRuntime
+
+
+def test_the_room_cutoff_guard_comes_off_with_the_plugin(room_driver, unloaded_plugin):
+    own = room_driver._transport_for.__wrapped__
+
+    unloaded_plugin()
+
+    assert room_driver._transport_for is own
+
+
 def test_a_reply_held_for_its_turns_end_is_dropped_with_its_timer(unloaded_plugin, monkeypatch):
     sent = []
     monkeypatch.setattr(plugin, "READY_GRACE_S", 0.2)
