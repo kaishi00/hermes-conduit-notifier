@@ -480,29 +480,29 @@ LEFT_OUT_ORDER = (pulse_candidates.QUIETED, pulse_candidates.MUTED, pulse_candid
                   pulse_candidates.RESTING, pulse_candidates.UNANSWERED)
 
 
+def _left_out_since(pulse_store: Any, now: float) -> float:
+    """Where What Pulse left out starts: the last day, or the latest report
+    when that's older."""
+    latest = pulse_store.latest_candidate_at()
+    return min(now - LEFT_OUT_S, latest) if latest is not None else now - LEFT_OUT_S
+
+
 def left_out(pulse_store: Any, home: Optional[Path] = None, now: Optional[float] = None,
              limit: int = LEFT_OUT) -> list[dict[str, Any]]:
     """What the latest reports considered and left out, and why, for What
-    Pulse left out: each candidate once (a remembered item, or the same
-    text, by its newest decision), not one that came up in a later report,
+    Pulse left out: each thing once (a remembered item, or the same text, by
+    its newest decision), not one that came up in that report or later,
     learning's and the user's rules' first, then the rest, newest and most
     valued first within each. One brought up since (``bring_up``) says
-    which card it became."""
-    now = time.time() if now is None else now
-    since = now - LEFT_OUT_S
-    latest = pulse_store.latest_candidate_at()
-    if latest is not None and latest < since:
-        since = latest
-    seen: set[tuple[str, Any]] = set()
+    which card it became, whichever report's candidate was brought up."""
+    seen: set[Any] = set()
     out = []
-    for row in pulse_store.left_out(since, LEFT_OUT_ROWS):
-        # Both the remembered item and the text, as the "came up later"
-        # check reads them: one report can know a thing as an item and
-        # another as words alone, and that is still one thing.
-        keys = set(pulse.store.same_thing(row))
-        if keys & seen or row["later"] or not row["text"]:
+    for row in pulse_store.left_out(_left_out_since(pulse_store, time.time() if now is None else now), LEFT_OUT_ROWS):
+        # One report can know a thing as a remembered item and another as
+        # words alone, and an item's words can change: it is one thing.
+        if row["thing"] in seen or row["later"] or not row["text"]:
             continue
-        seen |= keys
+        seen.add(row["thing"])
         out.append({"id": row["id"], "created_at": row["created_at"], "kind": row["kind"], "text": row["text"],
                     "why": row["why"], "decision": row["decision"], "skip": row["skip"], "value": row["value"],
                     "learned": pulse_learning.factor_entry(row["factor"]), "origin": row["origin"],
@@ -513,24 +513,30 @@ def left_out(pulse_store: Any, home: Optional[Path] = None, now: Optional[float]
     out.sort(key=lambda entry: (order.get(entry["decision"], len(order)), -entry["created_at"],
                                 -(entry["value"] or 0), entry["id"]))
     out = out[:limit]
-    # Titles only for what's listed: each is a read of Hermes's chats.
+    # Titles only for what's listed: each can be a read of Hermes's chats.
     titles: dict[tuple[str, str], str] = {}
     for entry in out:
         chat = (entry["profile"], entry["chat_id"])
         if chat[1] and chat not in titles:
-            titles[chat] = (pulse_followup.chat_title(Path(home), {"profile": chat[0], "chat_id": chat[1]})
-                            if home is not None else pulse_store.card_chat_title(*chat))
+            titles[chat] = _chat_title(pulse_store, home, *chat)
         entry["chat_title"] = titles.get(chat, "")
     return out
+
+
+def _chat_title(pulse_store: Any, home: Optional[Path], profile: str, chat_id: str) -> str:
+    """A chat's title as What Pulse learned names it, the one its newest
+    card gave it, or as Hermes has it for a chat no card came from yet."""
+    return pulse_store.card_chat_title(profile, chat_id) or (
+        pulse_followup.chat_title(Path(home), {"profile": profile, "chat_id": chat_id}) if home is not None else "")
 
 
 def bring_up(pulse_store: Any, candidate_id: Any, home: Optional[Path] = None,
              now: Optional[float] = None) -> dict[str, Any]:
     """Makes a card on the Pulse screen of something a report left out
     (``left_out``), as a report card: its thumbs, Do it and Done teach Pulse
-    about things like it. The card it already became, if it did. Refused
-    while Pulse is off, and for a candidate that came up or the journal no
-    longer has."""
+    about things like it. The card it already became, if it or another
+    candidate about the same thing did. Refused while Pulse is off, and for
+    a candidate whose thing came up or the journal no longer has."""
     if not pulse_store.get("enabled"):
         raise Refused("pulse_off")
     if not isinstance(candidate_id, int) or isinstance(candidate_id, bool):
@@ -538,11 +544,11 @@ def bring_up(pulse_store: Any, candidate_id: Any, home: Optional[Path] = None,
     found = pulse_store.candidate(candidate_id)
     if found is None or found["decision"] == pulse_candidates.SURFACED or not found["text"]:
         raise Refused("invalid", field="id")
+    now = time.time() if now is None else now
     row = pulse_learning.left_out_card(
-        pulse_store, found, kinds=pulse_report.KINDS, now=time.time() if now is None else now,
-        item_chat_title=lambda item: pulse_followup.chat_title(Path(home), item) if home is not None
-        else pulse_store.card_chat_title(item["profile"], item["chat_id"]))
-    card_id = pulse_store.bring_up(candidate_id, row)
+        pulse_store, found, kinds=pulse_report.KINDS, now=now,
+        item_chat_title=lambda item: _chat_title(pulse_store, home, item["profile"], item["chat_id"]))
+    card_id = pulse_store.bring_up(candidate_id, row, _left_out_since(pulse_store, now))
     card = pulse_store.card(card_id) if card_id is not None else None
     if card is None:
         raise Refused("invalid", field="id")

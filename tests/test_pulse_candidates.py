@@ -15,7 +15,7 @@ import pytest
 
 from test_pulse import (FIXTURE_SCHEMA, ROOT, SID, VOLCENGINE, VOLCENGINE_CONFIG, Routes, StateDB, _load, cli,  # noqa: F401
                         control, host, pulse, pulse_store, report, store)
-from test_pulse_followup import CHAT, commitment, fake_redactor, live  # noqa: F401
+from test_pulse_followup import CHAT, commitment, fake_redactor, followup, live  # noqa: F401
 
 candidates = _load("conduit_push.pulse_candidates", ROOT / "pulse_candidates.py")
 learning = _load("conduit_push.pulse_learning", ROOT / "pulse_learning.py")
@@ -848,6 +848,85 @@ def test_bringing_up_something_a_later_report_brought_up_is_refused(live):
             control.bring_up(live.store, stale, live.home, now=now)
         assert refused.value.code == "invalid" and refused.value.data == {"field": "id"}
     assert live.store.cards() == []
+
+
+def test_a_thing_is_one_thing_however_the_reports_joined_its_names(live):
+    """A remembered item's words changed between reports, and a later report
+    brought up only the new words: every candidate about it came up, the
+    item's old words too, so none lists and none can be brought up."""
+    now = time.time()
+    [old] = journal(live, "r1", [{"text": "Renew the passport", "origin": candidates.MEMORY, "item_id": 7}],
+                    now - 7200)
+    [new] = journal(live, "r2", [{"text": "Renew the passport by Friday", "origin": candidates.MEMORY, "item_id": 7,
+                                  "decision": candidates.RESTING}], now - 3600)
+    journal(live, "r3", [{"text": "renew the passport  by Friday", "decision": candidates.SURFACED, "rank": 1}],
+            now - 1800)
+    assert control.left_out(live.store, live.home, now=now) == []
+    for stale in (old, new):
+        with pytest.raises(control.Refused) as refused:
+            control.bring_up(live.store, stale, live.home, now=now)
+        assert refused.value.code == "invalid"
+    assert live.store.cards() == []
+
+
+def test_what_came_up_without_a_candidate_list_came_up(live):
+    """A report sent without its candidate list still makes cards, and so
+    does a follow-up: what they brought up after a report left it out came
+    up, so it isn't listed and can't be brought up. A card from before that
+    report doesn't count."""
+    now = time.time()
+    [plants, passport, gym] = journal(live, "r1", [
+        {"text": "Water the plants"},
+        {"text": "Renew the passport", "origin": candidates.MEMORY, "item_id": 7, "decision": candidates.RESTING},
+        {"text": "The gym at 7"}], now - 7200)
+    live.store.add_card({"kind": store.NOTICED, "level": "screen", "topic": "chore", "news": "water the  Plants",
+                         "created_at": now - 3600})
+    live.store.add_card({"kind": followup.FOLLOWUP, "item_id": 7, "level": "screen", "news": "Did you renew it?",
+                         "created_at": now - 3000})
+    live.store.add_card({"kind": store.NOTICED, "level": "screen", "news": "The gym at 7", "created_at": now - 9000})
+    assert [entry["id"] for entry in control.left_out(live.store, live.home, now=now)] == [gym]
+    for came_up in (plants, passport):
+        with pytest.raises(control.Refused) as refused:
+            control.bring_up(live.store, came_up, live.home, now=now)
+        assert refused.value.code == "invalid"
+    assert control.bring_up(live.store, gym, live.home, now=now)["news"] == "The gym at 7"
+
+
+def test_a_thing_brought_up_is_that_card_whichever_report_left_it_out(live):
+    """Brought up from one report's list, a thing a later report left out
+    again lists as that card, and bringing up any candidate about it gets
+    that card, not a second one, until Pulse lets the card go."""
+    now = time.time()
+    [first] = journal(live, "r1", [{"text": "Renew the passport", "origin": candidates.MEMORY, "item_id": 7}],
+                      now - 7200)
+    card = control.bring_up(live.store, first, live.home, now=now - 7000)
+    [again] = journal(live, "r2", [{"text": "Renew the passport by Friday", "origin": candidates.MEMORY,
+                                    "item_id": 7, "decision": candidates.RESTING}], now - 3600)
+    [entry] = control.left_out(live.store, live.home, now=now)
+    assert (entry["id"], entry["card_id"]) == (again, card["id"])
+    for candidate_id in (again, first):
+        assert control.bring_up(live.store, candidate_id, live.home, now=now)["id"] == card["id"]
+    assert len(live.store.cards()) == 1
+    with sqlite3.connect(live.store.path) as conn:
+        conn.execute("DELETE FROM cards WHERE id=?", (card["id"],))
+    [entry] = control.left_out(live.store, live.home, now=now)
+    assert entry["card_id"] is None
+    remade = control.bring_up(live.store, again, live.home, now=now)
+    assert remade["id"] != card["id"] and control.bring_up(live.store, first, live.home, now=now)["id"] == remade["id"]
+
+
+def test_what_pulse_left_out_names_a_chat_as_what_pulse_learned_does(live):
+    """By the title the chat's newest card gave it, so a chat Hermes no
+    longer has keeps its name, and by Hermes's for a chat no card came from
+    yet; a card brought up from it takes the same name."""
+    now = time.time()
+    [gone, _] = journal(live, "r1", [{"text": "Plan the trip", "chat_id": "gone"},
+                                     {"text": "The gym at 7", "chat_id": CHAT}], now - 600)
+    live.store.add_card({"kind": store.NOTICED, "level": "screen", "news": "Book the flights", "chat_id": "gone",
+                         "chat_title": "Holiday", "created_at": now - 9000})
+    titles = {entry["chat_id"]: entry["chat_title"] for entry in control.left_out(live.store, live.home, now=now)}
+    assert titles == {"gone": "Holiday", CHAT: "Deploy"}
+    assert control.bring_up(live.store, gone, live.home, now=now)["chat_title"] == "Holiday"
 
 
 def test_bringing_up_a_remembered_item_points_at_its_chat(live):
