@@ -18,6 +18,11 @@ checks it). The format is fixed, because Conduit reads it:
 ### New and improved
 - When Hermes needs several details only you can give, like where you leave from and your budget for a trip, it can ask them all at once, and Conduit shows them as a form: fill in what you know, leave the rest blank, and send it once. On a call from Hermes, say "skip" to leave one blank.
 
+## 0.81.2 (2026-10-26)
+
+### Fixes
+- A call Hermes places from a scheduled (cron) job now rings. Hermes runs those jobs in a worker that exits as soon as the job ends, and that cut off the call request on its way to the relay, so nothing rang and no missed call was reported. The same could drop a job's ordinary notification.
+
 ## 0.81.1 (2026-10-26)
 
 ### New and improved

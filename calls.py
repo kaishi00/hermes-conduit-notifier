@@ -26,6 +26,7 @@ dashboard's outcome route), and the next turn of its chat tells Hermes so
 
 from __future__ import annotations
 
+import atexit
 import contextvars
 import logging
 import threading
@@ -44,15 +45,83 @@ logger = logging.getLogger("hermes.plugins.conduit_push")
 CALL_TITLE = "Hermes wants to talk"
 # Seconds to wait before each delivery attempt.
 DELIVERY_DELAYS_S = (0.0, 2.0, 4.0)
+# How long a turn's end waits for its call requests to reach the relay. A cron
+# job's worker process exits right after its turn, taking a delivery thread
+# with it mid-send (#388); the bound keeps a slow relay from holding the turn.
+DELIVERY_WAIT_S = 3.0
+# How long the process's exit waits for call requests still on their way
+# (their retries, or the usual push they fall back to).
+EXIT_WAIT_S = 10.0
 # The relay's errors for an event it took but Apple didn't (relay/src/server.mjs).
 APNS_FAILURES = frozenset({"apns_rejected", "apns_unreachable"})
 
 
-def _spawn(work: Callable[[], None]) -> None:
+def _spawn(work: Callable[[], None]) -> bool:
+    """Starts ``work`` on a thread of its own; False when the plugin is unloaded."""
     if _stopped.is_set():
-        return
+        return False
     # Under the profile that started the work (see client.enqueue).
     threading.Thread(target=contextvars.copy_context().run, args=(work,), name="conduit-call", daemon=True).start()
+    return True
+
+
+# Deliveries still on their way, each with what's set once it ends, for the
+# wait at exit.
+_in_flight: set[threading.Event] = set()
+_in_flight_lock = threading.Lock()
+
+
+def _deadline() -> float:
+    return time.monotonic() + DELIVERY_WAIT_S
+
+
+def _deliver_waited(event: dict[str, Any], fallback: dict[str, Any] | None, deadline: float | None = None) -> None:
+    """Delivers ``event`` on its own thread, returning once it's done or at
+    ``deadline`` (DELIVERY_WAIT_S from now), whichever comes first. Retries go
+    on past it, and the process's exit waits for them (_wait_at_exit)."""
+    if _stopped.is_set():
+        return
+    done = threading.Event()
+
+    def work() -> None:
+        try:
+            deliver(event, fallback)
+        finally:
+            with _in_flight_lock:
+                _in_flight.discard(done)
+            done.set()
+    with _in_flight_lock:
+        _in_flight.add(done)
+    try:
+        started = _spawn(work)
+    except BaseException:
+        with _in_flight_lock:
+            _in_flight.discard(done)
+        raise
+    if started is False:  # unloaded meanwhile
+        with _in_flight_lock:
+            _in_flight.discard(done)
+        return
+    done.wait(max(0.0, (_deadline() if deadline is None else deadline) - time.monotonic()))
+
+
+def _wait_at_exit() -> None:
+    """At interpreter exit: waits up to EXIT_WAIT_S for deliveries still on
+    their way. Daemon threads still run while atexit does. Registered after
+    client's drain, so it runs first and a fallback it queues still goes."""
+    if _stopped.is_set():
+        return
+    deadline = time.monotonic() + EXIT_WAIT_S
+    with _in_flight_lock:
+        pending = list(_in_flight)
+    for done in pending:
+        done.wait(max(0.0, deadline - time.monotonic()))
+    left = sum(not done.is_set() for done in pending)
+    if left:
+        logger.info("Conduit left %d call request(s) unsent at exit", left)
+
+
+atexit.register(_wait_at_exit)
 
 
 # Homes with a waiter thread running, so a burst of held turn ends starts one,
@@ -130,9 +199,11 @@ def turn_ended(session_id: str, outcome: str, *, profile: str, fallback: dict[st
     except Exception:  # noqa: BLE001
         logger.warning("Conduit could not open call watches for this turn", exc_info=True)
         return False
+    # One wait for every call this turn end sends.
+    deadline = _deadline()
     try:
         # Watches consumed here are sent even if this turn's own check fails.
-        _send_due(store.fire_due(), profile)
+        _send_due(store.fire_due(), profile, deadline)
     except Exception:  # noqa: BLE001
         logger.warning("Conduit could not sweep held calls", exc_info=True)
     try:
@@ -155,16 +226,19 @@ def turn_ended(session_id: str, outcome: str, *, profile: str, fallback: dict[st
         return False
     try:
         event = call_event(result["watch"], outcome, session_id=session_id, profile=profile)
-        _spawn(lambda: deliver(event, fallback))
+        _deliver_waited(event, fallback, deadline)
     except Exception:  # noqa: BLE001 — the caller sends its usual push
         logger.warning("Conduit could not send a call request", exc_info=True)
         return False
     return True
 
 
-def _send_due(results: list[dict[str, Any]], profile: str) -> None:
+def _send_due(results: list[dict[str, Any]], profile: str, deadline: float | None = None) -> None:
     """Calls for jobs that ended during a hold that ran out. Their ordinary
-    push went out when they ended, so there is nothing to fall back to."""
+    push went out when they ended, so there is nothing to fall back to. All
+    of them wait together, until ``deadline`` (DELIVERY_WAIT_S from now)."""
+    if deadline is None:
+        deadline = _deadline()
     for result in results:
         if result["status"] != "call":
             logger.info("Conduit call for a finished job held back: %s", result.get("reason") or result["status"])
@@ -172,7 +246,7 @@ def _send_due(results: list[dict[str, Any]], profile: str) -> None:
         # One that can't go out never stops the rest: they're consumed too.
         try:
             event = call_event(result["watch"], result["outcome"], session_id=result["session_id"], profile=profile)
-            _spawn(lambda event=event: deliver(event, None))
+            _deliver_waited(event, None, deadline)
         except Exception:  # noqa: BLE001
             logger.warning("Conduit could not send a held call", exc_info=True)
 
@@ -488,7 +562,7 @@ def failed_turn(session_id: str, *, profile: str, fallback: dict[str, Any] | Non
         return False
     try:
         event = call_event(result["watch"], "failed", session_id=session_id, profile=profile)
-        _spawn(lambda: deliver(event, fallback))
+        _deliver_waited(event, fallback)
     except Exception:  # noqa: BLE001 — the caller sends its usual push
         logger.warning("Conduit could not send a call request", exc_info=True)
         return False
