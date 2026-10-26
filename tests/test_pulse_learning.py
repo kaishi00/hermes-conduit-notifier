@@ -599,6 +599,23 @@ def test_do_it_and_done_are_signals_by_how_far_they_got(live):
     assert [(row["what"], row["weight"]) for row in live.store.signals()] == [("act", prefs.ACT_SENT)]
 
 
+def test_a_report_cards_later_signals_keep_where_it_came_from_once_the_journal_drops_it(live):
+    now = time.time()
+    place, band = prefs.place("", CHAT), prefs.band(now + 3600, now)
+    [row_id] = live.store.add_candidates("r1", [{
+        "origin": "model", "kind": "date", "chat_id": CHAT, "source": "chat", "due_at": now + 3600, "value": 4,
+        "bring_up": True, "text": "The dentist moved to 9", "decision": "surfaced", "rank": 1, "band": band,
+        "place": place}], now=now)
+    [card_id] = live.store.add_cards([{"kind": store.NOTICED, "level": "screen", "topic": "date",
+                                       "title": "The dentist moved to 9", "news": "The dentist moved to 9",
+                                       "chat_id": CHAT, "created_at": now}], links=[row_id])
+    control.rate(live.store, card_id, "up")
+    assert live.store.prune_candidates(now + 1) == 1  # thirty days on
+    assert control.done(live.store, card_id) is True
+    assert {(row["what"], row["kind"], row["place"], row["band"]) for row in live.store.signals()} == {
+        ("thumb", "date", place, band), ("done", "date", place, band)}
+
+
 def test_ratings_are_refused_while_pulse_is_off(live):
     card = told_card(live)
     live.store.set("enabled", False)

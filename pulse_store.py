@@ -1408,9 +1408,9 @@ class PulseStore:
 
 def _signal_attrs(conn: sqlite3.Connection, card_id: int) -> Optional[dict[str, Any]]:
     """What a card's signals carry: its kind, place and band as it came up
-    (from its candidate when the journal still has it), and when it was
-    pushed, if it was. None for a card that takes none (a report or brief
-    as a whole)."""
+    (from its candidate when the journal still has it, else as the card's
+    earlier signals had them), and when it was pushed, if it was. None for a
+    card that takes none (a report or brief as a whole)."""
     card = conn.execute("SELECT * FROM cards WHERE id=?", (card_id,)).fetchone()
     if card is None or card["kind"] not in ("followup", NOTICED):
         return None
@@ -1420,6 +1420,10 @@ def _signal_attrs(conn: sqlite3.Connection, card_id: int) -> Optional[dict[str, 
         return {"kind": found["kind"], "pushed": pushed,
                 "place": found["place"] or prefs.place(found["profile"], found["chat_id"], found["area"], found["source"]),
                 "band": found["band"] or prefs.band(found["due_at"], float(found["created_at"]))}
+    # The journal keeps thirty days: a Done weeks after a thumb counts for what the thumb did.
+    kept = conn.execute("SELECT kind, place, band FROM signals WHERE card_id=? LIMIT 1", (card_id,)).fetchone()
+    if kept is not None:
+        return {"kind": kept["kind"], "place": kept["place"], "band": kept["band"], "pushed": pushed}
     item = conn.execute("SELECT due_at FROM items WHERE id=?", (card["item_id"],)).fetchone() \
         if card["item_id"] is not None else None
     band = prefs.band(item["due_at"], float(card["created_at"])) if item is not None else ""
