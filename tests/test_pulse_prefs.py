@@ -162,3 +162,70 @@ def test_why_names_the_biggest_part_and_the_votes_behind_it():
     timely = learn(history() + today).factor(prefs.attributes("commitment", "chat::new", "today"))
     assert (timely["scope"], timely["value"], timely["votes"]) == ("timely", "yes", 6.0)
     assert prefs.factor_words(timely).startswith("less of things due within the day or overdue: useful")
+
+
+def test_a_reset_forgets_what_was_learned_about_one_thing_until_then():
+    attrs = prefs.attributes("interest", "chat::x", "undated")
+    rows = history() + downs(3)
+    assert not surfaces(learn(rows))
+    # A chat's: the thumbs down on it go, what's learned elsewhere stays.
+    chat = prefs.learn(rows, NOW, [("place", "chat::x", NOW)])
+    assert surfaces(chat) and chat.score(attrs) == pytest.approx(learn(history()).score(attrs))
+    # Votes after the reset count: two of the three came after this one.
+    since = prefs.learn(rows, NOW, [("place", "chat::x", NOW - 1.5 * DAY)])
+    assert since.score(attrs) == pytest.approx(learn(history() + downs(2, start=101)).score(attrs))
+    # A kind's, from every chat.
+    watch = prefs.attributes("watch", "chat::new", "undated")
+    watched = history() + [signal(n, NOW - n * 3600, kind="watch", place=f"chat::c{n}") for n in range(1, 7)]
+    assert prefs.learn(watched, NOW, [("kind", "watch", NOW)]).score(watch) == \
+        pytest.approx(learn(history()).score(watch))
+    # A timing's.
+    today = [signal(200 + n, NOW - n * DAY, band="today", kind=("promise", "date", "interest")[n % 3],
+                    place=f"chat::t{n}") for n in range(6)]
+    soon = prefs.attributes("commitment", "chat::new", "today")
+    assert learn(history() + today).factor(soon)["scope"] == "timely"
+    assert prefs.learn(history() + today, NOW, [("timely", "yes", NOW)]).score(soon) == \
+        pytest.approx(learn(history()).score(soon))
+    # Everything, and a reset of nothing it knows changes nothing.
+    assert prefs.learn(rows, NOW, [("everything", "", NOW)]) is prefs.EMPTY
+    assert prefs.forget(rows, [("bogus", "x", NOW), ("place", "chat::y", NOW)]) == rows
+
+
+def test_a_reset_of_a_kinds_loudness_forgets_the_pushes_acted_on_until_then_and_only_those():
+    pushed = NOW - 2 * 3600
+    rows = history() + [signal(n, pushed + 60 * n, 1.0, what="act", weight=prefs.ACT_OPENED, pushed=pushed)
+                        for n in range(1, 4)]
+    learned = learn(rows)
+    assert learned.loudness("interest") > 0 and learned.pushes == {"interest": 3}
+    attrs = prefs.attributes("interest", "chat::x", "undated")
+    # The loudness from the first two goes; what the acts taught as votes stays.
+    loud = prefs.learn(rows, NOW, [("loud", "interest", pushed + 120)])
+    assert loud.pushes == {"interest": 1} and loud.loudness("interest") < learned.loudness("interest")
+    assert loud.score(attrs) == pytest.approx(learned.score(attrs))
+    assert prefs.learn(rows, NOW, [("loud", "date", NOW)]).loudness("interest") == learned.loudness("interest")
+    # Forgetting the votes about the kind or its chat leaves its loudness: each is its own.
+    for reset in (("kind", "interest", NOW), ("place", "chat::x", NOW)):
+        kept = prefs.learn(rows, NOW, [reset])
+        assert kept.loudness("interest") == learned.loudness("interest") and kept.pushes == {"interest": 3}
+    alone = prefs.learn(rows[-3:], NOW, [("kind", "interest", NOW)])
+    assert alone.votes == 0 and alone.loudness("interest") == learned.loudness("interest")
+    # Everything forgets it too.
+    assert prefs.learn(rows, NOW, [("everything", "", NOW)]) is prefs.EMPTY
+
+
+def test_preferences_list_what_learning_holds_strongest_first():
+    assert prefs.EMPTY.preferences() == []
+    pushed = NOW - 2 * 3600
+    learned = learn(history() + downs(3) + [signal(500, pushed + 60, 1.0, what="act", weight=prefs.ACT_OPENED,
+                                                   kind="date", place="chat::y", pushed=pushed)])
+    found = learned.preferences()
+    votes = [entry for entry in found if entry["scope"] != prefs.LOUD]
+    assert votes and all(abs(entry["effect"]) >= prefs.SHOWN_EFFECT for entry in votes)
+    assert [abs(entry["effect"]) for entry in votes] == sorted((abs(entry["effect"]) for entry in votes), reverse=True)
+    # The chat's says the votes behind it, as its Why? does.
+    chat = next(entry for entry in votes if entry["value"] == "chat::x")
+    factor = learned.factor(prefs.attributes("interest", "chat::x", "undated"))
+    assert chat == {"scope": "place", "value": "chat::x", "effect": factor["effect"], "useful": 0.0, "votes": 3.0}
+    # Loudness last, with the pushes that earned it.
+    assert found[-1] == {"scope": prefs.LOUD, "value": "date", "effect": round(learned.loudness("date"), 2),
+                         "pushes": 1}

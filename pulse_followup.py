@@ -967,6 +967,17 @@ def next_send(pulse_store: store.PulseStore, now: float, home: Optional[Path] = 
 FLOOR_S = 86400.0
 
 
+def _due(item: dict) -> Optional[float]:
+    due = item.get("due_at")
+    return float(due) if isinstance(due, (int, float)) and not isinstance(due, bool) else None
+
+
+def item_attrs(item: dict, now: float) -> dict[str, str]:
+    """A follow-up's attributes as learning sees them (pulse_prefs.attributes):
+    the follow-ups' kind, its chat, and how soon it's due."""
+    return prefs.attributes(FOLLOWUP, prefs.place(item["profile"], item["chat_id"]), prefs.band(_due(item), now))
+
+
 def item_level(item: dict, learned: prefs.Learned, *, nudge: str, ceiling: str, now: float) -> str:
     """How loudly a follow-up the check decided to tell comes up: its score
     (pulse_prefs.score: what learning adds for follow-ups from its chat and
@@ -976,9 +987,8 @@ def item_level(item: dict, learned: prefs.Learned, *, nudge: str, ceiling: str, 
     something due soon whatever its due date, which counts for what's
     learned about timing: with nothing learned it pushes at every nudge
     level, as follow-ups did before learning."""
-    due = item.get("due_at") if isinstance(item.get("due_at"), (int, float)) and \
-        not isinstance(item.get("due_at"), bool) else None
-    attrs = prefs.attributes(FOLLOWUP, prefs.place(item["profile"], item["chat_id"]), prefs.band(due, now))
+    due = _due(item)
+    attrs = item_attrs(item, now)
     floor = due is not None and (due < now if item["kind"] == PROMISE
                                  else item["kind"] == COMMITMENT and abs(due - now) <= FLOOR_S)
     level = prefs.level(prefs.score(learned, attrs), prefs.SOON, loud=learned.loudness(FOLLOWUP), nudge=nudge,
@@ -991,8 +1001,10 @@ def _told(pulse_store: store.PulseStore, item: dict, followup: dict, now: float,
     """A follow-up reached the user (delivered, or a card at ``loudness``):
     its card, then the promise closes, or, for the week-old "still want
     it?", stays open for one last check."""
+    attrs = item_attrs(item, now)
     learning.add_card(pulse_store, kind=FOLLOWUP, item=item, level_name=loudness, news=followup["news"],
-                      why=followup["why"], chat_title=chat_title(home, item) if home is not None else "", now=now)
+                      why=followup["why"], chat_title=chat_title(home, item) if home is not None else "", now=now,
+                      learned=pulse_store.learned(now).factor(attrs), place=attrs["place"], band=attrs["band"])
     if followup["news"] == STALE_NEWS and item["status"] == "open" and item["superseded_at"] is None:
         # The ask is done with: news from the last check gets its own attempts.
         pulse_store.retire_attempts(f"-f{item['id']}")

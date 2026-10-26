@@ -29,11 +29,14 @@ code, not as a hint to a model:
 Each reason's change is a lesson row; the Pulse screen lists them and
 undoing one puts Pulse back the way it was for what comes next (promises a
 rule already closed stay closed, checks already brought forward stay
-sooner).
+sooner). So is a reset (``reset``): it forgets what the signals taught
+about one kind, place or timing, a kind's loudness, or everything, and
+undoing it counts them again.
 """
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Callable, Optional, Sequence
 
@@ -52,6 +55,9 @@ MAX_SOONER = 2
 SET, TOO_OFTEN = "set", "too often"
 STEPPED = store.STEPPED_CAUSES
 LEVEL, RULE, SOONER_LESSON, SEEN = "level", "rule", "sooner", "seen"
+# A reset: its kind is what it forgets (pulse_prefs.RESET_SCOPES), its
+# value which one ("" for everything).
+RESET = store.RESET
 TOPIC_LIMIT = 200
 CARDS = 100
 
@@ -136,9 +142,12 @@ def muted_by(pulse_store: store.PulseStore, kind: str, profile: str, chat_id: st
 # Cards ------------------------------------------------------------------------
 
 def add_card(pulse_store: store.PulseStore, *, kind: str, item: dict, level_name: str, news: str, why: str,
-             chat_title: str, now: float) -> int:
+             chat_title: str, now: float, learned: Optional[dict] = None, place: str = "", band: str = "") -> int:
     """The item's card for this news; the one already there when a crash
-    came between making it and closing the item."""
+    came between making it and closing the item. ``learned``: the biggest
+    part learning played in bringing it up (pulse_prefs' Learned.factor),
+    for its Why?; ``place`` and ``band``: where it came from and how soon
+    it was due as it came up, which its signals carry."""
     existing = pulse_store.card_for(kind, item["id"], news)
     if existing is not None:
         return existing
@@ -146,7 +155,27 @@ def add_card(pulse_store: store.PulseStore, *, kind: str, item: dict, level_name
         "kind": kind, "item_id": item["id"], "level": level_name, "title": _clip(item["text"], 300),
         "quote": _clip(item["evidence"], 300), "news": news, "why": why, "profile": item["profile"],
         "chat_id": item["chat_id"], "chat_title": _clip(chat_title, 120), "message_id": item["message_id"],
-        "created_at": now})
+        "created_at": now, "learned": factor_json(learned), "place": place, "band": band})
+
+
+def factor_json(factor: Any) -> str:
+    """A factor (pulse_prefs' Learned.factor) as a card or candidate keeps
+    it: JSON, "" for none."""
+    if isinstance(factor, str):
+        return factor
+    return json.dumps(factor, sort_keys=True) if isinstance(factor, dict) and factor else ""
+
+
+def factor_entry(factor: Any) -> Optional[dict]:
+    """A kept factor as the app reads it: {"scope", "value", "effect",
+    "useful", "votes"}, or None."""
+    try:
+        found = json.loads(factor) if isinstance(factor, str) and factor else factor
+    except ValueError:
+        return None
+    if not isinstance(found, dict) or found.get("scope") not in ("all",) + prefs.FEATURES:
+        return None
+    return {key: found.get(key) for key in ("scope", "value", "effect", "useful", "votes")}
 
 
 # A report or brief as it reached the Pulse chat, on the Pulse screen too.
@@ -221,7 +250,8 @@ def add_noticed_cards(pulse_store: store.PulseStore, *, turn: Any, lines: list[t
                       item_chat_title: Callable[[dict], str], now: float, attempt: str = "",
                       marks: tuple[str, ...] = (), keep: int = 50, links: Sequence[int] = (),
                       found_in: Sequence[tuple[str, str]] = (), whys: Sequence[str] = (),
-                      levels: Sequence[str] = ()) -> list[int]:
+                      levels: Sequence[str] = (), factors: Sequence[str] = (),
+                      attrs: Sequence[tuple[str, str]] = ()) -> list[int]:
     """A delivered report's items (``report_lines``) as cards, one each, all
     at once, marked as ``add_cards`` marks them. An item drawn from a
     remembered thing (its "#n", shown in the report; what replaced it since,
@@ -232,7 +262,10 @@ def add_noticed_cards(pulse_store: store.PulseStore, *, turn: Any, lines: list[t
     line's reason (why now, where it came from), the card's Why?; a report
     written without a candidate list has none. ``levels``: how loudly each
     came up (pulse_candidates.levels: push, screen or brief); "screen" for
-    one without.
+    one without. ``factors``: the biggest part learning played in each
+    (pulse_candidates.factors), for its Why?; ``attrs``: each one's place
+    and band as it came up (pulse_candidates.card_attrs), which its signals
+    carry.
     ``item_chat_title`` gives a chat's title from its profile and chat_id."""
     rows = []
     for n, (kind, text, ref) in enumerate(lines):
@@ -242,7 +275,10 @@ def add_noticed_cards(pulse_store: store.PulseStore, *, turn: Any, lines: list[t
         level_name = levels[n] if n < len(levels) and levels[n] in ("push", "screen", "brief") else "screen"
         row: dict[str, Any] = {
             "kind": NOTICED, "level": level_name, "topic": kind if kind in kinds else "other",
-            "news": _clip(text, NOTICED_NEWS_LIMIT), "why": whys[n] if n < len(whys) else "", "created_at": now}
+            "news": _clip(text, NOTICED_NEWS_LIMIT), "why": whys[n] if n < len(whys) else "", "created_at": now,
+            "learned": factor_json(factors[n]) if n < len(factors) else ""}
+        if n < len(attrs):
+            row["place"], row["band"] = attrs[n]
         if item is not None:
             row.update(item_id=item["id"], title=_clip(item["text"], 300), quote=_clip(item["evidence"], 300),
                        profile=item["profile"], chat_id=item["chat_id"], message_id=item["message_id"],
@@ -257,13 +293,42 @@ def add_noticed_cards(pulse_store: store.PulseStore, *, turn: Any, lines: list[t
     return pulse_store.add_cards(rows, attempt=attempt, marks=marks, keep=keep, links=links)
 
 
+def left_out_card(pulse_store: store.PulseStore, found: dict, *, kinds: tuple[str, ...], now: float,
+                  item_chat_title: Callable[[dict], str]) -> dict[str, Any]:
+    """The card for something a report left out that the user brought up
+    (pulse_control.bring_up): a report card shown without a push, as
+    ``add_noticed_cards`` makes one from ``found``, its journaled
+    candidate, keeping its reason, the part learning played and how it came
+    up. One from no chat points at none, so Do it starts a new chat."""
+    kind = found["kind"]
+    row: dict[str, Any] = {
+        "kind": NOTICED, "level": "screen", "topic": kind if kind in kinds else "other",
+        "news": _clip(found["text"], NOTICED_NEWS_LIMIT), "why": found["why"] or "", "created_at": now,
+        "learned": found["factor"] or "", "place": found["place"] or "", "band": found["band"] or ""}
+    current = pulse_store.current_item(found["item_id"]) if found["item_id"] is not None else None
+    item = pulse_store.item(current) if current is not None else None
+    if item is not None:
+        row.update(item_id=item["id"], title=_clip(item["text"], 300), quote=_clip(item["evidence"], 300),
+                   profile=item["profile"], chat_id=item["chat_id"], message_id=item["message_id"],
+                   chat_title=_clip(item_chat_title(item), 120))
+    elif found["chat_id"]:
+        row.update(item_id=None, title=_clip(found["text"], 300), profile=found["profile"], chat_id=found["chat_id"],
+                   chat_title=_clip(item_chat_title({"profile": found["profile"], "chat_id": found["chat_id"]}), 120))
+    else:
+        row.update(item_id=None, title=_clip(found["text"], 300))
+    return row
+
+
 def card_entry(card: dict, done: Optional[dict] = None) -> dict[str, Any]:
-    """``done``: its done mark, as ``done_marks`` gives it."""
+    """``done``: its done mark, as ``done_marks`` gives it. ``learned``: the
+    biggest part learning played in bringing it up (``factor_entry``), or
+    None."""
     entry = {key: card[key] for key in ("id", "kind", "item_id", "level", "title", "quote", "news", "why", "profile",
                                         "chat_id", "chat_title", "message_id", "topic", "created_at", "seen_at",
                                         "briefed_at", "brief", "dismissed_at", "rest_until", "rating", "reason",
                                         "rated_at")}
-    return {**entry, "done_at": done["done_at"] if done else None, "done_by": done["done_by"] if done else ""}
+    return {**entry, "done_at": done["done_at"] if done else None, "done_by": done["done_by"] if done else "",
+            "learned": factor_entry(card.get("learned"))}
 
 
 # Done -------------------------------------------------------------------------
@@ -435,6 +500,26 @@ def undo(pulse_store: store.PulseStore, lesson_id: Any, now: float) -> bool:
     return pulse_store.undo_lesson(lesson_id, now)
 
 
+RESET_VALUE_LIMIT = 300
+
+
+def reset(pulse_store: store.PulseStore, scope: Any, value: Any, now: float) -> dict:
+    """Forgets what learning holds about one thing (pulse_prefs.forget): a
+    kind, a place or a timing (``scope`` "kind", "place" or "timely", with
+    the attribute's value as pulse_prefs.preferences gives it), a kind's
+    loudness ("loud", with the kind), or everything ("everything", no
+    value). The lesson; undoing it counts the signals again."""
+    if not isinstance(scope, str) or scope not in prefs.RESET_SCOPES:
+        raise Invalid("scope")
+    value = value if isinstance(value, str) else None
+    if value is None or (scope == prefs.EVERYTHING) != (value == "") or len(value) > RESET_VALUE_LIMIT \
+            or (scope == "timely" and value not in ("yes", "no")):
+        raise Invalid("value")
+    row = _lesson(pulse_store, scope, RESET, value=value, cause="reset", now=now)
+    assert row is not None  # no limit: always added
+    return row
+
+
 # Listing ----------------------------------------------------------------------
 
 def describe(lesson: dict) -> str:
@@ -448,9 +533,28 @@ def describe(lesson: dict) -> str:
         text = f"{kind}: check sooner"
     elif what == SEEN:
         text = f"{kind}: skip what you already saw in the chat"
+    elif what == RESET:
+        return "Forgot everything learned before this" if lesson["kind"] == prefs.EVERYTHING \
+            else f"Forgot what was learned about {preference_words(lesson['kind'], lesson['value'], lesson.get('chat_title'))}"
     else:
         text = f"{kind}: {what}"
     return text + (f" ({lesson['cause']})" if lesson["cause"] and lesson["cause"] != "set" else "")
+
+
+def preference_words(scope: str, value: str, chat_title: Optional[str] = None) -> str:
+    """What a preference or a reset is about, in words for `pulse learned`;
+    ``chat_title``: a chat place's title, when it's known."""
+    if scope == prefs.LOUD:
+        return f"how loudly {KIND_NAMES.get(value, value)} come up"
+    if scope == "kind":
+        return f"{KIND_NAMES.get(value, value)} items"
+    if scope == "timely":
+        return prefs.TIMELY_WORDS.get(value, value)
+    if scope == "place":
+        return (f"things from {chat_title or 'a chat'}" if value.startswith("chat:")
+                else f"things about {value[5:]}" if value.startswith("area:")
+                else f"things from {value[7:]}" if value.startswith("source:") else value)
+    return "what Pulse brings up" if scope == "all" else value
 
 
 def lesson_entry(lesson: dict) -> dict[str, Any]:

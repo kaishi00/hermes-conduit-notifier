@@ -2609,6 +2609,8 @@ def test_pulse_routes(remembering, db, monkeypatch):
     modules = {"pulse_control": control, "pulse": pulse}
     monkeypatch.setattr(api, "_plugin_package_module", lambda name: modules[name])
     monkeypatch.setattr(api, "_calls_home", lambda: home)
+    # More requests than the minute's limit allows, which this test doesn't test.
+    monkeypatch.setattr(api, "_pulse_limiter", api._MintLimiter(1000, api.PULSE_WINDOW_S, message="limit"))
     app = fastapi.FastAPI()
     app.include_router(api.router, prefix="/api/plugins/conduit_push")
     http = TestClient(app)
@@ -2670,6 +2672,25 @@ def test_pulse_routes(remembering, db, monkeypatch):
     assert http.put(f"{base}/levels", json={"kind": "followup", "level": "screen"}).json()["levels"] == {
         "followup": "screen"}
     assert http.put(f"{base}/levels", json={"kind": "followup", "level": "loud"}).status_code == 400
+    # What learning holds, reset; what the reports left out, and one brought up.
+    assert "pulse_explains" in api.ROUTE_CAPABILITIES
+    assert [entry["scope"] for entry in http.get(f"{base}/learned").json()["preferences"]] != []
+    reset = http.post(f"{base}/learned/reset", json={"scope": "kind", "value": "followup"}).json()
+    assert reset["reset"]["what"] == "reset" and reset["preferences"] == []
+    assert reset["lessons"][0]["id"] == reset["reset"]["id"]
+    bad = http.post(f"{base}/learned/reset", json={"scope": "everything", "value": "followup"})
+    assert bad.status_code == 400 and bad.json()["detail"] == {"code": "invalid", "field": "value"}
+    assert http.post(f"{base}/learned/reset", json={"scope": "everything"}).json()["reset"]["kind"] == "everything"
+    [left] = store_.add_candidates("r1", [{"origin": "model", "kind": "date", "text": "Dentist Friday at 9",
+                                           "decision": "not_picked", "bring_up": False}], now=time.time())
+    got = http.get(f"{base}/left_out")
+    assert got.headers["cache-control"] == "no-store" and [entry["id"] for entry in got.json()["left_out"]] == [left]
+    brought = http.post(f"{base}/left_out/bring_up", json={"id": left}).json()["card"]
+    assert brought["news"] == "Dentist Friday at 9" and brought["level"] == "screen"
+    assert http.post(f"{base}/left_out/bring_up", json={"id": left}).json()["card"]["id"] == brought["id"]
+    assert http.post(f"{base}/left_out/bring_up", json={"id": str(left)}).json()["detail"] == {
+        "code": "invalid", "field": "id"}
+    assert http.post(f"{base}/left_out/bring_up", json=[left]).status_code == 400
     assert "pulse" in api.ROUTE_CAPABILITIES and "pulse_feed" in api.ROUTE_CAPABILITIES
     assert "pulse_daily_brief" in api.ROUTE_CAPABILITIES  # Settings > Pulse says the brief comes every day
     # A report item Pulse found on its own takes Do it and Done too.
@@ -2716,6 +2737,10 @@ def test_pulse_routes(remembering, db, monkeypatch):
     assert http.get(f"{base}/followups").json()["followups"] == []
     assert http.get(f"{base}/feed").json()["cards"] == []
     assert http.get(f"{base}/learned").json()["lessons"] == []
+    assert http.get(f"{base}/learned").json()["preferences"] == []
+    assert http.get(f"{base}/left_out").json()["left_out"] == []
+    assert http.post(f"{base}/learned/reset", json={"scope": "everything"}).json()["detail"]["code"] == "pulse_off"
+    assert http.post(f"{base}/left_out/bring_up", json={"id": 1}).json()["detail"]["code"] == "pulse_off"
     rated = http.post(f"{base}/rate", json={"card": 1, "rating": "up"})
     assert rated.status_code == 409 and rated.json()["detail"]["code"] == "pulse_off"
     assert http.post(f"{base}/report").json()["detail"]["code"] == "pulse_off"

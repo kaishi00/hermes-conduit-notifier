@@ -455,6 +455,20 @@ def levels(picked: Sequence[dict]) -> list[str]:
     return [pick.get("level") or "" for pick in picked]
 
 
+def factors(picked: Sequence[dict]) -> list[str]:
+    """The biggest part learning played in each pick (``route``'s factor,
+    JSON; "" for none), the card's Why?: pulse_learning.add_noticed_cards's
+    ``factors``."""
+    return [pick.get("factor") or "" for pick in picked]
+
+
+def card_attrs(picked: Sequence[dict]) -> list[tuple[str, str]]:
+    """Each pick's place and band as it came up (``route``), which its
+    card's signals carry once the journal lets the candidate go:
+    pulse_learning.add_noticed_cards's ``attrs``."""
+    return [(pick.get("place") or "", pick.get("band") or "") for pick in picked]
+
+
 def found_in(picked: Sequence[dict]) -> list[tuple[str, str]]:
     """The chat each pick came from, as (profile, chat id), ("", "") when it
     came from none (the calendar, reminders, notes, jobs, tools or the

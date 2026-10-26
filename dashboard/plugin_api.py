@@ -8282,6 +8282,44 @@ async def post_pulse_undo(request: Request, response: Response) -> Dict[str, Any
     return await _pulse_route("undo", action, reads_only=True)
 
 
+@router.post("/pulse/learned/reset")
+async def post_pulse_reset(request: Request, response: Response) -> Dict[str, Any]:
+    """{"scope": "kind"|"place"|"timely"|"loud"|"everything", "value": "..."}:
+    forgets what learning holds about one thing ("value" as /pulse/learned's
+    preferences give it, "" for everything); answers with the lesson, which
+    /pulse/learned/undo takes back, and what's learned now."""
+    response.headers["Cache-Control"] = "no-store"
+    body = await _read_json_body(request, PULSE_MAX_BODY_BYTES)
+    body = body if isinstance(body, dict) else {}
+
+    def action(control: Any, store: Any, home: Any) -> Dict[str, Any]:
+        lesson = control.reset(store, body.get("scope"), body.get("value", ""))
+        return {"reset": lesson, **control.learned(store)}
+
+    return await _pulse_route("reset", action, reads_only=True)
+
+
+@router.get("/pulse/left_out")
+async def get_pulse_left_out(response: Response) -> Dict[str, Any]:
+    """What the latest reports considered and left out, and why: those
+    learning or the user's rules kept out first."""
+    response.headers["Cache-Control"] = "no-store"
+    return await _pulse_route("left_out", lambda control, store, home: {"left_out": control.left_out(store, home)},
+                              reads_only=True)
+
+
+@router.post("/pulse/left_out/bring_up")
+async def post_pulse_bring_up(request: Request, response: Response) -> Dict[str, Any]:
+    """{"id": n}: makes a card on the Pulse screen of something a report
+    left out (its id in /pulse/left_out): {"card": {...}}, as the feed lists
+    it, or the card it already became."""
+    response.headers["Cache-Control"] = "no-store"
+    body = await _read_json_body(request, PULSE_MAX_BODY_BYTES)
+    candidate_id = body.get("id") if isinstance(body, dict) else None
+    return await _pulse_route("bring_up", lambda control, store, home: {"card": control.bring_up(
+        store, candidate_id, home)}, reads_only=True)
+
+
 @router.put("/pulse/levels")
 async def put_pulse_levels(request: Request, response: Response) -> Dict[str, Any]:
     """{"kind": "followup", "level": "push"|"screen"|"brief"|"off"}: sets a
@@ -16435,6 +16473,11 @@ ROUTE_CAPABILITIES = (
     # loudly (pulse_prefs); a kind's level is the loudest it gets, and
     # thumbs no longer move it.
     "pulse_learns",
+    # Learning shown: a card's "learned" (the biggest part learning played
+    # in bringing it up, for Why?), /pulse/left_out (what reports left out,
+    # and why) with /pulse/left_out/bring_up, and /pulse/learned's
+    # "preferences" with /pulse/learned/reset.
+    "pulse_explains",
     "present-v1",
     "health-sync",
     "voice-tools",

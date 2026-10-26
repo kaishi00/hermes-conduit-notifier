@@ -64,10 +64,12 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
                             "or 'backfill'; "
                             "for followups: 'on', 'off', 'now' (check everything now, for testing), or nothing to list them; "
                             "for rate and done: the card number; "
-                            "for learned: 'undo' and a lesson number, or a kind and a loudness to set; "
+                            "for learned: 'undo' and a lesson number, 'reset' and a preference number or "
+                            "'everything' (what learning holds about it is forgotten), or a kind and a loudness to set; "
                             "for nudge: gentle, balanced or eager; "
                             "for budget: memory or followups; "
-                            "for candidates: how many reports to show; "
+                            "for candidates: how many reports to show, or 'bring' and a candidate number "
+                            "(one a report left out comes up on the Pulse screen); "
                             "for note: what you want from Pulse, in your own words, or 'clear'; "
                             "for quiet: 'today', 'until' and a day, 'off', 'days' and weekdays like sat,sun "
                             "(or none), or nothing to show the quiet times")
@@ -75,7 +77,9 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
                        help="for memory forget: the item number; for memory backfill: how many days back "
                             "(it shows what that costs), 'start', 'stop' or 'cancel'; "
                             "for rate: 'up', 'down', or a reason for a thumbs down (not_relevant, already_knew, "
-                            "too_late, too_often); for done: 'undo' to take the mark off; for learned: the lesson number, or push, screen, brief or off; "
+                            "too_late, too_often); for done: 'undo' to take the mark off; for learned: the lesson number, "
+                            "the preference number (or 'everything') to reset, or push, screen, brief or off; "
+                            "for candidates bring: the candidate number; "
                             "for budget: tokens a day, or 'auto' for follow-ups to go with the nudge level; "
                             "for note: more words of the note (a quoted note needs none)")
     prefs = commands.add_parser(
@@ -329,6 +333,7 @@ def _pulse(args: argparse.Namespace) -> int:
         print("Pulse: off (never turned on). `hermes conduit-push pulse on` to start it."
               + (" Nothing was changed." if action in ("followups", "learned") and (args.value or "").strip() else ""))
         return 1 if action in ("probe", "rate", "done") or (action == "learned" and (args.value or "").strip()) \
+            or (action == "candidates" and (args.value or "").strip() == "bring") \
             or (action == "memory" and (args.value or "").strip() in ("now", "forget")) \
             or (action == "followups" and (args.value or "").strip() in ("on", "now")) else 0
     pulse_store = pulse.open_store(home)
@@ -377,7 +382,8 @@ def _pulse(args: argparse.Namespace) -> int:
     if action == "nudge":
         return _pulse_nudge(pulse_store, (args.value or "").strip())
     if action == "candidates":
-        return _pulse_candidates(pulse_store, home, (args.value or "").strip())
+        return _pulse_candidates(pulse_store, home, (args.value or "").strip(),
+                                 str(getattr(args, "extra", "") or "").strip())
     if action == "budget":
         return _pulse_budget(pulse_store, (args.value or "").strip(), str(getattr(args, "extra", "") or "").strip())
     if action == "memory":
@@ -886,9 +892,23 @@ def _pulse_learning(pulse_store: Any, action: str, value: str, extra: str, home:
                 return 2
             print("Undone." if pulse_control.undo(pulse_store, int(extra)) else "Nothing to undo with that number.")
             return 0
+        if value == "reset":
+            found = _resettable(pulse_control.learned(pulse_store)["preferences"])
+            if extra == "everything":
+                scope, about = "everything", ""
+            elif extra.isdecimal() and len(extra) <= 3 and 1 <= int(extra) <= len(found):
+                scope, about = found[int(extra) - 1]["scope"], found[int(extra) - 1]["value"]
+            else:
+                print("Usage: hermes conduit-push pulse learned reset <preference number>|everything "
+                      "(the numbers `pulse learned` lists)")
+                return 2
+            lesson = pulse_control.reset(pulse_store, scope, about)
+            print(_printable(f"{lesson['text']}. `hermes conduit-push pulse learned undo {lesson['id']}` takes it back."))
+            return 0
         if value:
             if not extra:
-                print("Usage: hermes conduit-push pulse learned [undo <lesson> | <kind> push|screen|brief|off]")
+                print("Usage: hermes conduit-push pulse learned [undo <lesson> | reset <preference>|everything | "
+                      "<kind> push|screen|brief|off]")
                 return 2
             lesson = pulse_control.set_level(pulse_store, value, extra)
             print(_printable(lesson["text"]) if lesson else "It's set that way already.")
@@ -899,14 +919,48 @@ def _pulse_learning(pulse_store: Any, action: str, value: str, extra: str, home:
             return 1
         print(f"Pulse doesn't take that {refused.data.get('field', 'value')}.")
         return 2
-    lessons = pulse_learning.learned(pulse_store)
-    for kind, level in pulse_learning.levels(pulse_store).items():
+    shown = pulse_control.learned(pulse_store)
+    for kind, level in shown["levels"].items():
         print(f"{pulse_learning.KIND_NAMES.get(kind, kind)}: {pulse_learning.LEVEL_NAMES.get(level, level)}")
-    if not lessons:
+    if not shown["lessons"]:
         print("Nothing learned from ratings yet.")
-    for lesson in lessons:
+    for lesson in shown["lessons"]:
         print(_printable(f"#{lesson['id']} {lesson['text']}"))
+    if shown["preferences"]:
+        print("From your thumbs, Do it and Done (`pulse learned reset <n>` forgets one):")
+    numbers = {id(preference): n for n, preference in enumerate(_resettable(shown["preferences"]), 1)}
+    for preference in shown["preferences"]:
+        # The overall lean counts every vote: only `reset everything` forgets it.
+        n = numbers.get(id(preference))
+        print(_printable(f"[{n}] {_preference_text(preference)}" if n
+                         else f"    {_preference_text(preference)} (`reset everything` forgets it)"))
     return 0
+
+
+def _resettable(preferences: list) -> list:
+    """The preferences `pulse learned reset <n>` takes, in the order listed:
+    each but the overall lean (pulse_prefs.RESET_SCOPES)."""
+    from . import pulse_prefs
+    return [preference for preference in preferences if preference["scope"] in pulse_prefs.RESET_SCOPES]
+
+
+def _preference_text(preference: dict) -> str:
+    """A learned preference (pulse_control.learned) in a line for `pulse learned`."""
+    from . import pulse_learning, pulse_prefs
+    scope, value = preference["scope"], preference["value"]
+    strength = abs(preference["effect"])
+    how = "strongly" if strength >= 1.5 else "somewhat" if strength >= 0.5 else "slightly"
+    if scope == pulse_prefs.LOUD:
+        pushes = preference.get("pushes") or 0
+        return (f"{pulse_learning.KIND_NAMES.get(value, value)} come up {how} louder: {pushes} "
+                f"push{'' if pushes == 1 else 'es'} acted on within the hour")
+    what = (f"things from {preference['chat_title'] or 'a chat'}" if preference.get("chat_title") is not None
+            else pulse_learning.preference_words(scope, value))
+    lean = "more" if preference["effect"] > 0 else "less"
+    votes = preference.get("votes") or 0
+    counted = (f": useful {pulse_prefs._number(preference.get('useful') or 0)} of {pulse_prefs._number(votes)} times"
+               if votes else "")
+    return f"{how} {lean} of {what}{counted}"
 
 
 CANDIDATE_RUNS = 50
@@ -914,12 +968,25 @@ RUN_STATES = {"working": "being made", "ready": "ready to send", "failed": "fail
               "dropped": "too late to send"}
 
 
-def _pulse_candidates(pulse_store: Any, home: Any, value: str) -> int:
+def _pulse_candidates(pulse_store: Any, home: Any, value: str, extra: str = "") -> int:
     """What the latest reports' candidate lists put in front of Pulse, and
-    what became of each (pulse_candidates)."""
-    from . import pulse, pulse_candidates
+    what became of each (pulse_candidates); or, with "bring", one a report
+    left out brought up on the Pulse screen."""
+    from . import pulse, pulse_candidates, pulse_control
+    if value == "bring":
+        if not extra.lstrip("#").isdecimal() or len(extra) > 18:
+            print("Usage: hermes conduit-push pulse candidates bring <candidate number>")
+            return 2
+        try:
+            card = pulse_control.bring_up(pulse_store, int(extra.lstrip("#")), home)
+        except pulse_control.Refused as refused:
+            print("Pulse is off: `hermes conduit-push pulse on` first." if refused.code == "pulse_off"
+                  else f"No candidate #{_printable(extra.lstrip('#'))} that a report left out.")
+            return 1
+        print(_printable(f"On the Pulse screen as card #{card['id']}: {card['news']}"))
+        return 0
     if value and (not value.isdecimal() or len(value) > 3):
-        print("Usage: hermes conduit-push pulse candidates [how many reports]")
+        print("Usage: hermes conduit-push pulse candidates [how many reports | bring <candidate number>]")
         return 2
     run = pulse_store.get(pulse.REPORT_RUN)
     if isinstance(run, dict) and run.get("state") in RUN_STATES:
@@ -943,7 +1010,7 @@ def _pulse_candidates(pulse_store: Any, home: Any, value: str) -> int:
         picked = sum(row["decision"] == pulse_candidates.SURFACED for row in rows)
         print(f"Report of {when}: {picked} picked of {len(rows)}")
         for row in rows:
-            print("  " + _printable(pulse_candidates.describe(row)))
+            print(f"  #{row['id']} " + _printable(pulse_candidates.describe(row)))
     return 0
 
 

@@ -84,6 +84,8 @@ def test_every_capability_names_a_served_route_family():
         "pulse_quiet": "/pulse",
         # What Pulse learned shows at /pulse/learned; the levels it caps at /pulse/levels.
         "pulse_learns": "/pulse/learned",
+        # What it learned can be reset there, and what it left out is listed at /pulse/left_out.
+        "pulse_explains": "/pulse/left_out",
         "present-v1": "/present/",
         "health-sync": "/health/",
         "shortcut-inbox": "/inbox/",

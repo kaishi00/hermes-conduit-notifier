@@ -34,6 +34,12 @@ fades over weeks (PLACE_S) unless they keep saying so. A place with fewer
 votes has them all in the long memory already, where counting its last ones
 again would make a new chat's first thumbs down count twice. Kinds and
 timing keep their long memory.
+
+The user can reset what learning holds about one thing (``forget``): a
+kind, a place or a timing forgets the votes about things with it from
+before the reset, a kind's loudness forgets the pushes acted on quickly
+that earned it (neither forgets the other's), and everything forgets every
+signal before it. Undoing the reset counts them again.
 """
 
 from __future__ import annotations
@@ -60,6 +66,13 @@ PLACE_LAST = 3
 PLACE_S = 30 * 86400.0
 # Signals older than this weigh under 1% in the long memory: dropped.
 KEEP_S = 400 * 86400.0
+# What a reset can forget (``forget``): an attribute value (one of
+# FEATURES), a kind's loudness ("loud"), or everything ("everything").
+LOUD, EVERYTHING = "loud", "everything"
+RESET_SCOPES = ("kind", "place", "timely", LOUD, EVERYTHING)
+# A preference is listed (``Learned.preferences``) once it moves things by
+# this much either way, in log-odds.
+SHOWN_EFFECT = 0.1
 
 # The useful share at which learning changes nothing: a user who finds about
 # this share of what Pulse brings up useful gets what the model picks.
@@ -246,6 +259,8 @@ class Learned:
     counts: dict[tuple[str, str], tuple[float, float]]
     loud: dict[str, float]
     votes: int
+    # How many pushes acted on quickly earned each kind its ``loud``.
+    pushes: dict[str, int] = field(default_factory=dict)
 
     def score(self, attrs: dict[str, str]) -> float:
         """What learning adds to a candidate's score, in log-odds: 0 with no
@@ -272,16 +287,56 @@ class Learned:
     def loudness(self, kind: str) -> float:
         return self.loud.get(kind, 0.0)
 
+    def preferences(self) -> list[dict]:
+        """What learning holds, strongest first, for What Pulse learned: the
+        overall lean ("all") and each attribute value's part of ``score``
+        that moves things by SHOWN_EFFECT or more, as {"scope", "value",
+        "effect", "useful", "votes"} (the votes behind it, as ``factor``
+        counts them); then each kind's loudness from pushes acted on
+        quickly, as {"scope": LOUD, "value": kind, "effect", "pushes"}."""
+        parts = [("all", "", self.short.bias - logit(PRIOR))]
+        parts += [(name, value, effect) for (name, value), effect in self.short.weights.items()]
+        out = []
+        for scope, value, effect in sorted(parts, key=lambda part: (-abs(part[2]), part[0], part[1])):
+            if abs(effect) < SHOWN_EFFECT:
+                continue
+            useful, weight = self.counts.get((scope, value), (0.0, 0.0))
+            out.append({"scope": scope, "value": value, "effect": round(effect, 2), "useful": round(useful, 1),
+                        "votes": round(weight, 1)})
+        out += [{"scope": LOUD, "value": kind, "effect": round(value, 2), "pushes": self.pushes.get(kind, 0)}
+                for kind, value in sorted(self.loud.items(), key=lambda pair: (-pair[1], pair[0])) if value > 0]
+        return out
+
 
 EMPTY = Learned(Fit(logit(PRIOR)), Fit(logit(PRIOR)), {}, {}, 0)
 
 
-def learn(signals: Sequence[dict], now: float) -> Learned:
-    """The model ``signals`` add up to at ``now``."""
+def forget(signals: Iterable[dict], resets: Sequence[tuple[str, str, float]]) -> list[dict]:
+    """``signals`` without the ones ``resets`` forgot as votes: each reset,
+    as (scope, value, when), forgets the signals from at or before its time
+    about things with its attribute value (scope "kind", "place" or
+    "timely"), or every one ("everything"). What a kind's loudness counts
+    is ``loudness``'s to forget."""
+    resets = [reset for reset in resets if reset[0] in RESET_SCOPES and reset[0] != LOUD]
+    if not resets:
+        return list(signals)
+    out = []
+    for row in signals:
+        attrs = attributes(row["kind"], row["place"], row["band"])
+        if not any(row["at"] <= at and (scope == EVERYTHING or attrs.get(scope) == value)
+                   for scope, value, at in resets):
+            out.append(row)
+    return out
+
+
+def learn(signals: Sequence[dict], now: float, resets: Sequence[tuple[str, str, float]] = ()) -> Learned:
+    """The model ``signals`` add up to at ``now``, without what ``resets``
+    forgot (``forget``, ``loudness``)."""
     signals = [row for row in signals if now - row["at"] < KEEP_S]
-    found = votes(signals)
+    loud, pushes = loudness(signals, now, resets)
+    found = votes(forget(signals, resets))
     if not found:
-        return EMPTY
+        return Learned(EMPTY.long, EMPTY.short, {}, loud, 0, pushes) if loud else EMPTY
     prior = Fit(logit(PRIOR))
     faded = [0.5 ** (max(0.0, now - vote.at) / LONG_S) for vote in found]
     long = fit([(vote, vote.weight * fade) for vote, fade in zip(found, faded)], prior, STRENGTH)
@@ -312,13 +367,17 @@ def learn(signals: Sequence[dict], now: float) -> Learned:
             useful, weight = counts.get(key, (0.0, 0.0))
             counts[key] = (useful + vote.useful, weight + vote.weight)
     counts.update(last)
-    return Learned(long, short, counts, loudness(signals, now), len(found))
+    return Learned(long, short, counts, loud, len(found), pushes)
 
 
-def loudness(signals: Iterable[dict], now: float) -> dict[str, float]:
+def loudness(signals: Iterable[dict], now: float,
+             resets: Sequence[tuple[str, str, float]] = ()) -> tuple[dict[str, float], dict[str, int]]:
     """What each kind earned from pushes acted on quickly: QUICK_STEP per
     pushed card acted on (Do it or Done) within QUICK_S of its push,
-    fading like the long memory, at most QUICK_MAX."""
+    fading like the long memory, at most QUICK_MAX; and how many pushes
+    earned it. A reset of a kind's loudness ("loud") or of everything
+    forgets the ones acted on at or before it."""
+    forgotten = [(scope, value, at) for scope, value, at in resets if scope in (LOUD, EVERYTHING)]
     first: dict[int, tuple[float, float, str]] = {}
     for row in signals:
         if row["what"] in (ACT, DONE) and row.get("pushed") is not None and 0 <= row["at"] - row["pushed"] <= QUICK_S:
@@ -326,9 +385,13 @@ def loudness(signals: Iterable[dict], now: float) -> dict[str, float]:
             if seen is None or row["at"] < seen[0]:
                 first[row["card_id"]] = (row["at"], row["pushed"], row["kind"])
     loud: dict[str, float] = {}
+    pushes: dict[str, int] = {}
     for at, _, kind in first.values():
+        if any(at <= when and (scope == EVERYTHING or kind == value) for scope, value, when in forgotten):
+            continue
         loud[kind] = loud.get(kind, 0.0) + QUICK_STEP * 0.5 ** (max(0.0, now - at) / LONG_S)
-    return {kind: min(QUICK_MAX, value) for kind, value in loud.items()}
+        pushes[kind] = pushes.get(kind, 0) + 1
+    return {kind: min(QUICK_MAX, value) for kind, value in loud.items()}, pushes
 
 
 TIMELY_WORDS = {"yes": "things due within the day or overdue", "no": "things not due within the day"}

@@ -214,7 +214,15 @@ CREATE TABLE IF NOT EXISTS cards (
     briefed_at REAL,
     rating TEXT NOT NULL DEFAULT '',
     reason TEXT NOT NULL DEFAULT '',
-    rated_at REAL
+    rated_at REAL,
+    -- The biggest part learning played in bringing it up (pulse_prefs'
+    -- Learned.factor, JSON; "" for none), for its Why?.
+    learned TEXT NOT NULL DEFAULT '',
+    -- Where it came from and how soon it was due as it came up
+    -- (pulse_prefs.place and band), which its signals carry once the
+    -- journal no longer has its candidate.
+    place TEXT NOT NULL DEFAULT '',
+    band TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS cards_created ON cards(created_at);
 -- What ratings taught Pulse (pulse_learning): each row changes what Pulse
@@ -338,6 +346,8 @@ def _check_marks(marks: str) -> None:
 
 # A report's item on its own card (pulse_learning.add_noticed_cards).
 NOTICED = "noticed"
+# A lesson that forgets what learning holds about something (pulse_learning.reset).
+RESET = "reset"
 # Why an item memory learned after its time had passed is closed (pulse_memory.LATE_S).
 LATE_BY = "expiry: learned after its time had passed"
 # The report attempts split into such cards, newest last: their typed
@@ -347,7 +357,7 @@ SPLIT_REPORTS = "split_reports"
 SPLIT_ITEMS = '"split"'
 
 CARD_COLUMNS = ("kind", "item_id", "level", "title", "quote", "news", "why", "profile", "chat_id", "chat_title",
-                "message_id", "topic", "brief", "created_at")
+                "message_id", "topic", "brief", "created_at", "learned", "place", "band")
 # Card columns added after the first build, oldest first, with their types.
 # Columns a table gained after stores existed, added to a store from before.
 _ADDED_COLUMNS = (("cards", "topic", "TEXT NOT NULL DEFAULT ''"), ("cards", "brief", "TEXT NOT NULL DEFAULT ''"),
@@ -356,7 +366,9 @@ _ADDED_COLUMNS = (("cards", "topic", "TEXT NOT NULL DEFAULT ''"), ("cards", "bri
                   ("candidates", "band", "TEXT NOT NULL DEFAULT ''"), ("candidates", "place", "TEXT NOT NULL DEFAULT ''"),
                   ("candidates", "score", "REAL"), ("candidates", "factor", "TEXT NOT NULL DEFAULT ''"),
                   ("candidates", "floor", "INTEGER NOT NULL DEFAULT 0"),
-                  ("candidates", "level", "TEXT NOT NULL DEFAULT ''"))
+                  ("candidates", "level", "TEXT NOT NULL DEFAULT ''"),
+                  ("cards", "learned", "TEXT NOT NULL DEFAULT ''"), ("cards", "place", "TEXT NOT NULL DEFAULT ''"),
+                  ("cards", "band", "TEXT NOT NULL DEFAULT ''"))
 # What report cards said for Why? before a candidate's reason did (an item's card,
 # never shown; a whole report's card), and the setting that says a store has
 # cleared them.
@@ -1391,6 +1403,59 @@ class PulseStore:
                                (card_id,)).fetchone()
         return dict(row) if row else None
 
+    def left_out(self, since: float, limit: int) -> list[dict]:
+        """The candidates journaled from ``since`` on that didn't come up,
+        newest first, with whether the same remembered item (or the same
+        text) came up in the same run or a later one, as ``later``."""
+        with self._connect() as conn:
+            return [dict(row) for row in conn.execute(
+                "SELECT c.*, EXISTS(SELECT 1 FROM candidates s WHERE s.id!=c.id AND s.created_at>=c.created_at "
+                "AND s.decision='surfaced' AND "
+                "((c.item_id IS NOT NULL AND s.item_id=c.item_id) OR (c.text!='' AND s.text=c.text))) AS later "
+                "FROM candidates c WHERE c.created_at >= ? AND c.decision!='surfaced' "
+                "ORDER BY c.created_at DESC, c.id LIMIT ?", (since, limit))]
+
+    def latest_candidate_at(self) -> Optional[float]:
+        with self._connect() as conn:
+            row = conn.execute("SELECT MAX(created_at) FROM candidates").fetchone()
+        return float(row[0]) if row and row[0] is not None else None
+
+    def candidate(self, candidate_id: int) -> Optional[dict]:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM candidates WHERE id=?", (candidate_id,)).fetchone()
+        return dict(row) if row else None
+
+    def bring_up(self, candidate_id: int, row: dict[str, Any]) -> Optional[int]:
+        """Makes a card of a candidate that didn't come up (``row``, its
+        columns) and notes it on the candidate, in one write: its signals
+        carry the candidate's kind, place and band. The card it already has,
+        if another tap made one first (and it's still kept); None when the
+        journal no longer has the candidate."""
+        _check_columns(row, CARD_COLUMNS)
+        with _lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                found = conn.execute("SELECT card_id, EXISTS(SELECT 1 FROM cards WHERE cards.id=candidates.card_id) "
+                                     "AS kept FROM candidates WHERE id=?", (candidate_id,)).fetchone()
+                if found is None or (found["card_id"] is not None and found["kept"]):
+                    conn.execute("ROLLBACK")
+                    return None if found is None else int(found["card_id"])
+                card_id = int(conn.execute(f"INSERT INTO cards({', '.join(row)}) VALUES({', '.join('?' * len(row))})",
+                                           tuple(row.values())).lastrowid)
+                conn.execute("UPDATE candidates SET card_id=? WHERE id=?", (card_id, candidate_id))
+                conn.execute("COMMIT")
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+        return card_id
+
+    def card_chat_title(self, profile: str, chat_id: str) -> str:
+        """The title the newest card from this chat gave it; "" for none."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT chat_title FROM cards WHERE profile=? AND chat_id=? AND chat_title!='' "
+                               "ORDER BY id DESC LIMIT 1", (profile, chat_id)).fetchone()
+        return row["chat_title"] if row else ""
+
     def run_candidates(self, run_id: str) -> list[dict]:
         """A run's candidates: its picks in their order, then the rest as listed."""
         with self._connect() as conn:
@@ -1412,18 +1477,22 @@ class PulseStore:
                                                       (since,))]
 
     def learned(self, now: float) -> prefs.Learned:
-        """What the signals add up to at ``now`` (pulse_prefs.learn), fitted
-        again only once they change or LEARNED_FOR_S goes by: the tick asks
-        every half minute while a follow-up waits to go out."""
+        """What the signals add up to at ``now`` (pulse_prefs.learn), without
+        what the resets in force forgot, fitted again only once either
+        changes or LEARNED_FOR_S goes by: the tick asks every half minute
+        while a follow-up waits to go out."""
         since = now - prefs.KEEP_S
         with self._connect() as conn:
             totals = tuple(conn.execute("SELECT COUNT(*), TOTAL(at), TOTAL(useful), TOTAL(weight) FROM signals "
                                         "WHERE at >= ?", (since,)).fetchone())
+            resets = tuple((row["kind"], row["value"], float(row["created_at"])) for row in conn.execute(
+                "SELECT kind, value, created_at FROM lessons WHERE what=? AND undone_at IS NULL ORDER BY id",
+                (RESET,)))
         kept = _learned.get(str(self.path))
-        if kept is not None and kept[0] == totals and 0 <= now - kept[1] < LEARNED_FOR_S:
+        if kept is not None and kept[0] == (totals, resets) and 0 <= now - kept[1] < LEARNED_FOR_S:
             return kept[2]
-        fitted = prefs.learn(self.signals(since), now)
-        _learned[str(self.path)] = (totals, now, fitted)
+        fitted = prefs.learn(self.signals(since), now, resets)
+        _learned[str(self.path)] = ((totals, resets), now, fitted)
         return fitted
 
     def prune_signals(self, before: float) -> int:
@@ -1445,8 +1514,9 @@ class PulseStore:
 def _signal_attrs(conn: sqlite3.Connection, card_id: int) -> Optional[dict[str, Any]]:
     """What a card's signals carry: its kind, place and band as it came up
     (from its candidate when the journal still has it, else as the card's
-    earlier signals had them), and when it was pushed, if it was. None for a
-    card that takes none (a report or brief as a whole)."""
+    earlier signals had them, else as the card kept them), and when it was
+    pushed, if it was. None for a card that takes none (a report or brief as
+    a whole)."""
     card = conn.execute("SELECT * FROM cards WHERE id=?", (card_id,)).fetchone()
     if card is None or card["kind"] not in ("followup", NOTICED):
         return None
@@ -1460,6 +1530,10 @@ def _signal_attrs(conn: sqlite3.Connection, card_id: int) -> Optional[dict[str, 
     kept = conn.execute("SELECT kind, place, band FROM signals WHERE card_id=? LIMIT 1", (card_id,)).fetchone()
     if kept is not None:
         return {"kind": kept["kind"], "place": kept["place"], "band": kept["band"], "pushed": pushed}
+    if card["band"]:
+        # Kept on the card as it came up (0.83.0), for a first signal after the journal let its candidate go.
+        return {"kind": "followup" if card["kind"] == "followup" else card["topic"] or "other",
+                "place": card["place"], "band": card["band"], "pushed": pushed}
     item = conn.execute("SELECT due_at FROM items WHERE id=?", (card["item_id"],)).fetchone() \
         if card["item_id"] is not None else None
     band = prefs.band(item["due_at"], float(card["created_at"])) if item is not None else ""

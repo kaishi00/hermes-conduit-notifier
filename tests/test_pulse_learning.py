@@ -95,7 +95,7 @@ def test_what_pulse_learned_is_fitted_again_only_once_the_signals_change(live, m
     card = told_card(live)
     fits = []
     real = followup.prefs.learn
-    monkeypatch.setattr(followup.prefs, "learn", lambda signals, now: fits.append(now) or real(signals, now))
+    monkeypatch.setattr(followup.prefs, "learn", lambda signals, now, *rest: fits.append(now) or real(signals, now, *rest))
     now = time.time()
     first = live.store.learned(now)
     assert store.open_store(live.home).learned(now + 30) is first  # a tick later: the same fit
@@ -242,6 +242,88 @@ def test_levels_refuse_unknown_kinds_and_levels(live):
     assert control.set_level(live.store, "followup", "push") is None  # already there
 
 
+def rated_down_twice(live):
+    """Two of the chat's follow-ups rated down: its next one waits for the brief."""
+    brief_later(live)
+    first, second = told_card(live), told_card(live, "The build failed.")
+    control.rate(live.store, first["id"], "down")
+    control.rate(live.store, second["id"], "down")
+
+
+def test_a_reset_forgets_what_thumbs_taught_about_a_chat_and_undo_counts_them_again(live):
+    """What Pulse learned lists the chat by the title its cards gave it.
+    Forgetting what it learned about that chat pushes its next follow-up
+    again; undoing the reset holds the one after for the brief again."""
+    rated_down_twice(live)
+    found = control.learned(live.store)["preferences"]
+    # The chat's is the strongest: a chat's follows its last few votes.
+    assert [entry["scope"] for entry in found] == ["place", "timely", "kind", "all"]
+    chat = found[0]
+    assert (chat["value"], chat["profile"], chat["chat_id"], chat["chat_title"]) == (
+        prefs.place("", CHAT), "", CHAT, "Deploy")
+    assert chat["effect"] < 0 and (chat["useful"], chat["votes"]) == (0.0, 2.0)
+    lesson = control.reset(live.store, "place", chat["value"])
+    assert (lesson["kind"], lesson["what"], lesson["value"], lesson["chat_title"]) == (
+        "place", "reset", chat["value"], "Deploy")
+    assert lesson["text"] == "Forgot what was learned about things from Deploy"
+    # Every vote was about that chat.
+    shown = control.learned(live.store)
+    assert shown["lessons"] == [lesson] and shown["preferences"] == []
+    sent = len(live.sent())
+    tell(live, "The tests passed.")
+    delivered(live)
+    assert len(live.sent()) == sent + 1 and live.store.cards()[0]["level"] == "push"
+    assert control.undo(live.store, lesson["id"]) is True
+    assert control.learned(live.store)["preferences"] == found
+    tell(live, "The release is out.")
+    pulse.tick()
+    assert len(live.sent()) == sent + 1 and live.store.cards()[0]["level"] == "brief"
+
+
+def test_a_reset_of_everything_forgets_every_signal_until_then(live):
+    rated_down_twice(live)
+    lesson = control.reset(live.store, "everything")
+    assert (lesson["kind"], lesson["value"], lesson["text"]) == ("everything", "", "Forgot everything learned before this")
+    assert control.learned(live.store)["preferences"] == []
+    # A vote after it counts.
+    third = told_card(live, "The tests passed.")
+    control.rate(live.store, third["id"], "down")
+    found = control.learned(live.store)["preferences"]
+    assert found and {entry["votes"] for entry in found} == {1.0}
+
+
+def test_a_follow_up_card_says_what_learning_did_and_keeps_how_it_came_up(live):
+    """A card keeps the biggest part learning played in bringing it up, for
+    its Why?, and where it came from and how soon it was due."""
+    rated_down_twice(live)
+    tell(live, "The tests passed.")
+    pulse.tick()
+    held = live.store.cards()[0]
+    assert held["level"] == "brief" and (held["place"], held["band"]) == (prefs.place("", CHAT), "undated")
+    feed = {card["id"]: card for card in control.feed(live.store)["cards"]}
+    chat = control.learned(live.store)["preferences"][0]
+    assert feed[held["id"]]["learned"] == {key: chat[key] for key in ("scope", "value", "effect", "useful", "votes")}
+    assert feed[live.store.cards()[-1]["id"]]["learned"] is None  # the first came up with nothing learned
+
+
+@pytest.mark.parametrize("scope, value, field", [
+    ("chat", "chat::work", "scope"), (None, "", "scope"), ("loud", 5, "value"), ("kind", "", "value"),
+    ("everything", "followup", "value"), ("timely", "maybe", "value"),
+    ("place", "x" * (learning.RESET_VALUE_LIMIT + 1), "value")])
+def test_bad_resets_are_refused(live, scope, value, field):
+    with pytest.raises(control.Refused) as refused:
+        control.reset(live.store, scope, value)
+    assert refused.value.code == "invalid" and refused.value.data == {"field": field}
+    assert control.learned(live.store)["lessons"] == []
+
+
+def test_resets_are_refused_while_pulse_is_off(live):
+    live.store.set("enabled", False)
+    with pytest.raises(control.Refused) as refused:
+        control.reset(live.store, "everything")
+    assert refused.value.code == "pulse_off" and control.learned(live.store)["lessons"] == []
+
+
 def test_cli_rates_and_lists_what_was_learned(live, monkeypatch, capsys):
     import sys
     import types
@@ -260,6 +342,32 @@ def test_cli_rates_and_lists_what_was_learned(live, monkeypatch, capsys):
     assert run("learned", "followup", "screen") == 0 and "shown in Pulse" in capsys.readouterr().out
     assert run("rate", str(card["id"]), "meh") == 2
     assert run("learned", "followup") == 2
+
+
+def test_cli_lists_what_learning_holds_and_resets_it(live, monkeypatch, capsys):
+    import sys
+    import types
+    monkeypatch.setitem(sys.modules, "hermes_constants", types.SimpleNamespace(get_hermes_home=lambda: live.home))
+    run = lambda *argv: cli._pulse(types.SimpleNamespace(pulse_action=argv[0], value=argv[1] if len(argv) > 1 else "",
+                                                        extra=argv[2] if len(argv) > 2 else ""))
+    rated_down_twice(live)
+    assert run("learned") == 0
+    out = capsys.readouterr().out.splitlines()
+    listed = out[out.index("From your thumbs, Do it and Done (`pulse learned reset <n>` forgets one):") + 1:]
+    assert [line[:4] for line in listed] == ["[1] ", "[2] ", "[3] ", "    "]
+    assert listed[0] == "[1] somewhat less of things from Deploy: useful 0 of 2 times"
+    # The overall lean counts every vote: only resetting everything forgets it, so it takes no number.
+    assert listed[3] == "    slightly less of what Pulse brings up: useful 0 of 2 times (`reset everything` forgets it)"
+    for bad in ("", "4", "0", "x", "9" * 5000):
+        assert run("learned", "reset", bad) == 2 and "Usage:" in capsys.readouterr().out
+    assert run("learned", "reset", "1") == 0
+    [lesson] = control.learned(live.store)["lessons"]
+    assert capsys.readouterr().out == (f"Forgot what was learned about things from Deploy. "
+                                       f"`hermes conduit-push pulse learned undo {lesson['id']}` takes it back.\n")
+    assert run("learned", "reset", "everything") == 0
+    assert capsys.readouterr().out.startswith("Forgot everything learned before this.")
+    live.store.set("enabled", False)
+    assert run("learned", "reset", "everything") == 1
 
 
 def test_cli_sets_shows_and_clears_the_note_to_pulse(live, monkeypatch, capsys):
@@ -289,6 +397,7 @@ def test_cli_on_a_host_that_never_turned_pulse_on_leaves_no_file(tmp_path, monke
     run = lambda *argv: cli._pulse(types.SimpleNamespace(pulse_action=argv[0], value=argv[1] if len(argv) > 1 else "",
                                                         extra=argv[2] if len(argv) > 2 else ""))
     assert run("cards") == 0 and run("learned") == 0 and run("rate", "1", "up") == 1 and run("note") == 0
+    assert run("learned", "reset", "everything") == 1 and run("candidates", "bring", "1") == 1
     assert run("note", "clear") == 0
     assert not (tmp_path / store.DB_NAME).exists()
 
@@ -1290,6 +1399,31 @@ def test_a_report_card_carries_its_reason_and_one_written_without_a_list_has_non
     assert live.store.card(plain)["why"] == ""
     feed = {card["id"]: card for card in control.feed(live.store)["cards"]}
     assert feed[with_why]["why"] and feed[plain]["why"] == ""
+
+
+def test_a_report_card_keeps_what_learning_did_and_how_it_came_up(live):
+    """Each card keeps the biggest part learning played in bringing it up,
+    for its Why? (none for one learning played no part in), and its place
+    and band as it came up: its first signal carries them even once the
+    journal has let its candidate go, as one pointing at Pulse's turn
+    couldn't otherwise say."""
+    from types import SimpleNamespace
+    now = time.time()
+    place, band = prefs.place("", CHAT), prefs.band(now + 3600, now)
+    factor = {"scope": "place", "value": place, "effect": 0.8, "useful": 3.0, "votes": 3.0}
+    [learned, plain] = learning.add_noticed_cards(
+        live.store, turn=SimpleNamespace(session_id=SID, reply_id=7),
+        lines=[("date", "Dentist Friday at 9", None), ("fact", "Ana is in town", None)], chat_id=SID,
+        chat_title="Pulse", shown=set(), kinds=followup.report.KINDS, item_chat_title=lambda item: "", now=now,
+        factors=[learning.factor_json(factor), ""], attrs=[(place, band), ("", prefs.UNDATED)])
+    feed = {card["id"]: card for card in control.feed(live.store)["cards"]}
+    assert feed[learned]["learned"] == factor and feed[plain]["learned"] is None
+    control.rate(live.store, learned, "up")
+    control.rate(live.store, plain, "down")
+    assert {row["card_id"]: (row["kind"], row["place"], row["band"]) for row in live.store.signals()} == {
+        learned: ("date", place, band), plain: ("fact", "", prefs.UNDATED)}
+    # A kept factor that isn't one reads as none.
+    assert learning.factor_entry('{"scope": "chat", "value": "x"}') is None and learning.factor_entry("{") is None
 
 
 @pytest.mark.parametrize("before", ["no why column", "no candidates table", "stopped after the column"])
