@@ -1430,9 +1430,11 @@ def _signal_attrs(conn: sqlite3.Connection, card_id: int) -> Optional[dict[str, 
     if card["kind"] == "followup":
         return {"kind": "followup", "place": prefs.place(card["profile"], card["chat_id"]), "band": band,
                 "pushed": pushed}
-    # A report item from before candidate lists: its chat only when it's about something remembered.
+    # A report item whose candidate the journal no longer has, or never had: its chat when it's about
+    # something remembered or was found in one (it points there, with no message of Pulse's turn).
+    in_chat = card["item_id"] is not None or bool(card["chat_id"]) and card["message_id"] is None
     return {"kind": card["topic"] or "other", "band": band, "pushed": pushed,
-            "place": prefs.place(card["profile"], card["chat_id"]) if card["item_id"] is not None else ""}
+            "place": prefs.place(card["profile"], card["chat_id"]) if in_chat else ""}
 
 
 def _put_signal(conn: sqlite3.Connection, card_id: int, what: str, *, at: float, useful: float,

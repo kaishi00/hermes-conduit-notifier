@@ -340,7 +340,8 @@ def _number(value: float) -> str:
 
 def factor_words(factor: dict) -> str:
     """A ``Learned.factor`` in words, for `pulse candidates`: "useful 5 of
-    6 times: promise items"."""
+    6 times: promise items". The times are the votes behind it lately
+    (``Learned.counts``), each counted once, not faded as the fit fades them."""
     scope, value = factor.get("scope"), factor.get("value") or ""
     what = {"all": "what Pulse brings up", "kind": f"{value} items",
             "timely": TIMELY_WORDS.get(value, value)}.get(scope)

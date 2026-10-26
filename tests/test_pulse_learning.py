@@ -614,6 +614,12 @@ def test_a_report_cards_later_signals_keep_where_it_came_from_once_the_journal_d
     assert control.done(live.store, card_id) is True
     assert {(row["what"], row["kind"], row["place"], row["band"]) for row in live.store.signals()} == {
         ("thumb", "date", place, band), ("done", "date", place, band)}
+    # One whose first signal comes after: its chat when it was found in one, none when it points at Pulse's turn.
+    in_chat, own = found_card(live, chat_id=CHAT), found_card(live)
+    control.rate(live.store, in_chat, "down")
+    control.rate(live.store, own, "down")
+    places = {row["card_id"]: row["place"] for row in live.store.signals()}
+    assert (places[in_chat], places[own]) == (place, "")
 
 
 def test_ratings_are_refused_while_pulse_is_off(live):
