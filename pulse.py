@@ -58,6 +58,7 @@ from . import pulse_host as host
 from . import pulse_learning as learning
 from . import pulse_ledger as ledger
 from . import pulse_memory as memory
+from . import pulse_quiet as quiet
 from . import pulse_report as report
 from . import pulse_store as store
 
@@ -581,10 +582,16 @@ def _send(pulse_store: store.PulseStore, *, kind: str, chat_id: str, text: Any) 
                            chat_id=chat_id, text=text)
 
 
+def _quiet(pulse_store: store.PulseStore, home: Path, now: float) -> bool:
+    """Whether Pulse keeps to itself now (pulse_quiet): nothing goes on its
+    own, only what the user asked for."""
+    return bool(quiet.why(pulse_store, report_zone(pulse_store, home, now), now))
+
+
 def _maybe_probe(pulse_store: store.PulseStore, home: Path, now: float) -> bool:
-    """Sends a probe if one was asked for or is due; True when one went."""
+    """Sends a probe if one was asked for, or is due and Pulse isn't quiet; True when one went."""
     asked = pulse_store.take_probe_request()
-    if not asked and not _probe_due(pulse_store, now):
+    if not asked and (_quiet(pulse_store, home, now) or not _probe_due(pulse_store, now)):
         return False
     if any(row["kind"] == PROBE for row in pulse_store.in_flight()):
         if asked:
@@ -621,8 +628,15 @@ def _maybe_report(pulse_store: store.PulseStore, home: Path, now: float) -> bool
         if pulse_store.swap(REPORT_RUN, stored, dropped):
             stored = dropped  # so a run asked for now starts from it
         pending = False
-    if not pending and not asked and not _report_due(pulse_store, home, now):
-        return False
+    if pending and not asked and not run.get("asked") and _quiet(pulse_store, home, now):
+        # Pulse went quiet while a scheduled report was on its way: it doesn't
+        # go. One asked for by hand still does.
+        dropped = {**run, "state": RUN_DROPPED}
+        if pulse_store.swap(REPORT_RUN, stored, dropped):
+            stored = dropped
+        pending = False
+    if not pending and not asked and (_quiet(pulse_store, home, now) or not _report_due(pulse_store, home, now)):
+        return False  # a quiet day: the next scheduled one covers it
     if any(row["kind"] == REPORT for row in pulse_store.in_flight()):
         if asked:
             logger.info("conduit_push: Pulse: a report is already in flight; not sending another")
@@ -637,16 +651,20 @@ def _maybe_report(pulse_store: store.PulseStore, home: Path, now: float) -> bool
     if pending:
         return _send_report(pulse_store, home, run, chat.chat_id, now)
     if getattr(_ctx, "llm", None) is not None:
-        return _start_report_run(pulse_store, home, chat.chat_id, now, stored)
+        return _start_report_run(pulse_store, home, chat.chat_id, now, stored, asked=asked)
     _send_turn_report(pulse_store, home, chat.chat_id, now)
     return True
 
 
-def _start_report_run(pulse_store: store.PulseStore, home: Path, chat_id: str, now: float, stored: Any) -> bool:
+def _start_report_run(pulse_store: store.PulseStore, home: Path, chat_id: str, now: float, stored: Any, *,
+                      asked: bool = False) -> bool:
     """Starts the report's candidate list on a thread of its own, so a slow
-    model call never holds up the loop; True when it started."""
+    model call never holds up the loop; True when it started. A run the user
+    asked for says so: it goes even if Pulse goes quiet meanwhile."""
     global _report_thread
     run = {"id": secrets.token_hex(8), "state": RUN_WORKING, "started_at": now, "owner": _owner}
+    if asked:
+        run["asked"] = True
     if not pulse_store.swap(REPORT_RUN, stored, run):
         return False  # another process started one
     _report_thread = threading.Thread(target=_report_run, args=(home, chat_id, run), name="conduit-pulse-report",
@@ -738,7 +756,7 @@ def _maybe_followup(pulse_store: store.PulseStore, home: Path, now: float) -> bo
     one went."""
     if not pulse_store.get("followups"):
         return False
-    picked = followup.next_send(pulse_store, now, home)
+    picked = followup.next_send(pulse_store, now, home, quiet=_quiet(pulse_store, home, now))
     if picked is None:
         return False
     chat, problem = home_chat(pulse_store, home)
@@ -754,9 +772,15 @@ def _maybe_followup(pulse_store: store.PulseStore, home: Path, now: float) -> bo
 
 
 def _maybe_brief(pulse_store: store.PulseStore, home: Path, now: float) -> bool:
-    """Sends the morning brief when it's time, with what's still open and what's held for it; True when it went."""
+    """Sends the morning brief when it's time (not on a quiet day: the first
+    one after carries what's held), with what's still open and what's held
+    for it; True when it went."""
     zone = report_zone(pulse_store, home, now)
-    planned = brief.next_attempt(pulse_store, now, zone, pulse_store.get("brief_time"))
+    time_value = pulse_store.get("brief_time")
+    slot, _ = report.last_slot(now, zone, time_value or brief.DEFAULT_TIME)
+    if quiet.why(pulse_store, zone, now) or quiet.why(pulse_store, zone, slot):
+        return False  # quiet now, or at its time: not sent late once it isn't (at midnight, say)
+    planned = brief.next_attempt(pulse_store, now, zone, time_value)
     if planned is None:
         return False
     chat, problem = home_chat(pulse_store, home)
@@ -1015,6 +1039,8 @@ def _report_due(pulse_store: store.PulseStore, home: Path, now: float) -> bool:
     at, previous = report.last_slot(now, zone, pulse_store.get("report_time"))
     if now - at > REPORT_WINDOW_S:
         return False
+    if quiet.why(pulse_store, zone, at):
+        return False  # its time fell while Pulse was quiet: skipped, not sent late once it isn't
     # Any report delivered or on its way in the second half of the gap before
     # this time, an early `pulse report` too, stands in for the scheduled one.
     if any(row["state"] not in (store.REFUSED, store.NOT_ADMITTED, store.FAILED)

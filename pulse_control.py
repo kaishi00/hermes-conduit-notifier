@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from . import pulse, pulse_delivery, pulse_followup, pulse_hermes, pulse_learning, pulse_memory
+from . import pulse, pulse_delivery, pulse_followup, pulse_hermes, pulse_learning, pulse_memory, pulse_quiet
 from . import pulse_host as host
 
 RECENT = 5
@@ -172,7 +172,8 @@ def backfill_start(pulse_store: Any, home: Path, days: Optional[int] = None,
 
 
 SETTINGS = ("enabled", "memory", "followups", "daily_report", "report_profiles", "report_times", "time_zone",
-            "brief_time", "model", "nudge", "memory_daily_tokens", "followup_daily_tokens", "note")
+            "brief_time", "model", "nudge", "memory_daily_tokens", "followup_daily_tokens", "note",
+            "quiet_days", "quiet_until")
 # What a daily token budget may be set to.
 MIN_DAILY_TOKENS = 10_000
 MAX_DAILY_TOKENS = 5_000_000
@@ -189,7 +190,7 @@ def _encodes(text: str) -> bool:
     return True
 
 
-def update(pulse_store: Any, body: Any) -> None:
+def update(pulse_store: Any, body: Any, home: Any = None) -> None:
     """Applies the settings in ``body`` (any of SETTINGS). Every value is
     checked before any is written, so a bad one changes nothing; any other
     key is refused too. Values: booleans for "enabled", "memory", "followups" and "daily_report"; "all" or "this"
@@ -200,7 +201,10 @@ def update(pulse_store: Any, body: Any) -> None:
     MIN_DAILY_TOKENS to MAX_DAILY_TOKENS, for "memory_daily_tokens" and
     "followup_daily_tokens" (null for follow-ups: the nudge level's); a
     string of at most NOTE_LIMIT characters for "note", what the user asked
-    of Pulse in their own words ("" clears it)."""
+    of Pulse in their own words ("" clears it); a list of weekdays (Monday
+    0 to Sunday 6) for "quiet_days", when Pulse keeps to itself; null,
+    "today", a day (YYYY-MM-DD) or epoch seconds for "quiet_until", when a
+    quiet spell ends, in the user's time zone (``home`` finds it)."""
     if not isinstance(body, dict):
         raise Refused("invalid", field="")
     for field in body:
@@ -258,8 +262,40 @@ def update(pulse_store: Any, body: Any) -> None:
                 or not _encodes(value):
             raise Refused("invalid", field="note")
         changes["note"] = value
+    if "quiet_days" in body:
+        value = body["quiet_days"]
+        if not isinstance(value, list) or len(value) > len(pulse_quiet.DAYS) or any(
+                isinstance(day, bool) or not isinstance(day, int) or not 0 <= day < len(pulse_quiet.DAYS)
+                for day in value):
+            raise Refused("invalid", field="quiet_days")
+        changes["quiet_days"] = sorted(set(value))
+    if "quiet_until" in body:
+        changes["quiet_until"] = _quiet_until(pulse_store, body["quiet_until"], home)
     for key, value in changes.items():
         pulse_store.set(key, value)
+
+
+def _quiet_until(pulse_store: Any, value: Any, home: Any) -> Optional[float]:
+    """When a quiet spell ends: None clears it; "today" is the end of
+    today, or the spell already set when that ends later (Quiet for today
+    never shortens a vacation); a day (YYYY-MM-DD) is its start; a number
+    is epoch seconds. In the user's zone, ahead of now by at most
+    pulse_quiet.MAX_AHEAD_S."""
+    if value is None:
+        return None
+    now = time.time()
+    zone = pulse.report_zone(pulse_store, Path(home) if home else Path("."), now)
+    if value == "today":
+        end = pulse_quiet.next_midnight(zone, now)
+        current = pulse_quiet.until(pulse_store)
+        return current if current is not None and current > end else end
+    if isinstance(value, str):
+        at = pulse_quiet.day_start(zone, value)
+    else:
+        at = pulse_quiet.seconds(value)
+    if at is None or not now < at <= now + pulse_quiet.MAX_AHEAD_S:
+        raise Refused("invalid", field="quiet_until")
+    return at
 
 
 def _model(value: Any) -> Optional[dict[str, str]]:
@@ -319,9 +355,14 @@ def feed(pulse_store: Any, home: Optional[Path] = None, limit: int = pulse_learn
     chat = pulse.home_chat(pulse_store, Path(home))[0] if on else None
     cards = pulse_store.cards(limit)
     marks = pulse_store.done_marks([card["id"] for card in cards])
+    now = time.time()
+    zone = pulse.report_zone(pulse_store, Path(home) if home is not None else Path("."), now)
     return {"cards": [pulse_learning.card_entry(card, marks.get(card["id"])) for card in cards],
             "unseen": pulse_store.unseen_cards(), "levels": pulse_learning.levels(pulse_store),
-            "home_chat_id": chat.chat_id if chat else ""}
+            "home_chat_id": chat.chat_id if chat else "",
+            # The screen says when Pulse is quiet (pulse_quiet) and until when.
+            "quiet_now": pulse_quiet.why(pulse_store, zone, now),
+            "quiet_ends_at": pulse_quiet.ends_at(pulse_store, zone, now)}
 
 
 def see(pulse_store: Any, ids: Any, now: Optional[float] = None) -> int:
@@ -451,6 +492,11 @@ def state(pulse_store: Any, home: Path, now: Optional[float] = None) -> dict[str
         "levels": pulse_learning.levels(pulse_store),
         "unseen_cards": pulse_store.unseen_cards(),
         "brief_time": pulse.report.clock_text(pulse_store.get("brief_time") or pulse.brief.DEFAULT_TIME),
+        # Quiet times (pulse_quiet): the weekdays, the spell set, and whether it's quiet now and until when.
+        "quiet_days": pulse_quiet.days(pulse_store),
+        "quiet_until": pulse_quiet.until(pulse_store),
+        "quiet_now": pulse_quiet.why(pulse_store, zone, now),
+        "quiet_ends_at": pulse_quiet.ends_at(pulse_store, zone, now),
         "held_cards": pulse_store.held_count(),
         "memory_chunks": int(usage.get("chunks", 0) or 0),
         "memory_tokens": int(usage.get("tokens", 0) or 0),

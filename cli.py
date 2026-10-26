@@ -51,10 +51,10 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
              "next connects to this dashboard; `hermes conduit-push unpair` cuts it off now",
     )
     pulse = commands.add_parser("pulse", help="Pulse, the proactivity experiment: on, off, status, probe, report, home, outcomes, memory, followups, "
-                                                 "cards, rate, done, learned, nudge, budget, candidates, note")
+                                                 "cards, rate, done, learned, nudge, budget, candidates, note, quiet")
     pulse.add_argument("pulse_action", choices=["on", "off", "status", "probe", "report", "home", "outcomes", "memory",
                                                 "followups", "cards", "rate", "done", "learned", "nudge", "budget",
-                                                "candidates", "note"])
+                                                "candidates", "note", "quiet"])
     pulse.add_argument("value", nargs="?", default="",
                        help="for home: the id of the chat to use, or 'auto' to find it by title; "
                             "for outcomes: how many to show, or a chat id; "
@@ -68,7 +68,9 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
                             "for nudge: gentle, balanced or eager; "
                             "for budget: memory or followups; "
                             "for candidates: how many reports to show; "
-                            "for note: what you want from Pulse, in your own words, or 'clear'")
+                            "for note: what you want from Pulse, in your own words, or 'clear'; "
+                            "for quiet: 'today', 'until' and a day, 'off', 'days' and weekdays like sat,sun "
+                            "(or none), or nothing to show the quiet times")
     pulse.add_argument("extra", nargs="?", default="",
                        help="for memory forget: the item number; for memory backfill: how many days back "
                             "(it shows what that costs), 'start', 'stop' or 'cancel'; "
@@ -320,6 +322,7 @@ def _pulse(args: argparse.Namespace) -> int:
         or (action == "memory" and (args.value or "").strip() not in ("on", "off")) \
         or (action == "nudge" and not (args.value or "").strip()) \
         or (action == "note" and (args.value or "").strip() in ("", "clear")) \
+        or (action == "quiet" and not (args.value or "").strip()) \
         or (action == "budget" and not str(getattr(args, "extra", "") or "").strip())
     if (action in ("status", "probe", "off", "outcomes") or listing) and not (Path(home) / pulse_delivery.store.DB_NAME).exists():
         # Never turned on: say so without leaving a file behind.
@@ -364,6 +367,9 @@ def _pulse(args: argparse.Namespace) -> int:
     if action in ("cards", "rate", "done", "learned"):
         return _pulse_learning(pulse_store, action, (args.value or "").strip(),
                                str(getattr(args, "extra", "") or "").strip(), home)
+    if action == "quiet":
+        return _pulse_quiet(pulse_store, home, (args.value or "").strip(),
+                            str(getattr(args, "extra", "") or "").strip())
     if action == "note":
         # An unquoted two-word note is still the whole note.
         words = ((args.value or "").strip(), str(getattr(args, "extra", "") or "").strip())
@@ -418,6 +424,10 @@ def _pulse(args: argparse.Namespace) -> int:
               + datetime.fromtimestamp(upcoming, zone).strftime("%a %d %b %H:%M"))
     else:
         print("Morning brief: off while Pulse is")
+    quiet = _quiet_lines(pulse_store, zone, time.time())
+    if len(quiet) > 1 or not quiet[0].endswith("none"):
+        for line in quiet:
+            print(line)
     if pulse_store.get("report_profiles") == "all":
         others = [name for name, _ in pulse.report.profile_homes(home)]
         if others:
@@ -687,6 +697,53 @@ def _pulse_nudge(pulse_store: Any, value: str) -> int:
     print(f"Pulse nudges: {level} ({NUDGE_TEXT[level]}).")
     if value:
         print("Checks already booked keep their time and take the new pace from their next check.")
+    return 0
+
+
+def _quiet_lines(pulse_store: Any, zone: Any, now: float) -> list[str]:
+    """The quiet times (pulse_quiet), for `pulse quiet` and `pulse status`:
+    the days, the spell, and whether it's quiet now."""
+    from . import pulse_quiet
+    days = pulse_quiet.days(pulse_store)
+    lines = ["Quiet days: " + (", ".join(pulse_quiet.DAYS[day].capitalize() for day in days) if days else "none")]
+    end = pulse_quiet.until(pulse_store)
+    if end is not None and end > now:
+        lines.append("Quiet until " + datetime.fromtimestamp(end, zone).strftime("%a %d %b %H:%M"))
+    if pulse_quiet.why(pulse_store, zone, now):
+        ends = pulse_quiet.ends_at(pulse_store, zone, now)
+        lines.append("Pulse is quiet now: nothing on its own "
+                     + (f"until {datetime.fromtimestamp(ends, zone).strftime('%a %d %b %H:%M')}" if ends
+                        else "(every day is a quiet day)") + ".")
+    return lines
+
+
+def _pulse_quiet(pulse_store: Any, home: Any, value: str, extra: str) -> int:
+    """Shows or sets the quiet times (pulse_quiet): `quiet today`, `quiet
+    until 2026-11-03`, `quiet off`, `quiet days sat,sun` or `quiet days none`."""
+    from . import pulse, pulse_control, pulse_quiet
+    usage = "Usage: hermes conduit-push pulse quiet [today | until YYYY-MM-DD | off | days sat,sun | days none]"
+    try:
+        if value == "today":
+            pulse_control.update(pulse_store, {"quiet_until": "today"}, home)
+        elif value == "until":
+            pulse_control.update(pulse_store, {"quiet_until": extra}, home)
+        elif value == "off":
+            pulse_control.update(pulse_store, {"quiet_until": None}, home)
+        elif value == "days":
+            names = [] if extra == "none" else [name.strip().lower() for name in extra.split(",") if name.strip()]
+            if not names and extra != "none" or any(name not in pulse_quiet.DAYS for name in names):
+                print(usage)
+                return 2
+            pulse_control.update(pulse_store, {"quiet_days": [pulse_quiet.DAYS.index(name) for name in names]}, home)
+        elif value:
+            print(usage)
+            return 2
+    except pulse_control.Refused as error:
+        print("Quiet days are weekdays: mon to sun." if error.data.get("field") == "quiet_days"
+              else "Quiet until a day means a day ahead, within a year: YYYY-MM-DD.")
+        return 2
+    for line in _quiet_lines(pulse_store, pulse.report_zone(pulse_store, home), time.time()):
+        print(line)
     return 0
 
 

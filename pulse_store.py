@@ -65,6 +65,11 @@ DEFAULTS: dict[str, Any] = {
     # The morning brief (pulse_brief): every day at this local time, an hour
     # before the first report by default so the two don't arrive together.
     "brief_time": "07:00",
+    # Quiet times (pulse_quiet): the weekdays Pulse keeps to itself (Monday
+    # 0 to Sunday 6) and when a quiet spell ends (epoch seconds), in the
+    # user's time zone.
+    "quiet_days": [],
+    "quiet_until": None,
     "memory_since": None,
     "memory_run_at": 0.0,
     "memory_requested": False,

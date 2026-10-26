@@ -909,15 +909,19 @@ def attempts_of(pulse_store: store.PulseStore, item_id: int) -> list[dict]:
     return pulse_store.attempts_for_suffix(f"-f{item_id}")
 
 
-def next_send(pulse_store: store.PulseStore, now: float, home: Optional[Path] = None
+def next_send(pulse_store: store.PulseStore, now: float, home: Optional[Path] = None, *, quiet: bool = False
               ) -> Optional[tuple[dict, dict, int]]:
     """The follow-up to send now, its item and the attempt number: the
     oldest ``tell`` whose last attempt failed long enough ago, or none.
     Below "push" on the loudness ladder nothing is sent: each ``tell``
-    becomes a card in the Pulse screen (or waits for the brief) instead."""
+    becomes a card in the Pulse screen (or waits for the brief) instead,
+    and so does a push due while it's ``quiet`` (pulse_quiet): held for
+    the first brief after."""
     loudness = learning.level(pulse_store, FOLLOWUP)
     if loudness == "off":
         return None
+    if quiet and loudness == "push":
+        loudness = "brief"
     for followup in pulse_store.followups_to_tell():
         item = pulse_store.item(followup["item_id"])
         attempts = attempts_of(pulse_store, followup["item_id"])
