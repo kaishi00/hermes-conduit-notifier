@@ -9,7 +9,8 @@ the fingerprint words from it (``preview``), and accepting it (``accept``)
 leaves a sealed link.accept in the inviter's inbox with a send token for the
 acceptor's own. The inviter's Hermes answers with a link.confirm carrying a
 send token for its inbox, and both sides are linked. Either side can unlink,
-and the other side's Hermes drops it when its link.remove arrives.
+and the other side's Hermes drops it when its link.remove arrives: an acceptor
+that unlinks while it waits sends it in answer to the confirm, if one comes.
 
 One loop an installation reads the inbox (``LinkLoop``): whichever process
 holds ``conduit-rooms/.lease``. Everything a Link needs is in
@@ -270,9 +271,11 @@ class Links:
             again = _accepted(state, invite, now)
             if again is not None:
                 link_id = again
+                # Unlinked while it waited: accepted again, it waits again.
+                state["links"][again].pop("leaving", None)
             else:
                 for other_id, other in list(state["links"].items()):
-                    if _key_of(other, "sign") == invite.sign:
+                    if _key_of(other, "sign") == invite.sign and not other.get("leaving"):
                         if _status(other, now) != "unanswered":
                             raise LinkError("already_linked", f"This Hermes is already linked with {other['name']}; "
                                                               "unlink first to link again", 409)
@@ -318,8 +321,8 @@ class Links:
         """The Links and the invites still waiting, with no token or key."""
         state = self._store.read()
         now = int(self.clock())
-        links = sorted((_shown(link_id, link, now) for link_id, link in state["links"].items()),
-                       key=lambda link: (link["name"].casefold(), link["id"]))
+        links = sorted((_shown(link_id, link, now) for link_id, link in state["links"].items()
+                        if not link.get("leaving")), key=lambda link: (link["name"].casefold(), link["id"]))
         invites = sorted(({"id": invite_id, "name": invite["name"], "expires_at": invite["expires_at"]}
                           for invite_id, invite in state["invites"].items() if invite["expires_at"] > now),
                          key=lambda invite: (invite["expires_at"], invite["id"]))
@@ -332,23 +335,31 @@ class Links:
     def get(self, link_id: Any) -> Optional[dict[str, Any]]:
         """One Link as ``view`` shows it, or None."""
         link = self._store.read()["links"].get(link_id) if isinstance(link_id, str) else None
-        return None if link is None else _shown(link_id, link, int(self.clock()))
+        return None if link is None or link.get("leaving") else _shown(link_id, link, int(self.clock()))
 
     def remove(self, link_id: Any) -> dict[str, bool]:
         """Unlinks: the Link goes here at once, and the other side's Hermes
-        drops it when the link.remove arrives (sent later if it can't go now)."""
+        drops it when the link.remove arrives (sent later if it can't go now).
+        One still waiting for its confirm, whose accept may have reached the
+        inviter, goes from sight at once: its confirm, if it comes, is
+        answered with the link.remove."""
         if not isinstance(link_id, str):
             return {"removed": False}
         now = int(self.clock())
         with self._store.update() as state:
             link = state["links"].get(link_id)
-            if link is None:
+            if link is None or link.get("leaving"):
                 return {"removed": False}
-            _forget(state, link_id, now)
-            # An acceptor still waiting has no token for the other side's
-            # inbox; the inviter's refused confirm tells it instead.
             if link["send_token"]:
+                _forget(state, link_id, now)
                 state["outbox"].append(_outgoing(REMOVE, link_id, link, {}, now))
+            elif _status(link, now) == "waiting" and _accept_went(state, link_id):
+                # Until then this Hermes has no token for the inviter's inbox.
+                # Its sender stays for the confirm, which the inviter's Hermes
+                # takes as linked once the mailbox has it.
+                link["leaving"] = True
+            else:
+                _forget(state, link_id, now)
         self._flush_quietly()
         return {"removed": True}
 
@@ -389,10 +400,10 @@ class Links:
     # --- The mailbox calls the store says are waiting ---------------------------
 
     def flush(self) -> None:
-        """Makes the mailbox calls the store has waiting: senders to put for
-        new Links, envelopes to send, senders to delete. What fails stays for
+        """Makes the mailbox calls the store has waiting: senders to delete,
+        senders to put for new Links, envelopes to send. What fails stays for
         the next time, up to the mailbox's 7-day hold (an accept, until its
-        invite runs out)."""
+        invite runs out), unless the mailbox refused it as it is."""
         state = self._store.read()
         if not (any(not link.get("sender_up") for link in state["links"].values())
                 or state["outbox"] or state["cleanup"]):
@@ -401,12 +412,8 @@ class Links:
         mailbox = self._mailbox(identity, self._mailbox_url(state))
         with self._sending():
             state = self._store.read()  # what's left now no other pass can be sending it
-            for link_id, link in state["links"].items():
-                if not link.get("sender_up"):
-                    self._owner_call(mailbox, lambda: mailbox.put_sender(_link_sender(link_id), link["my_token"]))
-                    self._mark_sender_up(link_id)
-            for item in state["outbox"]:
-                self._deliver(identity, item)
+            # Old senders go first: an inbox with as many as the mailbox keeps
+            # takes a new one once they have.
             for item in state["cleanup"]:
                 try:
                     mailbox.delete_sender(item["sender"])
@@ -417,6 +424,12 @@ class Links:
                         continue
                 with self._store.update() as current:
                     current["cleanup"] = [other for other in current["cleanup"] if other["sender"] != item["sender"]]
+            for link_id, link in state["links"].items():
+                if not link.get("sender_up"):
+                    self._owner_call(mailbox, lambda: mailbox.put_sender(_link_sender(link_id), link["my_token"]))
+                    self._mark_sender_up(link_id)
+            for item in state["outbox"]:
+                self._deliver(identity, item)
 
     @contextmanager
     def _sending(self) -> Iterator[None]:
@@ -497,11 +510,13 @@ class Links:
                                   recipient_seal=_key_of(item, "seal"), message_id=item["id"],
                                   kind=item["kind"], body=item["body"], clock=self.clock)
         if item["kind"] == ACCEPT and not item.get("tried"):
-            # From here it may reach the inviter's mailbox.
+            # From here it may reach the inviter's mailbox. Unlinked before
+            # it was tried, it's gone, and it never goes.
             with self._store.update() as state:
-                for queued in state["outbox"]:
-                    if queued["id"] == item["id"]:
-                        queued["tried"] = True
+                queued = next((queued for queued in state["outbox"] if queued["id"] == item["id"]), None)
+                if queued is None:
+                    return
+                queued["tried"] = True
         room_mailbox.send(item["mailbox"], item["inbox"], item["token"], data, idempotency_key=item["id"])
 
     def _give_up(self, item: dict[str, Any], now: int, why: str, *, keep_link: bool = False) -> None:
@@ -682,7 +697,7 @@ class LinkLoop:
         links._registered(mailbox)
         drained = self._read(identity, mailbox, wait)
         links.flush()
-        if drained and self._expire_invites():
+        if drained and self._run_out():
             links.flush()
         return True
 
@@ -847,6 +862,11 @@ class LinkLoop:
                     link.update(status="linked", send_token=token)
                     # A copy of the accept still to go is answered.
                     state["outbox"] = [item for item in state["outbox"] if item["id"] != f"accept.{link_id}"]
+                    if link.pop("leaving", False):
+                        # Unlinked while it waited: the inviter's Hermes,
+                        # which took it as linked, hears now.
+                        _forget(state, link_id, now)
+                        state["outbox"].append(_outgoing(REMOVE, link_id, link, {}, now))
             return True
         if kind == REMOVE:
             with store.update() as state:
@@ -883,16 +903,22 @@ class LinkLoop:
                 link["seen"] = dict(sorted(seen.items(), key=lambda item: item[1])[-MAX_SEEN:])
         return True
 
-    def _expire_invites(self) -> bool:
+    def _run_out(self) -> bool:
         # Only once a read found the inbox empty: an accept still waiting there
-        # would go with its invite's sender.
+        # would go with its invite's sender, and a confirm with the sender of
+        # the Link it's for.
         now = int(self.clock())
         with self.links._store.update() as state:
             expired = [invite_id for invite_id, invite in state["invites"].items() if invite["expires_at"] <= now]
             for invite_id in expired:
                 del state["invites"][invite_id]
                 _clean_up(state, _invite_sender(invite_id), now)
-        return bool(expired)
+            # Unlinked while they waited, and no confirm came while one could.
+            unanswered = [link_id for link_id, link in state["links"].items()
+                          if link.get("leaving") and _status(link, now) == "unanswered"]
+            for link_id in unanswered:
+                _forget(state, link_id, now)
+        return bool(expired or unanswered)
 
 
 _loops: dict[str, LinkLoop] = {}
@@ -1061,9 +1087,16 @@ def _status(link: dict[str, Any], now: int) -> str:
 
 def _linked_with(state: dict[str, Any], sign: bytes, now: int) -> Optional[str]:
     for link_id, link in state["links"].items():
-        if _key_of(link, "sign") == sign and _status(link, now) != "unanswered":
+        if _key_of(link, "sign") == sign and _status(link, now) != "unanswered" and not link.get("leaving"):
             return link_id
     return None
+
+
+def _accept_went(state: dict[str, Any], link_id: str) -> bool:
+    """Whether a waiting Link's accept may have reached the inviter: it was
+    tried, or it's gone from the outbox, sent."""
+    item = next((item for item in state["outbox"] if item["id"] == f"accept.{link_id}"), None)
+    return item is None or bool(item.get("tried"))
 
 
 def _accept_fields(body: dict) -> Optional[dict[str, Any]]:

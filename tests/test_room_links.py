@@ -565,7 +565,7 @@ def test_a_link_still_waiting_after_eight_days_reads_unanswered(home):
 
 
 @needs_node
-def test_a_refused_confirm_means_the_acceptor_gave_up(home):
+def test_an_acceptor_who_unlinks_before_the_accept_is_read_ends_it_for_both(home):
     eric, mona = home("eric"), home("mona")
     url = eric.invite("Eric")["url"]
     link_id = mona.accept(url, "Mona")["link"]["id"]
@@ -574,7 +574,82 @@ def test_a_refused_confirm_means_the_acceptor_gave_up(home):
     _run(eric, mona)
 
     assert eric.view()["links"] == [] and eric.view()["invites"] == []
-    assert [row["sender"] for row in eric.mailbox().senders()] == []
+    assert mona._store.read()["links"] == {}
+    assert eric.mailbox().senders() == [] and mona.mailbox().senders() == []
+
+
+@needs_node
+def test_an_acceptor_who_unlinks_while_the_confirm_waits_ends_it_for_both(home):
+    eric, mona = home("eric"), home("mona")
+    url = eric.invite("Eric")["url"]
+    link_id = mona.accept(url, "Mona")["link"]["id"]
+    _run(eric, passes=1)  # Eric's Hermes answers; the confirm waits in Mona's inbox
+    assert [link["status"] for link in eric.view()["links"]] == ["linked"]
+
+    assert mona.remove(link_id) == {"removed": True}
+    assert mona.view()["links"] == [] and mona.get(link_id) is None
+    assert mona.preview(url)["linked_as"] is None and mona.remove(link_id) == {"removed": False}
+    _run(mona, eric)
+
+    assert eric.view()["links"] == [] and mona._store.read()["links"] == {}
+    assert eric.mailbox().senders() == [] and mona.mailbox().senders() == []
+
+
+@needs_node
+def test_an_unlinked_accept_nobody_answers_goes_after_the_wait(home):
+    clock = Clock()
+    eric, mona = home("eric"), home("mona", clock)
+    link_id = mona.accept(eric.invite("Eric")["url"], "Mona")["link"]["id"]
+    mona.remove(link_id)  # and Eric's Hermes stays off
+
+    _run(mona, passes=1)
+    assert link_id in mona._store.read()["links"]  # for the confirm, if it comes
+    clock.now += 8 * DAY + 60
+    _run(mona, passes=1)
+
+    assert mona._store.read()["links"] == {} and mona.mailbox().senders() == []
+
+
+@needs_node
+def test_an_accept_that_never_went_is_unlinked_at_once(home, monkeypatch):
+    eric, mona = home("eric"), home("mona")
+    url = eric.invite("Eric")["url"]
+    _accept_cut_off(mona, url, monkeypatch)
+    link_id = next(iter(mona._store.read()["links"]))
+
+    mona.remove(link_id)
+
+    assert mona._store.read()["links"] == {} and mona._store.read()["outbox"] == []
+
+
+@needs_node
+def test_an_accept_unlinked_just_before_it_goes_doesnt_go(home, monkeypatch):
+    # The unlink found it not yet tried, so it took the Link back at once.
+    eric, mona = home("eric"), home("mona")
+    _accept_cut_off(mona, eric.invite("Eric")["url"], monkeypatch)
+    state = mona._store.read()
+    link_id, [item] = next(iter(state["links"])), state["outbox"]
+    sent = _sends(monkeypatch)
+
+    mona.remove(link_id)
+    mona._send_outgoing(identity_module.load(mona.root), item)
+
+    assert sent == []
+
+
+@needs_node
+def test_accepting_an_invite_again_after_unlinking_it_links(home):
+    eric, mona = home("eric"), home("mona")
+    url = eric.invite("Eric")["url"]
+    link_id = mona.accept(url, "Mona")["link"]["id"]
+    mona.remove(link_id)
+
+    again = mona.accept(url, "Mona")["link"]
+    _run(eric, mona)
+
+    assert (again["id"], again["status"]) == (link_id, "waiting")
+    assert [link["status"] for link in eric.view()["links"]] == ["linked"]
+    assert [link["status"] for link in mona.view()["links"]] == ["linked"]
 
 
 @needs_node
@@ -665,6 +740,32 @@ def test_an_unlink_whose_envelope_cant_go_now_still_unlinks(home, monkeypatch, e
 
     assert eric.remove(link_id) == {"removed": True}
     assert eric.view()["links"] == []
+
+
+def _refusing(code, status=0):
+    def refuse(*args, **kwargs):
+        raise mailbox_module.MailboxError(code, "Refused", status)
+
+    return refuse
+
+
+@needs_node
+def test_senders_to_remove_go_before_new_ones_are_put(home, monkeypatch):
+    # An inbox with as many senders as the mailbox keeps takes a new one once old ones go.
+    eric, mona, link_id = _linked(home)
+    invite_id = eric.invite("Eric")["invite"]["id"]
+    with monkeypatch.context() as patched:
+        patched.setattr(mailbox_module.Mailbox, "delete_sender", _refusing("unreachable"))
+        eric.cancel(invite_id)
+    with eric._store.update() as state:
+        state["links"][link_id]["sender_up"] = False
+    monkeypatch.setattr(mailbox_module.Mailbox, "put_sender", _refusing("too_many_senders", 409))
+
+    with pytest.raises(mailbox_module.MailboxError):
+        eric.flush()
+
+    assert eric._store.read()["cleanup"] == []
+    assert [row["sender"] for row in eric.mailbox().senders()] == [f"l-{link_id}"]
 
 
 @needs_node
