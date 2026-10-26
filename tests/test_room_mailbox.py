@@ -1,7 +1,9 @@
 """The rooms mailbox's client (designs/cross-owner-agents, mailbox protocol v1)."""
 import base64
+import email.message
 import http.server
 import importlib.util
+import io
 import json
 import os
 import pathlib
@@ -14,6 +16,7 @@ import tempfile
 import threading
 import time
 import types
+import urllib.error
 import urllib.request
 
 import pytest
@@ -156,6 +159,45 @@ def test_reads_and_acks_take_only_whole_numbers(eric, read):
     with pytest.raises(mailbox_module.MailboxError) as refused:
         read(inbox)
     assert refused.value.code == "bad_request"
+
+
+@pytest.mark.parametrize("ack", [{}, {"seqs": []}, {"seqs": [0]}, {"seqs": [1] * 101}],
+                         ids=["nothing", "no-seqs", "seq-zero", "over-100-seqs"])
+def test_an_ack_the_mailbox_would_refuse_never_goes_out(eric, ack):
+    inbox = mailbox_module.Mailbox(f"http://127.0.0.1:{_free_port()}", eric)
+
+    with pytest.raises(mailbox_module.MailboxError) as refused:
+        inbox.ack(**ack)
+    assert refused.value.code == "bad_request"
+
+
+@pytest.mark.parametrize("token", ["short-token", "a registration token", "registration-token\r\n",
+                                   "registration-tökén"], ids=["short", "space", "line-end", "not-ascii"])
+def test_a_registration_token_the_mailbox_cant_have_is_refused(eric, token):
+    # The mailbox's own is 16 to 256 printable ASCII characters. Sent, one
+    # with a line end would fail in http.client and read as unreachable.
+    inbox = mailbox_module.Mailbox(f"http://127.0.0.1:{_free_port()}", eric, registration_token=token)
+
+    with pytest.raises(mailbox_module.MailboxError) as refused:
+        inbox.register()
+    assert refused.value.code == "bad_request"
+
+
+def test_a_refused_answer_is_closed(eric, monkeypatch):
+    # Left open, a refusal held by a MailboxError someone keeps would hold its
+    # connection with it.
+    answer = io.BytesIO(b'{"error": "unauthorized"}')
+
+    class Refusing:
+        def open(self, request, timeout):
+            raise urllib.error.HTTPError(request.full_url, 401, "Unauthorized", email.message.Message(), answer)
+
+    monkeypatch.setattr(mailbox_module, "_opener", Refusing())
+    with pytest.raises(mailbox_module.MailboxError) as refused:
+        mailbox_module.Mailbox("https://rooms.milim.dev", eric).info()
+
+    assert refused.value.code == "unauthorized"
+    assert answer.closed
 
 
 # --- Against the mailbox itself --------------------------------------------------

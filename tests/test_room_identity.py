@@ -116,6 +116,8 @@ def test_a_file_it_cant_parse_is_refused_and_kept(tmp_path):
     {"version": 1, "sign_key": "AAAA", "seal_key": _b64u(bytes(32)), "created_at": 1},
     {"version": 1, "sign_key": _b64u(bytes(32)), "created_at": 1},
     {"version": 2, "sign_key": _b64u(bytes(32)), "seal_key": _b64u(bytes(32)), "created_at": 1},
+    {"version": True, "sign_key": _b64u(bytes(32)), "seal_key": _b64u(bytes(32)), "created_at": 1},
+    {"version": 1.0, "sign_key": _b64u(bytes(32)), "seal_key": _b64u(bytes(32)), "created_at": 1},
     ["not", "an", "object"],
 ])
 def test_keys_of_a_shape_it_doesnt_write_are_refused_and_kept(tmp_path, stored):
@@ -128,6 +130,20 @@ def test_keys_of_a_shape_it_doesnt_write_are_refused_and_kept(tmp_path, stored):
 
     assert refused.value.code == "unreadable"
     assert json.loads(path.read_text()) == stored
+
+
+def test_without_cryptography_it_says_so_whether_or_not_theres_an_identity(tmp_path, monkeypatch):
+    identity_module.load_or_create(tmp_path / "made")
+    monkeypatch.setattr(identity_module.sealing, "crypto_available", lambda: False)
+
+    for root, reads in ((tmp_path / "made", (identity_module.load, identity_module.load_or_create)),
+                        (tmp_path / "none", (identity_module.load_or_create,))):
+        for read in reads:
+            with pytest.raises(identity_module.IdentityError) as refused:
+                read(root)
+            assert refused.value.code == "no_crypto"
+    assert identity_module.load(tmp_path / "none") is None
+    assert not (tmp_path / "none").exists()
 
 
 def test_the_file_is_owner_only_whatever_the_umask(tmp_path):

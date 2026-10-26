@@ -46,11 +46,14 @@ TIMEOUT_S = 15.0
 # large envelopes are waiting.
 MAX_ANSWER_BYTES = 4 * 1024 * 1024
 MAX_REFUSAL_BYTES = 4096
+ACK_MAX_SEQS = 100
 
 SENDER_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}\Z")
 INBOX_ID = re.compile(r"^[A-Za-z0-9_-]{43}\Z")
 IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9_.:-]{1,128}\Z")
 SEND_TOKEN = re.compile(r"^[\x21-\x7e]{1,512}\Z")
+# The mailbox's own MAILBOX_REGISTRATION_TOKEN rule.
+REGISTRATION_TOKEN = re.compile(r"^[\x21-\x7e]{16,256}\Z")
 _CODE = re.compile(r"^[a-z_]{1,64}\Z")
 _NUMERIC_LABEL = re.compile(r"^(?:\d+|0[xX][0-9A-Fa-f]*)\Z")
 
@@ -166,6 +169,9 @@ class Mailbox:
 
     def register(self) -> dict[str, Any]:
         """Makes the inbox, or confirms it: ``{inbox, limits, created}``."""
+        if self.registration_token and not REGISTRATION_TOKEN.match(self.registration_token):
+            raise MailboxError("bad_request", "a registration token is 16 to 256 printable ASCII characters, "
+                                              "with no spaces")
         headers = {"Mailbox-Registration": self.registration_token} if self.registration_token else None
         status, answer = self._owner("POST", "/v1/inboxes", {"key": sealing.b64u(self.identity.signing_public)},
                                      headers=headers)
@@ -229,8 +235,12 @@ class Mailbox:
             body["through"] = through
         if seqs is not None:
             body["seqs"] = list(seqs)
-        if not all(_whole(seq) for seq in [body.get("through", 0), *body.get("seqs", ())]):
-            raise MailboxError("bad_request", "an ack names seqs, which are whole numbers")
+        valid_through = through is None or _whole(through)
+        valid_seqs = seqs is None or (1 <= len(body["seqs"]) <= ACK_MAX_SEQS
+                                      and all(_whole(seq) and seq > 0 for seq in body["seqs"]))
+        if not body or not valid_through or not valid_seqs:
+            raise MailboxError("bad_request", "an ack names a whole number to delete through, or 1 to "
+                                              f"{ACK_MAX_SEQS} seqs of 1 or more")
         deleted = self._owner("POST", f"{self._inbox_path}/ack", body)[1].get("deleted")
         if not _whole(deleted):
             raise MailboxError("bad_answer", f"The mailbox at {self.host} answered an ack oddly")
@@ -319,6 +329,8 @@ def _refusal(error: urllib.error.HTTPError, host: str) -> MailboxError:
         raw = error.read(MAX_REFUSAL_BYTES)
     except (OSError, http.client.HTTPException):
         raw = b""
+    finally:
+        error.close()
     try:
         code = json.loads(raw).get("error")
     except (ValueError, RecursionError, AttributeError):

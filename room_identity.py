@@ -51,6 +51,7 @@ WORD_LIST_SHA256 = "2f5eed53a4727b4bf8880d8f3f199efc90e58503646d9ff8eff3a2ed3b24
 FINGERPRINT_LABEL = b"conduit-rooms-fingerprint-v1\n"
 
 _KEY = re.compile(r"^[A-Za-z0-9_-]{43}\Z")
+_NO_CRYPTO = "Linked Rooms needs Python's cryptography package, which this Hermes doesn't have"
 _thread_lock = threading.Lock()
 
 
@@ -157,7 +158,8 @@ def root_home(home: Any = None) -> Path:
 
 def load(root: Any) -> Optional[Identity]:
     """The installation's identity, or None before one is made. A file this
-    module can't read or didn't write raises IdentityError."""
+    module can't read or didn't write raises IdentityError, as does any file
+    on a Hermes without the cryptography package."""
     path = Path(root) / DIRECTORY / FILE_NAME
     try:
         raw = path.read_bytes()
@@ -166,6 +168,8 @@ def load(root: Any) -> Optional[Identity]:
     except OSError as exc:
         raise IdentityError("unreadable", f"Couldn't read {path} ({exc.strerror or exc}), so Linked Rooms is off on "
                                           "this installation until it can") from None
+    if not sealing.crypto_available():
+        raise IdentityError("no_crypto", _NO_CRYPTO)
     try:
         stored = json.loads(raw)
     except (ValueError, RecursionError):  # bytes that aren't UTF-8 included
@@ -178,12 +182,11 @@ def load(root: Any) -> Optional[Identity]:
 
 def load_or_create(root: Any, clock: Any = time.time) -> Identity:
     """The installation's identity, made the first time it's asked for."""
+    if not sealing.crypto_available():
+        raise IdentityError("no_crypto", _NO_CRYPTO)
     found = load(root)
     if found is not None:
         return found
-    if not sealing.crypto_available():
-        raise IdentityError("no_crypto", "Linked Rooms needs Python's cryptography package, which this Hermes "
-                                         "doesn't have")
     directory = Path(root) / DIRECTORY
     made = not directory.is_dir()
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -216,7 +219,7 @@ def _key(value: Any) -> Optional[bytes]:
 
 
 def _identity_from(stored: Any) -> Optional[Identity]:
-    if not isinstance(stored, dict) or stored.get("version") != VERSION:
+    if not isinstance(stored, dict) or type(stored.get("version")) is not int or stored["version"] != VERSION:
         return None
     signing_key, sealing_key = _key(stored.get("sign_key")), _key(stored.get("seal_key"))
     created_at = stored.get("created_at")
