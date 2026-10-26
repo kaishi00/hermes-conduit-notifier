@@ -9806,6 +9806,8 @@ def run_watch_tool(grant: _WatchGrant, request: Dict[str, Any]) -> Dict[str, Any
 # hears. read_chat reads only a chat the grant's newest find_chat returned.
 
 WATCH_CHAT_RESULTS = 5
+# VoiceChatFinder.path's exclude_sources (SessionSource.hermesKanbanSource).
+CHAT_SEARCH_EXCLUDED_SOURCES = "kanban"
 WATCH_CHAT_QUERY_CHARS = 200
 WATCH_CHAT_SNIPPET_CHARS = 160
 # Under the Watch's 35 s wait for an answer (WatchToolRelayClient).
@@ -9858,6 +9860,15 @@ def _hermes_session_routes():
     if not (hasattr(sessions, "search_sessions") and hasattr(sessions, "get_session_messages")):
         return None
     return sessions
+
+
+def _accepts_keyword(func: Any, name: str) -> bool:
+    """Whether ``func`` takes keyword ``name`` (by name or through ``**kwargs``)."""
+    try:
+        params = inspect.signature(func).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(p.name == name or p.kind is inspect.Parameter.VAR_KEYWORD for p in params)
 
 
 def chat_search_query(raw: Any) -> str:
@@ -10124,10 +10135,16 @@ def run_watch_find_chat(grant: _WatchGrant, args: Dict[str, Any], routes=None,
     if routes is None:
         return {"ok": False, "status": 501, "detail": "Searching chats needs a newer Hermes on this host."}
 
+    # Kanban workers' transcripts aren't chats (Hermes won't reopen one; the
+    # board runs it), so a call never finds them, as on the iPhone. A Hermes
+    # whose route predates the filter searches without it.
+    scope = {"exclude_sources": CHAT_SEARCH_EXCLUDED_SOURCES} if _accepts_keyword(
+        routes.search_sessions, "exclude_sources") else {}
+
     def search_for(words: str) -> list:
         # Its own deadline, so a stuck route frees the worker too.
         return chat_matches(asyncio.run(asyncio.wait_for(routes.search_sessions(
-            q=words, limit=WATCH_CHAT_RESULTS, profile=grant.profile), WATCH_CHAT_SEARCH_TIMEOUT_S)))
+            q=words, limit=WATCH_CHAT_RESULTS, profile=grant.profile, **scope), WATCH_CHAT_SEARCH_TIMEOUT_S)))
 
     matches = search_for(query)
     for word in chat_fallback_words(query) if not matches else []:

@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.83.1 (2026-10-26)
+
+### Fixes
+- Asking for a chat on an Apple Watch call could find a Kanban task's worker,
+  which isn't a chat you can pick up. Calls now leave workers to the board.
+
 ## 0.83.0 (2026-10-26)
 
 ### New and improved
