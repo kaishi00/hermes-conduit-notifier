@@ -7695,7 +7695,9 @@ async def post_conduit_prefs_import(request: Request, response: Response, profil
 # settings a tester changes, as pulse_control.py has them. Pulse is one per
 # host, in the dashboard's own Hermes home, so these routes take no profile.
 
-PULSE_MAX_BODY_BYTES = 4 * 1024
+# Room for the note to Pulse beside the other settings: pulse_control.NOTE_LIMIT
+# characters, each up to six bytes once JSON escapes it.
+PULSE_MAX_BODY_BYTES = 16 * 1024
 PULSE_LIMIT = 60
 PULSE_WINDOW_S = 60.0
 

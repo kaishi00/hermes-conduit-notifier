@@ -1123,12 +1123,22 @@ def test_the_report_stays_under_lcms_externalization_threshold(db, tmp_path, liv
     context, since = report.build(tmp_path, live.store, home_chat_id=SID, now=now)
     assert len(report.report_text("p12345678-1", context, since)) < report.LCM_DEFAULT_THRESHOLD
     assert "### Chat 39" in context
+    # The user's note to Pulse takes its share of the message first: the
+    # context is gathered to fit beside it, so the newest chat lines stay.
+    long_note = "n" * control.NOTE_LIMIT
+    live.store.set("note", long_note)
+    context, since = report.build(tmp_path, live.store, home_chat_id=SID, now=now)
+    text = report.report_text("p12345678-1", context, since, note=long_note)
+    assert context in text and long_note in text and len(text) <= report.report_budget(long_note)
+    assert "### Chat 39" in context
+    live.store.set("note", "")
     monkeypatch.setenv(report.LCM_THRESHOLD, "50000")
     assert report.report_budget() == report.REPORT_BUDGET
     monkeypatch.setenv(report.LCM_THRESHOLD, "junk")
     assert report.report_budget() == report.LCM_DEFAULT_THRESHOLD - report.LCM_MARGIN
     monkeypatch.setenv(report.LCM_THRESHOLD, "1")
     assert report.report_budget() == len(report.REPORT_TEXT) + report.BAR_ROOM + 1_000
+    assert report.report_budget("note") == len(report.REPORT_TEXT) + report.BAR_ROOM + len(report.note_block("note")) + 1_000
     # The message itself never goes over, whatever the context.
     monkeypatch.delenv(report.LCM_THRESHOLD)
     for name in ("USER.md", "MEMORY.md"):
@@ -1141,6 +1151,8 @@ def test_the_report_stays_under_lcms_externalization_threshold(db, tmp_path, liv
     monkeypatch.setenv(report.LCM_THRESHOLD, "1")
     text = report.report_text("p12345678-12", "y" * 50_000, "Tue 20 Oct 18:00")
     assert len(text) <= report.report_budget() and text.endswith(">>>")
+    text = report.report_text("p12345678-12", "y" * 50_000, "Tue 20 Oct 18:00", note="z" * 1_000)
+    assert len(text) <= report.report_budget("z" * 1_000) and text.endswith(">>>") and "z" * 1_000 in text
 
 
 def test_items_and_ratings_are_read_from_the_text():
@@ -2568,6 +2580,13 @@ def test_pulse_routes(remembering, db, monkeypatch):
     assert put.status_code == 200 and put.json()["enabled"] and put.json()["next_report_at"] is None
     bad = http.put(base, json={"report_times": ["noon"]})
     assert bad.status_code == 400 and bad.json()["detail"] == {"code": "invalid", "field": "report_times"}
+    # The note to Pulse fits the body cap in any script: NOTE_LIMIT characters of three bytes each here.
+    long_note = "記" * control.NOTE_LIMIT
+    noted = http.put(base, json={"note": long_note})
+    assert noted.status_code == 200 and noted.json()["note"] == long_note
+    over = http.put(base, json={"note": long_note + "記"})
+    assert over.status_code == 400 and over.json()["detail"] == {"code": "invalid", "field": "note"}
+    assert http.put(base, json={"note": " "}).json()["note"] == ""
     stop = http.post(f"{base}/backfill", json={"action": "stop"})
     assert stop.status_code == 409 and stop.json()["detail"]["code"] == "not_running"
     assert http.post(f"{base}/backfill", json={"action": "estimate", "days": 0}).status_code == 400
@@ -2608,6 +2627,7 @@ def test_pulse_routes(remembering, db, monkeypatch):
     assert "pulse_daily_brief" in api.ROUTE_CAPABILITIES  # Settings > Pulse says the brief comes every day
     # A report item Pulse found on its own takes Do it and Done too.
     assert "pulse_found_actions" in api.ROUTE_CAPABILITIES
+    assert "pulse_note" in api.ROUTE_CAPABILITIES  # Settings > Pulse shows the note to Pulse
     found = store_.add_card({"kind": "noticed", "level": "screen", "topic": "date", "news": "Dentist Friday",
                              "created_at": DAY})
     assert http.post(f"{base}/acted", json={"card": found}).json()["booked"] is True

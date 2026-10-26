@@ -600,7 +600,7 @@ def gather(home: Path, pulse_store: store.PulseStore, *, home_chat_id: str, now:
     the report turn's message leaves its context). ``extra`` is one more
     section, after what Pulse remembers; ``keyed`` gives each chat a key
     (recent_chats)."""
-    room = report_room() if room is None else room
+    room = report_room(note(pulse_store)) if room is None else room
     since = window_start(pulse_store, now)
     phone, zone_name = phone_context(home, now)
     zone_name = pulse_store.get("time_zone") or zone_name
@@ -646,15 +646,16 @@ def gather(home: Path, pulse_store: store.PulseStore, *, home_chat_id: str, now:
     return Gathered(rest + "\n\n" + chats, start, shown, resting, keys or {})
 
 
-def report_room() -> int:
+def report_room(note: str = "") -> int:
     """The room report_text's message leaves its context, so the whole
-    message stays under report_budget(). The 100 estimates what report_text
-    fills into REPORT_TEXT (the tag, the start time, the kinds and the
-    fence); report_text itself cuts anything still over."""
-    return report_budget() - len(REPORT_TEXT) - BAR_ROOM - 100
+    message stays under report_budget(): the user's note to Pulse takes
+    its share first. The 100 estimates what report_text fills into
+    REPORT_TEXT (the tag, the start time, the kinds and the fence);
+    report_text itself cuts anything still over."""
+    return report_budget(note) - len(REPORT_TEXT) - BAR_ROOM - len(note_block(note)) - 100
 
 
-def report_budget() -> int:
+def report_budget(note: str = "") -> int:
     """REPORT_BUDGET, kept under hermes-lcm's externalization threshold.
     The threshold counts whether or not LCM's externalization looks on from
     here: a report a little shorter than it could be costs little, one LCM
@@ -663,9 +664,10 @@ def report_budget() -> int:
         threshold = int(os.environ.get(LCM_THRESHOLD) or LCM_DEFAULT_THRESHOLD)
     except ValueError:
         threshold = LCM_DEFAULT_THRESHOLD
-    # Below the instructions plus a little context, no report fits; LCM's
-    # default is 12,000, so only a deliberately tiny threshold gets here.
-    return max(len(REPORT_TEXT) + BAR_ROOM + 1_000, min(REPORT_BUDGET, threshold - LCM_MARGIN))
+    # Below the instructions (the note included) plus a little context, no
+    # report fits; LCM's default is 12,000, so only a deliberately tiny
+    # threshold gets here.
+    return max(len(REPORT_TEXT) + BAR_ROOM + len(note_block(note)) + 1_000, min(REPORT_BUDGET, threshold - LCM_MARGIN))
 
 
 def note(pulse_store: Any) -> str:
@@ -691,7 +693,7 @@ def report_text(tag: str, context: str, since: str, nudge: str = "balanced", not
     fence = secrets.token_hex(6)
     while fence in context:
         fence = secrets.token_hex(6)
-    room = report_budget() - len(REPORT_TEXT.format(tag=tag, kinds=kinds, context="", since=since, fence=fence,
+    room = report_budget(note) - len(REPORT_TEXT.format(tag=tag, kinds=kinds, context="", since=since, fence=fence,
                                                     bar=bar, note=block))
     if len(context) > room:
         context = context[:max(0, room - 1)] + "…"

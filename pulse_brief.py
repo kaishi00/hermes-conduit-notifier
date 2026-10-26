@@ -122,7 +122,7 @@ def text_for(context_text: str, note: str = "") -> Callable[[str], str]:
         fence = secrets.token_hex(6)
         while fence in context_text:
             fence = secrets.token_hex(6)
-        room = report.report_budget() - len(TEXT.format(tag=tag, fence=fence, context="", note=block))
+        room = report.report_budget(note) - len(TEXT.format(tag=tag, fence=fence, context="", note=block))
         body = context_text if len(context_text) <= room else context_text[:max(0, room - 1)] + "…"
         return TEXT.format(tag=tag, fence=fence, context=body, note=block)
     return text

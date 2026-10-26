@@ -293,7 +293,7 @@ def _pulse(args: argparse.Namespace) -> int:
     listing = action in ("followups", "cards", "rate", "done", "learned", "candidates") \
         or (action == "memory" and (args.value or "").strip() not in ("on", "off")) \
         or (action == "nudge" and not (args.value or "").strip()) \
-        or (action == "note" and not (args.value or "").strip()) \
+        or (action == "note" and (args.value or "").strip() in ("", "clear")) \
         or (action == "budget" and not str(getattr(args, "extra", "") or "").strip())
     if (action in ("status", "probe", "off", "outcomes") or listing) and not (Path(home) / pulse_delivery.store.DB_NAME).exists():
         # Never turned on: say so without leaving a file behind.
@@ -339,7 +339,9 @@ def _pulse(args: argparse.Namespace) -> int:
         return _pulse_learning(pulse_store, action, (args.value or "").strip(),
                                str(getattr(args, "extra", "") or "").strip())
     if action == "note":
-        return _pulse_note(pulse_store, (args.value or "").strip())
+        # An unquoted two-word note is still the whole note.
+        words = ((args.value or "").strip(), str(getattr(args, "extra", "") or "").strip())
+        return _pulse_note(pulse_store, " ".join(word for word in words if word))
     if action == "nudge":
         return _pulse_nudge(pulse_store, (args.value or "").strip())
     if action == "candidates":
