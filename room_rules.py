@@ -333,17 +333,21 @@ def filter_search(result: Any, home: Any, profile: Any = None) -> Optional[str]:
     if home is None:
         # Never in a running Hermes: without a home the room stores can't be
         # read, so a room's helper can't be told from any other chat.
+        if not mentions_rooms(result):
+            return None
         warn_often("search home", "conduit_push: past-chat search ran with no Hermes home to check it in, so a "
                    "result that names group rooms went to the agent as a failed search", exc_info=False)
-        return json.dumps({"success": False, "error": SEARCH_FAILED}) if mentions_rooms(result) else None
+        return json.dumps({"success": False, "error": SEARCH_FAILED})
     searched = _profile_home(Path(home), profile)
     if searched is None:
         # Hermes gives no profile such a name today, and refuses a search of
         # one: which store holds that profile's rooms can't be told.
+        if not mentions_rooms(result):
+            return None
         warn_often("search profile", "conduit_push: past-chat search read profile %r, a name the plugin can't "
                    "place, so a result that names group rooms went to the agent as a failed search",
                    str(profile)[:64], exc_info=False)
-        return json.dumps({"success": False, "error": SEARCH_FAILED}) if mentions_rooms(result) else None
+        return json.dumps({"success": False, "error": SEARCH_FAILED})
     mode = payload.get("mode")
     if mode in ("read", "scroll"):
         session_id = payload.get("session_id")

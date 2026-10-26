@@ -96,6 +96,7 @@ class _Hermes:
         self.root = root
         self.guarded = {}  # session id -> deletes a turn's lease still refuses
         self.busy = set()  # session ids whose ledger has a turn not finished
+        self.fails = set()  # session ids Hermes' delete fails on (a row of theirs it can't read)
         self.broken = False
         self.prune = False  # the disband prunes the room's row in its transaction
         self.refuse = False  # the disband loses its authority fence
@@ -130,6 +131,8 @@ class _Hermes:
             self.block.wait(5)
         if self.broken:
             raise sqlite3.OperationalError("disk I/O error")
+        if self.fails & set(session_ids):
+            raise ValueError("malformed JSON")
         conn = sqlite3.connect(path)
         try:
             existing = [sid for sid in session_ids
@@ -489,9 +492,69 @@ def test_disband_still_succeeds_when_cleanup_fails(guard, caplog):
         result = _disband(guard, "with-laifu")
 
     assert result["idempotent"] is False
-    assert "couldn't delete the hidden chats of room with-laifu" in caplog.text
+    assert "couldn't delete every hidden chat of room with-laifu" in caplog.text
     assert _ids(furina) == {"f-with"}
     assert guard.held == 0
+
+
+def test_a_chat_hermes_cant_delete_keeps_only_itself(guard, caplog):
+    furina, nahida = _home(guard, "furina"), _home(guard, "nahida")
+    _room(guard.root / "state.db", "with-laifu", [FURINA, NAHIDA, LAIFU])
+    _room_session(furina, "f-with", "with-laifu")
+    _session(furina, "f-with-2", source="bot_room", title="Group: with-laifu #2")
+    _room_session(nahida, "n-with", "with-laifu")
+    guard.fails.add("f-with")
+
+    with caplog.at_level(logging.WARNING, logger=cleanup.__name__):
+        assert _disband(guard, "with-laifu")["idempotent"] is False
+
+    assert _ids(furina) == {"f-with"}
+    assert _ids(nahida) == set()
+    # Tried again shortly, as a chat a turn is finishing in is, then at the next load.
+    assert [ids for _, ids, _ in guard.deletes].count(["f-with"]) == 2
+    assert "couldn't delete" in caplog.text and "next loads" in caplog.text
+    assert guard.held == 0
+    guard.fails.clear()
+    assert cleanup.sweep() == 1
+    assert _ids(furina) == set()
+
+
+def test_a_home_whose_store_fails_is_tried_again_shortly(guard, monkeypatch):
+    furina = _home(guard, "furina")
+    _room(guard.root / "state.db", "with-laifu", [FURINA, LAIFU])
+    _room_session(furina, "f-with", "with-laifu")
+    registry = sys.modules["hermes_state_registry"]
+    acquire, opened = registry.acquire, []
+
+    def locked_at_first(db_path=None):
+        opened.append(db_path)
+        if len(opened) == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return acquire(db_path)
+
+    monkeypatch.setattr(registry, "acquire", locked_at_first)
+    _disband(guard, "with-laifu")
+
+    assert len(opened) == 2
+    assert _ids(furina) == set()
+
+
+def test_a_cleanup_that_cant_start_leaves_the_disband_done(guard, monkeypatch, caplog):
+    furina = _home(guard, "furina")
+    _room(guard.root / "state.db", "with-laifu", [FURINA, LAIFU])
+    _room_session(furina, "f-with", "with-laifu")
+
+    def no_thread(work, name):
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(cleanup, "_in_background", no_thread)
+    with caplog.at_level(logging.WARNING, logger=cleanup.__name__):
+        assert _disband(guard, "with-laifu")["idempotent"] is False
+
+    assert "room with-laifu" in caplog.text and "next loads" in caplog.text
+    assert _ids(furina) == {"f-with"}
+    assert cleanup.sweep() == 1
+    assert _ids(furina) == set()
 
 
 def test_a_store_it_cant_read_leaves_the_disband_to_hermes(guard):
@@ -615,7 +678,7 @@ def test_no_hermes_rooms_at_all_is_not_an_error(monkeypatch, caplog):
     assert not [record for record in caplog.records if record.levelno >= logging.INFO]
 
 
-def test_the_load_sweep_runs_once_per_process_off_the_start_path(hermes, monkeypatch):
+def test_the_load_sweep_runs_once_a_load_off_the_start_path(hermes, monkeypatch):
     furina = _home(hermes, "furina")
     _room(hermes.root / "state.db", "long-gone", [FURINA, LAIFU], disbanded_at=2.0)
     _room_session(furina, "f-gone", "long-gone")
@@ -627,12 +690,26 @@ def test_the_load_sweep_runs_once_per_process_off_the_start_path(hermes, monkeyp
     cleanup._sweeper.join(5)
     assert _ids(furina) == set()
 
-    # Loaded again in the same process: no second sweep.
-    cleanup.uninstall()
-    _room_session(furina, "f-gone-2", "long-gone")
-    assert cleanup.install()
-    assert cleanup._sweeper is None
-    assert _ids(furina) == {"f-gone-2"}
+    # The dashboard's copy, loaded in the same process, doesn't sweep again.
+    second_package = types.ModuleType("conduit_push_second")
+    second_package.__path__ = [str(ROOT)]
+    monkeypatch.setitem(sys.modules, "conduit_push_second", second_package)
+    second = _load("conduit_push_second.room_cleanup", ROOT / "room_cleanup.py")
+    try:
+        assert second.install()
+        assert second._sweeper is None
+
+        # Loaded again after Hermes unloaded it (a reload): it sweeps what
+        # the unload cut short.
+        cleanup.uninstall()
+        _room_session(furina, "f-gone-2", "long-gone")
+        assert cleanup.install()
+        cleanup._sweeper.join(5)
+        assert _ids(furina) == set()
+    finally:
+        second.uninstall()
+        for name in [name for name in sys.modules if name.startswith("conduit_push_second.")]:
+            sys.modules.pop(name)
 
 
 def test_unloading_stops_a_sweep_that_hasnt_run(hermes, monkeypatch):
@@ -663,6 +740,18 @@ def test_the_sweep_reads_every_store_of_this_host(hermes):
     assert cleanup.sweep() == 3
     assert _ids(furina) == {"f-live"}
     assert _ids(nahida) == set()
+
+
+def test_the_sweep_looks_rooms_up_in_batches(hermes, monkeypatch):
+    monkeypatch.setattr(cleanup, "ROOMS_PER_QUERY", 2)
+    furina = _home(hermes, "furina")
+    for index, room_id in enumerate(("gone-a", "gone-b", "gone-c")):
+        _room(hermes.root / "state.db", room_id, [FURINA, LAIFU], disbanded_at=2.0 + index)
+        _room_session(furina, f"f-{room_id}", room_id)
+    _room_session(furina, "f-live", "live-room")
+
+    assert cleanup.sweep() == 3
+    assert _ids(furina) == {"f-live"}
 
 
 # --- A member host's owner forgets a room -------------------------------------------
@@ -708,6 +797,44 @@ def test_forget_keeps_a_chat_whose_turn_is_still_finishing(hermes, held):
         hermes.busy.add(REMOTE)
 
     assert cleanup.forget_room("theirs", furina) == {"room_id": "theirs", "deleted": 0, "kept": 1}
+    assert _ids(furina) == {REMOTE}
+
+
+def test_forget_finds_the_rooms_chats_among_many(hermes, monkeypatch):
+    monkeypatch.setattr(cleanup, "MAX_ROOM_SESSIONS", 2)
+    furina = _home(hermes, "furina")
+    for room_id in ("room-a", "room-b", "room-c"):
+        _room_session(furina, f"f-{room_id}", room_id)
+    _room_session(furina, REMOTE, "theirs")
+
+    assert cleanup.forget_room("theirs", furina)["deleted"] == 1
+    assert _ids(furina) == {"f-room-a", "f-room-b", "f-room-c"}
+
+
+def test_forget_says_when_hermes_couldnt_delete_a_chat(hermes):
+    furina = _home(hermes, "furina")
+    _room_session(furina, REMOTE, "theirs")
+    _session(furina, "f-theirs-2", source="bot_room", title="Group: theirs #2")
+    hermes.fails.add(REMOTE)
+
+    with pytest.raises(cleanup.CleanupError) as failed:
+        cleanup.forget_room("theirs", furina)
+    assert failed.value.status == 503 and "try again" in str(failed.value)
+    assert _ids(furina) == {REMOTE}
+    assert hermes.held == 0
+
+
+def test_forget_says_try_again_when_the_session_store_wont_open(hermes, monkeypatch):
+    furina = _home(hermes, "furina")
+    _room_session(furina, REMOTE, "theirs")
+
+    def acquire(db_path=None):
+        raise sqlite3.OperationalError("unable to open database file")
+
+    monkeypatch.setattr(sys.modules["hermes_state_registry"], "acquire", acquire)
+    with pytest.raises(cleanup.CleanupError) as failed:
+        cleanup.forget_room("theirs", furina)
+    assert failed.value.status == 503 and "try again" in str(failed.value)
     assert _ids(furina) == {REMOTE}
 
 
@@ -759,6 +886,19 @@ def test_the_forget_route_deletes_and_says_what_it_kept(client, hermes):
     assert response.headers["cache-control"] == "no-store"
     assert response.json() == {"ok": True, "room_id": "theirs", "deleted": 1, "kept": 1}
     assert _ids(furina) == {"f-theirs-2"}
+
+
+def test_the_forget_route_says_try_again_when_the_session_store_fails(client, hermes):
+    furina = _home(hermes, "furina")
+    _room_session(furina, REMOTE, "theirs")
+    hermes.broken = True
+
+    response = client.delete(f"{BASE}/rooms/sessions", params={"room_id": "theirs"})
+
+    assert response.status_code == 503
+    assert response.headers["cache-control"] == "no-store"
+    assert "try again" in response.json()["detail"]
+    assert _ids(furina) == {REMOTE}
 
 
 @pytest.mark.parametrize("params", [{}, {"room_id": ""}, {"room_id": "../x"}, {"room_id": "Group: theirs"}])
@@ -861,4 +1001,9 @@ def test_cli_forget_says_what_it_couldnt_do(cli, hermes, capsys):
     hermes.guarded[REMOTE] = 1
     assert cli.dispatch(_forget_args("theirs", yes=True)) == 1
     assert "still finishing" in capsys.readouterr().out
+    assert _ids(furina) == {REMOTE}
+
+    hermes.fails.add(REMOTE)
+    assert cli.dispatch(_forget_args("theirs", yes=True)) == 1
+    assert "try again shortly" in capsys.readouterr().out
     assert _ids(furina) == {REMOTE}

@@ -6,10 +6,11 @@ disbanded, though Conduit says disbanding ends them. Once Hermes' disband_room
 returns, the plugin deletes the sessions of the home's own agents for that
 room, in every room, the way Hermes' own delete does: with their compressed
 history and their helpers' chats, but not a turn's that's still finishing. One
-of those is tried again shortly, then at the plugin's next load, which also
-ends what rooms disbanded before this version left behind. Agents on other
-people's Hermes keep theirs (Eric, 2026-10-26); forget_room is how their owner
-deletes one later, from `hermes conduit-push rooms forget` or Conduit.
+of those, or one Hermes' delete fails on, is tried again shortly, then a minute
+after the plugin next loads, which also ends what rooms disbanded before this
+version left behind. Agents on other people's Hermes keep theirs (Eric,
+2026-10-26); forget_room is how their owner deletes one later, from
+`hermes conduit-push rooms forget` or Conduit.
 """
 
 from __future__ import annotations
@@ -35,7 +36,8 @@ STATE_DB = "state.db"
 SOURCE = "bot_room"
 ROOM_TITLE = "Group: "
 _GUARD_FLAG = "__conduit_room_guard__"
-# Set on Hermes' module: one sweep per process, however many loads.
+# Set on Hermes' module: one sweep for every copy of the plugin a process
+# loads (the dashboard's and the plugin's own), until one unloads.
 _SWEPT_FLAG = "__conduit_room_sweep__"
 _ROOM_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 # Hermes numbers a title that's taken " #N" (hermes_state_titles).
@@ -49,9 +51,12 @@ _DELETE_PARAMETERS = frozenset({"sessions_dir", "exclude_active_write_guards", "
 # Hermes keeps at most 512 disbanded rooms in a store.
 MAX_SWEEP_ROOMS = 512
 MAX_ROOM_SESSIONS = 4096
+ROOMS_PER_QUERY = 100
 READ_TIMEOUT = 5.0
 RETRY_AFTER_S = 30.0
 SWEEP_AFTER_S = 60.0
+# As Conduit's other routes word a store that can't be read (artifacts).
+STORE_BUSY = "Hermes' session store is busy; try again shortly."
 
 _lock = threading.Lock()
 # Hermes' room module this load guards, Hermes' own function and this load's guard.
@@ -88,7 +93,13 @@ def forget_room(room_id: Any, home: Path) -> dict[str, Any]:
     home = Path(home)
     if _going_here(room_id, home):
         raise CleanupError(f"Room {room_id} is hosted here and still going: disband it to end its chats.", 409)
-    deleted, kept = _delete(home, _room_sessions(home / STATE_DB, {room_id}))
+    try:
+        deleted, kept, failed = _delete(home, _room_sessions(home / STATE_DB, {room_id}))
+    except (sqlite3.Error, OSError) as error:
+        raise CleanupError(STORE_BUSY, 503) from error
+    if failed:
+        raise CleanupError(f"Hermes couldn't delete {failed} hidden chat{'' if failed == 1 else 's'} for room "
+                           f"{room_id}; try again shortly.", 503)
     return {"room_id": room_id, "deleted": deleted, "kept": kept}
 
 
@@ -112,12 +123,15 @@ def sweep(home: Optional[Path] = None) -> int:
             for profile in profiles:
                 for member_home in homes.get(profile, ()):
                     plan.setdefault(member_home, set()).add(room_id)
-    deleted, kept = _delete_rooms(plan, "rooms disbanded on this host")
+    deleted, kept, failed = _delete_rooms(plan, "rooms disbanded on this host")
     if deleted:
         logger.info("conduit_push: deleted %d hidden chats of group rooms disbanded on this host", deleted)
     if kept:
         logger.info("conduit_push: %d hidden chats of group rooms disbanded on this host are still finishing a "
                     "turn; the plugin deletes them when it next loads", kept)
+    if failed:
+        logger.warning("conduit_push: couldn't delete every hidden chat of the group rooms disbanded on this host; "
+                       "the plugin tries again when it next loads")
     return deleted
 
 
@@ -128,7 +142,11 @@ def _guard(original: Callable[..., Any]) -> Callable[..., Any]:
         profiles = _before(db_path, room_id)
         result = original(db_path, *args, **kwargs)
         if profiles:
-            _in_background(functools.partial(_end, room_id, profiles, Path(db_path)), "conduit-room-cleanup")
+            try:
+                _in_background(functools.partial(_end, room_id, profiles, Path(db_path)), "conduit-room-cleanup")
+            except Exception:  # noqa: BLE001 - the room is disbanded either way
+                logger.warning("conduit_push: couldn't start deleting the hidden chats of room %s; the plugin "
+                               "deletes them when it next loads", room_id, exc_info=True)
         return result
 
     functools.update_wrapper(disband_room, original)
@@ -153,41 +171,47 @@ def _end(room_id: str, profiles: tuple[str, ...], store: Path) -> None:
     try:
         plan = {home: {room_id} for homes in _homes(set(profiles), store).values() for home in homes}
         what = f"room {room_id}"
-        _, kept = _delete_rooms(plan, what)
-        if kept and not _stop.wait(RETRY_AFTER_S):
-            _, kept = _delete_rooms(plan, what)
+        _, kept, failed = _delete_rooms(plan, what)
+        if (kept or failed) and not _stop.wait(RETRY_AFTER_S):
+            _, kept, failed = _delete_rooms(plan, what)
         if kept:
             logger.info("conduit_push: %d of room %s's hidden chats on this host are still finishing a turn; the "
                         "plugin deletes them when it next loads", kept, room_id)
+        if failed:
+            logger.warning("conduit_push: couldn't delete every hidden chat of room %s on this host; the plugin "
+                           "tries again when it next loads", room_id)
     except Exception:  # noqa: BLE001
         logger.warning("conduit_push: couldn't delete the hidden chats of room %s after it was disbanded; the plugin "
                        "tries again when it next loads", room_id, exc_info=True)
 
 
-def _delete_rooms(plan: dict[Path, set[str]], what: str) -> tuple[int, int]:
-    """(deleted, kept) over each home's chats for its rooms; a home that
-    fails is logged and the others still go."""
-    deleted = kept = 0
+def _delete_rooms(plan: dict[Path, set[str]], what: str) -> tuple[int, int, int]:
+    """(deleted, kept, failed) over each home's chats for its rooms; a home
+    whose store fails is logged, counts as one failed, and the others still
+    go."""
+    deleted = kept = failed = 0
     for home, room_ids in plan.items():
         try:
-            done, waiting = _delete(home, _room_sessions(home / STATE_DB, room_ids))
+            done, waiting, broken = _delete(home, _room_sessions(home / STATE_DB, room_ids))
         except Exception:  # noqa: BLE001
-            logger.warning("conduit_push: couldn't delete the hidden chats of %s in %s; the plugin tries again when "
-                           "it next loads", what, home, exc_info=True)
+            logger.warning("conduit_push: couldn't delete the hidden chats of %s in %s", what, home, exc_info=True)
+            failed += 1
             continue
         deleted += done
         kept += waiting
-    return deleted, kept
+        failed += broken
+    return deleted, kept, failed
 
 
-def _delete(home: Path, session_ids: list[str]) -> tuple[int, int]:
-    """(deleted, kept: a turn still finishing) with Hermes' own delete, one
-    chat at a time so one that's busy keeps only itself."""
+def _delete(home: Path, session_ids: list[str]) -> tuple[int, int, int]:
+    """(deleted, kept: a turn still finishing, failed) with Hermes' own
+    delete, one chat at a time so one that's busy or fails keeps only
+    itself."""
     if not session_ids:
-        return 0, 0
+        return 0, 0, 0
     registry = importlib.import_module("hermes_state_registry")
     db = registry.acquire(home / STATE_DB)
-    deleted = kept = 0
+    deleted = kept = failed = 0
     try:
         for session_id in session_ids:
             skipped: list[str] = []
@@ -195,27 +219,39 @@ def _delete(home: Path, session_ids: list[str]) -> tuple[int, int]:
                 deleted += db.delete_sessions(
                     [session_id], sessions_dir=home / "sessions", exclude_active_write_guards=True,
                     skipped_ids=skipped, include_compression_chain=True)
-            except Exception as error:  # noqa: BLE001 - Hermes' RuntimeStoreError
-                if getattr(error, "reason", None) not in _BUSY:
-                    raise
-                kept += 1
+            except Exception as error:  # noqa: BLE001 - Hermes' RuntimeStoreError, or one its store raises
+                if getattr(error, "reason", None) in _BUSY:
+                    kept += 1
+                else:
+                    failed += 1
+                    logger.warning("conduit_push: Hermes couldn't delete hidden chat %s in %s", session_id, home,
+                                   exc_info=True)
                 continue
             kept += len(skipped)
     finally:
         registry.release_or_close(db)
-    return deleted, kept
+    return deleted, kept, failed
 
 
 def _room_sessions(path: Path, room_ids: Iterable[str]) -> list[str]:
-    """The hidden sessions in one store titled for these rooms. Opens it
-    read-only, so a home without one gets none made."""
+    """The hidden sessions in one store titled for these rooms, looked up by
+    their titles a batch of rooms at a time. Opens it read-only, so a home
+    without one gets none made."""
     if not path.is_file():
         return []
-    rooms = set(room_ids)
-    rows = _select(path, "SELECT id, title FROM sessions WHERE source = ? AND title LIKE ? LIMIT ?",
-                   (SOURCE, ROOM_TITLE + "%", MAX_ROOM_SESSIONS))
-    return [str(row[0]) for row in rows
-            if isinstance(row[1], str) and (match := _TITLE.fullmatch(row[1])) and match.group(1) in rooms]
+    rooms = sorted({room_id for room_id in room_ids if isinstance(room_id, str) and _ROOM_ID.fullmatch(room_id)})
+    found: list[str] = []
+    for start in range(0, len(rooms), ROOMS_PER_QUERY):
+        batch = rooms[start:start + ROOMS_PER_QUERY]
+        # The title, or the title Hermes numbered; a room id has no GLOB metacharacters.
+        titles = " OR ".join("title = ? OR title GLOB ?" for _ in batch)
+        params = [value for room_id in batch for value in (ROOM_TITLE + room_id, f"{ROOM_TITLE}{room_id} #[0-9]*")]
+        rows = _select(path, f"SELECT id, title FROM sessions WHERE source = ? AND ({titles}) LIMIT ?",
+                       (SOURCE, *params, MAX_ROOM_SESSIONS))
+        wanted = set(batch)
+        found += [str(row[0]) for row in rows
+                  if isinstance(row[1], str) and (match := _TITLE.fullmatch(row[1])) and match.group(1) in wanted]
+    return found
 
 
 def _disbanded(store: Path) -> list[tuple[str, tuple[str, ...]]]:
@@ -362,11 +398,11 @@ def _missing(what: str) -> None:
 
 
 def install() -> bool:
-    """Guards Hermes' disband_room, once per process, and sweeps once a
-    minute after the first load. Imports it, since the plugin can load
-    before the gateway or the dashboard starts its rooms; both room services
-    look it up on the module when they disband. False when this Hermes has
-    no rooms, or can't delete a chat whole."""
+    """Guards Hermes' disband_room, once per process, and sweeps a minute
+    after the first load since the plugin last unloaded. Imports it, since
+    the plugin can load before the gateway or the dashboard starts its
+    rooms; both room services look it up on the module when they disband.
+    False when this Hermes has no rooms, or can't delete a chat whole."""
     global _guarded, _stop, _sweeper
     with _lock:
         if _guarded is not None:
@@ -399,9 +435,9 @@ def install() -> bool:
 
 
 def uninstall() -> None:
-    """Puts Hermes' own function back and stops a sweep that hasn't run
-    (the plugin unloads). A guard another load has set since is left to
-    that load."""
+    """Puts Hermes' own function back and stops a retry or a sweep that
+    hasn't run (the plugin unloads), so the next load sweeps. A guard
+    another load has set since is left to that load."""
     global _guarded
     with _lock:
         guarded, _guarded = _guarded, None
@@ -410,3 +446,4 @@ def uninstall() -> None:
             rooms, own, guard = guarded
             if vars(rooms).get(FUNCTION) is guard:
                 setattr(rooms, FUNCTION, own)
+            setattr(rooms, _SWEPT_FLAG, False)

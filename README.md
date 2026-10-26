@@ -2643,8 +2643,9 @@ for it, in every room, rooms of only your own agents too (Eric, 2026-10-26):
 each with its compressed history and its helpers' chats, the way Hermes' own
 delete takes one. A branch made from one stays, as a chat of its own. The
 disband answers before the delete is done, and never fails because of it. A
-session a turn is still finishing in is tried again 30 s later, then at the
-plugin's next load, which also deletes what rooms disbanded before this
+session a turn is still finishing in, or one Hermes' delete fails on, is tried
+again 30 s later, then a minute after the plugin next loads (Hermes starts, or
+reloads the plugin), which also deletes what rooms disbanded before this
 version left behind (the newest 512 disbanded rooms of each room store). An
 agent placed by `hosted_rooms.profiles` is found in the home that names.
 Agents on other people's Hermes keep their sessions for the room: someone who
@@ -2667,8 +2668,9 @@ room hosted here and still going is refused: disbanding it ends its chats.
 Conduit does the same through `DELETE /rooms/sessions?room_id=<id>&profile=`,
 behind the `room-forget` capability: `{"ok": true, "room_id": ..., "deleted":
 1, "kept": 0}`, where `kept` counts sessions a turn is still finishing in (try
-again in a minute), with 409 for a room still going here and 400 for anything
-that isn't a room id.
+again in a minute), with 409 for a room still going here, 503 when Hermes'
+session store is busy or its delete fails on one (try again shortly), and 400
+for anything that isn't a room id.
 
 ## Capabilities (plugin 0.4+)
 
