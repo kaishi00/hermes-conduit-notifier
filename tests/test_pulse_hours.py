@@ -232,7 +232,6 @@ def test_news_that_cant_wait_goes_at_night_and_says_why(live, monkeypatch):
     assert card["level"] == "push" and card["why"] == "it broke. Sent at night: it couldn't wait for the morning."
 
 
-
 def test_a_push_that_couldnt_wait_says_so_only_for_the_try_that_went_then(live):
     nights(live)
     promise(live)

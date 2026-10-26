@@ -329,17 +329,25 @@ _ENDINGS = ("ing", "ed", "es", "s")
 
 
 def _words(text: Any) -> set[str]:
-    """The words of 4 letters or more, without a common ending ("called"
-    is "call", "flights" "flight"), so a close said in other words meets
-    its item."""
+    """The words of 4 letters or more, each as _stem gives it, so a close
+    said in other words meets its item."""
     return {_stem(word) for word in _WORD.findall(_norm(text))}
 
 
 def _stem(word: str) -> str:
+    """A word without a common ending, spelled so its forms meet: "called"
+    and "call" are "call", "flights" and "flight" "flight", "closed" and
+    "close" "clos", "planned" and "plan" "plan", "replied" and "reply"
+    "repli"."""
     for ending in _ENDINGS:
         if word.endswith(ending) and len(word) - len(ending) >= 4 and not word.endswith("ss"):
-            return word[:-len(ending)]
-    return word
+            word = word[:-len(ending)]
+            break
+    if len(word) > 4 and word.endswith("e"):
+        word = word[:-1]
+    elif len(word) > 4 and word[-1] == word[-2] and word[-1] not in "aeiou":
+        word = word[:-1]
+    return word[:-1] + "i" if word.endswith("y") else word
 
 
 def candidates(remembered: Sequence[dict], chunk: Sequence[Any], chat_id: str) -> list[dict]:

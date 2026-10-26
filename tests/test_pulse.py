@@ -2042,6 +2042,9 @@ def test_a_chats_close_marks_the_cards_of_the_items_it_replaced(remembering):
     # Undo on a card about the replaced item opens the item that stands for it now.
     assert control.done(store_, reminder, False) is True
     assert store_.item(new)["status"] == "open" and store_.item(old)["superseded_by"] == new
+    # Put back, it isn't marked again from the chat; the user's own mark taken off leaves it to be read.
+    assert pulse.followup.read_first(store_.card(reminder)) is False
+    assert control.done(store_, seen, False) is True and pulse.followup.read_first(store_.card(seen)) is True
     store_.advance("", "work", message_id=4, at=DAY + 400, after_id=3,
                    closed=[{"id": new, "status": "done", "evidence": "Booked", "message_id": 4}])
     assert reminder in store_.done_marks([reminder])  # the new close marks it again
@@ -2054,12 +2057,18 @@ def test_a_chats_close_marks_the_cards_of_the_items_it_replaced(remembering):
 
 
 def test_memory_matches_a_chunk_on_words_without_their_endings():
-    assert memory._words("Called the dentists about flights, booking classes and news") == {
-        "call", "the", "dentist", "about", "flight", "book", "class", "news"} - {"the"}
+    assert memory._words("Called the dentists about flights, booking classes and news") == memory._words(
+        "call dentist about flight book class news")
+    for said, meant in (("closed", "close"), ("closes", "close"), ("planned", "plan"), ("updated", "update"),
+                        ("cancelled", "cancel"), ("scheduled", "schedule"), ("replied", "reply"),
+                        ("replies", "reply"), ("phones", "phone"), ("agreed", "agree")):
+        assert memory._words(said) == memory._words(meant), said
     item = _open(7, "commitment", "The user will call the dentist about the flight.", "call the dentist",
                  chat="other")
     chunk = [_row(1, "user", "Called the dentists, and the flights are booked", DAY + 60)]
     assert memory.candidates([item], chunk, "work") == [item]
+    item = _open(8, "commitment", "The user will close the account.", "close the account", chat="other")
+    assert memory.candidates([item], [_row(2, "user", "Closed the account", DAY + 60)], "work") == [item]
 
 
 def test_items_long_past_their_due_date_expire(remembering, db):

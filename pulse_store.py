@@ -229,7 +229,10 @@ CREATE TABLE IF NOT EXISTS cards (
     -- (pulse_prefs.place and band), which its signals carry once the
     -- journal no longer has its candidate.
     place TEXT NOT NULL DEFAULT '',
-    band TEXT NOT NULL DEFAULT ''
+    band TEXT NOT NULL DEFAULT '',
+    -- Put back with Undo after Pulse marked it done: its chat isn't read
+    -- again to mark it (pulse_followup.read_first, found_cards).
+    put_back_at REAL
 );
 CREATE INDEX IF NOT EXISTS cards_created ON cards(created_at);
 -- What ratings taught Pulse (pulse_learning): each row changes what Pulse
@@ -378,7 +381,8 @@ _ADDED_COLUMNS = (("cards", "topic", "TEXT NOT NULL DEFAULT ''"), ("cards", "bri
                   ("candidates", "floor", "INTEGER NOT NULL DEFAULT 0"),
                   ("candidates", "level", "TEXT NOT NULL DEFAULT ''"),
                   ("cards", "learned", "TEXT NOT NULL DEFAULT ''"), ("cards", "place", "TEXT NOT NULL DEFAULT ''"),
-                  ("cards", "band", "TEXT NOT NULL DEFAULT ''"), ("followups", "timing", "TEXT NOT NULL DEFAULT ''"))
+                  ("cards", "band", "TEXT NOT NULL DEFAULT ''"), ("followups", "timing", "TEXT NOT NULL DEFAULT ''"),
+                  ("cards", "put_back_at", "REAL"))
 # What report cards said for Why? before a candidate's reason did (an item's card,
 # never shown; a whole report's card), and the setting that says a store has
 # cleared them.
@@ -1113,13 +1117,13 @@ class PulseStore:
         """Report items Pulse found on its own (nothing remembered behind
         them) since ``since`` that are on the screen: not held for the brief,
         put away, rated not useful (Wrong time is only about when) or marked
-        done, and not tapped Do it on (its check reads the chat); oldest
-        first."""
+        done, and not tapped Do it on (its check reads the chat) or put back
+        with Undo after Pulse marked it; oldest first."""
         with self._connect() as conn:
-            rows = conn.execute("SELECT * FROM cards WHERE kind=? AND item_id IS NULL AND created_at >= ? "
+            rows = conn.execute("SELECT * FROM cards WHERE kind=? AND item_id IS NULL AND created_at > ? "
                                 "AND NOT (level='brief' AND briefed_at IS NULL) AND dismissed_at IS NULL "
                                 "AND NOT (rating='down' AND reason!=?) AND id NOT IN (SELECT card_id FROM card_done) "
-                                "AND id NOT IN (SELECT card_id FROM card_acts) "
+                                "AND id NOT IN (SELECT card_id FROM card_acts) AND put_back_at IS NULL "
                                 "ORDER BY created_at, id", (NOTICED, since, WRONG_TIME)).fetchall()
         return [dict(row) for row in rows]
 
@@ -1158,14 +1162,17 @@ class PulseStore:
         holds it closed, and its checks back where the mark stopped them.
         What the mark taught goes with it: the user's Done signal, and a Do
         it Pulse saw done goes back to something sent (all the check saw
-        before it). False with no mark."""
+        before it). A mark Pulse made, taken off, keeps the card as the user
+        left it: put_back_at. False with no mark."""
         with _lock, self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute("SELECT prior_json FROM card_done WHERE card_id=?", (card_id,)).fetchone()
+            row = conn.execute("SELECT done_by, prior_json FROM card_done WHERE card_id=?", (card_id,)).fetchone()
             if row is None:
                 conn.execute("ROLLBACK")
                 return False
             conn.execute("DELETE FROM card_done WHERE card_id=?", (card_id,))
+            if row["done_by"] == PULSE:
+                conn.execute("UPDATE cards SET put_back_at=? WHERE id=?", (now, card_id))
             conn.execute("DELETE FROM signals WHERE card_id=? AND what=?", (card_id, prefs.DONE))
             conn.execute("UPDATE signals SET weight=MIN(weight, ?) WHERE card_id=? AND what=?",
                          (prefs.ACT_SENT, card_id, prefs.ACT))

@@ -374,7 +374,9 @@ def done(pulse_store: store.PulseStore, card_id: Any, is_done: Any, *, now: floa
     a rating: Pulse was right to bring it up, the user just hadn't said. A
     report item Pulse found on its own has nothing behind it: Done marks the
     card, which the next report reads (pulse_candidates.recent_section).
-    Undo puts the promise and its checks back as they were."""
+    Undo puts the promise and its checks back as they were; taking off a
+    mark Pulse made, it keeps Pulse from marking the card again from its
+    chat (pulse_followup.read_first)."""
     card = action_card(pulse_store, card_id)
     if not isinstance(is_done, bool):
         raise Invalid("done")

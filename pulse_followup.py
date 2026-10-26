@@ -575,10 +575,6 @@ def check_acts(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzi
 HELD_EVERY_S = 6 * 3600.0
 HELD_CHECKED = "held_checked_at"
 HELD_RETRY_S = 3600.0
-# A held card Pulse marked done isn't read again while it could still be
-# held (pulse.HELD_DAYS): put back with Undo, it goes to the brief as the
-# user left it, instead of being marked again from the same chat.
-HELD_MARKED_S = 30 * 86400.0
 # pulse_brief.PENDING: the brief on its way and its cards.
 BRIEF_PENDING = "brief_cards"
 HELD_MAX = 12
@@ -594,15 +590,21 @@ Return a JSON object {"stale": ..., "why": ...}:
 
 def held_material(pulse_store: store.PulseStore, home: Path, card: dict, *, zone: tzinfo, now: float,
                   phone: str | None = None) -> str:
-    """What a held card's check reads: its news and what happened since it was held."""
+    """What a held card's check reads: its news and what happened since it
+    was held. A report item found outside the chats points at the report's
+    turn in Pulse's own chat, which stays out, as act_material leaves it
+    out: Pulse's reports aren't what was said about it."""
     where = home_for(home, card["profile"])
     if where is None:
         raise ChatUnreadable(f"no profile named {card['profile']!r} any more")
     since = float(card["created_at"])
+    home_chat = report.their_home_chat(where)
+    from_report = card["item_id"] is None and card["message_id"] is not None
+    own = "" if from_report or card["chat_id"] == home_chat else card["chat_id"]
     rows: list[Any] = []
-    if card["chat_id"]:
+    if own:
         try:
-            rows = [row for row in hermes.chain_messages(where, chat_id=card["chat_id"], after_id=0,
+            rows = [row for row in hermes.chain_messages(where, chat_id=own, after_id=0,
                                                          max_chars=PER_MESSAGE, limit=CHAT_ROWS)
                     if float(row["timestamp"] or 0) >= since]
         except hermes.HermesUnreadable as error:
@@ -610,17 +612,17 @@ def held_material(pulse_store: store.PulseStore, home: Path, card: dict, *, zone
     said, earlier = said_since(rows, f"{card['title']} {card['news']}", after=since, zone=zone)
     parts = [f"Now: {_local(now, zone)}", f"Held since: {_local(since, zone)}",
              f"About: {_clip(card['title'], 300)}", f"The news: {_clip(card['news'], NEWS_LIMIT)}",
-             "## Said in its chat since\n" + (said or "Nothing.")]
+             "## Said in its chat since\n" + ((said or "Nothing.") if own else "It came from no chat.")]
     if earlier:
         parts.append(EARLIER_TITLE.format(chat="its chat") + "\n" + earlier)
-    if not card["profile"] and card["chat_id"]:
-        outcomes = pulse_store.outcomes_between(card["chat_id"], since, now, MAX_OUTCOMES)
+    if not card["profile"] and own:
+        outcomes = pulse_store.outcomes_between(own, since, now, MAX_OUTCOMES)
         parts.append("## Tool calls in its chat since\n"
                      + ("\n".join(f"- [{_local(row['at'], zone)}] {ledger.line(row)}" for row in reversed(outcomes))
                         or "None."))
     try:
         later = evidence.later_section(where, f"{card['title']} {card['news']}", after=since,
-                                       exclude=(card["chat_id"], report.their_home_chat(where)), zone=zone)
+                                       exclude=(card["chat_id"], home_chat), zone=zone)
     except hermes.HermesUnreadable:
         later = ""
     if phone is None:
@@ -634,8 +636,10 @@ def read_first(card: dict) -> bool:
     """Whether a card's chat is read again before it goes into the brief or
     comes back from Not now: one about a remembered thing, or a report item
     Pulse found on its own (pulse_learning.add_noticed_cards). A morning
-    brief isn't."""
-    return card["item_id"] is not None or card["kind"] == learning.NOTICED
+    brief isn't, nor a card the user put back with Undo after Pulse marked
+    it done (pulse_store.unmark_done): it stays as they left it, instead of
+    being marked again from the same chat."""
+    return card["put_back_at"] is None and (card["item_id"] is not None or card["kind"] == learning.NOTICED)
 
 
 def _times(value: Any) -> dict[str, float]:
@@ -829,11 +833,10 @@ def check_held(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzi
         done["checks"] = done.get("checks", 0) + 1
         if isinstance(parsed, dict) and parsed.get("stale") is True:
             pulse_store.mark_done(card["id"], card["item_id"], closed_by=learning.HELD_DONE_BY, now=now, by="pulse")
-            checked[str(card["id"])] = now + HELD_MARKED_S
     if not still_leader():
         return  # the new leader keeps the checked times now
-    # A time over HELD_EVERY_S ago counts as none.
-    pulse_store.set(HELD_CHECKED, {key: value for key, value in checked.items() if value > now - HELD_EVERY_S})
+    held = {str(card["id"]) for card in pulse_store.held_cards(HELD_MAX)}
+    pulse_store.set(HELD_CHECKED, {key: value for key, value in checked.items() if key in held})
 
 
 # A report item Pulse found on its own (nothing remembered behind it) gets
@@ -895,10 +898,8 @@ def check_found(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tz
         done["tokens"] = done.get("tokens", 0) + tokens
         done["checks"] = done.get("checks", 0) + 1
         if isinstance(parsed, dict) and parsed.get("stale") is True:
-            # Nothing remembered is behind it: only the card is marked. Put
-            # back with Undo, it isn't read again: past FOUND_FOR_S, it's old.
+            # Nothing remembered is behind it: only the card is marked.
             pulse_store.mark_done(card["id"], None, closed_by="", now=now, by="pulse")
-            checked[str(card["id"])] = now + FOUND_FOR_S
     if not still_leader():
         return  # the new leader keeps the checked times now
     # A time over FOUND_FOR_S ago is a card's that's old now.
