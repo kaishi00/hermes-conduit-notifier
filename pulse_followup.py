@@ -595,7 +595,9 @@ def rest_time(choice: str, now: float, zone: tzinfo, pulse_store: store.PulseSto
     """When a card swiped away until ``choice`` (RESTS) comes back: in
     three hours (by 23:00; past 22:30 tomorrow), or tomorrow or a week
     from today, BRIEF_LEAD_S before the morning brief, so a card put off to
-    a day comes back with that day's brief, its chat read first."""
+    a day comes back with that day's brief, its chat read first. A brief
+    under MIN_REST_S away (one minutes after midnight, asked for just
+    before) rolls a day, as later today rolls to tomorrow."""
     from . import pulse_brief as brief
     if choice not in RESTS:
         raise ValueError(f"not a rest: {choice!r}")
@@ -606,8 +608,12 @@ def rest_time(choice: str, now: float, zone: tzinfo, pulse_store: store.PulseSto
         if at - now >= MIN_REST_S:
             return at
         choice = TOMORROW
-    return report.slot_on(now, zone, pulse_store.get("brief_time") or brief.DEFAULT_TIME,
-                          1 if choice == TOMORROW else 7) - BRIEF_LEAD_S
+    brief_time = pulse_store.get("brief_time") or brief.DEFAULT_TIME
+    day = 1 if choice == TOMORROW else 7
+    at = report.slot_on(now, zone, brief_time, day) - BRIEF_LEAD_S
+    if at - now < MIN_REST_S:
+        at = report.slot_on(now, zone, brief_time, day + 1) - BRIEF_LEAD_S
+    return at
 
 
 RESTED_INSTRUCTIONS = """You check whether news is still worth telling. Pulse, the part of Hermes (an AI assistant) that speaks up on its own, brought the user news, and the user put it off ("Not now") until a time that has come: it's about to come back to them.
@@ -635,9 +641,20 @@ def return_rested(pulse_store: store.PulseStore, now: float) -> list[int]:
             continue
         if card["item_id"] is not None and pulse_store.get("memory") and now - card["rest_until"] < BRIEF_LEAD_S:
             continue
-        if pulse_store.return_card(card["id"], now, card["rest_until"]):
+        if _back(pulse_store, card, now):
             returned.append(card["id"])
     return returned
+
+
+def _back(pulse_store: store.PulseStore, card: dict, now: float) -> bool:
+    """A card whose rest is over, back as new at the top; whether it came
+    back so. Marked done since the tick read it, it comes back as the user
+    left it instead; put back and swiped away again, it keeps its new
+    rest."""
+    if pulse_store.return_card(card["id"], now, card["rest_until"]):
+        return True
+    pulse_store.end_rest(card["id"], card["rest_until"])
+    return False
 
 
 def check_rested(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzinfo, now: float,
@@ -656,7 +673,7 @@ def check_rested(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: t
             break  # the process that leads now has its own loop
         if done.get("tokens", 0) >= budget or done.get("checks", 0) + done.get("failed", 0) >= MAX_CHECKS:
             # Nothing left for the read today: back unread rather than late.
-            pulse_store.return_card(card["id"], now, card["rest_until"])
+            _back(pulse_store, card, now)
             continue
         text = ""
         try:
@@ -670,7 +687,7 @@ def check_rested(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: t
             logger.warning("conduit_push: Pulse rested card check failed", exc_info=True)
             done["tokens"] = done.get("tokens", 0) + len(text) // 4
             done["failed"] = done.get("failed", 0) + 1
-            pulse_store.return_card(card["id"], now, card["rest_until"])
+            _back(pulse_store, card, now)
             continue
         done["tokens"] = done.get("tokens", 0) + tokens
         done["checks"] = done.get("checks", 0) + 1
@@ -680,7 +697,7 @@ def check_rested(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: t
                 pulse_store.mark_done(card["id"], card["item_id"], closed_by=learning.RESTED_DONE_BY, now=now,
                                       by="pulse")
         else:
-            pulse_store.return_card(card["id"], now, card["rest_until"])
+            _back(pulse_store, card, now)
 
 
 def check_held(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzinfo, now: float,

@@ -1067,10 +1067,12 @@ class PulseStore:
     def return_card(self, card_id: int, now: float, rest_until: Optional[float]) -> bool:
         """A card swiped away comes back as new, at the top of the list;
         whether it did. Only while ``rest_until`` is still its time: one put
-        back and swiped away again meanwhile keeps its new rest."""
+        back and swiped away again meanwhile keeps its new rest. Never one
+        marked done meanwhile: end_rest brings that one back as it is."""
         with _lock, self._connect() as conn:
             return conn.execute("UPDATE cards SET dismissed_at=NULL, rest_until=NULL, seen_at=NULL, created_at=? "
-                                "WHERE id=? AND dismissed_at IS NOT NULL AND rest_until IS ?",
+                                "WHERE id=? AND dismissed_at IS NOT NULL AND rest_until IS ? "
+                                "AND id NOT IN (SELECT card_id FROM card_done)",
                                 (now, card_id, rest_until)).rowcount > 0
 
     def end_rest(self, card_id: int, rest_until: Optional[float]) -> bool:
@@ -1083,13 +1085,15 @@ class PulseStore:
                                 (card_id, rest_until)).rowcount > 0
 
     def resting_items(self, now: float, rest_s: float) -> dict[int, float]:
-        """Remembered items a card of was swiped away and still rests: until
-        its time, or for ``rest_s`` after a Not now with no time; and when
-        it was swiped away (the latest)."""
+        """Remembered items a card of was swiped away and still rests: while
+        the card is away until a time (it comes back as new at that time,
+        or, its chat read first, a little after: return_card, end_rest), or
+        for ``rest_s`` after a Not now with no time; and when it was swiped
+        away (the latest)."""
         with self._connect() as conn:
             rows = conn.execute("SELECT item_id, MAX(dismissed_at) AS at FROM cards WHERE item_id IS NOT NULL "
                                 "AND dismissed_at IS NOT NULL AND ((rest_until IS NULL AND dismissed_at >= ?) "
-                                "OR rest_until > ?) GROUP BY item_id", (now - rest_s, now)).fetchall()
+                                "OR rest_until IS NOT NULL) GROUP BY item_id", (now - rest_s,)).fetchall()
         return {int(row["item_id"]): float(row["at"]) for row in rows}
 
     def turn_cards(self, kind: str) -> list[dict]:

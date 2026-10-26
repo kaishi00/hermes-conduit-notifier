@@ -367,6 +367,8 @@ def dismiss(pulse_store: Any, card_id: Any, dismissed: Any = True, now: Optional
     if until is not None and dismissed is True:
         if not isinstance(until, str) or until not in pulse_followup.RESTS:
             raise Refused("invalid", field="until")
+        if not isinstance(card_id, int) or isinstance(card_id, bool) or pulse_store.card(card_id) is None:
+            raise Refused("invalid", field="card")  # before the zone is read for a card that isn't there
         zone = pulse.report_zone(pulse_store, Path(home) if home else Path("."), now)
         rest_until = pulse_followup.rest_time(until, now, zone, pulse_store)
     return _learning(lambda: pulse_learning.dismiss(pulse_store, card_id, dismissed, now=now, rest_until=rest_until))

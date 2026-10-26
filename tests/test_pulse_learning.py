@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+import threading
 import time
 
 import pytest
@@ -1292,6 +1293,12 @@ def test_not_now_until_a_time_is_when_the_card_comes_back(live):
     assert rest("next_week", tuesday) == datetime(2026, 11, 3, 6, 50, tzinfo=utc).timestamp()
     live.store.set("brief_time", "06:30")
     assert rest("tomorrow", at(27, 23, 30)) == at(28, 6, 20)
+    # A brief minutes after midnight, asked for just before it: the day after, as later today rolls.
+    live.store.set("brief_time", "00:05")
+    assert rest("tomorrow", at(27, 23, 20)) == at(27, 23, 55)
+    assert rest("tomorrow", at(27, 23, 58)) == at(28, 23, 55)
+    assert rest("later_today", at(27, 23, 58)) == at(28, 23, 55)
+    assert rest("next_week", at(27, 23, 58)) == datetime(2026, 11, 2, 23, 55, tzinfo=utc).timestamp()
     with pytest.raises(ValueError):
         rest("never", tuesday)
 
@@ -1309,21 +1316,25 @@ def test_not_now_until_tomorrow_rests_the_thing_until_then_and_brings_the_card_b
     back_at = followup.rest_time("tomorrow", now, zone, live.store)
     card = live.store.card(card_id)
     assert card["dismissed_at"] == now and card["rest_until"] == back_at
-    # The thing rests until then, not a week.
+    # The thing rests while the card is away, not a week.
     assert f"#{item_id} " not in pulse.report.remembered(live.store, zone, back_at - 60)
-    assert f"#{item_id} " in pulse.report.remembered(live.store, zone, back_at + 60)
+    assert f"#{item_id} " not in pulse.report.remembered(live.store, zone, back_at + 60)
     # Not yet time: the tick leaves it away.
     assert followup.return_rested(live.store, back_at - 60) == []
     assert live.store.card(card_id)["dismissed_at"] == now
-    # Its time, memory off (nothing reads chats): back as new, at the top.
+    # Its time, memory off (nothing reads chats): back as new, at the top, and the thing with it.
     assert followup.return_rested(live.store, back_at + 1) == [card_id]
     card = live.store.card(card_id)
     assert card["dismissed_at"] is None and card["rest_until"] is None and card["seen_at"] is None
     assert card["created_at"] == back_at + 1 and live.store.unseen_cards() == 1
-    # Not a time Pulse knows, or with Put back: refused, or ignored.
+    assert f"#{item_id} " in pulse.report.remembered(live.store, zone, back_at + 60)
+    # Not a time Pulse knows, not a card, or with Put back: refused, refused, or ignored.
     with pytest.raises(control.Refused) as refused:
         control.dismiss(live.store, card_id, True, now=now, until="never")
     assert refused.value.data == {"field": "until"}
+    with pytest.raises(control.Refused) as refused:
+        control.dismiss(live.store, card_id + 50, True, now=now, until="tomorrow")
+    assert refused.value.data == {"field": "card"}
     assert control.dismiss(live.store, card_id, True, now=now, until="next_week") is True
     assert control.dismiss(live.store, card_id, False, until="tomorrow") is True
     assert live.store.card(card_id)["rest_until"] is None
@@ -1409,13 +1420,23 @@ def test_a_held_card_put_off_to_tomorrow_comes_back_for_that_brief(live, monkeyp
     # With memory on (the default), the tick leaves it to the memory run, which reads its chat
     # and holds it again for the brief.
     live.store.set("memory", True)
-    monkeypatch.setattr(pulse, "_maybe_memory", lambda *args: None)  # run below, by hand
+    monkeypatch.setattr(pulse, "_maybe_memory", lambda *args: None)  # the run itself, below, on this thread
     monkeypatch.setattr(pulse, "_maybe_probe", lambda *args: False)
     pulse.tick(back_at)
     assert live.store.card(held["id"])["dismissed_at"] is not None and live.sent() == []
-    followup.check_rested(live.store, live.home, llm_saying(stale=False, why="still open"), zone=timezone.utc,
-                          now=back_at + 1, still_leader=lambda: True, budget=10_000, done={})
+    asked = []
+
+    def memory_llm(instructions, text, purpose="pulse memory", route=None):
+        asked.append(purpose)
+        return {"stale": False, "why": "still open"}, 42
+
+    monkeypatch.setattr(pulse, "_memory_llm", memory_llm)
+    monkeypatch.setattr(pulse.memory, "run", lambda *args, **kwargs: None)  # memory itself read its chats
+    monkeypatch.setattr(pulse.followup, "run", lambda *args, **kwargs: None)
+    pulse._memory_run(live.home, "home", back_at + 1, threading.Event())
+    assert asked == ["pulse follow-up"]  # the rested card's chat, on the follow-up budget
     assert [card["id"] for card in live.store.held_cards(10)] == [held["id"]]
+    assert live.store.get("followup_today")["tokens"] == 42
     pulse.tick(brief_at + 1)
     [text] = live.sent()
     assert text.startswith("Pulse morning brief ") and "everything is green" in text
@@ -1461,6 +1482,56 @@ def test_a_rested_card_marked_done_meanwhile_ends_its_rest_without_a_read(live):
     assert followup.return_rested(live.store, back_at + 1) == []  # not back as new: it's done
     card = live.store.card(card_id)
     assert card["dismissed_at"] is None and card["rest_until"] is None and card["seen_at"] is not None
+
+
+def test_a_rested_thing_stays_out_of_reports_until_its_card_is_back(live):
+    live.store.set("memory", True)
+    live.store.set("time_zone", "UTC")
+    item_id = promise(live)
+    now = time.time()
+    card_id = learning.add_card(live.store, kind="followup", item=live.store.item(item_id), level_name="push",
+                                news="The deploy is still waiting on approval.", why="", chat_title="Deploy",
+                                now=now - 3600)
+    zone = pulse.report.zone_for("UTC")
+    assert control.dismiss(live.store, card_id, True, now=now, until="later_today") is True
+    back_at = live.store.card(card_id)["rest_until"]
+    # Its time: the tick leaves the card to the memory run, and a report meanwhile leaves the thing
+    # out, so a fresh card about it doesn't land beside the one coming back.
+    assert followup.return_rested(live.store, back_at + 1) == []
+    assert item_id in live.store.resting_items(back_at + 1, pulse.report.DISMISS_REST_S)
+    assert f"#{item_id} " not in pulse.report.remembered(live.store, zone, back_at + 1)
+    # Read and still open: back as new, and the thing with it.
+    followup.check_rested(live.store, live.home, llm_saying(stale=False, why="still open"), zone=zone,
+                          now=back_at + 2, still_leader=lambda: True, budget=10_000, done={})
+    assert live.store.card(card_id)["dismissed_at"] is None
+    assert item_id not in live.store.resting_items(back_at + 2, pulse.report.DISMISS_REST_S)
+    assert f"#{item_id} " in pulse.report.remembered(live.store, zone, back_at + 2)
+
+
+def test_a_rested_card_done_during_its_read_comes_back_as_the_user_left_it(live):
+    live.store.set("memory", True)
+    item_id = promise(live)
+    now = time.time()
+    card_id = learning.add_card(live.store, kind="followup", item=live.store.item(item_id), level_name="push",
+                                news="The deploy is still waiting on approval.", why="", chat_title="Deploy",
+                                now=now - 3600)
+    control.see(live.store, [card_id])
+    assert control.dismiss(live.store, card_id, True, now=now, until="later_today") is True
+    back_at = live.store.card(card_id)["rest_until"]
+    calls = []
+
+    def llm(instructions, text):  # the user marks the card done while the model reads its chat
+        calls.append(text)
+        assert control.done(live.store, card_id) is True
+        return {"stale": False, "why": "still open"}, 42
+
+    followup.check_rested(live.store, live.home, llm, zone=pulse.report.zone_for("UTC"), now=back_at + 1,
+                          still_leader=lambda: True, budget=10_000, done={})
+    card = live.store.card(card_id)
+    assert len(calls) == 1 and card["dismissed_at"] is None and card["rest_until"] is None
+    # Not as new: done, as they left it, seen and where it was.
+    assert card["created_at"] == now - 3600 and card["seen_at"] is not None and live.store.done_marks([card_id])
+    assert live.store.unseen_cards() == 0
 
 
 def test_a_card_put_off_again_meanwhile_keeps_its_new_rest(live):
