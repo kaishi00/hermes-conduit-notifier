@@ -344,7 +344,8 @@ def describe(row: dict) -> str:
     value = f" v{row['value']}" if row["value"] else ""
     ref = f" #{row['item_id']}" if row["item_id"] is not None else ""
     where = f" ({row['source']})" if row["origin"] == MODEL and row["source"] else ""
-    why = f" ({row['skip']})" if row["skip"] else ""
+    skip = f" ({row['skip']})" if row["skip"] else ""
+    because = f" (why: {_clip(row['why'], 120)})" if row.get("why") else ""
     card = f" → card #{row['card_id']}" if row["card_id"] else ""
     return (f"{DECISION_NAMES.get(row['decision'], row['decision']):<10} [{row['kind']}]{value}{ref}{where} "
-            f"{_clip(row['text'], 160)}{why}{card}")
+            f"{_clip(row['text'], 160)}{skip}{because}{card}")

@@ -16,7 +16,7 @@ checks it). The format is fixed, because Conduit reads it:
 ## 0.78.4 (2026-10-26)
 
 ### New and improved
-- Why? on a card from your Pulse report now says why that thing came up now and where it came from: the chat, calendar entry, reminder, note or job it rests on. Before, every report card gave the same stock line. The report itself is shorter, each line without the reason in brackets. Needs Conduit from the `pulse` branch to show it.
+- Why? on a card from your Pulse report now says why that thing came up now and where it came from: the chat, calendar entry, reminder, note or job it rests on. Before, every report card gave the same stock line, and those lines are cleared from earlier cards. The report itself is shorter, each line without the reason in brackets. Needs Conduit from the `pulse` branch to show it.
 
 ## 0.78.3 (2026-10-26)
 

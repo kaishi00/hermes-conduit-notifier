@@ -620,12 +620,15 @@ def test_candidates_command(reporting, capsys, monkeypatch):
                                                               pulse_action="candidates", value=value))
     assert run() == 0
     assert "No candidate lists yet" in capsys.readouterr().out
-    live.llm.replies.append({"remembered": [], "found": [FOUND, {**FOUND, "skip": "covered", "line": "The dentist"}]})
+    live.llm.replies.append({"remembered": [], "found": [FOUND, {**FOUND, "skip": "covered", "line": "The dentist",
+                                                                 "why": ""}]})
     listed(live)
     assert run("3") == 0
     out = capsys.readouterr().out.splitlines()
     assert out[0] == "Latest list: ready to send, 321 tokens" and out[1].endswith(": 1 picked of 2")
-    assert out[2:] == ["  picked     [follow-up] v4 (chat) Look at the flaky deploy (you asked in Deploy)",
+    # Each with its reason, when it has one: "why that?" as the card's Why? says it.
+    assert out[2:] == ["  picked     [follow-up] v4 (chat) Look at the flaky deploy (you asked in Deploy) "
+                       "(why: You asked about it in Deploy and nothing has been done since.)",
                        "  skipped    [follow-up] v4 (chat) The dentist (covered)"]
     assert run("lots") == 2
     capsys.readouterr()

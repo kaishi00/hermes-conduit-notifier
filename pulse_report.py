@@ -97,7 +97,7 @@ REPORT_TEXT = """Pulse report {tag}.
 
 Below is what Hermes can see now, covering {since} onward. Pick what to bring up and write at most 5 numbered items, one line each, in this form:
 
-1. [kind] what to tell the user, then (why now, and where it came from) #12
+1. [kind] what to tell the user #12
 
 Each line becomes its own card on the user's Pulse screen, read on its own and rated with a thumbs up or down, so make each one stand alone and write it to the user.
 kind is one of: {kinds}. When an item comes from something under "What Pulse remembers", end its line with that thing's number after "#", like #12; otherwise leave the number out. {bar} Leave out anything already done (in any chat or cron run, or moved past by later work), anything their calendar, reminders, Hermes's scheduled jobs or something running in the background already cover, anything Pulse already brought up (under "What Pulse brought up lately", in a chat line marked "Pulse's reminder" and Hermes's answer to it, or in an earlier report or morning brief in this chat) unless something about it changed, and anything rated "no" in earlier reports. Say only what the context below shows: never repeat something only an earlier turn in this chat says, and never add a cause, a history or a pattern the context doesn't state. Weigh each kind by how the user rated it before. If nothing qualifies, say "Nothing worth bringing up right now." and stop.{note}

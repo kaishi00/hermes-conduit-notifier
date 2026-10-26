@@ -623,6 +623,10 @@ def test_a_requested_report_lands_on_the_pulse_screen_and_pushes_its_items(live)
     [card] = live.store.cards()
     assert card["kind"] == "report" and card["level"] == "screen" and card["message_id"] == reply_id
     assert live.store.unseen_cards() == 1
+    # A whole-report card gives no stock reason for Why?.
+    assert card["why"] == ""
+    # A report written without a list asks for its lines without the reason in brackets.
+    assert "(why now" not in attempt["text"] and "1. [kind] what to tell the user #12" in attempt["text"]
 
 
 def test_a_failed_report_makes_no_card_and_feed_has_no_chat_without_home(live, tmp_path):
@@ -1145,21 +1149,30 @@ def test_a_report_card_carries_its_reason_and_one_written_without_a_list_has_non
     assert feed[with_why]["why"] and feed[plain]["why"] == ""
 
 
-def test_a_store_from_before_candidates_had_a_reason_gains_it_and_drops_the_stock_why(live):
+@pytest.mark.parametrize("before", ["no why column", "no candidates table", "stopped after the column"])
+def test_a_store_from_before_candidates_had_a_reason_gains_it_and_drops_the_stock_why(live, before):
     noticed, kept = found_card(live), promise(live)
     followup_card = learning.add_card(live.store, kind="followup", item=live.store.item(kept), level_name="push",
                                       news="The deploy is still waiting.", why="You said you would check it.",
                                       chat_title="Deploy", now=time.time())
     with sqlite3.connect(live.store.path) as conn:
         conn.execute("UPDATE cards SET why=? WHERE id=?", (store._STOCK_NOTICED_WHY, noticed))
-        conn.execute("ALTER TABLE candidates DROP COLUMN why")
-        assert "why" not in {row[1] for row in conn.execute("PRAGMA table_info(candidates)")}
+        conn.execute("DELETE FROM settings WHERE key=?", (store.STOCK_WHY_CLEARED,))
+        if before == "no why column":
+            conn.execute("ALTER TABLE candidates DROP COLUMN why")
+            assert "why" not in {row[1] for row in conn.execute("PRAGMA table_info(candidates)")}
+        elif before == "no candidates table":  # a store from before candidate lists (0.66 to 0.68)
+            conn.execute("DROP TABLE candidates")
+        # "stopped after the column": the column is there, the stock line isn't cleared yet.
     reopened = store.PulseStore(live.store.path)
     with sqlite3.connect(live.store.path) as conn:
         assert "why" in {row[1] for row in conn.execute("PRAGMA table_info(candidates)")}
     assert reopened.card(noticed)["why"] == "" and reopened.card(followup_card)["why"] == "You said you would check it."
-    # Opening it again changes nothing more.
+    # Cleared once: a stock line written after it (none ever is) stays, and opening again changes nothing.
+    with sqlite3.connect(live.store.path) as conn:
+        conn.execute("UPDATE cards SET why=? WHERE id=?", (store._STOCK_NOTICED_WHY, noticed))
     store.PulseStore(live.store.path)
+    assert reopened.card(noticed)["why"] == store._STOCK_NOTICED_WHY
     assert reopened.card(followup_card)["why"] == "You said you would check it."
 
 

@@ -317,8 +317,10 @@ CARD_COLUMNS = ("kind", "item_id", "level", "title", "quote", "news", "why", "pr
 _ADDED_COLUMNS = (("cards", "topic", "TEXT NOT NULL DEFAULT ''"), ("cards", "brief", "TEXT NOT NULL DEFAULT ''"),
                   ("cards", "dismissed_at", "REAL"), ("cards", "rest_until", "REAL"),
                   ("candidates", "why", "TEXT NOT NULL DEFAULT ''"))
-# What report cards said for Why? before a candidate's reason did (never shown).
+# What report cards said for Why? before a candidate's reason did (never shown),
+# and the setting that says a store has cleared it.
 _STOCK_NOTICED_WHY = "From your Pulse report: something Hermes noticed in your chats, calendar or notes."
+STOCK_WHY_CLEARED = "stock_noticed_why_cleared"
 LESSON_COLUMNS = ("kind", "what", "value", "profile", "chat_id", "card_id", "cause", "created_at")
 CANDIDATE_COLUMNS = ("origin", "item_id", "kind", "profile", "chat_id", "source", "area", "due_at", "actionable",
                      "value", "bring_up", "skip", "text", "why", "decision", "rank")
@@ -367,11 +369,20 @@ class PulseStore:
                     # Another process opening the same store added it first.
                     if column not in _columns(conn, table):
                         raise
-                    continue
-                if (table, column) == ("candidates", "why"):
-                    # A report card's why is now its candidate's reason, or nothing: the
-                    # stock line from before would show behind Why? as if it were one.
-                    conn.execute("UPDATE cards SET why='' WHERE kind=? AND why=?", (NOTICED, _STOCK_NOTICED_WHY))
+            # A report card's why is now its candidate's reason, or nothing: the stock
+            # line from before would show behind Why? as if it were one. Cleared once,
+            # with its marker in the same transaction, so a store from before candidate
+            # lists, or one a process stopped with midway, is cleared too.
+            if conn.execute("SELECT 1 FROM settings WHERE key=?", (STOCK_WHY_CLEARED,)).fetchone() is None:
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    if conn.execute("SELECT 1 FROM settings WHERE key=?", (STOCK_WHY_CLEARED,)).fetchone() is None:
+                        conn.execute("UPDATE cards SET why='' WHERE kind=? AND why=?", (NOTICED, _STOCK_NOTICED_WHY))
+                        conn.execute("INSERT INTO settings(key, value_json) VALUES(?, 'true')", (STOCK_WHY_CLEARED,))
+                    conn.execute("COMMIT")
+                except BaseException:
+                    conn.execute("ROLLBACK")
+                    raise
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.path), timeout=self.busy_timeout_s, isolation_level=None)

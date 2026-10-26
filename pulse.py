@@ -387,9 +387,11 @@ def tick(now: Optional[float] = None) -> None:
         _maybe_report(pulse_store, home, now)
 
 
-# Why a report or brief card is on the Pulse screen.
+# Why a report or brief card is on the Pulse screen. A report gives none: a
+# card's Why? is a reason of its own (its items' cards carry theirs, when a
+# candidate list gave them), never a stock line.
 TURN_WHY = {
-    REPORT: "Your Pulse report: what Hermes saw in your chats since the last one.",
+    REPORT: "",
     BRIEF: "Your morning brief: what's still outstanding, and the news you asked Pulse to hold for the morning.",
 }
 
