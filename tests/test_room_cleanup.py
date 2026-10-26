@@ -240,7 +240,12 @@ def hermes(tmp_path, monkeypatch):
             raise ValueError(f"invalid profile name {name!r}")
         return root / "profiles" / name
 
-    profiles.get_profile_dir = get_profile_dir
+    def list_profile_names():
+        # Hermes' listing: default, then each named profile's directory.
+        named = sorted(path.name for path in (root / "profiles").glob("*") if path.is_dir())
+        return ["default", *named]
+
+    profiles.get_profile_dir, profiles.list_profile_names = get_profile_dir, list_profile_names
     config = types.ModuleType("hermes_cli.config_effective")
 
     def load_user_config_effective(config_path=None, *, fail_closed=False):
@@ -557,16 +562,59 @@ def test_a_cleanup_that_cant_start_leaves_the_disband_done(guard, monkeypatch, c
     assert _ids(furina) == set()
 
 
-def test_a_store_it_cant_read_leaves_the_disband_to_hermes(guard):
-    store = guard.root / "state.db"
-    _room(store, "with-laifu", [FURINA, LAIFU])
+def _damage(store, room_id, members_json):
     conn = sqlite3.connect(store)
-    conn.execute("UPDATE hosted_rooms SET members_json = 'not json' WHERE room_id = 'with-laifu'")
+    conn.execute("UPDATE hosted_rooms SET members_json = ? WHERE room_id = ?", (members_json, room_id))
     conn.commit()
     conn.close()
 
-    assert _disband(guard, "with-laifu")["idempotent"] is False
-    assert guard.deletes == []
+
+def test_a_roster_it_cant_read_ends_the_rooms_chats_in_every_home(guard, tmp_path, caplog):
+    furina, nahida = _home(guard, "furina"), _home(guard, "nahida")
+    elsewhere = tmp_path / "elsewhere" / "lumine"
+    (guard.root / "config.yaml").write_text(f"hosted_rooms:\n  profiles:\n    lumine: {elsewhere}\n", encoding="utf-8")
+    store = guard.root / "state.db"
+    _room(store, "with-laifu", [FURINA, LAIFU])
+    _damage(store, "with-laifu", "not json")
+    _room_session(furina, "f-with", "with-laifu")
+    _room_session(nahida, "n-with", "with-laifu")
+    _room_session(elsewhere, "l-with", "with-laifu")
+    _room_session(furina, "f-other", "other-room")
+    _session(furina, "f-private", title="Weekend plans")
+
+    with caplog.at_level(logging.WARNING, logger=cleanup.__name__):
+        assert _disband(guard, "with-laifu")["idempotent"] is False
+
+    assert "couldn't read room with-laifu's members" in caplog.text and "every agent's home" in caplog.text
+    assert _ids(furina) == {"f-other", "f-private"}
+    assert _ids(nahida) == set()
+    assert _ids(elsewhere) == set()
+    assert guard.held == 0
+
+
+def test_a_store_locked_at_disband_still_ends_the_chats_hermes_prunes(guard, monkeypatch, caplog):
+    # The read before the disband times out, and Hermes prunes the room's row
+    # in the disband's own transaction, so no later sweep can find it.
+    furina, nahida = _home(guard, "furina"), _home(guard, "nahida")
+    _room(guard.root / "state.db", "with-laifu", [FURINA, LAIFU])
+    _room_session(furina, "f-with", "with-laifu")
+    _session(nahida, "n-private", title="Weekend plans")
+    guard.prune = True
+    select = cleanup._select
+
+    def locked_roster(path, sql, params):
+        if sql.startswith("SELECT members_json"):
+            raise sqlite3.OperationalError("database is locked")
+        return select(path, sql, params)
+
+    monkeypatch.setattr(cleanup, "_select", locked_roster)
+    with caplog.at_level(logging.WARNING, logger=cleanup.__name__):
+        _disband(guard, "with-laifu")
+
+    assert "couldn't read room with-laifu's members" in caplog.text
+    assert _ids(furina) == set()
+    assert _ids(nahida) == {"n-private"}
+    assert cleanup.sweep() == 0
 
 
 def test_hermes_refusing_the_disband_deletes_nothing(guard):
@@ -742,6 +790,26 @@ def test_the_sweep_reads_every_store_of_this_host(hermes):
     assert _ids(nahida) == set()
 
 
+def test_the_sweep_looks_in_every_home_for_rooms_whose_roster_it_cant_read(hermes):
+    furina, nahida = _home(hermes, "furina"), _home(hermes, "nahida")
+    store = hermes.root / "state.db"
+    _room(store, "damaged", [FURINA], disbanded_at=2.0)
+    _room(store, "too-deep", [FURINA], disbanded_at=3.0)
+    _room(store, "with-laifu", [FURINA, LAIFU], disbanded_at=4.0)
+    _damage(store, "damaged", "not json")
+    # Deeper than json.loads recurses: RecursionError, not a ValueError.
+    _damage(store, "too-deep", "[" * 100_000 + "]" * 100_000)
+    _room_session(furina, "f-damaged", "damaged")
+    _room_session(nahida, "n-damaged", "damaged")
+    _room_session(nahida, "n-deep", "too-deep")
+    _room_session(furina, "f-with", "with-laifu")
+    _room_session(furina, "f-live", "live-room")
+
+    assert cleanup.sweep() == 4
+    assert _ids(furina) == {"f-live"}
+    assert _ids(nahida) == set()
+
+
 def test_the_sweep_looks_rooms_up_in_batches(hermes, monkeypatch):
     monkeypatch.setattr(cleanup, "ROOMS_PER_QUERY", 2)
     furina = _home(hermes, "furina")
@@ -824,12 +892,20 @@ def test_forget_says_when_hermes_couldnt_delete_a_chat(hermes):
     assert hermes.held == 0
 
 
-def test_forget_says_try_again_when_the_session_store_wont_open(hermes, monkeypatch):
+# What opening Hermes' session store can raise (SessionDB.__init__): sqlite's
+# errors, StateDbReplacedError (a RuntimeError) and RuntimeStoreError (a ValueError).
+STORE_OPEN_ERRORS = [sqlite3.OperationalError("unable to open database file"),
+                     RuntimeError("state.db was replaced while it was open"),
+                     ValueError("runtime store unavailable")]
+
+
+@pytest.mark.parametrize("error", STORE_OPEN_ERRORS, ids=lambda error: type(error).__name__)
+def test_forget_says_try_again_when_the_session_store_wont_open(hermes, monkeypatch, error):
     furina = _home(hermes, "furina")
     _room_session(furina, REMOTE, "theirs")
 
     def acquire(db_path=None):
-        raise sqlite3.OperationalError("unable to open database file")
+        raise error
 
     monkeypatch.setattr(sys.modules["hermes_state_registry"], "acquire", acquire)
     with pytest.raises(cleanup.CleanupError) as failed:
@@ -897,6 +973,21 @@ def test_the_forget_route_says_try_again_when_the_session_store_fails(client, he
 
     assert response.status_code == 503
     assert response.headers["cache-control"] == "no-store"
+    assert "try again" in response.json()["detail"]
+    assert _ids(furina) == {REMOTE}
+
+
+def test_the_forget_route_says_try_again_when_the_session_store_wont_open(client, hermes, monkeypatch):
+    furina = _home(hermes, "furina")
+    _room_session(furina, REMOTE, "theirs")
+
+    def acquire(db_path=None):
+        raise RuntimeError("state.db was replaced while it was open")
+
+    monkeypatch.setattr(sys.modules["hermes_state_registry"], "acquire", acquire)
+    response = client.delete(f"{BASE}/rooms/sessions", params={"room_id": "theirs"})
+
+    assert response.status_code == 503
     assert "try again" in response.json()["detail"]
     assert _ids(furina) == {REMOTE}
 
@@ -1004,6 +1095,19 @@ def test_cli_forget_says_what_it_couldnt_do(cli, hermes, capsys):
     assert _ids(furina) == {REMOTE}
 
     hermes.fails.add(REMOTE)
+    assert cli.dispatch(_forget_args("theirs", yes=True)) == 1
+    assert "try again shortly" in capsys.readouterr().out
+    assert _ids(furina) == {REMOTE}
+
+
+def test_cli_forget_says_try_again_when_the_session_store_wont_open(cli, hermes, monkeypatch, capsys):
+    furina = _home(hermes, "furina")
+    _room_session(furina, REMOTE, "theirs")
+
+    def acquire(db_path=None):
+        raise RuntimeError("state.db was replaced while it was open")
+
+    monkeypatch.setattr(sys.modules["hermes_state_registry"], "acquire", acquire)
     assert cli.dispatch(_forget_args("theirs", yes=True)) == 1
     assert "try again shortly" in capsys.readouterr().out
     assert _ids(furina) == {REMOTE}

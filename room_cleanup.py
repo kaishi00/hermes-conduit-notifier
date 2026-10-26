@@ -8,7 +8,8 @@ room, in every room, the way Hermes' own delete does: with their compressed
 history and their helpers' chats, but not a turn's that's still finishing. One
 of those, or one Hermes' delete fails on, is tried again shortly, then a minute
 after the plugin next loads, which also ends what rooms disbanded before this
-version left behind. Agents on other people's Hermes keep theirs (Eric,
+version left behind. A room whose roster can't be read is looked for in every
+agent's home on this host. Agents on other people's Hermes keep theirs (Eric,
 2026-10-26); forget_room is how their owner deletes one later, from
 `hermes conduit-push rooms forget` or Conduit.
 """
@@ -95,7 +96,8 @@ def forget_room(room_id: Any, home: Path) -> dict[str, Any]:
         raise CleanupError(f"Room {room_id} is hosted here and still going: disband it to end its chats.", 409)
     try:
         deleted, kept, failed = _delete(home, _room_sessions(home / STATE_DB, {room_id}))
-    except (sqlite3.Error, OSError) as error:
+    except Exception as error:  # noqa: BLE001 - sqlite's errors, or what Hermes raises opening its store
+        logger.warning("conduit_push: couldn't delete room %s's hidden chats in %s", room_id, home, exc_info=True)
         raise CleanupError(STORE_BUSY, 503) from error
     if failed:
         raise CleanupError(f"Hermes couldn't delete {failed} hidden chat{'' if failed == 1 else 's'} for room "
@@ -141,7 +143,10 @@ def _guard(original: Callable[..., Any]) -> Callable[..., Any]:
         # Read first: Hermes can prune the room's row in the disband's own transaction.
         profiles = _before(db_path, room_id)
         result = original(db_path, *args, **kwargs)
-        if profiles:
+        if profiles is None:
+            logger.warning("conduit_push: couldn't read room %s's members before it was disbanded; looking for its "
+                           "hidden chats in every agent's home on this host", room_id)
+        if profiles is None or profiles:
             try:
                 _in_background(functools.partial(_end, room_id, profiles, Path(db_path)), "conduit-room-cleanup")
             except Exception:  # noqa: BLE001 - the room is disbanded either way
@@ -154,8 +159,8 @@ def _guard(original: Callable[..., Any]) -> Callable[..., Any]:
     return disband_room
 
 
-def _before(db_path: Any, room_id: Any) -> tuple[str, ...]:
-    """The room's agents on this host, empty when the room can't be read."""
+def _before(db_path: Any, room_id: Any) -> Optional[tuple[str, ...]]:
+    """The room's agents on this host; None when its roster can't be read."""
     if not isinstance(room_id, str) or not _ROOM_ID.fullmatch(room_id):
         return ()
     try:
@@ -163,12 +168,15 @@ def _before(db_path: Any, room_id: Any) -> tuple[str, ...]:
         return _local_profiles(rows[0][0]) if rows else ()
     except Exception:  # noqa: BLE001 - the disband is Hermes' either way
         logger.debug("conduit_push: couldn't read room %s's members before it was disbanded", room_id, exc_info=True)
-        return ()
+        return None
 
 
-def _end(room_id: str, profiles: tuple[str, ...], store: Path) -> None:
-    """The cleanup after one disband; never raises."""
+def _end(room_id: str, profiles: Optional[tuple[str, ...]], store: Path) -> None:
+    """The cleanup after one disband, in every agent's home when the room's
+    roster couldn't be read (None); never raises."""
     try:
+        if profiles is None:
+            profiles = _every_profile(store)
         plan = {home: {room_id} for homes in _homes(set(profiles), store).values() for home in homes}
         what = f"room {room_id}"
         _, kept, failed = _delete_rooms(plan, what)
@@ -258,12 +266,18 @@ def _disbanded(store: Path) -> list[tuple[str, tuple[str, ...]]]:
     rows = _select(store, "SELECT room_id, members_json FROM hosted_rooms WHERE disbanded_at IS NOT NULL "
                           "ORDER BY disbanded_at DESC LIMIT ?", (MAX_SWEEP_ROOMS,))
     rooms = []
+    everyone: Optional[tuple[str, ...]] = None
     for room_id, members in rows:
+        if not isinstance(room_id, str) or not _ROOM_ID.fullmatch(room_id):
+            continue
         try:
             profiles = _local_profiles(members)
-        except (TypeError, ValueError):
-            continue
-        if isinstance(room_id, str) and _ROOM_ID.fullmatch(room_id) and profiles:
+        except (TypeError, ValueError, RecursionError):
+            # A roster that can't be read: the room's chats are looked for in every agent's home.
+            if everyone is None:
+                everyone = _every_profile(store)
+            profiles = everyone
+        if profiles:
             rooms.append((room_id, profiles))
     return rooms
 
@@ -330,6 +344,19 @@ def _homes(profiles: set[str], store: Path) -> dict[str, list[Path]]:
         homes[profile] = [home for index, home in enumerate(found)
                           if home not in found[:index] and (home / STATE_DB).is_file()]
     return homes
+
+
+def _every_profile(store: Path) -> tuple[str, ...]:
+    """Every agent on this host, for a room whose roster can't be read:
+    Hermes' profiles, and those ``hosted_rooms.profiles`` places."""
+    names = set(_configured_homes(store.parent))
+    try:
+        from hermes_cli.profiles import list_profile_names
+
+        names.update(list_profile_names())
+    except Exception:  # noqa: BLE001 - the configured homes are still looked in
+        logger.debug("conduit_push: couldn't list this host's profiles", exc_info=True)
+    return tuple(sorted(name for name in names if isinstance(name, str) and _PROFILE.fullmatch(name)))
 
 
 def _configured_homes(home: Path) -> dict[str, Path]:
