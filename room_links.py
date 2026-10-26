@@ -24,6 +24,7 @@ the next pass. Envelopes of other kinds go to the handlers registered with
 from __future__ import annotations
 
 import hmac
+import ipaddress
 import json
 import logging
 import os
@@ -32,6 +33,7 @@ import secrets
 import tempfile
 import threading
 import time
+import urllib.parse
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -176,10 +178,13 @@ class Links:
     # --- What the routes and the CLI call --------------------------------------
 
     def invite(self, name: Any) -> dict[str, Any]:
-        """A new invite: ``{url, invite: {id, name, expires_at}}``. ``name``
-        is who the other person sees it's from."""
+        """A new invite: ``{url, invite: {id, name, expires_at}, words}``,
+        ``words`` this Hermes' own. ``name`` is who the other person sees
+        it's from."""
         name = _name(name)
         identity = self._identity()
+        # First, so a plugin install that can't show them makes no invite.
+        words = _words(identity.signing_public, identity.sealing_public)
         now = int(self.clock())
         invite_id, token = _new_id(9), room_mailbox.new_token()
         with self._store.update() as state:
@@ -191,20 +196,26 @@ class Links:
             url = self._mailbox_url(state)
             state["invites"][invite_id] = {"name": name, "token": token, "created_at": now,
                                            "expires_at": now + INVITE_TTL_S}
+        called = False
         try:
             mailbox = self._mailbox(identity, url)
+            called = True  # a new inbox gets every sender this Hermes gave out, this invite's too
             self._registered(mailbox)
             self._owner_call(mailbox, lambda: mailbox.put_sender(_invite_sender(invite_id), token))
         except (room_mailbox.MailboxError, LinkError) as exc:
             with self._store.update() as state:
                 state["invites"].pop(invite_id, None)
+                if called:
+                    # The mailbox may have put its sender without answering.
+                    _clean_up(state, _invite_sender(invite_id), int(self.clock()))
             raise _link_error(exc) from None
         expires_at = now + INVITE_TTL_S
         payload = {"v": VERSION, "name": name, "sign": sealing.b64u(identity.signing_public),
                    "seal": sealing.b64u(identity.sealing_public), "mailbox": mailbox.url, "invite": invite_id,
                    "token": token, "exp": expires_at}
         encoded = sealing.b64u(json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
-        return {"url": URL_PREFIX + encoded, "invite": {"id": invite_id, "name": name, "expires_at": expires_at}}
+        return {"url": URL_PREFIX + encoded, "invite": {"id": invite_id, "name": name, "expires_at": expires_at},
+                "words": words}
 
     def words(self) -> dict[str, Any]:
         """This installation's fingerprint words, or None before its first
@@ -213,13 +224,15 @@ class Links:
             identity = room_identity.load(self.root)
         except room_identity.IdentityError as exc:
             raise _link_error(exc) from None
-        return {"words": None if identity is None else list(identity.fingerprint),
+        return {"words": None if identity is None else _words(identity.signing_public, identity.sealing_public),
                 "crypto": sealing.crypto_available()}
 
     def preview(self, url: Any) -> dict[str, Any]:
         """What an invite says, before it's accepted: who it's from and their
-        fingerprint words, whether it ran out, whether it's this Hermes' own,
-        and the Link this Hermes already has with them, if any."""
+        fingerprint words, the host of the mailbox it names, whether it ran
+        out, whether it's this Hermes' own, and the Link this Hermes already
+        has with them, if any. An invite whose mailbox this Hermes won't
+        call is refused, as accepting it would be."""
         invite = parse_invite(url)
         try:
             identity = room_identity.load(self.root)
@@ -227,7 +240,10 @@ class Links:
             raise _link_error(exc) from None
         now = int(self.clock())
         state = self._store.read()
-        return {"name": invite.name, "words": _words(invite.sign, invite.seal), "expires_at": invite.expires_at,
+        if _peer_mailbox(invite.mailbox, self._mailbox_url(state)) is None:
+            raise _mailbox_refused()
+        return {"name": invite.name, "words": _words(invite.sign, invite.seal),
+                "mailbox": room_mailbox.url_host(invite.mailbox), "expires_at": invite.expires_at,
                 "expired": invite.expires_at <= now,
                 "own": identity is not None and identity.signing_public == invite.sign,
                 "linked_as": _linked_with(state, invite.sign, now)}
@@ -250,8 +266,7 @@ class Links:
         with self._store.update() as state:
             url_mine = self._mailbox_url(state)
             if _peer_mailbox(invite.mailbox, url_mine) is None:
-                raise LinkError("bad_invite", "That invite names a mailbox on its own computer, which this Hermes "
-                                              "can't reach")
+                raise _mailbox_refused()
             again = _accepted(state, invite, now)
             if again is not None:
                 link_id = again
@@ -397,7 +412,7 @@ class Links:
                     mailbox.delete_sender(item["sender"])
                 except room_mailbox.MailboxError as exc:
                     # Unauthorized: the inbox is gone, and its senders with it.
-                    if exc.code != "unauthorized" and int(self.clock()) < item["until"]:
+                    if _goes_later(exc) and int(self.clock()) < item["until"]:
                         logger.info("Linked Rooms will remove a sender from its inbox later (%s)", exc.code)
                         continue
                 with self._store.update() as current:
@@ -462,7 +477,10 @@ class Links:
         try:
             self._send_outgoing(identity, item)
         except room_mailbox.MailboxError as exc:
-            if exc.code != "unauthorized" and now < item["until"]:
+            # Unauthorized: the other side took its sender back, or lost its
+            # inbox. One the mailbox lost (not_found) is made again by its
+            # Hermes, with the senders it gave out.
+            if _goes_later(exc) and now < item["until"]:
                 logger.info("Linked Rooms will send a %s for Link %s later (%s)", item["kind"], item["link"],
                             exc.code)
                 return
@@ -503,8 +521,10 @@ class Links:
     def _flush_quietly(self) -> None:
         try:
             self.flush()
-        except (room_mailbox.MailboxError, room_identity.IdentityError, LinkError) as exc:
-            logger.info("Linked Rooms will finish with the mailbox later (%s)", getattr(exc, "code", exc))
+        except (room_mailbox.MailboxError, room_envelope.EnvelopeError, room_identity.IdentityError, LinkError,
+                OSError) as exc:
+            logger.info("Linked Rooms will finish with the mailbox later (%s)",
+                        getattr(exc, "code", type(exc).__name__))
 
     # --- Helpers ----------------------------------------------------------------
 
@@ -628,6 +648,9 @@ class LinkLoop:
         self._woken.set()
 
     def stop(self) -> None:
+        # Only tests stop a loop: in Hermes it ends with its process. A pass
+        # still running may finish after the lease goes, alongside another
+        # loop's, which handlers allow (an envelope can come again).
         self._stopped.set()
         self._woken.set()
         with self._lock:
@@ -778,7 +801,7 @@ class LinkLoop:
                 return
             mailbox_url = _peer_mailbox(accept["mailbox"], self.links._mailbox_url(state))
             if mailbox_url is None:
-                logger.info("Linked Rooms dropped an accept naming a mailbox it can't reach")
+                logger.info("Linked Rooms dropped an accept naming a mailbox on someone's own computer or network")
                 return
             # Someone already linked from that Hermes lost their side, or took
             # it back, and linked again: this Link replaces theirs.
@@ -1064,14 +1087,41 @@ def _canonical_mailbox(value: Any) -> Optional[str]:
 
 
 def _peer_mailbox(value: Any, mine: str) -> Optional[str]:
-    """The other side's mailbox URL, when this Hermes may reach it: http only
-    for a mailbox on this host, and only when this Hermes' own is too (tests,
-    a mailbox beside Hermes), so nobody can point it at a service of its own
-    computer's."""
+    """The other side's mailbox URL, when this Hermes may call it, so nobody
+    can point it at a service of this computer's or its network's: http
+    (only ever on this host) while this Hermes' own is too (tests, a mailbox
+    beside Hermes), and one on this computer or a private network only when
+    it's this Hermes' own."""
     url = _canonical_mailbox(value)
-    if url is None or (url.startswith("http://") and not mine.startswith("http://")):
+    if url is None:
         return None
-    return url
+    if url.startswith("http://"):
+        return url if mine.startswith("http://") else None
+    return None if url != mine and _private_host(url) else url
+
+
+def _private_host(url: str) -> bool:
+    """Whether a mailbox URL's host is this computer or on a private network:
+    a name only when it's localhost, since what other names resolve to isn't
+    known until they're called."""
+    host = urllib.parse.urlsplit(url).hostname or ""
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        return not ipaddress.ip_address(host).is_global
+    except ValueError:
+        return False
+
+
+def _goes_later(exc: room_mailbox.MailboxError) -> bool:
+    """Whether a mailbox call refused with ``exc`` may go through later as it
+    is: not once its token is refused, nor what the mailbox never takes."""
+    return exc.code not in ("unauthorized", "bad_request", "bad_url", "envelope_too_large", "payload_too_large")
+
+
+def _mailbox_refused() -> LinkError:
+    return LinkError("bad_invite", "That invite names a mailbox on someone's own computer or network, which this "
+                                   "Hermes doesn't call for an invite")
 
 
 def _key_of(entry: dict[str, Any], name: str) -> bytes:

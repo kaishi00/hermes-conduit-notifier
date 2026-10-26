@@ -2697,7 +2697,7 @@ invite is from who you think.
 
 ```bash
 hermes conduit-push links invite --name Eric             # the invite, and your Hermes' words
-hermes conduit-push links preview <conduit://link/...>   # who it's from, and their words
+hermes conduit-push links preview <conduit://link/...>   # who it's from, their words and mailbox
 hermes conduit-push links accept <conduit://link/...> --name Mona
 hermes conduit-push links list                           # Links, invites still waiting, the mailbox
 hermes conduit-push links remove <Link id>               # unlinks, on both sides; asks first (--yes doesn't)
@@ -2709,11 +2709,14 @@ after 8 days reads as unanswered (its accept or confirm ran out at the
 mailbox). An accept the mailbox didn't answer stays with its Link, and goes
 when the mailbox answers, while the invite lasts; accepting the same invite
 again is the same accept. Unlinking ends a Link here at once, and the other
-Hermes drops it when it next reads its inbox. To link again, unlink first: a
-new accept from the same Hermes then replaces the inviter's old Link, as it
-does after someone loses their side. This Hermes keeps up to 50 Links and 10
-waiting invites. Everything a Link needs, its send tokens included, stays in
-`conduit-rooms/links.json` (owner only), never in a log or a route's answer.
+Hermes drops it when it next reads its inbox. An unlink, accept or confirm the
+mailbox can't take now goes later, up to its 7-day hold (an accept, while its
+invite lasts), and one it refuses as it is (too large, say) doesn't. To link
+again, unlink first: a new accept from the same Hermes then replaces the
+inviter's old Link, as it does after someone loses their side. This Hermes
+keeps up to 50 Links and 10 waiting invites. Everything a Link needs, its send
+tokens included, stays in `conduit-rooms/links.json` (owner only), never in a
+log or a route's answer.
 
 The dashboard's process reads the inbox: one loop for the installation,
 whichever process holds `conduit-rooms/.lease`. While nothing waits it only
@@ -2738,10 +2741,11 @@ capability, with no `?profile=` (Links are the installation's):
   without Python's cryptography package (which refuses with `no_crypto` once
   it has keys).
 - `POST /rooms/links/invites` with `{"name": ...}`: `{"url": ..., "invite":
-  {"id", "name", "expires_at"}}`.
+  {"id", "name", "expires_at"}, "words": [...]}`, with this Hermes' words.
 - `POST /rooms/links/preview` with `{"url": ...}`: `{"name", "words",
-  "expires_at", "expired", "own", "linked_as"}`, where `linked_as` is the
-  Link this Hermes already has with them, or null.
+  "mailbox", "expires_at", "expired", "own", "linked_as"}`, where `mailbox`
+  is the host of the mailbox the invite names and `linked_as` the Link this
+  Hermes already has with them, or null.
 - `POST /rooms/links` with `{"url": ..., "name": ...}`: `{"link": {"id",
   "name", "status", "words", "created_at"}}`, its status `waiting`.
 - `GET /rooms/links`: `{"links": [...], "invites": [...], "mailbox": {"url",
@@ -2751,15 +2755,18 @@ capability, with no `?profile=` (Links are the installation's):
   /rooms/links/invites?invite_id=`: `{"cancelled": true}` (false for one this
   Hermes doesn't have).
 
-A refusal carries `detail` and a `code`: `bad_name` and `bad_invite` (400),
-`own_invite` (400, the invite is this Hermes'), `expired` and `invite_used`
+A refusal carries `detail` and a `code`: `bad_name` and `bad_invite` (400,
+also for an invite naming a mailbox on someone's own computer or a private
+network address, which this Hermes calls only when it's its own mailbox
+too), `own_invite` (400, the invite is this Hermes'), `expired` and `invite_used`
 (410), `already_linked`, `too_many_links` and `too_many_invites` (409),
 `no_crypto` and `no_word_list` (503, a plugin install missing its word list),
 and the mailbox's own, such as `clock_off` (503) when this host's clock is far
 from the mailbox's. A mailbox that can't be reached is 503, one that answers
 what it shouldn't is 502. A route that waits on the mailbox answers within
 50 s, or with `timed_out` (504) while the call finishes on its own. The routes
-answer 60 requests a minute between them.
+answer 60 requests a minute between them, one still waiting for a thread
+included.
 
 ## Capabilities (plugin 0.4+)
 

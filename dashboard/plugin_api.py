@@ -8108,11 +8108,16 @@ def room_links(action: Callable[[Any], Dict[str, Any]]) -> Dict[str, Any]:
 
 async def _room_links_route(action: Callable[[Any], Dict[str, Any]], route: str, *, mailbox: bool = False) -> Any:
     """``mailbox``: the action waits on the rooms mailbox, so it runs in the
-    links pool, for up to ROOM_LINKS_TIMEOUT_S."""
+    links pool, for up to ROOM_LINKS_TIMEOUT_S. Its slot of the limit is
+    taken first, so one waiting there for a thread counts too."""
     try:
-        run = _run_scoped(None, _limited(_room_links_limiter, None, lambda: room_links(action)),
-                          _room_links_executor if mailbox else None)
-        return {"ok": True, **(await (asyncio.wait_for(run, timeout=ROOM_LINKS_TIMEOUT_S) if mailbox else run))}
+        if mailbox:
+            await _run_scoped(None, lambda: _room_links_limiter.acquire(_limiter_key(None)))
+            answer = await asyncio.wait_for(_run_scoped(None, lambda: room_links(action), _room_links_executor),
+                                            timeout=ROOM_LINKS_TIMEOUT_S)
+        else:
+            answer = await _run_scoped(None, _limited(_room_links_limiter, None, lambda: room_links(action)))
+        return {"ok": True, **answer}
     except asyncio.TimeoutError:
         logger.warning("Linked Rooms' %s for Conduit timed out after %ss", route, ROOM_LINKS_TIMEOUT_S)
         return _store_refusal(TokenError(504, "The rooms mailbox didn't answer in time; look at the Links again in "

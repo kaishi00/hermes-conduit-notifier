@@ -1,6 +1,7 @@
 """Links between installations and the mailbox loop (designs/cross-owner-agents, layer 1, N3b)."""
 import argparse
 import base64
+import concurrent.futures
 import importlib.util
 import json
 import logging
@@ -114,7 +115,9 @@ def test_an_invite_is_accepted_and_confirmed(home):
 
     assert made["url"].startswith("conduit://link/")
     assert made["invite"]["name"] == "Eric" and made["invite"]["expires_at"] > time.time() + DAY - 60
+    assert made["words"] == _words(eric)
     assert preview["name"] == "Eric" and preview["words"] == _words(eric)
+    assert preview["mailbox"] == mailbox_module.url_host(eric.view()["mailbox"]["url"])
     assert preview["expired"] is False and preview["own"] is False and preview["linked_as"] is None
     assert accepted["status"] == "waiting" and accepted["name"] == "Eric"
     assert [invite["id"] for invite in eric.view()["invites"]] == [made["invite"]["id"]]
@@ -616,6 +619,76 @@ def test_a_remove_that_cant_go_now_goes_later(home, monkeypatch):
     assert eric.view()["links"] == []
 
 
+@needs_node
+@pytest.mark.parametrize("code,status,kept", [
+    ("envelope_too_large", 413, False), ("bad_request", 0, False), ("not_found", 404, True),
+    ("rate_limited", 429, True), ("unreachable", 0, True), ("internal_error", 500, True)])
+def test_only_an_envelope_that_can_go_later_is_tried_again(home, monkeypatch, code, status, kept):
+    # An inbox the mailbox lost (not_found) is made again by its Hermes.
+    eric, mona, link_id = _linked(home)
+
+    def refused(*args, **kwargs):
+        raise mailbox_module.MailboxError(code, "Refused", status)
+
+    monkeypatch.setattr(mailbox_module, "send", refused)
+    eric.remove(link_id)  # its link.remove waits in the outbox
+    eric.flush()
+
+    assert [item["kind"] for item in eric._store.read()["outbox"]] == (["link.remove"] if kept else [])
+
+
+@needs_node
+@pytest.mark.parametrize("code,status,kept", [
+    ("bad_request", 0, False), ("rate_limited", 429, True), ("internal_error", 500, True)])
+def test_only_a_sender_that_can_go_later_is_deleted_again(home, monkeypatch, code, status, kept):
+    eric, mona, link_id = _linked(home)
+
+    def refused(self, sender):
+        raise mailbox_module.MailboxError(code, "Refused", status)
+
+    monkeypatch.setattr(mailbox_module.Mailbox, "delete_sender", refused)
+    eric.remove(link_id)
+    eric.flush()
+
+    assert bool(eric._store.read()["cleanup"]) is kept
+
+
+@needs_node
+@pytest.mark.parametrize("error", [envelope.EnvelopeError("bad_key", "A key that can't seal"), OSError("disk")])
+def test_an_unlink_whose_envelope_cant_go_now_still_unlinks(home, monkeypatch, error):
+    eric, mona, link_id = _linked(home)
+
+    def flush(self):
+        raise error
+
+    monkeypatch.setattr(links_module.Links, "flush", flush)
+
+    assert eric.remove(link_id) == {"removed": True}
+    assert eric.view()["links"] == []
+
+
+@needs_node
+def test_an_invite_whose_sender_wasnt_answered_takes_the_sender_back(home, monkeypatch):
+    # The mailbox may have put it.
+    eric = home("eric")
+    real_put = mailbox_module.Mailbox.put_sender
+
+    def put_unanswered(self, sender, token):
+        real_put(self, sender, token)
+        raise mailbox_module.MailboxError("bad_answer", "The mailbox answered oddly")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(mailbox_module.Mailbox, "put_sender", put_unanswered)
+        with pytest.raises(links_module.LinkError):
+            eric.invite("Eric")
+    [sender] = [item["sender"] for item in eric._store.read()["cleanup"]]
+    assert sender.startswith("i-")
+
+    eric.flush()
+    assert eric._store.read()["cleanup"] == []
+    assert eric.mailbox().senders() == []
+
+
 class _CutOff(BaseException):
     """A process stopping mid-call: nothing handles it, as nothing handles a kill."""
 
@@ -861,10 +934,61 @@ def test_a_word_list_that_cant_be_read_is_refused_with_its_code(home, monkeypatc
         raise identity_module.IdentityError("no_word_list", "This plugin install is missing bip39_english.txt")
 
     monkeypatch.setattr(identity_module, "fingerprint_words", missing)
-    for call in (eric.view, lambda: eric.get(link_id), lambda: mona.preview(url)):
+    for call in (eric.view, lambda: eric.get(link_id), lambda: mona.preview(url), eric.words):
         with pytest.raises(links_module.LinkError) as refused:
             call()
         assert (refused.value.code, refused.value.status) == ("no_word_list", 503)
+
+
+def _no_word_list(*args):
+    raise identity_module.IdentityError("no_word_list", "This plugin install is missing bip39_english.txt")
+
+
+@needs_node
+def test_an_invite_isnt_made_without_its_words(home, monkeypatch):
+    venti = home("venti")
+    monkeypatch.setattr(identity_module, "fingerprint_words", _no_word_list)
+
+    with pytest.raises(links_module.LinkError) as refused:
+        venti.invite("Venti")
+
+    assert (refused.value.code, refused.value.status) == ("no_word_list", 503)
+    assert venti._store.read()["invites"] == {}
+
+
+def _invite_naming(url, mailbox):
+    """The invite in ``url``, naming another mailbox."""
+    fields = json.loads(links_module.sealing.unb64u(url[len(links_module.URL_PREFIX):], ValueError))
+    fields["mailbox"] = mailbox
+    return links_module.URL_PREFIX + links_module.sealing.b64u(json.dumps(fields).encode("utf-8"))
+
+
+@needs_node
+@pytest.mark.parametrize("mailbox", ["https://localhost", "https://127.0.0.1:8443", "https://10.0.0.5",
+                                     "https://192.168.1.20", "https://169.254.169.254", "https://[::1]",
+                                     "https://[fd00::5]", "https://rooms.localhost"])
+def test_an_invite_naming_a_mailbox_on_a_private_network_is_refused(home, mailbox):
+    # Accepting it would have this Hermes call a service there.
+    url = _invite_naming(home("eric").invite("Eric")["url"], mailbox)
+    mona = home("mona")
+
+    for call in (lambda: mona.preview(url), lambda: mona.accept(url, "Mona")):
+        with pytest.raises(links_module.LinkError) as refused:
+            call()
+        assert refused.value.code == "bad_invite"
+    assert mona.view()["links"] == []
+
+
+def test_an_invite_naming_this_hermes_own_private_mailbox_is_fine(tmp_path, monkeypatch):
+    monkeypatch.setenv("CONDUIT_ROOMS_MAILBOX_URL", "https://192.168.1.20")
+    mona = links_module.Links(tmp_path / "mona")
+    keys = identity_module.load_or_create(tmp_path / "eric")
+    fields = {"v": links_module.VERSION, "name": "Eric", "sign": links_module.sealing.b64u(keys.signing_public),
+              "seal": links_module.sealing.b64u(keys.sealing_public), "mailbox": "https://192.168.1.20",
+              "invite": "abcdefghijkl", "token": "t" * 32, "exp": int(time.time()) + DAY}
+    url = links_module.URL_PREFIX + links_module.sealing.b64u(json.dumps(fields).encode("utf-8"))
+
+    assert mona.preview(url)["mailbox"] == "192.168.1.20"
 
 
 @needs_node
@@ -1040,6 +1164,40 @@ def test_links_routes_that_wait_on_the_mailbox_have_their_own_threads_and_time(r
     assert listed.status_code == 200 and not threads["list"].startswith("conduit-room-links")
 
 
+def test_requests_waiting_for_the_links_threads_count_toward_the_limit(routes, monkeypatch):
+    monkeypatch.setenv("CONDUIT_ROOMS_MAILBOX_URL", "http://127.0.0.1:9")
+    monkeypatch.setattr(api._room_links_limiter, "clock", lambda: 1000.0)
+    monkeypatch.setattr(api, "ROOM_LINKS_TIMEOUT_S", 0.05)
+    pool, go_on = concurrent.futures.ThreadPoolExecutor(max_workers=1), threading.Event()
+    monkeypatch.setattr(api, "_room_links_executor", pool)
+    pool.submit(go_on.wait, 10)  # its one thread waits on a mailbox that doesn't answer
+    eric = routes("eric")
+    try:
+        waited = [eric.call("POST", "/rooms/links/invites", json={"name": "Eric"}) for _ in range(60)]
+        refused = eric.call("POST", "/rooms/links/invites", json={"name": "Eric"})
+    finally:
+        go_on.set()
+        pool.shutdown(wait=True, cancel_futures=True)
+
+    assert {answer.json()["code"] for answer in waited} == {"timed_out"}
+    assert refused.status_code == 429
+
+
+def test_the_identity_route_refuses_a_word_list_that_cant_be_read(routes, monkeypatch):
+    dashboard_identity = api._plugin_package_module("room_identity")
+    eric = routes("eric")
+    dashboard_identity.load_or_create(eric.root)
+
+    def missing(*args):
+        raise dashboard_identity.IdentityError("no_word_list", "This plugin install is missing bip39_english.txt")
+
+    monkeypatch.setattr(dashboard_identity, "fingerprint_words", missing)
+
+    refused = eric.call("GET", "/rooms/identity")
+
+    assert refused.status_code == 503 and refused.json()["code"] == "no_word_list"
+
+
 def test_unlinking_or_cancelling_what_isnt_there_says_so(routes):
     eric = routes("eric")
 
@@ -1130,6 +1288,28 @@ def test_cli_links_two_installations(cli, monkeypatch, mailbox_url, tmp_path, ca
     assert "Unlinked Mona" in capsys.readouterr().out
     _run(mona)
     assert eric.view()["links"] == [] and mona.view()["links"] == []
+
+
+@needs_node
+def test_cli_makes_no_invite_without_its_words(cli, monkeypatch, mailbox_url, tmp_path, capsys):
+    monkeypatch.setenv("CONDUIT_ROOMS_MAILBOX_URL", mailbox_url)
+    monkeypatch.setattr(identity_module, "fingerprint_words", _no_word_list)
+
+    assert cli("eric", "invite", name="Eric") == 1
+
+    said = capsys.readouterr().out
+    assert "Couldn't make the invite" in said and "conduit://link/" not in said
+    assert links_module.Links(tmp_path / "eric")._store.read()["invites"] == {}
+
+
+@needs_node
+def test_cli_preview_says_which_mailbox_the_invite_uses(cli, monkeypatch, mailbox_url, capsys):
+    monkeypatch.setenv("CONDUIT_ROOMS_MAILBOX_URL", mailbox_url)
+    assert cli("eric", "invite", name="Eric") == 0
+    url = _url_in(capsys.readouterr().out)
+
+    assert cli("mona", "preview", url) == 0
+    assert f"through the mailbox at {mailbox_module.url_host(mailbox_url)}" in capsys.readouterr().out
 
 
 @needs_node

@@ -684,12 +684,13 @@ def _links(args: argparse.Namespace) -> int:
             print(f"An invite from {_printable(made['invite']['name'])}, for one accept until "
                   f"{_link_time(made['invite']['expires_at'])}:")
             print(made["url"])
-            print(f"Your Hermes' words: {' '.join(links.words()['words'])}. The other person should see the same "
+            print(f"Your Hermes' words: {' '.join(made['words'])}. The other person should see the same "
                   "four words when they open the invite.")
             _say_if_nothing_reads(room_links, root)
         elif action == "preview":
             shown = links.preview(target)
-            print(f"From {_printable(shown['name'])}. Their Hermes' words: {' '.join(shown['words'])}.")
+            print(f"From {_printable(shown['name'])}, through the mailbox at {_printable(shown['mailbox'])}. "
+                  f"Their Hermes' words: {' '.join(shown['words'])}.")
             if shown["own"]:
                 print("It's your own invite: it's for the person you're linking with.")
             elif shown["expired"]:
