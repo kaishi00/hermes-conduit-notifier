@@ -13,6 +13,11 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.84.1 (2026-10-26)
+
+### Fixes
+- A Hermes that hosts two group rooms or more no longer keeps checking them over and over after a message, using CPU until Hermes restarted.
+
 ## 0.84.0 (2026-10-26)
 
 ### New and improved

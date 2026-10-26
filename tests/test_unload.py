@@ -115,12 +115,18 @@ def test_the_room_planner_guard_comes_off_with_the_plugin(room_planner, unloaded
 
 @pytest.fixture
 def room_driver(monkeypatch):
-    """Hermes' room driver, as far as the plugin's cut-off guard touches it."""
+    """Hermes' room driver, as far as the plugin's guards touch it."""
     driver = types.ModuleType("tui_gateway.hosted_room_driver")
 
     class HostedRoomRuntime:
         def _transport_for(self, binding, task):
             return None
+
+        def wakeup(self):
+            pass
+
+        def _run_room_once(self, binding):
+            self.wakeup()
 
     driver.HostedRoomRuntime = HostedRoomRuntime
     tui_gateway = types.ModuleType("tui_gateway")
@@ -136,6 +142,14 @@ def test_the_room_cutoff_guard_comes_off_with_the_plugin(room_driver, unloaded_p
     unloaded_plugin()
 
     assert room_driver._transport_for is own
+
+
+def test_the_room_wakeups_guard_comes_off_with_the_plugin(room_driver, unloaded_plugin):
+    own = room_driver.wakeup.__wrapped__
+
+    unloaded_plugin()
+
+    assert room_driver.wakeup is own
 
 
 @pytest.fixture

@@ -1554,6 +1554,23 @@ level, the first time it fills a message in, and leaves the planner alone,
 saying so at info level, when Hermes' planner has no
 `_derive_member_watermarks`.
 
+## Group rooms between turns (plugin 0.84.1+)
+
+Hermes' room driver looks at each gateway-hosted room on a thread of its own,
+up to four at once. A change, such as a message or a reply, wakes the driver
+and marks every room whose pass is still running, for one more pass once it
+ends. Hermes asks for that pass by waking the driver the same way, which marks
+the passes still running then. So with two rooms or more, their passes can
+keep marking each other, and the driver looks at every room over and over,
+using CPU, until Hermes restarts. With the plugin, a pass that ends only wakes
+the driver, which then looks at its room again, and any other wake still
+marks every room being looked at. The plugin's gateway load guards the driver
+there, and its dashboard routes guard it in a dashboard or `hermes serve` that
+runs as its own process and hosts rooms itself (with `plugins.isolation: host`
+the routes load in a plugin host process instead, so they don't guard that
+process's rooms). A Hermes whose room driver has no `wakeup` or
+`_run_room_once` logs one line, at info level, and keeps its own behaviour.
+
 ## Artifacts (plugin 0.40+)
 
 Conduit's Artifacts screens list what a profile's chats produced:

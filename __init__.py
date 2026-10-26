@@ -17,7 +17,7 @@ from hermes_constants import get_hermes_home
 from . import (call_tool, call_watches, calls, chat_on_screen, clarify_loop, client, conduit_first, cron_runs,
                desktop_selected, health_tool, inbox_tool, live_activity, location_tool, maps_tool, phone_tool,
                present_tool, pulse, reply_sources, review_notices, room_cleanup, room_cutoff, room_memory,
-               room_planner, room_rules, settings_tool, show_tool, turn_surface, voice_archive)
+               room_planner, room_rules, room_wakeups, settings_tool, show_tool, turn_surface, voice_archive)
 from .session_titles import bot_name as _bot_name, title as _session_title, titled as _titled
 from .client import enqueue
 from .events import approval_decision, clarification_text, event_id, is_silent_response, plain_text, push_event
@@ -69,11 +69,13 @@ def register(ctx: Any) -> None:
     # owner's own words (room_memory), a room with a long thread keeps
     # getting turns (room_planner), a member whose Hermes no longer accepts
     # the room fails its turn instead of holding the room up (room_cutoff),
-    # and disbanding a room ends its agents' hidden chats here
-    # (room_cleanup).
+    # a room's pass that ends doesn't keep every room's pass going
+    # (room_wakeups), and disbanding a room ends its agents' hidden chats
+    # here (room_cleanup).
     room_memory.install()
     room_planner.install()
     room_cutoff.install()
+    room_wakeups.install()
     room_cleanup.install()
     # An open chat's self-improvement updates follow the setting as it is
     # now, not as it was when the chat opened (review_notices).
@@ -409,11 +411,11 @@ def _finish_ready(session_id: str, ready: dict[str, Any] | None, send: bool) -> 
 def _unload() -> None:
     """Hermes unloads the plugin: replies held for a turn's end are
     dropped with their timers, held calls stay stored for the next load, the
-    group room guards (memory, planner, cut-off and disband cleanup, with a
-    sweep that hasn't run yet) and the self-improvement setting's live read
-    come off, the room turns it remembers are forgotten, and the delivery
-    and Live Activity threads end (waiting about a second for a send in
-    progress). Nothing more goes to the relay from this load."""
+    group room guards (memory, planner, cut-off, wakeups and disband
+    cleanup, with a sweep that hasn't run yet) and the self-improvement
+    setting's live read come off, the room turns it remembers are forgotten,
+    and the delivery and Live Activity threads end (waiting about a second
+    for a send in progress). Nothing more goes to the relay from this load."""
     with _pending_lock:
         held = list(_pending_ready.values())
         _pending_ready.clear()
@@ -428,6 +430,7 @@ def _unload() -> None:
     room_memory.uninstall()
     room_planner.uninstall()
     room_cutoff.uninstall()
+    room_wakeups.uninstall()
     room_cleanup.uninstall()
     room_rules.forget()
     review_notices.uninstall()
