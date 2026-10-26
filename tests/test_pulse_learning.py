@@ -1155,6 +1155,12 @@ def test_a_store_from_before_candidates_had_a_reason_gains_it_and_drops_the_stoc
     followup_card = learning.add_card(live.store, kind="followup", item=live.store.item(kept), level_name="push",
                                       news="The deploy is still waiting.", why="You said you would check it.",
                                       chat_title="Deploy", now=time.time())
+    # A whole report's card and a brief's, as cards from before had them.
+    whole = live.store.add_card({"kind": "report", "level": "screen", "news": "1. [date] Dentist Friday",
+                                 "why": store._STOCK_REPORT_WHY, "created_at": time.time()})
+    brief_why = "Your morning brief: what's still outstanding, and the news you asked Pulse to hold for the morning."
+    brief_card = live.store.add_card({"kind": "brief", "level": "push", "news": "Good morning.", "why": brief_why,
+                                      "created_at": time.time()})
     with sqlite3.connect(live.store.path) as conn:
         conn.execute("UPDATE cards SET why=? WHERE id=?", (store._STOCK_NOTICED_WHY, noticed))
         conn.execute("DELETE FROM settings WHERE key=?", (store.STOCK_WHY_CLEARED,))
@@ -1168,6 +1174,7 @@ def test_a_store_from_before_candidates_had_a_reason_gains_it_and_drops_the_stoc
     with sqlite3.connect(live.store.path) as conn:
         assert "why" in {row[1] for row in conn.execute("PRAGMA table_info(candidates)")}
     assert reopened.card(noticed)["why"] == "" and reopened.card(followup_card)["why"] == "You said you would check it."
+    assert reopened.card(whole)["why"] == "" and reopened.card(brief_card)["why"] == brief_why
     # Cleared once: a stock line written after it (none ever is) stays, and opening again changes nothing.
     with sqlite3.connect(live.store.path) as conn:
         conn.execute("UPDATE cards SET why=? WHERE id=?", (store._STOCK_NOTICED_WHY, noticed))
