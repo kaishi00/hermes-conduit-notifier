@@ -472,6 +472,9 @@ test('a blank answer leaves one question of a batch blank, never a whole decisio
       { qid: 'q1', question: 'When?', choices: [], multi_select: false },
     ],
   });
+  // A blank names its question: never the first one by default.
+  assert.equal(relay.wouldRespondPendingDecision('inst-1', 'gw-1', 'conduit-push-blank1', '', ''), false);
+  assert.equal(relay.respondPendingDecision('inst-1', 'gw-1', 'conduit-push-blank1', '').outcome, 'invalid_answer');
   assert.equal(relay.wouldRespondPendingDecision('inst-1', 'gw-1', 'conduit-push-blank1', 'q1', ''), true);
   assert.deepEqual(relay.respondPendingDecision('inst-1', 'gw-1', 'conduit-push-blank1', '', 'q1'),
     { outcome: 'answered', remaining: ['q0'] });

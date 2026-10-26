@@ -137,9 +137,10 @@ def test_the_line_names_the_surface_and_how_it_was_entered():
 def test_a_typed_message_on_a_screen_hears_that_open_questions_show_as_a_form():
     for surface in ("iphone", "ipad", "mac", "vision"):
         assert surfaces.FORM_HINT in surfaces.line(surface, "typed")
-        assert surfaces.FORM_HINT in surfaces.line(surface)
-        # Spoken, it's read out one question at a time.
+        # Spoken, it's read out one question at a time; and only a message
+        # Conduit says was typed hears it.
         assert surfaces.FORM_HINT not in surfaces.line(surface, "spoken")
+        assert surfaces.FORM_HINT not in surfaces.line(surface)
     for surface in ("watch", "carplay", "siri"):
         assert surfaces.FORM_HINT not in surfaces.line(surface, "typed")
 

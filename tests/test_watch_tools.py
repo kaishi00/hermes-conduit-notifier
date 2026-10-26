@@ -878,3 +878,32 @@ def test_local_live_on_the_watch_answers_the_call_from_hermes_with_the_users_wor
     store.note_waiting("st-1", "approval", description="Run a long script", command="x" * 2000)
     assert api._local_live_call_answer(voice, "yes") == \
         "I can't approve that one by voice. Say no to deny it, or approve it in Conduit on your iPhone."
+
+
+def test_local_live_on_the_watch_leaves_a_forms_question_blank(tmp_path, monkeypatch):
+    monkeypatch.setattr(api, "_calls_home", lambda: tmp_path)
+    monkeypatch.setattr(api, "_profile_scope", lambda profile: contextlib.nullcontext())
+    store = api._calls_store().CallStore(tmp_path)
+    store.update_settings({"enabled": True, "alerts": True})
+    form = [{"qid": "q0", "question": "Leaving from?", "choices": [], "multi_select": False},
+            {"qid": "q1", "question": "Total trip budget?", "choices": [], "multi_select": False},
+            {"qid": "q2", "question": "Your kind of escape?", "choices": ["Beach", "City"], "multi_select": False}]
+    store.note_waiting("st-1", "question", request_id="conduit-push-f", questions=form)
+    grant = types.SimpleNamespace(profile=None, answer_sessions=("st-1",), answer_approvals=False)
+
+    assert api._local_live_call_answer(grant, "Toronto") == ("Got it: Toronto. Hermes has your answer. Next: Total "
+                                                             "trip budget? Answer in your own words. Or say skip to "
+                                                             "leave it blank.")
+    assert api._local_live_call_answer(grant, "skip") == (
+        "Okay, I'll leave that blank. Next: Your kind of escape? 1: Beach. 2: City. Say the number of your choice, "
+        "or answer in your own words. Or say skip to leave it blank.")
+    assert api._local_live_call_answer(grant, "the beach") == "Got it: Beach. Hermes has your answer."
+    assert store.take_answers("conduit-push-f") == {"q0": "Toronto", "q1": "", "q2": "Beach"}
+
+    # Choices only: no form, so nothing may be left blank and "skip" is an answer.
+    batch = [{"qid": "q0", "question": "Which environment?", "choices": ["staging", "prod"], "multi_select": False},
+             {"qid": "q1", "question": "Which tests?", "choices": ["unit", "ui"], "multi_select": False}]
+    store.note_waiting("st-1", "question", request_id="conduit-push-b", questions=batch)
+    line = api._local_live_call_answer(grant, "prod")
+    assert line.endswith("Say the number of your choice, or answer in your own words."), line
+    assert api._local_live_call_answer(grant, "skip") == "Got it: skip. Hermes has your answer."

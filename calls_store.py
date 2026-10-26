@@ -582,14 +582,17 @@ class CallStore:
             entry = item["questions"][index]
             if entry["answer"] is not None:
                 return {"status": "answered", "message": f"Question {index + 1} is answered already."}
-            value, labels = map_answer(answer[:MAX_WAITING_ANSWER_CHARS], entry["choices"], entry["multi_select"])
             form = may_leave_blank(item["questions"])
             result: dict[str, Any] = {"status": "answered", "question": index + 1}
-            if not labels and form and is_skip(answer):
+            # A choice named whole ("Pass") is picked; other words that
+            # leave it blank do, even with a choice's name in them ("leave
+            # it blank" beside a choice called Blank).
+            if form and is_skip(answer) and not names_one_choice(answer, entry["choices"]):
                 # Blank, as a form's field left empty: Hermes reads it as skipped.
                 entry["answer"] = ""
                 result.update(answer=SKIPPED_ANSWER, skipped=True)
             else:
+                value, labels = map_answer(answer[:MAX_WAITING_ANSWER_CHARS], entry["choices"], entry["multi_select"])
                 entry["answer"] = value
                 result["answer"] = ", ".join(labels) if labels else value
             following = next((number for number in open_numbers if number != index), None)
@@ -1265,6 +1268,14 @@ def _without_recommended(choice: str) -> str:
 
 def _words(text: str) -> list[str]:
     return re.findall(r"[^\W_]+", text.lower())
+
+
+def names_one_choice(text: str, choices: list[str]) -> bool:
+    """Whether the whole answer is one choice's label, as written ("Pass").
+    Conduit's own is HermesCallWaiting.namesOneChoice: the two move
+    together."""
+    said = _words(text)
+    return bool(said) and [_words(_without_recommended(choice)) for choice in choices].count(said) == 1
 
 
 def _picked_choices(text: str, choices: list[str], multi_select: bool) -> list[int]:

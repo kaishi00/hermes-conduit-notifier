@@ -78,6 +78,21 @@ def test_a_forms_questions_may_be_left_blank_by_saying_skip(store):
     assert store.take_answers("conduit-push-f") == {"q0": "Toronto", "q1": "Pass", "q2": ""}
 
 
+def test_words_that_leave_it_blank_win_over_a_choice_named_inside_them(store):
+    # Only a choice named whole is picked over them: "leave it blank" beside
+    # a choice called Blank, or "I'll pass" beside Pass, leaves it blank.
+    form = [
+        {"qid": "q0", "question": "Anything to add?", "choices": [], "multi_select": False},
+        {"qid": "q1", "question": "Which cushion?", "choices": ["Blank", "Striped"], "multi_select": False},
+        {"qid": "q2", "question": "Your kind of escape?", "choices": ["Beach", "Pass"], "multi_select": False},
+    ]
+    store.note_waiting("s1", "question", request_id="conduit-push-g", questions=form)
+    assert store.answer_waiting("s1", answer="leave it blank", question=2)["skipped"] is True
+    assert store.answer_waiting("s1", answer="I'll pass", question=3)["skipped"] is True
+    assert store.answer_waiting("s1", answer="blank")["answer"] == "blank", "not a skip: the words go as they are"
+    assert store.take_answers("conduit-push-g") == {"q0": "blank", "q1": "", "q2": ""}
+
+
 def test_skip_is_only_an_answer_where_nothing_may_be_left_blank(store):
     # A batch of choices only, and a question on its own, show as today's
     # card, which has no blank: "skip" goes to Hermes as their words.
@@ -91,7 +106,7 @@ def test_skip_is_only_an_answer_where_nothing_may_be_left_blank(store):
 
 
 # Conduit reads the same words the same way (HermesCallWaitingTests'
-# testSkipWordsInTheAppsLanguages): the two lists move together.
+# testSkipIsReadTheSameWayAsThePlugin): the two lists move together.
 SKIPS = [
     "skip", "Skip it.", "skip this one, please", "I'll pass", "leave it blank", "Leave that empty",
     "go ahead and skip it please", "Überspringen", "lass es leer", "ich passe", "sáltala", "déjalo en blanco",

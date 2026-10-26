@@ -630,6 +630,9 @@ export class RelayStore {
     const createdAt = Number(decision?.createdAt);
     if (!decision || !Number.isFinite(createdAt) || createdAt < Date.now() - 2 * 60 * 60_000) return false;
     if (decision.cancelledAt || decision.answer !== undefined) return false;
+    // A blank leaves one named question of a batch blank, never a whole
+    // decision (respondPendingDecision).
+    if (answer === '' && !questionId) return false;
     const batchQuestions = decisionQuestions(decision);
     if (!batchQuestions.length) return answer !== '';
     const target = questionId || batchQuestions[0].qid;
@@ -649,6 +652,9 @@ export class RelayStore {
     // have answerable questions.
     if (decision.cancelledAt) return { outcome: 'released' };
     if (decision.answer !== undefined) return { outcome: 'already_answered' };
+    // A blank answer leaves one named question of a batch blank: never the
+    // first question by default, nor a decision with no batch.
+    if (answer === '' && !questionId) return { outcome: 'invalid_answer' };
     const batchQuestions = decisionQuestions(decision);
     if (batchQuestions.length) {
       decision.answers ??= Object.create(null);

@@ -1430,6 +1430,9 @@ or said it to CarPlay while driving. Just before Conduit sends a message it
 tells the plugin the surface and how the message was entered, and that
 message's turn gets one line of context, for example
 `[Conduit: this message came from CarPlay in the user's car, spoken. They are likely driving: …]`.
+A message typed on an iPhone, iPad, Mac or Vision Pro adds that several
+details only the user can give go in one clarify call with open questions,
+which Conduit shows as a form they may leave partly blank (0.82+).
 
 - `POST /api/plugins/conduit_push/turn-surface` with
   `{"session_id": "<runtime session id>", "text_sha256": "<hex>", "surface": "carplay", "input": "spoken"}`
@@ -1648,7 +1651,8 @@ and the dashboard routes under one file lock, so they survive restarts:
   marks each question `may_leave_blank` (0.82+): "skip", "leave it blank"
   and the like in the app's languages leave it blank, as the form's field
   left empty, and Hermes reads it as skipped (`answer: "left blank"`,
-  `skipped: true`); a choice named like them still picks the choice. The clarify
+  `skipped: true`); a choice named whole by the words ("Pass") still picks
+  the choice. The clarify
   loop takes the batch once every question has an answer. An approval takes
   `choice` (`once` or `deny`, with `reason` for a deny): the agent's process
   resolves the request with that command, never another one queued beside

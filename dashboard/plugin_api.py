@@ -13930,7 +13930,8 @@ def _local_live_call_answer(grant: _WatchGrant, words: str) -> Optional[str]:
                     return result.get("message") or None
                 if answer.casefold().startswith(lead.casefold()):
                     return "I've asked Hermes. It will explain, then ask again."
-                line = f"Got it: {result['answer']}. Hermes has your answer."
+                line = ("Okay, I'll leave that blank." if result.get("skipped")
+                        else f"Got it: {result['answer']}. Hermes has your answer.")
                 if isinstance(result.get("next"), dict):
                     line += " " + _local_live_question_line(result["next"])
                 return line

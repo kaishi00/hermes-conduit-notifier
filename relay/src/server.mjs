@@ -822,7 +822,10 @@ async function route(request, response) {
     const questionId = cleanText(body.question_id, 40);
     // A blank answer leaves one question of a batch blank, as a form field
     // the user didn't fill (Hermes reads it as skipped): only for a
-    // question, never for a whole decision.
+    // question, never for a whole decision. The relay can't tell a form
+    // from other batches and doesn't try: which questions may be left
+    // blank is Conduit's to say (ClarifyActivity.isForm), and a blank
+    // anywhere else still reads as skipped.
     const answer = validAnswer(body.answer, { blank: Boolean(questionId) });
     // gateway_id is the relay decision-routing discriminator: two gateways
     // on one installation can park SAME-id decisions, so the device names
