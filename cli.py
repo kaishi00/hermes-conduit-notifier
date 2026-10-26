@@ -113,6 +113,18 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
                        help="joins in, only when asked, or listens only")
     rooms.add_argument("--limit", type=int, help="its turns a day in the room")
     rooms.add_argument("--note", help="a private note for your agent in the room; empty clears it")
+    links = commands.add_parser(
+        "links",
+        help="Links between this Hermes and other people's, for rooms with their agents: make an invite, "
+             "preview or accept one, list them, remove a Link or cancel an invite",
+    )
+    links.add_argument("links_action", choices=["invite", "preview", "accept", "list", "remove", "cancel"])
+    links.add_argument("target", nargs="?", default="",
+                       help="for preview and accept: the invite's conduit://link/ URL; for remove: the Link's id; "
+                            "for cancel: the invite's id")
+    links.add_argument("--name", default="",
+                       help="for invite: who the other person sees it's from; for accept: who they see linked")
+    links.add_argument("--yes", action="store_true", help="for remove: unlink without asking first")
     parser.set_defaults(func=dispatch)
 
 
@@ -289,7 +301,9 @@ def dispatch(args: argparse.Namespace) -> int:
         return _prefs(args)
     if action == "rooms":
         return _rooms(args)
-    print("Usage: hermes conduit-push {pair|status|test|redact|e2e|unpair|pulse|prefs|rooms}")
+    if action == "links":
+        return _links(args)
+    print("Usage: hermes conduit-push {pair|status|test|redact|e2e|unpair|pulse|prefs|rooms|links}")
     return 2
 
 
@@ -634,6 +648,132 @@ def _forget_room(room: str, home: Path, yes: bool) -> int:
         print(f"Kept {kept}: a turn in it is still finishing. Try again in a minute.")
         return 1
     return 0
+
+
+# How long a links command waits for the dashboard's loop to see what it
+# changed before saying nothing reads the mailbox: the loop looks every 2 s.
+LINKS_READING_WAIT_S = 3.0
+_LINK_STATUS = {"linked": "linked", "waiting": "waiting for their Hermes to confirm",
+                "unanswered": "never confirmed; link again with a new invite"}
+_LINKS_USAGE = {
+    "preview": "hermes conduit-push links preview <conduit://link/...>",
+    "accept": "hermes conduit-push links accept <conduit://link/...> --name <your name>",
+    "remove": "hermes conduit-push links remove <Link id> (links list shows them)",
+    "cancel": "hermes conduit-push links cancel <invite id> (links list shows them)",
+}
+
+
+def _links(args: argparse.Namespace) -> int:
+    """Links between this installation and other people's (room_links): the
+    CLI makes and changes them, and the dashboard's loop reads the mailbox."""
+    from hermes_constants import get_hermes_home
+
+    from . import room_identity, room_links
+
+    action = args.links_action
+    target = str(getattr(args, "target", "") or "").strip()
+    name = str(getattr(args, "name", "") or "").strip()
+    if action in _LINKS_USAGE and not target:
+        print(f"Usage: {_LINKS_USAGE[action]}")
+        return 2
+    if action in ("invite", "accept") and not name:
+        print(f"Say who the other person sees {'it is from' if action == 'invite' else 'linked'} with --name, "
+              f"for example: hermes conduit-push links {action}{' <url>' if action == 'accept' else ''} --name Eric")
+        return 2
+    root = room_identity.root_home(get_hermes_home())
+    links = room_links.Links(root)
+    verb = {"invite": "make the invite", "preview": "read that invite", "accept": "accept it", "list": "list them",
+            "remove": "unlink", "cancel": "cancel it"}[action]
+    try:
+        if action == "invite":
+            made = links.invite(name)
+            print(f"An invite from {_printable(made['invite']['name'])}, for one accept until "
+                  f"{_link_time(made['invite']['expires_at'])}:")
+            print(made["url"])
+            print(f"Your Hermes' words: {' '.join(made['words'])}. The other person should see the same "
+                  "four words when they open the invite.")
+            _say_if_nothing_reads(room_links, root)
+        elif action == "preview":
+            shown = links.preview(target)
+            print(f"From {_printable(shown['name'])}, through the mailbox at {_printable(shown['mailbox'])}. "
+                  f"Their Hermes' words: {' '.join(shown['words'])}.")
+            if shown["own"]:
+                print("It's your own invite: it's for the person you're linking with.")
+            elif shown["expired"]:
+                print("It has run out: ask them for a new one.")
+            else:
+                print(f"It can be accepted until {_link_time(shown['expires_at'])}.")
+            if shown["linked_as"]:
+                print(f"This Hermes is already linked with them (Link {shown['linked_as']}).")
+        elif action == "accept":
+            try:
+                link = links.accept(target, name)["link"]
+            except room_links.AcceptKept as kept:
+                print(f"The accept didn't go yet: {kept}.")
+                _say_if_nothing_reads(room_links, root, "the accept waits here")
+                return 1
+            print(f"Linked with {_printable(link['name'])} once their Hermes confirms it (Link {link['id']}).")
+            _say_if_nothing_reads(room_links, root)
+        elif action == "list":
+            view = links.view()
+            if not view["links"] and not view["invites"]:
+                print("No Links or invites yet. Make an invite: hermes conduit-push links invite --name <your name>")
+                return 0
+            for link in view["links"]:
+                print(f"{_printable(link['name'])}: {_LINK_STATUS.get(link['status'], link['status'])}, words "
+                      f"{' '.join(link['words'])} (Link {link['id']})")
+            for invite in view["invites"]:
+                print(f"Invite from {_printable(invite['name'])}, until {_link_time(invite['expires_at'])} "
+                      f"(invite {invite['id']})")
+            mailbox = view["mailbox"]
+            print(f"Mailbox: {_printable(mailbox['url'])}"
+                  + ("" if mailbox["reading"] else "; nothing on this Hermes reads it right now"))
+        elif action == "remove":
+            return _remove_link(links, target, bool(getattr(args, "yes", False)))
+        elif not links.cancel(target)["cancelled"]:
+            print(f"No invite {_printable(target)} is waiting on this Hermes.")
+            return 1
+        else:
+            print("Cancelled the invite: it can't be accepted now.")
+    except (room_links.LinkError, OSError) as error:
+        print(f"Couldn't {verb}: {error}")
+        return 1
+    return 0
+
+
+def _remove_link(links: Any, link_id: str, yes: bool) -> int:
+    link = links.get(link_id)
+    if link is None:
+        print(f"No Link {_printable(link_id)} on this Hermes. hermes conduit-push links list shows them.")
+        return 1
+    who = _printable(link["name"])
+    print(f"This unlinks {who}'s Hermes from this one, on both sides. Linking again takes a new invite.")
+    if not yes:
+        try:
+            answer = input("Unlink? [y/N] ")
+        except EOFError:
+            answer = ""
+        if answer.strip().lower() not in ("y", "yes"):
+            print("Cancelled.")
+            return 0
+    links.remove(link_id)
+    print(f"Unlinked {who}. Their Hermes drops the Link when it next reads its mailbox.")
+    return 0
+
+
+def _say_if_nothing_reads(room_links: Any, root: Path,
+                          then: str = "the answer waits there, for up to 7 days,") -> None:
+    deadline = time.monotonic() + LINKS_READING_WAIT_S
+    while not room_links.reading(root):
+        if time.monotonic() >= deadline:
+            print(f"Nothing on this Hermes reads its rooms mailbox right now, so {then} until Hermes' dashboard "
+                  "runs with this plugin.")
+            return
+        time.sleep(0.2)
+
+
+def _link_time(at: int) -> str:
+    return datetime.fromtimestamp(at).strftime("%a %d %b %H:%M")
 
 
 def _print_room_choices(label: str, choices: Any) -> None:

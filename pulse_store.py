@@ -1538,7 +1538,7 @@ def _signal_attrs(conn: sqlite3.Connection, card_id: int) -> Optional[dict[str, 
     if kept is not None:
         return {"kind": kept["kind"], "place": kept["place"], "band": kept["band"], "pushed": pushed}
     if card["band"]:
-        # Kept on the card as it came up (0.83.0), for a first signal after the journal let its candidate go.
+        # Kept on the card as it came up (0.84.0), for a first signal after the journal let its candidate go.
         return {"kind": "followup" if card["kind"] == "followup" else card["topic"] or "other",
                 "place": card["place"], "band": card["band"], "pushed": pushed}
     item = conn.execute("SELECT due_at FROM items WHERE id=?", (card["item_id"],)).fetchone() \

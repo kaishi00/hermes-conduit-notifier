@@ -450,7 +450,7 @@ cannot establish fairness between actors.
 
 ## Rooms mailbox
 
-The rooms mailbox in [`mailbox/`](mailbox/) is a small store-and-forward service for linked rooms: agents on Hermes installations owned by different people, taking part in one room. Two installations that can't reach each other leave sealed envelopes in each other's inbox there, using outbound requests only, and the mailbox never sees what the envelopes say. The plugin doesn't use it yet: the link bridge comes in a later release. See [`mailbox/README.md`](mailbox/README.md) for its protocol, limits and self-hosting.
+The rooms mailbox in [`mailbox/`](mailbox/) is a small store-and-forward service for linked rooms: agents on Hermes installations owned by different people, taking part in one room. Two installations that can't reach each other leave sealed envelopes in each other's inbox there, using outbound requests only, and the mailbox never sees what the envelopes say. The plugin links installations through it (see Linking with someone, below), and rooms go through those Links with the room bridge, in a later release. See [`mailbox/README.md`](mailbox/README.md) for its protocol, limits and self-hosting.
 
 ## Lock Screen progress (plugin 0.32+)
 
@@ -2692,6 +2692,111 @@ again in a minute), with 409 for a room still going here, 503 when Hermes'
 session store is busy or won't open, or its delete fails on one (try again
 shortly), 501 on a Hermes whose session delete can't take a compression chain
 (update Hermes), and 400 for anything that isn't a room id.
+
+## Linking with someone (plugin 0.83+)
+
+Before one of your agents can sit in a room with someone else's, your Hermes
+and theirs link: each keeps the other's keys, and each can leave sealed
+envelopes in the other's inbox at the rooms mailbox (above). A Link belongs to
+the installation, so every profile shares it, as it shares the keys it's made
+with (`conduit-rooms/identity.json` in the root Hermes home, made at the first
+invite or accept). Nothing goes over a Link yet: the room bridge, in a later
+release, carries rooms over it.
+
+One of you makes an invite: a `conduit://link/` URL, also the QR code's
+payload, good for one accept within 24 hours. The other accepts it, giving the
+name you'll see. Their Hermes leaves the accept in yours, yours answers with a
+confirm, and you're linked. An invite shows four fingerprint words for each
+Hermes' keys: when you're together, check you both see the same four, so the
+invite is from who you think. The confirm, signed by the inviter's Hermes,
+names its mailbox, and the acceptor's Hermes uses that one from then on, so an
+invite whose mailbox was changed on its way can't send the Link elsewhere.
+
+```bash
+hermes conduit-push links invite --name Eric             # the invite, and your Hermes' words
+hermes conduit-push links preview <conduit://link/...>   # who it's from, their words and mailbox
+hermes conduit-push links accept <conduit://link/...> --name Mona
+hermes conduit-push links list                           # Links, invites still waiting, the mailbox
+hermes conduit-push links remove <Link id>               # unlinks, on both sides; asks first (--yes doesn't)
+hermes conduit-push links cancel <invite id>             # takes an invite back
+```
+
+A Link waits until the inviter's Hermes confirms it, and one still waiting
+after 8 days reads as unanswered (its accept or confirm ran out at the
+mailbox). An accept the mailbox didn't answer, or couldn't take yet, stays
+with its Link and is tried again while the invite lasts; accepting the same
+invite again is the same accept. Unlinking ends a Link here at once, and the other
+Hermes drops it when it next reads its inbox; one unlinked while it waits for
+its confirm is answered with the unlink when the confirm comes. A confirm that
+runs out at the mailbox before the acceptor's Hermes reads it (off for more
+than 7 days) leaves the inviter's side linked until its owner unlinks it. An
+unlink, accept or confirm the mailbox can't take now goes later, up to its
+7-day hold (an accept, while its invite lasts), and one it refuses as it is
+(too large, say) doesn't. An invite that says it lasts more than two days
+isn't taken: the clock where it was made is wrong, or someone made it by
+hand. To link again, unlink first: a new accept from the same Hermes
+then replaces the inviter's old Link, as it does after someone loses their
+side. If you and they accept each other's invites before either Hermes reads
+the other's accept, you're linked twice, the same on both sides; unlink
+either. This Hermes keeps up to 50 Links, each invite still waiting holding a
+place for one, and up to 10 waiting invites. An invite that ran out, and a
+Link unlinked while it waited, keep their place until Hermes' dashboard has
+read the mailbox for them, and a refusal for the count says how many. Everything a
+Link needs, its send tokens included, stays in `conduit-rooms/links.json`
+(owner only), never in a log or a route's answer.
+
+The dashboard's process reads the inbox: one loop for the installation,
+whichever process holds `conduit-rooms/.lease`. While nothing waits it only
+looks at `links.json` every 2 s, and it reads the mailbox once there's an
+invite, a Link or something to send. A command run while no dashboard runs
+makes its change, and says the answer waits at the mailbox, for up to 7 days,
+until the dashboard runs with this plugin (an accept the mailbox didn't take
+yet waits on this Hermes instead).
+
+The mailbox is rooms.milim.dev unless `CONDUIT_ROOMS_MAILBOX_URL` names
+another (`https://`, with nothing after its host name, or `http://` on this
+computer for a test; see [`mailbox/README.md`](mailbox/README.md) to run your
+own), and `CONDUIT_ROOMS_MAILBOX_REGISTRATION` holds the registration token
+one that asks for it gave you. Every Link and invite names the mailbox it was
+made with, so while any is left the plugin keeps that one, and logs that a new
+setting takes effect once none is.
+
+Conduit makes and reads them through these routes, behind the `room-links`
+capability, with no `?profile=` (Links are the installation's):
+
+- `GET /rooms/identity`: `{"words": [...], "crypto": true}`, with `words`
+  null until the first invite or accept, and `crypto` false on a Hermes
+  without Python's cryptography package (which refuses with `no_crypto` once
+  it has keys).
+- `POST /rooms/links/invites` with `{"name": ...}`: `{"url": ..., "invite":
+  {"id", "name", "expires_at"}, "words": [...]}`, with this Hermes' words.
+- `POST /rooms/links/preview` with `{"url": ...}`: `{"name", "words",
+  "mailbox", "expires_at", "expired", "own", "linked_as"}`, where `mailbox`
+  is the host of the mailbox the invite names and `linked_as` the Link this
+  Hermes already has with them, or null.
+- `POST /rooms/links` with `{"url": ..., "name": ...}`: `{"link": {"id",
+  "name", "status", "words", "created_at"}}`, its status `waiting`. A 503
+  with one of the mailbox's codes says it didn't take the accept yet: the
+  Link stays, waiting, and its accept is tried again while the invite lasts.
+- `GET /rooms/links`: `{"links": [...], "invites": [...], "mailbox": {"url",
+  "reading"}}`, statuses `waiting`, `linked` or `unanswered`, and `reading`
+  false while nothing on this Hermes reads the mailbox.
+- `DELETE /rooms/links?link_id=`: `{"removed": true}`, and `DELETE
+  /rooms/links/invites?invite_id=`: `{"cancelled": true}` (false for one this
+  Hermes doesn't have).
+
+A refusal carries `detail` and a `code`: `bad_name` and `bad_invite` (400,
+also for an invite naming a mailbox on someone's own computer or a private
+network address, which this Hermes calls only when it's its own mailbox
+too), `own_invite` (400, the invite is this Hermes'), `expired` and `invite_used`
+(410), `already_linked`, `too_many_links` and `too_many_invites` (409),
+`no_crypto` and `no_word_list` (503, a plugin install missing its word list),
+and the mailbox's own, such as `clock_off` (503) when this host's clock is far
+from the mailbox's. A mailbox that can't be reached is 503, one that answers
+what it shouldn't is 502. A route that waits on the mailbox answers within
+50 s, or with `timed_out` (504) while the call finishes on its own. The routes
+answer 60 requests a minute between them, one still waiting for a thread
+included.
 
 ## Capabilities (plugin 0.4+)
 

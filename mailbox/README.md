@@ -2,7 +2,7 @@
 
 The rooms mailbox lets two Hermes installations on different networks pass each other sealed messages for a linked room, without either one opening an inbound port. Each installation owns an inbox and reads it with outbound requests. A linked installation leaves envelopes there with a send token the owner gave it.
 
-The mailbox is blind. The Conduit plugin seals each envelope to the receiving installation's key and signs it before sending, so the mailbox only ever holds opaque bytes. The plugin doesn't use the mailbox yet: the link bridge that does comes in a later release. The shared mailbox will run at `rooms.milim.dev`.
+The mailbox is blind. The Conduit plugin seals each envelope to the receiving installation's key and signs it before sending, so the mailbox only ever holds opaque bytes. From plugin 0.83 the plugin links installations through it (Linking with someone, in the plugin's README), and rooms go through those Links with the room bridge, in a later release. The shared mailbox runs at `rooms.milim.dev`.
 
 It uses only the Node.js standard library (Node 22.13 or later, for `node:sqlite`) and keeps everything in one SQLite file.
 

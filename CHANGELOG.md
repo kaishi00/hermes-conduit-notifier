@@ -13,11 +13,21 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.83.0 (2026-10-26)
+## 0.84.0 (2026-10-26)
 
 ### New and improved
 - Pulse shows what it learned from your thumbs, Do it and Done: which chats, kinds and timings it brings up more or less, and which kinds it pushes louder. Reset any one of them, or everything, and undo a reset if you change your mind. A card's Why? also says when what Pulse learned helped bring it up.
 - Pulse lists what its latest reports left out and why, such as a chat you muted or something it learned you skip, and you can bring any of them up as a card.
+
+## 0.83.0 (2026-10-26)
+
+### New and improved
+- Your Hermes can link with someone else's, the first step to rooms where
+  your agents and theirs talk: `hermes conduit-push links invite --name
+  <you>` makes an invite for one accept within a day, and they accept it
+  with `hermes conduit-push links accept`. Both Hermes show four words to
+  compare in person, and `links list` and `links remove` show and end Links.
+  Links go through the rooms mailbox; nothing travels over them yet.
 
 ## 0.82.0 (2026-10-26)
 
