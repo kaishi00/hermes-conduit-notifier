@@ -309,12 +309,24 @@ def test_a_follow_up_card_says_what_learning_did_and_keeps_how_it_came_up(live):
 @pytest.mark.parametrize("scope, value, field", [
     ("chat", "chat::work", "scope"), (None, "", "scope"), ("loud", 5, "value"), ("kind", "", "value"),
     ("everything", "followup", "value"), ("timely", "maybe", "value"),
-    ("place", "x" * (learning.RESET_VALUE_LIMIT + 1), "value")])
+    ("place", "area:" + "x" * learning.RESET_VALUE_LIMIT, "value"),
+    # A place as pulse_prefs.place writes it, in plain text.
+    ("place", "Deploy", "value"), ("place", "chat:work", "value"), ("place", "chat:work:", "value"),
+    ("place", "area:", "value"), ("place", "area:\ud800", "value"), ("kind", "promise\x00", "value")])
 def test_bad_resets_are_refused(live, scope, value, field):
     with pytest.raises(control.Refused) as refused:
         control.reset(live.store, scope, value)
     assert refused.value.code == "invalid" and refused.value.data == {"field": field}
     assert control.learned(live.store)["lessons"] == []
+
+
+def test_a_kept_reset_naming_no_chat_still_lists(live):
+    """One that names a chat place it can't read (none gets in now) lists
+    as about a chat, and What Pulse learned still opens."""
+    live.store.add_lesson({"kind": "place", "what": "reset", "value": "chat:work", "profile": "", "chat_id": "",
+                           "card_id": None, "cause": "reset", "created_at": time.time()})
+    [lesson] = control.learned(live.store)["lessons"]
+    assert lesson["text"] == "Forgot what was learned about things from a chat" and "chat_title" not in lesson
 
 
 def test_resets_are_refused_while_pulse_is_off(live):

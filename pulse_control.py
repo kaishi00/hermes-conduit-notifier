@@ -449,10 +449,11 @@ def _reset_entry(pulse_store: Any, lesson: dict) -> dict:
 
 def _chat_of(pulse_store: Any, place: str) -> dict[str, str]:
     """A chat place's profile, id and title (pulse_prefs.place); {} for
-    another place."""
-    if not place.startswith("chat:"):
+    another place, or one that names no chat."""
+    parts = place.split(":", 2)
+    if parts[0] != "chat" or len(parts) != 3:
         return {}
-    _, profile, chat_id = place.split(":", 2)
+    _, profile, chat_id = parts
     return {"profile": profile, "chat_id": chat_id, "chat_title": pulse_store.card_chat_title(profile, chat_id)}
 
 
@@ -493,27 +494,31 @@ def left_out(pulse_store: Any, home: Optional[Path] = None, now: Optional[float]
     if latest is not None and latest < since:
         since = latest
     seen: set[tuple[str, Any]] = set()
-    titles: dict[tuple[str, str], str] = {}
     out = []
     for row in pulse_store.left_out(since, LEFT_OUT_ROWS):
-        key = ("item", row["item_id"]) if row["item_id"] is not None else ("text", " ".join(row["text"].split()).casefold())
+        key = ("item", row["item_id"]) if row["item_id"] is not None else ("text", pulse.store.same_text(row["text"]))
         if key in seen or row["later"] or not row["text"]:
             continue
         seen.add(key)
-        chat = (row["profile"] or "", row["chat_id"] or "")
-        if chat[1] and chat not in titles:
-            titles[chat] = (pulse_followup.chat_title(Path(home), {"profile": chat[0], "chat_id": chat[1]})
-                            if home is not None else pulse_store.card_chat_title(*chat))
         out.append({"id": row["id"], "created_at": row["created_at"], "kind": row["kind"], "text": row["text"],
                     "why": row["why"], "decision": row["decision"], "skip": row["skip"], "value": row["value"],
                     "learned": pulse_learning.factor_entry(row["factor"]), "origin": row["origin"],
-                    "source": row["source"], "area": row["area"], "profile": chat[0], "chat_id": chat[1],
-                    "chat_title": titles.get(chat, ""), "item_id": row["item_id"], "due_at": row["due_at"],
-                    "card_id": row["card_id"]})
+                    "source": row["source"], "area": row["area"], "profile": row["profile"] or "",
+                    "chat_id": row["chat_id"] or "", "chat_title": "", "item_id": row["item_id"],
+                    "due_at": row["due_at"], "card_id": row["card_id"]})
     order = {decision: n for n, decision in enumerate(LEFT_OUT_ORDER)}
     out.sort(key=lambda entry: (order.get(entry["decision"], len(order)), -entry["created_at"],
                                 -(entry["value"] or 0), entry["id"]))
-    return out[:limit]
+    out = out[:limit]
+    # Titles only for what's listed: each is a read of Hermes's chats.
+    titles: dict[tuple[str, str], str] = {}
+    for entry in out:
+        chat = (entry["profile"], entry["chat_id"])
+        if chat[1] and chat not in titles:
+            titles[chat] = (pulse_followup.chat_title(Path(home), {"profile": chat[0], "chat_id": chat[1]})
+                            if home is not None else pulse_store.card_chat_title(*chat))
+        entry["chat_title"] = titles.get(chat, "")
+    return out
 
 
 def bring_up(pulse_store: Any, candidate_id: Any, home: Optional[Path] = None,

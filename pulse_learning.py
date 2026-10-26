@@ -501,6 +501,18 @@ def undo(pulse_store: store.PulseStore, lesson_id: Any, now: float) -> bool:
 
 
 RESET_VALUE_LIMIT = 300
+# The places a reset can name, as pulse_prefs.place writes them.
+_RESET_PLACE = re.compile(r"chat:[^:]*:.+|area:.+|source:.+", re.S)
+
+
+def _plain(text: str) -> bool:
+    """No control characters, and nothing UTF-8 can't carry (an unpaired
+    surrogate from JSON)."""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return not any(ord(ch) < 32 for ch in text)
 
 
 def reset(pulse_store: store.PulseStore, scope: Any, value: Any, now: float) -> dict:
@@ -513,7 +525,8 @@ def reset(pulse_store: store.PulseStore, scope: Any, value: Any, now: float) -> 
         raise Invalid("scope")
     value = value if isinstance(value, str) else None
     if value is None or (scope == prefs.EVERYTHING) != (value == "") or len(value) > RESET_VALUE_LIMIT \
-            or (scope == "timely" and value not in ("yes", "no")):
+            or not _plain(value) or (scope == "timely" and value not in ("yes", "no")) \
+            or (scope == "place" and not _RESET_PLACE.fullmatch(value)):
         raise Invalid("value")
     row = _lesson(pulse_store, scope, RESET, value=value, cause="reset", now=now)
     assert row is not None  # no limit: always added

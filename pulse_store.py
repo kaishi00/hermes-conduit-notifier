@@ -1406,14 +1406,21 @@ class PulseStore:
     def left_out(self, since: float, limit: int) -> list[dict]:
         """The candidates journaled from ``since`` on that didn't come up,
         newest first, with whether the same remembered item (or the same
-        text) came up in the same run or a later one, as ``later``."""
+        text, ``same_text``) came up in the same run or a later one, as
+        ``later``."""
         with self._connect() as conn:
-            return [dict(row) for row in conn.execute(
-                "SELECT c.*, EXISTS(SELECT 1 FROM candidates s WHERE s.id!=c.id AND s.created_at>=c.created_at "
-                "AND s.decision='surfaced' AND "
-                "((c.item_id IS NOT NULL AND s.item_id=c.item_id) OR (c.text!='' AND s.text=c.text))) AS later "
-                "FROM candidates c WHERE c.created_at >= ? AND c.decision!='surfaced' "
-                "ORDER BY c.created_at DESC, c.id LIMIT ?", (since, limit))]
+            rows = [dict(row) for row in conn.execute(
+                "SELECT * FROM candidates WHERE created_at >= ? AND decision!='surfaced' "
+                "ORDER BY created_at DESC, id LIMIT ?", (since, limit))]
+            surfaced = conn.execute("SELECT item_id, text, created_at FROM candidates "
+                                    "WHERE created_at >= ? AND decision='surfaced'", (since,)).fetchall()
+        came_up: dict[tuple[str, Any], float] = {}
+        for row in surfaced:
+            for key in _same_thing(row):
+                came_up[key] = max(came_up.get(key, row["created_at"]), row["created_at"])
+        for row in rows:
+            row["later"] = any(key in came_up and came_up[key] >= row["created_at"] for key in _same_thing(row))
+        return rows
 
     def latest_candidate_at(self) -> Optional[float]:
         with self._connect() as conn:
@@ -1624,6 +1631,19 @@ def _sync_signals(conn: sqlite3.Connection, gaps: dict[str, list[sqlite3.Row]]) 
     for row in gaps["unmarked"]:
         conn.execute("UPDATE signals SET weight=? WHERE card_id=? AND what=?",
                      (prefs.ACT_SENT, row["card_id"], prefs.ACT))
+
+
+def same_text(text: str) -> str:
+    """A candidate's text spaced and cased alike, so the same thing found
+    twice reads as one."""
+    return " ".join(text.split()).casefold()
+
+
+def _same_thing(row: Any) -> list[tuple[str, Any]]:
+    """What a candidate is about: its remembered item, and its text."""
+    keys: list[tuple[str, Any]] = [("item", row["item_id"])] if row["item_id"] is not None else []
+    text = same_text(row["text"] or "")
+    return keys + [("text", text)] if text else keys
 
 
 def _insert_candidates(conn: sqlite3.Connection, run_id: str, rows: Sequence[dict[str, Any]], now: float) -> list[int]:

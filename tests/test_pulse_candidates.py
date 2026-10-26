@@ -738,10 +738,13 @@ def test_what_pulse_left_out_lists_each_thing_once_by_its_newest_decision(live):
         {"text": "Call Sam", "decision": candidates.SURFACED, "rank": 1},
         {"text": "Renew the passport", "origin": candidates.MEMORY, "item_id": 7, "decision": candidates.RESTING},
         {"text": "Dinner with Ana", "decision": candidates.SKIPPED, "skip": "covered"},
+        {"text": "Pay the  Rent", "value": 3},
         {"text": "Book the dentist", "value": 4}], now - 7200)
     journal(live, "r2", [
         {"text": "water the  plants", "decision": candidates.SKIPPED, "skip": "minor"},
         {"text": "Dinner with Ana", "decision": candidates.SURFACED, "rank": 1},
+        # Came up in other spacing and case: the same thing.
+        {"text": "pay the rent", "decision": candidates.SURFACED, "rank": 3},
         {"text": "Renew the passport by Friday", "origin": candidates.MEMORY, "item_id": 7,
          "decision": candidates.MUTED},
         # The same thing twice in one list, once picked: it came up.
