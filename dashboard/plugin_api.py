@@ -8201,6 +8201,131 @@ async def delete_room_link_invite(response: Response, invite_id: Optional[str] =
     return await _room_links_route(lambda links: links.cancel(invite_id), "cancel", mailbox=True)
 
 
+# Setting this Hermes up for rooms (room_setup.py): the API server, which is
+# the installation's, and the profile's room ceiling and approvals, then the
+# gateway restart that starts the API server. The limits are the
+# installation's too.
+
+ROOM_SETUP_LIMIT = 6
+ROOM_SETUP_WINDOW_S = 600.0
+ROOM_SETUP_READ_LIMIT = 30
+ROOM_SETUP_MAX_BODY_BYTES = 8 * 1024
+_room_setup_limiter = _MintLimiter(ROOM_SETUP_LIMIT, ROOM_SETUP_WINDOW_S,
+                                   message="Too many setup changes; try again in a few minutes")
+_room_setup_read_limiter = _MintLimiter(ROOM_SETUP_READ_LIMIT, ROOM_CHOICES_WINDOW_S,
+                                        message="Too many setup checks; try again shortly")
+_ROOM_SETUP_CANT_RESTART = "This Hermes can't restart its gateway from here; restart it on the host (hermes gateway restart)"
+
+
+def _room_setup() -> Any:
+    return _plugin_package_module("room_setup")
+
+
+def _room_setup_hermes(module: Any) -> Any:
+    """Hermes' calls for the switch. Each .env write is made in the scope of
+    the profile whose home it is: the root's (the API server's key and port)
+    in the default profile's, a named profile's own key in that profile's."""
+    return module.Hermes.load(env_scope=lambda home: _profile_scope(module.profile_name(home)))
+
+
+def _optional_module(name: str) -> Any:
+    try:
+        return importlib.import_module(name)
+    except ImportError:
+        return None
+
+
+def _restart_room_gateway(interrupt: bool) -> Dict[str, Any]:
+    """Restarts the host gateway (the default profile's), which starts the
+    API server: Hermes' own restart after a settings save, which says so
+    while chats run (``busy``), or with ``interrupt`` the forced one."""
+    gateway = _optional_module("hermes_cli.web_server_gateway")
+    spawn = getattr(_optional_module("hermes_cli.web_server"), "_spawn_gateway_restart", None)
+    try:
+        if interrupt and callable(spawn):
+            if _room_setup().takes_interrupt(spawn):
+                spawn("default", interrupt=True)
+            else:
+                spawn("default")
+            return {"started": True, "busy": False, "error": None}
+        refusal_of = getattr(gateway, "live_session_refusal", None)
+        refusal = refusal_of("default", "restart") if callable(refusal_of) else None
+        if refusal:
+            return {"started": False, "busy": True, "error": str(refusal)}
+        after = getattr(gateway, "_restart_gateway_after", None)
+        if callable(after):
+            answer = after("default", what="Linked Rooms setup", label="Linked Rooms setup")
+            return {"started": bool(answer.get("restart_started")), "busy": bool(answer.get("restart_busy")),
+                    "error": answer.get("restart_error") or None}
+        if callable(spawn):
+            spawn("default")
+            return {"started": True, "busy": False, "error": None}
+    except Exception as exc:  # noqa: BLE001 - the save stays; the answer says the restart didn't start
+        logger.warning("Linked Rooms setup couldn't restart the gateway (%s)", type(exc).__name__, exc_info=True)
+        return {"started": False, "busy": False, "error": str(exc) or _ROOM_SETUP_CANT_RESTART}
+    return {"started": False, "busy": False, "error": _ROOM_SETUP_CANT_RESTART}
+
+
+def room_setup(profile: Optional[str], body: Any = None) -> Dict[str, Any]:
+    """The setup state for ``profile`` (the dashboard's own without one),
+    or with ``body`` the setup done, and the restart when it needs one."""
+    module = _room_setup()
+    home = Path(_calls_home())
+    name = (profile or "").strip()
+    if not name or name.lower() == "current":
+        name = module.profile_name(home)
+    if body is not None:
+        if not isinstance(body, dict):
+            raise TokenError(400, 'Expected {"ceiling": [...], "interrupt": false}', "bad_request")
+        if not isinstance(body.get("interrupt", False), bool):
+            raise TokenError(400, "interrupt is true or false", "bad_request")
+    try:
+        hermes = _room_setup_hermes(module)
+        if body is None:
+            return module.state(hermes, home, name)
+        answer = module.apply(hermes, home, name, ceiling=body.get("ceiling"))
+    except module.SetupError as exc:
+        raise TokenError(exc.status, str(exc), exc.code)
+    if "restart" in answer["needs"]:
+        answer["restart"] = _restart_room_gateway(bool(body.get("interrupt")))
+    return answer
+
+
+async def _room_setup_route(profile: Optional[str], run: Callable[[], Dict[str, Any]],
+                            limiter: "_MintLimiter") -> Any:
+    try:
+        return {"ok": True, **(await _run_scoped(profile, _limited(limiter, None, run)))}
+    except TokenError as exc:
+        # ``code`` is room_setup's word for the refusal (bad_ceiling, yolo,
+        # managed, standalone_profile, no_port, unsupported…).
+        return _store_refusal(exc)
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
+        raise
+    except Exception as exc:
+        raise _unexpected("setup", exc, feature="Linked Rooms")
+
+
+@router.get("/rooms/setup")
+async def get_room_setup(response: Response, profile: Optional[str] = None) -> Any:
+    """What setting this Hermes up for rooms would do (``needs``) and what
+    blocks it (``blockers``), with the API server, the room ceiling and its
+    choices, approvals and the profile's room policy."""
+    response.headers["Cache-Control"] = "no-store"
+    return await _room_setup_route(profile, lambda: room_setup(profile), _room_setup_read_limiter)
+
+
+@router.post("/rooms/setup")
+async def post_room_setup(request: Request, response: Response, profile: Optional[str] = None) -> Any:
+    """Sets this Hermes up for rooms, with ``ceiling`` (the saved one, or
+    the default, without it), and restarts the gateway when the API server
+    isn't running: ``restart.busy`` while chats run, which ``interrupt``
+    overrides."""
+    response.headers["Cache-Control"] = "no-store"
+    body = await _read_json_body(request, ROOM_SETUP_MAX_BODY_BYTES)
+    return await _room_setup_route(profile, lambda: room_setup(profile, body), _room_setup_limiter)
+
+
 # --- Pulse settings ------------------------------------------------------------
 #
 # Conduit's Settings > Pulse page (TestFlight builds): Pulse's state and the
@@ -16708,6 +16833,9 @@ ROUTE_CAPABILITIES = (
     # /rooms/identity and /rooms/links: Links between this installation and
     # other people's, for Linked Rooms (no profile: they're the installation's).
     "room-links",
+    # GET/POST /rooms/setup: this Hermes' API server, a profile's room
+    # ceiling and approvals, set up for Linked Rooms.
+    "room-setup",
 )
 
 

@@ -13,6 +13,16 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.85.0 (2026-10-26)
+
+### New and improved
+- One command gets your Hermes ready for rooms with other people's agents:
+  `hermes conduit-push rooms setup` turns on Hermes' API server (with a new
+  key if it has none), saves the tools rooms may use (web, vision, X search
+  and past-chat search, unless you pick others with `--ceiling`), keeps
+  plugins and MCP servers added later out of rooms, keeps approvals on, and
+  restarts the gateway. It says what it will change and asks first.
+
 ## 0.84.2 (2026-10-26)
 
 ### Security
