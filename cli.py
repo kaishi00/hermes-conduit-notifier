@@ -8,6 +8,7 @@ import json
 import os
 import socket
 import sqlite3
+import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
@@ -96,13 +97,18 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     rooms = commands.add_parser(
         "rooms",
         help="What this profile's agent may do in group rooms with other people's agents: show or set it, "
-             "or delete its hidden chat for a room (forget)",
+             "delete its hidden chat for a room (forget), or set this Hermes up for rooms (setup)",
     )
-    rooms.add_argument("rooms_action", choices=["show", "set", "forget"])
+    rooms.add_argument("rooms_action", choices=["show", "set", "forget", "setup"])
     rooms.add_argument("--room", default="",
                        help="the room's id; without one, show and set use the defaults for rooms with no choices "
                             "of their own (forget needs one)")
-    rooms.add_argument("--yes", action="store_true", help="for forget: delete without asking first")
+    rooms.add_argument("--yes", action="store_true", help="for forget and setup: go ahead without asking first")
+    rooms.add_argument("--ceiling", metavar="TOOLSET,...",
+                       help="for setup: the toolsets rooms may use on this profile, comma-separated (empty: none); "
+                            "without it, the ones saved before, or web, vision, X search and past-chat search")
+    rooms.add_argument("--no-restart", dest="no_restart", action="store_true",
+                       help="for setup: don't restart the gateway; say how to")
     rooms.add_argument("--tools", choices=["talk", "look", "data", "custom"],
                        help="talk: no tools; look: web lookups; data: lookups and the data tools you pick; "
                             "custom: only the tools you pick")
@@ -586,6 +592,8 @@ def _rooms(args: argparse.Namespace) -> int:
     room = str(getattr(args, "room", "") or "").strip()
     if args.rooms_action == "forget":
         return _forget_room(room, Path(get_hermes_home()), bool(getattr(args, "yes", False)))
+    if args.rooms_action == "setup":
+        return _setup_rooms(args, Path(get_hermes_home()))
     store = room_choices.ChoicesStore(Path(get_hermes_home()))
     try:
         if args.rooms_action == "show":
@@ -654,6 +662,117 @@ def _forget_room(room: str, home: Path, yes: bool) -> int:
         print(f"Kept {kept}: a turn in it is still finishing. Try again in a minute.")
         return 1
     return 0
+
+
+def _setup_rooms(args: argparse.Namespace, home: Path) -> int:
+    """Sets this Hermes up for rooms with other people's agents (room_setup):
+    says what it changes, asks, saves, then restarts the gateway when the
+    API server isn't running yet."""
+    from . import room_setup
+
+    profile = room_setup.profile_name(home)
+    ceiling = None
+    if args.ceiling is not None:
+        ceiling = [name.strip() for name in str(args.ceiling).split(",") if name.strip()]
+    restart = "hermes gateway restart" if profile == "default" else "hermes -p default gateway restart"
+    try:
+        hermes = room_setup.Hermes.load()
+        state = room_setup.state(hermes, home, profile, ceiling=ceiling)
+    except room_setup.SetupError as error:
+        print(f"Couldn't set it up: {error}")
+        return 1
+    if state["blockers"]:
+        print("This Hermes can't be set up for rooms yet:")
+        for blocker in state["blockers"]:
+            print(f"  {_printable(blocker['message'])}")
+        return 1
+    labels = {choice["id"]: choice["label"] for choice in state["choices"]}
+    tools = ", ".join(_printable(labels.get(name, name)) for name in state["ceiling"]) or "none: agents only talk"
+    server = state["api_server"]
+    changes = state["changes"]
+    if not state["needs"]:
+        print(f"This Hermes is already set up for rooms (profile {profile}): its API server runs at "
+              f"{server['address']}, and rooms can use {tools}.")
+        return 0
+    print(f"Setting this Hermes up for rooms with other people's agents (profile {profile}):")
+    if "api_server_key" in changes:
+        print(f"- Hermes' API server: turned on with a new key, saved in "
+              f"{room_setup.room_identity.root_home(home) / '.env'}, at {server['address']}. Rooms reach your "
+              "agents through it.")
+    elif "api_server_enabled" in changes or "api_server_port" in changes:
+        print(f"- Hermes' API server: turned on with the key it has, at {server['address']}. Rooms reach your "
+              "agents through it.")
+    else:
+        print(f"- Hermes' API server: {'on' if server['running'] else 'set up'}, at {server['address']}.")
+    if "profile_key" in changes:
+        print(f"- Profile {profile} gets a key of its own for it, saved in {home / '.env'}: the API server lets a "
+              "room reach a profile's agent only with that profile's key.")
+    if server["error"]:
+        print(f"  It didn't start the last time: {_printable(server['error'])}")
+    print(f"- Tools rooms can use: {tools}.")
+    others = [_printable(choice["label"]) for choice in state["choices"] if choice["id"] not in state["ceiling"]]
+    if others:
+        print(f"  Others you can add with --ceiling: {', '.join(others)}.")
+    if ceiling is not None and "ceiling" in changes \
+            and "ceiling" not in room_setup.state(hermes, home, profile)["changes"]:
+        # A ceiling the setup saved before: each room pins its members'
+        # tools when it starts (designs/cross-owner-agents, decision 13).
+        print(f"- Profile {profile}'s agent then stops answering in rooms already started with other people's "
+              "agents, which hold it to the tools it had when they started. New rooms use these.")
+    print("- Tools added later (a plugin, an MCP server, a Hermes update) stay out of rooms until you add them here.")
+    if "approvals" in state["needs"]:
+        print("- Approvals: off becomes manual, since rooms need manual or smart approvals.")
+    if server["enabled"] and "ceiling" in state["needs"]:
+        print("- The API server is already on, so these tools are also all that other apps using it get "
+              "(Open WebUI and the like).")
+    if "restart" in state["needs"] and not args.no_restart:
+        print("- Then the gateway restarts to start the API server.")
+    if not args.yes:
+        try:
+            answer = input("Save this? [y/N] ")
+        except EOFError:
+            answer = ""
+        if answer.strip().lower() not in ("y", "yes"):
+            print("Cancelled.")
+            return 0
+    try:
+        after = room_setup.apply(hermes, home, profile, ceiling=ceiling)
+    except (room_setup.SetupError, OSError, ValueError, RuntimeError) as error:
+        print(f"Couldn't set it up: {error}")
+        return 1
+    print("Saved.")
+    if "restart" not in after["needs"]:
+        return 0
+    command = None if args.no_restart else room_setup.restart_command()
+    if command is None:
+        print(f"Restart the gateway to start the API server, at {after['api_server']['address']}: {restart}")
+        return 0
+    print("Restarting the gateway to start the API server...")
+    code = subprocess.call(command)
+    if code != 0:
+        print(f"The gateway didn't restart (exit {code}). Restart it yourself: {restart}")
+        return 1
+    server = _restarted_api_server(room_setup, hermes, home, profile)
+    if server["running"]:
+        print(f"The gateway restarted, and its API server runs at {server['address']}.")
+        return 0
+    why = f": {_printable(server['error']).rstrip('.')}" if server["error"] else ""
+    print(f"The gateway restarted, but its API server isn't running{why}. See: hermes gateway status")
+    return 1
+
+
+# How long `rooms setup` waits for the restarted gateway to record its API
+# server running (or failing).
+RESTART_WAIT_S = 20.0
+
+
+def _restarted_api_server(room_setup: Any, hermes: Any, home: Path, profile: str) -> dict:
+    deadline = time.monotonic() + RESTART_WAIT_S
+    while True:
+        server = room_setup.state(hermes, home, profile)["api_server"]
+        if server["running"] or server["error"] or time.monotonic() >= deadline:
+            return server
+        time.sleep(0.5)
 
 
 # How long a links command waits for the dashboard's loop to see what it

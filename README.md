@@ -2824,6 +2824,106 @@ A route that waits on the mailbox answers within 50 s, or with `timed_out`
 (504) while the call finishes on its own. The routes answer 60 requests a
 minute between them, one still waiting for a thread included.
 
+## Setting this Hermes up for rooms (plugin 0.85+)
+
+A room reaches a member's agent through Hermes' API server, which runs the
+agent's room turns with the toolsets its profile lets the API server use: the
+profile's room ceiling. Each room pins that ceiling (its policy's digest), so
+the setup saves it exactly. One command sets a profile up:
+
+```bash
+hermes conduit-push rooms setup                               # says what it changes, asks, saves, restarts the gateway
+hermes -p mona conduit-push rooms setup --ceiling web,vision  # only these toolsets
+hermes conduit-push rooms setup --ceiling "" --no-restart --yes   # no tools; you restart the gateway
+```
+
+It changes only what needs it:
+
+- **The API server**, the installation's (in the root Hermes home, whichever
+  profile asks). A Hermes with no key gets a new one in the root `.env`
+  (`API_SERVER_KEY`), and a named profile one of its own in its `.env`,
+  since the API server serves a profile's agent (at `/p/<name>`) only with
+  that profile's key. Neither is ever printed, logged or sent anywhere. An
+  API server turned off with `enabled: false` (in `platforms.api_server`,
+  `gateway.platforms.api_server` or `gateway.api_server`, wherever the
+  gateway reads it) is turned on, and one with its key only in `config.yaml`
+  gets `platforms.api_server.enabled: true`, without which the gateway
+  doesn't start it. When something else already answers on 8642 and the API
+  server never ran, it takes the next free port up to 8699
+  (`API_SERVER_PORT`). Whether it runs comes from the gateway's own record
+  (`gateway_state.json`), so a key the gateway has from its environment (a
+  service file's `Environment=`), which the setup can't read, is kept once
+  the gateway has run the API server with it.
+- **The room ceiling** (`platform_toolsets.api_server` in the profile's
+  `config.yaml`): the toolsets named with `--ceiling`, else the ones the setup
+  saved before, else Session Search, Vision, Web and X Search, what the room
+  choices can turn on (Look things up, Search my past chats). It's saved with
+  `no_mcp` and with every plugin and built-in toolset marked known
+  (`known_plugin_toolsets.api_server`, `known_builtin_toolsets.api_server`),
+  so a toolset added later (an MCP server, a plugin, a Hermes update) stays
+  out of rooms, and their digest stays the same, until you add it here.
+  Conduit's own tools (`conduit`) are never in it, nor toolsets whose every
+  tool rooms never allow (memory, running code, delegation, scheduled jobs).
+  If the API server was already on, for Open WebUI say, the ceiling is also
+  all that other apps using it get, and the command says so. Change the
+  ceiling here, not in `hermes tools`, whose save takes `no_mcp` out and so
+  lets MCP servers in. A room holds each member's agent to the tools it had
+  when the room started, so after a change the agent stops answering in
+  rooms already started with other people's agents, and the command says so
+  before it saves; new rooms use the new ceiling. With no toolsets at all,
+  Hermes' log says once that the API server has no valid toolsets: that's
+  the empty ceiling.
+- **Approvals**: off becomes manual, since rooms refuse a profile that runs
+  tools without asking.
+- **The gateway** restarts when the API server isn't running, to start it:
+  the command runs `hermes -p default gateway restart --detach` (the host
+  gateway runs the API server for every profile; `--detach` starts a gateway
+  no service manager runs in the background, not in your terminal), then
+  waits up to 20 s for the API server to run and says if it doesn't. With
+  `--no-restart`, or on a Hermes without `--detach`, it says how to restart
+  instead. A new ceiling or profile key needs no restart: Hermes reads them
+  for each request.
+
+What the setup can't fix stops it before anything is written, saying what to
+change: YOLO mode (`HERMES_YOLO_MODE`, `yolo`), a package-managed install or
+a setting an administrator pinned (`managed`), a profile that runs its own
+gateway (`gateway.standalone: true`, `standalone_profile`) or one the host
+gateway was told to stop serving (`hermes -p <name> gateway stop`,
+`parked_profile`), and no free port (`no_port`). One setup runs at a time on
+the installation.
+
+Conduit runs it through these routes, with `?profile=`, behind the
+`room-setup` capability:
+
+- `GET /rooms/setup`: `{"ready", "needs", "changes", "blockers", "profile",
+  "api_server": {"enabled", "key_set", "profile_key_set", "address",
+  "running", "error"}, "ceiling", "choices", "approvals", "policy"}`.
+  `needs` lists what a POST would do, in its order (`api_server`, `ceiling`,
+  `plugin_tools`, `approvals`, `restart`), `changes` what it would change
+  (`api_server_key`, `profile_key`, `api_server_port`, `api_server_enabled`,
+  `ceiling`, `plugin_tools`, `approvals`), and `ready` is true when nothing
+  needs doing or blocks it. Each blocker is `{"code", "message"}`.
+  `profile_key_set` says the profile has its own key (the default profile
+  uses the API server's), `address` is where the API server runs, or will
+  once set up, and `error` why it isn't running while the gateway is, such
+  as its port being taken. `choices` are the toolsets the ceiling can name
+  (`{"id", "label", "description"}`), and `policy` is the profile's room
+  policy as Hermes reads it now (`enabled_toolsets`, `approval_mode`,
+  `policy_digest` and the rest), or null.
+- `POST /rooms/setup` with `{"ceiling": [...], "interrupt": false}`, both
+  optional: the same, after the writes, with `changed` (what it changed, by
+  the same names as `changes`) and, when it needs one, `restart`:
+  `{"started", "busy", "error"}`. The restart is Hermes' own after a
+  settings save, `busy` while chats run on the gateway, unless `interrupt`
+  is true, which restarts it anyway. What was saved stays when the restart
+  doesn't start, and a POST again only restarts it.
+
+A refusal carries `detail` and a `code`: `bad_ceiling` and `bad_request`
+(400), a blocker's code (409), `bad_config` (409, a `config.yaml` setting the
+setup saves under isn't a section) and `unsupported` (501, a Hermes without
+what the setup calls). The routes answer 30 reads a minute and 6 setups in 10
+minutes.
+
 ## Capabilities (plugin 0.4+)
 
 `GET /api/plugins/conduit_push/capabilities` returns the plugin version and

@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.85.0 (2026-10-26)
+## 0.86.0 (2026-10-26)
 
 ### New and improved
 - Pulse keeps a night, 22:00 to 07:00 unless you change it, and sends no pushes then. What would have pushed waits for the morning brief, unless it can't wait, like a reminder due before morning. A Focus that holds Hermes's calls holds Pulse's pushes too.
@@ -21,6 +21,16 @@ checks it). The format is fixed, because Conduit reads it:
 - A follow-up that needs an office open waits for office hours, and one for the morning or the evening waits for then. Pulse checks it again before it goes, and its Why? says what it waited for.
 - A new reason for a thumbs down, Wrong time: the card comes back at a better time, and Pulse stops pushing that kind at that time of day. What Pulse learned lists it, and Undo takes it back.
 - Not now's "later today" ends when your night starts.
+
+## 0.85.0 (2026-10-26)
+
+### New and improved
+- One command gets your Hermes ready for rooms with other people's agents:
+  `hermes conduit-push rooms setup` turns on Hermes' API server (with a new
+  key if it has none), saves the tools rooms may use (web, vision, X search
+  and past-chat search, unless you pick others with `--ceiling`), keeps
+  plugins and MCP servers added later out of rooms, keeps approvals on, and
+  restarts the gateway. It says what it will change and asks first.
 
 ## 0.84.2 (2026-10-26)
 
