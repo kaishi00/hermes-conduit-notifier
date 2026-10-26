@@ -292,7 +292,7 @@ def _quiet_until(pulse_store: Any, value: Any, home: Any) -> Optional[float]:
     if isinstance(value, str):
         at = pulse_quiet.day_start(zone, value)
     else:
-        at = float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+        at = pulse_quiet.seconds(value)
     if at is None or not now < at <= now + pulse_quiet.MAX_AHEAD_S:
         raise Refused("invalid", field="quiet_until")
     return at

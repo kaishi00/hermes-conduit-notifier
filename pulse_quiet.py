@@ -9,6 +9,9 @@ the end of today, or the start of the day a vacation ends on).
 While it's quiet Pulse sends nothing on its own: no report, no delivery
 check, no morning brief, and a follow-up due now is held for the first brief
 after instead (a card on the Pulse screen meanwhile, as one below "push").
+A report or brief whose time fell while it was quiet is skipped, not sent
+late once the quiet ends (at midnight), and a scheduled report on its way
+when the quiet begins doesn't go.
 Memory keeps reading chats, a Do it check still runs (the user asked for
 it), a card put off with Not now still comes back on the screen, and a
 report or delivery check asked for by hand still goes.
@@ -16,6 +19,7 @@ report or delivery check asked for by hand still goes.
 
 from __future__ import annotations
 
+import math
 from datetime import datetime, timedelta, tzinfo
 from typing import Any, Optional
 
@@ -33,10 +37,20 @@ def days(pulse_store: Any) -> list[int]:
         if isinstance(value, list) else []
 
 
+def seconds(value: Any) -> Optional[float]:
+    """``value`` as epoch seconds, or None: not a number, or out of range."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    try:
+        at = float(value)
+    except OverflowError:
+        return None
+    return at if math.isfinite(at) else None
+
+
 def until(pulse_store: Any) -> Optional[float]:
     """When the quiet spell set ends, if one is."""
-    value = pulse_store.get("quiet_until")
-    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+    return seconds(pulse_store.get("quiet_until"))
 
 
 def why(pulse_store: Any, zone: tzinfo, now: float) -> str:

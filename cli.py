@@ -692,8 +692,9 @@ def _pulse_quiet(pulse_store: Any, home: Any, value: str, extra: str) -> int:
         elif value:
             print(usage)
             return 2
-    except pulse_control.Refused:
-        print("Quiet until a day means a day ahead, within a year: YYYY-MM-DD.")
+    except pulse_control.Refused as error:
+        print("Quiet days are weekdays: mon to sun." if error.data.get("field") == "quiet_days"
+              else "Quiet until a day means a day ahead, within a year: YYYY-MM-DD.")
         return 2
     for line in _quiet_lines(pulse_store, pulse.report_zone(pulse_store, home), time.time()):
         print(line)

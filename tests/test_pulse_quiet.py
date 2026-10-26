@@ -46,7 +46,8 @@ def test_the_settings_take_quiet_days_and_a_spell_until_today_or_a_day(live):
     now = time.time()
     control.update(live.store, {"quiet_until": "today"}, live.home)
     end = live.store.get("quiet_until")
-    assert end == quiet.next_midnight(UTC, now) and now < end <= now + 86400
+    assert end in (quiet.next_midnight(UTC, now), quiet.next_midnight(UTC, time.time()))  # midnight may pass
+    assert now < end <= now + 2 * 86400
     day = (datetime.fromtimestamp(now, UTC) + timedelta(days=3)).strftime("%Y-%m-%d")
     control.update(live.store, {"quiet_until": day}, live.home)
     assert live.store.get("quiet_until") == quiet.day_start(UTC, day) == datetime.strptime(day, "%Y-%m-%d").replace(
@@ -57,7 +58,7 @@ def test_the_settings_take_quiet_days_and_a_spell_until_today_or_a_day(live):
     control.update(live.store, {"quiet_until": now + 7200}, live.home)
     assert live.store.get("quiet_until") == now + 7200
     today = datetime.fromtimestamp(now, UTC).strftime("%Y-%m-%d")
-    for bad in ("yesterday", today, now - 1, now + 400 * 86400, True, "2026-13-40", [], float("nan")):
+    for bad in ("yesterday", today, now - 1, now + 400 * 86400, True, "2026-13-40", [], float("nan"), 10 ** 400):
         with pytest.raises(control.Refused):
             control.update(live.store, {"quiet_until": bad}, live.home)
     assert live.store.get("quiet_until") == now + 7200  # a refusal changes nothing
@@ -97,6 +98,39 @@ def test_a_quiet_day_holds_the_report_for_the_next_scheduled_one(live):
     assert sent.startswith("Pulse report")
 
 
+def test_a_scheduled_report_on_its_way_when_pulse_goes_quiet_doesnt_go(live):
+    live.store.set("time_zone", "UTC")
+    now = time.time()
+    live.store.set("quiet_until", now + 3600)  # quiet for today, tapped while the report was being made
+    live.store.set(pulse.REPORT_RUN, {"id": "r1", "state": pulse.RUN_FAILED, "started_at": now - 60})
+    pulse.tick()
+    assert live.sent() == [] and live.store.get(pulse.REPORT_RUN)["state"] == pulse.RUN_DROPPED
+    # One the user asked for still goes.
+    live.store.set(pulse.REPORT_RUN, {"id": "r2", "state": pulse.RUN_FAILED, "started_at": now - 60, "asked": True})
+    pulse.tick()
+    [sent] = live.sent()
+    assert sent.startswith("Pulse report")
+
+
+def test_a_report_or_brief_time_that_fell_while_quiet_isnt_sent_late_once_it_ends(live):
+    # Reports at 19:00 and the brief at 18:00: the first minutes of Sunday
+    # aren't a late Saturday report or brief when Saturday was quiet.
+    live.store.set("time_zone", "UTC")
+    live.store.set("daily_report", True)
+    live.store.set("report_time", "19:00")
+    live.store.set("brief_time", "18:00")
+    sunday_night = at(2026, 11, 1, 0, 5)
+    # Without quiet times, a missed one still goes, late.
+    assert pulse._report_due(live.store, live.home, sunday_night)
+    assert pulse.brief.next_attempt(live.store, sunday_night, UTC, "18:00") is not None
+    for setting, value, cleared in (("quiet_days", [5], []), ("quiet_until", at(2026, 11, 1), None)):
+        live.store.set(setting, value)  # Saturday's a quiet day, or it was quiet for the day
+        assert quiet.why(live.store, UTC, sunday_night) == ""  # over
+        assert not pulse._report_due(live.store, live.home, sunday_night)
+        assert not pulse._maybe_brief(live.store, live.home, sunday_night) and live.sent() == []
+        live.store.set(setting, cleared)
+
+
 def test_a_quiet_day_holds_a_due_follow_up_and_the_brief_for_the_first_brief_after(live):
     brief_due_now(live)
     live.store.set("quiet_days", [datetime.fromtimestamp(time.time(), UTC).weekday()])
@@ -120,6 +154,7 @@ def test_quiet_command(live, capsys, monkeypatch):
 
     assert run("days", "sat,sun") == 0 and live.store.get("quiet_days") == [5, 6]
     assert "Quiet days: Sat, Sun" in capsys.readouterr().out
+    assert run("until", "2026-13-40") == 2 and "YYYY-MM-DD" in capsys.readouterr().out
     before = time.time()
     assert run("today") == 0
     assert live.store.get("quiet_until") in (quiet.next_midnight(UTC, before), quiet.next_midnight(UTC, time.time()))

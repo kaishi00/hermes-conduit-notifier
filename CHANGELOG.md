@@ -16,7 +16,7 @@ checks it). The format is fixed, because Conduit reads it:
 ## 0.80.2 (2026-10-26)
 
 ### New and improved
-- Pulse has quiet times: pick the weekdays it keeps to itself, set it quiet until a day for a vacation, or make it quiet for the rest of today, from a Pulse notification too. While it's quiet, Pulse sends no report, delivery check or morning brief on its own, and a follow-up due then waits for the first morning brief after, as a card on the Pulse screen meanwhile. Memory keeps reading your chats, and a report you ask for still goes. Needs Conduit from the `pulse` branch to set them.
+- Pulse has quiet times: pick the weekdays it keeps to itself, set it quiet until a day for a vacation, or make it quiet for the rest of today, from a Pulse notification too. While it's quiet, Pulse sends no report, delivery check or morning brief on its own, and doesn't send one it skipped late once the quiet ends; a follow-up due then waits for the first morning brief after, as a card on the Pulse screen meanwhile. Memory keeps reading your chats, and a report you ask for still goes. Needs Conduit from the `pulse` branch to set them.
 
 ## 0.80.1 (2026-10-26)
 
