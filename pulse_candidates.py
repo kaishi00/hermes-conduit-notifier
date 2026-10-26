@@ -330,15 +330,15 @@ def _line(value: Any, *, ref: Optional[int] = None) -> str:
 def decide(pulse_store: store.PulseStore, rows: list[dict], *, now: float, limit: int = MAX_ITEMS,
            learned: Optional[prefs.Learned] = None) -> list[dict]:
     """Decides every candidate, in place: a remembered item that rests
-    (pulse_report.remembered_items) stays out, then ``route`` with what
-    the store has learned (pulse_prefs), the nudge level, each kind's level
-    and the "not relevant" rules."""
+    (pulse_report.remembered_items) stays out, said something about or not,
+    then ``route`` with what the store has learned (pulse_prefs), the nudge
+    level, each kind's level and the "not relevant" rules."""
     resting = {item["id"]: why for item, why in report.remembered_items(pulse_store, now)[1]}
     for row in rows:
-        if not row.get("decision") and row["origin"] == MEMORY and row["item_id"] in resting:
+        if row.get("decision") in (None, "", UNANSWERED) and row["origin"] == MEMORY and row["item_id"] in resting:
             row.update(decision=RESTING, skip=resting[row["item_id"]])
     if learned is None:
-        learned = prefs.learn(pulse_store.signals(now - prefs.KEEP_S), now)
+        learned = pulse_store.learned(now)
     muted = {(rule["profile"], rule["chat_id"]) for rule in learning.chat_rules(pulse_store) if rule["chat_id"]}
     return route(rows, limit=limit, now=now, learned=learned, nudge=learning.nudge(pulse_store),
                  ceiling=functools.lru_cache(maxsize=None)(lambda kind: learning.level(pulse_store, kind)),

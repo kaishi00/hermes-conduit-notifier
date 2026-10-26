@@ -405,6 +405,11 @@ MAX_CHAIN = 20
 # column kept its first name so a store from the first build still opens).
 
 _lock = threading.Lock()
+# What each store's signals added up to when last fitted (``learned``): its
+# path's (the signals' totals, when, the fit). Fitted again once the signals
+# change, or after LEARNED_FOR_S, over which fading changes next to nothing.
+_learned: dict[str, tuple[tuple, float, prefs.Learned]] = {}
+LEARNED_FOR_S = 600.0
 
 
 class PulseStore:
@@ -1392,6 +1397,21 @@ class PulseStore:
         with self._connect() as conn:
             return [dict(row) for row in conn.execute("SELECT * FROM signals WHERE at >= ? ORDER BY at, card_id, what",
                                                       (since,))]
+
+    def learned(self, now: float) -> prefs.Learned:
+        """What the signals add up to at ``now`` (pulse_prefs.learn), fitted
+        again only once they change or LEARNED_FOR_S goes by: the tick asks
+        every half minute while a follow-up waits to go out."""
+        since = now - prefs.KEEP_S
+        with self._connect() as conn:
+            totals = tuple(conn.execute("SELECT COUNT(*), TOTAL(at), TOTAL(useful), TOTAL(weight) FROM signals "
+                                        "WHERE at >= ?", (since,)).fetchone())
+        kept = _learned.get(str(self.path))
+        if kept is not None and kept[0] == totals and 0 <= now - kept[1] < LEARNED_FOR_S:
+            return kept[2]
+        fitted = prefs.learn(self.signals(since), now)
+        _learned[str(self.path)] = (totals, now, fitted)
+        return fitted
 
     def prune_signals(self, before: float) -> int:
         with _lock, self._connect() as conn:

@@ -253,17 +253,27 @@ def test_a_floor_the_model_said_nothing_about_still_comes_up():
 
 def test_a_remembered_item_rated_no_meanwhile_rests_whatever_the_model_said(live):
     now = time.time()
-    item_id = commitment(live)
+    item_id = commitment(live, due="2026-10-30", due_at=now + 3600)  # due within the day: a floor
     [card] = live.store.add_cards([{"kind": store.NOTICED, "item_id": item_id, "level": "screen", "title": "x",
                                     "news": "x", "why": "x", "created_at": now - 60}])
     learning.rate(live.store, card, "down", now=now - 30)
-    rows = [candidates._remembered(live.store.item(item_id), {"bring_up": True, "value": 5, "line": "Renew it"})]
+
+    def answered():
+        return candidates._remembered(live.store.item(item_id), {"bring_up": True, "value": 5, "line": "Renew it"})
+
+    def unanswered():
+        return {**candidates._remembered(live.store.item(item_id), {}), "decision": candidates.UNANSWERED}
+
+    rows = [answered()]
+    candidates.decide(live.store, rows, now=now)
+    assert (rows[0]["decision"], rows[0]["skip"]) == (candidates.RESTING, report.RATED)
+    rows = [unanswered()]  # the same when it said nothing about it, floor or not
     candidates.decide(live.store, rows, now=now)
     assert (rows[0]["decision"], rows[0]["skip"]) == (candidates.RESTING, report.RATED)
     learning.rate(live.store, card, "up", now=now - 20)  # changed back: back to what the model said
-    rows = [candidates._remembered(live.store.item(item_id), {"bring_up": True, "value": 5, "line": "Renew it"})]
+    rows = [answered(), unanswered()]
     candidates.decide(live.store, rows, now=now)
-    assert (rows[0]["decision"], rows[0]["skip"]) == (candidates.SURFACED, "")
+    assert [(row["decision"], row["skip"]) for row in rows] == [(candidates.SURFACED, "")] * 2
 
 
 # Saying ----------------------------------------------------------------------

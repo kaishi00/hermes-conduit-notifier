@@ -91,6 +91,23 @@ def test_follow_ups_fit_what_pulse_learned_only_once_one_is_to_be_told(live, mon
     assert followup.next_send(live.store, time.time()) is None
 
 
+def test_what_pulse_learned_is_fitted_again_only_once_the_signals_change(live, monkeypatch):
+    card = told_card(live)
+    fits = []
+    real = followup.prefs.learn
+    monkeypatch.setattr(followup.prefs, "learn", lambda signals, now: fits.append(now) or real(signals, now))
+    now = time.time()
+    first = live.store.learned(now)
+    assert store.open_store(live.home).learned(now + 30) is first  # a tick later: the same fit
+    control.rate(live.store, card["id"], "down")
+    second = live.store.learned(now + 60)  # a thumb since
+    assert second is not first and second.votes == 1
+    fitted = len(fits)
+    assert live.store.learned(now + 90) is second and len(fits) == fitted
+    live.store.learned(now + 60 + store.LEARNED_FOR_S)  # and again once fading has had time to count
+    assert len(fits) == fitted + 1
+
+
 def test_at_screen_level_news_becomes_a_card_without_a_turn(live):
     control.set_level(live.store, "followup", "screen")
     item_id = tell(live)
