@@ -245,6 +245,12 @@ def followup_timing(row: dict) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _this_try(row: dict) -> dict[str, Any]:
+    """A follow-up's timing for a new try: "cant_wait" was the try that
+    set it, and one that failed doesn't make the next go "anyway"."""
+    return {key: value for key, value in followup_timing(row).items() if key != "cant_wait"}
+
+
 def check_all_now(pulse_store: store.PulseStore, now: float) -> None:
     """Brings every scheduled check forward to ``now`` and frees the day's
     reminders, when `pulse followups now` asked (after ``schedule``). Not
@@ -1109,7 +1115,7 @@ def next_send(pulse_store: store.PulseStore, now: float, home: Optional[Path] = 
         if learned is None:
             learned = pulse_store.learned(now)
         loudness = item_level(item, learned, nudge=nudge, ceiling=ceiling, now=now)
-        timing = followup_timing(followup)
+        timing = _this_try(followup)
         if quiet and loudness == "push":
             loudness, timing = "brief", {**timing, "held": QUIET}
         if loudness == "push":
@@ -1137,7 +1143,7 @@ def _timed(pulse_store: store.PulseStore, item: dict, followup: dict, *, now: fl
     stands: "push" now; "brief" when it's held for the morning brief; None
     while it waits, held for its time (TIMED: checked again then) or while
     the user is busy; "screen" when that took over BUSY_MAX_S."""
-    timing = followup_timing(followup)
+    timing = _this_try(followup)
     due_end = _due_end(pulse_store, item, zone)
     found = hours.timing(pulse_store, zone, now, brief_at=_next_brief(pulse_store, zone, now),
                          closed=learning.closed_parts(pulse_store, FOLLOWUP),
