@@ -19,6 +19,12 @@ checks it). The format is fixed, because Conduit reads it:
 - Pulse shows what it learned from your thumbs, Do it and Done: which chats, kinds and timings it brings up more or less, and which kinds it pushes louder. Reset any one of them, or everything, and undo a reset if you change your mind. A card's Why? also says when what Pulse learned helped bring it up.
 - Pulse lists what its latest reports left out and why, such as a chat you muted or something it learned you skip, and you can bring any of them up as a card.
 
+## 0.83.1 (2026-10-26)
+
+### Fixes
+- Asking for a chat on an Apple Watch call could find a Kanban task's worker,
+  which isn't a chat you can pick up. Calls now leave workers to the board.
+
 ## 0.83.0 (2026-10-26)
 
 ### New and improved

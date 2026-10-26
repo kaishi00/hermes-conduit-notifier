@@ -36,10 +36,12 @@ class FakeRoutes:
         self.searches = searches or {}
         self.messages = messages or {}
         self.queries = []
+        self.scopes = []
         self.reads = []
 
-    async def search_sessions(self, q="", limit=20, profile=None, **_):
+    async def search_sessions(self, q="", limit=20, profile=None, **kwargs):
         self.queries.append((q, limit, profile))
+        self.scopes.append(kwargs)
         return {"results": self.searches.get(q, [])}
 
     async def get_session_messages(self, session_id, profile=None, limit=None, offset=0, order=None,
@@ -98,10 +100,21 @@ def test_find_chat_numbers_matches_and_retries_word_by_word():
     assert [q for q, _, _ in routes.queries] == ["home GPU", "home", "GPU"]
     assert {limit for _, limit, _ in routes.queries} == {5}
     assert {profile for _, _, profile in routes.queries} == {"work"}, "the grant's own profile"
+    assert routes.scopes == [{"exclude_sources": "kanban"}] * 3, "Kanban workers aren't chats (VoiceChatFinder.path)"
     nothing = api.run_watch_find_chat(grant, {"query": "printer"}, routes=routes)
     assert nothing == {"ok": True, "count": 0, "chats": ""}
     assert grant.chat_matches == [], "a search that found nothing leaves no older list to read"
     assert api.run_watch_find_chat(grant, {"query": " ?? "}, routes=routes)["detail"] == "query is required"
+
+
+def test_a_hermes_route_without_the_source_filter_searches_without_it():
+    class OldRoutes(FakeRoutes):
+        async def search_sessions(self, q="", limit=20, profile=None):
+            self.queries.append((q, limit, profile))
+            return {"results": self.searches.get(q, [])}
+
+    routes = OldRoutes({"GPU": [{"session_id": "s-gpu", "title": "GPU setup"}]})
+    assert api.run_watch_find_chat(make_grant(), {"query": "GPU"}, routes=routes)["count"] == 1
 
 
 def test_read_chat_reads_only_the_newest_searchs_chats():
