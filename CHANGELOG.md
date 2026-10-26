@@ -13,10 +13,22 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.79.1 (2026-10-26)
+## 0.80.1 (2026-10-26)
 
 ### New and improved
 - Why? on a card from your Pulse report now says why that thing came up now and where it came from: the chat, calendar entry, reminder, note or job it rests on. Before, every report card gave the same stock line, and those lines are cleared from earlier cards. The report itself is shorter, each line without the reason in brackets. Needs Conduit from the `pulse` branch to show it.
+
+## 0.80.0 (2026-10-26)
+
+### New and improved
+- Conduit's Predictive settings can suggest your next message after a
+  reply, offer words for a draft when you pause typing, and let Hermes
+  follow up on its own while you look at a chat. All are off until you
+  turn them on. Hermes answers on a copy of the chat that can't use tools
+  and saves nothing, and only the device that asked sees the answer, so
+  Hermes Desktop shows no notes for them. A faster model can answer
+  instead: set `auxiliary.conduit_predict` (provider and model) in the
+  profile's config.
 
 ## 0.79.0 (2026-10-26)
 

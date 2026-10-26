@@ -1445,6 +1445,39 @@ message's turn gets one line of context, for example
   that Desktop and Conduit both have open isn't placed as Conduit's
   (reply_sources), so neither gets a line, as before.
 
+## Predictions for Conduit (plugin 0.80+)
+
+Conduit's Predictive settings (all off until you turn them on) suggest your
+next message after a reply, offer words for a draft when you pause typing,
+and let Hermes take a turn of its own while you look at a chat. Each answer
+comes from a fork of the live chat, as Hermes' `/btw` does: the same prompt
+cache, every tool refused, nothing saved to the chat, state.db or memory.
+Unlike `prompt.btw`, whose answer goes to every client (Hermes Desktop shows
+it as a `[btw …]` note), the route answers only the device that asked.
+
+- `POST /api/plugins/conduit_push/predict` with
+  `{"session_id": "<runtime session id>", "kind": "replies" | "draft" | "turn", "count": 3, "language": "French", "model": "chat" | "fast", "wait_s": 20}`.
+  `draft` adds `"draft": "<unsent text>"`; `turn` adds
+  `"facts": {"last_reply_s": 192, "on_screen_s": 160, "check": 2, "max_checks": 4, "local_time": "Sunday 09:14"}`,
+  measured by Conduit and written out in words, so the model never
+  calculates. Answers, best first and each with a probability `p`:
+  `{"replies": [{"text", "p"}]}`; `{"next": [...], "replies": [...]}` for a
+  draft; `{"take_turn", "why", "ask_again_in_seconds", "nudge"}` for a turn,
+  where `nudge` is the hidden user turn Conduit sends (`display_kind:
+  "hidden"`) and `ask_again_in_seconds` is held to 30 s–15 min (`null`: not
+  until the user writes). An answer that isn't the JSON asked for comes back
+  with `"parsed": false` and nothing to suggest. Capability `predict`.
+- One prediction at a time per chat (429), at most 4 running on the host
+  (503), 40 a minute for the whole host. One that outlasts `wait_s` answers 504 and
+  is left to finish; its chat is free again when it does. `GET …/predict`
+  answers `{"fast_model": "<model>" | null, "today": <count>}`.
+- `"model": "fast"` answers on `auxiliary.conduit_predict` (`provider`,
+  `model`) from the chat's profile config, from a digest of the chat instead
+  of the warm cache; without it the chat's own model answers. Usage is
+  billed to the chat, like `/btw`.
+- The chat must be live in this dashboard (404 otherwise). On a Hermes without
+  the fork's parts the route falls back to its plain side question.
+
 ## Files in group chats (plugin 0.38+)
 
 A group chat room isn't a session, so Hermes' attach RPCs can't take a file

@@ -99,6 +99,7 @@ def test_every_capability_names_a_served_route_family():
         "cron-notifications": "/cron/notifications",
         "reply-sources": "/notifications/reply-sources",
         "chat-on-screen": "/notifications/on-screen",
+        "predict": "/predict",
         "room-files": "/room-files",
         "room-images": "/room-images",
         "speech-server": "/speech-server/",
