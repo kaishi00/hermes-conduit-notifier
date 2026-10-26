@@ -113,12 +113,16 @@ SKIPS = [
     "je passe", "laisse-le vide", "lewati saja", "biarkan kosong", "salta questa domanda", "lascialo in bianco",
     "pomiń to pytanie", "pode pular", "deixa em branco", "Пропусти этот вопрос", "оставь пустым", "bunu atla",
     "boş bırak", "スキップ", "スキップでお願いします", "飛ばしてください", "空欄のままでお願いします", "跳过", "这个问题跳过吧",
-    "留空", "스킵해 주세요", "비워 두세요", "이건 패스할게요",
+    "留空", "스킵해 주세요", "비워 두세요", "이건 패스할게요", "skip to the next question", "Skip to the next one.",
+    "überspringen, nächste Frage", "salta a la siguiente pregunta", "passons à la suivante",
+    "lewati, lanjut ke berikutnya", "salta alla prossima domanda", "pomiń, następne pytanie", "pula pra próxima",
+    "пропусти, следующий вопрос", "atla, sonraki soru", "スキップして次の質問へ", "跳过，下一题", "跳過，下一個",
+    "건너뛰어, 다음 질문으로", "다음으로 넘어가",
 ]
 NOT_SKIPS = [
     "", "Toronto", "not sure yet", "next week", "don't skip it", "skip the hotel", "skip?", "blanco", "leer",
     "go ahead and skip it now please", "nicht überspringen", "no lo saltes", "不要跳过", "跳过吗", "スキップしないで",
-    "건너뛰지 마세요",
+    "건너뛰지 마세요", "the next one", "next question", "nächste Woche", "la siguiente", "次の質問", "下一个", "다음",
 ]
 
 
