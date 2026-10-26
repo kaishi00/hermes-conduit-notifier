@@ -89,7 +89,7 @@ DEFAULTS: dict[str, Any] = {
     "memory_backfill_days": 30,  # what `pulse memory backfill start` reads
     "memory_backfill_unreadable": [],  # profiles the backfill couldn't read on its last run
 }
-# Which process runs the loop: {"owner": ..., "until": time.time()}.
+# Which process runs the loop: {"owner": "host:pid", "until": time.time(), "build": pulse.build_stamp()}.
 LEADER = "leader"
 
 _SCHEMA = """

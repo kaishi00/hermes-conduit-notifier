@@ -147,7 +147,8 @@ _said_stale = False
 def _owner_gone(owner: Any) -> bool:
     """Whether the process a lease names has exited: one on this host whose
     pid no longer runs. Unknown (another host, Windows, where signal 0 would
-    end the process) counts as still there."""
+    end the process) counts as still there, as does a pid already reused:
+    the status then waits out the lease, as it did before."""
     hostname, _, pid = str(owner).rpartition(":")
     if os.name == "nt" or hostname != socket.gethostname() or not pid.isdigit():
         return False
