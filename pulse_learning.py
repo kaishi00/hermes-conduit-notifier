@@ -458,10 +458,12 @@ def lesson_entry(lesson: dict) -> dict[str, Any]:
 
 def learned(pulse_store: store.PulseStore) -> list[dict]:
     """The lessons in force, newest first. A level lesson an even newer one
-    replaced is left out: undoing that newer one brings it back."""
+    replaced is left out (undoing that newer one brings it back), and so is
+    a two-thumb step from before learning, which ``level`` ignores too."""
     current = {}
     for lesson in pulse_store.lessons(what=LEVEL):
-        current[lesson["kind"]] = lesson["id"]
+        if lesson["cause"] not in STEPPED:
+            current[lesson["kind"]] = lesson["id"]
     return [lesson_entry(lesson) for lesson in reversed(pulse_store.lessons())
             if lesson["what"] != LEVEL or current.get(lesson["kind"]) == lesson["id"]]
 

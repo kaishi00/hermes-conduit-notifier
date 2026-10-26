@@ -549,6 +549,11 @@ def test_the_two_thumb_steps_from_before_learning_are_retired_once(live):
     control.set_level(reopened, "followup", "push")
     again = store.open_store(live.home)
     assert learning.level(again, "followup") == "push" and len(again.signals()) == 2
+    # A step an older process still running makes afterwards counts no more than those did.
+    assert again.add_lesson(dict(user, value="off", card_id=first["id"], cause="2 thumbs down",
+                                 created_at=time.time() + 1))
+    assert learning.level(again, "followup") == "push"
+    assert [lesson["cause"] for lesson in learning.learned(again)] == ["set"]
 
 
 def test_a_rating_is_a_signal_and_a_new_rating_replaces_it(live):
