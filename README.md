@@ -2508,7 +2508,8 @@ for rooms with none of their own:
   Custom (only the tools you pick). Always within the profile's own toolsets.
   Tool Search's own tools (`tool_search`, `tool_describe`, `tool_call`) work
   whenever anything is allowed: Hermes runs the hooks on the tool `tool_call`
-  reaches, by that tool's own name, so it's checked like a direct call.
+  reaches, by that tool's own name, so it's checked like a direct call, and a
+  `tool_call` the hooks see as itself is checked by the tools it names.
   Memory and skill writes, delegation, messaging, scheduled jobs, running code
   and Conduit's calls and settings (`memory`, `skill_manage`, `delegate_task`,
   `kanban_create`, `send_message`, `message_agent`, `react_to_message`,
@@ -2540,18 +2541,19 @@ private key blocks) replaced by `[credential removed]`. In every chat,
 `session_search` no longer finds the hidden sessions of rooms with other
 people's agents, and a direct read of one answers "session_id not found".
 
-If the room's roster or the choices can't be read, that turn gets no tools,
-with a warning in the log (the first time and every 100th), and so does a
-room session Hermes hasn't titled with its room yet. If the session store
-itself can't be read, the plugin can't tell a room's turn from another chat's,
-so it blocks each tool call it can't check, in any chat, with a note to the
-agent to try again in a moment, and logs a warning; a turn on Hermes' room
-platform still gets the room's framing and has its reply checked. A room that
-no room store has (kept where the plugin doesn't look) runs as Hermes alone
-would run it, with a warning (a `room_<digest>` session still counts as a
+If the room's roster or the choices can't be read, or aren't in a shape Hermes
+or the plugin writes, that turn gets no tools, with a warning in the log (the
+first time and every 100th), and so does a room session Hermes hasn't titled
+with its room yet. If the session store itself can't be read, the plugin can't
+tell a room's turn from another chat's, so it blocks each tool call it can't
+check, in any chat, with a note to the agent to try again in a moment, and logs
+a warning; a turn on Hermes' room platform still gets the room's framing and
+has its reply checked. A room that no room store has (kept where the plugin
+doesn't look) runs as Hermes alone would run it, with a warning: its tools, and
+its sessions in past-chat search (a `room_<digest>` session still counts as a
 room). A disbanded room keeps its rules: its sessions keep what other people's
-agents said. A `session_search` result that mentions group rooms in a shape
-the plugin can't read goes to the agent as a failed search. A Hermes without
+agents said. A `session_search` result that mentions group rooms in a shape the
+plugin can't read goes to the agent as a failed search. A Hermes without
 `transform_llm_output` or `transform_tool_result` logs a warning, and replies
 or searches then go out unchecked.
 

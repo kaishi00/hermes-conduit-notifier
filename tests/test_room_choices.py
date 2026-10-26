@@ -2,6 +2,7 @@
 import argparse
 import importlib.util
 import json
+import logging
 import pathlib
 import sys
 import tempfile
@@ -149,6 +150,23 @@ def test_a_corrupt_file_reads_as_defaults(tmp_path):
     assert store.get(OTHER).tools == "look"
 
 
+def test_a_room_entry_that_cant_be_used_gets_the_careful_choices_not_the_defaults(tmp_path, caplog):
+    (tmp_path / choices_module.FILE_NAME).write_text(json.dumps({
+        "version": 1, "defaults": {"tools": "look"},
+        "rooms": {ROOM: {"choices": {"tools": "look", "daily_limit": -3}, "at": 1.0},
+                  OTHER: {"choices": "talk", "at": "yesterday"}, "room-3": "custom"}}), encoding="utf-8")
+    store = ChoicesStore(tmp_path)
+    with caplog.at_level(logging.WARNING):
+        for room_id in (ROOM, OTHER, "room-3"):
+            assert store.get(room_id) == RoomChoices() and store.saved(room_id), room_id
+    assert "couldn't read the room choices" in caplog.text
+    # Rooms with no choices of their own still get the owner's defaults.
+    assert store.get("room-4").tools == "look"
+    # Setting the room's choices again mends its entry.
+    assert store.set(OTHER, {"share": "nothing"}) == RoomChoices(share="nothing")
+    assert ChoicesStore(tmp_path).get(OTHER) == RoomChoices(share="nothing")
+
+
 def test_the_oldest_rooms_go_past_the_limit(tmp_path, monkeypatch):
     monkeypatch.setattr(choices_module, "MAX_ROOMS", 3)
     clock = Clock()
@@ -255,3 +273,11 @@ def test_cli_refuses_choices_the_store_wont_keep(tmp_path, monkeypatch, capsys):
     assert cli.dispatch(_rooms_args("set", ROOM)) == 2
     assert cli.dispatch(_rooms_args("show", "../x")) == 1
     assert not (tmp_path / choices_module.FILE_NAME).exists()
+
+
+def test_cli_says_when_the_choices_cant_be_saved(tmp_path, monkeypatch, capsys):
+    cli = _load("conduit_push.cli", ROOT / "cli.py")
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path)
+    (tmp_path / choices_module.FILE_NAME).mkdir()
+    assert cli.dispatch(_rooms_args("set", ROOM, tools="look")) == 1
+    assert capsys.readouterr().out.startswith("Couldn't set that:")

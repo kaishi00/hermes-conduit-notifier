@@ -567,7 +567,7 @@ def _rooms(args: argparse.Namespace) -> int:
             print("Name a choice to set, for example: hermes conduit-push rooms set --room <id> --tools look")
             return 2
         saved = store.set(room, changes) if room else store.set_defaults(changes)
-    except room_choices.ChoicesError as error:
+    except (room_choices.ChoicesError, OSError) as error:
         print(f"Couldn't {'set' if args.rooms_action == 'set' else 'show'} that: {error}")
         return 1
     _print_room_choices(f"Room {room}" if room else "Defaults for rooms with no choices of their own", saved)

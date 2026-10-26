@@ -182,8 +182,7 @@ class ChoicesStore:
 
     # --- Storage -------------------------------------------------------------
 
-    @staticmethod
-    def _choices(state: dict[str, Any], room_id: str) -> tuple[RoomChoices, bool]:
+    def _choices(self, state: dict[str, Any], room_id: str) -> tuple[RoomChoices, bool]:
         defaults = _defaults(state)
         entry = state["rooms"].get(room_id)
         if entry is None:
@@ -191,8 +190,10 @@ class ChoicesStore:
         try:
             return choices_from(entry["choices"], defaults), True
         except ChoicesError:
-            # A hand edit broke it: the careful defaults, never a guess.
-            return defaults, True
+            # A hand edit broke it: the careful choices, never the owner's
+            # defaults (they may allow more than this room did).
+            self._unreadable(f"keeps room {room_id}'s choices in a shape it can't use", "that room gets")
+            return RoomChoices(), True
 
     def _load(self, *, for_write: bool = False) -> dict[str, Any]:
         try:
@@ -213,14 +214,14 @@ class ChoicesStore:
             raw = None
         return _normalized(raw)
 
-    def _unreadable(self, why: str) -> None:
+    def _unreadable(self, why: str, who: str = "its rooms get") -> None:
         key = str(self.path)
         # Not _thread_lock: a write loads the file while holding it.
         with _counts_lock:
             count = _unreadable_counts[key] = _unreadable_counts.get(key, 0) + 1
         level = logging.WARNING if count % 100 == 1 else logging.DEBUG
-        logger.log(level, "conduit_push: couldn't read the room choices in %s (it %s), so its rooms get the careful "
-                   "defaults: no tools (%d times so far)", self.path, why, count)
+        logger.log(level, "conduit_push: couldn't read the room choices in %s (it %s), so %s the careful "
+                   "defaults: no tools (%d times so far)", self.path, why, who, count)
 
     @contextmanager
     def _locked(self) -> Iterator[dict[str, Any]]:
@@ -298,13 +299,15 @@ def _normalized(raw: Any) -> dict[str, Any]:
     rooms = raw.get("rooms")
     if isinstance(rooms, dict):
         for room_id, entry in rooms.items():
-            if not isinstance(room_id, str) or not _ROOM_ID.fullmatch(room_id) or not isinstance(entry, dict):
+            if not isinstance(room_id, str) or not _ROOM_ID.fullmatch(room_id):
                 continue
+            # An entry a hand edit broke is kept, so its room gets the careful
+            # choices rather than the defaults.
+            entry = entry if isinstance(entry, dict) else {}
             at = entry.get("at")
-            if (not isinstance(entry.get("choices"), dict) or not isinstance(at, (int, float))
-                    or isinstance(at, bool) or not 0 <= at < MAX_AT):
-                continue
-            state["rooms"][room_id] = {"choices": entry["choices"], "at": float(at)}
+            if not isinstance(at, (int, float)) or isinstance(at, bool) or not 0 <= at < MAX_AT:
+                at = 0.0
+            state["rooms"][room_id] = {"choices": entry.get("choices"), "at": float(at)}
     return state
 
 

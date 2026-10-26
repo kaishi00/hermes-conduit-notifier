@@ -241,7 +241,7 @@ def _room_tool_block(kwargs: dict[str, Any]) -> dict[str, str] | None:
         room_rules.warn_often("room choices", "conduit_push: couldn't read the room choices for session %s; its "
                               "tools are off this turn", session_id)
         return {"action": "block", "message": room_rules.UNREADABLE_CHOICES_BLOCK}
-    message = room_rules.tool_block(kwargs.get("tool_name"), choices)
+    message = room_rules.tool_block(kwargs.get("tool_name"), choices, kwargs.get("args"))
     return {"action": "block", "message": message} if message else None
 
 

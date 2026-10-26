@@ -75,8 +75,11 @@ TIERS: dict[str, frozenset[str]] = {
 SEARCH_TOOL = "session_search"
 # Tool Search's bridge lists tools and calls one by name. Hermes peels the
 # bridge before the hooks run (agent/tool_executor), so they see the tool it
-# calls by that tool's own name and check it like a direct call.
-BRIDGE_TOOLS = frozenset({"tool_search", "tool_describe", "tool_call"})
+# calls by that tool's own name and check it like a direct call. When it
+# can't (an error while it checks the call), they see tool_call, and Hermes
+# runs the tool it names without asking them again: those names are checked.
+BRIDGE_CALL = "tool_call"
+BRIDGE_TOOLS = frozenset({"tool_search", "tool_describe", BRIDGE_CALL})
 _LEARNING_TOOLS = frozenset({"memory", "skill_manage"})
 
 _RULES = "Blocked by your owner's rules for this group room"
@@ -218,10 +221,16 @@ def allowed_tools(choices: RoomChoices) -> frozenset[str]:
     return frozenset(allowed - NEVER)
 
 
-def tool_block(tool_name: Any, choices: RoomChoices) -> Optional[str]:
+def tool_block(tool_name: Any, choices: RoomChoices, args: Any = None) -> Optional[str]:
     """Why a room turn with other people's agents can't call ``tool_name``
-    under ``choices``, or None when it can."""
+    under ``choices``, or None when it can. ``args``: the call's arguments
+    (a ``tool_call`` is checked by the tools it names)."""
     name = str(tool_name or "")
+    if name == BRIDGE_CALL:
+        for called in _called_names(args):
+            block = tool_block(called, choices)
+            if block is not None:
+                return block
     if name in _LEARNING_TOOLS:
         return LEARNING_BLOCK
     if name in NEVER:
@@ -237,6 +246,25 @@ def tool_block(tool_name: Any, choices: RoomChoices) -> Optional[str]:
     return TOOL_BLOCK.format(tool=name or "That tool")
 
 
+def _called_names(args: Any) -> list[str]:
+    """The tools a ``tool_call`` names, read as Hermes reads them
+    (tools/tool_search_validation): ``calls`` as a list, one call or JSON
+    text, else the single ``name``. Both are read, so neither slips by."""
+    if not isinstance(args, dict):
+        return []
+    calls = args.get("calls")
+    if isinstance(calls, str):
+        try:
+            calls = json.loads(calls)
+        except (ValueError, RecursionError):
+            calls = None
+    if isinstance(calls, dict):
+        calls = [calls]
+    entries = [*(calls if isinstance(calls, list) else ()), args]
+    names = (str(entry.get("name") or "").strip() for entry in entries if isinstance(entry, dict))
+    return [name for name in names if name]
+
+
 def framing(turn: Optional[RoomTurn], choices: RoomChoices) -> str:
     """The context a room turn with other people's agents gets: who's asking,
     and what the owner allows here. ``turn`` None is a room whose roster
@@ -246,7 +274,7 @@ def framing(turn: Optional[RoomTurn], choices: RoomChoices) -> str:
     elif turn.side == "member":
         opening = MEMBER_FRAMING
     else:
-        named = (f"@{handle}" if _HANDLE.fullmatch(handle) else handle for handle in turn.others)
+        named = (f"@{handle}" if _HANDLE.fullmatch(handle) else "another agent" for handle in turn.others)
         opening = HOME_FRAMING.format(others=", ".join(named) or "others")
     allowed = allowed_tools(choices) - {SEARCH_TOOL}
     # The tier's own tools, then the owner's picks in the order they made them.
@@ -308,7 +336,9 @@ def filter_search(result: Any, home: Any, profile: Any = None) -> Optional[str]:
             return None
         return json.dumps({"success": False, "error": f"session_id not found: {session_id}"}, ensure_ascii=False)
     results = payload.get("results")
-    if not isinstance(results, list) or not all(isinstance(entry, dict) for entry in results):
+    if not isinstance(results, list) or not all(
+            isinstance(entry, dict) and isinstance(entry.get("session_id"), str) and entry["session_id"]
+            for entry in results):
         return unknown()
     kept = [entry for entry in results if not _hidden_from_search(
         (str(entry.get("session_id") or ""), str(entry.get("parent_session_id") or "")), entry.get("source"),
@@ -329,12 +359,9 @@ def _unknown_search() -> str:
 
 def _hidden_from_search(session_ids: tuple[str, ...], source: Any, home: Optional[Path]) -> bool:
     """Whether a search hit belongs to a room with other people's agents; a
-    room session that can't be checked is hidden too. A hit whose source
-    isn't given is looked up."""
-    told = str(source or "").strip().lower()
-    named = any(ROOM_SESSION_ID.fullmatch(session_id) for session_id in session_ids)
-    if told not in ("", "unknown", ROOM_SOURCE) and not named:
-        return False
+    room session that can't be checked is hidden too. Each hit is looked up,
+    whatever source it gives (a helper the room's session delegated to is a
+    subagent's)."""
     for session_id in session_ids:
         if not session_id:
             continue
@@ -345,7 +372,8 @@ def _hidden_from_search(session_ids: tuple[str, ...], source: Any, home: Optiona
         if turn is not None:
             return turn.with_others
     # No row here: hidden when it says it's a room's.
-    return told == ROOM_SOURCE or named
+    return (str(source or "").strip().lower() == ROOM_SOURCE
+            or any(ROOM_SESSION_ID.fullmatch(session_id) for session_id in session_ids))
 
 
 def _profile_home(home: Path, profile: Any) -> Path:
@@ -452,22 +480,23 @@ def _lineage(path: Path, session_id: str) -> tuple[list[tuple[str, str]], str]:
         if not title and {"parent_session_id", "end_reason"} <= columns:
             compacted = next((hop[0] for hop in hops if hop[3] == "compression"), None)
             if compacted is not None:
-                title = _moved_title(conn, compacted, "model_config" in columns)
+                title = _moved_title(conn, compacted, columns)
         return [(hop[0], hop[1]) for hop in hops], title
     finally:
         conn.close()
 
 
-def _moved_title(conn: sqlite3.Connection, session_id: str, has_config: bool) -> str:
+def _moved_title(conn: sqlite3.Connection, session_id: str, columns: set[str]) -> str:
     """The title of the continuation a compacted session's title moved to."""
-    config = "model_config" if has_config else "NULL"
+    config = "model_config" if "model_config" in columns else "NULL"
+    newest = "started_at" if "started_at" in columns else "rowid"
     current = session_id
     for _ in range(LINEAGE_HOPS):
         ended = conn.execute("SELECT end_reason FROM sessions WHERE id = ?", (current,)).fetchone()
         if ended is None or ended[0] != "compression":
             return ""
         children = conn.execute(
-            f"SELECT id, title, {config} FROM sessions WHERE parent_session_id = ? ORDER BY started_at DESC LIMIT ?",
+            f"SELECT id, title, {config} FROM sessions WHERE parent_session_id = ? ORDER BY {newest} DESC LIMIT ?",
             (current, MAX_CHILDREN)).fetchall()
         # The continuation: a child that isn't a branch or a delegation.
         child = next((row for row in children if not _marks(row[2]) & {"_branched_from", "_delegate_from"}), None)
@@ -558,9 +587,21 @@ def _members_in(path: Path, room_id: str) -> Optional[list[Any]]:
         members = json.loads(row[0])
         if not isinstance(members, list):
             raise ValueError("the room's members aren't a list")
+        if not all(_known_member(member) for member in members):
+            raise ValueError("a member of the room isn't of a shape Hermes writes")
         return members
     finally:
         conn.close()
+
+
+def _known_member(member: Any) -> bool:
+    """Whether a roster entry has a shape Hermes writes
+    (gateway/hosted_room_discussion): an object whose target, if it has one,
+    is this host's agent or a peer's."""
+    if not isinstance(member, dict):
+        return False
+    target = member.get("target")
+    return target is None or (isinstance(target, dict) and target.get("kind") in ("local", "peer"))
 
 
 def _others(members: Optional[list[Any]]) -> tuple[str, ...]:
