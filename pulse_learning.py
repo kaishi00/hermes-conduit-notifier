@@ -506,13 +506,14 @@ _RESET_PLACE = re.compile(r"chat:[^:]*:.+|area:.+|source:.+", re.S)
 
 
 def _plain(text: str) -> bool:
-    """No control characters, and nothing UTF-8 can't carry (an unpaired
-    surrogate from JSON)."""
+    """No control characters (the C0 set, DEL and the C1 set, which the CLI
+    and the app would otherwise echo back), and nothing UTF-8 can't carry
+    (an unpaired surrogate from JSON)."""
     try:
         text.encode("utf-8")
     except UnicodeEncodeError:
         return False
-    return not any(ord(ch) < 32 for ch in text)
+    return not any(ord(ch) < 32 or 0x7f <= ord(ch) <= 0x9f for ch in text)
 
 
 def reset(pulse_store: store.PulseStore, scope: Any, value: Any, now: float) -> dict:

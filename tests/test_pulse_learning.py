@@ -108,6 +108,21 @@ def test_what_pulse_learned_is_fitted_again_only_once_the_signals_change(live, m
     assert len(fits) == fitted + 1
 
 
+def test_a_store_with_nothing_learned_is_not_kept(live):
+    """A host that never turned Pulse on reads through a scratch store with
+    a path of its own, so keeping its fit would leave the cache an entry
+    heavier per read."""
+    (live.home / "scratch").mkdir()
+    empty = store.open_store(live.home / "scratch")
+    now = time.time()
+    assert empty.learned(now).votes == 0
+    assert str(empty.path) not in store._learned
+    empty.set("enabled", True)
+    control.reset(empty, "everything", now=now)
+    empty.learned(now + 1)
+    assert str(empty.path) in store._learned  # a reset is worth keeping: it is what the fit leaves out
+
+
 def test_at_screen_level_news_becomes_a_card_without_a_turn(live):
     control.set_level(live.store, "followup", "screen")
     item_id = tell(live)
@@ -312,7 +327,8 @@ def test_a_follow_up_card_says_what_learning_did_and_keeps_how_it_came_up(live):
     ("place", "area:" + "x" * learning.RESET_VALUE_LIMIT, "value"),
     # A place as pulse_prefs.place writes it, in plain text.
     ("place", "Deploy", "value"), ("place", "chat:work", "value"), ("place", "chat:work:", "value"),
-    ("place", "area:", "value"), ("place", "area:\ud800", "value"), ("kind", "promise\x00", "value")])
+    ("place", "area:", "value"), ("place", "area:\ud800", "value"), ("kind", "promise\x00", "value"),
+    ("kind", "promise\x7f", "value"), ("place", "area:work\x9b", "value")])
 def test_bad_resets_are_refused(live, scope, value, field):
     with pytest.raises(control.Refused) as refused:
         control.reset(live.store, scope, value)

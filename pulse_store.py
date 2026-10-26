@@ -1407,19 +1407,26 @@ class PulseStore:
         """The candidates journaled from ``since`` on that didn't come up,
         newest first, with whether the same remembered item (or the same
         text, ``same_text``) came up in the same run or a later one, as
-        ``later``."""
+        ``later``. A ``card_id`` whose card has been pruned reads as None,
+        since bringing the thing up would make another."""
         with self._connect() as conn:
             rows = [dict(row) for row in conn.execute(
                 "SELECT * FROM candidates WHERE created_at >= ? AND decision!='surfaced' "
                 "ORDER BY created_at DESC, id LIMIT ?", (since, limit))]
             surfaced = conn.execute("SELECT item_id, text, created_at FROM candidates "
                                     "WHERE created_at >= ? AND decision='surfaced'", (since,)).fetchall()
+            made = {row["card_id"] for row in rows if row["card_id"] is not None}
+            kept = {int(found[0]) for found in conn.execute(
+                f"SELECT id FROM cards WHERE id IN ({', '.join('?' * len(made))})", tuple(made))} if made else set()
+        for row in rows:
+            if row["card_id"] not in kept:
+                row["card_id"] = None
         came_up: dict[tuple[str, Any], float] = {}
         for row in surfaced:
-            for key in _same_thing(row):
+            for key in same_thing(row):
                 came_up[key] = max(came_up.get(key, row["created_at"]), row["created_at"])
         for row in rows:
-            row["later"] = any(key in came_up and came_up[key] >= row["created_at"] for key in _same_thing(row))
+            row["later"] = any(key in came_up and came_up[key] >= row["created_at"] for key in same_thing(row))
         return rows
 
     def latest_candidate_at(self) -> Optional[float]:
@@ -1437,16 +1444,22 @@ class PulseStore:
         columns) and notes it on the candidate, in one write: its signals
         carry the candidate's kind, place and band. The card it already has,
         if another tap made one first (and it's still kept); None when the
-        journal no longer has the candidate."""
+        journal no longer has the candidate, or a report brought the same
+        thing up meanwhile, which ``left_out`` hides but a list read before
+        that report still offers."""
         _check_columns(row, CARD_COLUMNS)
         with _lock, self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
-                found = conn.execute("SELECT card_id, EXISTS(SELECT 1 FROM cards WHERE cards.id=candidates.card_id) "
+                found = conn.execute("SELECT item_id, text, created_at, card_id, "
+                                     "EXISTS(SELECT 1 FROM cards WHERE cards.id=candidates.card_id) "
                                      "AS kept FROM candidates WHERE id=?", (candidate_id,)).fetchone()
                 if found is None or (found["card_id"] is not None and found["kept"]):
                     conn.execute("ROLLBACK")
                     return None if found is None else int(found["card_id"])
+                if _came_up_since(conn, found):
+                    conn.execute("ROLLBACK")
+                    return None
                 card_id = int(conn.execute(f"INSERT INTO cards({', '.join(row)}) VALUES({', '.join('?' * len(row))})",
                                            tuple(row.values())).lastrowid)
                 conn.execute("UPDATE candidates SET card_id=? WHERE id=?", (card_id, candidate_id))
@@ -1490,15 +1503,24 @@ class PulseStore:
         while a follow-up waits to go out."""
         since = now - prefs.KEEP_S
         with self._connect() as conn:
-            totals = tuple(conn.execute("SELECT COUNT(*), TOTAL(at), TOTAL(useful), TOTAL(weight) FROM signals "
-                                        "WHERE at >= ?", (since,)).fetchone())
+            rows = [dict(row) for row in conn.execute("SELECT * FROM signals WHERE at >= ? ORDER BY at, card_id, what",
+                                                      (since,))]
             resets = tuple((row["kind"], row["value"], float(row["created_at"])) for row in conn.execute(
                 "SELECT kind, value, created_at FROM lessons WHERE what=? AND undone_at IS NULL ORDER BY id",
                 (RESET,)))
+        if not rows and not resets:
+            # Nothing to fit and nothing to keep. A host that never turned
+            # Pulse on reads through a scratch store with a path of its
+            # own, which would leave the cache an entry heavier per read.
+            return prefs.learn(rows, now, resets)
+        # From the rows just read, not read again: the fit and what the
+        # cache says it was fitted from are then the same signals.
+        totals = (len(rows), sum(row["at"] or 0 for row in rows), sum(row["useful"] or 0 for row in rows),
+                  sum(row["weight"] or 0 for row in rows))
         kept = _learned.get(str(self.path))
         if kept is not None and kept[0] == (totals, resets) and 0 <= now - kept[1] < LEARNED_FOR_S:
             return kept[2]
-        fitted = prefs.learn(self.signals(since), now, resets)
+        fitted = prefs.learn(rows, now, resets)
         _learned[str(self.path)] = ((totals, resets), now, fitted)
         return fitted
 
@@ -1639,11 +1661,22 @@ def same_text(text: str) -> str:
     return " ".join(text.split()).casefold()
 
 
-def _same_thing(row: Any) -> list[tuple[str, Any]]:
+def same_thing(row: Any) -> list[tuple[str, Any]]:
     """What a candidate is about: its remembered item, and its text."""
     keys: list[tuple[str, Any]] = [("item", row["item_id"])] if row["item_id"] is not None else []
     text = same_text(row["text"] or "")
     return keys + [("text", text)] if text else keys
+
+
+def _came_up_since(conn: sqlite3.Connection, row: Any) -> bool:
+    """Whether a report brought the same thing up (``same_thing``) in the
+    candidate's own run or a later one, which is what ``left_out`` leaves
+    out as ``later``."""
+    keys = set(same_thing(row))
+    if not keys:
+        return False
+    return any(keys & set(same_thing(other)) for other in conn.execute(
+        "SELECT item_id, text FROM candidates WHERE decision='surfaced' AND created_at>=?", (row["created_at"],)))
 
 
 def _insert_candidates(conn: sqlite3.Connection, run_id: str, rows: Sequence[dict[str, Any]], now: float) -> list[int]:

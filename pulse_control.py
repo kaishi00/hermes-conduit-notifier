@@ -496,10 +496,13 @@ def left_out(pulse_store: Any, home: Optional[Path] = None, now: Optional[float]
     seen: set[tuple[str, Any]] = set()
     out = []
     for row in pulse_store.left_out(since, LEFT_OUT_ROWS):
-        key = ("item", row["item_id"]) if row["item_id"] is not None else ("text", pulse.store.same_text(row["text"]))
-        if key in seen or row["later"] or not row["text"]:
+        # Both the remembered item and the text, as the "came up later"
+        # check reads them: one report can know a thing as an item and
+        # another as words alone, and that is still one thing.
+        keys = set(pulse.store.same_thing(row))
+        if keys & seen or row["later"] or not row["text"]:
             continue
-        seen.add(key)
+        seen |= keys
         out.append({"id": row["id"], "created_at": row["created_at"], "kind": row["kind"], "text": row["text"],
                     "why": row["why"], "decision": row["decision"], "skip": row["skip"], "value": row["value"],
                     "learned": pulse_learning.factor_entry(row["factor"]), "origin": row["origin"],

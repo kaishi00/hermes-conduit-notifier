@@ -808,6 +808,48 @@ def test_bringing_up_what_pulse_left_out_makes_a_card_once(live):
     assert refused.value.code == "pulse_off"
 
 
+def test_what_pulse_left_out_is_one_thing_whether_a_report_knew_it_as_an_item_or_as_words(live):
+    """One report can know a thing as a promise it remembers and another as
+    words alone: it still lists once. And a card Pulse has since let go
+    isn't named, since bringing the thing up would make another."""
+    now = time.time()
+    [as_words, gym] = journal(live, "r1", [
+        {"text": "Renew the passport", "value": 4},
+        {"text": "The gym at 7", "value": 2}], now - 7200)
+    journal(live, "r2", [{"text": "Renew the  Passport", "origin": candidates.MEMORY, "item_id": 7,
+                          "decision": candidates.RESTING}], now - 3600)
+    assert [entry["text"] for entry in control.left_out(live.store, live.home, now=now)] == [
+        "The gym at 7", "Renew the  Passport"]
+    card = control.bring_up(live.store, gym, live.home, now=now)
+    [named] = [entry for entry in control.left_out(live.store, live.home, now=now) if entry["id"] == gym]
+    assert named["card_id"] == card["id"]
+    with sqlite3.connect(live.store.path) as conn:
+        conn.execute("DELETE FROM cards WHERE id=?", (card["id"],))
+    [let_go] = [entry for entry in control.left_out(live.store, live.home, now=now) if entry["id"] == gym]
+    assert let_go["card_id"] is None
+
+
+def test_bringing_up_something_a_later_report_brought_up_is_refused(live):
+    """What Pulse left out leaves out what came up later, but a list read
+    before that report still offers it: the tap is refused rather than
+    making a second card about the same thing."""
+    now = time.time()
+    [by_text, by_item] = journal(live, "r1", [
+        {"text": "Pay the  Rent", "value": 3},
+        {"text": "Renew the passport", "origin": candidates.MEMORY, "item_id": 7}], now - 7200)
+    assert {entry["id"] for entry in control.left_out(live.store, live.home, now=now)} == {by_text, by_item}
+    journal(live, "r2", [
+        {"text": "pay the rent", "decision": candidates.SURFACED, "rank": 1},
+        {"text": "Renew the passport by Friday", "origin": candidates.MEMORY, "item_id": 7,
+         "decision": candidates.SURFACED, "rank": 2}], now - 3600)
+    assert control.left_out(live.store, live.home, now=now) == []
+    for stale in (by_text, by_item):
+        with pytest.raises(control.Refused) as refused:
+            control.bring_up(live.store, stale, live.home, now=now)
+        assert refused.value.code == "invalid" and refused.value.data == {"field": "id"}
+    assert live.store.cards() == []
+
+
 def test_bringing_up_a_remembered_item_points_at_its_chat(live):
     now = time.time()
     item_id = commitment(live)
