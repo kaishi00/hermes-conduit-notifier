@@ -1554,7 +1554,7 @@ level, the first time it fills a message in, and leaves the planner alone,
 saying so at info level, when Hermes' planner has no
 `_derive_member_watermarks`.
 
-## Group rooms between turns (plugin 0.82.1+)
+## Group rooms between turns (plugin 0.84.1+)
 
 Hermes' room driver looks at each gateway-hosted room on a thread of its own,
 up to four at once. A change, such as a message or a reply, wakes the driver
