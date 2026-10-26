@@ -185,8 +185,11 @@ def load_or_create(root: Any, clock: Any = time.time) -> Identity:
         raise IdentityError("no_crypto", "Linked Rooms needs Python's cryptography package, which this Hermes "
                                          "doesn't have")
     directory = Path(root) / DIRECTORY
+    made = not directory.is_dir()
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     directory.chmod(0o700)
+    if made:
+        _sync_directory(directory.parent)
     lock_path = directory / f".{FILE_NAME}.lock"
     with _thread_lock, open(lock_path, "a+b") as handle, _exclusive(handle):
         found = load(root)
@@ -267,6 +270,18 @@ def _save(path: Path, identity: Identity) -> None:
         temporary.unlink(missing_ok=True)
         raise
     path.chmod(0o600)
+    # The rename too: after a crash, the identity in place is this one, never
+    # none (and so, next time, a new one).
+    _sync_directory(path.parent)
+
+
+def _sync_directory(directory: Path) -> None:
+    if os.name == "posix":
+        descriptor = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
 
 @contextmanager

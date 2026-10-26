@@ -140,6 +140,32 @@ def test_the_file_is_owner_only_whatever_the_umask(tmp_path):
     assert _mode(tmp_path / "conduit-rooms" / "identity.json") == 0o600
 
 
+@pytest.mark.skipif(os.name != "posix", reason="a directory is flushed where the system can open one")
+def test_a_new_identity_is_on_disk_before_its_used(tmp_path, monkeypatch):
+    # After a crash the identity a Link was made with is the one there,
+    # never none (and so, silently, a new one): the new directory's entry,
+    # the file and its rename are each flushed, in that order.
+    flushed, real_fsync, real_replace = [], os.fsync, pathlib.Path.replace
+
+    def fsync(descriptor):
+        flushed.append(os.fstat(descriptor).st_ino)
+        real_fsync(descriptor)
+
+    def replace(self, target):
+        moved = real_replace(self, target)
+        flushed.append("renamed")
+        return moved
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(pathlib.Path, "replace", replace)
+    identity_module.load_or_create(tmp_path)
+
+    directory = tmp_path / "conduit-rooms"
+    root, rooms = os.stat(tmp_path).st_ino, os.stat(directory).st_ino
+    file = os.stat(directory / "identity.json").st_ino
+    assert flushed.index(root) < flushed.index(file) < flushed.index("renamed") < flushed.index(rooms)
+
+
 def test_its_repr_holds_no_private_key(tmp_path):
     made = identity_module.load_or_create(tmp_path)
     stored = json.loads((tmp_path / "conduit-rooms" / "identity.json").read_text())

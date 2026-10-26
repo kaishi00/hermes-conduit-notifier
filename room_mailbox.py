@@ -41,7 +41,9 @@ SIGNATURE_WINDOW_S = 300
 CLOCK_SLACK_S = SIGNATURE_WINDOW_S - 30
 MAX_WAIT_S = 25
 TIMEOUT_S = 15.0
-# A page holds about 1 MB of envelopes, in base64.
+# The mailbox stops a page at 1 MB of envelopes, and protocol v1's are at most
+# 256 KB, so a read's answer is at most about 1.4 MB in base64 however many
+# large envelopes are waiting.
 MAX_ANSWER_BYTES = 4 * 1024 * 1024
 MAX_REFUSAL_BYTES = 4096
 
@@ -206,8 +208,11 @@ class Mailbox:
         """Envelopes after seq ``after``, oldest first, and the seq to read
         after next. With ``wait`` (seconds, at most 25), an empty inbox
         holds the request until an envelope arrives or the wait ends."""
-        wait = min(max(int(wait), 0), MAX_WAIT_S)
-        target = f"{self._inbox_path}/envelopes?after={int(after)}&limit={int(limit)}"
+        if not _whole(after) or not _whole(limit) or limit < 1 or not _whole(wait):
+            raise MailboxError("bad_request", "a read takes whole numbers: the seq to read after, a limit of 1 "
+                                              "or more and the seconds to wait")
+        wait = min(wait, MAX_WAIT_S)
+        target = f"{self._inbox_path}/envelopes?after={after}&limit={limit}"
         if wait:
             target += f"&wait={wait}"
         answer = self._owner("GET", target, timeout=self.timeout + wait)[1]
@@ -221,9 +226,11 @@ class Mailbox:
         in ``seqs``: how many it deleted."""
         body: dict[str, Any] = {}
         if through is not None:
-            body["through"] = int(through)
+            body["through"] = through
         if seqs is not None:
-            body["seqs"] = [int(seq) for seq in seqs]
+            body["seqs"] = list(seqs)
+        if not all(_whole(seq) for seq in [body.get("through", 0), *body.get("seqs", ())]):
+            raise MailboxError("bad_request", "an ack names seqs, which are whole numbers")
         deleted = self._owner("POST", f"{self._inbox_path}/ack", body)[1].get("deleted")
         if not _whole(deleted):
             raise MailboxError("bad_answer", f"The mailbox at {self.host} answered an ack oddly")
@@ -337,7 +344,9 @@ def _clock_off(skew: float) -> str:
 
 
 def _canonical_host(host: str) -> Optional[str]:
-    host = host.lower()
+    # A trailing dot spells the same name from the DNS root; the mailbox's
+    # own URL leaves it off.
+    host = host.lower().removesuffix(".")
     if not host or not host.isascii():
         return None
     try:
@@ -348,9 +357,9 @@ def _canonical_host(host: str) -> Optional[str]:
         return f"[{address.compressed}]" if address.version == 6 else address.compressed
     # A URL parser reads a host whose last label is a number as an IPv4
     # address in some short form (127.1, 0x7f.1), and signs its own spelling.
-    if ":" in host or _NUMERIC_LABEL.match(host.rstrip(".").rsplit(".", 1)[-1]):
+    if ":" in host or _NUMERIC_LABEL.match(host.rsplit(".", 1)[-1]):
         return None
-    if not re.match(r"^[a-z0-9.-]+\Z", host):
+    if not re.match(r"^[a-z0-9-]+(?:\.[a-z0-9-]+)*\Z", host):
         return None
     return host
 

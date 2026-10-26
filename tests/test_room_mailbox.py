@@ -103,6 +103,9 @@ def test_each_request_gets_a_fresh_nonce(tmp_path):
     ("http://localhost:80", "localhost"),
     ("http://[::1]:9130", "[::1]:9130"),
     ("http://[0:0:0:0:0:0:0:1]:9130", "[::1]:9130"),
+    # The DNS root's spelling of the same name, as the mailbox's own URL has it.
+    ("https://rooms.milim.dev./", "rooms.milim.dev"),
+    ("http://localhost.:9130", "localhost:9130"),
 ])
 def test_the_host_is_signed_as_a_url_parser_gives_it(url, host):
     assert mailbox_module.url_host(mailbox_module.base_url(url)) == host
@@ -118,6 +121,9 @@ def test_the_host_is_signed_as_a_url_parser_gives_it(url, host):
     "https://",
     "https://b\N{LATIN SMALL LETTER U WITH DIAERESIS}cher.example",
     "http://127.1:9130",
+    "https://rooms..milim.dev",
+    "https://rooms.milim.dev..",
+    "https://.rooms.milim.dev",
     "https://rooms.milim.dev:0",
     "rooms.milim.dev",
     None,
@@ -126,6 +132,30 @@ def test_a_mailbox_is_reached_over_https_or_on_this_host(url):
     with pytest.raises(mailbox_module.MailboxError) as refused:
         mailbox_module.base_url(url)
     assert refused.value.code == "bad_url"
+
+
+@pytest.mark.parametrize("read", [
+    lambda inbox: inbox.fetch(after=True),
+    lambda inbox: inbox.fetch(after=1.5),
+    lambda inbox: inbox.fetch(after="3"),
+    lambda inbox: inbox.fetch(after=-1),
+    lambda inbox: inbox.fetch(limit=0),
+    lambda inbox: inbox.fetch(limit="abc"),
+    lambda inbox: inbox.fetch(wait=2.5),
+    lambda inbox: inbox.ack(through=False),
+    lambda inbox: inbox.ack(through="7"),
+    lambda inbox: inbox.ack(seqs=[1, "2"]),
+    lambda inbox: inbox.ack(seqs=[1.0]),
+], ids=["after-bool", "after-float", "after-text", "after-negative", "limit-zero", "limit-text", "wait-float",
+        "through-bool", "through-text", "seqs-text", "seqs-float"])
+def test_reads_and_acks_take_only_whole_numbers(eric, read):
+    # Refused before anything goes out: nothing listens at this address, so
+    # a request would read as unreachable.
+    inbox = mailbox_module.Mailbox(f"http://127.0.0.1:{_free_port()}", eric)
+
+    with pytest.raises(mailbox_module.MailboxError) as refused:
+        read(inbox)
+    assert refused.value.code == "bad_request"
 
 
 # --- Against the mailbox itself --------------------------------------------------
@@ -161,8 +191,11 @@ def mailbox_url():
     env = dict(os.environ, PUBLIC_URL=url, DATA_PATH=os.path.join(data, "mailbox.sqlite"), PORT=str(port),
                HOST="127.0.0.1", MAILBOX_REGISTRATIONS_PER_HOUR_PER_CLIENT="1000",
                MAILBOX_REGISTRATIONS_PER_MINUTE="1000")
-    server = subprocess.Popen([shutil.which("node"), str(ROOT / "mailbox" / "src" / "server.mjs")], env=env,
-                              stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    # Its log goes to a file, which can't fill up and stall it as a pipe nobody reads can.
+    log = pathlib.Path(data) / "server.log"
+    with open(log, "wb") as output:
+        server = subprocess.Popen([shutil.which("node"), str(ROOT / "mailbox" / "src" / "server.mjs")], env=env,
+                                  stdout=output, stderr=subprocess.STDOUT)
     try:
         deadline = time.monotonic() + 15
         while True:
@@ -172,7 +205,7 @@ def mailbox_url():
                         break
             except OSError:
                 if server.poll() is not None or time.monotonic() > deadline:
-                    raise RuntimeError("the mailbox didn't start: " + server.stderr.read().decode()[-2000:])
+                    raise RuntimeError("the mailbox didn't start: " + log.read_text(errors="replace")[-2000:])
                 time.sleep(0.1)
         yield url
     finally:
@@ -220,6 +253,30 @@ def test_a_linked_sender_leaves_envelopes_that_the_owner_reads_and_acks(mailbox_
     assert [(row["sender"], row["pending"]) for row in inbox.senders()] == [("l-mona", 1)]
     assert inbox.ack(through=after) == 1
     assert inbox.fetch(after=after) == ([], after)
+
+
+@needs_node
+def test_a_backlog_of_the_largest_envelopes_reads_a_page_at_a_time(mailbox_url, eric):
+    # In one answer, this backlog would be more than the client reads, and
+    # the inbox could never be read again: the mailbox stops each page at
+    # 1 MB of envelopes, whatever the limit.
+    inbox = mailbox_module.Mailbox(mailbox_url, eric)
+    inbox.register()
+    token = mailbox_module.new_token()
+    inbox.put_sender("l-mona", token)
+    for number in range(13):
+        mailbox_module.send(mailbox_url, eric.inbox, token, bytes([number]) * 262144,
+                            idempotency_key=f"large{number}")
+
+    pages, after = [], 0
+    while True:
+        page, after = inbox.fetch(after=after, limit=100)
+        if not page:
+            break
+        pages.append(page)
+
+    assert [len(page) for page in pages] == [4, 4, 4, 1]
+    assert [item.body[0] for page in pages for item in page] == list(range(13))
 
 
 @needs_node
