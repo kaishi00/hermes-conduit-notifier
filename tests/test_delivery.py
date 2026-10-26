@@ -5,9 +5,11 @@ import http.server
 import importlib.util
 import json
 import pathlib
+import subprocess
 import sys
 import tempfile
 import threading
+import time
 import types
 import urllib.error
 
@@ -51,12 +53,14 @@ class _Relay:
     def __init__(self, statuses):
         self.statuses = list(statuses)
         self.event_ids = []
+        self.delay = 0.0
         relay = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 relay.event_ids.append(body.get("event_id"))
+                time.sleep(relay.delay)
                 status = relay.statuses.pop(0) if relay.statuses else 200
                 if status == BARE_403:
                     # Something in front of the relay: no JSON error body.
@@ -494,3 +498,47 @@ def test_notifications_paused_follows_this_profiles_pairing(paired):
     assert client.notifications_paused() is True
     client._refusals[CREDENTIAL]["until"] = 0.0
     assert client.notifications_paused() is False
+
+
+_EXITING_WORKER = """
+import importlib.util, pathlib, sys, types
+root, state = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+constants = types.ModuleType("hermes_constants")
+constants.get_hermes_home = lambda: state.parent
+sys.modules["hermes_constants"] = constants
+package = types.ModuleType("conduit_push")
+package.__path__ = [str(root)]
+sys.modules["conduit_push"] = package
+spec = importlib.util.spec_from_file_location("conduit_push.client", root / "client.py")
+client = importlib.util.module_from_spec(spec)
+sys.modules["conduit_push.client"] = client
+spec.loader.exec_module(client)
+client.state_path = lambda: state
+client.EXIT_DRAIN_S = float(sys.argv[3])
+assert client.enqueue({"event_id": "response:0123456789abcdef", "type": "response.ready",
+                       "title": "Hermes", "body": "Done."})
+# Exits at once, as a cron job's worker does after its turn (#388).
+raise SystemExit(0)
+"""
+
+
+def _exit_right_after_enqueue(paired, tmp_path, delay, drain=3.0):
+    relay = paired([])
+    relay.delay = delay
+    script = tmp_path / "worker.py"
+    script.write_text(_EXITING_WORKER)
+    subprocess.run([sys.executable, str(script), str(ROOT), str(tmp_path / "conduit-push.json"), str(drain)],
+                   check=True, timeout=30)
+    return relay
+
+
+def test_a_process_that_exits_right_after_queueing_still_sends_it(paired, tmp_path):
+    relay = _exit_right_after_enqueue(paired, tmp_path, 0.5)
+    assert relay.event_ids == ["response:0123456789abcdef"]
+
+
+def test_the_wait_at_exit_is_bounded(paired, tmp_path):
+    started = time.monotonic()
+    relay = _exit_right_after_enqueue(paired, tmp_path, 4.0, drain=1.0)
+    assert time.monotonic() - started < 3.5
+    assert len(relay.event_ids) == 1  # it got there; the answer never came back in time

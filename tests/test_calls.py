@@ -3,6 +3,8 @@ import json
 import pathlib
 import sys
 import tempfile
+import threading
+import time
 import types
 
 import pytest
@@ -47,6 +49,7 @@ def _load(name, path):
 
 
 calls = _load("conduit_push.calls", ROOT / "calls.py")
+_REAL_SPAWN = calls._spawn
 plugin = _load("conduit_push.__init__", ROOT / "__init__.py")
 
 
@@ -469,6 +472,122 @@ def test_one_held_call_that_cannot_go_out_never_stops_the_rest(home, fake):
     broken = {**good, "session_id": "a", "watch": None}  # building its event raises
     calls._send_due([broken, good], "default")
     assert [event["session_id"] for event in fake.sent] == ["b"]
+
+
+class SlowClient(FakeClient):
+    """A relay that takes ``delay`` seconds to answer, or until released."""
+
+    def __init__(self, delay):
+        super().__init__()
+        self.delay = delay
+        self.release = threading.Event()
+
+    def send_now(self, event):
+        self.release.wait(self.delay)
+        return super().send_now(event)
+
+
+def _threads(monkeypatch):
+    # The real delivery thread, not the fixture's inline one.
+    monkeypatch.setattr(calls, "_spawn", _REAL_SPAWN)
+
+
+def test_a_turn_end_waits_for_its_call_request_to_reach_the_relay(home, monkeypatch):
+    # A cron job's worker exits right after its turn and takes a delivery
+    # thread still on its way to the relay with it (#388).
+    slow = SlowClient(0.2)
+    monkeypatch.setattr(calls, "client", slow)
+    _threads(monkeypatch)
+    _watch(home, "rt-1")
+    assert calls.turn_ended("rt-1", "done", profile="default", fallback=READY) is True
+    assert [event["type"] for event in slow.sent] == ["call.requested"]
+
+
+def test_a_failed_turns_alert_call_is_waited_for_too(home, monkeypatch):
+    slow = SlowClient(0.2)
+    monkeypatch.setattr(calls, "client", slow)
+    _threads(monkeypatch)
+    CallStore(home).update_settings({"enabled": True, "alerts": True})
+    assert calls.failed_turn("rt-1", profile="default", fallback=READY, turn_id="t1") is True
+    assert [event["type"] for event in slow.sent] == ["call.requested"]
+
+
+def test_a_slow_relay_holds_the_turn_end_no_longer_than_the_bound(home, monkeypatch):
+    slow = SlowClient(None)
+    monkeypatch.setattr(calls, "client", slow)
+    monkeypatch.setattr(calls, "DELIVERY_WAIT_S", 0.05)
+    _threads(monkeypatch)
+    _watch(home, "rt-1")
+    started = time.monotonic()
+    assert calls.turn_ended("rt-1", "done", profile="default", fallback=READY) is True
+    assert time.monotonic() - started < 2
+    assert slow.sent == []
+    # The delivery goes on past the wait.
+    slow.release.set()
+    deadline = time.monotonic() + 5
+    while not slow.sent and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert [event["type"] for event in slow.sent] == ["call.requested"]
+
+
+def test_an_unloaded_plugin_does_not_wait_on_a_call(home, monkeypatch):
+    slow = SlowClient(None)
+    monkeypatch.setattr(calls, "client", slow)
+    _threads(monkeypatch)
+    calls.stop()
+    try:
+        started = time.monotonic()
+        calls._deliver_waited({"type": "call.requested"}, None)
+        assert time.monotonic() - started < 1
+    finally:
+        calls.start()
+    assert slow.sent == []
+
+
+def test_the_exit_waits_for_a_call_still_on_its_way_and_its_fallback(home, monkeypatch):
+    # Past the turn end's wait, the worker's exit waits for the retries and,
+    # when they all fail, the usual push they fall back to.
+    class Down(SlowClient):
+        def send_now(self, event):
+            self.release.wait(self.delay)
+            self.sent.append(event)
+            raise OSError("relay unreachable")
+    down = Down(0.1)
+    monkeypatch.setattr(calls, "client", down)
+    monkeypatch.setattr(calls, "DELIVERY_WAIT_S", 0.01)
+    monkeypatch.setattr(calls, "_sleep", lambda seconds, wake=None: time.sleep(0.01))
+    _threads(monkeypatch)
+    _watch(home, "rt-1")
+    assert calls.turn_ended("rt-1", "done", profile="default", fallback=READY) is True
+    assert down.enqueued == []
+    calls._wait_at_exit()
+    assert len(down.sent) == len(calls.DELIVERY_DELAYS_S)
+    assert down.enqueued == [READY]
+    assert calls._in_flight == set()
+
+
+def test_held_calls_swept_at_a_turn_end_share_one_wait(home, monkeypatch):
+    slow = SlowClient(None)
+    monkeypatch.setattr(calls, "client", slow)
+    monkeypatch.setattr(calls, "DELIVERY_WAIT_S", 0.2)
+    _threads(monkeypatch)
+    due = [{"status": "call", "outcome": "done", "session_id": session,
+            "watch": {"id": str(n) * 24, "title": "Job", "session_ids": [session]}}
+           for n, session in enumerate(["a", "b", "c"], start=1)]
+    started = time.monotonic()
+    calls._send_due(due, "default")
+    assert time.monotonic() - started < 0.5
+    slow.release.set()
+    calls._wait_at_exit()
+    assert sorted(event["session_id"] for event in slow.sent) == ["a", "b", "c"]
+
+
+def test_a_plugin_unloaded_as_the_call_starts_does_not_wait(home, monkeypatch):
+    monkeypatch.setattr(calls, "_spawn", lambda work: False)
+    started = time.monotonic()
+    calls._deliver_waited({"type": "call.requested"}, None)
+    assert time.monotonic() - started < 1
+    assert calls._in_flight == set()
 
 
 # --- Calls Hermes asks for, and alert calls ----------------------------------

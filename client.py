@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import contextvars
 import hashlib
 import hmac
@@ -809,6 +810,33 @@ def _delivery_worker(generation: int = 0) -> None:
             logger.warning("Conduit notification delivery failed for %s: %s", event.get("type", "event"), error)
         finally:
             _events.task_done()
+
+
+# How long the process's exit waits for queued notifications to go out. A cron
+# job's worker process exits right after its turn, and the delivery thread
+# dies with it (#388).
+EXIT_DRAIN_S = 3.0
+
+
+def _drain_at_exit() -> None:
+    """At interpreter exit: waits up to EXIT_DRAIN_S for the queue to empty and
+    the send in progress to end. Daemon threads still run while atexit does."""
+    with _worker_lock:
+        if _stopped.is_set() or not _worker_started:
+            return
+    deadline = time.monotonic() + EXIT_DRAIN_S
+    with _events.all_tasks_done:
+        while _events.unfinished_tasks:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                logger.info("Conduit left %d notification(s) unsent at exit", _events.unfinished_tasks)
+                return
+            _events.all_tasks_done.wait(left)
+
+
+# At import, so it runs after calls' wait at exit (atexit runs last in, first
+# out) and sends a fallback push that wait queued.
+atexit.register(_drain_at_exit)
 
 
 def _requeue(item: Any) -> None:
