@@ -34,6 +34,12 @@ jobs:
           cache: pip
           cache-dependency-path: tests/requirements.txt
 
+      - uses: actions/setup-node@v5
+        with:
+          # The mailbox client's tests run the mailbox itself, which needs
+          # Node 22.13 or later; without it they skip.
+          node-version: "22"
+
       - name: Install the test dependencies
         # Hermes provides these at runtime. aiortc and av stay out, so their
         # tests skip, as they do in a cloud session.
