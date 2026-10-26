@@ -13,6 +13,17 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.87.0 (2026-10-26)
+
+### Fixes
+- A follow-up that couldn't wait for the morning, and went out on a second try after the night, said it was sent at night.
+
+### New and improved
+- Pulse notices when something it brought up got done somewhere else. When a chat shows a remembered thing done or called off, its cards move to Done, marked "seen in the chat", and Undo puts them back.
+- A reminder Pulse sent can still be closed for two weeks: say you did it in any chat, or in answer to the reminder, and its card moves to Done. Said again, it's remembered anew and gets its own reminder.
+- News Pulse found on its own, not from something it remembered, gets its chats read again a day after it came and once more the day after, and before the morning brief or before it comes back from Not now. If you took care of it, it moves to Done.
+- Once you Undo one of these, Pulse doesn't move that card to Done again from the same chats.
+
 ## 0.86.0 (2026-10-26)
 
 ### New and improved

@@ -894,10 +894,14 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
         # follow-up budget, whatever follow-ups' switch: they hold report
         # cards too, and a stale card shouldn't reach the brief either way.
         holds = follow_used < follow_cap and bool(pulse_store.held_cards(1))
-        # Likewise a card swiped away until now, about something still open:
-        # with the budget spent it comes back unread rather than late.
-        rests = any(card["item_id"] is not None for card in pulse_store.rested_cards(now))
-        if used >= cap and not follows and not acts and not holds and not rests:
+        # Likewise a card swiped away until now, about something still open
+        # or found in a chat: with the budget spent it comes back unread
+        # rather than late.
+        rests = any(followup.read_first(card) for card in pulse_store.rested_cards(now))
+        # A report item found in a chat is read again while it's new, last
+        # and on what the follow-ups leave, so it never crowds out a reminder.
+        founds = follow_used < follow_cap and bool(followup.found_due(pulse_store, now))
+        if used >= cap and not follows and not acts and not holds and not rests and not founds:
             return  # `pulse status` says so
         profiles = pulse_store.get("report_profiles")
         sources = memory_sources(pulse_store, home, home_chat_id, profiles)
@@ -909,6 +913,7 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
         done: dict[str, int] = {}
         checked: dict[str, int] = {}
         acted: dict[str, int] = {}
+        found: dict[str, int] = {}
         try:
             try:
                 if used < cap:
@@ -963,6 +968,18 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
                                  budget=follow_cap - follow_used, done=checked)
                 finally:
                     _count_checks(pulse_store, checked)
+            if founds:
+                try:
+                    followup.check_found(pulse_store, home, lambda instructions, text: ask(
+                                             instructions, text, purpose="pulse follow-up"), zone=zone,
+                                         now=max(now, time.time()),
+                                         still_leader=lambda: not stopped.is_set() and _leads(pulse_store),
+                                         budget=follow_cap - follow_used - checked.get("tokens", 0), done=found)
+                except Exception:  # noqa: BLE001 — they stay on the screen as they are
+                    logger.warning("conduit_push: Pulse found card checks failed", exc_info=True)
+                finally:
+                    _count_checks(pulse_store, found)  # counted apart: MAX_CHECKS is the follow-ups' own
+                    checked["tokens"] = checked.get("tokens", 0) + found.get("tokens", 0)
         finally:
             # A run stopped by an unreadable state.db still spent its tokens.
             if done.get("tokens"):

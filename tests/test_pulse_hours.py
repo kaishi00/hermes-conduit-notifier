@@ -232,6 +232,20 @@ def test_news_that_cant_wait_goes_at_night_and_says_why(live, monkeypatch):
     assert card["level"] == "push" and card["why"] == "it broke. Sent at night: it couldn't wait for the morning."
 
 
+
+def test_a_push_that_couldnt_wait_says_so_only_for_the_try_that_went_then(live):
+    nights(live)
+    promise(live)
+    check_now(live, llm_saying(decision="tell", news="The deploy failed.", why="it broke", urgent=True),
+              now=time.time() + followup.FIRST_CHECK_S + 1)
+    tonight = next_at(23)
+    assert followup.next_send(live.store, tonight, live.home, zone=UTC) is not None
+    assert followup.followup_timing(live.store.followups()[0])["cant_wait"] is True
+    # That try failed; the next goes in the morning, and its Why? doesn't say it couldn't wait.
+    assert followup.next_send(live.store, tonight + 9 * 3600, live.home, zone=UTC) is not None
+    timing = followup.followup_timing(live.store.followups()[0])
+    assert "cant_wait" not in timing and followup.held_note(timing, "push") == ""
+
 def test_news_for_office_hours_waits_for_them_and_is_checked_again_first(live):
     live.store.set("time_zone", "UTC")
     item_id = promise(live)
