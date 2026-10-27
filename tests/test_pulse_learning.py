@@ -1699,6 +1699,31 @@ def test_a_failed_found_card_check_tries_again_after_a_while(live):
     assert len(said.calls) == 1
 
 
+def test_the_found_card_check_keeps_the_times_another_process_stored_meanwhile(live, monkeypatch):
+    now = time.time()
+    read = found_card(live, chat_id=CHAT, news="The release notes still need sending",
+                      came=now - followup.FOUND_EVERY_S - 60)
+    failed = found_card(live, chat_id=CHAT, news="Look at the flaky deploy", came=now - followup.FOUND_EVERY_S - 60)
+
+    def llm(instructions, text):
+        if "flaky deploy" in text:
+            raise RuntimeError("model down")
+        return {"stale": False, "why": "still open"}, 42
+
+    swap = live.store.swap
+
+    def racing(key, old, new):
+        # A former leader's held check stores two found cards' times while this check runs.
+        if key == followup.FOUND_CHECKED and "99" not in (live.store.get(key) or {}):
+            live.store.set(key, {"99": now - 60, str(failed): now - 30})
+        return swap(key, old, new)
+
+    monkeypatch.setattr(live.store, "swap", racing)
+    assert run_found(live, llm, now)["failed"] == 1
+    # The later of two times holds: the failed check's try-again-soon doesn't undo that read.
+    assert live.store.get(followup.FOUND_CHECKED) == {"99": now - 60, str(read): now, str(failed): now - 30}
+
+
 def test_the_found_card_check_reads_the_note_to_pulse(live):
     card_id = found_card(live, chat_id=CHAT, news="Look at the flaky deploy")
     live.store.set("note", "Never bring up the gym.")
