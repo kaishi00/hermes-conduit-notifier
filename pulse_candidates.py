@@ -315,13 +315,15 @@ AFTER_ITEM, AFTER_EVENT = "after:item:", "after:event:"
 def _after(value: Any, follows: Optional[report.Gathered]) -> Optional[tuple[str, Optional[dict]]]:
     """What a next step's "after" names among what ``follows`` lists: an
     item done (#12, or 12) or an event that ended (e1), as its journal ref
-    and the done item (None for an event); None when it names neither."""
+    and the done item (None for an event); None when it names neither, or
+    an event with no id to name."""
     if follows is None:
         return None
     key = str(value or "").strip().lower().lstrip("#")
     event = follows.ended.get(key)
     if event is not None:
-        return f"{AFTER_EVENT}{_clip(event.get('id'), 200)}", None
+        event_id = _clip(str(event.get("id") or ""), 200)
+        return (f"{AFTER_EVENT}{event_id}", None) if event_id else None
     number = _ref(value)
     done = follows.done.get(number) if number is not None else None
     return (f"{AFTER_ITEM}{number}", done) if done is not None else None
@@ -445,9 +447,10 @@ def floor(row: dict, now: float) -> bool:
     """Whether a candidate comes up whatever learning says: a yearly date
     at a lead time (``DATE``), a promise Hermes made that's overdue, or a
     commitment, or something the user asked to be reminded of, due within
-    FLOOR_S of now. Not one the model gave a reason to leave out."""
+    FLOOR_S of now. Not one the model gave a reason to leave out, nor a
+    next step: Pulse's own idea, at most MAX_NEXT a report."""
     due = row.get("due_at")
-    if due is None or row.get("skip"):
+    if due is None or row.get("skip") or row["kind"] == report.NEXT:
         return False
     if row["origin"] == DATE:
         return True

@@ -100,12 +100,16 @@ def private_row(pulse_store: Optional[Any], row: dict) -> bool:
     """A report's or the look ahead's pick (a candidate row): its words, the
     remembered item it is or rests on, the yearly date it's a lead time of
     (pulse_dates.ref: a picked person's birthday, a fact's birthday or
-    anniversary), or the remembered item a next step follows. With no
-    ``pulse_store`` (it can't be read), a pick on a remembered item or a
-    date, or a next step after one, is private."""
+    anniversary), or the remembered item a next step follows. A next step
+    after an event goes by its why too, which names the event ("the dentist
+    appointment ended this morning..."): the event's words aren't kept with
+    it. With no ``pulse_store`` (it can't be read), a pick on a remembered
+    item or a date, or a next step after one, is private."""
     if private_words(row.get("text")):
         return True
     ref = str(row.get("ref") or "")
+    if ref.startswith(candidates.AFTER_EVENT):
+        return private_words(row.get("why"))
     if ref.startswith("date:person:"):
         return True  # a picked person's birthday
     item_id = row.get("item_id") if row.get("origin") in (candidates.MEMORY, candidates.DATE) else None

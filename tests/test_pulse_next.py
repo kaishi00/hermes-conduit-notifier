@@ -81,6 +81,12 @@ def done_in_chat(live, item_id, words, *, at=None):
     ({"last_status": "delivery_failed", "last_delivery_error": "Telegram: chat not found"},
      "its last message didn't reach the user: Telegram: chat not found"),
     ({"last_status": "delivery_failed"}, "its last message didn't reach the user"),
+    # Any status but a run that worked is a failure: Hermes's blocked_config, or one this doesn't know yet.
+    ({"last_status": "blocked_config", "failure_streak": 2, "last_error": "No delivery platform configured"},
+     "failed its last 2 runs: No delivery platform configured"),
+    ({"last_status": "timeout"}, "last run failed"),
+    ({"last_status": ""}, ""),
+    ({"last_status": None}, ""),
 ])
 def test_a_job_says_how_it_has_been_running_when_it_fails(job, health):
     assert report.job_health(job) == health
@@ -166,6 +172,13 @@ def test_what_got_done_leaves_out_what_pulse_told_and_what_done_only_put_away(li
     # Latest first: told news, a call-off and a fact put away aren't something done.
     assert [item["id"] for item in report.done_items(live.store, since)] == [flights, invoice, passport]
     assert report.done_items(live.store, time.time() + 60) == []
+    # What it leaves out never takes the room of what it keeps: the store leaves it out before its limit.
+    for n in range(3):
+        told = promise(live, f"Hermes will tell the user about build {n}.")
+        live.store.close_item(told, status="done", closed_by=learning.TOLD_BY)
+    assert [item["id"] for item in live.store.done_items(since, 2, skip_kinds=report.UNDONE_KINDS,
+                                                         skip_closer=learning.TOLD_BY)] == [flights, invoice]
+    assert [item["id"] for item in report.done_items(live.store, since)] == [flights, invoice, passport]
     assert learning.told(learning.TOLD_BY) and learning.told(f"{learning.TOLD_BY} (brief)")
     assert not learning.told(f"{learning.CHECKED_BY}: x") and not learning.told(None)
 
@@ -192,15 +205,17 @@ def test_the_done_section_numbers_each_item_and_says_where_and_how(live):
                          said_at=datetime(2026, 10, 26, 9, 15, tzinfo=UTC).timestamp())
     done_in_chat(live, flights, "Booked the flights for the 12th")
     [item] = report.done_items(live.store, since)
-    section = report.done_section([item], UTC)
+    section, listed = report.done_section([item], UTC)
     done_at = report._local(item["closed_at"], UTC)
     assert section == (f"{report.DONE_TITLE}\n- #{flights} [commitment] The user will book the flights to Lisbon. "
                        f"(said Mon 26 Oct 09:15): done {done_at}, a chat showed it done: \"Booked the flights for the 12th\"")
-    assert report.done_section([], UTC) == ""
-    # Another profile's says so; a long list stops at its budget.
-    assert ", profile nahida): done" in report.done_section([{**item, "profile": "nahida"}], UTC)
-    many = report.done_section([{**item, "id": n, "text": "x" * 160} for n in range(30)], UTC)
+    assert listed == {flights: item}
+    assert report.done_section([], UTC) == ("", {})
+    # Another profile's says so; a long list stops at its budget, and lists only what it shows.
+    assert ", profile nahida): done" in report.done_section([{**item, "profile": "nahida"}], UTC)[0]
+    many, listed = report.done_section([{**item, "id": n, "text": "x" * 160} for n in range(30)], UTC)
     assert len(many) <= len(report.DONE_TITLE) + 1 + report.DONE_BUDGET and many.count("\n- #") < 30
+    assert sorted(listed) == [n for n in range(30) if f"\n- #{n} [" in many]
 
 
 # What ended -----------------------------------------------------------------------------------
@@ -234,6 +249,14 @@ def test_the_events_that_ended_are_timed_attended_and_over(tmp_path):
     phone_home(tmp_path / "busy", events={**_batch()["events"], "upsert": many})
     assert [event["id"] for event in report.ended_events(tmp_path / "busy", at(9), LUNCHTIME)] == [
         f"e{n}" for n in range(5, 15)]
+    # All-day, declined and cancelled events never take the room of one that ended, and one
+    # that ended just as the window opened counts.
+    crowd = [event(f"a{n}", f"Trip day {n}", at(0) - n * 86400, at(0) + 86400, all_day=True) for n in range(120)]
+    crowd += [event(f"d{n}", f"Webinar {n}", at(9), at(9, 30), my_status="declined") for n in range(30)]
+    phone_home(tmp_path / "crowd", events={**_batch()["events"], "upsert": crowd + [
+        event("e_edge", "Stand-up", at(8, 30), at(9)), event("e_last", "Review", at(12), at(12, 30))]})
+    assert [event["id"] for event in report.ended_events(tmp_path / "crowd", at(9), LUNCHTIME)] == [
+        "e_edge", "e_last"]
     # No calendar shared, or none at all: nothing.
     assert report.ended_events(tmp_path / "none", at(9), LUNCHTIME) == []
 
@@ -288,6 +311,19 @@ def test_the_list_reads_what_got_done_and_what_ended_and_nothing_else_does(live)
     assert off.done == {} and set(off.ended) == {"e1"}
 
 
+def test_a_next_step_follows_only_what_the_list_shows_done(live):
+    now = time.time()
+    live.store.set("memory", True)
+    errands = [commitment(live, f"The user will do errand {n}: " + "x" * 140, words=f"errand {n}",
+                          said_at=now - 5 * 3600) for n in range(report.MAX_DONE)]
+    for n, item_id in enumerate(errands):
+        done_in_chat(live, item_id, f"did errand {n} " + "y" * 140, at=now - 3600 + n)
+    found = report.gather(live.home, live.store, home_chat_id=SID, now=now, next_steps=True, room=100_000)
+    assert "(cut here" not in found.text  # no cut: the section's own budget leaves some out
+    shown = [item_id for item_id in errands if f"\n- #{item_id} [" in found.text]
+    assert 0 < len(shown) < len(errands) and sorted(found.done) == sorted(shown)
+
+
 def test_a_cut_list_keeps_only_what_it_still_shows(live):
     now = time.time()
     live.store.set("memory", True)
@@ -339,6 +375,9 @@ def test_a_next_step_that_follows_nothing_listed_is_dropped(after):
     entry = {**NEXT, "after": after}
     assert candidates.found_row(entry, {}, follows=follows([DONE], {"e1": DENTIST})) is None
     assert candidates.found_row({**NEXT, "after": "#12"}, {}) is None  # a list with nothing done or ended
+    # An event with no id leaves nothing to follow.
+    assert candidates.found_row({**NEXT, "after": "e1"}, {}, follows=follows(ended={"e1": {"title": "Dentist"}})) \
+        is None
 
 
 def test_a_next_steps_own_chat_wins_and_other_kinds_ignore_after():
@@ -386,6 +425,12 @@ def test_at_most_two_next_steps_come_up_in_a_report():
     assert [row["decision"] for row in rows] == [candidates.SURFACED] * 2 + [candidates.OVER_LIMIT] + \
         [candidates.SURFACED] * 3
     assert [row["rank"] for row in rows if row["rank"]] == [1, 2, 3, 4, 5]
+    # Not even ones the model says were asked for, due within the hour: a next step is never a floor.
+    now = time.time()
+    rows = [candidate(asked=True, due_at=now + 600) for _ in range(3)]
+    candidates.route(rows, now=now)
+    assert [row["decision"] for row in rows] == [candidates.SURFACED] * 2 + [candidates.OVER_LIMIT]
+    assert not any(row["floor"] for row in rows)
 
 
 def test_next_steps_start_held_for_the_morning_brief(live):
@@ -415,6 +460,9 @@ def test_a_next_step_after_something_private_is_private(live):
     assert not push.private_row(live.store, row(f"{candidates.AFTER_EVENT}e_planning"))
     assert push.private_row(live.store, row(f"{candidates.AFTER_EVENT}e_dentist", "Book the dentist's cleaning"))
     assert not push.private_row(live.store, row(f"{candidates.AFTER_ITEM}x"))
+    # One after an event goes by its why, which names the event.
+    assert push.private_row(live.store, {**row(f"{candidates.AFTER_EVENT}e_9"), "why": "Your therapy session ended."})
+    assert not push.private_row(live.store, {**row(f"{candidates.AFTER_EVENT}e_9"), "why": "The planning meeting ended."})
     # With the store unreadable, one after any remembered item is private; one after an event isn't.
     assert push.private_row(None, row(f"{candidates.AFTER_ITEM}{flights}"))
     assert not push.private_row(None, row(f"{candidates.AFTER_EVENT}e_planning"))

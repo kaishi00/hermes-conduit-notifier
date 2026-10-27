@@ -82,6 +82,9 @@ MAX_FAILURES = 10
 MAX_JOBS = 25
 # A failing job's error, as the jobs list says it (job_health).
 JOB_ERROR_CLIP = 160
+# Hermes's last_status for a run that worked (delivery_queued: its message
+# is on its way); any other is a failure (error, blocked_config...).
+JOB_OK = ("ok", "delivery_queued")
 # What got done and what ended since the last report, which a next step
 # follows (designs/pulse-what-comes-next.md): the candidate list's.
 DONE_TITLE = "## Done since the last report"
@@ -89,7 +92,6 @@ ENDED_TITLE = "## Events that ended since the last report"
 MAX_DONE = 10
 MAX_ENDED = 10
 UNDONE_KINDS = ("fact", "interest")  # Done on one puts it away (done_items)
-DONE_READ = 100  # what done_items reads to find them: far more than a day closes
 DONE_BUDGET = 1_500
 ENDED_BUDGET = 2_000
 # What the phone's Shortcuts automations logged (inbox_store), newest first.
@@ -423,12 +425,13 @@ def job_health(job: dict) -> str:
     runs: <error>" (Hermes's ``failure_streak``), "last run failed: <error>",
     or "its last message didn't reach the user: <error>" (the run worked, its
     delivery didn't); "" for a job that's running fine or hasn't run yet. An
-    older Hermes keeps no streak: the last status alone says it."""
+    older Hermes keeps no streak: the last status alone says it. A status
+    this doesn't know is a failure (``JOB_OK``)."""
     status = job.get("last_status")
     if status == "delivery_failed":
         error = _clip(job.get("last_delivery_error"), JOB_ERROR_CLIP)
         return "its last message didn't reach the user" + (f": {error}" if error else "")
-    if status != "error":
+    if not isinstance(status, str) or not status or status in JOB_OK:
         return ""
     error = _clip(job.get("last_error"), JOB_ERROR_CLIP)
     streak = job.get("failure_streak")
@@ -451,8 +454,7 @@ def done_items(pulse_store: store.PulseStore, since: float) -> list[dict]:
     Shortcuts inbox, or by Pulse's checks. Not a promise or a watch Pulse
     closed by telling the user (pulse_learning.told): the news was that.
     Nor a fact or an interest, which Done only puts away: nothing got done."""
-    return [item for item in pulse_store.done_items(since, DONE_READ)
-            if not learning.told(item["closed_by"]) and item["kind"] not in UNDONE_KINDS][:MAX_DONE]
+    return pulse_store.done_items(since, MAX_DONE, skip_kinds=UNDONE_KINDS, skip_closer=learning.TOLD_BY)
 
 
 def closed_how(closed_by: Any) -> str:
@@ -473,11 +475,12 @@ def closed_how(closed_by: Any) -> str:
     return "closed as done"
 
 
-def done_section(items: Sequence[dict], zone: tzinfo) -> str:
+def done_section(items: Sequence[dict], zone: tzinfo) -> tuple[str, dict[int, dict]]:
     """The report's "Done since the last report" for ``items``
     (``done_items``), each with its #number, what it was and how it got
-    done; "" for none."""
-    lines, used = [], 0
+    done, and the items it lists by id (not one past DONE_BUDGET); "" and
+    {} for none."""
+    lines, listed, used = [], {}, 0
     for item in items:
         where = f", profile {item['profile']}" if item["profile"] else ""
         line = (f"- #{item['id']} [{item['kind']}] {_clip(item['text'], 160)} ({pulse_memory.said_where(item)} "
@@ -486,8 +489,9 @@ def done_section(items: Sequence[dict], zone: tzinfo) -> str:
         if used + len(line) > DONE_BUDGET:
             break
         lines.append(line)
+        listed[item["id"]] = item
         used += len(line) + 1
-    return DONE_TITLE + "\n" + "\n".join(lines) if lines else ""
+    return (DONE_TITLE + "\n" + "\n".join(lines), listed) if lines else ("", {})
 
 
 def _instant(text: Any) -> Optional[float]:
@@ -515,17 +519,9 @@ def ended_events(home: Path, since: float, now: float) -> list[dict]:
             if opened is None:
                 return []
             db, device = opened
-            found, _ = phone.events(db, device["id"], int(since), int(now) + 1, limit=MAX_EVENTS * 4)
+            return phone.ended_events(db, device["id"], since, now, MAX_ENDED)
     except Exception:  # noqa: BLE001 — the report goes out without them
         return []
-    ended = []
-    for event in found:
-        end = _instant(event.get("end"))
-        if (end is not None and since <= end <= now and not event.get("all_day")
-                and event.get("status") != "canceled" and event.get("my_status") != "declined"):
-            ended.append((end, event))
-    ended.sort(key=lambda pair: pair[0])
-    return [event for _, event in ended[-MAX_ENDED:]]
 
 
 def ended_section(pulse_store: store.PulseStore, events: Sequence[dict], zone: tzinfo,
@@ -806,9 +802,7 @@ def gather(home: Path, pulse_store: store.PulseStore, *, home_chat_id: str, now:
     later = later_lines(home, shown, home_chat_id=home_chat_id, zone=zone) if shown else ""
     done_text, ended_text, done, ended = "", "", {}, {}
     if next_steps:
-        items = done_items(pulse_store, since) if memory_on else []
-        done_text = done_section(items, zone)
-        done = {item["id"]: item for item in items}
+        done_text, done = done_section(done_items(pulse_store, since) if memory_on else [], zone)
         ended_text, ended = ended_section(pulse_store, ended_events(home, since, now), zone, now)
     sections = [header, ratings_section(pulse_store) if ratings else "", listed, later, done_text, ended_text, extra,
                 phone,

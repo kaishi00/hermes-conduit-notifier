@@ -1084,6 +1084,17 @@ class PhoneStore:
             f"SELECT {_EVENT_COLUMNS} FROM events WHERE device=? AND end_utc>? AND coalesce(status,'')!='canceled'"
             " AND coalesce(my_status,'')!='declined' ORDER BY start_utc, end_utc LIMIT ?", (device, now, count))]
 
+    def ended_events(self, db: sqlite3.Connection, device: str, since: float, until: float,
+                     count: int) -> list[dict[str, Any]]:
+        """The last ``count`` timed events that ended between ``since`` and
+        ``until`` (not cancelled or declined), in the order they ended."""
+        titles = {row[0]: row[1] for row in db.execute("SELECT id, title FROM calendars WHERE device=?", (device,))}
+        rows = db.execute(
+            f"SELECT {_EVENT_COLUMNS} FROM events WHERE device=? AND all_day=0 AND end_utc>=? AND end_utc<=? "
+            "AND coalesce(status,'')!='canceled' AND coalesce(my_status,'')!='declined' "
+            "ORDER BY end_utc DESC, start_utc DESC LIMIT ?", (device, since, until, count)).fetchall()
+        return [_event_view(row, titles) for row in reversed(rows)]
+
     def busy_blocks(self, db: sqlite3.Connection, device: str, start: int, end: int) -> list[tuple[int, int]]:
         """Merged busy time in [start, end): every event that isn't free,
         cancelled or declined. All-day events count only when marked busy or
