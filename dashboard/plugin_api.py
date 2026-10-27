@@ -4131,8 +4131,11 @@ class _LocalLiveReadBack:
             await self._start(words[:LOCAL_LIVE_MAX_TURN_CHARS])
             return True
         if kind == "response.cancel":
-            await self._stop(cancel_turn=True)
-            return True
+            # The user stopped the reply on the phone. With no sentence in
+            # progress here, the call's cancel still goes on: one the server
+            # finished may still be playing, and a server that shuts its
+            # microphone until its audio has played opens it again (#1325).
+            return await self._stop(cancel_turn=True)
         return False
 
     # The server's frames.
@@ -4300,8 +4303,9 @@ class _LocalLiveReadBack:
         _local_live_tasks.add(follower)
         follower.add_done_callback(_local_live_task_done)
 
-    async def _stop(self, cancel_turn: bool) -> None:
-        """The reply stops: nothing more of it is said."""
+    async def _stop(self, cancel_turn: bool) -> bool:
+        """The reply stops: nothing more of it is said. True when that sent
+        the server a response.cancel."""
         # A start still waiting on the call is overtaken.
         self.generation += 1
         self._release()
@@ -4309,7 +4313,9 @@ class _LocalLiveReadBack:
             self.follower.cancel()
             self.follower = None
         self.sentences.clear()
+        cancelled = False
         if self.speaking is not None and not self.muting:
+            cancelled = True
             self.muting = True
             # A server may drop a response it hadn't started without a word.
             self._arm_watchdog(LOCAL_LIVE_READ_BACK_CANCEL_TIMEOUT_S if not self.started
@@ -4320,6 +4326,7 @@ class _LocalLiveReadBack:
         if cancel_turn and turn is not None:
             await self.call.cancel_turn(turn)
         await self._end_reply("cancelled")
+        return cancelled
 
     async def _follow(self, turn: Any) -> None:
         """The turn's reply, sentence by sentence, as it streams."""

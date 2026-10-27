@@ -1023,6 +1023,12 @@ bridge alike:
   words stop it: its first sentence waits until the speech is transcribed
   (10 s at most), the words start a new turn, and a sound that transcribes
   to nothing lets the reply go on.
+- The call's own `response.cancel` (the Interrupt button) stops the reply
+  the same way and lets its turn go. It reaches the server even when no
+  sentence is in progress: one the server finished may still be playing on
+  the phone, and a server that keeps its microphone shut until its audio
+  has played opens it again. A server's error saying there was nothing to
+  cancel stays with the plugin.
 - A cancelled response the server says nothing more about is over after 2 s,
   and one that goes quiet (not started, or no audio) for 30 s is given up on.
 - A server whose transcripts of two sentences in a row don't match them
