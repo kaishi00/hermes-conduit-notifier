@@ -53,6 +53,8 @@ DECISION_NAMES = {SURFACED: "picked", SKIPPED: "skipped", NOT_PICKED: "left out"
                   RESTING: "resting", UNANSWERED: "no answer", QUIETED: "quieted", MUTED: "muted", OFF: "kind off"}
 
 MEMORY, MODEL = "memory", "model"
+# A yearly date at a lead time (pulse_ahead, the look ahead's): always a floor.
+DATE = "date"
 MAX_ITEMS = 5
 MAX_FOUND = 15
 TEXT_LIMIT = 600
@@ -218,12 +220,12 @@ def parse(reply: Any, gathered: report.Gathered) -> list[dict]:
         if item is None or item["id"] in answered:
             continue
         answered.add(item["id"])
-        rows.append(_remembered(item, entry))
-    rows += [{**_remembered(item, {}), "decision": UNANSWERED} for item in gathered.shown if item["id"] not in answered]
-    found = [row for row in (_found(entry, gathered.chats, gathered.zone) for entry in _entries(reply.get("found")))
+        rows.append(remembered_row(item, entry))
+    rows += [{**remembered_row(item, {}), "decision": UNANSWERED} for item in gathered.shown if item["id"] not in answered]
+    found = [row for row in (found_row(entry, gathered.chats, gathered.zone) for entry in _entries(reply.get("found")))
              if row]
     rows += found[:MAX_FOUND]
-    rows += [{**_remembered(item, {}), "skip": why, "decision": RESTING} for item, why in gathered.resting]
+    rows += [{**remembered_row(item, {}), "skip": why, "decision": RESTING} for item, why in gathered.resting]
     return rows
 
 
@@ -231,7 +233,9 @@ def _entries(value: Any) -> list[dict]:
     return [entry for entry in value if isinstance(entry, dict)] if isinstance(value, list) else []
 
 
-def _remembered(item: dict, entry: dict) -> dict:
+def remembered_row(item: dict, entry: dict) -> dict:
+    """A remembered item as a journal row not yet decided, with what the
+    model said about it (``entry``, {} for nothing)."""
     return {"origin": MEMORY, "item_id": item["id"], "kind": item["kind"], "profile": item["profile"],
             "chat_id": item["chat_id"], "source": "chat", "area": _choice(entry.get("area"), AREAS),
             "due_at": item["due_at"], "actionable": _flag(entry.get("actionable")), "value": _value(entry.get("value")),
@@ -240,7 +244,10 @@ def _remembered(item: dict, entry: dict) -> dict:
             "why": _clip(entry.get("why"), WHY_LIMIT), "asked": None}
 
 
-def _found(entry: dict, chats: dict[str, tuple[str, str]], zone: Optional[tzinfo] = None) -> Optional[dict]:
+def found_row(entry: dict, chats: dict[str, tuple[str, str]], zone: Optional[tzinfo] = None) -> Optional[dict]:
+    """Something else the model found (``entry``) as a journal row not yet
+    decided, its chat looked up by key in ``chats``; None when it gives
+    nothing to say."""
     text = _line(entry.get("line"))
     if not text:
         return None  # nothing it would say
@@ -370,13 +377,15 @@ def time_cap(pulse_store: store.PulseStore, zone: tzinfo, now: float) -> Callabl
 
 
 def floor(row: dict, now: float) -> bool:
-    """Whether a candidate comes up whatever learning says: a promise Hermes
-    made that's overdue, or a commitment, or something the user asked to be
-    reminded of, due within FLOOR_S of now. Not one the model gave a
-    reason to leave out."""
+    """Whether a candidate comes up whatever learning says: a yearly date
+    at a lead time (``DATE``), a promise Hermes made that's overdue, or a
+    commitment, or something the user asked to be reminded of, due within
+    FLOOR_S of now. Not one the model gave a reason to leave out."""
     due = row.get("due_at")
     if due is None or row.get("skip"):
         return False
+    if row["origin"] == DATE:
+        return True
     if row["kind"] == "promise":
         return due < now
     return (row["kind"] == "commitment" or row.get("asked") is True) and abs(due - now) <= FLOOR_S

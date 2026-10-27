@@ -8602,8 +8602,9 @@ async def post_pulse_reset(request: Request, response: Response) -> Dict[str, An
 
 @router.get("/pulse/left_out")
 async def get_pulse_left_out(response: Response) -> Dict[str, Any]:
-    """What the latest reports considered and left out, and why: those
-    learning or the user's rules kept out first."""
+    """What the latest reports and look aheads considered and left out, and
+    why: those learning or the user's rules kept out first. Each entry's
+    "from" says which ("report" or "look_ahead")."""
     response.headers["Cache-Control"] = "no-store"
     return await _pulse_route("left_out", lambda control, store, home: {"left_out": control.left_out(store, home)},
                               reads_only=True)
@@ -16829,6 +16830,11 @@ ROUTE_CAPABILITIES = (
     # /pulse/rate takes "wrong_time": the card comes back at a better time,
     # and that part of the day pushes no more for its kind.
     "pulse_hours",
+    # Pulse brings up the picked people's birthdays and the yearly dates
+    # memory keeps, and looks two weeks ahead once a day (pulse_ahead): PUT
+    # /pulse takes "look_ahead", and /pulse/left_out's entries say which
+    # part left each out ("from": "report" or "look_ahead").
+    "pulse_dates",
     "present-v1",
     "health-sync",
     "voice-tools",

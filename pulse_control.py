@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import pulse, pulse_candidates, pulse_delivery, pulse_followup, pulse_hermes, pulse_learning, pulse_memory
-from . import pulse_hours, pulse_quiet
+from . import pulse_ahead, pulse_hours, pulse_quiet
 from . import pulse_host as host
 from . import pulse_report
 
@@ -175,7 +175,7 @@ def backfill_start(pulse_store: Any, home: Path, days: Optional[int] = None,
 
 SETTINGS = ("enabled", "memory", "followups", "daily_report", "report_profiles", "report_times", "time_zone",
             "brief_time", "model", "nudge", "memory_daily_tokens", "followup_daily_tokens", "note",
-            "quiet_days", "quiet_until", "night")
+            "quiet_days", "quiet_until", "night", "look_ahead")
 # What a daily token budget may be set to.
 MIN_DAILY_TOKENS = 10_000
 MAX_DAILY_TOKENS = 5_000_000
@@ -195,7 +195,8 @@ def _encodes(text: str) -> bool:
 def update(pulse_store: Any, body: Any, home: Any = None) -> None:
     """Applies the settings in ``body`` (any of SETTINGS). Every value is
     checked before any is written, so a bad one changes nothing; any other
-    key is refused too. Values: booleans for "enabled", "memory", "followups" and "daily_report"; "all" or "this"
+    key is refused too. Values: booleans for "enabled", "memory", "followups", "daily_report" and "look_ahead"
+    (the daily look ahead, pulse_ahead); "all" or "this"
     for "report_profiles"; a list of "HH:MM" for "report_times"; an IANA
     name, or "" for the phone's, for "time_zone"; {"provider", "model"} for
     "model" (the model Pulse's turns run on), or null for the chat's own;
@@ -215,7 +216,7 @@ def update(pulse_store: Any, body: Any, home: Any = None) -> None:
         if field not in SETTINGS:
             raise Refused("invalid", field=str(field)[:64])
     changes: dict[str, Any] = {}
-    for field in ("enabled", "memory", "followups", "daily_report"):
+    for field in ("enabled", "memory", "followups", "daily_report", "look_ahead"):
         if field in body:
             if not isinstance(body[field], bool):
                 raise Refused("invalid", field=field)
@@ -333,12 +334,16 @@ def forget(pulse_store: Any, item_id: Any) -> bool:
 
 
 def items(pulse_store: Any, kind: str = "") -> list[dict[str, Any]]:
-    """Open memory items, most recently mentioned first."""
+    """Open memory items, most recently mentioned first. A fact about a date
+    that comes back every year has its month and day in ``every_year``
+    ("MM-DD", or "YYYY-MM-DD" with the year it began) and what it is in
+    ``occasion`` (pulse_dates); "" for the rest."""
     if kind and kind not in pulse_memory.KINDS:
         raise Refused("invalid", field="kind")
     return [{"id": item["id"], "kind": item["kind"], "text": item["text"], "evidence": item["evidence"],
              "explicit": bool(item["explicit"]), "due": item["due"], "due_at": item["due_at"],
-             "mentioned_at": item["mentioned_at"], "profile": item["profile"], "chat_id": item["chat_id"]}
+             "mentioned_at": item["mentioned_at"], "profile": item["profile"], "chat_id": item["chat_id"],
+             "every_year": item["every_year"], "occasion": item["occasion"]}
             for item in pulse_store.open_items(kind, limit=ITEMS)]
 
 
@@ -497,6 +502,8 @@ LEFT_OUT = 100
 # The journal rows read for it, newest first: far more than a day's lists
 # hold, so the order above is kept whatever ``limit`` cuts.
 LEFT_OUT_ROWS = 5000
+# What left a candidate out (an entry's "from").
+REPORT, LOOK_AHEAD = "report", "look_ahead"
 LEFT_OUT_ORDER = (pulse_candidates.QUIETED, pulse_candidates.MUTED, pulse_candidates.OFF,
                   pulse_candidates.OVER_LIMIT, pulse_candidates.SKIPPED, pulse_candidates.NOT_PICKED,
                   pulse_candidates.RESTING, pulse_candidates.UNANSWERED)
@@ -522,13 +529,13 @@ def _left_out_since(pulse_store: Any, now: float) -> float:
 
 def left_out(pulse_store: Any, home: Optional[Path] = None, now: Optional[float] = None,
              limit: int = LEFT_OUT) -> list[dict[str, Any]]:
-    """What the latest reports considered and left out, and why, for What
-    Pulse left out: each thing once (a remembered item, or the same text, by
-    its newest decision), not one that came up in that report or later,
-    learning's and the user's rules' first, then the rest, newest and most
-    valued first within each. One brought up (``bring_up``) says which card
-    it became, whichever report's candidate was brought up, however long
-    ago."""
+    """What the latest reports and look aheads (pulse_ahead) considered and
+    left out, and why, for What Pulse left out, each saying which of the two
+    (``from``): each thing once (a remembered item, or the same text, by its
+    newest decision), not one that came up in that run or later, learning's
+    and the user's rules' first, then the rest, newest and most valued first
+    within each. One brought up (``bring_up``) says which card it became,
+    whichever run's candidate was brought up, however long ago."""
     seen: set[Any] = set()
     out = []
     for row in pulse_store.left_out(_left_out_since(pulse_store, time.time() if now is None else now), LEFT_OUT_ROWS,
@@ -543,7 +550,9 @@ def left_out(pulse_store: Any, home: Optional[Path] = None, now: Optional[float]
                     "learned": pulse_learning.factor_entry(row["factor"]), "origin": row["origin"],
                     "source": row["source"], "area": row["area"], "profile": row["profile"] or "",
                     "chat_id": row["chat_id"] or "", "chat_title": "", "item_id": row["item_id"],
-                    "due_at": row["due_at"], "card_id": row["card_id"]})
+                    "due_at": row["due_at"], "card_id": row["card_id"],
+                    # Which part of Pulse left it out: a report, or the daily look ahead.
+                    "from": LOOK_AHEAD if str(row["run_id"]).startswith(pulse_ahead.RUN_PREFIX) else REPORT})
     order = {decision: n for n, decision in enumerate(LEFT_OUT_ORDER)}
     out.sort(key=lambda entry: (order.get(entry["decision"], len(order)), -entry["created_at"],
                                 -(entry["value"] or 0), entry["id"]))
@@ -645,6 +654,8 @@ def state(pulse_store: Any, home: Path, now: Optional[float] = None) -> dict[str
         "followups_active": bool(pulse_store.get("enabled") and pulse_store.get("followups")
                                  and pulse_store.get("memory")),
         "followup_counts": pulse_store.followup_counts(),
+        # The daily look ahead (pulse_ahead): runs with memory, like follow-ups.
+        "look_ahead": pulse_ahead.enabled(pulse_store),
         "followup_usage": {key: int(follow_usage.get(key, 0) or 0) for key in ("checks", "tokens", "failed")},
         "followup_daily_tokens": follow_cap,
         "followup_tokens_today": follow_used,
