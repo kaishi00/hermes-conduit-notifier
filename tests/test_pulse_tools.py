@@ -5,6 +5,7 @@ Pulse can't tell them apart from its own."""
 
 import json
 import sqlite3
+import time
 
 import pytest
 
@@ -103,7 +104,8 @@ def test_only_a_follow_up_about_what_was_said_searches_the_web():
 
 @pytest.mark.parametrize("query", ["https://evil.example/?d=passport", "see evil.example/collect?d=1",
                                    "www.evil.example", "ftp://x", "203.0.113.9 status", "evil.example#frag",
-                                   "EVIL.EXAMPLE/Path"])
+                                   "EVIL.EXAMPLE/Path", "evil.example:8080/collect?d=secret", "evil.example:8443",
+                                   "http://3232235777/?d=1", "http://0xC0A80001/x"])
 def test_a_search_with_a_web_address_is_blocked(query):
     # So no search can fetch a page with the user's data in its address.
     assert check("web_search", {"query": query}, PROMISE) == tools.Verdict(False, tools.ADDRESS_BLOCK)
@@ -116,6 +118,7 @@ def test_no_argument_of_a_search_may_carry_a_web_address():
 
 def test_words_that_name_a_site_still_search():
     assert check("web_search", {"query": "python.org release schedule 3.14"}, PROMISE).allowed
+    assert check("web_search", {"query": "python.org: 3.14 at 10:30"}, PROMISE).allowed
 
 
 @pytest.mark.parametrize("args", [{}, {"query": ""}, {"query": "   "}, {"query": 7}, {"query": "x" * 401}])
@@ -343,9 +346,40 @@ def test_a_pulse_turn_seen_to_end_holds_nothing(live):
     assert pulse.pre_tool_call(SID, "next", "terminal", {}) is None
 
 
+def test_a_turn_in_flight_when_pulse_is_turned_off_still_ends_the_hold(live):
+    # Off, Pulse sends nothing more, but the turn it had sent is followed to
+    # its end, so the Pulse chat's hold ends with it.
+    tell(live)
+    pulse.tick()
+    [attempt] = live.store.in_flight()
+    live.store.set("enabled", False)
+    pulse.tick()
+    assert pulse.pre_tool_call(SID, "pulse?", "terminal", {}) == block(pulse.HELD_MESSAGE)
+    live.db.message("user", attempt["text"], display_kind="hidden")
+    live.db.message("assistant", "The deploy finished and everything is green.")
+    pulse.tick()
+    ended = live.store.attempt_by_tag(attempt["tag"])
+    assert ended["state"] == store.DELIVERED and "\n" not in ended["text"]  # the chat it quoted trimmed, as when on
+    assert pulse.pre_tool_call(SID, "pulse?", "terminal", {}) is None
+    live.store.set("probe_requested", True)
+    pulse.tick()
+    assert len(live.sent()) == 1
+
+
+def test_a_turn_the_loop_would_count_failed_holds_nothing(live):
+    # No process may be running the loop to say so (none hosts the chats).
+    follow_up_turn(live)
+    assert pulse.pre_tool_call(SID, "next", "terminal", {}) == block(pulse.HELD_MESSAGE)
+    with sqlite3.connect(live.home / store.DB_NAME) as conn:
+        conn.execute("UPDATE attempts SET created_at=?", (time.time() - pulse.delivery.STUCK_S - 1,))
+    assert pulse.pre_tool_call(SID, "next", "terminal", {}) is None
+
+
 def test_when_pulse_cant_read_its_chat_only_its_known_chats_are_held(live, monkeypatch):
+    monkeypatch.setattr(pulse, "_known_home", {"an-earlier-pulse-chat"})
     follow_up_turn(live)
     assert pulse.pre_tool_call(SID, "next", "terminal", {}) == block(pulse.HELD_MESSAGE)  # known from here on
+    assert pulse._known_home == {SID}  # the chats Pulse is in now, not every one it was ever in
 
     def unreadable(*args, **kwargs):
         raise sqlite3.OperationalError("database is locked")
@@ -354,6 +388,7 @@ def test_when_pulse_cant_read_its_chat_only_its_known_chats_are_held(live, monke
     monkeypatch.setattr(store, "in_flight_attempts", unreadable)
     assert pulse.pre_tool_call(SID, "next", "terminal", {}) == block(pulse.HELD_MESSAGE)
     assert pulse.pre_tool_call(CHAT, "other", "terminal", {}) is None
+    assert pulse.pre_tool_call("an-earlier-pulse-chat", "other", "terminal", {}) is None
     monkeypatch.setattr(store, "in_flight_attempts", readable)
     monkeypatch.setattr(pulse.hermes, "chain_ids", unreadable)
     assert pulse.pre_tool_call(SID, "next", "terminal", {}) == block(pulse.HELD_MESSAGE)

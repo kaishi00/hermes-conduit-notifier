@@ -63,9 +63,12 @@ ADDS = frozenset({"add_event", "add_reminder"})
 MAX_PER_TURN = 6
 DAILY = {"maps": 20, "web": 10}
 MAX_QUERY = 400
-# A web address, or what fetching one needs: a scheme, www., a domain or IP
-# with a path or query.
-_ADDRESS = re.compile(r"://|\bwww\.|\b[\w-]+\.[a-z]{2,}[/?#]|\b\d{1,3}(?:\.\d{1,3}){3}\b", re.IGNORECASE)
+# A web address, or what fetching one needs: a scheme, www., a domain with a
+# port, path or query, or an IP. With a scheme, a host written any other way
+# (one number, hex) is caught by the scheme; without one, nothing reads it as
+# an address.
+_ADDRESS = re.compile(r"://|\bwww\.|\b[\w-]+\.[a-z]{2,}(?::\d{1,5}\b|[/?#])|\b\d{1,3}(?:\.\d{1,3}){3}\b",
+                      re.IGNORECASE)
 
 NO_TOOLS = "Pulse turns can't use tools."
 USES = ("conduit_calendar (overview, calendars, events, free_busy, next, reminders), conduit_phone (status, "
@@ -208,8 +211,10 @@ def _bridged(args: Any, turn: Turn, uses_where: Optional[Callable[[dict], bool]]
 def called(args: Any) -> list[tuple[str, dict]]:
     """The calls a tool_call makes, as Hermes reads them (room_rules.
     _called_names): ``calls`` as a list, one call or JSON text, else the
-    single ``name``; each with its arguments (JSON text read too; arguments
-    that can't be read are none, so the tool's action check refuses it)."""
+    single ``name``. Both are read, as there, so neither slips by: a call
+    Hermes wouldn't run is only checked and counted too. Each comes with its
+    arguments (JSON text read too; arguments that can't be read are none, so
+    the tool's action check refuses it)."""
     if not isinstance(args, dict):
         return []
     calls = args.get("calls")

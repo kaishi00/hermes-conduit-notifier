@@ -127,9 +127,9 @@ _looks_lock = threading.Lock()
 # began before Pulse asked anything of its chat is the user's own.
 _started: dict[tuple[str, str], float] = {}
 MAX_STARTED = 1024
-# The home chats' ids (their compression chains) last read: while Pulse's
-# store or Hermes's state.db can't be read, these chats stay held to Pulse's
-# rules (_held_home_turn).
+# The home chats' ids (their compression chains) when a Pulse attempt was
+# last seen in flight: while Pulse's store or Hermes's state.db can't be
+# read, these chats stay held to Pulse's rules (_held_home_turn).
 _known_home: set[str] = set()
 # Today's look-ups by label (pulse_tools.DAILY), with the UTC day they count.
 LOOK_COUNTS = "look_counts"
@@ -416,24 +416,29 @@ def _held_home_turn(session_id: str, turn_id: Any) -> bool:
     attempt is in flight, and it didn't start before the attempt was made,
     so it may be Pulse's own (the note hook failed, Hermes gave no turn id,
     or the injected text didn't match). An attempt whose turn Pulse saw end
-    holds nothing. Read without opening the store for writing, as this runs
-    for every call in every chat while Pulse has a store. When Pulse's store
-    or Hermes's state.db can't be read, the chats last known to be home
-    chats are held, and every other chat is left alone."""
+    holds nothing, nor one older than the loop lets an attempt run
+    (delivery.STUCK_S), which it counts failed: no process may be running
+    the loop to say so. Read without opening the store for writing, as this
+    runs for every call in every chat while Pulse has a store. When Pulse's
+    store or Hermes's state.db can't be read, the chats last known to be
+    home chats are held, and every other chat is left alone."""
+    global _known_home
     home = get_hermes_home()
     path = Path(home) / store.DB_NAME
     if not path.exists():
         return False
+    now = time.time()
     try:
         made: dict[str, float] = {}
         for key, created_at, detail in store.in_flight_attempts(path):
-            if key and detail != delivery.ENDED:
+            if key and detail != delivery.ENDED and now - created_at < delivery.STUCK_S:
                 made[key] = min(created_at, made.get(key, created_at))
         chains = {key: hermes.chain_ids(Path(home), key) for key in made}
     except Exception:  # noqa: BLE001 — unreadable: only the chats known to be Pulse's are held
         logger.debug("conduit_push: Pulse couldn't tell whether a turn is in its chat", exc_info=True)
         return not session_id or session_id in _known_home
-    _known_home.update(*chains.values())
+    if chains:
+        _known_home = set().union(*chains.values())
     times = [made[key] for key, chain in chains.items() if not session_id or session_id in chain]
     if not times:
         return False
@@ -511,14 +516,17 @@ def _hosts_chats() -> bool:
 
 def tick(now: Optional[float] = None) -> None:
     """One pass: reconcile what's in flight, read report ratings, then send
-    a probe or the report if one is due."""
+    a probe or the report if one is due. With Pulse off, a turn it sent
+    before is still followed to its end, so the Pulse chat's hold
+    (_held_home_turn) ends with it, and nothing else runs."""
     if _ctx is None or not turns_marked or not _hosts_chats():
         return
     home = get_hermes_home()
     if not (Path(home) / store.DB_NAME).exists():
         return  # never turned on: leave no file behind
     pulse_store = open_store(home)
-    if not pulse_store.get("enabled"):
+    on = bool(pulse_store.get("enabled"))
+    if not on and not pulse_store.in_flight():
         return
     now = time.time() if now is None else now
     if build_stamp() != _build:
@@ -532,14 +540,16 @@ def tick(now: Optional[float] = None) -> None:
         return
     if not pulse_store.claim_leader(_owner, LEADER_TTL_S, now, build=_build):
         return  # another process on this Hermes home runs the loop
-    # The loop's heartbeat: `pulse status` warns when nothing runs the loop.
-    pulse_store.set("last_tick_at", now)
     changed = delivery.reconcile(pulse_store, home, process_started_at=_started_at, now=now)
-    _turn_cards(pulse_store, home, changed, now)
     # A report's text carries a day of private chat; keep it only while in flight.
     pulse_store.trim_finished(REPORT)
     pulse_store.trim_finished(FOLLOWUP)  # likewise the chat a follow-up quotes
     pulse_store.trim_finished(BRIEF)
+    if not on:
+        return
+    # The loop's heartbeat: `pulse status` warns when nothing runs the loop.
+    pulse_store.set("last_tick_at", now)
+    _turn_cards(pulse_store, home, changed, now)
     _collect_ratings(pulse_store, home, now)
     # Even with follow-ups turned off: one already sent still lands.
     followup.settle(pulse_store, now, home)
