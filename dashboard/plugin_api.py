@@ -8080,11 +8080,23 @@ def _room_links_root() -> Path:
     return _plugin_package_module("room_identity").root_home(_calls_home())
 
 
+def _start_room_bridge(root: Path) -> None:
+    """The bridge that carries room turns over the Links (room_bridge.py),
+    started before the loop so a request it reads finds its handler."""
+    try:
+        _plugin_package_module("room_bridge").start(root)
+    except Exception:  # noqa: BLE001 - the Links go on without it
+        logger.warning("Conduit plugin: couldn't start Linked Rooms' bridge; a links route tries again",
+                       exc_info=True)
+
+
 def _start_room_links() -> None:
     if "hermes_cli.web_server" not in sys.modules:
         return  # not the dashboard (tests, a plugin host process): a links route starts it
     try:
-        _plugin_package_module("room_links").start(_room_links_root())
+        root = _room_links_root()
+        _start_room_bridge(root)
+        _plugin_package_module("room_links").start(root)
     except Exception:  # noqa: BLE001 - Linked Rooms only, never the routes
         logger.warning("Conduit plugin: couldn't start Linked Rooms' mailbox loop; a links route tries again",
                        exc_info=True)
@@ -8093,6 +8105,7 @@ def _start_room_links() -> None:
 def room_links(action: Callable[[Any], Dict[str, Any]]) -> Dict[str, Any]:
     module = _plugin_package_module("room_links")
     root = _room_links_root()
+    _start_room_bridge(root)
     try:
         loop = module.start(root)
     except Exception:  # noqa: BLE001 - the route still answers; the next one tries again
