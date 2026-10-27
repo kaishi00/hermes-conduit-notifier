@@ -618,6 +618,36 @@ def test_a_move_across_disks_keeps_links_and_never_moves_into_a_folder(tree, mon
     assert exc.value.status == 409 and (tree / "notes.txt").is_file() and os.listdir(tree / "docs" / "taken") == []
 
 
+def test_a_move_across_disks_copies_a_link_as_a_link_and_leaves_nothing_behind(tree, monkeypatch):
+    (tree / "link.txt").symlink_to(tree / "notes.txt")
+    real_rename, real_no_replace = os.rename, wf._rename_no_replace
+    first = []
+
+    def no_replace(source, target):
+        if not first:
+            first.append(target)
+            raise OSError(18, "Invalid cross-device link")
+        return real_no_replace(source, target)
+
+    def rename(source, target):  # shutil.move's own rename: copy it, as across disks
+        if ".conduit-" in str(target) or ".conduit-" in str(source):
+            raise OSError(18, "Invalid cross-device link")
+        return real_rename(source, target)
+
+    monkeypatch.setattr(wf, "_rename_no_replace", no_replace)
+    monkeypatch.setattr(os, "rename", rename)
+    ws().move(str(tree), str(tree / "link.txt"), str(tree / "docs"), "moved.txt")
+    assert os.path.islink(tree / "docs" / "moved.txt") and not os.path.lexists(tree / "link.txt")
+    assert (tree / "notes.txt").is_file() and not [n for n in os.listdir(tree / "docs") if n.startswith(".conduit-")]
+    first.clear()
+    monkeypatch.setattr(wf, "_rename_no_replace", lambda source, target: (
+        first.append(target), (_ for _ in ()).throw(OSError(18, "x") if len(first) == 1 else PermissionError(13, "no"))))
+    with pytest.raises(wf.WorkspaceError) as exc:
+        ws().move(str(tree), str(tree / "notes.txt"), str(tree / "docs"), "kept.txt")
+    assert exc.value.status == 403 and (tree / "notes.txt").is_file()
+    assert not [n for n in os.listdir(tree / "docs") if n.startswith(".conduit-")]
+
+
 def test_ssh_deletes_a_link_to_a_secret_but_not_the_secret(tree):
     (tree / "innocent.txt").symlink_to(tree / ".env")
     ssh(tree).delete(str(tree.resolve()), str(tree / "innocent.txt"))

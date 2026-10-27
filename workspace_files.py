@@ -30,6 +30,7 @@ import secrets
 import shlex
 import shutil
 import stat as stat_module
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -424,24 +425,51 @@ class LocalWorkspace:
         return {"entry": self._entry(target)}
 
     def _move_across(self, source: str, target: str, overwrite: bool) -> None:
-        """A move to another disk: copied beside the target under a private
-        name (links kept as links), then landed there as on one disk, so
-        nothing that appeared meanwhile is replaced or moved into."""
+        """A move to another disk: copied beside the target into a private
+        folder (shutil.move keeps a link a link), then landed there as on one
+        disk, so nothing that appeared meanwhile is replaced or moved into.
+        When it can't land, it goes back where it was."""
         if not overwrite and os.path.lexists(target):
             raise WorkspaceError(409, "Something with that name is already there")
-        temp = os.path.join(os.path.dirname(target), f".conduit-{secrets.token_hex(8)}.tmp")
         try:
-            shutil.move(source, temp)
+            box = tempfile.mkdtemp(prefix=".conduit-", dir=os.path.dirname(target))
         except PermissionError:
-            raise WorkspaceError(403, "Hermes can't move this")
+            raise WorkspaceError(403, "Hermes can't write in this folder")
+        except OSError as exc:
+            raise WorkspaceError(500, f"Couldn't move this ({exc.strerror or 'error'})")
+        temp = os.path.join(box, os.path.basename(target))
         try:
-            if overwrite and not os.path.isdir(temp):
-                os.replace(temp, target)
-            else:
-                _rename_no_replace(temp, target)
-        except (FileExistsError, IsADirectoryError, NotADirectoryError, OSError):
-            shutil.move(temp, source)  # back where it was
-            raise WorkspaceError(409, "Something with that name is already there")
+            try:
+                shutil.move(source, temp)
+            except PermissionError:
+                raise WorkspaceError(403, "Hermes can't move this")
+            except FileNotFoundError:
+                raise WorkspaceError(404, "That file or folder isn't there any more")
+            except OSError as exc:
+                raise WorkspaceError(500, f"Couldn't move this ({exc.strerror or 'error'})")
+            try:
+                if overwrite and not os.path.isdir(temp):
+                    os.replace(temp, target)
+                else:
+                    _rename_no_replace(temp, target)
+                return
+            except (FileExistsError, IsADirectoryError, NotADirectoryError):
+                failed = WorkspaceError(409, "Something with that name is already there")
+            except PermissionError:
+                failed = WorkspaceError(403, "Hermes can't move this")
+            except OSError as exc:
+                failed = WorkspaceError(500, f"Couldn't move this ({exc.strerror or 'error'})")
+            try:
+                if os.path.lexists(source):
+                    raise FileExistsError(source)
+                shutil.move(temp, source)  # back where it was
+            except OSError:
+                raise WorkspaceError(500, "Couldn't move this, and couldn't put it back: it's in "
+                                          + os.path.basename(box) + " beside the target")
+            raise failed
+        finally:
+            if not os.path.lexists(temp):
+                shutil.rmtree(box, ignore_errors=True)
 
     def duplicate(self, root_raw: Any, path: Any) -> Dict[str, Any]:
         root = self.root(root_raw)
