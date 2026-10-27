@@ -718,6 +718,9 @@ class ReadBackUpstream:
         self.unstarted = False
         # Answers the next response.create this many times with busy.
         self.busy = 0
+        # Leaves a held response's cancel unanswered until answer_cancel().
+        self.defer_cancel = False
+        self.deferred = None
         # Streams a response's audio over this long before its end.
         self.stream_s = 0.0
         self.sent = []
@@ -774,12 +777,19 @@ class ReadBackUpstream:
             self._speak(rid, text)
         elif kind == "response.cancel" and self.unstarted:
             self.held = None
+        elif kind == "response.cancel" and self.held is not None and self.defer_cancel:
+            self.deferred, self.held = self.held, None
         elif kind == "response.cancel" and self.held is not None:
             rid, _ = self.held
             self.held = None
             # Audio already on its way when the cancel lands.
             self.push({"type": "response.output_audio.delta", "response_id": rid, "delta": PCM})
             self.push({"type": "response.done", "response": {"id": rid, "status": "cancelled"}})
+
+    def answer_cancel(self):
+        rid, _ = self.deferred
+        self.deferred = None
+        self.push({"type": "response.done", "response": {"id": rid, "status": "cancelled"}})
 
     def _stream(self, rid, text):
         self.push({"type": "response.output_audio_transcript.delta", "response_id": rid, "delta": text})
@@ -949,14 +959,25 @@ def test_the_users_stop_reaches_the_server_once_whether_or_not_a_sentence_is_in_
         ws.send_text(json.dumps({"type": "conduit.turn.delta", "turn_id": turn["turn_id"],
                                  "text": "Once upon a time, there was a fox. "}))
         _next(ws, "response.created")
-        ws.send_text(json.dumps({"type": "response.cancel"}))
-        # A second tap while the server winds the first down tells it nothing new.
+        # The server holds its answer to the cancel, so the second tap lands
+        # while the first is still winding down.
+        upstream.defer_cancel = True
         ws.send_text(json.dumps({"type": "response.cancel"}))
         cancel, _ = _next(ws, "conduit.turn.cancel")
         assert cancel["turn_id"] == turn["turn_id"]
+        # A second tap then tells the server nothing new. The audio after it
+        # is relayed in order, so once it arrives both taps were handled.
+        ws.send_text(json.dumps({"type": "response.cancel"}))
+        ws.send_text(json.dumps({"type": "input_audio_buffer.append", "audio": PCM}))
+        deadline = time.monotonic() + 10
+        while not any(frame.get("type") == "input_audio_buffer.append" for frame in upstream.sent):
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        assert [frame["type"] for frame in upstream.sent].count("response.cancel") == 1
+        upstream.defer_cancel = False
+        upstream.answer_cancel()
         done, _ = _next(ws, "response.done")
         assert done["response"]["status"] == "cancelled"
-        assert [frame["type"] for frame in upstream.sent].count("response.cancel") == 1
         # The server already finished the sentence, which may still play on
         # the phone: the stop goes on, so a server that keeps its microphone
         # shut while its audio plays opens it (#1325).
