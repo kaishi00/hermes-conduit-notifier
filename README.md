@@ -3197,7 +3197,8 @@ them, and one that sends over the Links answers within 50 s, or with
 
 Your agents' approvals in rooms other people host go through these, behind
 the `room-approvals` capability (plugin 0.96+), which answer 60 requests a
-minute of their own:
+minute of their own, each within 30 s (else `api_server`, 503, while it
+finishes on its own):
 
 - `GET /rooms/approvals`: `{"approvals": [...]}`, the oldest turn's first,
   each `{"run_id", "request_id", "room_id", "room", "link", "from", "agent":

@@ -11,6 +11,7 @@ once or deny and the exact request id (legacy), or exactly the request id, execu
 import json
 import logging
 import sqlite3
+import threading
 
 import pytest
 
@@ -440,6 +441,41 @@ def test_the_approvals_routes_answer_sixty_requests_a_minute(approval_routes, mo
     refused = approval_routes.call("laifu", "GET", "/rooms/approvals")
     assert refused.status_code == 429 and refused.headers["cache-control"] == "no-store"
     assert approval_routes.call("laifu", "GET", "/rooms/invites").status_code == 200
+
+
+def test_the_approvals_routes_wait_on_threads_of_their_own(approval_routes, monkeypatch):
+    # Each read and answer waits on this Hermes' API server, so a slow one
+    # holds only these routes' threads, never the dashboard's shared ones.
+    threads = []
+    for name in ("run", "respond"):
+        real = getattr(approval_routes.runs, name)
+
+        def call(*args, real=real):
+            threads.append(threading.current_thread().name)
+            return real(*args)
+
+        monkeypatch.setattr(approval_routes.runs, name, call)
+    assert approval_routes.call("laifu", "GET", "/rooms/approvals").status_code == 200
+    assert approval_routes.call("laifu", "POST", "/rooms/approvals/answer",
+                                json={"run_id": RUN, "request_id": "req-1", "choice": "deny"}).status_code == 200
+    assert len(threads) == 3 and all(name.startswith("conduit-room-approvals") for name in threads)
+
+
+def test_an_api_server_too_slow_for_the_route_reads_as_not_answering(approval_routes, monkeypatch):
+    release = threading.Event()
+
+    def stuck(*args):
+        release.wait(5)
+        return None, {}
+
+    monkeypatch.setattr(approval_routes.runs, "run", stuck)
+    monkeypatch.setattr(api, "ROOM_APPROVALS_TIMEOUT_S", 0.2)
+    try:
+        refused = approval_routes.call("laifu", "GET", "/rooms/approvals")
+    finally:
+        release.set()
+    assert refused.status_code == 503 and refused.headers["cache-control"] == "no-store"
+    assert refused.json()["code"] == "api_server"
 
 
 # --- The CLI -------------------------------------------------------------------------

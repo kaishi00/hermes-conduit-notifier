@@ -8510,11 +8510,18 @@ async def get_room_people(response: Response, room_id: Optional[str] = None) -> 
 # Your agents' approvals from rooms other people host (room_approvals.py):
 # listed and answered here, through this Hermes' own API server, never
 # through the room's home. Conduit asks for them every few seconds while it
-# shows a room, so they have their own 60 a minute.
+# shows a room, so they have their own 60 a minute. Each read and answer
+# waits on that API server, up to 10 s a call, so they run on threads of
+# their own, which a slow server holds instead of the dashboard's shared
+# executor, and a request that takes longer reads as the server not answering.
 
 ROOM_APPROVALS_LIMIT = 60
+ROOM_APPROVALS_WORKERS = 2
+ROOM_APPROVALS_TIMEOUT_S = 30.0
 _room_approvals_limiter = _MintLimiter(ROOM_APPROVALS_LIMIT, ROOM_CHOICES_WINDOW_S,
                                        message="Too many approval requests; try again shortly")
+_room_approvals_executor = ThreadPoolExecutor(max_workers=ROOM_APPROVALS_WORKERS,
+                                              thread_name_prefix="conduit-room-approvals")
 
 
 def room_approvals(action: Callable[[Any], Dict[str, Any]]) -> Dict[str, Any]:
@@ -8530,8 +8537,15 @@ def room_approvals(action: Callable[[Any], Dict[str, Any]]) -> Dict[str, Any]:
 
 async def _room_approvals_route(action: Callable[[Any], Dict[str, Any]], route: str) -> Any:
     try:
-        answer = await _run_scoped(None, _limited(_room_approvals_limiter, None, lambda: room_approvals(action)))
+        answer = await asyncio.wait_for(
+            _run_scoped(None, _limited(_room_approvals_limiter, None, lambda: room_approvals(action)),
+                        _room_approvals_executor),
+            timeout=ROOM_APPROVALS_TIMEOUT_S)
         return {"ok": True, **answer}
+    except asyncio.TimeoutError:
+        logger.warning("Linked Rooms' %s for Conduit timed out after %ss", route, ROOM_APPROVALS_TIMEOUT_S)
+        return _store_refusal(TokenError(503, "This Hermes' API server didn't answer in time; check that its "
+                                              "gateway runs", "api_server"))
     except TokenError as exc:
         # ``code`` is room_approvals' word for the refusal (bad_choice,
         # no_approval, not_pending, refused, api_server…).
