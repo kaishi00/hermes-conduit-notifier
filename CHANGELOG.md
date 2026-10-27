@@ -13,6 +13,15 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.102.0 (2026-10-27)
+
+### New and improved
+- With Where you are on, Pulse's daily look ahead can save something for
+  the right place: "Leaving work: your anniversary is on Wednesday, and
+  she loved Kyoto" comes up as you leave work, with a notification, instead
+  of in the morning brief. If you don't go there in time, or turn Where you
+  are off, it shows on the Pulse screen without a notification.
+
 ## 0.101.0 (2026-10-27)
 
 ### Fixes

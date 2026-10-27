@@ -229,7 +229,8 @@ CREATE TABLE IF NOT EXISTS cards (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     kind TEXT NOT NULL,
     item_id INTEGER,
-    -- The loudness it went out at: push, screen or brief.
+    -- The loudness it went out at: push, screen or brief; or ``moment``
+    -- (MOMENT) while it waits, off the screen, for an arrival or departure.
     level TEXT NOT NULL,
     title TEXT NOT NULL DEFAULT '',
     quote TEXT NOT NULL DEFAULT '',
@@ -270,7 +271,10 @@ CREATE TABLE IF NOT EXISTS cards (
     -- for its Why?.
     looked TEXT NOT NULL DEFAULT '',
     -- A suggestion's card (kind "proposal"): its proposals row.
-    proposal INTEGER
+    proposal INTEGER,
+    -- A look ahead's pick held for a place (pulse_places, JSON): the saved
+    -- place, arrive or leave, until when, and once a moment reached it, when.
+    moment TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS cards_created ON cards(created_at);
 -- What ratings taught Pulse (pulse_learning): each row changes what Pulse
@@ -461,6 +465,9 @@ LOOK_SETTING = "look_first"
 WHERE_SETTING = "where"
 # How long a moment is kept (pulse_places).
 MOMENTS_KEEP_S = 86400.0
+# The level of a card held for a moment (pulse_places): off the Pulse screen
+# until it comes up.
+MOMENT = "moment"
 # A deadline from the inbox is deleted this long after it's done, forgotten,
 # replaced or expired (pulse_memory.forget_inbox): Undo works that long.
 INBOX_FORGET_S = 86400.0
@@ -471,7 +478,8 @@ SPLIT_REPORTS = "split_reports"
 SPLIT_ITEMS = '"split"'
 
 CARD_COLUMNS = ("kind", "item_id", "level", "title", "quote", "news", "why", "profile", "chat_id", "chat_title",
-                "message_id", "topic", "brief", "created_at", "learned", "place", "band", "looked", "proposal")
+                "message_id", "topic", "brief", "created_at", "learned", "place", "band", "looked", "proposal",
+                "moment")
 # The suggestion columns a tap moves (PulseStore.swap_proposal).
 _PROPOSAL_MOVES = ("state", "change_id", "undo_id", "decided_at", "asked_at", "undo_at")
 # Card columns added after the first build, oldest first, with their types.
@@ -490,7 +498,7 @@ _ADDED_COLUMNS = (("cards", "topic", "TEXT NOT NULL DEFAULT ''"), ("cards", "bri
                   ("items", "from_inbox", "TEXT NOT NULL DEFAULT ''"), ("items", "sender", "TEXT NOT NULL DEFAULT ''"),
                   ("attempts", "looked", "TEXT NOT NULL DEFAULT ''"), ("cards", "looked", "TEXT NOT NULL DEFAULT ''"),
                   ("cards", "proposal", "INTEGER"), ("items", "place_words", "TEXT NOT NULL DEFAULT ''"),
-                  ("items", "place_on", "TEXT NOT NULL DEFAULT ''"))
+                  ("items", "place_on", "TEXT NOT NULL DEFAULT ''"), ("cards", "moment", "TEXT NOT NULL DEFAULT ''"))
 # What report cards said for Why? before a candidate's reason did (an item's card,
 # never shown; a whole report's card), and the setting that says a store has
 # cleared them.
@@ -1431,27 +1439,28 @@ class PulseStore:
         return dict(row) if row else None
 
     def cards(self, limit: int = 100, without: Sequence[str] = ()) -> list[dict]:
-        """The newest cards, but those of the kinds in ``without``."""
-        clause = f"WHERE kind NOT IN ({','.join('?' * len(without))}) " if without else ""
+        """The newest cards, but those of the kinds in ``without`` and those
+        held for a moment (``moment_cards``)."""
+        clause = f" AND kind NOT IN ({','.join('?' * len(without))})" if without else ""
         with self._connect() as conn:
-            rows = conn.execute(f"SELECT * FROM cards {clause}ORDER BY created_at DESC, id DESC LIMIT ?",
-                                (*without, limit)).fetchall()
+            rows = conn.execute(f"SELECT * FROM cards WHERE level!=?{clause} ORDER BY created_at DESC, id DESC "
+                                f"LIMIT ?", (MOMENT, *without, limit)).fetchall()
         return [dict(row) for row in rows]
 
     def unseen_cards(self, without: Sequence[str] = ()) -> int:
         clause = f" AND kind NOT IN ({','.join('?' * len(without))})" if without else ""
         with self._connect() as conn:
-            return int(conn.execute(f"SELECT COUNT(*) FROM cards WHERE seen_at IS NULL{clause}",
-                                    tuple(without)).fetchone()[0])
+            return int(conn.execute(f"SELECT COUNT(*) FROM cards WHERE seen_at IS NULL AND level!=?{clause}",
+                                    (MOMENT, *without)).fetchone()[0])
 
     def see_cards(self, ids: Optional[list[int]], now: float, without: Sequence[str] = ()) -> int:
-        """Marks cards seen: these, or every one but those of the kinds in
-        ``without`` when ``ids`` is None."""
+        """Marks cards seen: these, or every one ``cards`` gives but those
+        of the kinds in ``without`` when ``ids`` is None."""
         with _lock, self._connect() as conn:
             if ids is None:
                 clause = f" AND kind NOT IN ({','.join('?' * len(without))})" if without else ""
-                return conn.execute(f"UPDATE cards SET seen_at=? WHERE seen_at IS NULL{clause}",
-                                    (now, *without)).rowcount
+                return conn.execute(f"UPDATE cards SET seen_at=? WHERE seen_at IS NULL AND level!=?{clause}",
+                                    (now, MOMENT, *without)).rowcount
             if not ids:
                 return 0
             return conn.execute(f"UPDATE cards SET seen_at=? WHERE seen_at IS NULL AND id IN ({','.join('?' * len(ids))})",
@@ -1484,6 +1493,36 @@ class PulseStore:
                                 "ORDER BY created_at, id LIMIT ?", (limit,)).fetchall()
         return [dict(row) for row in rows]
 
+    def moment_cards(self) -> list[dict]:
+        """The cards held for a moment (pulse_places), oldest first, each
+        with ``done``: marked done while it waited (pulse_followup.
+        check_held)."""
+        with self._connect() as conn:
+            rows = conn.execute("SELECT *, id IN (SELECT card_id FROM card_done) AS done FROM cards WHERE level=? "
+                                "ORDER BY created_at, id", (MOMENT,)).fetchall()
+        return [{**dict(row), "done": bool(row["done"])} for row in rows]
+
+    def swap_card_moment(self, card_id: int, old: str, new: str) -> bool:
+        """Sets what a held card waits for (its ``moment``, JSON) if it's still
+        held and still ``old``; whether it did."""
+        with _lock, self._connect() as conn:
+            return conn.execute("UPDATE cards SET moment=? WHERE id=? AND level=? AND moment=?",
+                                (new, card_id, MOMENT, old)).rowcount > 0
+
+    def release_card(self, card_id: int, *, level: str, now: float, why: str, news: Optional[str] = None,
+                     looked: Optional[str] = None, fresh: bool = True) -> bool:
+        """Puts a card held for a moment on the screen at ``level``, its Why?
+        now ``why``, with ``news`` and ``looked`` when given (the turn that
+        brought it up said it); ``fresh``: as new, at the top of the list,
+        else where it was made, seen. What it waited for goes, so no place
+        or time the user was there stays on it. Whether it was still held."""
+        with _lock, self._connect() as conn:
+            return conn.execute(
+                "UPDATE cards SET level=?, why=?, news=COALESCE(?, news), looked=COALESCE(?, looked), moment='', "
+                "created_at=CASE WHEN ? THEN ? ELSE created_at END, "
+                "seen_at=CASE WHEN ? THEN NULL ELSE COALESCE(seen_at, ?) END WHERE id=? AND level=?",
+                (level, why, news, looked, fresh, now, fresh, now, card_id, MOMENT)).rowcount > 0
+
     def found_cards(self, since: float) -> list[dict]:
         """Report items Pulse found on its own (nothing remembered behind
         them) since ``since`` that are on the screen: not held for the brief,
@@ -1492,7 +1531,8 @@ class PulseStore:
         with Undo after Pulse marked it; oldest first."""
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM cards WHERE kind=? AND item_id IS NULL AND created_at > ? "
-                                "AND NOT (level='brief' AND briefed_at IS NULL) AND dismissed_at IS NULL "
+                                "AND NOT (level='brief' AND briefed_at IS NULL) AND level!='moment' "
+                                "AND dismissed_at IS NULL "
                                 "AND NOT (rating='down' AND reason!=?) AND id NOT IN (SELECT card_id FROM card_done) "
                                 "AND id NOT IN (SELECT card_id FROM card_acts) AND put_back_at IS NULL "
                                 "ORDER BY created_at, id", (NOTICED, since, WRONG_TIME)).fetchall()
@@ -1704,12 +1744,12 @@ class PulseStore:
 
     def prune_cards(self, keep: int, held_before: float = 0.0) -> int:
         """Drops the oldest cards past ``keep``, but not one still held for the
-        brief unless it was made before ``held_before`` (no brief for weeks). A
-        card put away with Not now is no longer held."""
+        brief or a moment unless it was made before ``held_before`` (no brief
+        for weeks). A card put away with Not now is no longer held."""
         with _lock, self._connect() as conn:
             dropped = conn.execute(
-                "DELETE FROM cards WHERE (NOT (level='brief' AND briefed_at IS NULL AND dismissed_at IS NULL "
-                "AND id NOT IN (SELECT card_id FROM card_done)) OR created_at < ?) AND id NOT IN "
+                "DELETE FROM cards WHERE (NOT ((level='brief' AND briefed_at IS NULL AND dismissed_at IS NULL "
+                "AND id NOT IN (SELECT card_id FROM card_done)) OR level='moment') OR created_at < ?) AND id NOT IN "
                 "(SELECT id FROM cards ORDER BY created_at DESC, id DESC LIMIT ?)", (held_before, keep)).rowcount
             conn.execute("DELETE FROM card_done WHERE card_id NOT IN (SELECT id FROM cards)")
             conn.execute("DELETE FROM card_acts WHERE card_id NOT IN (SELECT id FROM cards)")
@@ -2397,6 +2437,18 @@ def _proposal(row: sqlite3.Row) -> dict:
         fields = {}
     proposal["fields"] = fields if isinstance(fields, dict) else {}
     return proposal
+
+
+def card_moment(card: dict) -> dict[str, Any]:
+    """What a card held for a moment waits for (cards.moment, pulse_places):
+    {"place_id", "place", "kind", "on", "until"}; once a moment reached it,
+    "reached_at" and "at" (when the user got there or left); once its turn
+    is on its way, "attempt". {} for a card that waits for nothing."""
+    try:
+        value = json.loads(card.get("moment") or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
 
 
 def looked_labels(value: Any) -> list[str]:

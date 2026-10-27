@@ -153,11 +153,25 @@ def _local(epoch: float, zone: tzinfo) -> str:
 def recent_section(pulse_store: store.PulseStore, zone: tzinfo, now: float) -> str:
     """What Pulse brought up in the last RECENT_S (report items,
     follow-ups and morning briefs), newest first, and what the user did with
-    each."""
+    each; first, what the look ahead holds for a place (pulse_places), so
+    it isn't raised twice."""
     cards = [card for card in pulse_store.cards(RECENT_CARDS)
              if card["kind"] in RECENT_KINDS and card["created_at"] >= now - RECENT_S]
     marks = pulse_store.done_marks([card["id"] for card in cards])
     lines, used = [], 0
+    for card in pulse_store.moment_cards():
+        if card["done"]:
+            continue
+        wait = store.card_moment(card)
+        did = "leaves" if wait.get("on") == "leave" else "gets to"
+        ref = f" (remembered #{card['item_id']})" if card["item_id"] is not None else ""
+        line = (f"- {_local(card['created_at'], zone)} [{card['topic'] or card['kind']}] "
+                f"{_clip(card['news'] or card['title'], RECENT_CLIP)}{ref} (held: Pulse brings it up when the user "
+                f"next {did} {_clip(wait.get('place'), 60) or 'a saved place'})")
+        if used + len(line) > RECENT_BUDGET:
+            break
+        lines.append(line)
+        used += len(line) + 1
     for card in cards:
         did = (" (rated useful)" if card["rating"] == "up"
                else " (the user said it came at the wrong time)" if card["reason"] == store.WRONG_TIME

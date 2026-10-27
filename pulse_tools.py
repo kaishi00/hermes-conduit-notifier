@@ -16,13 +16,13 @@ from typing import Any, Callable, Mapping, Optional
 
 logger = logging.getLogger(__name__)
 
-# The Pulse turns that may look things up (pulse.REPORT, FOLLOWUP and BRIEF);
-# a probe gets nothing.
-LOOK_KINDS = frozenset({"report", "followup", "brief"})
+# The Pulse turns that may look things up (pulse.REPORT, FOLLOWUP, BRIEF and
+# MOMENT, a pick the look ahead held for a place); a probe gets nothing.
+LOOK_KINDS = frozenset({"report", "followup", "brief", "moment"})
 FOLLOWUP = "followup"
 # A follow-up about what the user or Hermes said in a chat may search the web.
 # A watch's check reads the Shortcuts inbox (other people's words), and
-# reports and briefs carry it, so they never do.
+# reports, briefs and the look ahead's picks carry it, so they never do.
 SEARCH_ITEM_KINDS = frozenset({"promise", "commitment"})
 
 
@@ -85,7 +85,7 @@ WHERE_USES = ("conduit_calendar (overview, calendars, events, free_busy, next, r
               "alarms), conduit_contacts (people), conduit_location (now, places, history, distance_to: where the "
               "user is) and conduit_maps (search, lookup, reverse_geocode, directions, travel_times)")
 SEARCH_USE = ", and web_search (a few words: no web addresses, nothing private about the user)"
-# Appended to a report's, follow-up's or brief's note while look_first is on.
+# Appended to a report's, follow-up's, brief's or held pick's note while look_first is on.
 LOOK_NOTE = ("Before you answer you may look things up, at most {limit} times, to check what the message brings "
              "up or add a detail to it: {uses}. Don't bring up anything new from what you find. If adding "
              "something to the calendar or reminders would help, conduit_calendar's add_event or add_reminder "

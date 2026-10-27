@@ -53,7 +53,8 @@ REASON = "Pulse suggested it, and you tapped Add."
 UNDO_REASON = "You tapped Undo on Pulse's suggestion."
 # Why? on a suggestion's card, by its turn's kind.
 WHY = {"report": "Pulse suggested this in its report.", "followup": "Pulse suggested this in a follow-up.",
-       "brief": "Pulse suggested this in your morning brief."}
+       "brief": "Pulse suggested this in your morning brief.",
+       "moment": "Pulse suggested this with something it held for a place."}
 
 
 class ProposalError(Exception):
