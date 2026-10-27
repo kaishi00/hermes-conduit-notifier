@@ -756,7 +756,7 @@ def test_starting_over_keeps_the_old_keys_retirement_time(state_file):
     _rotate(http, e2e.SUITE_CLASSICAL)
     state = json.loads(state_file.read_text())
     # A day ago: still inside the old key's overlap, whatever today is.
-    retired_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 24 * 3600))
+    retired_at = time.strftime(e2e.KEY_TIME_FORMAT, time.gmtime(time.time() - 24 * 3600))
     state["e2e_previous"]["retired_at"] = retired_at
     state_file.write_text(json.dumps(state))
     assert _rotate(http, e2e.SUITE_CLASSICAL, kid_new=NEWER_KID)[2].status_code == 200
