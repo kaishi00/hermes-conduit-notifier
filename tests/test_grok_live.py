@@ -428,3 +428,13 @@ def test_session_update_text_is_never_rewritten(client, xai):
         ws.send_text("finish")
         _wait_close(ws)
     assert xai.upstream.sent[0] == update
+
+
+def test_socket_takes_another_profile_as_conduit_profile(client, xai, hermes):
+    # Hermes 0.22.3+ sends ?profile=<another profile> to that profile's plugin
+    # host, which has no sockets (hermes-conduit#1336).
+    xai.upstream = FakeUpstream(frames=[], close_code=1000)
+    with client.websocket_connect(f"{BASE}/grok-live/socket?conduit_profile=work") as ws:
+        ws.send_text("finish")
+        _wait_close(ws)
+    assert hermes.entered == ["work"]

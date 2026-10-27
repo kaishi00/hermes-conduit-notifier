@@ -991,6 +991,41 @@ the server speaks Classic's replies in its own voice. Classic then uses one
 server for listening and speaking. While the reply plays, Classic may open
 its listening socket too, so start the server with `--num_pipelines 2`.
 
+### Voice on a profile the dashboard didn't start with (plugin 0.93+)
+
+Since Hermes 0.22.3, a dashboard that serves several profiles runs each
+profile's plugins, except the one it started with, in a plugin host of its
+own (Hermes' PLG-3), whatever `plugins.isolation` says. A request goes there
+when its `?profile=` names such a profile. The host only carries plain
+request/response HTTP: Hermes refuses a plugin's WebSockets there (HTTP 501),
+and the host has none of the dashboard process's state. On those profiles
+Local Live, Classic voice on your speech server, Grok Live and Watch calls
+would fail, and Local Live's status would say "Local Live runs in the Hermes
+dashboard". So would the routes that work with the chats the dashboard's
+gateway runs: a takeover would judge claims by the host's pid, and Desktop
+views and predictions would find no gateway.
+
+This is a workaround until Hermes' plugin host carries WebSockets
+(NousResearch/hermes-agent#140051). The voice and Watch routes take the
+profile as `?conduit_profile=` instead: Local Live's status, key and socket,
+the speech server and Grok Live sockets, and `/watch-tools/grant`,
+`/watch-tools/revoke`, `/watch-audio/status`, `/sessions/takeover`,
+`/sessions/desktop-views` and `/predict` (Conduit sends it to
+`/watch-audio/prepare` too, which isn't per profile, so the Watch's audio
+runtime is made in the dashboard). Hermes doesn't route on that parameter, so the request stays in the dashboard
+process, and the route scopes itself to the profile as Hermes would for
+`?profile=`. It first asks Hermes' own consent check in that profile, so a
+profile that turned the plugin off gets 404. A Hermes Desktop ticket acts for
+its own profile only, so a request carrying one for another profile gets 403. When the request
+also sends `?profile=`, the two must name the same profile (400 otherwise).
+The capabilities route lists `dashboard-profiles`, and Conduit sends
+`?conduit_profile=` only to a plugin that lists it.
+
+With an older plugin or Conduit, run a dashboard for each profile instead
+(`hermes --profile <name> dashboard` on its own port, saved in Conduit as its
+own dashboard): that profile is then the one the dashboard started with. In a
+plugin host, Local Live's status says so and suggests the same.
+
 ### Local Live on a read-back speech server (plugin 0.50+)
 
 Some speech servers only listen and read text aloud, with no model of their
@@ -2138,7 +2173,7 @@ unless the user asks, with one exception: deadlines (plugin 0.90+).
   the day before, held for the morning brief: deadlines have a level of their
   own in What Pulse learned, and push only once the user turns them up there.
   Only the deadlines kept this way count: a report's card or typed rating for
-  anything else it tags a deadline is "other" (plugin 0.92.1+).
+  anything else it tags a deadline is "other" (plugin 0.93.1+).
 - **Deleted when they're over.** Each is deleted a day after it's done,
   forgotten or replaced, otherwise about a week after its day (when memory
   expires it, plus a day), and at once when the event it came from is deleted
