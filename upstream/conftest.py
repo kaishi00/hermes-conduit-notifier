@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import secrets
 import shutil
 import signal
 import socket
@@ -47,7 +48,9 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT = Path(__file__).resolve().parent / "contract.yml"
 PLUGIN = "conduit_push"
-TOKEN = "upstream-contract-session-token"
+# Made at run time: Hermes' install scan blocks a plugin whose files hold a
+# literal that looks like a token, and this folder ships with the plugin.
+TOKEN = secrets.token_hex(16)
 READY_TIMEOUT_S = 120
 # What a copy of the plugin leaves out: the relay and mailbox are not plugin code.
 COPY_IGNORE = shutil.ignore_patterns(".git", "node_modules", "relay", "mailbox", "tests", "upstream",
