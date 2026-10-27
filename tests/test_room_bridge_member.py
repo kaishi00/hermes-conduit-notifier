@@ -864,6 +864,40 @@ def test_output_is_cut_at_64_kib(laifu, hermes):
     assert long_reply.startswith(sent["output"])
 
 
+def test_output_utf_8_cant_hold_goes_with_a_question_mark_for_it(laifu, hermes):
+    run_id = admit(laifu)
+    # A lone surrogate, which JSON carries and UTF-8 can't: Hermes can pass one on from a tool's output.
+    hermes.run(run_id, status="completed", output="The 22nd \ud83d works.")
+    others = [admit(laifu, task) for task in ("t2", "t3")]
+    for other in others:
+        hermes.run(other, status="completed", output="Yes.")
+
+    laifu.member.tick()
+    read = ask(laifu, "GET", f"/v1/runs/{run_id}")
+
+    assert {status["run_id"]: status["output"] for status in laifu.link.statuses()} == {
+        run_id: "The 22nd ? works.", **dict.fromkeys(others, "Yes.")}
+    assert read["body"] == {"run_id": run_id, "status": "completed", "output": "The 22nd ? works."}
+    assert bridge.Store(laifu.root).read()["member"]["runs"][run_id]["shown"]["output"] == "The 22nd ? works."
+
+
+def test_an_answer_that_cant_go_for_another_reason_is_logged(laifu, hermes, caplog):
+    def broken(link_id, kind, body, message_id=None):
+        raise OSError("the store went away")
+
+    laifu.member = _member(laifu, send=broken)
+    body, key = dispatch()
+
+    laifu.member.handle(links_module.Received(link_id="link1", kind=bridge.REQUEST, message_id="m-broken",
+                                              at=int(NOW), body={"v": 1, "profile": "default", "method": "POST",
+                                                                 "path": "/v1/runs", "grant": GRANT, "key": key,
+                                                                 "body": body},
+                                              age=0, root=laifu.root))
+
+    assert "couldn't send its answer over Link link1 (OSError)" in caplog.text
+    assert "store went away" not in caplog.text
+
+
 def test_watching_survives_a_restart(laifu, hermes):
     run_id = admit(laifu)
     hermes.run(run_id, status="running")

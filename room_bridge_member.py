@@ -221,6 +221,9 @@ class Member:
         except room_links.LinkError as exc:
             # Hermes' client asks again when the home's wait ends.
             logger.info("Linked Rooms couldn't send its answer over Link %s (%s)", received.link_id, exc.code)
+        except Exception as exc:  # noqa: BLE001 - on a worker, nothing else would see it
+            logger.warning("Linked Rooms couldn't send its answer over Link %s (%s)", received.link_id,
+                           type(exc).__name__)
 
     def _answer(self, received: room_links.Received, request: room_bridge.Request,
                 heard: float) -> Optional[dict]:
@@ -645,9 +648,9 @@ def _shown(answer: Any, *, home_stopped: bool) -> Optional[dict]:
 
 
 def _cut(text: str) -> str:
-    """``text`` cut to MAX_OUTPUT_BYTES of UTF-8, at a character."""
-    encoded = text.encode("utf-8")
-    return text if len(encoded) <= MAX_OUTPUT_BYTES else encoded[:MAX_OUTPUT_BYTES].decode("utf-8", "ignore")
+    """``text`` cut to MAX_OUTPUT_BYTES of UTF-8, at a character. A lone
+    surrogate, which JSON carries and UTF-8 can't, reads as ``?``."""
+    return text.encode("utf-8", "replace")[:MAX_OUTPUT_BYTES].decode("utf-8", "ignore")
 
 
 def _error(code: str) -> dict:

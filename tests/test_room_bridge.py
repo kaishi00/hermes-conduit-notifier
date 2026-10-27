@@ -126,7 +126,7 @@ def test_a_store_with_only_the_homes_section_has_an_empty_members(tmp_path):
 
 
 @pytest.mark.parametrize("content", [
-    "not json", "[]", '{"version": 2}', '{"version": 1, "member": []}',
+    "not json", "[]", '{"version": 2}', '{"version": true}', '{"version": 1, "member": []}',
     '{"version": 1, "member": {"bindings": {"l": [{"room_id": "x"}]}, "runs": {}, "days": {}}}',
     '{"version": 1, "member": {"bindings": {}, "runs": {"r": {"kind": "run"}}, "days": {}}}',
 ])

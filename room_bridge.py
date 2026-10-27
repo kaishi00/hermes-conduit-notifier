@@ -224,7 +224,7 @@ def _empty() -> dict[str, Any]:
 
 
 def _well_formed(state: Any) -> bool:
-    if not isinstance(state, dict) or state.get("version") != VERSION:
+    if not isinstance(state, dict) or type(state.get("version")) is not int or state["version"] != VERSION:
         return False
     member = state.get("member", {"bindings": {}, "runs": {}, "days": {}})
     if not isinstance(member, dict) or not all(isinstance(member.get(name), dict)
