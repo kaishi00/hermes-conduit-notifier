@@ -70,13 +70,15 @@ NAMED = {
     "message": ("send", "message", "mail", "email", "sms", "post", "reply", "notify"),
 }
 READS = ("list", "get", "search", "read", "find", "fetch", "query", "view", "lookup", "status")
+REMOVES = ("delete", "remove", "cancel", "clear", "unset")
 _WORD = re.compile(r"[A-Z]?[a-z0-9]+|[A-Z]+(?![a-z])")
 
 
 def start(pulse_store: store.PulseStore, now: float) -> None:
     """The loop, with Pulse on: claims are judged from ``now`` unless they
     already are."""
-    if not isinstance(pulse_store.get(FROM), (int, float)):
+    since = pulse_store.get(FROM)
+    if not isinstance(since, (int, float)) or isinstance(since, bool):
         pulse_store.set(FROM, now)
 
 
@@ -112,7 +114,8 @@ def does(outcome: dict, action: str) -> bool:
         return False  # its actions say what it did
     # Words as written: sendMessage and send_message alike.
     words = [word.lower() for word in _WORD.findall(f"{outcome.get('tool') or ''} {outcome.get('action') or ''}")]
-    return any(word.startswith(NAMED[action]) for word in words) and not any(word.startswith(READS) for word in words)
+    return (any(word.startswith(NAMED[action]) for word in words)
+            and not any(word.startswith(READS + REMOVES) for word in words))
 
 
 def turn(rows: Sequence[Any], row_id: int, home: Path, chat_id: str) -> Optional[tuple[float, Optional[float]]]:

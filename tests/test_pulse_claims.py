@@ -92,6 +92,9 @@ def test_a_claim_is_in_hermess_own_words():
     ("createEvent", "", {"event"}),
     ("send_message", "send", {"message"}),
     ("send_message", "list", set()),
+    ("delete_reminder", "", set()),  # undoing it isn't doing it
+    ("mcp_google_calendar_delete_event", "", set()),
+    ("cancelScheduledMessage", "", set()),
     ("terminal", "", ALL),  # it runs other tools or code: it could have
     ("delegate_task", "", ALL),
     ("execute_code", "", ALL),
@@ -209,6 +212,11 @@ def test_the_loop_judges_from_when_pulse_is_on_and_off_starts_over(live, db, mon
     assert live.store.get(claims.FROM) == now + 120
     control.update(live.store, {"enabled": False})
     assert live.store.get(claims.FROM) is None
+    # A setting that isn't a time starts it over.
+    live.store.set("enabled", True)
+    live.store.set(claims.FROM, True)
+    pulse.tick(now + 180)
+    assert live.store.get(claims.FROM) == now + 180
 
 
 def test_claims_are_kept_once_and_forgotten_after_a_month(judging, db):
@@ -228,6 +236,20 @@ def test_claims_are_kept_once_and_forgotten_after_a_month(judging, db):
     assert len(store_.claims()) == 1
     _remember(judging, model, now + claims.KEEP_S + 1)
     assert store_.claims() == []
+
+
+def test_the_loop_forgets_claims_after_a_month_with_memory_off(live, db):
+    db.session()
+    live.store.set("enabled", True)
+    now = time.time()
+    assert live.store.advance("", "work", message_id=2, at=now, claims=[{
+        "message_id": 2, "action": "reminder", "text": "Hermes set it.", "evidence": "I've set a reminder",
+        "said_at": now, "turn_from": now - 60, "turn_to": None, "backed_by": "", "calls_json": "[]",
+        "kept_at": now}]) is not None
+    pulse.tick(now + claims.KEEP_S - 1)
+    assert len(live.store.claims()) == 1
+    pulse.tick(now + claims.KEEP_S + 1)
+    assert live.store.claims() == []
 
 
 def test_pulse_claims_lists_what_no_call_backed(judging, db, capsys, monkeypatch):

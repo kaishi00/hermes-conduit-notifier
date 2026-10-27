@@ -688,6 +688,8 @@ def tick(now: Optional[float] = None) -> None:
     pulse_store.prune_cards(CARDS_KEEP, held_before=now - HELD_DAYS * 86400.0)
     pulse_store.prune_candidates(now - candidates.JOURNAL_DAYS * 86400.0)
     pulse_store.prune_signals(now - prefs.KEEP_S)
+    # Claims too, with memory off: they're kept a month at most.
+    pulse_store.prune_claims(now - claims.KEEP_S)
     # Deadlines from the Shortcuts inbox: a day after they're over, or at
     # once when their event was deleted there.
     memory.forget_inbox(pulse_store, home, now)
