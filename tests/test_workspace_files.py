@@ -508,6 +508,33 @@ def test_ssh_new_files_never_replace_one_that_appears_meanwhile(tree):
     assert not [name for name in os.listdir(tree) if name.startswith(".conduit-")]
 
 
+def test_ssh_stops_listing_a_huge_folder_at_the_cap(tree, monkeypatch):
+    monkeypatch.setattr(wf, "MAX_ENTRIES", 3)
+    for index in range(10):
+        (tree / f"f{index}.txt").write_text("x")
+    root = str(tree.resolve())
+    listing = ssh(tree).list_dir(root, root)
+    assert len(listing["entries"]) == 3 and listing["truncated"] is True
+
+
+def test_search_never_reads_through_a_link(tree):
+    (tree / "docs" / "swapped.md").symlink_to(tree.parent / "outside.txt")
+    assert wf._search_file(str(tree / "docs" / "swapped.md"), "grouping") == []
+
+
+def test_ssh_name_search_leaves_out_a_link_to_a_secret(tree):
+    (tree / "innocent-notes.txt").symlink_to(tree / ".env")
+    found = ssh(tree).search(str(tree.resolve()), "notes", contents=False)
+    assert [entry["name"] for entry in found["names"]] == ["notes.txt"]
+
+
+def test_ssh_duplicate_finds_a_free_name_past_the_listing_cap(tree, monkeypatch):
+    monkeypatch.setattr(wf, "MAX_ENTRIES", 1)
+    (tree / "notes copy.txt").write_text("taken")
+    copy = ssh(tree).duplicate(str(tree.resolve()), str(tree / "notes.txt"))["entry"]["name"]
+    assert copy == "notes copy 2.txt" and (tree / "notes copy.txt").read_text() == "taken"
+
+
 # --- Routes --------------------------------------------------------------------
 
 

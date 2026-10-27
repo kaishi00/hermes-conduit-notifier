@@ -1664,9 +1664,10 @@ Conduit's Folder tab, beside Artifacts, browses one folder at a time: the
 open chat's working folder or a project's. These routes take that folder as
 `root` and keep every path inside it (a link that leads out is refused), on
 this host or on the profile's SSH machine, and leave out files that hold keys
-or passwords (`.env`, `auth.json`, `.ssh/` and the like) and the folders
-Hermes' own listing hides (a duplicated folder leaves them out too; a deleted
-folder goes with everything in it). On a personal install any folder can be a
+or passwords (`.env`, `auth.json`, `.ssh/` and the like; a duplicated folder
+leaves them out too, and a deleted folder goes with everything in it). Lists,
+searches and Recently Changed also skip the folders Hermes' own listing hides
+(`.git`, `node_modules` and the like). On a personal install any folder can be a
 root, as Hermes' own file routes allow there; Conduit only offers the chat's
 folder and the profile's projects. On a hosted or locked install every root
 stays inside the folder Hermes keeps files in. File contents are still read

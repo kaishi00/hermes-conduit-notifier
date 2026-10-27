@@ -48,6 +48,8 @@ _SENSITIVE_DIRS = frozenset({"mcp-tokens", "pairing", ".ssh", ".gnupg"})
 MAX_NAME_BYTES = 255
 MAX_PATH_CHARS = 4096
 MAX_ENTRIES = 2000
+# A single SSH step (not a walk) that takes longer is given up on.
+SSH_STEP_TIMEOUT_S = 25
 SEARCH_MAX_RESULTS = 200
 SEARCH_MAX_MATCHES_PER_FILE = 5
 SEARCH_MAX_FILES = 20000
@@ -406,7 +408,14 @@ class LocalWorkspace:
             raise WorkspaceError(403, "Hermes can't move this")
         except OSError as exc:
             if exc.errno == 18:  # EXDEV: another disk under the same root
-                shutil.move(source, target)
+                if not overwrite and os.path.lexists(target):
+                    raise WorkspaceError(409, "Something with that name is already there")
+                try:
+                    shutil.move(source, target)
+                except (FileExistsError, IsADirectoryError, NotADirectoryError, shutil.Error):
+                    raise WorkspaceError(409, "Something with that name is already there")
+                except PermissionError:
+                    raise WorkspaceError(403, "Hermes can't move this")
             else:
                 raise WorkspaceError(500, f"Couldn't move this ({exc.strerror or 'error'})")
         return {"entry": self._entry(target)}
@@ -537,7 +546,8 @@ def _rename_no_replace(source: str, target: str) -> None:
 def _search_file(path: str, lowered: str) -> List[Dict[str, Any]]:
     """Lines of a text file holding ``lowered``, case-insensitively."""
     try:
-        with open(path, "rb") as handle:
+        # Never through a link swapped in since the walk passed it.
+        with os.fdopen(os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)), "rb") as handle:
             data = handle.read(SEARCH_MAX_FILE_BYTES + 1)
     except OSError:
         return []
@@ -599,7 +609,8 @@ class SshWorkspace:
             raise WorkspaceError(400, str(exc) or "Invalid path")
 
     def _run(self, script: str, timeout: Optional[int] = None, stdin: Optional[str] = None) -> List[str]:
-        result = self._fs._execute(script, stdin_data=stdin, timeout=timeout)
+        # Always bounded: a wedged host never keeps a worker thread.
+        result = self._fs._execute(script, stdin_data=stdin, timeout=timeout or SSH_STEP_TIMEOUT_S)
         output = result.get("output", "") or ""
         for line in output.splitlines():
             if line.startswith(_ERROR):
@@ -711,10 +722,12 @@ class SshWorkspace:
                           f'[ -e "$p" ] || {{ echo {_ERROR}ENOENT; exit 1; }}\n'
                           f'[ -d "$p" ] || {{ echo {_ERROR}ENOTDIR; exit 1; }}\n'
                           f'follows "$p" || {{ echo {_ERROR}EOUTSIDE; exit 1; }}\n'
-                          'for c in "$p"/* "$p"/.[!.]* "$p"/..?*; do [ -e "$c" ] || [ -L "$c" ] || continue;'
+                          # One past the cap, so the answer can say it was cut.
+                          f'n=0; for c in "$p"/* "$p"/.[!.]* "$p"/..?*; do [ -e "$c" ] || [ -L "$c" ] || continue;'
+                          f' n=$((n+1)); [ $n -gt {MAX_ENTRIES + 1} ] && break;'
                           ' if [ ! -L "$c" ]; then rec "$c"; elif follows "$c"; then rec "$c" "" "$r"; else rec "$c" l; fi; done')
         entries = self._records(lines)
-        truncated = len(entries) > MAX_ENTRIES
+        truncated = len(entries) > MAX_ENTRIES or len(lines) > MAX_ENTRIES
         entries = entries[:MAX_ENTRIES]
         entries.sort(key=lambda item: (not item["isDirectory"], item["name"].lower(), item["name"]))
         return {"path": folder, "root": root, "entries": entries, "truncated": truncated}
@@ -734,8 +747,11 @@ class SshWorkspace:
         pattern = "*" + "".join("\\" + ch if ch in "*?[]\\" else ch for ch in needle) + "*"
         q_root = shlex.quote(root)
         name_lines = self._run(
-            _STAT + f'find {q_root} {self._prune()} -iname {shlex.quote(pattern)} -print 2>/dev/null'
-            f' | head -n {SEARCH_MAX_RESULTS} | while IFS= read -r f; do rec "$f"; done',
+            _STAT + self._guard(root) +
+            f'find {q_root} {self._prune()} -iname {shlex.quote(pattern)} -print 2>/dev/null'
+            f' | head -n {SEARCH_MAX_RESULTS} | while IFS= read -r f; do'
+            # A link goes with where it leads, so one to a secret stays out.
+            ' if [ ! -L "$f" ]; then rec "$f"; elif follows "$f"; then rec "$f" "" "$r"; else rec "$f" l; fi; done',
             timeout=int(SEARCH_TIME_S) + 7)
         names = [entry for entry in self._records(name_lines) if entry["path"] != root]
         matches: List[Dict[str, Any]] = []
@@ -886,7 +902,16 @@ class SshWorkspace:
         if source == root:
             raise WorkspaceError(400, "The workspace folder itself can't be duplicated")
         folder = posixpath.dirname(source)
-        taken = {entry["name"] for entry in self.list_dir(root, folder)["entries"]}
+        # Every name there, not the listing's first 2,000.
+        names = self._run(self._guard(root) + f'p={shlex.quote(folder)}\n'
+                          'for c in "$p"/* "$p"/.[!.]* "$p"/..?*; do [ -e "$c" ] || [ -L "$c" ] || continue;'
+                          ' printf \'%s\' "${c##*/}" | base64 | tr -d \'\\r\\n\'; echo; done')
+        taken = set()
+        for line in names:
+            try:
+                taken.add(base64.b64decode(line.strip(), validate=True).decode("utf-8", errors="replace"))
+            except (ValueError, binascii.Error):
+                continue
         name = copy_name(posixpath.basename(source), lambda candidate: candidate in taken)
         target = posixpath.join(folder, name)
         # The copy keeps links as links and leaves out what holds keys or
@@ -898,8 +923,11 @@ class SshWorkspace:
                   f'follows "$s" || {{ echo {_ERROR}EOUTSIDE; exit 1; }}\n'
                   f'inside "$t" || {{ echo {_ERROR}EOUTSIDE; exit 1; }}\n'
                   f'[ -e "$t" ] && {{ echo {_ERROR}EEXIST; exit 1; }}\n'
-                  f'cp -R -P -p -- "$s" "$t" || {{ echo {_ERROR}EACCES; exit 1; }}\n'
-                  f'[ -d "$t" ] && [ ! -L "$t" ] && find "$t" -mindepth 1 \\( {secrets_in_copy} \\) -prune -exec rm -rf -- {{}} + 2>/dev/null; exit 0')
+                  # A copy that fails partway, or can't lose its secrets, goes.
+                  f'cp -R -P -p -- "$s" "$t" || {{ rm -rf -- "$t"; echo {_ERROR}EACCES; exit 1; }}\n'
+                  f'if [ -d "$t" ] && [ ! -L "$t" ]; then find "$t" -mindepth 1 \\( {secrets_in_copy} \\) -prune -exec rm -rf -- {{}} +;'
+                  f' [ -z "$(find "$t" -mindepth 1 \\( {secrets_in_copy} \\) -print 2>/dev/null | head -n 1)" ] ||'
+                  f' {{ rm -rf -- "$t"; echo {_ERROR}EACCES; exit 1; }}; fi; exit 0')
         return {"entry": self._entry(target)}
 
     def delete(self, root_raw: Any, path: Any) -> Dict[str, Any]:
