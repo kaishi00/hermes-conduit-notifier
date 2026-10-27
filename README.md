@@ -2714,7 +2714,7 @@ or its roster is damaged) is looked for in every agent's home on this host.
 Agents on other people's Hermes keep their sessions for the room: someone who
 leaves keeps their agent's session, and a revoke can't tell leaving from
 disbanding. In a room with people you've linked (below), their Hermes are
-told it was disbanded and undo their agents' joins (plugin 0.91+), and those
+told it was disbanded and undo their agents' joins (plugin 0.93+), and those
 sessions stay too. A Hermes without `disband_room`, or whose session delete
 can't take a compression chain, logs one line and deletes nothing.
 
@@ -2993,7 +2993,7 @@ the room was taken back or started without them, or the invite runs out
 meanwhile. A join whose room never starts is undone once word of it can't come
 any more, a week after its invite ran out.
 
-From the join until the agent is out of the room (plugin 0.91+), its own
+From the join until the agent is out of the room (plugin 0.93+), its own
 Hermes makes it a fresh grant every 12 hours, for the same place and policy
 and again for 24 hours and 30 days, and sends it to the home over the Link (a
 `room.grant`), whose bridge route for the agent takes it with no restart, so a
@@ -3033,7 +3033,7 @@ calls a start needs (Hermes before RoomLink, or one that renamed them) can't
 make one (`unsupported`), and one that loses them in an update keeps its
 drafts and says it can't start them, with one line in the log.
 
-Once a room has started (plugin 0.91+), each person can take their agents
+Once a room has started (plugin 0.93+), each person can take their agents
 out of it, and its home can take out any of theirs. Leaving undoes each
 agent's join on its own Hermes at once (the Link stops carrying its requests,
 and its grant's scope is revoked, so its Hermes refuses the room's turns for
@@ -3123,7 +3123,7 @@ installation's):
   (`GET /rooms/invites` says how it ended).
 
 Taking agents out goes through these, behind the `room-leave` capability
-(plugin 0.91+):
+(plugin 0.93+):
 
 - `POST /rooms/leave` with `{"link", "room_id", "agents": [...] | null}`:
   `{"invite": ...}`, with the agents of those profiles out of the room, or
