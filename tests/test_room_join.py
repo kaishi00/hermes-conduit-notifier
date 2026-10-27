@@ -45,7 +45,7 @@ class Grants:
 
     def __init__(self, root):
         self.root = root
-        self.secrets, self.reserved, self.revoked = [], [], []
+        self.secrets, self.issued, self.reserved, self.revoked = [], [], [], []
 
     def gateway_room_grant_secret(self, root=None):
         self.secrets.append(root)
@@ -69,6 +69,7 @@ class Grants:
                    "execution_policy_digest": execution_policy_digest, "permissions": sorted(set(permissions)),
                    "issued_at": now, "expires_at": now + float(ttl_seconds), "status_expires_at": horizon}
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        self.issued.append(payload)
         return f"{_b64(encoded)}.{_b64(hmac.new(secret, encoded, hashlib.sha256).digest())}"
 
     def decode_room_grant(self, secret, token, *, permission, now=None):
@@ -138,10 +139,12 @@ def _joiner(side, api_url=None):
     return join_module.Joiner(side.root, hermes=hermes, clock=lambda: NOW)
 
 
-def _capabilities(side, profile="default"):
-    """What Laifu's API server answers its capabilities route with for the join's grant: the profile's catalog,
-    with the policy the API server runs for it."""
+def _capabilities(side, profile="default", digest=None):
+    """What Laifu's API server answers its capabilities route with for the join's grants: the profile's catalog,
+    with the policy the API server runs for it (the profile's config's, or another ``digest``)."""
     policy = side.setup.adapter().policy(profile, side.setup.home(profile))
+    if digest is not None:
+        policy = {**policy, "policy_digest": digest}
     value = {"installation_id": INSTALLATION, "protocol_versions": [2], "link_modes": ["direct"],
              "persistent_process": True, "text": True, "attachments": False, "execution_policy": policy,
              "catalog_digest": "c" * 64}
@@ -160,6 +163,10 @@ def _bound(side):
     return bridge.Store(side.root).read()["member"]["bindings"].get("link1", [])
 
 
+def _bearer(call):
+    return call["authorization"].removeprefix("HermesRoom ")
+
+
 def test_a_join_mints_with_the_installations_secret_and_holds_the_place_in_its_shared_state(laifu):
     catalog = _capabilities(laifu)
     joined = _join(laifu.joiner)
@@ -170,12 +177,15 @@ def test_a_join_mints_with_the_installations_secret_and_holds_the_place_in_its_s
     assert claims["expires_at"] - claims["issued_at"] == 24 * 3600
     assert claims["status_expires_at"] - claims["issued_at"] == 30 * 86400
     assert claims["execution_policy_digest"] == catalog["execution_policy"]["policy_digest"]
-    # The installation's secret, from its root, and its root's shared-state db.
+    # The installation's secret, from its root, and its root's shared-state db, where the look-only grant that
+    # read the API server's policy holds the place first.
+    probe = _claims(_bearer(laifu.api.calls_to("GET", "/v1/room-members/capabilities")[0]))
     assert laifu.grants.secrets and set(laifu.grants.secrets) == {laifu.root}
-    assert laifu.grants.reserved == [(laifu.root / "shared-state.db", claims["grant_id"], claims["status_expires_at"])]
+    assert laifu.grants.reserved == [(laifu.root / "shared-state.db", probe["grant_id"], probe["status_expires_at"]),
+                                     (laifu.root / "shared-state.db", claims["grant_id"], claims["status_expires_at"])]
     assert joined["catalog"] == catalog and joined["status_expires_at"] == int(claims["status_expires_at"])
     # The catalog comes from this Hermes' API server, for the grant, at the profile's address.
-    (call,) = laifu.api.calls_to("GET", "/v1/room-members/capabilities")
+    (_, call) = laifu.api.calls_to("GET", "/v1/room-members/capabilities")
     assert call["authorization"] == f"HermesRoom {joined['grant']}" and call["profile"] == "default"
     assert _bound(laifu) == [{name: claims[name] for name in ("home_install_id", "room_id", "member_id",
                                                              "target_profile")}]
@@ -188,8 +198,43 @@ def test_a_named_profile_joins_with_its_own_policy_at_its_own_address(laifu):
     joined = _join(laifu.joiner, "work")
 
     assert _claims(joined["grant"])["execution_policy_digest"] == catalog["execution_policy"]["policy_digest"]
-    (call,) = laifu.api.calls_to("GET", "/v1/room-members/capabilities")
-    assert call["profile"] == "work"
+    assert [call["profile"] for call in laifu.api.calls_to("GET", "/v1/room-members/capabilities")] == ["work"] * 2
+
+
+def test_a_join_reads_the_api_servers_policy_with_a_look_only_grant_and_mints_the_agents_grant_once(laifu):
+    # The API server runs another policy than this process reads from the profile's config.
+    catalog = _capabilities(laifu, digest="b" * 64)
+    joined = _join(laifu.joiner)
+
+    probe, grant = laifu.grants.issued
+    assert probe["permissions"] == ["status"] and probe["execution_policy_digest"] != "b" * 64
+    assert probe["expires_at"] - probe["issued_at"] == 60 and probe["status_expires_at"] - probe["issued_at"] == 60
+    assert grant["permissions"] == ["dispatch", "status", "stop"] and grant["execution_policy_digest"] == "b" * 64
+    assert _claims(joined["grant"]) == grant and joined["catalog"] == catalog
+    first, second = laifu.api.calls_to("GET", "/v1/room-members/capabilities")
+    assert _claims(_bearer(first)) == probe and _bearer(second) == joined["grant"]
+    assert laifu.grants.revoked == []
+
+
+def test_a_policy_that_changes_while_it_joins_refuses_the_join_and_revokes_its_grants(laifu, monkeypatch):
+    _capabilities(laifu)
+    hermes = laifu.joiner.hermes
+    asked = hermes.capabilities
+
+    def capabilities(profile, grant):
+        answered = asked(profile, grant)
+        _capabilities(laifu, digest="b" * 64)  # the API server's policy changes after its first answer
+        return answered
+
+    monkeypatch.setattr(hermes, "capabilities", capabilities)
+    with pytest.raises(join_module.JoinError) as refused:
+        _join(laifu.joiner)
+
+    assert (refused.value.code, refused.value.status) == ("api_server", 503)
+    probe, grant = laifu.grants.issued
+    # Hermes revokes a grant's whole scope, the look-only grant with it, until the agent's grant runs out.
+    assert laifu.grants.revoked == [(laifu.root / "shared-state.db", grant["grant_id"], grant["status_expires_at"])]
+    assert _bound(laifu) == []
 
 
 def test_leaving_revokes_the_grants_scope_in_the_shared_state(laifu):
@@ -247,4 +292,6 @@ def test_an_api_server_that_doesnt_answer_leaves_nothing_behind(laifu):
     assert (refused.value.code, refused.value.status) == ("api_server", 503)
     (reserved,) = laifu.grants.reserved
     assert [entry[1] for entry in laifu.grants.revoked] == [reserved[1]]
+    # Only the look-only grant was minted.
+    assert [grant["permissions"] for grant in laifu.grants.issued] == [["status"]]
     assert _bound(laifu) == []

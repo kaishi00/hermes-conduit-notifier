@@ -2,10 +2,11 @@
 
 When a person here joins a room another Hermes hosts (room_invites.py), each agent they bring gets a grant from
 this Hermes for its place in the room: dispatch, status and stop (never approve: approvals stay on the member's
-own Hermes, decision 6), for 24 hours to start turns and 30 days to read and stop them, the most Hermes allows. Its
-reservation holds the place, this Hermes' own API server answers with the agent's catalog for the grant (and a
-grant whose execution policy isn't the one the API server runs is minted again with that one), and the bridge's
-member side takes the Link's requests for it (room_bridge_member.bind). Leaving undoes all three.
+own Hermes, decision 6), for 24 hours to start turns and 30 days to read and stop them, the most Hermes allows. A
+look-only grant first reads which execution policy this Hermes' own API server runs for the profile, which the
+grant has to name (that process can see another policy than this one reads from the profile's config). The
+reservation holds the place, the API server answers with the agent's catalog for the grant, and the bridge's member
+side takes the Link's requests for it (room_bridge_member.bind). Leaving undoes all three.
 
 Hermes' calls come in through ``Hermes``. Nothing here imports Hermes at module level, so the tests give it a
 fake.
@@ -30,6 +31,10 @@ DISPATCH_S = 24 * 3600
 STATUS_S = 30 * 86400
 # Never approve (decision 6).
 PERMISSIONS = ("dispatch", "status", "stop")
+# The look-only grant that reads the API server's policy before the agent's grant is minted. Hermes revokes a grant's
+# whole scope, the agent's grant with it, so it isn't revoked once the join is made: it never leaves this process,
+# and runs out in a minute.
+PROBE_S = 60
 # A turn on Codex's app server runs its tools outside Hermes' tool hooks, where a room's rules can't see them.
 CODEX = "codex_app_server"
 CODEX_SETTINGS = ("openai_runtime", "api_mode")
@@ -78,33 +83,24 @@ class Joiner:
         installation = self.hermes.installation()
         scope = {"home_install_id": home_install_id, "room_id": room_id, "member_id": member_id,
                  "target_profile": profile}
-        digest = self.hermes.policy_digest(profile)
-        grant: Optional[str] = None
+        expected = {**scope, "authority_gateway_id": authority_gateway_id, "authority_epoch": authority_epoch}
+        place = {**expected, "target_install_id": installation}
+        minted: list[str] = []
         try:
-            # Minted again, once, when the API server runs another policy than the profile's config says.
-            for _ in range(2):
-                grant = self.hermes.issue(
-                    grant_id=f"grant-{uuid.uuid4().hex}", room_id=room_id, home_install_id=home_install_id,
-                    authority_gateway_id=authority_gateway_id, authority_epoch=authority_epoch, member_id=member_id,
-                    target_install_id=installation, target_profile=profile, execution_policy_digest=digest,
-                    permissions=PERMISSIONS, issued_at=now, ttl_seconds=DISPATCH_S, status_ttl_seconds=STATUS_S)
-                claims = self.hermes.decode(grant, "status")
-                expires_at = claims["status_expires_at"]
-                self.hermes.reserve(claims, expires_at)
-                catalog = self._catalog(profile, grant, installation, {
-                    **scope, "authority_gateway_id": authority_gateway_id, "authority_epoch": authority_epoch})
-                if catalog["execution_policy"]["policy_digest"] == digest:
-                    break
-                digest = catalog["execution_policy"]["policy_digest"]
-            else:
+            probe, _ = self._mint(minted, place, self.hermes.policy_digest(profile), ("status",), now, PROBE_S,
+                                  PROBE_S)
+            digest = self._catalog(profile, probe, installation, expected)["execution_policy"]["policy_digest"]
+            grant, claims = self._mint(minted, place, digest, PERMISSIONS, now, DISPATCH_S, STATUS_S)
+            catalog = self._catalog(profile, grant, installation, expected)
+            if catalog["execution_policy"]["policy_digest"] != digest:
                 raise JoinError("api_server", f"This Hermes' API server changed profile {profile}'s room policy "
                                               "while it joined; try again", 503)
             room_bridge_member.bind(self.root, link_id, scope)
         except BaseException:
-            if grant is not None:
-                self._revoke(grant)
+            if minted:
+                self._revoke(minted[-1])  # the whole scope, until its last grant runs out
             raise
-        return {"grant": grant, "catalog": catalog, "status_expires_at": int(expires_at)}
+        return {"grant": grant, "catalog": catalog, "status_expires_at": int(claims["status_expires_at"])}
 
     def leave(self, link_id: str, grant: str) -> None:
         """Undoes a join: the Link no longer carries the grant's requests, and the grant's scope is revoked."""
@@ -112,6 +108,18 @@ class Joiner:
         if scope is not None:
             room_bridge_member.unbind(self.root, link_id, scope)
         self._revoke(grant)
+
+    def _mint(self, minted: list[str], place: Mapping[str, Any], digest: str, permissions: tuple[str, ...], now: int,
+              ttl: int, status_ttl: int) -> tuple[str, dict[str, Any]]:
+        """A grant for the place and its claims, reserved. ``minted`` keeps it from the moment it's made, for a join
+        that fails to revoke."""
+        grant = self.hermes.issue(grant_id=f"grant-{uuid.uuid4().hex}", **place, execution_policy_digest=digest,
+                                  permissions=permissions, issued_at=now, ttl_seconds=ttl,
+                                  status_ttl_seconds=status_ttl)
+        minted.append(grant)
+        claims = self.hermes.decode(grant, "status")
+        self.hermes.reserve(claims, claims["status_expires_at"])
+        return grant, claims
 
     def _catalog(self, profile: str, grant: str, installation: str, scope: Mapping[str, Any]) -> dict[str, Any]:
         """The agent's catalog, as this Hermes' API server answers for the grant (what the home's probe will

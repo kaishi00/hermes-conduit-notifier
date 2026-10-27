@@ -223,7 +223,8 @@ class Rooms:
     def answer(self, link_id: Any, room_id: Any, agents: Any) -> dict[str, Any]:
         """Joins the room ``room_id`` the Link ``link_id`` invited this installation to with ``agents``, each
         ``{profile, handle, display_name}`` with its ``choices`` for the room if they aren't the join card's, or
-        declines it with none. The same answer again is the first; another is refused (``answered``). Returns
+        declines it with none. The same answer again is the first; another is refused (``answered``). A join
+        that the home's word on the room or the invite's end crosses is undone (``ended``, ``lapsed``). Returns
         the invite as the join card shows it."""
         key = f"{link_id}/{room_id}"
         with self._answering():
@@ -232,17 +233,14 @@ class Rooms:
             if invite is None:
                 raise RoomsError("no_invite", "This Hermes wasn't invited to that room over that Link", 404)
             agents = self._agents(agents, minimum=0)
-            if invite["status"] != "waiting":
-                if invite["status"] in ("joined", "declined") and [
-                        [agent[name] for name in ("profile", "handle", "display_name")] for agent in agents] == [
+            if invite["status"] in ("joined", "declined"):
+                if [[agent[name] for name in ("profile", "handle", "display_name")] for agent in agents] == [
                         [agent[name] for name in ("profile", "handle", "display_name")] for agent in invite["joined"]]:
                     return self._shown_invite(invite)
-                if invite["status"] in ("joined", "declined"):
-                    raise RoomsError("answered", "This invite has been answered", 409)
-                raise RoomsError("ended", "This room isn't waiting for an answer any more", 409)
-            now = int(self.clock())
-            if now >= invite["expires_at"]:
-                raise RoomsError("lapsed", "This invite ran out", 410)
+                raise RoomsError("answered", "This invite has been answered", 409)
+            ended = _ended(invite, int(self.clock()))
+            if ended is not None:
+                raise ended
             shown = self.link(link_id)
             if shown is None or shown.get("status") != "linked":
                 raise RoomsError("not_linked", "This Hermes isn't linked with them any more", 404)
@@ -270,15 +268,22 @@ class Rooms:
                     raise RoomsError(exc.code, str(exc), exc.status) from None
                 raise
             with self.store.update() as state:
-                invite = state["invites"][key]
-                invite["status"] = "joined" if joined else "declined"
-                invite["ended_at"] = None if joined else now
-                invite["joined"] = [{name: agent[name] for name in (
-                    "member_id", "profile", "handle", "display_name", "grant", "status_expires_at")}
-                    for agent in joined]
-                body = {"v": VERSION, "room_id": room_id, "join": [{name: agent[name] for name in (
-                    "member_id", "profile", "handle", "display_name", "grant", "catalog")} for agent in joined]}
-                _queue(state, link_id, ANSWER, room_id, body, now)
+                invite, now = state["invites"].get(key), int(self.clock())
+                # The home's word on the room can come in while the agents join, or the invite run out.
+                ended = _ended(invite, now)
+                if ended is None:
+                    invite["status"] = "joined" if joined else "declined"
+                    invite["ended_at"] = None if joined else now
+                    invite["joined"] = [{name: agent[name] for name in (
+                        "member_id", "profile", "handle", "display_name", "grant", "status_expires_at")}
+                        for agent in joined]
+                    body = {"v": VERSION, "room_id": room_id, "join": [{name: agent[name] for name in (
+                        "member_id", "profile", "handle", "display_name", "grant", "catalog")} for agent in joined]}
+                    _queue(state, link_id, ANSWER, room_id, body, now)
+            if ended is not None:
+                for done in joined:
+                    self._leave(link_id, done)
+                raise ended
         self.flush()
         return self._shown_invite(self.store.read()["invites"][key])
 
@@ -951,6 +956,16 @@ def _unique(handle: str, used: set[str]) -> str:
     raise AssertionError("a room has at most six agents")
 
 
+def _ended(invite: Optional[dict[str, Any]], now: int) -> Optional[RoomsError]:
+    """Why an invite that hasn't been answered can't be any more, if it can't: the home's word on its room came
+    (started without this installation, or not at all), or it ran out."""
+    if invite is None or invite["status"] != "waiting":
+        return RoomsError("ended", "This room isn't waiting for an answer any more", 409)
+    if now >= invite["expires_at"]:
+        return RoomsError("lapsed", "This invite ran out", 410)
+    return None
+
+
 def _cancel(invite: dict[str, Any], reason: str, now: int) -> None:
     """An invite whose room won't have this installation's agents: its grants go (each is revoked)."""
     invite.update(status="cancelled", reason=reason, ended_at=now,
@@ -1051,7 +1066,7 @@ def _start_from(body: Any) -> Optional[dict[str, Any]]:
     members = body["members"]
     if not isinstance(members, list) or not 2 <= len(members) <= MAX_AGENTS or not all(
             isinstance(member, dict) and set(member) == _MEMBER_FIELDS and _identifier(member["member_id"])
-            and _handle(member["handle"], reserved=frozenset())
+            and _handle(member["handle"])
             and _label(member["display_name"]) == member["display_name"]
             and (member["owner"] is None or room_links._checked_name(member["owner"]) == member["owner"])
             for member in members):
@@ -1086,8 +1101,8 @@ def _identifier(value: Any) -> bool:
     return isinstance(value, str) and bool(room_bridge.IDENTIFIER.match(value))
 
 
-def _handle(value: Any, reserved: frozenset = RESERVED) -> bool:
-    return isinstance(value, str) and bool(HANDLE.fullmatch(value)) and value.casefold() not in reserved
+def _handle(value: Any) -> bool:
+    return isinstance(value, str) and bool(HANDLE.fullmatch(value)) and value.casefold() not in RESERVED
 
 
 def _label(value: Any) -> Optional[str]:
