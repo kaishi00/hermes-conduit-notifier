@@ -1344,19 +1344,21 @@ class PulseStore:
                 "kind=CASE WHEN keep THEN kind ELSE '' END WHERE id=? AND handled_at IS NULL",
                 (now, json.dumps(outcome, sort_keys=True), moment_id)).rowcount)
 
-    def moments(self, limit: int = 50) -> list[dict]:
-        """The moments kept, newest first (`pulse where`)."""
+    def moments(self, since: float = 0.0, limit: int = 50) -> list[dict]:
+        """The moments kept that came at ``since`` or later, newest first
+        (`pulse where`)."""
         with self._connect() as conn:
             return [dict(row) for row in conn.execute(
-                "SELECT * FROM moments WHERE place!='' ORDER BY at DESC, id DESC LIMIT ?", (limit,)).fetchall()]
+                "SELECT * FROM moments WHERE place!='' AND received_at>=? ORDER BY at DESC, id DESC LIMIT ?",
+                (since, limit)).fetchall()]
 
     def prune_moments(self, before: float) -> int:
         with _lock, self._connect() as conn:
             return conn.execute("DELETE FROM moments WHERE received_at < ?", (before,)).rowcount
 
     def clear_moments(self, device: Optional[str] = None) -> int:
-        """Deletes every moment (Where you are turned off, or the location
-        shared here wiped), or one device's (that device wiped)."""
+        """Deletes every moment (Pulse or Where you are turned off, or the
+        location shared here wiped), or one device's (that device wiped)."""
         with _lock, self._connect() as conn:
             if device is None:
                 return conn.execute("DELETE FROM moments").rowcount
