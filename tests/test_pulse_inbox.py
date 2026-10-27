@@ -115,7 +115,7 @@ def test_a_deadline_is_kept_only_when_its_words_and_its_day_are_in_the_event():
                 {"due": "2026-10-26", "due_words": "3 November"},  # before the day it was logged
                 {"due": "2026-11-04"},  # Tuesday is the 3rd
                 {"due": "2027-12-03", "due_words": "3 November"},  # over DEADLINE_WITHIN_S out
-                {"event": "E2"}, {"event": True}, {"text": ""}, {"due": None}):
+                {"event": "E2"}, {"event": True}, {"event": "E" + "1" * 5000}, {"text": ""}, {"due": None}):
         assert memory._deadline({**good, **bad}, events, UTC, []) is None, bad
     # A plain repeat the model missed: the same day, in the same words.
     remembered = [{"id": 7, "text": "Netflix free trial ends", "evidence": "x", "due": "2026-11-03"}]
@@ -441,9 +441,12 @@ def test_the_inbox_routes_delete_the_deadlines_of_what_they_delete(monkeypatch, 
 
 def test_turning_it_off_forgets_the_deadlines_and_where_it_read_to(live):
     kept(live, trial(date.today() + timedelta(days=5), logged=time.time()))
+    live.store.set(memory.INBOX_LAST, {"at": time.time(), "events": 3, "deadlines": 1})
     assert control.state(live.store, live.home)["inbox_deadlines"] is True
     control.update(live.store, {"inbox_deadlines": False}, live.home)
     assert live.store.deadlines() == [] and live.store.get(store.INBOX_MARK) is None
+    # Its last read went with what it found, so on again it says nothing was read yet.
+    assert live.store.get(memory.INBOX_LAST) is None
     assert control.state(live.store, live.home)["inbox_deadlines"] is False
     with pytest.raises(control.Refused):
         control.update(live.store, {"inbox_deadlines": "no"}, live.home)

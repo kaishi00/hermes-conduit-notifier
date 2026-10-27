@@ -750,7 +750,8 @@ MAX_DEADLINES_SHOWN = 30
 DEADLINE_WITHIN_S = 400 * 86400.0
 DEADLINE_TEXT_LIMIT = 120
 SENDER_LIMIT = 120
-# The latest read, for `pulse inbox`: {"at", "events", "batches", "deadlines", "closed", "tokens", "error"}.
+# The latest read, for `pulse inbox`: {"at", "events", "batches", "deadlines", "closed", "skipped", "tokens",
+# "error"}.
 INBOX_LAST = "inbox_last"
 # A batch that failed: {"mark", "count", "retry_at"}; skipped after MAX_FAILURES tries.
 INBOX_FAILED = "inbox_failed"
@@ -783,10 +784,12 @@ def inbox_on(pulse_store: store.PulseStore) -> bool:
 
 def stop_inbox(pulse_store: store.PulseStore) -> int:
     """Memory no longer reads the Shortcuts inbox (turned off): it forgets
-    the deadlines it kept from it and where it read to, so turned on again
-    it starts afresh, INBOX_FIRST_S back. How many deadlines went."""
+    the deadlines it kept from it, where it read to and its last read, so
+    turned on again it starts afresh, INBOX_FIRST_S back. How many
+    deadlines went."""
     pulse_store.set(store.INBOX_MARK, None)
     pulse_store.set(INBOX_FAILED, None)
+    pulse_store.set(INBOX_LAST, None)
     return pulse_store.delete_items(pulse_store.items_from_inbox())
 
 
@@ -840,9 +843,11 @@ def render_deadlines(remembered: Sequence[dict], zone: tzinfo) -> str:
 
 
 def _event(value: Any, events: Sequence[dict]) -> Optional[dict]:
-    """The event a key names ("E3", or 3)."""
+    """The event a key names ("E3", or 3). A key too long to be one is
+    none, so a reply naming one fails only that deadline."""
     text = str(value if not isinstance(value, bool) else "").strip().upper().lstrip("E")
-    return events[int(text) - 1] if text.isdecimal() and 1 <= int(text) <= len(events) else None
+    return (events[int(text) - 1] if text.isdecimal() and len(text) <= 9 and 1 <= int(text) <= len(events)
+            else None)
 
 
 def _deadline(raw: Any, events: Sequence[dict], zone: tzinfo, remembered: Sequence[dict],
