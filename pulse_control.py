@@ -175,7 +175,7 @@ def backfill_start(pulse_store: Any, home: Path, days: Optional[int] = None,
 
 SETTINGS = ("enabled", "memory", "followups", "daily_report", "report_profiles", "report_times", "time_zone",
             "brief_time", "model", "nudge", "memory_daily_tokens", "followup_daily_tokens", "note",
-            "quiet_days", "quiet_until", "night", "look_ahead")
+            "quiet_days", "quiet_until", "night", "look_ahead", "inbox_deadlines")
 # What a daily token budget may be set to.
 MIN_DAILY_TOKENS = 10_000
 MAX_DAILY_TOKENS = 5_000_000
@@ -195,8 +195,9 @@ def _encodes(text: str) -> bool:
 def update(pulse_store: Any, body: Any, home: Any = None) -> None:
     """Applies the settings in ``body`` (any of SETTINGS). Every value is
     checked before any is written, so a bad one changes nothing; any other
-    key is refused too. Values: booleans for "enabled", "memory", "followups", "daily_report" and "look_ahead"
-    (the daily look ahead, pulse_ahead); "all" or "this"
+    key is refused too. Values: booleans for "enabled", "memory", "followups", "daily_report", "look_ahead"
+    (the daily look ahead, pulse_ahead) and "inbox_deadlines" (memory keeps
+    deadlines from the Shortcuts inbox, pulse_memory.read_inbox); "all" or "this"
     for "report_profiles"; a list of "HH:MM" for "report_times"; an IANA
     name, or "" for the phone's, for "time_zone"; {"provider", "model"} for
     "model" (the model Pulse's turns run on), or null for the chat's own;
@@ -216,7 +217,7 @@ def update(pulse_store: Any, body: Any, home: Any = None) -> None:
         if field not in SETTINGS:
             raise Refused("invalid", field=str(field)[:64])
     changes: dict[str, Any] = {}
-    for field in ("enabled", "memory", "followups", "daily_report", "look_ahead"):
+    for field in ("enabled", "memory", "followups", "daily_report", "look_ahead", "inbox_deadlines"):
         if field in body:
             if not isinstance(body[field], bool):
                 raise Refused("invalid", field=field)
@@ -283,6 +284,8 @@ def update(pulse_store: Any, body: Any, home: Any = None) -> None:
         changes[pulse_hours.SETTING] = night
     for key, value in changes.items():
         pulse_store.set(key, value)
+    if changes.get("inbox_deadlines") is False:
+        pulse_memory.stop_inbox(pulse_store)  # off forgets what it kept from the inbox
 
 
 def _quiet_until(pulse_store: Any, value: Any, home: Any) -> Optional[float]:
@@ -337,13 +340,17 @@ def items(pulse_store: Any, kind: str = "") -> list[dict[str, Any]]:
     """Open memory items, most recently mentioned first. A fact about a date
     that comes back every year has its month and day in ``every_year``
     ("MM-DD", or "YYYY-MM-DD" with the year it began) and what it is in
-    ``occasion`` (pulse_dates); "" for the rest."""
-    if kind and kind not in pulse_memory.KINDS:
+    ``occasion`` (pulse_dates); "" for the rest. A deadline memory kept from
+    the Shortcuts inbox has ``from_inbox`` true, ``sender`` (who its event
+    is from) and ``logged_at`` (when it was logged), and no chat."""
+    if kind and kind not in pulse_memory.ALL_KINDS:
         raise Refused("invalid", field="kind")
     return [{"id": item["id"], "kind": item["kind"], "text": item["text"], "evidence": item["evidence"],
              "explicit": bool(item["explicit"]), "due": item["due"], "due_at": item["due_at"],
              "mentioned_at": item["mentioned_at"], "profile": item["profile"], "chat_id": item["chat_id"],
-             "every_year": item["every_year"], "occasion": item["occasion"]}
+             "every_year": item["every_year"], "occasion": item["occasion"],
+             "from_inbox": bool(item["from_inbox"]), "sender": item["sender"],
+             "logged_at": item["valid_from"] if item["from_inbox"] else None}
             for item in pulse_store.open_items(kind, limit=ITEMS)]
 
 
@@ -656,6 +663,8 @@ def state(pulse_store: Any, home: Path, now: Optional[float] = None) -> dict[str
         "followup_counts": pulse_store.followup_counts(),
         # The daily look ahead (pulse_ahead): runs with memory, like follow-ups.
         "look_ahead": pulse_ahead.enabled(pulse_store),
+        # Deadlines from the Shortcuts inbox (pulse_memory.read_inbox): read with memory too.
+        "inbox_deadlines": pulse_memory.inbox_on(pulse_store),
         "followup_usage": {key: int(follow_usage.get(key, 0) or 0) for key in ("checks", "tokens", "failed")},
         "followup_daily_tokens": follow_cap,
         "followup_tokens_today": follow_used,
