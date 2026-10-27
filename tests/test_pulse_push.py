@@ -12,7 +12,8 @@ from datetime import datetime, timezone
 import pytest
 
 from test_pulse import SID, ROOT, _load, cli, control, plugin, pulse
-from test_pulse_followup import check_now, followup, live, llm_saying, promise  # noqa: F401
+from test_pulse_followup import check_now, commitment, followup, live, llm_saying, promise  # noqa: F401
+from test_pulse_candidates import listed, reporting  # noqa: F401
 from test_pulse_dates import fact
 
 push = _load("conduit_push.pulse_push", ROOT / "pulse_push.py")
@@ -183,6 +184,35 @@ def test_a_push_keeps_its_words_home_when_its_turn_cant_be_read_for_its_copy(liv
         "title_label": "pulse.noticed", "title": "Pulse noticed something",
         "private": True, "body": "Pulse has something for you."}
     assert pulse.push_copy(SID, "other-turn", "Done.")["body"] == "Done."  # not a Pulse turn
+
+
+def test_a_report_keeps_its_words_home_when_its_picks_cant_be_read_for_its_copy(reporting, monkeypatch):
+    # The turn reads, only its list's picks hit the lock: the reply's own words
+    # needn't show what made a pick private, so the copy can't go by them.
+    live = reporting
+    monkeypatch.setattr(pulse.hours, "busy", lambda home, now: None)
+    now = time.time()
+    gift = commitment(live, "The user will order Ana's gift.", due="2026-10-30", due_at=now + 3 * 86400,
+                      words="I need to order Ana's gift")
+    live.store.set("memory", True)
+    live.llm.replies.append({"remembered": [{"ref": gift, "bring_up": True, "value": 3, "skip": "", "actionable": True,
+                                             "line": "Order Ana's gift before Friday", "why": "You said so in Deploy."}],
+                             "found": []})
+    listed(live, now)
+    pulse.tick(now + 1)
+    [sent] = live.sent()
+    pulse.pre_llm_call(SID, "t1", sent)
+    reply = f"1. [commitment] The order for Ana #{gift}"
+    hidden = {"title_label": "pulse.noticed", "title": "Pulse noticed something",
+              "private": True, "body": "Pulse has something for you."}
+    assert pulse.push_copy(SID, "t1", reply) == {**hidden, "level": "active"}  # the pick's words are private
+
+    def locked(*args):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(pulse, "_run_picks", locked)
+    assert pulse.pushes(SID, "t1", reply) is True  # its reply's lines, as before
+    assert pulse.push_copy(SID, "t1", reply) == hidden
 
 
 def test_the_reply_event_carries_the_level_and_the_private_copy(live, monkeypatch):

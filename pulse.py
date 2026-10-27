@@ -324,12 +324,8 @@ def _pushed_picks(attempt: dict) -> Optional[list[dict]]:
     """A report turn's picks that came up as a push (pulse_candidates.levels;
     one journaled before levels were counts as one, as every item rode its
     report's push then); None for a report with no candidate list behind
-    it, or one that can't be read."""
-    try:
-        picked = _run_picks(open_store(), attempt)
-    except Exception:  # noqa: BLE001 — the reply still says them
-        logger.debug("conduit_push: Pulse couldn't read the report's picks", exc_info=True)
-        return None
+    it. Raises when Pulse's store can't be read."""
+    picked = _run_picks(open_store(), attempt)
     if picked is None:
         return None
     return [pick for pick, level in zip(picked, candidates.levels(picked)) if level in ("push", "")]
@@ -337,8 +333,14 @@ def _pushed_picks(attempt: dict) -> Optional[list[dict]]:
 
 def _pushed_lines(attempt: dict, response: Any) -> list[tuple[str, str, Optional[int]]]:
     """A report turn's items that go to the phone: its pushed picks
-    (``_pushed_picks``), else its reply's lines, all of them, as before."""
-    return _report_lines(_pushed_picks(attempt), response)
+    (``_pushed_picks``), else its reply's lines, all of them, as before, and
+    so when its picks can't be read (``push_copy`` then keeps its words home)."""
+    try:
+        picks = _pushed_picks(attempt)
+    except Exception:  # noqa: BLE001 — the reply still says them
+        logger.debug("conduit_push: Pulse couldn't read the report's picks", exc_info=True)
+        picks = None
+    return _report_lines(picks, response)
 
 
 def _report_lines(picks: Optional[list[dict]], response: Any) -> list[tuple[str, str, Optional[int]]]:
@@ -373,13 +375,17 @@ def push_copy(session_id: str, turn_id: Any, response: Any) -> dict[str, Any]:
     the numbers, kinds and remembered-item refs that are for the cards, and
     ``count`` says how many there are (two or more). Then how it goes
     (``_push_how``): its "level", and a private one's "private" and body.
-    When a Pulse turn's attempt can't be read here (``pushes`` read it a
-    moment before), it fails closed as ``_push_how`` does: it says only that
-    Pulse has something, with no level."""
+    When a Pulse turn's attempt or a report's picks can't be read here
+    (``pushes`` read them a moment before), it fails closed as ``_push_how``
+    does: it says only that Pulse has something, with no level."""
     attempt = _turn_attempt(session_id, turn_id)
     kind = attempt["kind"] if attempt else ""
     response = response if isinstance(response, str) else ""
-    picks = _pushed_picks(attempt) if kind == REPORT else None
+    try:
+        picks = _pushed_picks(attempt) if kind == REPORT else None
+    except Exception:  # noqa: BLE001 — never breaks the hook
+        logger.debug("conduit_push: Pulse couldn't read the report's picks", exc_info=True)
+        return _unread_copy()  # a pick may be private where the reply's words don't say so
     lines = _report_lines(picks, response) if kind == REPORT else []
     if lines:
         copy = {"title_label": "pulse.noticed", "title": "Pulse noticed something",
@@ -393,9 +399,15 @@ def push_copy(session_id: str, turn_id: Any, response: Any) -> dict[str, Any]:
     if attempt:
         return {**copy, **_push_how(attempt, copy["body"], picks or [])}
     if is_pulse_turn(session_id, turn_id):  # what it is can't be read, so its words stay home
-        return {"title_label": "pulse.noticed", "title": "Pulse noticed something",
-                "private": True, "body": push.PRIVATE_BODY}
+        return _unread_copy()
     return copy
+
+
+def _unread_copy() -> dict[str, Any]:
+    """A Pulse push whose turn or picks can't be read: only that Pulse has
+    something, with no level."""
+    return {"title_label": "pulse.noticed", "title": "Pulse noticed something",
+            "private": True, "body": push.PRIVATE_BODY}
 
 
 def _push_how(attempt: dict, body: str, picks: list[dict]) -> dict[str, Any]:
