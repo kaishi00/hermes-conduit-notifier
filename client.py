@@ -794,6 +794,47 @@ def _clear_refusal(credential: Any = None) -> None:
             _refusals.pop(str(credential), None)
 
 
+# Events a relay from before them refuses (it answers a type it doesn't know
+# 400), by the relay capability that says it takes them: such an event goes
+# only to a relay whose GET /v1/meta lists it. Relay 0.20+ answers that read
+# for the pairing's own credential, and a relay from before answers it 401,
+# which counts as taking none. What a pairing's relay takes is held for
+# RELAY_TAKES_S, a refused read as long.
+RELAY_GATED = {"room.invite": "room-invites"}
+RELAY_TAKES_S = 60 * 60.0
+_relay_takes: dict[tuple[str, str], tuple[float, frozenset[str]]] = {}
+_relay_takes_lock = threading.Lock()
+
+
+def relay_takes(state: dict[str, Any], capability: str, *, timeout: float = SEND_TIMEOUT,
+                clock: Callable[[], float] = time.monotonic) -> bool:
+    """Whether this pairing's relay lists ``capability``. A read that fails on
+    the way (no connection, 408, 429, the relay failing) raises, as a send
+    does, so the delivery loop tries it again; nothing about the read pauses
+    or marks the pairing."""
+    relay_url = str(state.get("relay_url") or "").rstrip("/")
+    # Held by the credential's digest, never the credential.
+    key = (relay_url, hashlib.sha256(str(state.get("credential")).encode()).hexdigest())
+    now = clock()
+    with _relay_takes_lock:
+        held = _relay_takes.get(key)
+    if held is not None and now < held[0]:
+        return capability in held[1]
+    try:
+        meta = request_json(f"{relay_url}/v1/meta", method="GET", credential=state["credential"], timeout=timeout)
+        listed = meta.get("capabilities") if isinstance(meta, dict) else None
+        takes = frozenset(item for item in listed if isinstance(item, str)) if isinstance(listed, list) else frozenset()
+    except RelayRejected as error:
+        if _worth_retrying(error):
+            raise
+        takes = frozenset()
+    except ValueError:  # an answer that isn't JSON says nothing it takes
+        takes = frozenset()
+    with _relay_takes_lock:
+        _relay_takes[key] = (now + RELAY_TAKES_S, takes)
+    return capability in takes
+
+
 def _delivery_worker(generation: int = 0) -> None:
     while generation == _generation:
         item = _events.get()
@@ -868,7 +909,13 @@ def _deliver(event: dict[str, Any], *, sleep: Callable[[float], None] = _pause,
                         event.get("type", "event"), _pause_reason(state), paused_until - now)
             return False
         try:
-            _send(event, state, timeout=max(MIN_SEND_TIMEOUT, min(SEND_TIMEOUT, started + RETRY_BUDGET - now)))
+            timeout = max(MIN_SEND_TIMEOUT, min(SEND_TIMEOUT, started + RETRY_BUDGET - now))
+            gate = RELAY_GATED.get(str(event.get("type")))
+            if gate and not relay_takes(state, gate, timeout=timeout, clock=clock):
+                logger.info("Conduit notification for %s not sent: the relay doesn't take it yet",
+                            event.get("type", "event"))
+                return False
+            _send(event, state, timeout=timeout)
         except Exception as error:
             if delay is not None and _worth_retrying(error) and clock() - started + delay <= RETRY_BUDGET:
                 logger.info("Conduit notification delivery for %s will be retried: %s", event.get("type", "event"), error)

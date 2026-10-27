@@ -48,15 +48,34 @@ SECRET = bytes(range(32))
 
 class _Relay:
     """A local relay that answers /v1/events with the given statuses in turn
-    (200 once they run out) and records the event ids it was sent."""
+    (200 once they run out) and records the event ids it was sent. GET
+    /v1/meta answers with ``meta`` in turn, the last one again once they run
+    out: a status, or the capabilities it lists (200)."""
 
-    def __init__(self, statuses):
+    def __init__(self, statuses, meta=None):
         self.statuses = list(statuses)
         self.event_ids = []
         self.delay = 0.0
+        self.meta = list(meta or [404])
+        self.meta_reads = []
         relay = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                # Whether the read came with this pairing's credential (never the header itself).
+                relay.meta_reads.append(self.headers.get("Authorization") == f"Bearer {CREDENTIAL}")
+                answer_with = relay.meta.pop(0) if len(relay.meta) > 1 else relay.meta[0]
+                if isinstance(answer_with, list):
+                    status, answer = 200, {"version": "0.20.0", "capabilities": answer_with}
+                else:
+                    status, answer = answer_with, {"error": "unauthorized" if answer_with == 401 else "nope"}
+                data = json.dumps(answer).encode()
+                self.send_response(status if self.path == "/v1/meta" else 404)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 relay.event_ids.append(body.get("event_id"))
@@ -94,10 +113,11 @@ def paired(tmp_path, monkeypatch):
     # Retries without the real waits.
     monkeypatch.setattr(client, "RETRY_DELAYS", (0.01, 0.01, 0.01), raising=False)
     client._refusals.clear()
+    client._relay_takes.clear()
     relays = []
 
-    def pair(statuses, **extra):
-        relay = _Relay(statuses)
+    def pair(statuses, meta=None, **extra):
+        relay = _Relay(statuses, meta)
         relays.append(relay)
         state = {"credential": "inst.gw.secret", "installation_id": "inst", "gateway_id": "gw",
                  "gateway_name": "box", "relay_url": relay.url}
@@ -106,6 +126,7 @@ def paired(tmp_path, monkeypatch):
         return relay
 
     yield pair
+    client._relay_takes.clear()
     for relay in relays:
         relay.close()
 
@@ -542,3 +563,85 @@ def test_the_wait_at_exit_is_bounded(paired, tmp_path):
     relay = _exit_right_after_enqueue(paired, tmp_path, 4.0, drain=1.0)
     assert time.monotonic() - started < 3.5
     assert len(relay.event_ids) == 1  # it got there; the answer never came back in time
+
+
+# --- Events a relay from before them refuses (room.invite) -------------------------
+
+
+def _invite(n=1):
+    return {"event_id": f"room-invite:{n:032x}", "type": "room.invite", "title": "Furina invited you to Zoo trip",
+            "body": "Choose which of your agents join, or decline.",
+            "room": {"link": "link1", "id": "conduit-0123abcd", "name": "Zoo trip", "from": "Furina"}}
+
+
+@pytest.mark.parametrize("encrypted", [False, True], ids=["plain", "encrypted"])
+def test_a_room_invite_goes_to_a_relay_that_says_it_takes_them(paired, encrypted):
+    extra = {"e2e": {"kid": KID, "secret": e2e.b64u(SECRET)}} if encrypted else {}
+    relay = paired([], meta=[["decisions", "room-invites"]], **extra)
+
+    _deliver(_invite(1))
+    _deliver(_invite(2))
+
+    assert len(relay.event_ids) == 2
+    assert relay.meta_reads == [True], "read once, with this pairing's credential, then held"
+
+
+def test_a_relay_that_doesnt_take_room_invites_isnt_sent_one(paired, caplog):
+    relay = paired([], meta=[["decisions", "calls"]])
+
+    with caplog.at_level("INFO"):
+        _deliver(_invite())
+
+    assert relay.event_ids == []
+    assert "the relay doesn't take it yet" in caplog.text
+    _deliver(_event())
+    assert relay.event_ids == [_event()["event_id"]], "other events don't ask"
+    assert relay.meta_reads == [True]
+
+
+def test_a_relay_that_refuses_the_read_takes_none_and_nothing_is_paused_or_marked(paired):
+    # A relay from before 0.20 answers a gateway's meta read 401.
+    relay = paired([], meta=[401])
+
+    _deliver(_invite(1))
+    _deliver(_invite(2))
+
+    assert relay.event_ids == []
+    assert relay.meta_reads == [True], "a refused read is held as long as an answer"
+    state = client.load_state()
+    assert "relay_rejected_at" not in state and "relay_blocked_at" not in state
+    assert not client.notifications_paused()
+    _deliver(_event())
+    assert relay.event_ids == [_event()["event_id"]]
+
+
+@pytest.mark.parametrize("failure", [503, 429])
+def test_a_read_that_fails_on_the_way_is_tried_again(paired, failure):
+    relay = paired([], meta=[failure, ["room-invites"]])
+
+    _deliver(_invite())
+
+    assert relay.meta_reads == [True, True]
+    assert relay.event_ids == [_invite()["event_id"]]
+
+
+def test_what_the_relay_takes_is_held_for_an_hour(paired):
+    relay = paired([], meta=[["decisions"], ["decisions", "room-invites"]])
+    state = client.load_state()
+
+    assert client.relay_takes(state, "room-invites", clock=lambda: 1000.0) is False
+    assert client.relay_takes(state, "room-invites", clock=lambda: 1000.0 + 3599) is False
+    assert len(relay.meta_reads) == 1
+    assert client.relay_takes(state, "room-invites", clock=lambda: 1000.0 + 3601) is True
+    assert len(relay.meta_reads) == 2
+
+
+def test_each_pairing_reads_what_its_relay_takes(paired):
+    old = paired([], meta=[["decisions"]])
+    _deliver(_invite(1))
+    new = paired([], meta=[["room-invites"]], credential="inst.gw2.secret2", gateway_id="gw2")
+
+    _deliver(_invite(2))
+
+    assert old.event_ids == [] and len(new.meta_reads) == 1
+    assert new.event_ids == [_invite(2)["event_id"]]

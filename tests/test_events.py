@@ -6,7 +6,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from events import REDACTED_APPROVAL_TEXT, REDACTED_QUESTION_TEXT, approval_decision, clarify_decision, clarification_text, event_id, is_silent_response, normalize_clarify_questions, push_event, redact_event, sanitize_call, sanitize_decision
+from events import REDACTED_APPROVAL_TEXT, REDACTED_QUESTION_TEXT, approval_decision, clarify_decision, clarification_text, event_id, is_silent_response, normalize_clarify_questions, push_event, redact_event, sanitize_call, sanitize_decision, sanitize_room
 
 
 def test_event_identifiers_are_stable_for_replayed_hooks():
@@ -625,3 +625,58 @@ def test_cards_and_the_call_screen_show_no_media_path():
                           "reason": "Send MEDIA:/tmp/x/notes.txt?"})
     assert call["title"] == "Deck 📎 Q4.pptx"
     assert call["reason"] == "Send 📎 notes.txt?"
+
+
+# --- Room invites (room.invite) -------------------------------------------------
+
+ROOM = {"link": "Lk3x9QwZ2b1c", "id": "conduit-0123abcd", "name": "Zoo trip", "from": "Furina"}
+
+
+def test_a_room_invite_carries_its_room_bounded():
+    event = push_event("room.invite", identifier=event_id("room-invite", ROOM["link"], ROOM["id"]), profile="",
+                       title="Furina invited you to Zoo trip", title_label="room.invite",
+                       room={**ROOM, "name": "Zoo\ntrip " + "x" * 300, "from": "F" * 100, "extra": "dropped"})
+
+    assert event["type"] == "room.invite" and event["event_id"].startswith("room-invite:")
+    assert "profile" not in event, "an invite is the installation's, not a profile's"
+    assert event["room"]["link"] == ROOM["link"] and event["room"]["id"] == ROOM["id"]
+    assert event["room"]["name"].startswith("Zoo trip ") and len(event["room"]["name"]) == 120
+    assert event["room"]["from"] == "F" * 64
+    assert "extra" not in event["room"]
+    assert event["title_label"] == "room.invite"
+
+
+def test_a_room_is_only_attached_to_room_invites():
+    assert "room" not in push_event("response.ready", identifier="response:12345678", room=ROOM)
+
+
+@pytest.mark.parametrize("room", [
+    "conduit-0123abcd",
+    [ROOM],
+    {**ROOM, "link": ""},
+    {**ROOM, "link": "has space"},
+    {**ROOM, "link": "x" * 49},
+    {**ROOM, "id": "-leading-dash"},
+    {**ROOM, "id": "bad/id"},
+    {**ROOM, "id": "x" * 129},
+    {key: value for key, value in ROOM.items() if key != "id"},
+])
+def test_a_malformed_room_is_dropped(room):
+    assert sanitize_room(room) is None
+
+
+def test_a_room_without_names_keeps_its_ids():
+    assert sanitize_room({"link": ROOM["link"], "id": ROOM["id"], "name": "  ", "from": 7}) == {
+        "link": ROOM["link"], "id": ROOM["id"]}
+
+
+def test_redact_event_keeps_only_the_rooms_ids():
+    event = push_event("room.invite", identifier="room-invite:0123456789abcdef", profile="",
+                       title="Furina invited you to Zoo trip", body="Choose which of your agents join, or decline.",
+                       title_label="room.invite", room=ROOM)
+
+    redacted = redact_event(event)
+
+    assert redacted["room"] == {"link": ROOM["link"], "id": ROOM["id"]}
+    assert "title" not in redacted and "body" not in redacted
+    assert redacted["title_label"] == "room.invite"

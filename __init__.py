@@ -270,6 +270,18 @@ def _post_tool_call(**kwargs: Any) -> None:
         _ledger_warned = True
 
 
+def _member_room_turn(session_id: str) -> bool:
+    """Whether this is a turn of one of this Hermes' agents in a room someone
+    else hosts (room_rules.py): the room shows it on its home's side, and the
+    hidden chat it runs in isn't one Conduit opens. A session that can't be
+    told apart notifies as any other."""
+    try:
+        turn = room_rules.room_turn(session_id, get_hermes_home())
+    except Exception:  # noqa: BLE001 — logged by room_rules; a reply too many beats one lost
+        return False
+    return turn is not None and turn.side == "member"
+
+
 def _post_llm_call(**kwargs: Any) -> None:
     session_id = _text(kwargs.get("session_id"))
     response = kwargs.get("assistant_response")
@@ -285,7 +297,8 @@ def _post_llm_call(**kwargs: Any) -> None:
     # news for the user, so they go like any reply.
     pulse_turn = pulse.is_pulse_turn(session_id, kwargs.get("turn_id"))
     quiet = (is_silent_response(response) or cron_runs.quiet(session_id, kwargs.get("task_id"), response)
-             or (pulse_turn and not pulse.pushes(session_id, kwargs.get("turn_id"), response)))
+             or (pulse_turn and not pulse.pushes(session_id, kwargs.get("turn_id"), response))
+             or _member_room_turn(session_id))
     chat_title = "" if quiet or pulse_turn else _session_title(session_id)
     # A Pulse push is titled by what it brings, not by Pulse's hidden chat.
     copy = (pulse.push_copy(session_id, kwargs.get("turn_id"), response) if pulse_turn and not quiet
@@ -520,9 +533,10 @@ def _on_session_end(**kwargs: Any) -> None:
     if pulse_turn:
         # Pulse records its own failures (``pulse status``).
         return
-    if cron_runs.quiet(session_id, kwargs.get("task_id")):
-        # A muted cron job's failed run: no push and no automatic alert call.
-        # A call the user asked for on this job (a watch) still rings.
+    if cron_runs.quiet(session_id, kwargs.get("task_id")) or _member_room_turn(session_id):
+        # A muted cron job's failed run, or an agent's in a room someone else
+        # hosts (where it shows): no push and no automatic alert call. A call
+        # the user asked for on this job (a watch) still rings.
         calls.turn_ended(session_id, "failed", profile=_profile, fallback=None)
         return
     failed = push_event(

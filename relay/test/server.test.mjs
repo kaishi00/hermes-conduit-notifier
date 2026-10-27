@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 
-import { SESSION_KEY_MAX_BYTES, callPushFor, notificationFor, phoneBackgroundPushFor, settlePushFor, validateEvent, validateDecision } from '../src/server.mjs';
+import { SESSION_KEY_MAX_BYTES, callPushFor, notificationFor, phoneBackgroundPushFor, settlePushFor, shouldDeliver, validateEvent, validateDecision } from '../src/server.mjs';
 import { normalizePreferences } from '../src/store.mjs';
 
 const preferences = { show_previews: true, completion_sound: false };
@@ -810,4 +810,89 @@ test('a background phone change is a silent low-priority push with only routing'
 test('phone changes have their own preference, on by default', () => {
   assert.equal(normalizePreferences({}).phone_changes, true);
   assert.equal(normalizePreferences({ phone_changes: false }).phone_changes, false);
+});
+
+// ── Room invites from people you've linked (room.invite) ─────────────────
+
+const roomInviteBody = {
+  type: 'room.invite',
+  event_id: 'room-invite:0123456789abcdef0123456789abcdef',
+  title: 'Furina invited you to Zoo trip',
+  body: 'Choose which of your agents join, or decline.',
+  room: { link: 'Lk3x9QwZ2b1c', id: 'conduit-0123abcd', name: 'Zoo trip', from: 'Furina' },
+};
+const inviteCopy = { title: 'Room invite', body: "Someone you've linked with invited you to a room." };
+
+test('validateEvent accepts a room invite and keeps its room', () => {
+  const event = validateEvent(roomInviteBody);
+  assert.equal(event.type, 'room.invite');
+  assert.deepEqual(event.room, roomInviteBody.room);
+});
+
+test("validateEvent bounds a room invite's names and drops a malformed room", () => {
+  const bounded = validateEvent({ ...roomInviteBody, room: { ...roomInviteBody.room, name: `  Zoo\ntrip ${'x'.repeat(200)}`, from: 'F'.repeat(100) } });
+  assert.equal(bounded.room.name.length, 120);
+  assert.ok(bounded.room.name.startsWith('Zoo trip'));
+  assert.equal(bounded.room.from.length, 64);
+  const { name: _name, from: _from, ...ids } = roomInviteBody.room;
+  assert.deepEqual(validateEvent({ ...roomInviteBody, room: { ...ids, name: '  ', from: 7 } }).room, ids, 'a blank or odd name is left out');
+  for (const room of [null, [], 'conduit-0123abcd', { ...ids, link: undefined }, { ...ids, link: 'has space' }, { ...ids, link: 'x'.repeat(49) },
+    { ...ids, id: undefined }, { ...ids, id: '-leading-dash' }, { ...ids, id: 'bad/id' }, { ...ids, id: 'x'.repeat(129) }]) {
+    assert.equal(validateEvent({ ...roomInviteBody, room }).room, undefined, JSON.stringify(room));
+  }
+  // Only a room invite carries a room.
+  assert.equal(validateEvent({ ...roomInviteBody, type: 'response.ready' }).room, undefined);
+});
+
+test("a room invite with previews off shows the generic copy and only the room's ids", () => {
+  const { payload } = notificationFor(validateEvent(roomInviteBody), { show_previews: false }, { id: 'gw-1' });
+  assert.deepEqual(payload.aps.alert, inviteCopy);
+  assert.equal(payload.aps.sound, 'default', 'it waits on the user, so it chimes');
+  assert.equal(payload.aps.category, undefined);
+  assert.deepEqual(payload.body.conduit.room, { link: roomInviteBody.room.link, id: roomInviteBody.room.id });
+  for (const shown of ['Zoo trip', 'Furina']) assert.ok(!JSON.stringify(payload).includes(shown), shown);
+  assert.equal(payload.conduit.room, undefined, 'the top-level copy stays routing-only');
+  const silenced = notificationFor(validateEvent(roomInviteBody), { attention_sound: false }, { id: 'gw-1' });
+  assert.equal(silenced.payload.aps.sound, undefined);
+});
+
+test("a room invite with previews on shows the plugin copy and the room's names", () => {
+  const { payload } = notificationFor(validateEvent(roomInviteBody), { show_previews: true }, { id: 'gw-1' });
+  assert.deepEqual(payload.aps.alert, { title: 'Furina invited you to Zoo trip', body: 'Choose which of your agents join, or decline.' });
+  assert.deepEqual(payload.body.conduit.room, roomInviteBody.room);
+});
+
+test('a room invite that would overflow APNs drops its room, never the notification', () => {
+  const { payload } = notificationFor(validateEvent(roomInviteBody), { show_previews: true }, { id: 'g'.repeat(3000) });
+  assert.equal(payload.body.conduit.room, undefined);
+  assert.equal(payload.aps.alert.title, 'Furina invited you to Zoo trip');
+});
+
+test('room invites have their own preference, off until a Conduit that shows them turns it on', () => {
+  assert.equal(normalizePreferences({}).room_invite, false);
+  assert.equal(normalizePreferences({ room_invite: true }).room_invite, true);
+});
+
+test('a room invite goes only to a phone that turned them on, never to one registered before them', () => {
+  // An app from before room invites would show one as a reply ("Response
+  // ready"), so a phone that never said it takes them gets none.
+  assert.equal(shouldDeliver({ enabled: true }, 'room.invite'), false, 'preferences stored before room invites');
+  assert.equal(shouldDeliver(normalizePreferences({}), 'room.invite'), false);
+  assert.equal(shouldDeliver(normalizePreferences({ room_invite: true }), 'room.invite'), true);
+  assert.equal(shouldDeliver({ ...normalizePreferences({ room_invite: true }), enabled: false }, 'room.invite'), false);
+  // Everything else still goes unless it's turned off, as before.
+  for (const type of ['approval.needed', 'response.ready', 'phone.changes', 'location.requested', 'plugin.hello']) {
+    assert.equal(shouldDeliver({ enabled: true }, type), true, type);
+  }
+  assert.equal(shouldDeliver({ enabled: true, turn_failed: false }, 'turn.failed'), false);
+});
+
+test('an encrypted room invite shows the generic copy and seals its room', () => {
+  const event = validateEvent({ ...roomInviteBody, event_id: envelope.msg, e2e: { ...envelope, req: '' } });
+  assert.equal(event.room, undefined);
+  const { payload } = notificationFor(event, {}, { id: 'gw-1' });
+  assert.deepEqual(payload.aps.alert, inviteCopy);
+  assert.equal(payload.aps['mutable-content'], 1);
+  assert.deepEqual(payload.conduit_e2e, event.e2e);
+  for (const shown of ['Zoo trip', 'Furina', roomInviteBody.room.id]) assert.ok(!JSON.stringify(payload).includes(shown), shown);
 });

@@ -95,6 +95,7 @@ The plugin currently emits notifications for:
 - completed background tasks: a delegated task that ends while the turn that started it is still running is part of that turn's reply and sends nothing of its own (plugin 0.35+)
 - calendar and reminder changes Hermes asks your phone to make (see [Calendar, Reminders, Focus and phone status](#calendar-reminders-focus-and-phone-status-from-conduit-plugin-027)): a notification to approve, or a silent wake for adds you let Hermes make without asking
 - call requests: a job you asked to be called about has ended, Hermes asked to call you, or (alert calls) Hermes has waited a minute on your approval or answer, or a turn failed (see [Hermes calls you](#hermes-calls-you-plugin-013))
+- room invites, to a Conduit that shows them: someone you've linked invited you to a room (plugin 0.104+, relay 0.20+; see [Rooms with people you've linked](#rooms-with-people-youve-linked-plugin-089)). Your agents' turns in a room someone else hosts send no reply or failure notification, since the room shows them.
 
 An exact `[Silent]` assistant response does not emit a completion notification. Reply and task bodies are sent as plain text: Markdown fences, emphasis, headings, link targets and table rules are dropped (plugin 0.35+). No notification shows a file's path on the host (plugin 0.71.2+): a `MEDIA:` tag in a reply, a question, an approval, a call or a phone change, and in the answer card or call screen that comes with it, reads as 📎 and the file's name, or its type (`📎 PPTX`) when the name is only a hash, and `[[audio_as_voice]]` and `[[as_document]]` are dropped. Code in a reply's fenced block stays as written.
 
@@ -241,6 +242,7 @@ gateway-bound inactive records still require separately reviewed maintenance.
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | `/healthz` | Health check |
+| GET | `/v1/meta` | The relay's version and capabilities, and with a phone's credential each paired gateway's plugin version and capabilities; a gateway's credential reads only the first two (0.20+), which the plugin checks before sending an event an older relay refuses |
 | POST | `/v1/token-challenges` | Push a one-time registration nonce to `device_token` (`bundle_id`, `environment` as for registering); 0.16+ |
 | POST | `/v1/installations` | Register a device; `token_proof` carries the pushed nonce (see "Registration proof") |
 | PUT | `/v1/installations/:id` | Update device token (a new one needs `token_proof`), PushKit token (`voip_token`, `null` clears it), the paired Apple Watch's PushKit token (`watch_voip_token`, 0.10+), location push token (`location_token`, 0.12+) / preferences |
@@ -3315,6 +3317,26 @@ your Hermes. Hermes ties a room's turns to their grant, so its API key can't
 answer them. The "Approval needed" notification goes out as it does for any
 chat, but its usual answer (the gateway's `approval.respond`) can't reach a
 room's turn, so Conduit answers it here, telling it by its session.
+
+When an invite comes in (plugin 0.104+), this Hermes tells your phone: a
+"Room invite" notification ("Laifu invited you to Zoo trip") that opens the
+invite in Conduit, sent through the push relay with the pairing of the
+profile the dashboard runs as. With previews off it reads "Someone you've
+linked with invited you to a room.", and end-to-end encryption seals the
+room's name and who it's from like any notification's text; only the Link's
+and the room's ids, which take the tap to the invite, stay outside. The relay
+sends it only to a phone whose Conduit shows room invites, which turns them on
+(the relay's `room_invite` preference, off until then, since an older Conduit
+would show one as a reply), and Conduit's Room invites setting turns them
+off. A relay older than 0.20 would refuse the event, so this Hermes sends one
+only to a relay whose `GET /v1/meta` lists `room-invites`, which it reads with
+the pairing's credential at most once an hour: until the relay takes them, an
+invite shows in Conduit and `rooms invites` without a notification.
+
+Your agents' turns in a room someone else hosts send no reply notification,
+and no failure notification or alert call when they fail: the room shows
+them, and the hidden chat each runs in isn't one Conduit opens. Their
+approvals and questions still notify.
 
 ```bash
 hermes conduit-push rooms invite --name "Zoo trip" --link <Link id> --link <Link id>   # with this profile's agent
