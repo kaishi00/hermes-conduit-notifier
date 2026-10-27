@@ -355,13 +355,17 @@ def test_nothing_ahead_asks_nothing_and_a_run_that_stops_leading_gives_the_day_b
 def test_a_held_look_ahead_card_no_brief_took_goes_to_the_screen_at_midnight(live):
     looking(live)
     now = time.time()
-    yesterday = datetime.fromtimestamp(now - 86400, timezone.utc)
+    # Yesterday at 10:00, an hour before its brief: now less a day would put
+    # a look after 23:00 before a brief on the next day, with none ahead.
+    yesterday = datetime.combine(datetime.fromtimestamp(now, timezone.utc).date() - timedelta(days=1),
+                                 datetime.min.time(), timezone.utc) + timedelta(hours=10)
     live.store.set("brief_time", (yesterday + timedelta(hours=1)).strftime("%H:%M"))
     fact(live, "The user's anniversary.", "our anniversary is tomorrow",
          (yesterday + timedelta(days=1)).strftime("%m-%d"), "anniversary")
-    look(live, now - 86400)
+    look(live, yesterday.timestamp())
     [card] = live.store.cards()
-    held = live.store.add_cards([{"kind": "followup", "level": "brief", "news": "held", "created_at": now - 86400}])
+    held = live.store.add_cards([{"kind": "followup", "level": "brief", "news": "held",
+                                  "created_at": yesterday.timestamp()}])
     assert card["level"] == "brief"
     live.store.set("brief_time", datetime.fromtimestamp(now + 10 * 3600, timezone.utc).strftime("%H:%M"))
     pulse.tick()
