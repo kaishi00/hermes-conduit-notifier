@@ -2119,7 +2119,24 @@ they arrive: a run starts at most every 15 minutes, and later arrivals ride
 the next one. A watch still open after a month asks if it's still wanted. A
 report item, the brief or a watch's message may quote an event, but Pulse
 memory never keeps other people's messages or facts about who sent them
-unless the user asks.
+unless the user asks, with one exception: deadlines (plugin 0.89+).
+
+- **Deadlines.** With Pulse memory on, each memory run also reads the events
+  logged since the last (the first read goes back 7 days; NFC tags and
+  sounds are skipped), on memory's daily budget, and keeps the deadlines in
+  them: a day by which something of the user's ends, renews or is due, like
+  a free trial, a bill or a return window, with the words it came from and
+  who sent it. Sales, deliveries and appointments are left out. A later event
+  can move one or close it ("Payment received"), and so can a chat.
+- **When they come up.** The daily look ahead brings each up a week ahead and
+  the day before, held for the morning brief: deadlines have a level of their
+  own in What Pulse learned, and push only once the user turns them up there.
+- **Deleted when they're over.** Each is deleted a day after it's done,
+  forgotten or replaced, otherwise about a week after its day (when memory
+  expires it, plus a day), and at once when the event it came from is deleted
+  here (`/inbox/delete`, `/inbox/wipe`). `hermes conduit-push pulse inbox off`, or
+  Settings > Pulse in the app (`PUT /pulse` with `"inbox_deadlines": false`),
+  stops it and deletes the ones kept; `pulse inbox` lists them.
 
 - **Straight to this host, sealed end to end.** The phone posts to
   `POST /api/plugins/conduit_push/inbox/ingest` over your dashboard

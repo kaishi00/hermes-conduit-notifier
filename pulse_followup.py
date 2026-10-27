@@ -1105,6 +1105,10 @@ def text_for(item: dict, followup: dict, *, title: str, zone: tzinfo) -> Callabl
 
 
 def chat_title(home: Path, item: dict) -> str:
+    """The title of the chat an item came from; "" for one from no chat (a
+    deadline from the Shortcuts inbox)."""
+    if not item["chat_id"]:
+        return ""
     where = home_for(home, item["profile"])
     try:
         chat = hermes.chat_by_id(where, item["chat_id"]) if where is not None else None

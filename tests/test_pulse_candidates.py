@@ -97,7 +97,7 @@ def test_the_list_call_fences_its_context_and_names_the_bar():
     assert seen["text"].endswith(f"context {fence}>>>") and fence not in context.text
     assert seen["text"].startswith(f"Pulse report list. It covers {SINCE} onward.")
     assert report.BARS["gentle"] in seen["instructions"] and "At most 5 in all." in seen["instructions"]
-    assert ", ".join(report.KINDS) in seen["instructions"]
+    assert ", ".join(report.FOUND_KINDS) in seen["instructions"] and "deadline" not in seen["instructions"]
     # The user's note to Pulse closes the instructions, when there is one.
     assert report.NOTE_TITLE not in seen["instructions"]
     candidates.ask(llm, context, nudge="gentle", note=" Never bring up the gym. ")

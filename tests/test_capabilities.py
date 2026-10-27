@@ -90,6 +90,8 @@ def test_every_capability_names_a_served_route_family():
         "pulse_hours": "/pulse",
         # The look ahead is a setting on the /pulse control route; what it left out is in /pulse/left_out.
         "pulse_dates": "/pulse/left_out",
+        # Deadlines from the inbox: a setting on the /pulse control route, listed at /pulse/memory.
+        "pulse_inbox": "/pulse/memory",
         "present-v1": "/present/",
         "health-sync": "/health/",
         "shortcut-inbox": "/inbox/",
