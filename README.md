@@ -6,7 +6,7 @@ Hermes Conduit Notifier is the open-source Hermes plugin that connects a Hermes 
 - **Live voice**: single-use Gemini Live tokens, temporary Qwen Live credentials, GPT-Live sessions on the host's ChatGPT subscription or API key, Grok Live relayed with the host's xAI sign-in, Local Live and Classic voice through your own speech server, voice web lookups, memory and personality for voice, and saved call transcripts.
 - **Apple Watch**: short-lived grants that let a Watch call run lookups and Hermes jobs, answer what Hermes waits on in a call from Hermes, and stream GPT-Live, Grok and Local Live audio, through the relay, sealed end to end.
 - **Phone data the user opts into**: Apple Health, location, maps, calendar, reminders, Focus, phone status, contacts and alarms, sent by the phone straight to this host and sealed end to end, with the `conduit_health`, `conduit_location`, `conduit_maps`, `conduit_calendar`, `conduit_phone` and `conduit_contacts` tools for the agent, and events from the user's Shortcuts automations through `conduit_inbox`.
-- **Conduit extras**: rich cards and on-screen cards during calls, Artifacts, group pictures, chat takeover, cron notification settings, Conduit settings the agent can change, and one-tap pairing and updates from the app.
+- **Conduit extras**: rich cards and on-screen cards during calls, Artifacts and the chat's Folder, group pictures, chat takeover, cron notification settings, Conduit settings the agent can change, and one-tap pairing and updates from the app.
 
 Every route sits behind the Hermes dashboard's own auth. The plugin holds no Apple Push Notification service key and no dashboard credentials: Apple credentials stay on the push relay, so self-hosted users never need to copy a shared signing key onto their gateway, and provider keys and sign-ins never leave this host. What each party can see is in the [privacy policy](https://kaishi00.github.io/hermes-conduit-notifier/privacy/).
 
@@ -1657,6 +1657,32 @@ aren't listed, except a bot's Bot Chat, the hidden session titled "Bot Chat"
 in its profile, and the sessions continuing it; a chat asked for by
 `session_id` is read even when hidden (plugin 0.78.1+; before, a Bot Chat
 listed nothing). Capability `artifacts`.
+
+## Workspace files (plugin 0.107+)
+
+Conduit's Folder tab, beside Artifacts, browses one folder at a time: the
+open chat's working folder or a project's. These routes take that folder as
+`root` and keep every path inside it (a link that leads out is refused), on
+this host or on the profile's SSH machine, and leave out files that hold keys
+or passwords (`.env`, `auth.json`, `.ssh/` and the like) and the folders
+Hermes' own listing hides. File contents are still read through Hermes'
+`/api/fs/*` routes.
+
+- `GET /api/plugins/conduit_push/workspace/list?root=…&path=…`: a folder's
+  entries with `isDirectory`, `size` and `mtime`, folders first (up to 2,000).
+- `GET …/workspace/search?root=…&q=…`: names that match, and lines inside text
+  files (up to 2 MB each) with where the match sits; it stops after 8 seconds
+  or 200 results and says `truncated`.
+- `GET …/workspace/recent?root=…`: the 40 files changed most recently.
+- `POST …/workspace/{action}` with a JSON body holding `root` and `path`:
+  `mkdir` and `new-file` (`name`, `content`), `save` (`content`, up to 8 MB,
+  refused with 409 when `expected_mtime` no longer matches the file), `move`
+  (`to`, `name`, `overwrite`; a rename is a move in the same folder),
+  `duplicate`, `delete` (never the root itself) and `upload` (`name`, base64
+  `data` up to 25 MB, `overwrite`).
+
+Capability `workspace-files`. Conduit's own copy of the scope is a view, not a
+lock: Hermes' `/api/fs/*` routes already reach the home folder.
 
 ## Hermes calls you (plugin 0.13+)
 
