@@ -112,7 +112,7 @@ def generated() -> str:
 def watched(path: str, module_paths: List[str], patterns: List[str]) -> bool:
     """Whether an upstream file is part of the contract: a module the plugin imports, or a watch path."""
     for module in module_paths:
-        if path == f"{module}.py" or path.startswith(f"{module}/") and module.count("/") > 0:
+        if path == f"{module}.py" or (path.startswith(f"{module}/") and module.count("/") > 0):
             return True
         if path == f"{module}/__init__.py":
             return True

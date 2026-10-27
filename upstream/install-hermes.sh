@@ -9,7 +9,9 @@
 # --skip-build` serves whatever dist it finds, so a stub page stands in.
 # pytest and PyYAML (tests/requirements.txt's versions) go into Hermes' own
 # environment, because the tests start the
-# dashboard with that Python and import nothing else.
+# dashboard with that Python and import nothing else. The websocket client
+# comes from Hermes' own lock, so it is checked rather than pinned over it.
+# HERMES_REPO overrides the upstream URL (a fork or a mirror).
 set -euo pipefail
 
 ref="${1:?usage: install-hermes.sh <ref> <dir>}"
@@ -19,12 +21,16 @@ case "$ref" in
 esac
 
 if [ ! -d "$dir/.git" ]; then
-    git clone --quiet --filter=blob:none https://github.com/NousResearch/hermes-agent "$dir"
+    git clone --quiet --filter=blob:none "${HERMES_REPO:-https://github.com/NousResearch/hermes-agent}" "$dir"
 fi
 git -C "$dir" fetch --quiet --tags origin
 git -C "$dir" checkout --quiet --detach "$ref"
 (cd "$dir" && uv sync --frozen --quiet)
 uv pip install --quiet --python "$dir/.venv/bin/python" pytest==9.1.1 pyyaml==6.0.3
+if ! "$dir/.venv/bin/python" -c 'import websockets' 2>/dev/null; then
+    echo "install-hermes.sh: Hermes $ref doesn't ship the websockets package the tests use" >&2
+    exit 1
+fi
 
 dist="$dir/hermes_cli/web_dist"
 if [ ! -f "$dist/index.html" ]; then

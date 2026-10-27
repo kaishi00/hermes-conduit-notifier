@@ -50,7 +50,7 @@ def failures(junit: Path) -> List[Dict[str, str]]:
             if tag == "error":
                 # A setup error (the dashboard didn't start) fails every test the same
                 # way: one harness issue, not one per test.
-                failure = harness_failure(sig, (node.text or "")[-3000:])
+                failure = harness_failure(sig, f"First seen in {test}:\n" + (node.text or "")[-3000:])
             else:
                 key = hashlib.sha1(f"{test}\n{sig}".encode()).hexdigest()[:12]
                 failure = {"test": test, "signature": sig, "key": key, "detail": (node.text or "")[-3000:]}
