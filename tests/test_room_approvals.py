@@ -15,7 +15,7 @@ import threading
 
 import pytest
 
-from test_room_bridge_member import NOW, ROOT, _load, bridge, member_module
+from test_room_bridge_member import NOW, ROOT, _load, bridge, links_module, member_module
 from test_room_invites import LAIFUS, _started, api, commands, invites_module, rooms, routes, slot  # noqa: F401
 
 approvals_module = _load("conduit_push.room_approvals", ROOT / "room_approvals.py")
@@ -261,6 +261,24 @@ def test_a_run_its_hermes_wont_show_is_left_out(waiting, caplog):
     del waiting.runs.runs[RUN]["answer"]["approval"]
 
     assert waiting.approvals.waiting() == []
+
+
+def test_an_approval_is_listed_while_the_rooms_or_links_store_cant_be_read(waiting, caplog):
+    # The answer reads neither, so the list still shows what waits, with what it can say of the room.
+    def unreadable(link_id):
+        raise links_module.LinkError("unreadable", "links.json isn't a links file this plugin wrote", 500)
+
+    approvals = approvals_module.Approvals(waiting.tmp_path / "laifu", hermes=waiting.runs, link=unreadable,
+                                           clock=waiting.clock)
+
+    assert approvals.waiting() == [_shown(waiting.room_id)]  # who hosts it, as the invite named them
+    assert "Linked Rooms couldn't read its Links" in caplog.text
+
+    (waiting.tmp_path / "laifu" / invites_module.DIRECTORY / "rooms.json").write_text("not a rooms file")
+
+    assert approvals.waiting() == [{**_shown(waiting.room_id), "room": None, "from": None,
+                                    "agent": {"profile": "default", "handle": None, "display_name": None}}]
+    assert approvals.answer(RUN, "req-1", "deny") == {"run_id": RUN, "request_id": "req-1", "choice": "deny"}
 
 
 def test_an_answer_goes_to_this_hermes_with_a_grant_of_its_own(waiting):

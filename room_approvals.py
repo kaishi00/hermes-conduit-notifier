@@ -141,7 +141,11 @@ class Approvals:
         agent = next((agent for agent in (*invite.get("joined", ()), *invite.get("gone", ()))
                       if agent["member_id"] == member_id), None)
         seated = next((member for member in invite.get("members") or () if member["member_id"] == member_id), None)
-        shown = self.link(run["link"])
+        try:
+            shown = self.link(run["link"])
+        except room_links.LinkError as exc:  # who hosts it, then, as the invite named them
+            logger.warning("Linked Rooms couldn't read its Links: %s", exc)
+            shown = None
         return {"room_id": room_id, "room": invite.get("name"), "link": run["link"],
                 "from": shown["name"] if shown else invite.get("from"),
                 "agent": {"profile": run["profile"],

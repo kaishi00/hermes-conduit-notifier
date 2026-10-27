@@ -3247,7 +3247,9 @@ finishes on its own):
   asks to do as Hermes shows you (each cut to 8 KB), and `choices`, `["once",
   "deny"]`. On a gateway with a session authority, `session_key` is the key
   Hermes keeps for the agent's hidden chat for the room (null when its session
-  store can't say), else the turn's `run_id`.
+  store can't say), else the turn's `run_id`. When this Hermes can't read the
+  room's invite, `room`, `from` and the agent's `handle` and `display_name` are
+  null (its log says why), and the approval is still listed and answered.
 - `POST /rooms/approvals/answer` with `{"run_id", "request_id", "choice"}`:
   `{"approval": {"run_id", "request_id", "choice"}}`. It's refused with
   `bad_choice` or `bad_request` (400), `no_approval` (404, no turn of your
