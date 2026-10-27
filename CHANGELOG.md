@@ -13,6 +13,11 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.95.1 (2026-10-27)
+
+### Fixes
+- Updating the plugin works again. Hermes' install scan refused 0.95.0, because a test file held something that looked like a password, so hosts stayed on the version they had.
+
 ## 0.95.0 (2026-10-27)
 
 ### Fixes
