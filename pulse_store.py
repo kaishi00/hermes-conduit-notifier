@@ -2031,6 +2031,16 @@ class PulseStore:
                 f"WHERE candidates.ref IN ({','.join('?' * len(refs))})", refs).fetchall()
         return [dict(row) for row in rows]
 
+    def away_refs(self, prefix: str) -> set[str]:
+        """The refs starting with ``prefix`` whose candidates made a card the
+        user put away for good (dismissed with no rest) or rated not
+        useful."""
+        with self._connect() as conn:
+            return {row["ref"] for row in conn.execute(
+                "SELECT DISTINCT candidates.ref AS ref FROM candidates JOIN cards ON cards.id=candidates.card_id "
+                "WHERE substr(candidates.ref, 1, ?)=? AND (cards.rating='down' OR "
+                "(cards.dismissed_at IS NOT NULL AND cards.rest_until IS NULL))", (len(prefix), prefix))}
+
     def journaled_refs(self, refs: Sequence[str]) -> set[str]:
         """Which of ``refs`` a candidate in the journal carries."""
         refs = [ref for ref in dict.fromkeys(refs) if ref]

@@ -300,7 +300,8 @@ def found_row(entry: dict, chats: dict[str, tuple[str, str]], zone: Optional[tzi
         elif done is None and not where:
             source = "calendar"
     elif follows is not None:
-        reminder = follows.reminders.get(str(entry.get("reminder") or "").strip().lower())
+        reminder = (follows.reminders.get(str(entry.get("reminder") or "").strip().lower())
+                    or (_reminder_named(follows.reminders, text, entry.get("why")) if source == "reminders" else None))
         if reminder is not None:
             ref, source = f"{REMINDER}{_clip(str(reminder['id']), 200)}", "reminders"
     row = {"origin": MODEL, "item_id": None, "kind": kind if kind in report.LIST_KINDS else "other",
@@ -314,14 +315,28 @@ def found_row(entry: dict, chats: dict[str, tuple[str, str]], zone: Optional[tzi
     return row
 
 
+def _reminder_named(reminders: dict[str, dict], *said: Any) -> Optional[dict]:
+    """The one listed reminder whose title ``said`` has in it, for an entry
+    from the reminders that gave no key (or one not listed); None for none
+    or more than one."""
+    words = " ".join(str(part or "") for part in said).casefold()
+    named = [reminder for reminder in reminders.values()
+             if str(reminder.get("title") or "").strip() and str(reminder["title"]).strip().casefold() in words]
+    return named[0] if len(named) == 1 else None
+
+
 # A next step's "ref" (the journal's): what it follows.
 AFTER_ITEM, AFTER_EVENT = "after:item:", "after:event:"
 # Any other found candidate's: the phone's open reminder it's about. One
 # reminder gets one card, however often it's moved: none again within
 # REMINDER_AGAIN_S of the last, and none while it's open once the user put
-# its card away for good or rated it not useful (``decide``).
+# its card away for good or rated it not useful (``decide``). Those it was
+# put away for are kept by ref (REMINDERS_AWAY, the newest AWAY_KEPT), so
+# the journal's and the cards' pruning don't bring it back.
 REMINDER = "reminder:"
 REMINDER_AGAIN_S = 7 * 86400.0
+REMINDERS_AWAY = "reminders_away"
+AWAY_KEPT = 500
 
 
 def _after(value: Any, follows: Optional[report.Gathered]) -> Optional[tuple[str, Optional[dict]]]:
@@ -443,11 +458,19 @@ def decide(pulse_store: store.PulseStore, rows: list[dict], *, now: float, limit
 def reminders_raised(pulse_store: store.PulseStore, refs: Sequence[str], now: float) -> set[str]:
     """Which of the phone reminders ``refs`` (REMINDER) already had a card:
     within REMINDER_AGAIN_S, or ever once its card was put away for good or
-    rated not useful."""
-    refs = [ref for ref in refs if ref.startswith(REMINDER)]
-    return {card["ref"] for card in pulse_store.ref_cards(refs)
-            if card["created_at"] >= now - REMINDER_AGAIN_S or card["rating"] == "down"
-            or (card["dismissed_at"] is not None and card["rest_until"] is None)}
+    rated not useful (kept in REMINDERS_AWAY as each is seen, so it stays
+    away once the journal or the cards drop it)."""
+    refs = {ref for ref in refs if ref.startswith(REMINDER)}
+    if not refs:
+        return set()
+    kept = pulse_store.get(REMINDERS_AWAY)
+    kept = [ref for ref in kept if isinstance(ref, str)] if isinstance(kept, list) else []
+    away = pulse_store.away_refs(REMINDER)
+    if not away <= set(kept):
+        kept = [ref for ref in kept if ref not in away] + sorted(away)
+        pulse_store.set(REMINDERS_AWAY, kept[-AWAY_KEPT:])
+    recent = {card["ref"] for card in pulse_store.ref_cards(sorted(refs)) if card["created_at"] >= now - REMINDER_AGAIN_S}
+    return refs & (recent | set(kept) | away)
 
 
 def time_cap(pulse_store: store.PulseStore, zone: tzinfo, now: float) -> Callable[[dict], str]:
@@ -622,7 +645,8 @@ def describe(row: dict) -> str:
     ref = f" #{row['item_id']}" if row["item_id"] is not None else ""
     after = str(row.get("ref") or "")
     ref += (f" (after #{after[len(AFTER_ITEM):]})" if after.startswith(AFTER_ITEM)
-            else " (after an event that ended)" if after.startswith(AFTER_EVENT) else "")
+            else " (after an event that ended)" if after.startswith(AFTER_EVENT)
+            else " (a phone reminder)" if after.startswith(REMINDER) else "")
     where = f" ({row['source']})" if row["origin"] == MODEL and row["source"] else ""
     skip = f" ({row['skip']})" if row["skip"] else ""
     because = f" (why: {_clip(row['why'], 120)})" if row.get("why") else ""

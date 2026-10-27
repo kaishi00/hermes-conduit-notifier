@@ -118,3 +118,37 @@ def test_a_reminder_put_off_until_later_can_come_back_after_the_week(live):
     card_for(live, "reminder:r_lock", created_at=now - 30 * 86400, dismissed_at=now - 30 * 86400,
              rest_until=now - 29 * 86400)
     assert decided(live, now)[0] == (candidates.SURFACED, "")
+
+
+def test_a_reminder_put_away_stays_away_once_the_journal_and_cards_drop_it(live):
+    now = time.time()
+    card_for(live, "reminder:r_lock", created_at=now - 20 * 86400, rating="down")
+    assert decided(live, now)[0] == (candidates.SKIPPED, "raised")
+    live.store.prune_candidates(now)
+    live.store.prune_cards(0)
+    assert decided(live, now + 90 * 86400) == [(candidates.SKIPPED, "raised"), (candidates.SURFACED, "")]
+
+
+@pytest.mark.parametrize("entry, ref", [
+    ({"line": "Call the building manager about the 64D cipher lock today."}, "reminder:r_lock"),
+    ({"why": "From your reminder: call the building manager about the 64D cipher lock."}, "reminder:r_lock"),
+    ({"reminder": "r9"}, None),  # FOUND's line names no reminder's title
+    ({"source": "chat"}, None),
+])
+def test_one_from_the_reminders_with_no_key_is_matched_by_its_title(entry, ref):
+    row = candidates.found_row({**FOUND, **entry}, {}, follows=follows())
+    assert row.get("ref") == ref
+
+
+def test_two_reminders_named_match_neither():
+    both = {**REMINDERS, "r2": {"id": "r_mgr", "title": "Call the building manager"}}
+    row = candidates.found_row({**FOUND, "line": "Call the building manager about the 64D cipher lock."}, {},
+                               follows=follows(both))
+    assert "ref" not in row
+
+
+def test_pulse_candidates_says_which_were_about_a_phone_reminder():
+    row = {"value": 4, "item_id": None, "ref": "reminder:r_lock", "origin": candidates.MODEL, "source": "reminders",
+           "skip": "raised", "why": "", "kind": "reminder", "text": "x", "decision": candidates.SKIPPED,
+           "card_id": None}
+    assert "(a phone reminder)" in candidates.describe(row)
