@@ -372,7 +372,10 @@ def push_copy(session_id: str, turn_id: Any, response: Any) -> dict[str, Any]:
     that came up as a push (``_pushed_lines``), one after another, without
     the numbers, kinds and remembered-item refs that are for the cards, and
     ``count`` says how many there are (two or more). Then how it goes
-    (``_push_how``): its "level", and a private one's "private" and body."""
+    (``_push_how``): its "level", and a private one's "private" and body.
+    When a Pulse turn's attempt can't be read here (``pushes`` read it a
+    moment before), it fails closed as ``_push_how`` does: it says only that
+    Pulse has something, with no level."""
     attempt = _turn_attempt(session_id, turn_id)
     kind = attempt["kind"] if attempt else ""
     response = response if isinstance(response, str) else ""
@@ -387,7 +390,12 @@ def push_copy(session_id: str, turn_id: Any, response: Any) -> dict[str, Any]:
         label, title = PUSH_TITLES.get(kind, ("response.ready", "Pulse"))
         copy = {"title_label": label, "title": title,
                 "body": brief.summary_line(response) if kind == BRIEF else response}
-    return {**copy, **_push_how(attempt, copy["body"], picks or [])} if attempt else copy
+    if attempt:
+        return {**copy, **_push_how(attempt, copy["body"], picks or [])}
+    if is_pulse_turn(session_id, turn_id):  # what it is can't be read, so its words stay home
+        return {"title_label": "pulse.noticed", "title": "Pulse noticed something",
+                "private": True, "body": push.PRIVATE_BODY}
+    return copy
 
 
 def _push_how(attempt: dict, body: str, picks: list[dict]) -> dict[str, Any]:

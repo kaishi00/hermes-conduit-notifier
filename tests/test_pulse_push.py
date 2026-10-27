@@ -165,6 +165,26 @@ def test_a_push_keeps_its_words_home_when_pulse_cant_read_its_store(live, monkey
     assert push.private_row(None, remembered) and push.private_row(None, yearly) and not push.private_row(None, model)
 
 
+def test_a_push_keeps_its_words_home_when_its_turn_cant_be_read_for_its_copy(live, monkeypatch):
+    # pushes() read the turn a moment before; the copy's own read hits the lock.
+    promise(live, "Hermes will remind the user to book the dentist.")
+    check_now(live, llm_saying(decision="tell", news="Dr Lee has Friday at 3.", why="the chat says so"),
+              now=time.time() + followup.FIRST_CHECK_S + 1)
+    pulse.tick()
+    [text] = live.sent()
+    pulse.pre_llm_call(SID, "t1", text)
+    assert pulse.pushes(SID, "t1", "Book it: Dr Lee has Friday at 3.") is True
+
+    def locked(*args):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(pulse, "open_store", locked)
+    assert pulse.push_copy(SID, "t1", "Book it: Dr Lee has Friday at 3.") == {
+        "title_label": "pulse.noticed", "title": "Pulse noticed something",
+        "private": True, "body": "Pulse has something for you."}
+    assert pulse.push_copy(SID, "other-turn", "Done.")["body"] == "Done."  # not a Pulse turn
+
+
 def test_the_reply_event_carries_the_level_and_the_private_copy(live, monkeypatch):
     monkeypatch.setattr(pulse.hours, "busy", lambda home, now: None)
     promise(live, "Hermes will remind the user to book the dentist.")
