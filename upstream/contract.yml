@@ -33,6 +33,11 @@ notes:
   dashboard websocket auth: >-
     hermes_cli.web_server_chat._ws_auth_ok and _ws_request_is_allowed sign in every plugin socket;
     without them the sockets fail closed.
+  Linked Rooms approvals: >-
+    Your agents' approvals in rooms other people host (feature map: "Linked Rooms"): read with the
+    run's own grant (GET /v1/runs/{id}) and answered with an approve-only grant of its scope
+    (POST /v1/runs/{id}/approval) on this Hermes' API server, and matched to their notification by
+    sessions.session_key in the profile's state.db.
 
 # Upstream behaviors we know are broken, keyed by test and failure signature.
 # A listed test xfails while it fails with this signature, and fails when it
@@ -311,6 +316,8 @@ routes:
   - DELETE /room-images/{room_id}
   - GET /room-images/{room_id}
   - PUT /room-images/{room_id}
+  - GET /rooms/approvals
+  - POST /rooms/approvals/answer
   - GET /rooms/choices
   - PUT /rooms/choices
   - GET /rooms/defaults

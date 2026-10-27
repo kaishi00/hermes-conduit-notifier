@@ -8509,6 +8509,77 @@ async def get_room_people(response: Response, room_id: Optional[str] = None) -> 
     return await _room_invites_route(None, lambda rooms: _room_people(rooms, room_id), "people")
 
 
+# Your agents' approvals from rooms other people host (room_approvals.py):
+# listed and answered here, through this Hermes' own API server, never
+# through the room's home. Conduit asks for them every few seconds while it
+# shows a room, so they have their own 60 a minute. Each read and answer
+# waits on that API server, up to 10 s a call, so they run on threads of
+# their own, which a slow server holds instead of the dashboard's shared
+# executor, and a request that takes longer reads as the server not answering.
+
+ROOM_APPROVALS_LIMIT = 60
+ROOM_APPROVALS_WORKERS = 2
+ROOM_APPROVALS_TIMEOUT_S = 30.0
+_room_approvals_limiter = _MintLimiter(ROOM_APPROVALS_LIMIT, ROOM_CHOICES_WINDOW_S,
+                                       message="Too many approval requests; try again shortly")
+_room_approvals_executor = ThreadPoolExecutor(max_workers=ROOM_APPROVALS_WORKERS,
+                                              thread_name_prefix="conduit-room-approvals")
+
+
+def room_approvals(action: Callable[[Any], Dict[str, Any]]) -> Dict[str, Any]:
+    module = _plugin_package_module("room_approvals")
+    root = _room_links_root()
+    # The bridge's member side watches the turns whose approvals these are.
+    _start_room_handlers(root)
+    try:
+        return action(module.here(root))
+    except module.ApprovalsError as exc:
+        raise TokenError(exc.status, str(exc), exc.code)
+
+
+async def _room_approvals_route(action: Callable[[Any], Dict[str, Any]], route: str) -> Any:
+    try:
+        answer = await asyncio.wait_for(
+            _run_scoped(None, _limited(_room_approvals_limiter, None, lambda: room_approvals(action)),
+                        _room_approvals_executor),
+            timeout=ROOM_APPROVALS_TIMEOUT_S)
+        return {"ok": True, **answer}
+    except asyncio.TimeoutError:
+        logger.warning("Linked Rooms' %s for Conduit timed out after %ss", route, ROOM_APPROVALS_TIMEOUT_S)
+        return _store_refusal(TokenError(503, "This Hermes' API server didn't answer in time; check that its "
+                                              "gateway runs", "api_server"))
+    except TokenError as exc:
+        # ``code`` is room_approvals' word for the refusal (bad_choice,
+        # no_approval, not_pending, refused, api_server…).
+        return _store_refusal(exc)
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
+        raise
+    except Exception as exc:
+        raise _unexpected(route, exc, feature="Linked Rooms")
+
+
+@router.get("/rooms/approvals")
+async def get_room_approvals(response: Response) -> Any:
+    """Each approval your agents' turns wait for in rooms other people
+    host, the oldest turn's first: its ``run_id`` and ``request_id``, the
+    room, who hosts it, the agent by its handle there, what it asks
+    (``description``, ``command``) and the ``choices``, once or deny."""
+    response.headers["Cache-Control"] = "no-store"
+    return await _room_approvals_route(lambda approvals: {"approvals": approvals.waiting()}, "approvals")
+
+
+@router.post("/rooms/approvals/answer")
+async def post_room_approval_answer(request: Request, response: Response) -> Any:
+    """Answers the approval ``request_id`` that your agent's turn ``run_id``
+    waits for with ``choice``, ``once`` or ``deny``, on this Hermes."""
+    response.headers["Cache-Control"] = "no-store"
+    body = _room_links_body(await _read_json_body(request, ROOM_LINKS_MAX_BODY_BYTES),
+                            '{"run_id": ..., "request_id": ..., "choice": "once" | "deny"}')
+    return await _room_approvals_route(lambda approvals: {"approval": approvals.answer(
+        body.get("run_id"), body.get("request_id"), body.get("choice"))}, "approval answer")
+
+
 # Setting this Hermes up for rooms (room_setup.py): the API server, which is
 # the installation's, and the profile's room ceiling and approvals, then the
 # gateway restart that starts the API server. The limits are the
@@ -17222,6 +17293,9 @@ ROUTE_CAPABILITIES = (
     # room with people you've linked, yours or theirs, and its fresh grants
     # while it goes on (Linked Rooms).
     "room-leave",
+    # GET /rooms/approvals and POST /rooms/approvals/answer: your agents'
+    # approvals from rooms other people host (Linked Rooms).
+    "room-approvals",
 )
 
 
