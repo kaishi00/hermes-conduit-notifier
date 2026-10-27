@@ -229,7 +229,10 @@ CREATE TABLE IF NOT EXISTS cards (
     -- (pulse_prefs.place and band), which its signals carry once the
     -- journal no longer has its candidate.
     place TEXT NOT NULL DEFAULT '',
-    band TEXT NOT NULL DEFAULT ''
+    band TEXT NOT NULL DEFAULT '',
+    -- Put back with Undo after Pulse marked it done: its chat isn't read
+    -- again to mark it (pulse_followup.read_first, found_cards).
+    put_back_at REAL
 );
 CREATE INDEX IF NOT EXISTS cards_created ON cards(created_at);
 -- What ratings taught Pulse (pulse_learning): each row changes what Pulse
@@ -378,7 +381,8 @@ _ADDED_COLUMNS = (("cards", "topic", "TEXT NOT NULL DEFAULT ''"), ("cards", "bri
                   ("candidates", "floor", "INTEGER NOT NULL DEFAULT 0"),
                   ("candidates", "level", "TEXT NOT NULL DEFAULT ''"),
                   ("cards", "learned", "TEXT NOT NULL DEFAULT ''"), ("cards", "place", "TEXT NOT NULL DEFAULT ''"),
-                  ("cards", "band", "TEXT NOT NULL DEFAULT ''"), ("followups", "timing", "TEXT NOT NULL DEFAULT ''"))
+                  ("cards", "band", "TEXT NOT NULL DEFAULT ''"), ("followups", "timing", "TEXT NOT NULL DEFAULT ''"),
+                  ("cards", "put_back_at", "REAL"))
 # What report cards said for Why? before a candidate's reason did (an item's card,
 # never shown; a whole report's card), and the setting that says a store has
 # cleared them.
@@ -400,6 +404,8 @@ STEPPED_CAUSES = ("2 thumbs up", "2 thumbs down")
 OLD_SCORES = "rating_scores"
 # Who closed a card's item when the user marked it Done (pulse_learning.DONE_BY's "user").
 USER = "user"
+# Who marked a card done when a chat showed it done (card_done's done_by).
+PULSE = "pulse"
 
 
 def _listed(conn: Any, key: str) -> list[str]:
@@ -781,7 +787,10 @@ class PulseStore:
         old item, which is kept with when and by what it stopped being true.
         Nothing is deleted. ``marks`` names the table that says where the
         chat was read to (MARKS), and ``window`` the backfill window's start.
-        A new item marked ``late`` (pulse_memory.LATE_S) is kept as expired."""
+        A new item marked ``late`` (pulse_memory.LATE_S) is kept as expired.
+        An item ``closed`` closes whether open or reminded, and its cards get
+        Pulse's done mark in the same write (_mark_cards_done), so none is
+        left open behind it."""
         _check_marks(marks)
         columns = ("profile", "chat_id", "message_id", "kind", "text", "evidence", "explicit", "due", "due_at",
                    "mentioned_at", "recorded_at", "valid_from")
@@ -822,11 +831,17 @@ class PulseStore:
                     conn.execute(f"UPDATE items SET superseded_at=?, superseded_by=?, valid_to=? WHERE id=? AND {live}",
                                  (now, new_id, item["mentioned_at"], target, profile))
             for entry in closed:  # an item replaced since closes through its successor
-                target = _current(conn, entry["id"], profile)
-                if target is not None:
-                    conn.execute(f"UPDATE items SET status=?, closed_by=?, closed_at=? WHERE id=? AND {live}",
-                                 (entry["status"], f"chat {chat_id} message {entry['message_id']}: {entry['evidence']}",
-                                  now, target, profile))
+                target = _current(conn, entry["id"], profile, reminded=True)
+                if target is None:
+                    continue
+                closer = f"chat {chat_id} message {entry['message_id']}: {entry['evidence']}"
+                prior = _prior(conn, target)
+                if conn.execute("UPDATE items SET status=?, closed_by=?, closed_at=? WHERE id=? "
+                                "AND status IN ('open', 'reminded') AND superseded_at IS NULL AND profile=?",
+                                (entry["status"], closer, now, target, profile)).rowcount:
+                    # Undo puts the item back while this close still holds it,
+                    # from a card about an item it replaced too.
+                    _mark_cards_done(conn, target, prior={**prior, "closer": closer, "item": target}, now=now)
             conn.execute(
                 f"INSERT INTO {marks}(profile, chat_id, message_id, at) VALUES(?,?,?,?) "
                 "ON CONFLICT(profile, chat_id) DO UPDATE SET message_id=excluded.message_id, at=excluded.at, "
@@ -882,6 +897,16 @@ class PulseStore:
             rows = conn.execute(f"SELECT * FROM items WHERE status='open' AND superseded_at IS NULL {where}"
                                 f"ORDER BY {'due_at IS NULL, due_at, ' if soonest else ''}mentioned_at DESC, id DESC LIMIT ?",
                                 (*params, limit)).fetchall()
+        return [dict(row) for row in rows]
+
+    def remembered_items(self, *, profile: str, limit: int, reminded_since: float) -> list[dict]:
+        """What memory reads a chat beside: the profile's open items, and its
+        commitments reminded since ``reminded_since``, which a chat can still
+        show done; most recently mentioned first."""
+        with self._connect() as conn:
+            rows = conn.execute("SELECT * FROM items WHERE superseded_at IS NULL AND profile=? AND (status='open' "
+                                "OR (status='reminded' AND closed_at >= ?)) ORDER BY mentioned_at DESC, id DESC LIMIT ?",
+                                (profile, reminded_since, limit)).fetchall()
         return [dict(row) for row in rows]
 
     def expire_items(self, *, due_before: float, now: float) -> int:
@@ -1088,6 +1113,20 @@ class PulseStore:
                                 "ORDER BY created_at, id LIMIT ?", (limit,)).fetchall()
         return [dict(row) for row in rows]
 
+    def found_cards(self, since: float) -> list[dict]:
+        """Report items Pulse found on its own (nothing remembered behind
+        them) since ``since`` that are on the screen: not held for the brief,
+        put away, rated not useful (Wrong time is only about when) or marked
+        done, and not tapped Do it on (its check reads the chat) or put back
+        with Undo after Pulse marked it; oldest first."""
+        with self._connect() as conn:
+            rows = conn.execute("SELECT * FROM cards WHERE kind=? AND item_id IS NULL AND created_at > ? "
+                                "AND NOT (level='brief' AND briefed_at IS NULL) AND dismissed_at IS NULL "
+                                "AND NOT (rating='down' AND reason!=?) AND id NOT IN (SELECT card_id FROM card_done) "
+                                "AND id NOT IN (SELECT card_id FROM card_acts) AND put_back_at IS NULL "
+                                "ORDER BY created_at, id", (NOTICED, since, WRONG_TIME)).fetchall()
+        return [dict(row) for row in rows]
+
     def mark_done(self, card_id: int, item_id: Optional[int], *, closed_by: str, now: float,
                   by: str = "user") -> bool:
         """Marks a card done in one transaction: keeps what its item and
@@ -1100,12 +1139,7 @@ class PulseStore:
             if conn.execute("SELECT 1 FROM card_done WHERE card_id=?", (card_id,)).fetchone():
                 conn.execute("ROLLBACK")
                 return False
-            item = check = None
-            if item_id is not None:
-                item = conn.execute("SELECT status, closed_by, closed_at FROM items WHERE id=?", (item_id,)).fetchone()
-                check = conn.execute("SELECT decision, next_check_at FROM followups WHERE item_id=?",
-                                     (item_id,)).fetchone()
-            prior = {**(dict(item) if item else {}), **(dict(check) if check else {})}
+            prior = _prior(conn, item_id) if item_id is not None else {}
             conn.execute("INSERT INTO card_done(card_id, done_at, done_by, prior_json) VALUES(?,?,?,?)",
                          (card_id, now, by, json.dumps(prior)))
             conn.execute("UPDATE card_acts SET check_at=NULL WHERE card_id=?", (card_id,))
@@ -1123,18 +1157,22 @@ class PulseStore:
 
     def unmark_done(self, card_id: int, item_id: Optional[int], *, closed_by: Sequence[str], now: float) -> bool:
         """Undo, in one transaction: takes the mark off and puts the item
-        back as it was while one of ``closed_by`` still holds it closed, and its
-        checks back where the mark stopped them. What the mark taught goes
-        with it: the user's Done signal, and a Do it Pulse saw done goes back
-        to something sent (all the check saw before it). False with no
-        mark."""
+        back as it was while one of ``closed_by``, or the chat's close the
+        mark came with (its ``closer``, on the ``item`` it closed), still
+        holds it closed, and its checks back where the mark stopped them.
+        What the mark taught goes with it: the user's Done signal, and a Do
+        it Pulse saw done goes back to something sent (all the check saw
+        before it). A mark Pulse made, taken off, keeps the card as the user
+        left it: put_back_at. False with no mark."""
         with _lock, self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute("SELECT prior_json FROM card_done WHERE card_id=?", (card_id,)).fetchone()
+            row = conn.execute("SELECT done_by, prior_json FROM card_done WHERE card_id=?", (card_id,)).fetchone()
             if row is None:
                 conn.execute("ROLLBACK")
                 return False
             conn.execute("DELETE FROM card_done WHERE card_id=?", (card_id,))
+            if row["done_by"] == PULSE:
+                conn.execute("UPDATE cards SET put_back_at=? WHERE id=?", (now, card_id))
             conn.execute("DELETE FROM signals WHERE card_id=? AND what=?", (card_id, prefs.DONE))
             conn.execute("UPDATE signals SET weight=MIN(weight, ?) WHERE card_id=? AND what=?",
                          (prefs.ACT_SENT, card_id, prefs.ACT))
@@ -1143,11 +1181,14 @@ class PulseStore:
             except ValueError:
                 prior = {}
             prior = prior if isinstance(prior, dict) else {}
+            closers = [*closed_by, *([prior["closer"]] if isinstance(prior.get("closer"), str) else [])]
+            if isinstance(prior.get("item"), int) and not isinstance(prior["item"], bool):
+                item_id = prior["item"]  # the item a chat's close closed: the card's, or what replaced it
             if isinstance(prior.get("status"), str):
                 conn.execute("UPDATE items SET status=?, closed_by=?, closed_at=? WHERE id=? "
-                             f"AND closed_by IN ({','.join('?' * len(closed_by))})",
+                             f"AND closed_by IN ({','.join('?' * len(closers))})",
                              (prior["status"], str(prior.get("closed_by") or ""), prior.get("closed_at"),
-                              item_id, *closed_by))
+                              item_id, *closers))
             if isinstance(prior.get("decision"), str) and prior["decision"] != "closed":
                 due = prior.get("next_check_at")
                 conn.execute("UPDATE followups SET decision=?, next_check_at=?, updated_at=? "
@@ -1782,18 +1823,44 @@ def _insert_candidates(conn: sqlite3.Connection, run_id: str, rows: Sequence[dic
             for row in rows]
 
 
-def _current(conn: sqlite3.Connection, item_id: int, profile: str) -> Optional[int]:
+def _current(conn: sqlite3.Connection, item_id: int, profile: str, *, reminded: bool = False) -> Optional[int]:
     """The item still standing for ``item_id``: itself, or what replaced
-    it; None once it's closed (or isn't this profile's)."""
+    it; None once it's closed (or isn't this profile's). With ``reminded``,
+    a commitment whose reminder went out still stands: a chat can close it."""
+    standing = ("open", "reminded") if reminded else ("open",)
     for _ in range(MAX_CHAIN):
         row = conn.execute("SELECT status, superseded_by FROM items WHERE id=? AND profile=?",
                            (item_id, profile)).fetchone()
-        if row is None or row["status"] != "open":
+        if row is None or row["status"] not in standing:
             return None
         if row["superseded_by"] is None:
             return item_id
         item_id = row["superseded_by"]
     return None
+
+
+def _prior(conn: sqlite3.Connection, item_id: int) -> dict[str, Any]:
+    """What an item and its checks are now, for a done mark's Undo."""
+    item = conn.execute("SELECT status, closed_by, closed_at FROM items WHERE id=?", (item_id,)).fetchone()
+    check = conn.execute("SELECT decision, next_check_at FROM followups WHERE item_id=?", (item_id,)).fetchone()
+    return {**(dict(item) if item else {}), **(dict(check) if check else {})}
+
+
+def _mark_cards_done(conn: sqlite3.Connection, item_id: int, *, prior: dict[str, Any], now: float) -> list[int]:
+    """Pulse's done mark, as mark_done makes it, on the cards Done takes
+    (follow-ups and report items) about ``item_id`` or an item it replaced
+    that aren't marked yet, each keeping ``prior`` for Undo; their ids."""
+    ids = [row["id"] for row in conn.execute(
+        "WITH RECURSIVE chain(id) AS (SELECT ? UNION SELECT items.id FROM items JOIN chain "
+        "ON items.superseded_by=chain.id) SELECT id FROM cards WHERE item_id IN (SELECT id FROM chain) "
+        "AND kind IN ('followup', ?) AND id NOT IN (SELECT card_id FROM card_done) ORDER BY id",
+        (item_id, NOTICED))]
+    for card_id in ids:
+        conn.execute("INSERT INTO card_done(card_id, done_at, done_by, prior_json) VALUES(?,?,?,?)",
+                     (card_id, now, PULSE, json.dumps(prior)))
+        conn.execute("UPDATE card_acts SET check_at=NULL WHERE card_id=?", (card_id,))
+        conn.execute("UPDATE cards SET seen_at=COALESCE(seen_at, ?) WHERE id=?", (now, card_id))
+    return ids
 
 
 class _Closing:

@@ -1142,7 +1142,7 @@ def _learning_status(pulse_store: Any) -> str:
 
 
 def _pulse_learning(pulse_store: Any, action: str, value: str, extra: str, home: Any = None) -> int:
-    from . import pulse, pulse_control, pulse_learning
+    from . import pulse, pulse_control, pulse_learning, pulse_store as store
     if action == "cards":
         zone = pulse.report_zone(pulse_store, Path(home) if home else Path("."))  # the user's, as `pulse status`
         cards = pulse_store.cards(MEMORY_LIST)
@@ -1151,7 +1151,9 @@ def _pulse_learning(pulse_store: Any, action: str, value: str, extra: str, home:
         marks = pulse_store.done_marks([card["id"] for card in cards])
         for card in cards:
             rated = f" (rated {card['rating']}{', ' + card['reason'] if card['reason'] else ''})" if card["rating"] else ""
-            finished = " (done)" if card["id"] in marks else ""
+            # Pulse marks one done when its chat, or another, shows it done.
+            finished = ("" if card["id"] not in marks else " (done, seen in a chat)"
+                        if marks[card["id"]]["done_by"] == store.PULSE else " (done)")
             if card.get("dismissed_at"):
                 back = card.get("rest_until")
                 finished += f" (put away, back {datetime.fromtimestamp(back, zone).strftime('%a %H:%M')})" if back \

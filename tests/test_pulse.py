@@ -1957,6 +1957,120 @@ def test_repeats_update_one_item_and_changes_supersede_it(remembering, db):
     assert closed["status"] == "done" and "Passport renewed" in closed["closed_by"]
 
 
+def _reminded(store_, item_id, at):
+    """The item as pulse_followup._told leaves a commitment whose reminder went out."""
+    with store_._connect() as conn:
+        conn.execute("UPDATE items SET status='reminded', closed_by='pulse reminder', closed_at=? WHERE id=?",
+                     (at, item_id))
+
+
+def test_a_chat_that_shows_a_reminded_commitment_done_closes_it_and_its_card(remembering, db):
+    store_ = remembering.store
+    db.message("user", "I need to call the dentist about my crown", sid="work", at=DAY + 60)
+    db.message("assistant", "I'll remind you.", sid="work", at=DAY + 70)
+    item = {"kind": "commitment", "text": "The user will call the dentist about their crown.",
+            "evidence": "I need to call the dentist about my crown", "line": 1, "explicit": True}
+    _remember(remembering, FakeModel({"items": [item]}), DAY + 70 + memory.IDLE_S)
+    [said] = store_.open_items()
+    card_id = pulse.learning.add_card(store_, kind="followup", item=said, level_name="push",
+                                      news="You meant to call the dentist about your crown.", why="",
+                                      chat_title="Work", now=DAY + 86400)
+    _reminded(store_, said["id"], DAY + 86400)
+    db.session("errands", title="Errands", pinned=0)
+    db.message("user", "Called the dentist, the crown is booked for Monday", sid="errands", at=DAY + 2 * 86400)
+    db.message("assistant", "Great, noted.", sid="errands", at=DAY + 2 * 86400 + 10)
+    model = FakeModel({"items": [], "closed": [{"number": said["id"], "status": "done", "line": 1,
+                                                "evidence": "Called the dentist, the crown is booked"}]})
+    _remember(remembering, model, DAY + 2 * 86400 + 10 + memory.IDLE_S)
+    # Shown as reminded, matched though the chat says "called" and the item "call".
+    assert f"#{said['id']} commitment: The user will call the dentist about their crown." in model.shown[0]
+    assert "(reminded 2026-10-21)" in model.shown[0]
+    closed = store_.item(said["id"])
+    assert closed["status"] == "done" and "Called the dentist" in closed["closed_by"]
+    assert store_.done_marks([card_id])[card_id]["done_by"] == "pulse"
+    assert store_.card(card_id)["seen_at"] is not None
+    # Undo puts it back as the reminder left it.
+    assert control.done(store_, card_id, False) is True
+    back = store_.item(said["id"])
+    assert (back["status"], back["closed_by"], back["closed_at"]) == ("reminded", "pulse reminder", DAY + 86400)
+    assert store_.done_marks([card_id]) == {}
+
+
+def test_a_reminded_commitment_is_closable_for_two_weeks_and_said_again_is_new(remembering):
+    store_ = remembering.store
+    [kept] = store_.advance("", "work", message_id=1, at=DAY, items=[{
+        "kind": "commitment", "text": "The user will renew their passport.", "evidence": "I'll renew my passport",
+        "explicit": 1, "due": "", "due_at": None, "message_id": 1, "mentioned_at": DAY}])
+    _reminded(store_, kept, DAY + 86400)
+    shown = lambda now: [item["id"] for item in store_.remembered_items(
+        profile="", limit=10, reminded_since=now - memory.REMINDED_KEEP_S)]
+    assert shown(DAY + 86400 + memory.REMINDED_KEEP_S) == [kept]
+    assert shown(DAY + 86400 + memory.REMINDED_KEEP_S + 1) == []
+    remembered = store_.remembered_items(profile="", limit=10, reminded_since=DAY)
+    chunk = [_row(1, "user", "I'll renew my passport this week", DAY + 3 * 86400)]
+    items, _, _ = memory.extract(FakeModel({"items": [
+        {"kind": "commitment", "text": "x", "evidence": "I'll renew my passport this week", "line": 1,
+         "same_as": kept},
+        {"kind": "commitment", "text": "The user will renew their passport.", "evidence": "I'll renew my passport",
+         "line": 1, "replaces": kept}]}), chunk, UTC, remembered=remembered)
+    # Pulse reminded the user already: said again, it's its own item, with a reminder of its own.
+    assert [(item["same_as"], item["replaces"]) for item in items] == [(None, None), (None, None)]
+    [new] = store_.advance("", "work", message_id=2, at=DAY + 3 * 86400, after_id=1, items=items[:1])
+    assert [item["id"] for item in store_.open_items()] == [new] and store_.item(kept)["status"] == "reminded"
+
+
+def test_a_chats_close_marks_the_cards_of_the_items_it_replaced(remembering):
+    store_ = remembering.store
+    said = lambda evidence, **more: {"kind": "commitment", "text": evidence, "evidence": evidence, "explicit": 1,
+                                     "due": "", "due_at": None, "message_id": 1, "mentioned_at": DAY, **more}
+    [old] = store_.advance("", "work", message_id=1, at=DAY, items=[said("book the flight Monday")])
+    reminder = pulse.learning.add_card(store_, kind="followup", item=store_.item(old), level_name="push",
+                                       news="The flight isn't booked yet.", why="", chat_title="Work", now=DAY + 60)
+    seen = store_.add_card({"kind": "noticed", "item_id": old, "level": "screen", "title": "Book the flight",
+                            "news": "Book the flight Monday.", "created_at": DAY + 90})
+    [new] = store_.advance("", "work", message_id=2, at=DAY + 120, after_id=1,
+                           items=[said("book the flight Tuesday", replaces=old)])
+    report_card = store_.add_card({"kind": "noticed", "item_id": new, "level": "screen", "title": "Book the flight",
+                                   "news": "Book the flight Tuesday.", "created_at": DAY + 180})
+    assert control.done(store_, seen) is True and store_.item(new)["status"] == "open"  # only that card
+    store_.advance("", "work", message_id=3, at=DAY + 300, after_id=2,
+                   closed=[{"id": old, "status": "done", "evidence": "Flight booked", "message_id": 3}])
+    marks = store_.done_marks([reminder, seen, report_card])
+    assert {card: mark["done_by"] for card, mark in marks.items()} == {reminder: "pulse", seen: "user",
+                                                                      report_card: "pulse"}
+    assert store_.item(new)["status"] == "done"
+    # Undo on a card about the replaced item opens the item that stands for it now.
+    assert control.done(store_, reminder, False) is True
+    assert store_.item(new)["status"] == "open" and store_.item(old)["superseded_by"] == new
+    # Put back, it isn't marked again from the chat; the user's own mark taken off leaves it to be read.
+    assert pulse.followup.read_first(store_.card(reminder)) is False
+    assert control.done(store_, seen, False) is True and pulse.followup.read_first(store_.card(seen)) is True
+    store_.advance("", "work", message_id=4, at=DAY + 400, after_id=3,
+                   closed=[{"id": new, "status": "done", "evidence": "Booked", "message_id": 4}])
+    assert reminder in store_.done_marks([reminder])  # the new close marks it again
+    # An Undo whose close no longer holds the item takes only the mark off,
+    # and a close of an item closed already marks nothing.
+    assert control.done(store_, report_card, False) is True and store_.item(new)["status"] == "done"
+    store_.advance("", "work", message_id=5, at=DAY + 500, after_id=4,
+                   closed=[{"id": new, "status": "cancelled", "evidence": "No trip", "message_id": 5}])
+    assert store_.done_marks([report_card]) == {} and "Booked" in store_.item(new)["closed_by"]
+
+
+def test_memory_matches_a_chunk_on_words_without_their_endings():
+    assert memory._words("Called the dentists about flights, booking classes and news") == memory._words(
+        "call dentist about flight book class news")
+    for said, meant in (("closed", "close"), ("closes", "close"), ("planned", "plan"), ("updated", "update"),
+                        ("cancelled", "cancel"), ("scheduled", "schedule"), ("replied", "reply"),
+                        ("replies", "reply"), ("phones", "phone"), ("agreed", "agree")):
+        assert memory._words(said) == memory._words(meant), said
+    item = _open(7, "commitment", "The user will call the dentist about the flight.", "call the dentist",
+                 chat="other")
+    chunk = [_row(1, "user", "Called the dentists, and the flights are booked", DAY + 60)]
+    assert memory.candidates([item], chunk, "work") == [item]
+    item = _open(8, "commitment", "The user will close the account.", "close the account", chat="other")
+    assert memory.candidates([item], [_row(2, "user", "Closed the account", DAY + 60)], "work") == [item]
+
+
 def test_items_long_past_their_due_date_expire(remembering, db):
     remembering.store.advance("", "work", message_id=1, at=DAY, items=[
         {"kind": "commitment", "text": "x", "evidence": "y", "explicit": 1, "due": "2026-10-20", "due_at": DAY,

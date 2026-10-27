@@ -67,6 +67,12 @@ MAX_OUTCOMES = 30
 # Remembered items shown beside a chunk, so a repeat updates one item.
 MAX_CANDIDATES = 30
 MAX_OPEN = 500
+# A commitment whose reminder went out stays beside the chunks this long,
+# so a later chat that shows it done closes it, and its card (2026-10-26,
+# Eric: "is there a way that pulse recognizes in later scans that a
+# previously surfaced card is taken care of?"). It can only be closed: said
+# again, it's a new item with a reminder of its own.
+REMINDED_KEEP_S = 14 * 86400.0
 # An item whose due date passed this long ago, with nothing since, expires.
 EXPIRE_S = 7 * 86400.0
 # Past any real date (year 5138): a stored time beyond it is corrupt, and datetime can't show it.
@@ -116,10 +122,10 @@ Each item has:
 - "explicit": true when said outright, false when you inferred it.
 - "due": only when a day or time was actually said for it: "YYYY-MM-DD", or "YYYY-MM-DDTHH:MM" when a time was said, in the user's local time. Resolve words like "Friday" or "tomorrow" against the date on the line they were said on. Otherwise null. Never guess a date.
 - "due_words": the exact words that gave the date, or null.
-- "same_as": the number of a remembered thing of the same kind this says again, or null. Say it again rather than repeating it as a new item.
-- "replaces": the number of a remembered thing of the same kind this changes (a new date, a changed plan, a fact that is no longer true), or null.
+- "same_as": the number of a remembered thing of the same kind this says again, or null. Say it again rather than repeating it as a new item. Never one marked "reminded": Pulse already reminded the user of it, and said again it's a new item.
+- "replaces": the number of a remembered thing of the same kind this changes (a new date, a changed plan, a fact that is no longer true), or null. Never one marked "reminded".
 
-"closed" lists remembered commitments, promises, intentions and watches that this conversation shows were done or called off: {"number": n, "status": "done" or "cancelled", "evidence": the exact words that show it, "line": that line's number}.
+"closed" lists remembered commitments, promises, intentions and watches, including ones marked "reminded", that this conversation shows were done or called off: {"number": n, "status": "done" or "cancelled", "evidence": the exact words that show it, "line": that line's number}.
 
 Leave out small talk, questions answered on the spot, details of the task being worked on in the conversation, what someone other than the user or Hermes will do, and anything only in tool lines. Texts, emails and notifications from other people that Hermes read out or quoted are never items: not their words, and not facts about the sender, unless the user asks Hermes to remember it. A line marked "Pulse's reminder" is a reminder from Pulse, the part of Hermes that speaks up on its own, that the user sent on, and one marked "answering Pulse's reminder" is Hermes's answer to it: neither is ever an item, though either can show a remembered thing done or called off."""
 
@@ -319,17 +325,39 @@ def handoffs_in(home: Path, chat_id: str, rows: Sequence[Any], texts: Sequence[t
 _WORD = re.compile(r"[a-z0-9][a-z0-9'-]{3,}")
 
 
+_ENDINGS = ("ing", "ed", "es", "s")
+
+
 def _words(text: Any) -> set[str]:
-    return set(_WORD.findall(_norm(text)))
+    """The words of 4 letters or more, each as _stem gives it, so a close
+    said in other words meets its item."""
+    return {_stem(word) for word in _WORD.findall(_norm(text))}
 
 
-def candidates(open_items: Sequence[dict], chunk: Sequence[Any], chat_id: str) -> list[dict]:
-    """The open items the model should see beside a chunk: this chat's
-    newest, then the ones sharing the most words with the chunk."""
+def _stem(word: str) -> str:
+    """A word without a common ending, spelled so its forms meet: "called"
+    and "call" are "call", "flights" and "flight" "flight", "closed" and
+    "close" "clos", "planned" and "plan" "plan", "replied" and "reply"
+    "repli"."""
+    for ending in _ENDINGS:
+        if word.endswith(ending) and len(word) - len(ending) >= 4 and not word.endswith("ss"):
+            word = word[:-len(ending)]
+            break
+    if len(word) > 4 and word.endswith("e"):
+        word = word[:-1]
+    elif len(word) > 4 and word[-1] == word[-2] and word[-1] not in "aeiou":
+        word = word[:-1]
+    return word[:-1] + "i" if word.endswith("y") else word
+
+
+def candidates(remembered: Sequence[dict], chunk: Sequence[Any], chat_id: str) -> list[dict]:
+    """The remembered items (open, or reminded lately) the model should see
+    beside a chunk: this chat's newest, then the ones sharing the most
+    words with the chunk."""
     words = set().union(*(_words(_text(row["content"])) for row in chunk)) if chunk else set()
-    same = [item for item in open_items if item["chat_id"] == chat_id][:MAX_CANDIDATES // 2]
+    same = [item for item in remembered if item["chat_id"] == chat_id][:MAX_CANDIDATES // 2]
     taken = {item["id"] for item in same}
-    scored = sorted(((len(words & _words(item["text"] + " " + item["evidence"])), item) for item in open_items
+    scored = sorted(((len(words & _words(item["text"] + " " + item["evidence"])), item) for item in remembered
                      if item["id"] not in taken), key=lambda pair: (-pair[0], -pair[1]["mentioned_at"]))
     return same + [item for score, item in scored if score >= 2][:MAX_CANDIDATES - len(same)]
 
@@ -338,7 +366,13 @@ def render_remembered(remembered: Sequence[dict], zone: tzinfo) -> str:
     return "\n".join(f"#{item['id']} {item['kind']}: {item['text']}"
                       + (f" (due {item['due']})" if item["due"] else "")
                       + f" (said {_local(item['mentioned_at'], zone):%Y-%m-%d}: \"{_clip(item['evidence'], 120)}\")"
+                      + (f" (reminded {_local(item['closed_at'], zone):%Y-%m-%d})" if _reminded(item) else "")
                       for item in remembered)
+
+
+def _reminded(item: dict) -> bool:
+    """A commitment whose reminder went out: memory can only close it."""
+    return item.get("status") == "reminded" and isinstance(item.get("closed_at"), (int, float))
 
 
 # One chunk's items ---------------------------------------------------------------
@@ -425,13 +459,15 @@ def _item(raw: Any, chunk: Sequence[Any], zone: tzinfo, remembered: Sequence[dic
     # A date without a time lasts to the end of its day.
     late = kind == "commitment" and due_at is not None and now is not None \
         and now - (due_at if "T" in due else due_at + 86400.0) > LATE_S
-    allowed = {item["id"] for item in remembered if item["kind"] == kind}
+    # Said again, a commitment Pulse already reminded of is a new item.
+    standing = [item for item in remembered if item["kind"] == kind and not _reminded(item)]
+    allowed = {item["id"] for item in standing}
     replaces = _number(raw.get("replaces"), allowed)  # a change wins over a repeat when both are named
     same_as = None if replaces else _number(raw.get("same_as"), allowed)
     if same_as is None and replaces is None:
         # The model missed a plain repeat: the same words, or the same sentence.
-        same_as = next((item["id"] for item in remembered if item["kind"] == kind and (
-            _norm(item["evidence"]) == _norm(evidence) or _norm(item["text"]) == _norm(text))), None)
+        same_as = next((item["id"] for item in standing if
+                        _norm(item["evidence"]) == _norm(evidence) or _norm(item["text"]) == _norm(text)), None)
     return {"kind": kind, "text": text, "evidence": evidence, "explicit": int(raw.get("explicit") is True),
             "due": due, "due_at": due_at, "message_id": row["id"], "mentioned_at": row["timestamp"],
             "same_as": same_as, "replaces": replaces, "late": late}
@@ -557,7 +593,9 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
                 chat.chat_id, max(chunk[0]["timestamp"] - IDLE_S, read_to), last["timestamp"], MAX_OUTCOMES)
                 if o["at"] > read_to]
             calls += 1
-            remembered = candidates(pulse_store.open_items(profile=chat.profile, limit=MAX_OPEN), chunk, chat.chat_id)
+            remembered = candidates(pulse_store.remembered_items(profile=chat.profile, limit=MAX_OPEN,
+                                                                 reminded_since=now - REMINDED_KEEP_S),
+                                    chunk, chat.chat_id)
             try:
                 # Only older chats (a backfill) set a commitment learned late
                 # aside: a live read that fell behind keeps it, for the
