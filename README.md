@@ -2575,13 +2575,36 @@ Capability `pulse_where`.
   from `"me"` or a saved place (above), each read in the location read log
   under the Pulse chat.
 - **Off** reads nothing and deletes the arrivals and departures Pulse kept;
-  so does wiping location in Conduit. The places on what Pulse remembers
-  stay, like the rest of its memory: `GET /pulse/memory` gives an item said
-  for a place `"place"` (`words`, `on`: `arrive` or `leave`, and `saved`:
-  the saved place it names, or null).
+  so do turning Pulse off and wiping location in Conduit. The places on what
+  Pulse remembers stay, like the rest of its memory: `GET /pulse/memory`
+  gives an item said for a place `"place"` (`words`, `on`: `arrive` or
+  `leave`, and `saved`: the saved place it names, or null).
 - `hermes conduit-push pulse where` lists what waits for a place and the
   saved place each names, and what the last day's arrivals and departures
   did.
+
+## Pulse brings up what it remembers (plugin 0.101+)
+
+With Pulse memory on, Pulse looks up what it remembers by what's happening,
+in code, with no model and nothing sent anywhere new:
+
+- **Today's events.** The morning brief gets "Related to today's events":
+  for each timed event left today (not all-day, cancelled or declined),
+  soonest first, the open items that share a name with it (the people in
+  it when the phone shares them, a name in its title: "Lunch with Dan") or
+  a word few items have, at most five in all, so the brief can say "lunch
+  with Dan at 1: he started the new job on Monday". A name relates however
+  often it comes up; a word most items share ("lunch", "review") doesn't
+  by itself, nor do dates or "meeting". Items rated "no", put away with Not
+  now, or past their date stay out, as in the report.
+- **A place** (with Where you are on, above). A reminder made due as you
+  get to a place carries what Pulse remembers about it, at most five: what
+  names the place ("Costco"), or its kind ("the office") when few items do,
+  for its check to use when it helps.
+  An arrival or departure with nothing waiting for it says nothing yet: it
+  keeps what it would have brought up, and `hermes conduit-push pulse
+  where` lists it ("it would have brought up: ..."), to judge before it
+  speaks.
 
 ## Apple Watch lookups and jobs (plugin 0.6+, jobs 0.7+, Gemini tokens 0.8+, Qwen tokens 0.75+)
 

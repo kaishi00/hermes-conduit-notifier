@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.101.0 (2026-10-27)
+## 0.102.0 (2026-10-27)
 
 ### Fixes
 - The Lock Screen could keep showing a finished turn as running, overnight
@@ -21,6 +21,23 @@ checks it). The format is fixed, because Conduit reads it:
   that Hermes moved to a new session while compacting a long chat, never sent
   the activity its end. Both now end it (a quick turn's end also needs the
   push relay's update).
+
+## 0.101.0 (2026-10-27)
+
+### Fixes
+- Turning Pulse off now deletes the arrivals and departures it kept for
+  Where you are, as turning Where you are off does. Before, they stayed
+  past their day until Pulse came back on. `hermes conduit-push pulse
+  where` lists only the last day's, and says when what waited for a place
+  was already on its way.
+
+### New and improved
+- Pulse brings up what it remembers when it's useful: the morning brief
+  mentions what it knows about the people and things in today's events
+  ("lunch with Dan at 1: he started the new job on Monday"), and a reminder
+  at a place comes with what Pulse remembers about that place. Arriving
+  somewhere with nothing waiting doesn't say anything yet: `hermes
+  conduit-push pulse where` shows what Pulse would have brought up.
 
 ## 0.100.0 (2026-10-27)
 

@@ -191,7 +191,8 @@ Return a JSON object {"decision": ..., "news": ..., "why": ..., "check_again_hou
 # Added to a check made as the user got to (or left) the place it was said for.
 PLACE_INSTRUCTION = ("\n\nIt was said for a place, and the material says the user just got there (or just left it): "
                      "that's when it was meant for. Answer \"tell\" unless the material shows it's done or no "
-                     "longer wanted, and start \"news\" with where they are (\"You're at Costco: ...\").")
+                     "longer wanted, and start \"news\" with where they are (\"You're at Costco: ...\"). What's "
+                     "under \"Also remembered about\" goes in \"news\" only when it helps with this, in a few words.")
 
 TEXT = """Pulse follow-up {tag}.
 In the chat "{title}" ({said}), you told the user: "{evidence}"
@@ -259,18 +260,22 @@ def place_wait_end(item: dict) -> float:
     return float(item["valid_from"]) + PLACE_WAIT_S
 
 
-def place_reached(pulse_store: store.PulseStore, item: dict, moment: dict, now: float) -> bool:
+def place_reached(pulse_store: store.PulseStore, item: dict, moment: dict, now: float,
+                  related: Sequence[int] = ()) -> bool:
     """The user got to (or left) the place ``item`` waits for (``moment``, a
-    pulse_store moments row): its check is due now, with the moment. False
-    when its follow-up isn't waiting for its place (already on its way)."""
+    pulse_store moments row): its check is due now, with the moment and
+    what Pulse remembers about the place (``related``, item ids,
+    pulse_places.Memories). False when its follow-up isn't waiting for its
+    place (already on its way)."""
     pulse_store.place_followup(item["id"], next_check_at=place_wait_end(item), now=now, decision=PLACE)
     row = pulse_store.followup(item["id"])
     if row is None or row["decision"] != PLACE:
         return False
+    reached = {"place": moment["place"], "words": item["place_words"], "on": moment["event"],
+               "at": float(moment["at"]), **({"related": list(related)} if related else {})}
     pulse_store.decide_followup(item["id"], decision=PLACE, news="", why=row["why"], checks=int(row["checks"]),
                                 next_check_at=now, now=now, failures=int(row["failures"]),
-                                timing={"moment": {"place": moment["place"], "words": item["place_words"],
-                                                   "on": moment["event"], "at": float(moment["at"])}})
+                                timing={"moment": reached})
     return True
 
 
@@ -444,6 +449,15 @@ def material(pulse_store: store.PulseStore, home: Path, item: dict, *, zone: tzi
         parts.append(f"## Where the user is\n{verb} {_clip(moment.get('place'), 80)} "
                      f"({_local(float(moment['at']), zone)}), the place they said this for "
                      f"(\"{_clip(moment.get('words'), 60)}\").")
+        # As each stands now: what replaced it, and none closed since.
+        also = [pulse_store.item(current) for current in dict.fromkeys(
+            pulse_store.current_item(item_id) for item_id in moment.get("related") or []
+            if isinstance(item_id, int) and not isinstance(item_id, bool)) if current is not None]
+        if also:
+            parts.append(f"## Also remembered about {_clip(moment.get('place'), 80)} (what Pulse remembers that "
+                         f"shares a word with the place)\n" + "\n".join(
+                             f"- [{found['kind']}] {_clip(found['text'], 200)} (\"{_clip(found['evidence'], 120)}\", "
+                             f"{_local(found['valid_from'], zone)})" for found in also))
     try:
         # Through the chat's compression chain: a long chat goes on in a new session.
         rows = hermes.chain_messages(where, chat_id=item["chat_id"], after_id=int(item["message_id"]),

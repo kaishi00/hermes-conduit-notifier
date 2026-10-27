@@ -3,8 +3,10 @@ the switch, arrivals and departures from the location store, places in
 what memory keeps, and a reminder that waits for its place."""
 
 import json
+import sys
 import threading
 import time
+import types
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -13,6 +15,8 @@ from test_location import BASE, DEVICE, NOW, PLACES, Phone, client, location, sh
 from test_location import _paired, api as location_api
 from test_pulse import ROOT, SID, DAY, FakeModel, _load, _row, cli, control, memory, pulse, store
 from test_pulse_followup import CHAT, check_now, followup, live, llm_saying, promise  # noqa: F401
+from test_pulse_hours import phone_home
+from test_phone import _batch, _event
 
 places = _load("conduit_push.pulse_places", ROOT / "pulse_places.py")
 hours = _load("conduit_push.pulse_hours", ROOT / "pulse_hours.py")
@@ -22,18 +26,23 @@ UTC = timezone.utc
 COSTCO = {"id": "p_costco", "name": "Costco Wholesale", "kind": "other", "private": False}
 
 
-def placed(live, words="Costco", on="arrive", *, text="The user will buy batteries.", line=None, said_at=None,
-           kind="commitment", due="", due_at=None):
-    """An item memory kept for a place, from the user's line (Hermes's for a promise); its id."""
+def remember(live, text, line, kind="fact", *, said_at=None, **fields):
+    """An item memory kept from ``line``, the user's (Hermes's for a promise); its id."""
     said_at = time.time() - 3600 if said_at is None else said_at
-    line = line or f"Next time I'm at {words}, remind me to get batteries"
-    message_id = live.db.message("user" if kind == "commitment" else "assistant", line, sid=CHAT, at=said_at)
+    message_id = live.db.message("assistant" if kind == "promise" else "user", line, sid=CHAT, at=said_at)
     mark = live.store.watermark("", CHAT)
     [item_id] = live.store.advance("", CHAT, message_id=message_id, at=said_at,
                                    after_id=mark["message_id"] if mark else 0, items=[{
-        "kind": kind, "text": text, "evidence": line, "explicit": 1, "due": due, "due_at": due_at,
-        "message_id": message_id, "mentioned_at": said_at, "place_words": words, "place_on": on}])
+        "kind": kind, "text": text, "evidence": line, "explicit": 1, "due": "", "due_at": None,
+        "message_id": message_id, "mentioned_at": said_at, **fields}])
     return item_id
+
+
+def placed(live, words="Costco", on="arrive", *, text="The user will buy batteries.", line=None, said_at=None,
+           kind="commitment", due="", due_at=None):
+    """An item memory kept for a place; its id."""
+    return remember(live, text, line or f"Next time I'm at {words}, remind me to get batteries", kind,
+                    said_at=said_at, due=due, due_at=due_at, place_words=words, place_on=on)
 
 
 _moments = iter(range(1, 1_000_000))
@@ -152,6 +161,31 @@ def test_a_moment_from_a_phone_that_keeps_no_history_keeps_only_its_id(where):
     assert not places.arrived(where.store, [one], time.time())  # still known, so not taken twice
     where.store.prune_moments(time.time() + 1)
     assert places.arrived(where.store, [one], time.time())  # a day on, gone
+
+
+def test_moments_are_kept_a_day_even_while_no_tick_runs(where):
+    old, new = moment(), moment()
+    then = time.time() - store.MOMENTS_KEEP_S - 60
+    assert places.arrived(where.store, [old], then)
+    assert [row["id"] for row in where.store.moments()] == [old["id"]]
+    assert where.store.moments(since=time.time() - store.MOMENTS_KEEP_S) == []  # what `pulse where` lists
+    # The next arrival prunes what's older than a day, whatever the tick does.
+    assert places.arrived(where.store, [new], time.time())
+    assert [row["id"] for row in where.store.new_moments()] == [new["id"]]
+
+
+def test_switching_pulse_off_deletes_the_moments_it_kept(where, capsys, monkeypatch):
+    arrive(where, moment())
+    assert where.store.moments()
+    control.update(where.store, {"enabled": False})
+    assert where.store.moments() == [] and where.store.new_moments() == []
+    control.update(where.store, {"enabled": True})
+    places.arrived(where.store, [moment()], time.time())
+    assert where.store.new_moments()
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: where.home)
+    run = lambda action: cli.dispatch(types.SimpleNamespace(conduit_push_action="pulse", pulse_action=action, value=""))
+    assert run("off") == 0
+    assert where.store.new_moments() == [] and "Pulse is off." in capsys.readouterr().out
 
 
 # Waiting for a place ------------------------------------------------------------
@@ -367,8 +401,11 @@ def test_a_follow_up_already_on_its_way_isnt_made_due_again(where):
     arrive(where, moment())
     check_now(where, llm_saying(decision="tell", news="You're at Costco: batteries.", why="not done"))
     again = moment()
-    assert arrive(where, again) == [] and outcome(where, again["id"]) == {"due": []}
+    assert arrive(where, again) == [] and outcome(where, again["id"]) == {"skipped": "on_its_way", "items": [item_id]}
     assert where.store.followup(item_id)["decision"] == "tell"
+    [row] = [row for row in where.store.moments() if row["id"] == again["id"]]
+    assert places.describe(row, UTC, {item_id: "batteries"}).endswith(
+        "nothing, as what waited for it was already on its way (waiting: batteries)")
 
 
 # The tick and the memory run ----------------------------------------------------
@@ -431,6 +468,179 @@ def test_memory_keeps_a_place_only_when_its_words_are_on_the_items_line():
                                           "place_words": "work", "place_on": "leave", "mentioned_at": DAY,
                                           "evidence": "e", "status": "open", "closed_at": None}], UTC)
     assert rendered.startswith("#7 commitment: The user will buy milk. (when leaving work) (said 2026-10-20")
+
+
+# What Pulse remembers about what's happening ------------------------------------
+
+LONDON = pulse.report.zone_for("Europe/London")
+# test_phone's batch is synced on the 14th at 08:00 in London.
+MORNING = datetime(2026, 10, 14, 8, 0, tzinfo=LONDON).timestamp()
+
+
+def kept(item_id, text, evidence="", mentioned_at=0.0):
+    return {"id": item_id, "text": text, "evidence": evidence, "mentioned_at": mentioned_at}
+
+
+def test_the_words_that_relate_are_the_ones_that_name_something():
+    assert places.key_words("Lunch with Dan’s team at the Ivy, 2pm") == {"lunch", "dan", "team", "ivi"}
+    # Hermes, the user, dates and meetings are in most items and events: they relate nothing.
+    assert places.key_words("Hermes will tell the user on Monday after the meetings") == {"tell", "after"}
+    assert places.key_words("Weekly sync calls in March, mornings") == {"weekli"}
+    # Names: the people in an event, and in its title when it isn't in Title Case.
+    assert places.event_keys({"title": "Lunch", "location": "The Ivy, 1 West St",
+                              "attendees": [{"name": "Dan Okafor", "email": "dan@example.com"}, "Sam"]}) == \
+        ({"lunch", "ivi", "west", "dan", "okafor"}, {"dan", "okafor"})
+    assert places.title_names("Lunch with Dan") == {"dan"} and places.title_names("Dinner at Mum’s") == {"mum"}
+    assert places.title_names("Design Review") == set() and places.title_names("Call Mum") == set()
+    # A place's name, but a kind's words.
+    assert places.place_keys("Acme HQ", "work") == ({"acme", "work", "offic", "workplac"}, {"acme"})
+    assert places.place_keys("Home", "home") == ({"home", "hous", "flat", "apartment"}, set())
+    assert places.place_keys("Costco Wholesale", "other") == ({"costco", "wholesal"}, {"costco", "wholesal"})
+
+
+def test_an_item_relates_by_a_name_or_a_rare_word_the_rarest_first():
+    found = places.Memories(
+        [kept(n, f"The user has lunch with {name} on Fridays.", f"lunch with {name}", mentioned_at=n)
+         for n, name in enumerate(("Anna", "Boris", "Carla", "Dmitri", "Elena"), 1)]
+        + [kept(6, "Dan started a new job at Stripe.", "Dan started at Stripe", mentioned_at=100),
+           kept(7, "Dan's sister lives in Lisbon.", "Dan's sister lives in Lisbon", mentioned_at=90),
+           kept(8, "Dan is vegetarian.", "Dan doesn't eat meat", mentioned_at=80),
+           kept(9, "Dan wants to see the new Bond film.", "Dan wants to see Bond", mentioned_at=70),
+           kept(10, "Dan plays squash with the user.", "squash with Dan", mentioned_at=60)])
+    ids = lambda *args, **kwargs: [item["id"] for item in found.related(*args, **kwargs)]
+    # Five items of ten have lunch, and five Dan: neither is rare.
+    assert ids(places.key_words("Lunch with Dan")) == [] and ids(places.key_words("Lunch")) == []
+    # But Dan is a name: he relates however often he comes up, the most recently mentioned first.
+    assert ids(*places.event_keys({"title": "Lunch with Dan"})) == [6, 7, 8, 9, 10]
+    assert ids(*places.event_keys({"title": "Lunch with Dan in Lisbon"})) == [7, 6, 8, 9, 10]  # the rarest first
+    assert ids(*places.event_keys({"title": "Lunch with Dan"}), exclude={6}, limit=2) == [7, 8]
+    assert ids(places.key_words("Stripe interview prep")) == [6]  # a rare word, no name
+    assert ids(frozenset()) == []
+    # A word is common in a tenth of what Pulse remembers, and in 5 items at least.
+    assert places.Memories([kept(n, "x") for n in range(10)]).rare == 5
+    assert places.Memories([kept(n, "x") for n in range(500)]).rare == 50
+
+
+def test_what_pulse_remembers_leaves_out_what_the_report_does(where, monkeypatch):
+    now = time.time()
+    found = lambda: [item["id"] for item, _ in places.memories(where.store, now).items]
+    kept_ids = [remember(where, f"Fact {n} about Dan.", f"Dan {n}") for n in range(5)]
+    closed, rated, away, back = kept_ids[1:]
+    where.store.close_item(closed, status="done", closed_by="user")
+    stale = remember(where, "The user will renew the passport.", "renew my passport", "commitment",
+                     said_at=now - 9 * 86400, due="2026-10-01", due_at=now - 8 * 86400)
+    said = {item_id: where.store.item(item_id)["mentioned_at"] for item_id in kept_ids}
+    monkeypatch.setattr(places.report, "rated_not_useful", lambda pulse_store: {rated: said[rated] + 1})
+    # Put away, or rated "no", until it's brought up again.
+    monkeypatch.setattr(where.store, "resting_items", lambda at, rest: {away: said[away] + 1, back: said[back] - 1})
+    assert found() == [back, kept_ids[0]] and stale not in found()
+
+
+def test_a_brief_reads_each_remembered_item_once_however_many_events(where, monkeypatch):
+    word = lambda n: "".join(chr(ord("a") + int(digit)) for digit in f"{n:03d}")  # 7: "aah"
+    message_id = where.db.message("user", "lots of projects", sid=CHAT, at=MORNING - 86400)
+    where.store.advance("", CHAT, message_id=message_id, at=MORNING - 86400, items=[{
+        "kind": "fact", "text": f"Project {word(n)} ships in Lisbon.", "evidence": f"project {word(n)}",
+        "explicit": 1, "due": "", "due_at": None, "message_id": message_id, "mentioned_at": MORNING - 86400}
+        for n in range(600)])
+    # The newest 500 are #101 to #600, the projects from "baa" on.
+    meetings = [_event(f"e_{n}", title=f"Project {word(100 + n)} review", end="2026-10-14T21:00:00+01:00",
+                       start=f"2026-10-14T{9 + n // 4:02d}:{n % 4 * 15:02d}:00+01:00", attendees=[], notes=None)
+                for n in range(40)]
+    phone_home(where.home, events={**_batch()["events"], "upsert": meetings})
+    read = []
+
+    class Read(places.Memories):
+        def __init__(self, items):
+            read.append(len(items))
+            super().__init__(items)
+
+    monkeypatch.setattr(places, "Memories", Read)
+    started = time.monotonic()
+    section = places.today_related(where.store, where.home, LONDON, MORNING)
+    # Memory's newest 500 items, read once for 40 events: no search index needed yet.
+    assert read == [memory.MAX_OPEN] and time.monotonic() - started < 2
+    assert section.count("\n- ") == places.MAX_RELATED and "\n- 09:00 Project baa review: #" in section
+
+
+def test_the_brief_brings_what_pulse_remembers_about_todays_events(where):
+    said_at = datetime(2026, 10, 12, 18, 0, tzinfo=UTC).timestamp()
+    dan = remember(where, "Dan started a new job at Stripe.", "Dan started at Stripe on Monday", said_at=said_at)
+    remember(where, "Priya is moving to Berlin.", "Priya moves to Berlin next month", said_at=said_at)
+    remember(where, "The user wants to try the ramen place.", "I want to try that ramen place", said_at=said_at)
+    events = _batch()["events"]
+    today = [_event("e_dan", title="Lunch with Dan", start="2026-10-14T13:00:00+01:00",
+                    end="2026-10-14T14:00:00+01:00", location="The Ivy", notes=None,
+                    attendees=[{"name": "Dan Okafor", "email": "dan@example.com", "status": "accepted"}]),
+             _event("e_priya", title="Coffee with Priya", start="2026-10-14T15:00:00+01:00",
+                    end="2026-10-14T15:30:00+01:00", my_status="declined", notes=None, attendees=[]),
+             _event("e_breakfast", title="Breakfast with Priya", start="2026-10-14T07:00:00+01:00",
+                    end="2026-10-14T07:30:00+01:00", notes=None, attendees=[]),
+             _event("e_birthday", title="Priya's birthday", all_day=True, start="2026-10-14T00:00:00+01:00",
+                    end="2026-10-15T00:00:00+01:00", notes=None, attendees=[]),
+             _event("e_friday", title="Dinner with Dan", start="2026-10-16T19:00:00+01:00",
+                    end="2026-10-16T21:00:00+01:00", notes=None, attendees=[])]
+    phone_home(where.home, events={**events, "upsert": events["upsert"] + today})
+    context = lambda: pulse.brief.context(where.home, where.store, [], home_chat_id="home", now=MORNING,
+                                          zone=LONDON)
+    # Priya's coffee was declined, breakfast is over, her birthday is all day and Friday isn't today.
+    assert f"{places.RELATED_TITLE}\n- 13:00 Lunch with Dan: #{dan} [fact] Dan started a new job at Stripe. " \
+           f"(said 12 Oct: \"Dan started at Stripe on Monday\")" in context()
+    related = context().split(places.RELATED_TITLE)[1]
+    assert "Priya" not in related and "ramen" not in related and related.count("\n- ") == 1
+    assert "What's under \"Related to today's events\"" in pulse.brief.NOTE
+    where.store.set("memory", False)
+    assert places.RELATED_TITLE not in context()
+
+
+def test_a_moment_with_nothing_waiting_only_notes_what_it_would_have_brought_up(where, capsys):
+    tyres = remember(where, "Costco's tyre centre closes at 6 on weekdays.", "The Costco tyre centre shuts at 6")
+    remember(where, "The user goes to PureGym.", "I go to PureGym")
+    one = moment()
+    assert arrive(where, one) == []
+    # Shadow mode: nothing is said or checked yet, it's kept to judge.
+    assert outcome(where, one["id"]) == {"due": [], "related": [tyres]}
+    assert where.store.followups() == [] and where.store.cards() == [] and not where.store.get("memory_requested")
+    assert cli._pulse_where(where.store, where.home, "") == 0
+    assert "Arrived at Costco Wholesale: nothing waited for it; it would have brought up: Costco's tyre centre " \
+           "closes at 6 on weekdays." in capsys.readouterr().out
+    where.store.set("memory", False)
+    two = moment()
+    arrive(where, two)
+    assert outcome(where, two["id"]) == {"due": []}
+
+
+def test_what_pulse_remembers_about_the_place_joins_the_check_it_makes_due(where, capsys):
+    item_id = placed(where)
+    leaving = placed(where, "Costco", "leave", text="The user will check the receipt.",
+                     line="When I leave Costco I'll check the receipt")
+    tyres = remember(where, "Costco's tyre centre closes at 6 on weekdays.", "The Costco tyre centre shuts at 6")
+    returns = remember(where, "The user's Costco returns window is 90 days.", "Costco takes returns for 90 days")
+    followup.schedule(where.store, time.time())
+    one = moment()
+    assert arrive(where, one) == [item_id]
+    # What waits for a place is never brought along: it has its own moment.
+    assert outcome(where, one["id"]) == {"due": [item_id], "related": [returns, tyres]}
+    assert leaving not in followup.followup_timing(where.store.followup(item_id))["moment"]["related"]
+    where.store.close_item(returns, status="done", closed_by="user")
+    seen = []
+
+    def llm(instructions, text):
+        seen.append((instructions, text))
+        return {"decision": "tell", "news": "You're at Costco: batteries. The tyre centre shuts at 6.",
+                "why": "nothing shows it's done"}, 9
+
+    now = time.time()
+    followup.run(where.store, where.home, llm, zone=UTC, now=now, still_leader=lambda: True, budget=10_000, done={},
+                 only=followup.moment_due(where.store, now))
+    [(instructions, text)] = seen
+    assert '"Also remembered about" goes in "news" only when it helps' in instructions
+    also = text.split("## Also remembered about Costco Wholesale ", 1)[1].split("\n## ", 1)[0]
+    assert "- [fact] Costco's tyre centre closes at 6 on weekdays. (\"The Costco tyre centre shuts at 6\"" in also
+    assert "returns" not in also  # closed since
+    assert cli._pulse_where(where.store, where.home, "") == 0
+    assert "Arrived at Costco Wholesale: made due: The user will buy batteries. (its check also read: The user's " \
+           "Costco returns window is 90 days.; Costco's tyre centre closes at 6 on weekdays.)" in capsys.readouterr().out
 
 
 # Settings, What Pulse remembers, and the command -----------------------------------

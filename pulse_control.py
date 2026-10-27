@@ -292,8 +292,9 @@ def update(pulse_store: Any, body: Any, home: Any = None) -> None:
         pulse_store.set(key, value)
     if changes.get("inbox_deadlines") is False:
         pulse_memory.stop_inbox(pulse_store)  # off forgets what it kept from the inbox
-    if changes.get("where") is False:
-        pulse_store.clear_moments()  # off keeps nothing of where the user was
+    if changes.get("where") is False or changes.get("enabled") is False:
+        # Off keeps nothing of where the user was: no tick runs to prune it.
+        pulse_store.clear_moments()
 
 
 def _quiet_until(pulse_store: Any, value: Any, home: Any) -> Optional[float]:

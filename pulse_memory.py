@@ -355,12 +355,12 @@ _ENDINGS = ("ing", "ed", "es", "s")
 
 
 def _words(text: Any) -> set[str]:
-    """The words of 4 letters or more, each as _stem gives it, so a close
+    """The words of 4 letters or more, each as stem gives it, so a close
     said in other words meets its item."""
-    return {_stem(word) for word in _WORD.findall(_norm(text))}
+    return {stem(word) for word in _WORD.findall(_norm(text))}
 
 
-def _stem(word: str) -> str:
+def stem(word: str) -> str:
     """A word without a common ending, spelled so its forms meet: "called"
     and "call" are "call", "flights" and "flight" "flight", "closed" and
     "close" "clos", "planned" and "plan" "plan", "replied" and "reply"
