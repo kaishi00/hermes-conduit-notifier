@@ -96,11 +96,12 @@ def private_item(item: Optional[dict]) -> bool:
     return (bool(item.get("every_year")) and item.get("occasion") in dates.GIFTS) or private_words(item.get("text"))
 
 
-def private_row(pulse_store: Any, row: dict) -> bool:
+def private_row(pulse_store: Optional[Any], row: dict) -> bool:
     """A report's or the look ahead's pick (a candidate row): its words, the
     remembered item it is or rests on, or the yearly date it's a lead time
     of (pulse_dates.ref: a picked person's birthday, a fact's birthday or
-    anniversary)."""
+    anniversary). With no ``pulse_store`` (it can't be read), a pick on a
+    remembered item or a date is private."""
     if private_words(row.get("text")):
         return True
     ref = str(row.get("ref") or "")
@@ -112,7 +113,7 @@ def private_row(pulse_store: Any, row: dict) -> bool:
         item_id = int(fact.group(1))
     if not isinstance(item_id, int) or isinstance(item_id, bool):
         return False
-    return private_item(pulse_store.item(item_id))
+    return pulse_store is None or private_item(pulse_store.item(item_id))
 
 
 def quiet_picks(picks: Sequence[dict]) -> bool:

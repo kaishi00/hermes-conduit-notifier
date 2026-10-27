@@ -12,7 +12,8 @@ from datetime import datetime, timezone
 import pytest
 
 from test_pulse import SID, ROOT, _load, cli, control, plugin, pulse
-from test_pulse_followup import check_now, followup, live, llm_saying, promise  # noqa: F401
+from test_pulse_followup import check_now, commitment, followup, live, llm_saying, promise  # noqa: F401
+from test_pulse_candidates import listed, reporting  # noqa: F401
 from test_pulse_dates import fact
 
 push = _load("conduit_push.pulse_push", ROOT / "pulse_push.py")
@@ -142,15 +143,76 @@ def test_a_private_push_says_only_that_pulse_has_something(live, monkeypatch):
     assert pulse._push_how(attempt, "The bank called back.", []) == {"level": "active"}
 
 
-def test_private_words_hide_a_push_even_when_pulse_cant_read_its_store(live, monkeypatch):
+def test_a_push_keeps_its_words_home_when_pulse_cant_read_its_store(live, monkeypatch):
     def locked(*args):
         raise sqlite3.OperationalError("database is locked")
 
     monkeypatch.setattr(pulse, "open_store", locked)
+    hidden = {"private": True, "body": "Pulse has something for you."}
     brief = {"kind": pulse.BRIEF, "item_id": ""}
-    assert pulse._push_how(brief, "Dentist at 3, then a calm day.", []) == {"private": True,
-                                                                         "body": "Pulse has something for you."}
+    assert pulse._push_how(brief, "Dentist at 3, then a calm day.", []) == hidden
     assert pulse._push_how(brief, "A calm day.", []) == {}  # at the default level
+    # What it rests on can't be read: a follow-up's item, a moment's card, a pick on an item or a date.
+    assert pulse._push_how({"kind": pulse.FOLLOWUP, "item_id": "0000beef-f7"}, "It's done.", []) == hidden
+    assert pulse._push_how({"kind": pulse.MOMENT, "item_id": pulse.places.attempt_item_id(5)}, "On your way.", []) \
+        == hidden
+    run = {"kind": pulse.REPORT, "item_id": "run-1"}
+    model = {"origin": "model", "item_id": None, "text": "A new Rust release"}
+    remembered = {"origin": "memory", "item_id": 7, "text": "Ana, by Friday"}
+    yearly = {"origin": "date", "item_id": None, "text": "On Wednesday", "ref": "date:fact:8:2026-10-28:eve"}
+    assert pulse._push_how(run, "A new Rust release", [model]) == {}
+    assert pulse._push_how(run, "A new Rust release · Ana, by Friday", [model, remembered]) == hidden
+    assert pulse._push_how(run, "On Wednesday", [yearly]) == hidden
+    assert push.private_row(None, remembered) and push.private_row(None, yearly) and not push.private_row(None, model)
+
+
+def test_a_push_keeps_its_words_home_when_its_turn_cant_be_read_for_its_copy(live, monkeypatch):
+    # pushes() read the turn a moment before; the copy's own read hits the lock.
+    promise(live, "Hermes will remind the user to book the dentist.")
+    check_now(live, llm_saying(decision="tell", news="Dr Lee has Friday at 3.", why="the chat says so"),
+              now=time.time() + followup.FIRST_CHECK_S + 1)
+    pulse.tick()
+    [text] = live.sent()
+    pulse.pre_llm_call(SID, "t1", text)
+    assert pulse.pushes(SID, "t1", "Book it: Dr Lee has Friday at 3.") is True
+
+    def locked(*args):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(pulse, "open_store", locked)
+    assert pulse.push_copy(SID, "t1", "Book it: Dr Lee has Friday at 3.") == {
+        "title_label": "pulse.noticed", "title": "Pulse noticed something",
+        "private": True, "body": "Pulse has something for you."}
+    assert pulse.push_copy(SID, "other-turn", "Done.")["body"] == "Done."  # not a Pulse turn
+
+
+def test_a_report_keeps_its_words_home_when_its_picks_cant_be_read_for_its_copy(reporting, monkeypatch):
+    # The turn reads, only its list's picks hit the lock: the reply's own words
+    # needn't show what made a pick private, so the copy can't go by them.
+    live = reporting
+    monkeypatch.setattr(pulse.hours, "busy", lambda home, now: None)
+    now = time.time()
+    gift = commitment(live, "The user will order Ana's gift.", due="2026-10-30", due_at=now + 3 * 86400,
+                      words="I need to order Ana's gift")
+    live.store.set("memory", True)
+    live.llm.replies.append({"remembered": [{"ref": gift, "bring_up": True, "value": 3, "skip": "", "actionable": True,
+                                             "line": "Order Ana's gift before Friday", "why": "You said so in Deploy."}],
+                             "found": []})
+    listed(live, now)
+    pulse.tick(now + 1)
+    [sent] = live.sent()
+    pulse.pre_llm_call(SID, "t1", sent)
+    reply = f"1. [commitment] The order for Ana #{gift}"
+    hidden = {"title_label": "pulse.noticed", "title": "Pulse noticed something",
+              "private": True, "body": "Pulse has something for you."}
+    assert pulse.push_copy(SID, "t1", reply) == {**hidden, "level": "active"}  # the pick's words are private
+
+    def locked(*args):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(pulse, "_run_picks", locked)
+    assert pulse.pushes(SID, "t1", reply) is True  # its reply's lines, as before
+    assert pulse.push_copy(SID, "t1", reply) == hidden
 
 
 def test_the_reply_event_carries_the_level_and_the_private_copy(live, monkeypatch):
