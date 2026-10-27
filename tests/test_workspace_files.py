@@ -595,6 +595,35 @@ def test_a_link_out_of_the_root_isnt_moved_on_either_backend(tree):
     assert (tree / "away").is_symlink()
 
 
+def test_a_move_across_disks_keeps_links_and_never_moves_into_a_folder(tree, monkeypatch):
+    (tree / "link.txt").symlink_to(tree / "notes.txt")
+    real_rename = wf._rename_no_replace
+    calls = []
+
+    def across(source, target):
+        if not calls:
+            calls.append(target)
+            raise OSError(18, "Invalid cross-device link")
+        return real_rename(source, target)
+
+    monkeypatch.setattr(wf, "_rename_no_replace", across)
+    ws().move(str(tree), str(tree / "link.txt"), str(tree / "docs"), "moved.txt")
+    assert os.path.islink(tree / "docs" / "moved.txt")
+    calls.clear()
+    (tree / "docs" / "taken").mkdir()
+    real_lexists = os.path.lexists
+    monkeypatch.setattr(wf.os.path, "lexists", lambda p: False if p.endswith("taken") else real_lexists(p))
+    with pytest.raises(wf.WorkspaceError) as exc:
+        ws().move(str(tree), str(tree / "notes.txt"), str(tree / "docs"), "taken")
+    assert exc.value.status == 409 and (tree / "notes.txt").is_file() and os.listdir(tree / "docs" / "taken") == []
+
+
+def test_ssh_deletes_a_link_to_a_secret_but_not_the_secret(tree):
+    (tree / "innocent.txt").symlink_to(tree / ".env")
+    ssh(tree).delete(str(tree.resolve()), str(tree / "innocent.txt"))
+    assert not os.path.lexists(tree / "innocent.txt") and (tree / ".env").read_text() == "SECRET=1\n"
+
+
 # --- Routes --------------------------------------------------------------------
 
 
