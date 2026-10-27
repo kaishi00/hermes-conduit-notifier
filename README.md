@@ -991,7 +991,7 @@ the server speaks Classic's replies in its own voice. Classic then uses one
 server for listening and speaking. While the reply plays, Classic may open
 its listening socket too, so start the server with `--num_pipelines 2`.
 
-### Voice on a profile the dashboard didn't start with (plugin 0.94+)
+### Voice on a profile the dashboard didn't start with (plugin 0.93+)
 
 Since Hermes 0.22.3, a dashboard that serves several profiles runs each
 profile's plugins, except the one it started with, in a plugin host of its

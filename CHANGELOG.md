@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.94.0 (2026-10-27)
+## 0.93.0 (2026-10-27)
 
 ### Fixes
 - On Hermes 0.22.3 and later, with one dashboard for several profiles, Local
