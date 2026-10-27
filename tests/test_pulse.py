@@ -1224,8 +1224,9 @@ def test_report_lines_name_the_remembered_item_they_came_from():
     assert report.ratings_from_json('[[1, "promise", true]]') == [report.Rating(1, "promise", True)]  # older rows
     assert report.ratings_from_json('[[1], "x"]') == [] and report.ratings_from_json("{") == []
     assert report.ratings_from_json('[["a", "x", true], [2, "fact", false, 7]]') == [report.Rating(2, "fact", False, 7)]
-    shown = report.shown_items("## What Pulse remembers\n#12 [commitment] Send the deck\n#3 [fact] x")
-    assert shown == {12, 3} and report.report_sources(reply, shown) == {1: 12}  # #7 wasn't in the report
+    shown = report.shown_kinds("## What Pulse remembers\n#12 [commitment] Send the deck\n#3 [fact] x")
+    assert shown == {12: "commitment", 3: "fact"}
+    assert report.report_sources(reply, set(shown)) == {1: 12}  # #7 wasn't in the report
     assert report.report_items("1. [fact] The vet") == {1: "fact"}  # a remembered kind keeps its name
 
 

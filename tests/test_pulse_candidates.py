@@ -668,7 +668,7 @@ def test_typed_ratings_of_a_list_report_still_name_its_remembered_picks(reportin
     listed(live, now)
     pulse.tick(now + 1)
     [sent] = live.sent()
-    assert report.shown_items(sent) == set()  # the turn lists no "What Pulse remembers" of its own
+    assert report.shown_kinds(sent) == {}  # the turn lists no "What Pulse remembers" of its own
     [attempt] = live.store.attempts_since(pulse.REPORT, now - 60)
     live.store.update_attempt(attempt["attempt_id"], state=store.DELIVERED)  # its cards never landed
     asked = []

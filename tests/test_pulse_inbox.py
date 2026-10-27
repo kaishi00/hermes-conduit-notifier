@@ -362,15 +362,16 @@ def test_a_reports_line_is_a_deadline_only_when_it_names_one_pulse_remembers(liv
     model could tag one it found "[deadline]": that line's card and a
     rating typed for it count as "other", as does a line naming something
     else Pulse remembers or something the report didn't show, on a card and
-    in a rating alike."""
+    in a rating alike. Both go by what the report showed, even once the
+    item it names is closed."""
     [deadline] = kept(live, trial(date.today() + timedelta(days=5), logged=time.time() - 3600))
     other = promise(live)
     lines = [("deadline", "Electricity bill due Friday", None), ("deadline", "Netflix free trial ends", deadline),
              ("deadline", "Hermes will say when the deploy finishes", other), ("deadline", "Rent due", other + 100)]
     cards = learning.add_noticed_cards(
         live.store, turn=types.SimpleNamespace(session_id="pulse", reply_id=7), lines=lines, chat_id="pulse",
-        chat_title="Pulse", shown={deadline, other}, kinds=report.KINDS, item_chat_title=lambda item: "",
-        now=time.time())
+        chat_title="Pulse", shown={deadline: "deadline", other: "promise"}, kinds=report.KINDS,
+        item_chat_title=lambda item: "", now=time.time())
     assert [live.store.card(card)["topic"] for card in cards] == ["other", "deadline", "other", "other"]
     assert live.store.card(cards[1])["item_id"] == deadline
     reply = (f"1. [deadline] Electricity bill due Friday\n2. [Deadline] Netflix free trial ends #{deadline}\n"
@@ -391,6 +392,15 @@ def test_a_reports_line_is_a_deadline_only_when_it_names_one_pulse_remembers(liv
     assert items == {1: "other", 2: "other", 3: "other", 4: "other"}
     items, _ = report.ratings_after(live.home, chat_id="pulse", tag="p1", since=0.0, shown={deadline: "deadline"})
     assert items == {1: "other", 2: "deadline", 3: "other", 4: "other"}
+    # Both closed before the cards are written: each card goes by what the report showed, as its rating does.
+    for item_id in (deadline, other):
+        assert live.store.close_item(item_id, status="done", closed_by="test")
+    late = learning.add_noticed_cards(
+        live.store, turn=types.SimpleNamespace(session_id="pulse", reply_id=8), lines=lines[1:3], chat_id="pulse",
+        chat_title="Pulse", shown={deadline: "deadline", other: "promise"}, kinds=report.KINDS,
+        item_chat_title=lambda item: "", now=time.time())
+    assert [(live.store.card(card)["topic"], live.store.card(card)["item_id"]) for card in late] == [
+        ("deadline", None), ("other", None)]
 
 
 # Deleting ------------------------------------------------------------------------

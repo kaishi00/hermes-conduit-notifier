@@ -714,15 +714,15 @@ def report_text(tag: str, context: str, since: str, nudge: str = "balanced", not
 
 # Ratings ------------------------------------------------------------------------
 
-def report_items(reply: str, deadlines: Collection[int] = ()) -> dict[int, str]:
+def report_items(reply: str, deadline_lines: Collection[int] = ()) -> dict[int, str]:
     """Item number -> kind, from the report's own lines. Deadline only for
-    a line naming a remembered deadline (``deadlines``: those lines'
+    a line naming a remembered deadline (``deadline_lines``: those lines'
     numbers), as a model's finds never make one (pulse_memory.DEADLINE)."""
     items = {}
     for number, kind in _ITEM.findall(reply or ""):
         kind = kind.lower()
         items.setdefault(int(number), kind if kind in KINDS and (kind != pulse_memory.DEADLINE
-                                                                 or int(number) in deadlines) else "other")
+                                                                 or int(number) in deadline_lines) else "other")
     return items
 
 
@@ -744,11 +744,6 @@ def shown_kinds(text: str) -> dict[int, str]:
     return {int(n): kind.lower() for n, kind in _SHOWN.findall(rest.split("\n## ")[0])} if found else {}
 
 
-def shown_items(text: str) -> set[int]:
-    """The remembered items a report message showed (``shown_kinds``)."""
-    return set(shown_kinds(text))
-
-
 def parse_ratings(text: str, items: dict[int, str], sources: Optional[dict[int, int]] = None) -> list[Rating]:
     """``1 yes, 2 no`` style ratings for items the report has. A number
     rated twice keeps its last rating."""
@@ -768,7 +763,8 @@ def ratings_after(home: Path, *, chat_id: str, tag: str, since: float,
     (each one's kind) when given (a report made from a candidate list, its
     picks), else what the report message, as Hermes keeps it, listed (Pulse
     trims its own copy once delivered). Its kind is deadline only when the
-    item it names is one."""
+    report showed the item it names as one, as for its card
+    (pulse_learning.add_noticed_cards)."""
     turn = hermes.find_turn(home, chat_id=chat_id, tag=tag, since=since)
     if turn is None or not turn.reply:
         return {}, []
