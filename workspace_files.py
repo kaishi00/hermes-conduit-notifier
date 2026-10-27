@@ -4,7 +4,9 @@ Conduit browses one root at a time: the open chat's working folder, or a
 project folder of the profile. Every operation here takes that root and keeps
 to it: a path that resolves outside it (through ``..`` or a symlink) is
 refused, and so is any file Hermes' own file routes refuse to show (``.env``,
-credential stores). Reads and previews go through Hermes' own routes
+credential stores). The root itself is the caller's choice: any folder on a
+personal install, as Hermes' /api/fs routes allow, and only inside its files
+folder (``boundary``) on a hosted or locked one. Reads and previews go through Hermes' own routes
 (/api/fs/read-text, read-data-url, download); this adds what those lack:
 listings with sizes and dates, search by name and inside files, recent files,
 and new folders and files, save with a conflict check, rename and move,
@@ -76,6 +78,12 @@ def default_sensitive(path: str) -> bool:
     if parts and is_sensitive_name(parts[-1]):
         return True
     return any(part.lower() in _SENSITIVE_DIRS for part in parts)
+
+
+def _any_case(name: str) -> str:
+    """A shell glob matching ``name`` in any letter case."""
+    return "".join(f"[{ch.lower()}{ch.upper()}]" if ch.isalpha() else ("[" + ch + "]" if ch in "*?[" else ch)
+                   for ch in name)
 
 
 def check_name(name: Any) -> str:
@@ -185,8 +193,12 @@ class LocalWorkspace:
             raise WorkspaceError(403, "Conduit doesn't create files that hold keys or passwords")
         return target
 
-    def _entry(self, path: str, name: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    def _entry(self, path: str, name: Optional[str] = None, root: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """``path``'s row. Under ``root``, a link that leads out of it shows
+        as the link itself: nothing about where it leads."""
         try:
+            if root is not None and os.path.islink(path) and not self._inside(root, os.path.realpath(path)):
+                raise OSError("leads outside")
             st = os.stat(path)
         except OSError:
             try:
@@ -219,7 +231,7 @@ class LocalWorkspace:
                     if len(entries) >= MAX_ENTRIES:
                         truncated = True
                         break
-                    entry = self._entry(item.path, item.name)
+                    entry = self._entry(item.path, item.name, root)
                     if entry is not None:
                         entries.append(entry)
         except PermissionError:
@@ -383,7 +395,8 @@ class LocalWorkspace:
                 os.replace(source, target)
             else:
                 _rename_no_replace(source, target)
-        except FileExistsError:
+        except (FileExistsError, IsADirectoryError, NotADirectoryError):
+            # A folder onto a file, or a file onto a folder.
             raise WorkspaceError(409, "Something with that name is already there")
         except PermissionError:
             raise WorkspaceError(403, "Hermes can't move this")
@@ -541,7 +554,8 @@ meta() {
   else printf '0 0'; fi
 }
 rec() {
-  if [ -d "$1" ]; then kind=d; else kind=f; fi
+  # $2 = l: a link shown as itself, not where it leads.
+  if [ "$2" != l ] && [ -d "$1" ]; then kind=d; else kind=f; fi
   set -- "$1" "$kind" $(meta "$1")
   printf '%s\t%s\t%s\t%s\n' "$(printf '%s' "$1" | base64 | tr -d '\r\n')" "$2" "$3" "$4"
 }
@@ -574,6 +588,7 @@ class SshWorkspace:
                     "ENOENT": (404, "That file is no longer there"),
                     "EEXIST": (409, "Something with that name is already there"),
                     "ENOTDIR": (400, "That's not a folder"),
+                    "EISDIR": (400, "Only files can be edited"),
                     "EACCES": (403, "Hermes can't do that here"),
                     "EOUTSIDE": (403, "That's outside this workspace"),
                     "ESTALE": (409, "This file changed since you opened it"),
@@ -654,7 +669,8 @@ class SshWorkspace:
                           f'[ -e "$p" ] || {{ echo {_ERROR}ENOENT; exit 1; }}\n'
                           f'[ -d "$p" ] || {{ echo {_ERROR}ENOTDIR; exit 1; }}\n'
                           f'follows "$p" || {{ echo {_ERROR}EOUTSIDE; exit 1; }}\n'
-                          'for c in "$p"/* "$p"/.[!.]* "$p"/..?*; do [ -e "$c" ] || [ -L "$c" ] || continue; rec "$c"; done')
+                          'for c in "$p"/* "$p"/.[!.]* "$p"/..?*; do [ -e "$c" ] || [ -L "$c" ] || continue;'
+                          ' if [ -L "$c" ] && ! follows "$c"; then rec "$c" l; else rec "$c"; fi; done')
         entries = self._records(lines)
         truncated = len(entries) > MAX_ENTRIES
         entries = entries[:MAX_ENTRIES]
@@ -683,7 +699,13 @@ class SshWorkspace:
         matches: List[Dict[str, Any]] = []
         truncated = len(name_lines) >= SEARCH_MAX_RESULTS
         if contents:
-            excludes = " ".join(f"--exclude-dir={shlex.quote(name)}" for name in sorted(HIDDEN_DIRS))
+            # Files that hold keys or passwords are never read, in any case.
+            excludes = " ".join(
+                [f"--exclude-dir={shlex.quote(name)}" for name in sorted(HIDDEN_DIRS)]
+                + [f"--exclude-dir={shlex.quote(_any_case(name))}" for name in sorted(_SENSITIVE_DIRS)]
+                + [f"--exclude={shlex.quote(_any_case(name))}"
+                   for name in sorted(_SENSITIVE_FILES)]
+                + [f"--exclude={shlex.quote(_any_case('.env.') + '*')}"])
             # --null ends each path with a NUL, so a path may hold anything;
             # the whole output comes back base64 since a shell can't carry NULs.
             lines = self._run(
@@ -771,7 +793,7 @@ class SshWorkspace:
         self._run(self._guard(root) + f't={shlex.quote(target)}\n'
                   f'[ -d "$(dirname -- "$t")" ] || {{ echo {_ERROR}ENOENT; exit 1; }}\n'
                   f'inside "$t" || {{ echo {_ERROR}EOUTSIDE; exit 1; }}\n'
-                  f'[ -d "$t" ] && {{ echo {_ERROR}EEXIST; exit 1; }}\n' + check + stale +
+                  f'[ -d "$t" ] && {{ echo {_ERROR}{"EISDIR" if existing else "EEXIST"}; exit 1; }}\n' + check + stale +
                   # A fresh name of mktemp's own: nothing already there is written through.
                   f'tmp=$(mktemp "$(dirname -- "$t")/.conduit-XXXXXXXX") || {{ echo {_ERROR}EACCES; exit 1; }}\n'
                   f'base64 -d > "$tmp" || {{ rm -f "$tmp"; echo {_ERROR}EACCES; exit 1; }}\n'
@@ -804,7 +826,10 @@ class SshWorkspace:
         self._run(self._guard(root) + f's={shlex.quote(source)}; t={shlex.quote(target)}\n'
                   f'inside "$s" && inside "$t" || {{ echo {_ERROR}EOUTSIDE; exit 1; }}\n'
                   f'[ -e "$s" ] || [ -L "$s" ] || {{ echo {_ERROR}ENOENT; exit 1; }}\n'
-                  f'[ -d "$t" ] && [ ! -L "$t" ] && {{ echo {_ERROR}EEXIST; exit 1; }}\n' + exists +
+                  f'[ -d "$t" ] && [ ! -L "$t" ] && {{ echo {_ERROR}EEXIST; exit 1; }}\n'
+                  # A folder never replaces a file either.
+                  f'[ -d "$s" ] && [ ! -L "$s" ] && {{ [ -e "$t" ] || [ -L "$t" ]; }} && {{ echo {_ERROR}EEXIST; exit 1; }}\n'
+                  + exists +
                   f'mv {"-f" if overwrite else "-n"} -- "$s" "$t" || {{ echo {_ERROR}EACCES; exit 1; }}\n'
                   f'[ -e "$s" ] || [ -L "$s" ] && {{ echo {_ERROR}EEXIST; exit 1; }}; exit 0')
         return {"entry": self._entry(target)}
@@ -821,7 +846,8 @@ class SshWorkspace:
         # The copy keeps links as links and leaves out what holds keys or
         # passwords, as this host's duplicate does.
         secrets_in_copy = " -o ".join(
-            [f"-name {shlex.quote(name)}" for name in sorted(_SENSITIVE_FILES | _SENSITIVE_DIRS)] + ["-name '.env.*'"])
+            [f"-iname {shlex.quote(name)}" for name in sorted(_SENSITIVE_FILES | _SENSITIVE_DIRS)]
+            + ["-iname '.env.*'"])
         self._run(self._guard(root) + f's={shlex.quote(source)}; t={shlex.quote(target)}\n'
                   f'follows "$s" || {{ echo {_ERROR}EOUTSIDE; exit 1; }}\n'
                   f'inside "$t" || {{ echo {_ERROR}EOUTSIDE; exit 1; }}\n'

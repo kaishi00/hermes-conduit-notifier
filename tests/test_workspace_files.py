@@ -4,6 +4,7 @@ import os
 import pathlib
 import subprocess
 import sys
+import time
 import types
 
 import pytest
@@ -384,6 +385,52 @@ def test_ssh_search_reads_colons_in_paths(tree):
     assert [m["name"] for m in found["matches"]] == ["a:1:b.txt"]
 
 
+def test_listings_show_a_link_out_of_the_root_as_the_link_itself(tree):
+    (tree / "big").mkdir()
+    (tree.parent / "secret_dir").mkdir()
+    (tree / "away").symlink_to(tree.parent / "secret_dir")
+    (tree / "leak.txt").symlink_to(tree.parent / "outside.txt")
+    (tree / "near").symlink_to(tree / "docs")
+    root = str(tree.resolve())
+    for listing in (ws().list_dir(root, root), ssh(tree).list_dir(root, root)):
+        rows = {entry["name"]: entry for entry in listing["entries"]}
+        assert rows["away"]["isDirectory"] is False
+        assert rows["leak.txt"]["size"] != len("grouping videos\n")
+        assert rows["near"]["isDirectory"] is True
+
+
+def test_moving_a_folder_onto_a_file_or_back_is_a_conflict(tree):
+    (tree / "folder").mkdir()
+    for workspace in (ws(), ssh(tree)):
+        root = str(tree.resolve())
+        with pytest.raises(wf.WorkspaceError) as exc:
+            workspace.move(root, str(tree / "folder"), root, "notes.txt", overwrite=True)
+        assert exc.value.status == 409
+        with pytest.raises(wf.WorkspaceError) as exc:
+            workspace.move(root, str(tree / "notes.txt"), root, "folder", overwrite=True)
+        assert exc.value.status == 409
+    assert (tree / "notes.txt").read_text() == "nothing here\n" and (tree / "folder").is_dir()
+
+
+def test_ssh_save_onto_a_folder_says_only_files_are_edited(tree):
+    with pytest.raises(wf.WorkspaceError) as exc:
+        ssh(tree).save(str(tree.resolve()), str(tree / "docs"), "x", None)
+    assert exc.value.status == 400
+
+
+def test_ssh_never_reads_or_copies_secrets_in_any_case(tree):
+    remote = ssh(tree)
+    root = str(tree.resolve())
+    (tree / "docs" / ".ENV").write_text("grouping SECRET\n")
+    (tree / "docs" / ".Env.local").write_text("grouping SECRET\n")
+    (tree / "docs" / ".SSH").mkdir()
+    (tree / "docs" / ".SSH" / "key").write_text("grouping SECRET\n")
+    found = remote.search(root, "secret", contents=True)
+    assert found["matches"] == []
+    copy = remote.duplicate(root, str(tree / "docs"))["entry"]["path"]
+    assert sorted(os.listdir(copy)) == ["guide.md"]
+
+
 # --- Routes --------------------------------------------------------------------
 
 
@@ -440,3 +487,48 @@ def test_without_hermes_routing_the_routes_refuse(monkeypatch):
 
 def test_the_capability_is_listed():
     assert "workspace-files" in api.ROUTE_CAPABILITIES
+
+
+def test_a_search_given_up_on_frees_its_slot_only_once_it_ends(tree, client, monkeypatch):
+    import threading
+    release = threading.Event()
+    started = threading.Event()
+
+    class Slow(wf.LocalWorkspace):
+        def search(self, *args, **kwargs):
+            started.set()
+            release.wait(5)
+            return {"names": [], "matches": [], "truncated": False}
+
+    monkeypatch.setattr(api, "_workspace", lambda profile: Slow())
+    monkeypatch.setattr(api, "WORKSPACE_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(api, "_workspace_walks", threading.BoundedSemaphore(1))
+    assert client.get(f"{BASE}/workspace/search", params={"root": str(tree), "q": "x"}).status_code == 504
+    assert started.is_set()
+    # The walk is still running: a second one waits its turn.
+    assert client.get(f"{BASE}/workspace/search", params={"root": str(tree), "q": "x"}).status_code == 503
+    release.set()
+    for _ in range(50):
+        if api._workspace_walks.acquire(blocking=False):
+            api._workspace_walks.release()
+            break
+        time.sleep(0.05)
+    else:
+        raise AssertionError("the walk never gave its slot back")
+
+
+def test_a_flood_is_turned_away_before_its_body_is_read(tree, client, monkeypatch):
+    read = []
+    original = api._read_json_body
+
+    async def counting(request, limit):
+        read.append(limit)
+        return await original(request, limit)
+
+    monkeypatch.setattr(api, "_read_json_body", counting)
+    monkeypatch.setattr(api, "_workspace_limiter",
+                        api._MintLimiter(1, 60.0, message="Too many file requests; try again shortly"))
+    body = {"root": str(tree), "path": str(tree), "name": "a"}
+    assert client.post(f"{BASE}/workspace/mkdir", json=body).status_code == 200
+    assert client.post(f"{BASE}/workspace/mkdir", json={**body, "name": "b"}).status_code == 429
+    assert len(read) == 1

@@ -1666,7 +1666,9 @@ open chat's working folder or a project's. These routes take that folder as
 this host or on the profile's SSH machine, and leave out files that hold keys
 or passwords (`.env`, `auth.json`, `.ssh/` and the like) and the folders
 Hermes' own listing hides (a duplicated folder leaves them out too; a deleted
-folder goes with everything in it). On a hosted or locked install every root
+folder goes with everything in it). On a personal install any folder can be a
+root, as Hermes' own file routes allow there; Conduit only offers the chat's
+folder and the profile's projects. On a hosted or locked install every root
 stays inside the folder Hermes keeps files in. File contents are still read
 through Hermes' `/api/fs/*` routes.
 

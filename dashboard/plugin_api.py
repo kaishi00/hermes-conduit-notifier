@@ -17326,15 +17326,40 @@ def _workspace(profile: Optional[str]) -> Any:
 
 
 async def _workspace_call(profile: Optional[str], op: Callable[[Any], Dict[str, Any]], *, walks: bool = False,
-                          name: str = "request") -> Dict[str, Any]:
+                          name: str = "request", limited: bool = False) -> Dict[str, Any]:
     no_store = {"Cache-Control": "no-store"}
-    await _scoped_acquire(_workspace_limiter, profile)
+    if not limited:
+        await _scoped_acquire(_workspace_limiter, profile)
     if walks and not _workspace_walks.acquire(blocking=False):
         raise HTTPException(status_code=503, detail="Hermes is still searching; try again shortly", headers=no_store)
+    # A walk's slot is freed exactly once: by the walk when it ran (even
+    # after this request stopped waiting), else by this request.
+    state = {"started": False, "abandoned": False}
+    state_lock = threading.Lock()
+
+    def job() -> Dict[str, Any]:
+        with state_lock:
+            if state["abandoned"]:
+                return {}
+            state["started"] = True
+        try:
+            return op(_workspace(profile))
+        finally:
+            if walks:
+                _workspace_walks.release()
+
     try:
         _workspace_files()  # loaded first, so its error type is known below
-        result = await asyncio.wait_for(_run_scoped(profile, lambda: op(_workspace(profile)), _workspace_executor),
-                                        timeout=WORKSPACE_TIMEOUT_S)
+        try:
+            result = await asyncio.wait_for(_run_scoped(profile, job, _workspace_executor),
+                                            timeout=WORKSPACE_TIMEOUT_S)
+        except BaseException:
+            with state_lock:
+                if not state["started"]:
+                    state["abandoned"] = True
+                    if walks:
+                        _workspace_walks.release()
+            raise
     except HTTPException as exc:
         exc.headers = {**(exc.headers or {}), **no_store}
         raise
@@ -17347,9 +17372,6 @@ async def _workspace_call(profile: Optional[str], op: Callable[[Any], Dict[str, 
         if workspace_error is not None and isinstance(exc, workspace_error):
             raise HTTPException(status_code=exc.status, detail=str(exc), headers=no_store)
         raise _unexpected(name, exc, feature="Workspace files")
-    finally:
-        if walks:
-            _workspace_walks.release()
     return {"ok": True, **result}
 
 
@@ -17397,6 +17419,9 @@ async def post_workspace(action: str, request: Request, response: Response,
     no_store = {"Cache-Control": "no-store"}
     if action not in {"mkdir", "new-file", "save", "move", "duplicate", "delete", "upload"}:
         raise HTTPException(status_code=404, detail="Not found", headers=no_store)
+    # Counted before the body is read, so a flood of large bodies is turned
+    # away before any of it is buffered.
+    await _scoped_acquire(_workspace_limiter, profile)
     body = await _read_json_body(request, WORKSPACE_MAX_BODY_BYTES)
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Request body must be an object", headers=no_store)
@@ -17431,7 +17456,7 @@ async def post_workspace(action: str, request: Request, response: Response,
         except (ValueError, binascii.Error):
             raise HTTPException(status_code=400, detail="data must be base64", headers=no_store)
         op = lambda ws: ws.upload(root, folder, name, data, overwrite)
-    return await _workspace_call(profile, op, name=action)
+    return await _workspace_call(profile, op, name=action, limited=True)
 
 
 # --- Capabilities ------------------------------------------------------------
