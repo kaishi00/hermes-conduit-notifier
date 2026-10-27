@@ -53,11 +53,11 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     )
     pulse = commands.add_parser("pulse", help="Pulse, the proactivity experiment: on, off, status, probe, report, home, outcomes, memory, followups, "
                                                  "cards, rate, done, learned, nudge, budget, candidates, note, quiet, night, "
-                                                 "dates, ahead, inbox, look, where, private")
+                                                 "dates, ahead, inbox, look, where, private, claims")
     pulse.add_argument("pulse_action", choices=["on", "off", "status", "probe", "report", "home", "outcomes", "memory",
                                                 "followups", "cards", "rate", "done", "learned", "nudge", "budget",
                                                 "candidates", "note", "quiet", "night", "dates", "ahead", "inbox",
-                                                "look", "where", "private"])
+                                                "look", "where", "private", "claims"])
     pulse.add_argument("value", nargs="?", default="",
                        help="for home: the id of the chat to use, or 'auto' to find it by title; "
                             "for outcomes: how many to show, or a chat id; "
@@ -87,7 +87,9 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
                             "for where: 'on' or 'off' (whether Pulse reads where you are), or nothing to show what "
                             "waits for a place and what your arrivals and departures did today; "
                             "for private: 'on' or 'off' (whether a push about a gift, a surprise, someone's "
-                            "birthday, health or money hides its words on the Lock Screen), or nothing to show it")
+                            "birthday, health or money hides its words on the Lock Screen), or nothing to show it; "
+                            "for claims: nothing to list what Hermes said it did with no call behind it, or 'all' "
+                            "for every claim with the call that backed it")
     pulse.add_argument("extra", nargs="?", default="",
                        help="for memory forget: the item number; for memory backfill: how many days back "
                             "(it shows what that costs), 'start', 'stop' or 'cancel'; "
@@ -376,11 +378,11 @@ def _pulse_model_line(pulse: Any, pulse_store: Any, home: Path, chat_id: str) ->
 def _pulse(args: argparse.Namespace) -> int:
     from hermes_constants import get_hermes_home
 
-    from . import pulse, pulse_delivery, pulse_learning, pulse_memory
+    from . import pulse, pulse_claims, pulse_delivery, pulse_learning, pulse_memory
     home = get_hermes_home()
     action = args.pulse_action
     # Follow-ups are on by default, so even `followups on|off` needs no file yet.
-    listing = action in ("followups", "cards", "rate", "done", "learned", "candidates", "dates") \
+    listing = action in ("followups", "cards", "rate", "done", "learned", "candidates", "dates", "claims") \
         or (action in ("memory", "ahead", "inbox", "look", "where", "private")
             and (args.value or "").strip() not in ("on", "off")) \
         or (action == "nudge" and not (args.value or "").strip()) \
@@ -406,6 +408,7 @@ def _pulse(args: argparse.Namespace) -> int:
                       "using Hermes's \"Pulse memory\" auxiliary model. `hermes conduit-push pulse memory off` stops that.")
         else:
             pulse_store.clear_moments()  # no tick runs to prune them
+            pulse_claims.stop(pulse_store)  # nor does the ledger record
             print("Pulse is off. Nothing more goes into the home chat.")
         return 0
     if action == "probe":
@@ -463,6 +466,8 @@ def _pulse(args: argparse.Namespace) -> int:
         return _pulse_where(pulse_store, home, (args.value or "").strip())
     if action == "private":
         return _pulse_private(pulse_store, (args.value or "").strip())
+    if action == "claims":
+        return _pulse_claims(pulse_store, home, (args.value or "").strip())
     print(f"Pulse: {'on' if pulse_store.get('enabled') else 'off'}")
     chat, problem = pulse.home_chat(pulse_store, home)
     if chat is not None:
@@ -2159,6 +2164,44 @@ def _pulse_backfill(pulse_store: Any, home: Any, extra: str) -> int:
                "unreadable": f"Couldn't read Hermes's chats ({data.get('error')})."}.get(refused.code, refused.code)
               .strip())
         return 1
+
+
+def _pulse_claims(pulse_store: Any, home: Any, value: str) -> int:
+    """What Hermes said in a chat it had just done with a tool, which memory
+    kept to judge (pulse_claims): the ones no call backed, or with `all`
+    every one, with the call that backed it. Nothing shows in Conduit yet."""
+    from . import pulse, pulse_claims, pulse_hermes
+    if value not in ("", "all"):
+        print("Usage: hermes conduit-push pulse claims [all]")
+        return 2
+    kept = pulse_store.claims(unbacked=value != "all")
+    since = pulse_claims.judged_from(pulse_store)
+    if not kept:
+        print(("No claims kept yet" if value == "all" else "No claims without a call behind them")
+              + (". Memory notes them in chats it reads once they go quiet." if since is not None else
+                 ". They're judged while Pulse is on, from the next time its loop runs."))
+        return 0
+    print("What Hermes said it did" + (", and the call that backed it" if value == "all" else
+                                      " with no call behind it in that turn")
+          + " (kept to judge; Conduit shows none of it yet):")
+    zone = pulse.report_zone(pulse_store, home)
+    try:
+        titles = pulse_hermes.chat_titles(Path(home), [claim["chat_id"] for claim in kept])
+    except pulse_hermes.HermesUnreadable:
+        titles = {}
+    for claim in kept:
+        when = datetime.fromtimestamp(claim["said_at"], zone).strftime("%a %d %b %H:%M")
+        chat = titles.get(claim["chat_id"]) or claim["chat_id"]
+        print(_printable(f"- #{claim['id']} {when} in \"{chat}\" ({claim['action']}): {claim['text']}"))
+        print(_printable(f"  Said: \"{claim['evidence']}\""))
+        if claim["backed_by"]:
+            print(_printable(f"  Backed by: {claim['backed_by']}"))
+        try:
+            calls = json.loads(claim["calls_json"])
+        except ValueError:
+            calls = []
+        print(_printable("  That turn's calls: " + ("; ".join(str(call) for call in calls) if calls else "none")))
+    return 0
 
 
 def _pulse_outcomes(pulse_store: Any, value: str) -> int:

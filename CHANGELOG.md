@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.108.0 (2026-10-27)
+
+### New and improved
+- Pulse notes when Hermes says it set a reminder, added an event or sent a
+  message, and checks a call in that turn did it. Nothing is shown yet:
+  `hermes conduit-push pulse claims` lists the ones with none, to judge.
+
 ## 0.107.0 (2026-10-27)
 
 ### New and improved

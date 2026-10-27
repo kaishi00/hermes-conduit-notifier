@@ -2718,6 +2718,17 @@ keeps it.
   comes back again. Feed cards carry `back` (`unsent` or `not_done`, empty
   for a card never back) and `back_acted_at`, and `hermes conduit-push
   pulse cards` marks them.
+- **Hermes's claims, kept to judge** (plugin 0.108+). Memory also notes
+  when Hermes said in a chat it had just set a reminder, an alarm or a
+  timer, added or changed an event, created or changed a scheduled job, or
+  sent a message, and looks in the outcome ledger for a call that worked
+  in the same turn of a tool that could have done it. Nothing is shown yet:
+  `hermes conduit-push pulse claims` lists the ones with no call behind
+  them (`pulse claims all` lists every one, with the call that backed
+  it), each with what was said and that turn's calls, to judge before a
+  card ever says "Hermes said it set a reminder, but none was made". Only
+  this profile's chats, from when Pulse is on, and kept 30 days, or until
+  Pulse is turned off.
 
 ## A phone reminder comes up once (plugin 0.106.1+)
 
