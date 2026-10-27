@@ -2496,18 +2496,20 @@ error, so the model can fix it.
   `added`, `changed`, `failed` with the phone's `note`, `not_added`,
   `expired`, `removing`, `removed`), `expires_at`, and `change_id` and
   `undo_id` once asked for. An app that doesn't ask gets none, and doesn't
-  count them as unseen.
+  count them as unseen; `POST /pulse/feed/seen` with `"ids": null` marks
+  them seen only with `"proposals": true`.
 - `POST /pulse/proposals/<id>/add` approves it once (a second tap, a retry or
   another device gets 409 `already_added`) and asks the phone for the change
   from the kept fields, with no model in between and never in the "add
   without asking" tier: the app that tapped Add applies it without the
   phone's own card, and another device asks there. A change the phone store
   refuses (409 with its code and `note`) leaves the suggestion to tap again.
-  `/dismiss` is Not now. `/undo` asks the phone to delete what it added,
-  once (409 `already_undone` while that's on its way or done), which the app
-  that tapped Undo applies the same way, and another device asks first.
+  `/dismiss` is Not now (409 `already_added` once Add was tapped). `/undo`
+  asks the phone to delete what it added, once (409 `already_undone` while
+  that's on its way or done), which the app that tapped Undo applies the
+  same way, and another device asks first.
   Until the phone says it added it, Undo gets 409 `not_added`, and until a
-  sync has sent the new event or reminder, `unknown_event` or
+  sync has sent the new event or reminder, it gets `unknown_event` or
   `unknown_reminder`.
 - While a Pulse turn is on its way in the Pulse chat, changes asked for from
   that chat through `conduit_calendar` or `conduit_phone` are refused

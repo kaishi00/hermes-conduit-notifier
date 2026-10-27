@@ -8794,7 +8794,8 @@ async def post_pulse_proposal_add(proposal_id: int, response: Response) -> Dict[
 
 @router.post("/pulse/proposals/{proposal_id}/dismiss")
 async def post_pulse_proposal_dismiss(proposal_id: int, response: Response) -> Dict[str, Any]:
-    """Not now on a suggestion's card: it won't be added, and its card goes: {"proposal": {...}}."""
+    """Not now on a suggestion's card: it won't be added, and its card goes: {"proposal": {...}}. 409 with
+    "already_added" once Add was tapped, "dismissed" for a second tap, "expired" or "not_found"."""
     response.headers["Cache-Control"] = "no-store"
     return await _pulse_route("proposal_dismiss", lambda control, store, home: {
         "proposal": control.dismiss_proposal(store, proposal_id, home)}, reads_only=True)
@@ -8814,15 +8815,16 @@ async def post_pulse_proposal_undo(proposal_id: int, response: Response) -> Dict
 
 @router.post("/pulse/feed/seen")
 async def post_pulse_seen(request: Request, response: Response) -> Dict[str, Any]:
-    """{"ids": [n, ...]} marks those cards seen, {"ids": null} every card: {"seen": count}."""
+    """{"ids": [n, ...]} marks those cards seen, {"ids": null} every card the app's feed shows, so suggestion
+    cards only with "proposals": true, as /pulse/feed?proposals=1: {"seen": count}."""
     response.headers["Cache-Control"] = "no-store"
     body = await _read_json_body(request, PULSE_MAX_BODY_BYTES)
     if not isinstance(body, dict) or "ids" not in body:
         raise HTTPException(status_code=400, detail={"code": "invalid", "field": "ids"},
                             headers={"Cache-Control": "no-store"})
-    ids = body["ids"]
-    return await _pulse_route("seen", lambda control, store, home: {"seen": control.see(store, ids)},
-                              reads_only=True)
+    ids, proposals = body["ids"], body.get("proposals", False)
+    return await _pulse_route("seen", lambda control, store, home: {
+        "seen": control.see(store, ids, proposals=proposals)}, reads_only=True)
 
 
 @router.post("/pulse/rate")

@@ -329,8 +329,8 @@ def undo(pulse_store: store.PulseStore, proposal_id: Any, home: Path, now: float
     undo_id = proposal["undo_id"]
     if undo_id:
         undone = phone.change_outcome(undo_id)
-        if undone is None and (proposal["undo_at"] or 0) >= now - STALE_S \
-                or undone is not None and undone["state"] in ("pending", "applied"):
+        if (undone is None and (proposal["undo_at"] or 0) >= now - STALE_S) \
+                or (undone is not None and undone["state"] in ("pending", "applied")):
             raise ProposalError("already_undone")
         if undone is not None:  # that delete didn't happen: a new one
             undo_id = ""

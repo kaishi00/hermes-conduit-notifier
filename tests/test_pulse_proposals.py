@@ -195,6 +195,11 @@ def test_its_card_comes_once_the_turns_message_is_in(live, handset):
     assert entry["proposal"] == {"id": kept["id"], "kind": "add_event", "line": LINE, "state": "waiting",
                                  "expires_at": kept["expires_at"]}
     assert asked["unseen"] == plain["unseen"] + 1
+    # Marking every card seen leaves it new for an app that never showed it.
+    control.see(live.store, None)
+    assert control.feed(live.store, live.home, proposals=True)["unseen"] == 1
+    assert control.see(live.store, None, proposals=True) == 1
+    assert control.feed(live.store, live.home, proposals=True)["unseen"] == 0
 
 
 def test_a_turn_that_ended_without_its_message_leaves_no_card(live, handset):
@@ -460,6 +465,11 @@ def test_the_suggestion_routes(live, handset, monkeypatch):
     feed = http.get(f"{base}/feed", params={"proposals": "1"}).json()
     assert [entry["proposal"]["id"] for entry in feed["cards"] if entry["kind"] == "proposal"] == [kept["id"]]
     assert all(entry["kind"] != "proposal" for entry in http.get(f"{base}/feed").json()["cards"])
+    # Seen for every card takes the suggestion's only with "proposals", as the feed shows it.
+    http.post(f"{base}/feed/seen", json={"ids": None})
+    assert http.get(f"{base}/feed", params={"proposals": "1"}).json()["unseen"] == 1
+    assert http.post(f"{base}/feed/seen", json={"ids": None, "proposals": "yes"}).status_code == 400
+    assert http.post(f"{base}/feed/seen", json={"ids": None, "proposals": True}).json()["seen"] == 1
     tapped = http.post(f"{base}/proposals/{kept['id']}/add")
     assert tapped.status_code == 200 and tapped.headers["cache-control"] == "no-store"
     assert tapped.json()["proposal"]["state"] == "adding" and tapped.json()["proposal"]["change_id"]

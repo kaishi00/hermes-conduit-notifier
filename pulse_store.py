@@ -1346,11 +1346,14 @@ class PulseStore:
             return int(conn.execute(f"SELECT COUNT(*) FROM cards WHERE seen_at IS NULL{clause}",
                                     tuple(without)).fetchone()[0])
 
-    def see_cards(self, ids: Optional[list[int]], now: float) -> int:
-        """Marks cards seen: these, or every one when ``ids`` is None."""
+    def see_cards(self, ids: Optional[list[int]], now: float, without: Sequence[str] = ()) -> int:
+        """Marks cards seen: these, or every one but those of the kinds in
+        ``without`` when ``ids`` is None."""
         with _lock, self._connect() as conn:
             if ids is None:
-                return conn.execute("UPDATE cards SET seen_at=? WHERE seen_at IS NULL", (now,)).rowcount
+                clause = f" AND kind NOT IN ({','.join('?' * len(without))})" if without else ""
+                return conn.execute(f"UPDATE cards SET seen_at=? WHERE seen_at IS NULL{clause}",
+                                    (now, *without)).rowcount
             if not ids:
                 return 0
             return conn.execute(f"UPDATE cards SET seen_at=? WHERE seen_at IS NULL AND id IN ({','.join('?' * len(ids))})",

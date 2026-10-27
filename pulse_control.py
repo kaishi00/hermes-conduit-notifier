@@ -406,12 +406,16 @@ def feed(pulse_store: Any, home: Optional[Path] = None, limit: int = pulse_learn
             "brief_time": pulse.report.clock_text(pulse_store.get("brief_time") or pulse.brief.DEFAULT_TIME)}
 
 
-def see(pulse_store: Any, ids: Any, now: Optional[float] = None) -> int:
-    """Marks cards seen: a list of ids, or every card for None."""
+def see(pulse_store: Any, ids: Any, now: Optional[float] = None, proposals: Any = False) -> int:
+    """Marks cards seen: a list of ids, or for None every card the app's feed
+    shows, so suggestion cards only with ``proposals``, as `feed`."""
     if ids is not None and not (isinstance(ids, list) and len(ids) <= 500 and all(
             isinstance(value, int) and not isinstance(value, bool) for value in ids)):
         raise Refused("invalid", field="ids")
-    return pulse_store.see_cards(ids, time.time() if now is None else now)
+    if not isinstance(proposals, bool):
+        raise Refused("invalid", field="proposals")
+    return pulse_store.see_cards(ids, time.time() if now is None else now,
+                                 without=() if proposals else (pulse_proposals.PROPOSAL,))
 
 
 def _learning(action: Any) -> Any:
@@ -431,7 +435,9 @@ def add_proposal(pulse_store: Any, proposal_id: Any, home: Any, now: Optional[fl
 
 
 def dismiss_proposal(pulse_store: Any, proposal_id: Any, home: Any, now: Optional[float] = None) -> dict[str, Any]:
-    """Not now on a suggestion's card: it won't be added, and the card goes."""
+    """Not now on a suggestion's card: it won't be added, and the card goes.
+    Refused with "already_added" once Add was tapped, "dismissed" for a
+    second tap, "expired" or "not_found"."""
     return _proposal(lambda: pulse_proposals.dismiss(pulse_store, proposal_id, Path(home),
                                                      time.time() if now is None else now))
 
