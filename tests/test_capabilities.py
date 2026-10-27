@@ -94,6 +94,8 @@ def test_every_capability_names_a_served_route_family():
         "pulse_inbox": "/pulse/memory",
         # Looking things up first: a setting on the /pulse control route; what a card's turn looked at is in the feed.
         "pulse_look": "/pulse/feed",
+        # Suggestions with an Add button: their cards in the feed, and the add, dismiss and undo routes.
+        "pulse_proposals": "/pulse/proposals/",
         "present-v1": "/present/",
         "health-sync": "/health/",
         "shortcut-inbox": "/inbox/",
