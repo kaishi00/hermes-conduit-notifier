@@ -450,7 +450,7 @@ cannot establish fairness between actors.
 
 ## Rooms mailbox
 
-The rooms mailbox in [`mailbox/`](mailbox/) is a small store-and-forward service for linked rooms: agents on Hermes installations owned by different people, taking part in one room. Two installations that can't reach each other leave sealed envelopes in each other's inbox there, using outbound requests only, and the mailbox never sees what the envelopes say. The plugin links installations through it (see Linking with someone, below), and rooms go through those Links with the room bridge, in a later release. See [`mailbox/README.md`](mailbox/README.md) for its protocol, limits and self-hosting.
+The rooms mailbox in [`mailbox/`](mailbox/) is a small store-and-forward service for linked rooms: agents on Hermes installations owned by different people, taking part in one room. Two installations that can't reach each other leave sealed envelopes in each other's inbox there, using outbound requests only, and the mailbox never sees what the envelopes say. The plugin links installations through it (see Linking with someone, below), and rooms with people you've linked go through those Links with the room bridge (see Rooms with people you've linked, below). See [`mailbox/README.md`](mailbox/README.md) for its protocol, limits and self-hosting.
 
 ## Lock Screen progress (plugin 0.32+)
 
@@ -2617,8 +2617,9 @@ for rooms with none of their own:
   agents from elsewhere are named by their handles, or as "another agent"
   when a handle isn't shaped like Hermes' own (the other host chose it).
 - **How it takes part** (joins in, only when asked, listens only) and **turns
-  a day** (40 by default) are kept for the room bridge, which enforces them
-  once it ships.
+  a day** (40 by default) hold in rooms hosted elsewhere, where the room
+  bridge on this host enforces them (see Rooms with people you've linked,
+  below). In a room this Hermes hosts, its own agents always join in.
 
 A room turn with other people's agents gets only that framing from the
 plugin: none of its other notes (Conduit's data, voice hints, declined calls).
@@ -2650,8 +2651,8 @@ logs a warning, and replies or searches then go out unchecked.
 
 These rules work through Hermes' tool hooks, so they hold only where those
 run. A profile on the Codex app-server runtime runs Codex's own tools outside
-them: don't put one in a room with other people's agents (a later release
-refuses it there).
+them, so rooms with people you've linked refuse one (below): it can't join one
+or be in one you make.
 
 ```bash
 hermes conduit-push rooms show                  # defaults, then each room
@@ -2736,8 +2737,7 @@ and theirs link: each keeps the other's keys, and each can leave sealed
 envelopes in the other's inbox at the rooms mailbox (above). A Link belongs to
 the installation, so every profile shares it, as it shares the keys it's made
 with (`conduit-rooms/identity.json` in the root Hermes home, made at the first
-invite or accept). Nothing goes over a Link yet: the room bridge, in a later
-release, carries rooms over it.
+invite or accept). Rooms with people you've linked (below) go over it.
 
 One of you makes an invite: a `conduit://link/` URL, also the QR code's
 payload, good for one accept within 24 hours. The other accepts it, giving the
@@ -2942,6 +2942,147 @@ A refusal carries `detail` and a `code`: `bad_ceiling` and `bad_request`
 setup saves under isn't a section) and `unsupported` (501, a Hermes without
 what the setup calls). The routes answer 30 reads a minute and 6 setups in 10
 minutes.
+
+## Rooms with people you've linked (plugin 0.89+)
+
+Once you're linked with someone (above) and this Hermes is set up for rooms
+(above), you can make a room with your agents and theirs. The room lives on
+your Hermes, its home. Each person's agents run on their own Hermes, with
+their own model, keys and choices for the room, and the room bridge carries
+their turns over the Link: the home's Hermes reaches each one at a loopback
+server on its own host, and the member's Hermes runs the turn through its own
+API server. Approvals stay on the agent's own Hermes, and How it takes part
+and Turns a day are held there.
+
+A room with people you've linked starts as a draft: its name, the agents of
+yours it starts with, and up to 5 people, by their Link. Each one's Hermes is
+sent an invite and shows it (Conduit's join card): who it's from, the room's
+name, the other people and agents, and how many agents they can bring (a room
+has up to 6 agents, everyone's together, and the places left after yours are
+shared out between the people invited). They join with some of their agents,
+each with its choices for the room (from their last room with the same
+people, else their defaults), or decline. The room starts by itself once
+everyone has answered, with whoever joined. Start now starts it with those
+who have, and tells the rest it started without them. With nobody else's
+agents it starts with yours alone, if there are two, and otherwise ends. A
+draft lasts 7 days (the mailbox's hold), its invites with it, and you can take
+it back while it waits: everyone invited who hasn't declined is told, and their
+Hermes undoes their agents' joins.
+
+Joining makes each agent a grant on its own Hermes, for its place in that
+room: to start turns there for 24 hours and to read and stop them for 30
+days, the most Hermes allows, and never to answer its approvals. Hermes
+reserves the agent's place in the room for it, this Hermes' API server answers
+the home's check with the agent's catalog, and the bridge takes the Link's
+requests for it. A join is refused, with nothing made or
+sent, for a profile that isn't set up for rooms, one whose turns run on
+Codex's app server (its tools run outside Hermes' tool hooks, where the room's
+rules can't see them; the home refuses its own such agents too), an invite
+that ran out, a Link that ended, or more agents than places. When one agent's
+grant can't be made, or this Hermes' API server doesn't answer for it, the
+others are undone too. They're all undone when word comes while they join that
+the room was taken back or started without them, or the invite runs out
+meanwhile. A join whose room never starts is undone once word of it can't come
+any more, a week after its invite ran out.
+
+For now only Hermes renews a grant, when a turn reaches the agent in the
+grant's last 5 minutes: in a room that's quiet then, the agent stops answering
+a day after it joined, and its turns read cut off (above). A later version
+renews grants while a room goes on, and adds leaving a room and its home
+removing an agent; until then an agent stays until the room is disbanded or
+the Link ends.
+
+At the start, the home asks each joined agent's Hermes, through the bridge,
+whether it still takes the grant: one that refuses, or whose catalog changed,
+is left out, and one that doesn't answer is kept (the bridge settles its
+turns). Then it makes the room in Hermes' running room service, with every
+agent, and gives each agent from a linked Hermes its route at the bridge,
+live with no restart on either side. An agent whose route can't be saved is
+cut off, and the room goes on. Handles come from each agent's owner and are
+made unique in the room (`laifu`, then `laifu-2`). Each person's Hermes is
+told the room started and who's in it, and an agent of theirs the room didn't
+seat is left (its grant revoked). Every host's agents are told whose agent
+each one is. The home takes an answer only from the Link it invited, for that
+person's places, while the draft waits, and only for agents of the Hermes
+that Link's answers first came from.
+
+The room goes in the room service the request that made it would use: with
+the dashboard in the gateway, the one for that request's profile, owned by
+whoever made it, as Conduit's own rooms there are; else the one Hermes'
+dashboard runs. A room made with the CLI goes in the gateway's, owned by the
+dashboard's session-token owner, while the dashboard runs in the gateway (even
+with another dashboard beside it, such as Hermes Desktop's), else in the
+dashboard's. A draft waits for its room service to run. A Hermes without the
+calls a start needs (Hermes before RoomLink, or one that renamed them) can't
+make one (`unsupported`), and one that loses them in an update keeps its
+drafts and says it can't start them, with one line in the log.
+
+```bash
+hermes conduit-push rooms invite --name "Zoo trip" --link <Link id> --link <Link id>   # with this profile's agent
+hermes conduit-push rooms invite --name "Zoo trip" --link <Link id> --agent default --agent work=furina-work
+hermes conduit-push rooms drafts                        # your rooms with linked people, and who answered
+hermes conduit-push rooms start --room <room id>        # start now, with whoever has joined
+hermes conduit-push rooms withdraw --room <room id>     # takes it back; asks first (--yes doesn't)
+hermes conduit-push rooms invites                       # the rooms you're invited to, and this profile's choices for each
+hermes conduit-push rooms join --room <room id>         # with this profile's agent, or --agent PROFILE[=HANDLE]...
+hermes conduit-push rooms decline --room <room id>
+```
+
+An agent's handle is its bot's name as Conduit tags it (`Research Buddy` is
+`@research-buddy`), else its profile's (`@hermes` for the default profile),
+and `--agent PROFILE=HANDLE` gives it another. `--link` with `join` or
+`decline` picks the invite when two Links invited you to the same room. The
+CLI sends invites and answers itself, but answers arrive, and rooms start,
+only through the dashboard's loop, so a command run while no dashboard runs
+says so.
+
+Everything rooms over Links need, the agents' grants included, stays in
+`conduit-rooms/rooms.json` in the root Hermes home (owner only, beside
+`links.json`), never in a log or a route's answer. A draft or invite that
+ended is forgotten after 30 days. This Hermes keeps up to 20 drafts waiting
+and 50 invites.
+
+Conduit makes and answers them through these routes, behind the
+`room-invites` capability, with no `?profile=` but on a new draft (they're the
+installation's):
+
+- `POST /rooms/drafts?profile=` with `{"name", "agents": [{"profile",
+  "handle", "display_name", "choices"}], "links": [...]}`: `{"draft": ...}`,
+  waiting. `choices` are the agent's choices for the room, or null for those
+  of its last room with the same people. The profile picks the room service.
+- `GET /rooms/drafts`: `{"drafts": [...], "starts": {"available",
+  "reason"}}`, newest first, each `{"room_id", "name", "status",
+  "created_at", "expires_at", "started_at", "reason", "agents", "people":
+  [{"link", "name", "status", "agents"}], "cut_off"}`. Its status is
+  `waiting`, `starting`, `started` or `ended` (with `reason` `withdrawn`,
+  `lapsed`, `too_few` or `start_failed`), each person's `waiting`, `joined`
+  or `declined`, and `cut_off` lists the member ids whose route couldn't be
+  saved. `starts` is unavailable (`unsupported`) on a Hermes that can't start
+  them.
+- `POST /rooms/drafts/start` with `{"room_id"}`: Start now, and `DELETE
+  /rooms/drafts?room_id=`: takes it back. Both answer `{"draft": ...}`.
+- `GET /rooms/invites`: `{"invites": [...]}`, newest first, each
+  `{"room_id", "link", "from", "name", "people", "agents", "slots",
+  "expires_at", "status", "joined", "profiles": [{"profile", "choices"}],
+  "reason"}`: `waiting`, `joined`, `declined`, `started`, `lapsed` or
+  `cancelled` (with `reason` `started_without_you`, `refused`, `too_few`,
+  `start_failed`, `withdrawn` or `lapsed`). `profiles` are each of this
+  Hermes' profiles with its choices for the room.
+- `POST /rooms/invites/answer` with `{"link", "room_id", "agents": [...]}`:
+  `{"invite": ...}`. No agents declines, and the same answer again is the
+  first.
+- `GET /rooms/people?room_id=`: who's who in a started room over Links,
+  `{"room_id", "home", "members": [{"member_id", "handle", "display_name",
+  "owner"}]}`, with `home` and `owner` null for yours.
+
+A refusal carries `detail` and a `code`: `bad_name`, `bad_links`,
+`bad_agents` and `bad_choices` (400), `not_linked`, `no_draft`, `no_invite`
+and `no_room` (404), `codex`, `not_set_up`, `too_many`, `too_many_drafts`,
+`not_waiting`, `answered` and `ended` (409), `lapsed` (410), `unsupported`
+(501), and `api_server` (503, this Hermes' API server didn't answer for an
+agent, and nothing was kept). The routes answer 60 requests a minute between
+them, and one that sends over the Links answers within 50 s, or with
+`timed_out` (504) while it finishes on its own.
 
 ## Capabilities (plugin 0.4+)
 

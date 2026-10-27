@@ -243,6 +243,50 @@ def test_the_file_is_private(tmp_path):
     assert store.path.stat().st_mode & 0o777 == 0o600
 
 
+def test_a_rooms_people_are_kept_with_its_choices(tmp_path):
+    store = ChoicesStore(tmp_path)
+    store.set(ROOM, {"tools": "look"}, people=["name:mona", "link:abc"])
+
+    assert store.last_with(["link:abc", "name:mona"]) == RoomChoices(tools="look")
+    assert store.last_with(["link:abc"]) is None and store.last_with([]) is None
+    # A change without people keeps the room's.
+    store.set(ROOM, {"daily_limit": 5})
+    assert ChoicesStore(tmp_path).last_with(["name:mona", "link:abc"]) == RoomChoices(tools="look", daily_limit=5)
+
+
+def test_the_last_room_with_the_same_people_is_the_one_set_most_recently(tmp_path):
+    clock = Clock()
+    store = ChoicesStore(tmp_path, clock=clock)
+    store.set("room-1", {"tools": "look"}, people=["link:abc"])
+    clock.now += 1
+    store.set("room-2", {"tools": "data"}, people=["link:abc"])
+    clock.now += 1
+    store.set("room-3", {"tools": "custom"}, people=["link:abc", "link:def"])
+
+    assert store.last_with(["link:abc"]).tools == "data"
+    clock.now += 1
+    store.set("room-1", {"share": "nothing"})
+    assert store.last_with(["link:abc"]) == RoomChoices(tools="look", share="nothing")
+
+
+@pytest.mark.parametrize("people", ["link:abc", [1], ["x" * 300], [""], ["x"] * 17])
+def test_people_that_arent_a_list_of_names_are_refused(tmp_path, people):
+    with pytest.raises(choices_module.ChoicesError):
+        ChoicesStore(tmp_path).set(ROOM, {"tools": "look"}, people=people)
+    assert not (tmp_path / choices_module.FILE_NAME).exists()
+
+
+def test_people_a_hand_edit_broke_never_match(tmp_path):
+    store = ChoicesStore(tmp_path)
+    store.set(ROOM, {"tools": "look"}, people=["link:abc"])
+    saved = json.loads(store.path.read_text())
+    saved["rooms"][ROOM]["people"] = "link:abc"
+    store.path.write_text(json.dumps(saved))
+
+    assert store.last_with(["link:abc"]) is None
+    assert store.get(ROOM).tools == "look"
+
+
 # --- Routes ---------------------------------------------------------------------
 
 

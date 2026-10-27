@@ -122,6 +122,7 @@ def test_every_capability_names_a_served_route_family():
         "room-forget": "/rooms/sessions",
         "room-links": "/rooms/links",
         "room-setup": "/rooms/setup",
+        "room-invites": "/rooms/drafts",
     }
     assert set(prefixes) == set(api.ROUTE_CAPABILITIES)
     for capability, prefix in prefixes.items():

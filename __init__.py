@@ -16,8 +16,9 @@ from hermes_constants import get_hermes_home
 
 from . import (call_tool, call_watches, calls, chat_on_screen, clarify_loop, client, conduit_first, cron_runs,
                desktop_selected, health_tool, inbox_tool, live_activity, location_tool, maps_tool, phone_tool,
-               present_tool, pulse, reply_sources, review_notices, room_cleanup, room_cutoff, room_memory,
-               room_planner, room_rules, room_wakeups, settings_tool, show_tool, turn_surface, voice_archive)
+               present_tool, pulse, reply_sources, review_notices, room_cleanup, room_cutoff, room_identity,
+               room_invites, room_memory, room_planner, room_rules, room_wakeups, settings_tool, show_tool,
+               turn_surface, voice_archive)
 from .session_titles import bot_name as _bot_name, title as _session_title, titled as _titled
 from .client import enqueue
 from .events import approval_decision, clarification_text, event_id, is_silent_response, plain_text, push_event
@@ -850,7 +851,13 @@ def _room_framing(session_id: str, platform: Any = None) -> str | None:
         choices = room_rules.choices_for(turn, home)
     except Exception:  # noqa: BLE001 — the tools stay blocked; the careful defaults frame the turn
         choices = room_rules.RoomChoices()
-    return room_rules.framing(turn, choices)
+    people = None
+    if turn.room_id and home is not None:
+        try:
+            people = room_invites.people(room_identity.root_home(home), turn.room_id)
+        except Exception:  # noqa: BLE001 — framed without owners' names
+            logger.debug("conduit_push: couldn't read who's who in room %s", turn.room_id, exc_info=True)
+    return room_rules.framing(turn, choices, people)
 
 
 def _room_platform(platform: Any) -> bool:
