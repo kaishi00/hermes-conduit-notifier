@@ -163,12 +163,14 @@ def muted_by(pulse_store: store.PulseStore, kind: str, profile: str, chat_id: st
 # Cards ------------------------------------------------------------------------
 
 def add_card(pulse_store: store.PulseStore, *, kind: str, item: dict, level_name: str, news: str, why: str,
-             chat_title: str, now: float, learned: Optional[dict] = None, place: str = "", band: str = "") -> int:
+             chat_title: str, now: float, learned: Optional[dict] = None, place: str = "", band: str = "",
+             looked: Sequence[str] = ()) -> int:
     """The item's card for this news; the one already there when a crash
     came between making it and closing the item. ``learned``: the biggest
     part learning played in bringing it up (pulse_prefs' Learned.factor),
     for its Why?; ``place`` and ``band``: where it came from and how soon
-    it was due as it came up, which its signals carry."""
+    it was due as it came up, which its signals carry; ``looked``: what the
+    turn that told it looked up (pulse_tools labels), for its Why? too."""
     existing = pulse_store.card_for(kind, item["id"], news)
     if existing is not None:
         return existing
@@ -176,7 +178,13 @@ def add_card(pulse_store: store.PulseStore, *, kind: str, item: dict, level_name
         "kind": kind, "item_id": item["id"], "level": level_name, "title": _clip(item["text"], 300),
         "quote": _clip(item["evidence"], 300), "news": news, "why": why, "profile": item["profile"],
         "chat_id": item["chat_id"], "chat_title": _clip(chat_title, 120), "message_id": item["message_id"],
-        "created_at": now, "learned": factor_json(learned), "place": place, "band": band})
+        "created_at": now, "learned": factor_json(learned), "place": place, "band": band,
+        "looked": looked_json(looked)})
+
+
+def looked_json(looked: Sequence[str]) -> str:
+    """What a Pulse turn looked up, as a card keeps it: JSON, "" for nothing."""
+    return json.dumps(list(dict.fromkeys(looked))) if looked else ""
 
 
 def factor_json(factor: Any) -> str:
@@ -205,10 +213,11 @@ TURN_NEWS_LIMIT = 6000
 
 
 def add_turn_card(pulse_store: store.PulseStore, *, kind: str, chat_id: str, chat_title: str, turn: Any,
-                  level_name: str, why: str, now: float, brief: str = "") -> Optional[int]:
+                  level_name: str, why: str, now: float, brief: str = "", looked: Sequence[str] = ()) -> Optional[int]:
     """The card for a delivered report or brief turn (``turn`` is its
     pulse_hermes.TurnRows), once: the one already there for that reply.
-    ``brief``: a brief's attempt item id, which its held cards carry too."""
+    ``brief``: a brief's attempt item id, which its held cards carry too.
+    ``looked``: what the turn looked up (pulse_tools labels)."""
     if kind not in TURN_KINDS or not turn.reply or turn.reply_id is None or empty_turn(kind, turn.reply):
         return None
     existing = pulse_store.card_for_message(kind, turn.session_id, turn.reply_id)
@@ -220,7 +229,7 @@ def add_turn_card(pulse_store: store.PulseStore, *, kind: str, chat_id: str, cha
     return pulse_store.add_card({
         "kind": kind, "item_id": None, "level": level_name, "news": news, "why": why,
         "chat_id": turn.session_id or chat_id, "chat_title": _clip(chat_title, 120), "message_id": turn.reply_id,
-        "brief": brief, "created_at": now})
+        "brief": brief, "created_at": now, "looked": looked_json(looked)})
 
 
 # A report item's line starts with its number ("1. [kind] ..."); a report
@@ -272,7 +281,7 @@ def add_noticed_cards(pulse_store: store.PulseStore, *, turn: Any, lines: list[t
                       marks: tuple[str, ...] = (), keep: int = 50, links: Sequence[int] = (),
                       found_in: Sequence[tuple[str, str]] = (), whys: Sequence[str] = (),
                       levels: Sequence[str] = (), factors: Sequence[str] = (),
-                      attrs: Sequence[tuple[str, str]] = ()) -> list[int]:
+                      attrs: Sequence[tuple[str, str]] = (), looked: Sequence[str] = ()) -> list[int]:
     """A delivered report's items (``report_lines``) as cards, one each, all
     at once, marked as ``add_cards`` marks them. An item drawn from a
     remembered thing (its "#n", shown in the report; what replaced it since,
@@ -291,7 +300,8 @@ def add_noticed_cards(pulse_store: store.PulseStore, *, turn: Any, lines: list[t
     topic, but deadline only for a line naming a deadline the report showed,
     as for a rating typed after it (pulse_report.ratings_after): a line the
     report found, or one naming something else Pulse remembers, gets "other"
-    (pulse_dates.DEADLINE: a model's finds never make one).
+    (pulse_dates.DEADLINE: a model's finds never make one). ``looked``: what
+    the turn looked up first (pulse_tools labels), on every card, for Why?.
     ``item_chat_title`` gives a chat's title from its profile and chat_id."""
     rows = []
     for n, (kind, text, ref) in enumerate(lines):
@@ -305,7 +315,7 @@ def add_noticed_cards(pulse_store: store.PulseStore, *, turn: Any, lines: list[t
         row: dict[str, Any] = {
             "kind": NOTICED, "level": level_name, "topic": topic,
             "news": _clip(text, NOTICED_NEWS_LIMIT), "why": whys[n] if n < len(whys) else "", "created_at": now,
-            "learned": factor_json(factors[n]) if n < len(factors) else ""}
+            "learned": factor_json(factors[n]) if n < len(factors) else "", "looked": looked_json(looked)}
         if n < len(attrs):
             row["place"], row["band"] = attrs[n]
         if item is not None:
@@ -357,7 +367,7 @@ def card_entry(card: dict, done: Optional[dict] = None) -> dict[str, Any]:
                                         "briefed_at", "brief", "dismissed_at", "rest_until", "rating", "reason",
                                         "rated_at")}
     return {**entry, "done_at": done["done_at"] if done else None, "done_by": done["done_by"] if done else "",
-            "learned": factor_entry(card.get("learned"))}
+            "learned": factor_entry(card.get("learned")), "looked": store.looked_labels(card.get("looked"))}
 
 
 # Done -------------------------------------------------------------------------

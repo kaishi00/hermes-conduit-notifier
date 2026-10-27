@@ -115,6 +115,10 @@ context {fence}>>>"""
 REPORT_NOTE = ("This turn was started by Pulse's report. Follow the instructions in the message and don't use any "
                "tools. Tell the user only what the message contains: this chat's earlier turns show what Pulse "
                "already brought up, nothing more.")
+# The note while Pulse looks things up first (pulse_tools.look_note follows).
+REPORT_LOOK_NOTE = ("This turn was started by Pulse's report. Follow the instructions in the message. Tell the user "
+                    "only what the message contains, with the details you look up about it: this chat's earlier "
+                    "turns show what Pulse already brought up, nothing more.")
 
 _ITEM = re.compile(r"^\s*(\d{1,2})[.)]\s*\[([A-Za-z-]+)\]", re.MULTILINE)
 _SOURCE = re.compile(r"^\s*(\d{1,2})[.)]\s*\[[A-Za-z-]+\].*?#(\d{1,9})\W*$", re.MULTILINE)
