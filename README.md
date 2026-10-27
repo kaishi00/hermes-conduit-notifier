@@ -2735,6 +2735,15 @@ keeps it.
   job gets no card of its own: Hermes already sends each failure, and a
   nudge after three in a row.
 
+## A phone reminder comes up once (plugin 0.106.1+)
+
+The candidate list gives each of the phone's open reminders a key (`r1`),
+and a card about one names it. One reminder gets one card, however often
+you move it: no other card about it for a week, and none at all, while it
+stays open, once you put its card away for good or rated it not useful
+(Not now until later lets it come back after the week). Before, moving a reminder back each morning counted as news, and
+each move could bring another card.
+
 ## Apple Watch lookups and jobs (plugin 0.6+, jobs 0.7+, Gemini tokens 0.8+, Qwen tokens 0.75+)
 
 With the wrist down, a Conduit Watch call can't reach Conduit on the iPhone,
