@@ -13,6 +13,20 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.88.0 (2026-10-27)
+
+### New and improved
+- Pulse remembers birthdays, anniversaries and other dates that come back every
+  year, from your chats and from the people you picked in Conduit, and keeps them
+  from year to year. Birthdays and anniversaries come up two weeks ahead, the day
+  before and on the day; other yearly dates the day before and on the day. What
+  Pulse remembers shows each one's day.
+- Once a day, an hour before the morning brief, Pulse looks two weeks ahead at
+  your calendar, reminders and what it remembers, and brings up what needs doing
+  now, like a gift to order or a table to book, with the morning brief. Turn it
+  off with `hermes conduit-push pulse ahead off`.
+- What Pulse left out says whether a report or the look ahead left each thing out.
+
 ## 0.87.1 (2026-10-27)
 
 ### Fixes

@@ -100,6 +100,9 @@ class Delivered:
     sender: str
     received_at: int
     body: bytes
+    # How long it waited at the mailbox by the mailbox's clock: the read's
+    # Date less ``received_at``, or None when the read had no Date.
+    age: Optional[int] = None
 
 
 def base_url(value: Any) -> str:
@@ -179,8 +182,8 @@ class Mailbox:
             raise MailboxError("bad_request", "a registration token is 16 to 256 printable ASCII characters, "
                                               "with no spaces")
         headers = {"Mailbox-Registration": self.registration_token} if self.registration_token else None
-        status, answer = self._owner("POST", "/v1/inboxes", {"key": sealing.b64u(self.identity.signing_public)},
-                                     headers=headers)
+        status, answer, _ = self._owner("POST", "/v1/inboxes", {"key": sealing.b64u(self.identity.signing_public)},
+                                        headers=headers)
         limits = answer.get("limits")
         if answer.get("inbox") != self.identity.inbox or not isinstance(limits, dict):
             raise MailboxError("bad_answer", f"The mailbox at {self.host} answered a registration oddly")
@@ -219,7 +222,8 @@ class Mailbox:
     def fetch(self, after: int = 0, limit: int = 50, wait: int = 0) -> tuple[list[Delivered], int]:
         """Envelopes after seq ``after``, oldest first, and the seq to read
         after next. With ``wait`` (seconds, at most 25), an empty inbox
-        holds the request until an envelope arrives or the wait ends."""
+        holds the request until an envelope arrives or the wait ends. Each
+        says how long it waited there by the mailbox's clock (``age``)."""
         if not _whole(after) or not _whole(limit) or limit < 1 or not _whole(wait):
             raise MailboxError("bad_request", "a read takes whole numbers: the seq to read after, a limit of 1 "
                                               "or more and the seconds to wait")
@@ -227,11 +231,11 @@ class Mailbox:
         target = f"{self._inbox_path}/envelopes?after={after}&limit={limit}"
         if wait:
             target += f"&wait={wait}"
-        answer = self._owner("GET", target, timeout=self.timeout + wait)[1]
+        _, answer, read_at = self._owner("GET", target, timeout=self.timeout + wait)
         rows, following = answer.get("envelopes"), answer.get("next")
         if not isinstance(rows, list) or not _whole(following):
             raise MailboxError("bad_answer", f"The mailbox at {self.host} answered a read oddly")
-        return [_delivered(row, self.host) for row in rows], following
+        return [_delivered(row, self.host, read_at) for row in rows], following
 
     def ack(self, through: Optional[int] = None, seqs: Optional[Iterable[int]] = None) -> int:
         """Deletes the envelopes up to and including ``through``, and those
@@ -253,7 +257,8 @@ class Mailbox:
         return deleted
 
     def _owner(self, method: str, target: str, payload: Optional[dict] = None, *,
-               headers: Optional[dict[str, str]] = None, timeout: Optional[float] = None) -> tuple[int, dict]:
+               headers: Optional[dict[str, str]] = None,
+               timeout: Optional[float] = None) -> tuple[int, dict, Optional[float]]:
         body = b"" if payload is None else json.dumps(payload, separators=(",", ":")).encode("utf-8")
         ts = int(self.clock())
         request_headers = {"Authorization": owner_authorization(self.identity, method, self.host, target, body,
@@ -356,11 +361,13 @@ def _global(address: str) -> bool:
 
 
 def _request(url: str, method: str, data: Optional[bytes], headers: dict[str, str], timeout: float,
-             host: str) -> tuple[int, dict]:
+             host: str) -> tuple[int, dict, Optional[float]]:
+    """The answer's status and JSON object, and its Date (None without one)."""
     request = urllib.request.Request(url, data=data, method=method, headers=headers)
     try:
         with _opener.open(request, timeout=timeout) as answer:
             status = answer.status
+            server_time = _date_of(getattr(answer, "headers", None))
             raw = answer.read(MAX_ANSWER_BYTES + 1)
     except urllib.error.HTTPError as error:
         raise _refusal(error, host) from None
@@ -371,14 +378,25 @@ def _request(url: str, method: str, data: Optional[bytes], headers: dict[str, st
     if len(raw) > MAX_ANSWER_BYTES:
         raise MailboxError("bad_answer", f"The mailbox at {host} answered with more than this plugin reads")
     if not raw:
-        return status, {}
+        return status, {}, server_time
     try:
         answer = json.loads(raw)
     except (ValueError, RecursionError):
         answer = None
     if not isinstance(answer, dict):
         raise MailboxError("bad_answer", f"The mailbox at {host} didn't answer like a rooms mailbox")
-    return status, answer
+    return status, answer, server_time
+
+
+def _date_of(headers: Any) -> Optional[float]:
+    """An answer's Date header as a time, or None."""
+    date = headers.get("Date") if headers is not None else None
+    if not date:
+        return None
+    try:
+        return email.utils.parsedate_to_datetime(date).timestamp()
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return None
 
 
 def _refusal(error: urllib.error.HTTPError, host: str) -> MailboxError:
@@ -394,15 +412,8 @@ def _refusal(error: urllib.error.HTTPError, host: str) -> MailboxError:
         code = None
     if not isinstance(code, str) or not _CODE.match(code):
         code = {401: "unauthorized", 404: "not_found", 429: "rate_limited"}.get(error.code, "bad_answer")
-    server_time = None
-    date = error.headers.get("Date") if error.headers is not None else None
-    if date:
-        try:
-            server_time = email.utils.parsedate_to_datetime(date).timestamp()
-        except (TypeError, ValueError, IndexError):
-            server_time = None
     message = _MESSAGES.get(code) or f"The mailbox at {host} refused the request ({error.code} {code})"
-    return MailboxError(code, message, error.code, server_time)
+    return MailboxError(code, message, error.code, _date_of(error.headers))
 
 
 def _clock_off(skew: float) -> str:
@@ -456,7 +467,7 @@ def _whole(value: Any) -> bool:
     return type(value) is int and value >= 0
 
 
-def _delivered(row: Any, host: str) -> Delivered:
+def _delivered(row: Any, host: str, read_at: Optional[float]) -> Delivered:
     if not isinstance(row, dict) or not _whole(row.get("seq")) or not isinstance(row.get("sender"), str) \
             or not _whole(row.get("received_at")) or not isinstance(row.get("body"), str):
         raise MailboxError("bad_answer", f"The mailbox at {host} answered a read oddly")
@@ -464,4 +475,5 @@ def _delivered(row: Any, host: str) -> Delivered:
         body = base64.b64decode(row["body"], validate=True)
     except (binascii.Error, ValueError):
         raise MailboxError("bad_answer", f"The mailbox at {host} answered a read oddly") from None
-    return Delivered(seq=row["seq"], sender=row["sender"], received_at=row["received_at"], body=body)
+    age = None if read_at is None else max(0, int(read_at) - row["received_at"])
+    return Delivered(seq=row["seq"], sender=row["sender"], received_at=row["received_at"], body=body, age=age)

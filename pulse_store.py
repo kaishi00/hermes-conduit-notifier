@@ -68,6 +68,10 @@ DEFAULTS: dict[str, Any] = {
     # The morning brief (pulse_brief): every day at this local time, an hour
     # before the first report by default so the two don't arrive together.
     "brief_time": "07:00",
+    # The look ahead (pulse_ahead): once a day before the brief, the next two
+    # weeks' dates and plans. On while Pulse memory is.
+    "look_ahead": True,
+    "ahead_requested": False,  # `pulse ahead now`
     # Quiet times (pulse_quiet): the weekdays Pulse keeps to itself (Monday
     # 0 to Sunday 6) and when a quiet spell ends (epoch seconds), in the
     # user's time zone.
@@ -161,7 +165,13 @@ CREATE TABLE IF NOT EXISTS items (
     superseded_by INTEGER,
     status TEXT NOT NULL DEFAULT 'open',
     closed_by TEXT NOT NULL DEFAULT '',
-    closed_at REAL
+    closed_at REAL,
+    -- A fact about a date that comes back every year (pulse_dates): "MM-DD",
+    -- or "YYYY-MM-DD" with the year it began; "" for none. Such a fact has
+    -- no due date, so it never expires.
+    every_year TEXT NOT NULL DEFAULT '',
+    -- What that date is: birthday, anniversary or other.
+    occasion TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS items_status ON items(status, kind);
 CREATE TABLE IF NOT EXISTS watermarks (
@@ -321,7 +331,11 @@ CREATE TABLE IF NOT EXISTS candidates (
     score REAL,
     factor TEXT NOT NULL DEFAULT '',
     floor INTEGER NOT NULL DEFAULT 0,
-    level TEXT NOT NULL DEFAULT ''
+    level TEXT NOT NULL DEFAULT '',
+    -- What a look ahead's candidate is about (pulse_ahead): for a yearly
+    -- date at a lead time, the date and the lead time, so each comes up
+    -- once a year; "" for the rest.
+    ref TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS candidates_run ON candidates(run_id);
 CREATE INDEX IF NOT EXISTS candidates_created ON candidates(created_at);
@@ -382,7 +396,8 @@ _ADDED_COLUMNS = (("cards", "topic", "TEXT NOT NULL DEFAULT ''"), ("cards", "bri
                   ("candidates", "level", "TEXT NOT NULL DEFAULT ''"),
                   ("cards", "learned", "TEXT NOT NULL DEFAULT ''"), ("cards", "place", "TEXT NOT NULL DEFAULT ''"),
                   ("cards", "band", "TEXT NOT NULL DEFAULT ''"), ("followups", "timing", "TEXT NOT NULL DEFAULT ''"),
-                  ("cards", "put_back_at", "REAL"))
+                  ("cards", "put_back_at", "REAL"), ("items", "every_year", "TEXT NOT NULL DEFAULT ''"),
+                  ("items", "occasion", "TEXT NOT NULL DEFAULT ''"), ("candidates", "ref", "TEXT NOT NULL DEFAULT ''"))
 # What report cards said for Why? before a candidate's reason did (an item's card,
 # never shown; a whole report's card), and the setting that says a store has
 # cleared them.
@@ -392,7 +407,7 @@ STOCK_WHY_CLEARED = "stock_noticed_why_cleared"
 LESSON_COLUMNS = ("kind", "what", "value", "profile", "chat_id", "card_id", "cause", "created_at")
 CANDIDATE_COLUMNS = ("origin", "item_id", "kind", "profile", "chat_id", "source", "area", "due_at", "actionable",
                      "value", "bring_up", "skip", "text", "why", "decision", "rank", "asked", "band", "place",
-                     "score", "factor", "floor", "level")
+                     "score", "factor", "floor", "level", "ref")
 # The setting that says a store's signals were first filled in from the
 # ratings, Do its and Dones it had before signals were kept (_sync_signals),
 # and its two-thumb steps retired: before learning, two net thumbs moved a
@@ -783,7 +798,8 @@ class PulseStore:
         when another reader got there first.
 
         An item with ``same_as`` only brings that item's last mention (and a
-        due date it lacked) up to date; one with ``replaces`` supersedes the
+        due date it lacked, or the yearly date a fact said again gives) up to
+        date; one with ``replaces`` supersedes the
         old item, which is kept with when and by what it stopped being true.
         Nothing is deleted. ``marks`` names the table that says where the
         chat was read to (MARKS), and ``window`` the backfill window's start.
@@ -793,7 +809,7 @@ class PulseStore:
         left open behind it."""
         _check_marks(marks)
         columns = ("profile", "chat_id", "message_id", "kind", "text", "evidence", "explicit", "due", "due_at",
-                   "mentioned_at", "recorded_at", "valid_from")
+                   "mentioned_at", "recorded_at", "valid_from", "every_year", "occasion")
         live = "status='open' AND superseded_at IS NULL AND profile=?"
         now, ids = time.time(), []
         with _lock, self._connect() as conn:
@@ -803,18 +819,27 @@ class PulseStore:
                 conn.execute("ROLLBACK")
                 return None
             for item in items:
+                item = {"every_year": "", "occasion": "", **item}
                 if item.get("same_as"):
                     # A repeat of an item replaced since it was shown repeats its successor;
                     # one of an item closed since is already on record.
                     target = _current(conn, item["same_as"], profile)
                     if target is None or conn.execute(
-                            # A date said again, or a later one, moves the item's date.
+                            # A date said again, or a later one, moves the item's date. A
+                            # yearly one (a fact's) is kept as said this time, and takes the
+                            # place of a due date, so the fact no longer expires.
                             f"UPDATE items SET mentioned_at=MAX(mentioned_at, ?), "
-                            f"due=CASE WHEN ? IS NOT NULL AND (due_at IS NULL OR ? > due_at) THEN ? ELSE due END, "
-                            f"due_at=CASE WHEN ? IS NOT NULL AND (due_at IS NULL OR ? > due_at) THEN ? ELSE due_at END "
+                            f"due=CASE WHEN ?!='' THEN '' "
+                            f"WHEN ? IS NOT NULL AND (due_at IS NULL OR ? > due_at) THEN ? ELSE due END, "
+                            f"due_at=CASE WHEN ?!='' THEN NULL "
+                            f"WHEN ? IS NOT NULL AND (due_at IS NULL OR ? > due_at) THEN ? ELSE due_at END, "
+                            f"every_year=CASE WHEN ?!='' THEN ? ELSE every_year END, "
+                            f"occasion=CASE WHEN ?!='' THEN ? ELSE occasion END "
                             f"WHERE id=? AND {live}",
-                            (item["mentioned_at"], item["due_at"], item["due_at"], item["due"], item["due_at"],
-                             item["due_at"], item["due_at"], target, profile)).rowcount:
+                            (item["mentioned_at"], item["every_year"], item["due_at"], item["due_at"], item["due"],
+                             item["every_year"], item["due_at"], item["due_at"], item["due_at"],
+                             item["every_year"], item["every_year"], item["every_year"], item["occasion"],
+                             target, profile)).rowcount:
                         continue
                 row = {**item, "profile": profile, "chat_id": chat_id, "recorded_at": now,
                        "valid_from": item["mentioned_at"]}
@@ -898,6 +923,15 @@ class PulseStore:
                                 f"ORDER BY {'due_at IS NULL, due_at, ' if soonest else ''}mentioned_at DESC, id DESC LIMIT ?",
                                 (*params, limit)).fetchall()
         return [dict(row) for row in rows]
+
+    def yearly_facts(self, *, profile: Optional[str] = None) -> list[dict]:
+        """Open facts about a date that comes back every year (pulse_dates),
+        of ``profile``, or every profile's when None; oldest first."""
+        where, params = ("AND profile=? ", [profile]) if profile is not None else ("", [])
+        with self._connect() as conn:
+            return [dict(row) for row in conn.execute(
+                f"SELECT * FROM items WHERE status='open' AND superseded_at IS NULL AND kind='fact' "
+                f"AND every_year!='' {where}ORDER BY id", params)]
 
     def remembered_items(self, *, profile: str, limit: int, reminded_since: float) -> list[dict]:
         """What memory reads a chat beside: the profile's open items, and its
@@ -1131,9 +1165,10 @@ class PulseStore:
                   by: str = "user") -> bool:
         """Marks a card done in one transaction: keeps what its item and
         checks were (for Undo), closes an open, reminded or expired item as
-        done by ``closed_by``, stops its checks and marks the card seen. A
-        card with no item (a report item Pulse found on its own) is only
-        marked. False when it was marked already."""
+        done by ``closed_by`` (not a fact about a yearly date), stops its
+        checks and marks the card seen. A card with no item (a report item
+        Pulse found on its own) is only marked. False when it was marked
+        already."""
         with _lock, self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             if conn.execute("SELECT 1 FROM card_done WHERE card_id=?", (card_id,)).fetchone():
@@ -1144,8 +1179,11 @@ class PulseStore:
                          (card_id, now, by, json.dumps(prior)))
             conn.execute("UPDATE card_acts SET check_at=NULL WHERE card_id=?", (card_id,))
             if item_id is not None:
+                # A fact about a yearly date stays: Done on a card drawn from it
+                # is about this year's, and the date comes round again.
                 conn.execute("UPDATE items SET status='done', closed_by=?, closed_at=? WHERE id=? "
-                             "AND status IN ('open', 'reminded', 'expired') AND superseded_at IS NULL",
+                             "AND status IN ('open', 'reminded', 'expired') AND superseded_at IS NULL "
+                             "AND NOT (kind='fact' AND every_year!='')",
                              (closed_by, now, item_id))
                 conn.execute("UPDATE followups SET next_check_at=NULL, decision='closed', updated_at=? "
                              "WHERE item_id=? AND next_check_at IS NOT NULL", (now, item_id))
@@ -1558,6 +1596,54 @@ class PulseStore:
         with self._connect() as conn:
             return [row["run_id"] for row in conn.execute(
                 "SELECT run_id FROM candidates GROUP BY run_id ORDER BY MAX(id) DESC LIMIT ?", (limit,))]
+
+    def add_run(self, run_id: str, rows: Sequence[dict[str, Any]], cards: dict[int, dict[str, Any]], *,
+                now: float) -> list[int]:
+        """Journals a run's candidates and adds the cards its picks became
+        (``cards``: a row's place in ``rows``, its card), each linked to its
+        candidate, in one write: a look ahead (pulse_ahead) never journals a
+        pick without its card, or a card without its journal. The cards'
+        ids, in their rows' order."""
+        for row in rows:
+            _check_columns(row, CANDIDATE_COLUMNS)
+        for card in cards.values():
+            _check_columns(card, CARD_COLUMNS)
+        with _lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                ids = _insert_candidates(conn, run_id, rows, now)
+                made = []
+                for n in sorted(cards):
+                    card = cards[n]
+                    card_id = int(conn.execute(f"INSERT INTO cards({', '.join(card)}) "
+                                               f"VALUES({', '.join('?' * len(card))})", tuple(card.values())).lastrowid)
+                    conn.execute("UPDATE candidates SET card_id=? WHERE id=?", (card_id, ids[n]))
+                    made.append(card_id)
+                conn.execute("COMMIT")
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+        return made
+
+    def journaled_refs(self, refs: Sequence[str]) -> set[str]:
+        """Which of ``refs`` a candidate in the journal carries."""
+        refs = [ref for ref in dict.fromkeys(refs) if ref]
+        if not refs:
+            return set()
+        with self._connect() as conn:
+            return {row["ref"] for row in conn.execute(
+                f"SELECT DISTINCT ref FROM candidates WHERE ref IN ({','.join('?' * len(refs))})", refs)}
+
+    def release_held(self, run_prefix: str, before: float) -> int:
+        """Puts on the screen (level ``screen``) the cards held for the
+        morning brief that runs whose id starts with ``run_prefix`` made
+        before ``before`` and no brief took: a look ahead's are for that
+        day's brief only. How many."""
+        with _lock, self._connect() as conn:
+            return conn.execute(
+                "UPDATE cards SET level='screen' WHERE level='brief' AND briefed_at IS NULL AND created_at < ? "
+                "AND id IN (SELECT card_id FROM candidates WHERE card_id IS NOT NULL AND substr(run_id, 1, ?)=?)",
+                (before, len(run_prefix), run_prefix)).rowcount
 
     # What the user did with cards (pulse_prefs) ------------------------------
 

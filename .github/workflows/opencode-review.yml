@@ -5,9 +5,10 @@ on:
 concurrency:
   # Adding run-review to a fork's PR shares the PR's group with its pushes (a
   # later push supersedes that review and is reviewed itself); any other label,
-  # or any label on an own-branch PR, gets one group per run, so it can't
-  # cancel anything.
-  group: opencode-review-${{ github.event.pull_request.number }}${{ github.event.action == 'labeled' && (github.event.label.name != 'run-review' || github.event.pull_request.head.repo.full_name == github.repository) && format('-{0}', github.run_id) || '' }}
+  # or any label on an own-branch or trusted contributor's PR, gets one group
+  # per run, so it can't cancel anything. The trusted list here and in the
+  # job's if must match.
+  group: opencode-review-${{ github.event.pull_request.number }}${{ github.event.action == 'labeled' && (github.event.label.name != 'run-review' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["malaiwah"]'), github.event.pull_request.user.login)) && format('-{0}', github.run_id) || '' }}
   cancel-in-progress: true
 
 jobs:
@@ -15,14 +16,17 @@ jobs:
     name: review (${{ matrix.reviewer }})
     # The reviewer is an agent holding the review secrets, and a PR's title,
     # body and diff all reach its prompt. PRs from this repository's own
-    # branches (people with push access) get it on every push. A fork's PR
-    # gets it once someone with triage access or more adds the run-review
-    # label after reading it, and then on every push while the label stays
-    # and the PR is open, so only label PRs from contributors you trust.
-    # Removing the label stops it.
+    # branches (people with push access) get it on every push, and so do fork
+    # PRs opened by the trusted contributors listed below (and in the
+    # concurrency group above). Another fork's PR gets it once someone with
+    # triage access or more adds the run-review label after reading it, and
+    # then on every push while the label stays and the PR is open, so only
+    # label PRs from contributors you trust. Removing the label stops it.
+    # This file runs from main, so a PR can't add its own author to the list.
     if: >-
       github.event_name != 'pull_request_target' ||
-      (github.event.pull_request.head.repo.full_name == github.repository && github.event.action != 'labeled') ||
+      ((github.event.pull_request.head.repo.full_name == github.repository ||
+        contains(fromJSON('["malaiwah"]'), github.event.pull_request.user.login)) && github.event.action != 'labeled') ||
       (github.event.pull_request.head.repo.full_name != github.repository && github.event.pull_request.state == 'open' &&
         ((github.event.action == 'labeled' && github.event.label.name == 'run-review') ||
          (github.event.action != 'labeled' && contains(github.event.pull_request.labels.*.name, 'run-review'))))
@@ -31,8 +35,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - reviewer: DeepSeek V4.1 Flash
-            model: go-custom/deepseek-flash
+          - reviewer: Muse Spark 1.3
+            model: commandcode/meta/muse-spark-1.3-contributor
           - reviewer: GLM-5.3-Flash
             model: zai-custom/glm-5.3-flash
     # No id-token: opencode uses the run's token (USE_GITHUB_TOKEN), not OIDC.
@@ -120,7 +124,7 @@ jobs:
         timeout-minutes: 40
         run: GITHUB_EVENT_NAME=pull_request GITHUB_ACTOR=${{ github.repository_owner }} opencode github run
         env:
-          OPENCODE_GO_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
+          COMMANDCODE_API_KEY: ${{ secrets.COMMANDCODE_API_KEY }}
           ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
           # The run's own token: this repo only, the job's permissions above,
           # and it expires when the run ends.
