@@ -56,8 +56,9 @@ logger = logging.getLogger(__name__)
 TASK = "pulse_memory"
 TASK_NAME = "Pulse memory"
 TASK_DESCRIPTION = ("Reads chats once they go quiet and keeps what Pulse should remember (what you'll do, "
-                    "what Hermes promised, dates and lasting facts), lists what its reports could bring up and "
-                    "checks follow-ups. Auto uses the Pulse chat's model.")
+                    "what Hermes promised, dates and lasting facts) and the deadlines your Shortcuts automations "
+                    "log, lists what its reports could bring up and checks follow-ups. Auto uses the Pulse chat's "
+                    "model.")
 KINDS = ("commitment", "promise", "intention", "interest", "fact", "watch")
 # A chat is read once it has been quiet this long.
 IDLE_S = 1200.0
