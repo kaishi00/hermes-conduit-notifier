@@ -1713,6 +1713,7 @@ def routes(tmp_path, monkeypatch):
 
     monkeypatch.setattr(dashboard_links, "start", start)
     monkeypatch.setattr(api._plugin_package_module("room_bridge"), "start", lambda root: None)
+    monkeypatch.setattr(api._plugin_package_module("room_invites"), "start", lambda root: None)
     monkeypatch.setattr(api, "_calls_home", lambda: current["home"])
     monkeypatch.setattr(api._room_links_limiter, "_mints", {})
     app = FastAPI()
@@ -1889,26 +1890,28 @@ def test_links_routes_start_the_installations_loop_and_wake_it(tmp_path, monkeyp
 
     monkeypatch.setattr(dashboard_links, "start", lambda root: seen.append(root) or Loop())
     monkeypatch.setattr(api._plugin_package_module("room_bridge"), "start", lambda root: seen.append(("bridge", root)))
+    monkeypatch.setattr(api._plugin_package_module("room_invites"), "start", lambda root: seen.append(("rooms", root)))
     (tmp_path / "profiles" / "work").mkdir(parents=True)
     monkeypatch.setattr(api, "_calls_home", lambda: tmp_path / "profiles" / "work")
     app = FastAPI()
     app.include_router(api.router, prefix=BASE)
 
     assert TestClient(app).get(f"{BASE}/rooms/links").status_code == 200
-    # The bridge first, so a request the loop reads finds its handler.
-    assert seen == [("bridge", tmp_path), tmp_path, "woken"]
+    # The bridge and the rooms first, so an envelope the loop reads finds its handler.
+    assert seen == [("bridge", tmp_path), ("rooms", tmp_path), tmp_path, "woken"]
 
 
 def test_the_loop_starts_where_the_dashboard_loads_the_routes(monkeypatch):
     started = []
     monkeypatch.setattr(api._plugin_package_module("room_links"), "start", lambda root: started.append("loop"))
     monkeypatch.setattr(api._plugin_package_module("room_bridge"), "start", lambda root: started.append("bridge"))
+    monkeypatch.setattr(api._plugin_package_module("room_invites"), "start", lambda root: started.append("rooms"))
 
     api._start_room_links()
     assert started == []  # tests, or a plugin host process: no dashboard here
     monkeypatch.setitem(sys.modules, "hermes_cli.web_server", types.ModuleType("hermes_cli.web_server"))
     api._start_room_links()
-    assert started == ["bridge", "loop"]
+    assert started == ["bridge", "rooms", "loop"]
 
 
 def test_a_bridge_that_wont_start_leaves_the_links_running(tmp_path, monkeypatch, caplog):
@@ -1923,6 +1926,7 @@ def test_a_bridge_that_wont_start_leaves_the_links_running(tmp_path, monkeypatch
 
     monkeypatch.setattr(api._plugin_package_module("room_links"), "start", lambda root: started.append("loop") or Loop())
     monkeypatch.setattr(api._plugin_package_module("room_bridge"), "start", refuse)
+    monkeypatch.setattr(api._plugin_package_module("room_invites"), "start", lambda root: started.append("rooms"))
     monkeypatch.setitem(sys.modules, "hermes_cli.web_server", types.ModuleType("hermes_cli.web_server"))
     monkeypatch.setattr(api, "_calls_home", lambda: tmp_path)
     app = FastAPI()
@@ -1931,8 +1935,26 @@ def test_a_bridge_that_wont_start_leaves_the_links_running(tmp_path, monkeypatch
     api._start_room_links()
     assert TestClient(app).get(f"{BASE}/rooms/links").status_code == 200
 
-    assert started == ["loop", "loop", "woken"]
+    assert started == ["rooms", "loop", "rooms", "loop", "woken"]
     assert len([record for record in caplog.records if "bridge" in record.getMessage()]) == 2
+
+
+def test_rooms_that_wont_start_leave_the_bridge_and_the_links_running(tmp_path, monkeypatch, caplog):
+    started = []
+
+    def refuse(root):
+        raise OSError("no")
+
+    monkeypatch.setattr(api._plugin_package_module("room_links"), "start", lambda root: started.append("loop"))
+    monkeypatch.setattr(api._plugin_package_module("room_bridge"), "start", lambda root: started.append("bridge"))
+    monkeypatch.setattr(api._plugin_package_module("room_invites"), "start", refuse)
+    monkeypatch.setitem(sys.modules, "hermes_cli.web_server", types.ModuleType("hermes_cli.web_server"))
+    monkeypatch.setattr(api, "_calls_home", lambda: tmp_path)
+
+    api._start_room_links()
+
+    assert started == ["bridge", "loop"]
+    assert len([record for record in caplog.records if "rooms loop" in record.getMessage()]) == 1
 
 
 def test_room_links_is_a_listed_capability(routes):
