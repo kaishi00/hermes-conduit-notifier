@@ -1,0 +1,170 @@
+name: Upstream contract
+
+# The plugin against a real Hermes dashboard (upstream/conftest.py), so a
+# Hermes change that breaks us shows up before Conduit users meet it
+# (hermes-conduit#1336 was in the canary five days before the release).
+#
+# - Pull requests that touch the plugin's dashboard routes or the contract:
+#   the latest Hermes release. A failure fails the check; no issue.
+# - Daily, after Hermes cuts its canary (~07:00 UTC): the newest canary and
+#   the newest release. A failure opens or updates an `upstream-break` issue,
+#   one per test and failure signature (upstream/report.py), so a known
+#   failure doesn't open a new issue for every canary.
+# - By hand: any Hermes tag or commit.
+
+on:
+  pull_request:
+    paths:
+      - "dashboard/**"
+      - "upstream/**"
+      - ".github/workflows/upstream-contract.yml"
+  schedule:
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Hermes tag or commit (empty for the newest canary and release)
+        required: false
+
+concurrency:
+  group: upstream-contract-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  HERMES_REPO: https://github.com/NousResearch/hermes-agent
+
+jobs:
+  refs:
+    name: Pick Hermes versions
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      refs: ${{ steps.pick.outputs.refs }}
+    steps:
+      - id: pick
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_REF: ${{ inputs.ref }}
+        run: |
+          # Tags only, no clone: ls-remote needs no token for a public repo.
+          tags=$(git ls-remote --tags --refs "$HERMES_REPO" | sed 's#.*refs/tags/##')
+          # Releases are v0.MINOR.PATCH; the older calendar tags (v2026.9.24) would sort above them.
+          release=$(printf '%s\n' "$tags" | grep -E '^v[0-9]{1,3}\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+          canary=$(printf '%s\n' "$tags" | grep -E '\+canary\.[0-9]{8}T[0-9]{6}Z$' | sort -t. -k4 | tail -1)
+          if [ -z "$release" ] || [ -z "$canary" ]; then
+            # Not a contract failure, so no issue: the red run is the alert.
+            echo "::error::Couldn't find Hermes' release and canary tags (release='$release' canary='$canary')"
+            exit 1
+          fi
+          case "$INPUT_REF" in -*) echo "::error::'$INPUT_REF' is not a ref"; exit 1 ;; esac
+          if [ -n "$INPUT_REF" ]; then refs=$(jq -cn --arg r "$INPUT_REF" '[$r]')
+          elif [ "$EVENT" = pull_request ]; then refs=$(jq -cn --arg r "$release" '[$r]')
+          else refs=$(jq -cn --arg c "$canary" --arg r "$release" '[$c, $r]')
+          fi
+          echo "release=$release canary=$canary -> $refs"
+          echo "refs=$refs" >> "$GITHUB_OUTPUT"
+
+  contract:
+    name: Hermes ${{ matrix.ref }}
+    needs: refs
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        ref: ${{ fromJSON(needs.refs.outputs.refs) }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        env:
+          REF: ${{ matrix.ref }}
+        run: |
+          # The results name their Hermes version, so the report never pairs them by position.
+          printf '%s\n' "$REF" > "$RUNNER_TEMP/ref.txt"
+          python3 -m pip install --quiet uv==0.11.32
+
+      - name: Install Hermes
+        env:
+          REF: ${{ matrix.ref }}
+        run: upstream/install-hermes.sh "$REF" "$RUNNER_TEMP/hermes"
+
+      - name: Watched upstream files changed since the previous tag
+        env:
+          REF: ${{ matrix.ref }}
+        run: |
+          hermes="$RUNNER_TEMP/hermes"
+          prev=$(git -C "$hermes" describe --tags --abbrev=0 "$REF^" 2>/dev/null || true)
+          : > "$RUNNER_TEMP/changed.txt"
+          if [ -n "$prev" ]; then
+            python3 upstream/contract.py changed "$hermes" "$prev" "$REF" > "$RUNNER_TEMP/changed.txt"
+            { echo "### Watched files changed, $prev to $REF"; echo '```'; cat "$RUNNER_TEMP/changed.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Run the contract tests
+        run: |
+          hermes="$RUNNER_TEMP/hermes"
+          HERMES_BIN="$hermes/.venv/bin/hermes" "$hermes/.venv/bin/python" -m pytest \
+            --rootdir=upstream upstream -rfEsxX -p no:cacheprovider --junitxml="$RUNNER_TEMP/junit.xml"
+
+      - name: Keep the results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: contract-${{ strategy.job-index }}
+          path: |
+            ${{ runner.temp }}/ref.txt
+            ${{ runner.temp }}/junit.xml
+            ${{ runner.temp }}/changed.txt
+          if-no-files-found: ignore
+
+  report:
+    name: Open or update upstream-break issues
+    needs: [refs, contract]
+    if: always() && github.event_name != 'pull_request' && needs.refs.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/results
+
+      - name: Report
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          REFS: ${{ needs.refs.outputs.refs }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh label create upstream-break --color B60205 \
+            --description "A Hermes change breaks the plugin's contract (upstream/contract.yml)" 2>/dev/null || true
+          declare -A reported
+          for dir in "$RUNNER_TEMP"/results/contract-*; do
+            [ -f "$dir/ref.txt" ] || continue
+            ref=$(head -1 "$dir/ref.txt")
+            [ -n "$ref" ] || continue
+            reported[$ref]=1
+            if [ -f "$dir/junit.xml" ]; then
+              python3 upstream/report.py "$dir/junit.xml" --ref "$ref" --run-url "$RUN_URL" --changed "$dir/changed.txt"
+            else
+              # Hermes didn't install, or the tests never ran: one harness issue.
+              python3 upstream/report.py --no-results --ref "$ref" --run-url "$RUN_URL"
+            fi
+          done
+          # A version whose job left nothing at all.
+          mapfile -t refs < <(echo "$REFS" | jq -r '.[]')
+          for ref in "${refs[@]}"; do
+            [ -n "${reported[$ref]:-}" ] || python3 upstream/report.py --no-results --ref "$ref" --run-url "$RUN_URL"
+          done

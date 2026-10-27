@@ -3089,7 +3089,7 @@ forget`, above). Only the home and the agent's own Hermes know it's out:
 another person's Hermes in the room still lists it.
 
 When a turn of one of your agents in a room someone else hosts needs your
-approval (plugin 0.96+), the turn waits on your Hermes, and the home only
+approval (plugin 0.97+), the turn waits on your Hermes, and the home only
 hears that it waits: its grant can't approve, and the bridge refuses its
 approval calls. Conduit lists what each such turn waits for, with the room,
 who hosts it and your agent, and you answer it there, or with `rooms
@@ -3196,7 +3196,7 @@ them, and one that sends over the Links answers within 50 s, or with
 `timed_out` (504) while it finishes on its own.
 
 Your agents' approvals in rooms other people host go through these, behind
-the `room-approvals` capability (plugin 0.96+), which answer 60 requests a
+the `room-approvals` capability (plugin 0.97+), which answer 60 requests a
 minute of their own, each within 30 s (else `api_server`, 503, while it
 finishes on its own):
 
