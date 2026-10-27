@@ -1,4 +1,4 @@
-"""Rooms with other people's agents, over Links, for Linked Rooms (designs/cross-owner-agents, N5a).
+"""Rooms with other people's agents, over Links, for Linked Rooms (designs/cross-owner-agents, N5a and N5b).
 
 A room whose agents live on more than one Hermes starts as a draft on its home, the Hermes that will host it:
 its name, the creator's own agents, and the people invited by Link (room_links.py). Each person's Hermes is sent
@@ -8,10 +8,15 @@ answered, or the creator starts it anyway, the home creates the room with every 
 service and puts each linked agent's route at the bridge (room_start.py), then tells each person, with a
 room.start, that it started with their agents, or that it didn't and why.
 
+While the room goes on, each person's Hermes mints its agents a fresh grant every 12 hours and sends it in a
+room.grant, which the home puts in the agent's route, so no grant runs out mid-room. A person takes their agents
+out with a room.leave, and the home takes one out, or ends the room when Hermes disbands it (room_cleanup.py), with
+a room.ended: an agent that's out is cut off at the home and undone on its own Hermes.
+
 Both sides keep what they need in ``conduit-rooms/rooms.json`` beside links.json, owner only, under a file lock:
 the home's drafts, the invites this installation was sent, and the envelopes still to go, each with a message id
-of its own, so one sent twice reaches the other side once. Grants travel only inside room.answer envelopes and
-this file, and are never logged or shown.
+of its own, so one sent twice reaches the other side once. Grants travel only inside room.answer and room.grant
+envelopes and this file, and are never logged or shown.
 """
 
 from __future__ import annotations
@@ -35,6 +40,8 @@ logger = logging.getLogger(__name__)
 
 VERSION = 1
 INVITE, ANSWER, START = "room.invite", "room.answer", "room.start"
+GRANT, LEAVE, ENDED = "room.grant", "room.leave", "room.ended"
+KINDS = (INVITE, ANSWER, START, GRANT, LEAVE, ENDED)
 DIRECTORY = room_identity.DIRECTORY
 FILE_NAME = "rooms.json"
 
@@ -57,6 +64,20 @@ IDLE_S = 2
 START_TRIES = 3
 # The longest the rooms loop waits after a pass that failed.
 MAX_BACKOFF_S = 300
+# A joined agent gets a fresh grant this often: a grant starts turns for a day (room_join.DISPATCH_S).
+RENEW_S = 12 * 3600
+# A renewal its API server didn't answer is tried again this soon, and that profile's others wait as long.
+RETRY_S = 60
+# What a renewal that couldn't be made waits for, by why (R3): its API server's answer, a policy change undone, a
+# Hermes updated. Its API server refusing the grant, or the grant past its last day, stops its renewals.
+_RENEW_LATER = {"api_server": (RETRY_S, "trying again in a minute"),
+                "policy_changed": (RENEW_S, "trying again in 12 hours"),
+                "unsupported": (RENEW_S, "trying again in 12 hours")}
+# Why the home ends a room on a member's Hermes: one of its agents taken out, or the room disbanded.
+ENDED_REASONS = frozenset({"removed", "disbanded"})
+# A change to a member's route the rooms loop makes (R15): its fresh grant, cut off, or its grant revoked and cut
+# off. One waiting never gives way to one that does less.
+_TODO_RANK = {"swap": 0, "cut_off": 1, "revoke": 2}
 
 # Hermes' mention handles: a room identifier, and never @all or @everyone; nor @user, the room's person in
 # Conduit (AppState.createGroupRoom).
@@ -116,6 +137,8 @@ class Rooms:
         self.joiner = joiner
         self.starter = starter
         self._told: set[str] = set()
+        # Until when a profile's renewals wait for its API server, which didn't answer (R16).
+        self._api_waits: dict[str, int] = {}
 
     # --- The home's drafts ---------------------------------------------------------
 
@@ -211,6 +234,61 @@ class Rooms:
         self.flush()
         return self._shown_draft(room_id, self.store.read()["drafts"][room_id])
 
+    def remove(self, room_id: Any, member: Any) -> dict[str, Any]:
+        """Takes a linked person's agent out of the started room ``room_id`` (R7): ``member`` is its member id, or
+        its handle with or without @. On the rooms loop's next pass its grant is revoked on its Hermes through the
+        bridge, where that answers, and its route cut off; its Hermes is told (room.ended), which undoes its join.
+        The same agent again is the first. Returns the draft as GET /rooms/drafts shows it."""
+        with self.store.update() as state:
+            draft = state["drafts"].get(room_id) if isinstance(room_id, str) else None
+            if draft is None:
+                raise RoomsError("no_draft", "There's no room with that id here", 404)
+            if draft["status"] == "ended":
+                raise RoomsError("ended", "That room has ended", 409)
+            if draft["status"] != "started":
+                raise RoomsError("not_started", "That room hasn't started yet", 409)
+            found = _member(draft, member)
+            if found is None:
+                raise RoomsError("no_member", "There's no agent with that handle or id in that room", 404)
+            if found["link"] is None:
+                raise RoomsError("own_agent", "That's one of your own agents: Hermes can't take one out of a room, "
+                                              "so disband the room to end it", 409)
+            if found.get("status", "in") == "left":
+                raise RoomsError("not_in", "That agent left the room", 409)
+            if found.get("status", "in") == "in":
+                member_id, now = found["member_id"], int(self.clock())
+                found["status"] = "removed"
+                _todo(draft, member_id, "revoke")
+                _queue(state, found["link"], ENDED, room_id, {"v": VERSION, "room_id": room_id, "reason": "removed",
+                                                              "member_ids": [member_id]}, now,
+                       parts=("removed", member_id))
+        self.flush()
+        return self._shown_draft(room_id, self.store.read()["drafts"][room_id])
+
+    def disbanded(self, room_id: Any) -> None:
+        """Hermes disbanded the room ``room_id`` here (room_cleanup's guard, R8): a room over Links that started
+        here ends, and each person with agents still in it is told (room.ended), whose Hermes undoes their joins.
+        Hermes' disband revoked the routes itself. What's queued goes on the rooms loop's next pass."""
+        if not isinstance(room_id, str) or not self.store.path.exists():
+            return
+        with self.store.update() as state:
+            draft = state["drafts"].get(room_id)
+            if draft is None or draft["status"] not in ("starting", "started"):
+                return
+            now = int(self.clock())
+            for link_id, person in draft["links"].items():
+                if draft["status"] == "started":
+                    ids = sorted(member["member_id"] for member in draft["members"]
+                                 if member["link"] == link_id and member.get("status", "in") == "in")
+                else:
+                    ids = sorted(agent["member_id"] for agent in person["join"]) if person["status"] == "joined" \
+                        else []
+                if ids:
+                    _queue(state, link_id, ENDED, room_id, {"v": VERSION, "room_id": room_id, "reason": "disbanded",
+                                                            "member_ids": ids}, now, parts=("disbanded", *ids))
+            draft.update(status="ended", reason="disbanded", ended_at=now)
+            draft.pop("route_todo", None)
+
     # --- Invites to this installation ----------------------------------------------------
 
     def invites(self) -> list[dict[str, Any]]:
@@ -274,9 +352,9 @@ class Rooms:
                 if ended is None:
                     invite["status"] = "joined" if joined else "declined"
                     invite["ended_at"] = None if joined else now
-                    invite["joined"] = [{name: agent[name] for name in (
-                        "member_id", "profile", "handle", "display_name", "grant", "status_expires_at")}
-                        for agent in joined]
+                    invite["joined"] = [{**{name: agent[name] for name in (
+                        "member_id", "profile", "handle", "display_name", "grant", "status_expires_at")},
+                        "renew_at": now + RENEW_S} for agent in joined]
                     body = {"v": VERSION, "room_id": room_id, "join": [{name: agent[name] for name in (
                         "member_id", "profile", "handle", "display_name", "grant", "catalog")} for agent in joined]}
                     _queue(state, link_id, ANSWER, room_id, body, now)
@@ -287,16 +365,53 @@ class Rooms:
         self.flush()
         return self._shown_invite(self.store.read()["invites"][key])
 
+    def leave(self, link_id: Any, room_id: Any, profiles: Any = None) -> dict[str, Any]:
+        """Takes this installation's agents out of the started room ``room_id`` the Link ``link_id`` invited it to
+        (R6): those of ``profiles``, or every one still in (None). Each is undone here (unbound, its grant's scope
+        revoked) and the home is told (room.leave), which cuts off its route. Their hidden chats for the room stay
+        (rooms forget deletes one). A room that hasn't started is declined, not left (R21). Returns the invite as
+        the join card shows it."""
+        key = f"{link_id}/{room_id}"
+        with self._answering():
+            invite = self.store.read()["invites"].get(key) if isinstance(link_id, str) and isinstance(
+                room_id, str) else None
+            if invite is None:
+                raise RoomsError("no_invite", "This Hermes wasn't invited to that room over that Link", 404)
+            if profiles is not None and (not isinstance(profiles, list) or not profiles or not all(
+                    isinstance(profile, str) for profile in profiles) or len(set(profiles)) != len(profiles)):
+                raise RoomsError("bad_agents", "Name each agent to take out once, by its profile")
+            status = _invite_status(invite, int(self.clock()))
+            if status == "waiting":
+                raise RoomsError("not_started", "That room hasn't started yet: decline it instead", 409)
+            if status == "joined":
+                raise RoomsError("not_started", "That room hasn't started yet: you can leave it once it does", 409)
+            in_room = {agent["profile"]: agent for agent in invite["joined"]} if status == "started" else {}
+            wanted = list(in_room) if profiles is None else profiles
+            if not wanted or any(profile not in in_room for profile in wanted):
+                raise RoomsError("not_in", "Those agents aren't in that room", 409)
+            leaving = [in_room[profile] for profile in wanted]
+            for agent in leaving:
+                self._leave(link_id, agent)
+            with self.store.update() as state:
+                invite, now = state["invites"][key], int(self.clock())
+                # The home can take them out meanwhile (room.ended): then it knows.
+                ids = sorted(agent["member_id"] for agent in invite["joined"]
+                             if agent["member_id"] in {each["member_id"] for each in leaving})
+                if invite["status"] == "started" and ids:
+                    _gone(invite, ids, "left", now)
+                    _queue(state, link_id, LEAVE, room_id, {"v": VERSION, "room_id": room_id, "member_ids": ids},
+                           now, parts=ids)
+        self.flush()
+        return self._shown_invite(self.store.read()["invites"][key])
+
     # --- Envelopes ------------------------------------------------------------------------
 
     def handle(self, received: room_links.Received) -> None:
         """An envelope from a Link, as the Link's loop hands it over."""
-        if received.kind == INVITE:
-            self.on_invite(received)
-        elif received.kind == ANSWER:
-            self.on_answer(received)
-        elif received.kind == START:
-            self.on_start(received)
+        handler = {INVITE: self.on_invite, ANSWER: self.on_answer, START: self.on_start, GRANT: self.on_grant,
+                   LEAVE: self.on_leave, ENDED: self.on_ended}.get(received.kind)
+        if handler is not None:
+            handler(received)
 
     def on_invite(self, received: room_links.Received) -> None:
         body = _invite_from(received.body)
@@ -371,8 +486,8 @@ class Rooms:
         key = f"{received.link_id}/{body['room_id']}"
         with self.store.update() as state:
             invite = state["invites"].get(key)
-            if invite is None or invite["status"] in ("started", "cancelled"):
-                return  # not invited over this Link, or sent again
+            if invite is None or invite["status"] not in ("waiting", "joined"):
+                return  # not invited over this Link, sent again, or it ended first (R9)
             if body.get("cancelled"):
                 leaving = invite["joined"]
                 _cancel(invite, body["reason"], int(self.clock()))
@@ -384,11 +499,81 @@ class Rooms:
         for agent in leaving:
             self._leave(received.link_id, agent)
 
+    def on_grant(self, received: room_links.Received) -> None:
+        """A member's fresh grant (R4), from its own Link for its own place while it's in the room: kept when it's
+        newer than the home's, and put in its route on the rooms loop's next pass (into the join for a room that
+        hasn't started, whose start registers it)."""
+        body = _grant_from(received.body)
+        if body is None:
+            logger.info("Linked Rooms dropped a room.grant from Link %s that isn't one", received.link_id)
+            return
+        room_id, member_id = body["room_id"], body["member_id"]
+        with self.store.update() as state:
+            draft = state["drafts"].get(room_id)
+            person = draft["links"].get(received.link_id) if draft is not None else None
+            agent = next((agent for agent in person["join"] if agent["member_id"] == member_id), None) \
+                if person is not None and person["status"] == "joined" else None
+            if agent is None or room_bridge.grant_scope(body["grant"]) != {
+                    "home_install_id": draft["home_install_id"], "room_id": room_id, "member_id": member_id,
+                    "target_profile": agent["profile"]}:
+                logger.info("Linked Rooms dropped a room.grant from Link %s for a place that isn't its own",
+                            received.link_id)
+                return
+            member = next((each for each in draft["members"] or () if each["member_id"] == member_id), None)
+            if draft["status"] not in ("waiting", "starting", "started") or (
+                    draft["members"] is not None and (member is None or member.get("status", "in") != "in")):
+                return  # the room ended, or the agent is out of it
+            issued, kept = room_bridge.grant_issued_at(body["grant"]), room_bridge.grant_issued_at(agent["grant"])
+            if issued is None or (kept is not None and issued <= kept):
+                return  # sent again, or older than the one the home has
+            agent["grant"] = body["grant"]
+            if draft["status"] != "waiting":
+                _todo(draft, member_id, "swap")
+
+    def on_leave(self, received: room_links.Received) -> None:
+        """A person took agents out of a room this installation hosts (R6): each is marked left, and its route cut
+        off on the rooms loop's next pass."""
+        body = _leave_from(received.body)
+        if body is None:
+            logger.info("Linked Rooms dropped a room.leave from Link %s that isn't one", received.link_id)
+            return
+        with self.store.update() as state:
+            draft = state["drafts"].get(body["room_id"])
+            members = {member["member_id"]: member for member in draft["members"] or ()} if draft is not None else {}
+            if any(members.get(member_id, {}).get("link") != received.link_id for member_id in body["member_ids"]):
+                logger.info("Linked Rooms dropped a room.leave from Link %s for agents that aren't its own",
+                            received.link_id)
+                return
+            if draft["status"] != "started":
+                return  # the room ended: a leave comes only after the room.start its start sent
+            for member_id in body["member_ids"]:
+                if members[member_id].get("status", "in") == "in":
+                    members[member_id]["status"] = "left"
+                    _todo(draft, member_id, "cut_off")
+
+    def on_ended(self, received: room_links.Received) -> None:
+        """The home took this installation's agents out of a room, or Hermes disbanded it there (R9): those it
+        names are out, undone here (unbound, their grants revoked), and the invite ends once none is in."""
+        body = _ended_from(received.body)
+        if body is None:
+            logger.info("Linked Rooms dropped a room.ended from Link %s that isn't one", received.link_id)
+            return
+        key = f"{received.link_id}/{body['room_id']}"
+        with self.store.update() as state:
+            invite = state["invites"].get(key)
+            if invite is None or invite["status"] not in ("joined", "started"):
+                return  # not invited over this Link, sent again, or it ended already
+            leaving = [agent for agent in invite["joined"] if agent["member_id"] in body["member_ids"]]
+            if leaving:
+                _gone(invite, body["member_ids"], body["reason"], int(self.clock()))
+        for agent in leaving:
+            self._leave(received.link_id, agent)
+
     # --- The start ---------------------------------------------------------------------------
 
     def _start_ready(self) -> None:
-        """Starts each draft that's ready: everyone answered, or Start now; one start at a time on this
-        installation, whichever process's loop gets there first."""
+        """Starts each draft that's ready: everyone answered, or Start now; then makes the route changes waiting
+        in started rooms. One process at a time on this installation, whichever loop gets there first."""
         directory = self.store.directory
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         if not _start_lock.acquire(blocking=False):
@@ -406,6 +591,7 @@ class Rooms:
                                     draft["start_now"] or all(person["status"] != "waiting"
                                                               for person in draft["links"].values()))):
                             self._start(room_id)
+                    self._routes()
                 finally:
                     room_links._unlock(handle)
         finally:
@@ -455,7 +641,9 @@ class Rooms:
         now = int(self.clock())
         with self.store.update() as state:
             draft = state["drafts"][room_id]
-            draft.update(status="started", started_at=now, routes=routes)
+            if draft["status"] != "starting":
+                return  # Hermes disbanded it meanwhile
+            draft.update(status="started", started_at=now, routes=routes, started_in=_started_in(found))
             members = [{"member_id": member["member_id"], "handle": member["handle"],
                         "display_name": member["display_name"],
                         "owner": None if member["link"] is None else draft["links"][member["link"]]["name"]}
@@ -500,7 +688,7 @@ class Rooms:
             handle = _unique(member["handle"], used)
             used.add(handle.casefold())
             members.append({"member_id": member["member_id"], "profile": member["profile"], "handle": handle,
-                            "display_name": member["display_name"], "link": member["link"]})
+                            "display_name": member["display_name"], "link": member["link"], "status": "in"})
         now = int(self.clock())
         with self.store.update() as state:
             draft = state["drafts"].get(room_id)
@@ -534,6 +722,140 @@ class Rooms:
             if person["status"] != "declined":
                 _queue(state, link_id, START, room_id, {"v": VERSION, "room_id": room_id, "cancelled": True,
                                                         "reason": reason}, now)
+
+    # --- While a room goes on (N5b) ------------------------------------------------------
+
+    def _routes(self) -> None:
+        """The route changes waiting in started rooms (R15), each in the room service its room started in (R5): a
+        member's fresh grant, or a member that left or was taken out cut off. One that fails is tried on the next
+        passes, START_TRIES times in all."""
+        for room_id, draft in sorted(self.store.read()["drafts"].items()):
+            if draft["status"] != "started" or not draft.get("route_todo"):
+                continue
+            try:
+                found = self.starter.find(draft.get("started_in") or draft["where"])
+            except room_start.StartError:
+                continue  # its service runs in another process, or isn't running yet
+            for member_id in sorted(draft["route_todo"]):
+                self._route(room_id, member_id, found)
+
+    def _route(self, room_id: str, member_id: str, found: room_start.Found) -> None:
+        """The change waiting for a member's route as it is when its turn comes, not as the pass read it (R23): a
+        leave, a take-out or the end since stops a fresh grant, and one that comes while it's made has its own
+        change made after it."""
+        draft = self.store.read()["drafts"].get(room_id)
+        todo = draft.get("route_todo", {}).get(member_id) if draft is not None and draft["status"] == "started" \
+            else None
+        if todo is None:
+            return  # made meanwhile, or the room ended
+        member = next(each for each in draft["members"] if each["member_id"] == member_id)
+        agent = _joined(draft, member)
+        failed = None
+        try:
+            if todo["do"] == "swap":
+                self.starter.swap(found, room_id=room_id, home_install_id=draft["home_install_id"],
+                                  link_id=member["link"], agent=agent,
+                                  registered=draft["routes"].get(member_id) == "live")
+            elif todo["do"] == "revoke":
+                self.starter.revoke(found, room_id=room_id, member_id=member_id)
+            else:
+                self.starter.cut_off(found, room_id=room_id, member_id=member_id)
+        except Exception as exc:  # noqa: BLE001 - tried again on the next pass
+            failed = type(exc).__name__
+        with self.store.update() as state:
+            draft = state["drafts"].get(room_id)
+            todos = draft.get("route_todo", {}) if draft is not None else {}
+            current = todos.get(member_id)
+            if current is None or current["do"] != todo["do"] or (
+                    todo["do"] == "swap" and _joined(draft, member)["grant"] != agent["grant"]):
+                return  # another change came meanwhile: the next pass makes it
+            if failed is None:
+                draft["routes"][member_id] = "live" if todo["do"] == "swap" else "cut_off"
+                del todos[member_id]
+            else:
+                current["tries"] += 1
+                if current["tries"] >= START_TRIES:
+                    del todos[member_id]
+                    if todo["do"] == "swap":
+                        logger.warning("Linked Rooms couldn't give member %s in room %s its fresh grant (%s); its "
+                                       "route keeps the one it has", member_id, room_id, failed)
+                    else:
+                        logger.warning("Linked Rooms couldn't cut off member %s in room %s (%s); its Hermes refuses "
+                                       "its turns instead", member_id, room_id, failed)
+            if not todos:
+                draft.pop("route_todo", None)
+
+    def _renew(self) -> None:
+        """Fresh grants for this installation's agents in rooms over Links, each 12 hours after its last (R3,
+        R13): one renewer at a time on the installation, under the answer lock, which a pass never waits for."""
+        now = int(self.clock())
+        due = [(key, agent["member_id"]) for key, invite in sorted(self.store.read()["invites"].items())
+               if invite["status"] in ("joined", "started") for agent in invite["joined"] if _due(agent, now)]
+        if not due or not _answer_lock.acquire(blocking=False):
+            return
+        try:
+            with open(self.store.directory / ".answer.lock", "a+b") as handle:
+                if not room_links._try_lock(handle):
+                    return
+                try:
+                    for key, member_id in due:
+                        self._renew_one(key, member_id)
+                finally:
+                    room_links._unlock(handle)
+        finally:
+            _answer_lock.release()
+
+    def _renew_one(self, key: str, member_id: str) -> None:
+        """One agent's fresh grant, sent to the home in a room.grant. One that can't be made waits, or stops
+        (R3, R16), and never revokes anything; one whose agent went out of the room meanwhile is revoked."""
+        now = int(self.clock())
+        invite = self.store.read()["invites"].get(key)
+        agent = _agent_in(invite, member_id)
+        if agent is None or not _due(agent, now) or self._api_waits.get(agent["profile"], 0) > now:
+            return
+        link_id, room_id = invite["link"], invite["room_id"]
+        shown = self.link(link_id)
+        if shown is None or shown.get("status") != "linked":
+            self._tell_once(f"unlinked:{key}", "Linked Rooms couldn't renew an agent's grant in room %s: this Hermes "
+                                               "isn't linked with its host any more", room_id)
+            self._renew_at(key, member_id, None)
+            return
+        try:
+            fresh = self.joiner.renew(agent["grant"])
+        except room_join.JoinError as exc:
+            wait, then = _RENEW_LATER.get(exc.code, (None, "it isn't renewed again"))
+            if exc.code == "api_server":
+                self._api_waits[agent["profile"]] = now + RETRY_S
+            self._tell_once(f"renew:{key}:{member_id}:{exc.code}", "Linked Rooms couldn't renew an agent's grant in "
+                                                                   "room %s (%s); %s", room_id, exc.code, then)
+            self._renew_at(key, member_id, None if wait is None else now + wait)
+            return
+        except Exception as exc:  # noqa: BLE001 - tried again in a minute
+            self._tell_once(f"renew:{key}:{member_id}:{type(exc).__name__}", "Linked Rooms couldn't renew an agent's "
+                            "grant in room %s (%s); trying again in a minute", room_id, type(exc).__name__)
+            self._renew_at(key, member_id, now + RETRY_S)
+            return
+        with self.store.update() as state:
+            current = _agent_in(state["invites"].get(key), member_id)
+            if current is not None:
+                current.update(grant=fresh["grant"], status_expires_at=fresh["status_expires_at"],
+                               renew_at=now + RENEW_S)
+                # One still to go is older: only the newest goes.
+                state["outbox"] = [item for item in state["outbox"] if not (
+                    item["kind"] == GRANT and item["link"] == link_id and item["body"].get("room_id") == room_id
+                    and item["body"].get("member_id") == member_id)]
+                _queue(state, link_id, GRANT, room_id, {"v": VERSION, "room_id": room_id, "member_id": member_id,
+                                                        "grant": fresh["grant"]}, now,
+                       parts=(member_id, fresh["issued_at"]))
+        if current is None:
+            # It left the room, or was taken out, while its grant was made: the fresh one goes too.
+            self._leave(link_id, {"grant": fresh["grant"]})
+
+    def _renew_at(self, key: str, member_id: str, when: Optional[int]) -> None:
+        with self.store.update() as state:
+            agent = _agent_in(state["invites"].get(key), member_id)
+            if agent is not None:
+                agent["renew_at"] = when
 
     def _leave(self, link_id: str, agent: dict[str, Any]) -> None:
         if not agent.get("grant"):
@@ -573,15 +895,18 @@ class Rooms:
                                    if (other["id"], other["link"]) != (item["id"], item["link"])]
 
     def pass_once(self) -> None:
-        """What the rooms loop does each time it looks: the envelopes still to go, then the drafts ready to
-        start. An installation that never had a room over a Link has nothing to look at, but where the dashboard
-        runs in the gateway, the loop holds the drafts from the CLI from its first pass (room_start's claim)."""
+        """What the rooms loop does each time it looks: the envelopes still to go, this installation's agents'
+        fresh grants, then the drafts ready to start and the route changes in started rooms. An installation that
+        never had a room over a Link has nothing to look at, but where the dashboard runs in the gateway, the loop
+        holds the drafts from the CLI from its first pass (room_start's claim)."""
         if self.starter is not None:
             self.starter.claim()
         if not self.store.path.exists():
             return
         self.flush()
         self._settle()
+        if self.joiner is not None:
+            self._renew()
         if self.starter is not None:
             self._start_ready()
         self.flush()
@@ -589,7 +914,7 @@ class Rooms:
     def _settle(self) -> None:
         """What time has ended: a draft that lapsed ends and says so; a join whose room never started is
         undone once word of it can't come any more (its invite's time and the mailbox's hold); what ended a
-        month ago is forgotten. Started rooms are kept (N5b ends them)."""
+        month ago is forgotten. Started rooms are kept until they end (left, removed, disbanded)."""
         now = int(self.clock())
         leaving = []
         with self.store.update() as state:
@@ -674,6 +999,8 @@ class Rooms:
             "expires_at": invite["expires_at"], "status": _invite_status(invite, int(self.clock())),
             "joined": [{name: agent[name] for name in ("profile", "handle", "display_name")}
                        for agent in invite["joined"]],
+            "gone": [{name: agent[name] for name in ("profile", "handle", "display_name", "reason")}
+                     for agent in invite.get("gone", [])],
             "profiles": [{"profile": profile,
                           "choices": self._filled(profile, invite["room_id"], people).as_dict()}
                          for profile in self._profiles()],
@@ -691,6 +1018,7 @@ class Rooms:
     def _shown_draft(self, room_id: str, draft: dict[str, Any]) -> dict[str, Any]:
         now = int(self.clock())
         status = "ended" if draft["status"] == "waiting" and now >= draft["expires_at"] else draft["status"]
+        statuses = {member["member_id"]: member.get("status", "in") for member in draft["members"] or ()}
         return {
             "room_id": room_id, "name": draft["name"], "status": status, "created_at": draft["created_at"],
             "expires_at": draft["expires_at"], "started_at": draft["started_at"],
@@ -701,7 +1029,12 @@ class Rooms:
                         "agents": [{name: agent[name] for name in ("member_id", "handle", "display_name")}
                                    for agent in person["join"]]}
                        for link_id, person in draft["links"].items()],
-            "cut_off": sorted(member_id for member_id, route in draft["routes"].items() if route != "live"),
+            # Members still in whose Hermes the room can't reach; then those that left, and those taken out.
+            "cut_off": sorted(member_id for member_id, route in draft["routes"].items()
+                              if route != "live" and statuses.get(member_id, "in") == "in"),
+            "left": sorted(member_id for member_id, kept in statuses.items() if kept == "left"),
+            "removed": sorted(member_id for member_id, kept in statuses.items() if kept == "removed"),
+            "members": None if draft["members"] is None else _members(draft),
         }
 
 
@@ -721,26 +1054,39 @@ def invites(root: Any) -> list[dict[str, Any]]:
 def people(root: Any, room_id: Any) -> Optional[dict[str, Any]]:
     """Who's who in a started room over Links that this installation hosts or has agents in (plan ruling 8):
     ``home``, the host's owner as this installation's Link names them (None when it's this one), and each
-    member with its owner's name (None for this installation's own). None for any other room."""
+    member with its owner's name (None for this installation's own) and its ``status``: in, or left or removed
+    (R10; on a member's Hermes, only its own agents' are known). A member's Hermes keeps answering for a room it
+    left or that ended, whose hidden chats it keeps, with each member as it was when it ended (the invite says how
+    it ended). None for any other room."""
     try:
         state = Store(root).read()
     except RoomsError:
         return None
     draft = state["drafts"].get(room_id) if isinstance(room_id, str) else None
     if draft is not None and draft["status"] == "started":
-        return {"room_id": room_id, "home": None, "members": [
-            {"member_id": member["member_id"], "handle": member["handle"], "display_name": member["display_name"],
-             "owner": None if member["link"] is None else draft["links"][member["link"]]["name"]}
-            for member in draft["members"]]}
+        return {"room_id": room_id, "home": None, "members": _members(draft)}
     for invite in state["invites"].values():
-        if invite["room_id"] == room_id and invite["status"] == "started":
-            mine = {agent["member_id"] for agent in invite["joined"]}
+        if invite["room_id"] == room_id and invite["status"] in ("started", "left", "ended") \
+                and invite["members"] is not None:
+            gone = {agent["member_id"]: agent["reason"] for agent in invite.get("gone", [])}
+            mine = {agent["member_id"] for agent in invite["joined"]} | set(gone)
             return {"room_id": room_id, "home": invite["from"], "members": [
                 {"member_id": member["member_id"], "handle": member["handle"],
                  "display_name": member["display_name"],
-                 "owner": None if member["member_id"] in mine else member["owner"] or invite["from"]}
+                 "owner": None if member["member_id"] in mine else member["owner"] or invite["from"],
+                 "status": gone[member["member_id"]] if gone.get(member["member_id"]) in ("left", "removed")
+                 else "in"}
                 for member in invite["members"]]}
     return None
+
+
+def disbanded(root: Any, room_id: Any) -> None:
+    """What room_cleanup's guard calls once Hermes' disband_room returns on the installation at ``root`` (R8): the
+    room ends in the rooms running for it in this process, if they are, and its word goes on a rooms loop's next
+    pass."""
+    rooms = _running.get(str(Path(root)))
+    # Nothing is sent from here: the rooms loop sends what this queues.
+    (rooms or Rooms(root, send=lambda *args, **kwargs: None, link=lambda link_id: None)).disbanded(room_id)
 
 
 def _viewer(root: Any) -> Rooms:
@@ -786,7 +1132,7 @@ def start(root: Any) -> Rooms:
         if rooms is not None:
             return rooms
         rooms = _running[key] = here(root)
-        for kind in (INVITE, ANSWER, START):
+        for kind in KINDS:
             room_links.handles(kind)(_on_envelope)
     threading.Thread(target=_loop, args=(rooms,), name="conduit-rooms", daemon=True).start()
     return rooms
@@ -910,9 +1256,28 @@ def _kept_draft(draft: Any) -> bool:
             for person in draft["links"].values()) \
         and (draft.get("members") is None or isinstance(draft["members"], list) and all(
             _agent(member) and isinstance(member.get("member_id"), str)
-            and (member.get("link") is None or member["link"] in draft["links"]) for member in draft["members"])) \
+            and (member.get("link") is None or member["link"] in draft["links"])
+            and member.get("status", "in") in ("in", "left", "removed") for member in draft["members"])) \
         and type(draft.get("attempts")) is int and "started_at" in draft and "reason" in draft \
-        and (draft.get("ended_at") is None or type(draft["ended_at"]) is int) and "ended_at" in draft
+        and (draft.get("ended_at") is None or type(draft["ended_at"]) is int) and "ended_at" in draft \
+        and (draft.get("started_in") is None or _kept_where(draft["started_in"])) and _kept_todos(draft)
+
+
+def _kept_where(value: Any) -> bool:
+    try:
+        _where(value)
+    except RoomsError:
+        return False
+    return True
+
+
+def _kept_todos(draft: dict[str, Any]) -> bool:
+    """A started draft's route changes, each for one of its linked members."""
+    todos = draft.get("route_todo", {})
+    linked = {member["member_id"] for member in draft["members"] or () if member.get("link") is not None}
+    return isinstance(todos, dict) and all(
+        member_id in linked and isinstance(todo, dict) and todo.get("do") in _TODO_RANK
+        and type(todo.get("tries")) is int for member_id, todo in todos.items())
 
 
 def _kept_invite(invite: Any) -> bool:
@@ -920,7 +1285,11 @@ def _kept_invite(invite: Any) -> bool:
         "link", "room_id", "name", "from", "status", "home_install_id", "authority_gateway_id")) \
         and all(type(invite.get(name)) is int for name in ("expires_at", "received_at", "authority_epoch")) \
         and all(isinstance(invite.get(name), list) for name in ("people", "agents", "slots", "joined")) \
-        and all(_agent(agent) and isinstance(agent.get("member_id"), str) for agent in invite["joined"]) \
+        and all(_agent(agent) and isinstance(agent.get("member_id"), str)
+                and (agent.get("renew_at") is None or type(agent["renew_at"]) is int) for agent in invite["joined"]) \
+        and isinstance(invite.get("gone", []), list) and all(
+            _agent(agent) and isinstance(agent.get("member_id"), str) and isinstance(agent.get("reason"), str)
+            for agent in invite.get("gone", [])) \
         and "members" in invite and "started_at" in invite and "reason" in invite \
         and "ended_at" in invite and (invite["ended_at"] is None or type(invite["ended_at"]) is int)
 
@@ -930,9 +1299,13 @@ def _agent(agent: Any) -> bool:
                                            for name in ("profile", "handle", "display_name"))
 
 
-def _queue(state: dict[str, Any], link_id: str, kind: str, room_id: str, body: dict, now: int) -> None:
-    """An envelope to go, with its message id: the same one queued again goes once."""
-    message_id = f"{kind}:{room_id}"
+def _queue(state: dict[str, Any], link_id: str, kind: str, room_id: str, body: dict, now: int,
+           parts: Any = ()) -> None:
+    """An envelope to go, with its message id: the same one queued again goes once. N5a's kinds go once per room
+    and Link (``kind:room_id``); the others' ids name the room and ``parts``, what makes each one (R2), since a
+    Link drops an id it's had in the last week."""
+    message_id = f"{kind}:{room_id}" if not parts else \
+        f"{kind}:{hashlib.sha256(json.dumps([room_id, *parts]).encode('utf-8')).hexdigest()[:32]}"
     if all((item["id"], item["link"]) != (message_id, link_id) for item in state["outbox"]):
         state["outbox"].append({"id": message_id, "link": link_id, "kind": kind, "body": body,
                                 "until": now + LASTS_S})
@@ -942,6 +1315,69 @@ def _joined(draft: dict[str, Any], member: dict[str, Any]) -> dict[str, Any]:
     """A linked member's join, with its grant and catalog."""
     return next(agent for agent in draft["links"][member["link"]]["join"]
                 if agent["member_id"] == member["member_id"])
+
+
+def _members(draft: dict[str, Any]) -> list[dict[str, Any]]:
+    """A started draft's members, each with its owner (None for this installation's own, else the name its Link
+    has here) and whether it's in the room, left it or was taken out."""
+    return [{"member_id": member["member_id"], "handle": member["handle"], "display_name": member["display_name"],
+             "owner": None if member["link"] is None else draft["links"][member["link"]]["name"],
+             "status": member.get("status", "in")} for member in draft["members"]]
+
+
+def _member(draft: dict[str, Any], member: Any) -> Optional[dict[str, Any]]:
+    """A started draft's member by its member id, else by its handle (casefolded, as Hermes' are, with or without
+    @)."""
+    if not isinstance(member, str):
+        return None
+    members = draft["members"] or []
+    handle = member.strip().removeprefix("@").casefold()
+    return next((each for each in members if each["member_id"] == member), None) or next(
+        (each for each in members if each["handle"].casefold() == handle), None)
+
+
+def _todo(draft: dict[str, Any], member_id: str, do: str) -> None:
+    """A change to a member's route for the rooms loop to make: it takes the place of one waiting that does no
+    more (R15), with tries of its own."""
+    todos = draft.setdefault("route_todo", {})
+    if member_id not in todos or _TODO_RANK[do] >= _TODO_RANK[todos[member_id]["do"]]:
+        todos[member_id] = {"do": do, "tries": 0}
+
+
+def _started_in(found: room_start.Found) -> Optional[dict[str, Any]]:
+    """Where a room started, so its route changes go to the same room service (R5); None for a canonical one
+    whose home isn't known, whose changes go where its draft said."""
+    if found.kind != "canonical":
+        return {"kind": "legacy"}
+    if isinstance(found.home, str) and found.home and isinstance(found.subject, str) and found.subject:
+        return {"kind": "canonical", "home": found.home, "subject": found.subject}
+    return None
+
+
+def _agent_in(invite: Optional[dict[str, Any]], member_id: str) -> Optional[dict[str, Any]]:
+    """An invite's agent still joined to its room, started or not yet."""
+    if invite is None or invite["status"] not in ("joined", "started"):
+        return None
+    return next((agent for agent in invite["joined"] if agent["member_id"] == member_id), None)
+
+
+def _due(agent: dict[str, Any], now: int) -> bool:
+    """Whether an agent's grant is due a renewal: one from before renewals (N5a's) is due now, and one whose
+    renewals stopped never."""
+    renew_at = agent.get("renew_at", 0)
+    return renew_at is not None and renew_at <= now
+
+
+def _gone(invite: dict[str, Any], member_ids: Any, reason: str, now: int) -> None:
+    """Agents out of an invite's room, with why (left, removed, disbanded): from joined, with their grants, into
+    gone. The invite ends once none is in: left, when the last one left."""
+    ids = set(member_ids)
+    invite.setdefault("gone", []).extend(
+        {**{name: agent[name] for name in ("member_id", "profile", "handle", "display_name")}, "reason": reason}
+        for agent in invite["joined"] if agent["member_id"] in ids)
+    invite["joined"] = [agent for agent in invite["joined"] if agent["member_id"] not in ids]
+    if not invite["joined"]:
+        invite.update(status="left" if reason == "left" else "ended", reason=reason, ended_at=now)
 
 
 def _unique(handle: str, used: set[str]) -> str:
@@ -974,9 +1410,9 @@ def _cancel(invite: dict[str, Any], reason: str, now: int) -> None:
 
 
 def _forget_old(state: dict[str, Any], now: int) -> None:
-    """Invites that ended (declined, cancelled, or lapsed unanswered) a month ago."""
+    """Invites that ended (declined, cancelled, left, ended, or lapsed unanswered) a month ago."""
     for key, invite in list(state["invites"].items()):
-        ended = invite["ended_at"] if invite["status"] in ("declined", "cancelled") else (
+        ended = invite["ended_at"] if invite["status"] in ("declined", "cancelled", "left", "ended") else (
             invite["expires_at"] if invite["status"] == "waiting" else None)
         if ended is not None and ended + KEPT_S < now:
             del state["invites"][key]
@@ -1049,7 +1485,6 @@ def _answer_from(body: Any) -> Optional[dict[str, Any]]:
     return {"room_id": body["room_id"], "join": join}
 
 
-_START_REASONS = frozenset({"started_without_you", "refused", "too_few", "start_failed", "withdrawn", "lapsed"})
 _MEMBER_FIELDS = frozenset({"member_id", "handle", "display_name", "owner"})
 
 
@@ -1071,7 +1506,45 @@ def _start_from(body: Any) -> Optional[dict[str, Any]]:
             and (member["owner"] is None or room_links._checked_name(member["owner"]) == member["owner"])
             for member in members):
         return None
+    # Each member once, by its id and its handle (R12).
+    if len({member["member_id"] for member in members}) != len(members) \
+            or len({member["handle"].casefold() for member in members}) != len(members):
+        return None
     return dict(body)
+
+
+def _grant_from(body: Any) -> Optional[dict[str, Any]]:
+    """A room.grant's body, or None when it isn't one."""
+    if not isinstance(body, dict) or set(body) != {"v", "room_id", "member_id", "grant"} \
+            or type(body["v"]) is not int or body["v"] != VERSION or not _identifier(body["room_id"]) \
+            or not _identifier(body["member_id"]) or not isinstance(body["grant"], str) \
+            or room_bridge.grant_scope(body["grant"]) is None:
+        return None
+    return dict(body)
+
+
+def _leave_from(body: Any) -> Optional[dict[str, Any]]:
+    """A room.leave's body, or None when it isn't one."""
+    if not isinstance(body, dict) or set(body) != {"v", "room_id", "member_ids"} or type(body["v"]) is not int \
+            or body["v"] != VERSION or not _identifier(body["room_id"]) or not _member_ids(body["member_ids"]):
+        return None
+    return dict(body)
+
+
+def _ended_from(body: Any) -> Optional[dict[str, Any]]:
+    """A room.ended's body, or None when it isn't one."""
+    if not isinstance(body, dict) or set(body) != {"v", "room_id", "reason", "member_ids"} \
+            or type(body["v"]) is not int or body["v"] != VERSION or not _identifier(body["room_id"]) \
+            or not isinstance(body["reason"], str) or body["reason"] not in ENDED_REASONS \
+            or not _member_ids(body["member_ids"]):
+        return None
+    return dict(body)
+
+
+def _member_ids(value: Any) -> bool:
+    """One to five member ids, each once: a person's agents in a room."""
+    return isinstance(value, list) and 1 <= len(value) <= MAX_AGENTS - 1 \
+        and all(_identifier(member_id) for member_id in value) and len(set(value)) == len(value)
 
 
 def _catalog(value: Any) -> bool:
