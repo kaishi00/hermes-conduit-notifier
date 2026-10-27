@@ -57,8 +57,10 @@ LABELS = tuple(entry.label for entry in ALLOWED.values())
 # is checked here.
 BRIDGE_CALL = "tool_call"
 BRIDGE_READS = frozenset({"tool_search", "tool_describe"})
-# The calendar's adds: never run on a Pulse turn.
+# The calendar's adds: never run on a Pulse turn. Called directly, each is
+# kept as a suggestion the user adds with one tap (pulse_proposals).
 ADDS = frozenset({"add_event", "add_reminder"})
+MAX_PROPOSALS = 2  # pulse_proposals.MAX_PER_TURN
 # Look-ups a turn may make, and a day's by label.
 MAX_PER_TURN = 6
 DAILY = {"maps": 20, "web": 10}
@@ -77,12 +79,11 @@ USES = ("conduit_calendar (overview, calendars, events, free_busy, next, reminde
 SEARCH_USE = ", and web_search (a few words: no web addresses, nothing private about the user)"
 # Appended to a report's, follow-up's or brief's note while look_first is on.
 LOOK_NOTE = ("Before you answer you may look things up, at most {limit} times, to check what the message brings "
-             "up or add a detail to it: {uses}. Don't bring up anything new from what you find. Every other tool "
-             "is blocked, and nothing on this turn can add to the calendar or reminders: if adding something "
-             "would help, say so and the user can add it.")
+             "up or add a detail to it: {uses}. Don't bring up anything new from what you find. If adding "
+             "something to the calendar or reminders would help, conduit_calendar's add_event or add_reminder "
+             "makes it a suggestion the user adds with one tap, at most {proposals} a turn: say you suggested it, "
+             "never that it's done. Every other tool is blocked.")
 NOT_ALLOWED = "Pulse turns can't use {what}. They may look things up with {uses}."
-ADD_BLOCK = ("Pulse turns can't add to the calendar or reminders. Mention it in your message if it would help; "
-             "the user can add it.")
 WHERE_BLOCK = ("Pulse turns can't use where the user is: name the places (\"near\" and \"from\" default to "
                "\"me\"), and not a saved place like home or work.")
 SEARCH_BLOCK = "Pulse can search the web only on a follow-up about something said in a chat."
@@ -112,10 +113,12 @@ class Turn:
 class Verdict:
     """``allowed``, else ``message`` says why not; ``labels``: the look-ups
     an allowed call makes, one per call (several through tool_call), none
-    for listing tools."""
+    for listing tools. ``propose``: a calendar add, which never runs and is
+    kept as a suggestion instead (pulse_proposals)."""
     allowed: bool
     message: str = ""
     labels: tuple[str, ...] = ()
+    propose: bool = False
 
 
 def uses(turn: Turn) -> str:
@@ -124,8 +127,8 @@ def uses(turn: Turn) -> str:
 
 
 def look_note(turn: Turn) -> str:
-    """The part of a Pulse turn's note that says what it may look up."""
-    return LOOK_NOTE.format(limit=MAX_PER_TURN, uses=uses(turn))
+    """The part of a Pulse turn's note that says what it may look up and suggest."""
+    return LOOK_NOTE.format(limit=MAX_PER_TURN, uses=uses(turn), proposals=MAX_PROPOSALS)
 
 
 def check(tool_name: Any, args: Any, turn: Turn,
@@ -140,17 +143,14 @@ def check(tool_name: Any, args: Any, turn: Turn,
         return Verdict(True)
     if name == BRIDGE_CALL:
         return _bridged(args, turn, uses_where)
-    verdict = _one(name, args if isinstance(args, dict) else {}, turn, uses_where)
-    if verdict.allowed and turn.calls + 1 > MAX_PER_TURN:
-        return Verdict(False, TURN_CAP_BLOCK)
-    return verdict
+    return _one(name, args if isinstance(args, dict) else {}, turn, uses_where)
 
 
 def _one(name: str, args: dict, turn: Turn, uses_where: Optional[Callable[[dict], bool]]) -> Verdict:
     entry = ALLOWED.get(name)
     action = args.get("action") if isinstance(args.get("action"), str) else ""
     if name == "conduit_calendar" and action in ADDS:
-        return Verdict(False, ADD_BLOCK)
+        return Verdict(False, propose=True)
     if entry is None or (name == "web_search" and not turn.searches):
         if name == "web_search":
             return Verdict(False, SEARCH_BLOCK)
@@ -158,6 +158,8 @@ def _one(name: str, args: dict, turn: Turn, uses_where: Optional[Callable[[dict]
     if entry.actions and action not in entry.actions:
         return Verdict(False, NOT_ALLOWED.format(what=f"{name} {action}" if action else f"{name} without an action",
                                                  uses=uses(turn)))
+    if turn.calls + 1 > MAX_PER_TURN:  # before Maps reads its places for it
+        return Verdict(False, TURN_CAP_BLOCK)
     if name == "web_search":
         query = args.get("query")
         if not isinstance(query, str) or not query.strip() or len(query) > MAX_QUERY:
@@ -197,14 +199,12 @@ def _bridged(args: Any, turn: Turn, uses_where: Optional[Callable[[dict], bool]]
         verdict = _one(name, arguments, Turn(turn.kind, turn.item_kind, turn.calls + len(labels), today),
                        uses_where)
         if not verdict.allowed:
-            if verdict.message == ADD_BLOCK:
+            if verdict.propose:
                 return Verdict(False, BRIDGE_BLOCK.format(tool=name))
             return verdict
         for label in verdict.labels:
             today[label] = today.get(label, 0) + 1
         labels.extend(verdict.labels)
-    if turn.calls + len(labels) > MAX_PER_TURN:
-        return Verdict(False, TURN_CAP_BLOCK)
     return Verdict(True, labels=tuple(labels))
 
 

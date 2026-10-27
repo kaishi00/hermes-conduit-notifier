@@ -61,8 +61,9 @@ def test_a_listed_tools_writes_and_side_effects_are_blocked(name, action):
 
 @pytest.mark.parametrize("action", ["add_event", "add_reminder"])
 def test_calendar_adds_never_run_on_a_pulse_turn(action):
+    # They're kept as suggestions with an Add button instead (pulse_proposals).
     assert check("conduit_calendar", {"action": action, "title": "Dinner"}, PROMISE) == tools.Verdict(
-        False, tools.ADD_BLOCK)
+        False, propose=True)
 
 
 READS = [*[("conduit_calendar", action, "calendar")
@@ -176,6 +177,21 @@ def test_calls_through_the_bridge_count_toward_the_caps():
     assert check("tool_call", twice, tools.Turn("report", today={"maps": 18})).allowed
     assert check("tool_call", twice, tools.Turn("report", today={"maps": 19})) == tools.Verdict(
         False, tools.DAILY_CAP_BLOCK.format(label="maps"))
+
+
+def test_past_the_turns_cap_maps_reads_no_places():
+    # Maps reads the user's places for each call it checks; a call past the
+    # cap is blocked before that, one at a time through the bridge too.
+    read = []
+
+    def where(args):
+        read.append(args)
+        return False
+    lookup = ("conduit_maps", {"action": "lookup", "query": "Nopa"})
+    assert check(*lookup, tools.Turn("report", calls=6), where) == tools.Verdict(False, tools.TURN_CAP_BLOCK)
+    assert check("tool_call", bridged(*[lookup] * 9), tools.Turn("report", calls=4), where) == tools.Verdict(
+        False, tools.TURN_CAP_BLOCK)
+    assert len(read) == 2
 
 
 # Where the user is, as Maps reads its places -------------------------------------

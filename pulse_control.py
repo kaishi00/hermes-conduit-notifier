@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import pulse, pulse_candidates, pulse_delivery, pulse_followup, pulse_hermes, pulse_learning, pulse_memory
-from . import pulse_ahead, pulse_hours, pulse_quiet
+from . import pulse_ahead, pulse_hours, pulse_proposals, pulse_quiet
 from . import pulse_host as host
 from . import pulse_report
 
@@ -33,6 +33,9 @@ class Refused(Exception):
     - ``not_running`` / ``nothing_to_cancel``: no backfill to stop or cancel.
     - ``changed``: the backfill changed meanwhile; try again.
     - ``invalid``: a setting's value isn't one Pulse takes (``field``).
+    - A suggestion's (pulse_proposals.ProposalError): ``already_added``,
+      ``dismissed``, ``expired``, ``not_found``, ``not_added``,
+      ``already_undone``, or the phone store's code with its ``note``.
     """
 
     def __init__(self, code: str, **data: Any) -> None:
@@ -368,19 +371,30 @@ def followups(pulse_store: Any, limit: int = ITEMS) -> list[dict[str, Any]]:
     return out
 
 
-def feed(pulse_store: Any, home: Optional[Path] = None, limit: int = pulse_learning.CARDS) -> dict[str, Any]:
+def feed(pulse_store: Any, home: Optional[Path] = None, limit: int = pulse_learning.CARDS,
+         proposals: bool = False) -> dict[str, Any]:
     """The Pulse screen: what Pulse brought the user, newest first, how many
     are unseen, each kind's loudness, and the Pulse chat's id ("" when
-    there's none), which Conduit keeps behind the screen."""
+    there's none), which Conduit keeps behind the screen. ``proposals``:
+    the app shows suggestion cards (pulse_proposals), each with its
+    "proposal"; an app that doesn't ask gets none, nor counts them."""
     # Pulse off: no chat stands behind the screen, whatever is titled Pulse.
     on = home is not None and pulse_store.get("enabled")
     chat = pulse.home_chat(pulse_store, Path(home))[0] if on else None
-    cards = pulse_store.cards(limit)
+    without = () if proposals else (pulse_proposals.PROPOSAL,)
+    cards = pulse_store.cards(limit, without=without)
     marks = pulse_store.done_marks([card["id"] for card in cards])
     now = time.time()
     zone = pulse.report_zone(pulse_store, Path(home) if home is not None else Path("."), now)
-    return {"cards": [pulse_learning.card_entry(card, marks.get(card["id"])) for card in cards],
-            "unseen": pulse_store.unseen_cards(), "levels": pulse_learning.levels(pulse_store),
+    entries = []
+    for card in cards:
+        entry = pulse_learning.card_entry(card, marks.get(card["id"]))
+        proposal = pulse_store.proposal(card.get("proposal")) if card["kind"] == pulse_proposals.PROPOSAL else None
+        if proposal is not None:
+            entry["proposal"] = pulse_proposals.entry(proposal, Path(home) if home is not None else Path("."), now)
+        entries.append(entry)
+    return {"cards": entries,
+            "unseen": pulse_store.unseen_cards(without=without), "levels": pulse_learning.levels(pulse_store),
             "home_chat_id": chat.chat_id if chat else "",
             # The screen says when Pulse is quiet (pulse_quiet) and until when.
             "quiet_now": pulse_quiet.why(pulse_store, zone, now),
@@ -405,6 +419,36 @@ def _learning(action: Any) -> Any:
         return action()
     except pulse_learning.Invalid as error:
         raise Refused("invalid", field=error.field) from None
+
+
+def add_proposal(pulse_store: Any, proposal_id: Any, home: Any, now: Optional[float] = None) -> dict[str, Any]:
+    """Add on a suggestion's card (pulse_proposals.add): the suggestion as
+    the feed shows it, with the phone change's "change_id". Refused with
+    "already_added" for a second tap, "dismissed", "expired" or
+    "not_found", or the phone store's code and its "note"."""
+    return _proposal(lambda: pulse_proposals.add(pulse_store, proposal_id, Path(home),
+                                                 time.time() if now is None else now))
+
+
+def dismiss_proposal(pulse_store: Any, proposal_id: Any, home: Any, now: Optional[float] = None) -> dict[str, Any]:
+    """Not now on a suggestion's card: it won't be added, and the card goes."""
+    return _proposal(lambda: pulse_proposals.dismiss(pulse_store, proposal_id, Path(home),
+                                                     time.time() if now is None else now))
+
+
+def undo_proposal(pulse_store: Any, proposal_id: Any, home: Any, now: Optional[float] = None) -> dict[str, Any]:
+    """Undo on an added suggestion's card: asks the phone to delete it.
+    Refused with "not_added" when there's nothing on the phone to delete,
+    "already_undone", or the phone store's code and its "note"."""
+    return _proposal(lambda: pulse_proposals.undo(pulse_store, proposal_id, Path(home),
+                                                  time.time() if now is None else now))
+
+
+def _proposal(action: Any) -> dict[str, Any]:
+    try:
+        return action()
+    except pulse_proposals.ProposalError as error:
+        raise Refused(error.code, **({"note": error.note} if error.note else {})) from None
 
 
 def rate(pulse_store: Any, card_id: Any, rating: Any, reason: Any = "", now: Optional[float] = None,
