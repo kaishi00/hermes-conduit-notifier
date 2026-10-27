@@ -353,7 +353,7 @@ class Rooms:
                             "aren't its own", received.link_id)
                 return
             if installations:
-                state["installations"].setdefault(received.link_id, installations.pop())
+                state["installations"].setdefault(received.link_id, next(iter(installations)))
             person.update(status="joined" if body["join"] else "declined", join=body["join"], answered_at=now)
 
     def on_start(self, received: room_links.Received) -> None:
@@ -1051,8 +1051,8 @@ def _start_from(body: Any) -> Optional[dict[str, Any]]:
     members = body["members"]
     if not isinstance(members, list) or not 2 <= len(members) <= MAX_AGENTS or not all(
             isinstance(member, dict) and set(member) == _MEMBER_FIELDS and _identifier(member["member_id"])
-            and _handle(member["handle"], reserved=frozenset()) and isinstance(member["display_name"], str)
-            and len(member["display_name"]) <= LABEL_MAX
+            and _handle(member["handle"], reserved=frozenset())
+            and _label(member["display_name"]) == member["display_name"]
             and (member["owner"] is None or room_links._checked_name(member["owner"]) == member["owner"])
             for member in members):
         return None
