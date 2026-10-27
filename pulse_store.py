@@ -76,6 +76,9 @@ DEFAULTS: dict[str, Any] = {
     # also reads what the phone's automations log and keeps deadlines, like a
     # trial ending or a bill due. On while Pulse memory is.
     "inbox_deadlines": True,
+    # Looking things up first (pulse_tools): a report, follow-up or brief turn
+    # may read the calendar, contacts and Maps before it speaks. On with Pulse.
+    "look_first": True,
     # Quiet times (pulse_quiet): the weekdays Pulse keeps to itself (Monday
     # 0 to Sunday 6) and when a quiet spell ends (epoch seconds), in the
     # user's time zone.
@@ -391,6 +394,8 @@ LATE_BY = "expiry: learned after its time had passed"
 # of the last event it read.
 INBOX_SETTING = "inbox_deadlines"
 INBOX_MARK = "inbox_mark"
+# Whether Pulse's turns may look things up first (DEFAULTS, pulse_tools).
+LOOK_SETTING = "look_first"
 # A deadline from the inbox is deleted this long after it's done, forgotten,
 # replaced or expired (pulse_memory.forget_inbox): Undo works that long.
 INBOX_FORGET_S = 86400.0
@@ -401,7 +406,7 @@ SPLIT_REPORTS = "split_reports"
 SPLIT_ITEMS = '"split"'
 
 CARD_COLUMNS = ("kind", "item_id", "level", "title", "quote", "news", "why", "profile", "chat_id", "chat_title",
-                "message_id", "topic", "brief", "created_at", "learned", "place", "band")
+                "message_id", "topic", "brief", "created_at", "learned", "place", "band", "looked")
 # Card columns added after the first build, oldest first, with their types.
 # Columns a table gained after stores existed, added to a store from before.
 _ADDED_COLUMNS = (("cards", "topic", "TEXT NOT NULL DEFAULT ''"), ("cards", "brief", "TEXT NOT NULL DEFAULT ''"),
@@ -415,7 +420,8 @@ _ADDED_COLUMNS = (("cards", "topic", "TEXT NOT NULL DEFAULT ''"), ("cards", "bri
                   ("cards", "band", "TEXT NOT NULL DEFAULT ''"), ("followups", "timing", "TEXT NOT NULL DEFAULT ''"),
                   ("cards", "put_back_at", "REAL"), ("items", "every_year", "TEXT NOT NULL DEFAULT ''"),
                   ("items", "occasion", "TEXT NOT NULL DEFAULT ''"), ("candidates", "ref", "TEXT NOT NULL DEFAULT ''"),
-                  ("items", "from_inbox", "TEXT NOT NULL DEFAULT ''"), ("items", "sender", "TEXT NOT NULL DEFAULT ''"))
+                  ("items", "from_inbox", "TEXT NOT NULL DEFAULT ''"), ("items", "sender", "TEXT NOT NULL DEFAULT ''"),
+                  ("attempts", "looked", "TEXT NOT NULL DEFAULT ''"), ("cards", "looked", "TEXT NOT NULL DEFAULT ''"))
 # What report cards said for Why? before a candidate's reason did (an item's card,
 # never shown; a whole report's card), and the setting that says a store has
 # cleared them.
@@ -652,6 +658,22 @@ class PulseStore:
             row = conn.execute("SELECT * FROM attempts WHERE tag=?", (tag,)).fetchone()
         return dict(row) if row else None
 
+    def note_looked(self, attempt_id: str, labels: Sequence[str]) -> None:
+        """Adds what a Pulse turn looked up (pulse_tools labels) to its
+        attempt, each once, in the order first used: its cards' Why?."""
+        with _lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = conn.execute("SELECT looked FROM attempts WHERE attempt_id=?", (attempt_id,)).fetchone()
+                if row is not None:
+                    looked = looked_labels(row["looked"])
+                    looked += [label for label in dict.fromkeys(labels) if label not in looked]
+                    conn.execute("UPDATE attempts SET looked=? WHERE attempt_id=?", (json.dumps(looked), attempt_id))
+                conn.execute("COMMIT")
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+
     def in_flight(self) -> list[dict]:
         marks = ",".join("?" * len(IN_FLIGHT))
         with self._connect() as conn:
@@ -662,6 +684,13 @@ class PulseStore:
     def recent(self, limit: int = 20) -> list[dict]:
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM attempts ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(row) for row in rows]
+
+    def looked_attempts(self, limit: int = 20) -> list[dict]:
+        """The latest attempts whose turn looked something up, newest first."""
+        with self._connect() as conn:
+            rows = conn.execute("SELECT * FROM attempts WHERE looked != '' ORDER BY created_at DESC LIMIT ?",
+                                (limit,)).fetchall()
         return [dict(row) for row in rows]
 
     def last_attempt_at(self, kind: str) -> Optional[float]:
@@ -2080,3 +2109,27 @@ class _Closing:
 
 def open_store(home: Path) -> PulseStore:
     return PulseStore(Path(home) / DB_NAME)
+
+
+def in_flight_attempts(path: Path, busy_timeout_s: float = 1.0) -> list[tuple[str, float, str]]:
+    """Each attempt in flight as (home chat, when it was made, detail):
+    read-only, without the schema setup opening the store does, as Pulse's
+    tool hook asks this for every call in every chat."""
+    marks = ",".join("?" * len(IN_FLIGHT))
+    conn = sqlite3.connect(f"{Path(path).resolve().as_uri()}?mode=ro", uri=True, timeout=busy_timeout_s)
+    try:
+        rows = conn.execute(f"SELECT session_key, created_at, detail FROM attempts WHERE state IN ({marks})",
+                            IN_FLIGHT).fetchall()
+    finally:
+        conn.close()
+    return [(key or "", float(made or 0.0), detail or "") for key, made, detail in rows]
+
+
+def looked_labels(value: Any) -> list[str]:
+    """A stored list of what a Pulse turn looked up (attempts.looked,
+    cards.looked); [] for none or one that can't be read."""
+    try:
+        labels = json.loads(value) if value else []
+    except (TypeError, ValueError):
+        return []
+    return [label for label in labels if isinstance(label, str)] if isinstance(labels, list) else []

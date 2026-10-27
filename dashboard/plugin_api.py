@@ -17132,6 +17132,10 @@ ROUTE_CAPABILITIES = (
     # them as kind "deadline" with "from_inbox", "sender" and "logged_at",
     # and their cards' topic is "deadline", with a level of its own.
     "pulse_inbox",
+    # Pulse's turns may look things up first (pulse_tools): GET /pulse says
+    # "look_first" and PUT /pulse takes it; a card's "looked" lists what its
+    # turn looked at ("calendar", "phone", "contacts", "maps", "web").
+    "pulse_look",
     "present-v1",
     "health-sync",
     "voice-tools",

@@ -63,6 +63,7 @@ from . import pulse_prefs as prefs
 from . import pulse_quiet as quiet
 from . import pulse_report as report
 from . import pulse_store as store
+from . import pulse_tools as tools
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +105,9 @@ PROBE_TEXT = "Pulse delivery check {tag}. Nothing to do: reply with one short li
 PROBE_NOTE = ("This turn was started by Pulse, the plugin that lets Hermes speak up on its own, to check that "
               "this chat can take turns while nobody is watching. Reply with one short line saying the check "
               "arrived. Don't use any tools.")
-BLOCK_MESSAGE = "Pulse turns can't use tools."
+BLOCK_MESSAGE = tools.NO_TOOLS
+HELD_MESSAGE = ("Tools are off in this chat while a Pulse turn is in progress here: answer without them, or ask "
+                "the user to try again in a moment.")
 
 _ctx: Any = None
 # Set once pre_llm_call is registered: without it a Pulse turn isn't
@@ -117,6 +120,19 @@ _started_at = 0.0
 # (session id, turn id) -> tag, for the Pulse turns that ran in this process.
 _turns: dict[tuple[str, str], str] = {}
 _turns_lock = threading.Lock()
+# (session id, turn id) -> the look-ups a Pulse turn made (pulse_tools).
+_looks: dict[tuple[str, str], int] = {}
+_looks_lock = threading.Lock()
+# (session id, turn id) -> when the turn started (pre_llm_call): a turn that
+# began before Pulse asked anything of its chat is the user's own.
+_started: dict[tuple[str, str], float] = {}
+MAX_STARTED = 1024
+# The home chats' ids (their compression chains) last read: while Pulse's
+# store or Hermes's state.db can't be read, these chats stay held to Pulse's
+# rules (_held_home_turn).
+_known_home: set[str] = set()
+# Today's look-ups by label (pulse_tools.DAILY), with the UTC day they count.
+LOOK_COUNTS = "look_counts"
 # The last problem logged, so a missing home chat isn't logged every tick.
 _last_problem = ""
 _last_ratings = 0.0
@@ -215,6 +231,7 @@ def pre_llm_call(session_id: str, turn_id: Any, user_message: Any) -> Optional[s
     """The hidden note for a Pulse turn, or None for any other turn. The
     tag must be one this profile's store sent, so a user typing something
     that looks like one gets nothing."""
+    _note_started(session_id, turn_id)
     if not isinstance(user_message, str) or "Pulse" not in user_message:
         return None
     home = get_hermes_home()
@@ -229,9 +246,38 @@ def pre_llm_call(session_id: str, turn_id: Any, user_message: Any) -> Optional[s
             if row["state"] != store.RUNNING:
                 pulse_store.update_attempt(row["attempt_id"], state=store.RUNNING,
                                            turn_id=turn_id if isinstance(turn_id, str) else "")
-            return {REPORT: report.REPORT_NOTE, FOLLOWUP: followup.NOTE, BRIEF: brief.NOTE}.get(row["kind"],
-                                                                                                 PROBE_NOTE)
+            return turn_note(pulse_store, row)
     return None
+
+
+def turn_note(pulse_store: store.PulseStore, row: dict) -> str:
+    """The hidden note for a Pulse attempt's turn: with look_first on, a
+    report, follow-up or brief may look things up first (pulse_tools)."""
+    kind = row["kind"]
+    if kind not in (REPORT, FOLLOWUP, BRIEF):
+        return PROBE_NOTE
+    if not looks_first(pulse_store):
+        return {REPORT: report.REPORT_NOTE, FOLLOWUP: followup.NOTE, BRIEF: brief.NOTE}[kind]
+    note = {REPORT: report.REPORT_LOOK_NOTE, FOLLOWUP: followup.LOOK_NOTE, BRIEF: brief.LOOK_NOTE}[kind]
+    return f"{note} {tools.look_note(_tool_turn(pulse_store, row))}"
+
+
+def looks_first(pulse_store: store.PulseStore) -> bool:
+    """Whether Pulse's turns may look things up first (`pulse look on|off`,
+    PUT /pulse's "look_first"): on unless set to False."""
+    return pulse_store.get(store.LOOK_SETTING) is not False
+
+
+def _tool_turn(pulse_store: store.PulseStore, row: dict, calls: int = 0,
+               today: Optional[dict[str, int]] = None) -> tools.Turn:
+    """What pulse_tools needs to know about an attempt's turn: its kind, and
+    for a follow-up the kind of its item."""
+    item_kind = ""
+    if row["kind"] == FOLLOWUP:
+        _, _, number = str(row["item_id"] or "").rpartition("-f")
+        item = pulse_store.item(int(number)) if number.isdigit() else None
+        item_kind = item["kind"] if item else ""
+    return tools.Turn(row["kind"], item_kind, calls, today or {})
 
 
 def is_pulse_turn(session_id: str, turn_id: Any) -> bool:
@@ -316,16 +362,103 @@ def push_copy(session_id: str, turn_id: Any, response: Any) -> dict[str, Any]:
     return {"title_label": label, "title": title, "body": brief.summary_line(response) if kind == BRIEF else response}
 
 
-def pre_tool_call(session_id: str, turn_id: Any) -> Optional[dict[str, str]]:
-    """Default deny: a Pulse turn gets no tools at all in slice 0."""
-    if is_pulse_turn(session_id, turn_id):
+def pre_tool_call(session_id: str, turn_id: Any, tool_name: Any = None,
+                  args: Any = None) -> Optional[dict[str, str]]:
+    """Default deny on Pulse turns (proactivity.md 7.6): a Pulse turn may make
+    the look-ups pulse_tools allows, with look_first on, and nothing else. A
+    turn in the home chat while a Pulse attempt is in flight there is held to
+    Pulse's rules even when it wasn't recognised (the note hook failed, Hermes
+    gave no turn id), with no tools at all. Never returns Hermes's "approve",
+    so YOLO or an "always" rule can't widen it. Raises when it can't decide
+    for a Pulse turn: Hermes then blocks the call."""
+    if not is_pulse_turn(session_id, turn_id):
+        return {"action": "block", "message": HELD_MESSAGE} if _held_home_turn(session_id, turn_id) else None
+    attempt = _turn_attempt(session_id, turn_id)
+    if attempt is None:
         return {"action": "block", "message": BLOCK_MESSAGE}
+    pulse_store = open_store()
+    if not looks_first(pulse_store):
+        return {"action": "block", "message": BLOCK_MESSAGE}
+    key = (session_id, turn_id)
+    with _looks_lock:  # parallel calls in one turn count one at a time
+        today = looks_today(pulse_store)
+        verdict = tools.check(tool_name, args, _tool_turn(pulse_store, attempt, _looks.get(key, 0), today))
+        if not verdict.allowed:
+            return {"action": "block", "message": verdict.message}
+        if verdict.labels:
+            _looks[key] = _looks.get(key, 0) + len(verdict.labels)
+            while len(_looks) > MAX_TURNS:
+                _looks.pop(next(iter(_looks)))
+            for label in verdict.labels:
+                today[label] = today.get(label, 0) + 1
+            pulse_store.set(LOOK_COUNTS, {"day": _utc_day(), "counts": today})
+            pulse_store.note_looked(attempt["attempt_id"], verdict.labels)
     return None
 
 
+def _utc_day(now: Optional[float] = None) -> str:
+    return time.strftime("%Y-%m-%d", time.gmtime(time.time() if now is None else now))
+
+
+def looks_today(pulse_store: store.PulseStore, now: Optional[float] = None) -> dict[str, int]:
+    """Today's look-ups by label (UTC days), for pulse_tools.DAILY and
+    `pulse look`."""
+    stored = pulse_store.get(LOOK_COUNTS)
+    if not isinstance(stored, dict) or stored.get("day") != _utc_day(now) or not isinstance(stored.get("counts"), dict):
+        return {}
+    return {label: count for label, count in stored["counts"].items()
+            if label in tools.LABELS and isinstance(count, int) and not isinstance(count, bool)}
+
+
+def _held_home_turn(session_id: str, turn_id: Any) -> bool:
+    """Whether a turn Pulse didn't recognise is held to Pulse's rules (7.6,
+    item 1): it's in a chat (or what compression made of it) where a Pulse
+    attempt is in flight, and it didn't start before the attempt was made,
+    so it may be Pulse's own (the note hook failed, Hermes gave no turn id,
+    or the injected text didn't match). An attempt whose turn Pulse saw end
+    holds nothing. Read without opening the store for writing, as this runs
+    for every call in every chat while Pulse has a store. When Pulse's store
+    or Hermes's state.db can't be read, the chats last known to be home
+    chats are held, and every other chat is left alone."""
+    home = get_hermes_home()
+    path = Path(home) / store.DB_NAME
+    if not path.exists():
+        return False
+    try:
+        made: dict[str, float] = {}
+        for key, created_at, detail in store.in_flight_attempts(path):
+            if key and detail != delivery.ENDED:
+                made[key] = min(created_at, made.get(key, created_at))
+        chains = {key: hermes.chain_ids(Path(home), key) for key in made}
+    except Exception:  # noqa: BLE001 — unreadable: only the chats known to be Pulse's are held
+        logger.debug("conduit_push: Pulse couldn't tell whether a turn is in its chat", exc_info=True)
+        return not session_id or session_id in _known_home
+    _known_home.update(*chains.values())
+    times = [made[key] for key, chain in chains.items() if not session_id or session_id in chain]
+    if not times:
+        return False
+    with _turns_lock:
+        started = _started.get((session_id, turn_id)) if isinstance(turn_id, str) else None
+    return started is None or started >= min(times)
+
+
+def _note_started(session_id: str, turn_id: Any) -> None:
+    if not isinstance(turn_id, str) or not turn_id:
+        return
+    with _turns_lock:
+        _started.setdefault((session_id, turn_id), time.time())
+        while len(_started) > MAX_STARTED:
+            _started.pop(next(iter(_started)))
+
+
 def turn_ended(session_id: str, turn_id: Any) -> None:
-    """A Pulse turn ended: noted on its attempt (a reply row should follow at
-    once), and the loop reconciles now instead of at its next tick."""
+    """A turn ended (every turn's end comes here): when it started is
+    forgotten, so a turn id Hermes uses again starts afresh. A Pulse turn's
+    end is noted on its attempt (a reply row should follow at once), and the
+    loop reconciles now instead of at its next tick."""
+    if isinstance(turn_id, str):
+        with _turns_lock:
+            _started.pop((session_id, turn_id), None)
     if not is_pulse_turn(session_id, turn_id):
         return
     with _turns_lock:
@@ -470,6 +603,8 @@ def _turn_cards(pulse_store: store.PulseStore, home: Path, changed: list[dict], 
     chat = home_chat(pulse_store, home)[0]
     title = (chat.title if chat else "") or pulse_store.get("home_title") or "Pulse"
     for attempt, row in rows.items():
+        # What the turn looked up first, on each of its cards for Why?.
+        looked = store.looked_labels(row.get("looked"))
         try:
             turn = hermes.find_turn(home, chat_id=row["session_key"], tag=row["tag"],
                                     since=row["created_at"] - delivery.SINCE_SLACK_S)
@@ -485,7 +620,7 @@ def _turn_cards(pulse_store: store.PulseStore, home: Path, changed: list[dict], 
                         keep=TURN_CARDS_DONE_KEEP, links=[pick["id"] for pick in picked],
                         found_in=candidates.found_in(picked), whys=candidates.whys(picked),
                         levels=candidates.levels(picked), factors=candidates.factors(picked),
-                        attrs=candidates.card_attrs(picked))
+                        attrs=candidates.card_attrs(picked), looked=looked)
                 else:
                     _mark_turn_card(pulse_store, attempt)
                 continue
@@ -503,12 +638,13 @@ def _turn_cards(pulse_store: store.PulseStore, home: Path, changed: list[dict], 
                     pulse_store, turn=turn, lines=lines, chat_id=row["session_key"], chat_title=title,
                     shown=report.shown_kinds(turn.prompt), kinds=report.KINDS,
                     item_chat_title=lambda item: followup.chat_title(home, item), now=now,
-                    attempt=str(attempt), marks=(TURN_CARDS_DONE, store.SPLIT_REPORTS), keep=TURN_CARDS_DONE_KEEP)
+                    attempt=str(attempt), marks=(TURN_CARDS_DONE, store.SPLIT_REPORTS), keep=TURN_CARDS_DONE_KEEP,
+                    looked=looked)
                 continue
             card = turn is not None and learning.add_turn_card(
                 pulse_store, kind=row["kind"], chat_id=row["session_key"], chat_title=title, turn=turn,
                 level_name="push" if row["kind"] == BRIEF else "screen", why=TURN_WHY[row["kind"]], now=now,
-                brief=str(row["item_id"] or "") if row["kind"] == BRIEF else "")
+                brief=str(row["item_id"] or "") if row["kind"] == BRIEF else "", looked=looked)
             if card:
                 _mark_turn_card(pulse_store, attempt)
         except (hermes.HermesUnreadable, sqlite3.Error):

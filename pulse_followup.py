@@ -183,13 +183,15 @@ In the chat "{title}" ({said}), the user said: "{evidence}"
 WATCH_TEXT = """Pulse watch {tag}.
 In the chat "{title}" ({said}), the user asked to be told: "{evidence}"
 {news}"""
-NOTE = ("This turn was started by Pulse, the part of Hermes that keeps what Hermes promised, reminds the user "
-        "of what they said they'd do and tells them what they asked to hear about. The message says what you "
-        "promised the user, what the user said they'd do or what they asked to be told, in another chat, and "
-        "what Pulse found. Tell the user in one or two short, friendly sentences, "
-        "starting with what it's about so it makes sense on its own; if the message says nothing shows it "
-        "happened, ask if they still want it. Make clear it's a follow-up on what was said in that chat, and "
-        "only pass on what the message says. Don't use any tools.")
+_NOTE = ("This turn was started by Pulse, the part of Hermes that keeps what Hermes promised, reminds the user "
+         "of what they said they'd do and tells them what they asked to hear about. The message says what you "
+         "promised the user, what the user said they'd do or what they asked to be told, in another chat, and "
+         "what Pulse found. Tell the user in one or two short, friendly sentences, "
+         "starting with what it's about so it makes sense on its own; if the message says nothing shows it "
+         "happened, ask if they still want it. Make clear it's a follow-up on what was said in that chat, and "
+         "only pass on what the message says")
+# While Pulse looks things up first, pulse_tools.look_note follows LOOK_NOTE.
+NOTE, LOOK_NOTE = _NOTE + ". Don't use any tools.", _NOTE + " and what you look up about it."
 STALE_NEWS = "It has been over a week and nothing shows it happened."
 # Added after the user rated a follow-up "already knew".
 SEEN_INSTRUCTION = ("\n\nThe user doesn't want to hear what they already saw: when that chat shows they already "
@@ -1320,11 +1322,12 @@ def held_note(timing: dict[str, Any], loudness: str) -> str:
 
 
 def _told(pulse_store: store.PulseStore, item: dict, followup: dict, now: float, loudness: str,
-          home: Optional[Path], *, timing: Optional[dict[str, Any]] = None) -> None:
+          home: Optional[Path], *, timing: Optional[dict[str, Any]] = None, looked: Sequence[str] = ()) -> None:
     """A follow-up reached the user (delivered, or a card at ``loudness``):
     its card, then the promise closes, or, for the week-old "still want
     it?", stays open for one last check. ``timing``: what held it, for its
-    Why? (``held_note``); the row's when not given."""
+    Why? (``held_note``); the row's when not given. ``looked``: what the
+    turn that told it looked up (pulse_tools labels)."""
     attrs = item_attrs(item, now)
     why = followup["why"].rstrip()
     note = held_note(followup_timing(followup) if timing is None else timing, loudness)
@@ -1332,7 +1335,8 @@ def _told(pulse_store: store.PulseStore, item: dict, followup: dict, now: float,
         why = f"{why}{'' if not why or why[-1] in '.!?…' else '.'} {note}".strip()
     learning.add_card(pulse_store, kind=FOLLOWUP, item=item, level_name=loudness, news=followup["news"], why=why,
                       chat_title=chat_title(home, item) if home is not None else "", now=now,
-                      learned=pulse_store.learned(now).factor(attrs), place=attrs["place"], band=attrs["band"])
+                      learned=pulse_store.learned(now).factor(attrs), place=attrs["place"], band=attrs["band"],
+                      looked=looked)
     if followup["news"] == STALE_NEWS and item["status"] == "open" and item["superseded_at"] is None:
         # The ask is done with: news from the last check gets its own attempts.
         pulse_store.retire_attempts(f"-f{item['id']}")
@@ -1357,14 +1361,16 @@ def settle(pulse_store: store.PulseStore, now: float, home: Optional[Path] = Non
     that ran out of tries (`pulse followups` shows both)."""
     for followup in pulse_store.followups_to_tell():
         attempts = attempts_of(pulse_store, followup["item_id"])
-        if any(row["state"] == store.DELIVERED for row in attempts):
+        delivered = [row for row in attempts if row["state"] == store.DELIVERED]
+        if delivered:
             item = pulse_store.item(followup["item_id"])
             if item is None:
                 pulse_store.decide_followup(followup["item_id"], decision="closed", news=followup["news"],
                                             why=followup["why"], checks=followup["checks"], next_check_at=None,
                                             now=now)
                 continue
-            _told(pulse_store, item, followup, now, "push", home)
+            _told(pulse_store, item, followup, now, "push", home,
+                  looked=[label for row in delivered for label in store.looked_labels(row.get("looked"))])
         elif len(attempts) >= TRIES and all(row["state"] not in store.IN_FLIGHT for row in attempts):
             # Out of memory's open promises, so it isn't counted or reported as open; the journal says why.
             expired = pulse_store.close_item(followup["item_id"], status="expired",

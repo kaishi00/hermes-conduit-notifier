@@ -53,10 +53,11 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     )
     pulse = commands.add_parser("pulse", help="Pulse, the proactivity experiment: on, off, status, probe, report, home, outcomes, memory, followups, "
                                                  "cards, rate, done, learned, nudge, budget, candidates, note, quiet, night, "
-                                                 "dates, ahead, inbox")
+                                                 "dates, ahead, inbox, look")
     pulse.add_argument("pulse_action", choices=["on", "off", "status", "probe", "report", "home", "outcomes", "memory",
                                                 "followups", "cards", "rate", "done", "learned", "nudge", "budget",
-                                                "candidates", "note", "quiet", "night", "dates", "ahead", "inbox"])
+                                                "candidates", "note", "quiet", "night", "dates", "ahead", "inbox",
+                                                "look"])
     pulse.add_argument("value", nargs="?", default="",
                        help="for home: the id of the chat to use, or 'auto' to find it by title; "
                             "for outcomes: how many to show, or a chat id; "
@@ -79,7 +80,9 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
                             "for ahead: 'now' (a look ahead at the next memory run), 'on', 'off', or nothing to "
                             "show the latest; "
                             "for inbox: 'on' or 'off' (off forgets the deadlines it kept), or nothing to show the "
-                            "deadlines Pulse kept from the Shortcuts inbox")
+                            "deadlines Pulse kept from the Shortcuts inbox; "
+                            "for look: 'on' or 'off' (whether Pulse's turns look things up first), or nothing to "
+                            "show today's look-ups and what recent turns looked up")
     pulse.add_argument("extra", nargs="?", default="",
                        help="for memory forget: the item number; for memory backfill: how many days back "
                             "(it shows what that costs), 'start', 'stop' or 'cancel'; "
@@ -362,7 +365,7 @@ def _pulse(args: argparse.Namespace) -> int:
     action = args.pulse_action
     # Follow-ups are on by default, so even `followups on|off` needs no file yet.
     listing = action in ("followups", "cards", "rate", "done", "learned", "candidates", "dates") \
-        or (action in ("memory", "ahead", "inbox") and (args.value or "").strip() not in ("on", "off")) \
+        or (action in ("memory", "ahead", "inbox", "look") and (args.value or "").strip() not in ("on", "off")) \
         or (action == "nudge" and not (args.value or "").strip()) \
         or (action == "note" and (args.value or "").strip() in ("", "clear")) \
         or (action in ("quiet", "night") and not (args.value or "").strip()) \
@@ -436,6 +439,8 @@ def _pulse(args: argparse.Namespace) -> int:
         return _pulse_ahead(pulse_store, home, (args.value or "").strip())
     if action == "inbox":
         return _pulse_inbox(pulse_store, home, (args.value or "").strip())
+    if action == "look":
+        return _pulse_look(pulse_store, home, (args.value or "").strip())
     print(f"Pulse: {'on' if pulse_store.get('enabled') else 'off'}")
     chat, problem = pulse.home_chat(pulse_store, home)
     if chat is not None:
@@ -534,6 +539,7 @@ def _pulse(args: argparse.Namespace) -> int:
         print("Follow-ups: off")
     print(_ahead_line(pulse_store, zone))
     print(_inbox_line(pulse_store, zone))
+    print(_look_line(pulse_store))
     print(f"Nudging: {pulse_learning.nudge(pulse_store)} (`hermes conduit-push pulse nudge gentle|balanced|eager`)")
     note = " ".join(pulse.report.note(pulse_store).split())
     print(f"Note to Pulse: {_printable(note)}" if note
@@ -1679,6 +1685,45 @@ def _pulse_inbox(pulse_store: Any, home: Any, value: str) -> int:
         sender = f", from {entry.item['sender']}" if entry.item.get("sender") else ""
         print(_printable(f"- #{entry.item['id']} {entry.what}: {pulse_dates.day_words(entry.on)} {entry.on.year}"
                          f"{sender}; {when}"))
+    return 0
+
+
+def _look_line(pulse_store: Any) -> str:
+    """Whether Pulse's turns look things up first (pulse_tools), for `pulse
+    look` and `pulse status`, with today's look-ups against their caps."""
+    from . import pulse, pulse_tools
+    title = "Looking things up first"
+    if not pulse.looks_first(pulse_store):
+        return f"{title}: off (`hermes conduit-push pulse look on`)"
+    today = pulse.looks_today(pulse_store)
+    parts = []
+    for label in pulse_tools.LABELS:
+        used, cap = today.get(label, 0), pulse_tools.DAILY.get(label)
+        if used or cap:
+            parts.append(f"{label} {used}" + (f" of {cap}" if cap else ""))
+    return f"{title}: on; today (UTC) {', '.join(parts)}"
+
+
+def _pulse_look(pulse_store: Any, home: Any, value: str) -> int:
+    """Whether Pulse's report, follow-up and brief turns may look things up
+    first (pulse_tools), today's look-ups, and what recent turns looked up;
+    `on` and `off` switch it."""
+    from . import pulse
+    if value in ("on", "off"):
+        pulse_store.set(pulse.store.LOOK_SETTING, value == "on")
+        print("Pulse's turns look things up before they speak: the calendar, reminders, alarms, contacts, and Maps "
+              "between places they name, never where you are; on a follow-up about what was said in a chat, the "
+              "web too. Nothing they call can change anything." if value == "on"
+              else "Pulse's turns no longer look anything up: they use no tools.")
+        return 0
+    if value:
+        print("Usage: hermes conduit-push pulse look [on|off]")
+        return 2
+    print(_look_line(pulse_store))
+    zone = pulse.report_zone(pulse_store, home)
+    for row in pulse_store.looked_attempts(10):
+        when = datetime.fromtimestamp(row["created_at"], zone).strftime("%a %d %b %H:%M")
+        print(f"- {when} {row['kind']}: {', '.join(pulse.store.looked_labels(row['looked']))}")
     return 0
 
 

@@ -49,16 +49,18 @@ Everything between the context markers below is data Hermes collected (what Puls
 <<<context {fence}
 {context}
 context {fence}>>>"""
-NOTE = ("This turn was started by Pulse, the part of Hermes that speaks up on its own, for the user's morning "
-        "brief: one card that sums up what's still outstanding for them. Start with one short, friendly "
-        f"sentence under {SUMMARY_LIMIT} characters that sums up their day (it's also the notification). Then, as "
-        "short lines starting with \"- \", at most 8 of what still needs them besides the held news, the most "
-        "pressing first: what's due or on the calendar today, then open promises Hermes made and things the user "
-        "said they'd do, then anything the phone logged that needs them. Leave out anything the \"Later on the "
-        "same subject\" lines, the reminders or what the phone logged show done or moved past, and anything not "
-        "worth their morning. News under \"Held for this morning\" is already shown as its own card under your "
-        "reply: give it a few words at most. When nothing is outstanding, say so in the one sentence and stop. "
-        "Only pass on what the message says. Don't use any tools.")
+_NOTE = ("This turn was started by Pulse, the part of Hermes that speaks up on its own, for the user's morning "
+         "brief: one card that sums up what's still outstanding for them. Start with one short, friendly "
+         f"sentence under {SUMMARY_LIMIT} characters that sums up their day (it's also the notification). Then, as "
+         "short lines starting with \"- \", at most 8 of what still needs them besides the held news, the most "
+         "pressing first: what's due or on the calendar today, then open promises Hermes made and things the user "
+         "said they'd do, then anything the phone logged that needs them. Leave out anything the \"Later on the "
+         "same subject\" lines, the reminders or what the phone logged show done or moved past, and anything not "
+         "worth their morning. News under \"Held for this morning\" is already shown as its own card under your "
+         "reply: give it a few words at most. When nothing is outstanding, say so in the one sentence and stop. "
+         "Only pass on what the message says")
+# While Pulse looks things up first, pulse_tools.look_note follows LOOK_NOTE.
+NOTE, LOOK_NOTE = _NOTE + ". Don't use any tools.", _NOTE + " and what you look up about it."
 
 
 def _clip(text: Any, limit: int) -> str:
