@@ -493,6 +493,8 @@ class LocalWorkspace:
         try:
             temp = _write_temp(os.path.dirname(target), data)
             if overwrite:
+                if os.path.lexists(target):
+                    shutil.copymode(target, temp)  # as save keeps it
                 os.replace(temp, target)
             else:
                 _rename_no_replace(temp, target)
@@ -759,13 +761,16 @@ class SshWorkspace:
         name_lines = self._run(
             _STAT + self._guard(root) +
             f'find {q_root} {self._prune()} -iname {shlex.quote(pattern)} -print 2>/dev/null'
-            f' | head -n {SEARCH_MAX_RESULTS} | while IFS= read -r f; do'
+            f' | head -n {SEARCH_MAX_RESULTS + 2} | while IFS= read -r f; do'
             # A link goes with where it leads, so one to a secret stays out.
             ' if [ ! -L "$f" ]; then rec "$f"; elif follows "$f"; then rec "$f" "" "$r"; else rec "$f" l; fi; done',
             timeout=int(SEARCH_TIME_S) + 7)
         names = [entry for entry in self._records(name_lines) if entry["path"] != root]
+        # Read past the cap (the root itself is one line): cut only when
+        # more than the cap would show, or the walk itself stopped short.
+        truncated = len(names) > SEARCH_MAX_RESULTS or len(name_lines) > SEARCH_MAX_RESULTS + 1
+        names = names[:SEARCH_MAX_RESULTS]
         matches: List[Dict[str, Any]] = []
-        truncated = len(name_lines) >= SEARCH_MAX_RESULTS
         if contents:
             # Files that hold keys or passwords are never read, in any case.
             excludes = " ".join(
@@ -866,7 +871,8 @@ class SshWorkspace:
                   f'[ -d "$t" ] && {{ echo {_ERROR}{"EISDIR" if existing else "EEXIST"}; exit 1; }}\n' + check + stale +
                   # A fresh name of mktemp's own: nothing already there is written through.
                   f'tmp=$(mktemp "$(dirname -- "$t")/.conduit-XXXXXXXX") || {{ echo {_ERROR}EACCES; exit 1; }}\n'
-                  f'base64 -d > "$tmp" || {{ rm -f "$tmp"; echo {_ERROR}EACCES; exit 1; }}\n'
+                  # -D on an older macOS, which has no -d.
+                  f'{{ base64 -d 2>/dev/null || base64 -D; }} > "$tmp" || {{ rm -f "$tmp"; echo {_ERROR}EACCES; exit 1; }}\n'
                   # mktemp's file is private: give it the file's own mode, or a new file's.
                   'm=$(stat -c %a -- "$t" 2>/dev/null || stat -f %Lp -- "$t" 2>/dev/null)\n'
                   'chmod "${m:-$(printf %o $((0666 & ~0$(umask))))}" "$tmp" 2>/dev/null\n' +

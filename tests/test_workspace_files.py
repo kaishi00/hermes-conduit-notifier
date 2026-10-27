@@ -541,6 +541,41 @@ def test_moving_a_link_moves_the_link(tree):
     assert os.path.islink(tree / "docs" / "moved.txt") and (tree / "notes.txt").is_file()
 
 
+class _OldMacShell(_LocalShell):
+    """A remote whose base64 decodes only with -D, as an older macOS."""
+
+    def _execute(self, command, *, stdin_data=None, timeout=None):
+        shim = 'base64() { if [ "$1" = -d ]; then return 64; elif [ "$1" = -D ]; then command base64 -d; else command base64 "$@"; fi; }\n'
+        return super()._execute(shim + command, stdin_data=stdin_data, timeout=timeout)
+
+
+def test_ssh_writes_on_a_mac_whose_base64_wants_capital_d(tree):
+    remote = wf.SshWorkspace(_OldMacShell(tree))
+    root = str(tree.resolve())
+    remote.new_file(root, root, "mac.txt", "hello\n")
+    assert (tree / "mac.txt").read_text() == "hello\n"
+
+
+def test_an_upload_over_a_script_keeps_its_mode(tree):
+    script = tree / "run.sh"
+    script.write_text("echo hi\n")
+    script.chmod(0o755)
+    ws().upload(str(tree), str(tree), "run.sh", b"echo bye\n", overwrite=True)
+    assert script.stat().st_mode & 0o777 == 0o755 and script.read_text() == "echo bye\n"
+
+
+def test_ssh_name_search_is_cut_only_past_the_cap(tree, monkeypatch):
+    monkeypatch.setattr(wf, "SEARCH_MAX_RESULTS", 2)
+    (tree / "a-hit.txt").write_text("x")
+    (tree / "b-hit.txt").write_text("x")
+    root = str(tree.resolve())
+    found = ssh(tree).search(root, "hit", contents=False)
+    assert len(found["names"]) == 2 and found["truncated"] is False
+    (tree / "c-hit.txt").write_text("x")
+    found = ssh(tree).search(root, "hit", contents=False)
+    assert len(found["names"]) == 2 and found["truncated"] is True
+
+
 # --- Routes --------------------------------------------------------------------
 
 
