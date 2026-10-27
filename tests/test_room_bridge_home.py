@@ -390,6 +390,65 @@ def test_a_read_for_a_run_it_hasnt_seen_asks_the_member_once(room):
     assert len(room.wire.requests()) == asked + 2
 
 
+def forged(value=GRANT):
+    """``value``'s payload under a signature that isn't the member's, as anything on this host could write it."""
+    return f"{value.split('.')[0]}.forged"
+
+
+def test_a_grant_that_only_says_its_for_the_runs_scope_is_asked_of_the_member(room):
+    # Only the member's Hermes can check a grant's signature: this side answers for a run only to the grants
+    # the member took for it.
+    peer = client(room)
+    run_id = admit(peer)["run_id"]
+    for route in (("GET", "/v1/runs/{id}"), ("POST", "/v1/runs/{id}/stop"), ("POST", "/v1/runs")):
+        room.hermes.refuse[route] = (403, "invalid_room_grant", "Invalid room grant.")
+    asked = len(room.wire.requests())
+    headers = {"Authorization": f"HermesRoom {forged()}"}
+
+    read = raw(room, "GET", f"/v1/runs/{run_id}", headers=headers)
+    stopped = raw(room, "POST", f"/v1/runs/{run_id}/stop", body={}, headers=headers)
+    replayed = raw(room, "POST", "/v1/runs", body=dispatch()[0], headers={**headers, "Idempotency-Key": "room:t1:1"})
+
+    assert [answer for answer, _ in (read, stopped, replayed)] == [403, 403, 403]
+    assert {body["error"]["code"] for _, body in (read, stopped, replayed)} == {"invalid_room_grant"}
+    assert [request["grant"] for request in room.wire.requests()[asked:]] == [forged()] * 3
+    del room.hermes.refuse[("GET", "/v1/runs/{id}")]
+    assert status(peer)["status"] == "queued"  # still running, and still read here
+    assert len(room.wire.requests()) == asked + 3
+
+
+def test_a_grant_the_member_gave_in_place_of_the_runs_is_answered_here(room):
+    refreshed_grant = grant()
+    room.hermes.answers[("POST", "/v1/room-members/grants/refresh")] = (200, {
+        "object": "hermes.room_member.grant", "grant": refreshed_grant, "expires_at": NOW + DAY,
+        "status_expires_at": NOW + 2 * DAY, "execution_policy": {"policy_digest": "0" * 64}})
+    peer = client(room)
+    run_id = admit(peer)["run_id"]
+    peer.refresh_grant(grant=GRANT)
+    asked = len(room.wire.requests())
+
+    read = raw(room, "GET", f"/v1/runs/{run_id}", headers={"Authorization": f"HermesRoom {refreshed_grant}"})
+    again = client(room).recover_dispatch(dispatch=dispatch()[0]["hosted_room_dispatch"], grant=refreshed_grant)
+
+    assert read == (200, {"run_id": run_id, "status": "queued"})
+    assert (again["run_id"], again["replayed"]) == (run_id, True)
+    assert len(room.wire.requests()) == asked
+
+
+def test_a_grant_the_member_takes_for_a_run_is_answered_here_from_then_on(room):
+    # One a refresh this side didn't carry gave Hermes: the member's answer vouches for it.
+    peer = client(room)
+    run_id = admit(peer)["run_id"]
+    other = grant()
+    asked = len(room.wire.requests())
+
+    first = raw(room, "GET", f"/v1/runs/{run_id}", headers={"Authorization": f"HermesRoom {other}"})
+    second = raw(room, "GET", f"/v1/runs/{run_id}", headers={"Authorization": f"HermesRoom {other}"})
+
+    assert first == second == (200, {"run_id": run_id, "status": "queued"})
+    assert len(room.wire.requests()) == asked + 1
+
+
 def test_a_run_silent_for_3_minutes_fails_and_is_stopped_there(room):
     peer = client(room)
     run_id = admit(peer)["run_id"]
@@ -657,6 +716,11 @@ def test_an_answer_utf_8_cant_hold_still_reaches_hermes(room):
 
     assert status_code == 200
     assert answer == {"object": "room_member.capabilities", "catalog": {"note": "Zoo \ud83d trip"}}
+
+
+def test_the_servers_backlog_holds_every_request_a_link_can_have_waiting():
+    # One it overflowed could be refused, which Hermes' client takes as a turn that wasn't admitted.
+    assert home_module._Server.request_queue_size >= 4 * home_module.MAX_WAITING
 
 
 def test_a_full_mailbox_or_too_many_requests_is_503(room):

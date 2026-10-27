@@ -308,8 +308,7 @@ def _well_formed(state: Any) -> bool:
                 for rooms in member["days"].values()) \
         and (port is None or (type(port) is int and 0 < port < 65536)) \
         and all(_carried_run(run) for run in home["runs"].values()) \
-        and all(isinstance(kept, dict) and isinstance(kept.get("run"), str) and isinstance(kept.get("status"), str)
-                and _number(kept.get("at")) for kept in home["kept"].values()) \
+        and all(_kept_admission(kept) for kept in home["kept"].values()) \
         and all(isinstance(item, dict) and isinstance(item.get("id"), str) and isinstance(item.get("link"), str)
                 and _number(item.get("at")) and isinstance(item.get("request"), dict) for item in home["outbox"])
 
@@ -331,8 +330,19 @@ def _carried_run(run: Any) -> bool:
     its watching read."""
     return isinstance(run, dict) and all(isinstance(run.get(name), str)
                                          for name in ("link", "run", "profile", "grant", "name")) \
-        and _number(run.get("admitted")) and _number(run.get("heard")) and type(run.get("seq")) is int \
+        and _digests(run.get("grants")) and _number(run.get("admitted")) and _number(run.get("heard")) \
+        and type(run.get("seq")) is int \
         and _shown(run.get("shown")) and "ended" in run and (run["ended"] is None or _number(run["ended"]))
+
+
+def _kept_admission(kept: Any) -> bool:
+    """An admission as the home's side keeps it, for Hermes' retry."""
+    return isinstance(kept, dict) and all(isinstance(kept.get(name), str) for name in ("run", "status", "profile")) \
+        and _number(kept.get("at")) and _digests(kept.get("grants")) and type(kept.get("own")) is bool
+
+
+def _digests(value: Any) -> bool:
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
 
 
 def _shown(value: Any) -> bool:

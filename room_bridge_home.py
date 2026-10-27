@@ -22,14 +22,19 @@ quiet on, or that runs past 12 minutes, reads failed, and a stop goes to
 the member.
 
 Only requests with a HermesRoom grant leave this host, and only over the
-Link their URL names. The server runs where the rooms lease is, on a port
-kept in bridge.json with the runs it answers for, so a room's route
-outlives restarts.
+Link their URL names. A grant's payload says what it's for, but only the
+member's Hermes can check its signature: this side answers for a run only
+to a grant the member took for it (its admission's, one it gave in that
+one's place, or one it answered a read with), and asks the member about
+anything else. The server runs where the rooms lease is, on a port kept in
+bridge.json with the runs it answers for, so a room's route outlives
+restarts.
 """
 
 from __future__ import annotations
 
 import collections
+import hashlib
 import http.server
 import json
 import logging
@@ -118,6 +123,10 @@ class _Asking:
     profile: str
     grant: str = field(repr=False)
     scope: Optional[dict]
+
+    @property
+    def digest(self) -> str:
+        return _digest(self.grant)
 
 
 @dataclass
@@ -229,6 +238,8 @@ class Home:
             return _passed(status_code, answer, room_bridge.CAPABILITY_FIELDS)
         sent = {"ttl_seconds": payload["ttl_seconds"]} if "ttl_seconds" in payload else {}
         status_code, answer, _ = self._ask(asking, "refresh", "POST", path, body=sent)
+        if 200 <= status_code < 300:
+            self._refreshed(asking, answer.get("grant"))
         return _passed(status_code, answer, room_bridge.GRANT_FIELDS)
 
     def _dispatch(self, asking: _Asking, key: Optional[str], payload: dict) -> tuple[int, dict]:
@@ -238,7 +249,7 @@ class Home:
             return 403, _error("invalid_room_dispatch")
         if key is not None and asking.scope is not None:
             kept = self.store.read()["home"]["kept"].get(f"{asking.link}/{key}")
-            if kept is not None and (kept.get("scope"), kept.get("profile")) == (asking.scope, asking.profile):
+            if kept is not None and _takes(kept, asking):
                 # Hermes' retry after a 504, or its recovery a minute later.
                 return 202, {"run_id": kept["run"], "status": kept["status"], "replayed": True}
             with self._lock:
@@ -280,15 +291,19 @@ class Home:
         now, run_id = self.clock(), f"unanswered_{secrets.token_hex(12)}"
         with self.store.update() as state:
             home = state["home"]
-            kept = home["kept"].setdefault(f"{asking.link}/{key}", {
-                "run": run_id, "status": "started", "at": now, "scope": asking.scope, "profile": asking.profile,
-                "own": True})
-            if kept["run"] == run_id:
+            kept = home["kept"].get(f"{asking.link}/{key}")
+            if kept is None:
+                kept = home["kept"][f"{asking.link}/{key}"] = {
+                    "run": run_id, "status": "started", "at": now, "profile": asking.profile,
+                    "grants": [asking.digest], "own": True}
                 home["runs"][f"{asking.link}/{run_id}"] = {
                     "link": asking.link, "run": run_id, "profile": asking.profile, "grant": asking.grant,
-                    "scope": asking.scope, "name": asking.name, "admitted": now, "heard": now, "seq": 0,
+                    "grants": [asking.digest], "name": asking.name, "admitted": now, "heard": now, "seq": 0,
                     "shown": {"status": "failed", "error": UNANSWERED.format(name=asking.name)}, "ended": now}
                 logger.info("Linked Rooms' bridge settled a turn over Link %s as unanswered", asking.link)
+            elif not _takes(kept, asking):
+                # Kept meanwhile, for another grant.
+                raise _Answered(503, _error("member_unavailable"))
         return 202, {"run_id": kept["run"], "status": kept["status"], "replayed": kept["run"] != run_id}
 
     def _read(self, asking: _Asking, run_id: str) -> tuple[int, dict]:
@@ -339,13 +354,22 @@ class Home:
         return 200, {"revoked": True}
 
     def _run(self, asking: _Asking, home: dict, run_id: str) -> Optional[dict]:
-        """The run this side answers for, when the request's grant is for its
-        scope (a refreshed grant keeps the scope) and its profile; a request
-        for anything else is the member's to answer."""
-        run = home["runs"].get(f"{asking.link}/{run_id}") if asking.scope is not None else None
-        if run is None or (run.get("scope"), run.get("profile")) != (asking.scope, asking.profile):
-            return None
-        return run
+        """The run this side answers the request for (_takes); a request for
+        anything else is the member's to answer."""
+        run = home["runs"].get(f"{asking.link}/{run_id}")
+        return run if run is not None and _takes(run, asking) else None
+
+    def _refreshed(self, asking: _Asking, grant: Any) -> None:
+        """A grant the member gave in place of the request's: what took the
+        request's grant takes it too. A refreshed grant keeps the scope."""
+        if asking.scope is None or not isinstance(grant, str) or room_bridge.grant_scope(grant) != asking.scope:
+            return
+        digest = _digest(grant)
+        with self.store.update() as state:
+            for entries in (state["home"]["runs"], state["home"]["kept"]):
+                for name, entry in entries.items():
+                    if name.startswith(f"{asking.link}/") and _takes(entry, asking):
+                        _take(entry, digest)
 
     def _ask(self, asking: _Asking, route: str, method: str, path: str, *, key: Optional[str] = None,
              body: Optional[dict] = None, run: Optional[str] = None) -> tuple[int, dict, Optional[dict]]:
@@ -451,25 +475,31 @@ class Home:
         with self.store.update() as state:
             home = state["home"]
             key = f"{asking.link}/{run_id}"
-            if key not in home["runs"]:
+            if key in home["runs"]:
+                if home["runs"][key]["profile"] == asking.profile:
+                    # The member took this grant for the run.
+                    _take(home["runs"][key], asking.digest)
+            else:
                 record = home["runs"][key] = {
                     "link": asking.link, "run": run_id, "profile": asking.profile, "grant": asking.grant,
-                    "scope": asking.scope, "name": asking.name, "admitted": now, "heard": now, "seq": 0,
+                    "grants": [asking.digest], "name": asking.name, "admitted": now, "heard": now, "seq": 0,
                     "shown": shown or {"status": "queued"}, "ended": None}
                 if record["shown"]["status"] in room_bridge.ENDED:
                     record["ended"] = now
                 if early is not None:
                     _apply(record, early[1], early[2], now)
                 kept = home["kept"].get(f"{asking.link}/{asked.key}") if asked.route == "dispatch" else None
-                if kept is not None and kept.get("own") and record["ended"] is None:
+                if kept is not None and kept["own"] and record["ended"] is None:
                     # Hermes has settled the turn as unanswered: the member's run stops.
                     record.update(shown={"status": "cancelled"}, ended=now)
                     home["outbox"].append(_outgoing(asking.link, asking.profile, f"/v1/runs/{run_id}/stop",
                                                     asking.grant, now))
             if asked.route == "dispatch" and asked.key is not None:
-                home["kept"].setdefault(f"{asking.link}/{asked.key}", {
-                    "run": run_id, "status": _admission_status(body), "at": now, "scope": asking.scope,
-                    "profile": asking.profile})
+                kept = home["kept"].setdefault(f"{asking.link}/{asked.key}", {
+                    "run": run_id, "status": _admission_status(body), "at": now, "profile": asking.profile,
+                    "grants": [], "own": False})
+                if (kept["run"], kept["profile"]) == (run_id, asking.profile):
+                    _take(kept, asking.digest)
 
     def on_status(self, received: room_links.Received) -> None:
         """A roomlink.status: a run's status as the member shows it, newer
@@ -643,6 +673,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
 class _Server(http.server.ThreadingHTTPServer):
     daemon_threads = True
+    # Each Link's waiting requests, and Hermes' status reads besides.
+    request_queue_size = 4 * MAX_WAITING
 
     def __init__(self, port: int, home: Home) -> None:
         self.home = home
@@ -798,6 +830,23 @@ def _outgoing(link_id: str, profile: str, path: str, grant: str, now: float) -> 
 def _admission_status(answer: dict) -> str:
     status = answer.get("status")
     return status if isinstance(status, str) and room_bridge.CODE.fullmatch(status) else "started"
+
+
+def _takes(entry: Mapping[str, Any], asking: _Asking) -> bool:
+    """Whether a run, or the admission kept for it, is this side's to answer
+    the request for: it's for the request's profile, and the member took the
+    request's grant for it."""
+    return entry["profile"] == asking.profile and asking.digest in entry["grants"]
+
+
+def _take(entry: dict, digest: str) -> None:
+    if digest not in entry["grants"]:
+        entry["grants"].append(digest)
+
+
+def _digest(grant: str) -> str:
+    """How a run keeps a grant the member took for it."""
+    return hashlib.sha256(grant.encode("utf-8", "replace")).hexdigest()
 
 
 def _is_run_id(value: Any) -> bool:

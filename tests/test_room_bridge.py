@@ -159,9 +159,9 @@ WATCHED = {"link": "link1", "kind": "run", "key": "room:t1:1", "profile": "defau
            "seq": 0, "ended": None}
 PASSED = {"link": "link1", "kind": "pass", "key": "room:t2:1", "output": "(pass)", "at": 1.0}
 DAY = {"keys": ["room:t1:1"], "notice": False}
-CARRIED = {"link": "link1", "run": "run_1", "profile": "default", "grant": "g", "scope": SCOPE, "name": "Laifu",
+CARRIED = {"link": "link1", "run": "run_1", "profile": "default", "grant": "g", "grants": ["0" * 64], "name": "Laifu",
            "admitted": 1.0, "heard": 1.0, "seq": 0, "shown": {"status": "queued"}, "ended": None}
-KEPT = {"run": "run_1", "status": "started", "at": 1.0, "scope": SCOPE, "profile": "default"}
+KEPT = {"run": "run_1", "status": "started", "at": 1.0, "profile": "default", "grants": ["0" * 64], "own": False}
 OUTGOING = {"id": "m1", "link": "link1", "at": 1.0, "request": {"v": 1, "profile": "default", "method": "POST",
                                                                "path": "/v1/runs/run_1/stop", "grant": "g"}}
 
@@ -194,9 +194,11 @@ def _without(entry, name):
     *({"passed": _without(PASSED, name)} for name in ("output", "at")),
     {"day": {"keys": "room:t1:1", "notice": False}}, {"day": {"keys": []}},
     *({"carried": _without(CARRIED, name)} for name in
-      ("profile", "grant", "name", "admitted", "heard", "seq", "shown", "ended")),
-    {"carried": {**CARRIED, "shown": {"output": "Yes!"}}},
-    *({"kept": _without(KEPT, name)} for name in ("status", "at")),
+      ("profile", "grant", "grants", "name", "admitted", "heard", "seq", "shown", "ended")),
+    {"carried": {**CARRIED, "shown": {"output": "Yes!"}}}, {"carried": {**CARRIED, "grants": "0" * 64}},
+    {"carried": {**CARRIED, "grants": [1]}},
+    *({"kept": _without(KEPT, name)} for name in ("status", "at", "profile", "grants", "own")),
+    {"kept": {**KEPT, "grants": "0" * 64}}, {"kept": {**KEPT, "own": "yes"}},
     {"outgoing": _without(OUTGOING, "at")},
 ])
 def test_an_entry_the_bridge_cant_use_makes_the_store_unreadable(tmp_path, entries):
