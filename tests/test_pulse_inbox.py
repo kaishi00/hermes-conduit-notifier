@@ -361,7 +361,8 @@ def test_a_reports_line_is_a_deadline_only_when_it_names_one_pulse_remembers(liv
     """A report turn without a candidate list writes its own lines, so its
     model could tag one it found "[deadline]": that line's card and a
     rating typed for it count as "other", as does a line naming something
-    else Pulse remembers or something the report didn't show."""
+    else Pulse remembers or something the report didn't show, on a card and
+    in a rating alike."""
     [deadline] = kept(live, trial(date.today() + timedelta(days=5), logged=time.time() - 3600))
     other = promise(live)
     lines = [("deadline", "Electricity bill due Friday", None), ("deadline", "Netflix free trial ends", deadline),
@@ -373,16 +374,23 @@ def test_a_reports_line_is_a_deadline_only_when_it_names_one_pulse_remembers(liv
     assert [live.store.card(card)["topic"] for card in cards] == ["other", "deadline", "other", "other"]
     assert live.store.card(cards[1])["item_id"] == deadline
     reply = (f"1. [deadline] Electricity bill due Friday\n2. [Deadline] Netflix free trial ends #{deadline}\n"
-             "3. [deadline] Review PR #12")
-    assert report.report_items(reply) == {1: "other", 2: "other", 3: "other"}  # naming nothing it showed
-    turn = types.SimpleNamespace(reply=reply, session_id="pulse",
-                                 prompt=f"{report.REMEMBERED_TITLE}\n#{deadline} [deadline] Netflix free trial ends")
+             f"3. [deadline] Review PR #12\n4. [deadline] Hermes will say when the deploy finishes #{other}")
+    assert report.report_items(reply) == {1: "other", 2: "other", 3: "other", 4: "other"}  # naming no deadline
+    turn = types.SimpleNamespace(reply=reply, session_id="pulse", prompt=(
+        f"{report.REMEMBERED_TITLE}\n#{deadline} [deadline] Netflix free trial ends\n"
+        f"#{other} [promise] Hermes will tell the user when the deploy finishes."))
+    assert report.shown_kinds(turn.prompt) == {deadline: "deadline", other: "promise"}
     monkeypatch.setattr(report.hermes, "find_turn", lambda home, **kwargs: turn)
-    monkeypatch.setattr(report.hermes, "user_text_after", lambda home, **kwargs: ["1 yes, 2 yes, 3 no"])
+    monkeypatch.setattr(report.hermes, "user_text_after", lambda home, **kwargs: ["1 yes, 2 yes, 3 no, 4 no"])
     items, ratings = report.ratings_after(live.home, chat_id="pulse", tag="p1", since=0.0)
-    assert items == {1: "other", 2: "deadline", 3: "other"}
+    assert items == {1: "other", 2: "deadline", 3: "other", 4: "other"}
     assert ratings == [report.Rating(1, "other", True), report.Rating(2, "deadline", True, deadline),
-                       report.Rating(3, "other", False)]
+                       report.Rating(3, "other", False), report.Rating(4, "other", False, other)]
+    # A report made from a candidate list: its picks say what each remembered item is.
+    items, _ = report.ratings_after(live.home, chat_id="pulse", tag="p1", since=0.0, shown={other: "promise"})
+    assert items == {1: "other", 2: "other", 3: "other", 4: "other"}
+    items, _ = report.ratings_after(live.home, chat_id="pulse", tag="p1", since=0.0, shown={deadline: "deadline"})
+    assert items == {1: "other", 2: "deadline", 3: "other", 4: "other"}
 
 
 # Deleting ------------------------------------------------------------------------

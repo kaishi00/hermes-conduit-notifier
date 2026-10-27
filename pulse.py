@@ -1158,7 +1158,8 @@ def _collect_ratings(pulse_store: store.PulseStore, home: Path, now: float) -> N
         if row["state"] != store.DELIVERED or str(row["attempt_id"]) in split:
             continue
         picked = _run_picks(pulse_store, row)
-        shown = None if picked is None else {pick["item_id"] for pick in picked if pick["item_id"] is not None}
+        shown = None if picked is None else {pick["item_id"]: pick["kind"] for pick in picked
+                                             if pick["item_id"] is not None}
         try:
             items, ratings = report.ratings_after(home, chat_id=row["session_key"], tag=row["tag"],
                                                   since=row["created_at"] - delivery.SINCE_SLACK_S, shown=shown)

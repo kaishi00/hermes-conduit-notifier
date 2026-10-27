@@ -118,7 +118,7 @@ REPORT_NOTE = ("This turn was started by Pulse's report. Follow the instructions
 
 _ITEM = re.compile(r"^\s*(\d{1,2})[.)]\s*\[([A-Za-z-]+)\]", re.MULTILINE)
 _SOURCE = re.compile(r"^\s*(\d{1,2})[.)]\s*\[[A-Za-z-]+\].*?#(\d{1,9})\W*$", re.MULTILINE)
-_SHOWN = re.compile(r"^#(\d{1,9}) \[", re.MULTILINE)
+_SHOWN = re.compile(r"^#(\d{1,9}) \[([A-Za-z-]+)\]", re.MULTILINE)
 REMEMBERED_TITLE = "## What Pulse remembers"
 _RATING = re.compile(r"(?<![\d.])(\d{1,2})\s*[:=.)-]?\s*(yes|no|y|n|👍|👎)(?![a-z])", re.IGNORECASE)
 
@@ -714,16 +714,15 @@ def report_text(tag: str, context: str, since: str, nudge: str = "balanced", not
 
 # Ratings ------------------------------------------------------------------------
 
-def report_items(reply: str, named: Collection[int] = ()) -> dict[int, str]:
+def report_items(reply: str, deadlines: Collection[int] = ()) -> dict[int, str]:
     """Item number -> kind, from the report's own lines. Deadline only for
-    a line naming something Pulse remembers (``named``: the item numbers
-    report_sources gives), as a model's finds never make one
-    (pulse_memory.DEADLINE)."""
+    a line naming a remembered deadline (``deadlines``: those lines'
+    numbers), as a model's finds never make one (pulse_memory.DEADLINE)."""
     items = {}
     for number, kind in _ITEM.findall(reply or ""):
         kind = kind.lower()
-        items.setdefault(int(number), kind if kind in KINDS and (kind != pulse_memory.DEADLINE or int(number) in named)
-                         else "other")
+        items.setdefault(int(number), kind if kind in KINDS and (kind != pulse_memory.DEADLINE
+                                                                 or int(number) in deadlines) else "other")
     return items
 
 
@@ -737,11 +736,17 @@ def report_sources(reply: str, shown: Optional[set[int]] = None) -> dict[int, in
             if first.get(int(match.group(1))) == match.start() and (shown is None or int(match.group(2)) in shown)}
 
 
-def shown_items(text: str) -> set[int]:
-    """The remembered items a report message showed: only lines under its
-    "What Pulse remembers" heading, so a chat quoting "#9 [fact]" adds none."""
+def shown_kinds(text: str) -> dict[int, str]:
+    """The remembered items a report message showed, with their kinds: only
+    lines under its "What Pulse remembers" heading, so a chat quoting
+    "#9 [fact]" adds none."""
     _, found, rest = (text or "").partition(REMEMBERED_TITLE)
-    return {int(n) for n in _SHOWN.findall(rest.split("\n## ")[0])} if found else set()
+    return {int(n): kind.lower() for n, kind in _SHOWN.findall(rest.split("\n## ")[0])} if found else {}
+
+
+def shown_items(text: str) -> set[int]:
+    """The remembered items a report message showed (``shown_kinds``)."""
+    return set(shown_kinds(text))
 
 
 def parse_ratings(text: str, items: dict[int, str], sources: Optional[dict[int, int]] = None) -> list[Rating]:
@@ -756,18 +761,20 @@ def parse_ratings(text: str, items: dict[int, str], sources: Optional[dict[int, 
 
 
 def ratings_after(home: Path, *, chat_id: str, tag: str, since: float,
-                  shown: Optional[set[int]] = None) -> tuple[dict[int, str], list[Rating]]:
+                  shown: Optional[dict[int, str]] = None) -> tuple[dict[int, str], list[Rating]]:
     """The delivered report's items, and the user's ratings in what they
     wrote after it in the home chat (up to the next Pulse turn). A rating
     names a remembered item only if the report showed that item: ``shown``
-    when given (a report made from a candidate list, its picks), else what
-    the report message, as Hermes keeps it, listed (Pulse trims its own copy
-    once delivered)."""
+    (each one's kind) when given (a report made from a candidate list, its
+    picks), else what the report message, as Hermes keeps it, listed (Pulse
+    trims its own copy once delivered). Its kind is deadline only when the
+    item it names is one."""
     turn = hermes.find_turn(home, chat_id=chat_id, tag=tag, since=since)
     if turn is None or not turn.reply:
         return {}, []
-    sources = report_sources(turn.reply, shown_items(turn.prompt) if shown is None else shown)
-    items = report_items(turn.reply, sources)
+    kinds = shown_kinds(turn.prompt) if shown is None else shown
+    sources = report_sources(turn.reply, set(kinds))
+    items = report_items(turn.reply, {n for n, item in sources.items() if kinds.get(item) == pulse_memory.DEADLINE})
     if not items:
         return {}, []
     replies = hermes.user_text_after(home, session_id=turn.session_id, tag=tag)

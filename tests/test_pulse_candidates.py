@@ -675,7 +675,7 @@ def test_typed_ratings_of_a_list_report_still_name_its_remembered_picks(reportin
     monkeypatch.setattr(report, "ratings_after", lambda home, **kwargs: asked.append(kwargs["shown"]) or ({}, []))
     monkeypatch.setattr(pulse, "_last_ratings", 0.0)
     pulse._collect_ratings(live.store, live.home, now + 2)
-    assert asked == [{item_id}]  # so "1 no" still names the remembered item
+    assert asked == [{item_id: "commitment"}]  # so "1 no" still names the remembered item, and its kind
 
 
 def test_a_ref_written_as_a_whole_float_still_counts():
