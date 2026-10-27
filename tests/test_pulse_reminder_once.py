@@ -167,3 +167,12 @@ def test_a_reminder_rated_wrong_time_comes_back_after_the_week(live):
     card_for(live, "reminder:r_lock", created_at=now - 30 * 86400, rating="down", reason="wrong_time",
              dismissed_at=now - 30 * 86400, rest_until=now - 29 * 86400)
     assert decided(live, now)[0] == (candidates.SURFACED, "")
+
+
+def test_a_reminder_rated_useful_again_is_let_go(live):
+    now = time.time()
+    card_id = card_for(live, "reminder:r_lock", created_at=now - 20 * 86400, rating="down")
+    assert decided(live, now)[0] == (candidates.SKIPPED, "raised")
+    with sqlite3.connect(live.store.path) as conn:
+        conn.execute("UPDATE cards SET rating='up' WHERE id=?", (card_id,))
+    assert decided(live, now)[0] == (candidates.SURFACED, "")

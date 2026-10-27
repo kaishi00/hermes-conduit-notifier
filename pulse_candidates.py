@@ -303,7 +303,7 @@ def found_row(entry: dict, chats: dict[str, tuple[str, str]], zone: Optional[tzi
     elif follows is not None:
         reminder = (follows.reminders.get(str(entry.get("reminder") or "").strip().lower())
                     or (_reminder_named(follows.reminders, text, entry.get("why")) if source == "reminders" else None))
-        if reminder is not None:
+        if reminder is not None and str(reminder.get("id") or ""):
             ref, source = f"{REMINDER}{_clip(str(reminder['id']), 200)}", "reminders"
     row = {"origin": MODEL, "item_id": None, "kind": kind if kind in report.LIST_KINDS else "other",
            "profile": profile, "chat_id": chat_id, "source": source,
@@ -332,7 +332,7 @@ AFTER_ITEM, AFTER_EVENT = "after:item:", "after:event:"
 # reminder gets one card, however often it's moved: none again within
 # REMINDER_AGAIN_S of the last, and none while it's open once the user put
 # its card away for good or rated it not useful (``decide``). Those it was
-# put away for are kept by ref (REMINDERS_AWAY, the newest AWAY_KEPT), so
+# put away for are kept by ref (REMINDERS_AWAY, the last AWAY_KEPT added), so
 # the journal's and the cards' pruning don't bring it back.
 REMINDER = "reminder:"
 REMINDER_AGAIN_S = 7 * 86400.0
@@ -459,17 +459,19 @@ def decide(pulse_store: store.PulseStore, rows: list[dict], *, now: float, limit
 def reminders_raised(pulse_store: store.PulseStore, refs: Sequence[str], now: float) -> set[str]:
     """Which of the phone reminders ``refs`` (REMINDER) already had a card:
     within REMINDER_AGAIN_S, or ever once its card was put away for good or
-    rated not useful (not "wrong time", which puts it off) (kept in REMINDERS_AWAY as each is seen, so it stays
-    away once the journal or the cards drop it)."""
-    # Every decide keeps what was put away, whatever this one is about.
+    rated not useful ("wrong time" only puts it off). Those are kept in
+    REMINDERS_AWAY on every decide, so they stay away once the journal or
+    the cards drop them; one whose card is still there but no longer put
+    away (rated again) is let go."""
     away = pulse_store.away_refs(REMINDER)
+    kept: list[str] = []
     for _ in range(5):  # another process may write it meanwhile
         stored = pulse_store.get(REMINDERS_AWAY)
         kept = [ref for ref in stored if isinstance(ref, str)] if isinstance(stored, list) else []
-        if away <= set(kept):
-            break
-        merged = ([ref for ref in kept if ref not in away] + sorted(away))[-AWAY_KEPT:]
-        if pulse_store.swap(REMINDERS_AWAY, stored, merged):
+        rated_again = {card["ref"] for card in pulse_store.ref_cards(kept)} - away
+        merged = ([ref for ref in kept if ref not in rated_again]
+                  + sorted(away - set(kept)))[-AWAY_KEPT:]
+        if merged == kept or pulse_store.swap(REMINDERS_AWAY, stored, merged):
             kept = merged
             break
     refs = {ref for ref in refs if ref.startswith(REMINDER)}
