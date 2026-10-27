@@ -8839,7 +8839,7 @@ async def post_pulse_backfill(request: Request, response: Response) -> Dict[str,
 async def get_pulse_memory(response: Response, kind: str = "") -> Dict[str, Any]:
     """What Pulse remembers: open items, most recently mentioned first."""
     response.headers["Cache-Control"] = "no-store"
-    return await _pulse_route("memory", lambda control, store, home: {"items": control.items(store, kind)},
+    return await _pulse_route("memory", lambda control, store, home: {"items": control.items(store, kind, home)},
                               reads_only=True)
 
 
@@ -9568,14 +9568,66 @@ def _location_ingest(body: Any) -> Dict[str, Any]:
     result = _location_call(lambda store: store.ingest(body))
     fired = result.pop("rules_fired", [])
     result["rules_fired"] = len(_start_rule_jobs(fired))
+    _location_tell_pulse(result.pop("moments", []))
     return result
+
+
+def _location_tell_pulse(moments: Any) -> None:
+    """Arrivals and departures at saved places in: Pulse makes due what
+    waits for them (pulse_places), with Where you are on, here and in each
+    profile that reads this location. Only where Pulse runs; the batch is
+    stored whatever happens here."""
+    if not moments:
+        return
+    try:
+        pulse_store = _plugin_package_module("pulse_store")
+        places = _plugin_package_module("pulse_places")
+        told = False
+        for home in places.homes(Path(_calls_home())):
+            if not (home / pulse_store.DB_NAME).exists():
+                continue  # Pulse never turned on there: leave no file behind
+            try:
+                told = places.arrived(pulse_store.open_store(home), moments, time.time()) or told
+            except Exception:  # noqa: BLE001 — the others still hear it
+                logger.warning("conduit_push: location couldn't tell a profile's Pulse about arrivals or departures",
+                               exc_info=True)
+        if told:
+            _wake_running_pulse()  # a loop in another profile's process finds them on its next tick
+    except Exception:  # noqa: BLE001 — taking the phone's batch never fails on Pulse
+        logger.warning("conduit_push: location couldn't tell Pulse about arrivals or departures", exc_info=True)
 
 
 def _location_wipe(device_id: Any) -> Dict[str, Any]:
+    readers = _location_pulse_homes()  # before the wipe ends their sharing
     result = _location_call(lambda store: store.wipe(device_id))
     result.pop("rule_jobs", None)
     _clear_rule_jobs()
+    _location_forget_pulse(readers, device_id)
     return result
+
+
+def _location_pulse_homes() -> List[Path]:
+    try:
+        return _plugin_package_module("pulse_places").homes(Path(_calls_home()))
+    except Exception:  # noqa: BLE001 — this home's at least
+        logger.warning("conduit_push: location couldn't list the profiles that read it", exc_info=True)
+        return [Path(_calls_home())]
+
+
+def _location_forget_pulse(homes: List[Path], device_id: Optional[str]) -> None:
+    """A wipe deletes the arrivals and departures Pulse kept a day too
+    (that device's, or all), wherever this location reached."""
+    try:
+        pulse_store = _plugin_package_module("pulse_store")
+    except Exception:  # noqa: BLE001 — they go within a day anyway
+        logger.warning("conduit_push: location wipe couldn't clear Pulse's moments", exc_info=True)
+        return
+    for home in homes:
+        try:
+            if (home / pulse_store.DB_NAME).exists():
+                pulse_store.open_store(home).clear_moments(device_id)
+        except Exception:  # noqa: BLE001 — they go within a day anyway
+            logger.warning("conduit_push: location wipe couldn't clear Pulse's moments", exc_info=True)
 
 
 def _location_remove_rule(rule_id: str) -> Dict[str, Any]:
@@ -17300,6 +17352,11 @@ ROUTE_CAPABILITIES = (
     # /pulse/feed?proposals=1 lists their cards (kind "proposal"), and POST
     # /pulse/proposals/<id>/add, /dismiss and /undo act on them.
     "pulse_proposals",
+    # Pulse reads where the user is with Where you are on (pulse_places): GET
+    # /pulse says "where" and "where_ready" and PUT /pulse takes "where"; a
+    # remembered item said for a place has "place"; a card's "looked" may
+    # list "location".
+    "pulse_where",
     "present-v1",
     "health-sync",
     "voice-tools",

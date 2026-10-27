@@ -17,7 +17,10 @@ Dated items left untouched a week past their date expire, and a commitment
 learned only after its time had passed (a backfill of older chats) is kept
 as expired: too late to remind. A fact about a date that comes back every
 year (a birthday, an anniversary) keeps its month and day instead of a due
-date, so it never expires: Pulse brings it up every year (pulse_dates). A reminder Pulse handed on with Do it, and
+date, so it never expires: Pulse brings it up every year (pulse_dates). A
+commitment or promise said for a place ("next time I'm at Costco") keeps
+the place's words, when they're on its line, and waits for the user to get
+there (pulse_places). A reminder Pulse handed on with Do it, and
 Hermes's answer to it, can close an item but never add one.
 
 It also reads what the phone's Shortcuts automations log (``read_inbox``,
@@ -107,6 +110,9 @@ LATE_S = 12 * 3600.0
 OCCASIONS = ("birthday", "anniversary", "other")
 # A yearly date's year before this is left out (a typo, or a placeholder).
 MIN_YEAR = 1900
+# What may be said for a place (pulse_followup.PLACE_KINDS), and how long its words may be.
+PLACE_KINDS = ("commitment", "promise")
+PLACE_LIMIT = 60
 # Who may say each kind; a fact can come from either.
 SPEAKERS = {"commitment": "user", "intention": "user", "interest": "user", "watch": "user",
             "promise": "assistant"}
@@ -139,6 +145,8 @@ Each item has:
 - "every_year": only for a fact about a date that comes back every year, such as a birthday or an anniversary, when its day was said: "MM-DD", or "YYYY-MM-DD" when the year it began was said too (the year someone was born, or married). Otherwise null.
 - "occasion": with "every_year", what the date is: "birthday", "anniversary" or "other". Otherwise null.
 - "due_words": the exact words that gave the date ("due" or "every_year"), or null.
+- "place": only for a commitment or a promise said for a place rather than a time ("next time I'm at Costco", "when I get home", "when I leave work"): the place's words as said on its line ("Costco", "home", "work"). Otherwise null. Never guess a place.
+- "place_on": with "place", "leave" when it's for leaving the place, else "arrive". Otherwise null.
 - "same_as": the number of a remembered thing of the same kind this says again, or null. Say it again rather than repeating it as a new item. Never one marked "reminded": Pulse already reminded the user of it, and said again it's a new item.
 - "replaces": the number of a remembered thing of the same kind this changes (a new date, a changed plan, a fact that is no longer true), or null. Never one marked "reminded".
 
@@ -384,6 +392,8 @@ def render_remembered(remembered: Sequence[dict], zone: tzinfo) -> str:
     return "\n".join(f"#{item['id']} {item['kind']}: {item['text']}"
                       + (f" (due {item['due']})" if item["due"] else "")
                       + (f" (every year on {item['every_year']})" if item.get("every_year") else "")
+                      + (f" (when {'leaving' if item.get('place_on') == 'leave' else 'at'} {item['place_words']})"
+                         if item.get("place_words") else "")
                       + f" ({said_where(item)} {_local(item['mentioned_at'], zone):%Y-%m-%d}: "
                         f"\"{_clip(item['evidence'], 120)}\")"
                       + (f" (reminded {_local(item['closed_at'], zone):%Y-%m-%d})" if _reminded(item) else "")
@@ -492,6 +502,16 @@ def _yearly(value: Any, occasion: Any, words: Any, chunk: Sequence[Any], row: An
         what if what in OCCASIONS else "other"
 
 
+def _place(value: Any, on: Any, row: Any) -> tuple[str, str]:
+    """A commitment's or promise's place words, only when they're on its own
+    line, and whether it's for arriving there or leaving ("arrive" unless
+    the model said "leave")."""
+    words = _clip(value, PLACE_LIMIT).strip(" \"'“”‘’.,!?")
+    if not words or _norm(words) not in _norm(_text(row["content"])):
+        return "", ""
+    return words, "leave" if str(on or "").strip().lower() == "leave" else "arrive"
+
+
 def _real(year: int, month: int, day: int) -> bool:
     try:
         datetime(year, month, day)
@@ -538,6 +558,7 @@ def _item(raw: Any, chunk: Sequence[Any], zone: tzinfo, remembered: Sequence[dic
                                    zone) if kind == "fact" else ("", "")
     if every_year:
         due, due_at = "", None  # it comes round every year: never due once, so never expired
+    place_words, place_on = _place(raw.get("place"), raw.get("place_on"), row) if kind in PLACE_KINDS else ("", "")
     # A date without a time lasts to the end of its day.
     late = kind == "commitment" and due_at is not None and now is not None \
         and now - (due_at if "T" in due else due_at + 86400.0) > LATE_S
@@ -552,7 +573,8 @@ def _item(raw: Any, chunk: Sequence[Any], zone: tzinfo, remembered: Sequence[dic
                         _norm(item["evidence"]) == _norm(evidence) or _norm(item["text"]) == _norm(text)), None)
     return {"kind": kind, "text": text, "evidence": evidence, "explicit": int(raw.get("explicit") is True),
             "due": due, "due_at": due_at, "message_id": row["id"], "mentioned_at": row["timestamp"],
-            "same_as": same_as, "replaces": replaces, "late": late, "every_year": every_year, "occasion": occasion}
+            "same_as": same_as, "replaces": replaces, "late": late, "every_year": every_year, "occasion": occasion,
+            "place_words": place_words, "place_on": place_on}
 
 
 CLOSABLE = ("commitment", "promise", "intention", "watch", "deadline")

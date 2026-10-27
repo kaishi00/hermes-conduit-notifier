@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import pulse, pulse_candidates, pulse_delivery, pulse_followup, pulse_hermes, pulse_learning, pulse_memory
-from . import pulse_ahead, pulse_hours, pulse_proposals, pulse_quiet
+from . import pulse_ahead, pulse_hours, pulse_places, pulse_proposals, pulse_quiet
 from . import pulse_host as host
 from . import pulse_report
 
@@ -178,7 +178,7 @@ def backfill_start(pulse_store: Any, home: Path, days: Optional[int] = None,
 
 SETTINGS = ("enabled", "memory", "followups", "daily_report", "report_profiles", "report_times", "time_zone",
             "brief_time", "model", "nudge", "memory_daily_tokens", "followup_daily_tokens", "note",
-            "quiet_days", "quiet_until", "night", "look_ahead", "inbox_deadlines", "look_first")
+            "quiet_days", "quiet_until", "night", "look_ahead", "inbox_deadlines", "look_first", "where")
 # What a daily token budget may be set to.
 MIN_DAILY_TOKENS = 10_000
 MAX_DAILY_TOKENS = 5_000_000
@@ -200,8 +200,9 @@ def update(pulse_store: Any, body: Any, home: Any = None) -> None:
     checked before any is written, so a bad one changes nothing; any other
     key is refused too. Values: booleans for "enabled", "memory", "followups", "daily_report", "look_ahead"
     (the daily look ahead, pulse_ahead), "inbox_deadlines" (memory keeps
-    deadlines from the Shortcuts inbox, pulse_memory.read_inbox) and
-    "look_first" (Pulse's turns may look things up, pulse_tools); "all" or "this"
+    deadlines from the Shortcuts inbox, pulse_memory.read_inbox),
+    "look_first" (Pulse's turns may look things up, pulse_tools) and
+    "where" (Pulse reads where the user is, pulse_places); "all" or "this"
     for "report_profiles"; a list of "HH:MM" for "report_times"; an IANA
     name, or "" for the phone's, for "time_zone"; {"provider", "model"} for
     "model" (the model Pulse's turns run on), or null for the chat's own;
@@ -221,7 +222,8 @@ def update(pulse_store: Any, body: Any, home: Any = None) -> None:
         if field not in SETTINGS:
             raise Refused("invalid", field=str(field)[:64])
     changes: dict[str, Any] = {}
-    for field in ("enabled", "memory", "followups", "daily_report", "look_ahead", "inbox_deadlines", "look_first"):
+    for field in ("enabled", "memory", "followups", "daily_report", "look_ahead", "inbox_deadlines", "look_first",
+                  "where"):
         if field in body:
             if not isinstance(body[field], bool):
                 raise Refused("invalid", field=field)
@@ -290,6 +292,8 @@ def update(pulse_store: Any, body: Any, home: Any = None) -> None:
         pulse_store.set(key, value)
     if changes.get("inbox_deadlines") is False:
         pulse_memory.stop_inbox(pulse_store)  # off forgets what it kept from the inbox
+    if changes.get("where") is False:
+        pulse_store.clear_moments()  # off keeps nothing of where the user was
 
 
 def _quiet_until(pulse_store: Any, value: Any, home: Any) -> Optional[float]:
@@ -340,22 +344,32 @@ def forget(pulse_store: Any, item_id: Any) -> bool:
     return pulse_store.close_item(item_id, status="cancelled", closed_by="user")
 
 
-def items(pulse_store: Any, kind: str = "") -> list[dict[str, Any]]:
+def items(pulse_store: Any, kind: str = "", home: Any = None) -> list[dict[str, Any]]:
     """Open memory items, most recently mentioned first. A fact about a date
     that comes back every year has its month and day in ``every_year``
     ("MM-DD", or "YYYY-MM-DD" with the year it began) and what it is in
     ``occasion`` (pulse_dates); "" for the rest. A deadline memory kept from
     the Shortcuts inbox has ``from_inbox`` true, ``sender`` (who its event
-    is from) and ``logged_at`` (when it was logged), and no chat."""
+    is from) and ``logged_at`` (when it was logged), and no chat. A
+    commitment or promise said for a place has ``place``: {"words" as said,
+    "on" ("arrive" or "leave"), "saved": the name of the saved place they
+    match on the location ``home`` reads, or null for none}; null for the
+    rest."""
     if kind and kind not in pulse_memory.ALL_KINDS:
         raise Refused("invalid", field="kind")
+    found = pulse_store.open_items(kind, limit=ITEMS)
+    saved = pulse_places.saved(pulse_places.view(Path(home) if home is not None else None)) \
+        if any(pulse_followup.waits_for_place(item) for item in found) else []
     return [{"id": item["id"], "kind": item["kind"], "text": item["text"], "evidence": item["evidence"],
              "explicit": bool(item["explicit"]), "due": item["due"], "due_at": item["due_at"],
              "mentioned_at": item["mentioned_at"], "profile": item["profile"], "chat_id": item["chat_id"],
              "every_year": item["every_year"], "occasion": item["occasion"],
              "from_inbox": bool(item["from_inbox"]), "sender": item["sender"],
-             "logged_at": item["valid_from"] if item["from_inbox"] else None}
-            for item in pulse_store.open_items(kind, limit=ITEMS)]
+             "logged_at": item["valid_from"] if item["from_inbox"] else None,
+             "place": {"words": item["place_words"], "on": item["place_on"] or "arrive",
+                       "saved": pulse_places.place_for(item["place_words"], saved)}
+             if pulse_followup.waits_for_place(item) else None}
+            for item in found]
 
 
 def followups(pulse_store: Any, limit: int = ITEMS) -> list[dict[str, Any]]:
@@ -719,6 +733,10 @@ def state(pulse_store: Any, home: Path, now: Optional[float] = None) -> dict[str
         "inbox_deadlines": pulse_memory.inbox_on(pulse_store),
         # Whether Pulse's turns may look things up first (pulse_tools).
         "look_first": pulse.looks_first(pulse_store),
+        # Where you are (pulse_places), and whether the phone shares its
+        # location in the background, which it needs.
+        "where": pulse_places.on(pulse_store),
+        "where_ready": pulse_places.background(pulse_places.view(Path(home)), now),
         "followup_usage": {key: int(follow_usage.get(key, 0) or 0) for key in ("checks", "tokens", "failed")},
         "followup_daily_tokens": follow_cap,
         "followup_tokens_today": follow_used,
