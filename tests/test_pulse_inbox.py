@@ -10,7 +10,7 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 
 from test_pulse import _load, ROOT, cli, control, memory, report, store
-from test_pulse_followup import followup, live  # noqa: F401
+from test_pulse_followup import followup, live, promise  # noqa: F401
 from test_pulse_dates import Model, at, candidates, dates, last_run, learning, look, looking
 
 inbox_store = _load("conduit_push.inbox_store", ROOT / "inbox_store.py")
@@ -355,6 +355,34 @@ def test_a_report_sees_a_deadline_from_the_inbox_and_never_finds_one(live):
     assert "deadline" in report.KINDS and "deadline" not in report.FOUND_KINDS
     assert candidates.found_row({"kind": "deadline", "line": "Bill due Friday"}, {})["kind"] == "other"
     assert followup.chat_title(live.home, item) == ""  # no chat to point at
+
+
+def test_a_reports_line_is_a_deadline_only_when_it_names_one_pulse_remembers(live, monkeypatch):
+    """A report turn without a candidate list writes its own lines, so its
+    model could tag one it found "[deadline]": that line's card and a
+    rating typed for it count as "other", as does a line naming something
+    else Pulse remembers or something the report didn't show."""
+    [deadline] = kept(live, trial(date.today() + timedelta(days=5), logged=time.time() - 3600))
+    other = promise(live)
+    lines = [("deadline", "Electricity bill due Friday", None), ("deadline", "Netflix free trial ends", deadline),
+             ("deadline", "Hermes will say when the deploy finishes", other), ("deadline", "Rent due", other + 100)]
+    cards = learning.add_noticed_cards(
+        live.store, turn=types.SimpleNamespace(session_id="pulse", reply_id=7), lines=lines, chat_id="pulse",
+        chat_title="Pulse", shown={deadline, other}, kinds=report.KINDS, item_chat_title=lambda item: "",
+        now=time.time())
+    assert [live.store.card(card)["topic"] for card in cards] == ["other", "deadline", "other", "other"]
+    assert live.store.card(cards[1])["item_id"] == deadline
+    reply = (f"1. [deadline] Electricity bill due Friday\n2. [Deadline] Netflix free trial ends #{deadline}\n"
+             "3. [deadline] Review PR #12")
+    assert report.report_items(reply) == {1: "other", 2: "other", 3: "other"}  # naming nothing it showed
+    turn = types.SimpleNamespace(reply=reply, session_id="pulse",
+                                 prompt=f"{report.REMEMBERED_TITLE}\n#{deadline} [deadline] Netflix free trial ends")
+    monkeypatch.setattr(report.hermes, "find_turn", lambda home, **kwargs: turn)
+    monkeypatch.setattr(report.hermes, "user_text_after", lambda home, **kwargs: ["1 yes, 2 yes, 3 no"])
+    items, ratings = report.ratings_after(live.home, chat_id="pulse", tag="p1", since=0.0)
+    assert items == {1: "other", 2: "deadline", 3: "other"}
+    assert ratings == [report.Rating(1, "other", True), report.Rating(2, "deadline", True, deadline),
+                       report.Rating(3, "other", False)]
 
 
 # Deleting ------------------------------------------------------------------------
