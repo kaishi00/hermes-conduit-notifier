@@ -67,7 +67,7 @@ NAMED = {
     "reminder": ("remind", "alarm", "timer", "todo", "task", "cron", "schedule"),
     "event": ("event", "calendar", "meeting"),
     "job": ("cron", "schedule", "job"),
-    "message": ("send", "message", "mail", "email", "sms", "post", "reply", "notify"),
+    "message": ("send", "message", "mail", "email", "sms", "reply", "notify"),
 }
 READS = ("list", "get", "search", "read", "find", "fetch", "query", "view", "lookup", "status")
 REMOVES = ("delete", "remove", "cancel", "clear", "unset")
@@ -84,8 +84,10 @@ def start(pulse_store: store.PulseStore, now: float) -> None:
 
 def stop(pulse_store: store.PulseStore) -> None:
     """Pulse turned off: the ledger stops, so judging starts over once the
-    loop runs again."""
+    loop runs again, and the claims kept are forgotten (the loop that would
+    prune them doesn't run)."""
     pulse_store.set(FROM, None)
+    pulse_store.prune_claims(float("inf"))
 
 
 def judged_from(pulse_store: store.PulseStore) -> Optional[float]:

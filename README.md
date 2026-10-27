@@ -2727,7 +2727,8 @@ keeps it.
   them (`pulse claims all` lists every one, with the call that backed
   it), each with what was said and that turn's calls, to judge before a
   card ever says "Hermes said it set a reminder, but none was made". Only
-  this profile's chats, from when Pulse is on, and kept 30 days.
+  this profile's chats, from when Pulse is on, and kept 30 days, or until
+  Pulse is turned off.
 
 ## A phone reminder comes up once (plugin 0.106.1+)
 

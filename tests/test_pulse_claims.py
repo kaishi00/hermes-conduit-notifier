@@ -95,6 +95,7 @@ def test_a_claim_is_in_hermess_own_words():
     ("delete_reminder", "", set()),  # undoing it isn't doing it
     ("mcp_google_calendar_delete_event", "", set()),
     ("cancelScheduledMessage", "", set()),
+    ("postpone_event", "", {"event"}),  # not a message posted
     ("terminal", "", ALL),  # it runs other tools or code: it could have
     ("delegate_task", "", ALL),
     ("execute_code", "", ALL),
@@ -196,6 +197,14 @@ def test_another_profiles_chats_and_older_ones_are_not_judged(judging, db, tmp_p
     assert store_.claims() == []
 
 
+def _keep(store_, at, message_id=2):
+    assert store_.advance("", "work", message_id=message_id, at=at, after_id=message_id - 2 if message_id > 2 else 0,
+                          claims=[{
+        "message_id": message_id, "action": "reminder", "text": "Hermes set it.", "evidence": "I've set a reminder",
+        "said_at": at, "turn_from": at - 60, "turn_to": None, "backed_by": "", "calls_json": "[]",
+        "kept_at": at}]) is not None
+
+
 def test_the_loop_judges_from_when_pulse_is_on_and_off_starts_over(live, db, monkeypatch):
     db.session()
     live.store.set("enabled", True)
@@ -205,13 +214,16 @@ def test_the_loop_judges_from_when_pulse_is_on_and_off_starts_over(live, db, mon
     pulse.tick(now + 60)
     assert live.store.get(claims.FROM) == now  # from when it started
     monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", pulse.get_hermes_home)
+    _keep(live.store, now)
     assert cli.dispatch(types.SimpleNamespace(conduit_push_action="pulse", pulse_action="off", value="")) == 0
     assert live.store.get(claims.FROM) is None and claims.judged_from(live.store) is None
+    assert live.store.claims() == []  # turning Pulse off forgets them
     live.store.set("enabled", True)
     pulse.tick(now + 120)
     assert live.store.get(claims.FROM) == now + 120
+    _keep(live.store, now + 120, message_id=4)
     control.update(live.store, {"enabled": False})
-    assert live.store.get(claims.FROM) is None
+    assert live.store.get(claims.FROM) is None and live.store.claims() == []
     # A setting that isn't a time starts it over.
     live.store.set("enabled", True)
     live.store.set(claims.FROM, True)
@@ -242,10 +254,7 @@ def test_the_loop_forgets_claims_after_a_month_with_memory_off(live, db):
     db.session()
     live.store.set("enabled", True)
     now = time.time()
-    assert live.store.advance("", "work", message_id=2, at=now, claims=[{
-        "message_id": 2, "action": "reminder", "text": "Hermes set it.", "evidence": "I've set a reminder",
-        "said_at": now, "turn_from": now - 60, "turn_to": None, "backed_by": "", "calls_json": "[]",
-        "kept_at": now}]) is not None
+    _keep(live.store, now)
     pulse.tick(now + claims.KEEP_S - 1)
     assert len(live.store.claims()) == 1
     pulse.tick(now + claims.KEEP_S + 1)
