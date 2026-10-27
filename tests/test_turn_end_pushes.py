@@ -90,6 +90,43 @@ def test_an_older_hermes_without_failed_counts_an_unfinished_turn_failed(pushed)
     assert _types(pushed) == ["turn.failed"]
 
 
+# A member's hidden chat for a room someone else hosts (room_rules.ROOM_SESSION_ID).
+REMOTE_ROOM = "room_" + "0123456789abcdef" * 2
+
+
+def test_a_turn_in_a_room_someone_else_hosts_sends_no_reply(pushed):
+    # The room shows it, on its home's side: the hidden chat it's named by isn't one the phone opens.
+    plugin._post_llm_call(session_id=REMOTE_ROOM, turn_id="t", assistant_response="Lions at 3.")
+    plugin._on_session_end(session_id=REMOTE_ROOM, turn_id="t", completed=True, failed=False, interrupted=False)
+    assert pushed == []
+
+
+def test_a_failed_turn_in_a_room_someone_else_hosts_sends_no_failure(pushed, monkeypatch):
+    alerts = []
+    monkeypatch.setattr(plugin.calls, "failed_turn", lambda *args, **kwargs: alerts.append(args) or False)
+    plugin._post_llm_call(session_id=REMOTE_ROOM, turn_id="t", assistant_response="The provider returned an error.")
+    plugin._on_session_end(session_id=REMOTE_ROOM, turn_id="t", completed=False, failed=True, interrupted=False)
+    assert pushed == [] and alerts == [], "nor an alert call"
+
+
+def test_a_turn_in_a_room_this_hermes_hosts_still_notifies(pushed, monkeypatch):
+    hosted = plugin.room_rules.RoomTurn(room_id="conduit-1", side="home", with_others=True, session_id="s")
+    monkeypatch.setattr(plugin.room_rules, "room_turn", lambda session_id, home: hosted)
+    plugin._post_llm_call(session_id="s", turn_id="t", assistant_response="Done.")
+    plugin._on_session_end(session_id="s", turn_id="t", completed=True, failed=False, interrupted=False)
+    assert _types(pushed) == ["response.ready"]
+
+
+def test_a_turn_whose_room_cant_be_told_still_notifies(pushed, monkeypatch):
+    def unread(session_id, home):
+        raise plugin.room_rules.SessionStoreError("couldn't read session s")
+
+    monkeypatch.setattr(plugin.room_rules, "room_turn", unread)
+    plugin._post_llm_call(session_id="s", turn_id="t", assistant_response="The provider returned an error.")
+    plugin._on_session_end(session_id="s", turn_id="t", completed=False, failed=True, interrupted=False)
+    assert _types(pushed) == ["turn.failed"]
+
+
 def test_a_turn_stopped_at_the_step_limit_still_answered(pushed):
     plugin._post_llm_call(session_id="s", turn_id="t", assistant_response="I ran out of steps; here's where I got.")
     plugin._on_session_end(session_id="s", turn_id="t", completed=False, failed=False, interrupted=False)

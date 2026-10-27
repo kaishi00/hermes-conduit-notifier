@@ -18,9 +18,13 @@ const defaultPreferences = Object.freeze({
   // Calendar and reminder changes Hermes asks the phone to make
   // (phone.changes), both the notification and the silent wake.
   phone_changes: true,
+  // Invites to rooms from people you've linked (room.invite). Off until a
+  // Conduit that shows them turns it on: one from before them would show the
+  // push as a reply, since its generic copy has none for an invite.
+  room_invite: false,
   completion_sound: true,
   // Sound for the notifications that wait on the user (approval.needed,
-  // input.needed, call.requested). Approvals time out and fail closed, so a silent banner
+  // input.needed, call.requested, phone.changes, room.invite). Approvals time out and fail closed, so a silent banner
   // is easy to miss; default on, with its own opt-out.
   attention_sound: true,
   show_previews: false,
@@ -813,6 +817,10 @@ function decisionQuestions(decision) {
 export function normalizePreferences(value = {}) {
   value ??= {};
   return Object.fromEntries(Object.entries(defaultPreferences).map(([key, fallback]) => [key, typeof value[key] === 'boolean' ? value[key] : fallback]));
+}
+
+export function preferenceDefault(key) {
+  return Object.hasOwn(defaultPreferences, key) ? defaultPreferences[key] : undefined;
 }
 
 function preferencesEqual(left, right) {

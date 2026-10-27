@@ -46,6 +46,9 @@ from typing import Any
 # Same shape events.py checks; repeated so e2e stays import-free of events.
 _LOCATE_ID = re.compile(r"^l_[A-Za-z0-9_-]{16,64}\Z")
 _MAPS_ID = re.compile(r"^m_[A-Za-z0-9_-]{16,64}\Z")
+# A room invite's Link and room ids, as events.sanitize_room checks them.
+_ROOM_LINK = re.compile(r"^[A-Za-z0-9_-]{1,48}\Z")
+_ROOM_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 
 VERSION = 1
 SALT = b"conduit-e2e-v1"
@@ -62,7 +65,7 @@ MAX_CT_CHARS = 2600
 # Fields that carry content. Everything else on an event stays visible to the
 # relay because it routes on it.
 INNER_FIELDS = ("title", "body", "session_id", "profile", "profile_name", "gateway", "stored_session_id", "decision", "call",
-                "locate", "maps", "title_label", "session_title", "count", "private")
+                "locate", "maps", "title_label", "session_title", "count", "private", "room")
 # How much a reply push may interrupt (events.PUSH_LEVELS): routing beside the envelope.
 _PUSH_LEVELS = ("passive", "active", "time-sensitive")
 
@@ -314,6 +317,9 @@ def seal_event(
         # Only routing survives; the phone shows the generic banner.
         inner = {key: value for key, value in inner.items() if key in ("session_id", "profile", "stored_session_id", "call",
                                                                      "locate", "maps")}
+        room_ids = _room_ids(event)
+        if room_ids:
+            inner["room"] = room_ids
         envelope = attempt(inner)
     if envelope is None:
         raise E2EError("the event does not fit an encrypted push")
@@ -345,7 +351,22 @@ def content_free(event: dict[str, Any], keys: Keys | None = None) -> dict[str, A
         maps_id = event["maps"].get("id")
         if isinstance(maps_id, str) and _MAPS_ID.match(maps_id):
             outgoing["maps"] = {"id": maps_id}
+    room_ids = _room_ids(event)
+    if room_ids:
+        # A room invite's Link and room, which take the tap to the invite.
+        outgoing["room"] = room_ids
     return outgoing
+
+
+def _room_ids(event: dict[str, Any]) -> dict[str, str] | None:
+    """A room invite's Link and room ids, without its name or who it's from."""
+    room = event.get("room") if event.get("type") == "room.invite" else None
+    if not isinstance(room, dict):
+        return None
+    link, room_id = room.get("link"), room.get("id")
+    if isinstance(link, str) and _ROOM_LINK.match(link) and isinstance(room_id, str) and _ROOM_ID.match(room_id):
+        return {"link": link, "id": room_id}
+    return None
 
 
 def _copy_routing(event: dict[str, Any], outgoing: dict[str, Any]) -> None:

@@ -13,6 +13,20 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.105.0 (2026-10-27)
+
+### Fixes
+- Your agents' turns in a room someone else hosts sent you a reply
+  notification for a chat Conduit can't open, and a failure notification or
+  an alert call when one failed. They don't any more: the room shows them.
+  Their approvals and questions still notify.
+
+### New and improved
+- When someone you've linked invites you to a room, a Conduit that shows
+  room invites gets a Room invite notification, which its Room invites
+  setting turns off. It needs the push relay's update (relay 0.21); until
+  your relay has it, the invite shows in Conduit without one.
+
 ## 0.104.0 (2026-10-27)
 
 ### Fixes

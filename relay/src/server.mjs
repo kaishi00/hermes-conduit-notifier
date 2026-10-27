@@ -10,14 +10,14 @@ import { limitsFromEnv } from './limits.mjs';
 import { LIVE_ACTIVITIES_CAPABILITY, LiveActivities, validateRegistration, validateReport, validateToken } from './live-activities.mjs';
 import { MAPS_TOKEN_ROUTE, MAPS_TOKENS_CAPABILITY, mapsTokensFromEnv } from './maps-tokens.mjs';
 import { RING_CONTROL_ROUTE, RING_CONTROL_WAIT_MAX_MS, RING_ROUTE, RING_SESSION_MAX_CHARS, RING_SESSION_ROUTE, RING_SESSION_WAIT_MAX_MS, Rings, ringBearer, validControl, validSessionStore, validSettle } from './rings.mjs';
-import { normalizeDashboardId, RelayStore, sanitizeBatchQuestions } from './store.mjs';
+import { normalizeDashboardId, preferenceDefault, RelayStore, sanitizeBatchQuestions } from './store.mjs';
 import { TOKEN_PROOF_CAPABILITY, TokenChallenges, tokenChallengePush, tokenProofModeFromEnv } from './token-proof.mjs';
 import { CLOSE_GRANT_CLOSED, WATCH_AUDIO_CAPABILITY, WatchAudioBridges, watchAudioUpgrade } from './watch-audio.mjs';
 import { WATCH_TOOLS_CAPABILITY, WatchToolGrants, watchToolRoutes } from './watch-tools.mjs';
 
 // Self-reported relay version/capabilities, surfaced via GET /v1/meta so the
 // app can show compatibility state (keep the version in sync with package.json).
-const RELAY_CAPABILITIES = ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls', 'voip-calls', 'watch-calls', 'ring-sessions', 'ring-controls', 'location-push', 'phone-changes', MAPS_TOKENS_CAPABILITY, LIVE_ACTIVITIES_CAPABILITY, TOKEN_PROOF_CAPABILITY, 'clarify-skip', 'push-levels'];
+const RELAY_CAPABILITIES = ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls', 'voip-calls', 'watch-calls', 'ring-sessions', 'ring-controls', 'location-push', 'phone-changes', MAPS_TOKENS_CAPABILITY, LIVE_ACTIVITIES_CAPABILITY, TOKEN_PROOF_CAPABILITY, 'clarify-skip', 'push-levels', 'room-invites'];
 const RELAY_INFO = (() => {
   try {
     const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
@@ -115,6 +115,12 @@ const PHONE_BACKGROUND_TTL_S = 24 * 60 * 60;
 // Lock Screen's summary ranks by. A level this relay doesn't know is
 // ignored, so the push goes as it always has.
 const PUSH_LEVELS = new Map([['passive', 0.2], ['active', 0.5], ['time-sensitive', 0.9]]);
+// An invite to a room from someone you've linked (Linked Rooms): its Link,
+// the room's id as the inviting Hermes made it, and, with previews on, the
+// room's name and who it's from. The ids mirror the plugin's room_links and
+// room_bridge, and the names its room_links.NAME_MAX and room name.
+const ROOM_LINK_PATTERN = /^[A-Za-z0-9_-]{1,48}$/;
+const ROOM_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 // A location request is only worth answering right away.
 const LOCATION_PUSH_TTL_S = 60;
 // Locate and maps lookups (conduit_maps) share it; the plugin keeps tighter budgets per kind.
@@ -942,6 +948,16 @@ async function route(request, response) {
   // without this endpoint simply 404 and the app renders an unknown state.
   if (request.method === 'GET' && url.pathname === '/v1/meta') {
     enforceRateLimit(`meta-ip:${client}`, 60, 60_000);
+    // A paired gateway (plugin) reads what this relay takes before it sends
+    // an event a relay from before it would refuse: only the version and
+    // capabilities, never the installation's gateways. Relays before 0.21
+    // answer it 401.
+    const gateway = gatewayCredential(request);
+    if (gateway) {
+      if (!store.authenticateGateway(gateway.installationId, gateway.gatewayId, gateway.secret)) return sendJson(response, 401, { error: 'unauthorized' });
+      enforceRateLimit(`meta-gateway:${gateway.installationId}:${gateway.gatewayId}`, 30, 60_000);
+      return sendJson(response, 200, { version: RELAY_INFO.version, capabilities: RELAY_INFO.capabilities });
+    }
     const credential = bearerCredential(request);
     if (!credential) return sendJson(response, 401, { error: 'unauthorized' });
     const installation = store.authenticate(credential.id, credential.secret, 'device');
@@ -1111,7 +1127,11 @@ function notificationFor(event, preferences, gateway = undefined) {
   const call = event.type === 'call.requested' && event.call
     ? (preferences.show_previews ? event.call : (({ title: _title, reason: _reason, ...rest }) => rest)(event.call))
     : undefined;
-  const bodyConduit = { ...routing, ...(decision ? { decision } : {}), ...(call ? { call } : {}) };
+  // A room invite's room and who it's from are chat content too.
+  const room = event.type === 'room.invite' && event.room
+    ? (preferences.show_previews ? event.room : { link: event.room.link, id: event.room.id })
+    : undefined;
+  const bodyConduit = { ...routing, ...(decision ? { decision } : {}), ...(call ? { call } : {}), ...(room ? { room } : {}) };
   const aps = {
     alert: { title, body },
     ...(sound ? { sound: 'default' } : {}),
@@ -1132,7 +1152,7 @@ function notificationFor(event, preferences, gateway = undefined) {
   // the budget degrades to the routing stub instead of losing the whole
   // notification. The headroom under the 4096 cap absorbs per-request APNs
   // headers and JSON escaping.
-  if ((decision || call) && Buffer.byteLength(JSON.stringify(payload)) > MAX_NOTIFICATION_BYTES) {
+  if ((decision || call || room) && Buffer.byteLength(JSON.stringify(payload)) > MAX_NOTIFICATION_BYTES) {
     payload = { aps, body: { conduit: routing }, conduit: routing };
   }
   // Collapse key: same gateway + session + type collapses (repeat alerts
@@ -1431,12 +1451,14 @@ function shortSessionId(sessionId) {
 }
 
 function waitsOnUser(type) {
-  return type === 'approval.needed' || type === 'input.needed' || type === 'call.requested' || type === 'phone.changes';
+  return type === 'approval.needed' || type === 'input.needed' || type === 'call.requested' || type === 'phone.changes'
+    || type === 'room.invite';
 }
 
 function genericCopy(type) {
   if (type === 'call.requested') return { title: 'Hermes wants to talk', body: 'Tap to talk to Hermes.' };
   if (type === 'phone.changes') return { title: 'Hermes has a change for you', body: 'Tap to review it in Conduit.' };
+  if (type === 'room.invite') return { title: 'Room invite', body: "Someone you've linked with invited you to a room." };
   if (type === 'approval.needed') return { title: 'Approval needed', body: 'Hermes is waiting for your approval.' };
   if (type === 'input.needed') return { title: 'Input needed', body: 'Hermes needs your response before it can continue.' };
   if (type === 'turn.failed') return { title: 'Turn failed', body: 'A Hermes turn could not be completed.' };
@@ -1444,13 +1466,16 @@ function genericCopy(type) {
   return { title: 'Response ready', body: 'Hermes has finished responding.' };
 }
 
+// A kind the phone's preferences don't name yet (stored before it existed)
+// takes its default, so one that's off until Conduit turns it on stays off.
 function shouldDeliver(preferences, type) {
   if (!preferences.enabled) return false;
-  return preferences[type.replace('.', '_')] !== false;
+  const key = type.replace('.', '_');
+  return (preferences[key] ?? preferenceDefault(key)) !== false;
 }
 
 function validateEvent(body) {
-  const types = new Set(['approval.needed', 'input.needed', 'response.ready', 'turn.failed', 'background_task.finished', 'call.requested', 'location.requested', 'phone.changes', 'plugin.hello']);
+  const types = new Set(['approval.needed', 'input.needed', 'response.ready', 'turn.failed', 'background_task.finished', 'call.requested', 'location.requested', 'phone.changes', 'room.invite', 'plugin.hello']);
   if (!types.has(body.type)) throw httpError(400, 'invalid_event_type');
   const eventId = String(body.event_id ?? '');
   if (!/^[A-Za-z0-9:_-]{8,128}$/.test(eventId)) throw httpError(400, 'invalid_event_id');
@@ -1495,6 +1520,7 @@ function validateEvent(body) {
     call: body.type === 'call.requested' ? validateCall(body.call) : undefined,
     locate: body.type === 'location.requested' ? validateLocate(body.locate) : undefined,
     maps: body.type === 'location.requested' ? validateMaps(body.maps) : undefined,
+    room: body.type === 'room.invite' ? validateRoom(body.room) : undefined,
     ...(mode ? { mode } : {}),
     ...(level ? { level } : {}),
   };
@@ -1523,6 +1549,18 @@ function validateLocate(value) {
 function validateMaps(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
   return typeof value.id === 'string' && /^m_[A-Za-z0-9_-]{16,64}$/.test(value.id) ? { id: value.id } : undefined;
+}
+
+// The room an invite is for (Linked Rooms), mirroring the plugin's
+// events.sanitize_room: its Link and id, else none (the notification still
+// shows), and its name and who it's from when they're text.
+function validateRoom(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  if (typeof value.link !== 'string' || !ROOM_LINK_PATTERN.test(value.link)) return undefined;
+  if (typeof value.id !== 'string' || !ROOM_ID_PATTERN.test(value.id)) return undefined;
+  const name = cleanText(value.name, 120);
+  const from = cleanText(value.from, 64);
+  return { link: value.link, id: value.id, ...(name ? { name } : {}), ...(from ? { from } : {}) };
 }
 
 // The job a call request is about (#449), mirroring the plugin's
@@ -1921,4 +1959,4 @@ function optionalMilliseconds(name, key) {
   return { [key]: value };
 }
 
-export { callPushFor, locationPushFor, notificationFor, phoneBackgroundPushFor, settlePushFor, validateEvent, validateDecision };
+export { callPushFor, locationPushFor, notificationFor, phoneBackgroundPushFor, settlePushFor, shouldDeliver, validateEvent, validateDecision };

@@ -34,7 +34,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
-from . import room_bridge, room_choices, room_identity, room_join, room_links, room_start, session_titles
+from . import client, room_bridge, room_choices, room_identity, room_join, room_links, room_start, session_titles
+from .events import event_id, push_event
 
 logger = logging.getLogger(__name__)
 
@@ -121,12 +122,13 @@ def people_key(link_ids: Any = (), names: Any = ()) -> list[str]:
 class Rooms:
     """The rooms over Links of the installation at ``root``: ``send`` is Links.send, ``link(link_id)`` the Link
     as Links.get shows it, ``profile_home(profile)`` a profile's home, ``joiner`` the member's Hermes calls
-    (room_join.Joiner) and ``starter`` the home's (room_start.Starter)."""
+    (room_join.Joiner), ``starter`` the home's (room_start.Starter) and ``notify(invite)`` what tells the phone
+    about a new invite (notify_invite)."""
 
     def __init__(self, root: Any, *, send: Optional[Callable[..., Any]] = None,
                  link: Optional[Callable[[str], Optional[dict]]] = None, clock: Callable[[], float] = time.time,
                  profile_home: Optional[Callable[[str], Path]] = None, joiner: Any = None,
-                 starter: Any = None) -> None:
+                 starter: Any = None, notify: Optional[Callable[[dict], None]] = None) -> None:
         self.root = Path(root)
         self.store = Store(self.root)
         links = None if send is not None and link is not None else room_links.Links(self.root)
@@ -136,6 +138,7 @@ class Rooms:
         self.profile_home = profile_home if profile_home is not None else self._profile_home
         self.joiner = joiner
         self.starter = starter
+        self.notify = notify if notify is not None else notify_invite
         self._told: set[str] = set()
         # Until when a profile's renewals wait for its API server, which didn't answer (R16).
         self._api_waits: dict[str, int] = {}
@@ -432,11 +435,13 @@ class Rooms:
             if len(state["invites"]) >= MAX_INVITES:
                 logger.warning("Linked Rooms dropped a room.invite: this Hermes keeps %d", MAX_INVITES)
                 return
-            state["invites"][key] = {
+            invite = state["invites"][key] = {
                 **body, "link": received.link_id, "from": shown["name"] if shown else "", "received_at": now,
                 "status": "waiting", "joined": [], "members": None, "started_at": None, "ended_at": None,
                 "reason": None,
             }
+            told = dict(invite)
+        self.notify(told)
 
     def on_answer(self, received: room_links.Received) -> None:
         """A person's answer to a draft: taken only from the Link invited, for its own places, while the draft
@@ -1078,6 +1083,24 @@ def people(root: Any, room_id: Any) -> Optional[dict[str, Any]]:
                  else "in"}
                 for member in invite["members"]]}
     return None
+
+
+INVITE_BODY = "Choose which of your agents join, or decline."
+
+
+def notify_invite(invite: dict[str, Any]) -> None:
+    """Tells the phone about a new invite through the relay (room.invite), with the pairing of this process'
+    Hermes home: the profile the dashboard runs as. Never fails the Link's loop: the invite list shows it
+    anyway, and a relay from before room invites isn't sent one (client.RELAY_GATED)."""
+    try:
+        sender = invite.get("from") or ""
+        client.enqueue(push_event(
+            "room.invite", identifier=event_id("room-invite", invite["link"], invite["room_id"]), profile="",
+            title=f"{sender or 'Someone'} invited you to {invite['name']}", title_label="room.invite",
+            body=INVITE_BODY,
+            room={"link": invite["link"], "id": invite["room_id"], "name": invite["name"], "from": sender}))
+    except Exception:  # noqa: BLE001
+        logger.warning("Linked Rooms couldn't tell the phone about an invite", exc_info=True)
 
 
 def disbanded(root: Any, room_id: Any) -> None:
