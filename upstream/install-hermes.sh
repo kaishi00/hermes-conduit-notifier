@@ -14,6 +14,9 @@ set -euo pipefail
 
 ref="${1:?usage: install-hermes.sh <ref> <dir>}"
 dir="${2:?usage: install-hermes.sh <ref> <dir>}"
+case "$ref" in
+    -*) echo "install-hermes.sh: '$ref' is not a ref" >&2; exit 2 ;;
+esac
 
 if [ ! -d "$dir/.git" ]; then
     git clone --quiet --filter=blob:none https://github.com/NousResearch/hermes-agent "$dir"

@@ -59,6 +59,7 @@ jobs:
             echo "::error::Couldn't find Hermes' release and canary tags (release='$release' canary='$canary')"
             exit 1
           fi
+          case "$INPUT_REF" in -*) echo "::error::'$INPUT_REF' is not a ref"; exit 1 ;; esac
           if [ -n "$INPUT_REF" ]; then refs=$(jq -cn --arg r "$INPUT_REF" '[$r]')
           elif [ "$EVENT" = pull_request ]; then refs=$(jq -cn --arg r "$release" '[$r]')
           else refs=$(jq -cn --arg c "$canary" --arg r "$release" '[$c, $r]')
