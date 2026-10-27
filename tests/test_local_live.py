@@ -1545,3 +1545,17 @@ def test_in_a_plugin_host_local_live_says_so(hermes, monkeypatch):
     api._local_live_auth_state.update(ready=False, started=False)
     api._local_live_start_auth()
     assert api._local_live_auth_state["reason"] == api.LOCAL_LIVE_PLUGIN_HOST_REASON
+
+
+@pytest.mark.parametrize("method,route", [
+    ("get", "/local-live/status"), ("post", "/local-live/key"), ("post", "/watch-tools/grant"),
+    ("post", "/watch-tools/revoke"), ("get", "/watch-audio/status"), ("post", "/sessions/takeover"),
+    ("get", "/sessions/desktop-views"), ("get", "/predict"), ("post", "/predict"),
+])
+def test_every_dashboard_route_takes_conduit_profile(client, hermes, method, route):
+    # Each route that needs this process reads ?conduit_profile=, so a
+    # mismatch with ?profile= is refused before anything else runs.
+    response = getattr(client, method)(f"{BASE}{route}?profile=home&conduit_profile=work",
+                                       **({"json": {}} if method == "post" else {}))
+    assert response.status_code == 400
+    assert response.json()["detail"] == "profile and conduit_profile name different profiles"

@@ -567,7 +567,8 @@ def _profile_scope(profile: Optional[str]):
 # other than the one the dashboard started with to that profile's own plugin
 # host. The host carries plain HTTP only (a WebSocket gets HTTP 501) and none
 # of this process's state: Local Live's key and calls, and the chats and jobs
-# Watch calls use. A workaround until Hermes carries them: Conduit names the
+# Watch calls use, the chats this process's gateway runs (takeover, Desktop
+# views, predictions). A workaround until Hermes carries them: Conduit names the
 # profile as ?conduit_profile= on the routes that need this process, Hermes
 # leaves the request here, and the route scopes itself to that profile, as it
 # does for ?profile=, after the same consent check. Conduit sends it only to a
@@ -6276,6 +6277,7 @@ async def post_session_takeover(request: Request, response: Response,
                                 profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     no_store = {"Cache-Control": "no-store"}
+    profile = await _conduit_route_profile_no_store(request, profile)
     try:
         body = await _read_json_body(request, TAKEOVER_MAX_BODY_BYTES)
         ids = _takeover_ids(body)
@@ -6589,8 +6591,9 @@ def prediction_status() -> Dict[str, Any]:
 
 
 @router.get("/predict")
-async def get_predict(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+async def get_predict(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
+    profile = await _conduit_route_profile_no_store(request, profile)
     try:
         return {"ok": True, **(await _run_scoped(profile, prediction_status))}
     except TokenError as exc:
@@ -6607,6 +6610,7 @@ async def get_predict(response: Response, profile: Optional[str] = None) -> Dict
 async def post_predict(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     no_store = {"Cache-Control": "no-store"}
+    profile = await _conduit_route_profile_no_store(request, profile)
     # One bucket for the host: the fork runs under the chat's own profile
     # whatever ?profile= names, so a bucket per profile could be sidestepped.
     await _scoped_acquire(_predict_limiter, profile, key="")
@@ -16188,12 +16192,13 @@ if "hermes_cli.web_server" in sys.modules:
 
 
 @router.get("/sessions/desktop-views")
-async def get_desktop_views(response: Response, profile: Optional[str] = None,
+async def get_desktop_views(request: Request, response: Response, profile: Optional[str] = None,
                             since: Optional[float] = None) -> Dict[str, Any]:
     """Chats Desktop or the web dashboard opened in ``profile``: per stored id,
     the newest open and how long it then stayed selected (seconds since the
     epoch), optionally only those seen after ``since``."""
     response.headers["Cache-Control"] = "no-store"
+    profile = await _conduit_route_profile_no_store(request, profile)
     _desktop_view_hook.ensure_started()
     _desktop_view_hook.try_install_quietly()  # a half-loaded gateway never fails the read
 
@@ -17125,10 +17130,10 @@ ROUTE_CAPABILITIES = (
     # /rooms/drafts, /rooms/invites and /rooms/people: rooms with people
     # you've linked, from the draft to the start (Linked Rooms).
     "room-invites",
-    # ?conduit_profile= on the voice and Watch routes that need the dashboard
-    # process (Local Live, the speech server and Grok Live sockets, Watch
-    # grants): any profile's, on a Hermes that hosts other profiles' plugins
-    # apart (hermes-conduit#1336).
+    # ?conduit_profile= on the routes that need the dashboard process (Local
+    # Live, the speech server and Grok Live sockets, Watch grants, chat
+    # takeover, Desktop views, predictions): any profile's, on a Hermes that
+    # hosts other profiles' plugins apart (hermes-conduit#1336).
     "dashboard-profiles",
 )
 
