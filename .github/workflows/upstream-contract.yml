@@ -145,7 +145,8 @@ jobs:
           gh label create upstream-break --color B60205 \
             --description "A Hermes change breaks the plugin's contract (upstream/contract.yml)" 2>/dev/null || true
           i=0
-          for ref in $(echo "$REFS" | python3 -c 'import json,sys; print("\n".join(json.load(sys.stdin)))'); do
+          mapfile -t refs < <(echo "$REFS" | jq -r '.[]')
+          for ref in "${refs[@]}"; do
             dir="$RUNNER_TEMP/results/contract-$i"
             i=$((i + 1))
             if [ ! -f "$dir/junit.xml" ]; then
