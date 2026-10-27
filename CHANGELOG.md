@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.102.0 (2026-10-27)
+## 0.103.0 (2026-10-27)
 
 ### New and improved
 - With Where you are on, Pulse's daily look ahead can save something for
@@ -21,6 +21,15 @@ checks it). The format is fixed, because Conduit reads it:
   she loved Kyoto" comes up as you leave work, with a notification, instead
   of in the morning brief. If you don't go there in time, or turn Where you
   are off, it shows on the Pulse screen without a notification.
+
+## 0.102.0 (2026-10-27)
+
+### Fixes
+- The Lock Screen could keep showing a finished turn as running, overnight
+  even. A turn that ended before Conduit had registered its Live Activity, or
+  that Hermes moved to a new session while compacting a long chat, never sent
+  the activity its end. Both now end it (a quick turn's end also needs the
+  push relay's update).
 
 ## 0.101.0 (2026-10-27)
 

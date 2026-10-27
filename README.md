@@ -2606,7 +2606,7 @@ in code, with no model and nothing sent anywhere new:
   where` lists it ("it would have brought up: ..."), to judge before it
   speaks.
 
-## Pulse holds a pick for a place (plugin 0.102+)
+## Pulse holds a pick for a place (plugin 0.103+)
 
 With Where you are on and Conduit sharing location in the background, the
 daily look ahead may hold one of its picks for a saved place instead of the
