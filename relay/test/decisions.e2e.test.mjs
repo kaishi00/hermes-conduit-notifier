@@ -2662,3 +2662,63 @@ test('phone changes: an alert notifies, a background change wakes silently, and 
     await stopRelay(child);
   }
 });
+
+test("room invites: a paired gateway reads that the relay takes them, and an invite notifies a phone that turned them on until it turns them off", async () => {
+  const aPort = await closedPort();
+  const isolatedPath = join(dir, 'relay-data-room-invite.json');
+  const capturePath = join(dir, `capture-room-invite-${Date.now()}.jsonl`);
+  const fixture = new RelayStore(isolatedPath);
+  const created = fixture.createInstallation({ bundleId: 'com.milim.relay', deviceToken: 'e'.repeat(64), environment: 'production' });
+  const pairing = fixture.createPairing(created.installation.id);
+  const claim = fixture.claimPairing(pairing.code, 'room target');
+  const child = await startRelay(aPort, 'accept', isolatedPath, { APNS_CAPTURE_PATH: capturePath });
+  children.push(child);
+  const base = `http://127.0.0.1:${aPort}`;
+  const device = `${created.installation.id}.${created.deviceSecret}`;
+  const gateway = `${created.installation.id}.${claim.gatewayId}.${claim.gatewaySecret}`;
+  const room = { link: 'Lk3x9QwZ2b1c', id: 'conduit-0123abcd', name: 'Zoo trip', from: 'Furina' };
+  const send = (eventId) => api(base, '/v1/events', {
+    method: 'POST',
+    credential: gateway,
+    body: { type: 'room.invite', event_id: eventId, title: 'Furina invited you to Zoo trip', body: 'Choose which of your agents join, or decline.', room },
+  });
+  const captured = () => {
+    try {
+      return readFileSync(capturePath, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
+    } catch {
+      return [];
+    }
+  };
+  try {
+    // The plugin asks before it sends what a relay from before this one would refuse.
+    const meta = await api(base, '/v1/meta', { credential: gateway });
+    assert.equal(meta.status, 200);
+    assert.deepEqual(Object.keys(meta.json).sort(), ['capabilities', 'version'], "a gateway reads what the relay takes, never the installation's gateways");
+    assert.equal(meta.json.version, relayVersion);
+    assert.ok(meta.json.capabilities.includes('room-invites'));
+    assert.deepEqual(await api(base, '/v1/meta', { credential: `${created.installation.id}.${claim.gatewayId}.${'x'.repeat(43)}` }),
+      { status: 401, json: { error: 'unauthorized' } });
+    assert.equal((await api(base, '/v1/meta', { credential: device })).json.gateways.length, 1, 'a device still reads its gateways');
+
+    // A phone whose Conduit never said it shows room invites gets none.
+    assert.deepEqual(await send('room-invite:00000000000000000000000000000000'), { status: 202, json: { accepted: true, delivered: false } });
+    assert.equal(captured().length, 0);
+    const on = await api(base, `/v1/installations/${created.installation.id}`, { method: 'PUT', credential: device, body: { preferences: { room_invite: true } } });
+    assert.equal(on.json.installation.preferences.room_invite, true);
+
+    assert.deepEqual(await send('room-invite:00000000000000000000000000000001'), { status: 202, json: { accepted: true, delivered: true } });
+    const [alert] = captured();
+    assert.equal(alert.deviceToken, 'e'.repeat(64));
+    assert.deepEqual(alert.notification.payload.aps.alert, { title: 'Room invite', body: "Someone you've linked with invited you to a room." });
+    assert.equal(alert.notification.payload.aps.sound, 'default');
+    assert.deepEqual(alert.notification.payload.body.conduit.room, { link: room.link, id: room.id });
+    assert.ok(!JSON.stringify(alert.notification.payload).includes('Zoo trip'), 'previews are off by default');
+
+    const off = await api(base, `/v1/installations/${created.installation.id}`, { method: 'PUT', credential: device, body: { preferences: { room_invite: false } } });
+    assert.equal(off.json.installation.preferences.room_invite, false);
+    assert.deepEqual(await send('room-invite:00000000000000000000000000000002'), { status: 202, json: { accepted: true, delivered: false } });
+    assert.equal(captured().length, 1);
+  } finally {
+    await stopRelay(child);
+  }
+});

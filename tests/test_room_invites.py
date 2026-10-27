@@ -402,7 +402,8 @@ def rooms(tmp_path):
     a default profile, and Laifu with a work one."""
     wire = Wire()
     side = types.SimpleNamespace(wire=wire, clock=Clock(), tmp_path=tmp_path, home=HomeHermes(tmp_path),
-                                 links={name: {} for name in ("furina", "laifu", "mona")}, member={})
+                                 links={name: {} for name in ("furina", "laifu", "mona")}, member={},
+                                 notified={name: [] for name in ("furina", "laifu", "mona")})
     for (name, link_id), other in NAMES.items():
         side.links[name][link_id] = {"id": link_id, "name": other, "status": "linked"}
     for name, installation in (("furina", FURINA), ("laifu", LAIFU), ("mona", MONA)):
@@ -420,7 +421,8 @@ def _rooms(side, name, **changes):
     options = dict(send=side.wire.sender(name), link=lambda link_id: side.links[name].get(link_id),
                    clock=side.clock, profile_home=_homes(root),
                    joiner=join_module.Joiner(root, hermes=side.member[name], clock=side.clock),
-                   starter=start_module.Starter(root, hermes=side.home, clock=side.clock))
+                   starter=start_module.Starter(root, hermes=side.home, clock=side.clock),
+                   notify=side.notified[name].append)
     options.update(changes)
     return invites_module.Rooms(root, **options)
 
@@ -470,6 +472,68 @@ def test_a_draft_invites_each_link_and_waits(rooms):
     # Nothing starts while anyone invited hasn't answered.
     rooms.furina.pass_once()
     assert draft_of(rooms, room_id)["status"] == "waiting" and not rooms.home.legacy.rooms
+
+
+def test_a_new_invite_tells_the_phone_once(rooms):
+    room_id = draft(rooms)["room_id"]
+
+    [told] = rooms.notified["laifu"]
+    assert (told["room_id"], told["link"], told["from"], told["name"]) == (room_id, "link1", "Furina", "Zoo trip")
+    assert [invite["room_id"] for invite in rooms.notified["mona"]] == [room_id]
+    assert rooms.notified["furina"] == [], "the home's own draft isn't an invite"
+    [to_laifu] = rooms.wire.bodies("room.invite", "link1")
+    rooms.laifu.on_invite(_received(rooms, "furina", "link1", "room.invite", to_laifu))
+    assert len(rooms.notified["laifu"]) == 1, "an invite sent again is the first one"
+
+
+def test_an_invite_dropped_as_it_comes_tells_no_one(rooms):
+    draft(rooms)
+    [to_laifu] = rooms.wire.bodies("room.invite", "link1")
+    rooms.notified["laifu"].clear()
+
+    rooms.laifu.on_invite(_received(rooms, "furina", "link1", "room.invite",
+                                    {**to_laifu, "room_id": "conduit-late", "expires_at": int(NOW) - 1}))
+
+    assert rooms.notified["laifu"] == []
+
+
+TOLD = {"room_id": "conduit-0123abcd", "link": "link1", "from": "Furina", "name": "Zoo trip", "status": "waiting"}
+
+
+def test_the_invite_push_says_who_invited_you_to_which_room(monkeypatch):
+    sent = []
+    monkeypatch.setattr(invites_module.client, "enqueue", lambda event: sent.append(event) or True)
+
+    invites_module.notify_invite(dict(TOLD))
+
+    [event] = sent
+    assert event["type"] == "room.invite"
+    assert event["event_id"] == invites_module.event_id("room-invite", "link1", "conduit-0123abcd")
+    assert (event["title"], event["title_label"]) == ("Furina invited you to Zoo trip", "room.invite")
+    assert event["body"] == "Choose which of your agents join, or decline."
+    assert event["room"] == {"link": "link1", "id": "conduit-0123abcd", "name": "Zoo trip", "from": "Furina"}
+    assert "profile" not in event and "session_id" not in event, "an invite is the installation's"
+
+
+def test_an_invite_from_a_link_without_a_name_is_from_someone(monkeypatch):
+    sent = []
+    monkeypatch.setattr(invites_module.client, "enqueue", lambda event: sent.append(event) or True)
+
+    invites_module.notify_invite({**TOLD, "from": ""})
+
+    assert sent[0]["title"] == "Someone invited you to Zoo trip"
+    assert "from" not in sent[0]["room"]
+
+
+def test_an_invite_push_that_fails_never_stops_the_links_loop(monkeypatch, caplog):
+    def refuse(event):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(invites_module.client, "enqueue", refuse)
+
+    invites_module.notify_invite(dict(TOLD))
+
+    assert "couldn't tell the phone about an invite" in caplog.text
 
 
 def test_an_invite_the_mailbox_didnt_take_goes_on_a_later_pass(rooms):
@@ -1931,7 +1995,8 @@ def routes(rooms, monkeypatch):
                                link=lambda link_id, name=name: rooms.links[name].get(link_id), clock=rooms.clock,
                                profile_home=_homes(root),
                                joiner=joins.Joiner(root, hermes=rooms.member[name], clock=rooms.clock),
-                               starter=starts.Starter(root, hermes=rooms.home, clock=rooms.clock))
+                               starter=starts.Starter(root, hermes=rooms.home, clock=rooms.clock),
+                               notify=rooms.notified[name].append)
         running[str(root)] = rooms.wire.sides[name] = side
         setattr(rooms, name, side)
     monkeypatch.setattr(dashboard, "start", lambda root: running[str(root)])

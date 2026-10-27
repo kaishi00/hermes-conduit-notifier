@@ -145,6 +145,43 @@ def test_a_sealed_call_request_carries_its_call_inside():
     assert inner["call"]["session_ids"] == ["rt-1", "st-1"]
 
 
+ROOM = {"link": "Lk3x9QwZ2b1c", "id": "conduit-0123abcd", "name": "Zoo trip", "from": "Furina"}
+
+
+def _invite(**changes):
+    return {"event_id": "room-invite:0123456789abcdef0123456789abcdef", "type": "room.invite",
+            "title": "Furina invited you to Zoo trip", "body": "Choose which of your agents join, or decline.",
+            "title_label": "room.invite", "room": dict(ROOM), **changes}
+
+
+def test_a_sealed_room_invite_carries_its_room_inside():
+    keys = _keys()
+    sealed = e2e.seal_event(_invite(), keys, installation_id=INSTALLATION, gateway_id=GATEWAY, now=1_760_000_000)
+    wire = json.dumps(sealed)
+    for shown in ROOM.values():
+        assert shown not in wire, shown
+    assert "room" not in sealed
+    inner = e2e.open_event(sealed, keys, installation_id=INSTALLATION, gateway_id=GATEWAY)
+    assert inner["room"] == ROOM
+
+
+def test_a_room_invite_too_big_to_seal_whole_keeps_only_its_rooms_ids():
+    keys = _keys()
+    event = _invite(title=os.urandom(3000).hex(), room={**ROOM, "name": os.urandom(60).hex()})
+    sealed = e2e.seal_event(event, keys, installation_id=INSTALLATION, gateway_id=GATEWAY)
+    assert len(sealed["e2e"]["ct"]) <= e2e.MAX_CT_CHARS
+    inner = e2e.open_event(sealed, keys, installation_id=INSTALLATION, gateway_id=GATEWAY)
+    assert inner == {"room": {"link": ROOM["link"], "id": ROOM["id"]}}
+
+
+def test_a_content_free_room_invite_carries_only_its_rooms_ids():
+    outgoing = e2e.content_free(_invite())
+    assert outgoing["room"] == {"link": ROOM["link"], "id": ROOM["id"]}
+    assert "title" not in outgoing and "body" not in outgoing
+    assert "room" not in e2e.content_free(_invite(room={**ROOM, "link": "bad link"}))
+    assert "room" not in e2e.content_free({**_invite(), "type": "response.ready"})
+
+
 @pytest.mark.parametrize("tamper", [
     lambda s: s.__setitem__("type", "approval.needed"),
     lambda s: s["e2e"].__setitem__("tok", "0" * 16),

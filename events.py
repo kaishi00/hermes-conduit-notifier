@@ -107,6 +107,7 @@ def push_event(
     locate: dict[str, Any] | None = None,
     maps: dict[str, Any] | None = None,
     count: int | None = None,
+    room: dict[str, Any] | None = None,
     level: str | None = None,
     private: bool = False,
 ) -> dict[str, Any]:
@@ -181,6 +182,13 @@ def push_event(
     # to the relay when the rest is sealed.
     if kind == "phone.changes":
         event["mode"] = mode if mode in PHONE_CHANGE_MODES else "alert"
+    # `room` (room.invite) is the room someone you've linked invited you to:
+    # its Link and id take the tap to the invite, and its name and who it's
+    # from are content.
+    if room is not None and kind == "room.invite":
+        sanitized_room = sanitize_room(room)
+        if sanitized_room:
+            event["room"] = sanitized_room
     # `level` (a Pulse reply, pulse_push) is how much the push may interrupt:
     # the relay sets it as the alert's interruption level (relay 0.20+; an
     # older one ignores it). Routing, not content: it stays visible to the
@@ -201,6 +209,30 @@ PHONE_CHANGE_MODES = ("alert", "background")
 PUSH_LEVELS = ("passive", "active", "time-sensitive")
 _LOCATE_ID = re.compile(r"^l_[A-Za-z0-9_-]{16,64}\Z")
 _MAPS_ID = re.compile(r"^m_[A-Za-z0-9_-]{16,64}\Z")
+
+
+# A room invite's Link (room_links' ids) and room (room_bridge.IDENTIFIER),
+# as the relay checks them.
+_ROOM_LINK = re.compile(r"^[A-Za-z0-9_-]{1,48}\Z")
+_ROOM_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
+
+
+def sanitize_room(value: Any) -> dict[str, Any] | None:
+    """A room invite's room, bounded: its Link and id, the room's name and
+    who it's from, as this Hermes shows that person. None when malformed."""
+    if not isinstance(value, dict):
+        return None
+    link, room_id = value.get("link"), value.get("id")
+    if not (isinstance(link, str) and _ROOM_LINK.match(link) and isinstance(room_id, str) and _ROOM_ID.match(room_id)):
+        return None
+    room: dict[str, Any] = {"link": link, "id": room_id}
+    name = _clean(value.get("name"), 120)
+    if name:
+        room["name"] = name
+    sender = _clean(value.get("from"), 64)
+    if sender:
+        room["from"] = sender
+    return room
 
 
 # How a watched job ended, or (an alert call) what Hermes waits on.
@@ -321,6 +353,10 @@ def redact_event(event: dict[str, Any]) -> dict[str, Any]:
     maps_id = maps.get("id") if isinstance(maps, dict) else None
     if isinstance(maps_id, str) and _MAPS_ID.match(maps_id):
         redacted["maps"] = {"id": maps_id}
+    room = sanitize_room(event.get("room")) if event.get("type") == "room.invite" else None
+    if room:
+        # The room's name and who it's from are content; its Link and id route.
+        redacted["room"] = {"link": room["link"], "id": room["id"]}
     return redacted
 
 
