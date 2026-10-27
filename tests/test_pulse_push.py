@@ -142,15 +142,27 @@ def test_a_private_push_says_only_that_pulse_has_something(live, monkeypatch):
     assert pulse._push_how(attempt, "The bank called back.", []) == {"level": "active"}
 
 
-def test_private_words_hide_a_push_even_when_pulse_cant_read_its_store(live, monkeypatch):
+def test_a_push_keeps_its_words_home_when_pulse_cant_read_its_store(live, monkeypatch):
     def locked(*args):
         raise sqlite3.OperationalError("database is locked")
 
     monkeypatch.setattr(pulse, "open_store", locked)
+    hidden = {"private": True, "body": "Pulse has something for you."}
     brief = {"kind": pulse.BRIEF, "item_id": ""}
-    assert pulse._push_how(brief, "Dentist at 3, then a calm day.", []) == {"private": True,
-                                                                         "body": "Pulse has something for you."}
+    assert pulse._push_how(brief, "Dentist at 3, then a calm day.", []) == hidden
     assert pulse._push_how(brief, "A calm day.", []) == {}  # at the default level
+    # What it rests on can't be read: a follow-up's item, a moment's card, a pick on an item or a date.
+    assert pulse._push_how({"kind": pulse.FOLLOWUP, "item_id": "0000beef-f7"}, "It's done.", []) == hidden
+    assert pulse._push_how({"kind": pulse.MOMENT, "item_id": pulse.places.attempt_item_id(5)}, "On your way.", []) \
+        == hidden
+    run = {"kind": pulse.REPORT, "item_id": "run-1"}
+    model = {"origin": "model", "item_id": None, "text": "A new Rust release"}
+    remembered = {"origin": "memory", "item_id": 7, "text": "Ana, by Friday"}
+    yearly = {"origin": "date", "item_id": None, "text": "On Wednesday", "ref": "date:fact:8:2026-10-28:eve"}
+    assert pulse._push_how(run, "A new Rust release", [model]) == {}
+    assert pulse._push_how(run, "A new Rust release · Ana, by Friday", [model, remembered]) == hidden
+    assert pulse._push_how(run, "On Wednesday", [yearly]) == hidden
+    assert push.private_row(None, remembered) and push.private_row(None, yearly) and not push.private_row(None, model)
 
 
 def test_the_reply_event_carries_the_level_and_the_private_copy(live, monkeypatch):

@@ -395,8 +395,10 @@ def _push_how(attempt: dict, body: str, picks: list[dict]) -> dict[str, Any]:
     moment, a follow-up that can't wait, a report's quiet picks, and whether
     the phone says the user is busy), and, with Hide private reminders on,
     for a private one (its words, its item, its picks or its held card),
-    "private" and the private body in place of its words. Private words hide
-    it even when Pulse's store can't be read, with no level then."""
+    "private" and the private body in place of its words. When Pulse's store
+    can't be read it fails closed, with no level: a follow-up's or a
+    moment's push, or one with a pick on a remembered item or a date, is
+    private, as are private words, and Hide private reminders counts as on."""
     try:
         pulse_store = open_store()
         home = Path(get_hermes_home())
@@ -421,7 +423,10 @@ def _push_how(attempt: dict, body: str, picks: list[dict]) -> dict[str, Any]:
         hide = push.hides_private(pulse_store)
     except Exception:  # noqa: BLE001 — never breaks the hook: the push goes at the default level
         logger.debug("conduit_push: Pulse couldn't tell how its push goes", exc_info=True)
-        level, private, hide = "", push.private_words(body), True
+        # What the push rests on can't be read, so its words stay home.
+        level, hide = "", True
+        private = (attempt["kind"] in (FOLLOWUP, MOMENT) or push.private_words(body)
+                   or any(push.private_row(None, pick) for pick in picks))
     how = {"level": level} if level else {}
     return {**how, "private": True, "body": push.PRIVATE_BODY} if private and hide else how
 

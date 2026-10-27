@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.104.1 (2026-10-27)
+
+### Fixes
+- If Pulse couldn't read its own records just as a reminder went out, a
+  private one could show its words on the Lock Screen. It now says only
+  "Pulse has something for you." then.
+
 ## 0.104.0 (2026-10-27)
 
 ### Fixes
