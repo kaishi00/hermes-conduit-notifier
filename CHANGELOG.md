@@ -13,6 +13,15 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.100.0 (2026-10-27)
+
+### Fixes
+- The Lock Screen could keep showing a finished turn as running, overnight
+  even. A turn that ended before Conduit had registered its Live Activity, or
+  that Hermes moved to a new session while compacting a long chat, never sent
+  the activity its end. Both now end it (a quick turn's end also needs the
+  push relay's update).
+
 ## 0.99.0 (2026-10-27)
 
 ### Fixes

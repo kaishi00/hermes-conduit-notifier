@@ -19,6 +19,16 @@ session; one that didn't (yet) is asked again only every
 ``UNTRACKED_RETRY_S`` (Conduit registers a moment after the turn starts), so a
 turn nobody watches costs a request or two. A relay without the route, or
 one that refuses the caller (401/403), turns the whole thing off for a while.
+
+A compaction can move a running turn to a new session id (Hermes does when
+it can't compact in place). The phone registered the turn under the ids it
+knew when it started, so the turn keeps reporting, and ends, under the id it
+started with: an id this reporter doesn't know is looked up in the session
+store's compaction lineage before it is taken for a turn of its own.
+
+An end the relay answered nobody is watching (the phone hadn't registered
+yet) says how long ago the turn ended, so the relay can still end an activity
+registered after it, but not one of the chat's next turn.
 """
 
 from __future__ import annotations
@@ -28,6 +38,7 @@ import logging
 import math
 import threading
 import time
+from pathlib import Path
 from typing import Any, Callable
 
 from . import client
@@ -62,6 +73,8 @@ REFUSED_S = 30 * 60.0
 ENDED_MEMORY_S = 120.0
 # Turns tracked at once; the oldest is forgotten past this.
 MAX_SESSIONS = 64
+# Session ids remembered as a compaction of a running turn, or as none.
+MAX_LINEAGE_IDS = 1024
 # A turn with no hook for this long is forgotten (its end never came).
 IDLE_FORGET_S = 2 * 60 * 60.0
 
@@ -152,8 +165,17 @@ class LiveActivityReporter:
         post: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         clock: Callable[[], float] = time.monotonic,
         start_thread: bool = True,
+        lineage: Callable[[str, set[str]], str | bool | None] | None = None,
     ) -> None:
         self._post = post or _post_to_relay
+        # Which of the running turns' ids a session id continues through
+        # compactions: the id, False when none, None when it can't tell yet.
+        self._lineage = lineage or (lambda _session_id, _running: False)
+        # A running turn's later session ids -> the id it started under.
+        self._moved: dict[str, str] = {}
+        # Ids that continue no running turn (a session's lineage never
+        # changes, so the answer is kept).
+        self._not_moved: set[str] = set()
         self._clock = clock
         self._start_thread = start_thread
         self._turns: dict[str, _Turn] = {}
@@ -179,6 +201,9 @@ class LiveActivityReporter:
             return
         with self._lock:
             now = self._clock()
+            # The chat's next turn runs under the id it moved to; the phone
+            # registers that one now.
+            self._moved.pop(session_id, None)
             self._turns.pop(session_id, None)
             self._ended.pop(session_id, None)
             self._turns[session_id] = _Turn(now)
@@ -213,6 +238,7 @@ class LiveActivityReporter:
     def turn_ended(self, session_id: str, outcome: str) -> None:
         if not session_id or outcome not in ENDS:
             return
+        session_id = self._turn_id(session_id)
         with self._lock:
             turn = self._turns.get(session_id)
             now = self._clock()
@@ -275,7 +301,7 @@ class LiveActivityReporter:
                 # a failed send marks it dirty again.
                 turn.dirty = False
                 turn.sent_at = now
-                due.append((session_id, turn, _payload(session_id, turn)))
+                due.append((session_id, turn, _payload(session_id, turn, now)))
             for session_id, ended_at in list(self._ended.items()):
                 if now - ended_at >= ENDED_MEMORY_S:
                     del self._ended[session_id]
@@ -342,10 +368,39 @@ class LiveActivityReporter:
                 del self._turns[session_id]
                 self._ended[session_id] = self._clock()
 
+    def _turn_id(self, session_id: str) -> str:
+        """The id a running turn started under, for one a compaction moved
+        it to; any other id as it is."""
+        with self._lock:
+            if session_id in self._moved:
+                return self._moved[session_id]
+            if session_id in self._turns or session_id in self._not_moved:
+                return session_id
+            running = {key for key, turn in self._turns.items() if turn.end is None}
+        if not running:
+            return session_id
+        try:
+            found = self._lineage(session_id, running)
+        except Exception:  # noqa: BLE001 — never into the turn
+            logger.debug("Conduit Live Activity lineage lookup failed", exc_info=True)
+            return session_id
+        with self._lock:
+            if isinstance(found, str) and found:
+                if len(self._moved) >= MAX_LINEAGE_IDS:
+                    self._moved.pop(next(iter(self._moved)))
+                self._moved[session_id] = found
+                return found
+            if found is False:
+                if len(self._not_moved) >= MAX_LINEAGE_IDS:
+                    self._not_moved.clear()
+                self._not_moved.add(session_id)
+        return session_id
+
     def _update(self, session_id: str, *, phase: str | None = None, tool: str | None | object = _UNSET,
                 context: int | None = None, count_tool: bool = False) -> None:
         if not session_id:
             return
+        session_id = self._turn_id(session_id)
         with self._lock:
             turn = self._turns.get(session_id)
             if turn is None or turn.end is not None:
@@ -386,6 +441,8 @@ class LiveActivityReporter:
             self._generation += 1
             self._turns.clear()
             self._ended.clear()
+            self._moved.clear()
+            self._not_moved.clear()
             # A reload (after pairing again, say) starts unpaused.
             self._paused_until = 0.0
             thread, self._thread = self._thread, None
@@ -421,7 +478,7 @@ class LiveActivityReporter:
                     self._wake.wait(timeout=max(0.05, next_in))
 
 
-def _payload(session_id: str, turn: _Turn) -> dict[str, Any]:
+def _payload(session_id: str, turn: _Turn, now: float) -> dict[str, Any]:
     # The relay takes at most 10,000.
     state: dict[str, Any] = {"phase": turn.phase, "tools": min(turn.tools, 10_000)}
     if turn.tool and turn.phase == "tool":
@@ -431,6 +488,8 @@ def _payload(session_id: str, turn: _Turn) -> dict[str, Any]:
     payload: dict[str, Any] = {"session_id": session_id, "state": state}
     if turn.end is not None:
         payload["end"] = turn.end
+        # A retried end still says when the turn ended.
+        payload["ended_ago"] = round(max(0.0, now - turn.ended_at), 1)
     return payload
 
 
@@ -469,4 +528,47 @@ def _mark_refused(mark: Any, *args: Any) -> None:
         logger.warning("Conduit could not record the relay's refusal", exc_info=True)
 
 
-reporter = LiveActivityReporter()
+# Parents followed up a compaction lineage before giving up.
+_LINEAGE_HOPS = 32
+
+
+def compacted_from(session_id: str, running: set[str]) -> str | bool | None:
+    """The running turn's id ``session_id`` continues through compactions,
+    read from Hermes' session store: False when it continues none, None
+    when that can't be settled yet (not stored yet, or unreadable)."""
+    import sqlite3
+
+    from hermes_constants import get_hermes_home
+
+    try:
+        path = Path(get_hermes_home()) / "state.db"
+        if not path.exists():
+            return None
+        db = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=1.0)
+    except Exception:  # noqa: BLE001 — a hook must never break the turn
+        return None
+    try:
+        current = session_id
+        for _ in range(_LINEAGE_HOPS):
+            row = db.execute("SELECT parent_session_id FROM sessions WHERE id = ?", (current,)).fetchone()
+            if row is None:
+                return None if current == session_id else False
+            parent = row[0]
+            if not parent:
+                return False
+            ended = db.execute("SELECT end_reason FROM sessions WHERE id = ?", (parent,)).fetchone()
+            # Only a compaction carries the turn on; a branch or a delegated
+            # child is a conversation of its own.
+            if not ended or ended[0] != "compression":
+                return False
+            if parent in running:
+                return parent
+            current = parent
+        return None
+    except sqlite3.Error:
+        return None
+    finally:
+        db.close()
+
+
+reporter = LiveActivityReporter(lineage=compacted_from)

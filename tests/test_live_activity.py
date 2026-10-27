@@ -121,7 +121,8 @@ def test_the_end_goes_out_at_once_and_only_once(reporter, relay, clock):
     reporter.tool_started("s-1", "terminal")
     reporter.turn_ended("s-1", "done")
     reporter.flush()
-    assert relay.posts[-1] == {"session_id": "s-1", "state": {"phase": "tool", "tools": 1, "tool": "terminal"}, "end": "done"}
+    assert relay.posts[-1] == {"session_id": "s-1", "state": {"phase": "tool", "tools": 1, "tool": "terminal"}, "end": "done",
+                                "ended_ago": 0.0}
     # Hermes also fires on_session_end after post_llm_call.
     reporter.turn_ended("s-1", "done")
     reporter.flush()
@@ -313,7 +314,8 @@ def test_a_failed_update_is_retried_and_holds_up_only_its_own_turn(reporter, rel
     reporter.waiting("s-2", "approval")
     reporter.turn_ended("s-2", "done")
     reporter.flush()
-    assert relay.posts[-1] == {"session_id": "s-2", "state": {"phase": "approval", "tools": 0}, "end": "done"}, \
+    assert relay.posts[-1] == {"session_id": "s-2", "state": {"phase": "approval", "tools": 0}, "end": "done",
+                               "ended_ago": 0.0}, \
         "the other turn's backoff never holds up this one"
     posts = len(relay.posts)
     clock[0] += live.BACKOFF_S
@@ -517,3 +519,128 @@ def test_an_accepted_report_ends_the_notification_pause(monkeypatch):
         assert "c" not in client._refusals
     finally:
         client._refusals.pop("c", None)
+
+
+def test_a_retried_end_says_how_long_ago_the_turn_ended(reporter, relay, clock):
+    reporter.turn_started("s-1")
+    reporter.turn_ended("s-1", "done")
+    relay.failure = OSError("connection reset")
+    reporter.flush()
+    relay.failure = None
+    clock[0] += live.END_RETRY_S
+    reporter.flush()
+    assert len(relay.posts) == 2
+    assert relay.posts[-1]["end"] == "done"
+    assert relay.posts[-1]["ended_ago"] == live.END_RETRY_S
+
+
+class Lineage:
+    """A session store where compactions moved some turns to new ids."""
+
+    def __init__(self, moves):
+        self.moves = moves
+        self.asked = []
+
+    def __call__(self, session_id, running):
+        self.asked.append((session_id, frozenset(running)))
+        if session_id in self.moves:
+            moved = self.moves[session_id]
+            return moved if moved in running or moved is None else False
+        return False
+
+
+def test_a_compacted_turn_reports_and_ends_under_the_id_it_started_with(clock, relay):
+    lineage = Lineage({"s-1b": "s-1"})
+    reporter = live.LiveActivityReporter(post=relay, clock=lambda: clock[0], start_thread=False, lineage=lineage)
+    reporter.turn_started("s-1")
+    clock[0] += live.FIRST_DELAY_S
+    reporter.flush()
+    # Compacted mid-turn: Hermes carries on under s-1b.
+    reporter.tool_started("s-1b", "web_search")
+    clock[0] += live.MIN_INTERVAL_S
+    reporter.flush()
+    assert relay.posts[-1]["session_id"] == "s-1"
+    assert relay.posts[-1]["state"] == {"phase": "tool", "tools": 1, "tool": "web"}
+    reporter.context_used("s-1b", 50, 100)
+    reporter.turn_ended("s-1b", "done")
+    reporter.flush()
+    assert relay.posts[-1]["session_id"] == "s-1"
+    assert relay.posts[-1]["end"] == "done"
+    assert relay.posts[-1]["state"]["context"] == 50
+    assert [asked for asked, _ in lineage.asked] == ["s-1b"], "looked up once, then remembered"
+    # Hermes' second end of the turn sends nothing more.
+    reporter.turn_ended("s-1b", "done")
+    reporter.flush()
+    assert sum(1 for post in relay.posts if post.get("end")) == 1
+
+
+def test_ids_that_continue_no_running_turn_are_their_own(clock, relay):
+    lineage = Lineage({"s-new": None})
+    reporter = live.LiveActivityReporter(post=relay, clock=lambda: clock[0], start_thread=False, lineage=lineage)
+    reporter.thinking("cron-1")
+    assert lineage.asked == [], "nothing running: nothing to look up"
+    reporter.turn_started("s-1")
+    reporter.thinking("cron-1")
+    reporter.thinking("cron-1")
+    assert [asked for asked, _ in lineage.asked] == ["cron-1"], "a settled answer is kept"
+    reporter.thinking("s-new")
+    reporter.thinking("s-new")
+    assert [asked for asked, _ in lineage.asked].count("s-new") == 2, "not stored yet: asked again"
+    reporter.turn_ended("cron-1", "done")
+    reporter.flush()
+    assert {post["session_id"] for post in relay.posts if post.get("end")} == {"cron-1"}
+
+
+def test_the_chats_next_turn_runs_under_the_id_it_moved_to(clock, relay):
+    lineage = Lineage({"s-1b": "s-1"})
+    reporter = live.LiveActivityReporter(post=relay, clock=lambda: clock[0], start_thread=False, lineage=lineage)
+    reporter.turn_started("s-1")
+    reporter.turn_ended("s-1b", "done")
+    reporter.flush()
+    assert relay.posts[-1]["session_id"] == "s-1"
+    clock[0] += 1
+    reporter.turn_started("s-1b")
+    reporter.turn_ended("s-1b", "failed")
+    reporter.flush()
+    assert relay.posts[-1]["session_id"] == "s-1b"
+    assert relay.posts[-1]["end"] == "failed"
+
+
+def test_a_failing_lineage_lookup_never_reaches_the_turn(clock, relay):
+    def broken(_session_id, _running):
+        raise RuntimeError("store locked")
+
+    reporter = live.LiveActivityReporter(post=relay, clock=lambda: clock[0], start_thread=False, lineage=broken)
+    reporter.turn_started("s-1")
+    reporter.thinking("s-2")
+    reporter.turn_ended("s-1", "done")
+    reporter.flush()
+    assert relay.posts[-1]["session_id"] == "s-1"
+
+
+def test_the_compaction_lineage_is_read_from_the_session_store(monkeypatch, tmp_path):
+    import sqlite3
+
+    db = sqlite3.connect(tmp_path / "state.db")
+    db.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT, end_reason TEXT)")
+    db.executemany("INSERT INTO sessions VALUES (?, ?, ?)", [
+        ("root", None, "compression"),
+        ("second", "root", "compression"),
+        ("third", "second", None),
+        ("branch", "root", None),
+        ("child", "open", None),
+        ("open", None, None),
+        ("forked", "branched-parent", None),
+        ("branched-parent", None, "branched"),
+    ])
+    db.commit()
+    db.close()
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path)
+    assert live.compacted_from("third", {"root"}) == "root", "through two compactions"
+    assert live.compacted_from("third", {"second"}) == "second"
+    assert live.compacted_from("third", {"elsewhere"}) is False
+    assert live.compacted_from("child", {"open"}) is False, "a delegated child is its own conversation"
+    assert live.compacted_from("forked", {"branched-parent"}) is False
+    assert live.compacted_from("unknown", {"root"}) is None, "not stored yet"
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path / "missing")
+    assert live.compacted_from("third", {"root"}) is None

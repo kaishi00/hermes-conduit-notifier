@@ -12,6 +12,14 @@
 // on the phone (the activity's static attributes). Nothing here is persisted:
 // a restart forgets every registration and the activities go stale on the
 // phone (Conduit sets a stale date), which is all that is lost.
+//
+// A turn can end before the phone has registered its activity: Conduit
+// registers a moment after the turn starts, and later still when it was
+// suspended right after sending (or the request failed and it tries again
+// once it is back on screen). The relay keeps such an end for the chat, and
+// a registration whose activity started before it gets the end at once,
+// instead of the Lock Screen counting up on a finished turn for hours. An
+// activity that started after it (the chat's next turn) is left alone.
 
 export const LIVE_ACTIVITIES_CAPABILITY = 'live-activities';
 
@@ -34,6 +42,9 @@ export const TOOL_CATEGORIES = new Set([
   'planning', 'schedule', 'messages', 'skills', 'connector', 'phone', 'home',
 ]);
 const MAX_SESSION_IDS = 6;
+// How long ago a reported end or a registered activity's start may say it
+// was, in seconds.
+const MAX_AGO_S = ACTIVITY_TTL_MS / 1000;
 // Tries at an end push before the activity is given up on.
 const END_ATTEMPTS = 3;
 const SESSION_ID_PATTERN = /^[A-Za-z0-9:_.\/-]{1,128}$/;
@@ -51,14 +62,18 @@ export class LiveActivities {
     this.activities = new Map();
     this.byInstallation = new Map();
     this.bySession = new Map();
+    // `${installationId}\n${sessionId}` -> { state, end, endedAt }: ends
+    // reported while no activity of the chat was registered.
+    this.unwatchedEnds = new Map();
   }
 
   get size() {
     return this.activities.size;
   }
 
-  // The phone started an activity for a chat known under `sessionIds`.
-  register(installationId, token, sessionIds) {
+  // The phone started an activity for a chat known under `sessionIds`,
+  // `startedAgoS` seconds ago (unknown from an older Conduit).
+  register(installationId, token, sessionIds, { startedAgoS } = {}) {
     this.sweep();
     this.remove(token);
     const activity = {
@@ -82,7 +97,37 @@ export class LiveActivities {
     this.byInstallation.set(installationId, tokens);
     // A newer registration for the same chat takes the id over.
     for (const sessionId of activity.sessionIds) this.bySession.set(sessionKey(installationId, sessionId), token);
+    this.endIfEnded(activity, startedAgoS);
     return activity;
+  }
+
+  // The chat's turn ended before this activity was registered: the end goes
+  // out now. Only an end after the activity started counts; without its
+  // start (an older Conduit) nothing is assumed.
+  endIfEnded(activity, startedAgoS) {
+    if (typeof startedAgoS !== 'number') return;
+    const now = this.now();
+    const startedAt = now - startedAgoS * 1000;
+    for (const sessionId of activity.sessionIds) {
+      const key = sessionKey(activity.installationId, sessionId);
+      const ended = this.unwatchedEnds.get(key);
+      if (!ended || now - ended.endedAt > ACTIVITY_TTL_MS || ended.endedAt < startedAt) continue;
+      this.unwatchedEnds.delete(key);
+      activity.pending = { state: ended.state, end: ended.end };
+      this.schedule(activity);
+      return;
+    }
+  }
+
+  rememberEnd(key, state, end, endedAt) {
+    this.unwatchedEnds.delete(key);
+    this.unwatchedEnds.set(key, { state, end, endedAt });
+    const now = this.now();
+    for (const [old, ended] of this.unwatchedEnds) {
+      // Insertion order: the oldest first.
+      if (this.unwatchedEnds.size <= this.maxActivities && now - ended.endedAt <= ACTIVITY_TTL_MS) break;
+      this.unwatchedEnds.delete(old);
+    }
   }
 
   // The phone ended the activity (or the token stopped working). Only the
@@ -105,10 +150,19 @@ export class LiveActivities {
     return activity;
   }
 
-  // A progress report from the host. Returns whether the phone is watching.
-  report(installationId, sessionId, state, end) {
+  // A progress report from the host; an end may come `endedAgoS` seconds
+  // after the turn ended (a retry). Returns whether the phone is watching.
+  report(installationId, sessionId, state, end, { endedAgoS = 0 } = {}) {
+    const key = sessionKey(installationId, sessionId);
     const activity = this.find(installationId, sessionId);
-    if (!activity) return false;
+    if (!activity) {
+      // Kept for an activity registered late. A report without an end is
+      // the chat's next turn, which the older end mustn't reach.
+      if (end) this.rememberEnd(key, state, end, this.now() - endedAgoS * 1000);
+      else this.unwatchedEnds.delete(key);
+      return false;
+    }
+    this.unwatchedEnds.delete(key);
     // Once the end is on its way, nothing after it may overtake it.
     if (activity.ending || activity.pending?.end) return true;
     activity.pending = { state, end };
@@ -209,10 +263,17 @@ export class LiveActivities {
 
   removeInstallation(installationId) {
     for (const token of [...(this.byInstallation.get(installationId) ?? [])]) this.remove(token);
+    for (const key of [...this.unwatchedEnds.keys()]) {
+      if (key.startsWith(`${installationId}\n`)) this.unwatchedEnds.delete(key);
+    }
   }
 
   sweep() {
     const now = this.now();
+    for (const [key, ended] of this.unwatchedEnds) {
+      if (now - ended.endedAt <= ACTIVITY_TTL_MS) break;
+      this.unwatchedEnds.delete(key);
+    }
     for (const [token, activity] of this.activities) {
       // Insertion order is registration order: the first live one ends the sweep.
       if (now - activity.registeredAt <= ACTIVITY_TTL_MS) break;
@@ -257,6 +318,8 @@ export function validateReport(body) {
   if (!sessionId || !raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const end = body.end === undefined || body.end === null ? undefined : (ENDS.has(body.end) ? body.end : null);
   if (end === null) return null;
+  // How long ago the turn ended, for an end sent late; unreadable is now.
+  const endedAgoS = secondsAgo(body.ended_ago) ?? 0;
   if (!PHASES.has(raw.phase)) return null;
   const tools = raw.tools === undefined || raw.tools === null ? 0 : boundedInteger(raw.tools, 0, 10_000);
   if (tools === undefined) return null;
@@ -270,7 +333,7 @@ export function validateReport(body) {
     if (context === undefined) return null;
     state.context = context;
   }
-  return { sessionId, state, end };
+  return { sessionId, state, end, ...(end ? { endedAgoS } : {}) };
 }
 
 // The body of the phone's registration: its activity token and the chat's
@@ -282,7 +345,14 @@ export function validateRegistration(body) {
   if (!body.session_ids.every((id) => typeof id === 'string' && SESSION_ID_PATTERN.test(id))) return null;
   const sessionIds = [...new Set(body.session_ids)];
   if (sessionIds.length === 0 || sessionIds.length > MAX_SESSION_IDS) return null;
-  return { token, sessionIds };
+  // How long ago the activity started; unknown from an older Conduit.
+  const startedAgoS = secondsAgo(body.started_ago);
+  return { token, sessionIds, ...(startedAgoS !== undefined ? { startedAgoS } : {}) };
+}
+
+function secondsAgo(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined;
+  return Math.min(Math.max(value, 0), MAX_AGO_S);
 }
 
 export function validateToken(body) {
