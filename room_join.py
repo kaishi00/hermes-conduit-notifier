@@ -1,4 +1,5 @@
-"""Joining a room over a Link with this installation's agents, for Linked Rooms (designs/cross-owner-agents, N5a).
+"""Joining a room over a Link with this installation's agents, for Linked Rooms (designs/cross-owner-agents, N5a and
+N5b).
 
 When a person here joins a room another Hermes hosts (room_invites.py), each agent they bring gets a grant from
 this Hermes for its place in the room: dispatch, status and stop (never approve: approvals stay on the member's
@@ -6,7 +7,8 @@ own Hermes, decision 6), for 24 hours to start turns and 30 days to read and sto
 look-only grant first reads which execution policy this Hermes' own API server runs for the profile, which the
 grant has to name (that process can see another policy than this one reads from the profile's config). The
 reservation holds the place, the API server answers with the agent's catalog for the grant, and the bridge's member
-side takes the Link's requests for it (room_bridge_member.bind). Leaving undoes all three.
+side takes the Link's requests for it (room_bridge_member.bind). Leaving undoes all three. While the room goes on, a
+fresh grant for the same place replaces the agent's every 12 hours (``renew``), so it never runs out.
 
 Hermes' calls come in through ``Hermes``. Nothing here imports Hermes at module level, so the tests give it a
 fake.
@@ -102,6 +104,30 @@ class Joiner:
             raise
         return {"grant": grant, "catalog": catalog, "status_expires_at": int(claims["status_expires_at"])}
 
+    def renew(self, grant: str) -> dict[str, Any]:
+        """A fresh grant for the place ``grant`` holds (N5b): the same place and policy, for 24 hours to start
+        turns and 30 days to read and stop them from now, minted once this Hermes' API server still takes
+        ``grant`` (live, not revoked, its reservation current) and still runs the policy it names, and
+        reserved. Never revokes anything: Hermes revokes a grant's whole scope, ``grant`` with it. JoinError
+        ``gone`` (410) for a grant past its last day, ``refused`` (409) when the API server refuses it,
+        ``policy_changed`` (409) when it runs another policy for the profile now, ``api_server`` (503) when it
+        doesn't answer."""
+        try:
+            claims = self.hermes.decode(grant, "status")
+        except ValueError:  # Hermes' HostedRoomGrantError: past its horizon, or not this Hermes' any more
+            raise JoinError("gone", "This agent's grant for the room ran out", 410) from None
+        place = {name: claims[name] for name in ("room_id", "home_install_id", "authority_gateway_id",
+                                                 "authority_epoch", "member_id", "target_install_id",
+                                                 "target_profile")}
+        profile, digest = place["target_profile"], claims["execution_policy_digest"]
+        expected = {name: value for name, value in place.items() if name != "target_install_id"}
+        catalog = self._catalog(profile, grant, place["target_install_id"], expected, renewing=True)
+        if catalog["execution_policy"]["policy_digest"] != digest:
+            raise JoinError("policy_changed", f"Profile {profile}'s room policy changed since it joined", 409)
+        fresh, fresh_claims = self._mint([], place, digest, PERMISSIONS, int(self.clock()), DISPATCH_S, STATUS_S)
+        return {"grant": fresh, "status_expires_at": int(fresh_claims["status_expires_at"]),
+                "issued_at": int(fresh_claims["issued_at"])}
+
     def leave(self, link_id: str, grant: str) -> None:
         """Undoes a join: the Link no longer carries the grant's requests, and the grant's scope is revoked."""
         scope = room_bridge.grant_scope(grant)
@@ -121,15 +147,20 @@ class Joiner:
         self.hermes.reserve(claims, claims["status_expires_at"])
         return grant, claims
 
-    def _catalog(self, profile: str, grant: str, installation: str, scope: Mapping[str, Any]) -> dict[str, Any]:
+    def _catalog(self, profile: str, grant: str, installation: str, scope: Mapping[str, Any], *,
+                 renewing: bool = False) -> dict[str, Any]:
         """The agent's catalog, as this Hermes' API server answers for the grant (what the home's probe will
-        compare at the start)."""
+        compare at the start). A grant it refuses as it renews (4xx, as the home's probe reads one) is
+        ``refused``: never renewed again."""
         status, answer = self.hermes.capabilities(profile, grant)
         if status is None:
             raise JoinError("api_server", f"This Hermes' API server didn't answer for profile {profile}; check that "
                                           "Linked Rooms is on for it and the gateway runs", 503)
         if status != 200:
             code = answer.get("error", {}).get("code") if isinstance(answer.get("error"), dict) else None
+            if renewing and 400 <= status < 500 and status not in (408, 429):
+                raise JoinError("refused", f"This Hermes' API server refused profile {profile}'s room grant "
+                                           f"({code or status})", 409)
             raise JoinError("api_server", f"This Hermes' API server refused profile {profile}'s room grant "
                                           f"({code or status})", 503)
         catalog = answer.get("catalog")

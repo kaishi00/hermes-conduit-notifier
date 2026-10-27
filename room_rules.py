@@ -275,7 +275,8 @@ def framing(turn: Optional[RoomTurn], choices: RoomChoices, people: Optional[Map
     and what the owner allows here. ``turn`` None is a room whose roster
     couldn't be read. ``people`` is who's who in a room over Links
     (room_invites.people): the owners are named by the names this host's
-    owner gave their Links."""
+    owner gave their Links, and the agents that left or were taken out,
+    which Hermes' roster keeps, aren't named."""
     owners = _owners(people)
     if turn is None:
         opening = UNKNOWN_FRAMING
@@ -283,8 +284,9 @@ def framing(turn: Optional[RoomTurn], choices: RoomChoices, people: Optional[Map
         host = owners.get(None)
         opening = MEMBER_FRAMING.format(host=f"{host}'s" if host else "someone else's")
     else:
+        gone = _gone(people)
         named = (_named(handle, owners) if _HANDLE.fullmatch(handle) else "another agent"
-                 for handle in turn.others)
+                 for handle in turn.others if handle.casefold() not in gone)
         opening = HOME_FRAMING.format(others=", ".join(named) or "others")
     allowed = allowed_tools(choices) - {SEARCH_TOOL}
     # The tier's own tools, then the owner's picks in the order they made them.
@@ -658,6 +660,16 @@ def _owners(people: Optional[Mapping[str, Any]]) -> dict[Optional[str], str]:
                 and _OWNER.fullmatch(str(member.get("owner") or "")):
             owners[member["handle"].casefold()] = str(member["owner"])
     return owners
+
+
+def _gone(people: Optional[Mapping[str, Any]]) -> set[str]:
+    """The casefolded handles of a room's members that left it or were
+    taken out (their turns are cut off), from its people record."""
+    if not isinstance(people, Mapping):
+        return set()
+    return {member["handle"].casefold() for member in people.get("members") or ()
+            if isinstance(member, Mapping) and isinstance(member.get("handle"), str)
+            and member.get("status") in ("left", "removed")}
 
 
 def _named(handle: str, owners: Mapping[Optional[str], str]) -> str:

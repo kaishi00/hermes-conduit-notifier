@@ -832,6 +832,22 @@ def test_the_framing_names_the_owners_in_a_room_over_links(host, notes, monkeypa
     assert "@laifu." in _context("s-home")
 
 
+def test_the_framing_leaves_out_the_agents_that_left_a_room_over_links():
+    turn = rules.RoomTurn(room_id="room-b", side="home", with_others=True, session_id="s-home",
+                          others=("laifu", "worky", "mona"))
+    people = {"room_id": "room-b", "home": None, "members": [
+        {"member_id": "furina", "handle": "furina", "display_name": "Furina", "owner": None, "status": "in"},
+        {"member_id": "laifu", "handle": "laifu", "display_name": "Laifu", "owner": "Laifu", "status": "in"},
+        {"member_id": "worky", "handle": "Worky", "display_name": "Worky", "owner": "Laifu", "status": "left"},
+        {"member_id": "mona", "handle": "mona", "display_name": "Mona", "owner": "Mona", "status": "removed"}]}
+
+    framing = rules.framing(turn, room_choices.RoomChoices(), people)
+
+    # Hermes' roster keeps them; their turns are cut off.
+    assert "agents that belong to other people: @laifu (Laifu's)." in framing
+    assert "worky" not in framing.casefold() and "mona" not in framing.casefold()
+
+
 def test_room_turns_get_no_other_plugin_notes(host, notes):
     framing = _context("s-home")
     assert framing and not any(note in framing for note in NOTES.values())

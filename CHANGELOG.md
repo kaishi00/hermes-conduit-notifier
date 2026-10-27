@@ -13,11 +13,24 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.94.0 (2026-10-27)
+## 0.95.0 (2026-10-27)
 
 ### Fixes
 - When you approve Hermes' requests from a Watch Local Live call, the card now stays up as long as Hermes waits (your approvals timeout setting). On current Hermes it always used five minutes.
 - Voice on a profile that no longer exists now says so, instead of saying Hermes couldn't check it.
+
+## 0.94.0 (2026-10-27)
+
+### New and improved
+- Rooms with people you've linked keep their agents: each agent's own Hermes
+  renews its place in the room every 12 hours, so a room that's quiet for a
+  day no longer cuts them off.
+- Leave a room you joined, with some or all of your agents, or take someone
+  else's agent out of a room you host. Their Hermes is told, and the agent's
+  turns there stop. Its chat for the room stays until its owner deletes it.
+  From the command line: `hermes conduit-push rooms leave` and `remove`.
+- Disbanding a room tells everyone linked into it, and their Hermes take
+  their agents out of it.
 
 ## 0.93.1 (2026-10-27)
 

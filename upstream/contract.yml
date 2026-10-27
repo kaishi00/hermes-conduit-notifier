@@ -318,10 +318,12 @@ routes:
   - DELETE /rooms/drafts
   - GET /rooms/drafts
   - POST /rooms/drafts
+  - POST /rooms/drafts/remove
   - POST /rooms/drafts/start
   - GET /rooms/identity
   - GET /rooms/invites
   - POST /rooms/invites/answer
+  - POST /rooms/leave
   - DELETE /rooms/links
   - GET /rooms/links
   - POST /rooms/links
