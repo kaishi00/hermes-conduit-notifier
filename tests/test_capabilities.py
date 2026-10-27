@@ -92,6 +92,8 @@ def test_every_capability_names_a_served_route_family():
         "pulse_dates": "/pulse/left_out",
         # Deadlines from the inbox: a setting on the /pulse control route, listed at /pulse/memory.
         "pulse_inbox": "/pulse/memory",
+        # Looking things up first: a setting on the /pulse control route; what a card's turn looked at is in the feed.
+        "pulse_look": "/pulse/feed",
         "present-v1": "/present/",
         "health-sync": "/health/",
         "shortcut-inbox": "/inbox/",

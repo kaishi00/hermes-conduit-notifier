@@ -62,8 +62,9 @@ def test_the_report_says_only_what_its_context_shows():
     # Its turn runs in Pulse's chat, whose earlier turns are no evidence of what's true now
     # (Eric, 2026-10-25: a report blamed a "reminder job" its context never mentioned).
     assert "never repeat something only an earlier turn in this chat says" in report.REPORT_TEXT
-    assert "Tell the user only what the message contains" in report.REPORT_NOTE
-    assert "and this chat's earlier reports" not in report.REPORT_NOTE
+    for note in (report.REPORT_NOTE, report.REPORT_LOOK_NOTE):
+        assert "Tell the user only what the message contains" in note
+        assert "and this chat's earlier reports" not in note
     assert "Say only what the context shows" in candidates.INSTRUCTIONS
 
 
@@ -513,7 +514,7 @@ def test_a_report_lists_its_candidates_then_says_what_code_picked(reporting):
         "2. [follow-up] Look at the flaky deploy (you asked in Deploy)"]
     [attempt] = live.store.in_flight()
     assert attempt["item_id"] == run["id"] and live.store.get(pulse.REPORT_RUN)["state"] == pulse.RUN_SENT
-    assert pulse.pre_llm_call(SID, "t1", sent) == report.REPORT_NOTE
+    assert pulse.pre_llm_call(SID, "t1", sent).startswith(report.REPORT_LOOK_NOTE)
     reply = f"1. [commitment] The passport #{item_id}\n2. [follow-up] The deploy, reworded"
     # The push and the cards say the list's lines, whatever the turn made of them.
     assert pulse.pushes(SID, "t1", reply)
@@ -548,7 +549,7 @@ def test_a_list_that_picks_nothing_says_so_and_makes_no_card(reporting):
     pulse.tick()
     [sent] = live.sent()
     assert sent.endswith("Reply with exactly: Nothing worth bringing up right now.")
-    assert pulse.pre_llm_call(SID, "t1", sent) == report.REPORT_NOTE
+    assert pulse.pre_llm_call(SID, "t1", sent).startswith(report.REPORT_LOOK_NOTE)
     assert not pulse.pushes(SID, "t1", "Nothing worth bringing up right now.")
     deliver(live, sent, "Nothing worth bringing up right now.")
     pulse.tick(time.time() + 1)
@@ -580,7 +581,7 @@ def test_a_list_that_fails_leaves_the_report_as_it_was(reporting, reply):
     assert live.store.get(pulse.REPORT_RUN)["state"] == pulse.RUN_SENT
     assert live.store.candidate_runs(5) == []
     deliver(live, sent, "1. [follow-up] Look at the flaky deploy\n2. [date] Ana lands at 18:00")
-    assert pulse.pre_llm_call(SID, "t1", sent) == report.REPORT_NOTE
+    assert pulse.pre_llm_call(SID, "t1", sent).startswith(report.REPORT_LOOK_NOTE)
     assert pulse.push_copy(SID, "t1", "1. [follow-up] Look at the flaky deploy\n2. [date] Ana lands at 18:00")[
         "body"] == "Look at the flaky deploy · Ana lands at 18:00"
     pulse.tick(time.time() + 1)

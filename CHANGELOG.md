@@ -13,6 +13,17 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.94.0 (2026-10-27)
+
+### New and improved
+- Pulse looks things up before it speaks. Its reports, morning brief and
+  follow-ups can read your calendar, reminders, alarms, contacts and phone
+  status, and look places up on Maps between places they name, never where
+  you are or your saved places. A follow-up about something said in a chat
+  can also search the web. Nothing they call can change anything, and each
+  card's Why? says what Pulse looked at. Turn it off in Settings > Pulse or
+  with `hermes conduit-push pulse look off`.
+
 ## 0.93.1 (2026-10-27)
 
 ### Fixes

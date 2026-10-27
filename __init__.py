@@ -195,9 +195,11 @@ def _pre_tool_call(**kwargs: Any) -> dict[str, str] | None:
         return block
     if _is_child(kwargs.get("session_id")):
         return None
-    # A Pulse turn gets no tools. Fails closed: Hermes blocks the call when
-    # this hook raises, so the check is outside _quietly.
-    block = pulse.pre_tool_call(_text(kwargs.get("session_id")), kwargs.get("turn_id"))
+    # A Pulse turn may only look things up (pulse_tools). Fails closed:
+    # Hermes blocks the call when this hook raises, so the check is outside
+    # _quietly.
+    block = pulse.pre_tool_call(_text(kwargs.get("session_id")), kwargs.get("turn_id"), kwargs.get("tool_name"),
+                                kwargs.get("args"))
     if block is not None:
         return block
     _quietly(live_activity.reporter.tool_started, _text(kwargs.get("session_id")), kwargs.get("tool_name"))
