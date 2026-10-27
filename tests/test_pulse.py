@@ -2825,7 +2825,7 @@ def test_pulse_routes(remembering, db, monkeypatch):
                             "created_at": DAY})
     feed = http.get(f"{base}/feed").json()
     assert [entry["id"] for entry in feed["cards"]] == [card] and feed["unseen"] == 1
-    assert feed["levels"] == {"followup": "push", "deadline": "brief"}
+    assert feed["levels"] == {"followup": "push", "deadline": "brief", "next": "brief"}
     assert http.post(f"{base}/feed/seen", json={"ids": None}).json()["seen"] == 1
     assert http.post(f"{base}/feed/seen", json={"ids": "all"}).status_code == 400
     assert http.post(f"{base}/feed/seen", json={}).status_code == 400
@@ -2834,11 +2834,11 @@ def test_pulse_routes(remembering, db, monkeypatch):
         "code": "invalid", "field": "rating"}
     [lesson] = http.post(f"{base}/rate", json={"card": card, "rating": "down", "reason": "too_often"}).json()["learned"]
     assert lesson["value"] == "brief"
-    assert http.get(f"{base}/learned").json()["levels"] == {"followup": "brief", "deadline": "brief"}
+    assert http.get(f"{base}/learned").json()["levels"] == {"followup": "brief", "deadline": "brief", "next": "brief"}
     undone = http.post(f"{base}/learned/undo", json={"id": lesson["id"]}).json()
-    assert undone["undone"] is True and undone["levels"] == {"followup": "push", "deadline": "brief"}
+    assert undone["undone"] is True and undone["levels"] == {"followup": "push", "deadline": "brief", "next": "brief"}
     assert http.put(f"{base}/levels", json={"kind": "followup", "level": "screen"}).json()["levels"] == {
-        "followup": "screen", "deadline": "brief"}
+        "followup": "screen", "deadline": "brief", "next": "brief"}
     assert http.put(f"{base}/levels", json={"kind": "followup", "level": "loud"}).status_code == 400
     # What learning holds, reset; what the reports left out, and one brought up.
     assert "pulse_explains" in api.ROUTE_CAPABILITIES

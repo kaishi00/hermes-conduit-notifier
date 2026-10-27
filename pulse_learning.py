@@ -50,10 +50,11 @@ from . import pulse_prefs as prefs
 from . import pulse_store as store
 
 LEVELS = prefs.LEVELS
-# The kinds whose level the user sets: follow-ups, and deadlines from the
-# Shortcuts inbox (pulse_memory.read_inbox), which start held for the morning
-# brief, so none pushes on its own until the user turns them up.
-DEFAULT_LEVELS = {"followup": "push", "deadline": "brief"}
+# The kinds whose level the user sets: follow-ups, deadlines from the
+# Shortcuts inbox (pulse_memory.read_inbox) and next steps (a report's
+# "next", after something got done or an event ended), which start held for
+# the morning brief, so none pushes on its own until the user turns them up.
+DEFAULT_LEVELS = {"followup": "push", "deadline": "brief", "next": "brief"}
 RATINGS = ("up", "down")
 WRONG_TIME = store.WRONG_TIME
 REASONS = ("not_relevant", "already_knew", "too_late", "too_often", WRONG_TIME)
@@ -85,7 +86,7 @@ NUDGES = {
 }
 DEFAULT_NUDGE = "balanced"
 
-KIND_NAMES = {"followup": "Follow-ups", "deadline": "Deadlines"}
+KIND_NAMES = {"followup": "Follow-ups", "deadline": "Deadlines", "next": "Next steps"}
 LEVEL_NAMES = {"push": "sent with a push", "screen": "shown in Pulse without a push",
                "brief": "held for the morning brief", "off": "off"}
 # A place's source in words, where its name alone says too little.
@@ -380,6 +381,16 @@ ACT_DONE_BY = "pulse: done in the chat after Do it"
 # Pulse marked it, having read it get done while the card waited for the brief.
 HELD_DONE_BY = "pulse: done before the morning brief"
 RESTED_DONE_BY = "pulse: done before it came back from Not now"
+# A follow-up's check found it done ("<CHECKED_BY>: <why>", pulse_followup).
+CHECKED_BY = "pulse follow-up check"
+# Pulse closed a promise or a watch by telling the user ("<TOLD_BY>", or with
+# its level: "<TOLD_BY> (screen)"): the news was the follow-up itself.
+TOLD_BY = "pulse follow-up"
+
+
+def told(closed_by: Any) -> bool:
+    """Whether an item was closed by Pulse telling the user (``TOLD_BY``)."""
+    return isinstance(closed_by, str) and (closed_by == TOLD_BY or closed_by.startswith(f"{TOLD_BY} ("))
 
 
 def action_card(pulse_store: store.PulseStore, card_id: Any) -> dict:
@@ -462,8 +473,8 @@ def set_level(pulse_store: store.PulseStore, kind: str, level_name: str, now: fl
               cause: str = SET, card: Optional[dict] = None) -> Optional[dict]:
     """Sets the kind's level, a ceiling (the user's, or "too often" with
     ``card``); the lesson, or None when it's there already. Only the
-    follow-ups' and the deadlines' levels are set by the user (DEFAULT_LEVELS);
-    "too often" sets a report kind's."""
+    levels of follow-ups, deadlines and next steps are set by the user
+    (DEFAULT_LEVELS); "too often" sets a report kind's."""
     if not isinstance(kind, str) or (kind not in DEFAULT_LEVELS and (cause == SET or not kind)):
         raise Invalid("kind")
     if not isinstance(level_name, str) or level_name not in LEVELS:

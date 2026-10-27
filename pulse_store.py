@@ -1146,6 +1146,19 @@ class PulseStore:
                                 (*params, limit)).fetchall()
         return [dict(row) for row in rows]
 
+    def done_items(self, since: float, limit: int = 50, *, skip_kinds: Sequence[str] = (),
+                   skip_closer: str = "") -> list[dict]:
+        """Items closed as done at ``since`` or later and still current,
+        latest closed first: none of ``skip_kinds``, nor one ``skip_closer``
+        closed (it alone, or with a note after it: "told (…)")."""
+        kinds = ",".join("?" * len(skip_kinds))
+        with self._connect() as conn:
+            return [dict(row) for row in conn.execute(
+                "SELECT * FROM items WHERE status='done' AND closed_at>=? AND superseded_at IS NULL "
+                f"AND kind NOT IN ({kinds}) AND (?='' OR (closed_by IS NOT ? AND substr(closed_by, 1, ?) IS NOT ?)) "
+                "ORDER BY closed_at DESC, id DESC LIMIT ?",
+                (since, *skip_kinds, skip_closer, skip_closer, len(skip_closer) + 2, f"{skip_closer} (", limit))]
+
     def yearly_facts(self, *, profile: Optional[str] = None) -> list[dict]:
         """Open facts about a date that comes back every year (pulse_dates),
         of ``profile``, or every profile's when None; oldest first."""

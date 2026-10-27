@@ -331,7 +331,7 @@ def test_the_model_words_a_deadline_and_sees_it_apart_from_the_rest(live):
 
 def test_deadlines_start_held_for_the_brief_and_turned_off_never_come_up(live):
     looking(live)
-    assert learning.levels(live.store) == {"followup": "push", "deadline": "brief"}
+    assert learning.levels(live.store) == {"followup": "push", "deadline": "brief", "next": "brief"}
     assert learning.KIND_NAMES["deadline"] == "Deadlines"
     kept(live, trial(date(2026, 10, 21), logged=at(13, 9)))
     control.set_level(live.store, "deadline", "off")
