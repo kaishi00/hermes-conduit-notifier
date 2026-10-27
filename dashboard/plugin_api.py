@@ -4304,8 +4304,8 @@ class _LocalLiveReadBack:
         follower.add_done_callback(_local_live_task_done)
 
     async def _stop(self, cancel_turn: bool) -> bool:
-        """The reply stops: nothing more of it is said. True when that sent
-        the server a response.cancel."""
+        """The reply stops: nothing more of it is said. True when the server
+        was sent a response.cancel for it, now or before."""
         # A start still waiting on the call is overtaken.
         self.generation += 1
         self._release()
@@ -4313,7 +4313,8 @@ class _LocalLiveReadBack:
             self.follower.cancel()
             self.follower = None
         self.sentences.clear()
-        cancelled = False
+        # A response already being cancelled was told before.
+        cancelled = self.muting
         if self.speaking is not None and not self.muting:
             cancelled = True
             self.muting = True

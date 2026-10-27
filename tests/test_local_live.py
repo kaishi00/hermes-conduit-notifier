@@ -950,6 +950,8 @@ def test_the_users_stop_reaches_the_server_once_whether_or_not_a_sentence_is_in_
                                  "text": "Once upon a time, there was a fox. "}))
         _next(ws, "response.created")
         ws.send_text(json.dumps({"type": "response.cancel"}))
+        # A second tap while the server winds the first down tells it nothing new.
+        ws.send_text(json.dumps({"type": "response.cancel"}))
         cancel, _ = _next(ws, "conduit.turn.cancel")
         assert cancel["turn_id"] == turn["turn_id"]
         done, _ = _next(ws, "response.done")
