@@ -609,13 +609,12 @@ class InboxStore:
 
     # Pulse memory (pulse_memory.read_inbox, forget_inbox) ------------------------------
 
-    def received(self, after: tuple[int, str, str], *, since: int = 0, skip_kinds: tuple[str, ...] = (),
+    def received(self, after: tuple[int, str, str], *, skip_kinds: tuple[str, ...] = (),
                  limit: int = 200) -> list[dict[str, Any]]:
         """Events received after ``after`` ((received_at, device, id), the
-        mark Pulse memory read to) and at or after ``since``, within their
-        device's days, in the order they arrived; each with its ``mark``.
-        Not the last SETTLE_S's, which an upload still waiting on the lock
-        could commit events before."""
+        mark Pulse memory read to), within their device's days, in the order
+        they arrived; each with its ``mark``. Not the last SETTLE_S's, which
+        an upload still waiting on the lock could commit events before."""
         now = int(self.clock())
         with self._read() as db:
             if db is None:
@@ -624,10 +623,10 @@ class InboxStore:
             rows = db.execute(
                 "SELECT e.device, e.id, e.kind, e.at_utc, e.at_local, e.received_at, e.source, e.title, e.text,"
                 " e.amount FROM events e JOIN devices d ON d.id = e.device"
-                " WHERE (e.received_at, e.device, e.id) > (?, ?, ?) AND e.received_at >= ? AND e.received_at < ?"
+                " WHERE (e.received_at, e.device, e.id) > (?, ?, ?) AND e.received_at < ?"
                 f" AND e.at_utc >= ? - d.keep_days * 86400{skip}"
                 " ORDER BY e.received_at, e.device, e.id LIMIT ?",
-                (*after, since, now - SETTLE_S, now, *skip_kinds, limit)).fetchall()
+                (*after, now - SETTLE_S, now, *skip_kinds, limit)).fetchall()
         return [{"device": device, "id": event_id, "kind": kind, "at_utc": at_utc, "at": at_local,
                  "source": source or "", "title": title or "", "text": text or "", "amount": amount or "",
                  "mark": (received_at, device, event_id)}

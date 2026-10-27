@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.93.1 (2026-10-27)
+
+### Fixes
+- Something a Pulse report found by itself could show as a deadline, and
+  rating it changed how loudly deadlines come up. Now only the deadlines
+  Pulse memory keeps count as deadlines.
+
 ## 0.93.0 (2026-10-27)
 
 ### Fixes

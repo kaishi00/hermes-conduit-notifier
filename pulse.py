@@ -479,7 +479,7 @@ def _turn_cards(pulse_store: store.PulseStore, home: Path, changed: list[dict], 
                 if picked:
                     learning.add_noticed_cards(
                         pulse_store, turn=turn, lines=candidates.lines(picked), chat_id=row["session_key"],
-                        chat_title=title, shown={pick["item_id"] for pick in picked if pick["item_id"] is not None},
+                        chat_title=title, shown=candidates.shown(picked),
                         kinds=report.KINDS, item_chat_title=lambda item: followup.chat_title(home, item), now=now,
                         attempt=str(attempt), marks=(TURN_CARDS_DONE, store.SPLIT_REPORTS),
                         keep=TURN_CARDS_DONE_KEEP, links=[pick["id"] for pick in picked],
@@ -501,7 +501,7 @@ def _turn_cards(pulse_store: store.PulseStore, home: Path, changed: list[dict], 
                 # so a retry never adds them twice.
                 learning.add_noticed_cards(
                     pulse_store, turn=turn, lines=lines, chat_id=row["session_key"], chat_title=title,
-                    shown=report.shown_items(turn.prompt), kinds=report.KINDS,
+                    shown=report.shown_kinds(turn.prompt), kinds=report.KINDS,
                     item_chat_title=lambda item: followup.chat_title(home, item), now=now,
                     attempt=str(attempt), marks=(TURN_CARDS_DONE, store.SPLIT_REPORTS), keep=TURN_CARDS_DONE_KEEP)
                 continue
@@ -1158,7 +1158,7 @@ def _collect_ratings(pulse_store: store.PulseStore, home: Path, now: float) -> N
         if row["state"] != store.DELIVERED or str(row["attempt_id"]) in split:
             continue
         picked = _run_picks(pulse_store, row)
-        shown = None if picked is None else {pick["item_id"] for pick in picked if pick["item_id"] is not None}
+        shown = None if picked is None else candidates.shown(picked)
         try:
             items, ratings = report.ratings_after(home, chat_id=row["session_key"], tag=row["tag"],
                                                   since=row["created_at"] - delivery.SINCE_SLACK_S, shown=shown)
