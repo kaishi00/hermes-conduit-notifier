@@ -906,6 +906,8 @@ class SshWorkspace:
         self._run(self._guard(root) + f's={shlex.quote(source)}; t={shlex.quote(target)}\n'
                   f'inside "$s" && inside "$t" || {{ echo {_ERROR}EOUTSIDE; exit 1; }}\n'
                   f'[ -e "$s" ] || [ -L "$s" ] || {{ echo {_ERROR}ENOENT; exit 1; }}\n'
+                  # A link that leads out isn't moved, as on this host.
+                  f'[ -L "$s" ] && ! follows "$s" && {{ echo {_ERROR}EOUTSIDE; exit 1; }}\n'
                   f'[ -d "$t" ] && [ ! -L "$t" ] && {{ echo {_ERROR}EEXIST; exit 1; }}\n'
                   # A folder never replaces a file either.
                   f'[ -d "$s" ] && [ ! -L "$s" ] && {{ [ -e "$t" ] || [ -L "$t" ]; }} && {{ echo {_ERROR}EEXIST; exit 1; }}\n'

@@ -576,6 +576,25 @@ def test_ssh_name_search_is_cut_only_past_the_cap(tree, monkeypatch):
     assert len(found["names"]) == 2 and found["truncated"] is True
 
 
+def test_ssh_content_search_never_reads_through_a_link(tree):
+    (tree / "docs" / "away.txt").symlink_to(tree.parent / "outside.txt")
+    (tree / "docs" / "innocent.txt").symlink_to(tree / ".env")
+    root = str(tree.resolve())
+    for needle in ("grouping videos", "SECRET"):
+        found = ssh(tree).search(root, needle, contents=True)
+        assert all(not m["path"].endswith(("away.txt", "innocent.txt")) for m in found["matches"]), found
+
+
+def test_a_link_out_of_the_root_isnt_moved_on_either_backend(tree):
+    (tree / "away").symlink_to(tree.parent / "outside.txt")
+    root = str(tree.resolve())
+    for workspace in (ws(), ssh(tree)):
+        with pytest.raises(wf.WorkspaceError) as exc:
+            workspace.move(root, str(tree / "away"), root, "renamed")
+        assert exc.value.status == 403
+    assert (tree / "away").is_symlink()
+
+
 # --- Routes --------------------------------------------------------------------
 
 
