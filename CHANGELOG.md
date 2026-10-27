@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.107.0 (2026-10-27)
+
+### New and improved
+- A card you tapped Do it on but never sent, or that Pulse's checks found
+  still not done, comes back once, held for your morning brief unless you
+  turned next steps up, saying when you tapped Do it. Not if you marked it
+  done, put it off or said it wasn't useful.
+
 ## 0.106.1 (2026-10-27)
 
 ### Fixes

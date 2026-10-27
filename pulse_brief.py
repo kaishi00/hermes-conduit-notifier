@@ -75,7 +75,9 @@ def _clip(text: Any, limit: int) -> str:
 
 def line(card: dict) -> str:
     where = f' (from the chat "{_clip(card["chat_title"], 80)}")' if card["chat_title"] else ""
-    return "- " + _clip(f"{card['news']}{where}", LINE_LIMIT)
+    # Back after a Do it that stalled: its Why? says so (pulse_followup.come_back).
+    back = f" [came back: {card['why']}]" if card.get("back") else ""
+    return "- " + _clip(f"{card['news']}{where}{back}", LINE_LIMIT)
 
 
 def context(home: Path, pulse_store: store.PulseStore, cards: list[dict], *, home_chat_id: str, now: float,

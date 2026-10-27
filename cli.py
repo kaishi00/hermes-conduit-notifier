@@ -1538,7 +1538,7 @@ def _learning_status(pulse_store: Any) -> str:
 
 
 def _pulse_learning(pulse_store: Any, action: str, value: str, extra: str, home: Any = None) -> int:
-    from . import pulse, pulse_control, pulse_learning, pulse_store as store
+    from . import pulse, pulse_control, pulse_followup, pulse_learning, pulse_store as store
     if action == "cards":
         zone = pulse.report_zone(pulse_store, Path(home) if home else Path("."))  # the user's, as `pulse status`
         cards = pulse_store.cards(MEMORY_LIST)
@@ -1554,6 +1554,9 @@ def _pulse_learning(pulse_store: Any, action: str, value: str, extra: str, home:
                 back = card.get("rest_until")
                 finished += f" (put away, back {datetime.fromtimestamp(back, zone).strftime('%a %H:%M')})" if back \
                     else " (put away)"
+            # Back after a Do it that stalled (pulse_followup.come_back).
+            finished += {pulse_followup.UNSENT: " (back: Do it left unsent)",
+                         pulse_followup.NOT_DONE: " (back: not done after Do it)"}.get(card.get("back") or "", "")
             topic = f" [{card['topic']}]" if card["topic"] else ""
             print(_printable(f"#{card['id']} [{card['level']}]{topic} {card['title']}: {card['news']}{rated}{finished}"))
         return 0

@@ -278,7 +278,13 @@ CREATE TABLE IF NOT EXISTS cards (
     proposal INTEGER,
     -- A look ahead's pick held for a place (pulse_places, JSON): the saved
     -- place, arrive or leave, until when, and once a moment reached it, when.
-    moment TEXT NOT NULL DEFAULT ''
+    moment TEXT NOT NULL DEFAULT '',
+    -- Back once after a Do it that stalled (pulse_followup.come_back):
+    -- "unsent" when Do it was left unsent or "not_done" when its checks
+    -- found it not done ("" for a card never back) and when that Do it was
+    -- tapped. No commas here: SQLite's DROP COLUMN takes one for the column's.
+    back TEXT NOT NULL DEFAULT '',
+    back_acted_at REAL
 );
 CREATE INDEX IF NOT EXISTS cards_created ON cards(created_at);
 -- What ratings taught Pulse (pulse_learning): each row changes what Pulse
@@ -502,7 +508,8 @@ _ADDED_COLUMNS = (("cards", "topic", "TEXT NOT NULL DEFAULT ''"), ("cards", "bri
                   ("items", "from_inbox", "TEXT NOT NULL DEFAULT ''"), ("items", "sender", "TEXT NOT NULL DEFAULT ''"),
                   ("attempts", "looked", "TEXT NOT NULL DEFAULT ''"), ("cards", "looked", "TEXT NOT NULL DEFAULT ''"),
                   ("cards", "proposal", "INTEGER"), ("items", "place_words", "TEXT NOT NULL DEFAULT ''"),
-                  ("items", "place_on", "TEXT NOT NULL DEFAULT ''"), ("cards", "moment", "TEXT NOT NULL DEFAULT ''"))
+                  ("items", "place_on", "TEXT NOT NULL DEFAULT ''"), ("cards", "moment", "TEXT NOT NULL DEFAULT ''"),
+                  ("cards", "back", "TEXT NOT NULL DEFAULT ''"), ("cards", "back_acted_at", "REAL"))
 # What report cards said for Why? before a candidate's reason did (an item's card,
 # never shown; a whole report's card), and the setting that says a store has
 # cleared them.
@@ -1259,6 +1266,23 @@ class PulseStore:
             row = conn.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
         return dict(row) if row else None
 
+    def closed_since(self, item_id: int, since: float) -> bool:
+        """Whether ``item_id``, or what replaced it, closed at ``since`` or
+        later: done, cancelled or expired then (one closed before, a promise
+        Pulse told the user, say, doesn't count)."""
+        with self._connect() as conn:
+            for _ in range(MAX_CHAIN):
+                row = conn.execute("SELECT status, closed_at, superseded_by FROM items WHERE id=?",
+                                   (item_id,)).fetchone()
+                if row is None:
+                    return False
+                if row["status"] not in ("open", "reminded"):
+                    return float(row["closed_at"] or 0.0) >= since
+                if row["superseded_by"] is None:
+                    return False
+                item_id = row["superseded_by"]
+        return False
+
     # Follow-ups -------------------------------------------------------------
 
     def add_followup(self, item_id: int, *, next_check_at: float, now: float, decision: str = "") -> None:
@@ -1668,10 +1692,11 @@ class PulseStore:
         return dict(row) if row else None
 
     def decide_act(self, card_id: int, *, acted_at: float, check_at: Optional[float], checks: int, outcome: str,
-                   why: str, stage: Optional[float] = None) -> None:
+                   why: str, stage: Optional[float] = None) -> bool:
         """Only while the act is the one read (a new Do it meanwhile starts
-        over). ``stage``: how far Do it got (pulse_prefs.ACT_SENT, ACT_DONE),
-        raised on its signal, never lowered."""
+        over); whether it was. ``stage``: how far Do it got
+        (pulse_prefs.ACT_SENT, ACT_DONE), raised on its signal, never
+        lowered."""
         with _lock, self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
@@ -1684,6 +1709,22 @@ class PulseStore:
             except BaseException:
                 conn.execute("ROLLBACK")
                 raise
+        return changed > 0
+
+    def bring_back(self, card_id: int, *, level: str, back: str, acted_at: float, why: str, now: float) -> bool:
+        """A card whose Do it stalled, back as new at the top of the list
+        (pulse_followup.come_back): at ``level``, "brief" holding it for the
+        morning brief, its Why? now ``why``; whether it came back. Once: never
+        a card back before, nor one marked done, swiped away or rated not
+        useful since."""
+        held = level == "brief"
+        with _lock, self._connect() as conn:
+            return conn.execute(
+                "UPDATE cards SET back=?, back_acted_at=?, why=?, level=?, seen_at=NULL, created_at=?, "
+                "briefed_at=CASE WHEN ? THEN NULL ELSE briefed_at END, brief=CASE WHEN ? THEN '' ELSE brief END "
+                "WHERE id=? AND back='' AND dismissed_at IS NULL AND NOT (rating='down' AND reason!=?) "
+                "AND id NOT IN (SELECT card_id FROM card_done)",
+                (back, acted_at, why, level, now, held, held, card_id, WRONG_TIME)).rowcount > 0
 
     def brief_cards(self, ids: list[int], now: float, brief: str = "") -> None:
         """Stamps held cards as gone out in the brief ``brief``; one put away

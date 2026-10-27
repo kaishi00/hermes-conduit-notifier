@@ -536,6 +536,9 @@ ACT_QUIET_S = 180.0
 ACT_AGAIN_S = (2 * 3600.0, 8 * 3600.0)
 # No answer in the chat by then: Do it was left unsent.
 ACT_GIVE_UP_S = 86400.0
+# Why a card whose Do it stalled came back (come_back, the card's ``back``):
+# Do it was left unsent, or its checks found it not done.
+UNSENT, NOT_DONE = "unsent", "not_done"
 
 ACT_INSTRUCTIONS = """You check whether something got done. Pulse, the part of Hermes (an AI assistant) that speaks up on its own, reminded its user of something, and the user tapped "Do it", which opened the chat it came from (or a new chat, for something that came from no chat) so they could take care of it with Hermes.
 
@@ -615,6 +618,7 @@ def check_acts(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzi
         if card is None or pulse_store.done_marks([card["id"]]):
             decide(check_at=None, checks=row["checks"], outcome="closed", why="")
             continue
+        back = functools.partial(come_back, pulse_store, card, row, zone=zone, now=now)
         text = ""
         try:
             text, last, answered, elsewhere = act_material(home, card, row["acted_at"], zone=zone, now=now)
@@ -625,8 +629,10 @@ def check_acts(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzi
             if not elsewhere and (not answered or now - last < ACT_QUIET_S):
                 # Not answered yet, or still going: look again, unless Do it was left unsent.
                 if now - row["acted_at"] >= ACT_GIVE_UP_S:
-                    decide(check_at=None, checks=row["checks"], outcome="no answer",
-                           why="the chat kept going" if answered else "nothing sent after Do it", stage=sent)
+                    if decide(check_at=None, checks=row["checks"], outcome="no answer",
+                              why="the chat kept going" if answered else "nothing sent after Do it",
+                              stage=sent) and not answered:
+                        back(UNSENT)
                 else:
                     decide(check_at=now + ACT_FIRST_S, checks=row["checks"], outcome="", why="")
                 continue
@@ -652,8 +658,47 @@ def check_acts(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzi
             decide(check_at=None, checks=checks, outcome="done", why=why, stage=prefs.ACT_DONE)
             continue
         again = ACT_AGAIN_S[checks - 1] if checks <= len(ACT_AGAIN_S) else None
-        decide(check_at=now + again if again else None, checks=checks, outcome="" if again else "not done", why=why,
-               stage=sent)
+        if decide(check_at=now + again if again else None, checks=checks, outcome="" if again else "not done",
+                  why=why, stage=sent) and not again:
+            back(NOT_DONE)
+
+
+def come_back(pulse_store: store.PulseStore, card: dict, act: dict, back: str, *, zone: tzinfo,
+              now: float) -> bool:
+    """A card whose Do it stalled (``back``: UNSENT or NOT_DONE) comes back
+    once, as new, at the next steps' level (pulse_learning.level): held for
+    the morning brief, or on the Pulse screen (at "push" too: a Do it the
+    user left is no news to push), its Why? saying so; whether it came back.
+    Not with next steps off, nor when its item closed since Do it, nor once
+    the card is back before, marked done, swiped away or rated not useful
+    (pulse_store.bring_back). Its chat was just read, so the held check
+    reads it again only HELD_EVERY_S on (mark_read)."""
+    level = learning.level(pulse_store, report.NEXT)
+    if level == "off":
+        return False
+    if card["item_id"] is not None and pulse_store.closed_since(card["item_id"], float(act["acted_at"])):
+        return False
+    when = tapped_words(float(act["acted_at"]), now, zone)
+    why = f"You tapped Do it {when} but didn't send it." if back == UNSENT else \
+        f"You tapped Do it {when}, and it isn't done yet."
+    if not pulse_store.bring_back(card["id"], level="brief" if level == "brief" else "screen", back=back,
+                                  acted_at=float(act["acted_at"]), why=why, now=now):
+        return False
+    if level == "brief":
+        mark_read(pulse_store, [card["id"]], now)
+    return True
+
+
+def tapped_words(acted_at: float, now: float, zone: tzinfo) -> str:
+    """When Do it was tapped, as a card back after it says: "today",
+    "yesterday", "on Tuesday" within the week, else "on 12 October"."""
+    tapped = datetime.fromtimestamp(acted_at, zone)
+    days = (datetime.fromtimestamp(now, zone).date() - tapped.date()).days
+    if days <= 0:
+        return "today"
+    if days == 1:
+        return "yesterday"
+    return f"on {tapped:%A}" if days < 7 else f"on {tapped.day} {tapped:%B}"
 
 
 # A card held for the morning brief is read again at most this often, so

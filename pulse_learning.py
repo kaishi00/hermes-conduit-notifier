@@ -362,11 +362,13 @@ def left_out_card(pulse_store: store.PulseStore, found: dict, *, kinds: tuple[st
 def card_entry(card: dict, done: Optional[dict] = None) -> dict[str, Any]:
     """``done``: its done mark, as ``done_marks`` gives it. ``learned``: the
     biggest part learning played in bringing it up (``factor_entry``), or
-    None."""
+    None. ``back``: why it came back after a Do it that stalled
+    (pulse_followup.UNSENT, NOT_DONE, or ""), and ``back_acted_at`` when
+    that Do it was tapped, so the app can say so in its own language."""
     entry = {key: card[key] for key in ("id", "kind", "item_id", "level", "title", "quote", "news", "why", "profile",
                                         "chat_id", "chat_title", "message_id", "topic", "created_at", "seen_at",
                                         "briefed_at", "brief", "dismissed_at", "rest_until", "rating", "reason",
-                                        "rated_at")}
+                                        "rated_at", "back", "back_acted_at")}
     return {**entry, "done_at": done["done_at"] if done else None, "done_by": done["done_by"] if done else "",
             "learned": factor_entry(card.get("learned")), "looked": store.looked_labels(card.get("looked"))}
 
