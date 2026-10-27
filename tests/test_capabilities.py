@@ -96,6 +96,8 @@ def test_every_capability_names_a_served_route_family():
         "pulse_look": "/pulse/feed",
         # Suggestions with an Add button: their cards in the feed, and the add, dismiss and undo routes.
         "pulse_proposals": "/pulse/proposals/",
+        # Where you are: a setting on the /pulse control route; a place on what /pulse/memory lists.
+        "pulse_where": "/pulse/memory",
         "present-v1": "/present/",
         "health-sync": "/health/",
         "shortcut-inbox": "/inbox/",

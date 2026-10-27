@@ -59,6 +59,7 @@ from . import pulse_host as host
 from . import pulse_learning as learning
 from . import pulse_ledger as ledger
 from . import pulse_memory as memory
+from . import pulse_places as places
 from . import pulse_prefs as prefs
 from . import pulse_proposals as proposals
 from . import pulse_quiet as quiet
@@ -271,14 +272,16 @@ def looks_first(pulse_store: store.PulseStore) -> bool:
 
 def _tool_turn(pulse_store: store.PulseStore, row: dict, calls: int = 0,
                today: Optional[dict[str, int]] = None) -> tools.Turn:
-    """What pulse_tools needs to know about an attempt's turn: its kind, and
-    for a follow-up the kind of its item."""
+    """What pulse_tools needs to know about an attempt's turn: its kind, for
+    a follow-up the kind of its item, and whether it may read where the
+    user is (pulse_places.reads)."""
     item_kind = ""
     if row["kind"] == FOLLOWUP:
         _, _, number = str(row["item_id"] or "").rpartition("-f")
         item = pulse_store.item(int(number)) if number.isdigit() else None
         item_kind = item["kind"] if item else ""
-    return tools.Turn(row["kind"], item_kind, calls, today or {})
+    return tools.Turn(row["kind"], item_kind, calls, today or {},
+                      places.reads(pulse_store, time.time(), get_hermes_home()))
 
 
 def is_pulse_turn(session_id: str, turn_id: Any) -> bool:
@@ -599,6 +602,9 @@ def tick(now: Optional[float] = None) -> None:
     # Deadlines from the Shortcuts inbox: a day after they're over, or at
     # once when their event was deleted there.
     memory.forget_inbox(pulse_store, home, now)
+    # Arrivals and departures at saved places, before anything else starts:
+    # one makes due what waits for it, which memory's run checks first.
+    places.take_moments(pulse_store, home, report_zone(pulse_store, home, now), now)
     _maybe_memory(pulse_store, home, now)
     # One new turn per tick: a probe first, then a follow-up, the brief, then the report.
     if not _maybe_probe(pulse_store, home, now) and not _maybe_followup(pulse_store, home, now) \
@@ -1090,7 +1096,11 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
         # on the follow-up budget, whatever follow-ups' switch; with the
         # budget spent, the dates due still come up, in code's words.
         looks = ahead.due(pulse_store, zone, now, asked=pulse_store.take_request(ahead.REQUESTED))
-        if used >= cap and not follows and not acts and not holds and not rests and not founds and not looks:
+        # What waits for a place the user just got to (pulse_places): first,
+        # and whatever the budget, as Do it is: they asked for it there.
+        moments = followup.moment_due(pulse_store, now) if pulse_store.get("followups") else []
+        if used >= cap and not follows and not acts and not holds and not rests and not founds and not looks \
+                and not moments:
             return  # `pulse status` says so
         profiles = pulse_store.get("report_profiles")
         sources = memory_sources(pulse_store, home, home_chat_id, profiles)
@@ -1104,7 +1114,21 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
         acted: dict[str, int] = {}
         found: dict[str, int] = {}
         looked: dict[str, int] = {}
+        placed: dict[str, int] = {}
         try:
+            if moments:
+                try:
+                    followup.run(pulse_store, home, lambda instructions, text: ask(
+                                     instructions, text, purpose="pulse follow-up"), zone=zone,
+                                 now=max(now, time.time()),
+                                 still_leader=lambda: not stopped.is_set() and _leads(pulse_store),
+                                 budget=float("inf"), done=placed, only=moments)
+                except Exception:  # noqa: BLE001 — each waits for the next time the user gets there
+                    logger.warning("conduit_push: Pulse checks for a place failed", exc_info=True)
+                finally:
+                    follow_used += placed.get("tokens", 0)
+                    _count_checks(pulse_store, placed)
+                wake()  # what they decided to tell goes now, not at the next tick
             try:
                 if used < cap:
                     memory.run(pulse_store, sources, ask, zone=zone, now=now,
@@ -1197,8 +1221,8 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
             # A run stopped by an unreadable state.db still spent its tokens.
             if done.get("tokens"):
                 pulse_store.set("memory_today", {"day": day, "tokens": used + done["tokens"]})
-            if checked.get("tokens") or looked.get("tokens"):
-                # follow_used holds the look ahead's by now.
+            if checked.get("tokens") or looked.get("tokens") or placed.get("tokens"):
+                # follow_used holds the look ahead's and the place checks' by now.
                 pulse_store.set("followup_today", {"day": day, "tokens": follow_used + checked.get("tokens", 0)})
             if done.get("chunks") or done.get("failed") or done.get("tokens"):
                 usage = pulse_store.get("memory_usage")
