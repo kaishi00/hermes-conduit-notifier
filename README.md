@@ -1016,7 +1016,7 @@ runtime is made in the dashboard). Hermes doesn't route on that parameter, so th
 process, and the route scopes itself to the profile as Hermes would for
 `?profile=`. It first asks Hermes' own consent check in that profile, so a
 profile that turned the plugin off gets 404. A Hermes Desktop ticket acts for
-its own profile only, so a request carrying one gets 403. When the request
+its own profile only, so a request carrying one for another profile gets 403. When the request
 also sends `?profile=`, the two must name the same profile (400 otherwise).
 The capabilities route lists `dashboard-profiles`, and Conduit sends
 `?conduit_profile=` only to a plugin that lists it.

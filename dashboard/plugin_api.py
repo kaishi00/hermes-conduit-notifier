@@ -589,8 +589,9 @@ async def _conduit_route_profile(conn: HTTPConnection, profile: Optional[str]) -
         raise HTTPException(status_code=400, detail="profile and conduit_profile name different profiles")
     if not named:
         return None
-    # A native ticket is one profile's principal; Hermes scopes it there.
-    if getattr(conn.state, "native_http_principal", None) is not None:
+    # A native ticket is one profile's principal: it may name its own home, not another.
+    ticket_home = _native_ticket_home(conn)
+    if ticket_home is not None and not (ticket_home and _job_profile_on_home(named, ticket_home)):
         raise HTTPException(status_code=403, detail=CONDUIT_PROFILE_TICKET_REASON)
     if await _plugin_refused_on(named):
         raise HTTPException(status_code=404, detail="Plugin not found")

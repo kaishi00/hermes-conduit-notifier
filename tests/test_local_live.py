@@ -1587,12 +1587,19 @@ def test_conduit_profile_must_match_profile(client, hermes):
     assert client.get(f"{BASE}/local-live/status?profile=work&conduit_profile=work").status_code == 200
 
 
-def test_conduit_profile_isnt_for_a_desktop_ticket(hermes):
-    conn = types.SimpleNamespace(query_params={"conduit_profile": "work"},
-                                 state=types.SimpleNamespace(native_http_principal={"profile_id": "/h/home"}))
-    with pytest.raises(api.HTTPException) as refused:
-        asyncio.run(api._conduit_route_profile(conn, None))
-    assert refused.value.status_code == 403
+def test_conduit_profile_takes_a_desktop_ticket_only_for_its_own_profile(hermes, monkeypatch, tmp_path):
+    monkeypatch.setattr(api, "_profile_dir", lambda name: tmp_path / name)
+    monkeypatch.setattr(api, "_plugin_refused_on", lambda name: asyncio.sleep(0, False))
+    state = types.SimpleNamespace(native_http_principal={"profile_id": str(tmp_path / "work")})
+    own = types.SimpleNamespace(query_params={"conduit_profile": "work"}, state=state)
+    assert asyncio.run(api._conduit_route_profile(own, None)) == "work"
+    for name, principal in (("home", state.native_http_principal), ("work", {})):
+        conn = types.SimpleNamespace(query_params={"conduit_profile": name},
+                                     state=types.SimpleNamespace(native_http_principal=principal))
+        with pytest.raises(api.HTTPException) as refused:
+            asyncio.run(api._conduit_route_profile(conn, None))
+        assert refused.value.status_code == 403
+    conn = own
     without = types.SimpleNamespace(query_params={}, state=conn.state)
     assert asyncio.run(api._conduit_route_profile(without, "home")) == "home"
 
