@@ -13,7 +13,6 @@ import itertools
 import json
 import logging
 import pathlib
-import socket
 import stat
 import sys
 import tempfile
@@ -254,7 +253,7 @@ class FakeHermes:
 
     @staticmethod
     def _send(handler, status, body):
-        raw = json.dumps(body).encode()
+        raw = body if isinstance(body, bytes) else json.dumps(body).encode()
         handler.send_response(status)
         handler.send_header("Content-Type", "application/json")
         handler.send_header("Content-Length", str(len(raw)))
@@ -829,6 +828,22 @@ def test_no_answer_from_the_api_server_is_503(laifu, hermes):
     assert [answer["status"] for answer in answers] == [503, 503, 503, 503]
     assert all(answer["body"]["error"]["code"] == "member_unavailable" for answer in answers)
     assert laifu.link.statuses() == []  # nothing said about a run it couldn't read
+
+
+@pytest.mark.parametrize("raw", [b"", b"not json", b"[]"])
+def test_a_2xx_with_no_answer_in_it_is_503(laifu, hermes, raw):
+    run_id = admit(laifu)
+    for route in (("GET", "/v1/room-members/capabilities"), ("POST", "/v1/room-members/grants/refresh"),
+                  ("POST", "/v1/room-members/grants/revoke"), ("POST", "/v1/runs/{id}/stop")):
+        hermes.answers[route] = (200, raw)
+
+    answers = [ask(laifu, method="GET", path="/v1/room-members/capabilities"),
+               ask(laifu, path="/v1/room-members/grants/refresh", body={"ttl_seconds": 3600}),
+               ask(laifu, path="/v1/room-members/grants/revoke", body={}),
+               ask(laifu, path=f"/v1/runs/{run_id}/stop", body={})]
+
+    assert [answer["status"] for answer in answers] == [503, 503, 503, 503]
+    assert all(answer["body"]["error"]["code"] == "member_unavailable" for answer in answers)
 
 
 def test_a_slow_api_server_is_503_after_its_time(laifu, hermes):

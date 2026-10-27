@@ -232,9 +232,28 @@ def _well_formed(state: Any) -> bool:
         return False
     return all(isinstance(scopes, list) and all(checked_scope(scope) is not None for scope in scopes)
                for scopes in member["bindings"].values()) \
-        and all(isinstance(run, dict) and isinstance(run.get("link"), str) and isinstance(run.get("kind"), str)
-                for run in member["runs"].values()) \
-        and all(isinstance(rooms, dict) for rooms in member["days"].values())
+        and all(_kept_run(run) for run in member["runs"].values()) \
+        and all(isinstance(rooms, dict) and all(isinstance(today, dict) and isinstance(today.get("keys"), list)
+                                                and isinstance(today.get("notice"), bool)
+                                                for today in rooms.values())
+                for rooms in member["days"].values())
+
+
+def _kept_run(run: Any) -> bool:
+    """A run as the member's side keeps it, with every field its watching
+    reads: one entry without them would stop the watching of every run."""
+    if not isinstance(run, dict) or not isinstance(run.get("link"), str):
+        return False
+    if run.get("kind") == "pass":
+        return isinstance(run.get("output"), str) and _number(run.get("at"))
+    return run.get("kind") == "run" and isinstance(run.get("profile"), str) and isinstance(run.get("grant"), str) \
+        and _number(run.get("admitted")) and _number(run.get("sent_at")) and type(run.get("seq")) is int \
+        and isinstance(run.get("shown"), dict) and isinstance(run["shown"].get("status"), str) \
+        and (run.get("ended") is None or _number(run.get("ended")))
+
+
+def _number(value: Any) -> bool:
+    return type(value) in (int, float)
 
 
 # room_links is imported so a copy of this module goes with the room_links

@@ -473,7 +473,8 @@ class Member:
     def _call(self, profile: str, method: str, path: str, grant: str, *, key: Optional[str] = None,
               body: Optional[dict] = None) -> tuple[Optional[int], dict]:
         """This Hermes' answer to one request for a room: its status and JSON
-        object, or None and {} when it didn't answer."""
+        object, or None and {} when it didn't answer, a 2xx without a JSON
+        object in it included."""
         try:
             base = self.api_url(profile)
         except Exception as exc:  # noqa: BLE001 - no API server to replay to is no answer
@@ -505,10 +506,13 @@ class Member:
         if len(raw) > MAX_ANSWER_BYTES:
             return None, {}
         try:
-            parsed = json.loads(raw) if raw else {}
+            parsed = json.loads(raw) if raw else None
         except (ValueError, RecursionError):
-            parsed = {}
-        return status, parsed if isinstance(parsed, dict) else {}
+            parsed = None
+        if not isinstance(parsed, dict):
+            # A refusal is one by its status alone; a 2xx is nothing without its answer.
+            return (None, {}) if 200 <= status < 300 else (status, {})
+        return status, parsed
 
     def _local_api_url(self, profile: str) -> str:
         from . import room_setup

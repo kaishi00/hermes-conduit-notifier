@@ -137,3 +137,47 @@ def test_a_store_it_didnt_write_is_unreadable(tmp_path, content):
     with pytest.raises(bridge.BridgeError) as refused:
         bridge.Store(tmp_path).read()
     assert refused.value.code == "unreadable"
+
+
+# Each kind of entry as the member's side writes it.
+WATCHED = {"link": "link1", "kind": "run", "key": "room:t1:1", "profile": "default", "grant": "g", "admitted": 1.0,
+           "home_stopped": False, "shown": {"status": "queued"}, "sent": {"status": "queued"}, "sent_at": 1.0,
+           "seq": 0, "ended": None}
+PASSED = {"link": "link1", "kind": "pass", "key": "room:t2:1", "output": "(pass)", "at": 1.0}
+DAY = {"keys": ["room:t1:1"], "notice": False}
+
+
+def _written(watched=WATCHED, passed=PASSED, day=DAY):
+    return {"version": 1,
+            "member": {"bindings": {"link1": [SCOPE]}, "runs": {"run_1": watched, "pass_1": passed},
+                       "days": {"2026-10-27": {"default/room-zoo": day}}}}
+
+
+def test_a_store_with_every_kind_of_entry_reads_as_written(tmp_path):
+    (tmp_path / "conduit-rooms").mkdir()
+    (tmp_path / "conduit-rooms" / "bridge.json").write_text(json.dumps(_written()))
+
+    assert bridge.Store(tmp_path).read() == _written()
+
+
+def _without(entry, name):
+    return {key: value for key, value in entry.items() if key != name}
+
+
+@pytest.mark.parametrize("entries", [
+    *({"watched": _without(WATCHED, name)} for name in
+      ("link", "kind", "profile", "grant", "admitted", "shown", "sent_at", "seq")),
+    {"watched": {**WATCHED, "kind": "later"}}, {"watched": {**WATCHED, "shown": {}}},
+    {"watched": {**WATCHED, "seq": "0"}}, {"watched": {**WATCHED, "admitted": True}},
+    {"watched": {**WATCHED, "ended": "now"}},
+    *({"passed": _without(PASSED, name)} for name in ("output", "at")),
+    {"day": {"keys": "room:t1:1", "notice": False}}, {"day": {"keys": []}},
+])
+def test_an_entry_the_bridge_cant_use_makes_the_store_unreadable(tmp_path, entries):
+    # One such entry would stop the watching of every run, each pass.
+    (tmp_path / "conduit-rooms").mkdir()
+    (tmp_path / "conduit-rooms" / "bridge.json").write_text(json.dumps(_written(**entries)))
+
+    with pytest.raises(bridge.BridgeError) as refused:
+        bridge.Store(tmp_path).read()
+    assert refused.value.code == "unreadable"
