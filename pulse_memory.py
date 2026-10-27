@@ -15,7 +15,9 @@ the item it repeats, a change supersedes the old item (kept, with when it
 stopped being true), and words showing an item done or called off close it.
 Dated items left untouched a week past their date expire, and a commitment
 learned only after its time had passed (a backfill of older chats) is kept
-as expired: too late to remind. A reminder Pulse handed on with Do it, and
+as expired: too late to remind. A fact about a date that comes back every
+year (a birthday, an anniversary) keeps its month and day instead of a due
+date, so it never expires: Pulse brings it up every year (pulse_dates). A reminder Pulse handed on with Do it, and
 Hermes's answer to it, can close an item but never add one.
 
 Shadow only: the items are read by ``pulse memory`` and the shadow report
@@ -38,6 +40,7 @@ from datetime import datetime, tzinfo
 from pathlib import Path
 from typing import Any, Callable, Collection, Iterator, Optional, Sequence
 
+from . import pulse_dates
 from . import pulse_hermes as hermes
 from . import pulse_ledger as ledger
 from . import pulse_store as store
@@ -92,6 +95,11 @@ HANDOFF_MIN = 20  # a shorter reminder could turn up in a message by chance
 # then, or missed (Eric, 2026-10-25: a 16:00 wallet reminder came five days
 # later). A date without a time counts from the end of its day.
 LATE_S = 12 * 3600.0
+# What a fact's yearly date is (pulse_dates): the first two get a two-week
+# heads-up, besides the day before and the day.
+OCCASIONS = ("birthday", "anniversary", "other")
+# A yearly date's year before this is left out (a typo, or a placeholder).
+MIN_YEAR = 1900
 # Who may say each kind; a fact can come from either.
 SPEAKERS = {"commitment": "user", "intention": "user", "interest": "user", "watch": "user",
             "promise": "assistant"}
@@ -120,8 +128,10 @@ Each item has:
 - "evidence": the exact words it comes from, copied from one line, at most 200 characters.
 - "line": that line's number.
 - "explicit": true when said outright, false when you inferred it.
-- "due": only when a day or time was actually said for it: "YYYY-MM-DD", or "YYYY-MM-DDTHH:MM" when a time was said, in the user's local time. Resolve words like "Friday" or "tomorrow" against the date on the line they were said on. Otherwise null. Never guess a date.
-- "due_words": the exact words that gave the date, or null.
+- "due": only when a day or time was actually said for it: "YYYY-MM-DD", or "YYYY-MM-DDTHH:MM" when a time was said, in the user's local time. Resolve words like "Friday" or "tomorrow" against the date on the line they were said on. Otherwise null. Never guess a date. Not for a date that comes back every year: that's "every_year".
+- "every_year": only for a fact about a date that comes back every year, such as a birthday or an anniversary, when its day was said: "MM-DD", or "YYYY-MM-DD" when the year it began was said too (the year someone was born, or married). Otherwise null.
+- "occasion": with "every_year", what the date is: "birthday", "anniversary" or "other". Otherwise null.
+- "due_words": the exact words that gave the date ("due" or "every_year"), or null.
 - "same_as": the number of a remembered thing of the same kind this says again, or null. Say it again rather than repeating it as a new item. Never one marked "reminded": Pulse already reminded the user of it, and said again it's a new item.
 - "replaces": the number of a remembered thing of the same kind this changes (a new date, a changed plan, a fact that is no longer true), or null. Never one marked "reminded".
 
@@ -135,6 +145,7 @@ Llm = Callable[[str, str], tuple[Any, int]]
 _CODE = re.compile(r"```.*?(?:```|\Z)", re.DOTALL)
 _ELLIPSIS = re.compile(r"\s*(?:\.\.\.|…)\s*")
 _DUE = re.compile(r"\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2})?")
+_YEARLY = re.compile(r"(?:(\d{4})-)?(\d{2})-(\d{2})")
 _WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 _QUOTES = str.maketrans({"“": '"', "”": '"', "‘": "'", "’": "'"})
 
@@ -365,6 +376,7 @@ def candidates(remembered: Sequence[dict], chunk: Sequence[Any], chat_id: str) -
 def render_remembered(remembered: Sequence[dict], zone: tzinfo) -> str:
     return "\n".join(f"#{item['id']} {item['kind']}: {item['text']}"
                       + (f" (due {item['due']})" if item["due"] else "")
+                      + (f" (every year on {item['every_year']})" if item.get("every_year") else "")
                       + f" (said {_local(item['mentioned_at'], zone):%Y-%m-%d}: \"{_clip(item['evidence'], 120)}\")"
                       + (f" (reminded {_local(item['closed_at'], zone):%Y-%m-%d})" if _reminded(item) else "")
                       for item in remembered)
@@ -399,12 +411,9 @@ def _due(value: Any, words: Any, chunk: Sequence[Any], row: Any, zone: tzinfo) -
     are on the item's own line or the one either side ("Friday?" "Yes"),
     it isn't before the day they were said, and a weekday they name is the
     date's."""
-    if not isinstance(value, str) or not value.strip():
+    if not isinstance(value, str) or not value.strip() or not _said_near(words, chunk, row):
         return "", None
     said = _norm(words)
-    at = next((n for n, other in enumerate(chunk) if other is row), None)
-    if at is None or not said or not any(said in _norm(_text(other["content"])) for other in chunk[max(0, at - 1):at + 2]):
-        return "", None
     value = value.strip().replace(" ", "T")
     if not _DUE.fullmatch(value):
         return "", None
@@ -420,6 +429,42 @@ def _due(value: Any, words: Any, chunk: Sequence[Any], row: Any, zone: tzinfo) -
     if named and _weekday(when) not in named:
         return "", None
     return value, when.replace(tzinfo=zone).timestamp()
+
+
+def _said_near(words: Any, chunk: Sequence[Any], row: Any) -> bool:
+    """Whether the words that gave a date are on ``row`` or the row either
+    side of it."""
+    said = _norm(words)
+    at = next((n for n, other in enumerate(chunk) if other is row), None)
+    return at is not None and bool(said) and any(said in _norm(_text(other["content"]))
+                                                 for other in chunk[max(0, at - 1):at + 2])
+
+
+def _yearly(value: Any, occasion: Any, words: Any, chunk: Sequence[Any], row: Any, zone: tzinfo) -> tuple[str, str]:
+    """A fact's yearly date as said, "MM-DD" or "YYYY-MM-DD" with the year it
+    began, and what it is (OCCASIONS, "other" when the model named none),
+    only when the words that gave it are on its line or the one either side,
+    as for a due date. A year before MIN_YEAR or after the one it was said
+    in is left out, and so is one that makes 29 February no real date."""
+    found = _YEARLY.fullmatch(value.strip()) if isinstance(value, str) else None
+    if found is None or not _said_near(words, chunk, row):
+        return "", ""
+    year, month, day = (int(found[1]) if found[1] else None), int(found[2]), int(found[3])
+    if not _real(2000, month, day):  # a leap year: 29 February is a real date
+        return "", ""
+    if year is not None and not (MIN_YEAR <= year <= _local(row["timestamp"], zone).year and _real(year, month, day)):
+        year = None
+    what = str(occasion or "").strip().lower()
+    return (f"{year:04d}-" if year is not None else "") + f"{month:02d}-{day:02d}", \
+        what if what in OCCASIONS else "other"
+
+
+def _real(year: int, month: int, day: int) -> bool:
+    try:
+        datetime(year, month, day)
+    except ValueError:
+        return False
+    return True
 
 
 def _weekday(when: datetime) -> str:
@@ -456,6 +501,10 @@ def _item(raw: Any, chunk: Sequence[Any], zone: tzinfo, remembered: Sequence[dic
     if SPEAKERS.get(kind, row["role"]) != row["role"]:
         return None  # the user's commitment in Hermes's words, or Hermes's promise in the user's
     due, due_at = _due(raw.get("due"), raw.get("due_words"), chunk, row, zone)
+    every_year, occasion = _yearly(raw.get("every_year"), raw.get("occasion"), raw.get("due_words"), chunk, row,
+                                   zone) if kind == "fact" else ("", "")
+    if every_year:
+        due, due_at = "", None  # it comes round every year: never due once, so never expired
     # A date without a time lasts to the end of its day.
     late = kind == "commitment" and due_at is not None and now is not None \
         and now - (due_at if "T" in due else due_at + 86400.0) > LATE_S
@@ -470,7 +519,7 @@ def _item(raw: Any, chunk: Sequence[Any], zone: tzinfo, remembered: Sequence[dic
                         _norm(item["evidence"]) == _norm(evidence) or _norm(item["text"]) == _norm(text)), None)
     return {"kind": kind, "text": text, "evidence": evidence, "explicit": int(raw.get("explicit") is True),
             "due": due, "due_at": due_at, "message_id": row["id"], "mentioned_at": row["timestamp"],
-            "same_as": same_as, "replaces": replaces, "late": late}
+            "same_as": same_as, "replaces": replaces, "late": late, "every_year": every_year, "occasion": occasion}
 
 
 CLOSABLE = ("commitment", "promise", "intention", "watch")
@@ -723,6 +772,8 @@ def describe(item: dict, zone: tzinfo) -> str:
     """One item for `pulse memory`."""
     where = f"[{item['profile']}] " if item["profile"] else ""
     due = f" (due {item['due']})" if item["due"] else ""
+    yearly = pulse_dates.words(item.get("every_year"))
+    due += f" (every year on {yearly})" if yearly else ""
     # The quote is from when the item was first said; a repeat moves only the last mention.
     first, latest = _local(item["valid_from"], zone), _local(item["mentioned_at"], zone)
     form = "%d %b" if latest.year == first.year else "%d %b %Y"

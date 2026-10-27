@@ -45,6 +45,9 @@ MAX_ROOMS = 512
 MAX_CUSTOM_TOOLS = 64
 MIN_DAILY_LIMIT, MAX_DAILY_LIMIT = 1, 500
 MAX_NOTE_CHARS = 1000
+# Who else a room has (room_invites.people_key): Links and other people's names.
+MAX_PEOPLE = 16
+MAX_PERSON_CHARS = 256
 # 2100-01-01: later (or inf) is a corrupt time.
 MAX_AT = 4_102_444_800
 
@@ -151,18 +154,36 @@ class ChoicesStore:
         """Whether the room has choices of its own."""
         return self._choices(self._load(), room_id_from(room_id))[1]
 
-    def set(self, room_id: Any, choices: Any) -> RoomChoices:
+    def set(self, room_id: Any, choices: Any, *, people: Any = None) -> RoomChoices:
         """Changes the fields ``choices`` names for the room, over what it had
-        (the defaults for a room with none). Returns the room's choices."""
+        (the defaults for a room with none). ``people`` says who else is in
+        the room, for ``last_with``; without it the room keeps the people it
+        had. Returns the room's choices."""
         room_id = room_id_from(room_id)
+        people = None if people is None else _people(people)
         with self._locked() as state:
             current = self._choices(state, room_id)[0]
             updated = choices_from(choices, current)
-            state["rooms"][room_id] = {"choices": updated.as_dict(), "at": self.clock()}
+            entry: dict[str, Any] = {"choices": updated.as_dict(), "at": self.clock()}
+            if people is None:
+                people = state["rooms"].get(room_id, {}).get("people")
+            if people is not None:
+                entry["people"] = people
+            state["rooms"][room_id] = entry
             while len(state["rooms"]) > MAX_ROOMS:
                 oldest = min(state["rooms"], key=lambda key: state["rooms"][key]["at"])
                 del state["rooms"][oldest]
             return updated
+
+    def last_with(self, people: Any) -> Optional[RoomChoices]:
+        """The choices of the room with exactly these other people that were
+        set most recently, or None: a new room with the same people starts
+        from them (decision 9)."""
+        wanted = _people(people)
+        state = self._load()
+        rooms = [(entry["at"], room_id) for room_id, entry in state["rooms"].items()
+                 if entry.get("people") == wanted]
+        return self._choices(state, max(rooms)[1])[0] if rooms else None
 
     def defaults(self) -> RoomChoices:
         return self._defaults(self._load())
@@ -309,6 +330,14 @@ def _note(value: Any) -> str:
     return text
 
 
+def _people(value: Any) -> list[str]:
+    # Who else is in a room, each as room_invites.people_key spells them.
+    if not isinstance(value, list) or len(value) > MAX_PEOPLE \
+            or not all(isinstance(person, str) and 1 <= len(person) <= MAX_PERSON_CHARS for person in value):
+        raise ChoicesError(f"people is a list of up to {MAX_PEOPLE} names")
+    return sorted(set(value))
+
+
 def _normalized(raw: Any, dropped: Optional[list[str]] = None) -> dict[str, Any]:
     """The file's state in the shape the store keeps; ``dropped`` gets the
     room keys that aren't room ids."""
@@ -331,6 +360,10 @@ def _normalized(raw: Any, dropped: Optional[list[str]] = None) -> dict[str, Any]
             if not isinstance(at, (int, float)) or isinstance(at, bool) or not 0 <= at < MAX_AT:
                 at = 0.0
             state["rooms"][room_id] = {"choices": entry.get("choices"), "at": float(at)}
+            try:
+                state["rooms"][room_id]["people"] = _people(entry["people"])
+            except (KeyError, ChoicesError):
+                pass  # none, or a hand edit's: the room matches no one
     return state
 
 

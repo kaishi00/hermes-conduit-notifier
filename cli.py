@@ -52,10 +52,11 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
              "next connects to this dashboard; `hermes conduit-push unpair` cuts it off now",
     )
     pulse = commands.add_parser("pulse", help="Pulse, the proactivity experiment: on, off, status, probe, report, home, outcomes, memory, followups, "
-                                                 "cards, rate, done, learned, nudge, budget, candidates, note, quiet, night")
+                                                 "cards, rate, done, learned, nudge, budget, candidates, note, quiet, night, "
+                                                 "dates, ahead")
     pulse.add_argument("pulse_action", choices=["on", "off", "status", "probe", "report", "home", "outcomes", "memory",
                                                 "followups", "cards", "rate", "done", "learned", "nudge", "budget",
-                                                "candidates", "note", "quiet", "night"])
+                                                "candidates", "note", "quiet", "night", "dates", "ahead"])
     pulse.add_argument("value", nargs="?", default="",
                        help="for home: the id of the chat to use, or 'auto' to find it by title; "
                             "for outcomes: how many to show, or a chat id; "
@@ -74,7 +75,9 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
                             "for note: what you want from Pulse, in your own words, or 'clear'; "
                             "for quiet: 'today', 'until' and a day, 'off', 'days' and weekdays like sat,sun "
                             "(or none), or nothing to show the quiet times; "
-                            "for night: when it starts, like 22:00, or 'off', or nothing to show it")
+                            "for night: when it starts, like 22:00, or 'off', or nothing to show it; "
+                            "for ahead: 'now' (a look ahead at the next memory run), 'on', 'off', or nothing to "
+                            "show the latest")
     pulse.add_argument("extra", nargs="?", default="",
                        help="for memory forget: the item number; for memory backfill: how many days back "
                             "(it shows what that costs), 'start', 'stop' or 'cancel'; "
@@ -96,14 +99,26 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
                        help="for import: drop the preferences the file doesn't list, instead of keeping them")
     rooms = commands.add_parser(
         "rooms",
-        help="What this profile's agent may do in group rooms with other people's agents: show or set it, "
-             "delete its hidden chat for a room (forget), or set this Hermes up for rooms (setup)",
+        help="Group rooms with other people's agents: what this profile's agent may do in them (show, set), "
+             "deleting its hidden chat for one (forget), setting this Hermes up for them (setup), and rooms with "
+             "people you've linked: make one (invite), see yours (drafts), start one now (start) or take it back "
+             "(withdraw), and see the ones you're invited to (invites), join or decline one",
     )
-    rooms.add_argument("rooms_action", choices=["show", "set", "forget", "setup"])
+    rooms.add_argument("rooms_action", choices=["show", "set", "forget", "setup", "invite", "drafts", "start",
+                                                "withdraw", "invites", "join", "decline"])
     rooms.add_argument("--room", default="",
                        help="the room's id; without one, show and set use the defaults for rooms with no choices "
-                            "of their own (forget needs one)")
-    rooms.add_argument("--yes", action="store_true", help="for forget and setup: go ahead without asking first")
+                            "of their own (forget, start, withdraw, join and decline need one)")
+    rooms.add_argument("--yes", action="store_true",
+                       help="for forget, setup and withdraw: go ahead without asking first")
+    rooms.add_argument("--name", help="for invite: the room's name")
+    rooms.add_argument("--link", action="append", default=None, metavar="LINK",
+                       help="for invite: a Link to invite the person of (links list shows them); repeat it for "
+                            "more; for join and decline: the Link that invited you, when two did")
+    rooms.add_argument("--agent", action="append", default=None, metavar="PROFILE[=HANDLE]",
+                       help="for invite and join: one of your agents to bring, by its profile, with its @handle "
+                            "in the room when it isn't the one from its bot's name; repeat it for more "
+                            "(without one, this profile's)")
     rooms.add_argument("--ceiling", metavar="TOOLSET,...",
                        help="for setup: the toolsets rooms may use on this profile, comma-separated (empty: none); "
                             "without it, the ones saved before, or web, vision, X search and past-chat search")
@@ -344,8 +359,8 @@ def _pulse(args: argparse.Namespace) -> int:
     home = get_hermes_home()
     action = args.pulse_action
     # Follow-ups are on by default, so even `followups on|off` needs no file yet.
-    listing = action in ("followups", "cards", "rate", "done", "learned", "candidates") \
-        or (action == "memory" and (args.value or "").strip() not in ("on", "off")) \
+    listing = action in ("followups", "cards", "rate", "done", "learned", "candidates", "dates") \
+        or (action in ("memory", "ahead") and (args.value or "").strip() not in ("on", "off")) \
         or (action == "nudge" and not (args.value or "").strip()) \
         or (action == "note" and (args.value or "").strip() in ("", "clear")) \
         or (action in ("quiet", "night") and not (args.value or "").strip()) \
@@ -356,7 +371,7 @@ def _pulse(args: argparse.Namespace) -> int:
               + (" Nothing was changed." if action in ("followups", "learned") and (args.value or "").strip() else ""))
         return 1 if action in ("probe", "rate", "done") or (action == "learned" and (args.value or "").strip()) \
             or (action == "candidates" and (args.value or "").strip() == "bring") \
-            or (action == "memory" and (args.value or "").strip() in ("now", "forget")) \
+            or (action in ("memory", "ahead") and (args.value or "").strip() in ("now", "forget")) \
             or (action == "followups" and (args.value or "").strip() in ("on", "now")) else 0
     pulse_store = pulse.open_store(home)
     if action in ("on", "off"):
@@ -413,6 +428,10 @@ def _pulse(args: argparse.Namespace) -> int:
         return _pulse_budget(pulse_store, (args.value or "").strip(), str(getattr(args, "extra", "") or "").strip())
     if action == "memory":
         return _pulse_memory(pulse_store, home, (args.value or "").strip(), str(getattr(args, "extra", "") or "").strip())
+    if action == "dates":
+        return _pulse_dates(pulse_store, home)
+    if action == "ahead":
+        return _pulse_ahead(pulse_store, home, (args.value or "").strip())
     print(f"Pulse: {'on' if pulse_store.get('enabled') else 'off'}")
     chat, problem = pulse.home_chat(pulse_store, home)
     if chat is not None:
@@ -509,6 +528,7 @@ def _pulse(args: argparse.Namespace) -> int:
             print(f"Follow-ups used today's {follow_cap} tokens; checks resume tomorrow.")
     else:
         print("Follow-ups: off")
+    print(_ahead_line(pulse_store, zone))
     print(f"Nudging: {pulse_learning.nudge(pulse_store)} (`hermes conduit-push pulse nudge gentle|balanced|eager`)")
     note = " ".join(pulse.report.note(pulse_store).split())
     print(f"Note to Pulse: {_printable(note)}" if note
@@ -590,6 +610,8 @@ def _rooms(args: argparse.Namespace) -> int:
     from . import room_choices
 
     room = str(getattr(args, "room", "") or "").strip()
+    if args.rooms_action in _LINKED_ROOMS:
+        return _linked_rooms(args, room, Path(get_hermes_home()))
     if args.rooms_action == "forget":
         return _forget_room(room, Path(get_hermes_home()), bool(getattr(args, "yes", False)))
     if args.rooms_action == "setup":
@@ -897,22 +919,212 @@ def _say_if_nothing_reads(room_links: Any, root: Path,
         time.sleep(0.2)
 
 
+# Rooms with people you've linked: what each command does, and how to use the ones that name a room.
+_LINKED_ROOMS = {"invite": "make the room", "drafts": "list them", "start": "start it", "withdraw": "take it back",
+                 "invites": "list them", "join": "join it", "decline": "decline it"}
+_LINKED_ROOMS_USAGE = {
+    "start": "hermes conduit-push rooms start --room <id> (rooms drafts shows them)",
+    "withdraw": "hermes conduit-push rooms withdraw --room <id> (rooms drafts shows them)",
+    "join": "hermes conduit-push rooms join --room <id> [--agent PROFILE[=HANDLE]]... (rooms invites shows them)",
+    "decline": "hermes conduit-push rooms decline --room <id> (rooms invites shows them)",
+}
+_DRAFT_ENDED = {"withdrawn": "taken back", "lapsed": "ran out before it started",
+                "too_few": "ended: nobody else's agents could join", "start_failed": "ended: Hermes couldn't make it"}
+_INVITE_ENDED = {"started_without_you": "it started without you", "refused": "their Hermes couldn't reach your agents",
+                 "too_few": "nobody else's agents could join", "start_failed": "their Hermes couldn't make it",
+                 "withdrawn": "they took it back", "lapsed": "it ran out"}
+
+
+def _linked_rooms(args: argparse.Namespace, room: str, home: Path) -> int:
+    """Rooms with people you've linked (room_invites): the CLI makes them and
+    answers invites, and the dashboard's rooms loop, which reads the answers,
+    starts them."""
+    from . import room_identity, room_invites, room_links
+
+    action = args.rooms_action
+    if action in _LINKED_ROOMS_USAGE and not room:
+        print(f"Usage: {_LINKED_ROOMS_USAGE[action]}")
+        return 2
+    root = room_identity.root_home(home)
+    try:
+        rooms = room_invites.here(root)
+        if action == "invite":
+            return _invite_to_room(rooms, room_invites, room_links, root, home, args)
+        if action == "drafts":
+            _print_drafts(rooms.drafts())
+        elif action == "start":
+            draft = rooms.start(room)
+            print(f"{_printable(draft['name'])} starts now with whoever has joined, and the rest are told it "
+                  "started without them.")
+            _say_if_nothing_reads(room_links, root, "it can't start")
+        elif action == "withdraw":
+            return _withdraw_room(rooms, room, bool(getattr(args, "yes", False)))
+        elif action == "invites":
+            from . import room_setup
+
+            _print_invites(rooms.invites(), room_setup.profile_name(home))
+        else:
+            return _answer_invite(rooms, room_invites, room_links, root, home, room, args)
+    except (room_invites.RoomsError, room_links.LinkError, OSError) as error:
+        print(f"Couldn't {_LINKED_ROOMS[action]}: {error}")
+        return 1
+    return 0
+
+
+def _invite_to_room(rooms: Any, room_invites: Any, room_links: Any, root: Path, home: Path,
+                    args: argparse.Namespace) -> int:
+    name = str(getattr(args, "name", "") or "").strip()
+    links = list(getattr(args, "link", None) or [])
+    if not name or not links:
+        print(f"Name the room with --name and the people to invite by their Link with --link (links list shows "
+              f"them), for example: hermes conduit-push rooms invite --name \"Zoo trip\" --link <Link id>")
+        return 2
+    draft = rooms.draft(name, _room_agents(room_invites, root, home, args), links, where={"kind": "any"})
+    print(f"Invited {_and(_printable(person['name']) for person in draft['people'])} to "
+          f"{_printable(draft['name'])} (room {draft['room_id']}) with {_handles(draft['agents'])}. It starts by "
+          "itself once everyone has answered; to start it sooner with whoever has joined: "
+          f"hermes conduit-push rooms start --room {draft['room_id']}")
+    _say_if_nothing_reads(room_links, root, "their answers wait there, and the room can't start,")
+    return 0
+
+
+def _answer_invite(rooms: Any, room_invites: Any, room_links: Any, root: Path, home: Path, room: str,
+                   args: argparse.Namespace) -> int:
+    links = getattr(args, "link", None) or []
+    link = str(links[-1]).strip() if links else ""
+    invites = [invite for invite in rooms.invites() if invite["room_id"] == room and link in ("", invite["link"])]
+    if not invites:
+        print(f"No invite to room {_printable(room)} on this Hermes. hermes conduit-push rooms invites shows them.")
+        return 1
+    if len(invites) > 1:
+        print(f"Two Links invited you to room {_printable(room)}: say which with --link (rooms invites shows them).")
+        return 2
+    invite = invites[0]
+    host = _printable(invite["from"])
+    if args.rooms_action == "decline":
+        shown = rooms.answer(invite["link"], room, [])
+        print(f"Declined {_printable(shown['name'])}; {host}'s Hermes is told.")
+        return 0
+    shown = rooms.answer(invite["link"], room, _room_agents(room_invites, root, home, args))
+    print(f"Joined {_printable(shown['name'])} with {_handles(shown['joined'])}. It starts on {host}'s Hermes "
+          "once everyone has answered.")
+    _say_if_nothing_reads(room_links, root, f"{host}'s Hermes can't reach your agents in it")
+    return 0
+
+
+def _withdraw_room(rooms: Any, room: str, yes: bool) -> int:
+    draft = next((shown for shown in rooms.drafts()["drafts"] if shown["room_id"] == room), None)
+    if draft is None:
+        print(f"No room {_printable(room)} of yours on this Hermes. hermes conduit-push rooms drafts shows them.")
+        return 1
+    name = _printable(draft["name"])
+    print(f"This takes back {name}: everyone you invited who hasn't declined is told, and their Hermes undoes "
+          "their agents' joins.")
+    if not yes:
+        try:
+            answer = input("Take it back? [y/N] ")
+        except EOFError:
+            answer = ""
+        if answer.strip().lower() not in ("y", "yes"):
+            print("Cancelled.")
+            return 0
+    rooms.withdraw(room)
+    print(f"Took back {name}.")
+    return 0
+
+
+def _room_agents(room_invites: Any, root: Path, home: Path, args: argparse.Namespace) -> list:
+    """The agents ``--agent`` names (PROFILE or PROFILE=HANDLE), else this
+    profile's."""
+    from . import room_setup
+
+    agents = []
+    for spec in getattr(args, "agent", None) or [room_setup.profile_name(home)]:
+        profile, _, handle = str(spec).partition("=")
+        agents.append(room_invites.own_agent(root, profile.strip(), handle.strip() or None))
+    return agents
+
+
+def _print_drafts(view: dict) -> None:
+    if not view["drafts"]:
+        print("No rooms with people you've linked yet. Make one: hermes conduit-push rooms invite --name <name> "
+              "--link <Link id>")
+    for draft in view["drafts"]:
+        if draft["status"] == "waiting":
+            status = f"waiting for answers until {_link_time(draft['expires_at'])}"
+        elif draft["status"] == "started":
+            status = f"started {_link_time(draft['started_at'])}"
+            if draft["cut_off"]:
+                status += f", with {len(draft['cut_off'])} agent(s) its Hermes can't reach"
+        elif draft["status"] == "ended":
+            status = _DRAFT_ENDED.get(draft["reason"], "ended")
+        else:
+            status = "starting"
+        print(f"{_printable(draft['name'])} (room {draft['room_id']}): {status}")
+        for person in draft["people"]:
+            answered = {"waiting": "hasn't answered", "declined": "declined"}.get(person["status"]) \
+                or f"joined with {_handles(person['agents'])}"
+            print(f"  {_printable(person['name'])}: {answered}")
+    if not view["starts"]["available"]:
+        print("This Hermes can't start rooms with people you've linked: update Hermes.")
+
+
+def _print_invites(invites: list, profile: str) -> None:
+    """The join card for each invite; one waiting for an answer shows the
+    choices this profile would join with."""
+    from . import room_choices
+
+    if not invites:
+        print("No rooms you're invited to over a Link.")
+    for invite in invites:
+        if invite["status"] == "waiting":
+            status = f"waiting for your answer until {_link_time(invite['expires_at'])}"
+        elif invite["status"] == "joined":
+            status = f"joined with {_handles(invite['joined'])}, waiting for it to start"
+        elif invite["status"] == "cancelled":
+            status = f"not starting with your agents: {_INVITE_ENDED.get(invite['reason'], 'it ended')}"
+        else:
+            status = {"lapsed": "ran out", "declined": "declined", "started": "started"}.get(invite["status"],
+                                                                                           invite["status"])
+        host = _printable(invite["from"])
+        print(f"{_printable(invite['name'])}, from {host} (room {invite['room_id']}, Link {invite['link']}): "
+              f"{status}")
+        agents = ", ".join(f"{_printable(agent['display_name'])} (@{agent['handle']})" for agent in invite["agents"])
+        others = "".join(f"{_printable(person)}, and " for person in invite["people"])
+        print(f"  With {others}{host}'s agents: {agents}")
+        if invite["status"] == "waiting":
+            print(f"  Places for {invite['slots']} of your agents: hermes conduit-push rooms join --room "
+                  f"{invite['room_id']} [--agent PROFILE]..., or rooms decline --room {invite['room_id']}")
+            mine = next((entry["choices"] for entry in invite["profiles"] if entry["profile"] == profile), None)
+            if mine is not None:
+                _print_room_choices(f"{profile} would join with", room_choices.choices_from(mine), indent="  ")
+
+
+def _handles(agents: Any) -> str:
+    return _and(f"@{agent['handle']}" for agent in agents) or "none of your agents"
+
+
+def _and(names: Any) -> str:
+    names = list(names)
+    return " and ".join(names) if len(names) < 3 else ", ".join(names[:-1]) + f" and {names[-1]}"
+
+
 def _link_time(at: int) -> str:
     return datetime.fromtimestamp(at).strftime("%a %d %b %H:%M")
 
 
-def _print_room_choices(label: str, choices: Any) -> None:
+def _print_room_choices(label: str, choices: Any, indent: str = "") -> None:
     tools = _ROOM_TOOLS.get(choices.tools, choices.tools)
     if choices.custom_tools and choices.tools in ("data", "custom"):
         tools += f": {', '.join(choices.custom_tools)}"
-    print(f"{_printable(label)}:")
-    print(f"  Can do: {_printable(tools)}")
-    print(f"  Shares: {_ROOM_SHARE.get(choices.share, choices.share)}")
-    print(f"  Searches your past chats: {'yes' if choices.search_chats else 'no'}")
-    print(f"  Takes part: {_ROOM_TAKES_PART.get(choices.takes_part, choices.takes_part)}")
-    print(f"  Turns a day: {choices.daily_limit}")
+    print(f"{indent}{_printable(label)}:")
+    print(f"{indent}  Can do: {_printable(tools)}")
+    print(f"{indent}  Shares: {_ROOM_SHARE.get(choices.share, choices.share)}")
+    print(f"{indent}  Searches your past chats: {'yes' if choices.search_chats else 'no'}")
+    print(f"{indent}  Takes part: {_ROOM_TAKES_PART.get(choices.takes_part, choices.takes_part)}")
+    print(f"{indent}  Turns a day: {choices.daily_limit}")
     if choices.note:
-        print(f"  Note: {_printable(choices.note.replace(chr(10), ' / '))}")
+        print(f"{indent}  Note: {_printable(choices.note.replace(chr(10), ' / '))}")
 
 
 def _pulse_report(pulse_store: Any, value: str) -> int:
@@ -1306,9 +1518,101 @@ def _pulse_candidates(pulse_store: Any, home: Any, value: str, extra: str = "") 
         rows = pulse_store.run_candidates(run_id)
         when = datetime.fromtimestamp(rows[0]["created_at"], zone).strftime("%a %d %b %H:%M")
         picked = sum(row["decision"] == pulse_candidates.SURFACED for row in rows)
-        print(f"Report of {when}: {picked} picked of {len(rows)}")
+        what = "Look ahead" if run_id.startswith(pulse.ahead.RUN_PREFIX) else "Report"
+        print(f"{what} of {when}: {picked} picked of {len(rows)}")
         for row in rows:
             print(f"  #{row['id']} " + _printable(pulse_candidates.describe(row)))
+    return 0
+
+
+def _ahead_line(pulse_store: Any, zone: Any) -> str:
+    """The look ahead (pulse_ahead), for `pulse ahead` and `pulse status`:
+    whether it's on, and when it last ran and what came of it."""
+    from . import pulse_ahead
+    if not pulse_ahead.enabled(pulse_store):
+        return "Look ahead: off (`hermes conduit-push pulse ahead on`)"
+    if not pulse_store.get("memory"):
+        return "Look ahead: waiting on memory, which it runs with: `hermes conduit-push pulse memory on`"
+    last = pulse_store.get(pulse_ahead.LAST)
+    if not isinstance(last, dict) or not isinstance(last.get("at"), (int, float)):
+        return "Look ahead: on; it hasn't run yet (once a day, an hour before the morning brief)"
+    when = datetime.fromtimestamp(last["at"], zone).strftime("%a %d %b %H:%M")
+    picked = int(last.get("picked") or 0)
+    came = (f"{picked} brought up" + (", held for the morning brief" if last.get("held") else "")) if picked \
+        else "nothing brought up"
+    error = last.get("error")
+    why = (" (the follow-ups' budget was spent, so dates came up in Pulse's own words)" if error == "budget"
+           else f" (its model call failed: {error}; dates came up in Pulse's own words)" if error else "")
+    return f"Look ahead: on; last ran {when}: {came}{why}"
+
+
+def _pulse_dates(pulse_store: Any, home: Any) -> int:
+    """The dates that come back every year that Pulse knows (pulse_dates),
+    and when each next comes up."""
+    from . import pulse, pulse_ahead, pulse_dates
+    zone = pulse.report_zone(pulse_store, home)
+    today = pulse_dates.local_today(zone, time.time())
+    found = pulse_dates.yearly(pulse_store, Path(home),
+                               None if pulse_store.get("report_profiles") == "all" else "")
+    if not found:
+        print("Pulse knows no dates that come back every year yet: it learns birthdays and anniversaries from "
+              "what's said in chats, and the birthdays of the people you pick in Conduit's Settings > Calendar & "
+              "phone > People.")
+        return 0
+    decided = pulse_store.journaled_refs([ref for entry in found for ref in pulse_dates.refs_round(entry, today)])
+    print("Dates that come back every year:")
+    for entry in sorted(found, key=lambda entry: pulse_dates.next_on(entry.month, entry.day, today)):
+        on = pulse_dates.next_on(entry.month, entry.day, today)
+        [coming] = pulse_dates.coming([entry], today, days=366)
+        if entry.item is None:
+            what = entry.what + (f" ({entry.relation}, picked in Conduit)" if entry.relation else " (picked in Conduit)")
+        else:
+            what = f"{entry.what} (remembered #{entry.item['id']})"
+        up, stage = pulse_dates.next_due(entry, today, decided)
+        print(_printable(f"- {what}: {pulse_dates.day_words(on)} {on.year}{pulse_dates.years_words(coming)}; "
+                         f"comes up {'today' if up == today else pulse_dates.day_words(up)}, "
+                         f"{pulse_dates.STAGE_WORDS[stage]}"))
+    if not pulse_ahead.enabled(pulse_store) or not pulse_store.get("memory"):
+        print("They come up with the look ahead. " + _ahead_line(pulse_store, zone))
+    return 0
+
+
+def _pulse_ahead(pulse_store: Any, home: Any, value: str) -> int:
+    """Shows the latest look ahead (pulse_ahead) and what it weighed; `on`
+    and `off` switch it, `now` asks for one at the next memory run."""
+    from . import pulse, pulse_ahead, pulse_candidates
+    if value in ("on", "off"):
+        pulse_store.set(pulse_ahead.SETTING, value == "on")
+        if value == "off":
+            pulse_store.set(pulse_ahead.REQUESTED, False)  # a `now` not yet taken doesn't wait for "on"
+        print("The look ahead is off: Pulse no longer looks two weeks ahead, and birthdays and anniversaries no "
+              "longer come up on their own." if value == "off" else
+              "The look ahead is on: once a day, an hour before the morning brief, Pulse looks two weeks ahead "
+              "for dates and plans worth getting ready for."
+              + ("" if pulse_store.get("memory") else " It runs with memory: `hermes conduit-push pulse memory on`."))
+        return 0
+    if value == "now":
+        off = [name for name, on in (("Pulse", pulse_store.get("enabled")), ("memory", pulse_store.get("memory")),
+                                     ("the look ahead", pulse_ahead.enabled(pulse_store))) if not on]
+        if off:
+            print(f"Off: {', '.join(off)}. Turn it on first.")
+            return 1
+        pulse_store.set(pulse_ahead.REQUESTED, True)
+        pulse_store.set("memory_requested", True)
+        print("Asked the dashboard for a look ahead at the next memory run; see `hermes conduit-push pulse ahead` "
+              "in a minute or two. It's a model call, and what it brings up is held for the brief while today's is "
+              "still to come.")
+        return 0
+    if value:
+        print("Usage: hermes conduit-push pulse ahead [now|on|off]")
+        return 2
+    zone = pulse.report_zone(pulse_store, home)
+    print(_ahead_line(pulse_store, zone))
+    last = pulse_store.get(pulse_ahead.LAST)
+    rows = pulse_store.run_candidates(last["run"]) if isinstance(last, dict) and isinstance(last.get("run"), str) \
+        and last["run"] else []
+    for row in rows:
+        print(f"  #{row['id']} " + _printable(pulse_candidates.describe(row)))
     return 0
 
 

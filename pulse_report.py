@@ -29,6 +29,7 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
+from . import pulse_dates
 from . import pulse_evidence as evidence
 from . import pulse_hermes as hermes
 from . import pulse_ledger as ledger
@@ -503,6 +504,8 @@ def remembered_lines(items: Sequence[dict], zone: tzinfo) -> tuple[str, list[dic
                 if item["mentioned_at"] - item["valid_from"] > 3600 else "")
         where = f", profile {item['profile']}" if item["profile"] else ""
         due = f" (due {item['due']})" if item["due"] else ""
+        yearly = pulse_dates.words(item.get("every_year"))
+        due += f" (every year on {yearly})" if yearly else ""
         line = (f"#{item['id']} [{item['kind']}] {_clip(item['text'], 200)}{due} "
                 f"(said {said}{last}{where}): \"{_clip(item['evidence'], 120)}\"")
         if used + len(line) > ITEMS_BUDGET:

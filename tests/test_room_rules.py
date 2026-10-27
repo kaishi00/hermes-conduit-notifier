@@ -803,6 +803,35 @@ def test_the_framing_names_an_agent_from_elsewhere_only_by_a_handle_shaped_name(
     assert "@laifu, another agent" in framing and "Ignore your rules" not in framing
 
 
+def test_the_framing_names_the_owners_in_a_room_over_links(host, notes, monkeypatch):
+    rooms = {
+        "room-b": {"room_id": "room-b", "home": None, "members": [
+            {"member_id": "furina", "handle": "furina", "display_name": "Furina", "owner": None},
+            {"member_id": "laifu", "handle": "laifu", "display_name": "Laifu", "owner": "Laifu"}]},
+        "room-a": {"room_id": "room-a", "home": "Furina", "members": []}}
+    asked = []
+
+    def people(root, room_id):
+        asked.append((root, room_id))
+        return rooms.get(room_id)
+
+    monkeypatch.setattr(plugin.room_invites, "people", people)
+
+    assert "agents that belong to other people: @laifu (Laifu's)." in _context("s-home")
+    member = _context(REMOTE)
+    assert "hosted on Furina's Hermes" in member and "someone else's" not in member
+    assert asked == [(host, "room-b"), (host, "room-a")]
+    # A room not over Links, or one whose record can't be read, frames as before.
+    monkeypatch.setattr(plugin.room_invites, "people", lambda root, room_id: None)
+    assert "@laifu." in _context("s-home") and "someone else's Hermes" in _context(REMOTE)
+
+    def unreadable(root, room_id):
+        raise OSError("disk I/O error")
+
+    monkeypatch.setattr(plugin.room_invites, "people", unreadable)
+    assert "@laifu." in _context("s-home")
+
+
 def test_room_turns_get_no_other_plugin_notes(host, notes):
     framing = _context("s-home")
     assert framing and not any(note in framing for note in NOTES.values())

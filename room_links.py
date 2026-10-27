@@ -131,13 +131,17 @@ class Invite:
 
 @dataclass(frozen=True)
 class Received:
-    """An envelope from a linked installation, for its kind's handler."""
+    """An envelope from a linked installation, for its kind's handler:
+    ``root`` is the installation it came to, and ``age`` how long it waited
+    at the mailbox by the mailbox's clock (None when the read had no Date)."""
 
     link_id: str
     kind: str
     message_id: str
     at: int
     body: dict
+    age: Optional[int] = None
+    root: Optional[Path] = None
 
 
 def handles(kind: str) -> Callable[[Callable[[Received], None]], Callable[[Received], None]]:
@@ -980,7 +984,8 @@ class LinkLoop:
             return True
         key = f"{link_id}/{header.id}"
         try:
-            handler(Received(link_id=link_id, kind=kind, message_id=header.id, at=header.at, body=opened.body))
+            handler(Received(link_id=link_id, kind=kind, message_id=header.id, at=header.at, body=opened.body,
+                             age=delivered.age, root=self.root))
         except Exception:  # noqa: BLE001 - one handler's failure doesn't stop the inbox
             tries = self._failures.get(key, 0) + 1
             if tries < HANDLER_TRIES:
@@ -1038,6 +1043,14 @@ def reading(root: Any) -> bool:
     process, or whichever holds the lease in another."""
     loop = _loops.get(str(Path(root)))
     return (loop is not None and loop.running) or lease_held(root)
+
+
+def holds_lease(root: Any) -> bool:
+    """Whether this process's loop for the installation (this copy of the
+    module's) holds its lease: what goes with reading the inbox, like the
+    bridge's watching of runs, runs only there."""
+    loop = _loops.get(str(Path(root)))
+    return loop is not None and loop._lease is not None
 
 
 def lease_held(root: Any) -> bool:

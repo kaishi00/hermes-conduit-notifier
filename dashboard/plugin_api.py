@@ -8089,11 +8089,30 @@ def _room_links_root() -> Path:
     return _plugin_package_module("room_identity").root_home(_calls_home())
 
 
+def _start_room_handlers(root: Path) -> None:
+    """What takes the Links' envelopes, started before the loop so an
+    envelope it reads finds its handler: the bridge that carries room turns
+    (room_bridge.py), and rooms over Links (room_invites.py), whose loop also
+    starts the rooms whose service runs in this process."""
+    try:
+        _plugin_package_module("room_bridge").start(root)
+    except Exception:  # noqa: BLE001 - the Links go on without it
+        logger.warning("Conduit plugin: couldn't start Linked Rooms' bridge; a links route tries again",
+                       exc_info=True)
+    try:
+        _plugin_package_module("room_invites").start(root)
+    except Exception:  # noqa: BLE001 - the Links go on without them
+        logger.warning("Conduit plugin: couldn't start Linked Rooms' rooms loop; a links or rooms route tries "
+                       "again", exc_info=True)
+
+
 def _start_room_links() -> None:
     if "hermes_cli.web_server" not in sys.modules:
         return  # not the dashboard (tests, a plugin host process): a links route starts it
     try:
-        _plugin_package_module("room_links").start(_room_links_root())
+        root = _room_links_root()
+        _start_room_handlers(root)
+        _plugin_package_module("room_links").start(root)
     except Exception:  # noqa: BLE001 - Linked Rooms only, never the routes
         logger.warning("Conduit plugin: couldn't start Linked Rooms' mailbox loop; a links route tries again",
                        exc_info=True)
@@ -8102,6 +8121,7 @@ def _start_room_links() -> None:
 def room_links(action: Callable[[Any], Dict[str, Any]]) -> Dict[str, Any]:
     module = _plugin_package_module("room_links")
     root = _room_links_root()
+    _start_room_handlers(root)
     try:
         loop = module.start(root)
     except Exception:  # noqa: BLE001 - the route still answers; the next one tries again
@@ -8208,6 +8228,162 @@ async def delete_room_link_invite(response: Response, invite_id: Optional[str] =
     """Takes an invite back before it's used."""
     response.headers["Cache-Control"] = "no-store"
     return await _room_links_route(lambda links: links.cancel(invite_id), "cancel", mailbox=True)
+
+
+# Rooms with people you've linked (room_invites.py): the home's drafts,
+# which start by themselves once everyone invited has answered, and the
+# invites this installation was sent, with the join card. Both are the
+# installation's, in its root home, so only a new draft takes a profile: its
+# room starts in the room service that profile's requests use (room_start's
+# where_from). The rooms loop starts with the bridge, before the Links' loop
+# (_start_room_handlers), and starts the drafts whose service runs here.
+
+ROOM_INVITES_LIMIT = 60
+# Room for a draft's or an answer's agents with their room choices.
+ROOM_INVITES_MAX_BODY_BYTES = 64 * 1024
+_room_invites_limiter = _MintLimiter(ROOM_INVITES_LIMIT, ROOM_CHOICES_WINDOW_S,
+                                     message="Too many room requests; try again shortly")
+
+
+def room_invites(action: Callable[[Any], Dict[str, Any]]) -> Dict[str, Any]:
+    module = _plugin_package_module("room_invites")
+    root = _room_links_root()
+    _start_room_handlers(root)
+    try:
+        loop = _plugin_package_module("room_links").start(root)
+    except Exception:  # noqa: BLE001 - the route still answers; the next one tries again
+        logger.warning("Conduit plugin: couldn't start Linked Rooms' mailbox loop", exc_info=True)
+        loop = None
+    try:
+        answer = action(module.start(root))
+    except module.RoomsError as exc:
+        raise TokenError(exc.status, str(exc), exc.code)
+    if loop is not None:
+        loop.wake()
+    return answer
+
+
+async def _room_invites_route(profile: Optional[str], action: Callable[[Any], Dict[str, Any]], route: str, *,
+                              mailbox: bool = False) -> Any:
+    """``mailbox``: the action sends over the Links, so it runs in the links
+    pool, for up to ROOM_LINKS_TIMEOUT_S, as the links routes that do."""
+    try:
+        if mailbox:
+            await _run_scoped(profile, lambda: _room_invites_limiter.acquire(_limiter_key(None)))
+            answer = await asyncio.wait_for(_run_scoped(profile, lambda: room_invites(action), _room_links_executor),
+                                            timeout=ROOM_LINKS_TIMEOUT_S)
+        else:
+            answer = await _run_scoped(profile, _limited(_room_invites_limiter, None, lambda: room_invites(action)))
+        return {"ok": True, **answer}
+    except asyncio.TimeoutError:
+        logger.warning("Linked Rooms' %s for Conduit timed out after %ss", route, ROOM_LINKS_TIMEOUT_S)
+        return _store_refusal(TokenError(504, "The rooms mailbox didn't answer in time; look at the room again in "
+                                              "a minute", "timed_out"))
+    except TokenError as exc:
+        # ``code`` is room_invites' word for the refusal (bad_agents,
+        # not_linked, not_set_up, codex, lapsed, answered…).
+        return _store_refusal(exc)
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
+        raise
+    except Exception as exc:
+        raise _unexpected(route, exc, feature="Linked Rooms")
+
+
+def _room_draft_where(request: Request, profile: Optional[str]) -> Dict[str, Any]:
+    """Where a draft this request makes starts (room_start.where_from)."""
+    module = _plugin_package_module("room_start")
+    try:
+        return module.where_from(request, profile)
+    except module.StartError as exc:
+        raise TokenError(exc.status, str(exc), exc.code)
+
+
+def _room_people(rooms: Any, room_id: Any) -> Dict[str, Any]:
+    people = _plugin_package_module("room_invites").people(rooms.root, room_id)
+    if people is None:
+        raise TokenError(404, "There's no room over Links with that id here", "no_room")
+    return people
+
+
+@router.post("/rooms/drafts")
+async def post_room_draft(request: Request, response: Response, profile: Optional[str] = None) -> Any:
+    """A room with people you've linked, waiting for their answers: its
+    ``name``, your ``agents`` (each ``{profile, handle, display_name}``, with
+    its ``choices`` for the room, or null for those of your last room with
+    the same people) and the ``links`` of the people invited. It starts by
+    itself once they've all answered, in the room service this profile's
+    requests use."""
+    response.headers["Cache-Control"] = "no-store"
+    body = _room_links_body(await _read_json_body(request, ROOM_INVITES_MAX_BODY_BYTES),
+                            '{"name": ..., "agents": [...], "links": [...]}')
+    try:
+        where = _room_draft_where(request, profile)
+    except TokenError as exc:
+        return _store_refusal(exc)
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
+        raise
+    return await _room_invites_route(profile, lambda rooms: {"draft": rooms.draft(
+        body.get("name"), body.get("agents"), body.get("links"), where=where)}, "draft", mailbox=True)
+
+
+@router.get("/rooms/drafts")
+async def get_room_drafts(response: Response) -> Any:
+    """The rooms this Hermes hosts with people you've linked, newest first:
+    waiting for answers, started or ended, each with who's invited and how
+    they answered; ``starts`` says whether this Hermes can start them."""
+    response.headers["Cache-Control"] = "no-store"
+    return await _room_invites_route(None, lambda rooms: rooms.drafts(), "drafts")
+
+
+@router.post("/rooms/drafts/start")
+async def post_room_draft_start(request: Request, response: Response) -> Any:
+    """Start now: the room starts with whoever has joined, and the rest are
+    told it started without them."""
+    response.headers["Cache-Control"] = "no-store"
+    body = _room_links_body(await _read_json_body(request, ROOM_LINKS_MAX_BODY_BYTES), '{"room_id": ...}')
+    return await _room_invites_route(None, lambda rooms: {"draft": rooms.start(body.get("room_id"))}, "start")
+
+
+@router.delete("/rooms/drafts")
+async def delete_room_draft(response: Response, room_id: Optional[str] = None) -> Any:
+    """Takes back a room still waiting for answers: everyone invited who
+    hasn't declined is told, and their Hermes undoes their joins."""
+    response.headers["Cache-Control"] = "no-store"
+    return await _room_invites_route(None, lambda rooms: {"draft": rooms.withdraw(room_id)}, "withdraw",
+                                     mailbox=True)
+
+
+@router.get("/rooms/invites")
+async def get_room_invites(response: Response) -> Any:
+    """The join card: each room this Hermes was invited to over a Link,
+    newest first, with who it's from, the other people and agents in it,
+    and each of your profiles' choices for it, from your last room with the
+    same people or the defaults."""
+    response.headers["Cache-Control"] = "no-store"
+    return await _room_invites_route(None, lambda rooms: {"invites": rooms.invites()}, "invites")
+
+
+@router.post("/rooms/invites/answer")
+async def post_room_invite_answer(request: Request, response: Response) -> Any:
+    """Joins the room ``room_id`` the Link ``link`` invited this Hermes to
+    with ``agents`` (each ``{profile, handle, display_name}``, with its
+    ``choices``, or null for the join card's), or declines it with none."""
+    response.headers["Cache-Control"] = "no-store"
+    body = _room_links_body(await _read_json_body(request, ROOM_INVITES_MAX_BODY_BYTES),
+                            '{"link": ..., "room_id": ..., "agents": [...]}')
+    return await _room_invites_route(None, lambda rooms: {"invite": rooms.answer(
+        body.get("link"), body.get("room_id"), body.get("agents"))}, "answer", mailbox=True)
+
+
+@router.get("/rooms/people")
+async def get_room_people(response: Response, room_id: Optional[str] = None) -> Any:
+    """Who's who in a started room over Links that this Hermes hosts or has
+    agents in: ``home``, the host's owner as your Link names them (null when
+    it's yours), and each member with its owner's name (null for yours)."""
+    response.headers["Cache-Control"] = "no-store"
+    return await _room_invites_route(None, lambda rooms: _room_people(rooms, room_id), "people")
 
 
 # Setting this Hermes up for rooms (room_setup.py): the API server, which is
@@ -8598,8 +8774,9 @@ async def post_pulse_reset(request: Request, response: Response) -> Dict[str, An
 
 @router.get("/pulse/left_out")
 async def get_pulse_left_out(response: Response) -> Dict[str, Any]:
-    """What the latest reports considered and left out, and why: those
-    learning or the user's rules kept out first."""
+    """What the latest reports and look aheads considered and left out, and
+    why: those learning or the user's rules kept out first. Each entry's
+    "from" says which ("report" or "look_ahead")."""
     response.headers["Cache-Control"] = "no-store"
     return await _pulse_route("left_out", lambda control, store, home: {"left_out": control.left_out(store, home)},
                               reads_only=True)
@@ -16825,6 +17002,11 @@ ROUTE_CAPABILITIES = (
     # /pulse/rate takes "wrong_time": the card comes back at a better time,
     # and that part of the day pushes no more for its kind.
     "pulse_hours",
+    # Pulse brings up the picked people's birthdays and the yearly dates
+    # memory keeps, and looks two weeks ahead once a day (pulse_ahead): PUT
+    # /pulse takes "look_ahead", and /pulse/left_out's entries say which
+    # part left each out ("from": "report" or "look_ahead").
+    "pulse_dates",
     "present-v1",
     "health-sync",
     "voice-tools",
@@ -16865,6 +17047,9 @@ ROUTE_CAPABILITIES = (
     # GET/POST /rooms/setup: this Hermes' API server, a profile's room
     # ceiling and approvals, set up for Linked Rooms.
     "room-setup",
+    # /rooms/drafts, /rooms/invites and /rooms/people: rooms with people
+    # you've linked, from the draft to the start (Linked Rooms).
+    "room-invites",
 )
 
 

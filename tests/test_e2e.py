@@ -755,12 +755,12 @@ def test_starting_over_keeps_the_old_keys_retirement_time(state_file):
     http.post(f"{BASE}/e2e", json=_body())
     _rotate(http, e2e.SUITE_CLASSICAL)
     state = json.loads(state_file.read_text())
-    # A day ago: still inside the old key's overlap, whatever today is.
-    retired_at = time.strftime(e2e.KEY_TIME_FORMAT, time.gmtime(time.time() - 24 * 3600))
-    state["e2e_previous"]["retired_at"] = retired_at
+    # A day ago, so the old key is still in its grace period whatever the date.
+    retired = time.strftime(e2e.KEY_TIME_FORMAT, time.gmtime(time.time() - 24 * 3600))
+    state["e2e_previous"]["retired_at"] = retired
     state_file.write_text(json.dumps(state))
     assert _rotate(http, e2e.SUITE_CLASSICAL, kid_new=NEWER_KID)[2].status_code == 200
-    assert json.loads(state_file.read_text())["e2e_previous"]["retired_at"] == retired_at
+    assert json.loads(state_file.read_text())["e2e_previous"]["retired_at"] == retired
 
 
 def test_starting_over_cannot_reuse_the_key_id_it_replaces(state_file):
