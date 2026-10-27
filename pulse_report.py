@@ -27,7 +27,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Collection, Optional, Sequence
 
 from . import pulse_dates
 from . import pulse_evidence as evidence
@@ -714,11 +714,16 @@ def report_text(tag: str, context: str, since: str, nudge: str = "balanced", not
 
 # Ratings ------------------------------------------------------------------------
 
-def report_items(reply: str) -> dict[int, str]:
-    """Item number -> kind, from the report's own lines."""
+def report_items(reply: str, named: Collection[int] = ()) -> dict[int, str]:
+    """Item number -> kind, from the report's own lines. Deadline only for
+    a line naming something Pulse remembers (``named``: the item numbers
+    report_sources gives), as a model's finds never make one
+    (pulse_memory.DEADLINE)."""
     items = {}
     for number, kind in _ITEM.findall(reply or ""):
-        items.setdefault(int(number), kind.lower() if kind.lower() in KINDS else "other")
+        kind = kind.lower()
+        items.setdefault(int(number), kind if kind in KINDS and (kind != pulse_memory.DEADLINE or int(number) in named)
+                         else "other")
     return items
 
 
@@ -761,12 +766,12 @@ def ratings_after(home: Path, *, chat_id: str, tag: str, since: float,
     turn = hermes.find_turn(home, chat_id=chat_id, tag=tag, since=since)
     if turn is None or not turn.reply:
         return {}, []
-    items = report_items(turn.reply)
+    sources = report_sources(turn.reply, shown_items(turn.prompt) if shown is None else shown)
+    items = report_items(turn.reply, sources)
     if not items:
         return {}, []
     replies = hermes.user_text_after(home, session_id=turn.session_id, tag=tag)
-    return items, parse_ratings("\n".join(replies), items, report_sources(
-        turn.reply, shown_items(turn.prompt) if shown is None else shown))
+    return items, parse_ratings("\n".join(replies), items, sources)
 
 
 def ratings_json(ratings: list[Rating]) -> str:

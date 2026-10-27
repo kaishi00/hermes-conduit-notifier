@@ -44,6 +44,7 @@ import json
 import re
 from typing import Any, Callable, Optional, Sequence
 
+from . import pulse_dates as dates
 from . import pulse_hours as hours
 from . import pulse_prefs as prefs
 from . import pulse_store as store
@@ -285,16 +286,23 @@ def add_noticed_cards(pulse_store: store.PulseStore, *, turn: Any, lines: list[t
     one without. ``factors``: the biggest part learning played in each
     (pulse_candidates.factors), for its Why?; ``attrs``: each one's place
     and band as it came up (pulse_candidates.card_attrs), which its signals
-    carry.
+    carry. A line's kind, if one of ``kinds``, is its card's topic, but
+    deadline only for a remembered deadline: a line the report found, or one
+    naming something else Pulse remembers, gets "other" (pulse_dates.DEADLINE:
+    a model's finds never make one).
     ``item_chat_title`` gives a chat's title from its profile and chat_id."""
     rows = []
     for n, (kind, text, ref) in enumerate(lines):
-        current = pulse_store.current_item(ref) if ref is not None and ref in shown else None
+        remembered = ref is not None and ref in shown
+        current = pulse_store.current_item(ref) if remembered else None
         item = pulse_store.item(current) if current is not None else None
         profile, found = found_in[n] if n < len(found_in) else ("", "")
         level_name = levels[n] if n < len(levels) and levels[n] in ("push", "screen", "brief") else "screen"
+        topic = kind if kind in kinds else "other"
+        if topic == dates.DEADLINE and (not remembered or item is not None and item["kind"] != dates.DEADLINE):
+            topic = "other"
         row: dict[str, Any] = {
-            "kind": NOTICED, "level": level_name, "topic": kind if kind in kinds else "other",
+            "kind": NOTICED, "level": level_name, "topic": topic,
             "news": _clip(text, NOTICED_NEWS_LIMIT), "why": whys[n] if n < len(whys) else "", "created_at": now,
             "learned": factor_json(factors[n]) if n < len(factors) else ""}
         if n < len(attrs):

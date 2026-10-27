@@ -1023,6 +1023,12 @@ bridge alike:
   words stop it: its first sentence waits until the speech is transcribed
   (10 s at most), the words start a new turn, and a sound that transcribes
   to nothing lets the reply go on.
+- The call's own `response.cancel` (the Interrupt button) stops the reply
+  the same way and lets its turn go. It reaches the server even when no
+  sentence is in progress: one the server finished may still be playing on
+  the phone, and a server that keeps its microphone shut until its audio
+  has played opens it again. A server's error saying there was nothing to
+  cancel stays with the plugin.
 - A cancelled response the server says nothing more about is over after 2 s,
   and one that goes quiet (not started, or no audio) for 30 s is given up on.
 - A server whose transcripts of two sentences in a row don't match them
@@ -2131,6 +2137,8 @@ unless the user asks, with one exception: deadlines (plugin 0.90+).
 - **When they come up.** The daily look ahead brings each up a week ahead and
   the day before, held for the morning brief: deadlines have a level of their
   own in What Pulse learned, and push only once the user turns them up there.
+  Only the deadlines kept this way count: a report's card or typed rating for
+  something it found itself is "other" (plugin 0.92.1+).
 - **Deleted when they're over.** Each is deleted a day after it's done,
   forgotten or replaced, otherwise about a week after its day (when memory
   expires it, plus a day), and at once when the event it came from is deleted
