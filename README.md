@@ -1021,6 +1021,17 @@ also sends `?profile=`, the two must name the same profile (400 otherwise).
 The capabilities route lists `dashboard-profiles`, and Conduit sends
 `?conduit_profile=` only to a plugin that lists it.
 
+Linked Rooms' new draft and host setup take it too (plugin 0.99+): `POST
+/rooms/drafts`, whose room starts in the room service of the profile's own
+session authority, which only the dashboard has, and `GET` and `POST
+/rooms/setup`, which write the installation's `.env` in the dashboard's scope
+and restart the gateway as the dashboard does. Conduit sends it there only to
+a plugin that lists `room-dashboard-profiles`, since an older one would act
+for the dashboard's own profile instead. The other rooms routes that take a
+profile (`/rooms/choices`, `/rooms/defaults` and `DELETE /rooms/sessions`)
+only read and write the profile's home, which works in its plugin host, and
+keep `?profile=`.
+
 With an older plugin or Conduit, run a dashboard for each profile instead
 (`hermes --profile <name> dashboard` on its own port, saved in Conduit as its
 own dashboard): that profile is then the one the dashboard started with. In a
@@ -3041,8 +3052,10 @@ gateway was told to stop serving (`hermes -p <name> gateway stop`,
 `parked_profile`), and no free port (`no_port`). One setup runs at a time on
 the installation.
 
-Conduit runs it through these routes, with `?profile=`, behind the
-`room-setup` capability:
+Conduit runs it through these routes, with `?profile=` (`?conduit_profile=`
+for a profile the dashboard didn't start with, plugin 0.99+: "Voice on a
+profile the dashboard didn't start with", above), behind the `room-setup`
+capability:
 
 - `GET /rooms/setup`: `{"ready", "needs", "changes", "blockers", "profile",
   "api_server": {"enabled", "key_set", "profile_key_set", "address",
@@ -3065,7 +3078,12 @@ Conduit runs it through these routes, with `?profile=`, behind the
   `{"started", "busy", "error"}`. The restart is Hermes' own after a
   settings save, `busy` while chats run on the gateway, unless `interrupt`
   is true, which restarts it anyway. What was saved stays when the restart
-  doesn't start, and a POST again only restarts it.
+  doesn't start, and a POST again only restarts it. Served in a profile's
+  plugin host (an older Conduit's `?profile=` for a profile the dashboard
+  didn't start with), it saves but never restarts the gateway (plugin
+  0.99+): a restart started there brings the gateway back with the host's
+  environment, Hermes' plugin host flag among it. `restart.error` then says
+  to restart it on the host or update Conduit.
 
 A refusal carries `detail` and a `code`: `bad_ceiling` and `bad_request`
 (400), a blocker's code (409), `bad_config` (409, a `config.yaml` setting the
@@ -3224,7 +3242,9 @@ installation's):
 - `POST /rooms/drafts?profile=` with `{"name", "agents": [{"profile",
   "handle", "display_name", "choices"}], "links": [...]}`: `{"draft": ...}`,
   waiting. `choices` are the agent's choices for the room, or null for those
-  of its last room with the same people. The profile picks the room service.
+  of its last room with the same people. The profile picks the room service,
+  and one the dashboard didn't start with comes as `?conduit_profile=`
+  (plugin 0.99+), as for the setup.
 - `GET /rooms/drafts`: `{"drafts": [...], "starts": {"available",
   "reason"}}`, newest first, each `{"room_id", "name", "status",
   "created_at", "expires_at", "started_at", "reason", "agents", "people":

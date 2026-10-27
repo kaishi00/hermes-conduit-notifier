@@ -2,6 +2,7 @@
 each agent's room ceiling and approvals, and the gateway restart
 (designs/cross-owner-agents, N3c, decision 13)."""
 import argparse
+import contextlib
 import hashlib
 import importlib.util
 import json
@@ -991,6 +992,67 @@ def test_the_setup_route_takes_a_profile(client, hermes, monkeypatch):
     assert _ceiling(hermes, "laifu") == ["no_mcp", "web"]
 
 
+# Hermes 0.22.3+ sends ?profile= for a profile the dashboard didn't start with
+# to that profile's plugin host, apart from the dashboard that restarts the
+# gateway; ?conduit_profile= keeps the setup here (hermes-conduit#1336).
+
+def test_the_setup_route_takes_another_profile_as_conduit_profile(client, hermes, monkeypatch):
+    seen = []
+    real = api._profile_scope
+
+    def scope(profile):
+        seen.append(profile)
+        return real(None)
+
+    monkeypatch.setattr(api, "_profile_scope", scope)
+    monkeypatch.setattr(api, "_calls_home", lambda: hermes.home("laifu"))
+    read = client.get(f"{BASE}/rooms/setup", params={"conduit_profile": "laifu"})
+    assert read.status_code == 200 and read.json()["profile"] == "laifu"
+    body = client.post(f"{BASE}/rooms/setup", params={"conduit_profile": "laifu"}, json={"ceiling": ["web"]}).json()
+    assert body["profile"] == "laifu" and body["restart"] == {"started": True, "busy": False, "error": None}
+    assert seen and set(seen) == {"laifu"}
+    assert _ceiling(hermes, "laifu") == ["no_mcp", "web"]
+    assert client.restarts.asked == [("refusal", "default", "restart"), ("after", "default")]
+
+
+@pytest.mark.parametrize("interrupt", [False, True])
+def test_a_setup_in_a_plugin_host_saves_but_never_restarts_the_gateway(client, hermes, monkeypatch, interrupt):
+    # An older Conduit's ?profile= setup runs there. A restart started from a
+    # plugin host brings the gateway back with the host's environment, Hermes'
+    # plugin host flag among it (on Hermes c73cbcc4).
+    monkeypatch.setenv("HERMES_PLUGIN_HOST_PROCESS", "1")
+    body = client.post(f"{BASE}/rooms/setup", json={"interrupt": interrupt}).json()
+    assert body["ok"] and "api_server_key" in body["changed"]
+    assert body["restart"] == {"started": False, "busy": False, "error": api._ROOM_SETUP_HOST_RESTART}
+    assert client.restarts.asked == []
+    assert "API_SERVER_KEY" in _env(hermes.root / ".env")
+
+
+@pytest.mark.parametrize("method", ["get", "post"])
+def test_the_setup_route_refuses_conduit_profile_naming_another_profile(client, hermes, method):
+    response = getattr(client, method)(f"{BASE}/rooms/setup", params={"profile": "home", "conduit_profile": "laifu"},
+                                       **({"json": {}} if method == "post" else {}))
+    assert response.status_code == 400 and response.headers["cache-control"] == "no-store"
+    assert hermes.config_writes == [] and client.restarts.asked == []
+
+
+@pytest.mark.parametrize("method", ["get", "post"])
+def test_the_setup_route_refuses_conduit_profile_where_the_profile_turned_the_plugin_off(client, hermes, monkeypatch,
+                                                                                         method):
+    dashboard = types.ModuleType("hermes_cli.web_server_dashboard")
+
+    async def refused(name):
+        return name == api.PLUGIN_NAME
+
+    dashboard._plugin_api_request_refused = refused
+    monkeypatch.setitem(sys.modules, "hermes_cli.web_server_dashboard", dashboard)
+    monkeypatch.setattr(api, "_profile_scope", lambda profile: contextlib.nullcontext())
+    response = getattr(client, method)(f"{BASE}/rooms/setup", params={"conduit_profile": "laifu"},
+                                       **({"json": {}} if method == "post" else {}))
+    assert response.status_code == 404 and response.headers["cache-control"] == "no-store"
+    assert hermes.config_writes == [] and client.restarts.asked == []
+
+
 def test_the_dashboard_writes_each_homes_env_in_its_own_profiles_scope(hermes, monkeypatch):
     # The root's key in the default profile's .env, a named profile's own key
     # in that profile's: never one in the other's.
@@ -1046,6 +1108,12 @@ def test_setup_changes_are_limited(client, hermes, monkeypatch):
 
 def test_room_setup_is_a_listed_capability(client):
     assert "room-setup" in client.get(f"{BASE}/capabilities").json()["capabilities"]
+
+
+def test_conduit_profile_on_the_rooms_routes_is_a_listed_capability(client):
+    # Conduit sends ?conduit_profile= to the rooms routes only for a plugin that lists it: an older one ignores
+    # the parameter and would set up the dashboard's own profile.
+    assert "room-dashboard-profiles" in client.get(f"{BASE}/capabilities").json()["capabilities"]
 
 
 # --- CLI --------------------------------------------------------------------------------
