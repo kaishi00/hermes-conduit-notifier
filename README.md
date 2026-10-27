@@ -2963,8 +2963,10 @@ Codex's app server (its tools run outside Hermes' tool hooks, where the room's
 rules can't see them; the home refuses its own such agents too), an invite
 that ran out, a Link that ended, or more agents than places. When one agent's
 grant can't be made, or this Hermes' API server doesn't answer for it, the
-others are undone too. A join whose room never starts is undone once word of
-it can't come any more, a week after its invite ran out.
+others are undone too. They're all undone when word comes while they join that
+the room was taken back or started without them, or the invite runs out
+meanwhile. A join whose room never starts is undone once word of it can't come
+any more, a week after its invite ran out.
 
 For now only Hermes renews a grant, when a turn reaches the agent in the
 grant's last 5 minutes: in a room that's quiet then, the agent stops answering
