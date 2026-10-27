@@ -24,6 +24,7 @@ from __future__ import annotations
 import base64
 import math
 import binascii
+import errno
 import os
 import posixpath
 import secrets
@@ -418,7 +419,7 @@ class LocalWorkspace:
         except PermissionError:
             raise WorkspaceError(403, "Hermes can't move this")
         except OSError as exc:
-            if exc.errno == 18:  # EXDEV: another disk under the same root
+            if exc.errno == errno.EXDEV:  # another disk under the same root
                 self._move_across(source, target, overwrite)
             else:
                 raise WorkspaceError(500, f"Couldn't move this ({exc.strerror or 'error'})")
@@ -441,11 +442,14 @@ class LocalWorkspace:
         try:
             try:
                 shutil.move(source, temp)
-            except PermissionError:
-                raise WorkspaceError(403, "Hermes can't move this")
-            except FileNotFoundError:
-                raise WorkspaceError(404, "That file or folder isn't there any more")
             except OSError as exc:
+                if os.path.lexists(temp):  # a part copied: kept, as the source may be part gone
+                    raise WorkspaceError(500, "Couldn't move all of this: what was copied is in "
+                                              + os.path.basename(box) + " beside the target")
+                if isinstance(exc, PermissionError):
+                    raise WorkspaceError(403, "Hermes can't move this")
+                if isinstance(exc, FileNotFoundError):
+                    raise WorkspaceError(404, "That file or folder isn't there any more")
                 raise WorkspaceError(500, f"Couldn't move this ({exc.strerror or 'error'})")
             try:
                 if overwrite and not os.path.isdir(temp):
