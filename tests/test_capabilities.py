@@ -123,6 +123,8 @@ def test_every_capability_names_a_served_route_family():
         "room-links": "/rooms/links",
         "room-setup": "/rooms/setup",
         "room-invites": "/rooms/drafts",
+        # ?conduit_profile= on the voice and Watch routes, Local Live's first.
+        "dashboard-profiles": "/local-live/",
     }
     assert set(prefixes) == set(api.ROUTE_CAPABILITIES)
     for capability, prefix in prefixes.items():

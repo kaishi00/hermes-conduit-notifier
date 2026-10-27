@@ -13,10 +13,21 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.95.0 (2026-10-27)
+## 0.94.0 (2026-10-27)
 
 ### Fixes
 - When you approve Hermes' requests from a Watch Local Live call, the card now stays up as long as Hermes waits (your approvals timeout setting). On current Hermes it always used five minutes.
+
+## 0.93.0 (2026-10-27)
+
+### Fixes
+- On Hermes 0.22.3 and later, with one dashboard for several profiles, Local
+  Live, voice on your own speech server, Grok Live, Watch calls, taking a chat
+  over from Hermes Desktop, the chats Desktop opened, and predictions didn't
+  work on any profile but the one the dashboard started with. With this
+  plugin and the next Conduit, they work on every profile. Hermes now runs
+  other profiles' plugins apart from the dashboard, where these can't work,
+  so they keep to the dashboard until Hermes can carry them.
 
 ## 0.92.0 (2026-10-27)
 

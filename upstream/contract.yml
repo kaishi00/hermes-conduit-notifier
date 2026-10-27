@@ -115,6 +115,8 @@ imports:
     optional: ["sessions"]
   hermes_cli.web_server_chat:
     optional: ["_ws_auth_ok", "_ws_request_is_allowed"]
+  hermes_cli.web_server_dashboard:
+    optional: ["_plugin_api_request_refused"]
   hermes_cli.web_server_profiles:
     optional: ["_config_profile_scope"]
   hermes_constants:
@@ -192,6 +194,7 @@ module_paths:
   - hermes_cli/tools_config
   - hermes_cli/web_routers
   - hermes_cli/web_server_chat
+  - hermes_cli/web_server_dashboard
   - hermes_cli/web_server_profiles
   - hermes_constants
   - hermes_state
