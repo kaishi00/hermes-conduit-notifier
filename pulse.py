@@ -50,6 +50,7 @@ from typing import Any, Callable, Optional
 from hermes_constants import get_hermes_home
 
 from . import pulse_delivery as delivery
+from . import pulse_ahead as ahead
 from . import pulse_brief as brief
 from . import pulse_candidates as candidates
 from . import pulse_followup as followup
@@ -410,6 +411,10 @@ def tick(now: Optional[float] = None) -> None:
     # Even with follow-ups turned off: one already sent still lands.
     followup.settle(pulse_store, now, home)
     brief.settle(pulse_store, now)
+    # A look ahead's card held for a brief that didn't take it that day (it
+    # failed, or Pulse went quiet) goes to the screen at midnight, so a later
+    # brief doesn't say "tomorrow" about today.
+    pulse_store.release_held(ahead.RUN_PREFIX, report.slot_on(now, report_zone(pulse_store, home, now), "00:00", 0))
     # Not now until a time that has come: the card comes back as new (one
     # about something still open after its chat is read, in _memory_run).
     followup.return_rested(pulse_store, now)
@@ -901,7 +906,11 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
         # A report item found in a chat is read again while it's new, last
         # and on what the follow-ups leave, so it never crowds out a reminder.
         founds = follow_used < follow_cap and bool(followup.found_due(pulse_store, now))
-        if used >= cap and not follows and not acts and not holds and not rests and not founds:
+        # The look ahead (pulse_ahead): once a day before the morning brief,
+        # on the follow-up budget, whatever follow-ups' switch; with the
+        # budget spent, the dates due still come up, in code's words.
+        looks = ahead.due(pulse_store, zone, now, asked=pulse_store.take_request(ahead.REQUESTED))
+        if used >= cap and not follows and not acts and not holds and not rests and not founds and not looks:
             return  # `pulse status` says so
         profiles = pulse_store.get("report_profiles")
         sources = memory_sources(pulse_store, home, home_chat_id, profiles)
@@ -914,6 +923,7 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
         checked: dict[str, int] = {}
         acted: dict[str, int] = {}
         found: dict[str, int] = {}
+        looked: dict[str, int] = {}
         try:
             try:
                 if used < cap:
@@ -932,6 +942,20 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
                                         budget=float("inf"), done=acted)
                 finally:
                     _count_checks(pulse_store, acted)  # in the totals, not the follow-up day's budget
+            if looks:
+                # Before the held checks: its cards count as just read, and
+                # the checks after it spend what it leaves of the budget.
+                try:
+                    ahead.run(pulse_store, home, lambda instructions, text: ask(
+                                  instructions, text, purpose="pulse look ahead"), zone=zone,
+                              now=max(now, time.time()),
+                              still_leader=lambda: not stopped.is_set() and _leads(pulse_store),
+                              budget=follow_cap - follow_used, done=looked)
+                except Exception:  # noqa: BLE001 — the brief goes without it
+                    logger.warning("conduit_push: Pulse look ahead failed", exc_info=True)
+                finally:
+                    follow_used += looked.get("tokens", 0)
+                    _count_checks(pulse_store, looked)  # in the totals, as the held checks are
             if holds or rests:
                 try:
                     if holds:
@@ -984,8 +1008,9 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
             # A run stopped by an unreadable state.db still spent its tokens.
             if done.get("tokens"):
                 pulse_store.set("memory_today", {"day": day, "tokens": used + done["tokens"]})
-            if checked.get("tokens"):
-                pulse_store.set("followup_today", {"day": day, "tokens": follow_used + checked["tokens"]})
+            if checked.get("tokens") or looked.get("tokens"):
+                # follow_used holds the look ahead's by now.
+                pulse_store.set("followup_today", {"day": day, "tokens": follow_used + checked.get("tokens", 0)})
             if done.get("chunks") or done.get("failed") or done.get("tokens"):
                 usage = pulse_store.get("memory_usage")
                 usage = usage if isinstance(usage, dict) else {}

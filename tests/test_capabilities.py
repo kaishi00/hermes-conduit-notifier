@@ -88,6 +88,8 @@ def test_every_capability_names_a_served_route_family():
         "pulse_explains": "/pulse/left_out",
         # The night is a setting on the /pulse control route; Wrong time a reason /pulse/rate takes.
         "pulse_hours": "/pulse",
+        # The look ahead is a setting on the /pulse control route; what it left out is in /pulse/left_out.
+        "pulse_dates": "/pulse/left_out",
         "present-v1": "/present/",
         "health-sync": "/health/",
         "shortcut-inbox": "/inbox/",

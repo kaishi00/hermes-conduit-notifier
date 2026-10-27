@@ -841,6 +841,23 @@ def check_held(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzi
     pulse_store.set(HELD_CHECKED, {key: value for key, value in checked.items() if key in held})
 
 
+def mark_read(pulse_store: store.PulseStore, card_ids: Sequence[int], now: float) -> None:
+    """Cards just made from what Pulse read now (the look ahead's,
+    pulse_ahead) count as read for check_held: their first read is
+    HELD_EVERY_S on, not in the same run. Through a compare-and-set, as
+    _store_found_times, so a time another process stored meanwhile stays.
+    A found card's first read is a day after it came anyway (found_due)."""
+    if not card_ids:
+        return
+    for _ in range(3):
+        stored = pulse_store.get(HELD_CHECKED)
+        kept = _times(stored)
+        kept.update({str(card_id): now for card_id in card_ids})
+        if pulse_store.swap(HELD_CHECKED, stored, kept):
+            return
+    logger.warning("conduit_push: Pulse held card read times weren't stored")
+
+
 # A report item Pulse found on its own (nothing remembered behind it) gets
 # its chat read again while it's new and on the screen (pulse_store.
 # found_cards), a day after it came (or after the held or the rested check

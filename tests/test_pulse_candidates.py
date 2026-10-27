@@ -260,10 +260,10 @@ def test_a_remembered_item_rated_no_meanwhile_rests_whatever_the_model_said(live
     learning.rate(live.store, card, "down", now=now - 30)
 
     def answered():
-        return candidates._remembered(live.store.item(item_id), {"bring_up": True, "value": 5, "line": "Renew it"})
+        return candidates.remembered_row(live.store.item(item_id), {"bring_up": True, "value": 5, "line": "Renew it"})
 
     def unanswered():
-        return {**candidates._remembered(live.store.item(item_id), {}), "decision": candidates.UNANSWERED}
+        return {**candidates.remembered_row(live.store.item(item_id), {}), "decision": candidates.UNANSWERED}
 
     rows = [answered()]
     candidates.decide(live.store, rows, now=now)

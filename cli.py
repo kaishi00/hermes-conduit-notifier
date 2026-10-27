@@ -52,10 +52,11 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
              "next connects to this dashboard; `hermes conduit-push unpair` cuts it off now",
     )
     pulse = commands.add_parser("pulse", help="Pulse, the proactivity experiment: on, off, status, probe, report, home, outcomes, memory, followups, "
-                                                 "cards, rate, done, learned, nudge, budget, candidates, note, quiet, night")
+                                                 "cards, rate, done, learned, nudge, budget, candidates, note, quiet, night, "
+                                                 "dates, ahead")
     pulse.add_argument("pulse_action", choices=["on", "off", "status", "probe", "report", "home", "outcomes", "memory",
                                                 "followups", "cards", "rate", "done", "learned", "nudge", "budget",
-                                                "candidates", "note", "quiet", "night"])
+                                                "candidates", "note", "quiet", "night", "dates", "ahead"])
     pulse.add_argument("value", nargs="?", default="",
                        help="for home: the id of the chat to use, or 'auto' to find it by title; "
                             "for outcomes: how many to show, or a chat id; "
@@ -74,7 +75,9 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
                             "for note: what you want from Pulse, in your own words, or 'clear'; "
                             "for quiet: 'today', 'until' and a day, 'off', 'days' and weekdays like sat,sun "
                             "(or none), or nothing to show the quiet times; "
-                            "for night: when it starts, like 22:00, or 'off', or nothing to show it")
+                            "for night: when it starts, like 22:00, or 'off', or nothing to show it; "
+                            "for ahead: 'now' (a look ahead at the next memory run), 'on', 'off', or nothing to "
+                            "show the latest")
     pulse.add_argument("extra", nargs="?", default="",
                        help="for memory forget: the item number; for memory backfill: how many days back "
                             "(it shows what that costs), 'start', 'stop' or 'cancel'; "
@@ -344,8 +347,8 @@ def _pulse(args: argparse.Namespace) -> int:
     home = get_hermes_home()
     action = args.pulse_action
     # Follow-ups are on by default, so even `followups on|off` needs no file yet.
-    listing = action in ("followups", "cards", "rate", "done", "learned", "candidates") \
-        or (action == "memory" and (args.value or "").strip() not in ("on", "off")) \
+    listing = action in ("followups", "cards", "rate", "done", "learned", "candidates", "dates") \
+        or (action in ("memory", "ahead") and (args.value or "").strip() not in ("on", "off")) \
         or (action == "nudge" and not (args.value or "").strip()) \
         or (action == "note" and (args.value or "").strip() in ("", "clear")) \
         or (action in ("quiet", "night") and not (args.value or "").strip()) \
@@ -356,7 +359,7 @@ def _pulse(args: argparse.Namespace) -> int:
               + (" Nothing was changed." if action in ("followups", "learned") and (args.value or "").strip() else ""))
         return 1 if action in ("probe", "rate", "done") or (action == "learned" and (args.value or "").strip()) \
             or (action == "candidates" and (args.value or "").strip() == "bring") \
-            or (action == "memory" and (args.value or "").strip() in ("now", "forget")) \
+            or (action in ("memory", "ahead") and (args.value or "").strip() in ("now", "forget")) \
             or (action == "followups" and (args.value or "").strip() in ("on", "now")) else 0
     pulse_store = pulse.open_store(home)
     if action in ("on", "off"):
@@ -413,6 +416,10 @@ def _pulse(args: argparse.Namespace) -> int:
         return _pulse_budget(pulse_store, (args.value or "").strip(), str(getattr(args, "extra", "") or "").strip())
     if action == "memory":
         return _pulse_memory(pulse_store, home, (args.value or "").strip(), str(getattr(args, "extra", "") or "").strip())
+    if action == "dates":
+        return _pulse_dates(pulse_store, home)
+    if action == "ahead":
+        return _pulse_ahead(pulse_store, home, (args.value or "").strip())
     print(f"Pulse: {'on' if pulse_store.get('enabled') else 'off'}")
     chat, problem = pulse.home_chat(pulse_store, home)
     if chat is not None:
@@ -509,6 +516,7 @@ def _pulse(args: argparse.Namespace) -> int:
             print(f"Follow-ups used today's {follow_cap} tokens; checks resume tomorrow.")
     else:
         print("Follow-ups: off")
+    print(_ahead_line(pulse_store, zone))
     print(f"Nudging: {pulse_learning.nudge(pulse_store)} (`hermes conduit-push pulse nudge gentle|balanced|eager`)")
     note = " ".join(pulse.report.note(pulse_store).split())
     print(f"Note to Pulse: {_printable(note)}" if note
@@ -1306,9 +1314,101 @@ def _pulse_candidates(pulse_store: Any, home: Any, value: str, extra: str = "") 
         rows = pulse_store.run_candidates(run_id)
         when = datetime.fromtimestamp(rows[0]["created_at"], zone).strftime("%a %d %b %H:%M")
         picked = sum(row["decision"] == pulse_candidates.SURFACED for row in rows)
-        print(f"Report of {when}: {picked} picked of {len(rows)}")
+        what = "Look ahead" if run_id.startswith(pulse.ahead.RUN_PREFIX) else "Report"
+        print(f"{what} of {when}: {picked} picked of {len(rows)}")
         for row in rows:
             print(f"  #{row['id']} " + _printable(pulse_candidates.describe(row)))
+    return 0
+
+
+def _ahead_line(pulse_store: Any, zone: Any) -> str:
+    """The look ahead (pulse_ahead), for `pulse ahead` and `pulse status`:
+    whether it's on, and when it last ran and what came of it."""
+    from . import pulse_ahead
+    if not pulse_ahead.enabled(pulse_store):
+        return "Look ahead: off (`hermes conduit-push pulse ahead on`)"
+    if not pulse_store.get("memory"):
+        return "Look ahead: waiting on memory, which it runs with: `hermes conduit-push pulse memory on`"
+    last = pulse_store.get(pulse_ahead.LAST)
+    if not isinstance(last, dict) or not isinstance(last.get("at"), (int, float)):
+        return "Look ahead: on; it hasn't run yet (once a day, an hour before the morning brief)"
+    when = datetime.fromtimestamp(last["at"], zone).strftime("%a %d %b %H:%M")
+    picked = int(last.get("picked") or 0)
+    came = (f"{picked} brought up" + (", held for the morning brief" if last.get("held") else "")) if picked \
+        else "nothing brought up"
+    error = last.get("error")
+    why = (" (the follow-ups' budget was spent, so dates came up in Pulse's own words)" if error == "budget"
+           else f" (its model call failed: {error}; dates came up in Pulse's own words)" if error else "")
+    return f"Look ahead: on; last ran {when}: {came}{why}"
+
+
+def _pulse_dates(pulse_store: Any, home: Any) -> int:
+    """The dates that come back every year that Pulse knows (pulse_dates),
+    and when each next comes up."""
+    from . import pulse, pulse_ahead, pulse_dates
+    zone = pulse.report_zone(pulse_store, home)
+    today = pulse_dates.local_today(zone, time.time())
+    found = pulse_dates.yearly(pulse_store, Path(home),
+                               None if pulse_store.get("report_profiles") == "all" else "")
+    if not found:
+        print("Pulse knows no dates that come back every year yet: it learns birthdays and anniversaries from "
+              "what's said in chats, and the birthdays of the people you pick in Conduit's Settings > Calendar & "
+              "phone > People.")
+        return 0
+    decided = pulse_store.journaled_refs([ref for entry in found for ref in pulse_dates.refs_round(entry, today)])
+    print("Dates that come back every year:")
+    for entry in sorted(found, key=lambda entry: pulse_dates.next_on(entry.month, entry.day, today)):
+        on = pulse_dates.next_on(entry.month, entry.day, today)
+        [coming] = pulse_dates.coming([entry], today, days=366)
+        if entry.item is None:
+            what = entry.what + (f" ({entry.relation}, picked in Conduit)" if entry.relation else " (picked in Conduit)")
+        else:
+            what = f"{entry.what} (remembered #{entry.item['id']})"
+        up, stage = pulse_dates.next_due(entry, today, decided)
+        print(_printable(f"- {what}: {pulse_dates.day_words(on)} {on.year}{pulse_dates.years_words(coming)}; "
+                         f"comes up {'today' if up == today else pulse_dates.day_words(up)}, "
+                         f"{pulse_dates.STAGE_WORDS[stage]}"))
+    if not pulse_ahead.enabled(pulse_store) or not pulse_store.get("memory"):
+        print("They come up with the look ahead. " + _ahead_line(pulse_store, zone))
+    return 0
+
+
+def _pulse_ahead(pulse_store: Any, home: Any, value: str) -> int:
+    """Shows the latest look ahead (pulse_ahead) and what it weighed; `on`
+    and `off` switch it, `now` asks for one at the next memory run."""
+    from . import pulse, pulse_ahead, pulse_candidates
+    if value in ("on", "off"):
+        pulse_store.set(pulse_ahead.SETTING, value == "on")
+        if value == "off":
+            pulse_store.set(pulse_ahead.REQUESTED, False)  # a `now` not yet taken doesn't wait for "on"
+        print("The look ahead is off: Pulse no longer looks two weeks ahead, and birthdays and anniversaries no "
+              "longer come up on their own." if value == "off" else
+              "The look ahead is on: once a day, an hour before the morning brief, Pulse looks two weeks ahead "
+              "for dates and plans worth getting ready for."
+              + ("" if pulse_store.get("memory") else " It runs with memory: `hermes conduit-push pulse memory on`."))
+        return 0
+    if value == "now":
+        off = [name for name, on in (("Pulse", pulse_store.get("enabled")), ("memory", pulse_store.get("memory")),
+                                     ("the look ahead", pulse_ahead.enabled(pulse_store))) if not on]
+        if off:
+            print(f"Off: {', '.join(off)}. Turn it on first.")
+            return 1
+        pulse_store.set(pulse_ahead.REQUESTED, True)
+        pulse_store.set("memory_requested", True)
+        print("Asked the dashboard for a look ahead at the next memory run; see `hermes conduit-push pulse ahead` "
+              "in a minute or two. It's a model call, and what it brings up is held for the brief while today's is "
+              "still to come.")
+        return 0
+    if value:
+        print("Usage: hermes conduit-push pulse ahead [now|on|off]")
+        return 2
+    zone = pulse.report_zone(pulse_store, home)
+    print(_ahead_line(pulse_store, zone))
+    last = pulse_store.get(pulse_ahead.LAST)
+    rows = pulse_store.run_candidates(last["run"]) if isinstance(last, dict) and isinstance(last.get("run"), str) \
+        and last["run"] else []
+    for row in rows:
+        print(f"  #{row['id']} " + _printable(pulse_candidates.describe(row)))
     return 0
 
 

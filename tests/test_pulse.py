@@ -630,10 +630,12 @@ def brief_off_the_clock(pulse_store, home):
     its time. Ten hours ahead, its last slot is always too old to send at
     the real time (BRIEF_OUT_OF_REACH for ticks at set hours). The night
     (pulse_hours) is on the clock too: off, so a push goes whatever hour
-    the tests run; its own tests set one."""
+    the tests run; its own tests set one. So is the look ahead (pulse_ahead),
+    from an hour before the brief's time: off; its own tests turn it on."""
     zone = pulse.report_zone(pulse_store, home)
     pulse_store.set("brief_time", datetime.fromtimestamp(time.time() + 10 * 3600, zone).strftime("%H:%M"))
     pulse_store.set("night", [])
+    pulse_store.set("look_ahead", False)
 
 
 def test_nothing_is_sent_while_pulse_is_off(live, db):
@@ -1648,6 +1650,35 @@ def test_a_due_date_must_be_said_near_its_item():
     items, _, _ = memory.extract(FakeModel({"items": [{"kind": "commitment", "text": "x", "evidence": "Renew the lease",
                                                     "due": "2026-11-20", "due_words": "next month"}]}), chunk, UTC)
     assert items[0]["due"] == "2026-11-20"  # "month" names no Monday
+
+
+def test_a_fact_about_a_yearly_date_keeps_its_day_instead_of_a_due_date():
+    chunk = [_row(1, "user", "Sam's birthday is on 8 November, she turns 40", DAY + 60),
+             _row(2, "user", "We got married on 3 June 2016", DAY + 70),
+             _row(3, "user", "Dad was born on 29 February", DAY + 80),
+             _row(4, "user", "I'll book the restaurant for 8 November", DAY + 90)]
+    fact = lambda evidence, **raw: {"kind": "fact", "text": evidence, "evidence": evidence, **raw}
+    items, _, _ = memory.extract(FakeModel({"items": [
+        fact("Sam's birthday is on 8 November", every_year="11-08", occasion="Birthday", due="2026-11-08",
+             due_words="8 November"),
+        fact("We got married on 3 June 2016", every_year="2016-06-03", occasion="wedding", due_words="3 June 2016"),
+        fact("Dad was born on 29 February", every_year="1987-02-29", occasion="birthday", due_words="29 February"),
+        fact("she turns 40", every_year="11-31", due_words="8 November"),  # no such day
+        fact("We got married", every_year="2030-06-03", occasion="anniversary", due_words="3 June"),  # a year to come
+        fact("Dad was born", every_year="02-28", occasion="birthday", due_words="in March"),  # never said
+        {"kind": "commitment", "text": "x", "evidence": "I'll book the restaurant", "every_year": "11-08",
+         "due": "2026-11-08", "due_words": "8 November"}]}), chunk, UTC)
+    assert [(i["every_year"], i["occasion"], i["due"], i["due_at"]) for i in items] == [
+        ("11-08", "birthday", "", None),  # its yearly date takes the due date's place: it never expires
+        ("2016-06-03", "other", "", None),
+        ("02-29", "birthday", "", None),  # 1987 had no 29 February: the year goes, the day stays
+        ("", "", "", None), ("06-03", "anniversary", "", None), ("", "", "", None),
+        ("", "", "2026-11-08", DAY + 19 * 86400)]  # only a fact keeps a yearly date
+    assert memory.render_remembered([{"id": 4, "kind": "fact", "text": "Sam's birthday is 8 November.", "due": "",
+                                      "every_year": "11-08", "mentioned_at": DAY, "evidence": "e", "status": "open",
+                                      "closed_at": None}], UTC).startswith(
+        "#4 fact: Sam's birthday is 8 November. (every year on 11-08) (said 2026-10-20")
+    assert '"every_year"' in memory.INSTRUCTIONS and '"occasion"' in memory.INSTRUCTIONS
 
 
 def test_each_kind_comes_from_its_own_speaker():
