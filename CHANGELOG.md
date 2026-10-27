@@ -26,6 +26,13 @@ checks it). The format is fixed, because Conduit reads it:
 - Disbanding a room tells everyone linked into it, and their Hermes take
   their agents out of it.
 
+## 0.93.1 (2026-10-27)
+
+### Fixes
+- Something a Pulse report found by itself could show as a deadline, and
+  rating it changed how loudly deadlines come up. Now only the deadlines
+  Pulse memory keeps count as deadlines.
+
 ## 0.93.0 (2026-10-27)
 
 ### Fixes

@@ -2172,6 +2172,8 @@ unless the user asks, with one exception: deadlines (plugin 0.90+).
 - **When they come up.** The daily look ahead brings each up a week ahead and
   the day before, held for the morning brief: deadlines have a level of their
   own in What Pulse learned, and push only once the user turns them up there.
+  Only the deadlines kept this way count: a report's card or typed rating for
+  anything else it tags a deadline is "other" (plugin 0.93.1+).
 - **Deleted when they're over.** Each is deleted a day after it's done,
   forgotten or replaced, otherwise about a week after its day (when memory
   expires it, plus a day), and at once when the event it came from is deleted

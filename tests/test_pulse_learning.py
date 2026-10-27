@@ -1447,14 +1447,14 @@ def test_a_report_card_carries_its_reason_and_one_written_without_a_list_has_non
     report = followup.report
     [with_why, without] = learning.add_noticed_cards(
         live.store, turn=turn, lines=[("date", "Dentist Friday at 9", None), ("fact", "Ana is in town", None)],
-        chat_id=SID, chat_title="Pulse", shown=set(), kinds=report.KINDS, item_chat_title=lambda item: "",
+        chat_id=SID, chat_title="Pulse", shown={}, kinds=report.KINDS, item_chat_title=lambda item: "",
         now=time.time(), whys=["Your calendar has it for Friday and nothing else that morning."])
     assert live.store.card(with_why)["why"] == "Your calendar has it for Friday and nothing else that morning."
     assert live.store.card(without)["why"] == ""
     # A report the turn wrote itself (no candidate list behind it) gives its cards no reason.
     [plain] = learning.add_noticed_cards(
         live.store, turn=turn, lines=[("date", "Dentist Friday at 9", None)], chat_id=SID, chat_title="Pulse",
-        shown=set(), kinds=report.KINDS, item_chat_title=lambda item: "", now=time.time() + 1)
+        shown={}, kinds=report.KINDS, item_chat_title=lambda item: "", now=time.time() + 1)
     assert live.store.card(plain)["why"] == ""
     feed = {card["id"]: card for card in control.feed(live.store)["cards"]}
     assert feed[with_why]["why"] and feed[plain]["why"] == ""
@@ -1473,7 +1473,7 @@ def test_a_report_card_keeps_what_learning_did_and_how_it_came_up(live):
     [learned, plain] = learning.add_noticed_cards(
         live.store, turn=SimpleNamespace(session_id=SID, reply_id=7),
         lines=[("date", "Dentist Friday at 9", None), ("fact", "Ana is in town", None)], chat_id=SID,
-        chat_title="Pulse", shown=set(), kinds=followup.report.KINDS, item_chat_title=lambda item: "", now=now,
+        chat_title="Pulse", shown={}, kinds=followup.report.KINDS, item_chat_title=lambda item: "", now=now,
         factors=[learning.factor_json(factor), ""], attrs=[(place, band), ("", prefs.UNDATED)])
     feed = {card["id"]: card for card in control.feed(live.store)["cards"]}
     assert feed[learned]["learned"] == factor and feed[plain]["learned"] is None
