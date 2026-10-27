@@ -1754,6 +1754,56 @@ def test_a_service_that_marks_no_routes_itself_has_its_stored_route_marked(rooms
     assert rooms.home.marked == [(rooms.home.legacy.db_path, room_id, slot("link1", 2), "needs_reauthorization")]
 
 
+def _crossing(side, then):
+    """Furina's next pass with ``then`` run once it has read the route changes waiting, before it makes them."""
+    starter = side.furina.starter
+    find = starter.find
+
+    def crossed(where):
+        starter.find = find
+        then()
+        return find(where)
+
+    starter.find = crossed
+    side.furina.pass_once()
+
+
+@pytest.mark.parametrize("out", ["leave", "remove"])
+def test_a_fresh_grant_crossed_by_its_agents_end_isnt_put_in_its_route(rooms, out):
+    # Laifu's agent was cut off at the start, so its fresh grant would register its route.
+    rooms.home.legacy.refuse_route.add(slot("link1", 1))
+    room_id = _started(rooms)
+    rooms.home.legacy.refuse_route.clear()
+    key = (room_id, slot("link1", 1))
+    rooms.clock.now += 12 * HOUR
+    rooms.laifu.pass_once()
+    assert len(_sent(rooms, "room.grant")) == 1
+
+    _crossing(rooms, lambda: rooms.laifu.leave("link1", room_id, ["default"]) if out == "leave"
+              else rooms.furina.remove(room_id, "laifu"))
+
+    assert key not in rooms.home.legacy.peer_routes
+    assert rooms.home.legacy.statuses[key] == "needs_reauthorization"
+    assert "route_todo" not in rooms.furina.store.read()["drafts"][room_id]
+
+
+def test_a_fresh_grant_crossed_by_the_rooms_disband_doesnt_bring_its_route_back(rooms):
+    room_id = _started(rooms)
+    service, key = rooms.home.legacy, (room_id, slot("link1", 1))
+    rooms.clock.now += 12 * HOUR
+    rooms.laifu.pass_once()
+
+    def disbanding():
+        # Hermes' disband revokes the room's routes (revoke_room_routes) before room_cleanup's guard ends it here.
+        for table in (service.peer_routes, service.peer_clients, service.statuses, service.routes):
+            del table[key]
+
+    _crossing(rooms, disbanding)
+    invites_module.disbanded(rooms.tmp_path / "furina", room_id)
+
+    assert key not in service.peer_routes and key not in service.routes
+
+
 # --- Who's who ----------------------------------------------------------------------------
 
 
@@ -2289,6 +2339,8 @@ def test_the_cli_leaves_a_room_and_takes_an_agent_out(commands, capsys, monkeypa
                                        "turns there stop.\nCancelled.\n")
     assert commands.run("furina", "remove", room=room_id, member="@mona", yes=True) == 0
     assert capsys.readouterr().out.splitlines()[1:] == ["Took @mona (Mona's) out of Zoo trip."]
+    assert commands.run("furina", "remove", room=room_id, member="@mona") == 0
+    assert capsys.readouterr().out == "You took @mona (Mona's) out of Zoo trip already.\n"
 
     assert commands.run("furina", "drafts") == 0
     shown = capsys.readouterr().out

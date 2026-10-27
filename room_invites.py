@@ -736,18 +736,26 @@ class Rooms:
                 found = self.starter.find(draft.get("started_in") or draft["where"])
             except room_start.StartError:
                 continue  # its service runs in another process, or isn't running yet
-            for member_id, todo in sorted(draft["route_todo"].items()):
-                self._route(room_id, draft, member_id, todo, found)
+            for member_id in sorted(draft["route_todo"]):
+                self._route(room_id, member_id, found)
 
-    def _route(self, room_id: str, draft: dict[str, Any], member_id: str, todo: dict[str, Any],
-               found: room_start.Found) -> None:
+    def _route(self, room_id: str, member_id: str, found: room_start.Found) -> None:
+        """The change waiting for a member's route as it is when its turn comes, not as the pass read it (R23): a
+        leave, a take-out or the end since stops a fresh grant, and one that comes while it's made has its own
+        change made after it."""
+        draft = self.store.read()["drafts"].get(room_id)
+        todo = draft.get("route_todo", {}).get(member_id) if draft is not None and draft["status"] == "started" \
+            else None
+        if todo is None:
+            return  # made meanwhile, or the room ended
         member = next(each for each in draft["members"] if each["member_id"] == member_id)
         agent = _joined(draft, member)
         failed = None
         try:
             if todo["do"] == "swap":
                 self.starter.swap(found, room_id=room_id, home_install_id=draft["home_install_id"],
-                                  link_id=member["link"], agent=agent)
+                                  link_id=member["link"], agent=agent,
+                                  registered=draft["routes"].get(member_id) == "live")
             elif todo["do"] == "revoke":
                 self.starter.revoke(found, room_id=room_id, member_id=member_id)
             else:
@@ -1048,7 +1056,8 @@ def people(root: Any, room_id: Any) -> Optional[dict[str, Any]]:
     ``home``, the host's owner as this installation's Link names them (None when it's this one), and each
     member with its owner's name (None for this installation's own) and its ``status``: in, or left or removed
     (R10; on a member's Hermes, only its own agents' are known). A member's Hermes keeps answering for a room it
-    left or that ended, whose hidden chats it keeps. None for any other room."""
+    left or that ended, whose hidden chats it keeps, with each member as it was when it ended (the invite says how
+    it ended). None for any other room."""
     try:
         state = Store(root).read()
     except RoomsError:

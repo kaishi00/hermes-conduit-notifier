@@ -3096,7 +3096,8 @@ installation's):
   "owner", "status"}]}`, with `home` and `owner` null for yours, and each
   member's `status` `in`, `left` or `removed` (on a member's Hermes, only
   for its own agents). A member's Hermes answers for a room its agents left,
-  or that ended, too.
+  or that ended, too, with each member as it was when it ended
+  (`GET /rooms/invites` says how it ended).
 
 Taking agents out goes through these, behind the `room-leave` capability
 (plugin 0.91+):

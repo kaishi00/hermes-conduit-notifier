@@ -1099,7 +1099,8 @@ def _remove_from_room(rooms: Any, room: str, member: str, yes: bool) -> int:
             print("Cancelled.")
             return 0
     rooms.remove(room, member)  # refuses one that isn't a linked person's agent
-    print(f"Took @{found['handle']} ({_printable(found['owner'])}'s) out of {_printable(draft['name'])}.")
+    took = f"@{found['handle']} ({_printable(found['owner'])}'s) out of {_printable(draft['name'])}"
+    print(f"You took {took} already." if found["status"] == "removed" else f"Took {took}.")
     return 0
 
 

@@ -162,13 +162,20 @@ class Starter:
                                           target_url=target_url, catalog=catalog)
 
     def swap(self, found: Found, *, room_id: str, home_install_id: str, link_id: str,
-             agent: Mapping[str, Any]) -> bool:
+             agent: Mapping[str, Any], registered: bool) -> bool:
         """The agent's fresh grant in its route: register_peer_route again with the route as it is but the
         grant (its trace and cancellation scope kept), which saves the stored link before it publishes, the way
-        Hermes' own refresh does. A route the service hasn't got (cut off at the start) is registered as at the
-        start. False when the route's grant is as new already (Hermes refreshed it itself since)."""
+        Hermes' own refresh does. A member cut off at the start, whose route the service hasn't got, is
+        registered as at the start; a route that was ``registered`` and that the service hasn't got any more,
+        it dropped itself (Hermes' disband revokes a room's routes before room_cleanup's guard ends the room
+        here), and isn't made again, as Hermes' own refresh doesn't. False when nothing changed: that, or the
+        route's grant as new already (Hermes refreshed it itself since)."""
         key = (room_id, agent["member_id"])
         route = getattr(found.service, "peer_routes", {}).get(key)
+        if route is None and registered:
+            logger.info("Linked Rooms left member %s in room %s without its fresh grant: the room service dropped "
+                        "its route", agent["member_id"], room_id)
+            return False
         if route is None:
             self.register(found, room_id=room_id, home_install_id=home_install_id, link_id=link_id, agent=agent)
             return True
