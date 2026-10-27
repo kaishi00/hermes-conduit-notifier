@@ -100,6 +100,8 @@ def test_every_capability_names_a_served_route_family():
         "pulse_where": "/pulse/memory",
         # Hide private reminders: a setting on the /pulse control route.
         "pulse_private": "/pulse",
+        # Next steps: their level is in /pulse/learned, their cards in the feed.
+        "pulse_next": "/pulse/learned",
         "present-v1": "/present/",
         "health-sync": "/health/",
         "shortcut-inbox": "/inbox/",

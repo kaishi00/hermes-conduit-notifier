@@ -17362,6 +17362,11 @@ ROUTE_CAPABILITIES = (
     # a gift, a surprise, someone's birthday, health or money has the body
     # "Pulse has something for you." and `private: true` in its sealed content.
     "pulse_private",
+    # Pulse brings up next steps after something got done or an event ended
+    # (pulse_candidates): their cards' topic is "next", and /pulse/learned's
+    # "levels" has "next", held for the morning brief until the user turns
+    # it up.
+    "pulse_next",
     "present-v1",
     "health-sync",
     "voice-tools",

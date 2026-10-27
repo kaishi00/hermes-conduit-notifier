@@ -1003,7 +1003,8 @@ def _report_run(home: Path, chat_id: str, run: dict) -> None:
         zone = report_zone(pulse_store, home, now)
         # Ratings reach the list through learning (pulse_prefs, in decide), not as text.
         gathered = report.gather(home, pulse_store, home_chat_id=chat_id, now=now, room=candidates.CONTEXT_BUDGET,
-                                 extra=candidates.recent_section(pulse_store, zone, now), keyed=True, ratings=False)
+                                 extra=candidates.recent_section(pulse_store, zone, now), keyed=True, ratings=False,
+                                 next_steps=True)
         route = lent_route(home, chat_id)
         lessons = candidates.lessons_block(seen=learning.report_lessons(pulse_store, learning.SEEN),
                                            sooner=learning.report_lessons(pulse_store, learning.SOONER_LESSON))

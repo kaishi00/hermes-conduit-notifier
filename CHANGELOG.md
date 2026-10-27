@@ -13,6 +13,16 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.106.0 (2026-10-27)
+
+### New and improved
+- When something gets done or a calendar event ends, Pulse can bring up what
+  still needs doing because of it: the hotel once the flights are booked,
+  booking the cleaning after the dentist. At most two a report, held for
+  your morning brief until you turn next steps up in What Pulse learned.
+- A scheduled job that keeps failing no longer counts as taking care of
+  something: Pulse brings up what rests on it and says the job is failing.
+
 ## 0.105.1 (2026-10-27)
 
 ### Fixes

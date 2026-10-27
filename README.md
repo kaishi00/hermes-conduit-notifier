@@ -2677,6 +2677,38 @@ keeps it.
 - `hermes conduit-push pulse status` says whether private reminders are
   hidden, and how many time-sensitive pushes went today.
 
+## Pulse knows what comes next (plugin 0.106+)
+
+- **Next steps.** Each report's list also reads what got done since the
+  last report (what Pulse remembered that you marked done, that a chat or
+  the Shortcuts inbox showed done, or that Pulse's checks found done; not a
+  promise or a watch Pulse closed by telling you, nor a fact Done only put
+  away) and the timed events on
+  the phone's calendar that ended since then (not cancelled or declined,
+  with their place, their people when the phone shares them, and what Pulse
+  remembers about them). From those it may bring up what concretely still
+  needs doing because of one: the hotel once the flights are booked, a
+  thank-you after an interview, the cleaning the dentist said to book. Code
+  keeps one only when it names the done item or the ended event it follows,
+  and at most 2 a report. The calendar is read as the phone already shares
+  it, on this host: nothing new leaves the phone.
+- Next steps have a level of their own, held for the morning brief until
+  you turn them up in What Pulse learned, `hermes conduit-push pulse learned
+  next push|screen|brief|off` or `PUT /pulse/levels` with `"kind": "next"`
+  (as for follow-ups and deadlines). Their cards' topic is `next`, and
+  `hermes conduit-push pulse candidates` says what each followed. One after
+  something private is private too (see Private reminders above).
+  Capability `pulse_next`.
+- **A failing job covers nothing.** The scheduled jobs Pulse's report and
+  its checks read say how each has been running: "failed its last 3 runs",
+  "last run failed" or "its last message didn't reach the user", with the
+  error, from Hermes's `last_status`, `last_error`, `failure_streak` and
+  `last_delivery_error` (an older Hermes keeps no streak: the last status
+  says it). Such a job covers nothing, so a promise resting on it comes up
+  as it would with no job, and its why says the job is failing. A failing
+  job gets no card of its own: Hermes already sends each failure, and a
+  nudge after three in a row.
+
 ## Apple Watch lookups and jobs (plugin 0.6+, jobs 0.7+, Gemini tokens 0.8+, Qwen tokens 0.75+)
 
 With the wrist down, a Conduit Watch call can't reach Conduit on the iPhone,

@@ -52,6 +52,7 @@ SEEDS, NEED = 20, 19  # a criterion must hold in NEED of SEEDS runs
 INVARIANT_SEEDS = 2
 
 OFF, SCREEN, PUSH = "off", "screen", "push"
+NOISY_KINDS = tuple(kind for kind in report.KINDS if kind != report.NEXT)
 
 
 @dataclass(frozen=True)
@@ -292,7 +293,8 @@ class Sim:
         if self.draws.random() < self.noise:
             value = min(5, max(1, value + self.draws.choice((-2, -1, 1, 2))))
         if self.draws.random() < self.noise:
-            kind = self.draws.choice(report.KINDS)
+            # Not a next step: one that names nothing done or ended never reaches the router.
+            kind = self.draws.choice(NOISY_KINDS)
         if self.draws.random() < self.noise:
             area = self.draws.choice(candidates.AREAS)
         return value, kind, area
