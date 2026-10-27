@@ -385,13 +385,7 @@ def pre_tool_call(session_id: str, turn_id: Any, tool_name: Any = None,
         now = time.time()  # one day for what's read and what's written back
         today = looks_today(pulse_store, now)
         verdict = tools.check(tool_name, args, _tool_turn(pulse_store, attempt, _looks.get(key, 0), today))
-        if verdict.propose:
-            # A calendar add never runs: it's kept as a suggestion with an Add button.
-            return {"action": "block", "message": proposals.propose(
-                pulse_store, attempt, args, profile=proposals.profile_name(Path(get_hermes_home())), now=now)}
-        if not verdict.allowed:
-            return {"action": "block", "message": verdict.message}
-        if verdict.labels:
+        if verdict.allowed and verdict.labels:
             _looks[key] = _looks.get(key, 0) + len(verdict.labels)
             while len(_looks) > MAX_TURNS:
                 _looks.pop(next(iter(_looks)))
@@ -399,6 +393,14 @@ def pre_tool_call(session_id: str, turn_id: Any, tool_name: Any = None,
                 today[label] = today.get(label, 0) + 1
             pulse_store.set(LOOK_COUNTS, {"day": _utc_day(now), "counts": today})
             pulse_store.note_looked(attempt["attempt_id"], verdict.labels)
+    if verdict.propose:
+        # A calendar add never runs: it's kept as a suggestion with an Add
+        # button. Not a look-up, so outside the lock: its caps are counted
+        # where it's kept.
+        return {"action": "block", "message": proposals.propose(
+            pulse_store, attempt, args, profile=proposals.profile_name(Path(get_hermes_home())), now=now)}
+    if not verdict.allowed:
+        return {"action": "block", "message": verdict.message}
     return None
 
 

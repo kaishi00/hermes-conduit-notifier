@@ -22,7 +22,7 @@ from typing import Any, Optional
 from . import phone_tool
 from . import pulse_report as report
 from . import pulse_store as store
-from .phone_store import FILE_NAME as PHONE_FILE, LOST_NOTE, PhoneError, PhoneStore
+from .phone_store import FILE_NAME as PHONE_FILE, LOST_NOTE, PhoneError, PhoneStore, new_change_id
 
 logger = logging.getLogger(__name__)
 
@@ -37,8 +37,10 @@ DAILY = 5
 KEEP_S = 7 * 86400.0
 # Kept this long, while its card is.
 PRUNE_S = 30 * 86400.0
-# An approval whose change never got written (the process stopped in
-# between) can be tapped again after this.
+# Add's change and Undo's delete get their ids before the phone store is
+# asked for them. One the phone store still doesn't have after this was
+# never written (the process stopped in between): it can be tapped again,
+# and asking again uses the same id, so the phone gets one change.
 STALE_S = 300.0
 WAITING, APPROVED, DISMISSED, EXPIRED = "waiting", "approved", "dismissed", "expired"
 
@@ -107,39 +109,45 @@ def line(checked: dict) -> str:
     event = checked["kind"] == "add_event"
     where = checked.get("calendar") or ("your calendar" if event else "your reminders")
     title = fields.get("title") or ("Event" if event else "Reminder")
+    # Times as the phone's calendar shows them, whatever offset they came in.
+    zone = _zone(checked.get("time_zone"), None)
     if event:
-        when = _span(fields.get("start"), fields.get("end"))
+        when = _span(_parsed(fields.get("start"), zone), _parsed(fields.get("end"), zone))
     else:
-        when = _when(fields.get("due"))
+        when = _when(_parsed(fields.get("due"), zone))
         when = f"due {when}" if when else ""
     return f"Add to {where}: {title}" + (f", {when}" if when else "")
 
 
-def _parsed(value: Any) -> Optional[date | datetime]:
+def _parsed(value: Any, zone: Any = None) -> Optional[date | datetime]:
+    """A field's date, or its time (in ``zone`` when that's known). The
+    fields are the phone store's, so a time has its offset ("Z" is
+    "+00:00" by then)."""
     if not isinstance(value, str):
         return None
     try:
-        return date.fromisoformat(value) if len(value) == 10 else datetime.fromisoformat(value)
+        moment = date.fromisoformat(value) if len(value) == 10 else datetime.fromisoformat(value)
     except ValueError:
         return None
+    if zone is not None and isinstance(moment, datetime) and moment.tzinfo is not None:
+        return moment.astimezone(zone)
+    return moment
 
 
-def _when(value: Any) -> str:
-    moment = _parsed(value)
+def _when(moment: Optional[date | datetime]) -> str:
     if isinstance(moment, datetime):
         return moment.strftime("%a %d %b, %H:%M")
     return moment.strftime("%a %d %b") if moment is not None else ""
 
 
-def _span(start: Any, end: Any) -> str:
-    begins, ends = _parsed(start), _parsed(end)
+def _span(begins: Optional[date | datetime], ends: Optional[date | datetime]) -> str:
     if begins is None:
         return ""
     if ends is None or ends == begins:
-        return _when(start)
+        return _when(begins)
     if isinstance(begins, datetime) and isinstance(ends, datetime) and ends.date() == begins.date():
-        return f"{_when(start)} to {ends:%H:%M}"
-    return f"{_when(start)} to {_when(end)}"
+        return f"{_when(begins)} to {ends:%H:%M}"
+    return f"{_when(begins)} to {_when(ends)}"
 
 
 def expires_at(checked: dict, now: float) -> float:
@@ -158,13 +166,15 @@ def expires_at(checked: dict, now: float) -> float:
     return min(now + KEEP_S, at)
 
 
-def _zone(name: Any) -> Any:
+def _zone(name: Any, unknown: Any = timezone.utc) -> Any:
+    """The phone's time zone, or ``unknown`` when it names none this host
+    knows (phone_tool._zone, which is always UTC then)."""
     try:
         from zoneinfo import ZoneInfo
 
-        return ZoneInfo(name) if isinstance(name, str) and name else timezone.utc
-    except Exception:  # noqa: BLE001 — an unknown zone reads as UTC
-        return timezone.utc
+        return ZoneInfo(name) if isinstance(name, str) and name else unknown
+    except Exception:  # noqa: BLE001 — a zone this host doesn't know
+        return unknown
 
 
 def profile_name(home: Path) -> str:
@@ -236,16 +246,20 @@ def _state(proposal: dict, home: Path, now: float) -> tuple[str, str]:
         return ("expired" if proposal["expires_at"] <= now else WAITING), ""
     if proposal["state"] != APPROVED:
         return ("not_added" if proposal["state"] == DISMISSED else EXPIRED), ""
-    if not proposal["change_id"]:
-        # Approved, and the change is being asked for; one that never got
-        # written (the process stopped in between) can be tapped again.
-        return ("adding" if (proposal["decided_at"] or 0) >= now - STALE_S else WAITING), ""
     phone = _phone(proposal["profile"], home)
     outcome = phone.change_outcome(proposal["change_id"]) if phone is not None else None
     if outcome is None:
-        return "failed", "The phone no longer has this change."
+        if proposal["asked_at"] is not None:
+            return "failed", "The phone no longer has this change."
+        # Approved, and its change is on its way to the phone store; one never
+        # written (STALE_S) can be tapped again while the suggestion lasts.
+        if (proposal["decided_at"] or 0) >= now - STALE_S:
+            return "adding", ""
+        return ("expired" if proposal["expires_at"] <= now else WAITING), ""
     if proposal["undo_id"] and outcome["state"] in ("applied", "edited"):
         undone = phone.change_outcome(proposal["undo_id"])
+        if undone is None and (proposal["undo_at"] or 0) >= now - STALE_S:
+            return "removing", ""  # on its way to the phone store
         if undone is not None and undone["state"] in ("pending", "applied"):
             return ("removing" if undone["state"] == "pending" else "removed"), ""
     note = LOST_NOTE if outcome["state"] == "lost" else outcome["note"] or ""
@@ -264,8 +278,13 @@ def add(pulse_store: store.PulseStore, proposal_id: Any, home: Path, now: float)
     or another device gets "already_added"), then asks the phone for the
     change from the stored fields, always asking there. A change the phone
     store refuses puts the suggestion back, with the reason. Its entry."""
-    proposal = _usable(pulse_store, proposal_id, now)
-    if not pulse_store.approve_proposal(proposal["id"], at=now, stale_before=now - STALE_S):
+    proposal = _open(pulse_store, proposal_id, home, now)
+    # The change's id goes with the approval, before the phone store is asked:
+    # asking again for one never written uses that id, and the phone store
+    # keeps one change per id.
+    change_id = proposal["change_id"] or new_change_id()
+    if not pulse_store.swap_proposal(proposal["id"], {"state": proposal["state"], "decided_at": proposal["decided_at"]},
+                                     state=APPROVED, change_id=change_id, decided_at=now):
         raise ProposalError(_taken(pulse_store, proposal["id"]))
     path = phone_home(home, proposal["profile"])
     try:
@@ -273,31 +292,32 @@ def add(pulse_store: store.PulseStore, proposal_id: Any, home: Path, now: float)
             raise PhoneError("nothing_shared", "The Hermes profile this suggestion was for is gone")
         change = PhoneStore(path).add_change(proposal["kind"], proposal["fields"], None, reason=REASON,
                                              session_title=pulse_store.get("home_title") or "Pulse",
-                                             device=proposal["device"], ask=True)
+                                             device=proposal["device"], ask=True, change_id=change_id)
     except PhoneError as error:
-        pulse_store.decide_proposal(proposal["id"], was=APPROVED, state=WAITING)
+        pulse_store.swap_proposal(proposal["id"], {"state": APPROVED, "decided_at": now}, state=WAITING,
+                                  change_id="", decided_at=None)
         raise ProposalError(error.code, str(error)) from None
-    pulse_store.set_proposal(proposal["id"], change_id=change["id"])
+    pulse_store.swap_proposal(proposal["id"], {"change_id": change_id}, asked_at=now)
     phone_tool.nudge(change, proposal["profile"] or "default")
     return entry(pulse_store.proposal(proposal["id"]), home, now)
 
 
 def dismiss(pulse_store: store.PulseStore, proposal_id: Any, home: Path, now: float) -> dict[str, Any]:
     """Not now on a suggestion's card: it won't be added, and its card goes."""
-    proposal = pulse_store.proposal(proposal_id)
-    if proposal is None:
-        raise ProposalError("not_found")
-    if not pulse_store.decide_proposal(proposal["id"], was=WAITING, state=DISMISSED, at=now):
+    proposal = _open(pulse_store, proposal_id, home, now)
+    if not pulse_store.swap_proposal(proposal["id"], {"state": proposal["state"], "decided_at": proposal["decided_at"]},
+                                     state=DISMISSED, decided_at=now):
         raise ProposalError(_taken(pulse_store, proposal["id"]))
-    if proposal["card_id"] is not None:
-        pulse_store.dismiss_card(proposal["card_id"], True, now)
+    pulse_store.dismiss_card(proposal["card_id"], True, now)
     return entry(pulse_store.proposal(proposal["id"]), home, now)
 
 
 def undo(pulse_store: store.PulseStore, proposal_id: Any, home: Path, now: float) -> dict[str, Any]:
     """Undo on an added suggestion's card: asks the phone to delete what it
     added, never in the auto tier: the app that tapped Undo applies it
-    without the phone's own card, as for Add, and another device asks first."""
+    without the phone's own card, as for Add, and another device asks first.
+    One Undo at a time: a second tap, a retry or another device gets
+    "already_undone" while the delete is on its way or done."""
     proposal = pulse_store.proposal(proposal_id)
     if proposal is None:
         raise ProposalError("not_found")
@@ -305,25 +325,44 @@ def undo(pulse_store: store.PulseStore, proposal_id: Any, home: Path, now: float
     outcome = phone.change_outcome(proposal["change_id"]) if phone is not None else None
     if outcome is None or outcome["state"] not in ("applied", "edited") or not outcome["item_id"]:
         raise ProposalError("not_added")
-    if proposal["undo_id"]:
-        undone = phone.change_outcome(proposal["undo_id"])
-        if undone is not None and undone["state"] in ("pending", "applied"):
+    # The delete's id is taken before the phone store is asked, as Add's is.
+    undo_id = proposal["undo_id"]
+    if undo_id:
+        undone = phone.change_outcome(undo_id)
+        if undone is None and (proposal["undo_at"] or 0) >= now - STALE_S \
+                or undone is not None and undone["state"] in ("pending", "applied"):
             raise ProposalError("already_undone")
+        if undone is not None:  # that delete didn't happen: a new one
+            undo_id = ""
+    undo_id = undo_id or new_change_id()
+    was = {"undo_id": proposal["undo_id"], "undo_at": proposal["undo_at"]}
+    if not pulse_store.swap_proposal(proposal["id"], was, undo_id=undo_id, undo_at=now):
+        raise ProposalError("already_undone")
     event = proposal["kind"] == "add_event"
     try:
         change = phone.add_change("delete_event" if event else "delete_reminder", None,
                                   {"event_id" if event else "reminder_id": outcome["item_id"]}, reason=UNDO_REASON,
                                   session_title=pulse_store.get("home_title") or "Pulse", device=proposal["device"],
-                                  ask=True)
+                                  ask=True, change_id=undo_id)
     except PhoneError as error:
+        pulse_store.swap_proposal(proposal["id"], {"undo_id": undo_id, "undo_at": now}, **was)  # tap again
         raise ProposalError(error.code, str(error)) from None
-    pulse_store.set_proposal(proposal["id"], undo_id=change["id"])
     phone_tool.nudge(change, proposal["profile"] or "default")
     return entry(pulse_store.proposal(proposal["id"]), home, now)
 
 
+def _open(pulse_store: store.PulseStore, proposal_id: Any, home: Path, now: float) -> dict:
+    """The suggestion Add or Not now names, while its card stands and it
+    still waits (or its approval's change was never written)."""
+    proposal = _usable(pulse_store, proposal_id, now)
+    shown = _state(proposal, home, now)[0]
+    if shown != WAITING:
+        raise ProposalError(EXPIRED if shown == "expired" else _taken(pulse_store, proposal["id"]))
+    return proposal
+
+
 def _usable(pulse_store: store.PulseStore, proposal_id: Any, now: float) -> dict:
-    """The suggestion Add names, while its card stands."""
+    """The suggestion a card's button names, while its card stands."""
     proposal = pulse_store.proposal(proposal_id)
     if proposal is None or proposal["card_id"] is None:
         raise ProposalError("not_found")

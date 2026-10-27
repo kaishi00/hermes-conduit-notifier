@@ -8802,10 +8802,11 @@ async def post_pulse_proposal_dismiss(proposal_id: int, response: Response) -> D
 
 @router.post("/pulse/proposals/{proposal_id}/undo")
 async def post_pulse_proposal_undo(proposal_id: int, response: Response) -> Dict[str, Any]:
-    """Undo on an added suggestion's card: asks the phone to delete it, which the app that tapped Undo applies
-    without the phone's own card (another device asks first): {"proposal": {...}} with the delete's "undo_id".
-    409 with "not_added" when nothing is on the phone to delete, "already_undone", or the phone store's code and
-    its "note"."""
+    """Undo on an added suggestion's card: asks the phone to delete it, once, which the app that tapped Undo
+    applies without the phone's own card (another device asks first): {"proposal": {...}} with the delete's
+    "undo_id". 409 with "not_added" until the phone says it added it, "already_undone" while a delete is on its
+    way or done, or the phone store's code and its "note" ("unknown_event" or "unknown_reminder" until a sync has
+    sent what it added)."""
     response.headers["Cache-Control"] = "no-store"
     return await _pulse_route("proposal_undo", lambda control, store, home: {
         "proposal": control.undo_proposal(store, proposal_id, home)}, reads_only=True)

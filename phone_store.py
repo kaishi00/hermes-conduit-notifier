@@ -322,6 +322,10 @@ def parse_day(value: Any, field: str) -> date:
     return parsed
 
 
+def new_change_id() -> str:
+    return "ch_" + secrets.token_urlsafe(16)
+
+
 def iso_utc(epoch: float) -> str:
     return datetime.fromtimestamp(epoch, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -768,14 +772,16 @@ class PhoneStore:
     # Pending changes (the agent's writes) ----------------------------------------------
 
     def add_change(self, kind: Any, fields: Any, target: Any = None, reason: Any = None, session_title: Any = None,
-                   device: Any = None, ask: bool = False) -> dict[str, Any]:
+                   device: Any = None, ask: bool = False, change_id: str | None = None) -> dict[str, Any]:
         """A change for the phone to apply. Picks the device (the one named,
         else the one that synced last with the sharing the change needs),
         checks the fields against what that device shares, and returns the
         change as the phone will see it, with ``device_name`` and a short
         ``summary`` for the notification. ``ask``: the phone asks the user
         even when they let Hermes add without asking (a Pulse suggestion's
-        Add, pulse_proposals)."""
+        Add, pulse_proposals). ``change_id``: the id it gets, from
+        ``new_change_id``, for a caller that records it before asking
+        (pulse_proposals), so asking again can't make a second change."""
         fields, target = _change_args(kind, fields, target)
         reason_text = clean_text(reason, "reason", MAX_REASON_CHARS, cap=True)
         title_text = clean_text(session_title, "session_title", MAX_SESSION_TITLE_CHARS, cap=True)
@@ -797,7 +803,7 @@ class PhoneStore:
             elif kind in ("set_alarm", "set_timer") and sharing.get("auto_add") is True and not ask:
                 # Only the user's own phone rings: nobody else sees it.
                 auto = True
-            change_id = "ch_" + secrets.token_urlsafe(16)
+            change_id = change_id or new_change_id()  # the key: one change per id
             db.execute(
                 "INSERT INTO changes(id, device, kind, target, fields, auto, reason, session_title, created_at,"
                 " expires_at, state) VALUES(?,?,?,?,?,?,?,?,?,?, 'pending')",

@@ -437,9 +437,10 @@ def dismiss_proposal(pulse_store: Any, proposal_id: Any, home: Any, now: Optiona
 
 
 def undo_proposal(pulse_store: Any, proposal_id: Any, home: Any, now: Optional[float] = None) -> dict[str, Any]:
-    """Undo on an added suggestion's card: asks the phone to delete it.
+    """Undo on an added suggestion's card: asks the phone to delete it, once.
     Refused with "not_added" when there's nothing on the phone to delete,
-    "already_undone", or the phone store's code and its "note"."""
+    "already_undone" while a delete is on its way or done, or the phone
+    store's code and its "note"."""
     return _proposal(lambda: pulse_proposals.undo(pulse_store, proposal_id, Path(home),
                                                   time.time() if now is None else now))
 

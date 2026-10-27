@@ -15,6 +15,11 @@ checks it). The format is fixed, because Conduit reads it:
 
 ## 0.97.0 (2026-10-27)
 
+### Fixes
+- Pulse's look-ups: one made right at midnight (UTC) could count the day
+  before's look-ups against the new day, and a Maps search past a message's
+  6 look-ups read your saved places before it was stopped.
+
 ### New and improved
 - Pulse suggests, you add. When an event or reminder would help, Pulse
   suggests it on a card of its own instead of adding it, saying what it

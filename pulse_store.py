@@ -388,14 +388,18 @@ CREATE TABLE IF NOT EXISTS proposals (
     profile TEXT NOT NULL DEFAULT '',
     -- What its card says, written by code from the fields.
     line TEXT NOT NULL,
-    -- waiting, approved (then change_id, and undo_id after Undo), dismissed or expired.
+    -- waiting, approved, dismissed or expired. Add's change and Undo's
+    -- delete get their ids here before the phone store is asked for them,
+    -- at decided_at and undo_at; asked_at once it has Add's.
     state TEXT NOT NULL DEFAULT 'waiting',
     change_id TEXT NOT NULL DEFAULT '',
     undo_id TEXT NOT NULL DEFAULT '',
     card_id INTEGER,
     created_at REAL NOT NULL,
     expires_at REAL NOT NULL,
-    decided_at REAL
+    decided_at REAL,
+    asked_at REAL,
+    undo_at REAL
 );
 CREATE INDEX IF NOT EXISTS proposals_attempt ON proposals(attempt_id);
 """
@@ -437,6 +441,8 @@ SPLIT_ITEMS = '"split"'
 
 CARD_COLUMNS = ("kind", "item_id", "level", "title", "quote", "news", "why", "profile", "chat_id", "chat_title",
                 "message_id", "topic", "brief", "created_at", "learned", "place", "band", "looked", "proposal")
+# The suggestion columns a tap moves (PulseStore.swap_proposal).
+_PROPOSAL_MOVES = ("state", "change_id", "undo_id", "decided_at", "asked_at", "undo_at")
 # Card columns added after the first build, oldest first, with their types.
 # Columns a table gained after stores existed, added to a store from before.
 _ADDED_COLUMNS = (("cards", "topic", "TEXT NOT NULL DEFAULT ''"), ("cards", "brief", "TEXT NOT NULL DEFAULT ''"),
@@ -774,30 +780,19 @@ class PulseStore:
                                 (*values, limit)).fetchall()
         return [_proposal(row) for row in rows]
 
-    def approve_proposal(self, proposal_id: int, *, at: float, stale_before: float) -> bool:
-        """Approves a waiting suggestion (Add), or again one approved before
-        ``stale_before`` whose change never got written: one change of
-        state, so a second tap finds it approved. Whether it moved."""
+    def swap_proposal(self, proposal_id: int, was: dict[str, Any], **values: Any) -> bool:
+        """Sets ``values`` on a suggestion only while the columns in ``was``
+        still hold what was read: one write, so of two taps at once, a
+        retry or another device, one moves it and the other finds it moved.
+        Whether it moved."""
+        unknown = (set(was) | set(values)) - set(_PROPOSAL_MOVES)
+        if unknown or not was or not values:  # named into SQL
+            raise ValueError(f"unknown or missing columns {sorted(unknown)!r}")
         with _lock, self._connect() as conn:
             return conn.execute(
-                "UPDATE proposals SET state='approved', decided_at=? WHERE id=? AND (state='waiting' OR "
-                "(state='approved' AND change_id='' AND decided_at<?))", (at, proposal_id, stale_before)).rowcount > 0
-
-    def decide_proposal(self, proposal_id: int, *, was: str, state: str, at: Optional[float] = None) -> bool:
-        """Moves a suggestion from ``was`` to ``state`` only if it's still in
-        ``was``: one change of state, so a second tap, a retry or another
-        device finds it moved. Whether it moved."""
-        with _lock, self._connect() as conn:
-            return conn.execute("UPDATE proposals SET state=?, decided_at=? WHERE id=? AND state=?",
-                                (state, at, proposal_id, was)).rowcount > 0
-
-    def set_proposal(self, proposal_id: int, **values: Any) -> None:
-        unknown = set(values) - {"change_id", "undo_id", "card_id", "state"}
-        if unknown:  # named into SQL
-            raise ValueError(f"unknown columns {sorted(unknown)!r}")
-        with _lock, self._connect() as conn:
-            conn.execute(f"UPDATE proposals SET {', '.join(f'{key}=?' for key in values)} WHERE id=?",
-                         (*values.values(), proposal_id))
+                f"UPDATE proposals SET {', '.join(f'{key}=?' for key in values)} "
+                f"WHERE id=? AND {' AND '.join(f'{key} IS ?' for key in was)}",
+                (*values.values(), proposal_id, *was.values())).rowcount > 0
 
     def add_proposal_card(self, proposal_id: int, row: dict[str, Any]) -> Optional[int]:
         """The suggestion's card, once: the card and the link in one write,
@@ -806,7 +801,8 @@ class PulseStore:
         with _lock, self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
-                if conn.execute("SELECT card_id FROM proposals WHERE id=?", (proposal_id,)).fetchone()[0] is not None:
+                linked = conn.execute("SELECT card_id FROM proposals WHERE id=?", (proposal_id,)).fetchone()
+                if linked is None or linked[0] is not None:  # gone meanwhile, or carded
                     conn.execute("ROLLBACK")
                     return None
                 card_id = int(conn.execute(f"INSERT INTO cards({', '.join(row)}) VALUES({', '.join('?' * len(row))})",
@@ -822,13 +818,19 @@ class PulseStore:
         """Waiting suggestions past their time, and those of ``attempts``
         (turns that ended without their message), become expired."""
         with _lock, self._connect() as conn:
-            changed = conn.execute("UPDATE proposals SET state='expired', decided_at=? "
-                                   "WHERE state='waiting' AND expires_at<=?", (now, now)).rowcount
-            if attempts:
-                changed += conn.execute(
-                    f"UPDATE proposals SET state='expired', decided_at=? WHERE state='waiting' "
-                    f"AND attempt_id IN ({','.join('?' * len(attempts))})", (now, *attempts)).rowcount
-            return changed
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                changed = conn.execute("UPDATE proposals SET state='expired', decided_at=? "
+                                       "WHERE state='waiting' AND expires_at<=?", (now, now)).rowcount
+                if attempts:
+                    changed += conn.execute(
+                        f"UPDATE proposals SET state='expired', decided_at=? WHERE state='waiting' "
+                        f"AND attempt_id IN ({','.join('?' * len(attempts))})", (now, *attempts)).rowcount
+                conn.execute("COMMIT")
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+        return changed
 
     def prune_proposals(self, before: float) -> int:
         """Drops suggestions made before ``before`` whose card is gone too."""

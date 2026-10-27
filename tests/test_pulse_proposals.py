@@ -8,6 +8,7 @@ import itertools
 import json
 import types
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -19,6 +20,7 @@ from test_phone import Phone, _batch, _event, _sharing, phone, tool
 proposals = _load("conduit_push.pulse_proposals", ROOT / "pulse_proposals.py")
 
 TOMORROW = (datetime.now(timezone.utc) + timedelta(days=1)).replace(hour=19, minute=0, second=0, microsecond=0)
+LONDON = ZoneInfo("Europe/London")  # the phone's (test_phone)
 
 
 def add_event(**args):
@@ -26,7 +28,8 @@ def add_event(**args):
             "end": (TOMORROW + timedelta(hours=2)).isoformat(), **args}
 
 
-LINE = f"Add to Personal: Dinner at Nopa, {TOMORROW:%a %d %b, %H:%M} to 21:00"
+LINE = (f"Add to Personal: Dinner at Nopa, {TOMORROW.astimezone(LONDON):%a %d %b, %H:%M} "
+        f"to {(TOMORROW + timedelta(hours=2)).astimezone(LONDON):%H:%M}")
 
 
 @pytest.fixture
@@ -104,8 +107,18 @@ def test_a_reminder_suggestion_names_its_list_and_runs_out_at_the_end_of_its_day
     [kept] = live.store.proposals()
     assert kept["line"] == f"Add to Reminders: Renew passport, due {due:%a %d %b}"
     assert kept["fields"]["list_id"] == "l_reminders"
-    end_of_day = datetime.combine(due + timedelta(days=1), datetime.min.time(), proposals._zone("Europe/London"))
+    end_of_day = datetime.combine(due + timedelta(days=1), datetime.min.time(), LONDON)
     assert kept["expires_at"] == end_of_day.timestamp()
+
+
+def test_the_cards_times_are_the_phones_whatever_offset_they_came_in(live, handset):
+    follow_up_turn(live)
+    pacific = timezone(timedelta(hours=-7))
+    args = add_event(start=TOMORROW.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                     end=(TOMORROW + timedelta(hours=2)).astimezone(pacific).isoformat())
+    assert suggest(live, args) == block(proposals.PROPOSED)
+    [kept] = live.store.proposals()
+    assert kept["line"] == LINE and kept["expires_at"] == TOMORROW.timestamp()
 
 
 @pytest.mark.parametrize("args, code", [
@@ -282,16 +295,102 @@ def test_a_change_the_phone_store_refuses_puts_the_suggestion_back(live, handset
     assert control.add_proposal(live.store, kept["id"], live.home)["state"] == "adding"
 
 
-def test_an_approval_whose_change_never_got_written_can_be_tapped_again(live, handset):
+def stopped(*args, **kwargs):
+    raise RuntimeError("the process stopped")
+
+
+def test_an_add_stopped_before_the_phone_store_had_it_is_asked_for_again_as_the_same_change(live, handset,
+                                                                                            monkeypatch):
     follow_up_turn(live)
     suggest(live)
     deliver(live)
     [kept] = live.store.proposals()
     now = datetime.now(timezone.utc).timestamp()
-    assert live.store.approve_proposal(kept["id"], at=now - proposals.STALE_S - 1, stale_before=now)  # then stopped
-    assert proposals.entry(live.store.proposal(kept["id"]), live.home, now)["state"] == "waiting"
-    assert control.add_proposal(live.store, kept["id"], live.home, now=now)["state"] == "adding"
+    with monkeypatch.context() as patch:
+        patch.setattr(proposals.PhoneStore, "add_change", stopped)
+        with pytest.raises(RuntimeError):
+            control.add_proposal(live.store, kept["id"], live.home, now=now)
+    claimed = live.store.proposal(kept["id"])["change_id"]
+    assert claimed and proposals.entry(live.store.proposal(kept["id"]), live.home, now)["state"] == "adding"
+    with pytest.raises(control.Refused, match="already_added"):
+        control.add_proposal(live.store, kept["id"], live.home, now=now + 1)  # it may still be on its way
+    later = now + proposals.STALE_S + 1
+    assert proposals.entry(live.store.proposal(kept["id"]), live.home, later)["state"] == "waiting"
+    assert control.add_proposal(live.store, kept["id"], live.home, now=later)["change_id"] == claimed
+    assert [change["id"] for change in handset.store.changes(mark_reported=False)] == [claimed]
+
+
+def test_an_add_stopped_after_the_phone_store_had_it_is_never_asked_for_twice(live, handset, monkeypatch):
+    follow_up_turn(live)
+    suggest(live)
+    deliver(live)
+    [kept] = live.store.proposals()
+    now = datetime.now(timezone.utc).timestamp()
+    real = live.store.swap_proposal
+    with monkeypatch.context() as patch:
+        patch.setattr(live.store, "swap_proposal",
+                      lambda proposal_id, was, **values: stopped() if "asked_at" in values else
+                      real(proposal_id, was, **values))
+        with pytest.raises(RuntimeError):
+            control.add_proposal(live.store, kept["id"], live.home, now=now)
+    later = now + proposals.STALE_S + 1
+    assert proposals.entry(live.store.proposal(kept["id"]), live.home, later)["state"] == "adding"
+    with pytest.raises(control.Refused, match="already_added"):
+        control.add_proposal(live.store, kept["id"], live.home, now=later)
     assert len(handset.store.changes(mark_reported=False)) == 1
+
+
+def on_the_phone(live, handset):
+    """An added suggestion whose event the phone has sent: Undo can delete it."""
+    kept, entry = added(live, handset)
+    handset.answer(entry["change_id"], "applied", item_id="e_nopa")
+    handset.share(events=[_event("e_nopa", title="Dinner at Nopa", start=TOMORROW.isoformat(),
+                                 end=(TOMORROW + timedelta(hours=2)).isoformat())])
+    return kept
+
+
+def deletes(handset):
+    return [change["id"] for change in handset.store.changes(mark_reported=False) if change["kind"] == "delete_event"]
+
+
+def test_two_undos_at_once_ask_the_phone_for_one_delete(live, handset, monkeypatch):
+    kept = on_the_phone(live, handset)
+    seen = live.store.proposal(kept["id"])  # what a second tap read before the first asked
+    undone = control.undo_proposal(live.store, kept["id"], live.home)
+    with monkeypatch.context() as patch:
+        patch.setattr(live.store, "proposal", lambda proposal_id: dict(seen))
+        with pytest.raises(control.Refused, match="already_undone"):
+            control.undo_proposal(live.store, kept["id"], live.home)
+    assert deletes(handset) == [undone["undo_id"]]
+
+
+def test_an_undo_stopped_before_the_phone_store_had_it_is_asked_for_again_as_the_same_delete(live, handset,
+                                                                                             monkeypatch):
+    kept = on_the_phone(live, handset)
+    now = datetime.now(timezone.utc).timestamp()
+    with monkeypatch.context() as patch:
+        patch.setattr(proposals.PhoneStore, "add_change", stopped)
+        with pytest.raises(RuntimeError):
+            control.undo_proposal(live.store, kept["id"], live.home, now=now)
+    claimed = live.store.proposal(kept["id"])["undo_id"]
+    assert claimed and proposals.entry(live.store.proposal(kept["id"]), live.home, now)["state"] == "removing"
+    with pytest.raises(control.Refused, match="already_undone"):
+        control.undo_proposal(live.store, kept["id"], live.home, now=now + 1)  # it may still be on its way
+    later = now + proposals.STALE_S + 1
+    assert proposals.entry(live.store.proposal(kept["id"]), live.home, later)["state"] == "added"
+    assert control.undo_proposal(live.store, kept["id"], live.home, now=later)["undo_id"] == claimed
+    assert deletes(handset) == [claimed]
+
+
+def test_an_undo_the_phone_store_refuses_can_be_tapped_again_at_once(live, handset):
+    kept = on_the_phone(live, handset)
+    handset.share(calendar="off", reminders=False)  # the phone stopped sharing its calendar
+    with pytest.raises(control.Refused) as refused:
+        control.undo_proposal(live.store, kept["id"], live.home)
+    assert refused.value.code == "not_shared" and deletes(handset) == []
+    handset.share(events=[_event("e_nopa", title="Dinner at Nopa", start=TOMORROW.isoformat(),
+                                 end=(TOMORROW + timedelta(hours=2)).isoformat())])
+    assert control.undo_proposal(live.store, kept["id"], live.home)["state"] == "removing"
 
 
 def test_not_now_takes_the_card_away_and_it_cant_be_added_after(live, handset):
@@ -308,13 +407,15 @@ def test_not_now_takes_the_card_away_and_it_cant_be_added_after(live, handset):
     assert handset.store.changes(mark_reported=False) == []
 
 
-def test_nothing_is_added_without_its_card(live, handset):
-    # Kept but not yet on the screen (its turn is on its way): Add can't take it.
+def test_nothing_is_added_or_put_away_without_its_card(live, handset):
+    # Kept but not yet on the screen (its turn is on its way): Add and Not now can't take it.
     follow_up_turn(live)
     suggest(live)
     [kept] = live.store.proposals()
-    with pytest.raises(control.Refused, match="not_found"):
-        control.add_proposal(live.store, kept["id"], live.home)
+    for tap in (control.add_proposal, control.dismiss_proposal):
+        with pytest.raises(control.Refused, match="not_found"):
+            tap(live.store, kept["id"], live.home)
+    assert live.store.proposal(kept["id"])["state"] == "waiting"
     assert handset.store.changes(mark_reported=False) == []
 
 

@@ -2488,23 +2488,27 @@ error, so the model can fix it.
   its card is.
 - Once the turn's message is in, each suggestion is its own card (kind
   `proposal`, on the screen), saying what it adds from its fields alone
-  ("Add to Personal: Dinner at Nopa, Sat 25 Oct, 19:00 to 21:00"), never the
-  model's words. It goes to the calendar or list the card names, even if the
-  phone's default changes meanwhile.
+  ("Add to Personal: Dinner at Nopa, Sat 25 Oct, 19:00 to 21:00", times in
+  the phone's time zone), never the model's words. It goes to the calendar
+  or list the card names, even if the phone's default changes meanwhile.
 - `GET /pulse/feed?proposals=1` includes them, each with `"proposal"`: `id`,
-  `kind`, `line`, `state` (`waiting`, `adding`, `added`, `changed`, `failed`
-  with the phone's `note`, `not_added`, `expired`, `removing`, `removed`),
-  `expires_at`, and `change_id` and `undo_id` once asked for. An app that
-  doesn't ask gets none, and doesn't count them as unseen.
+  `kind`, `line` (plain text, to show as is), `state` (`waiting`, `adding`,
+  `added`, `changed`, `failed` with the phone's `note`, `not_added`,
+  `expired`, `removing`, `removed`), `expires_at`, and `change_id` and
+  `undo_id` once asked for. An app that doesn't ask gets none, and doesn't
+  count them as unseen.
 - `POST /pulse/proposals/<id>/add` approves it once (a second tap, a retry or
   another device gets 409 `already_added`) and asks the phone for the change
   from the kept fields, with no model in between and never in the "add
   without asking" tier: the app that tapped Add applies it without the
   phone's own card, and another device asks there. A change the phone store
   refuses (409 with its code and `note`) leaves the suggestion to tap again.
-  `/dismiss` is Not now; `/undo` asks the phone to delete what it added
-  (409 `unknown_event` until the phone has sent it), which the app that
-  tapped Undo applies the same way, and another device asks first.
+  `/dismiss` is Not now. `/undo` asks the phone to delete what it added,
+  once (409 `already_undone` while that's on its way or done), which the app
+  that tapped Undo applies the same way, and another device asks first.
+  Until the phone says it added it, Undo gets 409 `not_added`, and until a
+  sync has sent the new event or reminder, `unknown_event` or
+  `unknown_reminder`.
 - While a Pulse turn is on its way in the Pulse chat, changes asked for from
   that chat through `conduit_calendar` or `conduit_phone` are refused
   (`pulse_turn`), and so are changes from a call Hermes names no chat for,
