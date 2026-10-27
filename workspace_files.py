@@ -22,6 +22,7 @@ host, the SSH machine's paths for SSH.
 from __future__ import annotations
 
 import base64
+import math
 import binascii
 import os
 import posixpath
@@ -367,7 +368,8 @@ class LocalWorkspace:
         if len(data) > SAVE_MAX_BYTES:
             raise WorkspaceError(413, "That's too much text to save")
         current = os.stat(target).st_mtime
-        if expected_mtime is not None and abs(current - float(expected_mtime)) > 0.001:
+        if expected_mtime is not None and (not math.isfinite(float(expected_mtime))
+                                           or abs(current - float(expected_mtime)) > 0.001):
             raise WorkspaceError(409, "This file changed since you opened it")
         temp = None
         try:
@@ -934,7 +936,19 @@ class SshWorkspace:
                   f'inside "$t" || {{ echo {_ERROR}EOUTSIDE; exit 1; }}\n'
                   'printf \'%s\' "$t" | base64 | tr -d \'\\r\\n\'; echo\n'
                   # A copy that fails partway, or can't lose its secrets, goes.
-                  f'cp -R -P -p -- "$s" "$t" || {{ rm -rf -- "$t"; echo {_ERROR}EACCES; exit 1; }}\n'
+                  # Never over something that appeared since the name was
+                  # picked: a folder claims its name with mkdir, anything else
+                  # lands with mv -n from a private folder beside it.
+                  'if [ -d "$s" ] && [ ! -L "$s" ]; then\n'
+                  f'  mkdir -- "$t" 2>/dev/null || {{ echo {_ERROR}EEXIST; exit 1; }}\n'
+                  f'  cp -R -P -p -- "$s"/. "$t"/ || {{ rm -rf -- "$t"; echo {_ERROR}EACCES; exit 1; }}\n'
+                  'else\n'
+                  f'  d=$(mktemp -d "$f/.conduit-XXXXXXXX") || {{ echo {_ERROR}EACCES; exit 1; }}\n'
+                  f'  cp -P -p -- "$s" "$d/c" || {{ rm -rf -- "$d"; echo {_ERROR}EACCES; exit 1; }}\n'
+                  '  mv -n -- "$d/c" "$t" 2>/dev/null\n'
+                  f'  if [ -e "$d/c" ] || [ -L "$d/c" ]; then rm -rf -- "$d"; echo {_ERROR}EEXIST; exit 1; fi\n'
+                  '  rm -rf -- "$d"\n'
+                  'fi\n'
                   f'if [ -d "$t" ] && [ ! -L "$t" ]; then find "$t" -mindepth 1 \\( {secrets_in_copy} \\) -prune -exec rm -rf -- {{}} +;'
                   f' [ -z "$(find "$t" -mindepth 1 \\( {secrets_in_copy} \\) -print 2>/dev/null | head -n 1)" ] ||'
                   f' {{ rm -rf -- "$t"; echo {_ERROR}EACCES; exit 1; }}; fi; exit 0')
