@@ -13,6 +13,32 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.100.0 (2026-10-27)
+
+### New and improved
+- Pulse can know where you are, once you turn on Where you are in Settings >
+  Pulse (it's off until you do). Say "next time I'm at Costco, remind me to
+  get batteries" and the reminder comes when you get there, or when you
+  leave if that's what you said, instead of on a schedule. Pulse's look-ups
+  can use where you are too. It needs your location shared in the
+  background, never reads a private place, and each read shows in
+  Location's read log. From the command line: `hermes conduit-push pulse
+  where`.
+
+## 0.99.0 (2026-10-27)
+
+### Fixes
+- On Hermes 0.22.3 and later, setting up rooms with people you've linked for
+  a profile the dashboard didn't start with, from an older Conduit, restarted
+  Hermes from the wrong process, and Hermes came back with that process's
+  settings. Now the setup is saved and you're asked to restart Hermes.
+
+### New and improved
+- On Hermes 0.22.3 and later, with one dashboard for several profiles, the
+  next Conduit can set up any of them for rooms with people you've linked
+  and make those rooms for it, not just for the profile the dashboard started
+  with.
+
 ## 0.98.0 (2026-10-27)
 
 ### Fixes

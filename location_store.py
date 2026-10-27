@@ -1388,6 +1388,7 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: f
         db.execute("UPDATE locates SET answered_at=? WHERE id=? AND answered_at IS NULL", (now, locate_id))
 
     fired: list[dict[str, Any]] = []
+    moments: list[dict[str, Any]] = []
     added = 0
     for event in events:
         if event["at"] > now + RULE_EVENT_SKEW_S:
@@ -1409,8 +1410,14 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: f
         # skew): it would run now and use up the day it names.
         if is_new and not paused and -RULE_EVENT_SKEW_S <= now - event["at"] <= RULE_EVENT_MAX_AGE_S:
             fired.extend(_fire_rules(db, event, place, now))
+            if not place["private"]:
+                # For Pulse (pulse_places), which keeps one a day at most, and
+                # none with no history kept here.
+                moments.append({"id": f"{device_id}/{event['id']}", "place_id": place["id"], "place": place["name"],
+                                "kind": place["kind"], "on": event["kind"], "at": event["at"],
+                                "keep": sharing["retention_days"] > 0})
     _prune(db, device_id, sharing["retention_days"], now)
-    return {"accepted": True, "fix": stored_fix, "events": added, "rules_fired": fired}
+    return {"accepted": True, "fix": stored_fix, "events": added, "rules_fired": fired, "moments": moments}
 
 
 def _fire_rules(db: sqlite3.Connection, event: dict[str, Any], place: dict[str, Any], now: float) -> list[dict[str, Any]]:

@@ -96,6 +96,8 @@ def test_every_capability_names_a_served_route_family():
         "pulse_look": "/pulse/feed",
         # Suggestions with an Add button: their cards in the feed, and the add, dismiss and undo routes.
         "pulse_proposals": "/pulse/proposals/",
+        # Where you are: a setting on the /pulse control route; a place on what /pulse/memory lists.
+        "pulse_where": "/pulse/memory",
         "present-v1": "/present/",
         "health-sync": "/health/",
         "shortcut-inbox": "/inbox/",
@@ -131,6 +133,8 @@ def test_every_capability_names_a_served_route_family():
         "dashboard-profiles": "/local-live/",
         "room-leave": "/rooms/leave",
         "room-approvals": "/rooms/approvals",
+        # ?conduit_profile= on the rooms routes that need the dashboard process, the setup's first.
+        "room-dashboard-profiles": "/rooms/setup",
     }
     assert set(prefixes) == set(api.ROUTE_CAPABILITIES)
     for capability, prefix in prefixes.items():

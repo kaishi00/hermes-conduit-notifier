@@ -19,7 +19,8 @@ watch_paths:
   - website/docs/user-guide/features/extending-the-dashboard.md
 
 # Words that make a changed hunk worth a closer look.
-keywords: [websocket, profile, plugin_api, isolation, consent, refused, ticket, session_token, x-hermes]
+keywords: [websocket, profile, plugin_api, isolation, consent, refused, ticket, session_token, x-hermes,
+           HERMES_PLUGIN_HOST_PROCESS]
 
 # What each integration point feeds in Conduit, for whoever reads an alert.
 # Feature map entries are in hermes-conduit docs/FEATURE_MAP.md.
@@ -30,6 +31,14 @@ notes:
     ?conduit_profile= instead.
   plugin consent per profile: >-
     _plugin_api_request_refused gates ?conduit_profile= the way Hermes gates ?profile=.
+  Linked Rooms on a secondary profile: >-
+    New drafts and the host setup (feature map: "Linked Rooms") take ?conduit_profile=: a draft
+    starts in the dashboard's session authority, which a plugin host's app lacks (there it starts
+    in the legacy service), and the setup restarts the gateway as the dashboard does.
+  plugin host flag: >-
+    HERMES_PLUGIN_HOST_PROCESS=1 marks a plugin host. The self-update refuses there, and the
+    Linked Rooms setup saves without restarting the gateway: a restart from a plugin host brings
+    the gateway back with the host's environment, this flag among it.
   dashboard websocket auth: >-
     hermes_cli.web_server_chat._ws_auth_ok and _ws_request_is_allowed sign in every plugin socket;
     without them the sockets fail closed.
