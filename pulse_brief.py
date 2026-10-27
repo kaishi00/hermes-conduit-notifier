@@ -2,7 +2,8 @@
 report's time zone by default, an hour before the first report, so the two
 don't arrive together), one Pulse turn in the home chat sums up what's
 still outstanding, with a push: open promises and things the user said
-they'd do, today's calendar and reminders, and what was held for it.
+they'd do, today's calendar and reminders, what Pulse remembers that relates
+to today's events (pulse_places.today_related), and what was held for it.
 
 A kind rated down to ``brief`` on the loudness ladder doesn't speak up when
 its news comes in; its cards wait and come with the brief. Delivered, they
@@ -18,6 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from . import pulse_places as places
 from . import pulse_report as report
 from . import pulse_store as store
 
@@ -57,7 +59,10 @@ _NOTE = ("This turn was started by Pulse, the part of Hermes that speaks up on i
          "said they'd do, then anything the phone logged that needs them. Leave out anything the \"Later on the "
          "same subject\" lines, the reminders or what the phone logged show done or moved past, and anything not "
          "worth their morning. News under \"Held for this morning\" is already shown as its own card under your "
-         "reply: give it a few words at most. When nothing is outstanding, say so in the one sentence and stop. "
+         "reply: give it a few words at most. What's under \"Related to today's events\" is what Pulse remembers that "
+         "shares a name or a word with one of today's events: where it helps with that event, say it with the event "
+         "in a few words (\"lunch with Dan at 1: he started the new job on Monday\"), and leave out the rest. "
+         "When nothing is outstanding, say so in the one sentence and stop. "
          "Only pass on what the message says")
 # While Pulse looks things up first, pulse_tools.look_note follows LOOK_NOTE.
 NOTE, LOOK_NOTE = _NOTE + ". Don't use any tools.", _NOTE + " and what you look up about it."
@@ -79,20 +84,22 @@ def context(home: Path, pulse_store: store.PulseStore, cards: list[dict], *, hom
     time, the phone's calendar and reminders, what Pulse memory keeps open
     and what happened since on the same subject, what the phone's
     automations logged since the report's look back starts (the last
-    report, 4 to 24 hours ago), and what was held for it. In that order, so
-    a long brief cut at the end (text_for) loses the held news first: it
-    shows as its own cards anyway."""
+    report, 4 to 24 hours ago), what Pulse remembers that relates to
+    today's events, and what was held for it. In that order, so a long
+    brief cut at the end (text_for) loses the held news first: it shows as
+    its own cards anyway."""
     held = HELD_TITLE + "\n" + "\n".join(line(card) for card in cards) if cards else ""
-    listed, later = "", ""
+    listed, later, related = "", "", ""
     if pulse_store.get("memory"):
         listed, shown = report.remembered_lines(report.remembered_items(pulse_store, now)[0], zone)
         later = report.later_lines(home, shown, home_chat_id=home_chat_id, zone=zone) if shown else ""
+        related = places.today_related(pulse_store, home, zone, now)
     since = report.window_start(pulse_store, now)
     start = datetime.fromtimestamp(since, zone).strftime("%a %d %b %H:%M")
     logged = report.inbox_context(home, since, title=LOGGED_TITLE.format(start=start))
     nothing = "" if held or listed or logged else _nothing(bool(pulse_store.get("memory")), _logs(home), start)
     sections = [f"## Now\n{datetime.fromtimestamp(now, zone).strftime('%A %d %B %Y, %H:%M')}", nothing,
-                report.phone_context(home, now)[0], listed, later, logged, held]
+                report.phone_context(home, now)[0], listed, later, logged, related, held]
     return "\n\n".join(section for section in sections if section)
 
 

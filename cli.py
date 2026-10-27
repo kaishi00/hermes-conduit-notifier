@@ -402,6 +402,7 @@ def _pulse(args: argparse.Namespace) -> int:
                 print("It also reads chats once they've been quiet for 20 minutes and keeps what's worth remembering, "
                       "using Hermes's \"Pulse memory\" auxiliary model. `hermes conduit-push pulse memory off` stops that.")
         else:
+            pulse_store.clear_moments()  # no tick runs to prune them
             print("Pulse is off. Nothing more goes into the home chat.")
         return 0
     if action == "probe":
@@ -1951,7 +1952,7 @@ def _pulse_where(pulse_store: Any, home: Any, value: str) -> int:
                              + (f"matches {match}" if match else "no saved place has that name") + f"{until})"))
     else:
         print("Nothing waits for a place.")
-    moments = pulse_store.moments()
+    moments = pulse_store.moments(since=time.time() - pulse.store.MOMENTS_KEEP_S)
     if moments:
         texts = {item["id"]: item["text"] for item in waiting}
         for moment in moments:
@@ -1972,7 +1973,8 @@ def _moment_items(moment: dict) -> list[int]:
         return []
     if not isinstance(outcome, dict):
         return []
-    return [item for item in (outcome.get("due") or outcome.get("items") or []) if isinstance(item, int)]
+    return [item for item in [*(outcome.get("due") or outcome.get("items") or []), *(outcome.get("related") or [])]
+            if isinstance(item, int)]
 
 
 def _pulse_memory(pulse_store: Any, home: Any, value: str, extra: str) -> int:
