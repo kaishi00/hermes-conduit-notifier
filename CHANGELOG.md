@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.94.0 (2026-10-27)
+## 0.95.0 (2026-10-27)
 
 ### New and improved
 - Pulse looks things up before it speaks. Its reports, morning brief and
@@ -23,6 +23,19 @@ checks it). The format is fixed, because Conduit reads it:
   can also search the web. Nothing they call can change anything, and each
   card's Why? says what Pulse looked at. Turn it off in Settings > Pulse or
   with `hermes conduit-push pulse look off`.
+
+## 0.94.0 (2026-10-27)
+
+### New and improved
+- Rooms with people you've linked keep their agents: each agent's own Hermes
+  renews its place in the room every 12 hours, so a room that's quiet for a
+  day no longer cuts them off.
+- Leave a room you joined, with some or all of your agents, or take someone
+  else's agent out of a room you host. Their Hermes is told, and the agent's
+  turns there stop. Its chat for the room stays until its owner deletes it.
+  From the command line: `hermes conduit-push rooms leave` and `remove`.
+- Disbanding a room tells everyone linked into it, and their Hermes take
+  their agents out of it.
 
 ## 0.93.1 (2026-10-27)
 

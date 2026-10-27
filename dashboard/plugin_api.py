@@ -8325,11 +8325,13 @@ async def delete_room_link_invite(response: Response, invite_id: Optional[str] =
 
 # Rooms with people you've linked (room_invites.py): the home's drafts,
 # which start by themselves once everyone invited has answered, and the
-# invites this installation was sent, with the join card. Both are the
-# installation's, in its root home, so only a new draft takes a profile: its
-# room starts in the room service that profile's requests use (room_start's
-# where_from). The rooms loop starts with the bridge, before the Links' loop
-# (_start_room_handlers), and starts the drafts whose service runs here.
+# invites this installation was sent, with the join card; then, while a room
+# goes on, taking agents out of it, yours (leave) or theirs (remove). Both are
+# the installation's, in its root home, so only a new draft takes a profile:
+# its room starts in the room service that profile's requests use
+# (room_start's where_from). The rooms loop starts with the bridge, before the
+# Links' loop (_start_room_handlers), starts the drafts whose service runs
+# here, and renews this installation's agents' grants in rooms elsewhere.
 
 ROOM_INVITES_LIMIT = 60
 # Room for a draft's or an answer's agents with their room choices.
@@ -8468,6 +8470,32 @@ async def post_room_invite_answer(request: Request, response: Response) -> Any:
                             '{"link": ..., "room_id": ..., "agents": [...]}')
     return await _room_invites_route(None, lambda rooms: {"invite": rooms.answer(
         body.get("link"), body.get("room_id"), body.get("agents"))}, "answer", mailbox=True)
+
+
+@router.post("/rooms/leave")
+async def post_room_leave(request: Request, response: Response) -> Any:
+    """Takes your agents out of the started room ``room_id`` the Link
+    ``link`` invited this Hermes to: those of the profiles in ``agents``, or
+    every one still in (null). Each is undone here and the room's host is
+    told, which cuts it off; their hidden chats for the room stay (DELETE
+    /rooms/sessions deletes one)."""
+    response.headers["Cache-Control"] = "no-store"
+    body = _room_links_body(await _read_json_body(request, ROOM_LINKS_MAX_BODY_BYTES),
+                            '{"link": ..., "room_id": ..., "agents": [...] | null}')
+    return await _room_invites_route(None, lambda rooms: {"invite": rooms.leave(
+        body.get("link"), body.get("room_id"), body.get("agents"))}, "leave", mailbox=True)
+
+
+@router.post("/rooms/drafts/remove")
+async def post_room_draft_remove(request: Request, response: Response) -> Any:
+    """Takes a linked person's agent out of a started room this Hermes
+    hosts: ``member`` is its member id or @handle. Its route is cut off and
+    its grant revoked, and its Hermes is told, which undoes its join."""
+    response.headers["Cache-Control"] = "no-store"
+    body = _room_links_body(await _read_json_body(request, ROOM_LINKS_MAX_BODY_BYTES),
+                            '{"room_id": ..., "member": ...}')
+    return await _room_invites_route(None, lambda rooms: {"draft": rooms.remove(
+        body.get("room_id"), body.get("member"))}, "remove", mailbox=True)
 
 
 @router.get("/rooms/people")
@@ -17184,6 +17212,10 @@ ROUTE_CAPABILITIES = (
     # takeover, Desktop views, predictions): any profile's, on a Hermes that
     # hosts other profiles' plugins apart (hermes-conduit#1336).
     "dashboard-profiles",
+    # POST /rooms/leave and /rooms/drafts/remove: taking agents out of a
+    # room with people you've linked, yours or theirs, and its fresh grants
+    # while it goes on (Linked Rooms).
+    "room-leave",
 )
 
 

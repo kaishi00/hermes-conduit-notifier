@@ -1,4 +1,5 @@
-"""Starting a room over Links on its home, for Linked Rooms (designs/cross-owner-agents, N5a).
+"""Starting a room over Links on its home, and changing its routes while it goes on, for Linked Rooms
+(designs/cross-owner-agents, N5a and N5b).
 
 Once everyone invited has answered a draft (room_invites.py), or its creator starts it anyway, the home creates
 the room in Hermes' running room service with every agent as a member, and gives each agent from a linked Hermes
@@ -6,6 +7,9 @@ its route: the bridge's URL for the agent's Link and profile (room_bridge.url), 
 minted for its place. Before that, Hermes' own client probes each one through the bridge, as Hermes' own
 groups.peer.register does, and an agent whose Hermes refuses its grant, or whose catalog or scope changed, is left
 out.
+
+Later, in the same service, a member's fresh grant goes into its route (``swap``), and a member that left or was
+taken out is cut off (``cut_off``, ``revoke``), as N2's guard cuts off one whose Hermes no longer accepts the room.
 
 The room service is the one the request that made the draft would have used: the canonical one (each profile's
 session authority's, found from the gateway runner the dashboard app keeps) when the dashboard runs in the
@@ -19,17 +23,17 @@ fake, and a Hermes without what a start needs keeps its drafts and says why (``u
 
 from __future__ import annotations
 
+import dataclasses
 import importlib
 import logging
 import os
 import sys
 import threading
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
-from . import room_bridge, room_identity, room_links
+from . import room_bridge, room_cutoff, room_identity, room_links
 
 logger = logging.getLogger(__name__)
 
@@ -60,14 +64,15 @@ class StartError(Exception):
         self.status = status
 
 
-@dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True)
 class Found:
     """The running room service a draft starts in: ``kind`` legacy or canonical, and for a canonical one the
-    subject that owns the room."""
+    subject that owns the room and the home whose session authority's it is."""
 
     kind: str
     service: Any
     subject: Optional[str]
+    home: Optional[str] = None
 
 
 class Starter:
@@ -156,6 +161,59 @@ class Starter:
                                           client=self.hermes.client(target_url, found.service.db_path),
                                           target_url=target_url, catalog=catalog)
 
+    def swap(self, found: Found, *, room_id: str, home_install_id: str, link_id: str,
+             agent: Mapping[str, Any], registered: bool) -> bool:
+        """The agent's fresh grant in its route: register_peer_route again with the route as it is but the
+        grant (its trace and cancellation scope kept), which saves the stored link before it publishes, the way
+        Hermes' own refresh does. A member cut off at the start, whose route the service hasn't got, is
+        registered as at the start; a route that was ``registered`` and that the service hasn't got any more,
+        it dropped itself (Hermes' disband revokes a room's routes before room_cleanup's guard ends the room
+        here), and isn't made again, as Hermes' own refresh doesn't. False when nothing changed: that, or the
+        route's grant as new already (Hermes refreshed it itself since)."""
+        key = (room_id, agent["member_id"])
+        route = getattr(found.service, "peer_routes", {}).get(key)
+        if route is None and registered:
+            logger.info("Linked Rooms left member %s in room %s without its fresh grant: the room service dropped "
+                        "its route", agent["member_id"], room_id)
+            return False
+        if route is None:
+            self.register(found, room_id=room_id, home_install_id=home_install_id, link_id=link_id, agent=agent)
+            return True
+        issued, current = room_bridge.grant_issued_at(agent["grant"]), room_bridge.grant_issued_at(route.grant)
+        if issued is None or (current is not None and current >= issued):
+            return False
+        target_url = self.hermes.link_url(room_bridge.url(self.root, link_id, agent["profile"]))
+        client = getattr(found.service, "peer_clients", {}).get(key) \
+            or self.hermes.client(target_url, found.service.db_path)
+        found.service.register_peer_route(room_id=room_id, member_id=agent["member_id"],
+                                          route=dataclasses.replace(route, grant=agent["grant"]), client=client,
+                                          target_url=target_url, catalog=self.hermes.catalog(agent["catalog"]))
+        return True
+
+    def cut_off(self, found: Found, *, room_id: str, member_id: str) -> None:
+        """The member's route marked as needing reauthorization (room_cutoff.CUT_OFF), where the service keeps
+        it and in its stored link, which N2's guard reads before each of the member's queued turns: they fail
+        before they're sent."""
+        mark = getattr(found.service, "_set_route_status", None)
+        if callable(mark):
+            mark(room_id, member_id, room_cutoff.CUT_OFF)
+        else:
+            self.hermes.mark(found.service.db_path, room_id=room_id, member_id=member_id, status=room_cutoff.CUT_OFF)
+
+    def revoke(self, found: Found, *, room_id: str, member_id: str) -> None:
+        """A member taken out of the room: its grant revoked on its Hermes through its route's client, as
+        Hermes' disband revokes each route's, when that answers, and its route cut off either way."""
+        key = (room_id, member_id)
+        route = getattr(found.service, "peer_routes", {}).get(key)
+        revoke = getattr(getattr(found.service, "peer_clients", {}).get(key), "revoke_grant", None)
+        if route is not None and callable(revoke):
+            try:
+                revoke(grant=route.grant)
+            except Exception as exc:  # noqa: BLE001 - its Hermes is told by room.ended too
+                logger.info("Linked Rooms couldn't revoke member %s's grant in room %s on its Hermes (%s); it's cut "
+                            "off", member_id, room_id, type(exc).__name__)
+        self.cut_off(found, room_id=room_id, member_id=member_id)
+
 
 def where_from(request: Any, profile: Optional[str]) -> dict[str, Any]:
     """Where a draft a dashboard request makes starts (R13): with the dashboard in the gateway (its app's session
@@ -224,7 +282,7 @@ class Hermes:
             if not _running(service):
                 raise StartError("no_room_service", "The gateway's room service for that profile isn't running")
             subject = where["subject"] if kind == "canonical" else calls["authenticated_subject"](dict(CLI_OWNER))
-            return Found("canonical", service, subject)
+            return Found("canonical", service, subject, str(home))
         if calls["get_hosted_room_service"] is None:
             raise StartError("unsupported", "This Hermes has no tui_gateway.methods_groups.get_hosted_room_service",
                              501)
@@ -244,6 +302,11 @@ class Hermes:
 
     def route(self, **fields: Any) -> Any:
         return self._call("PeerMemberRoute")(**fields)
+
+    def mark(self, db_path: Any, *, room_id: str, member_id: str, status: str) -> None:
+        """A stored route's status, for a service that doesn't keep its routes' itself."""
+        importlib.import_module("gateway.hosted_room_links").mark_room_link_status(
+            db_path, room_id=room_id, member_id=member_id, status=status)
 
     @property
     def error(self) -> type:
