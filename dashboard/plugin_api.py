@@ -4213,8 +4213,11 @@ class _LocalLiveReadBack:
             await self._start(words[:LOCAL_LIVE_MAX_TURN_CHARS])
             return True
         if kind == "response.cancel":
-            await self._stop(cancel_turn=True)
-            return True
+            # The user stopped the reply on the phone. With no sentence in
+            # progress here, the call's cancel still goes on: one the server
+            # finished may still be playing, and a server that shuts its
+            # microphone until its audio has played opens it again (#1325).
+            return await self._stop(cancel_turn=True)
         return False
 
     # The server's frames.
@@ -4382,8 +4385,10 @@ class _LocalLiveReadBack:
         _local_live_tasks.add(follower)
         follower.add_done_callback(_local_live_task_done)
 
-    async def _stop(self, cancel_turn: bool) -> None:
-        """The reply stops: nothing more of it is said."""
+    async def _stop(self, cancel_turn: bool) -> bool:
+        """The reply stops: nothing more of it is said. True when the server
+        was sent a response.cancel for it, now or before (a send that failed
+        counts too: the relay ends with a broken upstream anyway)."""
         # A start still waiting on the call is overtaken.
         self.generation += 1
         self._release()
@@ -4391,7 +4396,10 @@ class _LocalLiveReadBack:
             self.follower.cancel()
             self.follower = None
         self.sentences.clear()
+        # A response already being cancelled was told before.
+        cancelled = self.muting
         if self.speaking is not None and not self.muting:
+            cancelled = True
             self.muting = True
             # A server may drop a response it hadn't started without a word.
             self._arm_watchdog(LOCAL_LIVE_READ_BACK_CANCEL_TIMEOUT_S if not self.started
@@ -4402,6 +4410,7 @@ class _LocalLiveReadBack:
         if cancel_turn and turn is not None:
             await self.call.cancel_turn(turn)
         await self._end_reply("cancelled")
+        return cancelled
 
     async def _follow(self, turn: Any) -> None:
         """The turn's reply, sentence by sentence, as it streams."""
@@ -9601,8 +9610,31 @@ async def post_inbox_delete(request: Request, response: Response, profile: Optio
     response.headers["Cache-Control"] = "no-store"
     await _scoped_acquire(_inbox_delete_limiter, profile)
     body = await _read_json_body(request, INBOX_MAX_DELETE_BODY_BYTES)
-    return await _inbox_route(response, profile, lambda: _inbox_call(lambda store: store.delete_events(body)),
-                              "delete")
+    return await _inbox_route(response, profile, lambda: _inbox_delete(body), "delete")
+
+
+def _inbox_delete(body: Any) -> Dict[str, Any]:
+    result = _inbox_call(lambda store: store.delete_events(body))
+    _inbox_forget_pulse(body["device_id"], body["ids"])  # delete_events checked both
+    return result
+
+
+def _inbox_wipe(device_id: Optional[str]) -> Dict[str, Any]:
+    result = _inbox_call(lambda store: store.wipe(device_id))
+    _inbox_forget_pulse(device_id)
+    return result
+
+
+def _inbox_forget_pulse(device_id: Optional[str], events: Optional[list] = None) -> None:
+    """Events deleted (``events`` of a device's, all of one device's, or
+    every one with no device): the deadlines Pulse memory kept from them go
+    at once (pulse_memory.forget_deleted), whether or not Pulse is on. The
+    events are deleted whatever happens here, and Pulse's loop catches what
+    this couldn't (pulse_memory.forget_inbox)."""
+    try:
+        _plugin_package_module("pulse_memory").forget_deleted(Path(_calls_home()), device_id, events)
+    except Exception:  # noqa: BLE001 — deleting events never fails on Pulse
+        logger.warning("conduit_push: inbox couldn't tell Pulse about deleted events", exc_info=True)
 
 
 @router.post("/inbox/wipe")
@@ -9620,7 +9652,7 @@ async def post_inbox_wipe(request: Request, response: Response, profile: Optiona
     if device_id is None and body.get("all") is not True:
         raise HTTPException(status_code=400, detail="Name a device_id, or all: true",
                             headers={"Cache-Control": "no-store"})
-    return await _inbox_route(response, profile, lambda: _inbox_call(lambda store: store.wipe(device_id)), "delete")
+    return await _inbox_route(response, profile, lambda: _inbox_wipe(device_id), "delete")
 
 
 # A maps lookup the agent asked the phone for (conduit_maps): the phone,
@@ -17087,6 +17119,11 @@ ROUTE_CAPABILITIES = (
     # /pulse takes "look_ahead", and /pulse/left_out's entries say which
     # part left each out ("from": "report" or "look_ahead").
     "pulse_dates",
+    # Pulse memory keeps deadlines from the Shortcuts inbox (a trial ending,
+    # a bill due): PUT /pulse takes "inbox_deadlines", /pulse/memory lists
+    # them as kind "deadline" with "from_inbox", "sender" and "logged_at",
+    # and their cards' topic is "deadline", with a level of its own.
+    "pulse_inbox",
     "present-v1",
     "health-sync",
     "voice-tools",

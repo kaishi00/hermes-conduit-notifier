@@ -76,6 +76,11 @@ MAX_KEEP_DAYS = 30
 MAX_DEVICES = 4
 MAX_EVENTS_PER_BATCH = 50
 MAX_EVENTS_PER_DEVICE = 5000
+# Pulse memory reads events stored at least this long ago (``received``): an
+# upload stamps its events before it takes the writers' lock, so one still
+# waiting for it commits events stamped earlier than the last ones read.
+# Uploads hold the lock for milliseconds.
+SETTLE_S = 60
 MAX_SOURCE_CHARS = 120
 MAX_TITLE_CHARS = 200
 MAX_TEXT_CHARS = 4000
@@ -601,6 +606,54 @@ class InboxStore:
                     "text": text, "amount": amount, "trigger": trigger, "device": device_name}
             found.append({key: value for key, value in item.items() if value is not None})
         return found, len(rows) > limit
+
+    # Pulse memory (pulse_memory.read_inbox, forget_inbox) ------------------------------
+
+    def received(self, after: tuple[int, str, str], *, since: int = 0, skip_kinds: tuple[str, ...] = (),
+                 limit: int = 200) -> list[dict[str, Any]]:
+        """Events received after ``after`` ((received_at, device, id), the
+        mark Pulse memory read to) and at or after ``since``, within their
+        device's days, in the order they arrived; each with its ``mark``.
+        Not the last SETTLE_S's, which an upload still waiting on the lock
+        could commit events before."""
+        now = int(self.clock())
+        with self._read() as db:
+            if db is None:
+                return []
+            skip = f" AND e.kind NOT IN ({','.join('?' * len(skip_kinds))})" if skip_kinds else ""
+            rows = db.execute(
+                "SELECT e.device, e.id, e.kind, e.at_utc, e.at_local, e.received_at, e.source, e.title, e.text,"
+                " e.amount FROM events e JOIN devices d ON d.id = e.device"
+                " WHERE (e.received_at, e.device, e.id) > (?, ?, ?) AND e.received_at >= ? AND e.received_at < ?"
+                f" AND e.at_utc >= ? - d.keep_days * 86400{skip}"
+                " ORDER BY e.received_at, e.device, e.id LIMIT ?",
+                (*after, since, now - SETTLE_S, now, *skip_kinds, limit)).fetchall()
+        return [{"device": device, "id": event_id, "kind": kind, "at_utc": at_utc, "at": at_local,
+                 "source": source or "", "title": title or "", "text": text or "", "amount": amount or "",
+                 "mark": (received_at, device, event_id)}
+                for device, event_id, kind, at_utc, at_local, received_at, source, title, text, amount in rows]
+
+    def present(self, refs: list[tuple[str, str]]) \
+            -> tuple[set[tuple[str, str]], dict[str, tuple[int, int | None]]] | None:
+        """Which of ``refs`` ((device, event id)) are still kept, and for
+        each device still paired, the days it keeps and when its oldest
+        kept event was logged (None with none); nothing at all when the
+        inbox is gone (wiped). None when it can't be read (a newer
+        plugin's), so nothing is taken for deleted."""
+        if not self.path.exists():
+            return set(), {}
+        with self._read() as db:
+            if db is None:
+                return None
+            devices = {device: (int(keep or KEEP_DAYS), oldest) for device, keep, oldest in db.execute(
+                "SELECT d.id, d.keep_days, (SELECT MIN(e.at_utc) FROM events e WHERE e.device = d.id) FROM devices d")}
+            found: set[tuple[str, str]] = set()
+            for start in range(0, len(refs), 400):  # within SQLite's bound parameters
+                chunk = refs[start:start + 400]
+                found.update(db.execute(
+                    "SELECT device, id FROM events WHERE " + " OR ".join("(device=? AND id=?)" for _ in chunk),
+                    [part for ref in chunk for part in ref]).fetchall())
+        return found, devices
 
 
 def _fold(text: Any) -> Any:

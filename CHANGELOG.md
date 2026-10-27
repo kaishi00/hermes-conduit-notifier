@@ -13,15 +13,34 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.90.0 (2026-10-27)
+## 0.94.0 (2026-10-27)
 
 ### Fixes
 - On Hermes 0.22.3 and later, with one dashboard for several profiles, Local
-  Live, voice on your own speech server, Grok Live and Watch calls didn't work
-  on any profile but the one the dashboard started with. With this plugin and
-  the next Conduit, they work on every profile. Hermes now runs other
-  profiles' plugins apart from the dashboard, where voice calls can't
-  connect, so these keep to the dashboard until Hermes can carry them.
+  Live, voice on your own speech server, Grok Live, Watch calls, taking a chat
+  over from Hermes Desktop, the chats Desktop opened, and predictions didn't
+  work on any profile but the one the dashboard started with. With this
+  plugin and the next Conduit, they work on every profile. Hermes now runs
+  other profiles' plugins apart from the dashboard, where these can't work,
+  so they keep to the dashboard until Hermes can carry them.
+
+## 0.92.0 (2026-10-27)
+
+### Fixes
+- On a speech server that only reads text back, tapping Interrupt in a Local Live call didn't always reach the server, so one that keeps its microphone shut while it speaks could miss what you said next.
+
+## 0.90.0 (2026-10-27)
+
+### New and improved
+- Pulse keeps the deadlines it finds in what your Shortcuts automations log,
+  like a free trial ending, a subscription renewing or a bill due, and brings
+  each up a week ahead and the day before, held for the morning brief. A later
+  message can move or close one, and so can saying it's done in a chat.
+- Deadlines have their own level in What Pulse learned: turn them up there to
+  have them pushed. Each is deleted a day after it's done, otherwise about a
+  week after its day, and at once when you delete the event it came from. Turn
+  it off in Settings > Pulse or with `hermes conduit-push pulse inbox off`,
+  which deletes the ones kept.
 
 ## 0.89.0 (2026-10-27)
 

@@ -72,6 +72,10 @@ DEFAULTS: dict[str, Any] = {
     # weeks' dates and plans. On while Pulse memory is.
     "look_ahead": True,
     "ahead_requested": False,  # `pulse ahead now`
+    # Deadlines from the Shortcuts inbox (pulse_memory.read_inbox): memory
+    # also reads what the phone's automations log and keeps deadlines, like a
+    # trial ending or a bill due. On while Pulse memory is.
+    "inbox_deadlines": True,
     # Quiet times (pulse_quiet): the weekdays Pulse keeps to itself (Monday
     # 0 to Sunday 6) and when a quiet spell ends (epoch seconds), in the
     # user's time zone.
@@ -171,7 +175,12 @@ CREATE TABLE IF NOT EXISTS items (
     -- no due date, so it never expires.
     every_year TEXT NOT NULL DEFAULT '',
     -- What that date is: birthday, anniversary or other.
-    occasion TEXT NOT NULL DEFAULT ''
+    occasion TEXT NOT NULL DEFAULT '',
+    -- A deadline memory found in the Shortcuts inbox (pulse_memory.read_inbox):
+    -- the event it came from, "<device>/<event id>", and who that event is from;
+    -- "" for what came from a chat.
+    from_inbox TEXT NOT NULL DEFAULT '',
+    sender TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS items_status ON items(status, kind);
 CREATE TABLE IF NOT EXISTS watermarks (
@@ -377,6 +386,14 @@ RESET = "reset"
 WRONG_TIME = "wrong_time"
 # Why an item memory learned after its time had passed is closed (pulse_memory.LATE_S).
 LATE_BY = "expiry: learned after its time had passed"
+# Whether Pulse memory reads the Shortcuts inbox for deadlines (DEFAULTS), and
+# where it read to (pulse_memory.read_inbox): [received_at, device, event id]
+# of the last event it read.
+INBOX_SETTING = "inbox_deadlines"
+INBOX_MARK = "inbox_mark"
+# A deadline from the inbox is deleted this long after it's done, forgotten,
+# replaced or expired (pulse_memory.forget_inbox): Undo works that long.
+INBOX_FORGET_S = 86400.0
 # The report attempts split into such cards, newest last: their typed
 # ratings aren't read, so an item isn't counted twice.
 SPLIT_REPORTS = "split_reports"
@@ -397,7 +414,8 @@ _ADDED_COLUMNS = (("cards", "topic", "TEXT NOT NULL DEFAULT ''"), ("cards", "bri
                   ("cards", "learned", "TEXT NOT NULL DEFAULT ''"), ("cards", "place", "TEXT NOT NULL DEFAULT ''"),
                   ("cards", "band", "TEXT NOT NULL DEFAULT ''"), ("followups", "timing", "TEXT NOT NULL DEFAULT ''"),
                   ("cards", "put_back_at", "REAL"), ("items", "every_year", "TEXT NOT NULL DEFAULT ''"),
-                  ("items", "occasion", "TEXT NOT NULL DEFAULT ''"), ("candidates", "ref", "TEXT NOT NULL DEFAULT ''"))
+                  ("items", "occasion", "TEXT NOT NULL DEFAULT ''"), ("candidates", "ref", "TEXT NOT NULL DEFAULT ''"),
+                  ("items", "from_inbox", "TEXT NOT NULL DEFAULT ''"), ("items", "sender", "TEXT NOT NULL DEFAULT ''"))
 # What report cards said for Why? before a candidate's reason did (an item's card,
 # never shown; a whole report's card), and the setting that says a store has
 # cleared them.
@@ -808,68 +826,14 @@ class PulseStore:
         Pulse's done mark in the same write (_mark_cards_done), so none is
         left open behind it."""
         _check_marks(marks)
-        columns = ("profile", "chat_id", "message_id", "kind", "text", "evidence", "explicit", "due", "due_at",
-                   "mentioned_at", "recorded_at", "valid_from", "every_year", "occasion")
-        live = "status='open' AND superseded_at IS NULL AND profile=?"
-        now, ids = time.time(), []
         with _lock, self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = self._mark(conn, marks, profile, chat_id, window)
             if (row["message_id"] if row else 0) != after_id:
                 conn.execute("ROLLBACK")
                 return None
-            for item in items:
-                item = {"every_year": "", "occasion": "", **item}
-                if item.get("same_as"):
-                    # A repeat of an item replaced since it was shown repeats its successor;
-                    # one of an item closed since is already on record.
-                    target = _current(conn, item["same_as"], profile)
-                    if target is None or conn.execute(
-                            # A date said again, or a later one, moves the item's date. A
-                            # yearly one (a fact's) is kept as said this time, and takes the
-                            # place of a due date, so the fact no longer expires; a fact
-                            # already yearly takes no due date from a repeat.
-                            f"UPDATE items SET mentioned_at=MAX(mentioned_at, ?), "
-                            f"due=CASE WHEN ?!='' THEN '' "
-                            f"WHEN every_year='' AND ? IS NOT NULL AND (due_at IS NULL OR ? > due_at) THEN ? "
-                            f"ELSE due END, "
-                            f"due_at=CASE WHEN ?!='' THEN NULL "
-                            f"WHEN every_year='' AND ? IS NOT NULL AND (due_at IS NULL OR ? > due_at) THEN ? "
-                            f"ELSE due_at END, "
-                            f"every_year=CASE WHEN ?!='' THEN ? ELSE every_year END, "
-                            f"occasion=CASE WHEN ?!='' THEN ? ELSE occasion END "
-                            f"WHERE id=? AND {live}",
-                            (item["mentioned_at"], item["every_year"], item["due_at"], item["due_at"], item["due"],
-                             item["every_year"], item["due_at"], item["due_at"], item["due_at"],
-                             item["every_year"], item["every_year"], item["every_year"], item["occasion"],
-                             target, profile)).rowcount:
-                        continue
-                row = {**item, "profile": profile, "chat_id": chat_id, "recorded_at": now,
-                       "valid_from": item["mentioned_at"]}
-                new_id = conn.execute(
-                    f"INSERT INTO items({', '.join(columns)}) VALUES({','.join('?' * len(columns))})",
-                    tuple(row[column] for column in columns)).lastrowid
-                ids.append(new_id)
-                if item.get("late"):  # learned after its time had passed: too late to remind
-                    conn.execute("UPDATE items SET status='expired', closed_by=?, closed_at=? WHERE id=?",
-                                 (LATE_BY, now, new_id))
-                # Already replaced (by an earlier chunk): replace its successor.
-                target = _current(conn, item["replaces"], profile) if item.get("replaces") else None
-                if target is not None and target != new_id:
-                    conn.execute(f"UPDATE items SET superseded_at=?, superseded_by=?, valid_to=? WHERE id=? AND {live}",
-                                 (now, new_id, item["mentioned_at"], target, profile))
-            for entry in closed:  # an item replaced since closes through its successor
-                target = _current(conn, entry["id"], profile, reminded=True)
-                if target is None:
-                    continue
-                closer = f"chat {chat_id} message {entry['message_id']}: {entry['evidence']}"
-                prior = _prior(conn, target)
-                if conn.execute("UPDATE items SET status=?, closed_by=?, closed_at=? WHERE id=? "
-                                "AND status IN ('open', 'reminded') AND superseded_at IS NULL AND profile=?",
-                                (entry["status"], closer, now, target, profile)).rowcount:
-                    # Undo puts the item back while this close still holds it,
-                    # from a card about an item it replaced too.
-                    _mark_cards_done(conn, target, prior={**prior, "closer": closer, "item": target}, now=now)
+            ids = _keep(conn, profile, chat_id, items, closed,
+                        lambda entry: f"chat {chat_id} message {entry['message_id']}: {entry['evidence']}")
             conn.execute(
                 f"INSERT INTO {marks}(profile, chat_id, message_id, at) VALUES(?,?,?,?) "
                 "ON CONFLICT(profile, chat_id) DO UPDATE SET message_id=excluded.message_id, at=excluded.at, "
@@ -877,6 +841,36 @@ class PulseStore:
             if marks == "backfill_marks":
                 conn.execute("UPDATE backfill_marks SET window_from=? WHERE profile=? AND chat_id=?",
                              (window, profile, chat_id))
+            conn.execute("COMMIT")
+        return ids
+
+    def keep_inbox(self, *, mark: list, after: Optional[list], items: Sequence[dict[str, Any]] = (),
+                   closed: Sequence[dict[str, Any]] = ()) -> Optional[list[int]]:
+        """Records a read batch of the Shortcuts inbox (pulse_memory.read_inbox)
+        as ``advance`` records a chunk: its deadlines, the ones it repeats,
+        replaces or closes, and the inbox read up to ``mark`` (INBOX_MARK),
+        in one transaction, only if it was still read up to ``after`` and
+        the inbox is still read (INBOX_SETTING). Its items are this
+        profile's, with no chat. Returns the new items' ids, or None when
+        another reader got there first, or it was turned off meanwhile."""
+        with _lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            stored = {row["key"]: row["value_json"] for row in conn.execute(
+                "SELECT key, value_json FROM settings WHERE key IN (?, ?)", (INBOX_MARK, INBOX_SETTING))}
+            try:
+                current = json.loads(stored[INBOX_MARK]) if INBOX_MARK in stored else None
+            except ValueError:
+                current = None
+            try:
+                reading = json.loads(stored[INBOX_SETTING]) if INBOX_SETTING in stored else True
+            except ValueError:
+                reading = True
+            if current != after or reading is False:
+                conn.execute("ROLLBACK")
+                return None
+            ids = _keep(conn, "", "", items, closed, lambda entry: f"inbox {entry['event']}: {entry['evidence']}")
+            conn.execute("INSERT INTO settings(key, value_json) VALUES(?, ?) "
+                         "ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json", (INBOX_MARK, json.dumps(mark)))
             conn.execute("COMMIT")
         return ids
 
@@ -935,6 +929,59 @@ class PulseStore:
             return [dict(row) for row in conn.execute(
                 f"SELECT * FROM items WHERE status='open' AND superseded_at IS NULL AND kind='fact' "
                 f"AND every_year!='' {where}ORDER BY id", params)]
+
+    def deadlines(self) -> list[dict]:
+        """Open deadlines memory found in the Shortcuts inbox, soonest first."""
+        with self._connect() as conn:
+            return [dict(row) for row in conn.execute(
+                "SELECT * FROM items WHERE status='open' AND superseded_at IS NULL AND from_inbox!='' "
+                "ORDER BY due_at, id")]
+
+    def inbox_items(self) -> list[dict]:
+        """Every item memory found in the Shortcuts inbox, whatever became of
+        it, for pulse_memory.forget_inbox."""
+        with self._connect() as conn:
+            return [dict(row) for row in conn.execute(
+                "SELECT id, from_inbox, status, closed_at, superseded_at, superseded_by, valid_from FROM items "
+                "WHERE from_inbox!='' ORDER BY id")]
+
+    def items_from_inbox(self, device: Optional[str] = None, events: Optional[Sequence[str]] = None) -> list[int]:
+        """The items memory found in Shortcuts inbox events: ``events`` of
+        ``device``'s, all of ``device``'s, or every one (no device)."""
+        with self._connect() as conn:
+            if device is None:
+                rows = conn.execute("SELECT id FROM items WHERE from_inbox!=''").fetchall()
+            elif events is None:
+                rows = conn.execute("SELECT id FROM items WHERE substr(from_inbox, 1, ?)=?",
+                                    (len(device) + 1, f"{device}/")).fetchall()
+            else:
+                rows = []
+                refs = [f"{device}/{event}" for event in events]
+                for start in range(0, len(refs), 400):  # within SQLite's bound parameters
+                    chunk = refs[start:start + 400]
+                    rows += conn.execute(f"SELECT id FROM items WHERE from_inbox IN ({','.join('?' * len(chunk))})",
+                                         chunk).fetchall()
+        return sorted(row["id"] for row in rows)
+
+    def delete_items(self, ids: Sequence[int]) -> int:
+        """Deletes items memory found in the Shortcuts inbox, and their
+        follow-up rows (pulse_memory.forget_inbox); never an item from a
+        chat. The cards made from them stay, as what Pulse already said."""
+        gone = 0
+        for start in range(0, len(ids), 400):  # within SQLite's bound parameters
+            chunk = tuple(ids[start:start + 400])
+            marks = ",".join("?" * len(chunk))
+            with _lock, self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                found = [row["id"] for row in conn.execute(
+                    f"SELECT id FROM items WHERE id IN ({marks}) AND from_inbox!=''", chunk)]
+                if found:
+                    held = ",".join("?" * len(found))
+                    conn.execute(f"DELETE FROM followups WHERE item_id IN ({held})", found)
+                    conn.execute(f"DELETE FROM items WHERE id IN ({held})", found)
+                conn.execute("COMMIT")
+            gone += len(found)
+        return gone
 
     def remembered_items(self, *, profile: str, limit: int, reminded_since: float) -> list[dict]:
         """What memory reads a chat beside: the profile's open items, and its
@@ -1910,6 +1957,71 @@ def _insert_candidates(conn: sqlite3.Connection, run_id: str, rows: Sequence[dic
     return [int(conn.execute(f"INSERT INTO candidates(run_id, created_at, {', '.join(row)}) "
                              f"VALUES(?, ?, {', '.join('?' * len(row))})", (run_id, now, *row.values())).lastrowid)
             for row in rows]
+
+
+ITEM_COLUMNS = ("profile", "chat_id", "message_id", "kind", "text", "evidence", "explicit", "due", "due_at",
+                "mentioned_at", "recorded_at", "valid_from", "every_year", "occasion", "from_inbox", "sender")
+
+
+def _keep(conn: sqlite3.Connection, profile: str, chat_id: str, items: Sequence[dict[str, Any]],
+          closed: Sequence[dict[str, Any]], closer: Callable[[dict[str, Any]], str]) -> list[int]:
+    """What ``advance`` and ``keep_inbox`` write, inside their transaction:
+    the new items, the ones they repeat or replace, and the ones they close
+    (``closer`` says what closed each); the new items' ids."""
+    live = "status='open' AND superseded_at IS NULL AND profile=?"
+    now, ids = time.time(), []
+    for item in items:
+        item = {"every_year": "", "occasion": "", "from_inbox": "", "sender": "", **item}
+        if item.get("same_as"):
+            # A repeat of an item replaced since it was shown repeats its successor;
+            # one of an item closed since is already on record.
+            target = _current(conn, item["same_as"], profile)
+            if target is None or conn.execute(
+                    # A date said again, or a later one, moves the item's date. A
+                    # yearly one (a fact's) is kept as said this time, and takes the
+                    # place of a due date, so the fact no longer expires; a fact
+                    # already yearly takes no due date from a repeat.
+                    f"UPDATE items SET mentioned_at=MAX(mentioned_at, ?), "
+                    f"due=CASE WHEN ?!='' THEN '' "
+                    f"WHEN every_year='' AND ? IS NOT NULL AND (due_at IS NULL OR ? > due_at) THEN ? "
+                    f"ELSE due END, "
+                    f"due_at=CASE WHEN ?!='' THEN NULL "
+                    f"WHEN every_year='' AND ? IS NOT NULL AND (due_at IS NULL OR ? > due_at) THEN ? "
+                    f"ELSE due_at END, "
+                    f"every_year=CASE WHEN ?!='' THEN ? ELSE every_year END, "
+                    f"occasion=CASE WHEN ?!='' THEN ? ELSE occasion END "
+                    f"WHERE id=? AND {live}",
+                    (item["mentioned_at"], item["every_year"], item["due_at"], item["due_at"], item["due"],
+                     item["every_year"], item["due_at"], item["due_at"], item["due_at"],
+                     item["every_year"], item["every_year"], item["every_year"], item["occasion"],
+                     target, profile)).rowcount:
+                continue
+        row = {**item, "profile": profile, "chat_id": chat_id, "recorded_at": now, "valid_from": item["mentioned_at"]}
+        new_id = conn.execute(
+            f"INSERT INTO items({', '.join(ITEM_COLUMNS)}) VALUES({','.join('?' * len(ITEM_COLUMNS))})",
+            tuple(row[column] for column in ITEM_COLUMNS)).lastrowid
+        ids.append(new_id)
+        if item.get("late"):  # learned after its time had passed: too late to remind
+            conn.execute("UPDATE items SET status='expired', closed_by=?, closed_at=? WHERE id=?",
+                         (LATE_BY, now, new_id))
+        # Already replaced (by an earlier chunk): replace its successor.
+        target = _current(conn, item["replaces"], profile) if item.get("replaces") else None
+        if target is not None and target != new_id:
+            conn.execute(f"UPDATE items SET superseded_at=?, superseded_by=?, valid_to=? WHERE id=? AND {live}",
+                         (now, new_id, item["mentioned_at"], target, profile))
+    for entry in closed:  # an item replaced since closes through its successor
+        target = _current(conn, entry["id"], profile, reminded=True)
+        if target is None:
+            continue
+        said = closer(entry)
+        prior = _prior(conn, target)
+        if conn.execute("UPDATE items SET status=?, closed_by=?, closed_at=? WHERE id=? "
+                        "AND status IN ('open', 'reminded') AND superseded_at IS NULL AND profile=?",
+                        (entry["status"], said, now, target, profile)).rowcount:
+            # Undo puts the item back while this close still holds it,
+            # from a card about an item it replaced too.
+            _mark_cards_done(conn, target, prior={**prior, "closer": said, "item": target}, now=now)
+    return ids
 
 
 def _current(conn: sqlite3.Connection, item_id: int, profile: str, *, reminded: bool = False) -> Optional[int]:

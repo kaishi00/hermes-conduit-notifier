@@ -44,7 +44,7 @@ def test_a_delivered_follow_up_becomes_a_card_linked_to_its_chat(live):
     assert card["news"] == "The deploy finished and everything is green." and card["why"]
     assert card["quote"] == "I'll let you know when the deploy finishes." and card["seen_at"] is None
     feed = control.feed(live.store)
-    assert feed["unseen"] == 1 and feed["levels"] == {"followup": "push"}
+    assert feed["unseen"] == 1 and feed["levels"] == {"followup": "push", "deadline": "brief"}
     assert feed["cards"][0]["id"] == card["id"]
     assert control.see(live.store, [card["id"], 999]) == 1 and live.store.unseen_cards() == 0
     with pytest.raises(ValueError):

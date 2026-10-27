@@ -718,6 +718,9 @@ class ReadBackUpstream:
         self.unstarted = False
         # Answers the next response.create this many times with busy.
         self.busy = 0
+        # Leaves a held response's cancel unanswered until answer_cancel().
+        self.defer_cancel = False
+        self.deferred = None
         # Streams a response's audio over this long before its end.
         self.stream_s = 0.0
         self.sent = []
@@ -774,12 +777,19 @@ class ReadBackUpstream:
             self._speak(rid, text)
         elif kind == "response.cancel" and self.unstarted:
             self.held = None
+        elif kind == "response.cancel" and self.held is not None and self.defer_cancel:
+            self.deferred, self.held = self.held, None
         elif kind == "response.cancel" and self.held is not None:
             rid, _ = self.held
             self.held = None
             # Audio already on its way when the cancel lands.
             self.push({"type": "response.output_audio.delta", "response_id": rid, "delta": PCM})
             self.push({"type": "response.done", "response": {"id": rid, "status": "cancelled"}})
+
+    def answer_cancel(self):
+        rid, _ = self.deferred
+        self.deferred = None
+        self.push({"type": "response.done", "response": {"id": rid, "status": "cancelled"}})
 
     def _stream(self, rid, text):
         self.push({"type": "response.output_audio_transcript.delta", "response_id": rid, "delta": text})
@@ -936,6 +946,58 @@ def test_speaking_over_the_reply_stops_it_and_lets_the_turn_go(client, hermes, s
     assert {"type": "response.cancel"} in upstream.sent
     assert upstream.spoken() == ["Once upon a time, there was a fox.", "Okay."]
     assert [frame["type"] for frame in seen].count("response.output_audio.delta") == 1
+
+
+def test_the_users_stop_reaches_the_server_once_whether_or_not_a_sentence_is_in_progress(client, hermes, server):
+    server.upstream = upstream = ReadBackUpstream()
+    with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
+        _ready(ws, upstream)
+        # Mid-sentence: the plugin cancels the sentence it asked for, once.
+        upstream.hold = True
+        upstream.push({"type": "conversation.item.input_audio_transcription.completed", "transcript": "Tell me a story"})
+        turn, _ = _next(ws, "conduit.turn")
+        ws.send_text(json.dumps({"type": "conduit.turn.delta", "turn_id": turn["turn_id"],
+                                 "text": "Once upon a time, there was a fox. "}))
+        _next(ws, "response.created")
+        # The server holds its answer to the cancel, so the second tap lands
+        # while the first is still winding down.
+        upstream.defer_cancel = True
+        ws.send_text(json.dumps({"type": "response.cancel"}))
+        cancel, _ = _next(ws, "conduit.turn.cancel")
+        assert cancel["turn_id"] == turn["turn_id"]
+        # A second tap then tells the server nothing new. The audio after it
+        # is relayed in order, so once it arrives both taps were handled.
+        ws.send_text(json.dumps({"type": "response.cancel"}))
+        ws.send_text(json.dumps({"type": "input_audio_buffer.append", "audio": PCM}))
+        deadline = time.monotonic() + 10
+        while not any(frame.get("type") == "input_audio_buffer.append" for frame in upstream.sent):
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        assert [frame["type"] for frame in upstream.sent].count("response.cancel") == 1
+        upstream.defer_cancel = False
+        upstream.answer_cancel()
+        done, _ = _next(ws, "response.done")
+        assert done["response"]["status"] == "cancelled"
+        # The server already finished the sentence, which may still play on
+        # the phone: the stop goes on, so a server that keeps its microphone
+        # shut while its audio plays opens it (#1325).
+        upstream.hold = False
+        upstream.push({"type": "conversation.item.input_audio_transcription.completed", "transcript": "Another"})
+        turn, _ = _next(ws, "conduit.turn")
+        ws.send_text(json.dumps({"type": "conduit.turn.delta", "turn_id": turn["turn_id"], "text": "Okay."}))
+        ws.send_text(json.dumps({"type": "conduit.turn.done", "turn_id": turn["turn_id"]}))
+        _next(ws, "response.done")
+        ws.send_text(json.dumps({"type": "response.cancel"}))
+        # A server with nothing to cancel may say so; the call never hears it.
+        upstream.push({"type": "error", "error": {"code": "response_cancel_not_active", "message": "No active response"}})
+        ws.send_text("finish")
+        seen = []
+        with contextlib.suppress(Exception):
+            while True:
+                seen.append(json.loads(ws.receive_text()))
+        assert all(frame.get("type") != "error" for frame in seen)
+    assert [frame["type"] for frame in upstream.sent].count("response.cancel") == 2
+    assert upstream.sent[-1] == {"type": "response.cancel"}
 
 
 def test_a_typed_turn_is_run_by_the_plugin_not_read_back(client, hermes, server):
