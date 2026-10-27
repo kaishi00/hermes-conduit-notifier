@@ -668,14 +668,14 @@ def test_typed_ratings_of_a_list_report_still_name_its_remembered_picks(reportin
     listed(live, now)
     pulse.tick(now + 1)
     [sent] = live.sent()
-    assert report.shown_items(sent) == set()  # the turn lists no "What Pulse remembers" of its own
+    assert report.shown_kinds(sent) == {}  # the turn lists no "What Pulse remembers" of its own
     [attempt] = live.store.attempts_since(pulse.REPORT, now - 60)
     live.store.update_attempt(attempt["attempt_id"], state=store.DELIVERED)  # its cards never landed
     asked = []
     monkeypatch.setattr(report, "ratings_after", lambda home, **kwargs: asked.append(kwargs["shown"]) or ({}, []))
     monkeypatch.setattr(pulse, "_last_ratings", 0.0)
     pulse._collect_ratings(live.store, live.home, now + 2)
-    assert asked == [{item_id}]  # so "1 no" still names the remembered item
+    assert asked == [{item_id: "commitment"}]  # so "1 no" still names the remembered item, and its kind
 
 
 def test_a_ref_written_as_a_whole_float_still_counts():

@@ -480,6 +480,13 @@ def lines(picked: Sequence[dict]) -> list[tuple[str, str, Optional[int]]]:
     return [(pick["kind"], pick["text"], pick["item_id"]) for pick in picked]
 
 
+def shown(picked: Sequence[dict]) -> dict[int, str]:
+    """The remembered items among the picks, each with its kind, as
+    pulse_learning.add_noticed_cards and pulse_report.ratings_after take
+    what a report showed."""
+    return {pick["item_id"]: pick["kind"] for pick in picked if pick["item_id"] is not None}
+
+
 def whys(picked: Sequence[dict]) -> list[str]:
     """Each pick's reason (why now, where it came from), the card's Why?:
     pulse_learning.add_noticed_cards's ``whys``. "" for a pick without one

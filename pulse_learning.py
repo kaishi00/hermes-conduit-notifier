@@ -42,8 +42,9 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Callable, Mapping, Optional, Sequence
 
+from . import pulse_dates as dates
 from . import pulse_hours as hours
 from . import pulse_prefs as prefs
 from . import pulse_store as store
@@ -266,7 +267,7 @@ def report_lines(reply: Optional[str]) -> list[tuple[str, str, Optional[int]]]:
 
 
 def add_noticed_cards(pulse_store: store.PulseStore, *, turn: Any, lines: list[tuple[str, str, Optional[int]]],
-                      chat_id: str, chat_title: str, shown: set[int], kinds: tuple[str, ...],
+                      chat_id: str, chat_title: str, shown: Mapping[int, str], kinds: tuple[str, ...],
                       item_chat_title: Callable[[dict], str], now: float, attempt: str = "",
                       marks: tuple[str, ...] = (), keep: int = 50, links: Sequence[int] = (),
                       found_in: Sequence[tuple[str, str]] = (), whys: Sequence[str] = (),
@@ -285,7 +286,12 @@ def add_noticed_cards(pulse_store: store.PulseStore, *, turn: Any, lines: list[t
     one without. ``factors``: the biggest part learning played in each
     (pulse_candidates.factors), for its Why?; ``attrs``: each one's place
     and band as it came up (pulse_candidates.card_attrs), which its signals
-    carry.
+    carry. ``shown``: the remembered items the report showed, each with
+    the kind it showed. A line's kind, if one of ``kinds``, is its card's
+    topic, but deadline only for a line naming a deadline the report showed,
+    as for a rating typed after it (pulse_report.ratings_after): a line the
+    report found, or one naming something else Pulse remembers, gets "other"
+    (pulse_dates.DEADLINE: a model's finds never make one).
     ``item_chat_title`` gives a chat's title from its profile and chat_id."""
     rows = []
     for n, (kind, text, ref) in enumerate(lines):
@@ -293,8 +299,11 @@ def add_noticed_cards(pulse_store: store.PulseStore, *, turn: Any, lines: list[t
         item = pulse_store.item(current) if current is not None else None
         profile, found = found_in[n] if n < len(found_in) else ("", "")
         level_name = levels[n] if n < len(levels) and levels[n] in ("push", "screen", "brief") else "screen"
+        topic = kind if kind in kinds else "other"
+        if topic == dates.DEADLINE and (ref is None or shown.get(ref) != dates.DEADLINE):
+            topic = "other"
         row: dict[str, Any] = {
-            "kind": NOTICED, "level": level_name, "topic": kind if kind in kinds else "other",
+            "kind": NOTICED, "level": level_name, "topic": topic,
             "news": _clip(text, NOTICED_NEWS_LIMIT), "why": whys[n] if n < len(whys) else "", "created_at": now,
             "learned": factor_json(factors[n]) if n < len(factors) else ""}
         if n < len(attrs):

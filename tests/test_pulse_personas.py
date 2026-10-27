@@ -343,7 +343,7 @@ class Sim:
         picked = candidates.picks(self.store.run_candidates(run["id"]))  # as the report turn is sent
         cards = learning.add_noticed_cards(
             self.store, turn=_Turn, lines=candidates.lines(picked), chat_id=SID, chat_title="Pulse",
-            shown={pick["item_id"] for pick in picked if pick["item_id"] is not None}, kinds=report.KINDS,
+            shown=candidates.shown(picked), kinds=report.KINDS,
             item_chat_title=lambda item: item["chat_id"], now=now, attempt=run["id"],
             marks=(pulse.TURN_CARDS_DONE, store.SPLIT_REPORTS), keep=pulse.TURN_CARDS_DONE_KEEP,
             links=[pick["id"] for pick in picked], levels=candidates.levels(picked))

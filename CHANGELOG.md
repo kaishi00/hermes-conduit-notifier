@@ -19,6 +19,13 @@ checks it). The format is fixed, because Conduit reads it:
 - When you approve Hermes' requests from a Watch Local Live call, the card now stays up as long as Hermes waits (your approvals timeout setting). On current Hermes it always used five minutes.
 - Voice on a profile that no longer exists now says so, instead of saying Hermes couldn't check it.
 
+## 0.93.1 (2026-10-27)
+
+### Fixes
+- Something a Pulse report found by itself could show as a deadline, and
+  rating it changed how loudly deadlines come up. Now only the deadlines
+  Pulse memory keeps count as deadlines.
+
 ## 0.93.0 (2026-10-27)
 
 ### Fixes
