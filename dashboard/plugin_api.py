@@ -4305,7 +4305,8 @@ class _LocalLiveReadBack:
 
     async def _stop(self, cancel_turn: bool) -> bool:
         """The reply stops: nothing more of it is said. True when the server
-        was sent a response.cancel for it, now or before."""
+        was sent a response.cancel for it, now or before (a send that failed
+        counts too: the relay ends with a broken upstream anyway)."""
         # A start still waiting on the call is overtaken.
         self.generation += 1
         self._release()
