@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.91.0 (2026-10-27)
+## 0.93.0 (2026-10-27)
 
 ### New and improved
 - Rooms with people you've linked keep their agents: each agent's own Hermes
@@ -25,6 +25,11 @@ checks it). The format is fixed, because Conduit reads it:
   From the command line: `hermes conduit-push rooms leave` and `remove`.
 - Disbanding a room tells everyone linked into it, and their Hermes take
   their agents out of it.
+
+## 0.92.0 (2026-10-27)
+
+### Fixes
+- On a speech server that only reads text back, tapping Interrupt in a Local Live call didn't always reach the server, so one that keeps its microphone shut while it speaks could miss what you said next.
 
 ## 0.90.0 (2026-10-27)
 
