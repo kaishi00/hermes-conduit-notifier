@@ -53,11 +53,11 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     )
     pulse = commands.add_parser("pulse", help="Pulse, the proactivity experiment: on, off, status, probe, report, home, outcomes, memory, followups, "
                                                  "cards, rate, done, learned, nudge, budget, candidates, note, quiet, night, "
-                                                 "dates, ahead, inbox, look, where")
+                                                 "dates, ahead, inbox, look, where, private")
     pulse.add_argument("pulse_action", choices=["on", "off", "status", "probe", "report", "home", "outcomes", "memory",
                                                 "followups", "cards", "rate", "done", "learned", "nudge", "budget",
                                                 "candidates", "note", "quiet", "night", "dates", "ahead", "inbox",
-                                                "look", "where"])
+                                                "look", "where", "private"])
     pulse.add_argument("value", nargs="?", default="",
                        help="for home: the id of the chat to use, or 'auto' to find it by title; "
                             "for outcomes: how many to show, or a chat id; "
@@ -85,7 +85,9 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
                             "adds), or nothing to show today's look-ups, what recent turns looked up and what "
                             "they suggested; "
                             "for where: 'on' or 'off' (whether Pulse reads where you are), or nothing to show what "
-                            "waits for a place and what your arrivals and departures did today")
+                            "waits for a place and what your arrivals and departures did today; "
+                            "for private: 'on' or 'off' (whether a push about a gift, a surprise, someone's "
+                            "birthday, health or money hides its words on the Lock Screen), or nothing to show it")
     pulse.add_argument("extra", nargs="?", default="",
                        help="for memory forget: the item number; for memory backfill: how many days back "
                             "(it shows what that costs), 'start', 'stop' or 'cancel'; "
@@ -379,7 +381,8 @@ def _pulse(args: argparse.Namespace) -> int:
     action = args.pulse_action
     # Follow-ups are on by default, so even `followups on|off` needs no file yet.
     listing = action in ("followups", "cards", "rate", "done", "learned", "candidates", "dates") \
-        or (action in ("memory", "ahead", "inbox", "look", "where") and (args.value or "").strip() not in ("on", "off")) \
+        or (action in ("memory", "ahead", "inbox", "look", "where", "private")
+            and (args.value or "").strip() not in ("on", "off")) \
         or (action == "nudge" and not (args.value or "").strip()) \
         or (action == "note" and (args.value or "").strip() in ("", "clear")) \
         or (action in ("quiet", "night") and not (args.value or "").strip()) \
@@ -458,6 +461,8 @@ def _pulse(args: argparse.Namespace) -> int:
         return _pulse_look(pulse_store, home, (args.value or "").strip())
     if action == "where":
         return _pulse_where(pulse_store, home, (args.value or "").strip())
+    if action == "private":
+        return _pulse_private(pulse_store, (args.value or "").strip())
     print(f"Pulse: {'on' if pulse_store.get('enabled') else 'off'}")
     chat, problem = pulse.home_chat(pulse_store, home)
     if chat is not None:
@@ -558,6 +563,8 @@ def _pulse(args: argparse.Namespace) -> int:
     print(_inbox_line(pulse_store, zone))
     print(_look_line(pulse_store))
     print(_where_line(pulse_store, home))
+    print(_private_line(pulse_store))
+    print(_time_sensitive_line(pulse_store, zone))
     print(f"Nudging: {pulse_learning.nudge(pulse_store)} (`hermes conduit-push pulse nudge gentle|balanced|eager`)")
     note = " ".join(pulse.report.note(pulse_store).split())
     print(f"Note to Pulse: {_printable(note)}" if note
@@ -1926,7 +1933,7 @@ def _pulse_where(pulse_store: Any, home: Any, value: str) -> int:
             pulse_store.clear_moments()
             print("Pulse no longer reads where you are. What it remembers for a place stays, and waits for you to "
                   "turn this back on; what the look ahead held for a place comes to the Pulse screen without a "
-                  "notification.")
+                  "notification" + ("." if pulse_store.get("enabled") else " once Pulse is on again."))
         else:
             print("Pulse reads where you are while Conduit shares it in the background: a reminder you asked for "
                   "at a place comes when you get there, and its look-ups may use your location. Each read goes in "
@@ -1961,7 +1968,7 @@ def _pulse_where(pulse_store: Any, home: Any, value: str) -> int:
     moments = pulse_store.moments(since=time.time() - pulse.store.MOMENTS_KEEP_S)
     if moments:
         texts = {item["id"]: item["text"] for item in waiting}
-        picks = {card["id"]: card["news"] for card in held}
+        picks = {card["id"]: card for card in held}
         for moment in moments:
             for item_id in _moment_items(moment):
                 if item_id not in texts:
@@ -1969,11 +1976,45 @@ def _pulse_where(pulse_store: Any, home: Any, value: str) -> int:
                     texts[item_id] = found["text"] if found else f"#{item_id}"
             for card_id in _moment_picks(moment):
                 if card_id not in picks:
-                    card = pulse_store.card(card_id)
-                    picks[card_id] = card["news"] if card else f"card #{card_id}"
+                    picks[card_id] = pulse_store.card(card_id)
         print("Arrivals and departures in the last day:")
         for moment in moments:
             print(_printable(pulse_places.describe(moment, zone, texts, picks)))
+    return 0
+
+
+def _private_line(pulse_store: Any) -> str:
+    """Whether a private Pulse push hides its words (pulse_push), for `pulse
+    private` and `pulse status`."""
+    from . import pulse_push
+    if pulse_push.hides_private(pulse_store):
+        return (f'Private reminders: the Lock Screen says only "{pulse_push.PRIVATE_BODY}" '
+                "(`hermes conduit-push pulse private off` to show their words)")
+    return "Private reminders: shown like any other push (`hermes conduit-push pulse private on`)"
+
+
+def _time_sensitive_line(pulse_store: Any, zone: Any) -> str:
+    """Today's time-sensitive Pulse pushes against their cap (pulse_push), for `pulse status`."""
+    from . import pulse_push
+    sent = pulse_push.sent_today(pulse_store.get(pulse_push.TIME_SENSITIVE_KEY), datetime.now(zone).date().isoformat())
+    return f"Time-sensitive pushes today: {min(sent, pulse_push.TIME_SENSITIVE_DAILY)} of {pulse_push.TIME_SENSITIVE_DAILY}"
+
+
+def _pulse_private(pulse_store: Any, value: str) -> int:
+    """Whether a Pulse push about a gift, a surprise, someone's day, health
+    or money hides its words on the Lock Screen (pulse_push); `on` and `off`
+    switch it."""
+    from . import pulse_push
+    if value in ("on", "off"):
+        pulse_store.set(pulse_push.PRIVATE_SETTING, value == "on")
+        print("A Pulse push about a gift, a surprise, someone's birthday or anniversary, health or money says only "
+              f'"{pulse_push.PRIVATE_BODY}", even with Show previews on; the Pulse screen shows all of it.'
+              if value == "on" else "Pulse pushes show their words like any other, as Show previews says.")
+        return 0
+    if value:
+        print("Usage: hermes conduit-push pulse private [on|off]")
+        return 2
+    print(_private_line(pulse_store))
     return 0
 
 

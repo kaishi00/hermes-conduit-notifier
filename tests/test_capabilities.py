@@ -98,6 +98,8 @@ def test_every_capability_names_a_served_route_family():
         "pulse_proposals": "/pulse/proposals/",
         # Where you are: a setting on the /pulse control route; a place on what /pulse/memory lists.
         "pulse_where": "/pulse/memory",
+        # Hide private reminders: a setting on the /pulse control route.
+        "pulse_private": "/pulse",
         "present-v1": "/present/",
         "health-sync": "/health/",
         "shortcut-inbox": "/inbox/",

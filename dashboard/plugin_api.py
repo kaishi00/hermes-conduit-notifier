@@ -17357,6 +17357,11 @@ ROUTE_CAPABILITIES = (
     # remembered item said for a place has "place"; a card's "looked" may
     # list "location".
     "pulse_where",
+    # Hide private reminders on the Lock Screen (pulse_push): GET /pulse says
+    # "private_pushes" and PUT /pulse takes it. With it on, a Pulse push about
+    # a gift, a surprise, someone's birthday, health or money has the body
+    # "Pulse has something for you." and `private: true` in its sealed content.
+    "pulse_private",
     "present-v1",
     "health-sync",
     "voice-tools",

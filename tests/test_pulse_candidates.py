@@ -521,7 +521,7 @@ def test_a_report_lists_its_candidates_then_says_what_code_picked(reporting):
     assert pulse.push_copy(SID, "t1", reply) == {
         "title_label": "pulse.noticed", "title": "Pulse noticed 2 things", "count": 2,
         "body": "Renew your passport before the trip (you said so in Deploy) · "
-                "Look at the flaky deploy (you asked in Deploy)"}
+                "Look at the flaky deploy (you asked in Deploy)", "level": "active"}
     deliver(live, sent, reply)
     pulse.tick(now + 2)
     remembered, found = sorted(live.store.cards(), key=lambda card: card["id"])

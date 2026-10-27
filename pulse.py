@@ -59,12 +59,14 @@ from . import pulse_candidates as candidates
 from . import pulse_followup as followup
 from . import pulse_hermes as hermes
 from . import pulse_host as host
+from . import pulse_hours as hours
 from . import pulse_learning as learning
 from . import pulse_ledger as ledger
 from . import pulse_memory as memory
 from . import pulse_places as places
 from . import pulse_prefs as prefs
 from . import pulse_proposals as proposals
+from . import pulse_push as push
 from . import pulse_quiet as quiet
 from . import pulse_report as report
 from . import pulse_store as store
@@ -318,19 +320,30 @@ def _run_picks(pulse_store: store.PulseStore, attempt: dict) -> Optional[list[di
     return candidates.picks(rows) if rows else None
 
 
-def _pushed_lines(attempt: dict, response: Any) -> list[tuple[str, str, Optional[int]]]:
-    """A report turn's items that go to the phone: its candidate list's picks
-    that came up as a push (pulse_candidates.levels; one journaled before
-    levels were counts as one, as every item rode its report's push then),
-    else its reply's lines, all of them, as before."""
+def _pushed_picks(attempt: dict) -> Optional[list[dict]]:
+    """A report turn's picks that came up as a push (pulse_candidates.levels;
+    one journaled before levels were counts as one, as every item rode its
+    report's push then); None for a report with no candidate list behind
+    it, or one that can't be read."""
     try:
         picked = _run_picks(open_store(), attempt)
     except Exception:  # noqa: BLE001 — the reply still says them
         logger.debug("conduit_push: Pulse couldn't read the report's picks", exc_info=True)
-        picked = None
-    if picked is not None:
-        return candidates.lines([pick for pick, level in zip(picked, candidates.levels(picked))
-                                 if level in ("push", "")])
+        return None
+    if picked is None:
+        return None
+    return [pick for pick, level in zip(picked, candidates.levels(picked)) if level in ("push", "")]
+
+
+def _pushed_lines(attempt: dict, response: Any) -> list[tuple[str, str, Optional[int]]]:
+    """A report turn's items that go to the phone: its pushed picks
+    (``_pushed_picks``), else its reply's lines, all of them, as before."""
+    return _report_lines(_pushed_picks(attempt), response)
+
+
+def _report_lines(picks: Optional[list[dict]], response: Any) -> list[tuple[str, str, Optional[int]]]:
+    if picks is not None:
+        return candidates.lines(picks)
     return learning.report_lines(response if isinstance(response, str) else "")
 
 
@@ -358,19 +371,59 @@ def push_copy(session_id: str, turn_id: Any, response: Any) -> dict[str, Any]:
     what it is, not by Pulse's hidden chat. A report's body is its items
     that came up as a push (``_pushed_lines``), one after another, without
     the numbers, kinds and remembered-item refs that are for the cards, and
-    ``count`` says how many there are (two or more)."""
+    ``count`` says how many there are (two or more). Then how it goes
+    (``_push_how``): its "level", and a private one's "private" and body."""
     attempt = _turn_attempt(session_id, turn_id)
     kind = attempt["kind"] if attempt else ""
     response = response if isinstance(response, str) else ""
-    lines = _pushed_lines(attempt, response) if kind == REPORT else []
+    picks = _pushed_picks(attempt) if kind == REPORT else None
+    lines = _report_lines(picks, response) if kind == REPORT else []
     if lines:
         copy = {"title_label": "pulse.noticed", "title": "Pulse noticed something",
                 "body": " · ".join(" ".join(text.split()) for _, text, _ in lines)}
         if len(lines) > 1:  # one thing is "something", with no count
             copy.update(title=f"Pulse noticed {len(lines)} things", count=len(lines))
-        return copy
-    label, title = PUSH_TITLES.get(kind, ("response.ready", "Pulse"))
-    return {"title_label": label, "title": title, "body": brief.summary_line(response) if kind == BRIEF else response}
+    else:
+        label, title = PUSH_TITLES.get(kind, ("response.ready", "Pulse"))
+        copy = {"title_label": label, "title": title,
+                "body": brief.summary_line(response) if kind == BRIEF else response}
+    return {**copy, **_push_how(attempt, copy["body"], picks or [])} if attempt else copy
+
+
+def _push_how(attempt: dict, body: str, picks: list[dict]) -> dict[str, Any]:
+    """How a Pulse turn's push goes (pulse_push): its "level" (a place's
+    moment, a follow-up that can't wait, a report's quiet picks, and whether
+    the phone says the user is busy), and, with Hide private reminders on,
+    for a private one (its words, its item, its picks or its held card),
+    "private" and the private body in place of its words. Private words hide
+    it even when Pulse's store can't be read, with no level then."""
+    try:
+        pulse_store = open_store()
+        home = Path(get_hermes_home())
+        now = time.time()
+        timing: dict[str, Any] = {}
+        item = card = None
+        if attempt["kind"] == FOLLOWUP:
+            _, _, number = str(attempt["item_id"] or "").rpartition("-f")
+            item = pulse_store.item(int(number)) if number.isdigit() else None
+            row = pulse_store.followup(item["id"]) if item else None
+            timing = followup.followup_timing(row) if row else {}
+        elif attempt["kind"] == MOMENT:
+            card = places.attempt_card(pulse_store, str(attempt["item_id"] or ""))
+        level = push.level(pulse_store, moment=attempt["kind"] == MOMENT or bool(timing.get("moment")),
+                           cant_wait=timing.get("urgent") is True or timing.get("cant_wait") is True,
+                           quiet=attempt["kind"] == REPORT and push.quiet_picks(picks),
+                           busy=hours.busy(home, now), zone=report_zone(pulse_store, home, now), now=now)
+        private = (push.private_words(body) or push.private_item(item)
+                   or any(push.private_row(pulse_store, pick) for pick in picks)
+                   or (card is not None and (places.held(card).get("private") is True
+                                             or push.private_words(card["news"]) or push.private_words(card["title"]))))
+        hide = push.hides_private(pulse_store)
+    except Exception:  # noqa: BLE001 — never breaks the hook: the push goes at the default level
+        logger.debug("conduit_push: Pulse couldn't tell how its push goes", exc_info=True)
+        level, private, hide = "", push.private_words(body), True
+    how = {"level": level} if level else {}
+    return {**how, "private": True, "body": push.PRIVATE_BODY} if private and hide else how
 
 
 def pre_tool_call(session_id: str, turn_id: Any, tool_name: Any = None,

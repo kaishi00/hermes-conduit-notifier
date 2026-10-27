@@ -83,6 +83,10 @@ DEFAULTS: dict[str, Any] = {
     # in the background, for what waits for a place and for its look-ups.
     # Off until the user turns it on.
     "where": False,
+    # Hide private reminders on the Lock Screen (pulse_push): a push about a
+    # gift, a surprise, someone's day, health or money says only "Pulse has
+    # something for you". On until the user turns it off.
+    "private_pushes": True,
     # Quiet times (pulse_quiet): the weekdays Pulse keeps to itself (Monday
     # 0 to Sunday 6) and when a quiet spell ends (epoch seconds), in the
     # user's time zone.

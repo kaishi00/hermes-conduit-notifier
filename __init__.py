@@ -301,6 +301,8 @@ def _post_llm_call(**kwargs: Any) -> None:
         session_title=chat_title,
         body=plain_text(copy["body"]),
         count=copy.get("count"),
+        level=copy.get("level"),
+        private=copy.get("private") is True,
     )
     # A quick reply in a chat Hermes Desktop has selected: the user most
     # likely watched it arrive there (#87); so did one in a chat Conduit has
