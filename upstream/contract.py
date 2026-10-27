@@ -170,18 +170,24 @@ def split_contract() -> Tuple[str, str]:
 
 
 def main(argv: List[str]) -> int:
-    command = argv[1] if len(argv) > 1 else "check"
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    commands = parser.add_subparsers(dest="command")
+    commands.add_parser("check", help="fail when contract.yml is stale")
+    commands.add_parser("write", help="rewrite contract.yml's generated part")
+    diff = commands.add_parser("changed", help="the watched upstream files changed between two refs")
+    diff.add_argument("repo")
+    diff.add_argument("start")
+    diff.add_argument("end")
+    args = parser.parse_args(argv[1:])
+    if args.command == "changed":
+        print("\n".join(changed(args.repo, args.start, args.end)))
+        return 0
     head, current = split_contract()
     fresh = generated()
-    if command == "changed":
-        print("\n".join(changed(*argv[2:5])))
-        return 0
-    if command == "write":
+    if args.command == "write":
         CONTRACT.write_text(head.rstrip("\n") + "\n\n" + fresh)
         return 0
-    if command != "check":
-        print(__doc__)
-        return 2
     if current == fresh:
         print("upstream/contract.yml is current.")
         return 0

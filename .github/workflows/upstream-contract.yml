@@ -53,9 +53,14 @@ jobs:
           tags=$(git ls-remote --tags --refs "$HERMES_REPO" | sed 's#.*refs/tags/##')
           release=$(printf '%s\n' "$tags" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
           canary=$(printf '%s\n' "$tags" | grep -E '\+canary\.[0-9]{8}T[0-9]{6}Z$' | sort -t. -k4 | tail -1)
-          if [ -n "$INPUT_REF" ]; then refs="[\"$INPUT_REF\"]"
-          elif [ "$EVENT" = pull_request ]; then refs="[\"$release\"]"
-          else refs="[\"$canary\",\"$release\"]"
+          if [ -z "$release" ] || [ -z "$canary" ]; then
+            # Not a contract failure, so no issue: the red run is the alert.
+            echo "::error::Couldn't find Hermes' release and canary tags (release='$release' canary='$canary')"
+            exit 1
+          fi
+          if [ -n "$INPUT_REF" ]; then refs=$(jq -cn --arg r "$INPUT_REF" '[$r]')
+          elif [ "$EVENT" = pull_request ]; then refs=$(jq -cn --arg r "$release" '[$r]')
+          else refs=$(jq -cn --arg c "$canary" --arg r "$release" '[$c, $r]')
           fi
           echo "release=$release canary=$canary -> $refs"
           echo "refs=$refs" >> "$GITHUB_OUTPUT"

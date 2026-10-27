@@ -73,7 +73,7 @@ def gh(*args: str, input: Optional[str] = None) -> str:
 
 def open_issues() -> Dict[str, Dict]:
     """Open upstream-break issues by key."""
-    raw = gh("issue", "list", "--label", LABEL, "--state", "open", "--limit", "200", "--json", "number,body")
+    raw = gh("issue", "list", "--label", LABEL, "--state", "open", "--limit", "1000", "--json", "number,body")
     by_key = {}
     for issue in json.loads(raw or "[]"):
         match = MARKER_RE.search(issue.get("body") or "")

@@ -26,6 +26,7 @@ upstream is noticed. UPSTREAM_CONTRACT_RAW=1 reports them as plain results.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import shutil
 import signal
@@ -47,7 +48,6 @@ ROOT = Path(__file__).resolve().parents[1]
 CONTRACT = Path(__file__).resolve().parent / "contract.yml"
 PLUGIN = "conduit_push"
 TOKEN = "upstream-contract-session-token"
-PROFILES = ("launch", "second", "disabled")
 READY_TIMEOUT_S = 120
 # What a copy of the plugin leaves out: the relay and mailbox are not plugin code.
 COPY_IGNORE = shutil.ignore_patterns(".git", "node_modules", "relay", "mailbox", "tests", "upstream",
@@ -86,7 +86,7 @@ class FakeSpeechServer:
             with self._paths_lock:
                 self._paths.append(ws.request.path)
             await ws.send(json.dumps({"type": "ready"}))
-            with __import__("contextlib").suppress(Exception):
+            with contextlib.suppress(Exception):
                 await ws.wait_closed()
 
         async def main() -> None:
@@ -178,10 +178,12 @@ class Dashboard:
         except (OSError, asyncio.TimeoutError, InvalidHandshake) as exc:
             # The handshake itself failed: a route's answer, not the harness's.
             result = SocketResult(opened=False, error=type(exc).__name__)
-        # The relay dials before it forwards anything, but give a slow dial a moment.
-        for _ in range(20):
-            if len(self.speech.paths) > before or not result.opened:
-                break
+        # The fake server records a dial before it sends "ready", so once the first event
+        # arrived or the socket was refused, the list is final. Only a socket that opened
+        # and then went quiet could still be dialing: give it time.
+        deadline = time.monotonic() + 5
+        while (result.opened and result.first is None and result.close_code is None
+               and len(self.speech.paths) == before and time.monotonic() < deadline):
             time.sleep(0.05)
         result.dialed = self.speech.paths[before:]
         return result
@@ -239,20 +241,21 @@ def dashboard(tmp_path_factory: pytest.TempPathFactory):
 
     speech = FakeSpeechServer()
     speech.start()
-    shutil.copytree(ROOT, home / "plugins" / PLUGIN, ignore=COPY_IGNORE)
-    _set_config(home / "config.yaml", True, speech.url("launch"))
-    for name in ("second", "disabled"):
-        profile = home / "profiles" / name
-        (profile / "plugins").mkdir(exist_ok=True)
-        _set_config(profile / "config.yaml", name != "disabled", speech.url(name))
-
-    port = _free_port()
     log_path = home / "dashboard.log"
     log = log_path.open("w")
-    proc = subprocess.Popen([hermes, "dashboard", "--no-open", "--skip-build", "--port", str(port)],
-                            env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-    board = Dashboard(port, speech, home)
+    proc: Optional[subprocess.Popen] = None
     try:
+        shutil.copytree(ROOT, home / "plugins" / PLUGIN, ignore=COPY_IGNORE)
+        _set_config(home / "config.yaml", True, speech.url("launch"))
+        for name in ("second", "disabled"):
+            profile = home / "profiles" / name
+            (profile / "plugins").mkdir(exist_ok=True)
+            _set_config(profile / "config.yaml", name != "disabled", speech.url(name))
+
+        port = _free_port()
+        proc = subprocess.Popen([hermes, "dashboard", "--no-open", "--skip-build", "--port", str(port)],
+                                env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        board = Dashboard(port, speech, home)
         deadline = time.monotonic() + READY_TIMEOUT_S
         while True:
             if proc.poll() is not None:
@@ -268,14 +271,15 @@ def dashboard(tmp_path_factory: pytest.TempPathFactory):
             time.sleep(0.5)
         yield board
     finally:
-        with __import__("contextlib").suppress(ProcessLookupError):
-            os.killpg(proc.pid, signal.SIGTERM)
-        try:
-            proc.wait(15)
-        except subprocess.TimeoutExpired:
-            with __import__("contextlib").suppress(ProcessLookupError):
-                os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait(15)
+        if proc is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGTERM)
+            try:
+                proc.wait(15)
+            except subprocess.TimeoutExpired:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait(15)
         log.close()
         speech.stop()
         if os.environ.get("UPSTREAM_CONTRACT_LOG"):

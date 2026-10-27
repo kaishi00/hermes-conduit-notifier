@@ -3,7 +3,7 @@
 Run in a child process with a scratch HERMES_HOME, so importing Hermes
 touches no real profile. An optional import is one the plugin guards with a
 try; it still fails here, because a missing one quietly turns a feature off.
-A name tried from several modules (where Hermes moved it) needs only one.
+A name tried from several modules of one package (where Hermes moved it) needs only one.
 """
 
 from __future__ import annotations
@@ -40,7 +40,10 @@ for module, kinds in json.loads(sys.argv[1]).items():
         if not has(module, name):
             missing.append(f"{module}.{name}" if name != "*" else module)
     for name in kinds.get("optional", []):
-        alternatives.setdefault(name if name != "*" else f"* {module}", []).append(module)
+        # Alternatives share a name and a top-level package (tools.approval and
+        # tools.approval_context), so unrelated same-named imports stay apart.
+        key = f"{name} {module.split('.')[0]}" if name != "*" else f"* {module}"
+        alternatives.setdefault(key, []).append(module)
 # An optional name the plugin tries from several modules (an old and a new
 # home) is there when any of them has it.
 for key, modules in alternatives.items():
