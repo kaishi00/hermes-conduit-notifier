@@ -2366,9 +2366,10 @@ whether notes and attendees are included (off by default).
 - **Contacts (plugin 0.30+).** Only the people the user picks in Conduit
   (no address book permission): name, nickname, a relation the user types
   ("wife"), phone numbers, emails, birthday and organization, read with
-  `conduit_contacts` (`people`, with an optional `query`). With Pulse on
-  (plugin 0.88+), its daily look ahead brings up their birthdays two weeks
-  ahead, the day before and on the day. Turned off, they are deleted here.
+  `conduit_contacts` (`people`, with an optional `query`). With Pulse and
+  its memory on (plugin 0.88+), its daily look ahead brings up their
+  birthdays two weeks ahead, the day before and on the day. Turned off, they
+  are deleted here.
 
 Limits: 4 devices per profile, 5,000 items and 4 MiB per batch, 50 alarms and
 200 contacts per device, 120 uploads and 60 exchanges a minute per profile,
