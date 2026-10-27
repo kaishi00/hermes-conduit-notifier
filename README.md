@@ -1658,7 +1658,7 @@ in its profile, and the sessions continuing it; a chat asked for by
 `session_id` is read even when hidden (plugin 0.78.1+; before, a Bot Chat
 listed nothing). Capability `artifacts`.
 
-## Workspace files (plugin 0.107+)
+## Workspace files (plugin 0.109+)
 
 Conduit's Folder tab, beside Artifacts, browses one folder at a time: the
 open chat's working folder or a project's. These routes take that folder as
@@ -2739,6 +2739,27 @@ keeps it.
   as it would with no job, and its why says the job is failing. A failing
   job gets no card of its own: Hermes already sends each failure, and a
   nudge after three in a row.
+- **A Do it that stalled comes back once** (plugin 0.107+). When nothing
+  was sent from the chat a day after Do it, or Pulse's checks after Do it
+  found it still not done, the card comes back once at the next steps'
+  level: held for the morning brief by default, on the Pulse screen at
+  screen or push, never with a notification of its own. Its Why? says when
+  you tapped Do it. It stays away once its item closed since, or you marked
+  it done, put it off or said it wasn't useful, and a card back once never
+  comes back again. Feed cards carry `back` (`unsent` or `not_done`, empty
+  for a card never back) and `back_acted_at`, and `hermes conduit-push
+  pulse cards` marks them.
+- **Hermes's claims, kept to judge** (plugin 0.108+). Memory also notes
+  when Hermes said in a chat it had just set a reminder, an alarm or a
+  timer, added or changed an event, created or changed a scheduled job, or
+  sent a message, and looks in the outcome ledger for a call that worked
+  in the same turn of a tool that could have done it. Nothing is shown yet:
+  `hermes conduit-push pulse claims` lists the ones with no call behind
+  them (`pulse claims all` lists every one, with the call that backed
+  it), each with what was said and that turn's calls, to judge before a
+  card ever says "Hermes said it set a reminder, but none was made". Only
+  this profile's chats, from when Pulse is on, and kept 30 days, or until
+  Pulse is turned off.
 
 ## A phone reminder comes up once (plugin 0.106.1+)
 

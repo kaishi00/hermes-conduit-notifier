@@ -56,6 +56,7 @@ from . import pulse_delivery as delivery
 from . import pulse_ahead as ahead
 from . import pulse_brief as brief
 from . import pulse_candidates as candidates
+from . import pulse_claims as claims
 from . import pulse_followup as followup
 from . import pulse_hermes as hermes
 from . import pulse_host as host
@@ -667,6 +668,8 @@ def tick(now: Optional[float] = None) -> None:
         return
     # The loop's heartbeat: `pulse status` warns when nothing runs the loop.
     pulse_store.set("last_tick_at", now)
+    # The ledger records while Pulse is on: Hermes's claims are judged from then.
+    claims.start(pulse_store, now)
     _turn_cards(pulse_store, home, changed, now)
     _collect_ratings(pulse_store, home, now)
     # Even with follow-ups turned off: one already sent still lands.
@@ -685,6 +688,8 @@ def tick(now: Optional[float] = None) -> None:
     pulse_store.prune_cards(CARDS_KEEP, held_before=now - HELD_DAYS * 86400.0)
     pulse_store.prune_candidates(now - candidates.JOURNAL_DAYS * 86400.0)
     pulse_store.prune_signals(now - prefs.KEEP_S)
+    # Claims too, with memory off: they're kept a month at most.
+    pulse_store.prune_claims(now - claims.KEEP_S)
     # Deadlines from the Shortcuts inbox: a day after they're over, or at
     # once when their event was deleted there.
     memory.forget_inbox(pulse_store, home, now)

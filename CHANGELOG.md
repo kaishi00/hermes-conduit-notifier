@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.107.0 (2026-10-27)
+## 0.109.0 (2026-10-27)
 
 ### New and improved
 - Conduit's new Folder tab in Artifacts can search a chat's folder by file
@@ -22,6 +22,21 @@ checks it). The format is fixed, because Conduit reads it:
   folder it opened. It never shows, opens, creates or copies files that
   hold keys or passwords, and a save won't overwrite a file that changed
   meanwhile.
+
+## 0.108.0 (2026-10-27)
+
+### New and improved
+- Pulse notes when Hermes says it set a reminder, added an event or sent a
+  message, and checks a call in that turn did it. Nothing is shown yet:
+  `hermes conduit-push pulse claims` lists the ones with none, to judge.
+
+## 0.107.0 (2026-10-27)
+
+### New and improved
+- A card you tapped Do it on but never sent, or that Pulse's checks found
+  still not done, comes back once, held for your morning brief unless you
+  turned next steps up, saying when you tapped Do it. Not if you marked it
+  done, put it off or said it wasn't useful.
 
 ## 0.106.1 (2026-10-27)
 
