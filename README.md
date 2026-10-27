@@ -1021,7 +1021,7 @@ also sends `?profile=`, the two must name the same profile (400 otherwise).
 The capabilities route lists `dashboard-profiles`, and Conduit sends
 `?conduit_profile=` only to a plugin that lists it.
 
-Linked Rooms' new draft and host setup take it too (plugin 0.98+): `POST
+Linked Rooms' new draft and host setup take it too (plugin 0.99+): `POST
 /rooms/drafts`, whose room starts in the room service of the profile's own
 session authority, which only the dashboard has, and `GET` and `POST
 /rooms/setup`, which write the installation's `.env` in the dashboard's scope
@@ -2463,10 +2463,10 @@ is blocked, with a note naming what the turn may use:
 | `conduit_maps` | `search`, `lookup`, `reverse_geocode`, `directions`, `travel_times` | between places the turn names: never `"me"` (what `near` and `from` default to) or a saved place; 20 a day |
 | `web_search` | | only on a follow-up about a promise or commitment, which reads its chat (reports, briefs and watches carry the Shortcuts inbox, other people's words); no web address in the query; 10 a day |
 
-- At most 6 look-ups a turn; days are UTC. Calendar adds, `pending` (it
-  marks the phone's answers reported), alarm and timer changes, `navigate`,
-  `web_extract`, `conduit_location`, `conduit_health` and every other tool
-  stay blocked.
+- At most 6 look-ups a turn; days are UTC. Calendar adds become
+  suggestions (below). `pending` (it marks the phone's answers reported),
+  alarm and timer changes, `navigate`, `web_extract`, `conduit_location`,
+  `conduit_health` and every other tool stay blocked.
 - Tool Search's `tool_search` and `tool_describe` are allowed, and each call
   inside a `tool_call` Hermes couldn't unwrap is checked the same way.
 - A turn in the Pulse chat (or what compression made of it) that Pulse didn't
@@ -2483,6 +2483,53 @@ is blocked, with a note naming what the turn may use:
   with `"look_first"`. Off, Pulse's turns use no tools. `hermes conduit-push
   pulse look` shows today's look-ups and what recent turns looked at.
   Capability `pulse_look`.
+
+## Pulse suggests, you add (plugin 0.97+)
+
+A Pulse turn never changes the phone. When adding an event or reminder would
+help, its `conduit_calendar` `add_event` or `add_reminder` doesn't run: the
+plugin checks the change as the write would (the same fields, calendar or
+list, and limits, without writing), keeps it as a suggestion, and tells the
+model it suggested it. A change that fails the checks gets the tool's own
+error, so the model can fix it.
+
+- At most 2 suggestions a turn and 5 a day (UTC). A suggestion lasts until
+  its event starts or its reminder is due (a date's at the end of that day,
+  in the phone's time zone), or 7 days. It's kept 30 days, or longer while
+  its card is.
+- Once the turn's message is in, each suggestion is its own card (kind
+  `proposal`, on the screen), saying what it adds from its fields alone
+  ("Add to Personal: Dinner at Nopa, Sat 25 Oct, 19:00 to 21:00", times in
+  the phone's time zone), never the model's words. It goes to the calendar
+  or list the card names, even if the phone's default changes meanwhile.
+- `GET /pulse/feed?proposals=1` includes them, each with `"proposal"`: `id`,
+  `kind`, `line` (plain text, to show as is), `state` (`waiting`, `adding`,
+  `added`, `changed`, `failed` with the phone's `note`, `not_added`,
+  `expired`, `removing`, `removed`), `expires_at`, and `change_id` and
+  `undo_id` once asked for. An app that doesn't ask gets none, and doesn't
+  count them as unseen; `POST /pulse/feed/seen` with `"ids": null` marks
+  them seen only with `"proposals": true`.
+- `POST /pulse/proposals/<id>/add` approves it once (a second tap, a retry or
+  another device gets 409 `already_added`) and asks the phone for the change
+  from the kept fields, with no model in between and never in the "add
+  without asking" tier: the app that tapped Add applies it without the
+  phone's own card, and another device asks there. A change the phone store
+  refuses (409 with its code and `note`) leaves the suggestion to tap again.
+  `/dismiss` is Not now (409 `already_added` once Add was tapped). `/undo`
+  asks the phone to delete what it added, once (409 `already_undone` while
+  that's on its way or done), which the app that tapped Undo applies the
+  same way, and another device asks first.
+  Until the phone says it added it, Undo gets 409 `not_added`, and until a
+  sync has sent the new event or reminder, it gets `unknown_event` or
+  `unknown_reminder`.
+- While a Pulse turn is on its way in the Pulse chat, changes asked for from
+  that chat through `conduit_calendar` or `conduit_phone` are refused
+  (`pulse_turn`), and so are changes from a call Hermes names no chat for,
+  so a call that got past the hook still can't write. That includes one you
+  ask for there while Pulse's turn waits behind yours: ask again once
+  Pulse's message is in.
+- `hermes conduit-push pulse look` lists recent suggestions and how each
+  went. Capability `pulse_proposals`.
 
 ## Apple Watch lookups and jobs (plugin 0.6+, jobs 0.7+, Gemini tokens 0.8+, Qwen tokens 0.75+)
 
@@ -3006,7 +3053,7 @@ gateway was told to stop serving (`hermes -p <name> gateway stop`,
 the installation.
 
 Conduit runs it through these routes, with `?profile=` (`?conduit_profile=`
-for a profile the dashboard didn't start with, plugin 0.98+: "Voice on a
+for a profile the dashboard didn't start with, plugin 0.99+: "Voice on a
 profile the dashboard didn't start with", above), behind the `room-setup`
 capability:
 
@@ -3034,7 +3081,7 @@ capability:
   doesn't start, and a POST again only restarts it. Served in a profile's
   plugin host (an older Conduit's `?profile=` for a profile the dashboard
   didn't start with), it saves but never restarts the gateway (plugin
-  0.98+): a restart started there brings the gateway back with the host's
+  0.99+): a restart started there brings the gateway back with the host's
   environment, Hermes' plugin host flag among it. `restart.error` then says
   to restart it on the host or update Conduit.
 
@@ -3197,7 +3244,7 @@ installation's):
   waiting. `choices` are the agent's choices for the room, or null for those
   of its last room with the same people. The profile picks the room service,
   and one the dashboard didn't start with comes as `?conduit_profile=`
-  (plugin 0.98+), as for the setup.
+  (plugin 0.99+), as for the setup.
 - `GET /rooms/drafts`: `{"drafts": [...], "starts": {"available",
   "reason"}}`, newest first, each `{"room_id", "name", "status",
   "created_at", "expires_at", "started_at", "reason", "agents", "people":

@@ -8862,23 +8862,59 @@ async def post_pulse_forget(request: Request, response: Response) -> Dict[str, A
 
 
 @router.get("/pulse/feed")
-async def get_pulse_feed(response: Response) -> Dict[str, Any]:
-    """The Pulse screen: cards newest first, how many are unseen, each kind's loudness and the Pulse chat's id."""
+async def get_pulse_feed(response: Response, proposals: bool = False) -> Dict[str, Any]:
+    """The Pulse screen: cards newest first, how many are unseen, each kind's loudness and the Pulse chat's id.
+    ``proposals``: the app shows suggestion cards (kind "proposal", each with its "proposal"); without it,
+    they're left out and not counted."""
     response.headers["Cache-Control"] = "no-store"
-    return await _pulse_route("feed", lambda control, store, home: control.feed(store, home), reads_only=True)
+    return await _pulse_route("feed", lambda control, store, home: control.feed(store, home, proposals=proposals),
+                              reads_only=True)
+
+
+@router.post("/pulse/proposals/{proposal_id}/add")
+async def post_pulse_proposal_add(proposal_id: int, response: Response) -> Dict[str, Any]:
+    """Add on a suggestion's card: approves it once and asks the phone for the change, which always asks
+    there: {"proposal": {...}}, with the change's "change_id", which the app that tapped Add applies without
+    the phone's own card. 409 with "already_added" for a second tap, "dismissed", "expired", "not_found", or
+    the phone store's code and its "note" (the suggestion stays, to tap again)."""
+    response.headers["Cache-Control"] = "no-store"
+    return await _pulse_route("proposal_add", lambda control, store, home: {
+        "proposal": control.add_proposal(store, proposal_id, home)}, reads_only=True)
+
+
+@router.post("/pulse/proposals/{proposal_id}/dismiss")
+async def post_pulse_proposal_dismiss(proposal_id: int, response: Response) -> Dict[str, Any]:
+    """Not now on a suggestion's card: it won't be added, and its card goes: {"proposal": {...}}. 409 with
+    "already_added" once Add was tapped, "dismissed" for a second tap, "expired" or "not_found"."""
+    response.headers["Cache-Control"] = "no-store"
+    return await _pulse_route("proposal_dismiss", lambda control, store, home: {
+        "proposal": control.dismiss_proposal(store, proposal_id, home)}, reads_only=True)
+
+
+@router.post("/pulse/proposals/{proposal_id}/undo")
+async def post_pulse_proposal_undo(proposal_id: int, response: Response) -> Dict[str, Any]:
+    """Undo on an added suggestion's card: asks the phone to delete it, once, which the app that tapped Undo
+    applies without the phone's own card (another device asks first): {"proposal": {...}} with the delete's
+    "undo_id". 409 with "not_added" until the phone says it added it, "already_undone" while a delete is on its
+    way or done, or the phone store's code and its "note" ("unknown_event" or "unknown_reminder" until a sync has
+    sent what it added)."""
+    response.headers["Cache-Control"] = "no-store"
+    return await _pulse_route("proposal_undo", lambda control, store, home: {
+        "proposal": control.undo_proposal(store, proposal_id, home)}, reads_only=True)
 
 
 @router.post("/pulse/feed/seen")
 async def post_pulse_seen(request: Request, response: Response) -> Dict[str, Any]:
-    """{"ids": [n, ...]} marks those cards seen, {"ids": null} every card: {"seen": count}."""
+    """{"ids": [n, ...]} marks those cards seen, {"ids": null} every card the app's feed shows, so suggestion
+    cards only with "proposals": true, as /pulse/feed?proposals=1: {"seen": count}."""
     response.headers["Cache-Control"] = "no-store"
     body = await _read_json_body(request, PULSE_MAX_BODY_BYTES)
     if not isinstance(body, dict) or "ids" not in body:
         raise HTTPException(status_code=400, detail={"code": "invalid", "field": "ids"},
                             headers={"Cache-Control": "no-store"})
-    ids = body["ids"]
-    return await _pulse_route("seen", lambda control, store, home: {"seen": control.see(store, ids)},
-                              reads_only=True)
+    ids, proposals = body["ids"], body.get("proposals", False)
+    return await _pulse_route("seen", lambda control, store, home: {
+        "seen": control.see(store, ids, proposals=proposals)}, reads_only=True)
 
 
 @router.post("/pulse/rate")
@@ -17260,6 +17296,10 @@ ROUTE_CAPABILITIES = (
     # "look_first" and PUT /pulse takes it; a card's "looked" lists what its
     # turn looked at ("calendar", "phone", "contacts", "maps", "web").
     "pulse_look",
+    # A Pulse turn's calendar adds are suggestions (pulse_proposals): GET
+    # /pulse/feed?proposals=1 lists their cards (kind "proposal"), and POST
+    # /pulse/proposals/<id>/add, /dismiss and /undo act on them.
+    "pulse_proposals",
     "present-v1",
     "health-sync",
     "voice-tools",

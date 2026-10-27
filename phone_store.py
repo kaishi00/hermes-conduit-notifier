@@ -322,6 +322,10 @@ def parse_day(value: Any, field: str) -> date:
     return parsed
 
 
+def new_change_id() -> str:
+    return "ch_" + secrets.token_urlsafe(16)
+
+
 def iso_utc(epoch: float) -> str:
     return datetime.fromtimestamp(epoch, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -768,44 +772,38 @@ class PhoneStore:
     # Pending changes (the agent's writes) ----------------------------------------------
 
     def add_change(self, kind: Any, fields: Any, target: Any = None, reason: Any = None, session_title: Any = None,
-                   device: Any = None) -> dict[str, Any]:
+                   device: Any = None, ask: bool = False, change_id: str | None = None) -> dict[str, Any]:
         """A change for the phone to apply. Picks the device (the one named,
         else the one that synced last with the sharing the change needs),
         checks the fields against what that device shares, and returns the
         change as the phone will see it, with ``device_name`` and a short
-        ``summary`` for the notification."""
-        if kind not in CHANGE_KINDS:
-            raise PhoneError("invalid", f"kind must be one of {', '.join(CHANGE_KINDS)}")
-        fields = {} if fields is None else fields
-        if not isinstance(fields, dict):
-            raise PhoneError("malformed", "fields must be an object")
-        target = {} if target is None else target
-        if not isinstance(target, dict):
-            raise PhoneError("malformed", "target must be an object")
+        ``summary`` for the notification. ``ask``: the phone asks the user
+        even when they let Hermes add without asking (a Pulse suggestion's
+        Add, pulse_proposals). ``change_id``: the id it gets, from
+        ``new_change_id``, for a caller that records it before asking
+        (pulse_proposals), so asking again can't make a second change."""
+        fields, target = _change_args(kind, fields, target)
         reason_text = clean_text(reason, "reason", MAX_REASON_CHARS, cap=True)
         title_text = clean_text(session_title, "session_title", MAX_SESSION_TITLE_CHARS, cap=True)
-        need = change_need(kind)
         now = int(self.clock())
         with self._write() as db:
             _expire(db, now)
-            device_id, device_name, sharing = _pick_device(db, device, need, now=now)
+            device_id, device_name, sharing = _pick_device(db, device, change_need(kind), now=now)
             if db.execute("SELECT COUNT(*) FROM changes WHERE state='pending'").fetchone()[0] >= MAX_PENDING:
                 raise PhoneError("too_many_pending",
                                  f"{MAX_PENDING} changes are already waiting for the phone; wait for the user to "
                                  "answer some, or check them with action pending", status=409)
-            if kind in ALARM_CHANGE_KINDS:
-                clean_target, clean_fields, summary = _check_alarm_change(db, device_id, kind, fields, target, now)
-                collection = None
-            else:
-                clean_target, clean_fields, summary, collection = _check_change(db, device_id, kind, fields, target)
+            clean_target, clean_fields, summary, collection = _checked(db, device_id, kind, fields, target, now)
+            # ``ask`` keeps a change out of the "add without asking" tier
+            # (proactivity.md 7.6, item 7).
             auto = False
-            if kind in ("add_event", "add_reminder") and sharing.get("auto_add") is True:
+            if kind in ("add_event", "add_reminder") and sharing.get("auto_add") is True and not ask:
                 calendar = _calendar_row(db, device_id, "event" if kind == "add_event" else "reminder", collection)
                 auto = calendar is not None and not calendar["shared"]
-            elif kind in ("set_alarm", "set_timer") and sharing.get("auto_add") is True:
+            elif kind in ("set_alarm", "set_timer") and sharing.get("auto_add") is True and not ask:
                 # Only the user's own phone rings: nobody else sees it.
                 auto = True
-            change_id = "ch_" + secrets.token_urlsafe(16)
+            change_id = change_id or new_change_id()  # the key: one change per id
             db.execute(
                 "INSERT INTO changes(id, device, kind, target, fields, auto, reason, session_title, created_at,"
                 " expires_at, state) VALUES(?,?,?,?,?,?,?,?,?,?, 'pending')",
@@ -821,6 +819,49 @@ class PhoneStore:
                 shared = calendar["shared"]
         return {**_change_wire(row), "device_id": device_id, "device_name": device_name, "summary": summary,
                 "calendar": calendar["title"] if calendar else None, "shared_calendar": bool(shared)}
+
+    def check_change(self, kind: Any, fields: Any, target: Any = None, device: Any = None) -> dict[str, Any]:
+        """``add_change``'s checks without the write: the device the change
+        would go to, its fields as the phone would get them, the summary,
+        the calendar or list (its title and id, the default's when the
+        change names none) and whether it's shared, and the device's time
+        zone. Raises PhoneError as ``add_change`` would, but for a full
+        queue, which the write itself checks."""
+        fields, target = _change_args(kind, fields, target)
+        now = int(self.clock())
+        with self._read() as db:
+            if db is None:
+                raise PhoneError("nothing_shared", f"No device shares {_NEED_WORDS[change_need(kind)]} with Hermes")
+            device_id, device_name, _ = _pick_device(db, device, change_need(kind), now=now)
+            clean_target, clean_fields, summary, collection = _checked(db, device_id, kind, fields, target, now)
+            calendar = None
+            if kind in CALENDAR_CHANGE_KINDS:
+                calendar = _calendar_row(db, device_id, "event" if kind.endswith("_event") else "reminder",
+                                         collection)
+            zone = db.execute("SELECT tz FROM devices WHERE id=?", (device_id,)).fetchone()[0]
+        return {"kind": kind, "target": clean_target, "fields": clean_fields, "device_id": device_id,
+                "device_name": device_name, "summary": summary, "calendar": calendar["title"] if calendar else None,
+                "calendar_id": calendar["id"] if calendar else None,
+                "shared_calendar": bool(calendar and calendar["shared"]), "time_zone": zone}
+
+    def change_outcome(self, change_id: Any) -> dict[str, Any] | None:
+        """How one change went, read without marking it reported (so the
+        agent still sees it in ``pending``): its state ("pending", "applied",
+        "edited", "dismissed", "failed", "expired" or "lost"), the phone's
+        note and the id of what it made. None when there's no such change."""
+        if not isinstance(change_id, str) or not _CHANGE_ID.match(change_id):
+            return None
+        now = int(self.clock())
+        with self._read() as db:
+            if db is None:
+                return None
+            row = db.execute("SELECT state, note, item_id, finished_at, expires_at, kind, fields FROM changes"
+                             " WHERE id=?", (change_id,)).fetchone()
+        if row is None:
+            return None
+        state = "expired" if row[0] == "pending" and row[4] <= now else row[0]
+        return {"state": state, "note": row[1], "item_id": row[2], "finished_at": row[3], "kind": row[5],
+                "fields": _decode(row[6], {})}
 
     def changes(self, limit: int = 20, *, mark_reported: bool = True) -> list[dict[str, Any]]:
         """Recent changes, newest first, with their outcomes (the agent's
@@ -2115,6 +2156,27 @@ def _check_fields(kind: str, fields: dict[str, Any], *, partial: bool) -> dict[s
         if "location_alarm" in present or not partial:
             clean["location_alarm"] = _parse_location_alarm(present.get("location_alarm"), "location_alarm")
     return clean
+
+
+def _change_args(kind: Any, fields: Any, target: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+    """A change's kind, fields and target as ``add_change`` takes them, or PhoneError."""
+    if kind not in CHANGE_KINDS:
+        raise PhoneError("invalid", f"kind must be one of {', '.join(CHANGE_KINDS)}")
+    fields = {} if fields is None else fields
+    if not isinstance(fields, dict):
+        raise PhoneError("malformed", "fields must be an object")
+    target = {} if target is None else target
+    if not isinstance(target, dict):
+        raise PhoneError("malformed", "target must be an object")
+    return fields, target
+
+
+def _checked(db: sqlite3.Connection, device_id: str, kind: str, fields: dict[str, Any], target: dict[str, Any],
+             now: int) -> tuple[dict[str, Any] | None, dict[str, Any], str, str | None]:
+    """(target, fields, summary, calendar or list id) for any change kind, or PhoneError."""
+    if kind in ALARM_CHANGE_KINDS:
+        return (*_check_alarm_change(db, device_id, kind, fields, target, now), None)
+    return _check_change(db, device_id, kind, fields, target)
 
 
 def _check_change(db: sqlite3.Connection, device_id: str, kind: str, fields: dict[str, Any],

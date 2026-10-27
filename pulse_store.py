@@ -259,7 +259,9 @@ CREATE TABLE IF NOT EXISTS cards (
     put_back_at REAL,
     -- What the turn that brought it up looked up first (attempts.looked),
     -- for its Why?.
-    looked TEXT NOT NULL DEFAULT ''
+    looked TEXT NOT NULL DEFAULT '',
+    -- A suggestion's card (kind "proposal"): its proposals row.
+    proposal INTEGER
 );
 CREATE INDEX IF NOT EXISTS cards_created ON cards(created_at);
 -- What ratings taught Pulse (pulse_learning): each row changes what Pulse
@@ -373,6 +375,33 @@ CREATE TABLE IF NOT EXISTS signals (
     PRIMARY KEY (card_id, what)
 );
 CREATE INDEX IF NOT EXISTS signals_at ON signals(at);
+-- Pulse's suggestions (pulse_proposals): a calendar add a Pulse turn asked
+-- for, checked and kept instead of made, which its card adds with one tap.
+CREATE TABLE IF NOT EXISTS proposals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    attempt_id TEXT NOT NULL,
+    -- add_event or add_reminder, and its fields as the phone gets them.
+    kind TEXT NOT NULL,
+    fields TEXT NOT NULL,
+    -- The phone it goes to, and the profile whose phone store has it.
+    device TEXT NOT NULL,
+    profile TEXT NOT NULL DEFAULT '',
+    -- What its card says, written by code from the fields.
+    line TEXT NOT NULL,
+    -- waiting, approved, dismissed or expired. Add's change and Undo's
+    -- delete get their ids here before the phone store is asked for them,
+    -- at decided_at and undo_at; asked_at once it has Add's.
+    state TEXT NOT NULL DEFAULT 'waiting',
+    change_id TEXT NOT NULL DEFAULT '',
+    undo_id TEXT NOT NULL DEFAULT '',
+    card_id INTEGER,
+    created_at REAL NOT NULL,
+    expires_at REAL NOT NULL,
+    decided_at REAL,
+    asked_at REAL,
+    undo_at REAL
+);
+CREATE INDEX IF NOT EXISTS proposals_attempt ON proposals(attempt_id);
 """
 # Where memory has read each chat to: ``watermarks`` for chats as they
 # happen, ``backfill_marks`` for a backfill of older history (same shape, plus
@@ -411,7 +440,9 @@ SPLIT_REPORTS = "split_reports"
 SPLIT_ITEMS = '"split"'
 
 CARD_COLUMNS = ("kind", "item_id", "level", "title", "quote", "news", "why", "profile", "chat_id", "chat_title",
-                "message_id", "topic", "brief", "created_at", "learned", "place", "band", "looked")
+                "message_id", "topic", "brief", "created_at", "learned", "place", "band", "looked", "proposal")
+# The suggestion columns a tap moves (PulseStore.swap_proposal).
+_PROPOSAL_MOVES = ("state", "change_id", "undo_id", "decided_at", "asked_at", "undo_at")
 # Card columns added after the first build, oldest first, with their types.
 # Columns a table gained after stores existed, added to a store from before.
 _ADDED_COLUMNS = (("cards", "topic", "TEXT NOT NULL DEFAULT ''"), ("cards", "brief", "TEXT NOT NULL DEFAULT ''"),
@@ -426,7 +457,8 @@ _ADDED_COLUMNS = (("cards", "topic", "TEXT NOT NULL DEFAULT ''"), ("cards", "bri
                   ("cards", "put_back_at", "REAL"), ("items", "every_year", "TEXT NOT NULL DEFAULT ''"),
                   ("items", "occasion", "TEXT NOT NULL DEFAULT ''"), ("candidates", "ref", "TEXT NOT NULL DEFAULT ''"),
                   ("items", "from_inbox", "TEXT NOT NULL DEFAULT ''"), ("items", "sender", "TEXT NOT NULL DEFAULT ''"),
-                  ("attempts", "looked", "TEXT NOT NULL DEFAULT ''"), ("cards", "looked", "TEXT NOT NULL DEFAULT ''"))
+                  ("attempts", "looked", "TEXT NOT NULL DEFAULT ''"), ("cards", "looked", "TEXT NOT NULL DEFAULT ''"),
+                  ("cards", "proposal", "INTEGER"))
 # What report cards said for Why? before a candidate's reason did (an item's card,
 # never shown; a whole report's card), and the setting that says a store has
 # cleared them.
@@ -663,6 +695,11 @@ class PulseStore:
             row = conn.execute("SELECT * FROM attempts WHERE tag=?", (tag,)).fetchone()
         return dict(row) if row else None
 
+    def attempt(self, attempt_id: str) -> Optional[dict]:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM attempts WHERE attempt_id=?", (attempt_id,)).fetchone()
+        return dict(row) if row else None
+
     def note_looked(self, attempt_id: str, labels: Sequence[str]) -> None:
         """Adds what a Pulse turn looked up (pulse_tools labels) to its
         attempt, each once, in the order first used: its cards' Why?."""
@@ -690,6 +727,116 @@ class PulseStore:
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM attempts ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
         return [dict(row) for row in rows]
+
+    def add_proposal(self, row: dict[str, Any], *, per_turn: int, per_day: int, day_from: float) -> Optional[int]:
+        """Keeps a suggestion (pulse_proposals), unless its turn already has
+        ``per_turn`` of them or ``per_day`` were made since ``day_from``:
+        checked and written in one transaction. Its id, or None."""
+        with _lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                turn = conn.execute("SELECT COUNT(*) FROM proposals WHERE attempt_id=?",
+                                    (row["attempt_id"],)).fetchone()[0]
+                day = conn.execute("SELECT COUNT(*) FROM proposals WHERE created_at>=?", (day_from,)).fetchone()[0]
+                if turn >= per_turn or day >= per_day:
+                    conn.execute("ROLLBACK")
+                    return None
+                proposal_id = int(conn.execute(
+                    "INSERT INTO proposals(attempt_id, kind, fields, device, profile, line, created_at, expires_at) "
+                    "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+                    (row["attempt_id"], row["kind"], json.dumps(row["fields"]), row["device"], row["profile"],
+                     row["line"], row["created_at"], row["expires_at"])).lastrowid)
+                conn.execute("COMMIT")
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+        return proposal_id
+
+    def proposal_counts(self, attempt_id: str, day_from: float) -> tuple[int, int]:
+        """Suggestions made on this attempt's turn, and since ``day_from``."""
+        with self._connect() as conn:
+            turn = conn.execute("SELECT COUNT(*) FROM proposals WHERE attempt_id=?", (attempt_id,)).fetchone()[0]
+            day = conn.execute("SELECT COUNT(*) FROM proposals WHERE created_at>=?", (day_from,)).fetchone()[0]
+        return int(turn), int(day)
+
+    def proposal(self, proposal_id: Any) -> Optional[dict]:
+        if isinstance(proposal_id, bool) or not isinstance(proposal_id, int):
+            return None
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM proposals WHERE id=?", (proposal_id,)).fetchone()
+        return _proposal(row) if row else None
+
+    def proposals(self, *, state: Optional[str] = None, uncarded: bool = False, limit: int = 100) -> list[dict]:
+        """Suggestions, newest first: in ``state``, and without a card yet."""
+        where, values = [], []
+        if state is not None:
+            where.append("state=?")
+            values.append(state)
+        if uncarded:
+            where.append("card_id IS NULL")
+        clause = f" WHERE {' AND '.join(where)}" if where else ""
+        with self._connect() as conn:
+            rows = conn.execute(f"SELECT * FROM proposals{clause} ORDER BY created_at DESC, id DESC LIMIT ?",
+                                (*values, limit)).fetchall()
+        return [_proposal(row) for row in rows]
+
+    def swap_proposal(self, proposal_id: int, was: dict[str, Any], **values: Any) -> bool:
+        """Sets ``values`` on a suggestion only while the columns in ``was``
+        still hold what was read: one write, so of two taps at once, a
+        retry or another device, one moves it and the other finds it moved.
+        Whether it moved."""
+        unknown = (set(was) | set(values)) - set(_PROPOSAL_MOVES)
+        if unknown or not was or not values:  # named into SQL
+            raise ValueError(f"unknown or missing columns {sorted(unknown)!r}")
+        with _lock, self._connect() as conn:
+            return conn.execute(
+                f"UPDATE proposals SET {', '.join(f'{key}=?' for key in values)} "
+                f"WHERE id=? AND {' AND '.join(f'{key} IS ?' for key in was)}",
+                (*values.values(), proposal_id, *was.values())).rowcount > 0
+
+    def add_proposal_card(self, proposal_id: int, row: dict[str, Any]) -> Optional[int]:
+        """The suggestion's card, once: the card and the link in one write,
+        and nothing when another process made it first. Its id, or None."""
+        _check_columns(row, CARD_COLUMNS)
+        with _lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                linked = conn.execute("SELECT card_id FROM proposals WHERE id=?", (proposal_id,)).fetchone()
+                if linked is None or linked[0] is not None:  # gone meanwhile, or carded
+                    conn.execute("ROLLBACK")
+                    return None
+                card_id = int(conn.execute(f"INSERT INTO cards({', '.join(row)}) VALUES({', '.join('?' * len(row))})",
+                                           tuple(row.values())).lastrowid)
+                conn.execute("UPDATE proposals SET card_id=? WHERE id=?", (card_id, proposal_id))
+                conn.execute("COMMIT")
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+        return card_id
+
+    def expire_proposals(self, now: float, *, attempts: Sequence[str] = ()) -> int:
+        """Waiting suggestions past their time, and those of ``attempts``
+        (turns that ended without their message), become expired."""
+        with _lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                changed = conn.execute("UPDATE proposals SET state='expired', decided_at=? "
+                                       "WHERE state='waiting' AND expires_at<=?", (now, now)).rowcount
+                if attempts:
+                    changed += conn.execute(
+                        f"UPDATE proposals SET state='expired', decided_at=? WHERE state='waiting' "
+                        f"AND attempt_id IN ({','.join('?' * len(attempts))})", (now, *attempts)).rowcount
+                conn.execute("COMMIT")
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+        return changed
+
+    def prune_proposals(self, before: float) -> int:
+        """Drops suggestions made before ``before`` whose card is gone too."""
+        with _lock, self._connect() as conn:
+            return conn.execute("DELETE FROM proposals WHERE created_at<? AND (card_id IS NULL OR card_id NOT IN "
+                                "(SELECT id FROM cards))", (before,)).rowcount
 
     def looked_attempts(self, limit: int = 20) -> list[dict]:
         """The latest attempts whose turn looked something up, newest first."""
@@ -1185,20 +1332,28 @@ class PulseStore:
             row = conn.execute("SELECT * FROM cards WHERE id=?", (card_id,)).fetchone()
         return dict(row) if row else None
 
-    def cards(self, limit: int = 100) -> list[dict]:
+    def cards(self, limit: int = 100, without: Sequence[str] = ()) -> list[dict]:
+        """The newest cards, but those of the kinds in ``without``."""
+        clause = f"WHERE kind NOT IN ({','.join('?' * len(without))}) " if without else ""
         with self._connect() as conn:
-            rows = conn.execute("SELECT * FROM cards ORDER BY created_at DESC, id DESC LIMIT ?", (limit,)).fetchall()
+            rows = conn.execute(f"SELECT * FROM cards {clause}ORDER BY created_at DESC, id DESC LIMIT ?",
+                                (*without, limit)).fetchall()
         return [dict(row) for row in rows]
 
-    def unseen_cards(self) -> int:
+    def unseen_cards(self, without: Sequence[str] = ()) -> int:
+        clause = f" AND kind NOT IN ({','.join('?' * len(without))})" if without else ""
         with self._connect() as conn:
-            return int(conn.execute("SELECT COUNT(*) FROM cards WHERE seen_at IS NULL").fetchone()[0])
+            return int(conn.execute(f"SELECT COUNT(*) FROM cards WHERE seen_at IS NULL{clause}",
+                                    tuple(without)).fetchone()[0])
 
-    def see_cards(self, ids: Optional[list[int]], now: float) -> int:
-        """Marks cards seen: these, or every one when ``ids`` is None."""
+    def see_cards(self, ids: Optional[list[int]], now: float, without: Sequence[str] = ()) -> int:
+        """Marks cards seen: these, or every one but those of the kinds in
+        ``without`` when ``ids`` is None."""
         with _lock, self._connect() as conn:
             if ids is None:
-                return conn.execute("UPDATE cards SET seen_at=? WHERE seen_at IS NULL", (now,)).rowcount
+                clause = f" AND kind NOT IN ({','.join('?' * len(without))})" if without else ""
+                return conn.execute(f"UPDATE cards SET seen_at=? WHERE seen_at IS NULL{clause}",
+                                    (now, *without)).rowcount
             if not ids:
                 return 0
             return conn.execute(f"UPDATE cards SET seen_at=? WHERE seen_at IS NULL AND id IN ({','.join('?' * len(ids))})",
@@ -2128,6 +2283,16 @@ def in_flight_attempts(path: Path, busy_timeout_s: float = 1.0) -> list[tuple[st
     finally:
         conn.close()
     return [(key or "", float(made or 0.0), detail or "") for key, made, detail in rows]
+
+
+def _proposal(row: sqlite3.Row) -> dict:
+    proposal = dict(row)
+    try:
+        fields = json.loads(proposal["fields"])
+    except (TypeError, ValueError):
+        fields = {}
+    proposal["fields"] = fields if isinstance(fields, dict) else {}
+    return proposal
 
 
 def looked_labels(value: Any) -> list[str]:
