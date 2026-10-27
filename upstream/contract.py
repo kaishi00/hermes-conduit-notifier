@@ -34,18 +34,25 @@ HERMES_TOP = frozenset({
     "hermes_time", "hermes_yaml", "plugins", "tools", "tui_gateway"})
 # Not plugin code: tests, dev probes, and the relay and mailbox (Node).
 SKIP_DIRS = frozenset({".git", "tests", "probes", "upstream", "relay", "mailbox", "node_modules", "__pycache__"})
-ROUTE = re.compile(r'^@router\.(get|post|put|patch|delete|websocket)\("([^"]+)"', re.M)
+ROUTE = re.compile(r"""^\s*@router\.(get|post|put|patch|delete|websocket)\(\s*["']([^"']+)["']""", re.M)
 
 
 def plugin_sources() -> List[Path]:
     return sorted(p for p in ROOT.rglob("*.py") if not SKIP_DIRS.intersection(p.relative_to(ROOT).parts))
 
 
+def _catches_import(handler: ast.ExceptHandler) -> bool:
+    """Whether an except clause catches a failed import (bare, Exception, ImportError or a base of it)."""
+    names = handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
+    return any(n is None or (isinstance(n, ast.Name) and n.id in {"Exception", "BaseException", "ImportError",
+                                                                    "ModuleNotFoundError"}) for n in names)
+
+
 def _guarded(node: ast.AST, parents: Dict[ast.AST, ast.AST]) -> bool:
     """Whether an import sits in a try whose handlers catch its failure (an optional import)."""
     while node in parents:
         parent = parents[node]
-        if isinstance(parent, ast.Try) and node in parent.body:
+        if isinstance(parent, ast.Try) and node in parent.body and any(_catches_import(h) for h in parent.handlers):
             return True
         node = parent
     return False

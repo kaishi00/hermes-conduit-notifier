@@ -7,7 +7,8 @@
 # environment (`uv sync --frozen`), the way its developers run it. The web UI
 # is not built: the tests only talk to the API, and `hermes dashboard
 # --skip-build` serves whatever dist it finds, so a stub page stands in.
-# pytest and PyYAML go into Hermes' own environment, because the tests start the
+# pytest and PyYAML (tests/requirements.txt's versions) go into Hermes' own
+# environment, because the tests start the
 # dashboard with that Python and import nothing else.
 set -euo pipefail
 
@@ -20,7 +21,7 @@ fi
 git -C "$dir" fetch --quiet --tags origin
 git -C "$dir" checkout --quiet --detach "$ref"
 (cd "$dir" && uv sync --frozen --quiet)
-uv pip install --quiet --python "$dir/.venv/bin/python" pytest pyyaml
+uv pip install --quiet --python "$dir/.venv/bin/python" pytest==9.1.1 pyyaml==6.0.3
 
 dist="$dir/hermes_cli/web_dist"
 if [ ! -f "$dist/index.html" ]; then

@@ -77,8 +77,10 @@ jobs:
       - name: Install uv
         run: python3 -m pip install --quiet uv==0.11.32
 
-      - name: Install Hermes ${{ matrix.ref }}
-        run: upstream/install-hermes.sh "${{ matrix.ref }}" "$RUNNER_TEMP/hermes"
+      - name: Install Hermes
+        env:
+          REF: ${{ matrix.ref }}
+        run: upstream/install-hermes.sh "$REF" "$RUNNER_TEMP/hermes"
 
       - name: Watched upstream files changed since the previous tag
         env:
@@ -140,7 +142,8 @@ jobs:
             dir="$RUNNER_TEMP/results/contract-$i"
             i=$((i + 1))
             if [ ! -f "$dir/junit.xml" ]; then
-              echo "::warning::No results for Hermes $ref (install or harness failed); see the run."
+              # Hermes didn't install, or the tests never ran: one harness issue.
+              python3 upstream/report.py --no-results --ref "$ref" --run-url "$RUN_URL"
               continue
             fi
             python3 upstream/report.py "$dir/junit.xml" --ref "$ref" --run-url "$RUN_URL" --changed "$dir/changed.txt"

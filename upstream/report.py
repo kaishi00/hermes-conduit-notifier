@@ -48,15 +48,23 @@ def failures(junit: Path) -> List[Dict[str, str]]:
             test = f"{case.get('classname', '')}.{case.get('name', '').split('[')[0]}".lstrip(".")
             sig = signature(node.get("message") or node.text or "")
             if tag == "error":
-                # A setup error (the harness: Hermes didn't install or the dashboard didn't
-                # start) fails every test the same way: one issue, not one per test.
-                test = "harness"
-            key = hashlib.sha1(f"{test}\n{sig}".encode()).hexdigest()[:12]
+                # A setup error (the dashboard didn't start) fails every test the same
+                # way: one harness issue, not one per test.
+                failure = harness_failure(sig, (node.text or "")[-3000:])
+            else:
+                key = hashlib.sha1(f"{test}\n{sig}".encode()).hexdigest()[:12]
+                failure = {"test": test, "signature": sig, "key": key, "detail": (node.text or "")[-3000:]}
+            key = failure["key"]
             if key in keys:
                 continue
             keys.add(key)
-            found.append({"test": test, "signature": sig, "key": key, "detail": (node.text or "")[-3000:]})
+            found.append(failure)
     return found
+
+
+def harness_failure(sig: str, detail: str = "") -> Dict[str, str]:
+    key = hashlib.sha1(f"harness\n{sig}".encode()).hexdigest()[:12]
+    return {"test": "harness", "signature": sig, "key": key, "detail": detail or "See the run."}
 
 
 def gh(*args: str, input: Optional[str] = None) -> str:
@@ -94,14 +102,19 @@ def issue_body(failure: Dict[str, str], ref: str, run_url: str, changed: str) ->
 
 def main(argv: List[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("junit", type=Path)
+    parser.add_argument("junit", type=Path, nargs="?")
+    parser.add_argument("--no-results", action="store_true",
+                        help="the run left no results: Hermes didn't install or the tests never started")
     parser.add_argument("--ref", required=True)
     parser.add_argument("--run-url", default="")
     parser.add_argument("--changed", type=Path)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv[1:])
 
-    found = failures(args.junit)
+    if args.no_results:
+        found = [harness_failure("no test results: Hermes didn't install or the tests never started")]
+    else:
+        found = failures(args.junit)
     changed = args.changed.read_text() if args.changed and args.changed.exists() else ""
     if not found:
         print(f"No contract failures on {args.ref}.")
@@ -118,7 +131,8 @@ def main(argv: List[str]) -> int:
             continue
         number = str(issue["number"])
         comments = json.loads(gh("issue", "view", number, "--json", "comments"))["comments"]
-        if args.ref in (issue.get("body") or "") or any(f"`{args.ref}`" in c.get("body", "") for c in comments):
+        noted = f"`{args.ref}`"
+        if noted in (issue.get("body") or "") or any(noted in c.get("body", "") for c in comments):
             print(f"seen #{number}  {failure['key']}  already noted for {args.ref}")
             continue
         print(f"same #{number}  {failure['key']}  {failure['test']}")

@@ -49,6 +49,11 @@ def test_conduit_profile_socket_reaches_profile(dashboard, route):
     assert result.dialed == ["/second"], result
 
 
+def test_conduit_profile_http_unknown_profile_is_not_found(dashboard):
+    status, body = dashboard.get("local-live/status", conduit_profile="nobody")
+    assert status == 404, body
+
+
 def test_conduit_profile_http_reaches_profile(dashboard):
     status, body = dashboard.get("local-live/status", conduit_profile="second")
     assert status == 200, body
@@ -59,14 +64,13 @@ def test_conduit_profile_http_reaches_profile(dashboard):
 @pytest.mark.parametrize("route", SPEECH_SOCKETS)
 def test_conduit_profile_socket_needs_sign_in(dashboard, route):
     result = dashboard.open_socket(route, token=False, conduit_profile="second")
-    assert result.dialed == [], result
-    assert result.first is None, result
+    assert result.refused and result.dialed == [], result
 
 
 @pytest.mark.parametrize("route", SPEECH_SOCKETS)
 def test_conduit_profile_socket_unknown_profile_goes_nowhere(dashboard, route):
     result = dashboard.open_socket(route, conduit_profile="nobody")
-    assert result.dialed == [], result
+    assert result.refused and result.dialed == [], result
 
 
 def _hermes_gates_profile_consent(dashboard) -> bool:
@@ -76,7 +80,10 @@ def _hermes_gates_profile_consent(dashboard) -> bool:
     had no gate either, and conduit_profile matches Hermes there.
     """
     status, _ = dashboard.get("local-live/status", profile="disabled")
-    return status == 404
+    if status == 200:
+        return False
+    assert status in (401, 403, 404), f"Hermes answered {status} for a profile that didn't enable the plugin"
+    return True
 
 
 @pytest.mark.parametrize("route", SPEECH_SOCKETS)
@@ -86,20 +93,20 @@ def test_conduit_profile_socket_respects_profile_consent(dashboard, route):
     assert "/launch" not in result.dialed, result
     if not _hermes_gates_profile_consent(dashboard):
         pytest.skip("this Hermes has no per-profile plugin consent")
-    assert result.dialed == [], result
+    assert result.refused and result.dialed == [], result
 
 
 def test_conduit_profile_http_respects_profile_consent(dashboard):
     status, body = dashboard.get("local-live/status", conduit_profile="disabled")
     if not _hermes_gates_profile_consent(dashboard):
         pytest.skip("this Hermes has no per-profile plugin consent")
-    assert status == 404, body
+    assert status in (401, 403, 404), body
 
 
 @pytest.mark.parametrize("route", SPEECH_SOCKETS)
 def test_conduit_profile_mismatch_is_refused(dashboard, route):
     result = dashboard.open_socket(route, conduit_profile="second", profile="disabled")
-    assert result.dialed == [], result
+    assert result.refused and result.dialed == [], result
 
 
 def test_profile_without_sign_in_is_refused(dashboard):

@@ -72,7 +72,8 @@ class FakeSpeechServer:
 
     def __init__(self) -> None:
         self.port = _free_port()
-        self.paths: List[str] = []
+        self._paths: List[str] = []
+        self._paths_lock = threading.Lock()
         self._loop = asyncio.new_event_loop()
         self._started = threading.Event()
         self._stop: Optional[asyncio.Future] = None
@@ -82,7 +83,8 @@ class FakeSpeechServer:
         from websockets.asyncio.server import serve
 
         async def handler(ws: Any) -> None:
-            self.paths.append(ws.request.path)
+            with self._paths_lock:
+                self._paths.append(ws.request.path)
             await ws.send(json.dumps({"type": "ready"}))
             with __import__("contextlib").suppress(Exception):
                 await ws.wait_closed()
@@ -104,6 +106,12 @@ class FakeSpeechServer:
         if self._stop is not None:
             self._loop.call_soon_threadsafe(self._stop.set_result, None)
         self._thread.join(5)
+
+    @property
+    def paths(self) -> List[str]:
+        """The paths dialed so far, in order."""
+        with self._paths_lock:
+            return list(self._paths)
 
     def url(self, profile: str) -> str:
         return f"ws://127.0.0.1:{self.port}/{profile}"
@@ -150,7 +158,7 @@ class Dashboard:
 
     async def _open_socket(self, path: str, token: bool, query: Dict[str, str]) -> "SocketResult":
         from websockets.asyncio.client import connect
-        from websockets.exceptions import ConnectionClosed, InvalidStatus
+        from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidStatus
 
         before = len(self.speech.paths)
         url = self.plugin_url(path, scheme="ws", token=token, **query)
@@ -167,6 +175,9 @@ class Dashboard:
                     result = SocketResult(opened=True)
         except InvalidStatus as exc:
             result = SocketResult(opened=False, http_status=exc.response.status_code)
+        except (OSError, asyncio.TimeoutError, InvalidHandshake) as exc:
+            # The handshake itself failed: a route's answer, not the harness's.
+            result = SocketResult(opened=False, error=type(exc).__name__)
         # The relay dials before it forwards anything, but give a slow dial a moment.
         for _ in range(20):
             if len(self.speech.paths) > before or not result.opened:
@@ -178,25 +189,33 @@ class Dashboard:
 
 class SocketResult:
     def __init__(self, opened: bool, first: Optional[str] = None, close_code: Optional[int] = None,
-                 close_reason: str = "", http_status: Optional[int] = None) -> None:
+                 close_reason: str = "", http_status: Optional[int] = None, error: Optional[str] = None) -> None:
         self.opened = opened
         self.first = first
         self.close_code = close_code
         self.close_reason = close_reason
         self.http_status = http_status
+        self.error = error
         self.dialed: List[str] = []
+
+    @property
+    def refused(self) -> bool:
+        """Refused by an HTTP status at the handshake or a close before any speech server event."""
+        if self.first is not None:
+            return False
+        return (not self.opened and self.http_status is not None) or self.close_code is not None
 
     @property
     def signature(self) -> str:
         """A stable description of the outcome, for known failures and issue keys."""
         if not self.opened:
-            return f"HTTP {self.http_status}"
+            return f"HTTP {self.http_status}" if self.http_status is not None else f"handshake {self.error}"
         if self.close_code is not None:
             return f"close {self.close_code}"
         return f"dialed {','.join(self.dialed) or 'nothing'}"
 
     def __repr__(self) -> str:
-        return (f"SocketResult(opened={self.opened}, http_status={self.http_status}, close={self.close_code} "
+        return (f"SocketResult(opened={self.opened}, http_status={self.http_status}, error={self.error}, close={self.close_code} "
                 f"{self.close_reason!r}, dialed={self.dialed}, first={self.first!r})")
 
 
@@ -254,7 +273,9 @@ def dashboard(tmp_path_factory: pytest.TempPathFactory):
         try:
             proc.wait(15)
         except subprocess.TimeoutExpired:
-            os.killpg(proc.pid, signal.SIGKILL)
+            with __import__("contextlib").suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait(15)
         log.close()
         speech.stop()
         if os.environ.get("UPSTREAM_CONTRACT_LOG"):
