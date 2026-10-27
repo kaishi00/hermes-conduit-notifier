@@ -460,15 +460,16 @@ def reminders_raised(pulse_store: store.PulseStore, refs: Sequence[str], now: fl
     within REMINDER_AGAIN_S, or ever once its card was put away for good or
     rated not useful (kept in REMINDERS_AWAY as each is seen, so it stays
     away once the journal or the cards drop it)."""
-    refs = {ref for ref in refs if ref.startswith(REMINDER)}
-    if not refs:
-        return set()
+    # Every decide keeps what was put away, whatever this one is about.
     kept = pulse_store.get(REMINDERS_AWAY)
     kept = [ref for ref in kept if isinstance(ref, str)] if isinstance(kept, list) else []
     away = pulse_store.away_refs(REMINDER)
     if not away <= set(kept):
         kept = [ref for ref in kept if ref not in away] + sorted(away)
         pulse_store.set(REMINDERS_AWAY, kept[-AWAY_KEPT:])
+    refs = {ref for ref in refs if ref.startswith(REMINDER)}
+    if not refs:
+        return set()
     recent = {card["ref"] for card in pulse_store.ref_cards(sorted(refs)) if card["created_at"] >= now - REMINDER_AGAIN_S}
     return refs & (recent | set(kept) | away)
 

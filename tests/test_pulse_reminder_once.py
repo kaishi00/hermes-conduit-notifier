@@ -152,3 +152,11 @@ def test_pulse_candidates_says_which_were_about_a_phone_reminder():
            "skip": "raised", "why": "", "kind": "reminder", "text": "x", "decision": candidates.SKIPPED,
            "card_id": None}
     assert "(a phone reminder)" in candidates.describe(row)
+
+
+def test_a_report_about_other_things_still_keeps_a_put_away_reminder(live):
+    now = time.time()
+    card_for(live, "reminder:r_lock", created_at=now - 20 * 86400, rating="down")
+    candidates.decide(live.store, [candidate(kind="reminder", value=5)], now=now)  # nothing about it
+    live.store.prune_candidates(now)
+    assert decided(live, now + 90 * 86400)[0] == (candidates.SKIPPED, "raised")
