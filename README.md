@@ -2119,7 +2119,7 @@ they arrive: a run starts at most every 15 minutes, and later arrivals ride
 the next one. A watch still open after a month asks if it's still wanted. A
 report item, the brief or a watch's message may quote an event, but Pulse
 memory never keeps other people's messages or facts about who sent them
-unless the user asks, with one exception: deadlines (plugin 0.89+).
+unless the user asks, with one exception: deadlines (plugin 0.90+).
 
 - **Deadlines.** With Pulse memory on, each memory run also reads the events
   logged since the last (the first read goes back 7 days; NFC tags and
