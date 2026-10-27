@@ -287,6 +287,26 @@ CREATE TABLE IF NOT EXISTS cards (
     back_acted_at REAL
 );
 CREATE INDEX IF NOT EXISTS cards_created ON cards(created_at);
+-- What Hermes said in a chat it had just done with a tool (pulse_claims), kept
+-- to judge: "reminder", "event", "job" or "message", its words and when it
+-- said them, its turn (from the user's message to their next, NULL while
+-- there's none), the call that backed it ("" for none) and the turn's calls
+-- as digest lines (JSON). One per message and action.
+CREATE TABLE IF NOT EXISTS claims (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id TEXT NOT NULL,
+    message_id INTEGER NOT NULL,
+    action TEXT NOT NULL,
+    text TEXT NOT NULL,
+    evidence TEXT NOT NULL,
+    said_at REAL NOT NULL,
+    turn_from REAL NOT NULL,
+    turn_to REAL,
+    backed_by TEXT NOT NULL DEFAULT '',
+    calls_json TEXT NOT NULL DEFAULT '[]',
+    kept_at REAL NOT NULL,
+    UNIQUE(chat_id, message_id, action)
+);
 -- What ratings taught Pulse (pulse_learning): each row changes what Pulse
 -- does until it's undone.
 CREATE TABLE IF NOT EXISTS lessons (
@@ -1039,9 +1059,11 @@ class PulseStore:
 
     def advance(self, profile: str, chat_id: str, *, message_id: int, at: float,
                 items: Sequence[dict[str, Any]] = (), closed: Sequence[dict[str, Any]] = (),
-                after_id: int = 0, marks: str = "watermarks", window: float = 0.0) -> Optional[list[int]]:
+                claims: Sequence[dict[str, Any]] = (), after_id: int = 0, marks: str = "watermarks",
+                window: float = 0.0) -> Optional[list[int]]:
         """Records a read chunk: its items, the remembered items it repeats,
-        replaces or closes, and the chat read up to row ``message_id``
+        replaces or closes, Hermes's claims in it (pulse_claims.judge: one
+        kept before stays as it was), and the chat read up to row ``message_id``
         (written at ``at``), in one transaction, so a chunk is never half
         kept. Only if the chat was still read up to ``after_id``, so a chunk
         two processes read is kept once. Returns the new items' ids, or None
@@ -1066,6 +1088,12 @@ class PulseStore:
                 return None
             ids = _keep(conn, profile, chat_id, items, closed,
                         lambda entry: f"chat {chat_id} message {entry['message_id']}: {entry['evidence']}")
+            conn.executemany(
+                "INSERT OR IGNORE INTO claims(chat_id, message_id, action, text, evidence, said_at, turn_from, "
+                "turn_to, backed_by, calls_json, kept_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                [(chat_id, claim["message_id"], claim["action"], claim["text"], claim["evidence"], claim["said_at"],
+                  claim["turn_from"], claim["turn_to"], claim["backed_by"], claim["calls_json"], claim["kept_at"])
+                 for claim in claims])
             conn.execute(
                 f"INSERT INTO {marks}(profile, chat_id, message_id, at) VALUES(?,?,?,?) "
                 "ON CONFLICT(profile, chat_id) DO UPDATE SET message_id=excluded.message_id, at=excluded.at, "
@@ -1075,6 +1103,19 @@ class PulseStore:
                              (window, profile, chat_id))
             conn.execute("COMMIT")
         return ids
+
+    def claims(self, limit: int = 50, *, unbacked: bool = False) -> list[dict]:
+        """Hermes's claims kept to judge (pulse_claims), the latest said
+        first; with ``unbacked``, only the ones no call backed."""
+        where = "WHERE backed_by='' " if unbacked else ""
+        with self._connect() as conn:
+            return [dict(row) for row in conn.execute(
+                f"SELECT * FROM claims {where}ORDER BY said_at DESC, id DESC LIMIT ?", (limit,))]
+
+    def prune_claims(self, before: float) -> int:
+        """Forgets the claims kept before ``before``."""
+        with _lock, self._connect() as conn:
+            return conn.execute("DELETE FROM claims WHERE kept_at < ?", (before,)).rowcount
 
     def keep_inbox(self, *, mark: list, after: Optional[list], items: Sequence[dict[str, Any]] = (),
                    closed: Sequence[dict[str, Any]] = ()) -> Optional[list[int]]:

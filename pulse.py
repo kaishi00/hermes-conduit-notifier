@@ -56,6 +56,7 @@ from . import pulse_delivery as delivery
 from . import pulse_ahead as ahead
 from . import pulse_brief as brief
 from . import pulse_candidates as candidates
+from . import pulse_claims as claims
 from . import pulse_followup as followup
 from . import pulse_hermes as hermes
 from . import pulse_host as host
@@ -667,6 +668,8 @@ def tick(now: Optional[float] = None) -> None:
         return
     # The loop's heartbeat: `pulse status` warns when nothing runs the loop.
     pulse_store.set("last_tick_at", now)
+    # The ledger records while Pulse is on: Hermes's claims are judged from then.
+    claims.start(pulse_store, now)
     _turn_cards(pulse_store, home, changed, now)
     _collect_ratings(pulse_store, home, now)
     # Even with follow-ups turned off: one already sent still lands.

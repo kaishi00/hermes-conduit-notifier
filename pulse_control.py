@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import pulse, pulse_candidates, pulse_delivery, pulse_followup, pulse_hermes, pulse_learning, pulse_memory
-from . import pulse_ahead, pulse_hours, pulse_places, pulse_proposals, pulse_push, pulse_quiet
+from . import pulse_ahead, pulse_claims, pulse_hours, pulse_places, pulse_proposals, pulse_push, pulse_quiet
 from . import pulse_host as host
 from . import pulse_report
 
@@ -297,6 +297,8 @@ def update(pulse_store: Any, body: Any, home: Any = None) -> None:
     if changes.get("where") is False or changes.get("enabled") is False:
         # Off keeps nothing of where the user was: no tick runs to prune it.
         pulse_store.clear_moments()
+    if changes.get("enabled") is False:
+        pulse_claims.stop(pulse_store)  # the ledger stops recording
 
 
 def _quiet_until(pulse_store: Any, value: Any, home: Any) -> Optional[float]:
