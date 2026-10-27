@@ -13,6 +13,16 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.97.0 (2026-10-27)
+
+### New and improved
+- Pulse suggests, you add. When an event or reminder would help, Pulse
+  suggests it on a card of its own instead of adding it, saying what it
+  would add and to which calendar or list. Add puts it on your phone, Not
+  now drops it, and the card shows how it went, with Undo once it's added.
+  Pulse makes at most 2 suggestions a message and 5 a day, and nothing it
+  does can change your phone without your tap.
+
 ## 0.96.0 (2026-10-27)
 
 ### New and improved

@@ -302,6 +302,9 @@ routes:
   - PUT /pulse/levels
   - GET /pulse/memory
   - POST /pulse/memory/forget
+  - POST /pulse/proposals/{proposal_id}/add
+  - POST /pulse/proposals/{proposal_id}/dismiss
+  - POST /pulse/proposals/{proposal_id}/undo
   - POST /pulse/rate
   - POST /pulse/report
   - GET /qwen-live/status

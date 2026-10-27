@@ -60,6 +60,7 @@ from . import pulse_learning as learning
 from . import pulse_ledger as ledger
 from . import pulse_memory as memory
 from . import pulse_prefs as prefs
+from . import pulse_proposals as proposals
 from . import pulse_quiet as quiet
 from . import pulse_report as report
 from . import pulse_store as store
@@ -381,8 +382,13 @@ def pre_tool_call(session_id: str, turn_id: Any, tool_name: Any = None,
         return {"action": "block", "message": BLOCK_MESSAGE}
     key = (session_id, turn_id)
     with _looks_lock:  # parallel calls in one turn count one at a time
-        today = looks_today(pulse_store)
+        now = time.time()  # one day for what's read and what's written back
+        today = looks_today(pulse_store, now)
         verdict = tools.check(tool_name, args, _tool_turn(pulse_store, attempt, _looks.get(key, 0), today))
+        if verdict.propose:
+            # A calendar add never runs: it's kept as a suggestion with an Add button.
+            return {"action": "block", "message": proposals.propose(
+                pulse_store, attempt, args, profile=proposals.profile_name(Path(get_hermes_home())), now=now)}
         if not verdict.allowed:
             return {"action": "block", "message": verdict.message}
         if verdict.labels:
@@ -391,7 +397,7 @@ def pre_tool_call(session_id: str, turn_id: Any, tool_name: Any = None,
                 _looks.pop(next(iter(_looks)))
             for label in verdict.labels:
                 today[label] = today.get(label, 0) + 1
-            pulse_store.set(LOOK_COUNTS, {"day": _utc_day(), "counts": today})
+            pulse_store.set(LOOK_COUNTS, {"day": _utc_day(now), "counts": today})
             pulse_store.note_looked(attempt["attempt_id"], verdict.labels)
     return None
 
@@ -410,23 +416,20 @@ def looks_today(pulse_store: store.PulseStore, now: Optional[float] = None) -> d
             if label in tools.LABELS and isinstance(count, int) and not isinstance(count, bool)}
 
 
-def _held_home_turn(session_id: str, turn_id: Any) -> bool:
-    """Whether a turn Pulse didn't recognise is held to Pulse's rules (7.6,
-    item 1): it's in a chat (or what compression made of it) where a Pulse
-    attempt is in flight, and it didn't start before the attempt was made,
-    so it may be Pulse's own (the note hook failed, Hermes gave no turn id,
-    or the injected text didn't match). An attempt whose turn Pulse saw end
-    holds nothing, nor one older than the loop lets an attempt run
-    (delivery.STUCK_S), which it counts failed: no process may be running
-    the loop to say so. Read without opening the store for writing, as this
-    runs for every call in every chat while Pulse has a store. When Pulse's
-    store or Hermes's state.db can't be read, the chats last known to be
-    home chats are held, and every other chat is left alone."""
+def _in_flight_here(session_id: str) -> Optional[list[float]]:
+    """When each Pulse attempt in flight in this chat (or what compression
+    made of it; every chat for an empty ``session_id``) was made: [] for
+    none, or no Pulse store; None when Pulse's store or Hermes's state.db
+    can't be read. An attempt whose turn Pulse saw end counts as done, and
+    so does one older than the loop lets an attempt run (delivery.STUCK_S),
+    which it counts failed: no process may be running the loop to say so.
+    Read without opening the store for writing, as this runs for every call
+    in every chat while Pulse has a store."""
     global _known_home
     home = get_hermes_home()
     path = Path(home) / store.DB_NAME
     if not path.exists():
-        return False
+        return []
     now = time.time()
     try:
         made: dict[str, float] = {}
@@ -434,17 +437,41 @@ def _held_home_turn(session_id: str, turn_id: Any) -> bool:
             if key and detail != delivery.ENDED and now - created_at < delivery.STUCK_S:
                 made[key] = min(created_at, made.get(key, created_at))
         chains = {key: hermes.chain_ids(Path(home), key) for key in made}
-    except Exception:  # noqa: BLE001 — unreadable: only the chats known to be Pulse's are held
+    except Exception:  # noqa: BLE001 — unreadable: the callers hold the chats known to be Pulse's
         logger.debug("conduit_push: Pulse couldn't tell whether a turn is in its chat", exc_info=True)
-        return not session_id or session_id in _known_home
+        return None
     if chains:
         _known_home = set().union(*chains.values())
-    times = [made[key] for key, chain in chains.items() if not session_id or session_id in chain]
+    return [made[key] for key, chain in chains.items() if not session_id or session_id in chain]
+
+
+def _held_home_turn(session_id: str, turn_id: Any) -> bool:
+    """Whether a turn Pulse didn't recognise is held to Pulse's rules (7.6,
+    item 1): it's in a chat where a Pulse attempt is in flight
+    (``_in_flight_here``), and it didn't start before the attempt was made,
+    so it may be Pulse's own (the note hook failed, Hermes gave no turn id,
+    or the injected text didn't match). When Pulse's store or Hermes's
+    state.db can't be read, the chats last known to be home chats are held,
+    and every other chat is left alone."""
+    times = _in_flight_here(session_id)
+    if times is None:
+        return not session_id or session_id in _known_home
     if not times:
         return False
     with _turns_lock:
         started = _started.get((session_id, turn_id)) if isinstance(turn_id, str) else None
     return started is None or started >= min(times)
+
+
+def home_chat_busy(session_id: str) -> bool:
+    """Whether a Pulse attempt is in flight in this chat (``_in_flight_here``):
+    the phone tools refuse changes asked for from it then, so nothing Pulse's
+    turn calls changes the phone, even past this hook (pulse_proposals). As
+    for a held turn, unreadable stores hold the chats known to be Pulse's."""
+    times = _in_flight_here(session_id)
+    if times is None:
+        return not session_id or session_id in _known_home
+    return bool(times)
 
 
 def _note_started(session_id: str, turn_id: Any) -> None:
@@ -554,6 +581,8 @@ def tick(now: Optional[float] = None) -> None:
     # Even with follow-ups turned off: one already sent still lands.
     followup.settle(pulse_store, now, home)
     brief.settle(pulse_store, now)
+    # Suggestions whose turn's message is in get their cards, after the turn's own.
+    proposals.settle(pulse_store, home, now)
     # A look ahead's card held for a brief that didn't take it that day (it
     # failed, or Pulse went quiet) goes to the screen at midnight, so a later
     # brief doesn't say "tomorrow" about today.

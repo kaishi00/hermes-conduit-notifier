@@ -81,8 +81,9 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
                             "show the latest; "
                             "for inbox: 'on' or 'off' (off forgets the deadlines it kept), or nothing to show the "
                             "deadlines Pulse kept from the Shortcuts inbox; "
-                            "for look: 'on' or 'off' (whether Pulse's turns look things up first), or nothing to "
-                            "show today's look-ups and what recent turns looked up")
+                            "for look: 'on' or 'off' (whether Pulse's turns look things up first and suggest "
+                            "adds), or nothing to show today's look-ups, what recent turns looked up and what "
+                            "they suggested")
     pulse.add_argument("extra", nargs="?", default="",
                        help="for memory forget: the item number; for memory backfill: how many days back "
                             "(it shows what that costs), 'start', 'stop' or 'cancel'; "
@@ -1811,15 +1812,16 @@ def _look_line(pulse_store: Any) -> str:
 
 def _pulse_look(pulse_store: Any, home: Any, value: str) -> int:
     """Whether Pulse's report, follow-up and brief turns may look things up
-    first (pulse_tools), today's look-ups, and what recent turns looked up;
-    `on` and `off` switch it."""
-    from . import pulse
+    first (pulse_tools), today's look-ups, what recent turns looked up, and
+    what they suggested adding (pulse_proposals); `on` and `off` switch it."""
+    from . import pulse, pulse_proposals
     if value in ("on", "off"):
         pulse_store.set(pulse.store.LOOK_SETTING, value == "on")
         print("Pulse's turns look things up before they speak: the calendar, reminders, alarms, contacts, and Maps "
               "between places they name, never where you are; on a follow-up about what was said in a chat, the "
-              "web too. Nothing they call can change anything." if value == "on"
-              else "Pulse's turns no longer look anything up: they use no tools.")
+              "web too. Nothing they call can change anything: an add to the calendar or reminders becomes a "
+              "suggestion you add with one tap." if value == "on"
+              else "Pulse's turns no longer look anything up or suggest adds: they use no tools.")
         return 0
     if value:
         print("Usage: hermes conduit-push pulse look [on|off]")
@@ -1829,6 +1831,16 @@ def _pulse_look(pulse_store: Any, home: Any, value: str) -> int:
     for row in pulse_store.looked_attempts(10):
         when = datetime.fromtimestamp(row["created_at"], zone).strftime("%a %d %b %H:%M")
         print(f"- {when} {row['kind']}: {', '.join(pulse.store.looked_labels(row['looked']))}")
+    now = time.time()
+    suggested = pulse_store.proposals(limit=10)
+    if suggested:
+        # At most DAILY a day, so the ten newest hold all of today's.
+        today = sum(1 for proposal in suggested if proposal["created_at"] >= pulse_proposals.day_from(now))
+        print(f"Suggestions: {today} of {pulse_proposals.DAILY} today (UTC)")
+        for proposal in suggested:
+            when = datetime.fromtimestamp(proposal["created_at"], zone).strftime("%a %d %b %H:%M")
+            state = pulse_proposals.entry(proposal, Path(home), now)["state"].replace("_", " ")
+            print(_printable(f"- {when} {proposal['line']}: {state}"))
     return 0
 
 

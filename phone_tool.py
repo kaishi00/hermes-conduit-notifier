@@ -285,7 +285,7 @@ def handle_calendar(args: Any, *, session_id: Any = None, is_child: Callable[[An
             return _answer(**refused)
         return _answer(**_calendar(args if isinstance(args, dict) else {}, session_id, profile, now))
     except PhoneError as error:
-        return _answer(ok=False, error=error.code, note=_error_note(error))
+        return refusal(error)
     except Exception:  # noqa: BLE001 — a tool must never raise
         logger.warning("conduit_calendar failed", exc_info=True)
         return _answer(ok=False, error="unavailable", note="The calendar couldn't be read. Tell the user.")
@@ -464,7 +464,7 @@ def _queued(store: PhoneStore, change: dict[str, Any], profile: str) -> tuple[st
     agent hasn't seen yet)."""
     # Only once the change is queued, so a refused write leaves them for later.
     earlier = store.unreported_outcomes()
-    _nudge(change, profile)
+    nudge(change, profile)
     if change["auto"]:
         return "queued", ("Will apply on the phone's next wake (the user lets Hermes add without asking); the phone "
                           "tells them and offers Undo. It isn't on the phone yet: don't say it's done until pending "
@@ -479,7 +479,11 @@ def _queued(store: PhoneStore, change: dict[str, Any], profile: str) -> tuple[st
                                     "saying how it went; don't say it's done until pending shows applied."), earlier
 
 
-def _write(store: PhoneStore, kind: str, args: dict[str, Any], session_id: Any, profile: str) -> dict[str, Any]:
+def _change_fields(store: PhoneStore, kind: str,
+                   args: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """(fields, target, device) for a calendar change from the tool's
+    arguments: the device it goes to, with a calendar or list named by its
+    title resolved to its id."""
     is_event = kind.endswith("_event")
     need = change_need(kind)
     fields: dict[str, Any] = {}
@@ -508,6 +512,48 @@ def _write(store: PhoneStore, kind: str, args: dict[str, Any], session_id: Any, 
             fields = {} if args.get("completed") is None else {"completed": args.get("completed")}
         elif kind == "delete_reminder":
             fields = {}
+    return fields, target, device
+
+
+def proposed_add(args: dict[str, Any], store: PhoneStore | None = None) -> dict[str, Any]:
+    """What add_event or add_reminder with these arguments would ask the
+    phone for, checked as the write checks it but not written: a Pulse
+    suggestion (pulse_proposals; PhoneStore.check_change says what it
+    holds). Raises PhoneError as the write would."""
+    kind = args.get("action")
+    if kind not in ("add_event", "add_reminder"):
+        raise PhoneError("invalid", "Only add_event and add_reminder can be suggested")
+    store = store or _store()
+    fields, _, device = _change_fields(store, kind, args)
+    checked = store.check_change(kind, fields, device=device["id"])
+    # The calendar or list the suggestion names, not the phone's default when it's added.
+    key = "calendar_id" if kind == "add_event" else "list_id"
+    if checked["calendar_id"] and not checked["fields"].get(key):
+        checked["fields"] = {**checked["fields"], key: checked["calendar_id"]}
+    return checked
+
+
+def refusal(error: PhoneError) -> str:
+    """The calendar tool's answer to a change it refused, for a hook that
+    checks one the same way (pulse_proposals)."""
+    return _answer(ok=False, error=error.code, note=_error_note(error))
+
+
+def _not_while_pulse(session_id: Any) -> None:
+    """A change asked for from Pulse's chat while one of Pulse's turns is in
+    flight there is refused: Pulse's turns never change the phone (their
+    adds become suggestions, pulse_proposals), so a call that got past
+    Pulse's hook still can't write."""
+    from . import pulse
+
+    if pulse.home_chat_busy(session_id.strip() if isinstance(session_id, str) else ""):
+        raise PhoneError("pulse_turn", "Pulse is taking a turn in this chat, and nothing in it can change the phone. "
+                                       "Ask again once Pulse's message is in", status=409)
+
+
+def _write(store: PhoneStore, kind: str, args: dict[str, Any], session_id: Any, profile: str) -> dict[str, Any]:
+    _not_while_pulse(session_id)
+    fields, target, device = _change_fields(store, kind, args)
     session = session_id.strip() if isinstance(session_id, str) else ""
     change = store.add_change(kind, fields, target or None, reason=args.get("reason"),
                               session_title=session_titles.title(session) if session else None,
@@ -524,7 +570,7 @@ def _write(store: PhoneStore, kind: str, args: dict[str, Any], session_id: Any, 
     return answer
 
 
-def _nudge(change: dict[str, Any], profile: str) -> None:
+def nudge(change: dict[str, Any], profile: str) -> None:
     """Tells the phone through the relay. Never fails the tool: a phone that
     misses it picks the change up on its next exchange."""
     try:
@@ -624,6 +670,7 @@ def _alarm_write(store: PhoneStore, kind: str, args: dict[str, Any], session_id:
     if stray:
         return {"ok": False, "error": "invalid", "note": f"{kind} doesn't take {', '.join(stray)}."}
     target = {"alarm_id": args.get("alarm_id")} if kind == "cancel_alarm" else None
+    _not_while_pulse(session_id)
     with store.reader("alarms", args.get("device"), for_change=True) as opened:
         if opened is None:
             raise PhoneError("nothing_shared", "No device lets Hermes set alarms and timers.")
