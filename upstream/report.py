@@ -39,7 +39,12 @@ def signature(message: str) -> str:
 
 def failures(junit: Path) -> List[Dict[str, str]]:
     found, keys = [], set()
-    for case in ET.parse(junit).getroot().iter("testcase"):
+    try:
+        root = ET.parse(junit).getroot()
+    except ET.ParseError as error:
+        # Cut off mid-write (a timed-out job): one harness issue, and the other refs still report.
+        return [harness_failure("test results were unreadable", str(error))]
+    for case in root.iter("testcase"):
         for tag in ("failure", "error"):
             node = case.find(tag)
             if node is None:

@@ -281,7 +281,9 @@ def dashboard(tmp_path_factory: pytest.TempPathFactory):
             except subprocess.TimeoutExpired:
                 with contextlib.suppress(ProcessLookupError):
                     os.killpg(proc.pid, signal.SIGKILL)
-                proc.wait(15)
+                # Best effort: a teardown error would hide the tests' own result.
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    proc.wait(15)
         log.close()
         speech.stop()
         if os.environ.get("UPSTREAM_CONTRACT_LOG"):
