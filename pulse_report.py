@@ -278,9 +278,11 @@ def recent_chats(home: Path, *, home_chat_id: str, since: float, zone: tzinfo,
     return "\n\n".join(out)
 
 
-def phone_context(home: Path, now: float) -> tuple[str, Optional[str]]:
+def phone_context(home: Path, now: float, *,
+                  reminders: Optional[dict[str, dict]] = None) -> tuple[str, Optional[str]]:
     """Calendar and open reminders from the phone sync, and the phone's time
-    zone. Empty when Conduit shares neither."""
+    zone. Empty when Conduit shares neither. With ``reminders``, each open
+    reminder gets a key ("r1"), and ``reminders`` maps it to the reminder."""
     try:
         from .phone_store import PhoneStore
     except Exception:  # noqa: BLE001 — no phone store in this build
@@ -307,8 +309,13 @@ def phone_context(home: Path, now: float) -> tuple[str, Optional[str]]:
                 db, device = opened
                 zone_name = zone_name or device.get("time_zone")
                 found, more = phone.reminders(db, device["id"], limit=MAX_REMINDERS)
-                lines = [f"- {_clip(r.get('title'), 100)}" + (f" (due {r['due']})" if r.get("due") else "")
-                         for r in found]
+                lines = []
+                for number, r in enumerate(found, 1):
+                    key = ""
+                    if reminders is not None and r.get("id"):
+                        key = f"r{number} "
+                        reminders[key.strip()] = r
+                    lines.append(f"- {key}{_clip(r.get('title'), 100)}" + (f" (due {r['due']})" if r.get("due") else ""))
                 parts.append("## Open reminders\n" + ("\n".join(lines) or "None.") + ("\n(and more)" if more else ""))
     except Exception as error:  # noqa: BLE001 — the report goes out without the phone
         parts.append(f"## Phone\nCouldn't read the phone sync ({type(error).__name__}).")
@@ -766,6 +773,9 @@ class Gathered:
     # events listed (by key, "e1"), which a next step follows.
     done: dict[int, dict] = field(default_factory=dict)
     ended: dict[str, dict] = field(default_factory=dict)
+    # With ``keyed``: the phone's open reminders listed (by key, "r1"), which
+    # a found candidate can rest on.
+    reminders: dict[str, dict] = field(default_factory=dict)
 
 
 def build(home: Path, pulse_store: store.PulseStore, *, home_chat_id: str, now: float,
@@ -781,14 +791,15 @@ def gather(home: Path, pulse_store: store.PulseStore, *, home_chat_id: str, now:
     """What a report reads, in at most ``room`` characters (by default what
     the report turn's message leaves its context). ``extra`` is one more
     section, after what Pulse remembers; ``keyed`` gives each chat a key
-    (recent_chats). Without ``ratings`` it leaves out how the user rated
+    (recent_chats) and each open reminder one too. Without ``ratings`` it leaves out how the user rated
     earlier reports: the candidate list weighs those in code. With
     ``next_steps``, what got done and the events that ended since the
     report's start (``done_section``, ``ended_section``), which the candidate
     list's next steps follow."""
     room = report_room(note(pulse_store)) if room is None else room
     since = window_start(pulse_store, now)
-    phone, zone_name = phone_context(home, now)
+    reminders: Optional[dict[str, dict]] = {} if keyed else None
+    phone, zone_name = phone_context(home, now, reminders=reminders)
     zone_name = pulse_store.get("time_zone") or zone_name
     zone = zone_for(zone_name)
     others = profile_homes(home) if pulse_store.get("report_profiles") == "all" else []
@@ -837,7 +848,8 @@ def gather(home: Path, pulse_store: store.PulseStore, *, home_chat_id: str, now:
         shown = [item for item in shown if f"\n#{item['id']} [" in rest]  # a cut can take the last of them
         done = {item_id: item for item_id, item in done.items() if f"\n- #{item_id} [" in rest}
         ended = {key: event for key, event in ended.items() if f"\n- {key} " in rest}
-    return Gathered(rest + "\n\n" + chats, start, shown, resting, keys or {}, zone, done, ended)
+        reminders = {key: r for key, r in (reminders or {}).items() if f"\n- {key} " in rest}
+    return Gathered(rest + "\n\n" + chats, start, shown, resting, keys or {}, zone, done, ended, reminders or {})
 
 
 def report_room(note: str = "") -> int:

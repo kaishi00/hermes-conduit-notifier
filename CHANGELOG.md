@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.106.1 (2026-10-27)
+
+### Fixes
+- A reminder on your phone that you kept moving could bring a new Pulse
+  card each time. Now it gets one card, and none again for a week, or at
+  all once you put it away or said it wasn't useful.
+
 ## 0.106.0 (2026-10-27)
 
 ### New and improved

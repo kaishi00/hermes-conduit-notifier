@@ -2019,6 +2019,18 @@ class PulseStore:
                 raise
         return made
 
+    def ref_cards(self, refs: Sequence[str]) -> list[dict]:
+        """The cards candidates with one of ``refs`` made, each with its
+        candidate's ``ref``."""
+        refs = [ref for ref in dict.fromkeys(refs) if ref]
+        if not refs:
+            return []
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT cards.*, candidates.ref AS ref FROM candidates JOIN cards ON cards.id=candidates.card_id "
+                f"WHERE candidates.ref IN ({','.join('?' * len(refs))})", refs).fetchall()
+        return [dict(row) for row in rows]
+
     def journaled_refs(self, refs: Sequence[str]) -> set[str]:
         """Which of ``refs`` a candidate in the journal carries."""
         refs = [ref for ref in dict.fromkeys(refs) if ref]
