@@ -13742,7 +13742,11 @@ def _hermes_approval_timeout() -> float:
     """Hermes' own approval timeout (approvals.timeout), else its default.
     Call in the profile's scope."""
     try:
-        from tools.approval import _get_approval_timeout
+        try:
+            # Newer Hermes keeps it in tools.approval_context; tools.approval no longer has it.
+            from tools.approval_context import _get_approval_timeout
+        except ImportError:
+            from tools.approval import _get_approval_timeout
         value = float(_get_approval_timeout())
     except Exception:  # noqa: BLE001 — an older or different Hermes
         return LOCAL_LIVE_WATCH_APPROVAL_TIMEOUT_S
