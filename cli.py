@@ -1714,9 +1714,9 @@ def _ahead_line(pulse_store: Any, zone: Any) -> str:
     if not isinstance(last, dict) or not isinstance(last.get("at"), (int, float)):
         return "Look ahead: on; it hasn't run yet (once a day, an hour before the morning brief)"
     when = datetime.fromtimestamp(last["at"], zone).strftime("%a %d %b %H:%M")
-    picked = int(last.get("picked") or 0)
-    came = (f"{picked} brought up" + (", held for the morning brief" if last.get("held") else "")) if picked \
-        else "nothing brought up"
+    picked, waits = int(last.get("picked") or 0), int(last.get("moments") or 0)
+    came = (f"{picked} brought up" + (", held for the morning brief" if last.get("held") else "")
+            + (f", {waits} held for a place" if waits else "")) if picked else "nothing brought up"
     error = last.get("error")
     why = (" (the follow-ups' budget was spent, so dates came up in Pulse's own words)" if error == "budget"
            else f" (its model call failed: {error}; dates came up in Pulse's own words)" if error else "")
@@ -1917,15 +1917,16 @@ def _where_line(pulse_store: Any, home: Any) -> str:
 
 def _pulse_where(pulse_store: Any, home: Any, value: str) -> int:
     """Whether Pulse reads where the user is (pulse_places), what waits for
-    a place, and what the last day's arrivals and departures did; `on` and
-    `off` switch it."""
+    a place (what memory keeps, and the look ahead's picks), and what the
+    last day's arrivals and departures did; `on` and `off` switch it."""
     from . import pulse, pulse_followup, pulse_places
     if value in ("on", "off"):
         pulse_store.set(pulse.store.WHERE_SETTING, value == "on")
         if value == "off":
             pulse_store.clear_moments()
             print("Pulse no longer reads where you are. What it remembers for a place stays, and waits for you to "
-                  "turn this back on.")
+                  "turn this back on; what the look ahead held for a place comes to the Pulse screen without a "
+                  "notification.")
         else:
             print("Pulse reads where you are while Conduit shares it in the background: a reminder you asked for "
                   "at a place comes when you get there, and its look-ups may use your location. Each read goes in "
@@ -1952,29 +1953,49 @@ def _pulse_where(pulse_store: Any, home: Any, value: str) -> int:
                              + (f"matches {match}" if match else "no saved place has that name") + f"{until})"))
     else:
         print("Nothing waits for a place.")
+    held = pulse_store.moment_cards()
+    if held:
+        print("Held by the look ahead for a place:")
+        for card in held:
+            print(_printable(pulse_places.held_line(card, zone)))
     moments = pulse_store.moments(since=time.time() - pulse.store.MOMENTS_KEEP_S)
     if moments:
         texts = {item["id"]: item["text"] for item in waiting}
+        picks = {card["id"]: card["news"] for card in held}
         for moment in moments:
             for item_id in _moment_items(moment):
                 if item_id not in texts:
                     found = pulse_store.item(item_id)
                     texts[item_id] = found["text"] if found else f"#{item_id}"
+            for card_id in _moment_picks(moment):
+                if card_id not in picks:
+                    card = pulse_store.card(card_id)
+                    picks[card_id] = card["news"] if card else f"card #{card_id}"
         print("Arrivals and departures in the last day:")
         for moment in moments:
-            print(_printable(pulse_places.describe(moment, zone, texts)))
+            print(_printable(pulse_places.describe(moment, zone, texts, picks)))
     return 0
 
 
-def _moment_items(moment: dict) -> list[int]:
+def _moment_outcome(moment: dict) -> dict:
     try:
         outcome = json.loads(moment.get("outcome") or "{}")
-    except ValueError:
-        return []
-    if not isinstance(outcome, dict):
-        return []
-    return [item for item in [*(outcome.get("due") or outcome.get("items") or []), *(outcome.get("related") or [])]
-            if isinstance(item, int)]
+    except (TypeError, ValueError):
+        return {}
+    return outcome if isinstance(outcome, dict) else {}
+
+
+def _moment_items(moment: dict) -> list[int]:
+    from .pulse_places import ids_in
+    outcome = _moment_outcome(moment)
+    return [*(ids_in(outcome.get("due")) or ids_in(outcome.get("items"))), *ids_in(outcome.get("related"))]
+
+
+def _moment_picks(moment: dict) -> list[int]:
+    """The held picks a moment brought up, or left waiting (pulse_places.bring_up)."""
+    from .pulse_places import ids_in
+    outcome = _moment_outcome(moment)
+    return [*ids_in([outcome.get("pick")]), *ids_in(outcome.get("picks"))]
 
 
 def _pulse_memory(pulse_store: Any, home: Any, value: str, extra: str) -> int:

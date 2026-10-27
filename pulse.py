@@ -28,6 +28,9 @@ their own so a slow model call never holds up delivery.
 Follow-ups (pulse_followup) run on that thread after memory: each promise
 Hermes made is checked on, and news worth telling goes to the home chat as a
 follow-up turn, the one Pulse turn whose reply pushes like any reply.
+
+A pick the daily look ahead held for a place (pulse_places) comes up in a
+turn of its own as the user gets there or leaves, which pushes too.
 """
 
 from __future__ import annotations
@@ -73,6 +76,7 @@ PROBE = "probe"
 REPORT = "report"
 FOLLOWUP = followup.FOLLOWUP
 BRIEF = brief.BRIEF
+MOMENT = places.MOMENT
 # Settings > Pulse's model for Pulse's turns ({"provider", "model"}); unset,
 # they run on the Pulse chat's own model.
 MODEL = "turn_model"
@@ -254,13 +258,15 @@ def pre_llm_call(session_id: str, turn_id: Any, user_message: Any) -> Optional[s
 
 def turn_note(pulse_store: store.PulseStore, row: dict) -> str:
     """The hidden note for a Pulse attempt's turn: with look_first on, a
-    report, follow-up or brief may look things up first (pulse_tools)."""
+    report, follow-up, brief or held pick may look things up first
+    (pulse_tools)."""
     kind = row["kind"]
-    if kind not in (REPORT, FOLLOWUP, BRIEF):
+    if kind not in (REPORT, FOLLOWUP, BRIEF, MOMENT):
         return PROBE_NOTE
     if not looks_first(pulse_store):
-        return {REPORT: report.REPORT_NOTE, FOLLOWUP: followup.NOTE, BRIEF: brief.NOTE}[kind]
-    note = {REPORT: report.REPORT_LOOK_NOTE, FOLLOWUP: followup.LOOK_NOTE, BRIEF: brief.LOOK_NOTE}[kind]
+        return {REPORT: report.REPORT_NOTE, FOLLOWUP: followup.NOTE, BRIEF: brief.NOTE, MOMENT: places.PICK_NOTE}[kind]
+    note = {REPORT: report.REPORT_LOOK_NOTE, FOLLOWUP: followup.LOOK_NOTE, BRIEF: brief.LOOK_NOTE,
+            MOMENT: places.PICK_LOOK_NOTE}[kind]
     return f"{note} {tools.look_note(_tool_turn(pulse_store, row))}"
 
 
@@ -330,20 +336,21 @@ def _pushed_lines(attempt: dict, response: Any) -> list[tuple[str, str, Optional
 
 def pushes(session_id: str, turn_id: Any, response: Any = None) -> bool:
     """Whether a Pulse turn's reply goes to the phone like any reply: a
-    follow-up or the morning brief does (it's news for the user), and so
-    does a report with something that came up as a push (``_pushed_lines``:
-    a report whose picks all came up quieter lands as cards only); a probe
-    doesn't."""
+    follow-up, the morning brief or a pick held for a place does (it's news
+    for the user), and so does a report with something that came up as a
+    push (``_pushed_lines``: a report whose picks all came up quieter lands
+    as cards only); a probe doesn't."""
     attempt = _turn_attempt(session_id, turn_id)
     kind = attempt["kind"] if attempt else ""
     if kind == REPORT:
         return bool(_pushed_lines(attempt, response))
-    return kind in (FOLLOWUP, BRIEF)
+    return kind in (FOLLOWUP, BRIEF, MOMENT)
 
 
 # What Conduit titles a Pulse push (its `title_label`), and the English
 # `title` an app without that label shows.
-PUSH_TITLES = {FOLLOWUP: ("pulse.followup", "Pulse · Follow-up"), BRIEF: ("pulse.brief", "Your morning brief")}
+PUSH_TITLES = {FOLLOWUP: ("pulse.followup", "Pulse · Follow-up"), BRIEF: ("pulse.brief", "Your morning brief"),
+               MOMENT: ("pulse.noticed", "Pulse noticed something")}
 
 
 def push_copy(session_id: str, turn_id: Any, response: Any) -> dict[str, Any]:
@@ -577,6 +584,7 @@ def tick(now: Optional[float] = None) -> None:
     pulse_store.trim_finished(REPORT)
     pulse_store.trim_finished(FOLLOWUP)  # likewise the chat a follow-up quotes
     pulse_store.trim_finished(BRIEF)
+    pulse_store.trim_finished(MOMENT)  # and what a held pick rests on
     if not on:
         return
     # The loop's heartbeat: `pulse status` warns when nothing runs the loop.
@@ -605,10 +613,14 @@ def tick(now: Optional[float] = None) -> None:
     # Arrivals and departures at saved places, before anything else starts:
     # one makes due what waits for it, which memory's run checks first.
     places.take_moments(pulse_store, home, report_zone(pulse_store, home, now), now)
+    # A pick the look ahead held for a place: its card on the screen once its
+    # turn is in, or back to waiting; one no moment reached in time goes there too.
+    places.settle_picks(pulse_store, home, now)
+    places.release_picks(pulse_store, now)
     _maybe_memory(pulse_store, home, now)
-    # One new turn per tick: a probe first, then a follow-up, the brief, then the report.
+    # One new turn per tick: a probe first, then a follow-up, a held pick, the brief, then the report.
     if not _maybe_probe(pulse_store, home, now) and not _maybe_followup(pulse_store, home, now) \
-            and not _maybe_brief(pulse_store, home, now):
+            and not _maybe_moment(pulse_store, home, now) and not _maybe_brief(pulse_store, home, now):
         _maybe_report(pulse_store, home, now)
 
 
@@ -1003,6 +1015,25 @@ def _maybe_followup(pulse_store: store.PulseStore, home: Path, now: float) -> bo
     return True
 
 
+def _maybe_moment(pulse_store: store.PulseStore, home: Path, now: float) -> bool:
+    """Brings up a pick the look ahead held for a place the user just got
+    to or left (pulse_places.next_pick), in a turn of its own that may look
+    things up; True when one went."""
+    card = places.next_pick(pulse_store)
+    if card is None:
+        return False
+    chat, problem = home_chat(pulse_store, home)
+    _log_problem(problem)
+    if chat is None:
+        return False  # it waits for the next time (pulse_places.settle_picks)
+    item_id = places.attempt_item_id(card["id"])
+    if not places.sending(pulse_store, card, item_id):
+        return False
+    delivery.submit(pulse_store, _sender(pulse_store), kind=MOMENT, chat_id=chat.chat_id,
+                    text=places.pick_text(card, zone=report_zone(pulse_store, home, now)), item_id=item_id)
+    return True
+
+
 def _maybe_brief(pulse_store: store.PulseStore, home: Path, now: float) -> bool:
     """Sends the morning brief when it's time (not on a quiet day: the first
     one after carries what's held), with what's still open and what's held
@@ -1084,7 +1115,8 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
         # Cards held for the morning brief are read again before it, on the
         # follow-up budget, whatever follow-ups' switch: they hold report
         # cards too, and a stale card shouldn't reach the brief either way.
-        holds = follow_used < follow_cap and bool(pulse_store.held_cards(1))
+        holds = follow_used < follow_cap and (bool(pulse_store.held_cards(1))
+                                              or bool(followup.waiting_for_moment(pulse_store)))
         # Likewise a card swiped away until now, about something still open
         # or found in a chat: with the budget spent it comes back unread
         # rather than late.

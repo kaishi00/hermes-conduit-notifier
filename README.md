@@ -2606,6 +2606,42 @@ in code, with no model and nothing sent anywhere new:
   where` lists it ("it would have brought up: ..."), to judge before it
   speaks.
 
+## Pulse holds a pick for a place (plugin 0.103+)
+
+With Where you are on and Conduit sharing location in the background, the
+daily look ahead may hold one of its picks for a saved place instead of the
+morning brief ("Leaving work: your anniversary is on Wednesday 4 November,
+and she loved Kyoto"):
+
+- **What can wait.** The look ahead lists the saved places (never a private
+  one), and its model may give a date or a find `"moment": {"place",
+  "on"}`: a place it listed, and `arrive` or `leave`. Only a pick that would
+  push waits, at most ten at once, and code sets how long: until the start
+  of its day (so it comes up the day before at the latest), at most two
+  weeks. Anything else goes to the brief, as before.
+- **Off the screen while it waits.** Its card waits off the Pulse screen and
+  out of the unseen count, and "What Pulse brought up lately" lists it, so
+  the next look ahead or report doesn't raise it again. Like a card held for
+  the brief, it's read again every six hours, and one that no longer needs
+  telling is marked done.
+- **At its moment.** The first time you get to (or leave) the place in its
+  window where Pulse may speak up (not at night, on a quiet day, in a part
+  of the day you said is the wrong time for its kind, or during an event or
+  a Focus that holds calls), Pulse brings it up in a turn of its own, one
+  pick a moment. The turn may look things up first ("Bloom & Co is on the
+  way and open until 7"), never the web, and pushes as "Pulse noticed
+  something"; its card comes on the screen with the turn's words, and Why?
+  says it was held for that moment. A turn that doesn't go out leaves it
+  waiting for the next time.
+- **When it can't wait.** At its window's end, with Where you are off, or
+  once you make its kind quieter than a push, it comes on the screen
+  without a notification, and Why? says so. One marked done while it waited
+  goes where it was made, as seen. Once on the screen, a card keeps no place
+  or time.
+- `hermes conduit-push pulse where` lists what's held and for where, and
+  what each arrival or departure brought up; `pulse status` and `pulse
+  ahead` count the look ahead's picks held for a place.
+
 ## Apple Watch lookups and jobs (plugin 0.6+, jobs 0.7+, Gemini tokens 0.8+, Qwen tokens 0.75+)
 
 With the wrist down, a Conduit Watch call can't reach Conduit on the iPhone,

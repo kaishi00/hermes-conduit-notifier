@@ -22,16 +22,23 @@ the brief already went, it comes up on the Pulse screen. Nothing from the
 look ahead pushes on its own, and one held that no brief took that day goes
 to the screen at midnight (pulse.tick, PulseStore.release_held).
 
+With Where you are on (pulse_places), the look ahead reads the saved places
+too, and a pick that would push may wait for one instead of the brief
+("moment": getting there or leaving, ``held_until`` the day before its
+day): pulse_places brings it up the next time the user gets there or
+leaves, in a turn of its own.
+
 When the call can't be made (the follow-ups' budget is spent) or fails, the
 dates at a lead time still come up, in code's words (pulse_dates.line).
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, time as clock, timedelta, tzinfo
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
@@ -41,6 +48,7 @@ from . import pulse_candidates as candidates
 from . import pulse_dates
 from . import pulse_followup as followup
 from . import pulse_learning as learning
+from . import pulse_places as places
 from . import pulse_quiet as quiet
 from . import pulse_report as report
 from . import pulse_store as store
@@ -93,6 +101,12 @@ Return a JSON object {{"dates": [...], "ahead": [...]}}.
 - "source" (ahead only): calendar, reminders or chat (a remembered item); "area": one of {areas}.
 
 What belongs in "ahead" is what needs getting ready for in time: a trip to book or pack for, a party that needs a gift, a deadline that needs starting on. Leave out what happens today or tomorrow (the morning brief covers it), the dates under "Dates that come back every year" and "Deadlines" (they come up in "dates" when it's time), and what the material shows done or covered."""
+
+# Added to INSTRUCTIONS when Pulse may hold a pick for a place (pulse_places).
+MOMENT_RULE = """
+
+A date or an "ahead" entry may wait for a place instead of the morning brief: add "moment": {"place": "Work", "on": "leave"}, the place one listed under "Saved places", by its name, and "on" either "arrive" or "leave". Give one only when it's best heard as the user gets there or leaves, a day or more before its day: flowers or a gift on the way home before an anniversary, something to pick up at a shop they go to. Pulse brings it up the next time they do, and on the Pulse screen without a notification if they don't in time. With a moment, write the line so it still reads right on a later day: name the day ("on Monday 3 November"), not "in two weeks"."""
+PLACES_TITLE = "## Saved places (what may wait for the user to get to or leave one)"
 
 TEXT = """Pulse look ahead.
 
@@ -156,13 +170,15 @@ def brief_ahead(pulse_store: store.PulseStore, zone: tzinfo, now: float) -> bool
 class Looked:
     """What a look ahead reads: its text, the yearly dates in it by key
     (D1...), those at a lead time today and not decided yet (``due``), the
-    remembered items it shows by id, and whether anything lies ahead at all
-    (without anything, nothing is asked)."""
+    remembered items it shows by id, whether anything lies ahead at all
+    (without anything, nothing is asked), and the saved places a pick may
+    wait for (pulse_places.saved; none without Where you are)."""
     text: str
     dates: dict[str, pulse_dates.Coming]
     due: list[pulse_dates.Coming]
     items: dict[int, dict]
     ahead: bool
+    places: list[dict] = field(default_factory=list)
 
 
 def context(pulse_store: store.PulseStore, home: Path, *, zone: tzinfo, now: float,
@@ -185,11 +201,25 @@ def context(pulse_store: store.PulseStore, home: Path, *, zone: tzinfo, now: flo
     phone, phoned = calendar_section(home, zone, now)
     listed, shown = report.remembered_lines(_remembered(pulse_store, zone, now), zone)
     started = datetime.fromtimestamp(now, zone)
+    saved = held_places(pulse_store, home, now)
+    named = (PLACES_TITLE + "\n" + "\n".join(
+        f"- {_clip(place.get('name'), 80)}" + (f" ({place['kind']})" if place.get("kind") in places.KIND_WORDS else "")
+        for place in saved)) if saved else ""
     sections = [f"## Now\n{started:%A} {started.day} {started:%B %Y}, {started:%H:%M} ({zone})", dated, deadlines,
-                phone, listed, candidates.recent_section(pulse_store, zone, now)]
+                phone, listed, named, candidates.recent_section(pulse_store, zone, now)]
     return Looked(text="\n\n".join(section for section in sections if section), dates=keyed, due=list(due_now),
                   items={item["id"]: item for item in shown},
-                  ahead=bool(coming or phoned or any(item["due_at"] is not None for item in shown)))
+                  ahead=bool(coming or phoned or any(item["due_at"] is not None for item in shown)), places=saved)
+
+
+def held_places(pulse_store: store.PulseStore, home: Path, now: float) -> list[dict]:
+    """The saved places a pick may wait for: those Pulse may name
+    (pulse_places.saved), while it reads where the user is (Where you are
+    on and the phone sharing in the background); none otherwise."""
+    if not places.on(pulse_store):
+        return []
+    found = places.view(Path(home))
+    return places.saved(found) if places.background(found, now) else []
 
 
 def _date_line(key: str, entry: pulse_dates.Coming, due_now: bool, zone: tzinfo) -> str:
@@ -320,7 +350,8 @@ def parse(reply: Any, looked: Looked, *, zone: tzinfo) -> list[dict]:
     CANDIDATE_COLUMNS) not yet decided: every date at a lead time today, in
     the model's words where it answered for one (``reply``) and in code's
     where it didn't; then what else it found, up to MAX_AHEAD, a remembered
-    item by its number."""
+    item by its number. One the model held for a saved place Pulse offered
+    carries it as "moment" (``_held``), for ``decide``."""
     reply = reply if isinstance(reply, dict) else {}
     due_now = {entry.ref: entry for entry in looked.due}
     rows, answered = [], set()
@@ -329,7 +360,7 @@ def parse(reply: Any, looked: Looked, *, zone: tzinfo) -> list[dict]:
         if found is None or found.ref not in due_now or found.ref in answered:
             continue
         answered.add(found.ref)
-        rows.append(date_row(found, entry, zone))
+        rows.append(_held(date_row(found, entry, zone), entry, looked))
     rows += [date_row(found, {}, zone) for found in looked.due if found.ref not in answered]
     others, items = [], set()
     for entry in _entries(reply.get("ahead")):
@@ -342,8 +373,20 @@ def parse(reply: Any, looked: Looked, *, zone: tzinfo) -> list[dict]:
         else:
             row = candidates.found_row(entry, {}, zone)
         if row is not None:
-            others.append(row)
+            others.append(_held(row, entry, looked))
     return rows + others[:MAX_AHEAD]
+
+
+def _held(row: dict, entry: dict, looked: Looked) -> dict:
+    """``row``, with the place the model held it for ("moment": the saved
+    place, pulse_places.held_place, and "on") when it named one Pulse
+    offered (``Looked.places``) and getting there or leaving."""
+    moment = entry.get("moment")
+    if looked.places and isinstance(moment, dict) and moment.get("on") in ("arrive", "leave"):
+        place = places.held_place(moment.get("place"), looked.places)
+        if place is not None:
+            row["moment"] = {**place, "on": moment["on"]}
+    return row
 
 
 def date_row(entry: pulse_dates.Coming, said: dict, zone: tzinfo) -> dict:
@@ -445,7 +488,8 @@ def run(pulse_store: store.PulseStore, home: Path, llm: candidates.Llm, *, zone:
             text = TEXT.format(fence=fence, context=looked.text)
             reply, tokens = llm(INSTRUCTIONS.format(limit=MAX_AHEAD, kinds=", ".join(report.FOUND_KINDS),
                                                     areas=", ".join(candidates.AREAS))
-                                + report.note_block(report.note(pulse_store)), text)
+                                + (MOMENT_RULE if looked.places else "") + report.note_block(report.note(pulse_store)),
+                                text)
         except Exception as error:  # noqa: BLE001 — the dates still come up, in code's words
             logger.warning("conduit_push: Pulse look ahead call failed", exc_info=True)
             done["tokens"] = done.get("tokens", 0) + len(text) // 4
@@ -465,12 +509,14 @@ def run(pulse_store: store.PulseStore, home: Path, llm: candidates.Llm, *, zone:
             pulse_store.swap(DAY_KEY, day, taken)
             return
         last["run"] = f"{RUN_PREFIX}{day}-{secrets.token_hex(3)}"
-        cards = {n: card_row(row, looked, home=Path(home), now=now) for n, row in enumerate(rows)
-                 if row["decision"] == candidates.SURFACED}
+        moments = {n: row.pop("moment") for n, row in enumerate(rows) if "moment" in row}
+        cards = {n: card_row(row, looked, home=Path(home), now=now, moment=moments.get(n))
+                 for n, row in enumerate(rows) if row["decision"] == candidates.SURFACED}
         made = pulse_store.add_run(last["run"], rows, cards, now=now)
         # Just made from what was read now: the held check reads them hours on, not at once.
         followup.mark_read(pulse_store, made, now)
-        last.update(picked=len(made), held=any(card["level"] == "brief" for card in cards.values()))
+        last.update(picked=len(made), held=any(card["level"] == "brief" for card in cards.values()),
+                    moments=len(moments))
     pulse_store.set(LAST, last)
 
 
@@ -479,27 +525,54 @@ def decide(pulse_store: store.PulseStore, rows: list[dict], *, zone: tzinfo, now
     learning, each kind's level, the "not relevant" rules, at most MAX_AHEAD
     besides the floors), then caps how loudly each comes up: held for the
     morning brief while today's is still to come (``brief_ahead``), else on
-    the Pulse screen. Nothing from the look ahead pushes on its own."""
+    the Pulse screen. Nothing from the look ahead pushes on its own. One
+    that would push and that the model held for a place (``parse``'s
+    "moment") waits for it instead (level pulse_places.MOMENT), while its
+    window leaves time (``held_until``) and fewer than
+    pulse_places.MAX_HELD wait; its "moment" gains "until". The rest lose
+    their "moment"."""
     candidates.decide(pulse_store, rows, now=now, limit=MAX_AHEAD)
     held = brief_ahead(pulse_store, zone, now)
+    room = places.MAX_HELD - sum(1 for card in pulse_store.moment_cards() if not card["done"])
     for row in rows:
-        if row["decision"] == candidates.SURFACED and row["level"] in ("push", "brief"):
+        moment = row.pop("moment", None)
+        if row["decision"] != candidates.SURFACED:
+            continue
+        until = held_until(row, zone, now) if moment and row["level"] == "push" and room > 0 else None
+        if until is not None:
+            row.update(level=places.MOMENT, moment={**moment, "until": until})
+            room -= 1
+        elif row["level"] in ("push", "brief"):
             row["level"] = "brief" if held else "screen"
     return rows
 
 
-def card_row(row: dict, looked: Looked, *, home: Path, now: float) -> dict[str, Any]:
+def held_until(row: dict, zone: tzinfo, now: float) -> Optional[float]:
+    """Until when a pick waits for its place: the start of its day, so a
+    moment brings it up the day before at the latest, and at most DAYS days
+    on; None when that leaves no time."""
+    end = now + DAYS * 86400.0
+    due = row.get("due_at")
+    if isinstance(due, (int, float)) and not isinstance(due, bool):
+        day = datetime.fromtimestamp(float(due), zone).date()
+        end = min(end, datetime.combine(day, clock(), tzinfo=zone).timestamp())
+    return end if end > now else None
+
+
+def card_row(row: dict, looked: Looked, *, home: Path, now: float, moment: Optional[dict] = None) -> dict[str, Any]:
     """A pick's card, as a report's (pulse_learning.add_noticed_cards): a
     remembered item's points at the chat it came from; a fact's yearly date
     at the chat it was said in, without the fact, so Done marks only the
     card; a deadline's carries the deadline, so Done closes it, and points
     at no chat; a picked person's birthday and what the model found on the
-    calendar or the reminders at none."""
+    calendar or the reminders at none. ``moment``: the place one held for a
+    place waits for (``decide``)."""
     card: dict[str, Any] = {
         "kind": learning.NOTICED, "level": row["level"] or "screen",
         "topic": row["kind"] if row["kind"] in report.KINDS else "other",
         "news": _clip(row["text"], learning.NOTICED_NEWS_LIMIT), "why": row["why"] or "", "created_at": now,
-        "learned": row["factor"] or "", "place": row["place"] or "", "band": row["band"] or ""}
+        "learned": row["factor"] or "", "place": row["place"] or "", "band": row["band"] or "",
+        "moment": json.dumps(moment, sort_keys=True) if moment else ""}
     item = looked.items.get(row["item_id"]) if row["origin"] == candidates.MEMORY else None
     fact = next((entry.date.item for entry in looked.due if entry.ref == row.get("ref")), None) \
         if row["origin"] == candidates.DATE else None
