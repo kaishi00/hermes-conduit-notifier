@@ -468,7 +468,7 @@ def test_ssh_follows_links_without_realpath(tree):
     (tree / "docs" / "near.md").symlink_to("../notes.txt")
     (tree / "leak.txt").symlink_to(tree.parent / "outside.txt")
     remote.save(root, str(tree / "docs" / "near.md"), "through\n", None)
-    assert (tree / "docs" / "near.md").read_text() == "through\n"
+    assert (tree / "notes.txt").read_text() == "through\n" and (tree / "docs" / "near.md").is_symlink()
     with pytest.raises(wf.WorkspaceError) as exc:
         remote.save(root, str(tree / "leak.txt"), "x", None)
     assert exc.value.status == 403
@@ -533,6 +533,12 @@ def test_ssh_duplicate_finds_a_free_name_past_the_listing_cap(tree, monkeypatch)
     (tree / "notes copy.txt").write_text("taken")
     copy = ssh(tree).duplicate(str(tree.resolve()), str(tree / "notes.txt"))["entry"]["name"]
     assert copy == "notes copy 2.txt" and (tree / "notes copy.txt").read_text() == "taken"
+
+
+def test_moving_a_link_moves_the_link(tree):
+    (tree / "link.txt").symlink_to(tree / "notes.txt")
+    ws().move(str(tree), str(tree / "link.txt"), str(tree / "docs"), "moved.txt")
+    assert os.path.islink(tree / "docs" / "moved.txt") and (tree / "notes.txt").is_file()
 
 
 # --- Routes --------------------------------------------------------------------

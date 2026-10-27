@@ -48,6 +48,8 @@ _SENSITIVE_DIRS = frozenset({"mcp-tokens", "pairing", ".ssh", ".gnupg"})
 MAX_NAME_BYTES = 255
 MAX_PATH_CHARS = 4096
 MAX_ENTRIES = 2000
+# Copy names an SSH duplicate tries, ``a copy`` through ``a copy 100``.
+DUPLICATE_NAMES_TRIED = 100
 # A single SSH step (not a walk) that takes longer is given up on.
 SSH_STEP_TIMEOUT_S = 25
 SEARCH_MAX_RESULTS = 200
@@ -386,6 +388,12 @@ class LocalWorkspace:
         source = self._existing(root, path)
         if source == root:
             raise WorkspaceError(400, "The workspace folder itself can't be moved")
+        # A link (checked above to lead inside) moves as the link, as
+        # duplicate and delete treat it, never what it points to.
+        host = self._host(path)
+        link = os.path.join(os.path.realpath(os.path.dirname(host)), os.path.basename(host))
+        if os.path.islink(link) and self._inside(root, link):
+            source = link
         target = self._new(root, folder, name)
         if target == source:
             return {"entry": self._entry(target)}
@@ -843,7 +851,9 @@ class SshWorkspace:
         check = f'[ -e "$t" ] || [ -L "$t" ] && {{ echo {_ERROR}EEXIST; exit 1; }}\n' if create or not overwrite else ""
         if existing:
             check += (f'[ -e "$t" ] || {{ echo {_ERROR}ENOENT; exit 1; }}\n'
-                      f'follows "$t" || {{ echo {_ERROR}EOUTSIDE; exit 1; }}\n')
+                      f'follows "$t" || {{ echo {_ERROR}EOUTSIDE; exit 1; }}\n'
+                      # Through a link to its file, as this host's save writes: the link stays.
+                      'if [ -L "$t" ]; then t="$r"; fi\n')
         stale = ""
         if expected_mtime is not None:
             stale = (_STAT + f'set -- $(meta "$t"); [ "$1" = "{int(expected_mtime)}" ] || '
@@ -902,32 +912,36 @@ class SshWorkspace:
         if source == root:
             raise WorkspaceError(400, "The workspace folder itself can't be duplicated")
         folder = posixpath.dirname(source)
-        # Every name there, not the listing's first 2,000.
-        names = self._run(self._guard(root) + f'p={shlex.quote(folder)}\n'
-                          'for c in "$p"/* "$p"/.[!.]* "$p"/..?*; do [ -e "$c" ] || [ -L "$c" ] || continue;'
-                          ' printf \'%s\' "${c##*/}" | base64 | tr -d \'\\r\\n\'; echo; done')
-        taken = set()
-        for line in names:
-            try:
-                taken.add(base64.b64decode(line.strip(), validate=True).decode("utf-8", errors="replace"))
-            except (ValueError, binascii.Error):
-                continue
-        name = copy_name(posixpath.basename(source), lambda candidate: candidate in taken)
-        target = posixpath.join(folder, name)
+        # The first free copy name, picked on the host itself (whatever the
+        # folder's size) right before the copy.
+        candidates: List[str] = []
+
+        def offered(candidate: str) -> bool:
+            candidates.append(candidate)
+            return len(candidates) < DUPLICATE_NAMES_TRIED
+
+        copy_name(posixpath.basename(source), offered)
+        quoted = " ".join(shlex.quote(candidate) for candidate in candidates)
         # The copy keeps links as links and leaves out what holds keys or
         # passwords, as this host's duplicate does.
         secrets_in_copy = " -o ".join(
             [f"-iname {shlex.quote(name)}" for name in sorted(_SENSITIVE_FILES | _SENSITIVE_DIRS)]
             + ["-iname '.env.*'"])
-        self._run(self._guard(root) + f's={shlex.quote(source)}; t={shlex.quote(target)}\n'
+        lines = self._run(self._guard(root) + f's={shlex.quote(source)}; f={shlex.quote(folder)}; t=\n'
                   f'follows "$s" || {{ echo {_ERROR}EOUTSIDE; exit 1; }}\n'
+                  f'for n in {quoted}; do [ -e "$f/$n" ] || [ -L "$f/$n" ] || {{ t="$f/$n"; break; }}; done\n'
+                  f'[ -n "$t" ] || {{ echo {_ERROR}EEXIST; exit 1; }}\n'
                   f'inside "$t" || {{ echo {_ERROR}EOUTSIDE; exit 1; }}\n'
-                  f'[ -e "$t" ] && {{ echo {_ERROR}EEXIST; exit 1; }}\n'
+                  'printf \'%s\' "$t" | base64 | tr -d \'\\r\\n\'; echo\n'
                   # A copy that fails partway, or can't lose its secrets, goes.
                   f'cp -R -P -p -- "$s" "$t" || {{ rm -rf -- "$t"; echo {_ERROR}EACCES; exit 1; }}\n'
                   f'if [ -d "$t" ] && [ ! -L "$t" ]; then find "$t" -mindepth 1 \\( {secrets_in_copy} \\) -prune -exec rm -rf -- {{}} +;'
                   f' [ -z "$(find "$t" -mindepth 1 \\( {secrets_in_copy} \\) -print 2>/dev/null | head -n 1)" ] ||'
                   f' {{ rm -rf -- "$t"; echo {_ERROR}EACCES; exit 1; }}; fi; exit 0')
+        try:
+            target = base64.b64decode(next(line for line in lines if line.strip()).strip(), validate=True).decode("utf-8")
+        except (StopIteration, ValueError, binascii.Error):
+            raise WorkspaceError(500, "The SSH workspace couldn't say where the copy went")
         return {"entry": self._entry(target)}
 
     def delete(self, root_raw: Any, path: Any) -> Dict[str, Any]:

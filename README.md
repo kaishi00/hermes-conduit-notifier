@@ -1670,7 +1670,7 @@ searches and Recently Changed also skip the folders Hermes' own listing hides
 (`.git`, `node_modules` and the like). On a personal install any folder can be a
 root, as Hermes' own file routes allow there; Conduit only offers the chat's
 folder and the profile's projects. On a hosted or locked install every root
-stays inside the folder Hermes keeps files in. File contents are still read
+on this host stays inside the folder Hermes keeps files in. File contents are still read
 through Hermes' `/api/fs/*` routes.
 
 - `GET /api/plugins/conduit_push/workspace/list?root=…&path=…`: a folder's
