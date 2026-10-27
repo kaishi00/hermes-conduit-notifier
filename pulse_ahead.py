@@ -49,6 +49,7 @@ from . import pulse_dates
 from . import pulse_followup as followup
 from . import pulse_learning as learning
 from . import pulse_places as places
+from . import pulse_push as push
 from . import pulse_quiet as quiet
 from . import pulse_report as report
 from . import pulse_store as store
@@ -529,8 +530,9 @@ def decide(pulse_store: store.PulseStore, rows: list[dict], *, zone: tzinfo, now
     that would push and that the model held for a place (``parse``'s
     "moment") waits for it instead (level pulse_places.MOMENT), while its
     window leaves time (``held_until``) and fewer than
-    pulse_places.MAX_HELD wait; its "moment" gains "until". The rest lose
-    their "moment"."""
+    pulse_places.MAX_HELD wait; its "moment" gains "until", and "private"
+    for a private one (pulse_push.private_row), which its push reads. The
+    rest lose their "moment"."""
     candidates.decide(pulse_store, rows, now=now, limit=MAX_AHEAD)
     held = brief_ahead(pulse_store, zone, now)
     room = places.MAX_HELD - sum(1 for card in pulse_store.moment_cards() if not card["done"])
@@ -540,7 +542,8 @@ def decide(pulse_store: store.PulseStore, rows: list[dict], *, zone: tzinfo, now
             continue
         until = held_until(row, zone, now) if moment and row["level"] == "push" and room > 0 else None
         if until is not None:
-            row.update(level=places.MOMENT, moment={**moment, "until": until})
+            private = {"private": True} if push.private_row(pulse_store, row) else {}
+            row.update(level=places.MOMENT, moment={**moment, "until": until, **private})
             room -= 1
         elif row["level"] in ("push", "brief"):
             row["level"] = "brief" if held else "screen"

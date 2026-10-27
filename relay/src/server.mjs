@@ -17,7 +17,7 @@ import { WATCH_TOOLS_CAPABILITY, WatchToolGrants, watchToolRoutes } from './watc
 
 // Self-reported relay version/capabilities, surfaced via GET /v1/meta so the
 // app can show compatibility state (keep the version in sync with package.json).
-const RELAY_CAPABILITIES = ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls', 'voip-calls', 'watch-calls', 'ring-sessions', 'ring-controls', 'location-push', 'phone-changes', MAPS_TOKENS_CAPABILITY, LIVE_ACTIVITIES_CAPABILITY, TOKEN_PROOF_CAPABILITY, 'clarify-skip', 'room-invites'];
+const RELAY_CAPABILITIES = ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls', 'voip-calls', 'watch-calls', 'ring-sessions', 'ring-controls', 'location-push', 'phone-changes', MAPS_TOKENS_CAPABILITY, LIVE_ACTIVITIES_CAPABILITY, TOKEN_PROOF_CAPABILITY, 'clarify-skip', 'push-levels', 'room-invites'];
 const RELAY_INFO = (() => {
   try {
     const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
@@ -107,6 +107,14 @@ const PHONE_CHANGE_CATEGORY = 'PHONE_CHANGE';
 const PHONE_CHANGE_MODES = new Set(['alert', 'background']);
 const PHONE_BACKGROUND_PER_HOUR = 30;
 const PHONE_BACKGROUND_TTL_S = 24 * 60 * 60;
+// How much a Pulse reply may interrupt: the plugin's level for the push,
+// readable beside any envelope like a phone change's mode. It becomes the
+// alert's `interruption-level` (passive goes straight to Notification
+// Center; time-sensitive breaks through a Focus that allows it, and is
+// active for an app without the entitlement) and the `relevance-score` the
+// Lock Screen's summary ranks by. A level this relay doesn't know is
+// ignored, so the push goes as it always has.
+const PUSH_LEVELS = new Map([['passive', 0.2], ['active', 0.5], ['time-sensitive', 0.9]]);
 // An invite to a room from someone you've linked (Linked Rooms): its Link,
 // the room's id as the inviting Hermes made it, and, with previews on, the
 // room's name and who it's from. The ids mirror the plugin's room_links and
@@ -942,7 +950,7 @@ async function route(request, response) {
     enforceRateLimit(`meta-ip:${client}`, 60, 60_000);
     // A paired gateway (plugin) reads what this relay takes before it sends
     // an event a relay from before it would refuse: only the version and
-    // capabilities, never the installation's gateways. Relays before 0.20
+    // capabilities, never the installation's gateways. Relays before 0.21
     // answer it 401.
     const gateway = gatewayCredential(request);
     if (gateway) {
@@ -1129,6 +1137,7 @@ function notificationFor(event, preferences, gateway = undefined) {
     ...(sound ? { sound: 'default' } : {}),
     ...(event.type === 'call.requested' ? { category: CALL_CATEGORY } : {}),
     ...(event.type === 'phone.changes' ? { category: PHONE_CHANGE_CATEGORY } : {}),
+    ...levelAps(event),
     // Thread grouping is gateway-scoped: two dashboards both using session
     // "default" must never share a Notification Center thread. Gateway-less
     // callers (direct/test use) keep the legacy raw-session shape.
@@ -1409,6 +1418,7 @@ function encryptedNotificationFor(event, preferences, { gatewayId, dashboardId, 
     ...(sound ? { sound: 'default' } : {}),
     ...(event.type === 'call.requested' ? { category: CALL_CATEGORY } : {}),
     ...(event.type === 'phone.changes' ? { category: PHONE_CHANGE_CATEGORY } : {}),
+    ...levelAps(event),
     'mutable-content': 1,
     'thread-id': threadId,
   };
@@ -1421,6 +1431,12 @@ function encryptedNotificationFor(event, preferences, { gatewayId, dashboardId, 
     payload = { aps: plainAps, body: { conduit: routing }, conduit: routing };
   }
   return { collapseId: `${event.type}:${threadId}`, payload, threadId };
+}
+
+// The alert's level and its Lock Screen relevance (PUSH_LEVELS), for an
+// event that gives one.
+function levelAps(event) {
+  return event.level ? { 'interruption-level': event.level, 'relevance-score': PUSH_LEVELS.get(event.level) } : {};
 }
 
 function notificationContext(message, event) {
@@ -1466,6 +1482,9 @@ function validateEvent(body) {
   // How to wake the phone for a calendar change: plaintext routing beside
   // any envelope, alert unless said otherwise.
   const mode = body.type === 'phone.changes' ? validatePhoneMode(body.mode) : undefined;
+  // How much a reply may interrupt (PUSH_LEVELS), readable beside any
+  // envelope too.
+  const level = body.type === 'response.ready' ? validatePushLevel(body.level) : undefined;
   if (body.e2e !== undefined && body.e2e !== null) {
     // An encrypted event carries no readable content: any plaintext content
     // fields beside the envelope are ignored, never forwarded.
@@ -1477,6 +1496,7 @@ function validateEvent(body) {
       pluginCapabilities: validCapabilities(body.plugin_capabilities),
       e2e,
       ...(mode ? { mode } : {}),
+      ...(level ? { level } : {}),
       // The clarify request id the relay parks must be the one the
       // ciphertext is bound to (the envelope's `req`).
       clarify: body.type === 'input.needed' && e2e.req
@@ -1502,6 +1522,7 @@ function validateEvent(body) {
     maps: body.type === 'location.requested' ? validateMaps(body.maps) : undefined,
     room: body.type === 'room.invite' ? validateRoom(body.room) : undefined,
     ...(mode ? { mode } : {}),
+    ...(level ? { level } : {}),
   };
 }
 
@@ -1509,6 +1530,12 @@ function validatePhoneMode(value) {
   if (value === undefined || value === null) return 'alert';
   if (!PHONE_CHANGE_MODES.has(value)) throw httpError(400, 'invalid_mode');
   return value;
+}
+
+// A level this relay doesn't know is ignored, never refused: a newer plugin
+// may send one it can't set yet.
+function validatePushLevel(value) {
+  return typeof value === 'string' && PUSH_LEVELS.has(value) ? value : undefined;
 }
 
 // A location request's id, mirroring the plugin's events.push_event.

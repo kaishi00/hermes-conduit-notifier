@@ -377,7 +377,9 @@ def _sealed(event: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
     # Presence, not truthiness: an empty or malformed record is a broken key
     # and fails closed like any other.
     if state.get("e2e") is None or event.get("type") == "plugin.hello":
-        return event
+        # Whether a Pulse push is private is for the phone, sealed: in
+        # plaintext its body is already the private copy (pulse_push).
+        return {key: value for key, value in event.items() if key != "private"}
     keys = None
     try:
         keys = e2e.keys_from_state(state)
@@ -796,7 +798,7 @@ def _clear_refusal(credential: Any = None) -> None:
 
 # Events a relay from before them refuses (it answers a type it doesn't know
 # 400), by the relay capability that says it takes them: such an event goes
-# only to a relay whose GET /v1/meta lists it. Relay 0.20+ answers that read
+# only to a relay whose GET /v1/meta lists it. Relay 0.21+ answers that read
 # for the pairing's own credential, and a relay from before answers it 401,
 # which counts as taking none. What a pairing's relay takes is held for
 # RELAY_TAKES_S, a refused read as long.

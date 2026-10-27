@@ -728,6 +728,41 @@ test('call requests reach APNs with the call category and stop at the per-instal
   assert.equal(sent[2].aps.category, undefined);
 });
 
+test('a reply push goes at the level the plugin gave it, and /v1/meta says push-levels', async () => {
+  const aPort = await closedPort();
+  const isolatedPath = join(dir, 'relay-data-levels.json');
+  const capturePath = join(dir, `capture-levels-${Date.now()}.jsonl`);
+  const fixture = new RelayStore(isolatedPath);
+  const created = fixture.createInstallation({ bundleId: 'com.milim.relay', deviceToken: 'd'.repeat(64), environment: 'production' });
+  const pairing = fixture.createPairing(created.installation.id);
+  const claim = fixture.claimPairing(pairing.code, 'levels target');
+  const child = await startRelay(aPort, 'accept', isolatedPath, { APNS_CAPTURE_PATH: capturePath });
+  children.push(child);
+  const base = `http://127.0.0.1:${aPort}`;
+  const send = (eventId, level) => api(base, '/v1/events', {
+    method: 'POST',
+    credential: `${created.installation.id}.${claim.gatewayId}.${claim.gatewaySecret}`,
+    body: { type: 'response.ready', event_id: eventId, session_id: 'pulse-1', title: 'Pulse noticed something', body: 'Batteries', level },
+  });
+  try {
+    assert.equal((await send('response:levels0000000000001', 'time-sensitive')).status, 202);
+    assert.equal((await send('response:levels0000000000002', 'passive')).status, 202);
+    assert.equal((await send('response:levels0000000000003', 'critical')).status, 202, 'a level the relay does not set is ignored, not refused');
+    const meta = await api(base, '/v1/meta', { credential: `${created.installation.id}.${created.deviceSecret}` });
+    assert.ok(meta.json.capabilities.includes('push-levels'));
+  } finally {
+    await stopRelay(child);
+  }
+  const sent = readFileSync(capturePath, 'utf8').trim().split('\n').map((line) => JSON.parse(line).notification.payload.aps);
+  assert.equal(sent.length, 3);
+  assert.equal(sent[0]['interruption-level'], 'time-sensitive');
+  assert.equal(sent[0]['relevance-score'], 0.9);
+  assert.equal(sent[1]['interruption-level'], 'passive');
+  assert.equal(sent[1]['relevance-score'], 0.2);
+  assert.equal(sent[2]['interruption-level'], undefined);
+  assert.equal(sent[2]['relevance-score'], undefined);
+});
+
 test('a phone with a PushKit token gets a call as a VoIP push and can stop ringing', async () => {
   const aPort = await closedPort();
   const isolatedPath = join(dir, 'relay-data-voip.json');

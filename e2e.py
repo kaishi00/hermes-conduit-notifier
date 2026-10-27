@@ -65,7 +65,9 @@ MAX_CT_CHARS = 2600
 # Fields that carry content. Everything else on an event stays visible to the
 # relay because it routes on it.
 INNER_FIELDS = ("title", "body", "session_id", "profile", "profile_name", "gateway", "stored_session_id", "decision", "call",
-                "locate", "maps", "title_label", "session_title", "count", "room")
+                "locate", "maps", "title_label", "session_title", "count", "private", "room")
+# How much a reply push may interrupt (events.PUSH_LEVELS): routing beside the envelope.
+_PUSH_LEVELS = ("passive", "active", "time-sensitive")
 
 # The phone rotates a key this old (inline, or by a handover) on its next
 # dashboard connect.
@@ -266,8 +268,9 @@ def seal_event(
     """The outgoing event with its content sealed into an `e2e` envelope.
 
     Visible to the relay: type, re-keyed event id, plugin version and
-    capabilities, a phone change's wake mode, and for clarify decisions the
-    request id, question ids and whether the card fit. Everything in INNER_FIELDS is encrypted.
+    capabilities, a phone change's wake mode, a reply's level, and for
+    clarify decisions the request id, question ids and whether the card fit.
+    Everything in INNER_FIELDS is encrypted.
     """
     kind = str(event.get("type") or "")
     msg = keyed_event_id(keys, str(event.get("event_id") or ""))
@@ -368,13 +371,16 @@ def _room_ids(event: dict[str, Any]) -> dict[str, str] | None:
 
 def _copy_routing(event: dict[str, Any], outgoing: dict[str, Any]) -> None:
     """The fields the relay routes on, which stay outside the envelope: the
-    plugin's version and capabilities, and for phone.changes how to wake the
-    phone (``mode``: alert or background)."""
+    plugin's version and capabilities, for phone.changes how to wake the
+    phone (``mode``: alert or background), and for a reply how much its push
+    may interrupt (``level``)."""
     for field in ("plugin_version", "plugin_capabilities"):
         if field in event:
             outgoing[field] = event[field]
     if event.get("type") == "phone.changes" and event.get("mode") in ("alert", "background"):
         outgoing["mode"] = event["mode"]
+    if event.get("type") == "response.ready" and event.get("level") in _PUSH_LEVELS:
+        outgoing["level"] = event["level"]
 
 
 def open_event(outgoing: dict[str, Any], keys: Keys, *, installation_id: str, gateway_id: str) -> dict[str, Any]:

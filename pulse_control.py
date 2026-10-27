@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import pulse, pulse_candidates, pulse_delivery, pulse_followup, pulse_hermes, pulse_learning, pulse_memory
-from . import pulse_ahead, pulse_hours, pulse_places, pulse_proposals, pulse_quiet
+from . import pulse_ahead, pulse_hours, pulse_places, pulse_proposals, pulse_push, pulse_quiet
 from . import pulse_host as host
 from . import pulse_report
 
@@ -178,7 +178,8 @@ def backfill_start(pulse_store: Any, home: Path, days: Optional[int] = None,
 
 SETTINGS = ("enabled", "memory", "followups", "daily_report", "report_profiles", "report_times", "time_zone",
             "brief_time", "model", "nudge", "memory_daily_tokens", "followup_daily_tokens", "note",
-            "quiet_days", "quiet_until", "night", "look_ahead", "inbox_deadlines", "look_first", "where")
+            "quiet_days", "quiet_until", "night", "look_ahead", "inbox_deadlines", "look_first", "where",
+            "private_pushes")
 # What a daily token budget may be set to.
 MIN_DAILY_TOKENS = 10_000
 MAX_DAILY_TOKENS = 5_000_000
@@ -201,8 +202,9 @@ def update(pulse_store: Any, body: Any, home: Any = None) -> None:
     key is refused too. Values: booleans for "enabled", "memory", "followups", "daily_report", "look_ahead"
     (the daily look ahead, pulse_ahead), "inbox_deadlines" (memory keeps
     deadlines from the Shortcuts inbox, pulse_memory.read_inbox),
-    "look_first" (Pulse's turns may look things up, pulse_tools) and
-    "where" (Pulse reads where the user is, pulse_places); "all" or "this"
+    "look_first" (Pulse's turns may look things up, pulse_tools), "where"
+    (Pulse reads where the user is, pulse_places) and "private_pushes" (Hide
+    private reminders on the Lock Screen, pulse_push); "all" or "this"
     for "report_profiles"; a list of "HH:MM" for "report_times"; an IANA
     name, or "" for the phone's, for "time_zone"; {"provider", "model"} for
     "model" (the model Pulse's turns run on), or null for the chat's own;
@@ -223,7 +225,7 @@ def update(pulse_store: Any, body: Any, home: Any = None) -> None:
             raise Refused("invalid", field=str(field)[:64])
     changes: dict[str, Any] = {}
     for field in ("enabled", "memory", "followups", "daily_report", "look_ahead", "inbox_deadlines", "look_first",
-                  "where"):
+                  "where", "private_pushes"):
         if field in body:
             if not isinstance(body[field], bool):
                 raise Refused("invalid", field=field)
@@ -738,6 +740,8 @@ def state(pulse_store: Any, home: Path, now: Optional[float] = None) -> dict[str
         # location in the background, which it needs.
         "where": pulse_places.on(pulse_store),
         "where_ready": pulse_places.background(pulse_places.view(Path(home)), now),
+        # Hide private reminders on the Lock Screen (pulse_push).
+        "private_pushes": pulse_push.hides_private(pulse_store),
         "followup_usage": {key: int(follow_usage.get(key, 0) or 0) for key in ("checks", "tokens", "failed")},
         "followup_daily_tokens": follow_cap,
         "followup_tokens_today": follow_used,

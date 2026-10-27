@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.104.0 (2026-10-27)
+## 0.105.0 (2026-10-27)
 
 ### Fixes
 - Your agents' turns in a room someone else hosts sent you a reply
@@ -24,8 +24,25 @@ checks it). The format is fixed, because Conduit reads it:
 ### New and improved
 - When someone you've linked invites you to a room, a Conduit that shows
   room invites gets a Room invite notification, which its Room invites
-  setting turns off. It needs the push relay's update (relay 0.20); until
+  setting turns off. It needs the push relay's update (relay 0.21); until
   your relay has it, the invite shows in Conduit without one.
+
+## 0.104.0 (2026-10-27)
+
+### Fixes
+- `hermes conduit-push pulse where` could say a place brought up what the
+  look ahead saved for it when that never went out, and gave one reason for
+  everything still waiting. It now says what happened to each.
+
+### New and improved
+- Pulse notifications interrupt only as much as they need to: something
+  saved for a place, or that can't wait, comes as time-sensitive (at most
+  three a day); one that comes while you're busy, or that can wait, goes
+  quietly to Notification Center. Needs the push relay's update.
+- A Pulse reminder about a birthday, an anniversary, a gift, a surprise,
+  health or money shows only "Pulse has something for you." on the Lock
+  Screen, so a surprise stays one. Turn it off with `hermes conduit-push
+  pulse private off`.
 
 ## 0.103.0 (2026-10-27)
 

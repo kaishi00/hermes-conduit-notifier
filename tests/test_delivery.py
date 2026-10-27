@@ -66,7 +66,7 @@ class _Relay:
                 relay.meta_reads.append(self.headers.get("Authorization") == f"Bearer {CREDENTIAL}")
                 answer_with = relay.meta.pop(0) if len(relay.meta) > 1 else relay.meta[0]
                 if isinstance(answer_with, list):
-                    status, answer = 200, {"version": "0.20.0", "capabilities": answer_with}
+                    status, answer = 200, {"version": "0.21.0", "capabilities": answer_with}
                 else:
                     status, answer = answer_with, {"error": "unauthorized" if answer_with == 401 else "nope"}
                 data = json.dumps(answer).encode()
@@ -600,7 +600,7 @@ def test_a_relay_that_doesnt_take_room_invites_isnt_sent_one(paired, caplog):
 
 
 def test_a_relay_that_refuses_the_read_takes_none_and_nothing_is_paused_or_marked(paired):
-    # A relay from before 0.20 answers a gateway's meta read 401.
+    # A relay from before 0.21 answers a gateway's meta read 401.
     relay = paired([], meta=[401])
 
     _deliver(_invite(1))

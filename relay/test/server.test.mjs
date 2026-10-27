@@ -896,3 +896,51 @@ test('an encrypted room invite shows the generic copy and seals its room', () =>
   assert.deepEqual(payload.conduit_e2e, event.e2e);
   for (const shown of ['Zoo trip', 'Furina', roomInviteBody.room.id]) assert.ok(!JSON.stringify(payload).includes(shown), shown);
 });
+
+// ── Push levels (Pulse) ─────────────────────────────────────────────────
+
+const replyBody = {
+  type: 'response.ready',
+  event_id: 'response:0123456789abcdef',
+  session_id: 'pulse-1',
+  profile: 'default',
+  title: 'Pulse noticed something',
+  body: 'Batteries at Costco',
+};
+
+test('a reply keeps a level the relay knows; any other is ignored, never refused', () => {
+  for (const level of ['passive', 'active', 'time-sensitive']) {
+    assert.equal(validateEvent({ ...replyBody, level }).level, level);
+  }
+  for (const level of [undefined, null, '', 'critical', 'loud', 1, ['passive'], { level: 'passive' }]) {
+    assert.equal(validateEvent({ ...replyBody, level }).level, undefined, JSON.stringify(level));
+  }
+  assert.equal(validateEvent({ ...callBody, level: 'passive' }).level, undefined, 'a level belongs to replies only');
+  assert.equal(validateEvent({ ...phoneBody, level: 'time-sensitive' }).level, undefined);
+  const sealed = validateEvent({ ...replyBody, level: 'time-sensitive', event_id: envelope.msg, e2e: { ...envelope, req: '' } });
+  assert.equal(sealed.level, 'time-sensitive', 'the level stays readable beside the envelope');
+  assert.equal(sealed.title, undefined);
+});
+
+test("a level sets the alert's interruption level and Lock Screen relevance, plaintext or sealed", () => {
+  const scores = { passive: 0.2, active: 0.5, 'time-sensitive': 0.9 };
+  for (const [level, score] of Object.entries(scores)) {
+    const plain = notificationFor(validateEvent({ ...replyBody, level }), preferences, { id: 'gw-1' }).payload;
+    assert.equal(plain.aps['interruption-level'], level);
+    assert.equal(plain.aps['relevance-score'], score);
+    assert.deepEqual(plain.aps.alert, { title: 'Pulse noticed something', body: 'Batteries at Costco' });
+    const sealed = notificationFor(validateEvent({ ...replyBody, level, event_id: envelope.msg, e2e: { ...envelope, req: '' } }), preferences, { id: 'gw-1' }).payload;
+    assert.equal(sealed.aps['interruption-level'], level);
+    assert.equal(sealed.aps['relevance-score'], score);
+    assert.equal(sealed.aps['mutable-content'], 1);
+    assert.deepEqual(sealed.conduit, { type: 'response.ready', e2e: 1, gateway_id: 'gw-1' }, 'the level rides only in aps');
+  }
+  const unset = notificationFor(validateEvent(replyBody), preferences, { id: 'gw-1' }).payload;
+  assert.equal('interruption-level' in unset.aps, false, 'with no level the push goes as before');
+  assert.equal('relevance-score' in unset.aps, false);
+  // An envelope too big to carry is dropped; the generic alert keeps its level.
+  const event = validateEvent({ ...replyBody, level: 'passive', event_id: envelope.msg, e2e: { ...envelope, req: '', ct: 'A'.repeat(2600) } });
+  const dropped = notificationFor(event, {}, { id: 'g'.repeat(1400) }).payload;
+  assert.equal(dropped.conduit_e2e, undefined);
+  assert.equal(dropped.aps['interruption-level'], 'passive');
+});

@@ -589,7 +589,7 @@ def test_a_brief_turn_pushes(live):
     pulse._mark_turn(SID, "turn-b", attempt["tag"])
     assert pulse.pushes(SID, "turn-b") is True
     assert pulse.push_copy(SID, "turn-b", "Two things waited.") == {
-        "title_label": "pulse.brief", "title": "Your morning brief", "body": "Two things waited."}
+        "title_label": "pulse.brief", "title": "Your morning brief", "body": "Two things waited.", "level": "active"}
     # The summary line is the push; the lines under it are for the card.
     assert pulse.push_copy(SID, "turn-b", "\nA calm day, two things open.\n- Send the notes\n- Call Sam")["body"] \
         == "A calm day, two things open."
@@ -889,13 +889,15 @@ def test_a_requested_report_lands_on_the_pulse_screen_and_pushes_its_items(live)
     assert pulse.pushes(SID, "turn-r") is False
     assert pulse.pushes(SID, "turn-r", "Nothing worth bringing up right now.") is False
     # A report that brought something up tells the phone, in plain lines.
-    reply = "1. [date] Dentist Friday at 9\n2. [promise] Send the deck #4"
+    reply = "1. [date] Car service Friday at 9\n2. [promise] Send the deck #4"
     assert pulse.pushes(SID, "turn-r", reply) is True
     assert pulse.push_copy(SID, "turn-r", reply) == {
         "title_label": "pulse.noticed", "title": "Pulse noticed 2 things", "count": 2,
-        "body": "Dentist Friday at 9 · Send the deck"}
+        "body": "Car service Friday at 9 · Send the deck", "level": "active"}
     one = pulse.push_copy(SID, "turn-r", "1. [date] Dentist\n   Friday")
     assert one["title"] == "Pulse noticed something" and "count" not in one
+    # The dentist is health: the push says only that Pulse has something.
+    assert (one["body"], one["private"]) == ("Pulse has something for you.", True)
     assert pulse.push_copy(SID, "other-turn", reply)["body"] == reply
     live.db.message("user", attempt["text"])
     reply_id = live.db.message("assistant", "Here's your report.\n1. Deploy: green")

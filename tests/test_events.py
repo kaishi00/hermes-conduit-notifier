@@ -542,6 +542,22 @@ def test_a_pulse_push_says_how_many_things_it_brings():
     assert "count" in INNER_FIELDS  # sealed with the rest of the content
 
 
+
+def test_a_pulse_push_says_how_much_it_may_interrupt_and_whether_its_private():
+    event = push_event("response.ready", identifier="response:1", title_label="pulse.followup",
+                       body="Pulse has something for you.", level="time-sensitive", private=True)
+    assert (event["level"], event["private"]) == ("time-sensitive", True)
+    for level in ("critical", "Active", "", None, 1):
+        assert "level" not in push_event("response.ready", identifier="response:1", level=level)
+    assert "private" not in push_event("response.ready", identifier="response:1", private="yes")
+    # Only a reply carries them.
+    other = push_event("approval.needed", identifier="approval:1", level="passive", private=True)
+    assert "level" not in other and "private" not in other
+    # Redaction keeps the level (routing) and drops `private` with the rest.
+    redacted = redact_event(event)
+    assert redacted["level"] == "time-sensitive" and "private" not in redacted
+    assert "level" not in redact_event({**event, "level": "critical"})
+
 @pytest.mark.parametrize("label", ["", "approval", "Approval.Needed", "a.b.c.d", "phone.add event", 5])
 def test_push_event_drops_a_malformed_title_label(label):
     assert "title_label" not in push_event("approval.needed", identifier="approval:1", title_label=label)

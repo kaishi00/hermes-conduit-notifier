@@ -95,7 +95,7 @@ The plugin currently emits notifications for:
 - completed background tasks: a delegated task that ends while the turn that started it is still running is part of that turn's reply and sends nothing of its own (plugin 0.35+)
 - calendar and reminder changes Hermes asks your phone to make (see [Calendar, Reminders, Focus and phone status](#calendar-reminders-focus-and-phone-status-from-conduit-plugin-027)): a notification to approve, or a silent wake for adds you let Hermes make without asking
 - call requests: a job you asked to be called about has ended, Hermes asked to call you, or (alert calls) Hermes has waited a minute on your approval or answer, or a turn failed (see [Hermes calls you](#hermes-calls-you-plugin-013))
-- room invites, to a Conduit that shows them: someone you've linked invited you to a room (plugin 0.104+, relay 0.20+; see [Rooms with people you've linked](#rooms-with-people-youve-linked-plugin-089)). Your agents' turns in a room someone else hosts send no reply or failure notification, since the room shows them.
+- room invites, to a Conduit that shows them: someone you've linked invited you to a room (plugin 0.105+, relay 0.21+; see [Rooms with people you've linked](#rooms-with-people-youve-linked-plugin-089)). Your agents' turns in a room someone else hosts send no reply or failure notification, since the room shows them.
 
 An exact `[Silent]` assistant response does not emit a completion notification. Reply and task bodies are sent as plain text: Markdown fences, emphasis, headings, link targets and table rules are dropped (plugin 0.35+). No notification shows a file's path on the host (plugin 0.71.2+): a `MEDIA:` tag in a reply, a question, an approval, a call or a phone change, and in the answer card or call screen that comes with it, reads as 📎 and the file's name, or its type (`📎 PPTX`) when the name is only a hash, and `[[audio_as_voice]]` and `[[as_document]]` are dropped. Code in a reply's fenced block stays as written.
 
@@ -242,14 +242,14 @@ gateway-bound inactive records still require separately reviewed maintenance.
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | `/healthz` | Health check |
-| GET | `/v1/meta` | The relay's version and capabilities, and with a phone's credential each paired gateway's plugin version and capabilities; a gateway's credential reads only the first two (0.20+), which the plugin checks before sending an event an older relay refuses |
+| GET | `/v1/meta` | The relay's version and capabilities, and with a phone's credential each paired gateway's plugin version and capabilities; a gateway's credential reads only the first two (0.21+), which the plugin checks before sending an event an older relay refuses |
 | POST | `/v1/token-challenges` | Push a one-time registration nonce to `device_token` (`bundle_id`, `environment` as for registering); 0.16+ |
 | POST | `/v1/installations` | Register a device; `token_proof` carries the pushed nonce (see "Registration proof") |
 | PUT | `/v1/installations/:id` | Update device token (a new one needs `token_proof`), PushKit token (`voip_token`, `null` clears it), the paired Apple Watch's PushKit token (`watch_voip_token`, 0.10+), location push token (`location_token`, 0.12+) / preferences |
 | DELETE | `/v1/installations/:id` | Deactivate a device |
 | POST | `/v1/installations/:id/pairings` | Create a pairing code |
 | POST | `/v1/pairings/claim` | Claim a pairing code (gateway side) |
-| POST | `/v1/events` | Deliver a notification event |
+| POST | `/v1/events` | Deliver a notification event; a reply's `level` (`passive`, `active` or `time-sensitive`) sets its interruption level (0.20+, capability `push-levels`) |
 | DELETE | `/v1/gateways/current` | Revoke a gateway credential |
 | PUT / DELETE | `/v1/installations/:id/live-activities` | Register (`push_token`, `session_ids`) or remove (`push_token`) the Live Activity the phone started for a chat (0.15+) |
 | POST | `/v1/live-activity` | Report a running turn's progress (`session_id`, `state`, optional `end`); answers `tracked` (gateway side, 0.15+) |
@@ -2644,6 +2644,39 @@ and she loved Kyoto"):
   what each arrival or departure brought up; `pulse status` and `pulse
   ahead` count the look ahead's picks held for a place.
 
+## Pulse pushes: how much they interrupt, and private ones (plugin 0.104+)
+
+Each Pulse push says how much it may interrupt, decided in code, never by
+the model. The push relay (0.20+, capability `push-levels`) sets it as the
+notification's interruption level and its relevance on the Lock Screen; an
+older relay sends every push at the default level. The level isn't
+content: the relay sees it with end-to-end encryption on, and `redact on`
+keeps it.
+
+- **Time-sensitive** (can break through a Focus that allows time-sensitive
+  notifications): a pick held for a place at its moment, a reminder for a
+  place as you get there or leave, and a follow-up that can't wait (its
+  check said it's urgent, or it went at night or in a part of the day you
+  closed because it would be no use later). At most three a day in your
+  time zone; past that, they go as active. iOS shows them as active for a
+  Conduit build without the Time Sensitive Notifications capability.
+- **Passive** (into Notification Center, with no sound and no lit screen):
+  anything else that goes while the phone says you're busy (an event, or a
+  Focus that holds calls; driving doesn't count), and a report whose pushed
+  picks are all interests or far off.
+- **Active**: the rest, the morning brief included.
+- **Private reminders.** A push about someone's birthday or anniversary, or
+  whose words are about a gift, a surprise, health or money (English words),
+  says only "Pulse has something for you." whatever Show previews says, so
+  its words never leave this host in a push; its card shows everything. On
+  by default: Hide private reminders on the Lock Screen in Conduit's
+  Settings > Pulse, `hermes conduit-push pulse private on|off`, or `PUT
+  /pulse` with `"private_pushes"`; `GET /pulse` says `"private_pushes"`.
+  Capability `pulse_private`. With end-to-end encryption, the sealed push
+  says `private`, for Conduit to write that line in its own language.
+- `hermes conduit-push pulse status` says whether private reminders are
+  hidden, and how many time-sensitive pushes went today.
+
 ## Apple Watch lookups and jobs (plugin 0.6+, jobs 0.7+, Gemini tokens 0.8+, Qwen tokens 0.75+)
 
 With the wrist down, a Conduit Watch call can't reach Conduit on the iPhone,
@@ -3318,20 +3351,21 @@ answer them. The "Approval needed" notification goes out as it does for any
 chat, but its usual answer (the gateway's `approval.respond`) can't reach a
 room's turn, so Conduit answers it here, telling it by its session.
 
-When an invite comes in (plugin 0.104+), this Hermes tells your phone: a
+When an invite comes in (plugin 0.105+), this Hermes tells your phone: a
 "Room invite" notification ("Laifu invited you to Zoo trip") that opens the
 invite in Conduit, sent through the push relay with the pairing of the
 profile the dashboard runs as. With previews off it reads "Someone you've
-linked with invited you to a room.", and end-to-end encryption seals the
-room's name and who it's from like any notification's text; only the Link's
-and the room's ids, which take the tap to the invite, stay outside. The relay
-sends it only to a phone whose Conduit shows room invites, which turns them on
-(the relay's `room_invite` preference, off until then, since an older Conduit
-would show one as a reply), and Conduit's Room invites setting turns them
-off. A relay older than 0.20 would refuse the event, so this Hermes sends one
-only to a relay whose `GET /v1/meta` lists `room-invites`, which it reads with
-the pairing's credential at most once an hour: until the relay takes them, an
-invite shows in Conduit and `rooms invites` without a notification.
+linked with invited you to a room." and carries only the Link's and the
+room's ids, which take the tap to the invite, and end-to-end encryption seals
+the room, its name and who it's from included, like any notification's text.
+The relay sends it only to a phone whose Conduit shows room invites, which
+turns them on (the relay's `room_invite` preference, off until then, since an
+older Conduit would show one as a reply), and Conduit's Room invites setting
+turns them off. A relay older than 0.21 would refuse the event, so this
+Hermes sends one only to a relay whose `GET /v1/meta` lists `room-invites`,
+which it reads with the pairing's credential at most once an hour: until the
+relay takes them, an invite shows in Conduit and `rooms invites` without a
+notification.
 
 Your agents' turns in a room someone else hosts send no reply notification,
 and no failure notification or alert call when they fail: the room shows
