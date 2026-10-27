@@ -109,10 +109,12 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
              "deleting its hidden chat for one (forget), setting this Hermes up for them (setup), and rooms with "
              "people you've linked: make one (invite), see yours (drafts), start one now (start), take it back "
              "(withdraw) or take one of their agents out (remove), and see the ones you're invited to (invites), "
-             "join or decline one, or leave one",
+             "join or decline one, or leave one; and what your agents' turns in rooms other people host wait for "
+             "your approval for (approvals), to approve once or deny",
     )
     rooms.add_argument("rooms_action", choices=["show", "set", "forget", "setup", "invite", "drafts", "start",
-                                                "withdraw", "invites", "join", "decline", "leave", "remove"])
+                                                "withdraw", "invites", "join", "decline", "leave", "remove",
+                                                "approvals", "approve", "deny"])
     rooms.add_argument("--room", default="",
                        help="the room's id; without one, show and set use the defaults for rooms with no choices "
                             "of their own (forget, start, withdraw, join, decline, leave and remove need one)")
@@ -130,6 +132,10 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     rooms.add_argument("--member", default="", metavar="@HANDLE",
                        help="for remove: the agent to take out of your room, by its @handle or member id "
                             "(rooms drafts shows them)")
+    rooms.add_argument("--run", default="", metavar="RUN",
+                       help="for approve and deny: the turn waiting for your approval (rooms approvals shows them)")
+    rooms.add_argument("--request", default="", metavar="REQUEST",
+                       help="for approve and deny: the approval it waits for (rooms approvals shows them)")
     rooms.add_argument("--ceiling", metavar="TOOLSET,...",
                        help="for setup: the toolsets rooms may use on this profile, comma-separated (empty: none); "
                             "without it, the ones saved before, or web, vision, X search and past-chat search")
@@ -629,6 +635,8 @@ def _rooms(args: argparse.Namespace) -> int:
     room = str(getattr(args, "room", "") or "").strip()
     if args.rooms_action in _LINKED_ROOMS:
         return _linked_rooms(args, room, Path(get_hermes_home()))
+    if args.rooms_action in _ROOM_APPROVALS:
+        return _room_approvals(args, Path(get_hermes_home()))
     if args.rooms_action == "forget":
         return _forget_room(room, Path(get_hermes_home()), bool(getattr(args, "yes", False)))
     if args.rooms_action == "setup":
@@ -996,6 +1004,52 @@ def _linked_rooms(args: argparse.Namespace, room: str, home: Path) -> int:
         print(f"Couldn't {_LINKED_ROOMS[action]}: {error}")
         return 1
     return 0
+
+
+# Your agents' approvals in rooms other people host: what each command does.
+_ROOM_APPROVALS = {"approvals": "list them", "approve": "approve it", "deny": "deny it"}
+
+
+def _room_approvals(args: argparse.Namespace, home: Path) -> int:
+    """What your agents' turns in rooms other people host wait for your
+    approval for (room_approvals), answered here, once or deny."""
+    from . import room_approvals, room_identity
+
+    action = args.rooms_action
+    run, request = (str(getattr(args, name, "") or "").strip() for name in ("run", "request"))
+    if action != "approvals" and not (run and request):
+        print(f"Usage: hermes conduit-push rooms {action} --run <run id> --request <request id> (rooms approvals "
+              "shows them)")
+        return 2
+    try:
+        approvals = room_approvals.here(room_identity.root_home(home))
+        if action == "approvals":
+            _print_approvals(approvals.waiting())
+        elif action == "approve":
+            approvals.answer(run, request, "once")
+            print("Approved it, once: the turn goes on.")
+        else:
+            approvals.answer(run, request, "deny")
+            print("Denied it: the turn goes on without it.")
+    except (room_approvals.ApprovalsError, OSError) as error:
+        print(f"Couldn't {_ROOM_APPROVALS[action]}: {error}")
+        return 1
+    return 0
+
+
+def _print_approvals(approvals: list) -> None:
+    if not approvals:
+        print("None of your agents' turns in rooms other people host waits for your approval.")
+    for approval in approvals:
+        room = _printable(approval["room"] or "A room")
+        host = _printable(approval["from"] or "someone")
+        handle = approval["agent"]["handle"] or approval["agent"]["profile"]
+        command = _printable(approval["command"])
+        print(f"{room}, from {host} (room {approval['room_id']}): @{handle} asks to run {command}")
+        if approval["description"]:
+            print(f"  {_printable(approval['description'])}")
+        answer = f"--run {approval['run_id']} --request {approval['request_id']}"
+        print(f"  hermes conduit-push rooms approve {answer} (once), or rooms deny {answer}")
 
 
 def _invite_to_room(rooms: Any, room_invites: Any, room_links: Any, root: Path, home: Path,

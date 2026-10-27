@@ -3081,8 +3081,8 @@ your Hermes, its home. Each person's agents run on their own Hermes, with
 their own model, keys and choices for the room, and the room bridge carries
 their turns over the Link: the home's Hermes reaches each one at a loopback
 server on its own host, and the member's Hermes runs the turn through its own
-API server. Approvals stay on the agent's own Hermes, and How it takes part
-and Turns a day are held there.
+API server. Approvals stay on the agent's own Hermes, where its owner answers
+them (below), and How it takes part and Turns a day are held there.
 
 A room with people you've linked starts as a draft: its name, the agents of
 yours it starts with, and up to 5 people, by their Link. Each one's Hermes is
@@ -3173,6 +3173,20 @@ chat for the room stays on its own Hermes until its owner deletes it (`rooms
 forget`, above). Only the home and the agent's own Hermes know it's out:
 another person's Hermes in the room still lists it.
 
+When a turn of one of your agents in a room someone else hosts needs your
+approval (plugin 0.97+), the turn waits on your Hermes, and the home only
+hears that it waits: its grant can't approve, and the bridge refuses its
+approval calls. Conduit lists what each such turn waits for, with the room,
+who hosts it and your agent, and you answer it there, or with `rooms
+approvals`, `approve` and `deny`: once or deny, since a room turn's approval
+is for that one call. The answer goes to your own Hermes' API server with a
+grant made for it alone, for the turn's own place in the room, that can only
+answer approvals and lasts a minute, and nothing about the approval leaves
+your Hermes. Hermes ties a room's turns to their grant, so its API key can't
+answer them. The "Approval needed" notification goes out as it does for any
+chat, but its usual answer (the gateway's `approval.respond`) can't reach a
+room's turn, so Conduit answers it here, telling it by its session.
+
 ```bash
 hermes conduit-push rooms invite --name "Zoo trip" --link <Link id> --link <Link id>   # with this profile's agent
 hermes conduit-push rooms invite --name "Zoo trip" --link <Link id> --agent default --agent work=furina-work
@@ -3184,6 +3198,8 @@ hermes conduit-push rooms invites                       # the rooms you're invit
 hermes conduit-push rooms join --room <room id>         # with this profile's agent, or --agent PROFILE[=HANDLE]...
 hermes conduit-push rooms decline --room <room id>
 hermes conduit-push rooms leave --room <room id>        # takes your agents out, or --agent PROFILE...; asks first
+hermes conduit-push rooms approvals                     # what your agents' turns in rooms elsewhere wait for
+hermes conduit-push rooms approve --run <run id> --request <request id>   # once; rooms deny ... denies it
 ```
 
 An agent's handle is its bot's name as Conduit tags it (`Research Buddy` is
@@ -3263,6 +3279,30 @@ A refusal carries `detail` and a `code`: `bad_name`, `bad_links`,
 agent, and nothing was kept). The routes answer 60 requests a minute between
 them, and one that sends over the Links answers within 50 s, or with
 `timed_out` (504) while it finishes on its own.
+
+Your agents' approvals in rooms other people host go through these, behind
+the `room-approvals` capability (plugin 0.97+), which answer 60 requests a
+minute of their own, each within 30 s (else `api_server`, 503, while it
+finishes on its own):
+
+- `GET /rooms/approvals`: `{"approvals": [...]}`, the oldest turn's first,
+  each `{"run_id", "request_id", "room_id", "room", "link", "from", "agent":
+  {"profile", "handle", "display_name"}, "session_key", "description",
+  "command", "choices"}`: the room's name, who hosts it as your Link names
+  them, your agent by its handle there, the session its "Approval needed"
+  notification names (its `session_id` and `decision.session_key`), what it
+  asks to do as Hermes shows you (each cut to 8 KB), and `choices`, `["once",
+  "deny"]`. On a gateway with a session authority, `session_key` is the key
+  Hermes keeps for the agent's hidden chat for the room (null when its session
+  store can't say), else the turn's `run_id`. When this Hermes can't read the
+  room's invite, `room`, `from` and the agent's `handle` and `display_name` are
+  null (its log says why), and the approval is still listed and answered.
+- `POST /rooms/approvals/answer` with `{"run_id", "request_id", "choice"}`:
+  `{"approval": {"run_id", "request_id", "choice"}}`. It's refused with
+  `bad_choice` or `bad_request` (400), `no_approval` (404, no turn of your
+  agents waits for it here), `not_pending` (409, answered already, or its
+  turn moved on), `refused` (409, your Hermes refused it, as once the agent
+  is out of the room) or `api_server` (503).
 
 ## Capabilities (plugin 0.4+)
 

@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.97.0 (2026-10-27)
+## 0.98.0 (2026-10-27)
 
 ### Fixes
 - Pulse's look-ups: one made right at midnight (UTC) could count the day
@@ -27,6 +27,15 @@ checks it). The format is fixed, because Conduit reads it:
   now drops it, and the card shows how it went, with Undo once it's added.
   Pulse makes at most 2 suggestions a message and 5 a day, and nothing it
   does can change your phone without your tap.
+
+## 0.97.0 (2026-10-27)
+
+### New and improved
+- When one of your agents in a room someone else hosts asks for your
+  approval, it waits for you on your own Hermes, with the room and who hosts
+  it, and you approve it once or deny it there. The room's host never sees or
+  answers it. From the command line: `hermes conduit-push rooms approvals`,
+  `approve` and `deny`.
 
 ## 0.96.1 (2026-10-27)
 
