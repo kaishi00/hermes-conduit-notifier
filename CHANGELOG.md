@@ -19,8 +19,9 @@ checks it). The format is fixed, because Conduit reads it:
 - Conduit's new Folder tab in Artifacts can search a chat's folder by file
   name and inside files, list its recent files, and make new folders and
   files, rename, move, duplicate, delete and upload, without leaving the
-  folder it opened. It never shows or touches files that hold keys or
-  passwords, and a save won't overwrite a file that changed meanwhile.
+  folder it opened. It never shows, opens, creates or copies files that
+  hold keys or passwords, and a save won't overwrite a file that changed
+  meanwhile.
 
 ## 0.106.1 (2026-10-27)
 

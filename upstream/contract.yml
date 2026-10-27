@@ -51,7 +51,8 @@ notes:
     The Folder tab in Conduit's Artifacts (feature map: "Workspace files"). /workspace/* reads a
     profile's SSH workspace through hermes_cli.web_routers.files._fs_backend (and the adapter's
     _normalize and _execute), maps a Docker profile's container paths with
-    hermes_cli.web_server_files._agent_fs_path, and keeps out what _is_sensitive_path keeps out of
+    hermes_cli.web_server_files._agent_fs_path, keeps a locked or hosted install's roots inside
+    the folder _managed_files_policy names, and keeps out what _is_sensitive_path keeps out of
     Hermes' own file routes.
 
 # Upstream behaviors we know are broken, keyed by test and failure signature.
@@ -140,7 +141,7 @@ imports:
   hermes_cli.web_server_dashboard:
     optional: ["_plugin_api_request_refused"]
   hermes_cli.web_server_files:
-    optional: ["_agent_fs_path"]
+    optional: ["_agent_fs_path", "_managed_files_policy"]
   hermes_cli.web_server_profiles:
     optional: ["_config_profile_scope"]
   hermes_constants:

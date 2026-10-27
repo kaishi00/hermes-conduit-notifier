@@ -23,6 +23,7 @@ import base64
 import binascii
 import os
 import posixpath
+import secrets
 import shlex
 import shutil
 import stat as stat_module
@@ -43,6 +44,7 @@ _SENSITIVE_FILES = frozenset({
 _SENSITIVE_DIRS = frozenset({"mcp-tokens", "pairing", ".ssh", ".gnupg"})
 
 MAX_NAME_BYTES = 255
+MAX_PATH_CHARS = 4096
 MAX_ENTRIES = 2000
 SEARCH_MAX_RESULTS = 200
 SEARCH_MAX_MATCHES_PER_FILE = 5
@@ -90,6 +92,8 @@ def _path_text(raw: Any) -> str:
     text = str(raw or "").strip()
     if not text or "\x00" in text:
         raise WorkspaceError(400, "A path is required")
+    if len(text) > MAX_PATH_CHARS:
+        raise WorkspaceError(400, "That path is too long")
     return text
 
 
@@ -128,10 +132,13 @@ class LocalWorkspace:
 
     def __init__(self, resolve: Callable[[str], str] = lambda raw: raw,
                  sensitive: Callable[[str], bool] = default_sensitive,
-                 clock: Callable[[], float] = time.monotonic) -> None:
+                 clock: Callable[[], float] = time.monotonic,
+                 boundary: Optional[str] = None) -> None:
         self._resolve = resolve
         self._sensitive = sensitive
         self._clock = clock
+        # A hosted or locked install's one folder: no root may leave it.
+        self._boundary = os.path.realpath(boundary) if boundary else None
 
     # Paths
 
@@ -147,6 +154,8 @@ class LocalWorkspace:
     def root(self, raw: Any) -> str:
         host = self._host(raw)
         real = os.path.realpath(host)
+        if self._boundary is not None and not self._inside(self._boundary, real):
+            raise WorkspaceError(403, "That's outside the folder this Hermes keeps files in")
         if not os.path.isdir(real):
             raise WorkspaceError(404, "This folder is no longer there")
         return real
@@ -264,10 +273,13 @@ class LocalWorkspace:
         truncated = False
         try:
             for path, name, st in self._walk(root, deadline):
-                if lowered in name.lower() and len(names) < SEARCH_MAX_RESULTS:
-                    entry = self._entry(path, name)
-                    if entry is not None:
-                        names.append(entry)
+                if lowered in name.lower():
+                    if len(names) >= SEARCH_MAX_RESULTS:
+                        truncated = True
+                    else:
+                        entry = self._entry(path, name)
+                        if entry is not None:
+                            names.append(entry)
                 if not contents or st is None or st.st_size > SEARCH_MAX_FILE_BYTES:
                     continue
                 if len(matches) >= SEARCH_MAX_RESULTS:
@@ -337,16 +349,16 @@ class LocalWorkspace:
         current = os.stat(target).st_mtime
         if expected_mtime is not None and abs(current - float(expected_mtime)) > 0.001:
             raise WorkspaceError(409, "This file changed since you opened it")
-        temp = os.path.join(os.path.dirname(target), f".{os.path.basename(target)}.conduit-{os.getpid()}")
+        temp = None
         try:
-            with open(temp, "wb") as handle:
-                handle.write(data)
+            temp = _write_temp(os.path.dirname(target), data)
             shutil.copymode(target, temp)
             os.replace(temp, target)
+            temp = None
         except PermissionError:
             raise WorkspaceError(403, "Hermes can't write this file")
         finally:
-            if os.path.exists(temp):
+            if temp is not None and os.path.lexists(temp):
                 os.unlink(temp)
         return {"entry": self._entry(target)}
 
@@ -432,22 +444,44 @@ class LocalWorkspace:
             raise WorkspaceError(409, "A folder with that name is already there")
         if os.path.lexists(target) and not overwrite:
             raise WorkspaceError(409, "Something with that name is already there")
-        temp = os.path.join(os.path.dirname(target), f".{os.path.basename(target)}.conduit-upload-{os.getpid()}")
+        temp = None
         try:
-            with open(temp, "wb") as handle:
-                handle.write(data)
+            temp = _write_temp(os.path.dirname(target), data)
             if overwrite:
                 os.replace(temp, target)
             else:
                 _rename_no_replace(temp, target)
+            temp = None
         except FileExistsError:
             raise WorkspaceError(409, "Something with that name is already there")
         except PermissionError:
             raise WorkspaceError(403, "Hermes can't write in this folder")
         finally:
-            if os.path.exists(temp):
+            if temp is not None and os.path.lexists(temp):
                 os.unlink(temp)
         return {"entry": self._entry(target)}
+
+
+def _write_temp(folder: str, data: bytes) -> str:
+    """``data`` in a new file of its own in ``folder``: a random name, created
+    exclusively and never through a link, so nothing already there is written."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    for _ in range(8):
+        temp = os.path.join(folder, f".conduit-{secrets.token_hex(8)}.tmp")
+        try:
+            fd = os.open(temp, flags, 0o666)  # the umask applies, as for any new file
+        except FileExistsError:
+            continue
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except BaseException:
+            os.unlink(temp)
+            raise
+        return temp
+    raise WorkspaceError(500, "Couldn't write a temporary file here")
 
 
 class _Budget(Exception):
@@ -580,7 +614,14 @@ class SshWorkspace:
         """Shell that refuses a path ($1) whose real folder leaves the root."""
         return (f'root={shlex.quote(root)}\n'
                 'inside() { d=$(cd "$(dirname -- "$1")" 2>/dev/null && pwd -P) || return 1;'
-                ' case "$d/" in "$root"/*|"$root/") return 0;; esac; return 1; }\n')
+                ' case "$d/" in "$root"/*|"$root/") return 0;; esac; return 1; }\n'
+                # Where $1 itself leads: a folder's real path, or a link's
+                # target, which must stay inside too.
+                'follows() { if [ -d "$1" ]; then r=$(cd "$1" 2>/dev/null && pwd -P) || return 1;'
+                ' elif [ -L "$1" ]; then r=$(realpath -- "$1" 2>/dev/null || readlink -f -- "$1" 2>/dev/null);'
+                ' [ -n "$r" ] || return 1;'
+                ' else inside "$1"; return; fi;'
+                ' case "$r/" in "$root"/*|"$root/") return 0;; esac; return 1; }\n')
 
     def _records(self, lines: List[str]) -> List[Dict[str, Any]]:
         entries = []
@@ -609,9 +650,10 @@ class SshWorkspace:
     def list_dir(self, root_raw: Any, path_raw: Any) -> Dict[str, Any]:
         root = self.root(root_raw)
         folder = self._check(root, path_raw)
-        lines = self._run(_STAT + f'p={shlex.quote(folder)}\n'
+        lines = self._run(_STAT + self._guard(root) + f'p={shlex.quote(folder)}\n'
                           f'[ -e "$p" ] || {{ echo {_ERROR}ENOENT; exit 1; }}\n'
                           f'[ -d "$p" ] || {{ echo {_ERROR}ENOTDIR; exit 1; }}\n'
+                          f'follows "$p" || {{ echo {_ERROR}EOUTSIDE; exit 1; }}\n'
                           'for c in "$p"/* "$p"/.[!.]* "$p"/..?*; do [ -e "$c" ] || [ -L "$c" ] || continue; rec "$c"; done')
         entries = self._records(lines)
         truncated = len(entries) > MAX_ENTRIES
@@ -698,6 +740,7 @@ class SshWorkspace:
         root = self.root(root_raw)
         target = self._target(root, folder, name)
         self._run(self._guard(root) + f't={shlex.quote(target)}\n'
+                  f'[ -d "$(dirname -- "$t")" ] || {{ echo {_ERROR}ENOENT; exit 1; }}\n'
                   f'inside "$t" || {{ echo {_ERROR}EOUTSIDE; exit 1; }}\n'
                   f'[ -e "$t" ] || [ -L "$t" ] && {{ echo {_ERROR}EEXIST; exit 1; }}\n'
                   f'mkdir -- "$t" || {{ echo {_ERROR}EACCES; exit 1; }}')
@@ -713,18 +756,28 @@ class SshWorkspace:
         return {"entry": self._entry(target)}
 
     def _write(self, root: str, target: str, data: bytes, create: bool, expected_mtime: Optional[float] = None,
-               overwrite: bool = True) -> None:
-        """Write ``data`` (sent base64 on stdin) beside ``target``, then move it into place."""
+               overwrite: bool = True, existing: bool = False) -> None:
+        """Write ``data`` (sent base64 on stdin) beside ``target``, then move it
+        into place. ``existing``: a save, of a file that must be there and lead
+        nowhere outside the root."""
         check = f'[ -e "$t" ] || [ -L "$t" ] && {{ echo {_ERROR}EEXIST; exit 1; }}\n' if create or not overwrite else ""
+        if existing:
+            check += (f'[ -e "$t" ] || {{ echo {_ERROR}ENOENT; exit 1; }}\n'
+                      f'follows "$t" || {{ echo {_ERROR}EOUTSIDE; exit 1; }}\n')
         stale = ""
         if expected_mtime is not None:
             stale = (_STAT + f'set -- $(meta "$t"); [ "$1" = "{int(expected_mtime)}" ] || '
                      f'{{ echo {_ERROR}ESTALE; exit 1; }}\n')
         self._run(self._guard(root) + f't={shlex.quote(target)}\n'
+                  f'[ -d "$(dirname -- "$t")" ] || {{ echo {_ERROR}ENOENT; exit 1; }}\n'
                   f'inside "$t" || {{ echo {_ERROR}EOUTSIDE; exit 1; }}\n'
                   f'[ -d "$t" ] && {{ echo {_ERROR}EEXIST; exit 1; }}\n' + check + stale +
-                  'tmp="$t.conduit-$$"\n'
+                  # A fresh name of mktemp's own: nothing already there is written through.
+                  f'tmp=$(mktemp "$(dirname -- "$t")/.conduit-XXXXXXXX") || {{ echo {_ERROR}EACCES; exit 1; }}\n'
                   f'base64 -d > "$tmp" || {{ rm -f "$tmp"; echo {_ERROR}EACCES; exit 1; }}\n'
+                  # mktemp's file is private: give it the file's own mode, or a new file's.
+                  'm=$(stat -c %a -- "$t" 2>/dev/null || stat -f %Lp -- "$t" 2>/dev/null)\n'
+                  'chmod "${m:-$(printf %o $((0666 & ~0$(umask))))}" "$tmp" 2>/dev/null\n'
                   f'mv -f -- "$tmp" "$t" || {{ rm -f "$tmp"; echo {_ERROR}EACCES; exit 1; }}',
                   stdin=base64.b64encode(data).decode("ascii") + "\n")
 
@@ -734,7 +787,7 @@ class SshWorkspace:
         data = (content or "").encode("utf-8")
         if len(data) > SAVE_MAX_BYTES:
             raise WorkspaceError(413, "That's too much text to save")
-        self._write(root, target, data, create=False, expected_mtime=expected_mtime)
+        self._write(root, target, data, create=False, expected_mtime=expected_mtime, existing=True)
         return {"entry": self._entry(target)}
 
     def move(self, root_raw: Any, path: Any, folder: Any, name: Any, overwrite: bool = False) -> Dict[str, Any]:
@@ -765,10 +818,16 @@ class SshWorkspace:
         taken = {entry["name"] for entry in self.list_dir(root, folder)["entries"]}
         name = copy_name(posixpath.basename(source), lambda candidate: candidate in taken)
         target = posixpath.join(folder, name)
+        # The copy keeps links as links and leaves out what holds keys or
+        # passwords, as this host's duplicate does.
+        secrets_in_copy = " -o ".join(
+            [f"-name {shlex.quote(name)}" for name in sorted(_SENSITIVE_FILES | _SENSITIVE_DIRS)] + ["-name '.env.*'"])
         self._run(self._guard(root) + f's={shlex.quote(source)}; t={shlex.quote(target)}\n'
+                  f'follows "$s" || {{ echo {_ERROR}EOUTSIDE; exit 1; }}\n'
                   f'inside "$t" || {{ echo {_ERROR}EOUTSIDE; exit 1; }}\n'
                   f'[ -e "$t" ] && {{ echo {_ERROR}EEXIST; exit 1; }}\n'
-                  f'cp -R -p -- "$s" "$t" || {{ echo {_ERROR}EACCES; exit 1; }}')
+                  f'cp -R -P -p -- "$s" "$t" || {{ echo {_ERROR}EACCES; exit 1; }}\n'
+                  f'[ -d "$t" ] && [ ! -L "$t" ] && find "$t" -mindepth 1 \\( {secrets_in_copy} \\) -prune -exec rm -rf -- {{}} + 2>/dev/null; exit 0')
         return {"entry": self._entry(target)}
 
     def delete(self, root_raw: Any, path: Any) -> Dict[str, Any]:

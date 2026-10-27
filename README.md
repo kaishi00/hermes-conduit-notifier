@@ -1665,8 +1665,10 @@ open chat's working folder or a project's. These routes take that folder as
 `root` and keep every path inside it (a link that leads out is refused), on
 this host or on the profile's SSH machine, and leave out files that hold keys
 or passwords (`.env`, `auth.json`, `.ssh/` and the like) and the folders
-Hermes' own listing hides. File contents are still read through Hermes'
-`/api/fs/*` routes.
+Hermes' own listing hides (a duplicated folder leaves them out too; a deleted
+folder goes with everything in it). On a hosted or locked install every root
+stays inside the folder Hermes keeps files in. File contents are still read
+through Hermes' `/api/fs/*` routes.
 
 - `GET /api/plugins/conduit_push/workspace/list?root=…&path=…`: a folder's
   entries with `isDirectory`, `size` and `mtime`, folders first (up to 2,000).

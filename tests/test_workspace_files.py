@@ -224,6 +224,48 @@ def test_a_resolver_maps_agent_paths_to_this_host(tree):
     assert names(mapped.list_dir("/workspace", "/workspace/docs")) == ["guide.md"]
 
 
+def test_saves_and_uploads_never_write_through_a_planted_link(tree):
+    local = wf.LocalWorkspace()
+    root = str(tree.resolve())
+    victim = tree.parent / "victim.txt"
+    victim.write_text("keep\n")
+    for pid in (os.getpid(),):
+        (tree / f".notes.txt.conduit-{pid}").symlink_to(victim)
+    local.save(root, str(tree / "notes.txt"), "new\n", None)
+    local.upload(root, root, "u.txt", b"up")
+    assert victim.read_text() == "keep\n" and (tree / "notes.txt").read_text() == "new\n"
+    assert not [name for name in os.listdir(tree) if name.startswith(".conduit-")]
+    assert (tree / "u.txt").stat().st_mode & 0o777 == 0o666 & ~_umask()
+
+
+def _umask():
+    mask = os.umask(0)
+    os.umask(mask)
+    return mask
+
+
+def test_a_name_search_cut_short_says_so(tree, monkeypatch):
+    monkeypatch.setattr(wf, "SEARCH_MAX_RESULTS", 2)
+    for number in range(4):
+        (tree / f"match{number}.log").write_text("")
+    found = wf.LocalWorkspace().search(str(tree), "match", contents=False)
+    assert len(found["names"]) == 2 and found["truncated"] is True
+
+
+def test_a_locked_install_keeps_roots_inside_its_folder(tree):
+    local = wf.LocalWorkspace(boundary=str(tree / "docs"))
+    with pytest.raises(wf.WorkspaceError) as exc:
+        local.list_dir(str(tree), str(tree))
+    assert exc.value.status == 403
+    assert names(local.list_dir(str(tree / "docs"), str(tree / "docs"))) == ["guide.md"]
+
+
+def test_a_very_long_path_is_refused(tree):
+    with pytest.raises(wf.WorkspaceError) as exc:
+        wf.LocalWorkspace().list_dir("/" + "a" * 5000, "/")
+    assert exc.value.status == 400
+
+
 # --- SSH -----------------------------------------------------------------------
 
 
@@ -295,6 +337,47 @@ def test_ssh_refuses_paths_outside_and_stale_saves(tree):
         remote.delete(root, root)
 
 
+def test_ssh_refuses_links_that_lead_out_of_the_root(tree):
+    remote = ssh(tree)
+    root = str(tree.resolve())
+    (tree / "escape").symlink_to(tree.parent)
+    (tree / "leak.txt").symlink_to(tree.parent / "outside.txt")
+    for call in (lambda: remote.list_dir(root, str(tree / "escape")),
+                 lambda: remote.duplicate(root, str(tree / "escape")),
+                 lambda: remote.duplicate(root, str(tree / "leak.txt")),
+                 lambda: remote.save(root, str(tree / "leak.txt"), "x", None)):
+        with pytest.raises(wf.WorkspaceError) as exc:
+            call()
+        assert exc.value.status == 403
+    assert (tree.parent / "outside.txt").read_text() == "grouping videos\n"
+    assert not any(name.startswith("escape copy") or name.startswith("leak copy") for name in os.listdir(tree))
+
+
+def test_ssh_duplicate_leaves_secrets_out_and_keeps_modes(tree):
+    remote = ssh(tree)
+    root = str(tree.resolve())
+    (tree / "docs" / ".env").write_text("SECRET=1\n")
+    copy = remote.duplicate(root, str(tree / "docs"))["entry"]["path"]
+    assert sorted(os.listdir(copy)) == ["guide.md"]
+    script = tree / "run.sh"
+    script.write_text("echo hi\n")
+    script.chmod(0o755)
+    remote.save(root, str(script), "echo bye\n", None)
+    assert script.stat().st_mode & 0o777 == 0o755
+    assert not [name for name in os.listdir(tree) if name.startswith(".conduit-")]
+
+
+def test_ssh_says_a_missing_folder_or_file_is_missing(tree):
+    remote = ssh(tree)
+    root = str(tree.resolve())
+    for call in (lambda: remote.mkdir(root, str(tree / "gone"), "x"),
+                 lambda: remote.upload(root, str(tree / "gone"), "x", b"1"),
+                 lambda: remote.save(root, str(tree / "gone.txt"), "x", 5_000)):
+        with pytest.raises(wf.WorkspaceError) as exc:
+            call()
+        assert exc.value.status == 404
+
+
 def test_ssh_search_reads_colons_in_paths(tree):
     (tree / "a:1:b.txt").write_text("needle\n")
     found = ssh(tree).search(str(tree.resolve()), "needle", contents=True)
@@ -341,6 +424,18 @@ def test_routes_say_why_they_refuse(tree, client):
     stale = client.post(f"{BASE}/workspace/save", json={"root": root, "path": str(tree / "notes.txt"),
                                                          "content": "x", "expected_mtime": 1})
     assert stale.status_code == 409
+    nan = client.post(f"{BASE}/workspace/save", content='{"root": "%s", "path": "%s", "content": "x", '
+                      '"expected_mtime": NaN}' % (root, tree / "notes.txt"),
+                      headers={"Content-Type": "application/json"})
+    assert nan.status_code == 400 and (tree / "notes.txt").read_text() == "nothing here\n"
+
+
+def test_without_hermes_routing_the_routes_refuse(monkeypatch):
+    monkeypatch.setattr(api, "_workspace_files", lambda: wf)
+    monkeypatch.setitem(sys.modules, "hermes_cli.web_routers.files", None)
+    with pytest.raises(api.TokenError) as exc:
+        api._workspace(None)
+    assert exc.value.status == 501
 
 
 def test_the_capability_is_listed():

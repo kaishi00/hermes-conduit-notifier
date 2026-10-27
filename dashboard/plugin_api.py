@@ -17296,7 +17296,9 @@ def _workspace(profile: Optional[str]) -> Any:
     try:
         from hermes_cli.web_routers.files import _fs_backend, _fs_profile_home, _is_sensitive_path
     except Exception:
-        return module.LocalWorkspace()
+        # Without Hermes' own routing an SSH profile would land on this host
+        # and its secret-file check would be lost: refuse instead.
+        raise TokenError(501, "This Hermes can't route workspace files; update Hermes")
 
     def sensitive(path: str) -> bool:
         return module.default_sensitive(path) or _is_sensitive_path(Path(path))
@@ -17313,7 +17315,14 @@ def _workspace(profile: Optional[str]) -> Any:
     def resolve(raw: str) -> str:
         return str(_agent_fs_path(raw, profile_home=home)) if _agent_fs_path is not None else raw
 
-    return module.LocalWorkspace(resolve, sensitive)
+    # A hosted or locked install keeps its files under one folder, as
+    # Hermes' own file routes do there; a personal install has none.
+    try:
+        from hermes_cli.web_server_files import _managed_files_policy
+        boundary = _managed_files_policy(None, create_root=False).locked_root
+    except Exception:
+        boundary = None
+    return module.LocalWorkspace(resolve, sensitive, boundary=str(boundary) if boundary is not None else None)
 
 
 async def _workspace_call(profile: Optional[str], op: Callable[[Any], Dict[str, Any]], *, walks: bool = False,
@@ -17375,7 +17384,7 @@ def _workspace_mtime(body: Dict[str, Any]) -> Optional[float]:
     value = body.get("expected_mtime")
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         raise HTTPException(status_code=400, detail="expected_mtime must be a number",
                             headers={"Cache-Control": "no-store"})
     return float(value)
