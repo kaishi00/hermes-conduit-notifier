@@ -152,13 +152,16 @@ export class LiveActivities {
 
   // A progress report from the host; an end may come `endedAgoS` seconds
   // after the turn ended (a retry). Returns whether the phone is watching.
-  report(installationId, sessionId, state, end, { endedAgoS = 0 } = {}) {
+  // Only an end that says when the turn ended is kept for a late
+  // registration: an older plugin's, retried, could look newer than the
+  // chat's next turn.
+  report(installationId, sessionId, state, end, { endedAgoS } = {}) {
     const key = sessionKey(installationId, sessionId);
     const activity = this.find(installationId, sessionId);
     if (!activity) {
       // Kept for an activity registered late. A report without an end is
       // the chat's next turn, which the older end mustn't reach.
-      if (end) this.rememberEnd(key, state, end, this.now() - endedAgoS * 1000);
+      if (end && endedAgoS !== undefined) this.rememberEnd(key, state, end, this.now() - endedAgoS * 1000);
       else this.unwatchedEnds.delete(key);
       return false;
     }
@@ -270,9 +273,10 @@ export class LiveActivities {
 
   sweep() {
     const now = this.now();
+    // Not in end order (an end sent late is kept as of when it ended), so
+    // every one is looked at; there are at most maxActivities.
     for (const [key, ended] of this.unwatchedEnds) {
-      if (now - ended.endedAt <= ACTIVITY_TTL_MS) break;
-      this.unwatchedEnds.delete(key);
+      if (now - ended.endedAt > ACTIVITY_TTL_MS) this.unwatchedEnds.delete(key);
     }
     for (const [token, activity] of this.activities) {
       // Insertion order is registration order: the first live one ends the sweep.
@@ -318,8 +322,8 @@ export function validateReport(body) {
   if (!sessionId || !raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const end = body.end === undefined || body.end === null ? undefined : (ENDS.has(body.end) ? body.end : null);
   if (end === null) return null;
-  // How long ago the turn ended, for an end sent late; unreadable is now.
-  const endedAgoS = secondsAgo(body.ended_ago) ?? 0;
+  // How long ago the turn ended (plugin 0.100.0 on); unreadable is unknown.
+  const endedAgoS = secondsAgo(body.ended_ago);
   if (!PHASES.has(raw.phase)) return null;
   const tools = raw.tools === undefined || raw.tools === null ? 0 : boundedInteger(raw.tools, 0, 10_000);
   if (tools === undefined) return null;
@@ -333,7 +337,7 @@ export function validateReport(body) {
     if (context === undefined) return null;
     state.context = context;
   }
-  return { sessionId, state, end, ...(end ? { endedAgoS } : {}) };
+  return { sessionId, state, end, ...(end && endedAgoS !== undefined ? { endedAgoS } : {}) };
 }
 
 // The body of the phone's registration: its activity token and the chat's

@@ -585,10 +585,18 @@ def test_ids_that_continue_no_running_turn_are_their_own(clock, relay):
     assert [asked for asked, _ in lineage.asked] == ["cron-1"], "a settled answer is kept"
     reporter.thinking("s-new")
     reporter.thinking("s-new")
-    assert [asked for asked, _ in lineage.asked].count("s-new") == 2, "not stored yet: asked again"
+    assert [asked for asked, _ in lineage.asked].count("s-new") == 1, "not stored yet: not on every hook"
+    clock[0] += live.UNSETTLED_RETRY_S
+    reporter.thinking("s-new")
+    assert [asked for asked, _ in lineage.asked].count("s-new") == 2, "asked again a while later"
+    reporter.thinking("s-new")
+    lineage.moves["s-new"] = "s-1"
+    reporter.turn_ended("s-new", "done")
+    reporter.flush()
+    assert relay.posts[-1]["session_id"] == "s-1", "an end looks again at once"
     reporter.turn_ended("cron-1", "done")
     reporter.flush()
-    assert {post["session_id"] for post in relay.posts if post.get("end")} == {"cron-1"}
+    assert {post["session_id"] for post in relay.posts if post.get("end")} == {"s-1", "cron-1"}
 
 
 def test_the_chats_next_turn_runs_under_the_id_it_moved_to(clock, relay):
@@ -600,6 +608,21 @@ def test_the_chats_next_turn_runs_under_the_id_it_moved_to(clock, relay):
     assert relay.posts[-1]["session_id"] == "s-1"
     clock[0] += 1
     reporter.turn_started("s-1b")
+    reporter.turn_ended("s-1b", "failed")
+    reporter.flush()
+    assert relay.posts[-1]["session_id"] == "s-1b"
+    assert relay.posts[-1]["end"] == "failed"
+
+
+def test_a_moved_turn_that_never_ended_goes_when_the_chats_next_turn_starts(clock, relay):
+    lineage = Lineage({"s-1b": "s-1"})
+    reporter = live.LiveActivityReporter(post=relay, clock=lambda: clock[0], start_thread=False, lineage=lineage)
+    reporter.turn_started("s-1")
+    reporter.thinking("s-1b")
+    reporter.turn_started("s-1b")
+    clock[0] += live.FIRST_DELAY_S
+    reporter.flush()
+    assert {post["session_id"] for post in relay.posts} == {"s-1b"}, "the old turn sends nothing more"
     reporter.turn_ended("s-1b", "failed")
     reporter.flush()
     assert relay.posts[-1]["session_id"] == "s-1b"
@@ -632,6 +655,8 @@ def test_the_compaction_lineage_is_read_from_the_session_store(monkeypatch, tmp_
         ("open", None, None),
         ("forked", "branched-parent", None),
         ("branched-parent", None, "branched"),
+        ("loop-a", "loop-b", "compression"),
+        ("loop-b", "loop-a", "compression"),
     ])
     db.commit()
     db.close()
@@ -642,5 +667,6 @@ def test_the_compaction_lineage_is_read_from_the_session_store(monkeypatch, tmp_
     assert live.compacted_from("child", {"open"}) is False, "a delegated child is its own conversation"
     assert live.compacted_from("forked", {"branched-parent"}) is False
     assert live.compacted_from("unknown", {"root"}) is None, "not stored yet"
+    assert live.compacted_from("loop-a", {"root"}) is False, "a loop in the store ends the walk"
     monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path / "missing")
     assert live.compacted_from("third", {"root"}) is None

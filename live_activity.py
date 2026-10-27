@@ -75,6 +75,8 @@ ENDED_MEMORY_S = 120.0
 MAX_SESSIONS = 64
 # Session ids remembered as a compaction of a running turn, or as none.
 MAX_LINEAGE_IDS = 1024
+# An id the session store couldn't place yet is looked up again after this.
+UNSETTLED_RETRY_S = 30.0
 # A turn with no hook for this long is forgotten (its end never came).
 IDLE_FORGET_S = 2 * 60 * 60.0
 
@@ -176,6 +178,8 @@ class LiveActivityReporter:
         # Ids that continue no running turn (a session's lineage never
         # changes, so the answer is kept).
         self._not_moved: set[str] = set()
+        # Ids the store couldn't place yet -> when to look again.
+        self._unsettled: dict[str, float] = {}
         self._clock = clock
         self._start_thread = start_thread
         self._turns: dict[str, _Turn] = {}
@@ -202,8 +206,12 @@ class LiveActivityReporter:
         with self._lock:
             now = self._clock()
             # The chat's next turn runs under the id it moved to; the phone
-            # registers that one now.
-            self._moved.pop(session_id, None)
+            # registers that one now and ends the card of the turn before,
+            # so that turn goes too unless it still owes the relay its end.
+            moved_from = self._moved.pop(session_id, None)
+            before = self._turns.get(moved_from) if moved_from is not None else None
+            if before is not None and before.end is None:
+                del self._turns[moved_from]
             self._turns.pop(session_id, None)
             self._ended.pop(session_id, None)
             self._turns[session_id] = _Turn(now)
@@ -238,7 +246,8 @@ class LiveActivityReporter:
     def turn_ended(self, session_id: str, outcome: str) -> None:
         if not session_id or outcome not in ENDS:
             return
-        session_id = self._turn_id(session_id)
+        # An end always looks: one that missed its turn leaves the card up.
+        session_id = self._turn_id(session_id, recheck=True)
         with self._lock:
             turn = self._turns.get(session_id)
             now = self._clock()
@@ -368,13 +377,15 @@ class LiveActivityReporter:
                 del self._turns[session_id]
                 self._ended[session_id] = self._clock()
 
-    def _turn_id(self, session_id: str) -> str:
+    def _turn_id(self, session_id: str, recheck: bool = False) -> str:
         """The id a running turn started under, for one a compaction moved
         it to; any other id as it is."""
         with self._lock:
             if session_id in self._moved:
                 return self._moved[session_id]
             if session_id in self._turns or session_id in self._not_moved:
+                return session_id
+            if not recheck and self._clock() < self._unsettled.get(session_id, 0.0):
                 return session_id
             running = {key for key, turn in self._turns.items() if turn.end is None}
         if not running:
@@ -391,9 +402,16 @@ class LiveActivityReporter:
                 self._moved[session_id] = found
                 return found
             if found is False:
+                self._unsettled.pop(session_id, None)
                 if len(self._not_moved) >= MAX_LINEAGE_IDS:
                     self._not_moved.clear()
                 self._not_moved.add(session_id)
+            else:
+                # Not stored yet (a compaction being written) or never
+                # stored at all: not every hook reads the store for it.
+                if len(self._unsettled) >= MAX_LINEAGE_IDS:
+                    self._unsettled.pop(next(iter(self._unsettled)))
+                self._unsettled[session_id] = self._clock() + UNSETTLED_RETRY_S
         return session_id
 
     def _update(self, session_id: str, *, phase: str | None = None, tool: str | None | object = _UNSET,
@@ -443,6 +461,7 @@ class LiveActivityReporter:
             self._ended.clear()
             self._moved.clear()
             self._not_moved.clear()
+            self._unsettled.clear()
             # A reload (after pairing again, say) starts unpaused.
             self._paused_until = 0.0
             thread, self._thread = self._thread, None
@@ -548,7 +567,7 @@ def compacted_from(session_id: str, running: set[str]) -> str | bool | None:
     except Exception:  # noqa: BLE001 — a hook must never break the turn
         return None
     try:
-        current = session_id
+        current, seen = session_id, {session_id}
         for _ in range(_LINEAGE_HOPS):
             row = db.execute("SELECT parent_session_id FROM sessions WHERE id = ?", (current,)).fetchone()
             if row is None:
@@ -563,6 +582,9 @@ def compacted_from(session_id: str, running: set[str]) -> str | bool | None:
                 return False
             if parent in running:
                 return parent
+            if parent in seen:
+                return False  # a loop in the store: no turn continues through it
+            seen.add(parent)
             current = parent
         return None
     except sqlite3.Error:
