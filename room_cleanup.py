@@ -11,7 +11,9 @@ after the plugin next loads, which also ends what rooms disbanded before this
 version left behind. A room whose roster can't be read is looked for in every
 agent's home on this host. Agents on other people's Hermes keep theirs (Eric,
 2026-10-26); forget_room is how their owner deletes one later, from
-`hermes conduit-push rooms forget` or Conduit.
+`hermes conduit-push rooms forget` or Conduit. A room with people linked in
+(room_invites.py) ends for them first: their Hermes are told, and undo their
+agents' joins.
 """
 
 from __future__ import annotations
@@ -147,12 +149,11 @@ def _guard(original: Callable[..., Any]) -> Callable[..., Any]:
         if profiles is None:
             logger.warning("conduit_push: couldn't read room %s's members before it was disbanded; looking for its "
                            "hidden chats in every agent's home on this host", room_id)
-        if profiles is None or profiles:
-            try:
-                _in_background(functools.partial(_end, room_id, profiles, Path(db_path)), "conduit-room-cleanup")
-            except Exception:  # noqa: BLE001 - the room is disbanded either way
-                logger.warning("conduit_push: couldn't start deleting the hidden chats of room %s; the plugin "
-                               "deletes them when it next loads", room_id, exc_info=True)
+        try:
+            _in_background(functools.partial(_after, room_id, profiles, Path(db_path)), "conduit-room-cleanup")
+        except Exception:  # noqa: BLE001 - the room is disbanded either way
+            logger.warning("conduit_push: couldn't start deleting the hidden chats of room %s; the plugin "
+                           "deletes them when it next loads", room_id, exc_info=True)
         return result
 
     functools.update_wrapper(disband_room, original)
@@ -170,6 +171,28 @@ def _before(db_path: Any, room_id: Any) -> Optional[tuple[str, ...]]:
     except Exception:  # noqa: BLE001 - the disband is Hermes' either way
         logger.debug("conduit_push: couldn't read room %s's members before it was disbanded", room_id, exc_info=True)
         return None
+
+
+def _after(room_id: Any, profiles: Optional[tuple[str, ...]], store: Path) -> None:
+    """What follows a disband: the people linked into a room over Links
+    are told it ended, then this host's agents' hidden chats go."""
+    if isinstance(room_id, str) and _ROOM_ID.fullmatch(room_id):
+        _end_linked(room_id, store)
+    if profiles is None or profiles:
+        _end(room_id, profiles, store)
+
+
+def _end_linked(room_id: str, store: Path) -> None:
+    """A room over Links that started on this installation ends for the
+    people linked into it, whose Hermes undo their agents' joins
+    (room_invites, N5b); never raises."""
+    try:
+        from . import room_identity, room_invites
+
+        room_invites.disbanded(room_identity.root_home(store.parent), room_id)
+    except Exception:  # noqa: BLE001 - the room is disbanded here either way
+        logger.warning("conduit_push: couldn't tell the people linked into room %s that it was disbanded",
+                       room_id, exc_info=True)
 
 
 def _end(room_id: str, profiles: Optional[tuple[str, ...]], store: Path) -> None:

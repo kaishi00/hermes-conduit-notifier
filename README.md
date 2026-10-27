@@ -2690,8 +2690,10 @@ whose members the plugin can't read (its store was locked as it was disbanded,
 or its roster is damaged) is looked for in every agent's home on this host.
 Agents on other people's Hermes keep their sessions for the room: someone who
 leaves keeps their agent's session, and a revoke can't tell leaving from
-disbanding. A Hermes without `disband_room`, or whose session delete can't
-take a compression chain, logs one line and deletes nothing.
+disbanding. In a room with people you've linked (below), their Hermes are
+told it was disbanded and undo their agents' joins (plugin 0.91+), and those
+sessions stay too. A Hermes without `disband_room`, or whose session delete
+can't take a compression chain, logs one line and deletes nothing.
 
 Your agent's hidden session for a room hosted elsewhere stays until you
 delete it:
@@ -2968,12 +2970,18 @@ the room was taken back or started without them, or the invite runs out
 meanwhile. A join whose room never starts is undone once word of it can't come
 any more, a week after its invite ran out.
 
-For now only Hermes renews a grant, when a turn reaches the agent in the
-grant's last 5 minutes: in a room that's quiet then, the agent stops answering
-a day after it joined, and its turns read cut off (above). A later version
-renews grants while a room goes on, and adds leaving a room and its home
-removing an agent; until then an agent stays until the room is disbanded or
-the Link ends.
+From the join until the agent is out of the room (plugin 0.91+), its own
+Hermes makes it a fresh grant every 12 hours, for the same place and policy
+and again for 24 hours and 30 days, and sends it to the home over the Link (a
+`room.grant`), whose bridge route for the agent takes it with no restart, so a
+quiet room keeps its agents. A renewal this Hermes' API server doesn't answer
+is tried again a minute later (that profile's others wait as long), and one it
+can't make yet, for a policy changed since the agent joined or a Hermes
+missing what renewing needs, 12 hours later. One the API server refuses, a
+grant past its 30 days, or a Link that ended stops the agent's renewals, and
+its turns read cut off (above) once the grant it has runs out. Renewing never
+revokes anything, and Hermes still renews a grant itself when a turn reaches
+the agent in the grant's last 5 minutes.
 
 At the start, the home asks each joined agent's Hermes, through the bridge,
 whether it still takes the grant: one that refuses, or whose catalog changed,
@@ -2981,13 +2989,15 @@ is left out, and one that doesn't answer is kept (the bridge settles its
 turns). Then it makes the room in Hermes' running room service, with every
 agent, and gives each agent from a linked Hermes its route at the bridge,
 live with no restart on either side. An agent whose route can't be saved is
-cut off, and the room goes on. Handles come from each agent's owner and are
-made unique in the room (`laifu`, then `laifu-2`). Each person's Hermes is
-told the room started and who's in it, and an agent of theirs the room didn't
-seat is left (its grant revoked). Every host's agents are told whose agent
-each one is. The home takes an answer only from the Link it invited, for that
-person's places, while the draft waits, and only for agents of the Hermes
-that Link's answers first came from.
+cut off, and the room goes on, until its next fresh grant (above) saves it.
+Its later fresh grants go in the room service it started in. Handles come
+from each agent's owner and are made unique in the room (`laifu`, then
+`laifu-2`). Each person's Hermes is told the room started and who's in it,
+and an agent of theirs the room didn't seat is left (its grant revoked).
+Every host's agents are told whose agent each one is. The home takes an
+answer only from the Link it invited, for that person's places, while the
+draft waits, and only for agents of the Hermes that Link's answers first came
+from.
 
 The room goes in the room service the request that made it would use: with
 the dashboard in the gateway, the one for that request's profile, owned by
@@ -3000,24 +3010,45 @@ calls a start needs (Hermes before RoomLink, or one that renamed them) can't
 make one (`unsupported`), and one that loses them in an update keeps its
 drafts and says it can't start them, with one line in the log.
 
+Once a room has started (plugin 0.91+), each person can take their agents
+out of it, and its home can take out any of theirs. Leaving undoes each
+agent's join on its own Hermes at once (the Link stops carrying its requests,
+and its grant's scope is revoked, so its Hermes refuses the room's turns for
+it) and tells the home (a `room.leave`), which cuts off its route: its queued
+turns fail as a cut-off member's do (above). A room that hasn't started can't
+be left: decline it, or, once you've joined, leave it when it starts. When the
+home takes an agent out, it revokes the agent's grant on its Hermes through
+the bridge, where that answers, cuts off its route, and tells its Hermes (a
+`room.ended`), which undoes its join. The home's own agents can't be taken
+out, since a room in Hermes keeps its members: disbanding it ends it for
+everyone, and tells each person with agents still in it, whose Hermes undo
+their joins. An agent that's out stays on the room's roster, where Hermes
+keeps it, but the briefing the home's agents get stops naming it. Its hidden
+chat for the room stays on its own Hermes until its owner deletes it (`rooms
+forget`, above). Only the home and the agent's own Hermes know it's out:
+another person's Hermes in the room still lists it.
+
 ```bash
 hermes conduit-push rooms invite --name "Zoo trip" --link <Link id> --link <Link id>   # with this profile's agent
 hermes conduit-push rooms invite --name "Zoo trip" --link <Link id> --agent default --agent work=furina-work
 hermes conduit-push rooms drafts                        # your rooms with linked people, and who answered
 hermes conduit-push rooms start --room <room id>        # start now, with whoever has joined
 hermes conduit-push rooms withdraw --room <room id>     # takes it back; asks first (--yes doesn't)
+hermes conduit-push rooms remove --room <room id> --member @laifu   # takes one of their agents out; asks first
 hermes conduit-push rooms invites                       # the rooms you're invited to, and this profile's choices for each
 hermes conduit-push rooms join --room <room id>         # with this profile's agent, or --agent PROFILE[=HANDLE]...
 hermes conduit-push rooms decline --room <room id>
+hermes conduit-push rooms leave --room <room id>        # takes your agents out, or --agent PROFILE...; asks first
 ```
 
 An agent's handle is its bot's name as Conduit tags it (`Research Buddy` is
 `@research-buddy`), else its profile's (`@hermes` for the default profile),
-and `--agent PROFILE=HANDLE` gives it another. `--link` with `join` or
-`decline` picks the invite when two Links invited you to the same room. The
-CLI sends invites and answers itself, but answers arrive, and rooms start,
-only through the dashboard's loop, so a command run while no dashboard runs
-says so.
+and `--agent PROFILE=HANDLE` gives it another. In a room that started, `rooms
+drafts` shows each agent by its handle there, which `--member` takes (or its
+member id). `--link` with `join`, `decline` or `leave` picks the invite when
+two Links invited you to the same room. The CLI sends invites and answers
+itself, but answers arrive, and rooms start, only through the dashboard's
+loop, so a command run while no dashboard runs says so.
 
 Everything rooms over Links need, the agents' grants included, stays in
 `conduit-rooms/rooms.json` in the root Hermes home (owner only, beside
@@ -3036,32 +3067,52 @@ installation's):
 - `GET /rooms/drafts`: `{"drafts": [...], "starts": {"available",
   "reason"}}`, newest first, each `{"room_id", "name", "status",
   "created_at", "expires_at", "started_at", "reason", "agents", "people":
-  [{"link", "name", "status", "agents"}], "cut_off"}`. Its status is
-  `waiting`, `starting`, `started` or `ended` (with `reason` `withdrawn`,
-  `lapsed`, `too_few` or `start_failed`), each person's `waiting`, `joined`
-  or `declined`, and `cut_off` lists the member ids whose route couldn't be
-  saved. `starts` is unavailable (`unsupported`) on a Hermes that can't start
-  them.
+  [{"link", "name", "status", "agents"}], "cut_off", "left", "removed",
+  "members"}`. Its status is `waiting`, `starting`, `started` or `ended`
+  (with `reason` `withdrawn`, `lapsed`, `too_few`, `start_failed` or
+  `disbanded`), each person's `waiting`, `joined` or `declined`, and
+  `cut_off` lists the member ids still in whose route couldn't be saved,
+  `left` those that left and `removed` those taken out. `members` is who's in
+  a started room, as `GET /rooms/people` lists them (null before the start).
+  `starts` is unavailable (`unsupported`) on a Hermes that can't start them.
 - `POST /rooms/drafts/start` with `{"room_id"}`: Start now, and `DELETE
   /rooms/drafts?room_id=`: takes it back. Both answer `{"draft": ...}`.
 - `GET /rooms/invites`: `{"invites": [...]}`, newest first, each
   `{"room_id", "link", "from", "name", "people", "agents", "slots",
-  "expires_at", "status", "joined", "profiles": [{"profile", "choices"}],
-  "reason"}`: `waiting`, `joined`, `declined`, `started`, `lapsed` or
-  `cancelled` (with `reason` `started_without_you`, `refused`, `too_few`,
-  `start_failed`, `withdrawn` or `lapsed`). `profiles` are each of this
-  Hermes' profiles with its choices for the room.
+  "expires_at", "status", "joined", "gone", "profiles": [{"profile",
+  "choices"}], "reason"}`: `waiting`, `joined`, `declined`, `started`,
+  `lapsed`, `cancelled` (with `reason` `started_without_you`, `refused`,
+  `too_few`, `start_failed`, `withdrawn` or `lapsed`), `left` once all your
+  agents left, or `ended` once none is in (`removed` or `disbanded`).
+  `joined` are your agents in it, and `gone` those that are out, each
+  `{"profile", "handle", "display_name", "reason"}` (`left`, `removed` or
+  `disbanded`). `profiles` are each of this Hermes' profiles with its choices
+  for the room.
 - `POST /rooms/invites/answer` with `{"link", "room_id", "agents": [...]}`:
   `{"invite": ...}`. No agents declines, and the same answer again is the
   first.
 - `GET /rooms/people?room_id=`: who's who in a started room over Links,
   `{"room_id", "home", "members": [{"member_id", "handle", "display_name",
-  "owner"}]}`, with `home` and `owner` null for yours.
+  "owner", "status"}]}`, with `home` and `owner` null for yours, and each
+  member's `status` `in`, `left` or `removed` (on a member's Hermes, only
+  for its own agents). A member's Hermes answers for a room its agents left,
+  or that ended, too.
+
+Taking agents out goes through these, behind the `room-leave` capability
+(plugin 0.91+):
+
+- `POST /rooms/leave` with `{"link", "room_id", "agents": [...] | null}`:
+  `{"invite": ...}`, with the agents of those profiles out of the room, or
+  every one still in for null.
+- `POST /rooms/drafts/remove` with `{"room_id", "member"}`: `{"draft":
+  ...}`, with that agent out of the room. `member` is its member id, or its
+  handle there with or without `@`, and the same one again is the first.
 
 A refusal carries `detail` and a `code`: `bad_name`, `bad_links`,
-`bad_agents` and `bad_choices` (400), `not_linked`, `no_draft`, `no_invite`
-and `no_room` (404), `codex`, `not_set_up`, `too_many`, `too_many_drafts`,
-`not_waiting`, `answered` and `ended` (409), `lapsed` (410), `unsupported`
+`bad_agents` and `bad_choices` (400), `not_linked`, `no_draft`, `no_invite`,
+`no_member` and `no_room` (404), `codex`, `not_set_up`, `too_many`,
+`too_many_drafts`, `not_waiting`, `not_started`, `not_in`, `own_agent`,
+`answered` and `ended` (409), `lapsed` (410), `unsupported`
 (501), and `api_server` (503, this Hermes' API server didn't answer for an
 agent, and nothing was kept). The routes answer 60 requests a minute between
 them, and one that sends over the Links answers within 50 s, or with

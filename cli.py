@@ -101,24 +101,29 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
         "rooms",
         help="Group rooms with other people's agents: what this profile's agent may do in them (show, set), "
              "deleting its hidden chat for one (forget), setting this Hermes up for them (setup), and rooms with "
-             "people you've linked: make one (invite), see yours (drafts), start one now (start) or take it back "
-             "(withdraw), and see the ones you're invited to (invites), join or decline one",
+             "people you've linked: make one (invite), see yours (drafts), start one now (start), take it back "
+             "(withdraw) or take one of their agents out (remove), and see the ones you're invited to (invites), "
+             "join or decline one, or leave one",
     )
     rooms.add_argument("rooms_action", choices=["show", "set", "forget", "setup", "invite", "drafts", "start",
-                                                "withdraw", "invites", "join", "decline"])
+                                                "withdraw", "invites", "join", "decline", "leave", "remove"])
     rooms.add_argument("--room", default="",
                        help="the room's id; without one, show and set use the defaults for rooms with no choices "
-                            "of their own (forget, start, withdraw, join and decline need one)")
+                            "of their own (forget, start, withdraw, join, decline, leave and remove need one)")
     rooms.add_argument("--yes", action="store_true",
-                       help="for forget, setup and withdraw: go ahead without asking first")
+                       help="for forget, setup, withdraw, leave and remove: go ahead without asking first")
     rooms.add_argument("--name", help="for invite: the room's name")
     rooms.add_argument("--link", action="append", default=None, metavar="LINK",
                        help="for invite: a Link to invite the person of (links list shows them); repeat it for "
-                            "more; for join and decline: the Link that invited you, when two did")
+                            "more; for join, decline and leave: the Link that invited you, when two did")
     rooms.add_argument("--agent", action="append", default=None, metavar="PROFILE[=HANDLE]",
                        help="for invite and join: one of your agents to bring, by its profile, with its @handle "
                             "in the room when it isn't the one from its bot's name; repeat it for more "
-                            "(without one, this profile's)")
+                            "(without one, this profile's); for leave: one of your agents to take out, by its "
+                            "profile (without one, all of them)")
+    rooms.add_argument("--member", default="", metavar="@HANDLE",
+                       help="for remove: the agent to take out of your room, by its @handle or member id "
+                            "(rooms drafts shows them)")
     rooms.add_argument("--ceiling", metavar="TOOLSET,...",
                        help="for setup: the toolsets rooms may use on this profile, comma-separated (empty: none); "
                             "without it, the ones saved before, or web, vision, X search and past-chat search")
@@ -921,18 +926,23 @@ def _say_if_nothing_reads(room_links: Any, root: Path,
 
 # Rooms with people you've linked: what each command does, and how to use the ones that name a room.
 _LINKED_ROOMS = {"invite": "make the room", "drafts": "list them", "start": "start it", "withdraw": "take it back",
-                 "invites": "list them", "join": "join it", "decline": "decline it"}
+                 "invites": "list them", "join": "join it", "decline": "decline it", "leave": "leave it",
+                 "remove": "take it out"}
 _LINKED_ROOMS_USAGE = {
     "start": "hermes conduit-push rooms start --room <id> (rooms drafts shows them)",
     "withdraw": "hermes conduit-push rooms withdraw --room <id> (rooms drafts shows them)",
     "join": "hermes conduit-push rooms join --room <id> [--agent PROFILE[=HANDLE]]... (rooms invites shows them)",
     "decline": "hermes conduit-push rooms decline --room <id> (rooms invites shows them)",
+    "leave": "hermes conduit-push rooms leave --room <id> [--agent PROFILE]... (rooms invites shows them)",
+    "remove": "hermes conduit-push rooms remove --room <id> --member @HANDLE (rooms drafts shows them)",
 }
 _DRAFT_ENDED = {"withdrawn": "taken back", "lapsed": "ran out before it started",
-                "too_few": "ended: nobody else's agents could join", "start_failed": "ended: Hermes couldn't make it"}
+                "too_few": "ended: nobody else's agents could join", "start_failed": "ended: Hermes couldn't make it",
+                "disbanded": "disbanded"}
 _INVITE_ENDED = {"started_without_you": "it started without you", "refused": "their Hermes couldn't reach your agents",
                  "too_few": "nobody else's agents could join", "start_failed": "their Hermes couldn't make it",
-                 "withdrawn": "they took it back", "lapsed": "it ran out"}
+                 "withdrawn": "they took it back", "lapsed": "it ran out", "removed": "they took your agents out",
+                 "disbanded": "they disbanded it"}
 
 
 def _linked_rooms(args: argparse.Namespace, room: str, home: Path) -> int:
@@ -942,7 +952,8 @@ def _linked_rooms(args: argparse.Namespace, room: str, home: Path) -> int:
     from . import room_identity, room_invites, room_links
 
     action = args.rooms_action
-    if action in _LINKED_ROOMS_USAGE and not room:
+    member = str(getattr(args, "member", "") or "").strip()
+    if (action in _LINKED_ROOMS_USAGE and not room) or (action == "remove" and not member):
         print(f"Usage: {_LINKED_ROOMS_USAGE[action]}")
         return 2
     root = room_identity.root_home(home)
@@ -950,6 +961,10 @@ def _linked_rooms(args: argparse.Namespace, room: str, home: Path) -> int:
         rooms = room_invites.here(root)
         if action == "invite":
             return _invite_to_room(rooms, room_invites, room_links, root, home, args)
+        if action == "leave":
+            return _leave_room(rooms, room, args)
+        if action == "remove":
+            return _remove_from_room(rooms, room, member, bool(getattr(args, "yes", False)))
         if action == "drafts":
             _print_drafts(rooms.drafts())
         elif action == "start":
@@ -1033,6 +1048,69 @@ def _withdraw_room(rooms: Any, room: str, yes: bool) -> int:
     return 0
 
 
+def _leave_room(rooms: Any, room: str, args: argparse.Namespace) -> int:
+    """Takes your agents out of a room you joined, after saying what that
+    does: those --agent names, else all of them."""
+    links = getattr(args, "link", None) or []
+    link = str(links[-1]).strip() if links else ""
+    invites = [invite for invite in rooms.invites() if invite["room_id"] == room and link in ("", invite["link"])]
+    if not invites:
+        print(f"No invite to room {_printable(room)} on this Hermes. hermes conduit-push rooms invites shows them.")
+        return 1
+    if len(invites) > 1:
+        print(f"Two Links invited you to room {_printable(room)}: say which with --link (rooms invites shows them).")
+        return 2
+    invite = invites[0]
+    named = getattr(args, "agent", None)
+    profiles = [str(spec).partition("=")[0].strip() for spec in named] if named else None
+    leaving = [agent for agent in invite["joined"] if profiles is None or agent["profile"] in profiles]
+    if invite["status"] == "started" and leaving and len(leaving) == len(profiles or leaving):
+        print(f"This takes {_handles(leaving)} out of {_printable(invite['name'])}: {_printable(invite['from'])}'s "
+              f"Hermes is told, and {'its' if len(leaving) == 1 else 'their'} turns there stop.")
+        if not getattr(args, "yes", False) and not _confirmed("Leave it? [y/N] "):
+            print("Cancelled.")
+            return 0
+    shown = rooms.leave(invite["link"], room, profiles)
+    print(f"Left {_printable(shown['name'])} with {_handles(leaving)}. " + (
+        "Its hidden chat for the room stays on this Hermes; to delete it:" if len(leaving) == 1
+        else "Their hidden chats for the room stay on this Hermes; to delete one:"))
+    for agent in leaving:
+        named_profile = "" if agent["profile"] == "default" else f"-p {agent['profile']} "
+        print(f"  hermes {named_profile}conduit-push rooms forget --room {room}")
+    return 0
+
+
+def _remove_from_room(rooms: Any, room: str, member: str, yes: bool) -> int:
+    """Takes another person's agent out of a room you host, after saying
+    what that does."""
+    draft = next((shown for shown in rooms.drafts()["drafts"] if shown["room_id"] == room), None)
+    if draft is None:
+        print(f"No room {_printable(room)} of yours on this Hermes. hermes conduit-push rooms drafts shows them.")
+        return 1
+    members = draft["members"] or []
+    handle = member.removeprefix("@").casefold()
+    found = next((each for each in members if each["member_id"] == member), None) or next(
+        (each for each in members if each["handle"].casefold() == handle), None)
+    if found is not None and found["owner"] is not None and found["status"] == "in":
+        owner = _printable(found["owner"])
+        print(f"This takes @{found['handle']} ({owner}'s) out of {_printable(draft['name'])}: {owner}'s Hermes is "
+              "told, and its turns there stop.")
+        if not yes and not _confirmed("Take it out? [y/N] "):
+            print("Cancelled.")
+            return 0
+    rooms.remove(room, member)  # refuses one that isn't a linked person's agent
+    print(f"Took @{found['handle']} ({_printable(found['owner'])}'s) out of {_printable(draft['name'])}.")
+    return 0
+
+
+def _confirmed(prompt: str) -> bool:
+    try:
+        answer = input(prompt)
+    except EOFError:
+        answer = ""
+    return answer.strip().lower() in ("y", "yes")
+
+
 def _room_agents(room_invites: Any, root: Path, home: Path, args: argparse.Namespace) -> list:
     """The agents ``--agent`` names (PROFILE or PROFILE=HANDLE), else this
     profile's."""
@@ -1061,10 +1139,16 @@ def _print_drafts(view: dict) -> None:
         else:
             status = "starting"
         print(f"{_printable(draft['name'])} (room {draft['room_id']}): {status}")
+        # A started room's handles, which the start made unique: what rooms remove takes.
+        handles = {member["member_id"]: member["handle"] for member in draft["members"] or ()}
         for person in draft["people"]:
+            agents = [{**agent, "handle": handles.get(agent["member_id"], agent["handle"])}
+                      for agent in person["agents"]]
             answered = {"waiting": "hasn't answered", "declined": "declined"}.get(person["status"]) \
-                or f"joined with {_handles(person['agents'])}"
-            print(f"  {_printable(person['name'])}: {answered}")
+                or f"joined with {_handles(agents)}"
+            out = _out([agent["handle"] for agent in agents if agent["member_id"] in draft["left"]],
+                       [agent["handle"] for agent in agents if agent["member_id"] in draft["removed"]])
+            print(f"  {_printable(person['name'])}: {answered}" + (f" ({out})" if out else ""))
     if not view["starts"]["available"]:
         print("This Hermes can't start rooms with people you've linked: update Hermes.")
 
@@ -1083,9 +1167,15 @@ def _print_invites(invites: list, profile: str) -> None:
             status = f"joined with {_handles(invite['joined'])}, waiting for it to start"
         elif invite["status"] == "cancelled":
             status = f"not starting with your agents: {_INVITE_ENDED.get(invite['reason'], 'it ended')}"
+        elif invite["status"] == "ended":
+            status = f"ended: {_INVITE_ENDED.get(invite['reason'], 'it ended')}"
         else:
-            status = {"lapsed": "ran out", "declined": "declined", "started": "started"}.get(invite["status"],
-                                                                                           invite["status"])
+            status = {"lapsed": "ran out", "declined": "declined", "started": "started",
+                      "left": "you left it"}.get(invite["status"], invite["status"])
+            out = _out([agent["handle"] for agent in invite["gone"] if agent["reason"] == "left"],
+                       [agent["handle"] for agent in invite["gone"] if agent["reason"] == "removed"])
+            if invite["status"] == "started" and out:
+                status += f"; {out}"
         host = _printable(invite["from"])
         print(f"{_printable(invite['name'])}, from {host} (room {invite['room_id']}, Link {invite['link']}): "
               f"{status}")
@@ -1102,6 +1192,12 @@ def _print_invites(invites: list, profile: str) -> None:
 
 def _handles(agents: Any) -> str:
     return _and(f"@{agent['handle']}" for agent in agents) or "none of your agents"
+
+
+def _out(left: list, removed: list) -> str:
+    """The agents that left a room and those taken out, by handle: "@a left, @b taken out"."""
+    return ", ".join(f"{_and(f'@{handle}' for handle in handles)} {what}"
+                     for handles, what in ((left, "left"), (removed, "taken out")) if handles)
 
 
 def _and(names: Any) -> str:

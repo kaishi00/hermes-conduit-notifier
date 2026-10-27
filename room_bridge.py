@@ -21,6 +21,7 @@ import base64
 import binascii
 import json
 import logging
+import math
 import os
 import re
 import tempfile
@@ -167,6 +168,22 @@ def grant_scope(grant: Any) -> Optional[dict[str, str]]:
     (its first part, base64url JSON), or None when it can't be read. Only
     the member's API server can check the grant's signature; this is what
     it would be bound by."""
+    payload = _payload(grant)
+    return checked_scope({name: payload.get(name) for name in SCOPE_FIELDS}) if payload is not None else None
+
+
+def grant_issued_at(grant: Any) -> Optional[float]:
+    """When a HermesRoom grant says it was issued, read from its payload as
+    grant_scope reads its scope, or None: which of a member's grants is the
+    newer (room_invites), never whether one is good."""
+    payload = _payload(grant)
+    issued = payload.get("issued_at") if payload is not None else None
+    if isinstance(issued, bool) or not isinstance(issued, (int, float)) or not math.isfinite(issued):
+        return None
+    return float(issued)
+
+
+def _payload(grant: Any) -> Optional[dict[str, Any]]:
     if not isinstance(grant, str) or len(grant) > MAX_GRANT_BYTES:
         return None
     encoded, dot, _ = grant.partition(".")
@@ -176,8 +193,7 @@ def grant_scope(grant: Any) -> Optional[dict[str, str]]:
         payload = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)).decode("ascii"))
     except (binascii.Error, ValueError, UnicodeDecodeError, RecursionError):
         return None
-    return checked_scope({name: payload.get(name) for name in SCOPE_FIELDS}) if isinstance(payload, dict) \
-        else None
+    return payload if isinstance(payload, dict) else None
 
 
 def checked_scope(value: Any) -> Optional[dict[str, str]]:

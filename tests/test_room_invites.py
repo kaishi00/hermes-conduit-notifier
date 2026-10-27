@@ -1,6 +1,8 @@
-"""Rooms over Links (designs/cross-owner-agents, N5a): a room with other people's agents, from its draft to its
-start. Furina's home invites Laifu and Mona over their Links; their Hermes show the invite, join with their agents'
-grants, and Furina's starts the room in its running room service, each agent's route at its bridge.
+"""Rooms over Links (designs/cross-owner-agents, N5a and N5b): a room with other people's agents, from its draft to
+its end. Furina's home invites Laifu and Mona over their Links; their Hermes show the invite, join with their agents'
+grants, and Furina's starts the room in its running room service, each agent's route at its bridge. While it goes
+on, their Hermes send fresh grants every 12 hours, which go into the routes; they can leave it, Furina can take one
+of their agents out, and disbanding it ends it on every host.
 
 Between the installations is an in-process mailbox (Wire). Hermes' grant functions, room services and API
 servers are fakes of c73cbcc4's, with their checks (9e01b44 and 930e5ed have the same).
@@ -8,6 +10,7 @@ servers are fakes of c73cbcc4's, with their checks (9e01b44 and 930e5ed have the
 import argparse
 import base64
 import contextlib
+import dataclasses
 import fcntl
 import hashlib
 import hmac
@@ -15,6 +18,7 @@ import importlib.util
 import itertools
 import json
 import logging
+import re
 import stat
 import sys
 import types
@@ -71,25 +75,32 @@ def catalog(installation, profile, digest="a" * 64):
 
 class MemberHermes:
     """One installation's Hermes as a join calls it: hosted_room_peer's grants (issue_room_grant's token, signed
-    with gateway_room_grant_secret), hosted_rooms' reservations and revocations, and its API server's capabilities
-    route, which answers with the live catalog for a grant it takes."""
+    with gateway_room_grant_secret, and decode_room_grant's lifetimes), hosted_rooms' reservations and revocations
+    (revoke_room_grant_scope fences every grant of the scope issued until then; reserve_peer_room takes a
+    revoked reservation back), and its API server's capabilities route, which answers with the live catalog for a
+    grant it takes: live for status, not fenced, its reservation current."""
 
-    def __init__(self, installation):
+    def __init__(self, installation, clock=lambda: NOW):
         self.installation_id = installation
+        self.clock = clock
         self.key = hashlib.sha256(installation.encode()).digest()
         self.issued, self.reserved, self.revoked = [], [], []
+        self.reservations, self.fences = {}, {}
         self.not_ready, self.configs, self.policies, self.live_policies = set(), {}, {}, {}
         self.api_down = False
+        self.api_answer = None
 
     def installation(self):
         return self.installation_id
 
     def issue(self, **fields):
+        issued_at = float(self.clock() if fields.get("issued_at") is None else fields["issued_at"])
         payload = {"version": PROTOCOL, **{name: fields[name] for name in (
             "grant_id", "room_id", "home_install_id", "authority_gateway_id", "authority_epoch", "member_id",
             "target_install_id", "target_profile")}, "execution_policy_digest": fields["execution_policy_digest"],
-            "permissions": sorted(set(fields["permissions"])), "issued_at": NOW,
-            "expires_at": NOW + fields["ttl_seconds"], "status_expires_at": NOW + fields["status_ttl_seconds"]}
+            "permissions": sorted(set(fields["permissions"])), "issued_at": issued_at,
+            "expires_at": issued_at + fields["ttl_seconds"],
+            "status_expires_at": issued_at + fields["status_ttl_seconds"]}
         assert fields["ttl_seconds"] <= DAY and fields["status_ttl_seconds"] <= 30 * DAY
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         token = f"{_b64(encoded)}.{_b64(hmac.new(self.key, encoded, hashlib.sha256).digest())}"
@@ -102,15 +113,25 @@ class MemberHermes:
         if not hmac.compare_digest(_unb64(signature), hmac.new(self.key, payload, hashlib.sha256).digest()):
             raise ValueError("room grant signature is invalid")
         claims = json.loads(payload)
+        horizon = claims["status_expires_at"] if permission in ("approve", "status", "stop") else claims["expires_at"]
+        if not claims["issued_at"] - 30 <= self.clock() < horizon:
+            raise ValueError("room grant is expired or not active")
         if permission not in claims["permissions"]:
             raise ValueError("room grant does not allow this operation")
         return claims
 
     def reserve(self, claims, expires_at):
-        self.reserved.append((claims["room_id"], claims["member_id"], claims["target_profile"], expires_at))
+        scope = (claims["room_id"], claims["member_id"], claims["target_profile"])
+        self.reserved.append((*scope, expires_at))
+        kept = self.reservations.get(scope, {"expires_at": 0})["expires_at"]
+        self.reservations[scope] = {"expires_at": max(kept, expires_at), "revoked": False}
 
     def revoke(self, claims, expires_at):
-        self.revoked.append((claims["room_id"], claims["member_id"], claims["target_profile"], expires_at))
+        scope = (claims["room_id"], claims["member_id"], claims["target_profile"])
+        self.revoked.append((*scope, expires_at))
+        self.fences[scope] = max(self.fences.get(scope, 0), self.clock())
+        if scope in self.reservations:
+            self.reservations[scope]["revoked"] = True
 
     def policy_digest(self, profile):
         return self.policies.get(profile, "a" * 64)
@@ -124,9 +145,16 @@ class MemberHermes:
     def capabilities(self, profile, grant):
         if self.api_down:
             return None, {}
-        claims = self.decode(grant, "status")
-        if (claims["room_id"], claims["member_id"], claims["target_profile"]) not in {
-                entry[:3] for entry in self.reserved}:
+        if self.api_answer is not None:
+            return self.api_answer
+        try:
+            claims = self.decode(grant, "status")
+        except ValueError:
+            return 401, {"error": {"code": "invalid_room_grant"}}
+        scope = (claims["room_id"], claims["member_id"], claims["target_profile"])
+        reservation = self.reservations.get(scope)
+        if claims["issued_at"] <= self.fences.get(scope, 0) or reservation is None or reservation["revoked"] \
+                or reservation["expires_at"] <= self.clock():
             return 403, {"error": {"code": "room_reauthorization_required"}}
         live = self.live_policies.get(profile, self.policy_digest(profile))
         return 200, {"object": "hermes.room_member.capabilities",
@@ -154,9 +182,10 @@ class Catalog:
 
 
 class Service:
-    """tui_gateway/hosted_room_service.HostedRoomService, as the start calls it: create_room, with
-    validate_roster's checks, idempotent for the same room, and register_peer_route, which checks the route
-    against its catalog."""
+    """tui_gateway/hosted_room_service.HostedRoomService, as the start and a room's route changes call it:
+    create_room, with validate_roster's checks, idempotent for the same room; register_peer_route, which checks
+    the route against its catalog, saves it (``routes``, as its stored link) and publishes it ready, in
+    peer_routes and peer_clients; and _set_route_status, each route's status as its stored link keeps it."""
 
     kind = "legacy"
 
@@ -164,6 +193,7 @@ class Service:
         self.db_path = db_path
         self.profiles = profiles
         self.rooms, self.routes, self.owners = {}, {}, {}
+        self.peer_routes, self.peer_clients, self.statuses = {}, {}, {}
         self.running = True
         self.refuse_route = set()
         self.runtime = types.SimpleNamespace(status=lambda: {"running": self.running})
@@ -190,10 +220,15 @@ class Service:
     def register_peer_route(self, *, room_id, member_id, route, client, target_url=None, catalog=None):
         if member_id in self.refuse_route:
             raise OSError("disk I/O error")
-        assert route.capability_digest == catalog.catalog_digest
-        assert route.execution_policy_digest == catalog.execution_policy.policy_digest
-        self.routes[(room_id, member_id)] = types.SimpleNamespace(route=route, client=client, url=target_url,
-                                                                  catalog=catalog)
+        if route.capability_digest != catalog.catalog_digest \
+                or route.execution_policy_digest != catalog.execution_policy.policy_digest:
+            raise ValueError("peer route does not match its target catalog")
+        key = (room_id, member_id)
+        self.routes[key] = types.SimpleNamespace(route=route, client=client, url=target_url, catalog=catalog)
+        self.peer_routes[key], self.peer_clients[key], self.statuses[key] = route, client, "ready"
+
+    def _set_route_status(self, room_id, member_id, status):
+        self.statuses[(room_id, member_id)] = status
 
 
 class CanonicalService(Service):
@@ -208,11 +243,18 @@ class CanonicalService(Service):
 
 
 class Client:
-    """Hermes' PeerRunsHTTPClient as the start uses it: its probe of a member's capabilities through the
-    bridge, which the test answers."""
+    """Hermes' PeerRunsHTTPClient as the start and a removal use it: its probe of a member's capabilities and
+    its revoke of a member's grant, through the bridge, which the test answers."""
 
     def __init__(self, hermes, base_url, db_path):
         self.hermes, self.base_url, self.db_path = hermes, base_url, db_path
+
+    def revoke_grant(self, *, grant):
+        self.hermes.revoked_through.append((self.base_url, grant))
+        answer = self.hermes.revokes.get(self.base_url)
+        if isinstance(answer, Exception):
+            raise answer
+        return {"object": "hermes.room_member.grant_revocation", "revoked": True}
 
     def probe(self, *, grant):
         self.hermes.probed.append(self.base_url)
@@ -239,9 +281,24 @@ class PeerError(Exception):
         self.status_code, self.error_code = status_code, error_code
 
 
+@dataclasses.dataclass(frozen=True)
+class Route:
+    """tui_gateway/hosted_room_peer_transport.PeerMemberRoute."""
+
+    home_install_id: str
+    member_id: str
+    target_install_id: str
+    target_profile: str
+    capability_digest: str
+    cancellation_scope_id: str
+    trace_id: str
+    grant: str
+    execution_policy_digest: str = ""
+
+
 class HomeHermes:
     """The home's Hermes as a start calls it: the running room services, its installation id, and RoomLink's
-    catalog, route and client."""
+    catalog, route and client, and hosted_room_links' stored statuses for a service that marks none itself."""
 
     protocol_version = PROTOCOL
     error = PeerError
@@ -249,7 +306,10 @@ class HomeHermes:
     def __init__(self, tmp_path):
         self.legacy = Service(tmp_path / "furina" / "shared-state.db")
         self.canonical = None
+        self.home = str(tmp_path / "furina")
         self.probes, self.probed = {}, []
+        self.revokes, self.revoked_through = {}, []
+        self.marked = []
         self.missing = False
         self.gateway = False
 
@@ -267,7 +327,8 @@ class HomeHermes:
             raise start_module.StartError("unsupported", "This Hermes has no room service the plugin can use")
         kind = where["kind"]
         if kind in ("canonical", "any") and self.canonical is not None:
-            return start_module.Found("canonical", self.canonical, where.get("subject") or "legacy-owner")
+            return start_module.Found("canonical", self.canonical, where.get("subject") or "legacy-owner",
+                                      where.get("home") or self.home)
         if kind == "canonical":
             raise start_module.StartError("elsewhere", "The room's service runs in another process")
         if self.legacy is not None and self.legacy.running:
@@ -285,7 +346,10 @@ class HomeHermes:
         return Client(self, base_url, db_path)
 
     def route(self, **fields):
-        return types.SimpleNamespace(**fields)
+        return Route(**fields)
+
+    def mark(self, db_path, *, room_id, member_id, status):
+        self.marked.append((db_path, room_id, member_id, status))
 
 
 class Wire:
@@ -345,7 +409,7 @@ def rooms(tmp_path):
         root = tmp_path / name
         (root / "profiles" / "work").mkdir(parents=True)
         (root / "profiles" / "work" / "config.yaml").write_text("model: {}\n")
-        side.member[name] = MemberHermes(installation)
+        side.member[name] = MemberHermes(installation, side.clock)
         wire.sides[name] = _rooms(side, name)
         setattr(side, name, wire.sides[name])
     return side
@@ -614,8 +678,9 @@ def test_a_join_that_crosses_the_invites_end_is_undone(rooms, meanwhile):
     asked, ended = member.capabilities, []
 
     def capabilities(profile, grant):
-        # While Laifu's Hermes joins, Furina takes the draft back, or the invite runs out.
-        if not ended:
+        # While Laifu's Hermes joins (its API server answering for the agent's grant), Furina takes the draft
+        # back, or the invite runs out.
+        if "dispatch" in member.decode(grant, "status")["permissions"] and not ended:
             ended.append(meanwhile)
             if meanwhile == "withdrawn":
                 rooms.furina.withdraw(room_id)
@@ -729,12 +794,13 @@ def _received(side, sender, link_id, kind, body):
                                  age=0, root=side.tmp_path / other)
 
 
-def _grant(side, name, room_id, member_id, profile="default", installation=None):
+def _grant(side, name, room_id, member_id, profile="default", installation=None, issued_at=None):
     hermes = side.member[name]
     return hermes.issue(grant_id="grant-x", room_id=room_id, home_install_id=FURINA, authority_gateway_id=FURINA,
                         authority_epoch=1, member_id=member_id, target_install_id=installation or hermes.installation(),
                         target_profile=profile, execution_policy_digest="a" * 64,
-                        permissions=["dispatch", "status", "stop"], ttl_seconds=DAY, status_ttl_seconds=30 * DAY)
+                        permissions=["dispatch", "status", "stop"], issued_at=issued_at, ttl_seconds=DAY,
+                        status_ttl_seconds=30 * DAY)
 
 
 def _join(side, name, room_id, member_id, *, installation=None, **changes):
@@ -1143,7 +1209,8 @@ def test_a_join_whose_room_never_starts_is_undone_once_word_of_it_cant_come(room
     rooms.laifu.pass_once()
     shown = invite_of(rooms, "laifu", room_id)
     assert (shown["status"], shown["reason"]) == ("cancelled", "lapsed")
-    assert rooms.member["laifu"].revoked == [(room_id, slot("link1", 1), "default", NOW + 30 * DAY)]
+    # Its grant was renewed while it waited for the start (R13): the revoke lasts as long as the newest one.
+    assert rooms.member["laifu"].revoked == [(room_id, slot("link1", 1), "default", NOW + WEEK + 30 * DAY)]
 
 
 def test_ended_drafts_and_invites_are_forgotten_after_a_month_but_started_ones_are_kept(rooms):
@@ -1164,6 +1231,529 @@ def test_ended_drafts_and_invites_are_forgotten_after_a_month_but_started_ones_a
     assert [shown["room_id"] for shown in rooms.laifu.invites()] == [started]
 
 
+# --- Grants kept fresh, leave, remove and the end (N5b) -----------------------------------------
+
+
+HOUR = 3600
+WORKY = {"profile": "work", "handle": "worky", "display_name": "Worky"}
+# What a fresh grant keeps of the one before it: the agent's place and policy.
+PLACE = ("room_id", "home_install_id", "authority_gateway_id", "authority_epoch", "member_id", "target_install_id",
+         "target_profile", "execution_policy_digest")
+
+
+def _started(side, *, links=("link1",), laifus=(LAIFUS,), where=LEGACY):
+    """A room started with Furina's agent and the people of ``links``: Laifu with ``laifus``, Mona with hers."""
+    _listening(side)
+    room_id = draft(side, links=links, where=where)["room_id"]
+    for link_id in links:
+        if link_id == "link1":
+            answer(side, "laifu", room_id, "link1", *laifus)
+        else:
+            answer(side, "mona", room_id, "link2", MONAS)
+    side.furina.pass_once()
+    assert draft_of(side, room_id)["status"] == "started"
+    return room_id
+
+
+def _sent(side, kind):
+    """Each ``kind`` envelope sent: its Link, body and message id."""
+    return [(link_id, body, message_id) for _, link_id, sent_kind, body, message_id in side.wire.sent
+            if sent_kind == kind]
+
+
+def test_fresh_grants_every_12_hours_reach_the_route(rooms):
+    room_id = _started(rooms)
+    member, service, key = rooms.member["laifu"], rooms.home.legacy, (room_id, slot("link1", 1))
+    first = service.routes[key]
+    rooms.clock.now += 12 * HOUR - 1
+    rooms.laifu.pass_once()
+    assert _sent(rooms, "room.grant") == [] and len(member.issued) == 2
+
+    rooms.clock.now += 1
+    rooms.laifu.pass_once()
+
+    renewed = NOW + 12 * HOUR
+    [(link_id, body, message_id)] = _sent(rooms, "room.grant")
+    assert (link_id, set(body)) == ("link1", {"v", "room_id", "member_id", "grant"})
+    assert (body["v"], body["room_id"], body["member_id"]) == (1, room_id, slot("link1", 1))
+    assert re.fullmatch(r"room\.grant:[0-9a-f]{32}", message_id)
+    joined, fresh = member.issued[1:]
+    assert {name: fresh[name] for name in PLACE} == {name: joined[name] for name in PLACE}
+    assert fresh["grant_id"] != joined["grant_id"] and fresh["permissions"] == ["dispatch", "status", "stop"]
+    assert (fresh["issued_at"], fresh["expires_at"], fresh["status_expires_at"]) == (
+        renewed, renewed + DAY, renewed + 30 * DAY)
+    assert member.decode(body["grant"], "dispatch")["grant_id"] == fresh["grant_id"]
+    assert member.reserved[-1] == (room_id, slot("link1", 1), "default", renewed + 30 * DAY)
+    # Hermes revokes a grant's whole scope: the one before runs out by itself.
+    assert member.revoked == []
+
+    rooms.furina.pass_once()
+
+    swapped = service.routes[key]
+    assert swapped.route == dataclasses.replace(first.route, grant=body["grant"])
+    assert (swapped.client, swapped.url, swapped.catalog) == (first.client, first.url, first.catalog)
+    assert service.statuses[key] == "ready"
+    assert _grants(rooms, "furina") == [body["grant"]] and _grants(rooms, "laifu") == [body["grant"]]
+    # And every 12 hours after, each with its own message id (a Link drops one it's had in the last week).
+    rooms.clock.now += 12 * HOUR
+    rooms.laifu.pass_once()
+    rooms.furina.pass_once()
+    [_, (_, again, again_id)] = _sent(rooms, "room.grant")
+    assert again_id != message_id and service.peer_routes[key].grant == again["grant"]
+
+
+def test_an_older_grant_doesnt_replace_a_newer_one(rooms):
+    room_id = _started(rooms)
+    service, key = rooms.home.legacy, (room_id, slot("link1", 1))
+    rooms.wire.holding = True
+    for _ in range(2):
+        rooms.clock.now += 12 * HOUR
+        rooms.laifu.pass_once()
+    [(_, _, _), (_, newer, _)] = _sent(rooms, "room.grant")
+    rooms.wire.held.reverse()
+    rooms.wire.release()
+
+    rooms.furina.pass_once()
+
+    assert service.peer_routes[key].grant == newer["grant"]
+    # Hermes refreshed the route's grant itself since: a fresh one from before that isn't swapped in.
+    refreshed = _grant(rooms, "laifu", room_id, slot("link1", 1), issued_at=rooms.clock.now + 2 * HOUR)
+    service.peer_routes[key] = dataclasses.replace(service.peer_routes[key], grant=refreshed)
+    rooms.furina.handle(_received(rooms, "laifu", "link1", "room.grant", {
+        "v": 1, "room_id": room_id, "member_id": slot("link1", 1),
+        "grant": _grant(rooms, "laifu", room_id, slot("link1", 1), issued_at=rooms.clock.now + HOUR)}))
+    rooms.furina.pass_once()
+
+    assert service.peer_routes[key].grant == refreshed
+    assert "route_todo" not in rooms.furina.store.read()["drafts"][room_id]
+
+
+def test_a_member_back_after_days_gets_a_fresh_grant(rooms):
+    room_id = _started(rooms)
+    service, key = rooms.home.legacy, (room_id, slot("link1", 1))
+    # Laifu's Hermes was off: its agent's grant can't start turns any more, and Furina's marked its route.
+    rooms.clock.now += 3 * DAY
+    service.statuses[key] = "needs_reauthorization"
+
+    rooms.laifu.pass_once()
+    rooms.furina.pass_once()
+
+    assert [grant["issued_at"] for grant in rooms.member["laifu"].issued[2:]] == [NOW + 3 * DAY]
+    [(_, body, _)] = _sent(rooms, "room.grant")
+    assert service.peer_routes[key].grant == body["grant"] and service.statuses[key] == "ready"
+
+
+@pytest.mark.parametrize("trouble, again", [
+    ("down", 60), ("failing", 60), ("policy", 12 * HOUR), ("refused", None), ("gone", None)])
+def test_a_renewal_that_cant_be_made_waits_or_stops_and_revokes_nothing(rooms, caplog, trouble, again):
+    caplog.set_level(logging.INFO)
+    room_id = _started(rooms)
+    member, scope = rooms.member["laifu"], (room_id, slot("link1", 1), "default")
+    rooms.clock.now += 12 * HOUR
+    if trouble == "down":
+        member.api_down = True
+    elif trouble == "failing":
+        member.api_answer = (500, {"error": {"code": "internal_error"}})
+    elif trouble == "policy":
+        member.live_policies["default"] = "b" * 64
+    elif trouble == "refused":
+        member.fences[scope] = rooms.clock.now  # its owner revoked it on their Hermes
+    else:
+        rooms.clock.now = NOW + 30 * DAY  # past the grant's status horizon
+    asked, capabilities = [], member.capabilities
+    member.capabilities = lambda profile, grant: asked.append(profile) or capabilities(profile, grant)
+
+    rooms.laifu.pass_once()
+    rooms.laifu.pass_once()
+
+    assert len(member.issued) == 2 and member.revoked == [] and _sent(rooms, "room.grant") == []
+    assert caplog.text.count("couldn't renew") == 1
+    tried = len(asked)
+    rooms.clock.now += 60
+    rooms.laifu.pass_once()
+    assert len(asked) == tried + (again == 60)
+    rooms.clock.now += 12 * HOUR
+    rooms.laifu.pass_once()
+    assert len(asked) == tried + (again == 60) + (again is not None)
+    assert member.revoked == []
+
+
+@pytest.mark.parametrize("trouble, again", [("secret", 60), ("locked", 60), ("unsupported", 12 * HOUR)])
+def test_a_renewal_this_hermes_cant_make_for_now_is_tried_again(rooms, caplog, trouble, again):
+    caplog.set_level(logging.INFO)
+    _started(rooms)
+    member, tries = rooms.member["laifu"], []
+    decode, issue, reserve = member.decode, member.issue, member.reserve
+
+    def unreadable(token, permission):
+        # Its grant secret can't be read for a moment: the grant itself is still good.
+        tries.append(permission)
+        raise OSError("Input/output error")
+
+    def locked(claims, expires_at):
+        # Hermes' room store is busy as the fresh grant's place is reserved: the grant it made goes unused.
+        tries.append(claims["grant_id"])
+        raise RuntimeError("database is locked")
+
+    def missing(**fields):
+        # A Hermes without what minting needs, until it's updated.
+        tries.append(fields["grant_id"])
+        raise join_module.JoinError("unsupported", "This Hermes is missing what joining needs", 501)
+
+    if trouble == "secret":
+        member.decode = unreadable
+    elif trouble == "locked":
+        member.reserve = locked
+    else:
+        member.issue = missing
+    rooms.clock.now += 12 * HOUR
+    rooms.laifu.pass_once()
+    rooms.laifu.pass_once()
+    rooms.clock.now += 60
+    rooms.laifu.pass_once()
+
+    assert len(tries) == 1 + (again == 60) and _sent(rooms, "room.grant") == []
+    assert caplog.text.count("couldn't renew") == 1
+    assert "Input/output" not in caplog.text and "database is locked" not in caplog.text
+    member.decode, member.issue, member.reserve = decode, issue, reserve
+    rooms.clock.now += 12 * HOUR
+    rooms.laifu.pass_once()
+    assert len(_sent(rooms, "room.grant")) == 1 and member.revoked == []
+
+
+def test_a_renewal_crossed_by_its_agents_end_revokes_what_it_made(rooms):
+    room_id = _started(rooms)
+    member, scope = rooms.member["laifu"], (room_id, slot("link1", 1), "default")
+    reserve = member.reserve
+
+    def crossed(claims, expires_at):
+        if claims["issued_at"] > NOW:
+            # While Laifu's Hermes reserves its agent's fresh grant, Furina takes the agent out.
+            rooms.furina.remove(room_id, "laifu")
+        reserve(claims, expires_at)
+
+    member.reserve = crossed
+    rooms.clock.now += 12 * HOUR
+    rooms.laifu.pass_once()
+
+    # Its end revoked the grant it had; the fresh one, whose reserve took the scope back, is revoked too.
+    assert member.revoked == [(*scope, NOW + 30 * DAY), (*scope, NOW + 12 * HOUR + 30 * DAY)]
+    assert member.reservations[scope]["revoked"]
+    assert _sent(rooms, "room.grant") == [] and _grants(rooms, "laifu") == []
+    invite = invite_of(rooms, "laifu", room_id)
+    assert (invite["status"], invite["reason"]) == ("ended", "removed")
+
+
+def test_leave_revokes_and_unbinds_and_the_home_marks_them_left(rooms):
+    room_id = _started(rooms, laifus=(LAIFUS, WORKY))
+    member, service = rooms.member["laifu"], rooms.home.legacy
+
+    shown = rooms.laifu.leave("link1", room_id, ["work"])
+
+    assert member.revoked == [(room_id, slot("link1", 2), "work", NOW + 30 * DAY)]
+    assert bridge.Store(rooms.tmp_path / "laifu").read()["member"]["bindings"] == {"link1": [{
+        "home_install_id": FURINA, "room_id": room_id, "member_id": slot("link1", 1), "target_profile": "default"}]}
+    assert (shown["status"], shown["joined"], shown["gone"]) == ("started", [LAIFUS], [{**WORKY, "reason": "left"}])
+    [(link_id, body, message_id)] = _sent(rooms, "room.leave")
+    assert (link_id, body) == ("link1", {"v": 1, "room_id": room_id, "member_ids": [slot("link1", 2)]})
+    assert re.fullmatch(r"room\.leave:[0-9a-f]{32}", message_id)
+    shown = draft_of(rooms, room_id)
+    assert (shown["left"], shown["removed"], shown["cut_off"]) == ([slot("link1", 2)], [], [])
+
+    rooms.furina.pass_once()
+
+    # Its next turns are cut off before they're sent (N2's guard reads the route's stored status).
+    assert service.statuses[(room_id, slot("link1", 2))] == "needs_reauthorization"
+    assert service.statuses[(room_id, slot("link1", 1))] == "ready"
+    for name in ("furina", "laifu"):
+        assert [(each["handle"], each["status"]) for each in invites_module.people(
+            rooms.tmp_path / name, room_id)["members"]] == [("furina", "in"), ("laifu", "in"), ("worky", "left")]
+    # Only the agent still in gets fresh grants.
+    rooms.clock.now += 12 * HOUR
+    rooms.laifu.pass_once()
+    assert [body["member_id"] for _, body, _ in _sent(rooms, "room.grant")] == [slot("link1", 1)]
+
+    everyone = rooms.laifu.leave("link1", room_id)
+
+    assert (everyone["status"], everyone["joined"]) == ("left", [])
+    assert [body["member_ids"] for _, body, _ in _sent(rooms, "room.leave")] == [[slot("link1", 2)],
+                                                                               [slot("link1", 1)]]
+    assert draft_of(rooms, room_id)["left"] == [slot("link1", 1), slot("link1", 2)]
+    with pytest.raises(invites_module.RoomsError) as refused:
+        rooms.laifu.leave("link1", room_id)
+    assert (refused.value.code, refused.value.status) == ("not_in", 409)
+
+
+def test_leave_refuses_a_room_that_hasnt_started_and_agents_that_arent_in_it(rooms):
+    room_id = draft(rooms, links=("link1",))["room_id"]
+
+    def refused(link_id, *agents):
+        with pytest.raises(invites_module.RoomsError) as refusal:
+            rooms.laifu.leave(link_id, room_id, *agents)
+        return refusal.value.code, refusal.value.status
+
+    assert refused("link1") == ("not_started", 409)
+    answer(rooms, "laifu", room_id, "link1", LAIFUS)
+    assert refused("link1") == ("not_started", 409)
+    assert refused("link9") == ("no_invite", 404)
+    _listening(rooms)
+    rooms.furina.pass_once()
+    assert refused("link1", ["work"]) == ("not_in", 409)
+    for agents in ([], "default", ["default", "default"], [7]):
+        assert refused("link1", agents) == ("bad_agents", 400)
+    assert rooms.member["laifu"].revoked == [] and _sent(rooms, "room.leave") == []
+
+
+def test_remove_revokes_the_route_and_ends_it_on_the_member(rooms):
+    room_id = _started(rooms, links=("link1", "link2"))
+    service, key = rooms.home.legacy, (room_id, slot("link1", 1))
+    grant = service.peer_routes[key].grant
+
+    shown = rooms.furina.remove(room_id, "@Laifu")
+
+    assert (shown["removed"], shown["left"], shown["cut_off"]) == ([slot("link1", 1)], [], [])
+    [(link_id, body, message_id)] = _sent(rooms, "room.ended")
+    assert (link_id, body) == ("link1", {"v": 1, "room_id": room_id, "reason": "removed",
+                                         "member_ids": [slot("link1", 1)]})
+    assert re.fullmatch(r"room\.ended:[0-9a-f]{32}", message_id)
+    # Laifu's Hermes unbinds it and revokes its grant.
+    assert rooms.member["laifu"].revoked == [(room_id, slot("link1", 1), "default", NOW + 30 * DAY)]
+    assert bridge.Store(rooms.tmp_path / "laifu").read()["member"]["bindings"] == {}
+    invite = invite_of(rooms, "laifu", room_id)
+    assert (invite["status"], invite["reason"], invite["joined"], invite["gone"]) == (
+        "ended", "removed", [], [{**LAIFUS, "reason": "removed"}])
+
+    rooms.furina.pass_once()
+
+    # Furina's revokes it through the bridge, as Hermes' disband does, and cuts it off.
+    assert rooms.home.revoked_through == [(url("link1"), grant)]
+    assert service.statuses[key] == "needs_reauthorization"
+    assert service.statuses[(room_id, slot("link2", 1))] == "ready"
+    for name in ("furina", "laifu"):
+        assert [(each["handle"], each["status"]) for each in invites_module.people(
+            rooms.tmp_path / name, room_id)["members"]] == [("furina", "in"), ("laifu", "removed"), ("mona", "in")]
+    # Once.
+    assert rooms.furina.remove(room_id, slot("link1", 1))["removed"] == [slot("link1", 1)]
+    rooms.furina.pass_once()
+    assert len(_sent(rooms, "room.ended")) == 1 and len(rooms.home.revoked_through) == 1
+    waiting = draft(rooms, links=("link1",))["room_id"]
+    for room, agent, code, status in ((room_id, "furina", "own_agent", 409), (room_id, "@nobody", "no_member", 404),
+                                      ("conduit-nothing", "laifu", "no_draft", 404),
+                                      (waiting, "laifu", "not_started", 409)):
+        with pytest.raises(invites_module.RoomsError) as refused:
+            rooms.furina.remove(room, agent)
+        assert (refused.value.code, refused.value.status) == (code, status)
+    # Laifu's Hermes renews nothing for it.
+    rooms.clock.now += 12 * HOUR
+    rooms.laifu.pass_once()
+    assert _sent(rooms, "room.grant") == []
+
+
+def test_a_removed_agent_is_cut_off_even_when_its_hermes_cant_be_reached(rooms, caplog):
+    caplog.set_level(logging.INFO)
+    room_id = _started(rooms)
+    key = (room_id, slot("link1", 1))
+    rooms.home.revokes[url("link1")] = PeerError("peer request failed", status_code=504)
+    rooms.wire.refusing.add("furina")
+
+    rooms.furina.remove(room_id, "laifu")
+    rooms.furina.pass_once()
+
+    assert rooms.home.legacy.statuses[key] == "needs_reauthorization"
+    assert "route_todo" not in rooms.furina.store.read()["drafts"][room_id]
+    assert "PeerError" in caplog.text and invite_of(rooms, "laifu", room_id)["status"] == "started"
+    # Its Hermes hears once the mailbox takes the end.
+    rooms.wire.refusing.clear()
+    rooms.furina.pass_once()
+    assert invite_of(rooms, "laifu", room_id)["status"] == "ended"
+    assert rooms.member["laifu"].revoked == [(room_id, slot("link1", 1), "default", NOW + 30 * DAY)]
+
+
+def test_disband_ends_it_on_every_member_host(rooms):
+    room_id = _started(rooms, links=("link1", "link2"), laifus=(LAIFUS, WORKY))
+    rooms.laifu.leave("link1", room_id, ["work"])
+
+    # As room_cleanup's guard calls it once Hermes' disband_room returns; the rooms loop sends what it queues.
+    invites_module.disbanded(rooms.tmp_path / "furina", room_id)
+    rooms.furina.pass_once()
+
+    assert [(link_id, body) for link_id, body, _ in _sent(rooms, "room.ended")] == [
+        ("link1", {"v": 1, "room_id": room_id, "reason": "disbanded", "member_ids": [slot("link1", 1)]}),
+        ("link2", {"v": 1, "room_id": room_id, "reason": "disbanded", "member_ids": [slot("link2", 1)]})]
+    for name in ("laifu", "mona"):
+        invite = invite_of(rooms, name, room_id)
+        assert (invite["status"], invite["reason"], invite["joined"]) == ("ended", "disbanded", [])
+        assert bridge.Store(rooms.tmp_path / name).read()["member"]["bindings"] == {}
+    shown = draft_of(rooms, room_id)
+    assert (shown["status"], shown["reason"]) == ("ended", "disbanded")
+    assert invites_module.people(rooms.tmp_path / "furina", room_id) is None
+    # Their hidden chats stay on their Hermes (rooms forget), with who was who.
+    assert [(each["handle"], each["status"]) for each in invites_module.people(
+        rooms.tmp_path / "laifu", room_id)["members"]] == [("furina", "in"), ("laifu", "in"), ("worky", "left"),
+                                                           ("mona", "in")]
+    # Once, and only for a room over Links this installation hosts.
+    invites_module.disbanded(rooms.tmp_path / "furina", room_id)
+    invites_module.disbanded(rooms.tmp_path / "furina", "conduit-other")
+    invites_module.disbanded(rooms.tmp_path / "nobody", room_id)
+    rooms.furina.pass_once()
+    assert len(_sent(rooms, "room.ended")) == 2
+    assert not (rooms.tmp_path / "nobody" / invites_module.DIRECTORY).exists()
+
+
+def test_disbanded_goes_to_the_rooms_running_for_the_installation(rooms, monkeypatch):
+    room_id = _started(rooms)
+    monkeypatch.setitem(invites_module._running, str(rooms.tmp_path / "furina"), rooms.furina)
+    rooms.clock.now += HOUR
+
+    invites_module.disbanded(rooms.tmp_path / "furina", room_id)
+
+    assert rooms.furina.store.read()["drafts"][room_id]["ended_at"] == int(NOW + HOUR)
+    assert _sent(rooms, "room.ended") == []
+    rooms.furina.pass_once()
+    assert [link_id for link_id, _, _ in _sent(rooms, "room.ended")] == ["link1"]
+
+
+def test_a_room_start_after_its_end_cant_bring_the_invite_back(rooms):
+    _listening(rooms)
+    room_id = draft(rooms, links=("link1",))["room_id"]
+    answer(rooms, "laifu", room_id, "link1", LAIFUS)
+    rooms.wire.holding = True
+    rooms.furina.pass_once()
+    rooms.furina.remove(room_id, "laifu")
+    rooms.wire.held.reverse()
+
+    rooms.wire.release()
+
+    invite = invite_of(rooms, "laifu", room_id)
+    assert (invite["status"], invite["reason"], invite["joined"]) == ("ended", "removed", [])
+    assert rooms.member["laifu"].revoked == [(room_id, slot("link1", 1), "default", NOW + 30 * DAY)]
+    assert invites_module.people(rooms.tmp_path / "laifu", room_id) is None
+
+
+def test_grants_leaves_and_ends_that_arent_their_links_own_are_dropped(rooms, caplog):
+    caplog.set_level(logging.INFO)
+    room_id = _started(rooms, links=("link1", "link2"))
+    laifus, monas = slot("link1", 1), slot("link2", 1)
+
+    for sender, link_id, kind, body in (
+            # Mona's Link, for Laifu's agent; a room it isn't in; a grant for another place; one that isn't one.
+            ("mona", "link2", "room.grant", {"v": 1, "room_id": room_id, "member_id": laifus,
+                                             "grant": _grant(rooms, "mona", room_id, laifus)}),
+            ("laifu", "link1", "room.grant", {"v": 1, "room_id": "conduit-other", "member_id": laifus,
+                                              "grant": _grant(rooms, "laifu", "conduit-other", laifus)}),
+            ("laifu", "link1", "room.grant", {"v": 1, "room_id": room_id, "member_id": laifus,
+                                              "grant": _grant(rooms, "laifu", room_id, monas)}),
+            ("laifu", "link1", "room.grant", {"v": 1, "room_id": room_id, "member_id": laifus, "grant": "x.y"}),
+            ("mona", "link2", "room.leave", {"v": 1, "room_id": room_id, "member_ids": [laifus]}),
+            ("laifu", "link1", "room.leave", {"v": 1, "room_id": room_id, "member_ids": []})):
+        rooms.furina.handle(_received(rooms, sender, link_id, kind, body))
+    rooms.laifu.handle(_received(rooms, "furina", "link1", "room.ended", {
+        "v": 1, "room_id": room_id, "reason": "bored", "member_ids": [laifus]}))
+
+    assert caplog.text.count("dropped a room.grant") == 4 and caplog.text.count("dropped a room.leave") == 2
+    assert caplog.text.count("dropped a room.ended") == 1
+    shown = draft_of(rooms, room_id)
+    assert (shown["left"], shown["removed"]) == ([], [])
+    assert "route_todo" not in rooms.furina.store.read()["drafts"][room_id]
+    assert invite_of(rooms, "laifu", room_id)["status"] == "started"
+
+
+@pytest.mark.parametrize("twice", ["member_id", "handle"])
+def test_a_room_start_with_a_member_twice_is_dropped(rooms, caplog, twice):
+    caplog.set_level(logging.INFO)
+    room_id = draft(rooms)["room_id"]
+    answer(rooms, "laifu", room_id, "link1", LAIFUS)
+    laifu = {"member_id": slot("link1", 1), "handle": "laifu", "display_name": "Laifu", "owner": None}
+    other = {**laifu, "member_id": slot("link1", 2), "handle": "worky",
+             twice: laifu["member_id"] if twice == "member_id" else "LAIFU"}
+    members = [{"member_id": "default", "handle": "furina", "display_name": "Furina", "owner": None}, laifu, other]
+
+    rooms.laifu.handle(_received(rooms, "furina", "link1", "room.start",
+                                 {"v": 1, "room_id": room_id, "started_at": int(NOW), "members": members}))
+
+    assert invite_of(rooms, "laifu", room_id)["status"] == "joined"
+    assert "dropped a room.start" in caplog.text
+
+
+def test_a_room_started_before_this_version_gets_fresh_grants_at_once(rooms):
+    room_id = _started(rooms)
+    with rooms.laifu.store.update() as state:
+        for invite in state["invites"].values():
+            for agent in invite["joined"]:
+                del agent["renew_at"]
+    with rooms.furina.store.update() as state:
+        del state["drafts"][room_id]["started_in"]
+    rooms.clock.now += 60
+
+    rooms.laifu.pass_once()
+    rooms.furina.pass_once()
+
+    [(_, body, _)] = _sent(rooms, "room.grant")
+    assert rooms.home.legacy.peer_routes[(room_id, slot("link1", 1))].grant == body["grant"]
+
+
+def test_route_changes_go_to_the_service_the_room_started_in(rooms):
+    canonical = rooms.home.canonical = CanonicalService(rooms.tmp_path / "furina" / "state.db")
+    room_id = _started(rooms, where={"kind": "any"})
+    key = (room_id, slot("link1", 1))
+    assert key in canonical.peer_routes and rooms.home.legacy.peer_routes == {}
+    rooms.clock.now += 12 * HOUR
+    rooms.laifu.pass_once()
+    [(_, body, _)] = _sent(rooms, "room.grant")
+    # A loop where the gateway's service isn't (a dashboard beside it) leaves the swap to the gateway's.
+    rooms.home.canonical = None
+    rooms.furina.pass_once()
+    assert canonical.peer_routes[key].grant != body["grant"] and rooms.home.legacy.peer_routes == {}
+
+    rooms.home.canonical = canonical
+    rooms.furina.pass_once()
+
+    assert canonical.peer_routes[key].grant == body["grant"]
+
+
+def test_a_fresh_grant_the_service_wont_take_is_tried_three_times(rooms, caplog):
+    caplog.set_level(logging.INFO)
+    room_id = _started(rooms)
+    key = (room_id, slot("link1", 1))
+    before = rooms.home.legacy.peer_routes[key]
+    rooms.home.legacy.refuse_route.add(slot("link1", 1))
+    rooms.clock.now += 12 * HOUR
+    rooms.laifu.pass_once()
+
+    for _ in range(4):
+        rooms.furina.pass_once()
+
+    assert rooms.home.legacy.peer_routes[key] == before
+    assert "route_todo" not in rooms.furina.store.read()["drafts"][room_id]
+    assert caplog.text.count("couldn't give") == 1 and "disk I/O" not in caplog.text
+
+
+def test_a_fresh_grant_gives_a_member_cut_off_at_the_start_its_route(rooms):
+    rooms.home.legacy.refuse_route.add(slot("link1", 1))
+    room_id = _started(rooms)
+    assert draft_of(rooms, room_id)["cut_off"] == [slot("link1", 1)]
+    rooms.home.legacy.refuse_route.clear()
+    rooms.clock.now += 12 * HOUR
+    rooms.laifu.pass_once()
+
+    rooms.furina.pass_once()
+
+    route = rooms.home.legacy.peer_routes[(room_id, slot("link1", 1))]
+    assert draft_of(rooms, room_id)["cut_off"] == []
+    assert route.grant == _sent(rooms, "room.grant")[0][1]["grant"]
+    assert route.cancellation_scope_id == f"cancel-{room_id}"
+
+
+def test_a_service_that_marks_no_routes_itself_has_its_stored_route_marked(rooms):
+    room_id = _started(rooms, laifus=(LAIFUS, WORKY))
+    rooms.home.legacy._set_route_status = None
+    rooms.laifu.leave("link1", room_id, ["work"])
+
+    rooms.furina.pass_once()
+
+    assert rooms.home.marked == [(rooms.home.legacy.db_path, room_id, slot("link1", 2), "needs_reauthorization")]
+
+
 # --- Who's who ----------------------------------------------------------------------------
 
 
@@ -1172,9 +1762,9 @@ def test_people_says_whos_who_in_a_room_on_each_side(rooms):
     room_id = draft(rooms)["room_id"]
     _everyone_joins(rooms, room_id)
     rooms.furina.pass_once()
-    furina = {"member_id": "default", "handle": "furina", "display_name": "Furina"}
-    laifu = {"member_id": slot("link1", 1), "handle": "laifu", "display_name": "Laifu"}
-    mona = {"member_id": slot("link2", 1), "handle": "mona", "display_name": "Mona"}
+    furina = {"member_id": "default", "handle": "furina", "display_name": "Furina", "status": "in"}
+    laifu = {"member_id": slot("link1", 1), "handle": "laifu", "display_name": "Laifu", "status": "in"}
+    mona = {"member_id": slot("link2", 1), "handle": "mona", "display_name": "Mona", "status": "in"}
 
     assert invites_module.people(rooms.tmp_path / "furina", room_id) == {"room_id": room_id, "home": None, "members": [
         {**furina, "owner": None}, {**laifu, "owner": "Laifu"}, {**mona, "owner": "Mona"}]}
@@ -1218,7 +1808,7 @@ def test_start_takes_room_envelopes_for_its_installation_and_starts_once(tmp_pat
     monkeypatch.setattr(invites_module, "_running", {})
     loops = []
     monkeypatch.setattr(invites_module, "_loop", loops.append)
-    for kind in (invites_module.INVITE, invites_module.ANSWER, invites_module.START):
+    for kind in invites_module.KINDS:
         monkeypatch.delitem(links_module.HANDLERS, kind, raising=False)
     root = tmp_path / "laifu"
 
@@ -1226,14 +1816,14 @@ def test_start_takes_room_envelopes_for_its_installation_and_starts_once(tmp_pat
     assert invites_module.start(root) is started
     handled = []
     monkeypatch.setattr(started, "handle", handled.append)
-    for kind in (invites_module.INVITE, invites_module.ANSWER, invites_module.START):
+    for kind in invites_module.KINDS:
         for went_to in (root, tmp_path / "furina", None):
             links_module.HANDLERS[kind](links_module.Received(link_id="link1", kind=kind, message_id="m1",
                                                               at=int(NOW), body={}, age=0, root=went_to))
 
     assert invites_module._running == {str(root): started} and loops == [started]
     assert [(received.kind, received.root) for received in handled] == [
-        (kind, root) for kind in (invites_module.INVITE, invites_module.ANSWER, invites_module.START)]
+        (kind, root) for kind in invites_module.KINDS]
     # This Hermes' own calls, for the join and the start.
     assert isinstance(started.joiner.hermes, join_module.Hermes)
     assert isinstance(started.starter.hermes, start_module.Hermes)
@@ -1393,6 +1983,33 @@ def test_no_grant_is_logged_or_returned_by_a_route(routes, caplog):
         assert payload not in caplog.text
 
 
+def test_no_fresh_grant_is_logged_or_returned_by_a_route(routes, caplog):
+    caplog.set_level(logging.DEBUG)
+    room_id = _started(routes, links=("link1", "link2"), laifus=(LAIFUS, WORKY))
+    answers = []
+
+    def passes():
+        routes.clock.now += 12 * HOUR
+        for name in ("laifu", "mona", "furina"):
+            getattr(routes, name).pass_once()
+        for name in ("furina", "laifu", "mona"):
+            answers.extend([routes.call(name, "GET", "/rooms/drafts"), routes.call(name, "GET", "/rooms/invites"),
+                            routes.call(name, "GET", "/rooms/people", params={"room_id": room_id})])
+
+    passes()
+    answers.append(routes.call("laifu", "POST", "/rooms/leave",
+                               json={"link": "link1", "room_id": room_id, "agents": ["work"]}))
+    answers.append(routes.call("furina", "POST", "/rooms/drafts/remove", json={"room_id": room_id, "member": "@mona"}))
+    passes()
+
+    assert [answer.status_code for answer in answers] == [200] * len(answers)
+    assert len(_sent(routes, "room.grant")) == 4  # each agent's, then Laifu's own agent's again
+    for payload in [payload for name in ("laifu", "mona") for payload in routes.member[name].issued]:
+        encoded = _b64(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode())
+        assert all(encoded not in answer.text for answer in answers)
+        assert encoded not in caplog.text
+
+
 def test_routes_start_now_and_take_a_draft_back(routes):
     _listening(routes)
     started = routes.call("furina", "POST", "/rooms/drafts", json={"name": "Zoo trip", "agents": [FURINAS],
@@ -1421,6 +2038,10 @@ def test_routes_start_now_and_take_a_draft_back(routes):
     ("laifu", "POST", "/rooms/invites/answer", {"link": "link1", "room_id": "conduit-nope", "agents": []}, None, 404,
      "no_invite"),
     ("laifu", "GET", "/rooms/people", None, {"room_id": "conduit-nope"}, 404, "no_room"),
+    ("laifu", "POST", "/rooms/leave", {"link": "link1", "room_id": "conduit-nope", "agents": None}, None, 404,
+     "no_invite"),
+    ("furina", "POST", "/rooms/drafts/remove", {"room_id": "conduit-nope", "member": "laifu"}, None, 404,
+     "no_draft"),
 ])
 def test_routes_refuse_with_the_reasons_code(routes, name, method, path, body, params, status, code):
     refused = routes.call(name, method, path, json=body, params=params)
@@ -1429,7 +2050,8 @@ def test_routes_refuse_with_the_reasons_code(routes, name, method, path, body, p
     assert refused.json()["code"] == code and refused.json()["detail"]
 
 
-@pytest.mark.parametrize("path", ["/rooms/drafts", "/rooms/drafts/start", "/rooms/invites/answer"])
+@pytest.mark.parametrize("path", ["/rooms/drafts", "/rooms/drafts/start", "/rooms/invites/answer", "/rooms/leave",
+                                  "/rooms/drafts/remove"])
 def test_routes_refuse_a_body_that_isnt_an_object(routes, path):
     refused = routes.call("furina", "POST", path, json=["Zoo trip"])
     assert refused.status_code == 400 and refused.headers["cache-control"] == "no-store"
@@ -1446,8 +2068,29 @@ def test_a_hermes_that_cant_host_rooms_with_linked_people_says_so(routes):
     assert routes.wire.sent == []
 
 
+def test_routes_leave_a_room_and_take_an_agent_out(routes):
+    room_id = _started(routes, links=("link1", "link2"), laifus=(LAIFUS, WORKY))
+
+    left = routes.call("laifu", "POST", "/rooms/leave", json={"link": "link1", "room_id": room_id, "agents": ["work"]})
+    assert left.status_code == 200 and left.headers["cache-control"] == "no-store"
+    assert left.json()["ok"] and left.json()["invite"]["gone"] == [{**WORKY, "reason": "left"}]
+    taken = routes.call("furina", "POST", "/rooms/drafts/remove", json={"room_id": room_id, "member": "@mona"})
+    assert taken.status_code == 200 and taken.headers["cache-control"] == "no-store"
+    shown = taken.json()["draft"]
+    assert (shown["left"], shown["removed"]) == ([slot("link1", 2)], [slot("link2", 1)])
+    assert [(member["handle"], member["owner"], member["status"]) for member in shown["members"]] == [
+        ("furina", None, "in"), ("laifu", "Laifu", "in"), ("worky", "Laifu", "left"), ("mona", "Mona", "removed")]
+    assert invite_of(routes, "mona", room_id)["status"] == "ended"
+    everyone = routes.call("laifu", "POST", "/rooms/leave", json={"link": "link1", "room_id": room_id,
+                                                                  "agents": None})
+    assert everyone.json()["invite"]["status"] == "left"
+    again = routes.call("laifu", "POST", "/rooms/leave", json={"link": "link1", "room_id": room_id, "agents": None})
+    assert (again.status_code, again.json()["code"]) == (409, "not_in")
+
+
 def test_room_invites_is_a_listed_capability(routes):
-    assert "room-invites" in routes.call("furina", "GET", "/capabilities").json()["capabilities"]
+    capabilities = routes.call("furina", "GET", "/capabilities").json()["capabilities"]
+    assert "room-invites" in capabilities and "room-leave" in capabilities
 
 
 def test_a_draft_made_where_the_dashboard_runs_in_the_gateway_is_the_requests_subjects(routes, monkeypatch):
@@ -1500,7 +2143,7 @@ def commands(rooms, monkeypatch):
         root = rooms.tmp_path / who
         current["home"] = root if profile == "default" else root / "profiles" / profile
         return module.dispatch(argparse.Namespace(conduit_push_action="rooms", rooms_action=action, **{
-            "room": "", "yes": False, "name": None, "link": None, "agent": None, **arguments}))
+            "room": "", "yes": False, "name": None, "link": None, "agent": None, "member": None, **arguments}))
 
     rooms.run = run
     return rooms
@@ -1605,9 +2248,11 @@ def test_the_cli_says_what_it_couldnt_do(commands, capsys):
     assert "--name" in capsys.readouterr().out
     assert commands.run("furina", "invite", name="Zoo trip") == 2
     assert "--link" in capsys.readouterr().out
-    for action in ("start", "withdraw", "join", "decline"):
+    for action in ("start", "withdraw", "join", "decline", "leave", "remove"):
         assert commands.run("furina", action) == 2
         assert capsys.readouterr().out.startswith(f"Usage: hermes conduit-push rooms {action} --room")
+    assert commands.run("furina", "remove", room="conduit-nope") == 2
+    assert capsys.readouterr().out.startswith("Usage: hermes conduit-push rooms remove --room <id> --member")
     assert commands.run("furina", "invite", name="Zoo trip", link=["link9"]) == 1
     assert capsys.readouterr().out.startswith("Couldn't make the room: This Hermes isn't linked with one of them")
     assert commands.run("furina", "start", room="conduit-nope") == 1
@@ -1624,6 +2269,59 @@ def test_the_cli_says_what_it_couldnt_do(commands, capsys):
     assert commands.run("laifu", "join", room=room_id) == 1
     assert capsys.readouterr().out.startswith("Couldn't join it: Profile default isn't set up for rooms")
     assert commands.member["laifu"].issued == []
+
+
+def test_the_cli_leaves_a_room_and_takes_an_agent_out(commands, capsys, monkeypatch):
+    room_id = _started(commands, links=("link1", "link2"), laifus=(LAIFUS, WORKY))
+    capsys.readouterr()
+    monkeypatch.setattr("builtins.input", lambda prompt: "n")
+
+    assert commands.run("laifu", "leave", room=room_id, agent=["work"]) == 0
+    assert capsys.readouterr().out == ("This takes @worky out of Zoo trip: Furina's Hermes is told, and its turns "
+                                       "there stop.\nCancelled.\n")
+    assert invite_of(commands, "laifu", room_id)["gone"] == []
+    assert commands.run("laifu", "leave", room=room_id, agent=["work"], yes=True) == 0
+    assert capsys.readouterr().out.splitlines()[1:] == [
+        "Left Zoo trip with @worky. Its hidden chat for the room stays on this Hermes; to delete it:",
+        f"  hermes -p work conduit-push rooms forget --room {room_id}"]
+    assert commands.run("furina", "remove", room=room_id, member="@mona") == 0
+    assert capsys.readouterr().out == ("This takes @mona (Mona's) out of Zoo trip: Mona's Hermes is told, and its "
+                                       "turns there stop.\nCancelled.\n")
+    assert commands.run("furina", "remove", room=room_id, member="@mona", yes=True) == 0
+    assert capsys.readouterr().out.splitlines()[1:] == ["Took @mona (Mona's) out of Zoo trip."]
+
+    assert commands.run("furina", "drafts") == 0
+    shown = capsys.readouterr().out
+    assert "  Laifu: joined with @laifu and @worky (@worky left)" in shown
+    assert "  Mona: joined with @mona (@mona taken out)" in shown
+    assert commands.run("laifu", "invites") == 0
+    assert f"Zoo trip, from Furina (room {room_id}, Link link1): started; @worky left" in capsys.readouterr().out
+    assert commands.run("mona", "invites") == 0
+    assert f"Zoo trip, from Furina (room {room_id}, Link link2): ended: they took your agents out" in \
+        capsys.readouterr().out
+    assert commands.run("laifu", "leave", room=room_id, yes=True) == 0
+    assert capsys.readouterr().out.splitlines()[1:] == [
+        "Left Zoo trip with @laifu. Its hidden chat for the room stays on this Hermes; to delete it:",
+        f"  hermes conduit-push rooms forget --room {room_id}"]
+    assert commands.run("laifu", "invites") == 0
+    assert f"Zoo trip, from Furina (room {room_id}, Link link1): you left it" in capsys.readouterr().out
+    assert commands.run("furina", "remove", room=room_id, member="furina", yes=True) == 1
+    assert capsys.readouterr().out.startswith("Couldn't take it out: That's one of your own agents")
+
+
+def test_the_cli_shows_a_started_rooms_agents_by_their_handles_there(commands, capsys):
+    # Laifu's agent takes @mona first, so Mona's is @mona-2 in the room (plan ruling 3): the one to take out.
+    room_id = _started(commands, links=("link1", "link2"), laifus=({**LAIFUS, "handle": "mona"},))
+    capsys.readouterr()
+
+    assert commands.run("furina", "drafts") == 0
+    shown = capsys.readouterr().out
+    assert "  Laifu: joined with @mona\n" in shown and "  Mona: joined with @mona-2\n" in shown
+    assert commands.run("furina", "remove", room=room_id, member="@mona-2", yes=True) == 0
+    assert capsys.readouterr().out.splitlines()[1:] == ["Took @mona-2 (Mona's) out of Zoo trip."]
+    assert [member["status"] for member in draft_of(commands, room_id)["members"]] == ["in", "in", "removed"]
+    assert commands.run("furina", "drafts") == 0
+    assert "  Mona: joined with @mona-2 (@mona-2 taken out)\n" in capsys.readouterr().out
 
 
 def test_the_cli_asks_which_link_when_two_invited_you_to_one_room(commands, capsys):
@@ -1678,5 +2376,7 @@ def test_the_rooms_command_parses_a_room_with_people_youve_linked():
                               "--agent", "default", "--agent", "work=laifu-work"])
     assert (args.rooms_action, args.name, args.link, args.agent) == (
         "invite", "Zoo trip", ["link1", "link2"], ["default", "work=laifu-work"])
-    for action in ("drafts", "start", "withdraw", "invites", "join", "decline"):
+    for action in ("drafts", "start", "withdraw", "invites", "join", "decline", "leave", "remove"):
         assert parser.parse_args(["rooms", action, "--room", "r1"]).rooms_action == action
+    args = parser.parse_args(["rooms", "remove", "--room", "r1", "--member", "@mona"])
+    assert (args.rooms_action, args.member) == ("remove", "@mona")

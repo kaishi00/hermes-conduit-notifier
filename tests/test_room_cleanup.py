@@ -617,6 +617,47 @@ def test_a_store_locked_at_disband_still_ends_the_chats_hermes_prunes(guard, mon
     assert cleanup.sweep() == 0
 
 
+def test_disband_ends_a_room_over_links_on_its_members_hosts(guard, monkeypatch):
+    # room_invites tells each member host of a room over Links that started here (N5b).
+    told = []
+    invites = types.ModuleType("conduit_push.room_invites")
+    invites.disbanded = lambda root, room_id: told.append((pathlib.Path(root), room_id))
+    monkeypatch.setitem(sys.modules, "conduit_push.room_invites", invites)
+    monkeypatch.setattr(sys.modules["conduit_push"], "room_invites", invites, raising=False)
+    nahidas = guard.root / "profiles" / "nahida" / "state.db"
+    _room(guard.root / "state.db", "with-laifu", [FURINA, LAIFU])
+    _room(guard.root / "shared-state.db", "legacy", [FURINA, LAIFU])
+    _room(nahidas, "nahidas", [NAHIDA, LAIFU])
+    _room(guard.root / "state.db", "only-theirs", [LAIFU])
+
+    for store, room_id in ((None, "with-laifu"), (guard.root / "shared-state.db", "legacy"), (nahidas, "nahidas"),
+                           (None, "only-theirs")):
+        _disband(guard, room_id, store=store)
+
+    assert told == [(guard.root, "with-laifu"), (guard.root, "legacy"), (guard.root, "nahidas"),
+                    (guard.root, "only-theirs")]
+
+
+def test_a_room_over_links_whose_hosts_cant_be_told_still_has_its_chats_ended(guard, monkeypatch, caplog):
+    invites = types.ModuleType("conduit_push.room_invites")
+
+    def disbanded(root, room_id):
+        raise OSError("disk I/O error")
+
+    invites.disbanded = disbanded
+    monkeypatch.setitem(sys.modules, "conduit_push.room_invites", invites)
+    monkeypatch.setattr(sys.modules["conduit_push"], "room_invites", invites, raising=False)
+    furina = _home(guard, "furina")
+    _room(guard.root / "state.db", "with-laifu", [FURINA, LAIFU])
+    _room_session(furina, "f-with", "with-laifu")
+
+    with caplog.at_level(logging.WARNING, logger=cleanup.__name__):
+        assert _disband(guard, "with-laifu")["idempotent"] is False
+
+    assert _ids(furina) == set()
+    assert "room with-laifu" in caplog.text
+
+
 def test_hermes_refusing_the_disband_deletes_nothing(guard):
     furina = _home(guard, "furina")
     _room(guard.root / "state.db", "with-laifu", [FURINA, LAIFU])
