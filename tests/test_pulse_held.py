@@ -87,7 +87,9 @@ def test_a_pick_held_for_a_place_waits_off_the_screen(holding):
     assert ahead.MOMENT_RULE.strip() in instructions
     assert f"{ahead.PLACES_TITLE}\n- Home (home)\n- Work (work)" in text and "Clinic" not in text  # never a private one
     assert card["level"] == places.MOMENT and card["news"] == LINE
-    assert waits(card) == {"place_id": "p_work", "place": "Work", "kind": "work", "on": "leave", "until": at(28)}
+    # Sam's birthday is private: its push will say only that Pulse has something.
+    assert waits(card) == {"place_id": "p_work", "place": "Work", "kind": "work", "on": "leave", "until": at(28),
+                           "private": True}
     # Off the screen: not listed, not counted, not seen, and kept.
     assert holding.store.cards() == [] and holding.store.unseen_cards() == 0
     assert control.feed(holding.store, holding.home)["cards"] == []
@@ -161,7 +163,10 @@ def test_leaving_the_place_brings_the_pick_up_in_a_turn_of_its_own(holding, monk
     assert note.startswith(places.PICK_LOOK_NOTE) and "web_search" not in note
     assert pulse.pre_tool_call(SID, "t1", "web_search", {"query": "florists"})["action"] == "block"
     assert pulse.pushes(SID, "t1")
-    assert pulse.push_copy(SID, "t1", "Leaving work: Sam turns 40 on Wednesday.")["title_label"] == "pulse.noticed"
+    # At its moment it's time-sensitive, and Sam's birthday shows no words on the Lock Screen.
+    assert pulse.push_copy(SID, "t1", "Leaving work: pick up flowers for Wednesday.") == {
+        "title_label": "pulse.noticed", "title": "Pulse noticed something", "body": "Pulse has something for you.",
+        "private": True, "level": "time-sensitive"}
     # Its words are the card's once it's in.
     reply = "Leaving work: Sam turns 40 on Wednesday 28 October, and Bloom & Co on your way is open until 7."
     holding.db.message("user", text, display_kind="hidden")
@@ -178,16 +183,16 @@ def test_leaving_the_place_brings_the_pick_up_in_a_turn_of_its_own(holding, monk
 def test_a_held_pick_waits_for_the_next_time_while_pulse_may_not_speak(holding, monkeypatch):
     _, card = held(holding)
     holding.store.set("night", ["17:00", "19:00"])
-    assert reach(holding) == {"due": [], "picks": [card["id"]], "picks_skipped": "night"}
+    assert reach(holding) == {"due": [], "picks": [card["id"]], "picks_skipped": ["night"]}
     assert "reached_at" not in waits(holding.store.card(card["id"]))
-    line = places.describe(holding.store.moments()[0], UTC, {}, {card["id"]: card["news"]})
+    line = places.describe(holding.store.moments()[0], UTC, {}, {card["id"]: card})
     assert line.endswith(f"what the look ahead held for it waits for the next time, as it was night: {LINE}")
     holding.store.set("night", [])
     # "Wrong time" for its kind (a date) closes that part of the day to it.
     with monkeypatch.context() as patched:
         patched.setattr(places.learning, "closed_parts",
                         lambda pulse_store, kind: {"evening"} if kind == "date" else set())
-        assert reach(holding, now=LEFT + 600)["picks_skipped"] == "part:evening"
+        assert reach(holding, now=LEFT + 600)["picks_skipped"] == ["part:evening"]
     assert reach(holding, now=LEFT + 1200)["pick"] == card["id"]
 
 
@@ -200,7 +205,7 @@ def test_a_turn_that_doesnt_go_out_leaves_the_pick_waiting(holding):
     holding.store.update_attempt(attempt["attempt_id"], state=store.REFUSED, detail="busy")
     pulse.tick(now=LEFT + 60)
     assert waits(holding.store.card(card["id"])) == {"place_id": "p_work", "place": "Work", "kind": "work",
-                                                     "on": "leave", "until": at(28)}
+                                                     "on": "leave", "until": at(28), "private": True}
     assert holding.store.card(card["id"])["level"] == places.MOMENT
     # Reached but never sent while the moment was fresh: it waits too.
     reach(holding, now=LEFT + 3600)
@@ -291,8 +296,40 @@ def test_pulse_where_lists_what_the_look_ahead_held(holding, capsys, monkeypatch
     out = capsys.readouterr().out
     assert "(leaving Work, until Wed 28 Oct 00:00, coming up now)" in out
     assert "Left Work: nothing waited for it" not in out
-    assert f"Left Work: brought up what the look ahead held for it: {LINE}" in out
-    assert run("off") == 0 and "comes to the Pulse screen without a notification" in capsys.readouterr().out
+    assert f"Left Work: is bringing up what the look ahead held for it: {LINE}" in out
+    # It never went out while the moment was fresh: the moment says so, and the pick waits.
+    places.settle_picks(holding.store, holding.home, LEFT + places.FRESH_S + 1)
+    assert run() == 0
+    out = capsys.readouterr().out
+    assert "(leaving Work, until Wed 28 Oct 00:00)" in out
+    assert f"Left Work: tried to bring up what the look ahead held for it, but its turn didn't go out: {LINE}" in out
+    assert run("off") == 0
+    assert capsys.readouterr().out.endswith("comes to the Pulse screen without a notification.\n")
+    holding.store.set("enabled", False)
+    assert run("off") == 0 and capsys.readouterr().out.endswith("without a notification once Pulse is on again.\n")
+
+
+def test_a_moment_says_why_each_pick_waits_and_one_another_took_isnt_its(holding, monkeypatch):
+    _, card = held(holding)
+    moment = {"at": LEFT, "event": "leave", "place": "Work", "handled_at": LEFT,
+              "outcome": json.dumps({"due": [], "picks": [card["id"], 99], "picks_skipped": ["part:evening", "event"]})}
+    assert places.describe(moment, UTC, {}, {card["id"]: card, 99: None}).endswith(
+        f"waits for the next time, as you said evening was the wrong time: {LINE}; "
+        "as your calendar was busy: card #99")
+    # Before 0.104.0, one reason for them all.
+    older = {**moment, "outcome": json.dumps({"due": [], "picks": [card["id"]], "picks_skipped": "night"})}
+    assert places.describe(older, UTC, {}, {card["id"]: card}).endswith(f"as it was night: {LINE}")
+    # Another process took the pick as this moment reached it: it neither comes up nor waits for this one.
+    monkeypatch.setattr(holding.store, "swap_card_moment", lambda *args: False)
+    assert reach(holding) == {"due": []}
+
+
+def test_a_held_pick_for_a_place_with_no_name_waits_for_that_place_only(holding):
+    _, card = held(holding)
+    nameless = {**waits(card), "place_id": "", "place": ""}
+    assert holding.store.swap_card_moment(card["id"], card["moment"], json.dumps(nameless, sort_keys=True))
+    somewhere = {"event": "leave", "place_id": "p_gym", "place": "", "at": LEFT - 60}
+    assert places.picks_for(holding.store, somewhere, LEFT) == []
 
 
 def test_pulse_where_reads_only_whole_ids_from_a_moments_outcome():

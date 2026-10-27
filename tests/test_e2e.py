@@ -486,6 +486,28 @@ def test_the_title_label_and_chat_title_ride_inside_the_envelope():
     assert inner["session_title"] == "Quarterly numbers"
 
 
+
+def test_a_pulse_replys_level_rides_beside_the_envelope_and_private_only_inside(monkeypatch):
+    keys = _keys()
+    event = {"event_id": "response:1", "type": "response.ready", "session_id": "sess-1", "title": "Pulse",
+             "body": "Pulse has something for you.", "title_label": "pulse.followup", "level": "time-sensitive",
+             "private": True}
+    sealed = e2e.seal_event(event, keys, installation_id=INSTALLATION, gateway_id=GATEWAY, now=1_760_000_000)
+    assert sealed["level"] == "time-sensitive" and "private" not in sealed
+    assert e2e.open_event(sealed, keys, installation_id=INSTALLATION, gateway_id=GATEWAY)["private"] is True
+    for other in ({**event, "level": "critical"}, {**event, "type": "turn.failed"}):
+        assert "level" not in e2e.seal_event(other, keys, installation_id=INSTALLATION, gateway_id=GATEWAY)
+    stripped = e2e.content_free(event, keys)
+    assert stripped["level"] == "time-sensitive" and "private" not in stripped
+    # Not provisioned yet: plaintext, whose body is already the private copy,
+    # never says `private`.
+    state = _state()
+    del state["e2e"]
+    sent = _capture(monkeypatch, state)
+    client.send_now(event)
+    assert (sent[0]["level"], sent[0]["body"]) == ("time-sensitive", "Pulse has something for you.")
+    assert "private" not in sent[0]
+
 # --- Key rotation --------------------------------------------------------------
 
 NEW_KID = "fedcba9876543210fedcba9876543210"

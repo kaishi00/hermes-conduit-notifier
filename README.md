@@ -247,7 +247,7 @@ gateway-bound inactive records still require separately reviewed maintenance.
 | DELETE | `/v1/installations/:id` | Deactivate a device |
 | POST | `/v1/installations/:id/pairings` | Create a pairing code |
 | POST | `/v1/pairings/claim` | Claim a pairing code (gateway side) |
-| POST | `/v1/events` | Deliver a notification event |
+| POST | `/v1/events` | Deliver a notification event; a reply's `level` (`passive`, `active` or `time-sensitive`) sets its interruption level (0.20+, capability `push-levels`) |
 | DELETE | `/v1/gateways/current` | Revoke a gateway credential |
 | PUT / DELETE | `/v1/installations/:id/live-activities` | Register (`push_token`, `session_ids`) or remove (`push_token`) the Live Activity the phone started for a chat (0.15+) |
 | POST | `/v1/live-activity` | Report a running turn's progress (`session_id`, `state`, optional `end`); answers `tracked` (gateway side, 0.15+) |
@@ -2641,6 +2641,39 @@ and she loved Kyoto"):
 - `hermes conduit-push pulse where` lists what's held and for where, and
   what each arrival or departure brought up; `pulse status` and `pulse
   ahead` count the look ahead's picks held for a place.
+
+## Pulse pushes: how much they interrupt, and private ones (plugin 0.104+)
+
+Each Pulse push says how much it may interrupt, decided in code, never by
+the model. The push relay (0.20+, capability `push-levels`) sets it as the
+notification's interruption level and its relevance on the Lock Screen; an
+older relay sends every push at the default level. The level isn't
+content: the relay sees it with end-to-end encryption on, and `redact on`
+keeps it.
+
+- **Time-sensitive** (can break through a Focus that allows time-sensitive
+  notifications): a pick held for a place at its moment, a reminder for a
+  place as you get there or leave, and a follow-up that can't wait (its
+  check said it's urgent, or it went at night or in a part of the day you
+  closed because it would be no use later). At most three a day in your
+  time zone; past that, they go as active. iOS shows them as active for a
+  Conduit build without the Time Sensitive Notifications capability.
+- **Passive** (into Notification Center, with no sound and no lit screen):
+  anything else that goes while the phone says you're busy (an event, or a
+  Focus that holds calls; driving doesn't count), and a report whose pushed
+  picks are all interests or far off.
+- **Active**: the rest, the morning brief included.
+- **Private reminders.** A push about someone's birthday or anniversary, or
+  whose words are about a gift, a surprise, health or money (English words),
+  says only "Pulse has something for you." whatever Show previews says, so
+  its words never leave this host in a push; its card shows everything. On
+  by default: Hide private reminders on the Lock Screen in Conduit's
+  Settings > Pulse, `hermes conduit-push pulse private on|off`, or `PUT
+  /pulse` with `"private_pushes"`; `GET /pulse` says `"private_pushes"`.
+  Capability `pulse_private`. With end-to-end encryption, the sealed push
+  says `private`, for Conduit to write that line in its own language.
+- `hermes conduit-push pulse status` says whether private reminders are
+  hidden, and how many time-sensitive pushes went today.
 
 ## Apple Watch lookups and jobs (plugin 0.6+, jobs 0.7+, Gemini tokens 0.8+, Qwen tokens 0.75+)
 

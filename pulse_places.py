@@ -422,7 +422,7 @@ def handle(pulse_store: Any, home: Path, zone: tzinfo, moment: dict, now: float,
     which joins the checks of the items it made due. With none made due,
     nothing says it yet: it's kept for `pulse where`, to judge first. And
     a pick the look ahead held for it (``bring_up``): {"pick": its card},
-    or {"picks": [cards waiting], "picks_skipped": why}."""
+    or {"picks": [cards waiting], "picks_skipped": [why each waits]}."""
     if not on(pulse_store):
         return {"skipped": "off"}
     if now - float(moment["at"]) > FRESH_S:
@@ -538,8 +538,8 @@ def picks_for(pulse_store: Any, moment: dict, now: float) -> list[dict]:
         wait = held(card)
         if card["done"] or "reached_at" in wait or wait.get("on") != moment["event"] or _until(wait) <= now:
             continue
-        if (wait.get("place_id") and wait["place_id"] == moment["place_id"]) or \
-                _phrase(wait.get("place")) == _phrase(moment["place"]):
+        name = _phrase(wait.get("place"))
+        if (wait.get("place_id") and wait["place_id"] == moment["place_id"]) or (name and name == _phrase(moment["place"])):
             found.append(card)
     return sorted(found, key=lambda card: (_until(held(card)), card["id"]))
 
@@ -550,24 +550,37 @@ def bring_up(pulse_store: Any, home: Path, zone: tzinfo, moment: dict, now: floa
     reached for the tick to bring it up in a turn of its own
     (pulse._maybe_moment). While it's not the time (``not_now``, with what
     "Wrong time" closed for the pick's kind), they wait for the next time:
-    {"picks": [their cards], "picks_skipped": why}. {} when none waits."""
-    picks = picks_for(pulse_store, moment, now)
-    reasons = []
-    for card in picks:
+    {"picks": [their cards], "picks_skipped": [why each waits]}. {} when
+    none waits."""
+    waits, reasons = [], []
+    for card in picks_for(pulse_store, moment, now):
         why = not_now(pulse_store, home, zone, now, kind=learning.lesson_kind(card))
         if why:
+            waits.append(card["id"])
             reasons.append(why)
             continue
         reached = {**held(card), "reached_at": now, "at": float(moment["at"])}
         if pulse_store.swap_card_moment(card["id"], card["moment"], json.dumps(reached, sort_keys=True)):
             return {"pick": card["id"]}
-    return {"picks": [card["id"] for card in picks], "picks_skipped": reasons[0] if reasons else ""} if picks else {}
+        # Another process took it meanwhile (it came on the screen, or another
+        # moment reached it): it neither came up nor waits for this one.
+    return {"picks": waits, "picks_skipped": reasons} if waits else {}
 
 
 def attempt_item_id(card_id: int) -> str:
     """A fresh id per attempt, random first, as a follow-up's: a turn's tag
     is made from it."""
     return f"{secrets.token_hex(4)}-m{card_id}"
+
+
+_ATTEMPT_CARD = re.compile(r"[0-9a-f]{8}-m([0-9]+)")
+
+
+def attempt_card(pulse_store: Any, item_id: str) -> Optional[dict]:
+    """The card a moment's attempt brings up (``attempt_item_id``): held,
+    or on the screen once its turn was delivered; None when it's gone."""
+    found = _ATTEMPT_CARD.fullmatch(item_id)
+    return pulse_store.card(int(found.group(1))) if found else None
 
 
 def next_pick(pulse_store: Any) -> Optional[dict]:
@@ -709,11 +722,10 @@ def held_line(card: dict, zone: tzinfo) -> str:
     return f"- {_clip(card['news'], 160)} ({what}{wait.get('place') or '?'}, until {until}{state})"
 
 
-def describe(moment: dict, zone: tzinfo, texts: dict[int, str], picks: Optional[dict[int, str]] = None) -> str:
+def describe(moment: dict, zone: tzinfo, texts: dict[int, str], picks: Optional[dict[int, Optional[dict]]] = None) -> str:
     """A moment as `pulse where` lists it. ``texts``: items' text by id;
-    ``picks``: held picks' words by card id."""
-    from datetime import datetime
-
+    ``picks``: the cards of the picks held for it, as they are now, by id
+    (None for one that's gone)."""
     when = datetime.fromtimestamp(float(moment["at"]), zone).strftime("%a %d %b %H:%M")
     verb = "Arrived at" if moment["event"] == "arrive" else "Left"
     try:
@@ -726,7 +738,8 @@ def describe(moment: dict, zone: tzinfo, texts: dict[int, str], picks: Optional[
         return "; ".join(texts.get(item_id, f"#{item_id}") for item_id in ids)
 
     def held_words(ids: Sequence[int]) -> str:
-        return "; ".join(_clip((picks or {}).get(card_id) or f"card #{card_id}", 120) for card_id in ids)
+        return "; ".join(_clip(((picks or {}).get(card_id) or {}).get("news") or f"card #{card_id}", 120)
+                         for card_id in ids)
 
     due, items, related = ids_in(outcome.get("due")), ids_in(outcome.get("items")), ids_in(outcome.get("related"))
     pick, waits = ids_in([outcome.get("pick")]), ids_in(outcome.get("picks"))
@@ -739,16 +752,34 @@ def describe(moment: dict, zone: tzinfo, texts: dict[int, str], picks: Optional[
     elif outcome.get("skipped"):
         parts.append(f"nothing, as {_reason(outcome['skipped'])}" + (f" (waiting: {named(items)})" if items else ""))
     if pick:
-        parts.append(f"brought up what the look ahead held for it: {held_words(pick)}")
+        parts.append(f"{_pick_state(moment, (picks or {}).get(pick[0]))}: {held_words(pick)}")
     elif waits:
-        parts.append(f"what the look ahead held for it waits for the next time, as "
-                     f"{_reason(outcome.get('picks_skipped'))}: {held_words(waits)}")
+        skipped = outcome.get("picks_skipped")
+        # One reason for them all before 0.104.0; since, one each.
+        whys = skipped if isinstance(skipped, list) and len(skipped) == len(waits) else [skipped] * len(waits)
+        grouped: dict[str, list[int]] = {}
+        for card_id, why in zip(waits, whys):
+            grouped.setdefault(_reason(why), []).append(card_id)
+        parts.append("what the look ahead held for it waits for the next time, " + "; ".join(
+            f"as {why}: {held_words(ids)}" for why, ids in grouped.items()))
     if not parts:
         parts.append("nothing waited for it")
     # Not said yet: what it would have brought up, to judge before it speaks.
     if related:
         parts.append(f"it would have brought up: {named(related)}")
     return f"- {when} {verb} {moment['place']}: {'; '.join(parts)}"
+
+
+def _pick_state(moment: dict, card: Optional[dict]) -> str:
+    """What came of the pick ``moment`` reached, as its card is now: still
+    coming up from it, back to waiting or on the screen without its turn
+    (Hermes didn't take it, or it went stale), or brought up (or gone)."""
+    if card is None or card["level"] not in (MOMENT, "screen"):
+        return "brought up what the look ahead held for it"
+    wait = held(card)
+    if card["level"] == MOMENT and "reached_at" in wait and wait.get("at") == float(moment["at"]):
+        return "is bringing up what the look ahead held for it"
+    return "tried to bring up what the look ahead held for it, but its turn didn't go out"
 
 
 def ids_in(value: Any) -> list[int]:

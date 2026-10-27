@@ -107,6 +107,8 @@ def push_event(
     locate: dict[str, Any] | None = None,
     maps: dict[str, Any] | None = None,
     count: int | None = None,
+    level: str | None = None,
+    private: bool = False,
 ) -> dict[str, Any]:
     event: dict[str, Any] = {
         "event_id": identifier,
@@ -179,10 +181,24 @@ def push_event(
     # to the relay when the rest is sealed.
     if kind == "phone.changes":
         event["mode"] = mode if mode in PHONE_CHANGE_MODES else "alert"
+    # `level` (a Pulse reply, pulse_push) is how much the push may interrupt:
+    # the relay sets it as the alert's interruption level (relay 0.20+; an
+    # older one ignores it). Routing, not content: it stays visible to the
+    # relay when the rest is sealed.
+    if kind == "response.ready" and level in PUSH_LEVELS:
+        event["level"] = level
+    # `private` (a Pulse reply about a gift, a surprise, someone's day, health
+    # or money): its body is already the private copy, and the phone reads
+    # this to write that copy in its own language. Only ever sealed: the
+    # plaintext path drops it (client._sealed).
+    if kind == "response.ready" and private is True:
+        event["private"] = True
     return event
 
 
 PHONE_CHANGE_MODES = ("alert", "background")
+# What the relay may set as a push's interruption level (relay PUSH_LEVELS).
+PUSH_LEVELS = ("passive", "active", "time-sensitive")
 _LOCATE_ID = re.compile(r"^l_[A-Za-z0-9_-]{16,64}\Z")
 _MAPS_ID = re.compile(r"^m_[A-Za-z0-9_-]{16,64}\Z")
 
@@ -252,6 +268,9 @@ def redact_event(event: dict[str, Any]) -> dict[str, Any]:
     if event.get("type") == "phone.changes" and event.get("mode") in PHONE_CHANGE_MODES:
         # How the relay wakes the phone: routing, not content.
         redacted["mode"] = event["mode"]
+    if event.get("type") == "response.ready" and event.get("level") in PUSH_LEVELS:
+        # How much a Pulse push may interrupt: routing, not content.
+        redacted["level"] = event["level"]
     label = event.get("title_label")
     if isinstance(label, str) and _TITLE_LABEL.match(label):
         # Which title the phone writes: not content, so it stays.
