@@ -465,7 +465,7 @@ async function route(request, response) {
     const registration = validateRegistration(body);
     if (!registration) return sendJson(response, 400, { error: 'invalid_live_activity' });
     enforceRateLimit('live-activity-registration-global', config.budgets.liveActivityRegistrationsPerMinute, 60_000);
-    liveActivities.register(installation.id, registration.token, registration.sessionIds);
+    liveActivities.register(installation.id, registration.token, registration.sessionIds, { startedAgoS: registration.startedAgoS });
     return sendJson(response, 200, { registered: true });
   }
 
@@ -481,7 +481,7 @@ async function route(request, response) {
     if (!store.activeInstallation(gateway.installationId)) return sendJson(response, 200, { tracked: false });
     const watched = liveActivities.find(gateway.installationId, report.sessionId);
     if (watched) enforceRateLimit('live-activity-update-global', config.budgets.liveActivityUpdatesPerMinute, 60_000);
-    const tracked = liveActivities.report(gateway.installationId, report.sessionId, report.state, report.end);
+    const tracked = liveActivities.report(gateway.installationId, report.sessionId, report.state, report.end, { endedAgoS: report.endedAgoS });
     return sendJson(response, 200, { tracked });
   }
 

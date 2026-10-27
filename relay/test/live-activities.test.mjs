@@ -132,6 +132,12 @@ test('reports carry only known phases, categories and bounded numbers', () => {
     { sessionId: 's-1', state: { phase: 'tool', tool: 'browser', tools: 4, context: 99 }, end: undefined });
   assert.deepEqual(validateReport({ session_id: 's-1', state: { phase: 'thinking' }, end: 'stopped' }),
     { sessionId: 's-1', state: { phase: 'thinking', tools: 0 }, end: 'stopped' });
+  assert.equal(validateReport({ session_id: 's-1', state: { phase: 'thinking' }, end: 'done', ended_ago: 12.5 }).endedAgoS, 12.5);
+  assert.equal(validateReport({ session_id: 's-1', state: { phase: 'thinking' }, end: 'done', ended_ago: 'soon' }).endedAgoS, undefined,
+    'an unreadable age is unknown');
+  assert.equal(validateReport({ session_id: 's-1', state: { phase: 'thinking' }, end: 'done', ended_ago: -5 }).endedAgoS, 0);
+  assert.equal(validateReport({ session_id: 's-1', state: { phase: 'thinking' }, ended_ago: 5 }).endedAgoS, undefined,
+    'only an end has an age');
   assert.equal(validateReport({ session_id: 's-1', state: { phase: 'tool', tool: 'rm -rf /' } }), null);
   assert.equal(validateReport({ session_id: 's-1', state: { phase: 'writing a novel' } }), null);
   assert.equal(validateReport({ session_id: 's-1', state: { phase: 'thinking', context: 140 } }), null);
@@ -150,6 +156,11 @@ test('registrations need an activity token and one to six chat ids', () => {
   assert.equal(validateRegistration({ push_token: TOKEN_A, session_ids: Array.from({ length: 7 }, (_, i) => `s${i}`) }), null);
   assert.deepEqual(validateRegistration({ push_token: TOKEN_A, session_ids: Array(7).fill('a') }),
     { token: TOKEN_A, sessionIds: ['a'] }, 'repeats count once');
+  assert.deepEqual(validateRegistration({ push_token: TOKEN_A, session_ids: ['a'], started_ago: 3.25 }),
+    { token: TOKEN_A, sessionIds: ['a'], startedAgoS: 3.25 });
+  assert.deepEqual(validateRegistration({ push_token: TOKEN_A, session_ids: ['a'], started_ago: '3' }),
+    { token: TOKEN_A, sessionIds: ['a'] }, 'an unreadable start is unknown, not refused');
+  assert.equal(validateRegistration({ push_token: TOKEN_A, session_ids: ['a'], started_ago: 1e12 }).startedAgoS, 8 * 60 * 60);
 });
 
 test('an end waits for the update in flight, so it never lands first', async () => {
@@ -224,4 +235,84 @@ test('a send that settles after its token was registered again leaves the new re
   await new Promise((resolve) => setTimeout(resolve, 30));
   assert.deepEqual(sent, ['end'], 'the old end is not sent again to the new registration');
   assert.ok(activities.find('install-1', 'session-2'));
+});
+
+test('a turn that ended before its activity was registered ends it once registered', async () => {
+  const { activities, sent, advance } = harness();
+  assert.equal(activities.report('install-1', 'stored-1', { phase: 'thinking', tools: 2, context: 30 }, 'done', { endedAgoS: 0 }), false);
+  advance(20_000);
+  // Started 25 s ago, before the end 20 s ago: the same turn.
+  activities.register('install-1', TOKEN_A, ['runtime-1', 'stored-1'], { startedAgoS: 25 });
+  await settle();
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].push.payload.aps.event, 'end');
+  assert.deepEqual(sent[0].push.payload.aps['content-state'], { phase: 'done', tools: 2, context: 30, endedAt: sent[0].push.payload.aps.timestamp });
+  assert.equal(activities.size, 0, 'ended and forgotten');
+  activities.register('install-1', TOKEN_B, ['stored-1'], { startedAgoS: 60 });
+  await settle();
+  assert.equal(sent.length, 1, 'an end is used once');
+});
+
+test("an end never reaches the chat's next turn", async () => {
+  const { activities, sent, advance } = harness();
+  activities.report('install-1', 'session-1', { phase: 'thinking', tools: 0 }, 'done', { endedAgoS: 0 });
+  advance(10_000);
+  // Started 4 s ago, after the end: the next turn.
+  activities.register('install-1', TOKEN_A, ['session-1'], { startedAgoS: 4 });
+  await settle();
+  assert.equal(sent.length, 0);
+  assert.equal(activities.size, 1);
+
+  // An end sent late says when the turn ended.
+  activities.unregister('install-1', TOKEN_A);
+  activities.report('install-1', 'session-2', { phase: 'thinking', tools: 0 }, 'done', { endedAgoS: 30 });
+  activities.register('install-1', TOKEN_B, ['session-2'], { startedAgoS: 10 });
+  await settle();
+  assert.equal(sent.length, 0, 'started after the end, though the end arrived first');
+});
+
+test('the next turn running clears an unwatched end; an older Conduit gets nothing assumed', async () => {
+  const { activities, sent } = harness();
+  activities.report('install-1', 'session-1', { phase: 'thinking', tools: 0 }, 'done', { endedAgoS: 0 });
+  activities.report('install-1', 'session-1', { phase: 'thinking', tools: 0 });
+  activities.register('install-1', TOKEN_A, ['session-1'], { startedAgoS: 600 });
+  await settle();
+  assert.equal(sent.length, 0);
+
+  activities.report('install-1', 'session-2', { phase: 'thinking', tools: 0 }, 'done', { endedAgoS: 0 });
+  activities.register('install-1', TOKEN_B, ['session-2']);
+  await settle();
+  assert.equal(sent.length, 0, 'no start, no end');
+  activities.report('install-2', 'session-3', { phase: 'thinking', tools: 0 }, 'failed', { endedAgoS: 0 });
+  activities.report('install-1', 'session-4', { phase: 'thinking', tools: 0 }, 'done');
+  activities.register('install-1', 'd'.repeat(64), ['session-4'], { startedAgoS: 600 });
+  await settle();
+  assert.equal(sent.length, 0, "an older plugin's end, which doesn't say when the turn ended, is not kept");
+  activities.register('install-1', 'c'.repeat(64), ['session-3'], { startedAgoS: 600 });
+  await settle();
+  assert.equal(sent.length, 0, "another installation's end never reaches this phone");
+});
+
+test('unwatched ends are kept for the life of an activity, and bounded', async () => {
+  const { activities, sent, advance } = harness({ maxActivities: 2 });
+  activities.report('install-1', 'session-1', { phase: 'thinking', tools: 0 }, 'done', { endedAgoS: 0 });
+  advance(8 * 60 * 60 * 1000 + 1);
+  activities.register('install-1', TOKEN_A, ['session-1'], { startedAgoS: 9 * 60 * 60 });
+  await settle();
+  assert.equal(sent.length, 0, 'too old');
+  for (const id of ['s-1', 's-2', 's-3']) activities.report('install-1', id, { phase: 'thinking', tools: 0 }, 'done', { endedAgoS: 0 });
+  assert.equal(activities.unwatchedEnds.size, 2);
+  assert.equal(activities.unwatchedEnds.has('install-1\ns-1'), false, 'the oldest went');
+  activities.removeInstallation('install-1');
+  assert.equal(activities.unwatchedEnds.size, 0);
+});
+
+test('the sweep drops every expired unwatched end, whatever order they came in', () => {
+  const { activities, advance } = harness();
+  activities.report('install-1', 'fresh', { phase: 'thinking', tools: 0 }, 'done', { endedAgoS: 0 });
+  // Sent late: it ended almost eight hours ago.
+  activities.report('install-1', 'late', { phase: 'thinking', tools: 0 }, 'done', { endedAgoS: 8 * 60 * 60 - 1 });
+  advance(2_000);
+  activities.sweep();
+  assert.deepEqual([...activities.unwatchedEnds.keys()], ['install-1\nfresh']);
 });
