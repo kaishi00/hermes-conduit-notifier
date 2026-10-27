@@ -624,6 +624,8 @@ async def _plugin_refused_on(profile: str) -> bool:
             return bool(await _plugin_api_request_refused(PLUGIN_NAME))
     except TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc))
+    except HTTPException:
+        raise  # Hermes' own answer, such as 404 for a profile that doesn't exist
     except Exception:  # noqa: BLE001 — Hermes failing to read the profile; a retry may get past it
         logger.exception("Conduit couldn't ask Hermes whether profile %r allows the plugin", profile)
         raise HTTPException(status_code=503, detail="Hermes couldn't check this profile's plugins")
@@ -13865,7 +13867,11 @@ def _hermes_approval_timeout() -> float:
     """Hermes' own approval timeout (approvals.timeout), else its default.
     Call in the profile's scope."""
     try:
-        from tools.approval import _get_approval_timeout
+        try:
+            # Newer Hermes keeps it in tools.approval_context; tools.approval no longer has it.
+            from tools.approval_context import _get_approval_timeout
+        except ImportError:
+            from tools.approval import _get_approval_timeout
         value = float(_get_approval_timeout())
     except Exception:  # noqa: BLE001 — an older or different Hermes
         return LOCAL_LIVE_WATCH_APPROVAL_TIMEOUT_S

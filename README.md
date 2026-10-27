@@ -2435,7 +2435,7 @@ Limits: 4 devices per profile, 5,000 items and 4 MiB per batch, 50 alarms and
 200 contacts per device, 120 uploads and 60 exchanges a minute per profile,
 64 KiB per exchange.
 
-## Pulse looks things up first (plugin 0.95+)
+## Pulse looks things up first (plugin 0.96+)
 
 Pulse's report, morning brief and follow-up turns can look things up before
 they speak, to check or add a detail to what they bring up ("and your
