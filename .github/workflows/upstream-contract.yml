@@ -82,7 +82,12 @@ jobs:
           persist-credentials: false
 
       - name: Install uv
-        run: python3 -m pip install --quiet uv==0.11.32
+        env:
+          REF: ${{ matrix.ref }}
+        run: |
+          # The results name their Hermes version, so the report never pairs them by position.
+          printf '%s\n' "$REF" > "$RUNNER_TEMP/ref.txt"
+          python3 -m pip install --quiet uv==0.11.32
 
       - name: Install Hermes
         env:
@@ -113,6 +118,7 @@ jobs:
         with:
           name: contract-${{ strategy.job-index }}
           path: |
+            ${{ runner.temp }}/ref.txt
             ${{ runner.temp }}/junit.xml
             ${{ runner.temp }}/changed.txt
           if-no-files-found: ignore
@@ -144,15 +150,21 @@ jobs:
         run: |
           gh label create upstream-break --color B60205 \
             --description "A Hermes change breaks the plugin's contract (upstream/contract.yml)" 2>/dev/null || true
-          i=0
-          mapfile -t refs < <(echo "$REFS" | jq -r '.[]')
-          for ref in "${refs[@]}"; do
-            dir="$RUNNER_TEMP/results/contract-$i"
-            i=$((i + 1))
-            if [ ! -f "$dir/junit.xml" ]; then
+          declare -A reported
+          for dir in "$RUNNER_TEMP"/results/contract-*; do
+            [ -f "$dir/ref.txt" ] || continue
+            ref=$(head -1 "$dir/ref.txt")
+            [ -n "$ref" ] || continue
+            reported[$ref]=1
+            if [ -f "$dir/junit.xml" ]; then
+              python3 upstream/report.py "$dir/junit.xml" --ref "$ref" --run-url "$RUN_URL" --changed "$dir/changed.txt"
+            else
               # Hermes didn't install, or the tests never ran: one harness issue.
               python3 upstream/report.py --no-results --ref "$ref" --run-url "$RUN_URL"
-              continue
             fi
-            python3 upstream/report.py "$dir/junit.xml" --ref "$ref" --run-url "$RUN_URL" --changed "$dir/changed.txt"
+          done
+          # A version whose job left nothing at all.
+          mapfile -t refs < <(echo "$REFS" | jq -r '.[]')
+          for ref in "${refs[@]}"; do
+            [ -n "${reported[$ref]:-}" ] || python3 upstream/report.py --no-results --ref "$ref" --run-url "$RUN_URL"
           done

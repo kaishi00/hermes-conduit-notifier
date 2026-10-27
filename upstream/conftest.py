@@ -106,6 +106,8 @@ class FakeSpeechServer:
         if self._stop is not None:
             self._loop.call_soon_threadsafe(self._stop.set_result, None)
         self._thread.join(5)
+        if not self._thread.is_alive():
+            self._loop.close()
 
     @property
     def paths(self) -> List[str]:
@@ -240,11 +242,11 @@ def dashboard(tmp_path_factory: pytest.TempPathFactory):
         subprocess.run([hermes, "profile", "create", name], env=env, check=True, capture_output=True, timeout=120)
 
     speech = FakeSpeechServer()
-    speech.start()
     log_path = home / "dashboard.log"
     log = log_path.open("w")
     proc: Optional[subprocess.Popen] = None
     try:
+        speech.start()
         shutil.copytree(ROOT, home / "plugins" / PLUGIN, ignore=COPY_IGNORE)
         _set_config(home / "config.yaml", True, speech.url("launch"))
         for name in ("second", "disabled"):
