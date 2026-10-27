@@ -1096,7 +1096,15 @@ def _remove_from_room(rooms: Any, room: str, member: str, yes: bool) -> int:
     handle = member.removeprefix("@").casefold()
     found = next((each for each in members if each["member_id"] == member), None) or next(
         (each for each in members if each["handle"].casefold() == handle), None)
-    if found is not None and found["owner"] is not None and found["status"] == "in":
+    if found is None:
+        # Refused as the plugin refuses it: asking it could take out an agent the room started with meanwhile,
+        # unasked.
+        why = {"ended": "That room has ended",
+               "started": "There's no agent with that handle or id in that room"}.get(
+            draft["status"], "That room hasn't started yet")
+        print(f"Couldn't {_LINKED_ROOMS['remove']}: {why}")
+        return 1
+    if found["owner"] is not None and found["status"] == "in":
         owner = _printable(found["owner"])
         print(f"This takes @{found['handle']} ({owner}'s) out of {_printable(draft['name'])}: {owner}'s Hermes is "
               "told, and its turns there stop.")

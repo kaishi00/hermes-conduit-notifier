@@ -545,7 +545,7 @@ class Rooms:
                             received.link_id)
                 return
             if draft["status"] != "started":
-                return  # the room ended
+                return  # the room ended: a leave comes only after the room.start its start sent
             for member_id in body["member_ids"]:
                 if members[member_id].get("status", "in") == "in":
                     members[member_id]["status"] = "left"

@@ -2376,6 +2376,36 @@ def test_the_cli_shows_a_started_rooms_agents_by_their_handles_there(commands, c
     assert "  Mona: joined with @mona-2 (@mona-2 taken out)\n" in capsys.readouterr().out
 
 
+def test_the_cli_takes_no_one_out_of_a_room_that_starts_while_it_looks(commands, capsys, monkeypatch):
+    # Waiting when the CLI reads it, started by the time it would take the agent out: it couldn't say what that
+    # does, so it takes no one out and says why, as for a room that hasn't started.
+    _listening(commands)
+    room_id = commands.furina.draft("Zoo trip", [dict(FURINAS)], ["link1"], where=LEGACY)["room_id"]
+    commands.laifu.answer("link1", room_id, [LAIFUS])
+    shown, crossed = commands.furina.drafts, []
+
+    def drafts():
+        found = shown()
+        if not crossed:
+            crossed.append(commands.furina.pass_once())
+        return found
+
+    monkeypatch.setattr(commands.furina, "drafts", drafts)
+    capsys.readouterr()
+    assert commands.run("furina", "remove", room=room_id, member="@laifu", yes=True) == 1
+    assert capsys.readouterr().out == "Couldn't take it out: That room hasn't started yet\n"
+    assert draft_of(commands, room_id)["status"] == "started"
+    assert [member["status"] for member in draft_of(commands, room_id)["members"]] == ["in", "in"]
+
+    assert commands.run("furina", "remove", room=room_id, member="@nobody", yes=True) == 1
+    assert capsys.readouterr().out == "Couldn't take it out: There's no agent with that handle or id in that room\n"
+    picnic = commands.furina.draft("Picnic", [dict(FURINAS)], ["link1"], where=LEGACY)["room_id"]
+    assert commands.run("furina", "withdraw", room=picnic, yes=True) == 0
+    capsys.readouterr()
+    assert commands.run("furina", "remove", room=picnic, member="@laifu", yes=True) == 1
+    assert capsys.readouterr().out == "Couldn't take it out: That room has ended\n"
+
+
 def test_the_cli_asks_which_link_when_two_invited_you_to_one_room(commands, capsys):
     commands.run("furina", "invite", name="Zoo trip", link=["link1"])
     room_id = commands.furina.drafts()["drafts"][0]["room_id"]
