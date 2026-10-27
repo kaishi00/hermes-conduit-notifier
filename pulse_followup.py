@@ -31,6 +31,11 @@ was asked (inbox_store). When new events come in, its checks are brought
 forward (``check_watches_now``), so "tell me when the bank confirms the
 transfer" is told when the bank's notification arrives, not at the next
 backoff. A watch asks if it's still wanted after WATCH_GIVE_UP_S.
+
+A commitment or promise said for a place ("next time I'm at Costco", "when I
+leave work") waits for it instead of a schedule (pulse_places): its check
+comes when the user gets there or leaves, with that moment, and its
+reminder goes at once. With no date it waits PLACE_WAIT_S, then expires.
 """
 
 from __future__ import annotations
@@ -42,7 +47,7 @@ import re
 import secrets
 from datetime import datetime, tzinfo
 from pathlib import Path
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Callable, Collection, Optional, Sequence
 
 from . import pulse_evidence as evidence
 from . import pulse_hermes as hermes
@@ -91,6 +96,15 @@ BACKOFF_S = (2 * 3600.0, 6 * 3600.0, 86400.0, 2 * 86400.0, 3 * 86400.0)
 GIVE_UP_S = 7 * 86400.0
 # A watch waits on the world, so it asks later than a promise.
 WATCH_GIVE_UP_S = 30 * 86400.0
+# What may wait for a place (pulse_places), and how long one with no date
+# waits (one with a date: GIVE_UP_S past it) before it expires. Its row
+# waits with PLACE until a moment makes it due.
+PLACE_KINDS = (PROMISE, COMMITMENT)
+PLACE_WAIT_S = 30 * 86400.0
+PLACE = "waiting for its place"
+# A reminder for a place that can't go this long after the user got there
+# (another follow-up was on its way, a try failed) shows without a push.
+MOMENT_FRESH_S = 30 * 60.0
 # Set when the inbox takes new events (inbox_arrived): open watches are checked
 # at the next follow-up run.
 INBOX_ARRIVED = "inbox_arrived_at"
@@ -174,6 +188,11 @@ Return a JSON object {"decision": ..., "news": ..., "why": ..., "check_again_hou
 - "why": one short sentence saying what in the material led to the decision.
 - "check_again_hours": for "wait", when checking again could find something new (a number from 0.5 to 72), else null.""" + WHEN_FIELDS
 
+# Added to a check made as the user got to (or left) the place it was said for.
+PLACE_INSTRUCTION = ("\n\nIt was said for a place, and the material says the user just got there (or just left it): "
+                     "that's when it was meant for. Answer \"tell\" unless the material shows it's done or no "
+                     "longer wanted, and start \"news\" with where they are (\"You're at Costco: ...\").")
+
 TEXT = """Pulse follow-up {tag}.
 In the chat "{title}" ({said}), you told the user: "{evidence}"
 {news}"""
@@ -225,6 +244,36 @@ def first_check(item: dict, pace: float = 1.0) -> float:
     return start + FIRST_CHECK_S * pace
 
 
+def waits_for_place(item: dict) -> bool:
+    """Whether an item waits for a place: a commitment or promise memory
+    kept place words for."""
+    return item.get("kind") in PLACE_KINDS and bool(item.get("place_words"))
+
+
+def place_wait_end(item: dict) -> float:
+    """When an item waiting for its place stops waiting: PLACE_WAIT_S after
+    it was said, or GIVE_UP_S past its date when it has one."""
+    due = item.get("due_at")
+    if isinstance(due, (int, float)) and not isinstance(due, bool):
+        return float(due) + GIVE_UP_S
+    return float(item["valid_from"]) + PLACE_WAIT_S
+
+
+def place_reached(pulse_store: store.PulseStore, item: dict, moment: dict, now: float) -> bool:
+    """The user got to (or left) the place ``item`` waits for (``moment``, a
+    pulse_store moments row): its check is due now, with the moment. False
+    when its follow-up isn't waiting for its place (already on its way)."""
+    pulse_store.place_followup(item["id"], next_check_at=place_wait_end(item), now=now, decision=PLACE)
+    row = pulse_store.followup(item["id"])
+    if row is None or row["decision"] != PLACE:
+        return False
+    pulse_store.decide_followup(item["id"], decision=PLACE, news="", why=row["why"], checks=int(row["checks"]),
+                                next_check_at=now, now=now, failures=int(row["failures"]),
+                                timing={"moment": {"place": moment["place"], "words": item["place_words"],
+                                                   "on": moment["event"], "at": float(moment["at"])}})
+    return True
+
+
 def give_up_from(item: dict) -> float:
     """A promise counts as forgotten a week after this: when it was said,
     or its due time when that's later (one due in a month isn't late yet)."""
@@ -265,8 +314,10 @@ def check_all_now(pulse_store: store.PulseStore, now: float) -> None:
         return
     pulse_store.set(REMINDERS_TOLD, [])
     for row in pulse_store.followups(-1):  # -1: every row
-        # Not the "still want it?" ones: their next check closes them on no news.
-        if row["next_check_at"] is not None and row["next_check_at"] > now and row["decision"] not in (ASKED, TIMED):
+        # Not the "still want it?" ones: their next check closes them on no
+        # news. Nor one waiting for its place: its time is when the user gets there.
+        if row["next_check_at"] is not None and row["next_check_at"] > now \
+                and row["decision"] not in (ASKED, TIMED, PLACE):
             pulse_store.decide_followup(row["item_id"], decision=row["decision"], news=row["news"], why=row["why"],
                                         checks=int(row["checks"]), next_check_at=now, now=now,
                                         failures=int(row["failures"]), timing=followup_timing(row))
@@ -326,7 +377,12 @@ def schedule(pulse_store: store.PulseStore, now: float) -> None:
     for kind in KINDS:
         for item in pulse_store.open_items(kind):
             open_ids.add(item["id"])
-            if not off:  # turned off by ratings: no new schedules until it's back on
+            if off:  # turned off by ratings: no new schedules until it's back on
+                continue
+            if waits_for_place(item):
+                # Said with its place, or since: it waits for that, not a schedule.
+                pulse_store.place_followup(item["id"], next_check_at=place_wait_end(item), now=now, decision=PLACE)
+            else:
                 pulse_store.add_followup(item["id"], next_check_at=first_check(item, pace), now=now)
     pulse_store.end_followups(keep=open_ids, now=now)
 
@@ -366,10 +422,12 @@ def said_since(rows: Sequence[Any], subject: str, *, after: float, zone: tzinfo)
     return "\n".join(reversed(kept)), "\n".join(line for line in (_line(row, zone) for row in earlier) if line)
 
 
-def material(pulse_store: store.PulseStore, home: Path, item: dict, *, zone: tzinfo, now: float) -> str:
+def material(pulse_store: store.PulseStore, home: Path, item: dict, *, zone: tzinfo, now: float,
+             moment: Optional[dict] = None) -> str:
     """What a check reads: the newest of what was said since the promise,
     as much as the budget holds, and what that chat said on the subject
-    before it."""
+    before it; with ``moment`` (followup_timing's), where the user just got
+    to or left."""
     where = home_for(home, item["profile"])
     if where is None:
         raise ChatUnreadable(f"no profile named {item['profile']!r} any more")
@@ -381,6 +439,11 @@ def material(pulse_store: store.PulseStore, home: Path, item: dict, *, zone: tzi
              f"{words}: \"{_clip(item['evidence'], 300)}\" ({_local(item['valid_from'], zone)})"]
     if item.get("due"):
         parts.append(f"Due: {item['due']}")
+    if moment:
+        verb = "Just arrived at" if moment.get("on") == "arrive" else "Just left"
+        parts.append(f"## Where the user is\n{verb} {_clip(moment.get('place'), 80)} "
+                     f"({_local(float(moment['at']), zone)}), the place they said this for "
+                     f"(\"{_clip(moment.get('words'), 60)}\").")
     try:
         # Through the chat's compression chain: a long chat goes on in a new session.
         rows = hermes.chain_messages(where, chat_id=item["chat_id"], after_id=int(item["message_id"]),
@@ -420,17 +483,19 @@ def material(pulse_store: store.PulseStore, home: Path, item: dict, *, zone: tzi
 
 
 def check(llm: Llm, text: str, *, skip_seen: bool = False, kind: str = PROMISE,
-          note: str = "") -> tuple[dict[str, Any], int]:
+          note: str = "", place: bool = False) -> tuple[dict[str, Any], int]:
     """One check: the decision, news, why, wait hint, when the news is
     useful (pulse_hours.WHEN) and whether it's urgent, or a ``wait`` with
-    the reason when the reply is unusable."""
+    the reason when the reply is unusable. ``place``: made as the user got
+    to (or left) the place it was said for."""
     mark = secrets.token_hex(4)
     while mark in text:  # the material can't close its own fence
         mark = secrets.token_hex(4)
     instructions = {COMMITMENT: COMMITMENT_INSTRUCTIONS, WATCH: WATCH_INSTRUCTIONS}.get(kind, INSTRUCTIONS)
     # "Already knew" is about news: a reminder is meant to repeat.
     parsed, tokens = llm(instructions + (SEEN_INSTRUCTION if skip_seen and kind != COMMITMENT else "")
-                         + report.note_block(note), f"<<<check {mark}\n{text}\ncheck {mark}>>>")
+                         + (PLACE_INSTRUCTION if place else "") + report.note_block(note),
+                         f"<<<check {mark}\n{text}\ncheck {mark}>>>")
     if not isinstance(parsed, dict) or parsed.get("decision") not in DECISIONS:
         return {"decision": "wait", "news": "", "why": "the check's reply was unusable", "hint": None,
                 "when": hours.ANY, "urgent": False}, tokens
@@ -950,17 +1015,29 @@ def check_found(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tz
     _store_found_times(pulse_store, checked, now)
 
 
+def moment_due(pulse_store: store.PulseStore, now: float) -> list[int]:
+    """The items whose check is due because the user just got to (or left)
+    the place they wait for (``place_reached``)."""
+    return [row["item_id"] for row in pulse_store.due_followups(now)
+            if row["decision"] == PLACE and followup_timing(row).get("moment")]
+
+
 def run(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzinfo, now: float,
-        still_leader: Callable[[], bool], budget: float, done: Optional[dict[str, int]] = None) -> None:
+        still_leader: Callable[[], bool], budget: float, done: Optional[dict[str, int]] = None,
+        only: Optional[Collection[int]] = None) -> None:
     """Checks the promises and commitments that are due, soonest first, while the budget
-    and the lease last, after the chats a Do it opened."""
+    and the lease last, after the chats a Do it opened. ``only``: just these
+    items' checks (``moment_due``'s), and no Do it reads."""
     done = {} if done is None else done
-    check_acts(pulse_store, home, llm, zone=zone, now=now, still_leader=still_leader, budget=budget, done=done)
+    if only is None:
+        check_acts(pulse_store, home, llm, zone=zone, now=now, still_leader=still_leader, budget=budget, done=done)
     if learning.level(pulse_store, FOLLOWUP) == "off":
         return
     pace = learning.pace(pulse_store, FOLLOWUP)
     skip_seen = learning.skips_seen(pulse_store, FOLLOWUP)
     for row in pulse_store.due_followups(now):
+        if only is not None and row["item_id"] not in only:
+            continue
         if not still_leader() or done.get("tokens", 0) >= budget or \
                 done.get("checks", 0) + done.get("failed", 0) >= MAX_CHECKS:
             return
@@ -970,14 +1047,25 @@ def run(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzinfo, no
             continue
         if mute(pulse_store, item, row, now):
             continue
+        # Waiting for its place: checked when the user gets there (or
+        # leaves), with that moment; due without one, its wait is over.
+        place = waits_for_place(item) and row["decision"] == PLACE
+        moment = followup_timing(row).get("moment") if place else None
+        if place and not moment:
+            expired = pulse_store.close_item(item["id"], status="expired",
+                                             closed_by=f"pulse follow-up: never at {item['place_words']}"[:300])
+            pulse_store.decide_followup(item["id"], decision="expired" if expired else "closed", news="",
+                                        why=_clip(f"the wait for {item['place_words']} ended", WHY_LIMIT),
+                                        checks=int(row["checks"]), next_check_at=None, now=now)
+            continue
         # A reminder held for a free slot, or news held for its time, is
         # checked again before it goes: the user may have done it meanwhile.
         held = row["decision"] in (REMINDER_HELD, TIMED)
         checks = int(row["checks"]) + 1
         # Only after a real check read the chat (a promise found by a backfill is read first).
         give_up = WATCH_GIVE_UP_S if item["kind"] == WATCH else GIVE_UP_S
-        stale = (row["decision"] == "wait" and now - give_up_from(item) >= give_up) or \
-            (held and row["news"] == STALE_NEWS)
+        stale = not place and ((row["decision"] == "wait" and now - give_up_from(item) >= give_up) or
+                               (held and row["news"] == STALE_NEWS))
         if stale and not held:
             last = pulse_store.get("followup_stale_at")
             if isinstance(last, (int, float)) and not isinstance(last, bool) and now - last < STALE_EVERY_S:
@@ -986,14 +1074,23 @@ def run(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzinfo, no
                 continue
         text = ""
         try:
-            text = material(pulse_store, home, item, zone=zone, now=now)
-            outcome, tokens = check(llm, text, skip_seen=skip_seen, kind=item["kind"], note=report.note(pulse_store))
+            text = material(pulse_store, home, item, zone=zone, now=now, moment=moment)
+            outcome, tokens = check(llm, text, skip_seen=skip_seen, kind=item["kind"], note=report.note(pulse_store),
+                                    place=moment is not None)
         except Exception as error:  # noqa: BLE001 — a failed check waits for the next
             logger.warning("conduit_push: Pulse follow-up check failed", exc_info=True)
             # A call that failed may still have been billed: count its input
             # roughly, so a failing loop still meets the daily cap.
             done["tokens"] = done.get("tokens", 0) + len(text) // 4
             failures = int(row["failures"]) + 1
+            if place and failures < MAX_FAILURES:
+                # Its moment is gone: it waits for the next one.
+                pulse_store.decide_followup(item["id"], decision=PLACE, news="",
+                                            why=f"the check as you got there failed ({type(error).__name__})",
+                                            checks=checks, next_check_at=place_wait_end(item), now=now,
+                                            failures=failures)
+                done["failed"] = done.get("failed", 0) + 1
+                continue
             if row["decision"] == ASKED or failures >= MAX_FAILURES:
                 # The user was asked already, or checks keep failing: end it rather than loop.
                 why = ("asked if it was still wanted; the last check failed" if row["decision"] == ASKED
@@ -1017,7 +1114,7 @@ def run(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzinfo, no
         # saying another would hold it again), and what held it, for its Why?.
         kept = followup_timing(row) if held else {}
         timing = {**kept, "when": kept.get("when") or outcome["when"],
-                  "urgent": kept.get("urgent") is True or outcome["urgent"]}
+                  "urgent": kept.get("urgent") is True or outcome["urgent"], **({"moment": moment} if moment else {})}
         if stale and decision == "wait":
             # A week with nothing showing it happened, even in other chats
             # or the background: ask if it's still wanted.
@@ -1034,6 +1131,11 @@ def run(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzinfo, no
                 continue  # closed by the user (or the chat) during the call
             _tell(pulse_store, item, row, news=outcome["news"], why=outcome["why"], checks=checks, now=now,
                   timing=timing)
+            continue
+        if decision == "wait" and place:
+            # Not now after all (the chat says so): the next time they're there.
+            pulse_store.decide_followup(item["id"], decision=PLACE, news="", why=outcome["why"], checks=checks,
+                                        next_check_at=place_wait_end(item), now=now)
             continue
         if decision == "wait" and row["decision"] == ASKED:
             expired = pulse_store.close_item(item["id"], status="expired",
@@ -1056,8 +1158,13 @@ def _tell(pulse_store: store.PulseStore, item: dict, row: dict, *, news: str, wh
           timing: dict[str, Any]) -> None:
     """News for next_send to tell. A commitment's reminder takes one of
     the day's (``_tell_reminder``), unless it already took one before it
-    was held for its time."""
-    if item["kind"] == COMMITMENT and row["decision"] != TIMED:
+    was held for its time; one for a place the user just got to is never
+    held for a slot, as its time is now."""
+    if item["kind"] == COMMITMENT and timing.get("moment"):
+        _count_reminder(pulse_store, now)
+        pulse_store.decide_followup(item["id"], decision="tell", news=news, why=why, checks=checks,
+                                    next_check_at=None, now=now, timing=timing)
+    elif item["kind"] == COMMITMENT and row["decision"] != TIMED:
         _tell_reminder(pulse_store, item["id"], news=news, why=why, checks=checks, now=now, timing=timing)
     else:
         pulse_store.decide_followup(item["id"], decision="tell", news=news, why=why, checks=checks,
@@ -1078,13 +1185,22 @@ def _hold_reminder(pulse_store: store.PulseStore, now: float) -> Optional[float]
     ready today), else when the oldest of today's reminders (the nudge
     level's number) is a day old."""
     per_day = learning.nudging(pulse_store)["reminders"]
-    told = pulse_store.get(REMINDERS_TOLD)
-    told = sorted(at for at in (told if isinstance(told, list) else [])
-                  if isinstance(at, (int, float)) and not isinstance(at, bool) and now - at < 86400.0)
+    told = _reminders_today(pulse_store, now)
     if len(told) >= per_day:
         return told[-per_day] + 86400.0
     pulse_store.set(REMINDERS_TOLD, told + [now])
     return None
+
+
+def _reminders_today(pulse_store: store.PulseStore, now: float) -> list[float]:
+    told = pulse_store.get(REMINDERS_TOLD)
+    return sorted(at for at in (told if isinstance(told, list) else [])
+                  if isinstance(at, (int, float)) and not isinstance(at, bool) and now - at < 86400.0)
+
+
+def _count_reminder(pulse_store: store.PulseStore, now: float) -> None:
+    """Counts a reminder that goes whatever the day's count: one for a place."""
+    pulse_store.set(REMINDERS_TOLD, _reminders_today(pulse_store, now) + [now])
 
 
 def mute(pulse_store: store.PulseStore, item: dict, row: dict, now: float) -> bool:
@@ -1163,14 +1279,22 @@ def next_send(pulse_store: store.PulseStore, now: float, home: Optional[Path] = 
             continue
         if learned is None:
             learned = pulse_store.learned(now)
-        loudness = item_level(item, learned, nudge=nudge, ceiling=ceiling, now=now)
         timing = _this_try(followup)
-        if quiet and loudness == "push":
+        moment = timing.get("moment")
+        # A reminder for a place the user just got to comes up at least on
+        # the screen, up to the level the user set, and is never held for
+        # the brief or a better time: by then they've left. Its time was
+        # checked as they got there (pulse_places.not_now).
+        loudness = item_level(item, learned, nudge=nudge, ceiling=ceiling, now=now, floor=bool(moment))
+        if moment:
+            if loudness == "push" and now - float(moment.get("at") or 0) > MOMENT_FRESH_S:
+                loudness, timing = "screen", {**timing, "late": True}
+        elif quiet and loudness == "push":
             loudness, timing = "brief", {**timing, "held": QUIET}
         if loudness == "push":
             if len(attempts) >= TRIES or (attempts and now - attempts[-1]["updated_at"] < RETRY_S):
                 continue
-            if zone is not None:
+            if zone is not None and not moment:
                 loudness, timing = _timed(pulse_store, item, followup, now=now, zone=zone, home=home)
                 if loudness is None:
                     continue
@@ -1260,7 +1384,8 @@ def item_attrs(item: dict, now: float) -> dict[str, str]:
     return prefs.attributes(FOLLOWUP, prefs.place(item["profile"], item["chat_id"]), prefs.band(_due(item), now))
 
 
-def item_level(item: dict, learned: prefs.Learned, *, nudge: str, ceiling: str, now: float) -> str:
+def item_level(item: dict, learned: prefs.Learned, *, nudge: str, ceiling: str, now: float,
+               floor: bool = False) -> str:
     """How loudly a follow-up the check decided to tell comes up: its score
     (pulse_prefs.score: what learning adds for follow-ups from its chat and
     of its timing, as a pick) gives push, the screen or the brief
@@ -1268,11 +1393,12 @@ def item_level(item: dict, learned: prefs.Learned, *, nudge: str, ceiling: str, 
     ``ceiling``, the level the user set. It's news now, so it's as loud as
     something due soon whatever its due date, which counts for what's
     learned about timing: with nothing learned it pushes at every nudge
-    level, as follow-ups did before learning."""
+    level, as follow-ups did before learning. ``floor``: it's one anyway
+    (a reminder for a place the user just got to)."""
     due = _due(item)
     attrs = item_attrs(item, now)
-    floor = due is not None and (due < now if item["kind"] == PROMISE
-                                 else item["kind"] == COMMITMENT and abs(due - now) <= FLOOR_S)
+    floor = floor or (due is not None and (due < now if item["kind"] == PROMISE
+                                           else item["kind"] == COMMITMENT and abs(due - now) <= FLOOR_S))
     level = prefs.level(prefs.score(learned, attrs), prefs.SOON, loud=learned.loudness(FOLLOWUP), nudge=nudge,
                         floor=floor, lowest="brief")
     return prefs.quieter(level, ceiling)
@@ -1318,6 +1444,13 @@ def held_note(timing: dict[str, Any], loudness: str) -> str:
         notes.append(f"Shown without a notification: {busy[1]} for over three hours.")
     elif busy and loudness == "push":
         notes.append(f"Waited until {busy[0]}.")
+    moment = timing.get("moment")
+    if isinstance(moment, dict) and moment.get("words"):
+        words = _clip(moment["words"], 60)
+        notes.insert(0, f"You said this for {words}, and you just arrived." if moment.get("on") == "arrive"
+                     else f"You said this for leaving {words}, and you just left.")
+        if loudness == "screen" and timing.get("late") is True:
+            notes.append("Shown without a notification: it couldn't go out while you were there.")
     return " ".join(notes)
 
 
@@ -1385,6 +1518,11 @@ def settle(pulse_store: store.PulseStore, now: float, home: Optional[Path] = Non
 def describe(row: dict, item: Optional[dict], zone: tzinfo) -> str:
     what = _clip(item["text"], 100) if item else f"item {row['item_id']}"
     state = row["decision"] or "waiting"
-    when = f", next check {_local(row['next_check_at'], zone)}" if row.get("next_check_at") else ""
+    if row["decision"] == PLACE and item and row.get("next_check_at"):
+        due = followup_timing(row).get("moment")
+        state += f" ({_clip(item.get('place_words'), 40)})"
+        when = ", checking now" if due else f", until {_local(row['next_check_at'], zone)}"
+    else:
+        when = f", next check {_local(row['next_check_at'], zone)}" if row.get("next_check_at") else ""
     why = f": {row['why']}" if row.get("why") else ""
     return f"#{row['item_id']} {what}  [{state}{when}]{why}"

@@ -2460,13 +2460,15 @@ is blocked, with a note naming what the turn may use:
 | `conduit_calendar` | `overview`, `calendars`, `events`, `free_busy`, `next`, `reminders` | |
 | `conduit_phone` | `status`, `alarms` | |
 | `conduit_contacts` | `people` | |
-| `conduit_maps` | `search`, `lookup`, `reverse_geocode`, `directions`, `travel_times` | between places the turn names: never `"me"` (what `near` and `from` default to) or a saved place; 20 a day |
+| `conduit_maps` | `search`, `lookup`, `reverse_geocode`, `directions`, `travel_times` | between places the turn names: never `"me"` (what `near` and `from` default to) or a saved place, unless Where you are is on (below); 20 a day |
+| `conduit_location` | `now`, `places`, `history`, `distance_to` | only with Where you are on (below) |
 | `web_search` | | only on a follow-up about a promise or commitment, which reads its chat (reports, briefs and watches carry the Shortcuts inbox, other people's words); no web address in the query; 10 a day |
 
 - At most 6 look-ups a turn; days are UTC. Calendar adds become
   suggestions (below). `pending` (it marks the phone's answers reported),
-  alarm and timer changes, `navigate`, `web_extract`, `conduit_location`,
-  `conduit_health` and every other tool stay blocked.
+  alarm and timer changes, `navigate`, `web_extract`, `conduit_location`'s
+  `locate` and place rules, `conduit_health` and every other tool stay
+  blocked.
 - Tool Search's `tool_search` and `tool_describe` are allowed, and each call
   inside a `tool_call` Hermes couldn't unwrap is checked the same way.
 - A turn in the Pulse chat (or what compression made of it) that Pulse didn't
@@ -2476,15 +2478,15 @@ is blocked, with a note naming what the turn may use:
   Hermes's "approve", so YOLO mode or an "always" rule can't widen any of
   this, and a check that fails raises, which Hermes takes as a block.
 - Each card says what its turn looked at, for Why? (`"looked"` in
-  `/pulse/feed`: `calendar`, `phone`, `contacts`, `maps`, `web`, never the
-  queries). Maps look-ups are in the location read log under the Pulse
-  chat's title.
+  `/pulse/feed`: `calendar`, `phone`, `contacts`, `maps`, `location`,
+  `web`, never the queries). Maps look-ups and location reads are in the
+  location read log under the Pulse chat's title.
 - On with Pulse: `hermes conduit-push pulse look on|off`, or `PUT /pulse`
   with `"look_first"`. Off, Pulse's turns use no tools. `hermes conduit-push
   pulse look` shows today's look-ups and what recent turns looked at.
   Capability `pulse_look`.
 
-## Pulse suggests, you add (plugin 0.97+)
+## Pulse suggests, you add (plugin 0.98+)
 
 A Pulse turn never changes the phone. When adding an event or reminder would
 help, its `conduit_calendar` `add_event` or `add_reminder` doesn't run: the
@@ -2530,6 +2532,56 @@ error, so the model can fix it.
   Pulse's message is in.
 - `hermes conduit-push pulse look` lists recent suggestions and how each
   went. Capability `pulse_proposals`.
+
+## Pulse knows where you are (plugin 0.100+)
+
+Off until you turn it on: Where you are in Conduit's Settings > Pulse,
+`hermes conduit-push pulse where on|off`, or `PUT /pulse` with `"where"`.
+Pulse reads where you are only while it's on and Conduit shares your
+location in the background (Settings > Location), not paused. `GET /pulse`
+says `"where"` and `"where_ready"` (sharing in the background now).
+Capability `pulse_where`.
+
+- **Reminders for a place.** Pulse memory keeps the place a commitment or
+  promise was said for ("next time I'm at Costco", "when I get home", "when
+  I leave work"), only when the words are on the item's own line, never
+  guessed. Instead of checks on a schedule, the item waits for its place: 30
+  days, or a week past its date when it has one, then it expires. When you
+  get there (or leave, when that's what you said), Pulse checks it as it
+  checks any follow-up, with where you are, and the reminder goes at once
+  ("You're at Costco: batteries"), even past the day's reminders. Its card's
+  Why? says "You said this for Costco, and you just arrived." One that
+  can't go within 30 minutes (another follow-up was on its way) shows on
+  the Pulse screen without a notification. A check that says not now, or
+  fails, waits for the next time you're there.
+- **Places.** The words name a saved place by its name ("Costco" is
+  "Costco Wholesale") or its kind ("home" or "my place", "work" or "the
+  office", "the gym", "school"), and a kind's words name only a place of
+  that kind: "home" isn't Home Depot. Words that name no saved place are
+  kept, and match one saved later. A private place never matches.
+- **Arriving and leaving.** As `/location/ingest` takes arrivals at and
+  departures from saved, non-private places, at most 15 minutes old (the
+  place rules' limit), it hands them to Pulse, here and in each profile
+  that reads this location ("Share with this host's other profiles"), and
+  Pulse handles them on its next tick, before anything else. Each is kept a
+  day in `conduit-pulse.db` with what it did; one from a phone that keeps
+  no location history keeps only its id. Nothing is made due at night, on
+  a quiet day, in a part of the day you said is the wrong time for
+  follow-ups, during an event or a Focus that holds calls (driving doesn't
+  count), with follow-ups off, or with follow-ups kept for the brief (it
+  would come after you've left): what waits for the place waits for the
+  next time.
+- **Look-ups.** Pulse's look-ups may read `conduit_location` and ask Maps
+  from `"me"` or a saved place (above), each read in the location read log
+  under the Pulse chat.
+- **Off** reads nothing and deletes the arrivals and departures Pulse kept;
+  so does wiping location in Conduit. The places on what Pulse remembers
+  stay, like the rest of its memory: `GET /pulse/memory` gives an item said
+  for a place `"place"` (`words`, `on`: `arrive` or `leave`, and `saved`:
+  the saved place it names, or null).
+- `hermes conduit-push pulse where` lists what waits for a place and the
+  saved place each names, and what the last day's arrivals and departures
+  did.
 
 ## Apple Watch lookups and jobs (plugin 0.6+, jobs 0.7+, Gemini tokens 0.8+, Qwen tokens 0.75+)
 

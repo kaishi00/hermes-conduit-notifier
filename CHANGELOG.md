@@ -13,6 +13,18 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.100.0 (2026-10-27)
+
+### New and improved
+- Pulse can know where you are, once you turn on Where you are in Settings >
+  Pulse (it's off until you do). Say "next time I'm at Costco, remind me to
+  get batteries" and the reminder comes when you get there, or when you
+  leave if that's what you said, instead of on a schedule. Pulse's look-ups
+  can use where you are too. It needs your location shared in the
+  background, never reads a private place, and each read shows in
+  Location's read log. From the command line: `hermes conduit-push pulse
+  where`.
+
 ## 0.99.0 (2026-10-27)
 
 ### Fixes

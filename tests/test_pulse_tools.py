@@ -9,7 +9,7 @@ import time
 
 import pytest
 
-from test_maps import NOW, _phone, location, maps
+from test_maps import NOW, _phone, location, maps, sharing
 from test_pulse import ROOT, SID, _load, cli, control, plugin, pulse, store
 from test_pulse_followup import CHAT, commitment, followup, live, tell  # noqa: F401
 
@@ -37,7 +37,7 @@ def block(message):
 NEVER = ["terminal", "execute_code", "process", "delegate_task", "browser_navigate", "computer_use", "read_file",
          "write_file", "patch", "search_files", "session_search", "memory", "skill_manage", "skill_view",
          "cronjob", "kanban", "mcp_github_create_issue", "send_message", "web_extract", "clarify",
-         "conduit_call_watch", "conduit_location", "conduit_health", "conduit_settings", "conduit_present",
+         "conduit_call_watch", "conduit_health", "conduit_settings", "conduit_present",
          "conduit_inbox", ""]
 
 
@@ -86,9 +86,35 @@ def test_a_probe_gets_nothing():
     assert check("tool_search", {"query": "calendar"}, probe) == tools.Verdict(False, tools.NO_TOOLS)
 
 
-def test_maps_never_uses_where_the_user_is():
+def test_maps_never_uses_where_the_user_is_without_where_you_are():
     assert check("conduit_maps", {"action": "search", "query": "pizza"}, where=lambda args: True) == \
         tools.Verdict(False, tools.WHERE_BLOCK)
+    # With it on (pulse_places.reads: the switch, and sharing in the background), "me" and saved places are fine.
+    assert check("conduit_maps", {"action": "search", "query": "pizza"}, tools.Turn("report", where=True),
+                 where=lambda args: True) == tools.Verdict(True, labels=("maps",))
+
+
+@pytest.mark.parametrize("action", ["now", "places", "history", "distance_to"])
+def test_where_the_user_is_is_read_only_with_where_you_are(action):
+    for turn in (REPORT, BRIEF, PROMISE, WATCH):
+        assert check("conduit_location", {"action": action}, turn) == tools.Verdict(False, tools.LOCATION_BLOCK)
+        on = tools.Turn(turn.kind, turn.item_kind, where=True)
+        assert check("conduit_location", {"action": action}, on) == tools.Verdict(True, labels=("location",))
+
+
+@pytest.mark.parametrize("action", ["locate", "set_rule", "remove_rule", "rules", None])
+def test_a_locate_and_the_place_rules_never_run_on_a_pulse_turn(action):
+    # A locate wakes the phone; the rules are what runs on a move, not where the user is.
+    # Refused as never allowed whether Where you are is on or off: turning it on wouldn't help.
+    for turn in (tools.Turn("report", where=True), REPORT):
+        verdict = check("conduit_location", {} if action is None else {"action": action}, turn)
+        assert not verdict.allowed and verdict.message.startswith("Pulse turns can't use conduit_location")
+
+
+def test_a_turn_says_it_may_read_where_the_user_is_only_when_it_may():
+    assert "conduit_location" not in tools.look_note(REPORT) and "never \"me\"" in tools.look_note(REPORT)
+    on = tools.look_note(tools.Turn("report", where=True))
+    assert "conduit_location (now, places, history, distance_to" in on and "never \"me\"" not in on
 
 
 def test_only_a_follow_up_about_what_was_said_searches_the_web():
@@ -177,6 +203,18 @@ def test_calls_through_the_bridge_count_toward_the_caps():
     assert check("tool_call", twice, tools.Turn("report", today={"maps": 18})).allowed
     assert check("tool_call", twice, tools.Turn("report", today={"maps": 19})) == tools.Verdict(
         False, tools.DAILY_CAP_BLOCK.format(label="maps"))
+
+
+def test_past_the_days_cap_maps_reads_no_places():
+    read = []
+
+    def where(args):
+        read.append(args)
+        return True
+    spent = tools.Turn("report", today={"maps": 20})
+    assert check("conduit_maps", {"action": "search", "query": "pizza"}, spent, where) == tools.Verdict(
+        False, tools.DAILY_CAP_BLOCK.format(label="maps"))
+    assert read == []
 
 
 def test_past_the_turns_cap_maps_reads_no_places():
@@ -296,6 +334,17 @@ def test_with_look_first_off_a_pulse_turn_gets_no_tools(live):
     text = follow_up_turn(live)
     assert pulse.pre_llm_call(SID, "t1", text) == followup.NOTE
     assert pulse.pre_tool_call(SID, "t1", "conduit_calendar", {"action": "events"}) == block(pulse.BLOCK_MESSAGE)
+
+
+def test_a_pulse_turn_reads_where_the_user_is_with_where_you_are_and_background_sharing(live):
+    row = {"kind": pulse.REPORT, "item_id": None}
+    assert not pulse._tool_turn(live.store, row).where
+    live.store.set(store.WHERE_SETTING, True)
+    assert not pulse._tool_turn(live.store, row).where  # nothing shared
+    phone = _phone(location.LocationStore(live.home))
+    assert pulse._tool_turn(live.store, row).where
+    location.LocationStore(live.home).ingest(phone.seal(phone.batch(sharing=sharing(background=False))))
+    assert not pulse._tool_turn(live.store, row).where
 
 
 def test_a_follow_ups_item_says_whether_it_may_search(live):

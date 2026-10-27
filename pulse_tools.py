@@ -42,8 +42,12 @@ ALLOWED: dict[str, Entry] = {
     "conduit_contacts": Entry("contacts", frozenset({"people"}), "The same snapshot."),
     "conduit_maps": Entry("maps", frozenset({"search", "lookup", "reverse_geocode", "directions", "travel_times"}),
                           "Asks Apple Maps from this host or the phone, within Maps' own budgets: the query leaves "
-                          "the host, and each call goes in the location read log. Never \"me\" or a saved place: "
-                          "where the user is waits for its own switch. Navigate is a write."),
+                          "the host, and each call goes in the location read log. \"me\" or a saved place only "
+                          "with Where you are on (Turn.where). Navigate is a write."),
+    "conduit_location": Entry("location", frozenset({"now", "places", "history", "distance_to"}),
+                              "Reads where the user is from what Conduit shared with this host, only with Where you "
+                              "are on (Turn.where): no network, and each read goes in the location read log. Not "
+                              "locate, which asks the phone, nor the rules, which change things."),
     "web_search": Entry("web", frozenset(),
                         "Sends the query to Hermes's search provider. Only on a follow-up about a promise or "
                         "commitment, and never with a web address in it, so no search fetches a page with the "
@@ -76,6 +80,10 @@ NO_TOOLS = "Pulse turns can't use tools."
 USES = ("conduit_calendar (overview, calendars, events, free_busy, next, reminders), conduit_phone (status, "
         "alarms), conduit_contacts (people) and conduit_maps (search, lookup, reverse_geocode, directions, "
         "travel_times, between places you name: never \"me\" or a saved place)")
+# With Where you are on.
+WHERE_USES = ("conduit_calendar (overview, calendars, events, free_busy, next, reminders), conduit_phone (status, "
+              "alarms), conduit_contacts (people), conduit_location (now, places, history, distance_to: where the "
+              "user is) and conduit_maps (search, lookup, reverse_geocode, directions, travel_times)")
 SEARCH_USE = ", and web_search (a few words: no web addresses, nothing private about the user)"
 # Appended to a report's, follow-up's or brief's note while look_first is on.
 LOOK_NOTE = ("Before you answer you may look things up, at most {limit} times, to check what the message brings "
@@ -86,6 +94,8 @@ LOOK_NOTE = ("Before you answer you may look things up, at most {limit} times, t
 NOT_ALLOWED = "Pulse turns can't use {what}. They may look things up with {uses}."
 WHERE_BLOCK = ("Pulse turns can't use where the user is: name the places (\"near\" and \"from\" default to "
                "\"me\"), and not a saved place like home or work.")
+LOCATION_BLOCK = ("Pulse turns can't read where the user is: that needs Where you are on in Pulse's settings, and "
+                  "location shared in the background. Write the message without it.")
 SEARCH_BLOCK = "Pulse can search the web only on a follow-up about something said in a chat."
 ADDRESS_BLOCK = "A Pulse search can't have a web address in it: search with words."
 QUERY_BLOCK = "web_search needs a query of up to 400 characters."
@@ -97,12 +107,14 @@ BRIDGE_BLOCK = "Pulse turns call tools directly: call {tool} itself instead of t
 @dataclass(frozen=True)
 class Turn:
     """The Pulse turn a call is made on: its attempt's kind, the kind of
-    the item a follow-up is about, the look-ups it has made, and today's
-    look-ups by label."""
+    the item a follow-up is about, the look-ups it has made, today's
+    look-ups by label, and whether it may read where the user is
+    (pulse_places.reads: Where you are on, and sharing in the background)."""
     kind: str
     item_kind: str = ""
     calls: int = 0
     today: Mapping[str, int] = field(default_factory=dict)
+    where: bool = False
 
     @property
     def searches(self) -> bool:
@@ -123,7 +135,7 @@ class Verdict:
 
 def uses(turn: Turn) -> str:
     """What ``turn`` may look things up with, for its note and a block."""
-    return USES + (SEARCH_USE if turn.searches else "")
+    return (WHERE_USES if turn.where else USES) + (SEARCH_USE if turn.searches else "")
 
 
 def look_note(turn: Turn) -> str:
@@ -158,19 +170,23 @@ def _one(name: str, args: dict, turn: Turn, uses_where: Optional[Callable[[dict]
     if entry.actions and action not in entry.actions:
         return Verdict(False, NOT_ALLOWED.format(what=f"{name} {action}" if action else f"{name} without an action",
                                                  uses=uses(turn)))
-    if turn.calls + 1 > MAX_PER_TURN:  # before Maps reads its places for it
+    # Only for what Where you are would allow: the rest it never would.
+    if name == "conduit_location" and not turn.where:
+        return Verdict(False, LOCATION_BLOCK)
+    # The caps come before Maps reads its places for a call.
+    if turn.calls + 1 > MAX_PER_TURN:
         return Verdict(False, TURN_CAP_BLOCK)
+    cap = DAILY.get(entry.label)
+    if cap is not None and turn.today.get(entry.label, 0) >= cap:
+        return Verdict(False, DAILY_CAP_BLOCK.format(label=entry.label))
     if name == "web_search":
         query = args.get("query")
         if not isinstance(query, str) or not query.strip() or len(query) > MAX_QUERY:
             return Verdict(False, QUERY_BLOCK)
         if any(_ADDRESS.search(text) for text in _texts(args)):
             return Verdict(False, ADDRESS_BLOCK)
-    if name == "conduit_maps" and (uses_where or maps_uses_where)(args):
+    if name == "conduit_maps" and not turn.where and (uses_where or maps_uses_where)(args):
         return Verdict(False, WHERE_BLOCK)
-    cap = DAILY.get(entry.label)
-    if cap is not None and turn.today.get(entry.label, 0) >= cap:
-        return Verdict(False, DAILY_CAP_BLOCK.format(label=entry.label))
     return Verdict(True, labels=(entry.label,))
 
 
@@ -196,7 +212,7 @@ def _bridged(args: Any, turn: Turn, uses_where: Optional[Callable[[dict], bool]]
     for name, arguments in calls:
         if name == BRIDGE_CALL or name in BRIDGE_READS:
             return Verdict(False, BRIDGE_BLOCK.format(tool=name))
-        verdict = _one(name, arguments, Turn(turn.kind, turn.item_kind, turn.calls + len(labels), today),
+        verdict = _one(name, arguments, Turn(turn.kind, turn.item_kind, turn.calls + len(labels), today, turn.where),
                        uses_where)
         if not verdict.allowed:
             if verdict.propose:

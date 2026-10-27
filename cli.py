@@ -53,11 +53,11 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     )
     pulse = commands.add_parser("pulse", help="Pulse, the proactivity experiment: on, off, status, probe, report, home, outcomes, memory, followups, "
                                                  "cards, rate, done, learned, nudge, budget, candidates, note, quiet, night, "
-                                                 "dates, ahead, inbox, look")
+                                                 "dates, ahead, inbox, look, where")
     pulse.add_argument("pulse_action", choices=["on", "off", "status", "probe", "report", "home", "outcomes", "memory",
                                                 "followups", "cards", "rate", "done", "learned", "nudge", "budget",
                                                 "candidates", "note", "quiet", "night", "dates", "ahead", "inbox",
-                                                "look"])
+                                                "look", "where"])
     pulse.add_argument("value", nargs="?", default="",
                        help="for home: the id of the chat to use, or 'auto' to find it by title; "
                             "for outcomes: how many to show, or a chat id; "
@@ -83,7 +83,9 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
                             "deadlines Pulse kept from the Shortcuts inbox; "
                             "for look: 'on' or 'off' (whether Pulse's turns look things up first and suggest "
                             "adds), or nothing to show today's look-ups, what recent turns looked up and what "
-                            "they suggested")
+                            "they suggested; "
+                            "for where: 'on' or 'off' (whether Pulse reads where you are), or nothing to show what "
+                            "waits for a place and what your arrivals and departures did today")
     pulse.add_argument("extra", nargs="?", default="",
                        help="for memory forget: the item number; for memory backfill: how many days back "
                             "(it shows what that costs), 'start', 'stop' or 'cancel'; "
@@ -377,7 +379,7 @@ def _pulse(args: argparse.Namespace) -> int:
     action = args.pulse_action
     # Follow-ups are on by default, so even `followups on|off` needs no file yet.
     listing = action in ("followups", "cards", "rate", "done", "learned", "candidates", "dates") \
-        or (action in ("memory", "ahead", "inbox", "look") and (args.value or "").strip() not in ("on", "off")) \
+        or (action in ("memory", "ahead", "inbox", "look", "where") and (args.value or "").strip() not in ("on", "off")) \
         or (action == "nudge" and not (args.value or "").strip()) \
         or (action == "note" and (args.value or "").strip() in ("", "clear")) \
         or (action in ("quiet", "night") and not (args.value or "").strip()) \
@@ -453,6 +455,8 @@ def _pulse(args: argparse.Namespace) -> int:
         return _pulse_inbox(pulse_store, home, (args.value or "").strip())
     if action == "look":
         return _pulse_look(pulse_store, home, (args.value or "").strip())
+    if action == "where":
+        return _pulse_where(pulse_store, home, (args.value or "").strip())
     print(f"Pulse: {'on' if pulse_store.get('enabled') else 'off'}")
     chat, problem = pulse.home_chat(pulse_store, home)
     if chat is not None:
@@ -552,6 +556,7 @@ def _pulse(args: argparse.Namespace) -> int:
     print(_ahead_line(pulse_store, zone))
     print(_inbox_line(pulse_store, zone))
     print(_look_line(pulse_store))
+    print(_where_line(pulse_store, home))
     print(f"Nudging: {pulse_learning.nudge(pulse_store)} (`hermes conduit-push pulse nudge gentle|balanced|eager`)")
     note = " ".join(pulse.report.note(pulse_store).split())
     print(f"Note to Pulse: {_printable(note)}" if note
@@ -1896,6 +1901,78 @@ def _pulse_look(pulse_store: Any, home: Any, value: str) -> int:
             state = pulse_proposals.entry(proposal, Path(home), now)["state"].replace("_", " ")
             print(_printable(f"- {when} {proposal['line']}: {state}"))
     return 0
+
+
+def _where_line(pulse_store: Any, home: Any) -> str:
+    from . import pulse_places
+    title = "Where you are"
+    if not pulse_places.on(pulse_store):
+        return f"{title}: off (`hermes conduit-push pulse where on`)"
+    if not pulse_places.background(pulse_places.view(Path(home)), time.time()):
+        return (f"{title}: on, but Conduit isn't sharing your location in the background, so Pulse reads none "
+                "(Settings > Location in Conduit)")
+    return f"{title}: on"
+
+
+def _pulse_where(pulse_store: Any, home: Any, value: str) -> int:
+    """Whether Pulse reads where the user is (pulse_places), what waits for
+    a place, and what the last day's arrivals and departures did; `on` and
+    `off` switch it."""
+    from . import pulse, pulse_followup, pulse_places
+    if value in ("on", "off"):
+        pulse_store.set(pulse.store.WHERE_SETTING, value == "on")
+        if value == "off":
+            pulse_store.clear_moments()
+            print("Pulse no longer reads where you are. What it remembers for a place stays, and waits for you to "
+                  "turn this back on.")
+        else:
+            print("Pulse reads where you are while Conduit shares it in the background: a reminder you asked for "
+                  "at a place comes when you get there, and its look-ups may use your location. Each read goes in "
+                  "Location's read log in Conduit.")
+        return 0
+    if value:
+        print("Usage: hermes conduit-push pulse where [on|off]")
+        return 2
+    print(_where_line(pulse_store, home))
+    zone = pulse.report_zone(pulse_store, home)
+    saved = pulse_places.saved(pulse_places.view(Path(home)))
+    waiting = pulse_places.waiting(pulse_store)
+    if waiting:
+        print("Waiting for a place:")
+        for item in waiting:
+            match = pulse_places.place_for(item["place_words"], saved)
+            leaving = "leaving " if item["place_on"] == "leave" else ""
+            row = pulse_store.followup(item["id"])
+            until = ""
+            if row and row["decision"] == pulse_followup.PLACE and row["next_check_at"]:
+                until = (", checking now" if pulse_followup.followup_timing(row).get("moment") else
+                         f", until {datetime.fromtimestamp(row['next_check_at'], zone).strftime('%a %d %b')}")
+            print(_printable(f"- #{item['id']} {item['text']} ({leaving}{item['place_words']}: "
+                             + (f"matches {match}" if match else "no saved place has that name") + f"{until})"))
+    else:
+        print("Nothing waits for a place.")
+    moments = pulse_store.moments()
+    if moments:
+        texts = {item["id"]: item["text"] for item in waiting}
+        for moment in moments:
+            for item_id in _moment_items(moment):
+                if item_id not in texts:
+                    found = pulse_store.item(item_id)
+                    texts[item_id] = found["text"] if found else f"#{item_id}"
+        print("Arrivals and departures in the last day:")
+        for moment in moments:
+            print(_printable(pulse_places.describe(moment, zone, texts)))
+    return 0
+
+
+def _moment_items(moment: dict) -> list[int]:
+    try:
+        outcome = json.loads(moment.get("outcome") or "{}")
+    except ValueError:
+        return []
+    if not isinstance(outcome, dict):
+        return []
+    return [item for item in (outcome.get("due") or outcome.get("items") or []) if isinstance(item, int)]
 
 
 def _pulse_memory(pulse_store: Any, home: Any, value: str, extra: str) -> int:

@@ -79,6 +79,10 @@ DEFAULTS: dict[str, Any] = {
     # Looking things up first (pulse_tools): a report, follow-up or brief turn
     # may read the calendar, contacts and Maps before it speaks. On with Pulse.
     "look_first": True,
+    # Where you are (pulse_places): Pulse reads the location Conduit shares
+    # in the background, for what waits for a place and for its look-ups.
+    # Off until the user turns it on.
+    "where": False,
     # Quiet times (pulse_quiet): the weekdays Pulse keeps to itself (Monday
     # 0 to Sunday 6) and when a quiet spell ends (epoch seconds), in the
     # user's time zone.
@@ -185,7 +189,12 @@ CREATE TABLE IF NOT EXISTS items (
     -- the event it came from, "<device>/<event id>", and who that event is from;
     -- "" for what came from a chat.
     from_inbox TEXT NOT NULL DEFAULT '',
-    sender TEXT NOT NULL DEFAULT ''
+    sender TEXT NOT NULL DEFAULT '',
+    -- A commitment or promise said for a place, not a time (pulse_places):
+    -- the place's words as said ("Costco", "home"), and whether it's for
+    -- arriving there or leaving ("arrive" or "leave"); "" for none.
+    place_words TEXT NOT NULL DEFAULT '',
+    place_on TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS items_status ON items(status, kind);
 CREATE TABLE IF NOT EXISTS watermarks (
@@ -402,6 +411,24 @@ CREATE TABLE IF NOT EXISTS proposals (
     undo_at REAL
 );
 CREATE INDEX IF NOT EXISTS proposals_attempt ON proposals(attempt_id);
+-- Arrivals at and departures from the user's saved places, as the location
+-- store told Pulse (pulse_places), kept a day: what each made due, or why
+-- it made nothing. One from a phone that keeps no history keeps only its
+-- id and when it was handled.
+CREATE TABLE IF NOT EXISTS moments (
+    id TEXT PRIMARY KEY,
+    place_id TEXT NOT NULL DEFAULT '',
+    place TEXT NOT NULL DEFAULT '',
+    kind TEXT NOT NULL DEFAULT '',
+    -- "arrive" or "leave".
+    event TEXT NOT NULL DEFAULT '',
+    at REAL NOT NULL,
+    received_at REAL NOT NULL,
+    keep INTEGER NOT NULL DEFAULT 1,
+    handled_at REAL,
+    -- What it did (pulse_places.handle, JSON): the items it made due, or why none.
+    outcome TEXT NOT NULL DEFAULT ''
+);
 """
 # Where memory has read each chat to: ``watermarks`` for chats as they
 # happen, ``backfill_marks`` for a backfill of older history (same shape, plus
@@ -430,6 +457,10 @@ INBOX_SETTING = "inbox_deadlines"
 INBOX_MARK = "inbox_mark"
 # Whether Pulse's turns may look things up first (DEFAULTS, pulse_tools).
 LOOK_SETTING = "look_first"
+# Whether Pulse reads where the user is (DEFAULTS, pulse_places).
+WHERE_SETTING = "where"
+# How long a moment is kept (pulse_places).
+MOMENTS_KEEP_S = 86400.0
 # A deadline from the inbox is deleted this long after it's done, forgotten,
 # replaced or expired (pulse_memory.forget_inbox): Undo works that long.
 INBOX_FORGET_S = 86400.0
@@ -458,7 +489,8 @@ _ADDED_COLUMNS = (("cards", "topic", "TEXT NOT NULL DEFAULT ''"), ("cards", "bri
                   ("items", "occasion", "TEXT NOT NULL DEFAULT ''"), ("candidates", "ref", "TEXT NOT NULL DEFAULT ''"),
                   ("items", "from_inbox", "TEXT NOT NULL DEFAULT ''"), ("items", "sender", "TEXT NOT NULL DEFAULT ''"),
                   ("attempts", "looked", "TEXT NOT NULL DEFAULT ''"), ("cards", "looked", "TEXT NOT NULL DEFAULT ''"),
-                  ("cards", "proposal", "INTEGER"))
+                  ("cards", "proposal", "INTEGER"), ("items", "place_words", "TEXT NOT NULL DEFAULT ''"),
+                  ("items", "place_on", "TEXT NOT NULL DEFAULT ''"))
 # What report cards said for Why? before a candidate's reason did (an item's card,
 # never shown; a whole report's card), and the setting that says a store has
 # cleared them.
@@ -1204,11 +1236,24 @@ class PulseStore:
 
     # Follow-ups -------------------------------------------------------------
 
-    def add_followup(self, item_id: int, *, next_check_at: float, now: float) -> None:
+    def add_followup(self, item_id: int, *, next_check_at: float, now: float, decision: str = "") -> None:
         """A check schedule for an item that has none yet."""
         with _lock, self._connect() as conn:
-            conn.execute("INSERT OR IGNORE INTO followups(item_id, next_check_at, created_at, updated_at) "
-                         "VALUES(?,?,?,?)", (item_id, next_check_at, now, now))
+            conn.execute("INSERT OR IGNORE INTO followups(item_id, next_check_at, decision, created_at, updated_at) "
+                         "VALUES(?,?,?,?,?)", (item_id, next_check_at, decision, now, now))
+
+    def place_followup(self, item_id: int, *, next_check_at: float, now: float, decision: str) -> None:
+        """A check schedule waiting for the item's place (``decision``): a
+        new one, or one still waiting for its first or next check (as
+        sooner_followups brings closer), for an item a repeat named a place
+        for since."""
+        with _lock, self._connect() as conn:
+            conn.execute("INSERT INTO followups(item_id, next_check_at, decision, created_at, updated_at) "
+                         "VALUES(?,?,?,?,?) ON CONFLICT(item_id) DO UPDATE SET "
+                         "next_check_at=excluded.next_check_at, decision=excluded.decision, "
+                         "updated_at=excluded.updated_at WHERE followups.next_check_at IS NOT NULL "
+                         "AND followups.decision IN ('', 'wait', 'check failed')",
+                         (item_id, next_check_at, decision, now, now))
 
     def end_followups(self, *, keep: set, now: float, only: Optional[int] = None) -> None:
         """Stops checking items no longer open (``only``: just that one).
@@ -1266,6 +1311,57 @@ class PulseStore:
         with self._connect() as conn:
             rows = conn.execute("SELECT decision, COUNT(*) AS n FROM followups GROUP BY decision").fetchall()
         return {(row["decision"] or "waiting"): row["n"] for row in rows}
+
+    # Moments (pulse_places) --------------------------------------------------
+
+    def add_moments(self, moments: Sequence[dict[str, Any]], now: float) -> list[str]:
+        """Keeps the arrivals and departures the location store passed on,
+        each once (a batch sent again adds nothing); the new ones' ids."""
+        added = []
+        with _lock, self._connect() as conn:
+            for moment in moments:
+                if conn.execute("INSERT OR IGNORE INTO moments(id, place_id, place, kind, event, at, received_at, "
+                                "keep) VALUES(?,?,?,?,?,?,?,?)",
+                                (moment["id"], moment["place_id"], moment["place"], moment["kind"], moment["on"],
+                                 moment["at"], now, 1 if moment["keep"] else 0)).rowcount:
+                    added.append(moment["id"])
+        return added
+
+    def new_moments(self) -> list[dict]:
+        """The moments not handled yet, oldest first."""
+        with self._connect() as conn:
+            return [dict(row) for row in conn.execute(
+                "SELECT * FROM moments WHERE handled_at IS NULL ORDER BY at, id").fetchall()]
+
+    def moment_handled(self, moment_id: str, outcome: dict[str, Any], now: float) -> bool:
+        """Records what a moment did; False when it was handled already. One
+        from a phone that keeps no history keeps only its id and when, so
+        the same batch sent again adds nothing."""
+        with _lock, self._connect() as conn:
+            return bool(conn.execute(
+                "UPDATE moments SET handled_at=?, outcome=CASE WHEN keep THEN ? ELSE '' END, "
+                "place_id=CASE WHEN keep THEN place_id ELSE '' END, place=CASE WHEN keep THEN place ELSE '' END, "
+                "kind=CASE WHEN keep THEN kind ELSE '' END WHERE id=? AND handled_at IS NULL",
+                (now, json.dumps(outcome, sort_keys=True), moment_id)).rowcount)
+
+    def moments(self, limit: int = 50) -> list[dict]:
+        """The moments kept, newest first (`pulse where`)."""
+        with self._connect() as conn:
+            return [dict(row) for row in conn.execute(
+                "SELECT * FROM moments WHERE place!='' ORDER BY at DESC, id DESC LIMIT ?", (limit,)).fetchall()]
+
+    def prune_moments(self, before: float) -> int:
+        with _lock, self._connect() as conn:
+            return conn.execute("DELETE FROM moments WHERE received_at < ?", (before,)).rowcount
+
+    def clear_moments(self, device: Optional[str] = None) -> int:
+        """Deletes every moment (Where you are turned off, or the location
+        shared here wiped), or one device's (that device wiped)."""
+        with _lock, self._connect() as conn:
+            if device is None:
+                return conn.execute("DELETE FROM moments").rowcount
+            prefix = f"{device}/"
+            return conn.execute("DELETE FROM moments WHERE substr(id, 1, ?) = ?", (len(prefix), prefix)).rowcount
 
     # Cards and lessons (pulse_learning) --------------------------------------
 
@@ -2149,7 +2245,8 @@ def _insert_candidates(conn: sqlite3.Connection, run_id: str, rows: Sequence[dic
 
 
 ITEM_COLUMNS = ("profile", "chat_id", "message_id", "kind", "text", "evidence", "explicit", "due", "due_at",
-                "mentioned_at", "recorded_at", "valid_from", "every_year", "occasion", "from_inbox", "sender")
+                "mentioned_at", "recorded_at", "valid_from", "every_year", "occasion", "from_inbox", "sender",
+                "place_words", "place_on")
 
 
 def _keep(conn: sqlite3.Connection, profile: str, chat_id: str, items: Sequence[dict[str, Any]],
@@ -2160,7 +2257,8 @@ def _keep(conn: sqlite3.Connection, profile: str, chat_id: str, items: Sequence[
     live = "status='open' AND superseded_at IS NULL AND profile=?"
     now, ids = time.time(), []
     for item in items:
-        item = {"every_year": "", "occasion": "", "from_inbox": "", "sender": "", **item}
+        item = {"every_year": "", "occasion": "", "from_inbox": "", "sender": "", "place_words": "", "place_on": "",
+                **item}
         if item.get("same_as"):
             # A repeat of an item replaced since it was shown repeats its successor;
             # one of an item closed since is already on record.
@@ -2169,7 +2267,8 @@ def _keep(conn: sqlite3.Connection, profile: str, chat_id: str, items: Sequence[
                     # A date said again, or a later one, moves the item's date. A
                     # yearly one (a fact's) is kept as said this time, and takes the
                     # place of a due date, so the fact no longer expires; a fact
-                    # already yearly takes no due date from a repeat.
+                    # already yearly takes no due date from a repeat. A place said
+                    # again is where it waits now (pulse_followup.schedule).
                     f"UPDATE items SET mentioned_at=MAX(mentioned_at, ?), "
                     f"due=CASE WHEN ?!='' THEN '' "
                     f"WHEN every_year='' AND ? IS NOT NULL AND (due_at IS NULL OR ? > due_at) THEN ? "
@@ -2178,11 +2277,14 @@ def _keep(conn: sqlite3.Connection, profile: str, chat_id: str, items: Sequence[
                     f"WHEN every_year='' AND ? IS NOT NULL AND (due_at IS NULL OR ? > due_at) THEN ? "
                     f"ELSE due_at END, "
                     f"every_year=CASE WHEN ?!='' THEN ? ELSE every_year END, "
-                    f"occasion=CASE WHEN ?!='' THEN ? ELSE occasion END "
+                    f"occasion=CASE WHEN ?!='' THEN ? ELSE occasion END, "
+                    f"place_on=CASE WHEN ?!='' THEN ? ELSE place_on END, "
+                    f"place_words=CASE WHEN ?!='' THEN ? ELSE place_words END "
                     f"WHERE id=? AND {live}",
                     (item["mentioned_at"], item["every_year"], item["due_at"], item["due_at"], item["due"],
                      item["every_year"], item["due_at"], item["due_at"], item["due_at"],
                      item["every_year"], item["every_year"], item["every_year"], item["occasion"],
+                     item["place_words"], item["place_on"], item["place_words"], item["place_words"],
                      target, profile)).rowcount:
                 continue
         row = {**item, "profile": profile, "chat_id": chat_id, "recorded_at": now, "valid_from": item["mentioned_at"]}
