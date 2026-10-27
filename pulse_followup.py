@@ -786,6 +786,7 @@ def check_rested(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: t
             continue
         done["tokens"] = done.get("tokens", 0) + tokens
         done["checks"] = done.get("checks", 0) + 1
+        _found_read(pulse_store, card, now)
         if isinstance(parsed, dict) and parsed.get("stale") is True:
             # Unless the user put it back meanwhile: then it stays as they left it.
             if pulse_store.end_rest(card["id"], card["rest_until"]):
@@ -831,6 +832,7 @@ def check_held(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzi
             continue
         done["tokens"] = done.get("tokens", 0) + tokens
         done["checks"] = done.get("checks", 0) + 1
+        _found_read(pulse_store, card, now)
         if isinstance(parsed, dict) and parsed.get("stale") is True:
             pulse_store.mark_done(card["id"], card["item_id"], closed_by=learning.HELD_DONE_BY, now=now, by="pulse")
     if not still_leader():
@@ -841,10 +843,10 @@ def check_held(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzi
 
 # A report item Pulse found on its own (nothing remembered behind it) gets
 # its chat read again while it's new and on the screen (pulse_store.
-# found_cards), a day after it came and again a day later, so one done
-# elsewhere goes to Done (Undo puts it back). Last in a run, on what the
-# follow-up checks leave of their budget and at most FOUND_MAX, so it never
-# crowds out a reminder.
+# found_cards), a day after it came (or after the held or the rested check
+# read it) and again a day later, so one done elsewhere goes to Done (Undo
+# puts it back). Last in a run, on what the follow-up checks leave of their
+# budget and at most FOUND_MAX, so it never crowds out a reminder.
 FOUND_EVERY_S = 86400.0
 FOUND_FOR_S = 3 * 86400.0
 FOUND_MAX = 3
@@ -865,6 +867,30 @@ def found_due(pulse_store: store.PulseStore, now: float) -> list[dict]:
     checked = _times(pulse_store.get(FOUND_CHECKED))
     return [card for card in pulse_store.found_cards(now - FOUND_FOR_S)
             if now - checked.get(str(card["id"]), float(card["created_at"])) >= FOUND_EVERY_S]
+
+
+def _found_read(pulse_store: store.PulseStore, card: dict, now: float) -> None:
+    """A found card the held or the rested check just read counts as read
+    for check_found too: its next read is a day after this one, not in the
+    same run or the next."""
+    if card["kind"] == learning.NOTICED and card["item_id"] is None:
+        _store_found_times(pulse_store, {str(card["id"]): now}, now)
+
+
+def _store_found_times(pulse_store: store.PulseStore, times: dict[str, float], now: float) -> None:
+    """Puts found cards' read times in with the ones stored, the later of two
+    for a card, through a compare-and-set: a time another process stored
+    meanwhile (a former leader finishing its held or rested checks) isn't
+    lost. A time over FOUND_FOR_S ago goes, a card's that's old now. After
+    three lost races in a row it gives up, and those cards are read early."""
+    for _ in range(3):
+        stored = pulse_store.get(FOUND_CHECKED)
+        kept = _times(stored)
+        for key, at in times.items():
+            kept[key] = max(kept.get(key, at), at)
+        if pulse_store.swap(FOUND_CHECKED, stored, {key: at for key, at in kept.items() if at > now - FOUND_FOR_S}):
+            return
+    logger.warning("conduit_push: Pulse found card read times weren't stored")
 
 
 def check_found(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzinfo, now: float,
@@ -898,12 +924,11 @@ def check_found(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tz
         done["tokens"] = done.get("tokens", 0) + tokens
         done["checks"] = done.get("checks", 0) + 1
         if isinstance(parsed, dict) and parsed.get("stale") is True:
-            # Nothing remembered is behind it: only the card is marked.
+            # Nothing remembered is behind it: only the card is marked, so no closer is kept.
             pulse_store.mark_done(card["id"], None, closed_by="", now=now, by="pulse")
     if not still_leader():
         return  # the new leader keeps the checked times now
-    # A time over FOUND_FOR_S ago is a card's that's old now.
-    pulse_store.set(FOUND_CHECKED, {key: value for key, value in checked.items() if value > now - FOUND_FOR_S})
+    _store_found_times(pulse_store, checked, now)
 
 
 def run(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzinfo, now: float,
