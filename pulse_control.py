@@ -175,7 +175,7 @@ def backfill_start(pulse_store: Any, home: Path, days: Optional[int] = None,
 
 SETTINGS = ("enabled", "memory", "followups", "daily_report", "report_profiles", "report_times", "time_zone",
             "brief_time", "model", "nudge", "memory_daily_tokens", "followup_daily_tokens", "note",
-            "quiet_days", "quiet_until", "night", "look_ahead", "inbox_deadlines")
+            "quiet_days", "quiet_until", "night", "look_ahead", "inbox_deadlines", "look_first")
 # What a daily token budget may be set to.
 MIN_DAILY_TOKENS = 10_000
 MAX_DAILY_TOKENS = 5_000_000
@@ -196,8 +196,9 @@ def update(pulse_store: Any, body: Any, home: Any = None) -> None:
     """Applies the settings in ``body`` (any of SETTINGS). Every value is
     checked before any is written, so a bad one changes nothing; any other
     key is refused too. Values: booleans for "enabled", "memory", "followups", "daily_report", "look_ahead"
-    (the daily look ahead, pulse_ahead) and "inbox_deadlines" (memory keeps
-    deadlines from the Shortcuts inbox, pulse_memory.read_inbox); "all" or "this"
+    (the daily look ahead, pulse_ahead), "inbox_deadlines" (memory keeps
+    deadlines from the Shortcuts inbox, pulse_memory.read_inbox) and
+    "look_first" (Pulse's turns may look things up, pulse_tools); "all" or "this"
     for "report_profiles"; a list of "HH:MM" for "report_times"; an IANA
     name, or "" for the phone's, for "time_zone"; {"provider", "model"} for
     "model" (the model Pulse's turns run on), or null for the chat's own;
@@ -217,7 +218,7 @@ def update(pulse_store: Any, body: Any, home: Any = None) -> None:
         if field not in SETTINGS:
             raise Refused("invalid", field=str(field)[:64])
     changes: dict[str, Any] = {}
-    for field in ("enabled", "memory", "followups", "daily_report", "look_ahead", "inbox_deadlines"):
+    for field in ("enabled", "memory", "followups", "daily_report", "look_ahead", "inbox_deadlines", "look_first"):
         if field in body:
             if not isinstance(body[field], bool):
                 raise Refused("invalid", field=field)
@@ -665,6 +666,8 @@ def state(pulse_store: Any, home: Path, now: Optional[float] = None) -> dict[str
         "look_ahead": pulse_ahead.enabled(pulse_store),
         # Deadlines from the Shortcuts inbox (pulse_memory.read_inbox): read with memory too.
         "inbox_deadlines": pulse_memory.inbox_on(pulse_store),
+        # Whether Pulse's turns may look things up first (pulse_tools).
+        "look_first": pulse.looks_first(pulse_store),
         "followup_usage": {key: int(follow_usage.get(key, 0) or 0) for key in ("checks", "tokens", "failed")},
         "followup_daily_tokens": follow_cap,
         "followup_tokens_today": follow_used,

@@ -26,6 +26,9 @@ def live(tmp_path, monkeypatch):
     monkeypatch.setattr(pulse, "turns_marked", True)
     monkeypatch.setattr(pulse, "_started_at", time.time() - 10)
     monkeypatch.setattr(pulse, "_turns", {})
+    monkeypatch.setattr(pulse, "_looks", {})
+    monkeypatch.setattr(pulse, "_started", {})
+    monkeypatch.setattr(pulse, "_known_home", set())
     monkeypatch.setattr(pulse, "_last_problem", "")
     monkeypatch.setattr(pulse, "_last_ratings", 0.0)
     monkeypatch.setattr(pulse, "_zone_cache", (0.0, None))
@@ -338,8 +341,12 @@ def test_a_follow_up_turn_gets_its_note_and_pushes(live, monkeypatch):
     tell(live)
     pulse.tick()
     text = live.sent()[0]
-    assert pulse.pre_llm_call(SID, "t1", text) == followup.NOTE
+    # A follow-up about a promise may look things up, the web too.
+    assert pulse.pre_llm_call(SID, "t1", text) == f"{followup.LOOK_NOTE} " + pulse.tools.look_note(
+        pulse.tools.Turn(pulse.FOLLOWUP, followup.PROMISE))
+    assert "web_search" in pulse.pre_llm_call(SID, "t1", text)
     assert pulse.pre_tool_call(SID, "t1")["action"] == "block"
+    assert pulse.pre_tool_call(SID, "t1", "web_search", {"query": "deploy status page"}) is None
     assert pulse.pushes(SID, "t1")
     queued = []
     monkeypatch.setattr(plugin, "enqueue", queued.append)
