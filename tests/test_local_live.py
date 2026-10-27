@@ -1580,6 +1580,17 @@ def test_conduit_profile_is_refused_where_the_profile_turned_the_plugin_off(clie
     assert message["code"] == api.SPEECH_SERVER_CLOSE_REFUSED
 
 
+def test_a_failing_consent_check_closes_the_socket_as_retryable(client, hermes, monkeypatch):
+    async def failing(name):
+        raise api.HTTPException(status_code=503, detail="Hermes can't read this profile")
+
+    monkeypatch.setattr(api, "_plugin_refused_on", failing)
+    with client.websocket_connect(f"{BASE}/speech-server/socket?conduit_profile=work") as ws:
+        while (message := ws.receive())["type"] != "websocket.close":
+            pass
+    assert message["code"] == api.SPEECH_SERVER_CLOSE_FAILED
+
+
 def test_conduit_profile_must_match_profile(client, hermes):
     response = client.get(f"{BASE}/local-live/status?profile=home&conduit_profile=work")
     assert response.status_code == 400

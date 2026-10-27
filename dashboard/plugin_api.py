@@ -618,6 +618,8 @@ async def _plugin_refused_on(profile: str) -> bool:
             raise
         return False
     try:
+        # Hermes' scope is a context variable, so it holds across this await
+        # for this request only; Hermes awaits the same check inside it.
         with _profile_scope(profile):
             return bool(await _plugin_api_request_refused(PLUGIN_NAME))
     except TokenError as exc:
@@ -2368,7 +2370,8 @@ async def grok_live_socket(ws: WebSocket) -> None:
     try:
         profile = await _conduit_route_profile(ws, profile)
     except HTTPException as exc:
-        await refuse(GROK_CLOSE_REFUSED, str(exc.detail))
+        # A 5xx is Hermes failing, which a retry may get past; the rest won't change.
+        await refuse(GROK_CLOSE_FAILED if exc.status_code >= 500 else GROK_CLOSE_REFUSED, str(exc.detail))
         return
     try:
         token, auth, model = await asyncio.wait_for(
@@ -2827,7 +2830,8 @@ async def _speech_server_socket(ws: WebSocket, relay: Callable[..., Any]) -> Non
     try:
         profile = await _conduit_route_profile(ws, profile)
     except HTTPException as exc:
-        await refuse(SPEECH_SERVER_CLOSE_REFUSED, str(exc.detail))
+        # A 5xx is Hermes failing, which a retry may get past; the rest won't change.
+        await refuse(SPEECH_SERVER_CLOSE_FAILED if exc.status_code >= 500 else SPEECH_SERVER_CLOSE_REFUSED, str(exc.detail))
         return
     try:
         url, key = await asyncio.wait_for(
