@@ -1242,6 +1242,19 @@ class PulseStore:
             conn.execute("INSERT OR IGNORE INTO followups(item_id, next_check_at, decision, created_at, updated_at) "
                          "VALUES(?,?,?,?,?)", (item_id, next_check_at, decision, now, now))
 
+    def place_followup(self, item_id: int, *, next_check_at: float, now: float, decision: str) -> None:
+        """A check schedule waiting for the item's place (``decision``): a
+        new one, or one still waiting for its first or next check (as
+        sooner_followups brings closer), for an item a repeat named a place
+        for since."""
+        with _lock, self._connect() as conn:
+            conn.execute("INSERT INTO followups(item_id, next_check_at, decision, created_at, updated_at) "
+                         "VALUES(?,?,?,?,?) ON CONFLICT(item_id) DO UPDATE SET "
+                         "next_check_at=excluded.next_check_at, decision=excluded.decision, "
+                         "updated_at=excluded.updated_at WHERE followups.next_check_at IS NOT NULL "
+                         "AND followups.decision IN ('', 'wait', 'check failed')",
+                         (item_id, next_check_at, decision, now, now))
+
     def end_followups(self, *, keep: set, now: float, only: Optional[int] = None) -> None:
         """Stops checking items no longer open (``only``: just that one).
         A follow-up waiting to be told, told or undelivered keeps its row."""
@@ -2254,7 +2267,8 @@ def _keep(conn: sqlite3.Connection, profile: str, chat_id: str, items: Sequence[
                     # A date said again, or a later one, moves the item's date. A
                     # yearly one (a fact's) is kept as said this time, and takes the
                     # place of a due date, so the fact no longer expires; a fact
-                    # already yearly takes no due date from a repeat.
+                    # already yearly takes no due date from a repeat. A place said
+                    # again is where it waits now (pulse_followup.schedule).
                     f"UPDATE items SET mentioned_at=MAX(mentioned_at, ?), "
                     f"due=CASE WHEN ?!='' THEN '' "
                     f"WHEN every_year='' AND ? IS NOT NULL AND (due_at IS NULL OR ? > due_at) THEN ? "
@@ -2263,11 +2277,14 @@ def _keep(conn: sqlite3.Connection, profile: str, chat_id: str, items: Sequence[
                     f"WHEN every_year='' AND ? IS NOT NULL AND (due_at IS NULL OR ? > due_at) THEN ? "
                     f"ELSE due_at END, "
                     f"every_year=CASE WHEN ?!='' THEN ? ELSE every_year END, "
-                    f"occasion=CASE WHEN ?!='' THEN ? ELSE occasion END "
+                    f"occasion=CASE WHEN ?!='' THEN ? ELSE occasion END, "
+                    f"place_on=CASE WHEN ?!='' THEN ? ELSE place_on END, "
+                    f"place_words=CASE WHEN ?!='' THEN ? ELSE place_words END "
                     f"WHERE id=? AND {live}",
                     (item["mentioned_at"], item["every_year"], item["due_at"], item["due_at"], item["due"],
                      item["every_year"], item["due_at"], item["due_at"], item["due_at"],
                      item["every_year"], item["every_year"], item["every_year"], item["occasion"],
+                     item["place_words"], item["place_on"], item["place_words"], item["place_words"],
                      target, profile)).rowcount:
                 continue
         row = {**item, "profile": profile, "chat_id": chat_id, "recorded_at": now, "valid_from": item["mentioned_at"]}

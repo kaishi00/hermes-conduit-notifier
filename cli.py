@@ -1916,8 +1916,8 @@ def _where_line(pulse_store: Any, home: Any) -> str:
 
 def _pulse_where(pulse_store: Any, home: Any, value: str) -> int:
     """Whether Pulse reads where the user is (pulse_places), what waits for
-    a place, and what today's arrivals and departures did; `on` and `off`
-    switch it."""
+    a place, and what the last day's arrivals and departures did; `on` and
+    `off` switch it."""
     from . import pulse, pulse_followup, pulse_places
     if value in ("on", "off"):
         pulse_store.set(pulse.store.WHERE_SETTING, value == "on")
@@ -1959,7 +1959,7 @@ def _pulse_where(pulse_store: Any, home: Any, value: str) -> int:
                 if item_id not in texts:
                     found = pulse_store.item(item_id)
                     texts[item_id] = found["text"] if found else f"#{item_id}"
-        print("Arrivals and departures today:")
+        print("Arrivals and departures in the last day:")
         for moment in moments:
             print(_printable(pulse_places.describe(moment, zone, texts)))
     return 0

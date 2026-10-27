@@ -167,11 +167,12 @@ def _one(name: str, args: dict, turn: Turn, uses_where: Optional[Callable[[dict]
         if name == "web_search":
             return Verdict(False, SEARCH_BLOCK)
         return Verdict(False, NOT_ALLOWED.format(what=name or "that tool", uses=uses(turn)))
-    if name == "conduit_location" and not turn.where:
-        return Verdict(False, LOCATION_BLOCK)
     if entry.actions and action not in entry.actions:
         return Verdict(False, NOT_ALLOWED.format(what=f"{name} {action}" if action else f"{name} without an action",
                                                  uses=uses(turn)))
+    # Only for what Where you are would allow: the rest it never would.
+    if name == "conduit_location" and not turn.where:
+        return Verdict(False, LOCATION_BLOCK)
     # The caps come before Maps reads its places for a call.
     if turn.calls + 1 > MAX_PER_TURN:
         return Verdict(False, TURN_CAP_BLOCK)

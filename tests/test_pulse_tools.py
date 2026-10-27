@@ -105,8 +105,10 @@ def test_where_the_user_is_is_read_only_with_where_you_are(action):
 @pytest.mark.parametrize("action", ["locate", "set_rule", "remove_rule", "rules", None])
 def test_a_locate_and_the_place_rules_never_run_on_a_pulse_turn(action):
     # A locate wakes the phone; the rules are what runs on a move, not where the user is.
-    verdict = check("conduit_location", {} if action is None else {"action": action}, tools.Turn("report", where=True))
-    assert not verdict.allowed and verdict.message.startswith("Pulse turns can't use conduit_location")
+    # Refused as never allowed whether Where you are is on or off: turning it on wouldn't help.
+    for turn in (tools.Turn("report", where=True), REPORT):
+        verdict = check("conduit_location", {} if action is None else {"action": action}, turn)
+        assert not verdict.allowed and verdict.message.startswith("Pulse turns can't use conduit_location")
 
 
 def test_a_turn_says_it_may_read_where_the_user_is_only_when_it_may():

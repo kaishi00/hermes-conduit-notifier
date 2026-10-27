@@ -263,7 +263,7 @@ def place_reached(pulse_store: store.PulseStore, item: dict, moment: dict, now: 
     """The user got to (or left) the place ``item`` waits for (``moment``, a
     pulse_store moments row): its check is due now, with the moment. False
     when its follow-up isn't waiting for its place (already on its way)."""
-    pulse_store.add_followup(item["id"], next_check_at=place_wait_end(item), now=now, decision=PLACE)
+    pulse_store.place_followup(item["id"], next_check_at=place_wait_end(item), now=now, decision=PLACE)
     row = pulse_store.followup(item["id"])
     if row is None or row["decision"] != PLACE:
         return False
@@ -380,7 +380,8 @@ def schedule(pulse_store: store.PulseStore, now: float) -> None:
             if off:  # turned off by ratings: no new schedules until it's back on
                 continue
             if waits_for_place(item):
-                pulse_store.add_followup(item["id"], next_check_at=place_wait_end(item), now=now, decision=PLACE)
+                # Said with its place, or since: it waits for that, not a schedule.
+                pulse_store.place_followup(item["id"], next_check_at=place_wait_end(item), now=now, decision=PLACE)
             else:
                 pulse_store.add_followup(item["id"], next_check_at=first_check(item, pace), now=now)
     pulse_store.end_followups(keep=open_ids, now=now)

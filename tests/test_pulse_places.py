@@ -174,6 +174,32 @@ def test_an_item_for_a_place_waits_for_it_a_month_instead_of_a_schedule(where):
     assert where.store.followup(undated)["next_check_at"] == rows[undated]["next_check_at"]
 
 
+def test_a_repeat_that_names_a_place_makes_the_item_wait_for_it(where):
+    now = time.time()
+    item_id = placed(where, "", line="I need to buy batteries")
+    followup.schedule(where.store, now)
+    assert where.store.followup(item_id)["decision"] == ""  # on a schedule
+
+    def again(line, words, on):
+        message_id = where.db.message("user", line, sid=CHAT, at=now - 60)
+        mark = where.store.watermark("", CHAT)
+        assert where.store.advance("", CHAT, message_id=message_id, at=now - 60, after_id=mark["message_id"], items=[{
+            "kind": "commitment", "text": "The user will buy batteries.", "evidence": line, "explicit": 1, "due": "",
+            "due_at": None, "message_id": message_id, "mentioned_at": now - 60, "same_as": item_id,
+            "place_words": words, "place_on": on}]) == []
+
+    again("Next time I'm at Costco, remind me about the batteries", "Costco", "arrive")
+    item = where.store.item(item_id)
+    assert (item["place_words"], item["place_on"]) == ("Costco", "arrive")
+    followup.schedule(where.store, now)
+    row = where.store.followup(item_id)
+    assert row["decision"] == followup.PLACE and row["next_check_at"] == pytest.approx(item["valid_from"] + 30 * 86400)
+    # Said again with no place, it keeps its place; a moment makes it due.
+    again("Don't forget the batteries", "", "")
+    assert where.store.item(item_id)["place_words"] == "Costco"
+    assert arrive(where, moment()) == [item_id]
+
+
 def test_arriving_makes_what_waits_for_the_place_due_and_its_check_knows_it(where):
     item_id = placed(where)
     other = placed(where, "the pharmacy", text="The user will pick up the prescription.",
@@ -462,7 +488,7 @@ def test_the_where_command(where, capsys):
     arrive(where, moment({"id": "p_home", "name": "Home", "kind": "home"}))
     assert run() == 0
     out = capsys.readouterr().out
-    assert "Where you are: on\n" in out and "Arrivals and departures today:" in out
+    assert "Where you are: on\n" in out and "Arrivals and departures in the last day:" in out
     assert "Arrived at Home: nothing waited for it" in out
     assert run("off") == 0 and not places.on(where.store) and where.store.moments() == []
     assert "no longer reads where you are" in capsys.readouterr().out

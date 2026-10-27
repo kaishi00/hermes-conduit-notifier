@@ -2580,7 +2580,8 @@ Capability `pulse_where`.
   for a place `"place"` (`words`, `on`: `arrive` or `leave`, and `saved`:
   the saved place it names, or null).
 - `hermes conduit-push pulse where` lists what waits for a place and the
-  saved place each names, and what today's arrivals and departures did.
+  saved place each names, and what the last day's arrivals and departures
+  did.
 
 ## Apple Watch lookups and jobs (plugin 0.6+, jobs 0.7+, Gemini tokens 0.8+, Qwen tokens 0.75+)
 

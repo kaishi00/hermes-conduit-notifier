@@ -61,7 +61,7 @@ _WORD = re.compile(r"[^\W_]+(?:'[^\W_]+)*")
 _QUOTES = str.maketrans({"’": "'", "‘": "'", "`": "'"})
 # Why a moment made nothing due (pulse where).
 SKIPPED_WORDS = {"off": "Where you are was off", "late": "it reached Pulse too late",
-                 "followups_off": "follow-ups were off", "brief": "follow-ups go only in your brief",
+                 "followups_off": "follow-ups or Pulse memory were off", "brief": "follow-ups go only in your brief",
                  "quiet": "it was a quiet day", "night": "it was night",
                  hours.EVENT: "your calendar was busy", hours.FOCUS: "a Focus held calls"}
 
@@ -255,7 +255,10 @@ def describe(moment: dict, zone: tzinfo, texts: dict[int, str]) -> str:
     except ValueError:
         outcome = {}
     outcome = outcome if isinstance(outcome, dict) else {}
-    named = lambda ids: "; ".join(texts.get(item_id, f"#{item_id}") for item_id in ids)
+
+    def named(ids: Sequence[int]) -> str:
+        return "; ".join(texts.get(item_id, f"#{item_id}") for item_id in ids)
+
     if moment.get("handled_at") is None:
         what = "not handled yet"
     elif outcome.get("due"):
