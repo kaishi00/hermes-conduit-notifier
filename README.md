@@ -2708,6 +2708,16 @@ keeps it.
   as it would with no job, and its why says the job is failing. A failing
   job gets no card of its own: Hermes already sends each failure, and a
   nudge after three in a row.
+- **A Do it that stalled comes back once** (plugin 0.107+). When nothing
+  was sent from the chat a day after Do it, or Pulse's checks after Do it
+  found it still not done, the card comes back once at the next steps'
+  level: held for the morning brief by default, on the Pulse screen at
+  screen or push, never with a notification of its own. Its Why? says when
+  you tapped Do it. It stays away once its item closed since, or you marked
+  it done, put it off or said it wasn't useful, and a card back once never
+  comes back again. Feed cards carry `back` (`unsent` or `not_done`, empty
+  for a card never back) and `back_acted_at`, and `hermes conduit-push
+  pulse cards` marks them.
 
 ## A phone reminder comes up once (plugin 0.106.1+)
 
