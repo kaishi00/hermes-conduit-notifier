@@ -13,6 +13,15 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.96.0 (2026-10-27)
+
+### New and improved
+- When one of your agents in a room someone else hosts asks for your
+  approval, it waits for you on your own Hermes, with the room and who hosts
+  it, and you approve it once or deny it there. The room's host never sees or
+  answers it. From the command line: `hermes conduit-push rooms approvals`,
+  `approve` and `deny`.
+
 ## 0.94.0 (2026-10-27)
 
 ### New and improved
