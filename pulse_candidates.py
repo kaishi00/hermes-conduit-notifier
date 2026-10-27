@@ -197,7 +197,7 @@ def ask(llm: Llm, gathered: report.Gathered, *, nudge: str, note: str = "",
     while fence in gathered.text:
         fence = secrets.token_hex(6)
     instructions = INSTRUCTIONS.format(bar=report.BARS.get(nudge, report.BARS["balanced"]), limit=MAX_ITEMS,
-                                       found=MAX_FOUND, kinds=", ".join(report.KINDS), areas=", ".join(AREAS),
+                                       found=MAX_FOUND, kinds=", ".join(report.FOUND_KINDS), areas=", ".join(AREAS),
                                        lessons=lessons)
     reply, tokens = llm(instructions + report.note_block(note),
                         TEXT.format(since=gathered.since, fence=fence, context=gathered.text))
@@ -235,9 +235,14 @@ def _entries(value: Any) -> list[dict]:
 
 def remembered_row(item: dict, entry: dict) -> dict:
     """A remembered item as a journal row not yet decided, with what the
-    model said about it (``entry``, {} for nothing)."""
+    model said about it (``entry``, {} for nothing). A deadline from the
+    Shortcuts inbox comes from there, whatever its area, as the look ahead
+    has it (pulse_ahead.date_row), so what Pulse learns about one counts
+    for the rest."""
+    inbox = bool(item.get("from_inbox"))
     return {"origin": MEMORY, "item_id": item["id"], "kind": item["kind"], "profile": item["profile"],
-            "chat_id": item["chat_id"], "source": "chat", "area": _choice(entry.get("area"), AREAS),
+            "chat_id": item["chat_id"], "source": "inbox" if inbox else "chat",
+            "area": "" if inbox else _choice(entry.get("area"), AREAS),
             "due_at": item["due_at"], "actionable": _flag(entry.get("actionable")), "value": _value(entry.get("value")),
             "bring_up": entry.get("bring_up") is True, "skip": _skip(entry.get("skip")),
             "text": _line(entry.get("line"), ref=item["id"]) or _clip(item["text"], TEXT_LIMIT),
@@ -254,7 +259,7 @@ def found_row(entry: dict, chats: dict[str, tuple[str, str]], zone: Optional[tzi
     kind = str(entry.get("kind") or "").strip().lower()
     where = chats.get(str(entry.get("chat") or "").strip().lower())
     profile, chat_id = where or ("", "")
-    return {"origin": MODEL, "item_id": None, "kind": kind if kind in report.KINDS else "other", "profile": profile,
+    return {"origin": MODEL, "item_id": None, "kind": kind if kind in report.FOUND_KINDS else "other", "profile": profile,
             "chat_id": chat_id, "source": "chat" if where else _choice(entry.get("source"), SOURCES),
             "area": _choice(entry.get("area"), AREAS), "due_at": _due(entry.get("due"), zone),
             "actionable": _flag(entry.get("actionable")), "value": _value(entry.get("value")),

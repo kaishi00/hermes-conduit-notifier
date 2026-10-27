@@ -38,7 +38,11 @@ from . import pulse_store as store
 
 # The report's own kinds, then the ones Pulse memory remembers, so a line
 # drawn from a remembered item keeps its kind and its rating counts there.
-KINDS = ("commitment", "promise", "date", "follow-up", "reminder", "watch", "intention", "interest", "fact", "other")
+# A deadline comes only from the Shortcuts inbox (pulse_memory.read_inbox),
+# never from what a model finds (FOUND_KINDS): its level starts at the brief.
+KINDS = ("commitment", "promise", "date", "follow-up", "reminder", "watch", "intention", "interest", "fact", "other",
+         pulse_memory.DEADLINE)
+FOUND_KINDS = tuple(kind for kind in KINDS if kind != pulse_memory.DEADLINE)
 DEFAULT_TIMES = "08:00,13:00,18:00"
 # A report covers what happened since the last delivered one, within these bounds.
 MIN_WINDOW_S = 4 * 3600.0
@@ -507,7 +511,7 @@ def remembered_lines(items: Sequence[dict], zone: tzinfo) -> tuple[str, list[dic
         yearly = pulse_dates.words(item.get("every_year"))
         due += f" (every year on {yearly})" if yearly else ""
         line = (f"#{item['id']} [{item['kind']}] {_clip(item['text'], 200)}{due} "
-                f"(said {said}{last}{where}): \"{_clip(item['evidence'], 120)}\"")
+                f"({pulse_memory.said_where(item)} {said}{last}{where}): \"{_clip(item['evidence'], 120)}\"")
         if used + len(line) > ITEMS_BUDGET:
             break
         lines.append(line)
@@ -515,7 +519,8 @@ def remembered_lines(items: Sequence[dict], zone: tzinfo) -> tuple[str, list[dic
         used += len(line) + 1
     if not lines:
         return "", []
-    return REMEMBERED_TITLE + " (open items it kept from the chats it has read)\n" + "\n".join(lines), shown
+    logged = " and what the phone logged" if any(item.get("from_inbox") for item in shown) else ""
+    return REMEMBERED_TITLE + f" (open items it kept from the chats it has read{logged})\n" + "\n".join(lines), shown
 
 
 def later_lines(home: Path, items: Sequence[dict], *, home_chat_id: str, zone: tzinfo) -> str:
@@ -694,7 +699,7 @@ def report_text(tag: str, context: str, since: str, nudge: str = "balanced", not
     """The report turn's message, its context cut at the end if it would
     take the message over report_budget()."""
     bar = BARS.get(nudge, BARS["balanced"])
-    kinds = ", ".join(KINDS)
+    kinds = ", ".join(FOUND_KINDS)
     block = note_block(note)
     # A fresh marker per report, so text in the context can't close the fence.
     fence = secrets.token_hex(6)

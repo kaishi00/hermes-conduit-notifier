@@ -16,6 +16,11 @@ Each lead time comes up once a year: the look ahead (pulse_ahead) journals
 every date it decided at one with its ``ref``, and asks only about the rest.
 Code words each one (``line``, ``why``); the look ahead's model can say it
 better, and when it can't be asked, code's words go as they are.
+
+A deadline memory kept from the Shortcuts inbox (pulse_memory.read_inbox,
+designs/pulse-inbox-deadlines.md) is a date too, once (``deadlines``): it
+comes up a week ahead (SOON, from 7 days out until 2) and the day before
+(LAST, or on the day when Pulse learns of it then).
 """
 
 from __future__ import annotations
@@ -35,10 +40,15 @@ logger = logging.getLogger(__name__)
 BIRTHDAY, ANNIVERSARY, OTHER = "birthday", "anniversary", "other"
 # The occasions that get two weeks' notice too: time to plan, book or buy.
 GIFTS = (BIRTHDAY, ANNIVERSARY)
-# The lead times, and the days out each is due from and until.
+# A deadline from the Shortcuts inbox: a date that comes once.
+DEADLINE = "deadline"
+# The lead times, and the days out each is due from and until: a yearly
+# date's, then a deadline's.
 AHEAD, EVE, DAY = "ahead", "eve", "day"
-STAGES = {AHEAD: (14, 2), EVE: (1, 1), DAY: (0, 0)}
-STAGE_WORDS = {AHEAD: "two weeks ahead", EVE: "the day before", DAY: "on the day"}
+SOON, LAST = "soon", "last"
+STAGES = {AHEAD: (14, 2), EVE: (1, 1), DAY: (0, 0), SOON: (7, 2), LAST: (1, 0)}
+STAGE_WORDS = {AHEAD: "two weeks ahead", EVE: "the day before", DAY: "on the day", SOON: "a week ahead",
+               LAST: "the day before"}
 # How far ahead the look ahead lists dates.
 WINDOW_DAYS = 14
 # A year before this is a placeholder or a typo, not when it began.
@@ -68,9 +78,24 @@ class Yearly:
 
 
 @dataclass(frozen=True)
+class Deadline:
+    """A deadline memory kept from the Shortcuts inbox: the day by which
+    something of the user's ends or is due, once."""
+    key: str  # "deadline:<item id>"
+    on: date
+    item: dict  # the deadline
+    occasion: str = DEADLINE
+    year: Optional[int] = None
+
+    @property
+    def what(self) -> str:
+        return str(self.item["text"])
+
+
+@dataclass(frozen=True)
 class Coming:
-    """A yearly date within the look ahead's window."""
-    date: Yearly
+    """A yearly date or a deadline within the look ahead's window."""
+    date: Yearly | Deadline
     on: date  # when it next comes round
     days: int  # days from today
     stage: str  # the lead time due today, or ""
@@ -136,6 +161,8 @@ def next_on(month: int, day: int, today: date) -> date:
 
 
 def stages(occasion: str) -> tuple[str, ...]:
+    if occasion == DEADLINE:
+        return SOON, LAST
     return (AHEAD, EVE, DAY) if occasion in GIFTS else (EVE, DAY)
 
 
@@ -199,14 +226,27 @@ def yearly(pulse_store: store.PulseStore, home: Path, profile: Optional[str] = N
                      if not (fact.occasion == BIRTHDAY and (fact.month, fact.day) in birthdays)]
 
 
-def coming(dates: Sequence[Yearly], today: date, days: int = WINDOW_DAYS) -> list[Coming]:
+def deadlines(pulse_store: store.PulseStore) -> list[Deadline]:
+    """The open deadlines memory kept from the Shortcuts inbox, each on its day."""
+    out = []
+    for item in pulse_store.deadlines():
+        try:
+            on = date.fromisoformat(str(item["due"])[:10])
+        except ValueError:
+            continue
+        out.append(Deadline(key=f"deadline:{item['id']}", on=on, item=item))
+    return out
+
+
+def coming(dates: Sequence[Yearly | Deadline], today: date, days: int = WINDOW_DAYS) -> list[Coming]:
     """The dates that come round within ``days`` of today (today included),
-    soonest first, each with the lead time due today, if any."""
+    soonest first, each with the lead time due today, if any. A deadline
+    whose day has passed comes round no more."""
     out = []
     for found in dates:
-        on = next_on(found.month, found.day, today)
+        on = found.on if isinstance(found, Deadline) else next_on(found.month, found.day, today)
         ahead = (on - today).days
-        if ahead > days:
+        if ahead > days or ahead < 0:
             continue
         years = on.year - found.year if found.year is not None and on.year > found.year else None
         out.append(Coming(found, on, ahead, stage_on(found.occasion, ahead), years))
@@ -235,7 +275,13 @@ def _clip(text: Any, limit: int) -> str:
 
 def line(entry: Coming) -> str:
     """Code's words for a date at its lead time, written to the user: what
-    and when, and the years when known. A fact's are the user's own words."""
+    and when, and the years when known. A fact's are the user's own words;
+    a deadline's, what memory noted, with its time when it has one."""
+    if isinstance(entry.date, Deadline):
+        when = {0: "today", 1: f"tomorrow, {day_words(entry.on)}"}.get(entry.days, f"on {day_words(entry.on)}")
+        due = str(entry.date.item.get("due") or "")
+        at = f" at {due[11:16]}" if "T" in due else ""
+        return f"{_clip(entry.date.what, QUOTE_LIMIT)} {when}{at}."
     when = {DAY: "today", EVE: f"tomorrow, {day_words(entry.on)}"}.get(entry.stage, f"on {day_words(entry.on)}")
     if entry.date.item is None:
         verb = "is" if entry.stage in (DAY, EVE) else "is coming up"
@@ -246,7 +292,13 @@ def line(entry: Coming) -> str:
 
 def why(entry: Coming, said_on: str = "") -> str:
     """Code's Why? for a date at its lead time: where Pulse knows it from,
-    and its lead times. ``said_on``: when a fact was said, as words."""
+    and its lead times. ``said_on``: when a fact was said, or a deadline
+    logged, as words."""
+    if isinstance(entry.date, Deadline):
+        sender = _clip(entry.date.item.get("sender"), QUOTE_LIMIT)
+        where = (f"From {sender}, logged" if sender else "Logged") + " on your phone" \
+            + (f" on {said_on}" if said_on else "") + "."
+        return f"{where} Pulse brings up deadlines from your Shortcuts inbox a week ahead and the day before."
     if entry.date.item is None:
         who = entry.date.who + (f" ({entry.date.relation})" if entry.date.relation else "")
         where = f"{who} is one of the people you picked in Settings."
@@ -257,10 +309,17 @@ def why(entry: Coming, said_on: str = "") -> str:
     return f"{where} Pulse brings up dates that come back every year the day before and on the day."
 
 
-def next_due(found: Yearly, today: date, decided: Collection[str] = ()) -> tuple[date, str]:
+def next_due(found: Yearly | Deadline, today: date, decided: Collection[str] = ()) -> Optional[tuple[date, str]]:
     """When a date next comes up and at which lead time (today, if one is
     due now), past the lead times the look ahead already decided this time
-    round (``decided``: their refs); for `pulse dates`."""
+    round (``decided``: their refs); for `pulse dates` and `pulse inbox`.
+    None for a deadline with none left."""
+    if isinstance(found, Deadline):
+        for name in stages(DEADLINE):
+            first, last = STAGES[name]
+            if today <= found.on - timedelta(days=last) and ref(found.key, found.on, name) not in decided:
+                return max(found.on - timedelta(days=first), today), name
+        return None
     on = next_on(found.month, found.day, today)
     for name in stages(found.occasion):
         first, last = STAGES[name]
@@ -272,10 +331,10 @@ def next_due(found: Yearly, today: date, decided: Collection[str] = ()) -> tuple
     return following - timedelta(days=STAGES[name][0]), name
 
 
-def refs_round(found: Yearly, today: date) -> list[str]:
+def refs_round(found: Yearly | Deadline, today: date) -> list[str]:
     """The refs of a date's lead times this time round, for ``next_due``'s
     ``decided``."""
-    on = next_on(found.month, found.day, today)
+    on = found.on if isinstance(found, Deadline) else next_on(found.month, found.day, today)
     return [ref(found.key, on, name) for name in stages(found.occasion)]
 
 
