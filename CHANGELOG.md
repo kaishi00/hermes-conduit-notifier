@@ -28,6 +28,11 @@ checks it). The format is fixed, because Conduit reads it:
   Pulse makes at most 2 suggestions a message and 5 a day, and nothing it
   does can change your phone without your tap.
 
+## 0.96.1 (2026-10-27)
+
+### Fixes
+- Updating the plugin works again. Hermes' install scan refused 0.95.0 and 0.96.0, because a test file held something that looked like a password, so hosts stayed on the version they had.
+
 ## 0.96.0 (2026-10-27)
 
 ### New and improved
