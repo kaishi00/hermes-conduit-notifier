@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.93.0 (2026-10-27)
+## 0.94.0 (2026-10-27)
 
 ### New and improved
 - Rooms with people you've linked keep their agents: each agent's own Hermes
@@ -25,6 +25,17 @@ checks it). The format is fixed, because Conduit reads it:
   From the command line: `hermes conduit-push rooms leave` and `remove`.
 - Disbanding a room tells everyone linked into it, and their Hermes take
   their agents out of it.
+
+## 0.93.0 (2026-10-27)
+
+### Fixes
+- On Hermes 0.22.3 and later, with one dashboard for several profiles, Local
+  Live, voice on your own speech server, Grok Live, Watch calls, taking a chat
+  over from Hermes Desktop, the chats Desktop opened, and predictions didn't
+  work on any profile but the one the dashboard started with. With this
+  plugin and the next Conduit, they work on every profile. Hermes now runs
+  other profiles' plugins apart from the dashboard, where these can't work,
+  so they keep to the dashboard until Hermes can carry them.
 
 ## 0.92.0 (2026-10-27)
 
