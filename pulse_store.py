@@ -1715,8 +1715,8 @@ class PulseStore:
         """A card whose Do it stalled, back as new at the top of the list
         (pulse_followup.come_back): at ``level``, "brief" holding it for the
         morning brief, its Why? now ``why``; whether it came back. Once: never
-        a card back before, nor one marked done, swiped away or rated not
-        useful since."""
+        a card back before, nor one marked done, swiped away or rated down
+        since ("wrong time" aside: that's about timing, not usefulness)."""
         held = level == "brief"
         with _lock, self._connect() as conn:
             return conn.execute(

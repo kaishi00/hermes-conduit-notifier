@@ -629,9 +629,12 @@ def check_acts(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzi
             if not elsewhere and (not answered or now - last < ACT_QUIET_S):
                 # Not answered yet, or still going: look again, unless Do it was left unsent.
                 if now - row["acted_at"] >= ACT_GIVE_UP_S:
+                    # Left unsent only when nothing at all came after the tap:
+                    # a message Hermes never answered was sent.
+                    unsent = not answered and last <= row["acted_at"]
                     if decide(check_at=None, checks=row["checks"], outcome="no answer",
-                              why="the chat kept going" if answered else "nothing sent after Do it",
-                              stage=sent) and not answered:
+                              why="the chat kept going" if answered else "nothing sent after Do it" if unsent
+                              else "no answer after Do it", stage=sent) and unsent:
                         back(UNSENT)
                 else:
                     decide(check_at=now + ACT_FIRST_S, checks=row["checks"], outcome="", why="")
@@ -663,7 +666,7 @@ def check_acts(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzi
             back(NOT_DONE)
 
 
-def come_back(pulse_store: store.PulseStore, card: dict, act: dict, back: str, *, zone: tzinfo,
+def come_back(pulse_store: store.PulseStore, card: dict, act_row: dict, back: str, *, zone: tzinfo,
               now: float) -> bool:
     """A card whose Do it stalled (``back``: UNSENT or NOT_DONE) comes back
     once, as new, at the next steps' level (pulse_learning.level): held for
@@ -676,13 +679,13 @@ def come_back(pulse_store: store.PulseStore, card: dict, act: dict, back: str, *
     level = learning.level(pulse_store, report.NEXT)
     if level == "off":
         return False
-    if card["item_id"] is not None and pulse_store.closed_since(card["item_id"], float(act["acted_at"])):
+    if card["item_id"] is not None and pulse_store.closed_since(card["item_id"], float(act_row["acted_at"])):
         return False
-    when = tapped_words(float(act["acted_at"]), now, zone)
+    when = tapped_words(float(act_row["acted_at"]), now, zone)
     why = f"You tapped Do it {when} but didn't send it." if back == UNSENT else \
         f"You tapped Do it {when}, and it isn't done yet."
     if not pulse_store.bring_back(card["id"], level="brief" if level == "brief" else "screen", back=back,
-                                  acted_at=float(act["acted_at"]), why=why, now=now):
+                                  acted_at=float(act_row["acted_at"]), why=why, now=now):
         return False
     if level == "brief":
         mark_read(pulse_store, [card["id"]], now)

@@ -175,3 +175,20 @@ def test_a_store_from_before_come_backs_gets_the_columns(live):
     reopened = pulse.store.PulseStore(live.store.path)
     card_id = reopened.add_card({"kind": "noticed", "level": "screen", "news": "x", "created_at": time.time()})
     assert (reopened.card(card_id)["back"], reopened.card(card_id)["back_acted_at"]) == ("", None)
+
+
+def test_a_message_hermes_never_answered_was_sent_and_brings_nothing_back(live):
+    card = told_card(live)
+    acted_at = time.time() + 1
+    control.acted(live.store, card["id"], now=acted_at)
+    live.db.message("user", "Can you check the deploy?", sid=CHAT, at=acted_at + 30)
+    run_acts(live, llm_saying(done=True, why=""), acted_at + followup.ACT_GIVE_UP_S + 1)
+    assert live.store.card(card["id"])["back"] == ""
+    assert (live.store.act(card["id"])["outcome"], live.store.act(card["id"])["why"]) == (
+        "no answer", "no answer after Do it")
+
+
+def test_the_brief_keeps_why_a_long_card_came_back():
+    why = "You tapped Do it yesterday but didn't send it."
+    line = pulse.brief.line({"news": "word " * 200, "chat_title": "", "back": "unsent", "why": why})
+    assert line.endswith(f"[came back: {why}]") and len(line) <= pulse.brief.LINE_LIMIT + 2
