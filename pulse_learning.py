@@ -49,7 +49,10 @@ from . import pulse_prefs as prefs
 from . import pulse_store as store
 
 LEVELS = prefs.LEVELS
-DEFAULT_LEVELS = {"followup": "push"}
+# The kinds whose level the user sets: follow-ups, and deadlines from the
+# Shortcuts inbox (pulse_memory.read_inbox), which start held for the morning
+# brief, so none pushes on its own until the user turns them up.
+DEFAULT_LEVELS = {"followup": "push", "deadline": "brief"}
 RATINGS = ("up", "down")
 WRONG_TIME = store.WRONG_TIME
 REASONS = ("not_relevant", "already_knew", "too_late", "too_often", WRONG_TIME)
@@ -81,9 +84,11 @@ NUDGES = {
 }
 DEFAULT_NUDGE = "balanced"
 
-KIND_NAMES = {"followup": "Follow-ups"}
+KIND_NAMES = {"followup": "Follow-ups", "deadline": "Deadlines"}
 LEVEL_NAMES = {"push": "sent with a push", "screen": "shown in Pulse without a push",
                "brief": "held for the morning brief", "off": "off"}
+# A place's source in words, where its name alone says too little.
+SOURCE_NAMES = {"inbox": "the Shortcuts inbox"}
 
 
 def _clip(text: Any, limit: int) -> str:
@@ -438,7 +443,8 @@ def set_level(pulse_store: store.PulseStore, kind: str, level_name: str, now: fl
               cause: str = SET, card: Optional[dict] = None) -> Optional[dict]:
     """Sets the kind's level, a ceiling (the user's, or "too often" with
     ``card``); the lesson, or None when it's there already. Only the
-    follow-ups' level is set by the user; "too often" sets a report kind's."""
+    follow-ups' and the deadlines' levels are set by the user (DEFAULT_LEVELS);
+    "too often" sets a report kind's."""
     if not isinstance(kind, str) or (kind not in DEFAULT_LEVELS and (cause == SET or not kind)):
         raise Invalid("kind")
     if not isinstance(level_name, str) or level_name not in LEVELS:
@@ -595,7 +601,7 @@ def preference_words(scope: str, value: str, chat_title: Optional[str] = None) -
     if scope == "place":
         return (f"things from {chat_title or 'a chat'}" if value.startswith("chat:")
                 else f"things about {value[5:]}" if value.startswith("area:")
-                else f"things from {value[7:]}" if value.startswith("source:") else value)
+                else f"things from {SOURCE_NAMES.get(value[7:], value[7:])}" if value.startswith("source:") else value)
     return "what Pulse brings up" if scope == "all" else value
 
 

@@ -422,6 +422,9 @@ def tick(now: Optional[float] = None) -> None:
     pulse_store.prune_cards(CARDS_KEEP, held_before=now - HELD_DAYS * 86400.0)
     pulse_store.prune_candidates(now - candidates.JOURNAL_DAYS * 86400.0)
     pulse_store.prune_signals(now - prefs.KEEP_S)
+    # Deadlines from the Shortcuts inbox: a day after they're over, or at
+    # once when their event was deleted there.
+    memory.forget_inbox(pulse_store, home, now)
     _maybe_memory(pulse_store, home, now)
     # One new turn per tick: a probe first, then a follow-up, the brief, then the report.
     if not _maybe_probe(pulse_store, home, now) and not _maybe_followup(pulse_store, home, now) \
@@ -933,6 +936,15 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
                                done=done)
             except Exception:  # noqa: BLE001 — follow-ups on what memory already has still run
                 logger.warning("conduit_push: Pulse memory run failed", exc_info=True)
+            if used < cap and memory.inbox_on(pulse_store):
+                # The Shortcuts inbox's deadlines, after the chats, on what
+                # they leave of memory's budget.
+                try:
+                    memory.read_inbox(pulse_store, home, ask, zone=zone, now=max(now, time.time()),
+                                      still_leader=lambda: not stopped.is_set() and _leads(pulse_store),
+                                      budget=cap - used, done=done)
+                except Exception:  # noqa: BLE001 — the chats' items are kept already
+                    logger.warning("conduit_push: Pulse memory couldn't read the inbox", exc_info=True)
             if acts:
                 try:
                     followup.check_acts(pulse_store, home, lambda instructions, text: ask(
