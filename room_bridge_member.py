@@ -70,27 +70,8 @@ _MESSAGES = {
     "member_unavailable": "This agent's Hermes didn't answer.",
 }
 
-# Hermes' run states (tui_gateway/hosted_room_peer_http.py).
-ACTIVE = frozenset({"queued", "running", "waiting_for_approval", "stopping"})
-ENDED = frozenset({"completed", "failed", "interrupted", "cancelled"})
-# A capabilities answer and a refreshed grant, as Hermes' client reads them.
-CAPABILITY_FIELDS = ("object", "room_id", "home_install_id", "authority_gateway_id", "authority_epoch", "member_id",
-                     "target_profile", "catalog")
-GRANT_FIELDS = ("object", "grant", "expires_at", "status_expires_at")
-
-_RUN = r"(?P<run>[A-Za-z0-9_-]{1,64})"
-_ROUTES = (
-    ("POST", re.compile(r"/v1/runs"), "dispatch"),
-    ("GET", re.compile(rf"/v1/runs/{_RUN}"), "read"),
-    ("POST", re.compile(rf"/v1/runs/{_RUN}/stop"), "stop"),
-    ("POST", re.compile(rf"/v1/runs/{_RUN}/(?:approval|clarify)"), "approval"),
-    ("GET", re.compile(r"/v1/room-members/capabilities"), "capabilities"),
-    ("POST", re.compile(r"/v1/room-members/grants/refresh"), "refresh"),
-    ("POST", re.compile(r"/v1/room-members/grants/revoke"), "revoke"),
-)
 # Applied however old: the home's Stop and revoke mean the same later.
 _ANY_AGE = frozenset({"stop", "revoke"})
-_CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")
 # Hermes' client reads these codes from an invalid_room_dispatch's message
 # (tui_gateway/hosted_room_peer_http._LEGACY_DISPATCH_MESSAGE_CODES): its
 # API server says a grant that doesn't cover the dispatch that way. The
@@ -98,7 +79,6 @@ _CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _DISPATCH_MESSAGE_CODES = (("room grant", "invalid_room_grant"),
                            ("capability catalog changed", "room_capability_catalog_changed"),
                            ("execution policy changed", "room_execution_policy_changed"))
-_RUN_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 # A member's turn prompt, as Hermes builds it
 # (gateway/hosted_room_discussion._build_prompt), and its mention rule
@@ -227,7 +207,7 @@ class Member:
 
     def _answer(self, received: room_links.Received, request: room_bridge.Request,
                 heard: float) -> Optional[dict]:
-        route, run_id = _route(request.method, request.path)
+        route, run_id = room_bridge.route(request.method, request.path)
         if route not in _ANY_AGE:
             # By the mailbox's clock alone (how long it waited there), then
             # this host's own for the wait for a worker.
@@ -257,12 +237,12 @@ class Member:
             return self._stop(received.link_id, profile, grant, run_id, reply)
         if route == "capabilities":
             status, answer = self._call(profile, "GET", "/v1/room-members/capabilities", grant)
-            return _passed(reply, status, answer, CAPABILITY_FIELDS)
+            return _passed(reply, status, answer, room_bridge.CAPABILITY_FIELDS)
         if route == "refresh":
             payload = request.body or {}
             sent = {"ttl_seconds": payload["ttl_seconds"]} if "ttl_seconds" in payload else {}
             status, answer = self._call(profile, "POST", "/v1/room-members/grants/refresh", grant, body=sent)
-            return _passed(reply, status, answer, GRANT_FIELDS)
+            return _passed(reply, status, answer, room_bridge.GRANT_FIELDS)
         status, answer = self._call(profile, "POST", "/v1/room-members/grants/revoke", grant, body={})
         return _passed(reply, status, answer, ("revoked",))
 
@@ -333,7 +313,7 @@ class Member:
                                     body={"hosted_room_dispatch": fields})
         if status is not None and 200 <= status < 300:
             run_id = answer.get("run_id")
-            if isinstance(run_id, str) and _RUN_ID.fullmatch(run_id):
+            if isinstance(run_id, str) and room_bridge.RUN_ID.fullmatch(run_id):
                 return reply(202, *self._admitted(link_id, key, profile, request.grant, run_id, answer))
         if known is None and status is not None and 400 <= status < 500:
             with self.store.update() as state:
@@ -352,7 +332,7 @@ class Member:
         with self.store.update() as state:
             run = state["member"]["runs"].get(run_id)
             if run is None:
-                shown = {"status": status if status in ACTIVE else "queued"}
+                shown = {"status": status if status in room_bridge.ACTIVE else "queued"}
                 run = state["member"]["runs"][run_id] = {
                     "link": link_id, "kind": "run", "key": key, "profile": profile, "grant": grant,
                     "admitted": now, "home_stopped": False, "shown": shown, "sent": shown, "sent_at": now,
@@ -425,7 +405,8 @@ class Member:
         elif status is not None and 200 <= status < 300 and answer.get("status") == "unknown":
             fixed = self._status_of(profile, grant, run_id, answer, home_stopped=False)
         read = status is not None and 200 <= status < 300 and fixed is None
-        if fixed is None and now - run["admitted"] >= CAP_S and not (read and answer.get("status") in ENDED):
+        if fixed is None and now - run["admitted"] >= CAP_S \
+                and not (read and answer.get("status") in room_bridge.ENDED):
             self._call(profile, "POST", f"/v1/runs/{run_id}/stop", grant, body={})
             fixed = {"status": "interrupted", "error": CAPPED}
         with self.store.update() as state:
@@ -437,7 +418,7 @@ class Member:
                     _shown(answer, home_stopped=fresh.get("home_stopped") is True) if read else None)
                 if shown is not None:
                     fresh["shown"] = shown
-                    if shown["status"] in ENDED:
+                    if shown["status"] in room_bridge.ENDED:
                         fresh["ended"] = now
             return None if fresh is None else dict(fresh)
 
@@ -588,14 +569,6 @@ def _watch(member: Member) -> None:
 # --- Helpers -----------------------------------------------------------------------
 
 
-def _route(method: str, path: str) -> tuple[Optional[str], Optional[str]]:
-    for route_method, pattern, name in _ROUTES:
-        found = pattern.fullmatch(path) if method == route_method else None
-        if found is not None:
-            return name, found.groupdict().get("run")
-    return None, None
-
-
 def _key_of(fields: Mapping[str, Any]) -> Optional[str]:
     """The Idempotency-Key Hermes' client sends with a dispatch."""
     task_id, generation = fields.get("task_id"), fields.get("execution_generation")
@@ -624,7 +597,7 @@ def _due(run: dict, now: float) -> bool:
     shown = run.get("shown")
     if shown is None:
         return False
-    return shown != run.get("sent") or (shown["status"] in ACTIVE and now - run["sent_at"] >= HEARTBEAT_S)
+    return shown != run.get("sent") or (shown["status"] in room_bridge.ACTIVE and now - run["sent_at"] >= HEARTBEAT_S)
 
 
 def _shown(answer: Any, *, home_stopped: bool) -> Optional[dict]:
@@ -638,7 +611,8 @@ def _shown(answer: Any, *, home_stopped: bool) -> Optional[dict]:
         return None
     if status == "completed":
         output = answer.get("output")
-        return {"status": "completed", "output": _cut(output if isinstance(output, str) else "")}
+        return {"status": "completed",
+                "output": room_bridge.cut(output if isinstance(output, str) else "", MAX_OUTPUT_BYTES)}
     if status == "failed":
         return {"status": "failed", "error": FAILED}
     if status in ("interrupted", "unknown"):
@@ -648,13 +622,7 @@ def _shown(answer: Any, *, home_stopped: bool) -> Optional[dict]:
         return {"status": "cancelled"} if home_stopped else {"status": "interrupted", "error": STOPPED}
     # A state this plugin doesn't know is one Hermes' client wouldn't: the
     # run's still on, until it ends or the cap stops it.
-    return {"status": status if status in ACTIVE else "running"}
-
-
-def _cut(text: str) -> str:
-    """``text`` cut to MAX_OUTPUT_BYTES of UTF-8, at a character. A lone
-    surrogate, which JSON carries and UTF-8 can't, reads as ``?``."""
-    return text.encode("utf-8", "replace")[:MAX_OUTPUT_BYTES].decode("utf-8", "ignore")
+    return {"status": status if status in room_bridge.ACTIVE else "running"}
 
 
 def _error(code: str) -> dict:
@@ -670,7 +638,7 @@ def _refused(reply: Callable[..., dict], status: Optional[int], answer: dict) ->
         return reply(503, _error("member_unavailable"))
     error = answer.get("error")
     code = error.get("code") if isinstance(error, dict) else None
-    if not isinstance(code, str) or not _CODE.fullmatch(code):
+    if not isinstance(code, str) or not room_bridge.CODE.fullmatch(code):
         return reply(status, {"error": {"message": REFUSED}})
     if code == "invalid_room_dispatch":
         message = str(error.get("message") or "").lower()
