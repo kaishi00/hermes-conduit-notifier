@@ -608,6 +608,9 @@ def live(tmp_path, monkeypatch):
     monkeypatch.setattr(pulse, "turns_marked", True)
     monkeypatch.setattr(pulse, "_started_at", time.time() - 10)
     monkeypatch.setattr(pulse, "_turns", {})
+    monkeypatch.setattr(pulse, "_looks", {})
+    monkeypatch.setattr(pulse, "_started", {})
+    monkeypatch.setattr(pulse, "_known_home", set())
     monkeypatch.setattr(pulse, "_last_problem", "")
     monkeypatch.setattr(pulse, "_last_ratings", 0.0)
     monkeypatch.setattr(pulse, "_zone_cache", (0.0, None))
@@ -756,7 +759,12 @@ def test_a_pulse_turn_gets_its_note_and_no_tools(live, db):
     assert live.store.in_flight()[0]["state"] == store.RUNNING
     assert plugin._pre_tool_call(session_id=SID, turn_id="t1", tool_name="terminal", args={}) == {
         "action": "block", "message": pulse.BLOCK_MESSAGE}
-    # Another turn in the same chat is the user's own.
+    # Another turn in the same chat while the check is in flight may be
+    # Pulse's own, not recognised: held, with no tools (7.6, item 1).
+    assert plugin._pre_tool_call(session_id=SID, turn_id="t2", tool_name="read_file", args={}) == {
+        "action": "block", "message": pulse.HELD_MESSAGE}
+    # Once Pulse's turn ended, a turn there is the user's own.
+    pulse.turn_ended(SID, "t1")
     assert plugin._pre_tool_call(session_id=SID, turn_id="t2", tool_name="read_file", args={}) is None
 
 
@@ -1351,14 +1359,25 @@ def test_a_report_long_past_its_time_waits_for_the_next_one(live, db):
     assert len(live.sent()) == 1
 
 
-def test_a_report_turn_gets_the_report_note_and_no_tools(live, db):
+def test_a_report_turn_gets_the_report_note_and_may_only_look_things_up(live, db):
     db.session()
     _due_report(live)
     live.store.set("report_requested", True)
     pulse.tick()
     [text] = live.sent()
+    look = pulse.tools.look_note(pulse.tools.Turn(pulse.REPORT))
+    assert pulse.pre_llm_call(SID, "t9", text) == f"{report.REPORT_LOOK_NOTE} {look}"
+    assert "web_search" not in look  # a report carries the Shortcuts inbox: it never searches
+    assert pulse.pre_tool_call(SID, "t9")["action"] == "block"
+    assert pulse.pre_tool_call(SID, "t9", "terminal", {"command": "ls"})["action"] == "block"
+    assert pulse.pre_tool_call(SID, "t9", "conduit_calendar", {"action": "events"}) is None
+    assert pulse.pre_tool_call(SID, "t9", "web_search", {"query": "flights"}) == {
+        "action": "block", "message": pulse.tools.SEARCH_BLOCK}
+    # Looking things up first off: the old note, and no tools at all.
+    live.store.set(store.LOOK_SETTING, False)
     assert pulse.pre_llm_call(SID, "t9", text) == report.REPORT_NOTE
-    assert pulse.pre_tool_call(SID, "t9") == {"action": "block", "message": pulse.BLOCK_MESSAGE}
+    assert pulse.pre_tool_call(SID, "t9", "conduit_calendar", {"action": "events"}) == {
+        "action": "block", "message": pulse.BLOCK_MESSAGE}
 
 
 def test_a_probe_and_a_report_due_together_go_on_separate_ticks(live, db):

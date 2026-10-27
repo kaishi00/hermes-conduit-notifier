@@ -2435,6 +2435,44 @@ Limits: 4 devices per profile, 5,000 items and 4 MiB per batch, 50 alarms and
 200 contacts per device, 120 uploads and 60 exchanges a minute per profile,
 64 KiB per exchange.
 
+## Pulse looks things up first (plugin 0.96+)
+
+Pulse's report, morning brief and follow-up turns can look things up before
+they speak, to check or add a detail to what they bring up ("and your
+evening is free", "it's a 25-minute drive"), never to bring up something
+new. Code decides what a Pulse turn may call, from the tool, its arguments
+and the turn, never from what the model says a call is for. Everything else
+is blocked, with a note naming what the turn may use:
+
+| Tool | Actions | Limits |
+|---|---|---|
+| `conduit_calendar` | `overview`, `calendars`, `events`, `free_busy`, `next`, `reminders` | |
+| `conduit_phone` | `status`, `alarms` | |
+| `conduit_contacts` | `people` | |
+| `conduit_maps` | `search`, `lookup`, `reverse_geocode`, `directions`, `travel_times` | between places the turn names: never `"me"` (what `near` and `from` default to) or a saved place; 20 a day |
+| `web_search` | | only on a follow-up about a promise or commitment, which reads its chat (reports, briefs and watches carry the Shortcuts inbox, other people's words); no web address in the query; 10 a day |
+
+- At most 6 look-ups a turn; days are UTC. Calendar adds, `pending` (it
+  marks the phone's answers reported), alarm and timer changes, `navigate`,
+  `web_extract`, `conduit_location`, `conduit_health` and every other tool
+  stay blocked.
+- Tool Search's `tool_search` and `tool_describe` are allowed, and each call
+  inside a `tool_call` Hermes couldn't unwrap is checked the same way.
+- A turn in the Pulse chat (or what compression made of it) that Pulse didn't
+  recognise, while a Pulse turn is on its way there, gets no tools: it may be
+  Pulse's own. A turn that started before Pulse sent anything keeps its
+  tools, and the hold ends when Pulse's turn does. The hook never returns
+  Hermes's "approve", so YOLO mode or an "always" rule can't widen any of
+  this, and a check that fails raises, which Hermes takes as a block.
+- Each card says what its turn looked at, for Why? (`"looked"` in
+  `/pulse/feed`: `calendar`, `phone`, `contacts`, `maps`, `web`, never the
+  queries). Maps look-ups are in the location read log under the Pulse
+  chat's title.
+- On with Pulse: `hermes conduit-push pulse look on|off`, or `PUT /pulse`
+  with `"look_first"`. Off, Pulse's turns use no tools. `hermes conduit-push
+  pulse look` shows today's look-ups and what recent turns looked at.
+  Capability `pulse_look`.
+
 ## Apple Watch lookups and jobs (plugin 0.6+, jobs 0.7+, Gemini tokens 0.8+, Qwen tokens 0.75+)
 
 With the wrist down, a Conduit Watch call can't reach Conduit on the iPhone,
