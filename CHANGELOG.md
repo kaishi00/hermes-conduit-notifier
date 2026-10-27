@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.95.0 (2026-10-27)
+
+### Fixes
+- When you approve Hermes' requests from a Watch Local Live call, the card now stays up as long as Hermes waits (your approvals timeout setting). On current Hermes it always used five minutes.
+- Voice on a profile that no longer exists now says so, instead of saying Hermes couldn't check it.
+
 ## 0.94.0 (2026-10-27)
 
 ### New and improved

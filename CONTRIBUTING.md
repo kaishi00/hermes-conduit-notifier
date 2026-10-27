@@ -50,6 +50,31 @@ push to main. To run them locally:
     (cd relay && npm test)
     (cd mailbox && npm test)
 
+## Upstream contract
+
+`upstream/` runs the plugin against a real Hermes dashboard, so a Hermes change
+that breaks us shows up from the daily canary rather than from users
+(`.github/workflows/upstream-contract.yml`; it runs on PRs that touch
+`dashboard/` or `upstream/`, and every morning on the newest canary and
+release, opening one `upstream-break` issue per failure).
+
+- `upstream/contract.yml` lists the Hermes modules and names the plugin imports
+  and the routes it serves. That part is generated: after adding a Hermes
+  import or a route, run `python3 upstream/contract.py write` and commit it
+  (the plugin suite fails until you do). Say what a new integration point
+  feeds in `notes`.
+- A test of upstream behavior checks the behavior we need, never the broken
+  one. When upstream breaks it and we work around it, list it under
+  `known_failures` with its signature: it reports as a known failure until
+  upstream fixes it, then fails so the workaround gets another look.
+- Tests check where a request landed (which profile's settings it used), not
+  only that it was answered.
+
+To run them locally (Linux or macOS, about a minute):
+
+    upstream/install-hermes.sh v0.22.5 /tmp/hermes
+    HERMES_BIN=/tmp/hermes/.venv/bin/hermes /tmp/hermes/.venv/bin/python -m pytest --rootdir=upstream upstream
+
 ## Review labels
 
 A PR labeled `waiting on contributor` is waiting on its author. Push or comment
