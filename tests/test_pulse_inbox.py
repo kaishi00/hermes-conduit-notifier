@@ -258,6 +258,10 @@ def test_a_failed_read_is_tried_again_later_and_skipped_after_too_many(live):
     done = read(live, model, now=now + 3 * memory.RETRY_S + 3)
     assert model.asked == [] and done["skipped"] == 1
     assert live.store.get(store.INBOX_MARK)[1:] == [DEVICE, "e1"] and live.store.get(memory.INBOX_FAILED) is None
+    # `pulse inbox` says what was skipped.
+    assert live.store.get(memory.INBOX_LAST)["skipped"] == 1
+    live.store.set("memory", True)
+    assert "0 events, 0 new deadlines; 1 skipped after failed reads" in cli._inbox_line(live.store, UTC)
 
 
 def test_another_reader_or_turning_it_off_meanwhile_keeps_nothing(live):
@@ -445,6 +449,15 @@ def test_turning_it_off_forgets_the_deadlines_and_where_it_read_to(live):
         control.update(live.store, {"inbox_deadlines": "no"}, live.home)
     control.update(live.store, {"inbox_deadlines": True}, live.home)
     assert memory.inbox_on(live.store)
+    # Should turning it off fail to forget them, the loop's next tick does, its event still logged.
+    now = time.time()
+    Phone(live.home).log(event("e1", "a", logged=now - 3600))
+    [item_id] = kept(live, trial(date.today() + timedelta(days=5), logged=now - 3600))
+    assert memory.forget_inbox(live.store, live.home, now) == 0
+    live.store.set(store.INBOX_SETTING, False)
+    assert memory.forget_inbox(live.store, live.home, time.time()) == 1
+    assert live.store.item(item_id) is None and live.store.get(store.INBOX_MARK) is None
+    assert memory.forget_inbox(live.store, live.home, time.time()) == 0
 
 
 def test_what_pulse_remembers_lists_a_deadline_with_who_its_from(live):
@@ -480,3 +493,7 @@ def test_the_commands_show_switch_and_list_the_deadlines(live, capsys, monkeypat
     assert "and forgot the 1 it kept" in capsys.readouterr().out and live.store.deadlines() == []
     assert run("inbox") == 0 and "Deadlines from the Shortcuts inbox: off" in capsys.readouterr().out
     assert run("inbox", "on") == 0 and memory.inbox_on(live.store)
+    kept(live, trial(due, logged=time.time() - 3600))
+    assert run("inbox") == 0 and "Read what the phone logged up to " in capsys.readouterr().out
+    live.store.set(store.INBOX_MARK, [1, DEVICE])  # not a mark
+    assert run("inbox") == 0 and "Read what the phone logged" not in capsys.readouterr().out

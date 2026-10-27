@@ -859,9 +859,12 @@ class PulseStore:
                 "SELECT key, value_json FROM settings WHERE key IN (?, ?)", (INBOX_MARK, INBOX_SETTING))}
             try:
                 current = json.loads(stored[INBOX_MARK]) if INBOX_MARK in stored else None
+            except ValueError:
+                current = None
+            try:
                 reading = json.loads(stored[INBOX_SETTING]) if INBOX_SETTING in stored else True
             except ValueError:
-                current, reading = None, True
+                reading = True
             if current != after or reading is False:
                 conn.execute("ROLLBACK")
                 return None

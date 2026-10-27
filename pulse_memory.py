@@ -962,7 +962,8 @@ def read_inbox(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzi
     if failed.get("retry_at", 0) > now:
         return done  # waits for its retry
     events = inbox.received(start, skip_kinds=INBOX_SKIP_KINDS, limit=INBOX_READ)
-    last = {"at": now, "events": 0, "batches": 0, "deadlines": 0, "closed": 0, "tokens": 0, "error": ""}
+    last = {"at": now, "events": 0, "batches": 0, "deadlines": 0, "closed": 0, "tokens": 0, "skipped": 0,
+            "error": ""}
     calls = skipped = 0
     for batch in inbox_batches(events, zone):
         if calls >= INBOX_MAX_CHUNKS or done["tokens"] >= budget or not still_leader():
@@ -977,6 +978,7 @@ def read_inbox(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzi
             pulse_store.set(INBOX_FAILED, None)
             done["skipped"] += 1
             skipped += 1
+            last["skipped"] += len(batch)
             after, failed = mark, {}
             continue
         calls += 1
@@ -1023,8 +1025,12 @@ def forget_inbox(pulse_store: store.PulseStore, home: Path, now: float) -> int:
     inbox (or went past its cap, the oldest first) stays until its day has
     passed, and so does one whose phone was paired again, which drops what
     the earlier pairing sent. Nothing is taken for deleted while the inbox
-    can't be read. Returns how many went."""
+    can't be read. Turned off, every one goes, with where it read to, in
+    case turning it off couldn't forget them (``stop_inbox``). Returns how
+    many went."""
     rows = pulse_store.inbox_items()
+    if not inbox_on(pulse_store):
+        return stop_inbox(pulse_store) if rows or pulse_store.get(store.INBOX_MARK) is not None else 0
     if not rows:
         return 0
     by_id = {row["id"]: row for row in rows}

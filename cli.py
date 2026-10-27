@@ -1637,9 +1637,11 @@ def _inbox_line(pulse_store: Any, zone: Any) -> str:
         return f"{title}: on; {kept} kept; nothing read yet"
     when = datetime.fromtimestamp(last["at"], zone).strftime("%a %d %b %H:%M")
     found = int(last.get("deadlines") or 0)
+    skipped = int(last.get("skipped") or 0)
+    skipped = f"; {skipped} skipped after failed reads" if skipped else ""
     error = f"; it failed: {_printable(str(last['error']))}" if last.get("error") else ""
     return (f"{title}: on; {kept} kept; last read {when}: {int(last.get('events') or 0)} events, "
-            f"{found} new deadline{'' if found == 1 else 's'}{error}")
+            f"{found} new deadline{'' if found == 1 else 's'}{skipped}{error}")
 
 
 def _pulse_inbox(pulse_store: Any, home: Any, value: str) -> int:
@@ -1663,8 +1665,8 @@ def _pulse_inbox(pulse_store: Any, home: Any, value: str) -> int:
         return 2
     zone = pulse.report_zone(pulse_store, home)
     print(_inbox_line(pulse_store, zone))
-    mark = pulse_store.get(pulse_memory.store.INBOX_MARK)
-    if isinstance(mark, list) and mark and isinstance(mark[0], int) and not isinstance(mark[0], bool):
+    mark = pulse_memory._mark(pulse_store.get(pulse_memory.store.INBOX_MARK))
+    if mark:
         print(f"Read what the phone logged up to {datetime.fromtimestamp(mark[0], zone):%a %d %b %H:%M}.")
     today = pulse_dates.local_today(zone, time.time())
     found = pulse_dates.deadlines(pulse_store)
