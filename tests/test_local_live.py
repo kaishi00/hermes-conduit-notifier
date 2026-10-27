@@ -1473,3 +1473,75 @@ def test_thinking_is_never_spoken():
     think = api._ThinkFilter()
     out = "".join(think.feed(piece) for piece in ["Hel", "lo <th", "ink>secret", " stuff</thi", "nk> there", "<"])
     assert out + think.flush() == "Hello  there<"
+
+
+# --- Another profile, served by this dashboard (hermes-conduit#1336) ----------------
+#
+# Hermes 0.22.3+ sends ?profile=<another profile> to that profile's plugin host,
+# which has no sockets and none of this process's calls; ?conduit_profile= keeps
+# the request here, scoped to that profile.
+
+def test_conduit_profile_status_and_key_are_that_profiles(client, hermes):
+    body = client.get(f"{BASE}/local-live/status?conduit_profile=work").json()
+    assert api.local_live_profile_for_key(body["api_key"]) == "work"
+    new = client.post(f"{BASE}/local-live/key?conduit_profile=work").json()["api_key"]
+    assert api.local_live_profile_for_key(new) == "work"
+    assert api.local_live_profile_for_key(body["api_key"]) is None
+
+
+def test_conduit_profile_call_takes_that_profiles_turns(client, hermes, server):
+    headers = {"Authorization": f"Bearer {_key(hermes, 'work')}"}
+    with client.websocket_connect(f"{BASE}/local-live/socket?conduit_profile=work") as ws:
+        thread, result = _ask_in_background(client, headers, _completion("Turn on the lights"))
+        assert json.loads(ws.receive_text())["text"] == "Turn on the lights"
+        ws.send_text(json.dumps({"type": "conduit.turn.delta", "turn_id": "t1", "text": "Done."}))
+        ws.send_text(json.dumps({"type": "conduit.turn.done", "turn_id": "t1"}))
+        thread.join(10)
+        ws.send_text("finish")
+    assert result["response"].json()["choices"][0]["message"]["content"] == "Done."
+
+
+def test_conduit_profile_is_refused_where_the_profile_turned_the_plugin_off(client, hermes, monkeypatch):
+    dashboard = types.ModuleType("hermes_cli.web_server_dashboard")
+
+    async def refused(name):
+        assert name == api.PLUGIN_NAME
+        return hermes.profile == "off"
+
+    dashboard._plugin_api_request_refused = refused
+    monkeypatch.setitem(sys.modules, "hermes_cli.web_server_dashboard", dashboard)
+    assert client.get(f"{BASE}/local-live/status?conduit_profile=off").status_code == 404
+    assert client.get(f"{BASE}/local-live/status?conduit_profile=work").status_code == 200
+    with client.websocket_connect(f"{BASE}/speech-server/socket?conduit_profile=off") as ws:
+        while (message := ws.receive())["type"] != "websocket.close":
+            pass
+    assert message["code"] == api.SPEECH_SERVER_CLOSE_REFUSED
+
+
+def test_conduit_profile_must_match_profile(client, hermes):
+    response = client.get(f"{BASE}/local-live/status?profile=home&conduit_profile=work")
+    assert response.status_code == 400
+    assert response.headers["cache-control"] == "no-store"
+    assert client.get(f"{BASE}/local-live/status?profile=work&conduit_profile=work").status_code == 200
+
+
+def test_conduit_profile_isnt_for_a_desktop_ticket(hermes):
+    conn = types.SimpleNamespace(query_params={"conduit_profile": "work"},
+                                 state=types.SimpleNamespace(native_http_principal={"profile_id": "/h/home"}))
+    with pytest.raises(api.HTTPException) as refused:
+        asyncio.run(api._conduit_route_profile(conn, None))
+    assert refused.value.status_code == 403
+    without = types.SimpleNamespace(query_params={}, state=conn.state)
+    assert asyncio.run(api._conduit_route_profile(without, "home")) == "home"
+
+
+def test_dashboard_profiles_is_a_capability():
+    assert "dashboard-profiles" in api.ROUTE_CAPABILITIES
+
+
+def test_in_a_plugin_host_local_live_says_so(hermes, monkeypatch):
+    monkeypatch.delitem(sys.modules, "hermes_cli.web_server", raising=False)
+    monkeypatch.setitem(sys.modules, "hermes_cli.plugin_host_child", types.ModuleType("hermes_cli.plugin_host_child"))
+    api._local_live_auth_state.update(ready=False, started=False)
+    api._local_live_start_auth()
+    assert api._local_live_auth_state["reason"] == api.LOCAL_LIVE_PLUGIN_HOST_REASON

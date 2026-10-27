@@ -561,6 +561,67 @@ def _profile_scope(profile: Optional[str]):
     return _config_profile_scope(profile or None)
 
 
+# --- Profiles this dashboard serves itself (hermes-conduit#1336) ---------------
+#
+# Hermes 0.22.3+ (PLG-3) sends a plugin request whose ?profile= names a profile
+# other than the one the dashboard started with to that profile's own plugin
+# host. The host carries plain HTTP only (a WebSocket gets HTTP 501) and none
+# of this process's state: Local Live's key and calls, and the chats and jobs
+# Watch calls use. A workaround until Hermes carries them: Conduit names the
+# profile as ?conduit_profile= on the routes that need this process, Hermes
+# leaves the request here, and the route scopes itself to that profile, as it
+# does for ?profile=, after the same consent check. Conduit sends it only to a
+# plugin that lists the "dashboard-profiles" capability.
+
+CONDUIT_PROFILE_PARAM = "conduit_profile"
+CONDUIT_PROFILE_TICKET_REASON = "A Hermes Desktop ticket acts for its own profile only"
+
+
+async def _conduit_route_profile(conn: HTTPConnection, profile: Optional[str]) -> Optional[str]:
+    """The profile a route acts for: ?conduit_profile= when sent, else ``profile``
+    (?profile=). Raises HTTPException when the request can't act for it."""
+    named = conn.query_params.get(CONDUIT_PROFILE_PARAM)
+    if named is None:
+        return profile
+    named = named.strip()
+    if (profile or "").strip() and profile.strip() != named:
+        raise HTTPException(status_code=400, detail="profile and conduit_profile name different profiles")
+    if not named:
+        return None
+    # A native ticket is one profile's principal; Hermes scopes it there.
+    if getattr(conn.state, "native_http_principal", None) is not None:
+        raise HTTPException(status_code=403, detail=CONDUIT_PROFILE_TICKET_REASON)
+    if await _plugin_refused_on(named):
+        raise HTTPException(status_code=404, detail="Plugin not found")
+    return named
+
+
+async def _conduit_route_profile_no_store(request: Request, profile: Optional[str]) -> Optional[str]:
+    """``_conduit_route_profile`` for a route whose answers are never cached."""
+    try:
+        return await _conduit_route_profile(request, profile)
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
+        raise
+
+
+async def _plugin_refused_on(profile: str) -> bool:
+    """Whether ``profile`` turned this plugin off: Hermes' own gate for a
+    ?profile= request, asked in that profile's scope."""
+    try:
+        from hermes_cli.web_server_dashboard import _plugin_api_request_refused
+    except ImportError as exc:
+        # A Hermes without per-profile consent: ?profile= has no gate there either.
+        if exc.name not in ("hermes_cli", "hermes_cli.web_server_dashboard"):
+            raise
+        return False
+    try:
+        with _profile_scope(profile):
+            return bool(await _plugin_api_request_refused(PLUGIN_NAME))
+    except TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+
+
 _Scoped = TypeVar("_Scoped")
 
 
@@ -2303,6 +2364,11 @@ async def grok_live_socket(ws: WebSocket) -> None:
         await refuse(GROK_CLOSE_UNAUTHORIZED, "Dashboard sign-in required")
         return
     try:
+        profile = await _conduit_route_profile(ws, profile)
+    except HTTPException as exc:
+        await refuse(GROK_CLOSE_REFUSED, str(exc.detail))
+        return
+    try:
         token, auth, model = await asyncio.wait_for(
             _run_scoped(profile, lambda: _grok_live_socket_setup(profile), _grok_live_executor),
             timeout=GROK_LIVE_SETUP_TIMEOUT_S)
@@ -2757,6 +2823,11 @@ async def _speech_server_socket(ws: WebSocket, relay: Callable[..., Any]) -> Non
         await refuse(SPEECH_SERVER_CLOSE_UNAUTHORIZED, "Dashboard sign-in required")
         return
     try:
+        profile = await _conduit_route_profile(ws, profile)
+    except HTTPException as exc:
+        await refuse(SPEECH_SERVER_CLOSE_REFUSED, str(exc.detail))
+        return
+    try:
         url, key = await asyncio.wait_for(
             _run_scoped(profile, lambda: _speech_server_setup(profile), _speech_server_executor),
             timeout=SPEECH_SERVER_SETUP_TIMEOUT_S)
@@ -2938,6 +3009,12 @@ LOCAL_LIVE_NO_CALL_REPLY = "Conduit isn't in a Local Live call right now."
 LOCAL_LIVE_UNAVAILABLE = ("This Hermes can't take the voice server's key (no dashboard token routes). "
                           "Update Hermes to use Local Live.")
 _LOCAL_LIVE_PROFILE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+
+# A profile whose plugin Hermes runs in a plugin host of its own (Hermes
+# 0.22.3+ with several profiles): only the dashboard process serves Local
+# Live, and a Conduit that knows ?conduit_profile= reaches it there.
+LOCAL_LIVE_PLUGIN_HOST_REASON = ("Hermes runs this profile's plugins apart from the dashboard, where Local Live "
+                                 "can't work. Update Conduit, or start a dashboard for this profile.")
 
 _local_live_auth_state: Dict[str, Any] = {"ready": False, "reason": "Local Live is starting", "started": False}
 _local_live_auth_lock = threading.Lock()
@@ -3274,7 +3351,9 @@ def _local_live_start_auth() -> None:
         if "hermes_cli.web_server" not in sys.modules:
             # Not the dashboard yet (tests, a plugin host process, or imported
             # before it): a later status or socket call tries again.
-            _local_live_auth_state.update(ready=False, reason="Local Live runs in the Hermes dashboard")
+            _local_live_auth_state.update(ready=False, reason=(
+                LOCAL_LIVE_PLUGIN_HOST_REASON if "hermes_cli.plugin_host_child" in sys.modules
+                else "Local Live runs in the Hermes dashboard"))
             return
         _local_live_auth_state["started"] = True
     try:
@@ -3575,8 +3654,9 @@ def local_live_status(
 
 
 @router.get("/local-live/status")
-async def get_local_live_status(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+async def get_local_live_status(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
+    profile = await _conduit_route_profile_no_store(request, profile)
     _local_live_start_auth()
     in_call = _local_live_active_call(profile or "") is not None
     last_request_at = _local_live_last_request.get(_local_live_profile_key(profile))
@@ -3597,10 +3677,11 @@ async def get_local_live_status(response: Response, profile: Optional[str] = Non
 
 
 @router.post("/local-live/key")
-async def post_local_live_key(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+async def post_local_live_key(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     """A new key for the voice server. This process drops the old one at once;
     other dashboard processes accept it for up to 30 s (their verified cache)."""
     response.headers["Cache-Control"] = "no-store"
+    profile = await _conduit_route_profile_no_store(request, profile)
     _local_live_start_auth()
     if not _local_live_auth_state.get("ready"):
         raise HTTPException(status_code=503, detail=str(_local_live_auth_state.get("reason") or LOCAL_LIVE_UNAVAILABLE),
@@ -11108,6 +11189,7 @@ async def post_watch_tool_grant(request: Request, response: Response, profile: O
     response.headers["Cache-Control"] = "no-store"
     response.headers["Pragma"] = "no-cache"
     no_store = {"Cache-Control": "no-store"}
+    profile = await _conduit_route_profile_no_store(request, profile)
     body = await _read_json_body(request, WATCH_GRANT_MAX_BODY_BYTES)
     try:
         # A native ticket is one profile's principal; its home bounds the
@@ -11127,6 +11209,7 @@ async def post_watch_tool_grant(request: Request, response: Response, profile: O
 @router.post("/watch-tools/revoke")
 async def post_watch_tool_revoke(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
+    profile = await _conduit_route_profile_no_store(request, profile)
     body = await _read_json_body(request, WATCH_GRANT_MAX_BODY_BYTES)
     try:
         # Closing here is quick; the relay is told on a thread of its own.
@@ -15380,8 +15463,9 @@ def _watch_audio_grant_engines(runtime: Optional[_WatchAudioRuntime] = None, pro
 
 
 @router.get("/watch-audio/status")
-async def get_watch_audio_status(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+async def get_watch_audio_status(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
+    profile = await _conduit_route_profile_no_store(request, profile)
     _local_live_start_auth()
     try:
         return {"ok": True, **(await asyncio.wait_for(_run_scoped(profile, lambda: watch_audio_status(profile=profile)),
@@ -17041,6 +17125,11 @@ ROUTE_CAPABILITIES = (
     # /rooms/drafts, /rooms/invites and /rooms/people: rooms with people
     # you've linked, from the draft to the start (Linked Rooms).
     "room-invites",
+    # ?conduit_profile= on the voice and Watch routes that need the dashboard
+    # process (Local Live, the speech server and Grok Live sockets, Watch
+    # grants): any profile's, on a Hermes that hosts other profiles' plugins
+    # apart (hermes-conduit#1336).
+    "dashboard-profiles",
 )
 
 

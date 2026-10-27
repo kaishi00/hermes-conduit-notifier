@@ -13,6 +13,16 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.90.0 (2026-10-27)
+
+### Fixes
+- On Hermes 0.22.3 and later, with one dashboard for several profiles, Local
+  Live, voice on your own speech server, Grok Live and Watch calls didn't work
+  on any profile but the one the dashboard started with. With this plugin and
+  the next Conduit, they work on every profile. Hermes now runs other
+  profiles' plugins apart from the dashboard, where voice calls can't
+  connect, so these keep to the dashboard until Hermes can carry them.
+
 ## 0.89.0 (2026-10-27)
 
 ### New and improved
