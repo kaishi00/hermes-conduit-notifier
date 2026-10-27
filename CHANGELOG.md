@@ -13,6 +13,20 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.98.0 (2026-10-27)
+
+### Fixes
+- On Hermes 0.22.3 and later, setting up rooms with people you've linked for
+  a profile the dashboard didn't start with, from an older Conduit, restarted
+  Hermes from the wrong process, and Hermes came back with that process's
+  settings. Now the setup is saved and you're asked to restart Hermes.
+
+### New and improved
+- On Hermes 0.22.3 and later, with one dashboard for several profiles, the
+  next Conduit can set up any of them for rooms with people you've linked
+  and make those rooms for it, not just for the profile the dashboard started
+  with.
+
 ## 0.97.0 (2026-10-27)
 
 ### New and improved

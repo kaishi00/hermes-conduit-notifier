@@ -2173,6 +2173,65 @@ def test_a_draft_made_where_the_dashboard_runs_in_the_gateway_is_the_requests_su
     assert routes.home.canonical.owners == {room_id: "subject:furina"}
 
 
+def _drafts_for(routes, monkeypatch, work):
+    """Where the dashboard runs in the gateway, with ``work``'s session authority; the profiles a draft's
+    authority and scope were asked for."""
+    asked, scoped = [], []
+
+    def context(request, profile):
+        asked.append(profile)
+        return (types.SimpleNamespace(db=types.SimpleNamespace(db_path=work / "state.db")),
+                types.SimpleNamespace(subject="subject:furina"))
+
+    sessions = types.ModuleType("hermes_cli.web_server_sessions")
+    sessions._session_mutation_context = context
+    monkeypatch.setitem(__import__("sys").modules, "hermes_cli.web_server_sessions", sessions)
+    routes.app.state.session_authority = object()
+    monkeypatch.setattr(api, "_profile_scope", lambda profile: scoped.append(profile) or contextlib.nullcontext())
+    return asked, scoped
+
+
+def test_a_draft_for_another_profile_as_conduit_profile_starts_in_that_profiles_service(routes, monkeypatch):
+    # Hermes 0.22.3+ sends ?profile= for a profile the dashboard didn't start
+    # with to that profile's plugin host, which has no session authority, so
+    # its draft would start in the legacy service; ?conduit_profile= keeps the
+    # request here (hermes-conduit#1336).
+    _listening(routes)
+    work = routes.tmp_path / "furina" / "profiles" / "work"
+    routes.home.canonical = CanonicalService(work / "state.db")
+    asked, scoped = _drafts_for(routes, monkeypatch, work)
+
+    made = routes.call("furina", "POST", "/rooms/drafts", params={"conduit_profile": "work"},
+                       json={"name": "Zoo trip", "agents": [{**FURINAS, "profile": "work"}], "links": ["link1"]})
+    assert made.status_code == 200, made.text
+    room_id = made.json()["draft"]["room_id"]
+    stored = json.loads((routes.tmp_path / "furina" / invites_module.DIRECTORY / "rooms.json").read_text())
+    assert stored["drafts"][room_id]["where"] == {"kind": "canonical", "home": str(work), "subject": "subject:furina"}
+    assert asked == ["work"] and set(scoped) == {"work"}
+    answer(routes, "laifu", room_id, "link1", LAIFUS)
+    routes.furina.pass_once()
+    assert routes.home.canonical.owners == {room_id: "subject:furina"}
+
+
+@pytest.mark.parametrize("query,status", [({"profile": "home", "conduit_profile": "work"}, 400),
+                                          ({"conduit_profile": "work"}, 404)])
+def test_a_draft_for_another_profile_is_refused_before_anything_is_made(routes, monkeypatch, query, status):
+    _listening(routes)
+    work = routes.tmp_path / "furina" / "profiles" / "work"
+    asked, scoped = _drafts_for(routes, monkeypatch, work)
+
+    async def refused(name):
+        return True
+
+    dashboard = types.ModuleType("hermes_cli.web_server_dashboard")
+    dashboard._plugin_api_request_refused = refused
+    monkeypatch.setitem(__import__("sys").modules, "hermes_cli.web_server_dashboard", dashboard)
+    made = routes.call("furina", "POST", "/rooms/drafts", params=query,
+                       json={"name": "Zoo trip", "agents": [{**FURINAS, "profile": "work"}], "links": ["link1"]})
+    assert made.status_code == status and made.headers["cache-control"] == "no-store"
+    assert asked == [] and routes.call("furina", "GET", "/rooms/drafts").json()["drafts"] == []
+
+
 # --- CLI ------------------------------------------------------------------------------------
 
 

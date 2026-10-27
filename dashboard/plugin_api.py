@@ -568,11 +568,13 @@ def _profile_scope(profile: Optional[str]):
 # host. The host carries plain HTTP only (a WebSocket gets HTTP 501) and none
 # of this process's state: Local Live's key and calls, and the chats and jobs
 # Watch calls use, the chats this process's gateway runs (takeover, Desktop
-# views, predictions). A workaround until Hermes carries them: Conduit names the
+# views, predictions), and the room services and gateway restarts Linked Rooms'
+# drafts and setup use. A workaround until Hermes carries them: Conduit names the
 # profile as ?conduit_profile= on the routes that need this process, Hermes
 # leaves the request here, and the route scopes itself to that profile, as it
 # does for ?profile=, after the same consent check. Conduit sends it only to a
-# plugin that lists the "dashboard-profiles" capability.
+# plugin that lists the "dashboard-profiles" capability, and to the rooms
+# routes only to one that lists "room-dashboard-profiles".
 
 CONDUIT_PROFILE_PARAM = "conduit_profile"
 CONDUIT_PROFILE_TICKET_REASON = "A Hermes Desktop ticket acts for its own profile only"
@@ -8331,7 +8333,9 @@ async def delete_room_link_invite(response: Response, invite_id: Optional[str] =
 # goes on, taking agents out of it, yours (leave) or theirs (remove). Both are
 # the installation's, in its root home, so only a new draft takes a profile:
 # its room starts in the room service that profile's requests use
-# (room_start's where_from). The rooms loop starts with the bridge, before the
+# (room_start's where_from), which only the dashboard process has, so a
+# profile it didn't start with comes as ?conduit_profile= (_conduit_route_profile,
+# hermes-conduit#1336). The rooms loop starts with the bridge, before the
 # Links' loop (_start_room_handlers), starts the drafts whose service runs
 # here, and renews this installation's agents' grants in rooms elsewhere.
 
@@ -8412,6 +8416,7 @@ async def post_room_draft(request: Request, response: Response, profile: Optiona
     itself once they've all answered, in the room service this profile's
     requests use."""
     response.headers["Cache-Control"] = "no-store"
+    profile = await _conduit_route_profile_no_store(request, profile)
     body = _room_links_body(await _read_json_body(request, ROOM_INVITES_MAX_BODY_BYTES),
                             '{"name": ..., "agents": [...], "links": [...]}')
     try:
@@ -8583,7 +8588,9 @@ async def post_room_approval_answer(request: Request, response: Response) -> Any
 # Setting this Hermes up for rooms (room_setup.py): the API server, which is
 # the installation's, and the profile's room ceiling and approvals, then the
 # gateway restart that starts the API server. The limits are the
-# installation's too.
+# installation's too. The setup writes the installation's .env in the
+# dashboard's scope and restarts the gateway as the dashboard does, so a
+# profile it didn't start with comes as ?conduit_profile= (hermes-conduit#1336).
 
 ROOM_SETUP_LIMIT = 6
 ROOM_SETUP_WINDOW_S = 600.0
@@ -8596,6 +8603,14 @@ _room_setup_read_limiter = _MintLimiter(ROOM_SETUP_READ_LIMIT, ROOM_CHOICES_WIND
 _ROOM_SETUP_CANT_RESTART = "This Hermes can't restart its gateway from here; restart it on the host (hermes gateway restart)"
 _ROOM_SETUP_RESTART_FAILED = ("The gateway didn't restart (this Hermes' log says why); restart it on the host "
                               "(hermes gateway restart)")
+# Hermes 0.22.3+ runs a profile's plugins apart from the dashboard, in a
+# plugin host (an older Conduit's ?profile= setup for a profile the dashboard
+# didn't start with lands there). A restart started there brings the gateway
+# back with the host's environment, Hermes' plugin host flag among it, which
+# has Hermes load every plugin in-process (on Hermes c73cbcc4). So the setup
+# is saved there, and the gateway is left to be restarted.
+_ROOM_SETUP_HOST_RESTART = ("Hermes runs this profile's plugins apart from its dashboard, where its gateway can't "
+                            "be restarted safely; restart it on the host (hermes gateway restart), or update Conduit")
 
 
 def _room_setup() -> Any:
@@ -8620,6 +8635,8 @@ def _restart_room_gateway(interrupt: bool) -> Dict[str, Any]:
     """Restarts the host gateway (the default profile's), which starts the
     API server: Hermes' own restart after a settings save, which says so
     while chats run (``busy``), or with ``interrupt`` the forced one."""
+    if os.environ.get("HERMES_PLUGIN_HOST_PROCESS") == "1":
+        return {"started": False, "busy": False, "error": _ROOM_SETUP_HOST_RESTART}
     gateway = _optional_module("hermes_cli.web_server_gateway")
     spawn = getattr(_optional_module("hermes_cli.web_server"), "_spawn_gateway_restart", None)
     try:
@@ -8693,11 +8710,12 @@ async def _room_setup_route(profile: Optional[str], run: Callable[[], Dict[str, 
 
 
 @router.get("/rooms/setup")
-async def get_room_setup(response: Response, profile: Optional[str] = None) -> Any:
+async def get_room_setup(request: Request, response: Response, profile: Optional[str] = None) -> Any:
     """What setting this Hermes up for rooms would do (``needs``) and what
     blocks it (``blockers``), with the API server, the room ceiling and its
     choices, approvals and the profile's room policy."""
     response.headers["Cache-Control"] = "no-store"
+    profile = await _conduit_route_profile_no_store(request, profile)
     return await _room_setup_route(profile, lambda: room_setup(profile), _room_setup_read_limiter)
 
 
@@ -8708,6 +8726,7 @@ async def post_room_setup(request: Request, response: Response, profile: Optiona
     isn't running: ``restart.busy`` while chats run, which ``interrupt``
     overrides."""
     response.headers["Cache-Control"] = "no-store"
+    profile = await _conduit_route_profile_no_store(request, profile)
     body = await _read_json_body(request, ROOM_SETUP_MAX_BODY_BYTES)
     return await _room_setup_route(profile, lambda: room_setup(profile, body), _room_setup_limiter)
 
@@ -17296,6 +17315,10 @@ ROUTE_CAPABILITIES = (
     # GET /rooms/approvals and POST /rooms/approvals/answer: your agents'
     # approvals from rooms other people host (Linked Rooms).
     "room-approvals",
+    # ?conduit_profile= on POST /rooms/drafts and GET/POST /rooms/setup: a
+    # room made for, and this Hermes set up for rooms on, any profile's, on a
+    # Hermes that hosts other profiles' plugins apart (hermes-conduit#1336).
+    "room-dashboard-profiles",
 )
 
 
