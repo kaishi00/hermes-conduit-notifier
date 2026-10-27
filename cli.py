@@ -53,10 +53,10 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     )
     pulse = commands.add_parser("pulse", help="Pulse, the proactivity experiment: on, off, status, probe, report, home, outcomes, memory, followups, "
                                                  "cards, rate, done, learned, nudge, budget, candidates, note, quiet, night, "
-                                                 "dates, ahead")
+                                                 "dates, ahead, inbox")
     pulse.add_argument("pulse_action", choices=["on", "off", "status", "probe", "report", "home", "outcomes", "memory",
                                                 "followups", "cards", "rate", "done", "learned", "nudge", "budget",
-                                                "candidates", "note", "quiet", "night", "dates", "ahead"])
+                                                "candidates", "note", "quiet", "night", "dates", "ahead", "inbox"])
     pulse.add_argument("value", nargs="?", default="",
                        help="for home: the id of the chat to use, or 'auto' to find it by title; "
                             "for outcomes: how many to show, or a chat id; "
@@ -77,7 +77,9 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
                             "(or none), or nothing to show the quiet times; "
                             "for night: when it starts, like 22:00, or 'off', or nothing to show it; "
                             "for ahead: 'now' (a look ahead at the next memory run), 'on', 'off', or nothing to "
-                            "show the latest")
+                            "show the latest; "
+                            "for inbox: 'on' or 'off' (off forgets the deadlines it kept), or nothing to show the "
+                            "deadlines Pulse kept from the Shortcuts inbox")
     pulse.add_argument("extra", nargs="?", default="",
                        help="for memory forget: the item number; for memory backfill: how many days back "
                             "(it shows what that costs), 'start', 'stop' or 'cancel'; "
@@ -365,7 +367,7 @@ def _pulse(args: argparse.Namespace) -> int:
     action = args.pulse_action
     # Follow-ups are on by default, so even `followups on|off` needs no file yet.
     listing = action in ("followups", "cards", "rate", "done", "learned", "candidates", "dates") \
-        or (action in ("memory", "ahead") and (args.value or "").strip() not in ("on", "off")) \
+        or (action in ("memory", "ahead", "inbox") and (args.value or "").strip() not in ("on", "off")) \
         or (action == "nudge" and not (args.value or "").strip()) \
         or (action == "note" and (args.value or "").strip() in ("", "clear")) \
         or (action in ("quiet", "night") and not (args.value or "").strip()) \
@@ -437,6 +439,8 @@ def _pulse(args: argparse.Namespace) -> int:
         return _pulse_dates(pulse_store, home)
     if action == "ahead":
         return _pulse_ahead(pulse_store, home, (args.value or "").strip())
+    if action == "inbox":
+        return _pulse_inbox(pulse_store, home, (args.value or "").strip())
     print(f"Pulse: {'on' if pulse_store.get('enabled') else 'off'}")
     chat, problem = pulse.home_chat(pulse_store, home)
     if chat is not None:
@@ -534,6 +538,7 @@ def _pulse(args: argparse.Namespace) -> int:
     else:
         print("Follow-ups: off")
     print(_ahead_line(pulse_store, zone))
+    print(_inbox_line(pulse_store, zone))
     print(f"Nudging: {pulse_learning.nudge(pulse_store)} (`hermes conduit-push pulse nudge gentle|balanced|eager`)")
     note = " ".join(pulse.report.note(pulse_store).split())
     print(f"Note to Pulse: {_printable(note)}" if note
@@ -1713,6 +1718,67 @@ def _pulse_ahead(pulse_store: Any, home: Any, value: str) -> int:
     return 0
 
 
+def _inbox_line(pulse_store: Any, zone: Any) -> str:
+    """Deadlines from the Shortcuts inbox (pulse_memory.read_inbox), for
+    `pulse inbox` and `pulse status`: whether memory reads it, how many it
+    kept, and its last read."""
+    from . import pulse_memory
+    title = "Deadlines from the Shortcuts inbox"
+    if not pulse_memory.inbox_on(pulse_store):
+        return f"{title}: off (`hermes conduit-push pulse inbox on`)"
+    if not pulse_store.get("memory"):
+        return f"{title}: waiting on memory, which reads them: `hermes conduit-push pulse memory on`"
+    kept = len(pulse_store.deadlines())
+    last = pulse_store.get(pulse_memory.INBOX_LAST)
+    if not isinstance(last, dict) or not isinstance(last.get("at"), (int, float)):
+        return f"{title}: on; {kept} kept; nothing read yet"
+    when = datetime.fromtimestamp(last["at"], zone).strftime("%a %d %b %H:%M")
+    found = int(last.get("deadlines") or 0)
+    skipped = int(last.get("skipped") or 0)
+    skipped = f"; {skipped} skipped after failed reads" if skipped else ""
+    error = f"; it failed: {_printable(str(last['error']))}" if last.get("error") else ""
+    return (f"{title}: on; {kept} kept; last read {when}: {int(last.get('events') or 0)} events, "
+            f"{found} new deadline{'' if found == 1 else 's'}{skipped}{error}")
+
+
+def _pulse_inbox(pulse_store: Any, home: Any, value: str) -> int:
+    """Whether Pulse memory keeps deadlines from the Shortcuts inbox
+    (pulse_memory.read_inbox), and the ones it kept, each with when it next
+    comes up; `on` and `off` switch it, and off forgets them."""
+    from . import pulse, pulse_dates, pulse_memory
+    if value in ("on", "off"):
+        pulse_store.set(pulse_memory.store.INBOX_SETTING, value == "on")
+        if value == "off":
+            gone = pulse_memory.stop_inbox(pulse_store)
+            print("Pulse memory no longer reads the Shortcuts inbox for deadlines"
+                  + (f", and forgot the {gone} it kept." if gone else "."))
+        else:
+            print("Pulse memory reads the Shortcuts inbox for deadlines, like a trial ending or a bill due, and "
+                  "brings each up a week ahead and the day before, held for the morning brief."
+                  + ("" if pulse_store.get("memory") else " It reads with memory: `hermes conduit-push pulse memory on`."))
+        return 0
+    if value:
+        print("Usage: hermes conduit-push pulse inbox [on|off]")
+        return 2
+    zone = pulse.report_zone(pulse_store, home)
+    print(_inbox_line(pulse_store, zone))
+    mark = pulse_memory._mark(pulse_store.get(pulse_memory.store.INBOX_MARK))
+    if mark:
+        print(f"Read what the phone logged up to {datetime.fromtimestamp(mark[0], zone):%a %d %b %H:%M}.")
+    today = pulse_dates.local_today(zone, time.time())
+    found = pulse_dates.deadlines(pulse_store)
+    decided = pulse_store.journaled_refs([ref for entry in found for ref in pulse_dates.refs_round(entry, today)])
+    for entry in found:
+        up = pulse_dates.next_due(entry, today, decided)
+        when = ("brought up already" if up is None
+                else f"comes up {'today' if up[0] == today else pulse_dates.day_words(up[0])}, "
+                     f"{pulse_dates.STAGE_WORDS[up[1]]}")
+        sender = f", from {entry.item['sender']}" if entry.item.get("sender") else ""
+        print(_printable(f"- #{entry.item['id']} {entry.what}: {pulse_dates.day_words(entry.on)} {entry.on.year}"
+                         f"{sender}; {when}"))
+    return 0
+
+
 def _pulse_memory(pulse_store: Any, home: Any, value: str, extra: str) -> int:
     from . import pulse, pulse_memory
     if value == "now":
@@ -1745,19 +1811,19 @@ def _pulse_memory(pulse_store: Any, home: Any, value: str, extra: str) -> int:
         return 0
     if value == "backfill":
         return _pulse_backfill(pulse_store, home, extra)
-    if value and value not in pulse_memory.KINDS:
-        print("Usage: hermes conduit-push pulse memory [" + "|".join(pulse_memory.KINDS)
+    if value and value not in pulse_memory.ALL_KINDS:
+        print("Usage: hermes conduit-push pulse memory [" + "|".join(pulse_memory.ALL_KINDS)
               + "|now|on|off|forget <n>|backfill [days|start|stop|cancel]]")
         return 2
     items = pulse_store.open_items(value, limit=MEMORY_LIST + 1)
     if len(items) > MEMORY_LIST:
         items = items[:MEMORY_LIST]
-        print(f"The {MEMORY_LIST} most recent of {sum(pulse_store.item_counts().get(k, 0) for k in ([value] if value else pulse_memory.KINDS))}:")
+        print(f"The {MEMORY_LIST} most recent of {sum(pulse_store.item_counts().get(k, 0) for k in ([value] if value else pulse_memory.ALL_KINDS))}:")
     if not items:
         print("Pulse hasn't kept anything yet." if pulse_store.get("memory") else "Pulse memory is off.")
         return 0
     zone = pulse.report_zone(pulse_store, home)
-    for kind in pulse_memory.KINDS:
+    for kind in pulse_memory.ALL_KINDS:
         group = [item for item in items if item["kind"] == kind]
         if group:
             print(f"{kind.capitalize()} ({len(group)})")

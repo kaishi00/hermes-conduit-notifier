@@ -26,6 +26,19 @@ checks it). The format is fixed, because Conduit reads it:
 - Disbanding a room tells everyone linked into it, and their Hermes take
   their agents out of it.
 
+## 0.90.0 (2026-10-27)
+
+### New and improved
+- Pulse keeps the deadlines it finds in what your Shortcuts automations log,
+  like a free trial ending, a subscription renewing or a bill due, and brings
+  each up a week ahead and the day before, held for the morning brief. A later
+  message can move or close one, and so can saying it's done in a chat.
+- Deadlines have their own level in What Pulse learned: turn them up there to
+  have them pushed. Each is deleted a day after it's done, otherwise about a
+  week after its day, and at once when you delete the event it came from. Turn
+  it off in Settings > Pulse or with `hermes conduit-push pulse inbox off`,
+  which deletes the ones kept.
+
 ## 0.89.0 (2026-10-27)
 
 ### New and improved

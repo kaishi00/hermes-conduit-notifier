@@ -9544,8 +9544,31 @@ async def post_inbox_delete(request: Request, response: Response, profile: Optio
     response.headers["Cache-Control"] = "no-store"
     await _scoped_acquire(_inbox_delete_limiter, profile)
     body = await _read_json_body(request, INBOX_MAX_DELETE_BODY_BYTES)
-    return await _inbox_route(response, profile, lambda: _inbox_call(lambda store: store.delete_events(body)),
-                              "delete")
+    return await _inbox_route(response, profile, lambda: _inbox_delete(body), "delete")
+
+
+def _inbox_delete(body: Any) -> Dict[str, Any]:
+    result = _inbox_call(lambda store: store.delete_events(body))
+    _inbox_forget_pulse(body["device_id"], body["ids"])  # delete_events checked both
+    return result
+
+
+def _inbox_wipe(device_id: Optional[str]) -> Dict[str, Any]:
+    result = _inbox_call(lambda store: store.wipe(device_id))
+    _inbox_forget_pulse(device_id)
+    return result
+
+
+def _inbox_forget_pulse(device_id: Optional[str], events: Optional[list] = None) -> None:
+    """Events deleted (``events`` of a device's, all of one device's, or
+    every one with no device): the deadlines Pulse memory kept from them go
+    at once (pulse_memory.forget_deleted), whether or not Pulse is on. The
+    events are deleted whatever happens here, and Pulse's loop catches what
+    this couldn't (pulse_memory.forget_inbox)."""
+    try:
+        _plugin_package_module("pulse_memory").forget_deleted(Path(_calls_home()), device_id, events)
+    except Exception:  # noqa: BLE001 — deleting events never fails on Pulse
+        logger.warning("conduit_push: inbox couldn't tell Pulse about deleted events", exc_info=True)
 
 
 @router.post("/inbox/wipe")
@@ -9563,7 +9586,7 @@ async def post_inbox_wipe(request: Request, response: Response, profile: Optiona
     if device_id is None and body.get("all") is not True:
         raise HTTPException(status_code=400, detail="Name a device_id, or all: true",
                             headers={"Cache-Control": "no-store"})
-    return await _inbox_route(response, profile, lambda: _inbox_call(lambda store: store.wipe(device_id)), "delete")
+    return await _inbox_route(response, profile, lambda: _inbox_wipe(device_id), "delete")
 
 
 # A maps lookup the agent asked the phone for (conduit_maps): the phone,
@@ -17026,6 +17049,11 @@ ROUTE_CAPABILITIES = (
     # /pulse takes "look_ahead", and /pulse/left_out's entries say which
     # part left each out ("from": "report" or "look_ahead").
     "pulse_dates",
+    # Pulse memory keeps deadlines from the Shortcuts inbox (a trial ending,
+    # a bill due): PUT /pulse takes "inbox_deadlines", /pulse/memory lists
+    # them as kind "deadline" with "from_inbox", "sender" and "logged_at",
+    # and their cards' topic is "deadline", with a level of its own.
+    "pulse_inbox",
     "present-v1",
     "health-sync",
     "voice-tools",
