@@ -13,6 +13,15 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.107.0 (2026-10-27)
+
+### New and improved
+- Conduit's new Folder tab in Artifacts can search a chat's folder by file
+  name and inside files, list its recent files, and make new folders and
+  files, rename, move, duplicate, delete and upload, without leaving the
+  folder it opened. It never shows or touches files that hold keys or
+  passwords, and a save won't overwrite a file that changed meanwhile.
+
 ## 0.106.0 (2026-10-27)
 
 ### New and improved

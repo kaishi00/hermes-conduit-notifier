@@ -47,6 +47,12 @@ notes:
     run's own grant (GET /v1/runs/{id}) and answered with an approve-only grant of its scope
     (POST /v1/runs/{id}/approval) on this Hermes' API server, and matched to their notification by
     sessions.session_key in the profile's state.db.
+  workspace files: >-
+    The Folder tab in Conduit's Artifacts (feature map: "Workspace files"). /workspace/* reads a
+    profile's SSH workspace through hermes_cli.web_routers.files._fs_backend (and the adapter's
+    _normalize and _execute), maps a Docker profile's container paths with
+    hermes_cli.web_server_files._agent_fs_path, and keeps out what _is_sensitive_path keeps out of
+    Hermes' own file routes.
 
 # Upstream behaviors we know are broken, keyed by test and failure signature.
 # A listed test xfails while it fails with this signature, and fails when it
@@ -127,10 +133,14 @@ imports:
     optional: ["_get_platform_tools", "_get_plugin_toolset_keys"]
   hermes_cli.web_routers:
     optional: ["sessions"]
+  hermes_cli.web_routers.files:
+    optional: ["_fs_backend", "_fs_profile_home", "_is_sensitive_path"]
   hermes_cli.web_server_chat:
     optional: ["_ws_auth_ok", "_ws_request_is_allowed"]
   hermes_cli.web_server_dashboard:
     optional: ["_plugin_api_request_refused"]
+  hermes_cli.web_server_files:
+    optional: ["_agent_fs_path"]
   hermes_cli.web_server_profiles:
     optional: ["_config_profile_scope"]
   hermes_constants:
@@ -207,8 +217,10 @@ module_paths:
   - hermes_cli/profiles
   - hermes_cli/tools_config
   - hermes_cli/web_routers
+  - hermes_cli/web_routers/files
   - hermes_cli/web_server_chat
   - hermes_cli/web_server_dashboard
+  - hermes_cli/web_server_files
   - hermes_cli/web_server_profiles
   - hermes_constants
   - hermes_state
@@ -377,3 +389,7 @@ routes:
   - POST /watch-tools/revoke
   - POST /web-search
   - GET /web-search/status
+  - GET /workspace/list
+  - GET /workspace/recent
+  - GET /workspace/search
+  - POST /workspace/{action}

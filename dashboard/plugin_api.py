@@ -45,6 +45,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import base64
+import binascii
 import collections
 import concurrent.futures
 import contextvars
@@ -17250,6 +17251,180 @@ async def get_artifacts(response: Response, profile: Optional[str] = None, befor
     return {"ok": True, **page}
 
 
+# --- Workspace files -----------------------------------------------------------
+#
+# Conduit's Folder tab (workspace_files.py beside this folder): one root at a
+# time (the chat's working folder or a project folder), listed with sizes and
+# dates, searched by name and inside files, its recent files, and new
+# folders and files, saves that refuse a file changed meanwhile, rename and
+# move, duplicate, delete and upload. Every path stays inside the root it
+# names, and files Hermes keeps from its own file routes stay out. An SSH
+# profile works through Hermes' SSH adapter, a Docker profile's container
+# paths through its host mount, as Hermes' /api/fs routes resolve them.
+
+WORKSPACE_LIMIT = 240
+WORKSPACE_WINDOW_S = 60.0
+WORKSPACE_TIMEOUT_S = 30.0
+WORKSPACE_MAX_BODY_BYTES = 36 * 1024 * 1024
+_workspace_limiter = _MintLimiter(WORKSPACE_LIMIT, WORKSPACE_WINDOW_S,
+                                  message="Too many file requests; try again shortly")
+_workspace_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="conduit-workspace")
+# Searches walk whole trees: two at a time, a third is turned away.
+_workspace_walks = threading.BoundedSemaphore(2)
+_workspace_module: Any = None
+_workspace_module_lock = threading.Lock()
+
+
+def _workspace_files() -> Any:
+    """workspace_files.py beside this folder, loaded once."""
+    global _workspace_module
+    with _workspace_module_lock:
+        if _workspace_module is None:
+            path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "workspace_files.py")
+            spec = importlib.util.spec_from_file_location("conduit_push_dashboard_workspace_files", path)
+            if spec is None or spec.loader is None or not os.path.isfile(path):
+                raise TokenError(501, "This plugin install is missing workspace_files.py; update the plugin")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _workspace_module = module
+        return _workspace_module
+
+
+def _workspace(profile: Optional[str]) -> Any:
+    """The profile's workspace backend: its SSH machine, or this host."""
+    module = _workspace_files()
+    try:
+        from hermes_cli.web_routers.files import _fs_backend, _fs_profile_home, _is_sensitive_path
+    except Exception:
+        return module.LocalWorkspace()
+
+    def sensitive(path: str) -> bool:
+        return module.default_sensitive(path) or _is_sensitive_path(Path(path))
+
+    remote = _fs_backend(profile)
+    if remote is not None:
+        return module.SshWorkspace(remote, sensitive)
+    home = _fs_profile_home(profile)
+    try:
+        from hermes_cli.web_server_files import _agent_fs_path
+    except Exception:
+        _agent_fs_path = None
+
+    def resolve(raw: str) -> str:
+        return str(_agent_fs_path(raw, profile_home=home)) if _agent_fs_path is not None else raw
+
+    return module.LocalWorkspace(resolve, sensitive)
+
+
+async def _workspace_call(profile: Optional[str], op: Callable[[Any], Dict[str, Any]], *, walks: bool = False,
+                          name: str = "request") -> Dict[str, Any]:
+    no_store = {"Cache-Control": "no-store"}
+    await _scoped_acquire(_workspace_limiter, profile)
+    if walks and not _workspace_walks.acquire(blocking=False):
+        raise HTTPException(status_code=503, detail="Hermes is still searching; try again shortly", headers=no_store)
+    try:
+        _workspace_files()  # loaded first, so its error type is known below
+        result = await asyncio.wait_for(_run_scoped(profile, lambda: op(_workspace(profile)), _workspace_executor),
+                                        timeout=WORKSPACE_TIMEOUT_S)
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), **no_store}
+        raise
+    except TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers=no_store)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="That took too long; try again", headers=no_store)
+    except Exception as exc:
+        workspace_error = getattr(_workspace_module, "WorkspaceError", None)
+        if workspace_error is not None and isinstance(exc, workspace_error):
+            raise HTTPException(status_code=exc.status, detail=str(exc), headers=no_store)
+        raise _unexpected(name, exc, feature="Workspace files")
+    finally:
+        if walks:
+            _workspace_walks.release()
+    return {"ok": True, **result}
+
+
+@router.get("/workspace/list")
+async def get_workspace_list(response: Response, root: str, path: Optional[str] = None,
+                             profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    return await _workspace_call(profile, lambda ws: ws.list_dir(root, path or root), name="list")
+
+
+@router.get("/workspace/search")
+async def get_workspace_search(response: Response, root: str, q: str = "", contents: bool = True,
+                               profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    return await _workspace_call(profile, lambda ws: ws.search(root, q, contents), walks=True, name="search")
+
+
+@router.get("/workspace/recent")
+async def get_workspace_recent(response: Response, root: str, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    return await _workspace_call(profile, lambda ws: ws.recent(root), walks=True, name="recent")
+
+
+def _workspace_text(body: Dict[str, Any], key: str) -> str:
+    value = body.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise HTTPException(status_code=400, detail=f"{key} is required", headers={"Cache-Control": "no-store"})
+    return value
+
+
+def _workspace_mtime(body: Dict[str, Any]) -> Optional[float]:
+    value = body.get("expected_mtime")
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise HTTPException(status_code=400, detail="expected_mtime must be a number",
+                            headers={"Cache-Control": "no-store"})
+    return float(value)
+
+
+@router.post("/workspace/{action}")
+async def post_workspace(action: str, request: Request, response: Response,
+                         profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    no_store = {"Cache-Control": "no-store"}
+    if action not in {"mkdir", "new-file", "save", "move", "duplicate", "delete", "upload"}:
+        raise HTTPException(status_code=404, detail="Not found", headers=no_store)
+    body = await _read_json_body(request, WORKSPACE_MAX_BODY_BYTES)
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Request body must be an object", headers=no_store)
+    root = _workspace_text(body, "root")
+    overwrite = body.get("overwrite") is True
+    if action == "mkdir":
+        folder, name = _workspace_text(body, "path"), _workspace_text(body, "name")
+        op = lambda ws: ws.mkdir(root, folder, name)
+    elif action == "new-file":
+        folder, name = _workspace_text(body, "path"), _workspace_text(body, "name")
+        content = body.get("content") if isinstance(body.get("content"), str) else ""
+        op = lambda ws: ws.new_file(root, folder, name, content)
+    elif action == "save":
+        path, content = _workspace_text(body, "path"), body.get("content")
+        if not isinstance(content, str):
+            raise HTTPException(status_code=400, detail="content is required", headers=no_store)
+        expected = _workspace_mtime(body)
+        op = lambda ws: ws.save(root, path, content, expected)
+    elif action == "move":
+        path, folder, name = _workspace_text(body, "path"), _workspace_text(body, "to"), _workspace_text(body, "name")
+        op = lambda ws: ws.move(root, path, folder, name, overwrite)
+    elif action == "duplicate":
+        path = _workspace_text(body, "path")
+        op = lambda ws: ws.duplicate(root, path)
+    elif action == "delete":
+        path = _workspace_text(body, "path")
+        op = lambda ws: ws.delete(root, path)
+    else:
+        folder, name = _workspace_text(body, "path"), _workspace_text(body, "name")
+        try:
+            data = base64.b64decode(_workspace_text(body, "data"), validate=True)
+        except (ValueError, binascii.Error):
+            raise HTTPException(status_code=400, detail="data must be base64", headers=no_store)
+        op = lambda ws: ws.upload(root, folder, name, data, overwrite)
+    return await _workspace_call(profile, op, name=action)
+
+
 # --- Capabilities ------------------------------------------------------------
 #
 # Conduit reads this once per connection to tell which of its features this
@@ -17395,6 +17570,8 @@ ROUTE_CAPABILITIES = (
     "speech-server",
     "local-live-agent",
     "artifacts",
+    # /workspace/*: the Folder tab's listings, search, recent files and file actions.
+    "workspace-files",
     "local-live",
     # GET/PUT /rooms/choices and /rooms/defaults: an agent's choices in rooms
     # with other people's agents, enforced on this host (Linked Rooms).

@@ -1,0 +1,347 @@
+import base64
+import importlib.util
+import os
+import pathlib
+import subprocess
+import sys
+import types
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+BASE = "/api/plugins/conduit_push"
+
+if "hermes_constants" not in sys.modules:
+    _hermes_constants = types.ModuleType("hermes_constants")
+    _hermes_constants.get_hermes_home = lambda: pathlib.Path("/nonexistent-hermes-home")
+    sys.modules["hermes_constants"] = _hermes_constants
+
+_spec = importlib.util.spec_from_file_location("conduit_workspace_files_test", ROOT / "workspace_files.py")
+wf = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(wf)
+
+_api_spec = importlib.util.spec_from_file_location("conduit_plugin_api_workspace", ROOT / "dashboard" / "plugin_api.py")
+api = importlib.util.module_from_spec(_api_spec)
+_api_spec.loader.exec_module(api)
+
+
+@pytest.fixture
+def tree(tmp_path):
+    root = tmp_path / "project"
+    (root / "docs").mkdir(parents=True)
+    (root / "docs" / "guide.md").write_text("# Guide\nGrouping videos by topic\n")
+    (root / "notes.txt").write_text("nothing here\n")
+    (root / ".env").write_text("SECRET=1\n")
+    (root / "node_modules").mkdir()
+    (root / "node_modules" / "dep.js").write_text("grouping videos\n")
+    (tmp_path / "outside.txt").write_text("grouping videos\n")
+    return root
+
+
+def ws():
+    return wf.LocalWorkspace()
+
+
+def names(listing):
+    return [entry["name"] for entry in listing["entries"]]
+
+
+# --- Reading -------------------------------------------------------------------
+
+
+def test_a_listing_has_folders_first_with_sizes_and_dates_and_leaves_secrets_out(tree):
+    listing = ws().list_dir(str(tree), str(tree))
+    assert names(listing) == ["docs", "notes.txt"]
+    notes = listing["entries"][1]
+    assert notes["size"] == len("nothing here\n") and notes["mtime"] > 0 and notes["isDirectory"] is False
+    assert listing["entries"][0]["size"] is None
+
+
+def test_a_path_outside_the_root_is_refused(tree):
+    with pytest.raises(wf.WorkspaceError) as exc:
+        ws().list_dir(str(tree), str(tree.parent))
+    assert exc.value.status == 403
+    with pytest.raises(wf.WorkspaceError) as exc:
+        ws().list_dir(str(tree), str(tree / "docs" / ".." / ".."))
+    assert exc.value.status == 403
+
+
+def test_a_symlink_out_of_the_root_is_refused(tree):
+    (tree / "escape").symlink_to(tree.parent)
+    with pytest.raises(wf.WorkspaceError) as exc:
+        ws().list_dir(str(tree), str(tree / "escape"))
+    assert exc.value.status == 403
+    with pytest.raises(wf.WorkspaceError):
+        ws().move(str(tree), str(tree / "notes.txt"), str(tree / "escape"), "notes.txt")
+
+
+def test_search_finds_names_and_lines_inside_files(tree):
+    found = ws().search(str(tree), "grouping", contents=True)
+    assert [m["path"] for m in found["matches"]] == [str(tree / "docs" / "guide.md")]
+    line = found["matches"][0]["lines"][0]
+    assert line["line"] == 2 and line["text"] == "Grouping videos by topic"
+    assert (line["matchStart"], line["matchLength"]) == (0, len("grouping"))
+    by_name = ws().search(str(tree), "GUIDE", contents=False)
+    assert [entry["name"] for entry in by_name["names"]] == ["guide.md"] and by_name["matches"] == []
+
+
+def test_search_never_reads_secrets_or_skipped_folders(tree):
+    found = ws().search(str(tree), "secret", contents=True)
+    assert found["matches"] == [] and found["names"] == []
+    assert ws().search(str(tree), "dep", contents=False)["names"] == []
+
+
+def test_a_long_line_is_trimmed_around_its_match(tree):
+    (tree / "long.txt").write_text("x" * 500 + "needle" + "y" * 500 + "\n")
+    line = ws().search(str(tree), "needle", contents=True)["matches"][0]["lines"][0]
+    assert len(line["text"]) <= wf.SNIPPET_CHARS + 2
+    assert line["text"][line["matchStart"]:line["matchStart"] + 6] == "needle"
+
+
+def test_a_search_out_of_time_says_so(tree):
+    ticks = iter(range(0, 10_000, 5))
+    workspace = wf.LocalWorkspace(clock=lambda: next(ticks))
+    assert workspace.search(str(tree), "grouping", contents=True)["truncated"] is True
+
+
+def test_recent_files_come_newest_first(tree):
+    os.utime(tree / "notes.txt", (1_000, 1_000))
+    os.utime(tree / "docs" / "guide.md", (2_000, 2_000))
+    recent = ws().recent(str(tree))["entries"]
+    assert [entry["name"] for entry in recent] == ["guide.md", "notes.txt"]
+
+
+# --- Changing ------------------------------------------------------------------
+
+
+def test_new_folders_and_files_never_replace_anything(tree):
+    ws().mkdir(str(tree), str(tree), "drafts")
+    assert (tree / "drafts").is_dir()
+    entry = ws().new_file(str(tree), str(tree / "drafts"), "todo.md", "- one\n")["entry"]
+    assert entry["path"] == str(tree / "drafts" / "todo.md") and (tree / "drafts" / "todo.md").read_text() == "- one\n"
+    for call in (lambda: ws().mkdir(str(tree), str(tree), "drafts"),
+                 lambda: ws().new_file(str(tree), str(tree / "drafts"), "todo.md")):
+        with pytest.raises(wf.WorkspaceError) as exc:
+            call()
+        assert exc.value.status == 409
+
+
+@pytest.mark.parametrize("name", ["", ".", "..", "a/b", "../x", "a\\b", "x" * 300])
+def test_a_name_is_one_path_component(tree, name):
+    with pytest.raises(wf.WorkspaceError) as exc:
+        ws().mkdir(str(tree), str(tree), name)
+    assert exc.value.status == 400
+
+
+def test_secrets_cant_be_created_or_touched(tree):
+    with pytest.raises(wf.WorkspaceError):
+        ws().new_file(str(tree), str(tree), ".env.local")
+    with pytest.raises(wf.WorkspaceError):
+        ws().delete(str(tree), str(tree / ".env"))
+    with pytest.raises(wf.WorkspaceError):
+        ws().move(str(tree), str(tree / "notes.txt"), str(tree), ".env")
+    assert (tree / ".env").exists() and (tree / "notes.txt").exists()
+
+
+def test_a_save_refuses_a_file_changed_since_it_was_read(tree):
+    target = tree / "notes.txt"
+    read_at = target.stat().st_mtime
+    entry = ws().save(str(tree), str(target), "edited\n", read_at)["entry"]
+    assert target.read_text() == "edited\n"
+    os.utime(target, (read_at + 50, read_at + 50))
+    with pytest.raises(wf.WorkspaceError) as exc:
+        ws().save(str(tree), str(target), "lost\n", entry["mtime"])
+    assert exc.value.status == 409 and target.read_text() == "edited\n"
+
+
+def test_a_save_keeps_the_files_mode(tree):
+    target = tree / "run.sh"
+    target.write_text("echo hi\n")
+    target.chmod(0o755)
+    ws().save(str(tree), str(target), "echo bye\n", None)
+    assert target.stat().st_mode & 0o777 == 0o755
+    assert sorted(os.listdir(tree)) == sorted([".env", "docs", "node_modules", "notes.txt", "run.sh"])
+
+
+def test_rename_and_move_refuse_to_replace_unless_asked(tree):
+    ws().move(str(tree), str(tree / "notes.txt"), str(tree), "renamed.txt")
+    assert (tree / "renamed.txt").exists() and not (tree / "notes.txt").exists()
+    ws().move(str(tree), str(tree / "renamed.txt"), str(tree / "docs"), "renamed.txt")
+    assert (tree / "docs" / "renamed.txt").exists()
+    (tree / "other.txt").write_text("other\n")
+    with pytest.raises(wf.WorkspaceError) as exc:
+        ws().move(str(tree), str(tree / "other.txt"), str(tree / "docs"), "renamed.txt")
+    assert exc.value.status == 409 and (tree / "other.txt").exists()
+    ws().move(str(tree), str(tree / "other.txt"), str(tree / "docs"), "renamed.txt", overwrite=True)
+    assert (tree / "docs" / "renamed.txt").read_text() == "other\n"
+
+
+def test_a_folder_cant_move_inside_itself_and_the_root_cant_move(tree):
+    with pytest.raises(wf.WorkspaceError) as exc:
+        ws().move(str(tree), str(tree / "docs"), str(tree / "docs"), "docs")
+    assert exc.value.status == 400
+    with pytest.raises(wf.WorkspaceError):
+        ws().move(str(tree), str(tree), str(tree / "docs"), "moved")
+
+
+def test_duplicates_take_the_next_free_copy_name(tree):
+    first = ws().duplicate(str(tree), str(tree / "docs" / "guide.md"))["entry"]
+    second = ws().duplicate(str(tree), str(tree / "docs" / "guide.md"))["entry"]
+    assert (first["name"], second["name"]) == ("guide copy.md", "guide copy 2.md")
+    folder = ws().duplicate(str(tree), str(tree / "docs"))["entry"]
+    assert folder["name"] == "docs copy" and (tree / "docs copy" / "guide.md").exists()
+
+
+def test_delete_removes_files_and_folders_but_never_the_root(tree):
+    ws().delete(str(tree), str(tree / "docs"))
+    assert not (tree / "docs").exists()
+    with pytest.raises(wf.WorkspaceError) as exc:
+        ws().delete(str(tree), str(tree))
+    assert exc.value.status == 400 and tree.exists()
+
+
+def test_deleting_a_link_leaves_what_it_points_to(tree):
+    (tree / "link").symlink_to(tree / "docs")
+    ws().delete(str(tree), str(tree / "link"))
+    assert not (tree / "link").exists() and (tree / "docs" / "guide.md").exists()
+
+
+def test_uploads_land_whole_and_ask_before_replacing(tree):
+    ws().upload(str(tree), str(tree / "docs"), "photo.bin", b"\x00\x01")
+    assert (tree / "docs" / "photo.bin").read_bytes() == b"\x00\x01"
+    with pytest.raises(wf.WorkspaceError) as exc:
+        ws().upload(str(tree), str(tree / "docs"), "photo.bin", b"new")
+    assert exc.value.status == 409
+    ws().upload(str(tree), str(tree / "docs"), "photo.bin", b"new", overwrite=True)
+    assert (tree / "docs" / "photo.bin").read_bytes() == b"new"
+    assert [n for n in os.listdir(tree / "docs") if "conduit" in n] == []
+
+
+def test_a_resolver_maps_agent_paths_to_this_host(tree):
+    mapped = wf.LocalWorkspace(resolve=lambda raw: raw.replace("/workspace", str(tree), 1))
+    assert names(mapped.list_dir("/workspace", "/workspace/docs")) == ["guide.md"]
+
+
+# --- SSH -----------------------------------------------------------------------
+
+
+class _LocalShell:
+    """Hermes' SSH adapter, its commands run by this machine's sh."""
+
+    def __init__(self, cwd):
+        self.cwd = str(cwd)
+
+    def _normalize(self, path):
+        import posixpath
+        raw = str(path).strip()
+        if not raw.startswith("/"):
+            raw = posixpath.join(self.cwd, raw)
+        return posixpath.normpath(raw)
+
+    def _execute(self, command, *, stdin_data=None, timeout=None):
+        done = subprocess.run(["sh", "-c", command], input=stdin_data, capture_output=True, text=True,
+                              cwd=self.cwd, timeout=timeout or 30)
+        return {"output": done.stdout + done.stderr, "returncode": done.returncode}
+
+
+def ssh(tree):
+    return wf.SshWorkspace(_LocalShell(tree))
+
+
+def test_ssh_lists_searches_and_changes_files_the_same_way(tree):
+    remote = ssh(tree)
+    root = str(tree.resolve())
+    listing = remote.list_dir(root, root)
+    assert names(listing) == ["docs", "notes.txt"] and listing["entries"][1]["size"] == len("nothing here\n")
+    found = remote.search(root, "grouping", contents=True)
+    assert [m["path"] for m in found["matches"]] == [str(tree / "docs" / "guide.md")]
+    assert found["matches"][0]["lines"][0]["line"] == 2
+    assert [entry["name"] for entry in remote.search(root, "guide", contents=False)["names"]] == ["guide.md"]
+    remote.mkdir(root, root, "drafts")
+    remote.new_file(root, str(tree / "drafts"), "a b.md", "hello\n")
+    assert (tree / "drafts" / "a b.md").read_text() == "hello\n"
+    with pytest.raises(wf.WorkspaceError) as exc:
+        remote.new_file(root, str(tree / "drafts"), "a b.md", "again\n")
+    assert exc.value.status == 409
+    remote.move(root, str(tree / "drafts" / "a b.md"), root, "moved.md")
+    assert (tree / "moved.md").exists()
+    assert remote.duplicate(root, str(tree / "moved.md"))["entry"]["name"] == "moved copy.md"
+    remote.upload(root, root, "data.bin", b"\x00\xff")
+    assert (tree / "data.bin").read_bytes() == b"\x00\xff"
+    remote.delete(root, str(tree / "drafts"))
+    assert not (tree / "drafts").exists()
+
+
+def test_ssh_refuses_paths_outside_and_stale_saves(tree):
+    remote = ssh(tree)
+    root = str(tree.resolve())
+    with pytest.raises(wf.WorkspaceError) as exc:
+        remote.list_dir(root, str(tree.parent))
+    assert exc.value.status == 403
+    (tree / "escape").symlink_to(tree.parent)
+    with pytest.raises(wf.WorkspaceError):
+        remote.mkdir(root, str(tree / "escape"), "x")
+    assert not (tree.parent / "x").exists()
+    target = tree / "notes.txt"
+    os.utime(target, (5_000, 5_000))
+    with pytest.raises(wf.WorkspaceError) as exc:
+        remote.save(root, str(target), "lost\n", 4_000)
+    assert exc.value.status == 409 and target.read_text() == "nothing here\n"
+    remote.save(root, str(target), "kept\n", 5_000)
+    assert target.read_text() == "kept\n"
+    with pytest.raises(wf.WorkspaceError):
+        remote.delete(root, root)
+
+
+def test_ssh_search_reads_colons_in_paths(tree):
+    (tree / "a:1:b.txt").write_text("needle\n")
+    found = ssh(tree).search(str(tree.resolve()), "needle", contents=True)
+    assert [m["name"] for m in found["matches"]] == ["a:1:b.txt"]
+
+
+# --- Routes --------------------------------------------------------------------
+
+
+@pytest.fixture
+def client(monkeypatch):
+    monkeypatch.setattr(api, "_workspace_files", lambda: wf)
+    monkeypatch.setattr(api, "_workspace_module", wf)
+    monkeypatch.setattr(api, "_workspace", lambda profile: wf.LocalWorkspace())
+    app = FastAPI()
+    app.include_router(api.router, prefix=BASE)
+    return TestClient(app)
+
+
+def test_routes_list_search_and_change(tree, client):
+    root = str(tree)
+    listing = client.get(f"{BASE}/workspace/list", params={"root": root}).json()
+    assert listing["ok"] is True and names(listing) == ["docs", "notes.txt"]
+    found = client.get(f"{BASE}/workspace/search", params={"root": root, "q": "grouping"}).json()
+    assert len(found["matches"]) == 1
+    assert client.get(f"{BASE}/workspace/recent", params={"root": root}).json()["entries"]
+    made = client.post(f"{BASE}/workspace/new-file", json={"root": root, "path": root, "name": "n.md"}).json()
+    assert made["entry"]["name"] == "n.md"
+    data = base64.b64encode(b"bytes").decode()
+    client.post(f"{BASE}/workspace/upload", json={"root": root, "path": root, "name": "u.bin", "data": data})
+    assert (tree / "u.bin").read_bytes() == b"bytes"
+    client.post(f"{BASE}/workspace/delete", json={"root": root, "path": str(tree / "u.bin")})
+    assert not (tree / "u.bin").exists()
+
+
+def test_routes_say_why_they_refuse(tree, client):
+    root = str(tree)
+    outside = client.get(f"{BASE}/workspace/list", params={"root": root, "path": str(tree.parent)})
+    assert outside.status_code == 403 and outside.json()["detail"] == "That's outside this workspace"
+    assert client.post(f"{BASE}/workspace/delete", json={"root": root}).status_code == 400
+    assert client.post(f"{BASE}/workspace/explode", json={"root": root}).status_code == 404
+    bad = client.post(f"{BASE}/workspace/upload", json={"root": root, "path": root, "name": "x", "data": "%%%"})
+    assert bad.status_code == 400
+    stale = client.post(f"{BASE}/workspace/save", json={"root": root, "path": str(tree / "notes.txt"),
+                                                         "content": "x", "expected_mtime": 1})
+    assert stale.status_code == 409
+
+
+def test_the_capability_is_listed():
+    assert "workspace-files" in api.ROUTE_CAPABILITIES
