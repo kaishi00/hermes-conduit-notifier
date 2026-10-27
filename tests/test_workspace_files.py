@@ -431,6 +431,83 @@ def test_ssh_never_reads_or_copies_secrets_in_any_case(tree):
     assert sorted(os.listdir(copy)) == ["guide.md"]
 
 
+def test_a_link_to_a_secret_under_an_innocent_name_stays_out(tree):
+    (tree / "innocent.txt").symlink_to(tree / ".env")
+    (tree / ".ssh").mkdir()
+    (tree / "keys").symlink_to(tree / ".ssh")
+    root = str(tree.resolve())
+    for listing in (ws().list_dir(root, root), ssh(tree).list_dir(root, root)):
+        assert "innocent.txt" not in names(listing) and "keys" not in names(listing)
+
+
+def test_a_secret_is_refused_whether_or_not_it_is_there(tree):
+    for path in (tree / ".env", tree / ".envrc"):
+        with pytest.raises(wf.WorkspaceError) as exc:
+            ws().list_dir(str(tree), str(path))
+        assert exc.value.status == 403
+
+
+def test_a_file_link_is_duplicated_as_a_link(tree):
+    (tree / "link.txt").symlink_to(tree / "notes.txt")
+    copy = ws().duplicate(str(tree), str(tree / "link.txt"))["entry"]["path"]
+    assert os.path.islink(copy)
+
+
+class _BsdShell(_LocalShell):
+    """A remote without realpath or readlink -f, as an older macOS."""
+
+    def _execute(self, command, *, stdin_data=None, timeout=None):
+        shim = ('realpath() { return 1; }\n'
+                'readlink() { [ "$1" = -f ] && return 1; command readlink "$@"; }\n')
+        return super()._execute(shim + command, stdin_data=stdin_data, timeout=timeout)
+
+
+def test_ssh_follows_links_without_realpath(tree):
+    remote = wf.SshWorkspace(_BsdShell(tree))
+    root = str(tree.resolve())
+    (tree / "docs" / "near.md").symlink_to("../notes.txt")
+    (tree / "leak.txt").symlink_to(tree.parent / "outside.txt")
+    remote.save(root, str(tree / "docs" / "near.md"), "through\n", None)
+    assert (tree / "docs" / "near.md").read_text() == "through\n"
+    with pytest.raises(wf.WorkspaceError) as exc:
+        remote.save(root, str(tree / "leak.txt"), "x", None)
+    assert exc.value.status == 403
+
+
+def test_ssh_refuses_a_link_to_a_secret_inside_the_root(tree):
+    remote = ssh(tree)
+    root = str(tree.resolve())
+    (tree / "innocent.txt").symlink_to(tree / ".env")
+    (tree / ".ssh").mkdir()
+    (tree / "keys").symlink_to(tree / ".ssh")
+    for call in (lambda: remote.save(root, str(tree / "innocent.txt"), "x", None),
+                 lambda: remote.mkdir(root, str(tree / "keys"), "x"),
+                 lambda: remote.new_file(root, str(tree / "keys"), "authorized_keys", "x")):
+        with pytest.raises(wf.WorkspaceError) as exc:
+            call()
+        assert exc.value.status == 403
+    assert (tree / ".env").read_text() == "SECRET=1\n" and os.listdir(tree / ".ssh") == []
+
+
+def test_ssh_new_files_never_replace_one_that_appears_meanwhile(tree):
+    remote = ssh(tree)
+    root = str(tree.resolve())
+    remote._write(root, str(tree / "fresh.txt"), b"one", create=True)
+    assert (tree / "fresh.txt").read_text() == "one"
+    original = remote._run
+
+    def racing(script, **kwargs):
+        if "mv -n" in script:
+            (tree / "raced.txt").write_text("theirs")
+        return original(script, **kwargs)
+
+    remote._run = racing
+    with pytest.raises(wf.WorkspaceError) as exc:
+        remote._write(root, str(tree / "raced.txt"), b"mine", create=True)
+    assert exc.value.status == 409 and (tree / "raced.txt").read_text() == "theirs"
+    assert not [name for name in os.listdir(tree) if name.startswith(".conduit-")]
+
+
 # --- Routes --------------------------------------------------------------------
 
 

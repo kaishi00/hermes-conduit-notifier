@@ -177,10 +177,11 @@ class LocalWorkspace:
         real = os.path.realpath(host)
         if not self._inside(root, real):
             raise WorkspaceError(403, "That's outside this workspace")
-        if not os.path.lexists(real):
-            raise WorkspaceError(404, "That file is no longer there")
+        # Refused before it's looked for: a 404 would say a secret file isn't there.
         if self._sensitive(real) or self._sensitive(host):
             raise WorkspaceError(403, "Conduit doesn't open files that hold keys or passwords")
+        if not os.path.lexists(real):
+            raise WorkspaceError(404, "That file is no longer there")
         return real
 
     def _new(self, root: str, folder: Any, name: Any) -> str:
@@ -227,6 +228,9 @@ class LocalWorkspace:
             with os.scandir(folder) as scan:
                 for item in scan:
                     if item.name in HIDDEN_DIRS or self._sensitive(item.path):
+                        continue
+                    # A link under an innocent name to a secret stays out too.
+                    if item.is_symlink() and self._sensitive(os.path.realpath(item.path)):
                         continue
                     if len(entries) >= MAX_ENTRIES:
                         truncated = True
@@ -412,15 +416,24 @@ class LocalWorkspace:
         source = self._existing(root, path)
         if source == root:
             raise WorkspaceError(400, "The workspace folder itself can't be duplicated")
+        # A link (checked above to lead inside) is copied as the link, beside it.
+        host = self._host(path)
+        link = os.path.join(os.path.realpath(os.path.dirname(host)), os.path.basename(host))
+        if os.path.islink(link) and self._inside(root, link):
+            source = link
         folder = os.path.dirname(source)
         name = copy_name(os.path.basename(source), lambda candidate: os.path.lexists(os.path.join(folder, candidate)))
         target = os.path.join(folder, name)
         try:
-            if os.path.isdir(source):
+            if os.path.isdir(source) and not os.path.islink(source):
                 shutil.copytree(source, target, symlinks=True,
                                 ignore=lambda folder, names: [n for n in names if self._sensitive(os.path.join(folder, n))])
             else:
-                shutil.copy2(source, target)
+                # A link stays a link, as the SSH copy keeps it.
+                shutil.copy2(source, target, follow_symlinks=False)
+        except FileExistsError:
+            # Taken between choosing the name and copying.
+            raise WorkspaceError(409, "Something with that name is already there")
         except PermissionError:
             raise WorkspaceError(403, "Hermes can't write in this folder")
         return {"entry": self._entry(target)}
@@ -549,15 +562,22 @@ def _search_file(path: str, lowered: str) -> List[Dict[str, Any]]:
 # name survives. Sizes and dates come from GNU stat, else BSD stat (macOS).
 _STAT = r'''
 meta() {
-  if s=$(stat -c '%Y %s' -- "$1" 2>/dev/null); then printf '%s' "$s";
-  elif s=$(stat -f '%m %z' -- "$1" 2>/dev/null); then printf '%s' "$s";
+  if _ms=$(stat -c '%Y %s' -- "$1" 2>/dev/null); then printf '%s' "$_ms";
+  elif _ms=$(stat -f '%m %z' -- "$1" 2>/dev/null); then printf '%s' "$_ms";
   else printf '0 0'; fi
 }
 rec() {
-  # $2 = l: a link shown as itself, not where it leads.
+  # $2 = l: a link shown as itself, not where it leads. $3: where a link
+  # leads, sent along so a link to a secret stays out.
+  _rt=${3:-}
   if [ "$2" != l ] && [ -d "$1" ]; then kind=d; else kind=f; fi
   set -- "$1" "$kind" $(meta "$1")
-  printf '%s\t%s\t%s\t%s\n' "$(printf '%s' "$1" | base64 | tr -d '\r\n')" "$2" "$3" "$4"
+  if [ -n "$_rt" ]; then
+    printf '%s\t%s\t%s\t%s\t%s\n' "$(printf '%s' "$1" | base64 | tr -d '\r\n')" "$2" "$3" "$4" \
+      "$(printf '%s' "$_rt" | base64 | tr -d '\r\n')"
+  else
+    printf '%s\t%s\t%s\t%s\n' "$(printf '%s' "$1" | base64 | tr -d '\r\n')" "$2" "$3" "$4"
+  fi
 }
 '''
 _ERROR = "__CONDUIT_FS_ERROR__:"
@@ -616,9 +636,21 @@ class SshWorkspace:
             path = posixpath.join(parent, posixpath.basename(path))
             if not self._inside(root, path):
                 raise WorkspaceError(403, "That's outside this workspace")
-        if self._sensitive(path):
+        if self._sensitive(path) or self._sensitive(self._resolved(root, path)):
             raise WorkspaceError(403, "Conduit doesn't open files that hold keys or passwords")
         return path
+
+    def _resolved(self, root: str, path: str) -> str:
+        """Where ``path`` really is: a link's target, or the real folder it
+        sits in, so a link under an innocent name to a secret is refused."""
+        lines = self._run(self._guard(root) + f'p={shlex.quote(path)}; r=\n'
+                          'if [ -L "$p" ] || [ -d "$p" ]; then follows "$p" >/dev/null 2>&1;'
+                          ' else d=$(cd "$(dirname -- "$p")" 2>/dev/null && pwd -P) && r="$d/$(basename -- "$p")"; fi\n'
+                          'printf \'%s\' "$r" | base64 | tr -d \'\\r\\n\'; echo')
+        try:
+            return base64.b64decode("".join(lines).strip(), validate=True).decode("utf-8", errors="replace")
+        except (ValueError, binascii.Error):
+            return ""
 
     def _real_parent(self, path: str) -> str:
         lines = self._run(f'cd {shlex.quote(posixpath.dirname(path))} 2>/dev/null && pwd -P || '
@@ -634,6 +666,12 @@ class SshWorkspace:
                 # target, which must stay inside too.
                 'follows() { if [ -d "$1" ]; then r=$(cd "$1" 2>/dev/null && pwd -P) || return 1;'
                 ' elif [ -L "$1" ]; then r=$(realpath -- "$1" 2>/dev/null || readlink -f -- "$1" 2>/dev/null);'
+                # Neither on an older BSD: follow the chain with plain readlink.
+                ' if [ -z "$r" ]; then _fl="$1"; _fn=0;'
+                ' while [ -L "$_fl" ] && [ $_fn -lt 32 ]; do _ft=$(readlink -- "$_fl") || return 1;'
+                ' case "$_ft" in /*) _fl="$_ft";; *) _fl="$(dirname -- "$_fl")/$_ft";; esac; _fn=$((_fn+1)); done;'
+                ' [ -L "$_fl" ] && return 1;'
+                ' _fd=$(cd "$(dirname -- "$_fl")" 2>/dev/null && pwd -P) || return 1; r="$_fd/$(basename -- "$_fl")"; fi;'
                 ' [ -n "$r" ] || return 1;'
                 ' else inside "$1"; return; fi;'
                 ' case "$r/" in "$root"/*|"$root/") return 0;; esac; return 1; }\n')
@@ -642,12 +680,16 @@ class SshWorkspace:
         entries = []
         for line in lines:
             parts = line.split("\t")
-            if len(parts) != 4:
+            if len(parts) not in (4, 5):
                 continue
             try:
                 path = base64.b64decode(parts[0], validate=True).decode("utf-8", errors="replace")
                 mtime, size = float(parts[2]), int(parts[3])
+                leads = base64.b64decode(parts[4], validate=True).decode("utf-8", errors="replace") \
+                    if len(parts) == 5 else None
             except (ValueError, binascii.Error):
+                continue
+            if leads is not None and self._sensitive(leads):
                 continue
             is_dir = parts[1] == "d"
             name = posixpath.basename(path)
@@ -670,7 +712,7 @@ class SshWorkspace:
                           f'[ -d "$p" ] || {{ echo {_ERROR}ENOTDIR; exit 1; }}\n'
                           f'follows "$p" || {{ echo {_ERROR}EOUTSIDE; exit 1; }}\n'
                           'for c in "$p"/* "$p"/.[!.]* "$p"/..?*; do [ -e "$c" ] || [ -L "$c" ] || continue;'
-                          ' if [ -L "$c" ] && ! follows "$c"; then rec "$c" l; else rec "$c"; fi; done')
+                          ' if [ ! -L "$c" ]; then rec "$c"; elif follows "$c"; then rec "$c" "" "$r"; else rec "$c" l; fi; done')
         entries = self._records(lines)
         truncated = len(entries) > MAX_ENTRIES
         entries = entries[:MAX_ENTRIES]
@@ -799,8 +841,12 @@ class SshWorkspace:
                   f'base64 -d > "$tmp" || {{ rm -f "$tmp"; echo {_ERROR}EACCES; exit 1; }}\n'
                   # mktemp's file is private: give it the file's own mode, or a new file's.
                   'm=$(stat -c %a -- "$t" 2>/dev/null || stat -f %Lp -- "$t" 2>/dev/null)\n'
-                  'chmod "${m:-$(printf %o $((0666 & ~0$(umask))))}" "$tmp" 2>/dev/null\n'
-                  f'mv -f -- "$tmp" "$t" || {{ rm -f "$tmp"; echo {_ERROR}EACCES; exit 1; }}',
+                  'chmod "${m:-$(printf %o $((0666 & ~0$(umask))))}" "$tmp" 2>/dev/null\n' +
+                  (f'mv -f -- "$tmp" "$t" || {{ rm -f "$tmp"; echo {_ERROR}EACCES; exit 1; }}' if overwrite and not create else
+                   # Never replaces what appeared since the check: mv -n leaves
+                   # the temp file behind instead.
+                   f'mv -n -- "$tmp" "$t" 2>/dev/null; [ -e "$tmp" ] && {{ rm -f "$tmp";'
+                   f' if [ -e "$t" ] || [ -L "$t" ]; then echo {_ERROR}EEXIST; else echo {_ERROR}EACCES; fi; exit 1; }}; exit 0'),
                   stdin=base64.b64encode(data).decode("ascii") + "\n")
 
     def save(self, root_raw: Any, path: Any, content: str, expected_mtime: Optional[float]) -> Dict[str, Any]:

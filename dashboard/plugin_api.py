@@ -17273,6 +17273,7 @@ _workspace_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="cond
 _workspace_walks = threading.BoundedSemaphore(2)
 _workspace_module: Any = None
 _workspace_module_lock = threading.Lock()
+_workspace_unmapped_logged = False
 
 
 def _workspace_files() -> Any:
@@ -17310,6 +17311,12 @@ def _workspace(profile: Optional[str]) -> Any:
     try:
         from hermes_cli.web_server_files import _agent_fs_path
     except Exception:
+        # An older Hermes without Docker path mapping: paths are taken as
+        # this host's, which they are there.
+        global _workspace_unmapped_logged
+        if not _workspace_unmapped_logged:
+            _workspace_unmapped_logged = True
+            logger.warning("Conduit workspace files: Hermes has no _agent_fs_path; Docker paths aren't mapped")
         _agent_fs_path = None
 
     def resolve(raw: str) -> str:
