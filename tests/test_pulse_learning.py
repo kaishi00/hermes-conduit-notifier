@@ -1129,6 +1129,18 @@ def test_done_upgrades_a_reminded_or_told_card_and_undo_restores_that(live):
     assert (item["status"], item["closed_by"]) == (told_status, told_by)
 
 
+def test_undo_with_no_closer_named_takes_the_mark_off_and_leaves_the_item(live):
+    item_id = promise(live)
+    card_id = learning.add_card(live.store, kind="followup", item=live.store.item(item_id), level_name="screen",
+                                news="Still waiting on the deploy.", why="", chat_title="Deploy", now=time.time())
+    assert control.done(live.store, card_id) is True
+    # Nothing named holds the item closed, so there's nothing to put back: only the mark goes
+    # (SQLite takes the empty IN list and matches nothing).
+    assert live.store.unmark_done(card_id, item_id, closed_by=(), now=time.time()) is True
+    assert live.store.done_marks([card_id]) == {}
+    assert live.store.item(item_id)["status"] == "done"
+
+
 def test_a_done_card_leaves_the_morning_brief(live):
     brief_later(live)
     control.set_level(live.store, "followup", "brief")
@@ -1284,13 +1296,13 @@ def test_do_it_done_in_another_chat_marks_the_card_done(live):
     assert live.store.act(card["id"])["outcome"] == "done"
 
 
-def found_card(live, *, chat_id=SID, news="The dentist is Friday at 9 (calendar).", topic="date"):
+def found_card(live, *, chat_id=SID, news="The dentist is Friday at 9 (calendar).", topic="date", came=None):
     """A report item Pulse found on its own, nothing remembered behind it:
     by default from no chat, so it points at the report's turn in Pulse's
-    chat (pulse_learning.add_noticed_cards)."""
+    chat (pulse_learning.add_noticed_cards), and just now."""
     return live.store.add_card({"kind": "noticed", "level": "screen", "topic": topic, "title": news, "news": news,
                                 "chat_id": chat_id, "message_id": 1 if chat_id == SID else None,
-                                "created_at": time.time()})
+                                "created_at": time.time() if came is None else came})
 
 
 def test_done_marks_a_report_item_found_on_its_own_and_the_next_report_reads_it(live):
@@ -1716,6 +1728,21 @@ def test_a_report_item_found_on_its_own_and_held_for_the_brief_is_read_before_it
     assert live.store.held_cards(12) == [] and live.store.done_marks([card_id])[card_id]["done_by"] == "pulse"
 
 
+def test_a_found_card_the_held_check_read_is_read_again_a_day_later_once_its_in_the_brief(live):
+    now = time.time()
+    card_id = live.store.add_card({"kind": "noticed", "level": "brief", "topic": "follow-up",
+                                   "title": "The release notes still need sending",
+                                   "news": "The release notes still need sending", "chat_id": CHAT,
+                                   "created_at": now - 1.5 * followup.FOUND_EVERY_S})
+    still = llm_saying(stale=False, why="still open")
+    run_held(live, still, now)
+    assert len(still.calls) == 1
+    live.store.brief_cards([card_id], now + 60, "x-brief")
+    # On the screen with the brief now, it was read just before: the found check reads it a day later.
+    assert followup.found_due(live.store, now + 120) == []
+    assert [card["id"] for card in followup.found_due(live.store, now + followup.FOUND_EVERY_S)] == [card_id]
+
+
 def test_a_report_item_found_on_its_own_and_put_off_is_read_before_it_comes_back(live):
     live.store.set("memory", True)
     now = time.time()
@@ -1734,6 +1761,36 @@ def test_a_report_item_found_on_its_own_and_put_off_is_read_before_it_comes_back
                                       "created_at": now})
     assert control.dismiss(live.store, brief_card, True, now=now, until="tomorrow") is True
     assert followup.return_rested(live.store, live.store.card(brief_card)["rest_until"] + 1) == [brief_card]
+
+
+def test_a_found_card_read_before_it_comes_back_isnt_read_again_in_that_run_or_the_next(live, monkeypatch):
+    live.store.set("memory", True)
+    now = time.time()
+    put_off = found_card(live, chat_id=CHAT, news="The release notes still need sending", topic="follow-up",
+                         came=now - 2 * followup.FOUND_EVERY_S)
+    run_found(live, llm_saying(stale=False, why="still open"), now - followup.FOUND_EVERY_S)  # read a day after it came
+    assert control.dismiss(live.store, put_off, True, now=now, until="tomorrow") is True
+    back_at = live.store.card(put_off)["rest_until"]
+    found_card(live, chat_id=CHAT, news="Look at the flaky deploy", came=back_at - followup.FOUND_EVERY_S - 60)
+    asked = []
+
+    def memory_llm(instructions, text, purpose="pulse memory", route=None):
+        asked.append(text)
+        return {"stale": False, "why": "still open"}, 42
+
+    monkeypatch.setattr(pulse, "_memory_llm", memory_llm)
+    monkeypatch.setattr(pulse.memory, "run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pulse.followup, "run", lambda *args, **kwargs: None)
+    live.store.claim_leader(pulse._owner, pulse.LEADER_TTL_S, time.time())  # the checks stop when it doesn't lead
+    pulse._memory_run(live.home, SID, back_at + 1, threading.Event())
+    # Its chat is read before it comes back, and the found check reads only the other card.
+    assert len(asked) == 2 and sum("release notes still need sending" in text for text in asked) == 1
+    assert live.store.card(put_off)["dismissed_at"] is None
+    pulse._memory_run(live.home, SID, back_at + 300, threading.Event())
+    assert len(asked) == 2
+    # A day after that read, it's read again while it's new.
+    pulse._memory_run(live.home, SID, back_at + 1 + followup.FOUND_EVERY_S, threading.Event())
+    assert sum("release notes still need sending" in text for text in asked) == 2
 
 
 def test_a_card_put_back_after_the_read_before_it_came_back_stays_as_the_user_left_it(live):

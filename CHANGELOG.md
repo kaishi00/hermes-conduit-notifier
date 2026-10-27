@@ -13,6 +13,11 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.87.1 (2026-10-27)
+
+### Fixes
+- News Pulse found on its own, read just before it came back from Not now or went into the morning brief, is no longer read again right after.
+
 ## 0.87.0 (2026-10-26)
 
 ### Fixes
