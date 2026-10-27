@@ -827,12 +827,15 @@ class PulseStore:
                     if target is None or conn.execute(
                             # A date said again, or a later one, moves the item's date. A
                             # yearly one (a fact's) is kept as said this time, and takes the
-                            # place of a due date, so the fact no longer expires.
+                            # place of a due date, so the fact no longer expires; a fact
+                            # already yearly takes no due date from a repeat.
                             f"UPDATE items SET mentioned_at=MAX(mentioned_at, ?), "
                             f"due=CASE WHEN ?!='' THEN '' "
-                            f"WHEN ? IS NOT NULL AND (due_at IS NULL OR ? > due_at) THEN ? ELSE due END, "
+                            f"WHEN every_year='' AND ? IS NOT NULL AND (due_at IS NULL OR ? > due_at) THEN ? "
+                            f"ELSE due END, "
                             f"due_at=CASE WHEN ?!='' THEN NULL "
-                            f"WHEN ? IS NOT NULL AND (due_at IS NULL OR ? > due_at) THEN ? ELSE due_at END, "
+                            f"WHEN every_year='' AND ? IS NOT NULL AND (due_at IS NULL OR ? > due_at) THEN ? "
+                            f"ELSE due_at END, "
                             f"every_year=CASE WHEN ?!='' THEN ? ELSE every_year END, "
                             f"occasion=CASE WHEN ?!='' THEN ? ELSE occasion END "
                             f"WHERE id=? AND {live}",

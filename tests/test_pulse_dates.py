@@ -157,6 +157,13 @@ def test_a_fact_about_a_yearly_date_stays_open_and_said_again_picks_up_its_date(
     live.store.expire_items(due_before=now + 400 * 86400, now=now)
     assert live.store.item(old)["status"] == "open"
     assert [entry["id"] for entry in live.store.yearly_facts()] == [old]
+    # A repeat that gives it a date once ("the party's on the 6th") leaves it yearly, with no date to expire on.
+    said(live, {"kind": "fact", "text": "x", "evidence": "y", "same_as": old, "due": "2027-03-06",
+                "due_at": now + 30 * 86400}, now + 1)
+    item = live.store.item(old)
+    assert (item["every_year"], item["due"], item["due_at"], item["mentioned_at"]) == ("03-03", "", None, now + 1)
+    live.store.expire_items(due_before=now + 400 * 86400, now=now)
+    assert live.store.item(old)["status"] == "open"
     # Done on a card drawn from it marks the card: the date comes round again.
     [card] = live.store.add_cards([{"kind": learning.NOTICED, "level": "screen", "item_id": old, "news": "n",
                                     "created_at": now}])
@@ -181,6 +188,7 @@ def test_it_runs_once_a_day_from_an_hour_before_the_brief_and_not_while_quiet(li
     assert ahead.due(live.store, UTC, at(14, 9), asked=True)  # `pulse ahead now`
     live.store.set("quiet_days", [3])  # Thursdays
     assert not ahead.due(live.store, UTC, at(15, 6)) and ahead.due(live.store, UTC, at(16, 6))
+    assert ahead.due(live.store, UTC, at(15, 6), asked=True)  # asked, it goes while quiet, as an asked report does
     live.store.set("look_ahead", False)
     assert not ahead.due(live.store, UTC, at(16, 6)) and not ahead.due(live.store, UTC, at(16, 6), asked=True)
 
