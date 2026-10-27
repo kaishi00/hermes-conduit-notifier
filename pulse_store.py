@@ -124,7 +124,9 @@ CREATE TABLE IF NOT EXISTS attempts (
     detail TEXT NOT NULL DEFAULT '',
     turn_id TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL,
-    updated_at REAL NOT NULL
+    updated_at REAL NOT NULL,
+    -- What its turn looked up (pulse_tools labels, JSON; "" for nothing).
+    looked TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS attempts_state ON attempts(state);
 CREATE TABLE IF NOT EXISTS outcomes (
@@ -254,7 +256,10 @@ CREATE TABLE IF NOT EXISTS cards (
     band TEXT NOT NULL DEFAULT '',
     -- Put back with Undo after Pulse marked it done: its chat isn't read
     -- again to mark it (pulse_followup.read_first, found_cards).
-    put_back_at REAL
+    put_back_at REAL,
+    -- What the turn that brought it up looked up first (attempts.looked),
+    -- for its Why?.
+    looked TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS cards_created ON cards(created_at);
 -- What ratings taught Pulse (pulse_learning): each row changes what Pulse
