@@ -1743,6 +1743,25 @@ def test_a_found_card_the_held_check_read_is_read_again_a_day_later_once_its_in_
     assert [card["id"] for card in followup.found_due(live.store, now + followup.FOUND_EVERY_S)] == [card_id]
 
 
+def test_a_found_cards_read_keeps_a_time_another_process_stored_meanwhile(live, monkeypatch):
+    now = time.time()
+    card_id = live.store.add_card({"kind": "noticed", "level": "brief", "topic": "follow-up",
+                                   "title": "The release notes still need sending",
+                                   "news": "The release notes still need sending", "chat_id": CHAT,
+                                   "created_at": now - 1.5 * followup.FOUND_EVERY_S})
+    swap = live.store.swap
+
+    def racing(key, old, new):
+        # Another process stores a found card's time between this read of the times and this write.
+        if key == followup.FOUND_CHECKED and "99" not in (live.store.get(key) or {}):
+            live.store.set(key, {"99": now - 60})
+        return swap(key, old, new)
+
+    monkeypatch.setattr(live.store, "swap", racing)
+    run_held(live, llm_saying(stale=False, why="still open"), now)
+    assert live.store.get(followup.FOUND_CHECKED) == {"99": now - 60, str(card_id): now}
+
+
 def test_a_report_item_found_on_its_own_and_put_off_is_read_before_it_comes_back(live):
     live.store.set("memory", True)
     now = time.time()

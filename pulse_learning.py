@@ -356,9 +356,6 @@ ACT_DONE_BY = "pulse: done in the chat after Do it"
 # Pulse marked it, having read it get done while the card waited for the brief.
 HELD_DONE_BY = "pulse: done before the morning brief"
 RESTED_DONE_BY = "pulse: done before it came back from Not now"
-# A report item Pulse found on its own has no item for it to close (nor for
-# Undo to put back): it names the check all the same, as the others do.
-FOUND_DONE_BY = "pulse: done while it was new on the screen"
 
 
 def action_card(pulse_store: store.PulseStore, card_id: Any) -> dict:
