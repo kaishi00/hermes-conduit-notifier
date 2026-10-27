@@ -107,28 +107,42 @@ def test_the_store_is_owner_only_and_keeps_a_section_it_doesnt_know(tmp_path):
     store = bridge.Store(tmp_path)
     with store.update() as state:
         state["member"]["bindings"]["link1"] = [SCOPE]
-        state["home"] = {"port": 8700}
+        state["home"]["port"] = 8700
+        state["later"] = {"rooms": 1}
 
     assert stat.S_IMODE((tmp_path / "conduit-rooms" / "bridge.json").stat().st_mode) == 0o600
     assert stat.S_IMODE((tmp_path / "conduit-rooms").stat().st_mode) == 0o700
     read = store.read()
-    assert read["member"]["bindings"] == {"link1": [SCOPE]} and read["home"] == {"port": 8700}
+    assert read["member"]["bindings"] == {"link1": [SCOPE]} and read["home"]["port"] == 8700
+    assert read["later"] == {"rooms": 1}
     assert bridge.Store(tmp_path / "empty").read()["member"] == {"bindings": {}, "runs": {}, "days": {}}
 
 
-def test_a_store_with_only_the_homes_section_has_an_empty_members(tmp_path):
-    (tmp_path / "conduit-rooms").mkdir()
-    (tmp_path / "conduit-rooms" / "bridge.json").write_text('{"version": 1, "home": {"port": 8700}}')
+HOME = {"port": 8700, "runs": {}, "kept": {}, "outbox": []}
 
-    read = bridge.Store(tmp_path).read()
 
-    assert read["member"] == {"bindings": {}, "runs": {}, "days": {}} and read["home"] == {"port": 8700}
+def test_a_store_with_one_sides_section_has_the_others_empty(tmp_path):
+    for side, section in (("furina", {"home": HOME}), ("laifu", {"member": {"bindings": {}, "runs": {}, "days": {}}})):
+        (tmp_path / side / "conduit-rooms").mkdir(parents=True)
+        (tmp_path / side / "conduit-rooms" / "bridge.json").write_text(json.dumps({"version": 1, **section}))
+
+    furina, laifu = bridge.Store(tmp_path / "furina").read(), bridge.Store(tmp_path / "laifu").read()
+
+    assert furina["member"] == {"bindings": {}, "runs": {}, "days": {}} and furina["home"] == HOME
+    # As the member's side alone wrote it, before the home's had a section.
+    assert laifu["home"] == {"port": None, "runs": {}, "kept": {}, "outbox": []}
 
 
 @pytest.mark.parametrize("content", [
     "not json", "[]", '{"version": 2}', '{"version": true}', '{"version": 1, "member": []}',
     '{"version": 1, "member": {"bindings": {"l": [{"room_id": "x"}]}, "runs": {}, "days": {}}}',
     '{"version": 1, "member": {"bindings": {}, "runs": {"r": {"kind": "run"}}, "days": {}}}',
+    '{"version": 1, "home": []}', '{"version": 1, "home": {"port": 8700}}',
+    '{"version": 1, "home": {"port": "8700", "runs": {}, "kept": {}, "outbox": []}}',
+    '{"version": 1, "home": {"port": 0, "runs": {}, "kept": {}, "outbox": []}}',
+    '{"version": 1, "home": {"port": null, "runs": {"l/r": {"link": "l"}}, "kept": {}, "outbox": []}}',
+    '{"version": 1, "home": {"port": null, "runs": {}, "kept": {"l/k": {}}, "outbox": []}}',
+    '{"version": 1, "home": {"port": null, "runs": {}, "kept": {}, "outbox": [{"id": "m1", "link": "l"}]}}',
 ])
 def test_a_store_it_didnt_write_is_unreadable(tmp_path, content):
     (tmp_path / "conduit-rooms").mkdir()
@@ -139,18 +153,25 @@ def test_a_store_it_didnt_write_is_unreadable(tmp_path, content):
     assert refused.value.code == "unreadable"
 
 
-# Each kind of entry as the member's side writes it.
+# Each kind of entry as the two sides write it.
 WATCHED = {"link": "link1", "kind": "run", "key": "room:t1:1", "profile": "default", "grant": "g", "admitted": 1.0,
            "home_stopped": False, "shown": {"status": "queued"}, "sent": {"status": "queued"}, "sent_at": 1.0,
            "seq": 0, "ended": None}
 PASSED = {"link": "link1", "kind": "pass", "key": "room:t2:1", "output": "(pass)", "at": 1.0}
 DAY = {"keys": ["room:t1:1"], "notice": False}
+CARRIED = {"link": "link1", "run": "run_1", "profile": "default", "grant": "g", "scope": SCOPE, "name": "Laifu",
+           "admitted": 1.0, "heard": 1.0, "seq": 0, "shown": {"status": "queued"}, "ended": None}
+KEPT = {"run": "run_1", "status": "started", "at": 1.0, "scope": SCOPE, "profile": "default"}
+OUTGOING = {"id": "m1", "link": "link1", "at": 1.0, "request": {"v": 1, "profile": "default", "method": "POST",
+                                                               "path": "/v1/runs/run_1/stop", "grant": "g"}}
 
 
-def _written(watched=WATCHED, passed=PASSED, day=DAY):
+def _written(watched=WATCHED, passed=PASSED, day=DAY, carried=CARRIED, kept=KEPT, outgoing=OUTGOING):
     return {"version": 1,
             "member": {"bindings": {"link1": [SCOPE]}, "runs": {"run_1": watched, "pass_1": passed},
-                       "days": {"2026-10-27": {"default/room-zoo": day}}}}
+                       "days": {"2026-10-27": {"default/room-zoo": day}}},
+            "home": {"port": 8700, "runs": {"link1/run_1": carried}, "kept": {"link1/room:t1:1": kept},
+                     "outbox": [outgoing]}}
 
 
 def test_a_store_with_every_kind_of_entry_reads_as_written(tmp_path):
@@ -172,6 +193,11 @@ def _without(entry, name):
     {"watched": {**WATCHED, "ended": "now"}},
     *({"passed": _without(PASSED, name)} for name in ("output", "at")),
     {"day": {"keys": "room:t1:1", "notice": False}}, {"day": {"keys": []}},
+    *({"carried": _without(CARRIED, name)} for name in
+      ("profile", "grant", "name", "admitted", "heard", "seq", "shown", "ended")),
+    {"carried": {**CARRIED, "shown": {"output": "Yes!"}}},
+    *({"kept": _without(KEPT, name)} for name in ("status", "at")),
+    {"outgoing": _without(OUTGOING, "at")},
 ])
 def test_an_entry_the_bridge_cant_use_makes_the_store_unreadable(tmp_path, entries):
     # One such entry would stop the watching of every run, each pass.

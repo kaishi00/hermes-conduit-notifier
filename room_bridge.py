@@ -4,13 +4,15 @@ A room's home reaches a member's agent on another Hermes through that
 Hermes' runs API (``POST /v1/runs``, its status and stop, and the room
 grant routes), with the HermesRoom grant the member's Hermes gave it. Over
 a Link those requests go as sealed envelopes through the rooms mailbox
-(room_links.py): the home's side leaves a ``roomlink.request`` for each,
-and the member's side (room_bridge_member.py) replays it to its own API
-server, answers with a ``roomlink.response``, and sends each run's status
-as ``roomlink.status`` while it runs. This module has the envelopes'
-bodies and the store both sides keep, ``conduit-rooms/bridge.json``
-beside links.json, owner only, under a file lock as links.json is. Grants
-travel only inside sealed envelopes and that file, and are never logged.
+(room_links.py): the home's side (room_bridge_home.py) takes them on a
+loopback server and leaves a ``roomlink.request`` for each, and the
+member's side (room_bridge_member.py) replays it to its own API server,
+answers with a ``roomlink.response``, and sends each run's status as
+``roomlink.status`` while it runs. This module has the envelopes' bodies,
+the routes both sides carry, and the store both sides keep,
+``conduit-rooms/bridge.json`` beside links.json, owner only, under a file
+lock as links.json is. Grants travel only inside sealed envelopes and that
+file, and are never logged.
 """
 
 from __future__ import annotations
@@ -54,6 +56,30 @@ IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 _PRINTABLE = re.compile(r"^[\x21-\x7e]+\Z")
 _REQUEST_FIELDS = frozenset({"v", "profile", "method", "path", "grant", "key", "body"})
 _REQUIRED_FIELDS = frozenset({"v", "profile", "method", "path", "grant"})
+
+# Hermes' run states (tui_gateway/hosted_room_peer_http.py).
+ACTIVE = frozenset({"queued", "running", "waiting_for_approval", "stopping"})
+ENDED = frozenset({"completed", "failed", "interrupted", "cancelled"})
+# A capabilities answer and a refreshed grant, as Hermes' client reads them.
+CAPABILITY_FIELDS = ("object", "room_id", "home_install_id", "authority_gateway_id", "authority_epoch", "member_id",
+                     "target_profile", "catalog")
+GRANT_FIELDS = ("object", "grant", "expires_at", "status_expires_at")
+# A run's id, and an error code as Hermes' client reads one.
+RUN_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
+CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")
+
+# The requests the bridge carries, by their Hermes path; approvals are
+# answered by the agent's owner on their own Hermes, never carried.
+_RUN = r"(?P<run>[A-Za-z0-9_-]{1,64})"
+_ROUTES = (
+    ("POST", re.compile(r"/v1/runs"), "dispatch"),
+    ("GET", re.compile(rf"/v1/runs/{_RUN}"), "read"),
+    ("POST", re.compile(rf"/v1/runs/{_RUN}/stop"), "stop"),
+    ("POST", re.compile(rf"/v1/runs/{_RUN}/(?:approval|clarify)"), "approval"),
+    ("GET", re.compile(r"/v1/room-members/capabilities"), "capabilities"),
+    ("POST", re.compile(r"/v1/room-members/grants/refresh"), "refresh"),
+    ("POST", re.compile(r"/v1/room-members/grants/revoke"), "revoke"),
+)
 
 _thread_lock = threading.Lock()
 
@@ -100,6 +126,17 @@ def request_from(body: Any) -> Optional[Request]:
     return Request(profile=profile, method=method, path=path, grant=grant, key=key, body=payload)
 
 
+def route(method: str, path: str) -> tuple[Optional[str], Optional[str]]:
+    """The route a request is (``dispatch``, ``read``, ``stop``,
+    ``approval``, ``capabilities``, ``refresh``, ``revoke``) and its run's
+    id, or None and None for one the bridge doesn't carry."""
+    for route_method, pattern, name in _ROUTES:
+        found = pattern.fullmatch(path) if method == route_method else None
+        if found is not None:
+            return name, found.groupdict().get("run")
+    return None, None
+
+
 def response_body(re_id: str, status: int, body: dict, run: Optional[dict] = None) -> dict:
     """A roomlink.response's body: the member's answer to the request whose
     message id is ``re_id``, and on an admission, the run's status then."""
@@ -117,6 +154,12 @@ def status_body(run_id: str, seq: int, shown: Mapping[str, Any]) -> dict:
         if name in shown:
             body[name] = shown[name]
     return body
+
+
+def cut(text: str, limit: int) -> str:
+    """``text`` cut to ``limit`` bytes of UTF-8, at a character. A lone
+    surrogate, which JSON carries and UTF-8 can't, reads as ``?``."""
+    return text.encode("utf-8", "replace")[:limit].decode("utf-8", "ignore")
 
 
 def grant_scope(grant: Any) -> Optional[dict[str, str]]:
@@ -151,13 +194,33 @@ def checked_scope(value: Any) -> Optional[dict[str, str]]:
 
 
 def start(root: Any) -> None:
-    """Starts the bridge for the installation at ``root`` in this process:
-    the member's side, which answers roomlink.request on the room_links
-    copy this module came with, and watches the runs it admitted while that
-    copy's loop holds the lease. Calling it again does nothing."""
-    from . import room_bridge_member
+    """Starts the bridge for the installation at ``root`` in this process,
+    on the room_links copy this module came with: the member's side, which
+    answers roomlink.request and watches the runs it admitted, and the
+    home's, which takes this Hermes' requests on its loopback server. Each
+    runs while that copy's loop holds the lease. Calling it again does
+    nothing."""
+    from . import room_bridge_home, room_bridge_member
 
     room_bridge_member.start(root)
+    room_bridge_home.start(root)
+
+
+def url(root: Any, link_id: Any, profile: Any) -> str:
+    """The base URL Hermes reaches a member's agent at over the Link
+    ``link_id``: the agent's profile on the Hermes at its other end, at the
+    port the home's side keeps (room_bridge_home.py). A room's route for the
+    agent points there. ValueError for what isn't a Link's id or a profile,
+    BridgeError (not_listening, 503) before the bridge has listened."""
+    if not room_links._is_id(link_id):
+        raise ValueError("That isn't a Link's id")
+    if not isinstance(profile, str) or not PROFILE.match(profile):
+        raise ValueError("That isn't a profile's name")
+    port = Store(root).read()["home"]["port"]
+    if port is None:
+        raise BridgeError("not_listening", "Linked Rooms' bridge hasn't listened on this Hermes yet; it does once "
+                                           "there's a Link", 503)
+    return f"http://127.0.0.1:{port}/l/{link_id}/p/{profile}"
 
 
 # --- The store ----------------------------------------------------------------------
@@ -165,7 +228,7 @@ def start(root: Any) -> None:
 
 class Store:
     """``<root>/conduit-rooms/bridge.json``. Each side keeps its own section
-    (the member's is ``member``); one this plugin doesn't know is kept."""
+    (``member`` and ``home``); one this plugin doesn't know is kept."""
 
     def __init__(self, root: Any) -> None:
         self.directory = Path(root) / DIRECTORY
@@ -220,23 +283,35 @@ class Store:
 
 
 def _empty() -> dict[str, Any]:
-    return {"version": VERSION, "member": {"bindings": {}, "runs": {}, "days": {}}}
+    return {"version": VERSION, "member": {"bindings": {}, "runs": {}, "days": {}},
+            "home": {"port": None, "runs": {}, "kept": {}, "outbox": []}}
 
 
 def _well_formed(state: Any) -> bool:
     if not isinstance(state, dict) or type(state.get("version")) is not int or state["version"] != VERSION:
         return False
-    member = state.get("member", {"bindings": {}, "runs": {}, "days": {}})
+    empty = _empty()
+    member, home = state.get("member", empty["member"]), state.get("home", empty["home"])
     if not isinstance(member, dict) or not all(isinstance(member.get(name), dict)
                                                for name in ("bindings", "runs", "days")):
         return False
+    if not isinstance(home, dict) or not all(isinstance(home.get(name), dict) for name in ("runs", "kept")) \
+            or not isinstance(home.get("outbox"), list):
+        return False
+    port = home.get("port", "")
     return all(isinstance(scopes, list) and all(checked_scope(scope) is not None for scope in scopes)
                for scopes in member["bindings"].values()) \
         and all(_kept_run(run) for run in member["runs"].values()) \
         and all(isinstance(rooms, dict) and all(isinstance(today, dict) and isinstance(today.get("keys"), list)
                                                 and isinstance(today.get("notice"), bool)
                                                 for today in rooms.values())
-                for rooms in member["days"].values())
+                for rooms in member["days"].values()) \
+        and (port is None or (type(port) is int and 0 < port < 65536)) \
+        and all(_carried_run(run) for run in home["runs"].values()) \
+        and all(isinstance(kept, dict) and isinstance(kept.get("run"), str) and isinstance(kept.get("status"), str)
+                and _number(kept.get("at")) for kept in home["kept"].values()) \
+        and all(isinstance(item, dict) and isinstance(item.get("id"), str) and isinstance(item.get("link"), str)
+                and _number(item.get("at")) and isinstance(item.get("request"), dict) for item in home["outbox"])
 
 
 def _kept_run(run: Any) -> bool:
@@ -248,14 +323,21 @@ def _kept_run(run: Any) -> bool:
         return isinstance(run.get("output"), str) and _number(run.get("at"))
     return run.get("kind") == "run" and isinstance(run.get("profile"), str) and isinstance(run.get("grant"), str) \
         and _number(run.get("admitted")) and _number(run.get("sent_at")) and type(run.get("seq")) is int \
-        and isinstance(run.get("shown"), dict) and isinstance(run["shown"].get("status"), str) \
-        and (run.get("ended") is None or _number(run.get("ended")))
+        and _shown(run.get("shown")) and (run.get("ended") is None or _number(run.get("ended")))
+
+
+def _carried_run(run: Any) -> bool:
+    """A run as the home's side keeps it, with every field its answers and
+    its watching read."""
+    return isinstance(run, dict) and all(isinstance(run.get(name), str)
+                                         for name in ("link", "run", "profile", "grant", "name")) \
+        and _number(run.get("admitted")) and _number(run.get("heard")) and type(run.get("seq")) is int \
+        and _shown(run.get("shown")) and "ended" in run and (run["ended"] is None or _number(run["ended"]))
+
+
+def _shown(value: Any) -> bool:
+    return isinstance(value, dict) and isinstance(value.get("status"), str)
 
 
 def _number(value: Any) -> bool:
     return type(value) in (int, float)
-
-
-# room_links is imported so a copy of this module goes with the room_links
-# copy whose loop it registers with.
-_ = room_links
