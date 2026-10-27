@@ -104,6 +104,7 @@ Return a JSON object {{"remembered": [...], "found": [...]}}.
 
 "found" has whatever else is worth considering, from the chats, calendar, reminders, notes, jobs or failed tool calls, up to {found} entries, ones you'd leave out included:
 {{"kind": "date", "bring_up": true, "value": 4, "skip": "", "actionable": true, "line": "...", "why": "...", "due": "2026-10-27T14:00", "asked": false, "source": "chat", "chat": "c2", "area": "work"}}
+{{"kind": "reminder", "bring_up": true, "value": 3, "skip": "", "actionable": true, "line": "...", "why": "...", "due": "2026-10-28T09:00", "asked": true, "source": "reminders", "reminder": "r2", "area": "personal"}}
 
 - "bring_up": true when it belongs in this report. {bar} At most {limit} in all.
 - "value": how useful hearing it now would be, from 1 (not at all) to 5 (they'd want it now).
@@ -458,15 +459,19 @@ def decide(pulse_store: store.PulseStore, rows: list[dict], *, now: float, limit
 def reminders_raised(pulse_store: store.PulseStore, refs: Sequence[str], now: float) -> set[str]:
     """Which of the phone reminders ``refs`` (REMINDER) already had a card:
     within REMINDER_AGAIN_S, or ever once its card was put away for good or
-    rated not useful (kept in REMINDERS_AWAY as each is seen, so it stays
+    rated not useful (not "wrong time", which puts it off) (kept in REMINDERS_AWAY as each is seen, so it stays
     away once the journal or the cards drop it)."""
     # Every decide keeps what was put away, whatever this one is about.
-    kept = pulse_store.get(REMINDERS_AWAY)
-    kept = [ref for ref in kept if isinstance(ref, str)] if isinstance(kept, list) else []
     away = pulse_store.away_refs(REMINDER)
-    if not away <= set(kept):
-        kept = [ref for ref in kept if ref not in away] + sorted(away)
-        pulse_store.set(REMINDERS_AWAY, kept[-AWAY_KEPT:])
+    for _ in range(5):  # another process may write it meanwhile
+        stored = pulse_store.get(REMINDERS_AWAY)
+        kept = [ref for ref in stored if isinstance(ref, str)] if isinstance(stored, list) else []
+        if away <= set(kept):
+            break
+        merged = ([ref for ref in kept if ref not in away] + sorted(away))[-AWAY_KEPT:]
+        if pulse_store.swap(REMINDERS_AWAY, stored, merged):
+            kept = merged
+            break
     refs = {ref for ref in refs if ref.startswith(REMINDER)}
     if not refs:
         return set()

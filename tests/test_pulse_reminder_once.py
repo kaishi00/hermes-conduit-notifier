@@ -160,3 +160,10 @@ def test_a_report_about_other_things_still_keeps_a_put_away_reminder(live):
     candidates.decide(live.store, [candidate(kind="reminder", value=5)], now=now)  # nothing about it
     live.store.prune_candidates(now)
     assert decided(live, now + 90 * 86400)[0] == (candidates.SKIPPED, "raised")
+
+
+def test_a_reminder_rated_wrong_time_comes_back_after_the_week(live):
+    now = time.time()
+    card_for(live, "reminder:r_lock", created_at=now - 30 * 86400, rating="down", reason="wrong_time",
+             dismissed_at=now - 30 * 86400, rest_until=now - 29 * 86400)
+    assert decided(live, now)[0] == (candidates.SURFACED, "")
