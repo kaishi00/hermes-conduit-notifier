@@ -1581,10 +1581,15 @@ def test_conduit_profile_is_refused_where_the_profile_turned_the_plugin_off(clie
 
 
 def test_a_failing_consent_check_closes_the_socket_as_retryable(client, hermes, monkeypatch):
-    async def failing(name):
-        raise api.HTTPException(status_code=503, detail="Hermes can't read this profile")
+    dashboard = types.ModuleType("hermes_cli.web_server_dashboard")
 
-    monkeypatch.setattr(api, "_plugin_refused_on", failing)
+    async def failing(name):
+        raise OSError("config.yaml unreadable")
+
+    dashboard._plugin_api_request_refused = failing
+    monkeypatch.setitem(sys.modules, "hermes_cli.web_server_dashboard", dashboard)
+    response = client.get(f"{BASE}/local-live/status?conduit_profile=work")
+    assert response.status_code == 503 and response.headers["cache-control"] == "no-store"
     with client.websocket_connect(f"{BASE}/speech-server/socket?conduit_profile=work") as ws:
         while (message := ws.receive())["type"] != "websocket.close":
             pass

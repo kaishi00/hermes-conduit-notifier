@@ -624,6 +624,9 @@ async def _plugin_refused_on(profile: str) -> bool:
             return bool(await _plugin_api_request_refused(PLUGIN_NAME))
     except TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc))
+    except Exception:  # noqa: BLE001 — Hermes failing to read the profile; a retry may get past it
+        logger.exception("Conduit couldn't ask Hermes whether profile %r allows the plugin", profile)
+        raise HTTPException(status_code=503, detail="Hermes couldn't check this profile's plugins")
 
 
 _Scoped = TypeVar("_Scoped")
