@@ -24,12 +24,14 @@ from __future__ import annotations
 import base64
 import math
 import binascii
+import errno
 import os
 import posixpath
 import secrets
 import shlex
 import shutil
 import stat as stat_module
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -417,18 +419,73 @@ class LocalWorkspace:
         except PermissionError:
             raise WorkspaceError(403, "Hermes can't move this")
         except OSError as exc:
-            if exc.errno == 18:  # EXDEV: another disk under the same root
-                if not overwrite and os.path.lexists(target):
-                    raise WorkspaceError(409, "Something with that name is already there")
-                try:
-                    shutil.move(source, target)
-                except (FileExistsError, IsADirectoryError, NotADirectoryError, shutil.Error):
-                    raise WorkspaceError(409, "Something with that name is already there")
-                except PermissionError:
-                    raise WorkspaceError(403, "Hermes can't move this")
+            if exc.errno == errno.EXDEV:  # another disk under the same root
+                self._move_across(source, target, overwrite)
+            elif exc.errno == errno.ENOENT:
+                raise WorkspaceError(404, "That file or folder isn't there any more")
             else:
                 raise WorkspaceError(500, f"Couldn't move this ({exc.strerror or 'error'})")
         return {"entry": self._entry(target)}
+
+    def _move_across(self, source: str, target: str, overwrite: bool) -> None:
+        """A move to another disk: copied beside the target into a private
+        folder (shutil.move keeps a link a link), then landed there as on one
+        disk, so nothing that appeared meanwhile is replaced or moved into.
+        When it can't land, it goes back where it was."""
+        if not overwrite and os.path.lexists(target):
+            raise WorkspaceError(409, "Something with that name is already there")
+        try:
+            box = tempfile.mkdtemp(prefix=".conduit-", dir=os.path.dirname(target))
+        except PermissionError:
+            raise WorkspaceError(403, "Hermes can't write in this folder")
+        except FileNotFoundError:
+            raise WorkspaceError(404, "That folder isn't there any more")
+        except OSError as exc:
+            raise WorkspaceError(500, f"Couldn't move this ({exc.strerror or exc})")
+        temp = os.path.join(box, os.path.basename(target))
+        try:
+            try:
+                shutil.move(source, temp)
+            except OSError as exc:
+                try:  # nothing copied yet, or a file whose source is still whole
+                    if os.path.isdir(temp) and not os.path.islink(temp):
+                        if not os.listdir(temp):
+                            os.rmdir(temp)
+                    elif os.path.lexists(temp) and os.path.lexists(source):
+                        os.unlink(temp)
+                except OSError:
+                    pass
+                if os.path.lexists(temp):  # a part copied: kept, as the source may be part gone
+                    raise WorkspaceError(500, "Couldn't move all of this: what was copied is in "
+                                              + os.path.basename(box) + " beside the target")
+                if isinstance(exc, PermissionError):
+                    raise WorkspaceError(403, "Hermes can't move this")
+                if isinstance(exc, FileNotFoundError):
+                    raise WorkspaceError(404, "That file or folder isn't there any more")
+                raise WorkspaceError(500, f"Couldn't move this ({exc.strerror or exc})")
+            try:
+                if overwrite and not (os.path.isdir(temp) and not os.path.islink(temp)):
+                    os.replace(temp, target)
+                else:
+                    _rename_no_replace(temp, target)
+                return
+            except (FileExistsError, IsADirectoryError, NotADirectoryError):
+                failed = WorkspaceError(409, "Something with that name is already there")
+            except PermissionError:
+                failed = WorkspaceError(403, "Hermes can't move this")
+            except OSError as exc:
+                failed = WorkspaceError(500, f"Couldn't move this ({exc.strerror or exc})")
+            try:
+                if os.path.lexists(source):
+                    raise FileExistsError(source)
+                shutil.move(temp, source)  # back where it was
+            except OSError:
+                raise WorkspaceError(500, "Couldn't move this, and couldn't put it back: it's in "
+                                          + os.path.basename(box) + " beside the target")
+            raise failed
+        finally:
+            if not os.path.lexists(temp):
+                shutil.rmtree(box, ignore_errors=True)
 
     def duplicate(self, root_raw: Any, path: Any) -> Dict[str, Any]:
         root = self.root(root_raw)
@@ -467,10 +524,10 @@ class LocalWorkspace:
             raise WorkspaceError(400, "The workspace folder itself can't be deleted")
         if not self._inside(root, parent) or not self._inside(root, target):
             raise WorkspaceError(403, "That's outside this workspace")
-        if not os.path.lexists(target):
-            raise WorkspaceError(404, "That file is no longer there")
         if self._sensitive(target):
             raise WorkspaceError(403, "Conduit doesn't touch files that hold keys or passwords")
+        if not os.path.lexists(target):
+            raise WorkspaceError(404, "That file is no longer there")
         try:
             if os.path.isdir(target) and not os.path.islink(target):
                 shutil.rmtree(target)
@@ -651,7 +708,7 @@ class SshWorkspace:
         real = next((line for line in lines if line.startswith("/")), path)
         return posixpath.normpath(real)
 
-    def _check(self, root: str, raw: Any) -> str:
+    def _check(self, root: str, raw: Any, resolve: bool = True) -> str:
         path = self._norm(raw)
         if not self._inside(root, path):
             # Its real path may still be inside: a root reached through a link.
@@ -659,7 +716,7 @@ class SshWorkspace:
             path = posixpath.join(parent, posixpath.basename(path))
             if not self._inside(root, path):
                 raise WorkspaceError(403, "That's outside this workspace")
-        if self._sensitive(path) or self._sensitive(self._resolved(root, path)):
+        if self._sensitive(path) or (resolve and self._sensitive(self._resolved(root, path))):
             raise WorkspaceError(403, "Conduit doesn't open files that hold keys or passwords")
         return path
 
@@ -948,7 +1005,8 @@ class SshWorkspace:
                   # picked: a folder claims its name with mkdir, anything else
                   # lands with mv -n from a private folder beside it.
                   'if [ -d "$s" ] && [ ! -L "$s" ]; then\n'
-                  f'  mkdir -- "$t" 2>/dev/null || {{ echo {_ERROR}EEXIST; exit 1; }}\n'
+                  f'  mkdir -- "$t" 2>/dev/null || {{ if [ -e "$t" ] || [ -L "$t" ]; then echo {_ERROR}EEXIST;'
+                  f' else echo {_ERROR}EACCES; fi; exit 1; }}\n'
                   f'  cp -R -P -p -- "$s"/. "$t"/ || {{ rm -rf -- "$t"; echo {_ERROR}EACCES; exit 1; }}\n'
                   'else\n'
                   f'  d=$(mktemp -d "$f/.conduit-XXXXXXXX") || {{ echo {_ERROR}EACCES; exit 1; }}\n'
@@ -968,7 +1026,9 @@ class SshWorkspace:
 
     def delete(self, root_raw: Any, path: Any) -> Dict[str, Any]:
         root = self.root(root_raw)
-        target = self._check(root, path)
+        # Only the link goes, never what it points to: one to a secret can
+        # be removed, as on this host.
+        target = self._check(root, path, resolve=False)
         if target == root:
             raise WorkspaceError(400, "The workspace folder itself can't be deleted")
         self._run(self._guard(root) + f't={shlex.quote(target)}\n'

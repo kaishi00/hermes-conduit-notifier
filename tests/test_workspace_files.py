@@ -595,6 +595,126 @@ def test_a_link_out_of_the_root_isnt_moved_on_either_backend(tree):
     assert (tree / "away").is_symlink()
 
 
+def test_a_move_across_disks_keeps_links_and_never_moves_into_a_folder(tree, monkeypatch):
+    (tree / "link.txt").symlink_to(tree / "notes.txt")
+    real_rename = wf._rename_no_replace
+    calls = []
+
+    def across(source, target):
+        if not calls:
+            calls.append(target)
+            raise OSError(18, "Invalid cross-device link")
+        return real_rename(source, target)
+
+    monkeypatch.setattr(wf, "_rename_no_replace", across)
+    ws().move(str(tree), str(tree / "link.txt"), str(tree / "docs"), "moved.txt")
+    assert os.path.islink(tree / "docs" / "moved.txt")
+    calls.clear()
+    (tree / "docs" / "taken").mkdir()
+    real_lexists = os.path.lexists
+    monkeypatch.setattr(wf.os.path, "lexists", lambda p: False if p.endswith("taken") else real_lexists(p))
+    with pytest.raises(wf.WorkspaceError) as exc:
+        ws().move(str(tree), str(tree / "notes.txt"), str(tree / "docs"), "taken")
+    assert exc.value.status == 409 and (tree / "notes.txt").is_file() and os.listdir(tree / "docs" / "taken") == []
+
+
+def test_a_move_across_disks_copies_a_link_as_a_link_and_leaves_nothing_behind(tree, monkeypatch):
+    (tree / "link.txt").symlink_to(tree / "notes.txt")
+    real_rename, real_no_replace = os.rename, wf._rename_no_replace
+    first = []
+
+    def no_replace(source, target):
+        if not first:
+            first.append(target)
+            raise OSError(18, "Invalid cross-device link")
+        return real_no_replace(source, target)
+
+    def rename(source, target):  # shutil.move's own rename: copy it, as across disks
+        if ".conduit-" in str(target) or ".conduit-" in str(source):
+            raise OSError(18, "Invalid cross-device link")
+        return real_rename(source, target)
+
+    monkeypatch.setattr(wf, "_rename_no_replace", no_replace)
+    monkeypatch.setattr(os, "rename", rename)
+    ws().move(str(tree), str(tree / "link.txt"), str(tree / "docs"), "moved.txt")
+    assert os.path.islink(tree / "docs" / "moved.txt") and not os.path.lexists(tree / "link.txt")
+    assert (tree / "notes.txt").is_file() and not [n for n in os.listdir(tree / "docs") if n.startswith(".conduit-")]
+    first.clear()
+    monkeypatch.setattr(wf, "_rename_no_replace", lambda source, target: (
+        first.append(target), (_ for _ in ()).throw(OSError(18, "x") if len(first) == 1 else PermissionError(13, "no"))))
+    with pytest.raises(wf.WorkspaceError) as exc:
+        ws().move(str(tree), str(tree / "notes.txt"), str(tree / "docs"), "kept.txt")
+    assert exc.value.status == 403 and (tree / "notes.txt").is_file()
+    assert not [n for n in os.listdir(tree / "docs") if n.startswith(".conduit-")]
+
+
+def test_a_move_across_disks_that_copies_only_part_says_where_the_part_is(tree, monkeypatch):
+    (tree / "docs" / "part").mkdir()
+    (tree / "docs" / "part" / "a.txt").write_text("a")
+    monkeypatch.setattr(wf, "_rename_no_replace", lambda source, target: (_ for _ in ()).throw(OSError(18, "x")))
+
+    def half(source, target):
+        os.mkdir(target)
+        pathlib.Path(target, "a.txt").write_text("a")
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(wf.shutil, "move", half)
+    with pytest.raises(wf.WorkspaceError) as exc:
+        ws().move(str(tree), str(tree / "docs" / "part"), str(tree), "part")
+    left = [n for n in os.listdir(tree) if n.startswith(".conduit-")]
+    assert exc.value.status == 500 and left and left[0] in str(exc.value)
+    assert (tree / "docs" / "part" / "a.txt").is_file()
+    wf.shutil.rmtree(tree / left[0])
+
+    def none(source, target):
+        os.mkdir(target)
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(wf.shutil, "move", none)
+    with pytest.raises(wf.WorkspaceError) as exc:
+        ws().move(str(tree), str(tree / "docs" / "part"), str(tree), "part")
+    assert exc.value.status == 403 and not [n for n in os.listdir(tree) if n.startswith(".conduit-")]
+
+    def a_file(source, target):
+        pathlib.Path(target).write_text("")
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(wf.shutil, "move", a_file)
+    with pytest.raises(wf.WorkspaceError) as exc:
+        ws().move(str(tree), str(tree / "docs" / "part" / "a.txt"), str(tree), "a.txt")
+    assert exc.value.status == 403 and not [n for n in os.listdir(tree) if n.startswith(".conduit-")]
+
+
+def test_a_move_across_disks_replaces_with_a_link_to_a_folder_when_asked(tree, monkeypatch):
+    (tree / "folder-link").symlink_to(tree / "docs")
+    (tree / "taken.txt").write_text("old")
+    real_replace = os.replace
+    first = []
+
+    def replace(source, target):
+        if not first:
+            first.append(target)
+            raise OSError(18, "Invalid cross-device link")
+        return real_replace(source, target)
+
+    monkeypatch.setattr(os, "replace", replace)
+    ws().move(str(tree), str(tree / "folder-link"), str(tree), "taken.txt", overwrite=True)
+    assert os.path.islink(tree / "taken.txt") and not os.path.lexists(tree / "folder-link")
+
+
+def test_deleting_a_secret_name_is_refused_whether_or_not_it_is_there(tree):
+    for workspace in (ws(), ssh(tree)):
+        with pytest.raises(wf.WorkspaceError) as exc:
+            workspace.delete(str(tree.resolve()), str(tree / "id_rsa"))
+        assert exc.value.status == 403
+
+
+def test_ssh_deletes_a_link_to_a_secret_but_not_the_secret(tree):
+    (tree / "innocent.txt").symlink_to(tree / ".env")
+    ssh(tree).delete(str(tree.resolve()), str(tree / "innocent.txt"))
+    assert not os.path.lexists(tree / "innocent.txt") and (tree / ".env").read_text() == "SECRET=1\n"
+
+
 # --- Routes --------------------------------------------------------------------
 
 

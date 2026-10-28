@@ -13,6 +13,16 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.109.1 (2026-10-28)
+
+### Fixes
+- Moving a file in the Folder tab to a different disk could follow a link
+  instead of moving the link itself, or land inside a folder that had just
+  appeared with the target's name. It now lands beside the target first.
+- Deleting a link to a key or password file over SSH was refused. It now
+  deletes the link, never the file it points to.
+- When a copy's name couldn't be claimed, the Folder tab now says why.
+
 ## 0.109.0 (2026-10-27)
 
 ### New and improved

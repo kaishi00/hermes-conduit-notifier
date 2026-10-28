@@ -304,9 +304,11 @@ def test_a_fact_dates_card_points_at_the_chat_it_was_said_in_without_the_fact(li
     assert live.store.item(wedding)["status"] == "open"
 
 
-def test_after_the_brief_went_what_it_brings_up_goes_on_the_screen(live):
+def test_after_the_brief_went_what_it_brings_up_goes_on_the_screen(live, monkeypatch):
     looking(live)
-    now = time.time()
+    # Today at noon: before 01:00 an hour back is yesterday, and today's brief still to come.
+    now = datetime.combine(datetime.now(timezone.utc).date(), datetime.min.time(), timezone.utc).timestamp() + 12 * 3600
+    monkeypatch.setattr(time, "time", lambda: now)
     live.store.set("brief_time", datetime.fromtimestamp(now - 3600, timezone.utc).strftime("%H:%M"))
     assert ahead.brief_ahead(live.store, UTC, now)  # within the brief's window, none sent yet
     live.store.add_attempt(attempt_id="b:1", item_id="b", attempt=1, kind=pulse.BRIEF, tag="t", text="x",
@@ -355,13 +357,17 @@ def test_nothing_ahead_asks_nothing_and_a_run_that_stops_leading_gives_the_day_b
 def test_a_held_look_ahead_card_no_brief_took_goes_to_the_screen_at_midnight(live):
     looking(live)
     now = time.time()
-    yesterday = datetime.fromtimestamp(now - 86400, timezone.utc)
+    # Yesterday at 10:00, an hour before its brief: now less a day would put
+    # a look after 23:00 before a brief on the next day, with none ahead.
+    yesterday = datetime.combine(datetime.fromtimestamp(now, timezone.utc).date() - timedelta(days=1),
+                                 datetime.min.time(), timezone.utc) + timedelta(hours=10)
     live.store.set("brief_time", (yesterday + timedelta(hours=1)).strftime("%H:%M"))
     fact(live, "The user's anniversary.", "our anniversary is tomorrow",
          (yesterday + timedelta(days=1)).strftime("%m-%d"), "anniversary")
-    look(live, now - 86400)
+    look(live, yesterday.timestamp())
     [card] = live.store.cards()
-    held = live.store.add_cards([{"kind": "followup", "level": "brief", "news": "held", "created_at": now - 86400}])
+    held = live.store.add_cards([{"kind": "followup", "level": "brief", "news": "held",
+                                  "created_at": yesterday.timestamp()}])
     assert card["level"] == "brief"
     live.store.set("brief_time", datetime.fromtimestamp(now + 10 * 3600, timezone.utc).strftime("%H:%M"))
     pulse.tick()
