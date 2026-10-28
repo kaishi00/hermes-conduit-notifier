@@ -1,8 +1,8 @@
 """Hermes loads dashboard/plugin_api.py, and the routes and the tools behind
 them are in dashboard/api/, one module per feature (notifier#443). These hold
 the layout's rules (CONTRIBUTING.md): plugin_api.py only loads the package,
-a module takes another's names through the module, never by name, and every
-route is on core's router."""
+a module takes another's names through the module, never by name, and uses
+only the modules above it as it loads, and every route is on core's router."""
 
 import ast
 import builtins
@@ -69,6 +69,25 @@ def _annotation_names(tree):
     return names
 
 
+def _run_as_it_loads(node):
+    """What Python runs of a top-level statement as its module loads: all of
+    it but the bodies of functions and lambdas. A def's decorators and
+    defaults run, and so may its annotations (FastAPI reads a route's as its
+    decorator runs); a class's body runs."""
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+        a = node.args
+        parts = getattr(node, "decorator_list", []) + a.defaults + [d for d in a.kw_defaults if d is not None]
+        parts += [arg.annotation for arg in a.posonlyargs + a.args + a.kwonlyargs + [a.vararg, a.kwarg]
+                  if arg is not None and arg.annotation is not None]
+        parts += [node.returns] if getattr(node, "returns", None) is not None else []
+        for part in parts:
+            yield from _run_as_it_loads(part)
+        return
+    yield node
+    for child in ast.iter_child_nodes(node):
+        yield from _run_as_it_loads(child)
+
+
 def _globals(name):
     """What a module defines at its top level (or through ``global`` in a
     function), and the global names its code takes."""
@@ -110,6 +129,19 @@ def test_a_module_takes_another_by_module():
                 assert all(a.name in MODULES and a.asname is None for a in node.names), f"{name}.py:{node.lineno}"
             elif isinstance(node, (ast.Import, ast.ImportFrom)):
                 assert all(a.name != "*" for a in node.names), f"{name}.py:{node.lineno}: a star import"
+
+
+def test_a_module_uses_only_the_modules_above_it_as_it_loads():
+    # Every module is created before the first one runs, so a function may
+    # use any of them; what runs as a module loads (a base class, a default,
+    # a constant made from another module's) finds a module below it not yet
+    # run. A branch counts whether it's taken or not.
+    for position, name in enumerate(MODULES):
+        tree = ast.parse(_source(name))
+        below = _siblings(tree) & set(MODULES[position + 1:])
+        early = sorted({f"line {n.lineno}: {n.id}" for statement in tree.body for n in _run_as_it_loads(statement)
+                        if isinstance(n, ast.Name) and n.id in below})
+        assert not early, f"{name}.py uses modules below it as it loads: {early}"
 
 
 def test_no_name_in_a_module_is_defined_twice():
