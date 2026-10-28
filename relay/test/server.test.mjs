@@ -185,7 +185,11 @@ test('a push names the bot by its name, not its profile id', () => {
   assert.equal(payload.body.conduit.profile_name, 'Nova');
   const unnamed = notificationFor(validateEvent({ type: 'response.ready', event_id: 'ready:12345679', session_id: 'sess-1', profile: 'default' }),
     { show_previews: false, completion_sound: false });
-  assert.equal(unnamed.payload.aps.alert.body, 'Hermes has finished responding.\nProfile: default · Session: sess-1');
+  assert.equal(unnamed.payload.aps.alert.body, 'Hermes has finished responding.\nProfile: Default · Session: sess-1', 'its id capitalized, as Conduit names it');
+  const scout = notificationFor(validateEvent({ type: 'response.ready', event_id: 'ready:12345680', session_id: 'sess-1', profile: 'scout', title: 'Scout', session_title: 'Scout' }),
+    { show_previews: false, show_chat_names: true, completion_sound: false });
+  assert.equal(scout.payload.aps.alert.title, 'Scout');
+  assert.equal(scout.payload.aps.alert.body, 'Hermes has finished responding.\nProfile: Scout · Session: sess-1', 'the title and the profile line agree');
   assert.equal('profile_name' in unnamed.payload.conduit, false);
 });
 

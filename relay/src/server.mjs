@@ -1464,7 +1464,7 @@ function levelAps(event) {
 }
 
 function notificationContext(message, event) {
-  const profile = String(event.profileName || event.profile || '').trim();
+  const profile = profileName(event);
   const sessionId = String(event.sessionId ?? '').trim();
   const details = [profile && `Profile: ${profile}`, sessionId && `Session: ${shortSessionId(sessionId)}`].filter(Boolean);
   return details.length ? `${message}\n${details.join(' · ')}` : message;
@@ -1478,15 +1478,24 @@ function chatNamesTitle(genericTitle, event) {
 // says it: the bot's name, else the id, nothing for an unnamed default
 // profile or when the title already ends with it (a Bot Chat's).
 function profileLine(event, title) {
-  const id = String(event.profile || '').trim();
-  let named = String(event.profileName || '').trim();
-  // A name that is only the id names it no more than the id, as in Conduit.
-  if (named === id) named = '';
-  const name = named || (id.toLowerCase() === 'default' ? '' : id.slice(0, 1).toUpperCase() + id.slice(1));
+  const unnamedDefault = !profileGivenName(event) && String(event.profile || '').trim().toLowerCase() === 'default';
+  const name = unnamedDefault ? '' : profileName(event);
   const shown = String(title || '').trim().toLowerCase();
   const lower = name.toLowerCase();
   if (!name || shown === lower || shown.endsWith(` · ${lower}`)) return '';
   return name;
+}
+
+// A profile as Conduit names it: its bot's name, else its id capitalized. A
+// name that is only the id names it no more than the id.
+function profileName(event) {
+  const id = String(event.profile || '').trim();
+  return profileGivenName(event) || id.slice(0, 1).toUpperCase() + id.slice(1);
+}
+
+function profileGivenName(event) {
+  const named = String(event.profileName || '').trim();
+  return named === String(event.profile || '').trim() ? '' : named;
 }
 
 function shortSessionId(sessionId) {
