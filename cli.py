@@ -2230,6 +2230,8 @@ def _pulse_spots(pulse_store: Any, home: Any, value: str) -> int:
         state += (" (waiting: Pulse is off)" if not pulse_store.get("enabled") else
                   " (waiting: Where you are is off)" if not pulse_places.on(pulse_store) else
                   " (waiting: the phone isn't sharing its location in the background)")
+    elif pulse_spots.on(pulse_store) and not pulse_spots.precise(Path(home)):
+        state += " (waiting: the phone shares its location in the background at less than Precise)"
     print(f"Walking past: {state}")
     phone = pulse_store.get(pulse_spots.PHONE)
     if isinstance(phone, dict) and isinstance(phone.get("room"), int):

@@ -1482,7 +1482,7 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: f
     spots = _spot_entries(batch.get("spot_entries"), now) if watching else []
     room = batch.get("spots_room")
     return {"accepted": True, "fix": stored_fix, "events": added, "rules_fired": fired, "moments": moments,
-            "spot_entries": spots, "spots_watching": watching,
+            "spot_entries": spots, "spots_watching": watching, "spots_keep": sharing["retention_days"] > 0,
             "spots_room": room if isinstance(room, int) and not isinstance(room, bool) and 0 <= room <= 20 else None}
 
 

@@ -57,7 +57,8 @@ def test_the_look_ahead_offers_shops_only_while_the_phone_may_watch_them(holding
     assert card["level"] == "brief" and card["moment"] == ""
 
 
-@pytest.mark.parametrize("said", ["Work", "", "a shop that sells very particular flowers in town", "1 2 3", 7, "a the"])
+@pytest.mark.parametrize("said", ["Work", "", "a shop that sells very particular flowers in town", "1 2 3", 7, "a the",
+                                  "home", "my place", "my office"])
 def test_words_that_arent_a_kind_of_shop_hold_nothing(holding, said):
     _, card = held_for(holding, spot=said)
     assert card["level"] == "brief" and card["moment"] == ""
@@ -293,6 +294,17 @@ def test_turning_where_you_are_off_forgets_the_shops_walked_into(holding):
     assert holding.store.spot_entries() == []
 
 
+def test_with_no_history_kept_a_shop_brings_things_up_and_isnt_kept(holding):
+    _, card = held_for(holding)
+    now = LEFT
+    assert spots.entered([holding.home], DEVICE, [entry(f"0.c{card['id']}", at_=now - 30)], now, keep=False)
+    assert holding.store.spot_entries() == []
+    [new] = holding.store.new_moments()
+    assert new["keep"] == 0
+    places.take_moments(holding.store, holding.home, UTC, now)
+    assert "reached_at" in waits(holding.store.card(card["id"]))
+
+
 def test_shops_walked_into_are_kept_a_month(holding, monkeypatch):
     _, card = held_for(holding)
     spots.entered([holding.home], DEVICE, [entry(f"0.c{card['id']}", at_=LEFT - 30)], LEFT)
@@ -356,6 +368,10 @@ def test_the_ingest_reply_lists_the_shops_and_takes_what_was_walked_into(client,
                  spot_entries=[{**walked, "id": "s_4"}])
     assert off == rough == {"spots": []}
     assert len(pulse_store.spot_entries()) == 1
+    # No history kept: the entry is a moment that keeps no place, and isn't kept with its timing.
+    assert send(sharing={**precise, "retention_days": 0}, spot_entries=[{**walked, "id": "s_5"}])["spots"]
+    assert len(pulse_store.spot_entries()) == 1
+    assert [moment["keep"] for moment in pulse_store.new_moments() if moment["id"] == f"{DEVICE}/s_5"] == [0]
     # An older batch arriving late changes nothing, so it gets no list (the phone keeps its watches).
     older = (now - timedelta(minutes=5)).isoformat()
     batch = phone.batch(sent_at=older, sharing=precise, spot_entries=[])
@@ -370,6 +386,11 @@ def test_pulse_spots_lists_what_is_watched_and_walked_into(holding, capsys, monk
     monkeypatch.setattr(cli.time, "time", lambda: LEFT)
     spots.entered([holding.home], DEVICE, [entry(f"0.c{card['id']}", at_=LEFT - 30)], LEFT)
     holding.store.set(spots.PHONE, {"room": 14, "at": LEFT})
+    # Sharing at Area: the phone gets nothing to watch.
+    assert cli._pulse_spots(holding.store, holding.home, "") == 0
+    assert "Walking past: on (waiting: the phone shares its location in the background at less than Precise)" in (
+        capsys.readouterr().out)
+    monkeypatch.setattr(spots, "precise", lambda *args, **kwargs: True)
     assert cli._pulse_spots(holding.store, holding.home, "") == 0
     out = capsys.readouterr().out
     assert "Walking past: on\n" in out

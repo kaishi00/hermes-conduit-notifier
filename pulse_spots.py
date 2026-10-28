@@ -107,6 +107,13 @@ def reads(pulse_store: Any, now: float, home: Optional[Path] = None) -> bool:
     return bool(pulse_store.get("enabled")) and on(pulse_store) and places.reads(pulse_store, now, home)
 
 
+def precise(home: Optional[Path] = None) -> bool:
+    """Whether the phone shares in the background at Precise, the only
+    precision it watches shops at (location_store)."""
+    sharing = (places.view(home) or {}).get("sharing") or {}
+    return sharing.get("background_precision") == "precise"
+
+
 def words(value: Any) -> str:
     """The model's words for a kind of shop ("a florist"), tidied: one
     line, at most QUERY_CHARS characters and QUERY_WORDS words; "" when
@@ -122,6 +129,14 @@ def query(text: Any) -> str:
     "a", "an" or "the"; "" when nothing else is left ("a the")."""
     searched = _ARTICLE.sub("", words(text)).strip()
     return searched if places._phrase(searched) else ""
+
+
+def only_saved(searched: str) -> bool:
+    """Whether search words name what only a saved place can be ("home",
+    "my office"): never a shop to search for."""
+    kinds = {word for words_ in places.KIND_KEYS.values() for word in words_} | {
+        places._phrase(words_) for kind in places.KIND_WORDS.values() for words_ in kind}
+    return places._phrase(searched) in kinds
 
 
 def intent(value: Any, default: str = PICK_INTENT) -> str:
@@ -155,7 +170,7 @@ def held_spot(value: Any, saved: Sequence[dict[str, Any]], wanted: Any = None,
     place itself)."""
     said = words(value)
     searched = query(said)
-    if not searched or places.place_for(said, saved) is not None:
+    if not searched or places.place_for(said, saved) is not None or only_saved(searched):
         return None
     kept = intent(wanted)
     held = {"place_id": PREFIX + places._phrase(searched), "place": said, "kind": KIND, "spot": searched,
@@ -186,13 +201,10 @@ def watches(pulse_store: Any, home: Path, now: float) -> list[dict[str, Any]]:
         found.append({"id": f"c{card['id']}", "query": str(wait["spot"]), "until": _until(wait),
                       "intent": wanted, "radius": radius(wanted, wait.get("radius_m"))})
     saved = places.saved(places.view(home))
-    # Words only a saved place can stand for: "home", and "my place" too.
-    kinds = {word for words_ in places.KIND_KEYS.values() for word in words_} | {
-        places._phrase(words_) for kind in places.KIND_WORDS.values() for words_ in kind}
     for item in places.waiting(pulse_store, "arrive"):
         said = item.get("place_words")
         searched = query(said)
-        if not searched or places.place_for(said, saved) is not None or places._phrase(searched) in kinds:
+        if not searched or places.place_for(said, saved) is not None or only_saved(searched):
             continue  # a saved place's, or one only a saved place can be ("home")
         end = min(followup.place_wait_end(item), now + ITEM_WATCH_S)
         if end > now:
@@ -267,12 +279,15 @@ def reach(entry: dict[str, Any]) -> str:
     return next(wanted for wanted in ("arrival", "errand", "opportunity") if close_enough(entry, wanted))
 
 
-def entered(homes: Sequence[Path], device_id: str, entries: Sequence[dict[str, Any]], now: float) -> bool:
+def entered(homes: Sequence[Path], device_id: str, entries: Sequence[dict[str, Any]], now: float,
+            keep: bool = True) -> bool:
     """The shops the phone said the user walked into (location_store's
     parsed "spot_entries"): each kept with its timing by the profile whose
     watch it was ("0.c12": the first of ``homes``), and made a moment there
     while that Pulse may still read where the user is (pulse_places.arrived).
-    True when any moment was new, so the caller wakes Pulse."""
+    True when any moment was new, so the caller wakes Pulse. ``keep``
+    False (the phone keeps no history here): the moment keeps no place and
+    the shop isn't kept with its timing."""
     told = False
     for entry in entries:
         index, _, watch = str(entry.get("spot_id") or "").partition(".")
@@ -282,13 +297,14 @@ def entered(homes: Sequence[Path], device_id: str, entries: Sequence[dict[str, A
         try:
             if not (home / store.DB_NAME).exists():
                 continue
-            told = _entered(store.open_store(home), home, device_id, watch, entry, now) or told
+            told = _entered(store.open_store(home), home, device_id, watch, entry, now, keep) or told
         except Exception:  # noqa: BLE001 — the other entries still count
             logger.warning("conduit_push: Pulse couldn't take a shop walked into", exc_info=True)
     return told
 
 
-def _entered(pulse_store: Any, home: Path, device_id: str, watch: str, entry: dict[str, Any], now: float) -> bool:
+def _entered(pulse_store: Any, home: Path, device_id: str, watch: str, entry: dict[str, Any], now: float,
+             keep: bool = True) -> bool:
     if not reads(pulse_store, now, home):
         return False
     searched, wanted, own = _watched(pulse_store, watch)
@@ -300,7 +316,9 @@ def _entered(pulse_store: Any, home: Path, device_id: str, watch: str, entry: di
     reached = max(reach(entry), wanted if confirmed else "opportunity", key=places.REACH.index)
     moment_id = f"{device_id}/{entry['id']}"
     moment = {"id": moment_id, "place_id": PREFIX + places._phrase(searched), "place": entry["name"], "kind": KIND,
-              "on": "arrive", "at": entry["at"], "keep": True, "reach": reached}
+              "on": "arrive", "at": entry["at"], "keep": keep, "reach": reached}
+    if not keep:
+        return confirmed and places.arrived(pulse_store, [moment], now)
     pulse_store.add_spot_entry({
         "id": moment_id, "device": device_id, "watch": watch, "query": searched, "name": entry["name"],
         "at": entry["at"], "received_at": now, "distance_m": entry.get("distance_m"),

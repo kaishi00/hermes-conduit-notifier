@@ -2720,7 +2720,9 @@ shop near you, never coordinates:
   far inside the watched circle the phone's fix was and an estimate of the
   seconds that took (at the fix's speed, or walking pace). Turning Pulse or
   Where you are off, or deleting your location from your gateway, deletes
-  them. `hermes conduit-push pulse spots` lists what's watched, how many
+  them. With no location history kept (Settings > Location), a shop come
+  near still brings things up, but neither it nor its timing is kept.
+  `hermes conduit-push pulse spots` lists what's watched, how many
   more places the phone said it could watch, and the shops walked into with
   their timing.
 
