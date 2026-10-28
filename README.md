@@ -3478,6 +3478,8 @@ hermes conduit-push rooms decline --room <room id>
 hermes conduit-push rooms leave --room <room id>        # takes your agents out, or --agent PROFILE...; asks first
 hermes conduit-push rooms approvals                     # what your agents' turns in rooms elsewhere wait for
 hermes conduit-push rooms approve --run <run id> --request <request id>   # once; rooms deny ... denies it
+hermes conduit-push rooms copies                        # the copies this Hermes keeps of rooms other people host
+hermes conduit-push rooms copies --room <room id>       # one, with its members and their owners
 ```
 
 An agent's handle is its bot's name as Conduit tags it (`Research Buddy` is
@@ -3583,6 +3585,40 @@ finishes on its own):
   agents waits for it here), `not_pending` (409, answered already, or its
   turn moved on), `refused` (409, your Hermes refused it, as once the agent
   is out of the room) or `api_server` (503).
+
+Everyone whose agents are in a room keeps a copy of it on their own Hermes,
+which their Conduit reads, so nobody's phone talks to anyone else's server.
+The room's home sends each of them its log a page at a time over their Link,
+with what the room is doing (whether it ended, who's answering, how each
+linked agent's route is; never the home's own approvals or its own agents'
+turn errors), and their Hermes keeps it with Hermes' replica store in
+`conduit-rooms/copies.db` (owner only), apart from Hermes' own rooms. Pages
+stop when you leave or your agents are taken out, and you keep what you had;
+a disbanded room's go on until every copy has its end. A Hermes without
+Hermes' replica store (`gateway/hosted_room_replicas.py`) keeps no copies,
+and says so once in its log. The copies go through these, behind the
+`room-copies` capability (plugin 0.110+), within the rooms routes' 60 a
+minute:
+
+- `GET /rooms/copies`: `{"copies": [...]}`, the one that changed last first,
+  each `{"room_id", "name", "link", "from", "members", "yours", "status",
+  "reason", "started_at", "ended_at", "state", "last_seq", "latest_seq",
+  "updated_at"}`: who hosts it as your Link names them, each member `{"member_id",
+  "handle", "display_name", "owner"}` (`owner` null for the host's own), your
+  agents in it `{"member_id", "profile", "handle"}`, the invite's `status`
+  and `reason` (`ended` with the home's reason once it ends; after this Hermes
+  forgets the invite, a month after it ended, `yours` is empty and the dates
+  null), and `state`: `{"ended", "working", "activity", "routes"}`, each of
+  the last two a list of `{"member_id", "status"}`.
+- `GET /rooms/copies/log?room_id=&since_seq=0&limit=100`: the copy's events
+  after `since_seq`, as `groups.log` pages a room this Hermes hosts:
+  `{"events", "cursor", "latest_seq", "has_more", "authority"}`, with
+  `latest_seq` what the copy holds. `limit` is 1 to 500.
+- `DELETE /rooms/copies?room_id=`: `{"room_id", "forgotten"}`. A page the home
+  sends later starts the copy again from its first event.
+
+They're refused with `bad_room`, `bad_since` or `bad_limit` (400) and
+`no_copy` (404).
 
 ## Capabilities (plugin 0.4+)
 

@@ -115,15 +115,17 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
              "deleting its hidden chat for one (forget), setting this Hermes up for them (setup), and rooms with "
              "people you've linked: make one (invite), see yours (drafts), start one now (start), take it back "
              "(withdraw) or take one of their agents out (remove), and see the ones you're invited to (invites), "
-             "join or decline one, or leave one; and what your agents' turns in rooms other people host wait for "
-             "your approval for (approvals), to approve once or deny",
+             "join or decline one, or leave one; what your agents' turns in rooms other people host wait for "
+             "your approval for (approvals), to approve once or deny; and the copies this Hermes keeps of rooms "
+             "other people host (copies)",
     )
     rooms.add_argument("rooms_action", choices=["show", "set", "forget", "setup", "invite", "drafts", "start",
                                                 "withdraw", "invites", "join", "decline", "leave", "remove",
-                                                "approvals", "approve", "deny"])
+                                                "approvals", "approve", "deny", "copies"])
     rooms.add_argument("--room", default="",
                        help="the room's id; without one, show and set use the defaults for rooms with no choices "
-                            "of their own (forget, start, withdraw, join, decline, leave and remove need one)")
+                            "of their own, and copies lists them all (forget, start, withdraw, join, decline, leave "
+                            "and remove need one)")
     rooms.add_argument("--yes", action="store_true",
                        help="for forget, setup, withdraw, leave and remove: go ahead without asking first")
     rooms.add_argument("--name", help="for invite: the room's name")
@@ -655,6 +657,10 @@ def _rooms(args: argparse.Namespace) -> int:
         return _linked_rooms(args, room, Path(get_hermes_home()))
     if args.rooms_action in _ROOM_APPROVALS:
         return _room_approvals(args, Path(get_hermes_home()))
+    if args.rooms_action == "copies":
+        from . import room_identity
+
+        return _room_copies(room, room_identity.root_home(Path(get_hermes_home())))
     if args.rooms_action == "forget":
         return _forget_room(room, Path(get_hermes_home()), bool(getattr(args, "yes", False)))
     if args.rooms_action == "setup":
@@ -1052,6 +1058,31 @@ def _room_approvals(args: argparse.Namespace, home: Path) -> int:
     except (room_approvals.ApprovalsError, OSError) as error:
         print(f"Couldn't {_ROOM_APPROVALS[action]}: {error}")
         return 1
+    return 0
+
+
+def _room_copies(room: str, root: Path) -> int:
+    """The copies this Hermes keeps of rooms other people host (room_copies),
+    each with who hosts it and how much of it the copy has; with a room, its
+    members too."""
+    from . import room_copies
+
+    try:
+        shown = [room_copies.copy(root, room)] if room else room_copies.copies(root)
+    except (room_copies.CopiesError, OSError, sqlite3.Error) as error:
+        print(f"Couldn't show {'it' if room else 'them'}: {error}")
+        return 1
+    if not shown:
+        print("This Hermes keeps no copies of rooms other people host.")
+    for copy in shown:
+        held = copy["last_seq"]
+        status = _printable(copy["status"] + (f" ({copy['reason']})" if copy["reason"] else ""))
+        print(f"{copy['room_id']}: {_printable(copy['name'])}, hosted by {_printable(copy['from'])}, {status}; "
+              f"{held} event{'' if held == 1 else 's'} of {copy['latest_seq']}")
+        if room:
+            for member in copy["members"]:
+                owner = _printable(f"{member['owner']}'s") if member["owner"] else "the host's"
+                print(f"  @{_printable(member['handle'])} ({_printable(member['display_name'])}, {owner})")
     return 0
 
 

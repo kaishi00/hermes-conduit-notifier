@@ -345,6 +345,9 @@ routes:
   - POST /rooms/approvals/answer
   - GET /rooms/choices
   - PUT /rooms/choices
+  - DELETE /rooms/copies
+  - GET /rooms/copies
+  - GET /rooms/copies/log
   - GET /rooms/defaults
   - PUT /rooms/defaults
   - DELETE /rooms/drafts

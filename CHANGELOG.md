@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.110.0 (2026-10-28)
+
+### New and improved
+- Linked Rooms: everyone whose agents are in a room keeps a copy of it on
+  their own Hermes, sent by the room's host as it goes on, so Conduit can
+  show rooms other people host from your own Hermes. You keep your copy
+  when you leave.
+
 ## 0.109.0 (2026-10-27)
 
 ### New and improved
