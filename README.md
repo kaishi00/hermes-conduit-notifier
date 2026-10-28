@@ -2675,7 +2675,7 @@ and she loved Kyoto"):
   what each arrival or departure brought up; `pulse status` and `pulse
   ahead` count the look ahead's picks held for a place.
 
-## Pulse watches shops you walk past (plugin 0.110+)
+## Pulse watches shops you walk past (plugin 0.111+)
 
 With Where you are on, Conduit sharing location in the background at
 Precise (a shop's name and how far you were from it say as much as a

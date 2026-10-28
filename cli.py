@@ -2271,6 +2271,8 @@ def _pulse_spots(pulse_store: Any, home: Any, value: str) -> int:
         said = datetime.fromtimestamp(float(phone.get("at") or 0), zone).strftime("%a %d %b %H:%M")
         print(f"The phone said it could watch {phone['room']} more places ({said}).")
     watching = pulse_spots.watches(pulse_store, Path(home), now)
+    if watching and not pulse_spots.precise(Path(home)):
+        print("None of these go to the phone until it shares at Precise.")
     print("Watching for:" if watching else "Watching for nothing now.")
     for watch in watching:
         until = datetime.fromtimestamp(watch["until"], zone).strftime("%a %d %b %H:%M")

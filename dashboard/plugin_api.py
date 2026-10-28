@@ -17679,9 +17679,10 @@ ROUTE_CAPABILITIES = (
     # it up.
     "pulse_next",
     # Walking past (pulse_spots): a /location/ingest batch carrying
-    # "spot_entries" (the shops watched that the user walked into, maybe
-    # none) and "spots_room" gets "reply" back, sealed (spots_aad): {"spots":
-    # [{"id", "query", "until"}]}, the shops to watch now. GET /pulse says
+    # "spot_entries" (the watched shops the user came near, maybe none) and
+    # "spots_room" gets "reply" back, sealed (spots_aad): {"spots": [{"id",
+    # "query", "until", "intent", "radius": {"walk", "drive"}}]}, the shops
+    # to watch now. GET /pulse says
     # "spots" and PUT /pulse takes it.
     "pulse_spots",
     "present-v1",

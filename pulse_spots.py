@@ -354,7 +354,7 @@ def phone_said(pulse_store: Any, room: Any, now: float) -> None:
 def describe(entry: dict[str, Any], zone: tzinfo) -> str:
     """A shop walked into as `pulse spots` lists it."""
     when = datetime.fromtimestamp(float(entry["at"]), zone).strftime("%a %d %b %H:%M")
-    timing = ("no fix to tell how late" if entry.get("depth_m") is None else
+    timing = ("nothing to tell how late" if entry.get("depth_m") is None else
               f"{entry['depth_m']:.0f} m inside, about {entry['late_s']:.0f} s late" +
               (f" (fix ±{entry['accuracy_m']:.0f} m)" if entry.get("accuracy_m") is not None else ""))
     counted = "" if entry.get("confirmed", 1) else f", not close enough for an {entry.get('intent')}"
