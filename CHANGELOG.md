@@ -17,7 +17,9 @@ checks it). The format is fixed, because Conduit reads it:
 
 ### Fixes
 - A Bot Chat's notifications named a bot that has no name by its profile id
-  in lowercase, while Conduit shows it capitalized. They now match.
+  in lowercase, while Conduit shows it capitalized. They now match, and the
+  relay's plain copy names an unnamed profile the same way (push relay
+  0.23.1).
 
 ## 0.114.0 (2026-10-28)
 

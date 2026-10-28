@@ -1478,10 +1478,14 @@ function chatNamesTitle(genericTitle, event) {
 // says it: the bot's name, else the id, nothing for an unnamed default
 // profile or when the title already ends with it (a Bot Chat's).
 function profileLine(event, title) {
-  const named = String(event.profileName || '').trim();
   const id = String(event.profile || '').trim();
-  const name = named || (id.toLowerCase() === 'default' ? '' : id);
-  if (!name || title === name || title.endsWith(` · ${name}`)) return '';
+  let named = String(event.profileName || '').trim();
+  // A name that is only the id names it no more than the id, as in Conduit.
+  if (named === id) named = '';
+  const name = named || (id.toLowerCase() === 'default' ? '' : id.slice(0, 1).toUpperCase() + id.slice(1));
+  const shown = String(title || '').trim().toLowerCase();
+  const lower = name.toLowerCase();
+  if (!name || shown === lower || shown.endsWith(` · ${lower}`)) return '';
   return name;
 }
 
