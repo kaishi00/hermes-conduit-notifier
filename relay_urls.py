@@ -20,6 +20,7 @@ never echo the URL, which may hold a secret.
 from __future__ import annotations
 
 import ipaddress
+import re
 import urllib.parse
 
 _CGNAT = ipaddress.ip_network("100.64.0.0/10")  # Tailscale addresses
@@ -136,3 +137,16 @@ def paired_relay_url(returned: object, claimed: str) -> str:
     except RelayURLError:
         raise RelayURLError("The relay didn't return an https:// address to use after pairing. "
                             "Set its PUBLIC_URL to an https:// URL and pair again.") from None
+
+
+def replaced_pairing_query(previous: dict, current: dict) -> str:
+    """Names the phone a re-pair moved to, for the relay that revokes the
+    old pairing: the Apple Watch's ring follows the pairing to that phone
+    (a new iPhone, same Watch). Only on the same relay, which alone knows
+    that installation."""
+    installation = current.get("installation_id")
+    if not isinstance(installation, str) or not re.fullmatch(r"[0-9a-fA-F-]{36}", installation) \
+            or installation == previous.get("installation_id") \
+            or str(previous.get("relay_url") or "").rstrip("/") != str(current.get("relay_url") or "").rstrip("/"):
+        return ""
+    return f"?replaced_by={installation}"

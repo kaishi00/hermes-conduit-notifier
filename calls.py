@@ -655,6 +655,26 @@ def call_event(watch: dict[str, Any], outcome: str, *, session_id: str, profile:
     )
 
 
+def call_delivery(answer: Any) -> str:
+    """Where the relay says a call went, for the host's log: a call that
+    rang nowhere is told apart from one that rang, without the phone's trace."""
+    answer = answer if isinstance(answer, dict) else {}
+    if answer.get("duplicate") is True:
+        # A retry of a request the relay already sent: it went the first time.
+        return "already sent (a retry of the same call)"
+    if answer.get("delivered") is False:
+        return "not sent: the paired iPhone turned off notifications of this kind"
+    if answer.get("rang") is not True:
+        return ("sent as a \"Hermes wants to talk\" notification: the relay didn't ring the paired iPhone "
+                "(Ring like a phone call is off, Conduit hasn't registered it, or Apple refused the ring; "
+                "the relay's log says which)")
+    if answer.get("watch") is True:
+        return "rang the paired iPhone, and sent the ring to its Apple Watch (the relay's log says if Apple refused it)"
+    if answer.get("watch") is False:
+        return "rang the paired iPhone; no Apple Watch rings for it"
+    return "rang the paired iPhone"
+
+
 def deliver(event: dict[str, Any], fallback: dict[str, Any] | None) -> None:
     relay_failed = False
     for delay in DELIVERY_DELAYS_S:
@@ -683,6 +703,7 @@ def deliver(event: dict[str, Any], fallback: dict[str, Any] | None) -> None:
         # A relay that failed after taking the event answers the retry as a
         # duplicate without sending it again.
         if not (relay_failed and isinstance(answer, dict) and answer.get("duplicate")):
+            logger.info("Conduit call request: %s", call_delivery(answer))
             return
         logger.warning("Conduit call request was taken but never sent")
         break

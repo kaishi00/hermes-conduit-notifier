@@ -403,9 +403,11 @@ async function route(request, response) {
     // their tokens are its own, and they're retired once this one exists.
     const sameDeviceToken = proven ? deviceToken : undefined;
     voipToken = unclaimedToken('voipToken', voipToken, undefined, sameDeviceToken) ?? undefined;
+    const askedWatchVoipToken = watchVoipToken;
     watchVoipToken = unclaimedToken('watchVoipToken', watchVoipToken, undefined, sameDeviceToken) ?? undefined;
+    const wantedWatchVoipToken = askedWatchVoipToken && !watchVoipToken ? askedWatchVoipToken : undefined;
     locationToken = unclaimedToken('locationToken', locationToken, undefined, sameDeviceToken) ?? undefined;
-    const created = store.createInstallation({ bundleId: body.bundle_id, deviceToken, voipToken, watchVoipToken, locationToken, environment: body.environment, preferences: body.preferences });
+    const created = store.createInstallation({ bundleId: body.bundle_id, deviceToken, voipToken, watchVoipToken, wantedWatchVoipToken, locationToken, environment: body.environment, preferences: body.preferences });
     if (proven) retireOtherInstallations(deviceToken, created.installation.id);
     return sendJson(response, 201, {
       installation: created.installation,
@@ -445,6 +447,11 @@ async function route(request, response) {
     } else {
       changes = changesFor();
       if (store.wouldUpdateInstallation(installation.id, changes)) enforceDeviceChangeBudget();
+    }
+    // A Watch token left out is remembered, so the pairing that moves here
+    // from the phone holding it brings it along (store.gatewayRevoked).
+    if (watchVoipToken !== undefined) {
+      store.setWantedWatchVoipToken(installation.id, watchVoipToken && changes.watchVoipToken === undefined ? watchVoipToken : null);
     }
     const updated = store.updateInstallation(installation.id, changes);
     if (proven) retireOtherInstallations(deviceToken, installation.id);
@@ -938,6 +945,11 @@ async function route(request, response) {
     enforceRevocationBudget();
     store.removeGateway(credential.installationId, credential.gatewayId);
     watchGrants.closeOwned(credential.installationId, credential.gatewayId, 'revoked');
+    // A host that paired this profile with another phone names it, so the
+    // Watch's ring can follow the pairing there (a new iPhone, same Watch).
+    const replacedBy = url.searchParams.get('replaced_by');
+    const watch = store.gatewayRevoked(credential.installationId, /^[0-9a-f-]{36}$/i.test(replacedBy ?? '') ? replacedBy.toLowerCase() : null);
+    if (watch) console.log(JSON.stringify({ level: 'info', message: `watch voip token ${watch} with a revoked pairing` }));
     response.writeHead(204).end();
     return;
   }
@@ -1262,8 +1274,11 @@ async function deliverEvent(response, installation, event, gateway) {
   if (event.type === 'phone.changes' && event.mode === 'background') return sendPhoneBackground(response, installation, event, gateway);
   // A phone that can ring gets the call as a VoIP push; anything that stops
   // it ringing sends the usual notification below instead.
+  // `watch`: the paired Watch is rung too (read before its push can clear
+  // a refused token). Hosts log where a call rang.
+  const watch = Boolean(installation.watchVoipToken);
   if (event.type === 'call.requested' && installation.voipToken && await ring(installation, event, gateway)) {
-    return sendJson(response, 202, { accepted: true, delivered: true, rang: true });
+    return sendJson(response, 202, { accepted: true, delivered: true, rang: true, watch });
   }
   const notification = notificationFor(event, installation.preferences, gateway);
   let result;
