@@ -676,6 +676,13 @@ def test_a_move_across_disks_that_copies_only_part_says_where_the_part_is(tree, 
     assert exc.value.status == 403 and not [n for n in os.listdir(tree) if n.startswith(".conduit-")]
 
 
+def test_deleting_a_secret_name_is_refused_whether_or_not_it_is_there(tree):
+    for workspace in (ws(), ssh(tree)):
+        with pytest.raises(wf.WorkspaceError) as exc:
+            workspace.delete(str(tree.resolve()), str(tree / "id_rsa"))
+        assert exc.value.status == 403
+
+
 def test_ssh_deletes_a_link_to_a_secret_but_not_the_secret(tree):
     (tree / "innocent.txt").symlink_to(tree / ".env")
     ssh(tree).delete(str(tree.resolve()), str(tree / "innocent.txt"))

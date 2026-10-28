@@ -438,6 +438,8 @@ class LocalWorkspace:
             box = tempfile.mkdtemp(prefix=".conduit-", dir=os.path.dirname(target))
         except PermissionError:
             raise WorkspaceError(403, "Hermes can't write in this folder")
+        except FileNotFoundError:
+            raise WorkspaceError(404, "That folder isn't there any more")
         except OSError as exc:
             raise WorkspaceError(500, f"Couldn't move this ({exc.strerror or 'error'})")
         temp = os.path.join(box, os.path.basename(target))
@@ -516,10 +518,10 @@ class LocalWorkspace:
             raise WorkspaceError(400, "The workspace folder itself can't be deleted")
         if not self._inside(root, parent) or not self._inside(root, target):
             raise WorkspaceError(403, "That's outside this workspace")
-        if not os.path.lexists(target):
-            raise WorkspaceError(404, "That file is no longer there")
         if self._sensitive(target):
             raise WorkspaceError(403, "Conduit doesn't touch files that hold keys or passwords")
+        if not os.path.lexists(target):
+            raise WorkspaceError(404, "That file is no longer there")
         try:
             if os.path.isdir(target) and not os.path.islink(target):
                 shutil.rmtree(target)
