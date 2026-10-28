@@ -138,6 +138,7 @@ def test_every_capability_names_a_served_route_family():
         "dashboard-profiles": "/local-live/",
         "room-leave": "/rooms/leave",
         "room-approvals": "/rooms/approvals",
+        "room-copies": "/rooms/copies",
         # ?conduit_profile= on the rooms routes that need the dashboard process, the setup's first.
         "room-dashboard-profiles": "/rooms/setup",
     }

@@ -34,7 +34,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
-from . import client, room_bridge, room_choices, room_identity, room_join, room_links, room_start, session_titles
+from . import (client, room_bridge, room_choices, room_copies, room_identity, room_join, room_links, room_start,
+               session_titles)
 from .events import event_id, push_event
 
 logger = logging.getLogger(__name__)
@@ -42,7 +43,7 @@ logger = logging.getLogger(__name__)
 VERSION = 1
 INVITE, ANSWER, START = "room.invite", "room.answer", "room.start"
 GRANT, LEAVE, ENDED = "room.grant", "room.leave", "room.ended"
-KINDS = (INVITE, ANSWER, START, GRANT, LEAVE, ENDED)
+KINDS = (INVITE, ANSWER, START, GRANT, LEAVE, ENDED, *room_copies.KINDS)
 DIRECTORY = room_identity.DIRECTORY
 FILE_NAME = "rooms.json"
 
@@ -122,13 +123,13 @@ def people_key(link_ids: Any = (), names: Any = ()) -> list[str]:
 class Rooms:
     """The rooms over Links of the installation at ``root``: ``send`` is Links.send, ``link(link_id)`` the Link
     as Links.get shows it, ``profile_home(profile)`` a profile's home, ``joiner`` the member's Hermes calls
-    (room_join.Joiner), ``starter`` the home's (room_start.Starter) and ``notify(invite)`` what tells the phone
-    about a new invite (notify_invite)."""
+    (room_join.Joiner), ``starter`` the home's (room_start.Starter), ``notify(invite)`` what tells the phone
+    about a new invite (notify_invite) and ``copier`` Hermes' calls for the rooms' copies (room_copies.Hermes)."""
 
     def __init__(self, root: Any, *, send: Optional[Callable[..., Any]] = None,
                  link: Optional[Callable[[str], Optional[dict]]] = None, clock: Callable[[], float] = time.time,
                  profile_home: Optional[Callable[[str], Path]] = None, joiner: Any = None,
-                 starter: Any = None, notify: Optional[Callable[[dict], None]] = None) -> None:
+                 starter: Any = None, notify: Optional[Callable[[dict], None]] = None, copier: Any = None) -> None:
         self.root = Path(root)
         self.store = Store(self.root)
         links = None if send is not None and link is not None else room_links.Links(self.root)
@@ -142,6 +143,7 @@ class Rooms:
         self._told: set[str] = set()
         # Until when a profile's renewals wait for its API server, which didn't answer (R16).
         self._api_waits: dict[str, int] = {}
+        self.copies = room_copies.Copies(self, hermes=copier)
 
     # --- The home's drafts ---------------------------------------------------------
 
@@ -412,7 +414,8 @@ class Rooms:
     def handle(self, received: room_links.Received) -> None:
         """An envelope from a Link, as the Link's loop hands it over."""
         handler = {INVITE: self.on_invite, ANSWER: self.on_answer, START: self.on_start, GRANT: self.on_grant,
-                   LEAVE: self.on_leave, ENDED: self.on_ended}.get(received.kind)
+                   LEAVE: self.on_leave, ENDED: self.on_ended, room_copies.PAGE: self.copies.on_page,
+                   room_copies.COPIED: self.copies.on_copied}.get(received.kind)
         if handler is not None:
             handler(received)
 
@@ -901,7 +904,8 @@ class Rooms:
 
     def pass_once(self) -> None:
         """What the rooms loop does each time it looks: the envelopes still to go, this installation's agents'
-        fresh grants, then the drafts ready to start and the route changes in started rooms. An installation that
+        fresh grants, then the drafts ready to start and the route changes in started rooms, and the started
+        rooms' copies for the people in them (room_copies). An installation that
         never had a room over a Link has nothing to look at, but where the dashboard runs in the gateway, the loop
         holds the drafts from the CLI from its first pass (room_start's claim)."""
         if self.starter is not None:
@@ -914,6 +918,7 @@ class Rooms:
             self._renew()
         if self.starter is not None:
             self._start_ready()
+            self.copies.send_pages()
         self.flush()
 
     def _settle(self) -> None:
@@ -1283,7 +1288,8 @@ def _kept_draft(draft: Any) -> bool:
             and member.get("status", "in") in ("in", "left", "removed") for member in draft["members"])) \
         and type(draft.get("attempts")) is int and "started_at" in draft and "reason" in draft \
         and (draft.get("ended_at") is None or type(draft["ended_at"]) is int) and "ended_at" in draft \
-        and (draft.get("started_in") is None or _kept_where(draft["started_in"])) and _kept_todos(draft)
+        and (draft.get("started_in") is None or _kept_where(draft["started_in"])) and _kept_todos(draft) \
+        and _kept_copies(draft)
 
 
 def _kept_where(value: Any) -> bool:
@@ -1301,6 +1307,18 @@ def _kept_todos(draft: dict[str, Any]) -> bool:
     return isinstance(todos, dict) and all(
         member_id in linked and isinstance(todo, dict) and todo.get("do") in _TODO_RANK
         and type(todo.get("tries")) is int for member_id, todo in todos.items())
+
+
+def _kept_copies(draft: dict[str, Any]) -> bool:
+    """A started draft's copies (room_copies), each for one of its Links."""
+    copies = draft.get("copies", {})
+    return isinstance(copies, dict) and all(
+        link_id in draft["links"] and isinstance(copy, dict) and type(copy.get("acked")) is int
+        and (copy.get("state") is None or isinstance(copy["state"], str))
+        and (copy.get("sent") is None or isinstance(copy["sent"], dict) and all(
+            type(copy["sent"].get(name)) is int for name in ("to", "tries"))
+            and isinstance(copy["sent"].get("digest"), str) and isinstance(copy["sent"].get("at"), (int, float)))
+        for link_id, copy in copies.items())
 
 
 def _kept_invite(invite: Any) -> bool:
