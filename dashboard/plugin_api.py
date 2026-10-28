@@ -9582,11 +9582,14 @@ def _location_spots(device_id: str, result: Dict[str, Any]) -> Optional[Dict[str
     now, every reading profile's. Only where Pulse runs; the batch is
     stored whatever happens here, and a failure sends no list (the phone
     keeps watching what it has until its time runs out). Paused, or sharing
-    in the background at less than Precise: an empty list."""
+    in the background at less than Precise: an empty list. An older batch
+    arriving late (stale) says nothing either way: no list."""
     try:
         spots = _plugin_package_module("pulse_spots")
         places = _plugin_package_module("pulse_places")
         pulse_store = _plugin_package_module("pulse_store")
+        if result.get("stale"):
+            return None
         if not result.get("spots_watching"):
             return {"spots": []}
         homes = places.homes(Path(_calls_home()))

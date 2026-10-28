@@ -2,7 +2,7 @@
 
 import json
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -338,6 +338,10 @@ def test_the_ingest_reply_lists_the_shops_and_takes_what_was_walked_into(client,
                  spot_entries=[{**walked, "id": "s_4"}])
     assert off == rough == {"spots": []}
     assert len(pulse_store.spot_entries()) == 1
+    # An older batch arriving late changes nothing, so it gets no list (the phone keeps its watches).
+    older = (now - timedelta(minutes=5)).isoformat()
+    batch = phone.batch(sent_at=older, sharing=precise, spot_entries=[])
+    assert "reply" not in client.post(f"{BASE}/location/ingest", json=phone.seal(batch)).json()
 
 
 # The CLI and the control route --------------------------------------------------------
