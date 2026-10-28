@@ -931,30 +931,8 @@ def _deliver(event: dict[str, Any], *, sleep: Callable[[float], None] = _pause,
             return False
         record_relay_accepted(state)
         _note_push(True)
-        if event.get("type") == "call.requested":
-            logger.info("Conduit call request: %s", call_delivery(answer))
         return True
     return False  # not reached: the last attempt has no delay
-
-
-def call_delivery(answer: Any) -> str:
-    """Where the relay says a call went, for the host's log: a call that
-    rang nowhere is told apart from one that rang, without the phone's trace."""
-    answer = answer if isinstance(answer, dict) else {}
-    if answer.get("duplicate") is True:
-        # A retry of a request the relay already sent: it went the first time.
-        return "already sent (a retry of the same call)"
-    if answer.get("delivered") is False:
-        return "not sent: the paired iPhone turned off notifications of this kind"
-    if answer.get("rang") is not True:
-        return ("sent as a \"Hermes wants to talk\" notification: the paired iPhone has no ringing "
-                "(Ring like a phone call is off, or Conduit hasn't registered it)")
-    if answer.get("watch") is True:
-        return "rang the paired iPhone, and sent the ring to its Apple Watch"
-    if answer.get("watch") is False:
-        return "rang the paired iPhone; no Apple Watch rings for it"
-    return "rang the paired iPhone"
-
 
 
 def _note_push(ok: bool, error: Exception | None = None) -> None:

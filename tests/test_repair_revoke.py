@@ -254,15 +254,3 @@ def test_the_cli_re_pair_names_the_new_phone_too(monkeypatch, tmp_path):
 ])
 def test_the_new_phone_is_named_only_when_it_is_another_on_the_same_relay(previous, current):
     assert api._relay_urls().replaced_pairing_query(previous, current) == ""
-
-
-@pytest.mark.parametrize("answer, said", [
-    ({"accepted": True, "delivered": True, "rang": True, "watch": True}, "rang the paired iPhone, and sent the ring to its Apple Watch"),
-    ({"accepted": True, "duplicate": True}, "already sent"),
-    ({"accepted": True, "delivered": True, "rang": True, "watch": False}, "rang the paired iPhone; no Apple Watch rings for it"),
-    ({"accepted": True, "delivered": True, "rang": True}, "rang the paired iPhone"),
-    ({"accepted": True, "delivered": True}, "sent as a \"Hermes wants to talk\" notification"),
-    ({"accepted": True, "delivered": False}, "not sent"),
-])
-def test_the_host_log_says_where_a_call_went(answer, said):
-    assert client.call_delivery(answer).startswith(said)
