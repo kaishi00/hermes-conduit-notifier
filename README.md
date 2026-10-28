@@ -110,9 +110,9 @@ The plugin tells a cron run by its task id (`cron:<job id>:…`) or its classic 
 
 Beside notifications, the plugin keeps a Live Activity up to date while a turn you sent from Conduit runs (see [Lock Screen progress](#lock-screen-progress-plugin-032)).
 
-Each notification is titled with the session's title when it has one (for example a Telegram topic name), so you can tell which chat it came from: a reply shows the session title, and the others prefix it (`Approval needed · Infra`). A Conduit Bot Chat, whose title is always `Bot Chat`, is titled with its bot's name instead, as Conduit's Bots list shows it (its Bot Mode title, else its display name, else its profile name), so you can tell which bot replied. Every push also carries that name, so a call from the bot names it too. Untitled sessions keep the generic copy. With previews off the title is not shown; `redact on` or end-to-end encryption keeps it from reaching the relay.
+Each notification is titled with the session's title when it has one (for example a Telegram topic name), so you can tell which chat it came from: a reply shows the session title, and the others prefix it (`Approval needed · Infra`). A Conduit Bot Chat, whose title is always `Bot Chat`, is titled with its bot's name instead, as Conduit's Bots list shows it (its Bot Mode title, else its display name, else its profile name), so you can tell which bot replied. Every push also carries that name, so a call from the bot names it too. Untitled sessions keep the generic copy. How much shows is Conduit's Settings > Notifications > Show in notifications: Generic shows neither the title nor the text, Chat names shows the session's title and the profile without Hermes' words, and Full previews shows both, with the profile as the subtitle. `redact on` or end-to-end encryption keeps the title from reaching the relay.
 
-The iOS app controls which categories are enabled, whether notification previews are shown, whether completion sounds play, and whether approval and input-needed notifications play a sound (on by default).
+The iOS app controls which categories are enabled, how much a notification shows, whether completion sounds play, and whether approval and input-needed notifications play a sound (on by default).
 
 ## Privacy and security
 
