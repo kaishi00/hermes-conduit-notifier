@@ -57,7 +57,7 @@ def test_the_look_ahead_offers_shops_only_while_the_phone_may_watch_them(holding
     assert card["level"] == "brief" and card["moment"] == ""
 
 
-@pytest.mark.parametrize("said", ["Work", "", "a shop that sells very particular flowers in town", "1 2 3", 7])
+@pytest.mark.parametrize("said", ["Work", "", "a shop that sells very particular flowers in town", "1 2 3", 7, "a the"])
 def test_words_that_arent_a_kind_of_shop_hold_nothing(holding, said):
     _, card = held_for(holding, spot=said)
     assert card["level"] == "brief" and card["moment"] == ""

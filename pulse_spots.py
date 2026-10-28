@@ -119,8 +119,9 @@ def words(value: Any) -> str:
 
 def query(text: Any) -> str:
     """What the phone searches Apple Maps for: the words without a leading
-    "a", "an" or "the"."""
-    return _ARTICLE.sub("", words(text)).strip()
+    "a", "an" or "the"; "" when nothing else is left ("a the")."""
+    searched = _ARTICLE.sub("", words(text)).strip()
+    return searched if places._phrase(searched) else ""
 
 
 def intent(value: Any, default: str = PICK_INTENT) -> str:
