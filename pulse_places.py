@@ -437,7 +437,17 @@ def handle(pulse_store: Any, home: Path, zone: tzinfo, moment: dict, now: float,
 def _make_due(pulse_store: Any, home: Path, zone: tzinfo, moment: dict, now: float,
               found: Optional[Memories]) -> dict[str, Any]:
     """What a moment makes due of what waits for its place (``handle``)."""
-    match = matcher({"name": moment["place"], "kind": moment["kind"]})
+    by_name = matcher({"name": moment["place"], "kind": moment["kind"]})
+    match = by_name
+    if moment["kind"] == SPOT:
+        from . import pulse_spots as spots
+
+        # A shop also stands for the words it was searched for ("pharmacy"
+        # found a Walgreens), as an item said for them was watched.
+        searched = str(moment.get("place_id") or "").partition(":")[2]
+
+        def match(words: Any) -> bool:
+            return by_name(words) or (bool(searched) and _phrase(spots.query(words)) == searched)
     # What was said for a place needs the user at it: a shop only nearby isn't.
     near = moment["kind"] == SPOT and _reach(moment.get("reach")) < REACH.index("errand")
     items = [] if near else [item for item in waiting(pulse_store, moment["event"]) if match(item["place_words"])]

@@ -185,6 +185,36 @@ def test_walking_into_a_shop_said_for_something_makes_it_due(holding):
     assert json.loads(row["outcome"])["due"] == [costco]
 
 
+def test_a_shop_found_for_words_makes_due_what_was_said_for_them(holding):
+    holding.store.set("memory", True)
+    now = time.time()
+    pharmacy = placed(holding, "the pharmacy", said_at=now - 3600)
+    [watch] = spots.watches(holding.store, holding.home, now)
+    # Maps found a Walgreens for "pharmacy": no word in common, and it's still the place.
+    assert spots.entered([holding.home], DEVICE, [entry(f"0.{watch['id']}", name="Walgreens", at_=now - 30)], now)
+    places.take_moments(holding.store, holding.home, UTC, now)
+    [row] = holding.store.moments()
+    assert json.loads(row["outcome"])["due"] == [pharmacy]
+
+
+def test_an_entry_for_another_profiles_watch_counts_for_nothing_here(holding):
+    _, card = held_for(holding)
+    other = f"0.i{card['id'] + 50}"  # an id this profile never sent
+    assert not spots.entered([holding.home], DEVICE, [entry(other, at_=LEFT - 30)], LEFT)
+
+
+def test_a_profile_that_cant_be_read_sends_no_list(holding, monkeypatch):
+    held_for(holding)
+    monkeypatch.setattr(spots, "watches", lambda *_: (_ for _ in ()).throw(RuntimeError("busy")))
+    with pytest.raises(RuntimeError):
+        spots.reply([holding.home], LOOKED + 60)
+
+
+def test_shop_words_lose_control_characters():
+    assert spots.words("a\u202eflorist\u200b") == "a florist"
+    assert spots.words("\u200b\u2060") == ""
+
+
 @pytest.mark.parametrize("wanted, fix, counts", [
     ("opportunity", {"distance_m": 280.0, "radius_m": 300.0}, True),
     ("opportunity", {"distance_m": None}, True),  # nearby is enough, a fix or not
@@ -310,6 +340,7 @@ def test_shops_walked_into_are_kept_a_month(holding, monkeypatch):
     spots.entered([holding.home], DEVICE, [entry(f"0.c{card['id']}", at_=LEFT - 30)], LEFT)
     later = LEFT + spots.KEEP_S + 1
     monkeypatch.setattr(spots, "_watched", lambda *_: ("florist", "opportunity", None))  # still waiting a month on
+    monkeypatch.setattr(spots, "watches", lambda *_: [{"id": f"c{card['id']}"}])
     spots.entered([holding.home], DEVICE, [entry(f"0.c{card['id']}", name="Petals", at_=later - 30)], later)
     assert [kept["name"] for kept in holding.store.spot_entries()] == ["Petals"]
 

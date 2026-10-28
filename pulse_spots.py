@@ -92,6 +92,7 @@ INTENTS = {"opportunity": {"walk": 750.0, "drive": 3000.0},
 BOUNDS = {"opportunity": (500.0, 5000.0), "errand": (50.0, 300.0), "arrival": (50.0, 300.0)}
 PICK_INTENT = "opportunity"
 ITEM_INTENT = "errand"
+_CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]+")
 _ARTICLE = re.compile(r"^(?:a|an|the|some)\s+", re.IGNORECASE)
 _WATCH_ID = re.compile(r"[ci][0-9]{1,12}")
 
@@ -118,7 +119,8 @@ def words(value: Any) -> str:
     """The model's words for a kind of shop ("a florist"), tidied: one
     line, at most QUERY_CHARS characters and QUERY_WORDS words; "" when
     they aren't."""
-    text = " ".join(str(value or "").split()) if isinstance(value, str) else ""
+    # No control or invisible characters, as in a place's name (location_store).
+    text = " ".join(_CONTROL.sub(" ", value).split()) if isinstance(value, str) else ""
     if not text or len(text) > QUERY_CHARS or len(text.split()) > QUERY_WORDS:
         return ""
     return text if any(char.isalpha() for char in text) else ""
@@ -224,13 +226,12 @@ def reply(homes: Sequence[Path], now: float) -> dict[str, Any]:
     ("radius": {"walk", "drive"} metres). {"spots": []} when none."""
     found: list[dict[str, Any]] = []
     for index, home in enumerate(homes):
-        try:
-            if not (Path(home) / store.DB_NAME).exists():
-                continue
-            found += [{**watch, "id": f"{index}.{watch['id']}"}
-                      for watch in watches(store.open_store(Path(home)), Path(home), now)]
-        except Exception:  # noqa: BLE001 — the others' still go
-            logger.warning("conduit_push: Pulse couldn't list a profile's shops to watch", exc_info=True)
+        if not (Path(home) / store.DB_NAME).exists():
+            continue
+        # A profile that can't be read raises: no list at all, so the phone
+        # keeps what it watches instead of hearing there's nothing.
+        found += [{**watch, "id": f"{index}.{watch['id']}"}
+                  for watch in watches(store.open_store(Path(home)), Path(home), now)]
     found.sort(key=lambda watch: (watch["until"], watch["id"]))
     return {"spots": [{"id": watch["id"], "query": watch["query"],
                        "until": datetime.fromtimestamp(watch["until"], timezone.utc).isoformat(timespec="seconds"),
@@ -308,8 +309,8 @@ def _entered(pulse_store: Any, home: Path, device_id: str, watch: str, entry: di
     if not reads(pulse_store, now, home):
         return False
     searched, wanted, own = _watched(pulse_store, watch)
-    if not searched:
-        return False  # done, reached or gone since: nothing waits for it
+    if not searched or watch not in {found["id"] for found in watches(pulse_store, home, now)}:
+        return False  # done, reached or gone since, or not this profile's watch: nothing waits for it
     depth, late = lateness(entry)
     confirmed = close_enough(entry, wanted, own)
     # A watch with its own wider circle counts its entries for its intent.
