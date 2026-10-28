@@ -1083,10 +1083,19 @@ function notificationFor(event, preferences, gateway = undefined) {
     gatewayId ? createHash('sha256').update(`${gatewayId}:${seed}`).digest('hex').slice(0, 16) : undefined;
   if (event.e2e) return encryptedNotificationFor(event, preferences, { gatewayId, dashboardId, scopeToken });
   const generic = genericCopy(event.type);
-  const title = preferences.show_previews && event.title ? event.title : generic.title;
+  // Chat names (#1415) joins the chat's title to the generic one, as
+  // Conduit's NotificationCopy.chatNames does, over the generic body: none
+  // of Hermes' words, and never the plugin's own title, which may quote a
+  // tool's prompt.
+  const title = preferences.show_previews && event.title ? event.title
+    : preferences.show_chat_names && event.sessionTitle ? chatNamesTitle(generic.title, event)
+      : generic.title;
   // Keep previews private by default, while still making notifications from
   // different profiles and sessions distinguishable in Notification Center.
   const body = preferences.show_previews && event.body ? event.body : notificationContext(generic.body, event);
+  // With the reply as the body, the profile moves to the subtitle, as
+  // Conduit's own copy shows it.
+  const subtitle = preferences.show_previews && event.body ? profileLine(event, title) : '';
   const completion = event.type === 'response.ready' || event.type === 'background_task.finished';
   // Approval, clarify and call pushes wait on the user, so they chime by
   // default: `!== false` keeps installations whose stored preferences predate
@@ -1133,7 +1142,7 @@ function notificationFor(event, preferences, gateway = undefined) {
     : undefined;
   const bodyConduit = { ...routing, ...(decision ? { decision } : {}), ...(call ? { call } : {}), ...(room ? { room } : {}) };
   const aps = {
-    alert: { title, body },
+    alert: { title, ...(subtitle ? { subtitle } : {}), body },
     ...(sound ? { sound: 'default' } : {}),
     ...(event.type === 'call.requested' ? { category: CALL_CATEGORY } : {}),
     ...(event.type === 'phone.changes' ? { category: PHONE_CHANGE_CATEGORY } : {}),
@@ -1446,6 +1455,21 @@ function notificationContext(message, event) {
   return details.length ? `${message}\n${details.join(' · ')}` : message;
 }
 
+function chatNamesTitle(genericTitle, event) {
+  return event.type === 'response.ready' ? event.sessionTitle : `${genericTitle} · ${event.sessionTitle}`;
+}
+
+// Which profile a push came from, as Conduit's NotificationCopy.profileLine
+// says it: the bot's name, else the id, nothing for an unnamed default
+// profile or when the title already ends with it (a Bot Chat's).
+function profileLine(event, title) {
+  const named = String(event.profileName || '').trim();
+  const id = String(event.profile || '').trim();
+  const name = named || (id === 'default' ? '' : id);
+  if (!name || title === name || title.endsWith(` · ${name}`)) return '';
+  return name;
+}
+
 function shortSessionId(sessionId) {
   return sessionId.length > 10 ? `…${sessionId.slice(-8)}` : sessionId;
 }
@@ -1513,6 +1537,8 @@ function validateEvent(body) {
     profile: cleanText(body.profile, 80),
     // The bot's name as Conduit's Bots list shows it, when Hermes gave it one.
     profileName: cleanText(body.profile_name, 64),
+    // The chat's title, for Chat names (#1415).
+    sessionTitle: cleanText(body.session_title, 120),
     gateway: cleanIdentifier(body.gateway, 80),
     pluginVersion: cleanIdentifier(body.plugin_version, 40),
     pluginCapabilities: validCapabilities(body.plugin_capabilities),

@@ -2698,7 +2698,7 @@ keeps it.
 - **Active**: the rest, the morning brief included.
 - **Private reminders.** A push about someone's birthday or anniversary, or
   whose words are about a gift, a surprise, health or money (English words),
-  says only "Pulse has something for you." whatever Show previews says, so
+  says only "Pulse has something for you." whatever Show in notifications says, so
   its words never leave this host in a push; its card shows everything. On
   by default: Hide private reminders on the Lock Screen in Conduit's
   Settings > Pulse, `hermes conduit-push pulse private on|off`, or `PUT
