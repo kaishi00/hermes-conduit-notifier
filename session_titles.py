@@ -96,7 +96,7 @@ def _bot_name(home: Any) -> str:
     it was given, else its profile id capitalized, and "Hermes" for the main
     one. A name that is only the id names it no more than the id (Conduit's
     BotProfile.displayLabel). A name given the main bot in Conduit stays on
-    the phone, which puts it on the push."""
+    the phone, so the push says Hermes and the phone swaps the name in."""
     given = _given_name(home)
     profile = _profile_of(home)
     if given and given != profile:
