@@ -1219,7 +1219,7 @@ start the agent or call a model. A resumed call appends to the same session.
 | --- | --- | --- |
 | POST | `/api/plugins/conduit_push/voice/sessions` with `{call_id, engine, session_id?, chat_id?, title?, turns: [{index, role, text, at?}]}` | `{ok, session_id, chat_id?, written, appended, created}` |
 | GET | `/api/plugins/conduit_push/voice/chat-calls?chat_id=[&call_id=]` | `{ok, chat_id, calls: [{call_id, engine, turns?: [{role, text, at}]}]}` |
-| GET | `/api/plugins/conduit_push/voice/tags` | `{ok, tags: {session_id: {kind, engine?, archived?, parent_id?, parent_title?}}}` |
+| GET | `/api/plugins/conduit_push/voice/tags` | `{ok, tags: {session_id: {kind, engine?, archived?, parent_id?, parent_title?}}, chat_calls: [{call_id, chat_id, engine?, started_at?, ended_at?}]}` |
 | POST | `/api/plugins/conduit_push/voice/tags` with `{session_id, kind: classic or job, parent_id?, parent_title?}` | `{ok, session_id, kind, ...}` |
 | POST | `/api/plugins/conduit_push/voice/archive` with `{session_id}` | `{ok, session_id, archived}` |
 | GET | `/api/plugins/conduit_push/voice/summary?session_id=` | `{ok, available, text, covers}` |
@@ -1244,7 +1244,12 @@ start the agent or call a model. A resumed call appends to the same session.
   the same index rules, and the chat's own messages are never touched;
   `session_id` comes back null and `created` false (no session is made).
   `voice/chat-calls` lists them for the chat; turns come only for the one
-  call named by `call_id`.
+  call named by `call_id`. `voice/tags` also lists every chat's kept calls
+  (`chat_calls`, the latest 300, oldest first, with each call's first and
+  last turn's time), so each device files those chats under Voice and draws
+  their call cards; a host whose calls predate the list (or whose list is
+  unreadable) reads it from the calls themselves. A chat deleted in Desktop
+  leaves the list, and its calls are cleared, the next time it's asked for.
   A chat keeps its latest 50 calls of at most 2000 turns each.
   When the call ends it is written to the memory provider under the chat's
   session, but no session-end hooks fire: the chat goes on. A chat that no
@@ -1265,8 +1270,17 @@ start the agent or call a model. A resumed call appends to the same session.
   already archived chat is left as it is (`archived: false`), and any other
   session gets 422. Such a chat may still be open when its call ends, so
   nothing reopens it: the next turn run in a voice chat archived this way
-  (a call row or a Classic chat) un-archives it from the `pre_llm_call`
-  hook, the way Hermes' reopen does.
+  (a call row, a Classic chat or a voice job's chat) un-archives it from the
+  `pre_llm_call` hook, the way Hermes' reopen does.
+- A voice job's chat (tagged `job`) is archived the same way once Hermes has
+  answered what voice asked there: at the end of the turn, or when Conduit
+  tags it after its call ended. Only while every request in it came from
+  voice: a job's prompt, the Watch's next request, or words marked
+  `(voice) `, as Conduit and the Watch send a job's corrections. A turn
+  typed into it brings it back for good, and a pinned, archived, running or
+  unanswered one stays as it is. The chat an unattached call took for its
+  first request is the call's chat, never tagged a job (on the phone or
+  the Watch), and stays listed.
 - A create is idempotent per `call_id`: a retried first save whose response
   was lost continues the row it made instead of starting a second one.
 - Appends and summaries go only to rows saved as voice calls; any other
@@ -3606,7 +3620,7 @@ installation's):
   for its own agents). A member's Hermes answers for a room its agents left,
   or that ended, too, with each member as it was when it ended
   (`GET /rooms/invites` says how it ended). With `room-posts` (plugin
-  0.114+), the home adds `posts`, the room's latest 500 posts it made for
+  0.115+), the home adds `posts`, the room's latest 500 posts it made for
   linked people, each `{"event_id", "seq", "by"}` with `by` their name as
   your Link calls them, and a member's Hermes adds `you`, the name the home
   gives you (the one your posts carry there).
@@ -3695,7 +3709,8 @@ own Conduit, through their own Hermes, which sends the post to the room's
 home over the Link that invited it. The home posts it in the room as the
 room's user, as Conduit's own messages are, with every line of it starting
 with the person's name as its Link calls them (`Mona: `, or `Guest: ` for a
-Link without a name), so the home's agents can tell it from their owner's.
+Link without a name, or with one that has anything but letters, digits,
+spaces and `.'&-`), so the home's agents can tell it from their owner's.
 It takes a post only from someone with an agent still in the room, of at
 most 16,000 bytes (and 64 KB with its lines named), and 60 an hour from each
 person in each room; any kind of line break starts a named line. Both sides
@@ -3710,7 +3725,7 @@ one message in each agent's turns, so the host saying it again later is the
 host's too. When who's who in the room or
 what was posted can't be read, the agents are told any of the user's lines
 may be someone else's. These are behind the
-`room-posts` capability (plugin 0.114+), within the rooms routes' 60 a
+`room-posts` capability (plugin 0.115+), within the rooms routes' 60 a
 minute:
 
 - `POST /rooms/copies/messages` with `{"room_id", "event_id", "text"}`:

@@ -209,7 +209,15 @@ class Posts:
         room_id, link_id, client_id = body["room_id"], received.link_id, body["event_id"]
         draft = self.rooms.store.read()["drafts"].get(room_id)
         seq, error = None, None
-        if draft is None or not any(member["link"] == link_id for member in draft.get("members") or ()):
+        try:
+            # Posted already, its answer lost: where it is, though they've left or the room has ended since.
+            posted = _rows(self.path, "SELECT seq FROM posted WHERE room_id=? AND link=? AND client_id=? AND seq>0",
+                           (room_id, link_id, client_id)) if draft is not None else []
+        except (sqlite3.Error, OSError):
+            posted = []
+        if posted:
+            seq = int(posted[0]["seq"])
+        elif draft is None or not any(member["link"] == link_id for member in draft.get("members") or ()):
             error = "not_in"
         elif draft["status"] != "started":
             error = "ended"
@@ -221,15 +229,14 @@ class Posts:
                 text = _text(body["text"])
             except PostsError as exc:
                 error = exc.code if exc.code in ERRORS else "bad_post"
-        if error is None:
+        if error is None and seq is None:
             try:
                 event_id = self.hermes.user_event_id(f"post:{room_invites.peer_id(link_id)}:{client_id}")
             except Exception as exc:  # noqa: BLE001 - no hosted rooms here: they can post again
                 self._tell_once("event_id", "Linked Rooms can't take posts in its rooms: %s",
                                 exc if isinstance(exc, PostsError) else type(exc).__name__)
                 event_id, error = None, "unavailable"
-        seq = None
-        if error is None:
+        if error is None and seq is None:
             try:
                 seq = self._posted_seq(room_id, event_id)
                 recent = self._recent(room_id, link_id) if seq is None else 0
@@ -240,7 +247,7 @@ class Posts:
             if seq is None and recent >= PER_HOUR:
                 error = "too_many"
             elif seq is None:
-                named = _named(text, draft["links"][link_id].get("name") or GUEST)
+                named = _named(text, poster(draft["links"][link_id].get("name")))
                 if len(named.encode("utf-8")) > MAX_NAMED_BYTES:
                     error = "too_long"
             if error is None and seq is None:
@@ -377,6 +384,16 @@ def _text(value: Any) -> str:
     if len(text.encode("utf-8")) > MAX_TEXT_BYTES:
         raise PostsError("too_long", f"A post is at most {MAX_TEXT_BYTES} bytes")
     return text
+
+
+# A name a post goes under: letters, digits, spaces and a little punctuation, never a colon, a bracket or a quote,
+# so no named line reads like another part of Hermes' room prompt ("User (user): ", "@handle: ").
+_POSTER = re.compile(r"[^\W_][\w .'\u2019&-]{0,63}")
+
+
+def poster(name: Any) -> str:
+    """The name a Link's posts go under: its name when it's a plain one, else GUEST."""
+    return name if isinstance(name, str) and _POSTER.fullmatch(name) else GUEST
 
 
 def _named(text: str, name: str) -> str:

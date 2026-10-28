@@ -5171,6 +5171,12 @@ VOICE_CHAT_CALLS_KEY = "conduit.voice.chat_calls:{chat_id}"
 VOICE_MAX_CHAT_CALL_TURNS = 2000
 # Calls kept per chat; past it the oldest goes.
 VOICE_MAX_CHAT_CALLS = 50
+# Every chat's kept calls in one list, oldest first, so each device can file
+# the chats under Voice and draw their call cards: call_id, chat_id, engine,
+# started_at, ended_at. Written with each save; a host that predates it is
+# read once from the calls themselves.
+VOICE_CHAT_CALL_INDEX_KEY = "conduit.voice.chat_call_index"
+VOICE_MAX_CHAT_CALL_INDEX = 300
 _VOICE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _VOICE_UNSUPPORTED = "This Hermes version can't store voice transcripts; update Hermes"
 
@@ -5637,6 +5643,124 @@ def _chat_call_ids(db, chat_id: str) -> list:
     return [i for i in ids if isinstance(i, str) and _VOICE_ID_RE.match(i)] if isinstance(ids, list) else []
 
 
+def _chat_call_index_entry(raw: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(raw, dict):
+        return None
+    call_id, chat_id = raw.get("call_id"), raw.get("chat_id")
+    if not isinstance(call_id, str) or not isinstance(chat_id, str) \
+            or not _VOICE_ID_RE.match(call_id) or not _VOICE_ID_RE.match(chat_id):
+        return None
+    entry: Dict[str, Any] = {"call_id": call_id, "chat_id": chat_id}
+    if isinstance(raw.get("engine"), str):
+        entry["engine"] = raw["engine"]
+    for key in ("started_at", "ended_at"):
+        value = raw.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 < value < VOICE_MAX_TIMESTAMP:
+            entry[key] = value
+    return entry
+
+
+def _stored_chat_call_index(db) -> Optional[list]:
+    """The list as stored; None when this host has never written it, or
+    when it's unreadable (it's read from the calls again then)."""
+    raw = db.get_meta(VOICE_CHAT_CALL_INDEX_KEY)
+    if raw is None:
+        return None
+    try:
+        stored = json.loads(raw or "[]")
+    except ValueError:
+        logger.warning("Conduit voice: the chat call list is unreadable; reading it from the calls")
+        return None
+    entries = [_chat_call_index_entry(e) for e in stored] if isinstance(stored, list) else []
+    return [e for e in entries if e is not None]
+
+
+def _write_chat_call_index(db, entries: list) -> None:
+    db.set_meta(VOICE_CHAT_CALL_INDEX_KEY, json.dumps(entries[-VOICE_MAX_CHAT_CALL_INDEX:], separators=(",", ":")))
+
+
+def _turn_time(turn: Any) -> Optional[float]:
+    value = turn.get("timestamp") if isinstance(turn, dict) else None
+    return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def _index_chat_call(db, call_id: str, chat_id: str, engine: Optional[str], turns: list) -> None:
+    """Lists the call with its first and last turn's times: a new one as the
+    newest, a listed one where it was, so a later save doesn't reorder it."""
+    entries = _stored_chat_call_index(db)
+    if entries is None:
+        entries = _chat_calls_on_disk()
+        if entries is None:
+            return  # unread, so left unwritten: the next read lists this call with the rest
+    times = [t for t in (_turn_time(turn) for turn in turns) if t is not None]
+    entry = _chat_call_index_entry({"call_id": call_id, "chat_id": chat_id, "engine": engine,
+                                    "started_at": times[0] if times else None,
+                                    "ended_at": times[-1] if times else None})
+    at = next((i for i, e in enumerate(entries) if e["call_id"] == call_id), None)
+    if at is not None:
+        del entries[at]
+    if entry is not None:
+        entries.insert(len(entries) if at is None else at, entry)
+    _write_chat_call_index(db, entries)
+
+
+def _unindex_chat_calls(db, gone: Callable[[Dict[str, Any]], bool]) -> None:
+    entries = _stored_chat_call_index(db)
+    if entries and any(gone(e) for e in entries):
+        _write_chat_call_index(db, [e for e in entries if not gone(e)])
+
+
+def _chat_calls_on_disk() -> Optional[list]:
+    """The calls a host kept before the list existed, read once from the
+    calls themselves (oldest first), without loading their turns. None when
+    they couldn't be read."""
+    from hermes_constants import get_hermes_home
+    path = get_hermes_home() / "state.db"
+    if not path.exists():
+        return []
+    prefix = VOICE_CHAT_CALL_KEY.format(call_id="")
+    pattern = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+    try:
+        conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=1.0)
+        try:
+            rows = conn.execute(
+                "SELECT substr(key, ?), json_extract(value, '$.chat_id'), json_extract(value, '$.engine'), "
+                "json_extract(value, '$.turns[0].timestamp'), "
+                # Not '#-1': that needs SQLite 3.31.
+                "json_extract(value, '$.turns[' || (json_array_length(value, '$.turns') - 1) || '].timestamp') "
+                "FROM state_meta WHERE key LIKE ? ESCAPE '\\' AND json_valid(value)",
+                (len(prefix) + 1, pattern)).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        logger.warning("Conduit voice: couldn't read the calls kept with chats", exc_info=True)
+        return None
+    entries = [_chat_call_index_entry({"call_id": r[0], "chat_id": r[1], "engine": r[2],
+                                       "started_at": r[3], "ended_at": r[4]}) for r in rows]
+    entries = [e for e in entries if e is not None]
+    entries.sort(key=lambda e: e.get("started_at") or 0)
+    return entries[-VOICE_MAX_CHAT_CALL_INDEX:]
+
+
+def _chat_call_index(db) -> list:
+    """Every chat's kept calls, oldest first; read from the calls once on a
+    host whose saves predate the list, and kept from then on."""
+    entries = _stored_chat_call_index(db)
+    if entries is not None:
+        return entries
+    entries = _chat_calls_on_disk()
+    if entries is None:
+        return []  # nothing written, so the next read tries again
+    if hasattr(db, "set_meta"):
+        try:
+            with _voice_lock():
+                if _stored_chat_call_index(db) is None:
+                    _write_chat_call_index(db, entries)
+        except Exception:  # noqa: BLE001 — the list is still answered; the next read writes it
+            logger.warning("Conduit voice: couldn't keep the chat call list", exc_info=True)
+    return entries
+
+
 def _drop_chat_calls(db, chat_id: str) -> None:
     """A gone chat's calls and list (Hermes has no meta delete)."""
     ids = _chat_call_ids(db, chat_id)
@@ -5647,6 +5771,7 @@ def _drop_chat_calls(db, chat_id: str) -> None:
             db.set_meta(VOICE_CHAT_CALL_KEY.format(call_id=call_id), "")
     if ids:
         db.set_meta(VOICE_CHAT_CALLS_KEY.format(chat_id=chat_id), "")
+    _unindex_chat_calls(db, lambda entry: entry["chat_id"] == chat_id)
 
 
 def _save_chat_call_turns(chat_id: str, call_id: str, engine: str, turns: list,
@@ -5697,10 +5822,19 @@ def _save_chat_call_turns(chat_id: str, call_id: str, engine: str, turns: list,
                     # Only once the list no longer names them.
                     for old in evicted:
                         db.set_meta(VOICE_CHAT_CALL_KEY.format(call_id=old), "")
+                    if evicted:
+                        _unindex_chat_calls(db, lambda entry: entry["call_id"] in evicted)
             if messages:
                 db.set_meta(VOICE_CHAT_CALL_KEY.format(call_id=call_id), json.dumps(
                     {"chat_id": chat_id, "engine": engine, "turns": stored + messages},
                     separators=(",", ":")))
+                _index_chat_call(db, call_id, chat_id, engine, stored + messages)
+            elif call is not None:
+                # A retry after a failed list write: the turns are stored, so
+                # the call is listed now.
+                listed = _stored_chat_call_index(db)
+                if listed is None or all(e["call_id"] != call_id for e in listed):
+                    _index_chat_call(db, call_id, chat_id, engine, stored)
             result = {"session_id": None, "chat_id": chat_id, "written": last + 1, "appended": len(messages),
                       "skipped": len(turns) - len(fresh), "created": False}
         finally:
@@ -5762,9 +5896,22 @@ def set_voice_tag(body: Dict[str, Any]) -> Dict[str, Any]:
             if _voice_tags(db).get(session_id, {}).get("kind") == "call":
                 raise TokenError(422, "That session is a saved voice call; its tag can't change")
             _set_voice_tag(db, session_id, tag)
+            # A live call's jobs are tagged when the call ends, often after
+            # Hermes answered them: one that's done leaves Desktop's list
+            # now, as it would have at its turn's end.
+            if kind == "job":
+                _archive_settled_job(db, session_id)
         finally:
             db.close()
     return {"session_id": session_id, **tag}
+
+
+def _archive_settled_job(db, session_id: str) -> bool:
+    try:
+        return _voice_archive().archive_settled_job(db, session_id)
+    except Exception:  # noqa: BLE001 — the tag is stored; the chat just stays listed
+        logger.warning("Couldn't archive Conduit voice job %s", session_id, exc_info=True)
+        return False
 
 
 def archive_classic_voice_chat(body: Dict[str, Any]) -> Dict[str, Any]:
@@ -5792,9 +5939,30 @@ def archive_classic_voice_chat(body: Dict[str, Any]) -> Dict[str, Any]:
 def voice_tags() -> Dict[str, Any]:
     db = _open_voice_db()
     try:
-        return {"tags": _voice_tags(db)}
+        tags, calls = _voice_tags(db), _chat_call_index(db)
+        # A chat deleted in Desktop leaves no save to clear its calls: they
+        # go here, the first time a device asks.
+        gone = {chat_id for chat_id in {e["chat_id"] for e in calls} if not db.get_session(chat_id)} \
+            if hasattr(db, "get_session") else set()
     finally:
         db.close()
+    if gone:
+        _drop_gone_chats_calls(gone)
+    return {"tags": tags, "chat_calls": [e for e in calls if e["chat_id"] not in gone]}
+
+
+def _drop_gone_chats_calls(chat_ids: set) -> None:
+    try:
+        with _voice_lock():
+            db = _open_voice_db(_VOICE_WRITE)
+            try:
+                for chat_id in chat_ids:
+                    if not db.get_session(chat_id):
+                        _drop_chat_calls(db, chat_id)
+            finally:
+                db.close()
+    except Exception:  # noqa: BLE001 — they're left out of the answer anyway; the next read retries
+        logger.warning("Conduit voice: couldn't clear gone chats' calls", exc_info=True)
 
 
 def voice_summary(session_id: Any) -> Dict[str, Any]:
@@ -6385,6 +6553,25 @@ if "hermes_cli.web_server" in sys.modules:
 TURN_SURFACE_MAX_BODY_BYTES = 1024
 _turn_surface_module: Any = None
 _turn_surface_lock = threading.Lock()
+
+
+_voice_archive_module: Any = None
+_voice_archive_lock = threading.Lock()
+
+
+def _voice_archive() -> Any:
+    """voice_archive.py beside this folder, loaded once."""
+    global _voice_archive_module
+    with _voice_archive_lock:
+        if _voice_archive_module is None:
+            path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "voice_archive.py")
+            spec = importlib.util.spec_from_file_location("conduit_push_dashboard_voice_archive", path)
+            if spec is None or spec.loader is None:
+                raise RuntimeError("This plugin install is missing voice_archive.py; update the plugin")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _voice_archive_module = module
+        return _voice_archive_module
 
 
 def _turn_surface() -> Any:
@@ -11699,6 +11886,10 @@ WATCH_APPROVAL_CHOICES = ("once", "deny")
 WATCH_JOB_PROMPT = ("[Background job started from a Conduit voice conversation. Nobody is watching this chat live, "
                     "so work on it on your own. When you are done, end your final message with a plain-language "
                     "summary that can be read aloud: what you found or did, with the key details.]\n\n{instructions}")
+# The user's words for a running job, marked as the call's like the
+# phone's (Conduit's threadTurnText): a job's chat that only voice used
+# leaves Desktop's list once answered (voice_archive).
+WATCH_JOB_FOLLOW_UP_PROMPT = "(voice) {words}"
 # A later ordinary request of the call, sent into the chat its first one
 # made (#1250).
 WATCH_JOB_NEXT_PROMPT = ("[The next request from the same Conduit voice conversation. As before, end your final message "
@@ -12498,7 +12689,11 @@ class _WatchJobs:
             self._close_session(job)
             return {"ok": True, "status": "not_started", "title": job.title,
                     "message": f"{job.title} was cancelled before it started."}
-        self._tag(job)
+        with self.lock:
+            # The chat the call took is the call's, not a job, as on the phone.
+            call_chat = self.call_chat is job
+        if not call_chat:
+            self._tag(job)
         where = f" on {job.profile}" if job.profile else ""
         return {"ok": True, "status": "started", "job_id": job.job_id, "title": job.title,
                 "session_id": job.stored_session_id or sid,
@@ -12734,7 +12929,8 @@ class _WatchJobs:
             if sid:
                 attempts += 1
                 try:
-                    result = self._redirect(sid, words, timeout=max(1.0, deadline - time.monotonic()), adds=adds)
+                    result = self._redirect(sid, WATCH_JOB_FOLLOW_UP_PROMPT.format(words=words),
+                                            timeout=max(1.0, deadline - time.monotonic()), adds=adds)
                 except WatchJobError as exc:
                     if not was_queued:
                         self._end_follow_up(job)
@@ -13078,6 +13274,8 @@ class _WatchJobs:
                     try:
                         if _voice_tags(db).get(session_id, {}).get("kind") != "call":
                             _set_voice_tag(db, session_id, {"kind": "job"})
+                            # Its turn may have ended before the tag landed.
+                            _archive_settled_job(db, session_id)
                     finally:
                         db.close()
         except Exception as exc:  # noqa: BLE001 — the job runs untagged

@@ -1092,7 +1092,7 @@ def people(root: Any, room_id: Any, strict: bool = False) -> Optional[dict[str, 
         return None
     draft = state["drafts"].get(room_id) if isinstance(room_id, str) else None
     if draft is not None and draft["status"] == "started":
-        names = {link_id: person["name"] or room_posts.GUEST for link_id, person in draft["links"].items()}
+        names = {link_id: room_posts.poster(person["name"]) for link_id, person in draft["links"].items()}
         try:
             latest = room_posts.latest(root, room_id)
         except (sqlite3.Error, OSError) as exc:
@@ -1110,7 +1110,7 @@ def people(root: Any, room_id: Any, strict: bool = False) -> Optional[dict[str, 
             gone = {agent["member_id"]: agent["reason"] for agent in invite.get("gone", [])}
             mine = {agent["member_id"] for agent in invite["joined"]} | set(gone)
             # What the home calls this installation's owner: the name its posts carry there.
-            you = next((member["owner"] or room_posts.GUEST for member in invite["members"]
+            you = next((room_posts.poster(member["owner"]) for member in invite["members"]
                         if member["member_id"] in mine), None)
             return {"room_id": room_id, "home": invite["from"], "you": you, "members": [
                 {"member_id": member["member_id"], "handle": member["handle"],

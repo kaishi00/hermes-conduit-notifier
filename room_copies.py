@@ -192,7 +192,7 @@ class Copies:
             self._tell_once(f"posts:{room_id}", "Linked Rooms can't send room %s's copy: who posted in it can't "
                                                 "be read (%s)", room_id, type(exc).__name__)
             return
-        posts = {event_id: None if link == link_id else draft["links"].get(link, {}).get("name") or room_posts.GUEST
+        posts = {event_id: None if link == link_id else room_posts.poster(draft["links"].get(link, {}).get("name"))
                  for event_id, link in posted.items()}
         body = self._fitted({"v": VERSION, "room_id": room_id, "name": draft["name"],
                              "members": _shown_members(draft), "page": page, "state": state}, own, posts)

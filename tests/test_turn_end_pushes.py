@@ -707,3 +707,19 @@ def test_conduit_notify_registers_on_a_hermes_without_display_fields():
 
     notify_tool.register(OlderHermes(), is_child=lambda _: False)
     assert registered == [("conduit_notify", notify_tool.available)]
+
+
+def test_only_an_answered_turn_checks_for_a_voice_job_to_archive(pushed, tmp_path, monkeypatch):
+    # hermes-conduit#1124: a voice job's chat leaves Desktop's list once answered.
+    checked = []
+    monkeypatch.setattr(plugin.voice_archive, "archive_answered_job",
+                        lambda home, session_id: checked.append((home, session_id)) or True)
+    plugin._on_session_end(session_id="job", turn_id="t1", completed=True, failed=False, interrupted=False)
+    plugin._on_session_end(session_id="job", turn_id="t2", completed=False, failed=True, interrupted=False)
+    plugin._on_session_end(session_id="job", turn_id="t3", completed=False, failed=False, interrupted=True)
+    assert checked == [(tmp_path, "job")]
+
+    def broken(home, session_id):
+        raise RuntimeError("store gone")
+    monkeypatch.setattr(plugin.voice_archive, "archive_answered_job", broken)
+    plugin._on_session_end(session_id="job", turn_id="t4", completed=True, failed=False, interrupted=False)
