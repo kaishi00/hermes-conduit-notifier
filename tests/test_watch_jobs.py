@@ -1452,7 +1452,7 @@ def test_a_follow_up_goes_into_the_running_turn_and_its_end_is_the_jobs_result()
     grant, server = running_job()
     server.results["session.redirect"] = {"status": "redirected"}
     assert follow_up(grant) == {"ok": True, "title": "Check the build logs", "outcome": "interrupted"}
-    assert server.methods("session.redirect") == [{"session_id": "rt-1", "text": "make it Alex"}]
+    assert server.methods("session.redirect") == [{"session_id": "rt-1", "text": "(voice) make it Alex"}]
     # The cut-off reply's marker is no result.
     server.emit("rt-1", "message.complete", {"text": "[This response was interrupted by a user correction.]"})
     server.emit("rt-1", "message.delta", {"text": "Alex"})
@@ -1514,7 +1514,7 @@ def test_a_hermes_without_redirect_gets_a_steer():
     grant, server = running_job()
     server.fail["session.redirect"] = "Method not found"
     assert follow_up(grant)["outcome"] == "interrupted"
-    assert server.methods("session.steer") == [{"session_id": "rt-1", "text": "make it Alex"}]
+    assert server.methods("session.steer") == [{"session_id": "rt-1", "text": "(voice) make it Alex"}]
 
 
 def test_an_addition_is_steered_not_redirected():
@@ -1522,7 +1522,7 @@ def test_an_addition_is_steered_not_redirected():
     grant, server = running_job()
     answer = api.run_watch_job_call(grant, "interrupt_job", {"job_id": "watch-1", "message": "a quiet table", "kind": "add"})
     assert answer["outcome"] == "interrupted"
-    assert server.methods("session.steer") == [{"session_id": "rt-1", "text": "a quiet table"}]
+    assert server.methods("session.steer") == [{"session_id": "rt-1", "text": "(voice) a quiet table"}]
     assert server.methods("session.redirect") == []
 
 
@@ -1536,7 +1536,7 @@ def test_an_addition_hermes_wont_steer_is_redirected():
             server.fail["session.steer"] = refusal
         answer = api.run_watch_job_call(grant, "interrupt_job", {"job_id": next(iter(grant.jobs.jobs)), "message": "a quiet table", "kind": "ADD"})
         assert answer["outcome"] == "interrupted", refusal
-        assert server.methods("session.redirect") == [{"session_id": "rt-1", "text": "a quiet table"}], refusal
+        assert server.methods("session.redirect") == [{"session_id": "rt-1", "text": "(voice) a quiet table"}], refusal
 
 
 def test_a_change_or_unknown_kind_still_redirects():
@@ -1604,7 +1604,7 @@ def test_follow_ups_reach_the_job_through_the_sealed_grant_route():
     assert answer["outcome"] == "interrupted"
     # The kind gets through the sealed route too.
     api.run_watch_tool(grant, {"tool": "interrupt_job", "args": {"job_id": "watch-1", "message": "a quiet table", "kind": "add"}})
-    assert server.methods("session.steer") == [{"session_id": "rt-1", "text": "a quiet table"}]
+    assert server.methods("session.steer") == [{"session_id": "rt-1", "text": "(voice) a quiet table"}]
 
 
 def test_an_end_held_for_queued_words_whose_turn_never_comes_settles_the_job(monkeypatch):
@@ -1809,6 +1809,18 @@ def test_work_kept_apart_gets_a_chat_of_its_own():
     # The first joining one is the call's chat.
     server.emit("rt-2", "message.complete", {"text": "Plan", "status": "complete"})
     assert start_joining(grant, "and book the hotel")["session_id"] == "st-2"
+
+
+def test_the_calls_chat_isnt_filed_as_a_job_and_a_tagged_job_is_archived_if_answered(tags, monkeypatch):
+    archived = []
+    monkeypatch.setattr(api, "_archive_settled_job", lambda db, sid: archived.append(sid))
+    grant = make_jobs()
+    # The chat the call took stays listed, as on the phone; a job is filed
+    # and, if its turn already ended, archived with its tag.
+    assert start_joining(grant, "plan the trip")["session_id"] == "st-1"
+    assert start(grant, "research flights")["session_id"] == "st-2"
+    assert tags() == {"st-2": {"kind": "job"}}
+    assert archived == ["st-2"]
 
 
 def test_the_calls_chat_closes_after_its_last_request():

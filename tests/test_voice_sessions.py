@@ -4,6 +4,7 @@ import importlib.util
 import json
 import pathlib
 import queue
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -129,6 +130,9 @@ class FakeSessionDB:
         self._check(session_id)
         self.store.messages[session_id].extend(dict(message) for message in messages)
         return len(messages)
+
+    def get_messages(self, session_id, **kwargs):
+        return list(self.store.messages.get(session_id, []))
 
 
 @pytest.fixture
@@ -299,7 +303,7 @@ def test_the_hook_reads_the_tags_the_routes_write():
     voice_archive = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(voice_archive)
     assert voice_archive.VOICE_TAGS_KEY == api.VOICE_TAGS_KEY
-    assert voice_archive.ARCHIVED_KINDS == api.VOICE_TAG_KINDS - {"job"}
+    assert voice_archive.ARCHIVED_KINDS == api.VOICE_TAG_KINDS
 
 
 def test_a_classic_voice_chat_is_archived_when_its_call_ends(client, hermes, monkeypatch):
@@ -1280,3 +1284,160 @@ def test_only_assistant_turns_carry_cards(client, hermes):
     save(client, chat_id="chat-1", turns=shown)
     [call] = client.get(f"{BASE}/voice/chat-calls", params={"chat_id": "chat-1", "call_id": "call-1"}).json()["calls"]
     assert "cards" not in call["turns"][0]
+
+
+# --- Voice jobs leave Desktop's list once answered ------------------------------
+
+JOB_PROMPT = "[Background job started from a Conduit voice conversation. Nobody is watching.]\n\nCheck the GPU box"
+
+
+def test_a_job_tagged_after_hermes_answered_it_is_archived(client, hermes, monkeypatch):
+    # A live call tags its jobs when it ends; the job may be done by then.
+    _archives_like_hermes(monkeypatch)
+    store = chat(hermes, "done")
+    store.messages["done"] = [{"role": "user", "content": JOB_PROMPT}, {"role": "assistant", "content": "Idle."}]
+    chat(hermes, "running").messages["running"] = [{"role": "user", "content": JOB_PROMPT}]
+    store.messages["typed"] = [{"role": "user", "content": JOB_PROMPT}, {"role": "assistant", "content": "Idle."},
+                               {"role": "user", "content": "now the NAS"}, {"role": "assistant", "content": "Full."}]
+    store.sessions["typed"] = {"id": "typed", "end_reason": None}
+    for session_id in ("done", "running", "typed"):
+        assert client.post(f"{BASE}/voice/tags", json={"session_id": session_id, "kind": "job",
+                                                        "parent_id": "call-1"}).status_code == 200
+    assert store.sessions["done"]["archived"] == 1 and store.sessions["done"]["auto_archived"] == 1
+    assert "archived" not in store.sessions["running"] and "archived" not in store.sessions["typed"]
+    # A Classic chat is archived only when its call ends, through /voice/archive.
+    classic = chat(hermes, "classic")
+    classic.messages["classic"] = [{"role": "user", "content": "(voice) hi"}, {"role": "assistant", "content": "hi"}]
+    client.post(f"{BASE}/voice/tags", json={"session_id": "classic", "kind": "classic"})
+    assert "archived" not in store.sessions["classic"]
+
+
+def test_a_failed_job_archive_still_stores_the_tag(client, hermes, monkeypatch):
+    _archives_like_hermes(monkeypatch, fail=True)
+    store = chat(hermes, "done")
+    store.messages["done"] = [{"role": "user", "content": JOB_PROMPT}, {"role": "assistant", "content": "Idle."}]
+    assert client.post(f"{BASE}/voice/tags", json={"session_id": "done", "kind": "job"}).status_code == 200
+    assert client.get(f"{BASE}/voice/tags").json()["tags"]["done"] == {"kind": "job"}
+
+
+# --- Every chat's kept calls, for every device -----------------------------------
+
+
+def test_the_tags_answer_lists_every_chats_calls(client, hermes):
+    chat(hermes)
+    chat(hermes, "chat-2")
+    assert client.get(f"{BASE}/voice/tags").json()["chat_calls"] == []
+    save(client, chat_id="chat-1", turns=turns(("user", "a"), ("assistant", "b")))
+    save(client, chat_id="chat-2", call_id="call-2", engine="gpt-live", turns=turns(("user", "c")))
+    # A reconnect continues call-1: it keeps its place, to its new last turn.
+    save(client, chat_id="chat-1", turns=[{"index": 2, "role": "user", "text": "d", "at": 1_780_000_002}])
+    listed = client.get(f"{BASE}/voice/tags").json()["chat_calls"]
+    assert listed == [
+        {"call_id": "call-1", "chat_id": "chat-1", "engine": "gemini-live",
+         "started_at": 1_780_000_000, "ended_at": 1_780_000_002},
+        {"call_id": "call-2", "chat_id": "chat-2", "engine": "gpt-live",
+         "started_at": 1_780_000_000, "ended_at": 1_780_000_000},
+    ]
+
+
+def test_calls_a_chat_forgot_or_lost_leave_the_list(client, hermes, monkeypatch):
+    store = chat(hermes)
+    chat(hermes, "chat-2")
+    monkeypatch.setattr(api, "VOICE_MAX_CHAT_CALLS", 2)
+    for call_id in ("call-1", "call-2", "call-3"):
+        save(client, chat_id="chat-1", call_id=call_id, turns=turns(("user", call_id)))
+    save(client, chat_id="chat-2", call_id="call-4", turns=turns(("user", "x")))
+    listed = lambda: [e["call_id"] for e in client.get(f"{BASE}/voice/tags").json()["chat_calls"]]
+    assert listed() == ["call-2", "call-3", "call-4"]
+    del store.sessions["chat-1"]
+    assert save(client, chat_id="chat-1", call_id="call-5", turns=turns(("user", "y"))).status_code == 422
+    assert listed() == ["call-4"]
+
+
+def test_the_list_is_bounded_and_its_entries_checked(client, hermes, monkeypatch):
+    store = chat(hermes)
+    monkeypatch.setattr(api, "VOICE_MAX_CHAT_CALL_INDEX", 2)
+    for call_id in ("call-1", "call-2", "call-3"):
+        save(client, chat_id="chat-1", call_id=call_id, turns=turns(("user", call_id)))
+    assert [e["call_id"] for e in client.get(f"{BASE}/voice/tags").json()["chat_calls"]] == ["call-2", "call-3"]
+    store.meta[api.VOICE_CHAT_CALL_INDEX_KEY] = json.dumps([{"call_id": "ok", "chat_id": "chat-1"}, {"call_id": 3},
+                                                            {"call_id": "x", "chat_id": "chat-1", "started_at": True}])
+    assert client.get(f"{BASE}/voice/tags").json()["chat_calls"] == [
+        {"call_id": "ok", "chat_id": "chat-1"}, {"call_id": "x", "chat_id": "chat-1"}]
+
+
+def test_a_host_whose_calls_predate_the_list_reads_them_once(client, hermes, tmp_path):
+    # Saved by an older plugin: the calls are in state_meta, the list isn't.
+    home = tmp_path / "default"
+    home.mkdir(exist_ok=True)
+    conn = sqlite3.connect(home / "state.db")
+    conn.execute("CREATE TABLE state_meta (key TEXT PRIMARY KEY, value TEXT)")
+    conn.executemany("INSERT INTO state_meta VALUES (?, ?)", [
+        ("conduit.voice.chat_call:late", json.dumps({"chat_id": "chat-1", "engine": "grok-live", "turns": [
+            {"role": "user", "content": "a", "timestamp": 1_780_000_100},
+            {"role": "assistant", "content": "b", "timestamp": 1_780_000_160}]})),
+        ("conduit.voice.chat_call:early", json.dumps({"chat_id": "chat-2", "engine": "gpt-live", "turns": [
+            {"role": "user", "content": "c", "timestamp": 1_780_000_000}]})),
+        ("conduit.voice.chat_call:gone", ""),
+        ("conduit.voice.chat_calls:chat-1", json.dumps(["late"])),
+        ("conduit.voice.chat_callXlookalike", json.dumps({"chat_id": "chat-3", "turns": []})),
+    ])
+    conn.commit()
+    conn.close()
+    store = chat(hermes)
+    chat(hermes, "chat-2")
+    both = [
+        {"call_id": "early", "chat_id": "chat-2", "engine": "gpt-live",
+         "started_at": 1_780_000_000, "ended_at": 1_780_000_000},
+        {"call_id": "late", "chat_id": "chat-1", "engine": "grok-live",
+         "started_at": 1_780_000_100, "ended_at": 1_780_000_160},
+    ]
+    assert client.get(f"{BASE}/voice/tags").json()["chat_calls"] == both
+    assert len(json.loads(store.meta[api.VOICE_CHAT_CALL_INDEX_KEY])) == 2, "kept from then on"
+    # An unreadable list is read from the calls again, not emptied.
+    store.meta[api.VOICE_CHAT_CALL_INDEX_KEY] = "not json"
+    assert client.get(f"{BASE}/voice/tags").json()["chat_calls"] == both
+    assert len(json.loads(store.meta[api.VOICE_CHAT_CALL_INDEX_KEY])) == 2
+
+
+def test_a_failed_read_of_the_older_calls_is_tried_again(client, hermes, monkeypatch):
+    store = chat(hermes)
+    disk = [None]
+    monkeypatch.setattr(api, "_chat_calls_on_disk", lambda: disk[0])
+    assert client.get(f"{BASE}/voice/tags").json()["chat_calls"] == []
+    # A save meanwhile doesn't start the list without them either.
+    save(client, chat_id="chat-1", call_id="call-2", turns=turns(("user", "b")))
+    assert api.VOICE_CHAT_CALL_INDEX_KEY not in store.meta
+    disk[0] = [{"call_id": "call-1", "chat_id": "chat-1"}, {"call_id": "call-2", "chat_id": "chat-1"}]
+    assert [e["call_id"] for e in client.get(f"{BASE}/voice/tags").json()["chat_calls"]] == ["call-1", "call-2"]
+    assert api.VOICE_CHAT_CALL_INDEX_KEY in store.meta
+
+
+def test_a_failed_backfill_write_still_answers(client, hermes, monkeypatch):
+    store = chat(hermes)
+    store.set_meta = lambda key, value: (_ for _ in ()).throw(RuntimeError("locked"))
+    monkeypatch.setattr(api, "_chat_calls_on_disk", lambda: [{"call_id": "call-1", "chat_id": "chat-1"}])
+    answer = client.get(f"{BASE}/voice/tags")
+    assert answer.status_code == 200
+    assert answer.json()["chat_calls"] == [{"call_id": "call-1", "chat_id": "chat-1"}]
+
+
+def test_a_chat_deleted_in_desktop_leaves_the_list_when_asked(client, hermes):
+    store = chat(hermes)
+    chat(hermes, "chat-2")
+    save(client, chat_id="chat-1", turns=turns(("user", "a")))
+    save(client, chat_id="chat-2", call_id="call-2", turns=turns(("user", "b")))
+    del store.sessions["chat-1"]  # no save reaches it again
+    assert [e["call_id"] for e in client.get(f"{BASE}/voice/tags").json()["chat_calls"]] == ["call-2"]
+    assert [e["call_id"] for e in json.loads(store.meta[api.VOICE_CHAT_CALL_INDEX_KEY])] == ["call-2"]
+    assert store.meta[api.VOICE_CHAT_CALL_KEY.format(call_id="call-1")] == ""
+
+
+def test_a_call_whose_list_write_failed_is_listed_on_the_retry(client, hermes, monkeypatch):
+    store = chat(hermes)
+    real = api._index_chat_call
+    monkeypatch.setattr(api, "_index_chat_call", lambda *a: (_ for _ in ()).throw(RuntimeError("locked")))
+    assert save(client, chat_id="chat-1", turns=turns(("user", "a"))).status_code >= 500
+    monkeypatch.setattr(api, "_index_chat_call", real)
+    assert save(client, chat_id="chat-1", turns=turns(("user", "a"))).json()["appended"] == 0
+    assert [e["call_id"] for e in client.get(f"{BASE}/voice/tags").json()["chat_calls"]] == ["call-1"]
