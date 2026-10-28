@@ -13,6 +13,16 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.114.0 (2026-10-28)
+
+### New and improved
+- Voice jobs no longer pile up in Hermes Desktop's chat list: once Hermes
+  has answered one, it's archived like a finished call, and typing into it
+  brings it back. Conduit still lists it under its call.
+- Calls kept with a chat now show on every device: each one's chat is
+  listed under Voice in Conduit and shows its call cards, not only on the
+  phone that made the call.
+
 ## 0.113.0 (2026-10-28)
 
 ### Fixes

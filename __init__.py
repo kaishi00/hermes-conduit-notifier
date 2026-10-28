@@ -539,6 +539,12 @@ def _on_session_end(**kwargs: Any) -> None:
     if answered:
         if not _settle_ready(session_id, kwargs.get("turn_id"), "done"):
             calls.turn_ended(session_id, "done", profile=_profile, fallback=None)
+        # A voice job's chat leaves Desktop's list once Hermes has answered
+        # what voice asked there (hermes-conduit#1124).
+        try:
+            voice_archive.archive_answered_job(get_hermes_home(), session_id)
+        except Exception:  # noqa: BLE001 — a hook must never break the turn
+            logger.debug("conduit_push: voice job archive check failed", exc_info=True)
         return
     _settle_ready(session_id, kwargs.get("turn_id"), "dropped")
     if kwargs.get("interrupted"):
