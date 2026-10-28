@@ -23,7 +23,8 @@ checks it). The format is fixed, because Conduit reads it:
 
 ### New and improved
 - The host's log says where each call from Hermes went: the iPhone, the
-  iPhone and its Apple Watch, or a notification because the iPhone can't ring.
+  iPhone and its Apple Watch, or a notification when the relay couldn't ring
+  the iPhone.
 
 ## 0.112.0 (2026-10-28)
 
