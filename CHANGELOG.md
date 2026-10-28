@@ -13,13 +13,23 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.114.1 (2026-10-28)
+## 0.115.1 (2026-10-28)
 
 ### Fixes
 - A message you spoke (a voice call, CarPlay, the Apple Watch) could be
   answered with a sound file Hermes made itself, which the call then read
   out as a file path. Hermes is now told the answer is heard, so it replies
   in words. A file you ask for still comes as before.
+
+## 0.115.0 (2026-10-28)
+
+### Fixes
+- A room's copy with one damaged entry couldn't be read at all.
+
+### New and improved
+- In a room someone else hosts that your agents are in, you can post too,
+  through your own Hermes. Your agents can tell your messages from ones the
+  host wrote under your name.
 
 ## 0.114.0 (2026-10-28)
 
