@@ -1329,14 +1329,14 @@ def test_the_tags_answer_lists_every_chats_calls(client, hermes):
     assert client.get(f"{BASE}/voice/tags").json()["chat_calls"] == []
     save(client, chat_id="chat-1", turns=turns(("user", "a"), ("assistant", "b")))
     save(client, chat_id="chat-2", call_id="call-2", engine="gpt-live", turns=turns(("user", "c")))
-    # A reconnect continues call-1: it's listed again as the newest, to its new last turn.
+    # A reconnect continues call-1: it keeps its place, to its new last turn.
     save(client, chat_id="chat-1", turns=[{"index": 2, "role": "user", "text": "d", "at": 1_780_000_002}])
     listed = client.get(f"{BASE}/voice/tags").json()["chat_calls"]
     assert listed == [
-        {"call_id": "call-2", "chat_id": "chat-2", "engine": "gpt-live",
-         "started_at": 1_780_000_000, "ended_at": 1_780_000_000},
         {"call_id": "call-1", "chat_id": "chat-1", "engine": "gemini-live",
          "started_at": 1_780_000_000, "ended_at": 1_780_000_002},
+        {"call_id": "call-2", "chat_id": "chat-2", "engine": "gpt-live",
+         "started_at": 1_780_000_000, "ended_at": 1_780_000_000},
     ]
 
 

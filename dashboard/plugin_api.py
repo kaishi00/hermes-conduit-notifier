@@ -5685,19 +5685,22 @@ def _turn_time(turn: Any) -> Optional[float]:
 
 
 def _index_chat_call(db, call_id: str, chat_id: str, engine: Optional[str], turns: list) -> None:
-    """Lists the call (again, as the newest) with its first and last turn's times."""
+    """Lists the call with its first and last turn's times: a new one as the
+    newest, a listed one where it was, so a later save doesn't reorder it."""
     entries = _stored_chat_call_index(db)
     if entries is None:
         entries = _chat_calls_on_disk()
         if entries is None:
             return  # unread, so left unwritten: the next read lists this call with the rest
-    entries = [e for e in entries if e["call_id"] != call_id]
     times = [t for t in (_turn_time(turn) for turn in turns) if t is not None]
     entry = _chat_call_index_entry({"call_id": call_id, "chat_id": chat_id, "engine": engine,
                                     "started_at": times[0] if times else None,
                                     "ended_at": times[-1] if times else None})
+    at = next((i for i, e in enumerate(entries) if e["call_id"] == call_id), None)
+    if at is not None:
+        del entries[at]
     if entry is not None:
-        entries.append(entry)
+        entries.insert(len(entries) if at is None else at, entry)
     _write_chat_call_index(db, entries)
 
 
@@ -5722,7 +5725,9 @@ def _chat_calls_on_disk() -> Optional[list]:
         try:
             rows = conn.execute(
                 "SELECT substr(key, ?), json_extract(value, '$.chat_id'), json_extract(value, '$.engine'), "
-                "json_extract(value, '$.turns[0].timestamp'), json_extract(value, '$.turns[#-1].timestamp') "
+                "json_extract(value, '$.turns[0].timestamp'), "
+                # Not '#-1': that needs SQLite 3.31.
+                "json_extract(value, '$.turns[' || (json_array_length(value, '$.turns') - 1) || '].timestamp') "
                 "FROM state_meta WHERE key LIKE ? ESCAPE '\\' AND json_valid(value)",
                 (len(prefix) + 1, pattern)).fetchall()
         finally:
