@@ -34,5 +34,11 @@
     "request_ct": "3KzdgIkgGzXth_u6OLG69KJdOHs-ZpQ1zZiDXxDHK9uZ0AtkxMhgmNkhL41iwDnHpQXzGDbN22lEZecj-9nl0soF3qC-4eEsiWmQZe-P4WbV9--vJ3krWoZX9yXm9RYEbvtTeAwlewwfp9yGDQleQaQJVr149SEGWfbr-P0j7qze",
     "answer": "{\"error\":\"paused\",\"id\":\"m_vector0123456789abcd\",\"note\":\"x\",\"ok\":false}",
     "answer_ct": "yzg2DSNRs2O4KP-JqCiLxMOu8K8CJxxAedJ7XQZOXPKq6QkWnaDPHRwIucRhLCk52UiCzk_wayZV9utToCcaOzy2na1WTgGCDfBCPTvIe-HYvYTYfhY"
+  },
+  "spots": {
+    "aad": "conduit-location/1\nspots\nkid=4186c0bc93b7b264b5991464ab3e4c1f\ndev=device-vector-1\nbatch=batch-vector-1",
+    "nonce": "AAAAAAAAAAAAAAAB",
+    "plaintext": "{\"spots\":[{\"id\":\"0.c12\",\"intent\":\"opportunity\",\"query\":\"florist\",\"radius\":{\"drive\":3000.0,\"walk\":750.0},\"until\":\"2026-10-28T00:00:00+00:00\"}]}",
+    "ct": "RSb-7Nwq_9jt-B7HWAv_SPltlJEc6LxRt7X3SZpkRAPmQpIwx2XqSgbozttH4e7PXIBz7--wx6SvijJ4rB52grSIcH1P5lW--qyBlDHqv8LF8X36fLS865DAjZ1lHblttmF43FSZy6jgBAUa4kWH3830Do-kgxQGJqhlLIsAmlKOJZYXJwtuI4MbFThcMw6ZptFoTpazrq8FEoHF_G0"
   }
 }

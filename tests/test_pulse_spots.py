@@ -367,3 +367,20 @@ def test_the_control_route_reads_and_sets_walking_past(holding):
     with pytest.raises(control.Refused):
         control.update(holding.store, {"spots": "yes"})
 
+
+
+def test_the_sealed_reply_matches_the_shared_vector():
+    # ConduitTests opens the same reply (tests/location_vector.json "spots").
+    vector = location_api_vector()["spots"]
+    top = location_api_vector()
+    key = bytes.fromhex(top["key"])
+    aad = location.spots_aad(top["kid"], top["device_id"], top["batch_id"])
+    assert aad.decode() == vector["aad"]
+    nonce, ct = location.seal(key, vector["plaintext"].encode(), aad, nonce=bytes(11) + b"\x01")
+    assert (nonce, ct) == (vector["nonce"], vector["ct"])
+    watch = json.loads(vector["plaintext"])["spots"][0]
+    assert set(watch) == {"id", "query", "until", "intent", "radius"}
+
+
+def location_api_vector():
+    return json.loads((ROOT / "tests" / "location_vector.json").read_text())
