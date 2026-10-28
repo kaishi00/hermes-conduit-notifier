@@ -1486,11 +1486,13 @@ function profileLine(event, title) {
   return name;
 }
 
-// A profile as Conduit names it: its bot's name, else its id capitalized. A
-// name that is only the id names it no more than the id.
+// A profile as Conduit names it: its bot's name, else its id capitalized, and
+// Hermes for the main one. A name that is only the id names it no more than
+// the id.
 function profileName(event) {
   const id = String(event.profile || '').trim();
-  return profileGivenName(event) || id.slice(0, 1).toUpperCase() + id.slice(1);
+  if (profileGivenName(event)) return profileGivenName(event);
+  return id.toLowerCase() === 'default' ? 'Hermes' : id.slice(0, 1).toUpperCase() + id.slice(1);
 }
 
 function profileGivenName(event) {

@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.115.3 (2026-10-28)
+
+### Fixes
+- Notifications called the main bot "Default" when it has no name, in its
+  Bot Chat's title and in the relay's plain copy, while Conduit calls it
+  Hermes. They now say Hermes (push relay 0.23.2).
+
 ## 0.115.2 (2026-10-28)
 
 ### Fixes
