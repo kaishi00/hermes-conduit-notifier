@@ -621,3 +621,51 @@ def test_the_oldest_held_end_of_a_turn_without_its_id_ends_done_when_too_many_ar
 def test_a_call_id_with_a_trailing_newline_is_refused():
     assert events._CALL_ID.match("a" * 8)
     assert events._CALL_ID.match("a" * 8 + "\n") is None
+
+
+# conduit_notify (#1415): Hermes writes its turn's push.
+
+notify_tool = sys.modules["conduit_push.notify_tool"]
+
+
+@pytest.fixture
+def paired(monkeypatch):
+    monkeypatch.setattr(notify_tool.client, "load_state", lambda: {"paired": True})
+    monkeypatch.setattr(notify_tool, "_kept", {})
+
+
+def test_a_written_notification_replaces_the_replys_opening(pushed, paired):
+    answer = notify_tool.handle({"title": "Report finished", "body": "All  150 products\nanalysed."}, session_id="s")
+    assert '"ok": true' in answer
+    plugin._post_llm_call(session_id="s", turn_id="t", assistant_response="Here is the full report: ...")
+    plugin._on_session_end(session_id="s", turn_id="t", completed=True, failed=False, interrupted=False)
+    [event] = pushed
+    assert event["title"] == "Report finished"
+    assert event["headline"] == "Report finished"
+    assert event["body"] == "All 150 products analysed."
+    assert event["title_label"] == "response.ready"
+
+    plugin._post_llm_call(session_id="s", turn_id="t2", assistant_response="Next answer.")
+    plugin._on_session_end(session_id="s", turn_id="t2", completed=True, failed=False, interrupted=False)
+    assert pushed[1]["body"] == "Next answer." and "headline" not in pushed[1], "taken once"
+
+
+def test_a_silent_reply_drops_the_written_notification(pushed, paired):
+    notify_tool.handle({"title": "Done", "body": "Nothing changed."}, session_id="s")
+    plugin._post_llm_call(session_id="s", turn_id="t", assistant_response="[SILENT]")
+    plugin._on_session_end(session_id="s", turn_id="t", completed=True, failed=False, interrupted=False)
+    assert pushed == []
+    assert notify_tool.take("s") is None, "it doesn't wait for a later turn"
+
+
+def test_conduit_notify_refuses_what_cant_notify(paired, monkeypatch):
+    assert "missing_text" in notify_tool.handle({"title": "Done"}, session_id="s")
+    assert "subagent" in notify_tool.handle({"title": "a", "body": "b"}, session_id="kid", is_child=lambda s: s == "kid")
+    monkeypatch.setattr(notify_tool.client, "load_state", lambda: None)
+    assert "not_paired" in notify_tool.handle({"title": "a", "body": "b"}, session_id="s")
+    assert notify_tool.take("s") is None
+
+
+def test_a_written_notification_goes_stale(paired):
+    notify_tool.keep("s", "Done", "Result.", now=0)
+    assert notify_tool.take("s", now=notify_tool.KEEP_S + 1) is None

@@ -65,7 +65,7 @@ MAX_CT_CHARS = 2600
 # Fields that carry content. Everything else on an event stays visible to the
 # relay because it routes on it.
 INNER_FIELDS = ("title", "body", "session_id", "profile", "profile_name", "gateway", "stored_session_id", "decision", "call",
-                "locate", "maps", "title_label", "session_title", "count", "private", "room")
+                "locate", "maps", "title_label", "session_title", "headline", "count", "private", "room")
 # How much a reply push may interrupt (events.PUSH_LEVELS): routing beside the envelope.
 _PUSH_LEVELS = ("passive", "active", "time-sensitive")
 

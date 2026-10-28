@@ -112,6 +112,8 @@ Beside notifications, the plugin keeps a Live Activity up to date while a turn y
 
 Each notification is titled with the session's title when it has one (for example a Telegram topic name), so you can tell which chat it came from: a reply shows the session title, and the others prefix it (`Approval needed · Infra`). A Conduit Bot Chat, whose title is always `Bot Chat`, is titled with its bot's name instead, as Conduit's Bots list shows it (its Bot Mode title, else its display name, else its profile name), so you can tell which bot replied. Every push also carries that name, so a call from the bot names it too. Untitled sessions keep the generic copy. How much shows is Conduit's Settings > Notifications > Show in notifications: Generic shows neither the title nor the text, Chat names shows the session's title and the profile without Hermes' words, and Full previews shows both, with the profile as the subtitle. `redact on` or end-to-end encryption keeps the title from reaching the relay.
 
+Hermes can write a reply's notification itself with the `conduit_notify` tool (plugin 0.112+), when you asked to be told something is done or a scheduled job reports: a title of a few words and a sentence or two, sent instead of the reply's opening when the turn ends. It sends no push of its own, so the turn still sends one, under the same settings, and a reply that sends none (`[SILENT]`, a muted job) sends none with it. The title rides as `headline`, sealed with the rest, and Conduit shows it only with Full previews; Chat names and Generic never show it.
+
 The iOS app controls which categories are enabled, how much a notification shows, whether completion sounds play, and whether approval and input-needed notifications play a sound (on by default).
 
 ## Privacy and security
@@ -2675,7 +2677,7 @@ and she loved Kyoto"):
   what each arrival or departure brought up; `pulse status` and `pulse
   ahead` count the look ahead's picks held for a place.
 
-## Pulse watches shops you walk past (plugin 0.111+)
+## Pulse watches shops you walk past (plugin 0.112+)
 
 With Where you are on, Conduit sharing location in the background at
 Precise (a shop's name and how far you were from it say as much as a

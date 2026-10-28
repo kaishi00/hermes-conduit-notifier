@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.112.0 (2026-10-28)
+
+### New and improved
+- Hermes can write the notification a reply sends, with a heading and a
+  sentence on the result, when you asked to be told something is done or a
+  scheduled job reports. Conduit shows it with Show in notifications on Full
+  previews.
+
 ## 0.111.0 (2026-10-28)
 
 ### New and improved
