@@ -421,6 +421,8 @@ class LocalWorkspace:
         except OSError as exc:
             if exc.errno == errno.EXDEV:  # another disk under the same root
                 self._move_across(source, target, overwrite)
+            elif exc.errno == errno.ENOENT:
+                raise WorkspaceError(404, "That file or folder isn't there any more")
             else:
                 raise WorkspaceError(500, f"Couldn't move this ({exc.strerror or 'error'})")
         return {"entry": self._entry(target)}
@@ -443,6 +445,8 @@ class LocalWorkspace:
             try:
                 shutil.move(source, temp)
             except OSError as exc:
+                if os.path.isdir(temp) and not os.path.islink(temp) and not os.listdir(temp):
+                    os.rmdir(temp)  # nothing copied yet
                 if os.path.lexists(temp):  # a part copied: kept, as the source may be part gone
                     raise WorkspaceError(500, "Couldn't move all of this: what was copied is in "
                                               + os.path.basename(box) + " beside the target")

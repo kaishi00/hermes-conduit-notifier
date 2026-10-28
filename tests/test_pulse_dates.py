@@ -304,9 +304,11 @@ def test_a_fact_dates_card_points_at_the_chat_it_was_said_in_without_the_fact(li
     assert live.store.item(wedding)["status"] == "open"
 
 
-def test_after_the_brief_went_what_it_brings_up_goes_on_the_screen(live):
+def test_after_the_brief_went_what_it_brings_up_goes_on_the_screen(live, monkeypatch):
     looking(live)
-    now = time.time()
+    # Today at noon: before 01:00 an hour back is yesterday, and today's brief still to come.
+    now = datetime.combine(datetime.now(timezone.utc).date(), datetime.min.time(), timezone.utc).timestamp() + 12 * 3600
+    monkeypatch.setattr(time, "time", lambda: now)
     live.store.set("brief_time", datetime.fromtimestamp(now - 3600, timezone.utc).strftime("%H:%M"))
     assert ahead.brief_ahead(live.store, UTC, now)  # within the brief's window, none sent yet
     live.store.add_attempt(attempt_id="b:1", item_id="b", attempt=1, kind=pulse.BRIEF, tag="t", text="x",

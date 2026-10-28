@@ -655,6 +655,7 @@ def test_a_move_across_disks_that_copies_only_part_says_where_the_part_is(tree, 
 
     def half(source, target):
         os.mkdir(target)
+        pathlib.Path(target, "a.txt").write_text("a")
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr(wf.shutil, "move", half)
@@ -663,6 +664,16 @@ def test_a_move_across_disks_that_copies_only_part_says_where_the_part_is(tree, 
     left = [n for n in os.listdir(tree) if n.startswith(".conduit-")]
     assert exc.value.status == 500 and left and left[0] in str(exc.value)
     assert (tree / "docs" / "part" / "a.txt").is_file()
+    wf.shutil.rmtree(tree / left[0])
+
+    def none(source, target):
+        os.mkdir(target)
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(wf.shutil, "move", none)
+    with pytest.raises(wf.WorkspaceError) as exc:
+        ws().move(str(tree), str(tree / "docs" / "part"), str(tree), "part")
+    assert exc.value.status == 403 and not [n for n in os.listdir(tree) if n.startswith(".conduit-")]
 
 
 def test_ssh_deletes_a_link_to_a_secret_but_not_the_secret(tree):
