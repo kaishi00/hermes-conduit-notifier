@@ -105,17 +105,17 @@ NEXT_PROMPT = "[The next request from the same Conduit voice conversation. As be
 
 
 def _job_home(tmp_path, chats, tags):
-    """chats: id -> (pinned, archived, [(role, content), ...])."""
+    """chats: id -> (pinned, archived, [(role, content[, tool_calls]), ...])."""
     conn = sqlite3.connect(tmp_path / "state.db")
     conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, archived INTEGER, auto_archived INTEGER, "
                  "pinned INTEGER)")
     conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, "
-                 "content TEXT)")
+                 "content TEXT, tool_calls TEXT)")
     conn.execute("CREATE TABLE state_meta (key TEXT PRIMARY KEY, value TEXT)")
     for chat_id, (pinned, archived, messages) in chats.items():
         conn.execute("INSERT INTO sessions VALUES (?, ?, 0, ?)", (chat_id, archived, pinned))
-        conn.executemany("INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)",
-                         [(chat_id, role, content) for role, content in messages])
+        conn.executemany("INSERT INTO messages (session_id, role, content, tool_calls) VALUES (?, ?, ?, ?)",
+                         [(chat_id, *m, None)[:4] for m in messages])
     conn.execute("INSERT INTO state_meta VALUES (?, ?)", (voice_archive.VOICE_TAGS_KEY, json.dumps(tags)))
     conn.commit()
     conn.close()
@@ -134,8 +134,9 @@ class JobSessionDB(FakeSessionDB):
         return {"id": row[0], "archived": row[1], "pinned": row[2]} if row else None
 
     def get_messages(self, session_id):
-        return [{"role": role, "content": content} for role, content in self.conn.execute(
-            "SELECT role, content FROM messages WHERE session_id = ? ORDER BY id", (session_id,))]
+        return [{"role": role, "content": content, "tool_calls": json.loads(calls) if calls else None}
+                for role, content, calls in self.conn.execute(
+                    "SELECT role, content, tool_calls FROM messages WHERE session_id = ? ORDER BY id", (session_id,))]
 
     def _auto_archive_lineage(self, session_id):
         with self.conn:
@@ -163,11 +164,15 @@ def test_a_voice_job_someone_used_or_kept_stays_listed(tmp_path):
         "typed": (0, 0, [("user", JOB_PROMPT), ("assistant", "Idle."), ("user", "thanks, now the NAS"),
                          ("assistant", "Full.")]),
         "running": (0, 0, [("user", JOB_PROMPT)]),
+        # Hermes said something on its way to a tool, and is still working.
+        "working": (0, 0, [("user", JOB_PROMPT), ("assistant", "Let me check.", '[{"id": "t1"}]'),
+                           ("tool", "GPU idle")]),
+        "calling": (0, 0, [("user", JOB_PROMPT), ("assistant", "Let me check.", '[{"id": "t1"}]')]),
         "silent": (0, 0, [("user", JOB_PROMPT), ("assistant", "  ")]),
         "pinned": (1, 0, [("user", JOB_PROMPT), ("assistant", "Idle.")]),
         "archived": (0, 1, [("user", JOB_PROMPT), ("assistant", "Idle.")]),
-    }, {sid: {"kind": "job"} for sid in ("typed", "running", "silent", "pinned", "archived")})
-    for session_id in ("typed", "running", "silent", "pinned"):
+    }, {sid: {"kind": "job"} for sid in ("typed", "running", "working", "calling", "silent", "pinned", "archived")})
+    for session_id in ("typed", "running", "working", "calling", "silent", "pinned"):
         assert not voice_archive.archive_answered_job(home, session_id, open_db=JobSessionDB)
         assert _flags(home, session_id) == (0, 0)
     assert not voice_archive.archive_answered_job(home, "archived", open_db=JobSessionDB)

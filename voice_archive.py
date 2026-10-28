@@ -123,12 +123,15 @@ def settled_voice_job(db, session_id: str) -> bool:
     row = db.get_session(session_id)
     if not row or row.get("pinned") or row.get("archived"):
         return False
-    messages = [m for m in db.get_messages(session_id) if isinstance(m, dict) and m.get("role") in ("user", "assistant")]
+    messages = [m for m in db.get_messages(session_id)
+                if isinstance(m, dict) and m.get("role") in ("user", "assistant", "tool")]
     asked = [m for m in messages if m.get("role") == "user"]
     if not asked or not all(is_voice_request(m.get("content")) for m in asked):
         return False
+    # An answer that calls tools ("Let me check") is mid-turn, not the last word.
     answer = messages[-1]
-    return answer.get("role") == "assistant" and isinstance(answer.get("content"), str) and bool(answer["content"].strip())
+    return answer.get("role") == "assistant" and not answer.get("tool_calls") \
+        and isinstance(answer.get("content"), str) and bool(answer["content"].strip())
 
 
 def archive_settled_job(db, session_id: str) -> bool:

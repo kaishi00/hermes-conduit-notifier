@@ -5687,7 +5687,11 @@ def _turn_time(turn: Any) -> Optional[float]:
 def _index_chat_call(db, call_id: str, chat_id: str, engine: Optional[str], turns: list) -> None:
     """Lists the call (again, as the newest) with its first and last turn's times."""
     entries = _stored_chat_call_index(db)
-    entries = [e for e in (_chat_calls_on_disk() if entries is None else entries) if e["call_id"] != call_id]
+    if entries is None:
+        entries = _chat_calls_on_disk()
+        if entries is None:
+            return  # unread, so left unwritten: the next read lists this call with the rest
+    entries = [e for e in entries if e["call_id"] != call_id]
     times = [t for t in (_turn_time(turn) for turn in turns) if t is not None]
     entry = _chat_call_index_entry({"call_id": call_id, "chat_id": chat_id, "engine": engine,
                                     "started_at": times[0] if times else None,
@@ -5703,9 +5707,10 @@ def _unindex_chat_calls(db, gone: Callable[[Dict[str, Any]], bool]) -> None:
         _write_chat_call_index(db, [e for e in entries if not gone(e)])
 
 
-def _chat_calls_on_disk() -> list:
+def _chat_calls_on_disk() -> Optional[list]:
     """The calls a host kept before the list existed, read once from the
-    calls themselves (oldest first), without loading their turns."""
+    calls themselves (oldest first), without loading their turns. None when
+    they couldn't be read."""
     from hermes_constants import get_hermes_home
     path = get_hermes_home() / "state.db"
     if not path.exists():
@@ -5724,7 +5729,7 @@ def _chat_calls_on_disk() -> list:
             conn.close()
     except sqlite3.Error:
         logger.warning("Conduit voice: couldn't read the calls kept with chats", exc_info=True)
-        return []
+        return None
     entries = [_chat_call_index_entry({"call_id": r[0], "chat_id": r[1], "engine": r[2],
                                        "started_at": r[3], "ended_at": r[4]}) for r in rows]
     entries = [e for e in entries if e is not None]
@@ -5739,6 +5744,8 @@ def _chat_call_index(db) -> list:
     if entries is not None:
         return entries
     entries = _chat_calls_on_disk()
+    if entries is None:
+        return []  # nothing written, so the next read tries again
     if hasattr(db, "set_meta"):
         try:
             with _voice_lock():

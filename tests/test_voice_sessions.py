@@ -1400,6 +1400,19 @@ def test_a_host_whose_calls_predate_the_list_reads_them_once(client, hermes, tmp
     assert len(json.loads(store.meta[api.VOICE_CHAT_CALL_INDEX_KEY])) == 2
 
 
+def test_a_failed_read_of_the_older_calls_is_tried_again(client, hermes, monkeypatch):
+    store = chat(hermes)
+    disk = [None]
+    monkeypatch.setattr(api, "_chat_calls_on_disk", lambda: disk[0])
+    assert client.get(f"{BASE}/voice/tags").json()["chat_calls"] == []
+    # A save meanwhile doesn't start the list without them either.
+    save(client, chat_id="chat-1", call_id="call-2", turns=turns(("user", "b")))
+    assert api.VOICE_CHAT_CALL_INDEX_KEY not in store.meta
+    disk[0] = [{"call_id": "call-1", "chat_id": "chat-1"}, {"call_id": "call-2", "chat_id": "chat-1"}]
+    assert [e["call_id"] for e in client.get(f"{BASE}/voice/tags").json()["chat_calls"]] == ["call-1", "call-2"]
+    assert api.VOICE_CHAT_CALL_INDEX_KEY in store.meta
+
+
 def test_a_failed_backfill_write_still_answers(client, hermes, monkeypatch):
     store = chat(hermes)
     store.set_meta = lambda key, value: (_ for _ in ()).throw(RuntimeError("locked"))
