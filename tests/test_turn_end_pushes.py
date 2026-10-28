@@ -632,6 +632,7 @@ notify_tool = sys.modules["conduit_push.notify_tool"]
 def paired(monkeypatch):
     monkeypatch.setattr(notify_tool.client, "load_state", lambda: {"paired": True})
     monkeypatch.setattr(notify_tool, "_kept", {})
+    monkeypatch.setattr(notify_tool, "_taken", {})
 
 
 def test_a_written_notification_replaces_the_replys_opening(pushed, paired):
@@ -669,3 +670,40 @@ def test_conduit_notify_refuses_what_cant_notify(paired, monkeypatch):
 def test_a_written_notification_goes_stale(paired):
     notify_tool.keep("s", "Done", "Result.", now=0)
     assert notify_tool.take("s", now=notify_tool.KEEP_S + 1) is None
+
+
+def test_a_turn_that_ends_without_a_reply_drops_its_written_notification(pushed, paired):
+    notify_tool.handle({"title": "Report finished", "body": "All done."}, session_id="s")
+    plugin._on_session_end(session_id="s", turn_id="t", interrupted=True)
+    plugin._post_llm_call(session_id="s", turn_id="t2", assistant_response="Next answer.")
+    plugin._on_session_end(session_id="s", turn_id="t2", completed=True, failed=False, interrupted=False)
+    [event] = [e for e in pushed if e["type"] == "response.ready"]
+    assert event["body"] == "Next answer." and "headline" not in event
+
+
+def test_a_turn_reported_twice_keeps_its_written_notification(pushed, paired):
+    notify_tool.handle({"title": "Report finished", "body": "All done."}, session_id="s")
+    plugin._post_llm_call(session_id="s", turn_id="t", assistant_response="First.")
+    plugin._post_llm_call(session_id="s", turn_id="t", assistant_response="Second.")
+    plugin._on_session_end(session_id="s", turn_id="t", completed=True, failed=False, interrupted=False)
+    [event] = pushed
+    assert event["headline"] == "Report finished" and event["body"] == "All done."
+
+
+def test_only_the_newest_written_notifications_are_kept(paired, monkeypatch):
+    monkeypatch.setattr(notify_tool, "MAX_KEPT", 2)
+    for session in ("a", "b", "c"):
+        notify_tool.keep(session, "Done", session)
+    assert notify_tool.take("a") is None
+    assert notify_tool.take("c") == ("Done", "c")
+
+
+def test_conduit_notify_registers_on_a_hermes_without_display_fields():
+    registered = []
+
+    class OlderHermes:
+        def register_tool(self, name, toolset, schema, handler, check_fn):
+            registered.append((name, check_fn))
+
+    notify_tool.register(OlderHermes(), is_child=lambda _: False)
+    assert registered == [("conduit_notify", notify_tool.available)]

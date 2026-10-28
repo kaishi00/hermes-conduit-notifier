@@ -305,7 +305,7 @@ def _post_llm_call(**kwargs: Any) -> None:
     chat_title = "" if quiet or pulse_turn else _session_title(session_id)
     # What the turn wrote for its push with conduit_notify, taken whatever
     # happens so it never rides a later turn's reply.
-    headline = notify_tool.take(session_id)
+    headline = notify_tool.take(session_id, kwargs.get("turn_id"))
     # A Pulse push is titled by what it brings, not by Pulse's hidden chat.
     if pulse_turn and not quiet:
         copy = pulse.push_copy(session_id, kwargs.get("turn_id"), response)
@@ -524,6 +524,7 @@ def _on_session_end(**kwargs: Any) -> None:
         return
     _end_parent_turn(session_id)
     _drop_unnamed_end(session_id)
+    notify_tool.drop(session_id)
     pulse_turn = pulse.is_pulse_turn(session_id, kwargs.get("turn_id"))
     _quietly(pulse.turn_ended, session_id, kwargs.get("turn_id"))
     # A turn Hermes doesn't call failed but that didn't complete (it hit the

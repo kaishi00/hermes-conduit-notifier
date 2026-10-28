@@ -58,6 +58,9 @@ SCHEMA: dict[str, Any] = {
 _lock = threading.Lock()
 # session id -> (title, body, kept at)
 _kept: dict[str, tuple[str, str, float]] = {}
+# session id -> (turn id, (title, body)): what a turn's push took, for a
+# second report of the same turn, which replaces the first.
+_taken: dict[str, tuple[str, tuple[str, str]]] = {}
 
 
 def register(ctx: Any, *, is_child: Callable[[Any], bool]) -> None:
@@ -129,14 +132,33 @@ def keep(session_id: str, title: str, body: str, now: float | None = None) -> No
             del _kept[next(iter(_kept))]
 
 
-def take(session_id: str, now: float | None = None) -> tuple[str, str] | None:
-    """The title and body this chat's turn wrote for its push, once."""
+def take(session_id: str, turn_id: Any = None, now: float | None = None) -> tuple[str, str] | None:
+    """The title and body this chat's turn wrote for its push, once; the
+    same turn reported again gets them again."""
     now = time.time() if now is None else now
+    turn = turn_id if isinstance(turn_id, str) and turn_id else None
     with _lock:
         kept = _kept.pop(session_id, None)
-    if kept is None or now - kept[2] > KEEP_S:
-        return None
-    return kept[0], kept[1]
+        if kept is None:
+            taken = _taken.get(session_id)
+            return taken[1] if turn and taken and taken[0] == turn else None
+        if now - kept[2] > KEEP_S:
+            return None
+        headline = (kept[0], kept[1])
+        if turn:
+            _taken.pop(session_id, None)
+            _taken[session_id] = (turn, headline)
+            while len(_taken) > MAX_KEPT:
+                del _taken[next(iter(_taken))]
+        return headline
+
+
+def drop(session_id: str) -> None:
+    """The turn ended: what it wrote never rides a later turn's reply, even
+    when this one sent none (interrupted, or failed before answering)."""
+    with _lock:
+        _kept.pop(session_id, None)
+        _taken.pop(session_id, None)
 
 
 def _line(value: Any, limit: int) -> str:
