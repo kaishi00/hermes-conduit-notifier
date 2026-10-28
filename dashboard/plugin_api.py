@@ -8545,9 +8545,10 @@ def room_invites(action: Callable[[Any], Dict[str, Any]]) -> Dict[str, Any]:
     except Exception:  # noqa: BLE001 - the route still answers; the next one tries again
         logger.warning("Conduit plugin: couldn't start Linked Rooms' mailbox loop", exc_info=True)
         loop = None
+    posts = _plugin_package_module("room_posts")
     try:
         answer = action(module.start(root))
-    except module.RoomsError as exc:
+    except (module.RoomsError, posts.PostsError) as exc:
         raise TokenError(exc.status, str(exc), exc.code)
     if loop is not None:
         loop.wake()
@@ -8835,6 +8836,38 @@ async def delete_room_copy(response: Response, room_id: Optional[str] = None) ->
     home sends later starts it again."""
     response.headers["Cache-Control"] = "no-store"
     return await _room_copies_route(lambda module, root: module.forget(root, room_id), "forget copy")
+
+
+# Posts in rooms other people host (room_posts.py): Conduit posts to its own
+# Hermes, which sends each to the room's home over the Link that invited it;
+# the home posts it in the room named for its person and says how it went.
+# Posting goes over the Links, as the invites' answers do.
+
+ROOM_POSTS_MAX_BODY_BYTES = 64 * 1024
+
+
+@router.post("/rooms/copies/messages")
+async def post_room_copy_message(request: Request, response: Response) -> Any:
+    """Posts ``text`` in the room ``room_id`` someone else hosts, which your
+    agents are in: sent to its home, which posts it named for you.
+    ``event_id`` is the retry key (the same one again is the same post).
+    Answers the post as ``GET /rooms/copies/messages`` lists it: ``status``
+    sending until the home answers."""
+    response.headers["Cache-Control"] = "no-store"
+    body = _room_links_body(await _read_json_body(request, ROOM_POSTS_MAX_BODY_BYTES),
+                            '{"room_id": ..., "event_id": ..., "text": ...}')
+    return await _room_invites_route(None, lambda rooms: {"message": rooms.posts.post(
+        body.get("room_id"), body.get("event_id"), body.get("text"))}, "post", mailbox=True)
+
+
+@router.get("/rooms/copies/messages")
+async def get_room_copy_messages(response: Response, room_id: Optional[str] = None) -> Any:
+    """What you posted in the room ``room_id`` someone else hosts, oldest
+    first: each ``event_id``, ``text`` and ``status`` (sending, posted with
+    the room's ``seq``, or refused with its ``error``: ended, not_in,
+    too_long, too_many, unavailable, bad_post)."""
+    response.headers["Cache-Control"] = "no-store"
+    return await _room_invites_route(None, lambda rooms: {"messages": rooms.posts.listed(room_id)}, "posts")
 
 
 # Setting this Hermes up for rooms (room_setup.py): the API server, which is
@@ -17945,6 +17978,10 @@ ROUTE_CAPABILITIES = (
     # GET/DELETE /rooms/copies and GET /rooms/copies/log: this Hermes' copies
     # of rooms other people host, sent by their home (Linked Rooms).
     "room-copies",
+    # POST/GET /rooms/copies/messages: posting in rooms other people host,
+    # through this Hermes, and GET /rooms/people's posts on the home: who
+    # wrote what (Linked Rooms).
+    "room-posts",
     # ?conduit_profile= on POST /rooms/drafts and GET/POST /rooms/setup: a
     # room made for, and this Hermes set up for rooms on, any profile's, on a
     # Hermes that hosts other profiles' plugins apart (hermes-conduit#1336).
