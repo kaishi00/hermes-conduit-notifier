@@ -185,7 +185,11 @@ test('a push names the bot by its name, not its profile id', () => {
   assert.equal(payload.body.conduit.profile_name, 'Nova');
   const unnamed = notificationFor(validateEvent({ type: 'response.ready', event_id: 'ready:12345679', session_id: 'sess-1', profile: 'default' }),
     { show_previews: false, completion_sound: false });
-  assert.equal(unnamed.payload.aps.alert.body, 'Hermes has finished responding.\nProfile: default · Session: sess-1');
+  assert.equal(unnamed.payload.aps.alert.body, 'Hermes has finished responding.\nProfile: Default · Session: sess-1', 'its id capitalized, as Conduit names it');
+  const scout = notificationFor(validateEvent({ type: 'response.ready', event_id: 'ready:12345680', session_id: 'sess-1', profile: 'scout', title: 'Scout', session_title: 'Scout' }),
+    { show_previews: false, show_chat_names: true, completion_sound: false });
+  assert.equal(scout.payload.aps.alert.title, 'Scout');
+  assert.equal(scout.payload.aps.alert.body, 'Hermes has finished responding.\nProfile: Scout · Session: sess-1', 'the title and the profile line agree');
   assert.equal('profile_name' in unnamed.payload.conduit, false);
 });
 
@@ -209,10 +213,13 @@ test('Full previews names the profile in the subtitle (#1415)', () => {
   const event = (extra) => validateEvent({ type: 'response.ready', event_id: `ready:${Math.random().toString(36).slice(2, 12)}`, title: 'Trip plan', body: 'Done.', ...extra });
   const subtitle = (extra) => notificationFor(event(extra), preferences).payload.aps.alert.subtitle;
   assert.equal(subtitle({ profile: 'work', profile_name: 'Atlas' }), 'Atlas');
-  assert.equal(subtitle({ profile: 'work' }), 'work');
+  assert.equal(subtitle({ profile: 'work' }), 'Work', 'an unnamed profile by its id capitalized, as in Conduit');
+  assert.equal(subtitle({ profile: 'work', profile_name: 'work' }), 'Work', 'a name that is only the id too');
   assert.equal(subtitle({ profile: 'default' }), undefined, 'an unnamed default profile says nothing');
   assert.equal(notificationFor(validateEvent({ type: 'response.ready', event_id: 'ready:32345678', title: 'Atlas', body: 'Hi.', profile_name: 'Atlas' }), preferences)
     .payload.aps.alert.subtitle, undefined, 'a Bot Chat\'s title already names its bot');
+  assert.equal(notificationFor(validateEvent({ type: 'response.ready', event_id: 'ready:42345678', title: 'Scout', body: 'Hi.', profile: 'scout' }), preferences)
+    .payload.aps.alert.subtitle, undefined, 'nor an unnamed bot\'s, which the plugin titles with its id capitalized');
 });
 
 // Gateway session keys built by Hermes' build_session_key carry whatever
@@ -806,7 +813,7 @@ test('a phone change that asks is a notification in its category, generic until 
   assert.equal(payload.aps.sound, 'default', 'it waits on the user, so it chimes');
   assert.ok(!JSON.stringify(payload).includes('Dentist'));
   const shown = notificationFor(validateEvent(phoneBody), { show_previews: true }, { id: 'gw-1' }).payload;
-  assert.deepEqual(shown.aps.alert, { title: 'Hermes wants to add an event', subtitle: 'work', body: 'Dentist · Fri 16 Oct 15:00' });
+  assert.deepEqual(shown.aps.alert, { title: 'Hermes wants to add an event', subtitle: 'Work', body: 'Dentist · Fri 16 Oct 15:00' });
 });
 
 test('a sealed phone change shows the fallback copy and keeps its category', () => {
