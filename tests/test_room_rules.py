@@ -1125,3 +1125,22 @@ def test_other_tools_and_unreadable_results_pass_through(host):
     for result in ("not json", '["a"]', '{"success": false, "error": "x"}'):
         assert plugin._transform_tool_result(tool_name="session_search", args={}, result=result,
                                              session_id="s-chat") is None
+
+
+def test_a_member_session_not_titled_yet_gets_the_careful_line_and_one_log_line(host, notes, caplog):
+    untitled = "room_" + "fedcba9876543210" * 2
+    _session(host, untitled, source="bot_room")
+
+    for _ in range(2):
+        framed = _context(untitled)
+        assert rules.UNREAD_POSTERS_LINE in framed and "someone else's Hermes" in framed
+    assert sum("isn't titled with its room" in record.getMessage() for record in caplog.records
+               if record.levelname == "WARNING") == 1
+
+
+def test_a_rooms_private_chat_is_told_its_room(host, notes):
+    plugin.room_chats.Store(host).set("room-a", "s-chat")
+
+    context = _context("s-chat")
+    assert "This chat is about the room" in context and "room-a" in context
+    assert "This chat is about the room" not in _context("s-home")

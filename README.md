@@ -3700,11 +3700,14 @@ minute:
   after `since_seq`, as `groups.log` pages a room this Hermes hosts:
   `{"events", "cursor", "latest_seq", "has_more", "authority"}`, with
   `latest_seq` what the copy holds. `limit` is 1 to 500.
-- `DELETE /rooms/copies?room_id=`: `{"room_id", "forgotten"}`. A page the home
-  sends later starts the copy again from its first event.
+- `DELETE /rooms/copies?room_id=`: `{"room_id", "forgotten"}`, once the room
+  is over for you (you left it, were taken out, or it ended), with what you
+  posted there. While an agent of yours is still in it, it's refused with
+  `still_in` (409: your posts there frame your agents' turns, so leave
+  first), and a room this Hermes hosts with `hosted` (409, plugin 0.116+).
 
-They're refused with `bad_room`, `bad_since` or `bad_limit` (400) and
-`no_copy` (404). A copy or an event this Hermes can't read is left out, and
+They're refused with `bad_room`, `bad_since` or `bad_limit` (400),
+`no_copy` (404) and `unreadable` (503, the rooms can't be read now). A copy or an event this Hermes can't read is left out, and
 its log says so once.
 
 People whose agents are in a room someone else hosts post in it from their
@@ -3744,6 +3747,32 @@ minute:
   posted there, oldest first, each `status` `sending`, `posted` (with the
   room's `seq`) or `refused` (with its `error`: `ended`, `not_in`,
   `too_long`, `too_many`, `unavailable` or `bad_post`).
+
+## Your agent works on a room for you (plugin 0.116+)
+
+In your private chats, your agents can read your rooms with other people for
+you, with the `conduit_room` tool: notes, a summary, "what did Mona say about
+Saturday?", a draft of your reply. `list` gives the rooms you host with
+people you've linked and your copies of rooms they host: who hosts each, its
+agents and whose they are, and whether it's going or ended. `read` gives a
+room's messages, the newest 100 by default (up to 200, `after_seq` or
+`before_seq` for others), each with who it's from as Conduit's room screen
+names them: "you", a person by the name their Link has here, an agent with
+its owner ("Laifu (Mona's)", "Furina (yours)"). Long messages are cut at
+4,000 characters and an answer stays under 64 KB. It reads what this Hermes
+keeps (the room's log, or its copy) and sends nothing to the room. A room
+turn never has it (the API server keeps the `conduit` tools out, and the
+room rules never allow it), and neither does a subagent.
+
+A room can have a private chat of its own with one of your agents
+(`conduit-room-chats.json` in the profile's home, owner only). Each turn
+there is told which room it's about. In a room hosted elsewhere where an
+agent of yours Listens only, that agent writes you notes in that chat once
+the room has been quiet for 30 minutes after new messages, or has ended:
+what was decided, what you said you'd do, what you might have missed. The
+rooms loop sends them as a hidden turn into the chat, once for each stretch
+of the room, and tries again 30 minutes after a chat that refused them. A
+room with no chat yet gets none until it has one.
 
 ## Capabilities (plugin 0.4+)
 

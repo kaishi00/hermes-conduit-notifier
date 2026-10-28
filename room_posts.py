@@ -155,7 +155,8 @@ class Posts:
         """What this installation's owner posted in the room ``room_id``, oldest first, and how each went."""
         if not isinstance(room_id, str) or not room_id:
             raise PostsError("bad_room", "Name the room")
-        rows = _rows(self.path, "SELECT * FROM sent WHERE room_id=? ORDER BY created_at, rowid", (room_id,))
+        link, params = _link_filter(self.rooms.root, room_id)
+        rows = _rows(self.path, f"SELECT * FROM sent WHERE room_id=?{link} ORDER BY created_at, rowid", params)
         return [_shown_sent(row) for row in rows]
 
     def sent_texts(self, room_id: str) -> list[str]:
@@ -334,8 +335,9 @@ _OWNED = "room_id=? AND (status IN ('posted', 'sending') OR (status='refused' AN
 
 def sent_texts(root: Any, room_id: str) -> list[str]:
     """The texts this installation's owner posted in the room, the latest."""
-    rows = _rows(path(root), f"SELECT text FROM sent WHERE {_OWNED} ORDER BY created_at DESC, rowid DESC LIMIT ?",
-                 (room_id, SENT_TEXTS))
+    link, params = _link_filter(root, room_id)
+    rows = _rows(path(root), f"SELECT text FROM sent WHERE {_OWNED}{link} ORDER BY created_at DESC, rowid DESC "
+                             "LIMIT ?", (*params, SENT_TEXTS))
     return [row["text"] for row in rows]
 
 
@@ -348,10 +350,11 @@ def forged_for(root: Any, room_id: str, session_id: str, name: str, prompt: Any)
     if not room_rules.is_room_prompt(prompt):
         return []
     digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
-    rows = _rows(path(root), f"SELECT link, event_id, text FROM sent WHERE {_OWNED} AND NOT EXISTS ("
+    link, params = _link_filter(root, room_id)
+    rows = _rows(path(root), f"SELECT link, event_id, text FROM sent WHERE {_OWNED}{link} AND NOT EXISTS ("
                              "SELECT 1 FROM claimed WHERE claimed.room_id=sent.room_id AND claimed.session_id=? "
                              "AND claimed.link=sent.link AND claimed.event_id=sent.event_id AND claimed.prompt!=?) "
-                             "ORDER BY created_at, rowid", (room_id, session_id, digest))
+                             "ORDER BY created_at, rowid", (*params, session_id, digest))
     found, used = room_rules.forged_keys(prompt, name, [((row["link"], row["event_id"]), row["text"])
                                                         for row in rows][-SENT_TEXTS:])
     if used:
@@ -404,6 +407,25 @@ def _in(invites: dict[str, Any], room_id: str) -> Optional[dict[str, Any]]:
     """The invite a started room someone else hosts came with, while an agent of this installation's is in it."""
     return next((invite for invite in invites.values()
                  if invite["room_id"] == room_id and invite["status"] == "started" and invite["joined"]), None)
+
+
+def _link_filter(root: Any, room_id: str) -> tuple[str, tuple]:
+    """The SQL that keeps a room's sent posts to the Link its current invite came over (a room id is only unique
+    per home: a re-join over a new Link is another room), with its parameters after the room's id."""
+    try:
+        invites = _invites_store(root).read()["invites"].values()
+    except Exception:  # noqa: BLE001 - every Link's, as before
+        return "", (room_id,)
+    found = [invite for invite in invites if invite["room_id"] == room_id and invite["members"] is not None]
+    current = next((invite for invite in found if invite["status"] == "started" and invite["joined"]), None) or max(
+        found, key=lambda invite: invite.get("started_at") or 0, default=None)
+    return ("", (room_id,)) if current is None else (" AND link=?", (room_id, current["link"]))
+
+
+def _invites_store(root: Any) -> Any:
+    from . import room_invites
+
+    return room_invites.Store(root)
 
 
 def _shown_sent(row: sqlite3.Row) -> dict[str, Any]:

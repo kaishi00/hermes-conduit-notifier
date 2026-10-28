@@ -313,6 +313,12 @@ class Copies:
         with _db_lock:
             _create(self.path)
             try:
+                # Who posted what goes first, so a page whose events are kept is never without it: a page that
+                # failed after them and comes again may find nothing left to ingest.
+                with closing(sqlite3.connect(self.path)) as conn, conn:
+                    conn.execute(_POSTS_TABLE)
+                    conn.executemany("INSERT OR REPLACE INTO conduit_room_copy_posts VALUES (?, ?, ?)",
+                                     [(room_id, each["event_id"], each["by"]) for each in body.get("posts", ())])
                 result = self.hermes.ingest_page(self.path, room_id=room_id, room_name=body["name"],
                                                  members=body["members"], page=body["page"])
                 seq = int(result["stored_seq"])
@@ -321,9 +327,6 @@ class Copies:
                     conn.execute("INSERT OR REPLACE INTO conduit_room_copies VALUES (?, ?, ?, ?, ?, ?)",
                                  (room_id, received.link_id, invite["from"], json.dumps(body["members"]),
                                   json.dumps(body["state"]), float(self.rooms.clock())))
-                    conn.execute(_POSTS_TABLE)
-                    conn.executemany("INSERT OR REPLACE INTO conduit_room_copy_posts VALUES (?, ?, ?)",
-                                     [(room_id, each["event_id"], each["by"]) for each in body.get("posts", ())])
             except self.hermes.replica_error as exc:
                 logger.info("Linked Rooms' copy of room %s didn't take a page (%s)", room_id, exc)
                 seq = _held(self.path, room_id)
@@ -432,10 +435,22 @@ def log(root: Any, room_id: Any, *, since_seq: Any = 0, limit: Any = 100) -> dic
 
 
 def forget(root: Any, room_id: Any) -> dict[str, Any]:
-    """Deletes this installation's copy of a room, and what its owner posted there: a later page starts it
-    again."""
+    """Deletes this installation's copy of a room that's over for it, and what its owner posted there. A room its
+    agents are still in is refused (its posts frame their turns: leave first), and so is one this installation
+    hosts, whose posts are the home's record of who wrote what."""
+    from . import room_invites
+
     if not isinstance(room_id, str) or not room_id:
         raise CopiesError("bad_room", "Name the room")
+    try:
+        state = room_invites.Store(root).read()
+    except room_invites.RoomsError:
+        raise CopiesError("unreadable", "This Hermes can't read its rooms now: try again", 503) from None
+    if room_id in state["drafts"]:
+        raise CopiesError("hosted", "This Hermes hosts that room: it keeps no copy of it", 409)
+    if any(invite["room_id"] == room_id and invite["status"] == "started" and invite["joined"]
+           for invite in state["invites"].values()):
+        raise CopiesError("still_in", "Your agents are still in that room: leave it first", 409)
     file = path(root)
     forgotten = False
     if file.exists():

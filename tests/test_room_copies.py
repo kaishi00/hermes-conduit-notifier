@@ -496,21 +496,33 @@ def test_a_home_without_the_log_reader_sends_nothing(copies, caplog):
     assert sum("can't send copies" in record.message for record in caplog.records) == 1
 
 
-def test_forget_deletes_a_copy(copies):
+def test_forget_deletes_a_copy_once_the_room_is_over(copies):
     room_id = started(copies, links=("link1",))
     copies.furina.pass_once()
 
+    # Still in it: its posts and their framing need it (leave first).
+    with pytest.raises(copies_module.CopiesError) as refused:
+        copies_module.forget(copies.tmp_path / "laifu", room_id)
+    assert (refused.value.code, refused.value.status) == ("still_in", 409)
+    assert copy_of(copies, "laifu", room_id)["last_seq"] == 1
+
+    copies.furina.disbanded(room_id)
+    for _ in range(3):
+        copies.furina.pass_once()
+        copies.laifu.pass_once()
     assert copies_module.forget(copies.tmp_path / "laifu", room_id) == {"room_id": room_id, "forgotten": True}
 
     assert copies_module.copies(copies.tmp_path / "laifu") == []
     assert copies_module.forget(copies.tmp_path / "laifu", room_id) == {"room_id": room_id, "forgotten": False}
-    # The next page has a gap there; its answer says the copy holds nothing, and the home starts it again.
-    say(copies, room_id, "Still there?")
+
+
+def test_forget_refuses_a_room_this_hermes_hosts(copies):
+    room_id = started(copies, links=("link1",))
     copies.furina.pass_once()
-    assert copies_module.copies(copies.tmp_path / "laifu") == []
-    assert _sent(copies, "room.copied")[-1][1]["seq"] == 0
-    copies.furina.pass_once()
-    assert copy_of(copies, "laifu", room_id)["last_seq"] == 2
+
+    with pytest.raises(copies_module.CopiesError) as refused:
+        copies_module.forget(copies.tmp_path / "furina", room_id)
+    assert (refused.value.code, refused.value.status) == ("hosted", 409)
 
 
 def test_the_log_reads_a_page_at_a_time(copies):
@@ -572,6 +584,12 @@ def test_the_routes_list_read_and_forget_copies(copies, client):
     assert read.json()["ok"] and texts(read.json()) == ["Hi"]
     missing = client.get(f"{BASE}/rooms/copies/log", params={"room_id": "conduit-other"})
     assert (missing.status_code, missing.json()["code"]) == (404, "no_copy")
+    refused = client.delete(f"{BASE}/rooms/copies", params={"room_id": room_id})
+    assert (refused.status_code, refused.json()["code"]) == (409, "still_in")
+    copies.furina.disbanded(room_id)
+    for _ in range(3):
+        copies.furina.pass_once()
+        copies.laifu.pass_once()
     gone = client.delete(f"{BASE}/rooms/copies", params={"room_id": room_id})
     assert gone.json() == {"ok": True, "room_id": room_id, "forgotten": True}
     assert client.get(f"{BASE}/rooms/copies").json()["copies"] == []

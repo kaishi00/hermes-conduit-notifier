@@ -16,9 +16,9 @@ from hermes_constants import get_hermes_home
 
 from . import (call_tool, call_watches, calls, chat_on_screen, clarify_loop, client, conduit_first, cron_runs,
                desktop_selected, health_tool, inbox_tool, live_activity, location_tool, maps_tool, notify_tool, phone_tool,
-               present_tool, pulse, reply_sources, review_notices, room_cleanup, room_cutoff, room_identity,
-               room_invites, room_memory, room_planner, room_posts, room_rules, room_wakeups, settings_tool,
-               show_tool, turn_surface, voice_archive)
+               present_tool, pulse, reply_sources, review_notices, room_chats, room_cleanup, room_cutoff,
+               room_identity, room_invites, room_memory, room_planner, room_posts, room_rules, room_tool, room_wakeups,
+               settings_tool, show_tool, turn_surface, voice_archive)
 from .session_titles import bot_name as _bot_name, title as _session_title, titled as _titled
 from .client import enqueue
 from .events import approval_decision, clarification_text, event_id, is_silent_response, plain_text, push_event
@@ -131,6 +131,9 @@ def register(ctx: Any) -> None:
     # changes the phone applies (the user approves them there), and the skill.
     phone_tool.register(ctx, is_child=_is_child, profile=lambda: _profile,
                         skill_path=Path(__file__).resolve().parent / "skills" / phone_tool.SKILL_NAME / "SKILL.md")
+    # The user's rooms with other people (Linked Rooms), read for them in
+    # their private chats; never in a room turn.
+    room_tool.register(ctx, is_child=_is_child)
     try:
         ctx.register_hook("post_approval_response", _post_approval_response)
     except Exception:  # noqa: BLE001
@@ -794,9 +797,19 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
         _voice_persona_note(kwargs.get("conversation_history")),
         # Subagents can't use the shared data (each tool refuses them).
         None if child else conduit_first.note(),
+        # A room's private chat is told which room it's about (room_chats).
+        None if child else _room_chat_note(session_id),
     ]
     context = "\n\n".join(note for note in notes if note)
     return {"context": context} if context else None
+
+
+def _room_chat_note(session_id: str) -> str | None:
+    try:
+        return room_chats.note(session_id, get_hermes_home())
+    except Exception:  # noqa: BLE001 — a hook must never break the turn
+        logger.debug("conduit_push: room chat note failed", exc_info=True)
+        return None
 
 
 def _transform_tool_result(**kwargs: Any) -> str | None:
@@ -890,6 +903,11 @@ def _room_framing(session_id: str, platform: Any = None, prompt: Any = None) -> 
     except Exception:  # noqa: BLE001 — the tools stay blocked; the careful defaults frame the turn
         choices = room_rules.RoomChoices()
     people, posts, unread = None, None, False
+    if turn.side == "member" and not turn.room_id:
+        # Hermes titles a member's session with its room in a second write: until then who's who can't be read.
+        unread = True
+        _warn_room_once("title", "conduit_push: room session %s isn't titled with its room yet; its framing says "
+                                 "the user's lines may be anyone's", session_id, exc_info=False)
     if turn.room_id and home is not None:
         root = room_identity.root_home(home)
         try:
