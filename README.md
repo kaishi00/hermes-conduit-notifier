@@ -3000,7 +3000,7 @@ relay key. The host still opens no inbound route.
   root, so the relay can neither read nor forge one. The Watch speaks each
   engine's own events, as the phone does, and its tools and jobs go through
   the grant's lookups. The wire format, keys and control messages are
-  described where they're built (`dashboard/plugin_api.py`, "Watch audio").
+  described where they're built (`dashboard/api/watch_audio.py`).
 - **GPT-Live** runs WebRTC in a small helper process
   (`dashboard/watch_audio_helper.py`) under a Python that has `aiortc`. The
   plugin does the SDP exchange with the Codex sign-in itself, so the

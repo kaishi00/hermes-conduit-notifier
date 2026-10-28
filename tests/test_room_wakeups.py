@@ -506,5 +506,5 @@ def test_the_dashboard_routes_guard_it_as_they_load(driver, monkeypatch):
     try:
         assert driver.HostedRoomRuntime.wakeup.__wrapped__ is own
     finally:
-        module._room_wakeups_module.uninstall()
+        module.rooms._room_wakeups_module.uninstall()
     assert driver.HostedRoomRuntime.wakeup is own

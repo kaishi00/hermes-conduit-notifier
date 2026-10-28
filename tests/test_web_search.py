@@ -36,32 +36,32 @@ def test_search_returns_titles_urls_and_clipped_snippets():
             {"title": "Long", "url": "https://example.com/l", "description": "x" * 900},
         ])
 
-    result = api.run_web_search("  weather   in Toronto ", 5, search=search)
+    result = api.gemini_qwen_live.run_web_search("  weather   in Toronto ", 5, search=search)
 
     assert calls == [("weather in Toronto", 5)]
     assert result["query"] == "weather in Toronto"
     assert result["results"][0] == {"title": "Weather", "url": "https://example.com/w", "snippet": "Sunny and 21°C"}
     assert [r["url"] for r in result["results"]] == ["https://example.com/w", "https://example.com/l"]
-    assert len(result["results"][1]["snippet"]) == api.SEARCH_MAX_SNIPPET_CHARS
+    assert len(result["results"][1]["snippet"]) == api.gemini_qwen_live.SEARCH_MAX_SNIPPET_CHARS
 
 
 def test_search_clamps_the_limit():
     seen = []
-    api.run_web_search("q", 50, search=lambda q, n: seen.append(n) or hermes_reply())
-    api.run_web_search("q", "nope", search=lambda q, n: seen.append(n) or hermes_reply())
-    assert seen == [api.SEARCH_MAX_RESULTS, 3]
+    api.gemini_qwen_live.run_web_search("q", 50, search=lambda q, n: seen.append(n) or hermes_reply())
+    api.gemini_qwen_live.run_web_search("q", "nope", search=lambda q, n: seen.append(n) or hermes_reply())
+    assert seen == [api.gemini_qwen_live.SEARCH_MAX_RESULTS, 3]
 
 
-@pytest.mark.parametrize("query", [None, "", "   ", "x" * (api.SEARCH_MAX_QUERY_CHARS + 1)])
+@pytest.mark.parametrize("query", [None, "", "   ", "x" * (api.gemini_qwen_live.SEARCH_MAX_QUERY_CHARS + 1)])
 def test_search_rejects_empty_or_huge_queries(query):
-    with pytest.raises(api.TokenError) as err:
-        api.run_web_search(query, search=lambda q, n: pytest.fail("must not search"))
+    with pytest.raises(api.core.TokenError) as err:
+        api.gemini_qwen_live.run_web_search(query, search=lambda q, n: pytest.fail("must not search"))
     assert err.value.status == 400
 
 
 def test_search_passes_hermes_error_through():
-    with pytest.raises(api.TokenError) as err:
-        api.run_web_search("q", search=lambda q, n: hermes_reply(success=False, error="No web search provider configured."))
+    with pytest.raises(api.core.TokenError) as err:
+        api.gemini_qwen_live.run_web_search("q", search=lambda q, n: hermes_reply(success=False, error="No web search provider configured."))
     assert err.value.status == 502
     assert "No web search provider configured." in str(err.value)
 
@@ -70,26 +70,26 @@ def test_search_without_the_hermes_web_tool_is_unsupported():
     def missing(query, limit):
         raise ModuleNotFoundError("No module named 'tools'", name="tools")
 
-    with pytest.raises(api.TokenError) as err:
-        api.run_web_search("q", search=missing)
+    with pytest.raises(api.core.TokenError) as err:
+        api.gemini_qwen_live.run_web_search("q", search=missing)
     assert err.value.status == 503
 
 
 def test_search_is_rate_limited_per_profile(monkeypatch):
-    monkeypatch.setattr(api, "_search_limiter", api._MintLimiter(1, 60.0, message="slow down"))
-    api.run_web_search("q", search=lambda q, n: hermes_reply(), limiter_key="a")
-    api.run_web_search("q", search=lambda q, n: hermes_reply(), limiter_key="b")
-    with pytest.raises(api.TokenError) as err:
-        api.run_web_search("q", search=lambda q, n: hermes_reply(), limiter_key="a")
+    monkeypatch.setattr(api.gemini_qwen_live, "_search_limiter", api.core._MintLimiter(1, 60.0, message="slow down"))
+    api.gemini_qwen_live.run_web_search("q", search=lambda q, n: hermes_reply(), limiter_key="a")
+    api.gemini_qwen_live.run_web_search("q", search=lambda q, n: hermes_reply(), limiter_key="b")
+    with pytest.raises(api.core.TokenError) as err:
+        api.gemini_qwen_live.run_web_search("q", search=lambda q, n: hermes_reply(), limiter_key="a")
     assert err.value.status == 429
     assert str(err.value) == "slow down"
 
 
 @pytest.fixture
 def client(monkeypatch):
-    monkeypatch.setattr(api, "_hermes_web_search", lambda q, n: hermes_reply([{"title": "T", "url": "https://e.com", "description": "d"}]))
-    monkeypatch.setattr(api, "_hermes_web_search_status", lambda: {"available": True, "backend": "searxng"})
-    monkeypatch.setattr(api, "_search_limiter", api._MintLimiter(api.SEARCH_LIMIT, api.SEARCH_WINDOW_S))
+    monkeypatch.setattr(api.gemini_qwen_live, "_hermes_web_search", lambda q, n: hermes_reply([{"title": "T", "url": "https://e.com", "description": "d"}]))
+    monkeypatch.setattr(api.gemini_qwen_live, "_hermes_web_search_status", lambda: {"available": True, "backend": "searxng"})
+    monkeypatch.setattr(api.gemini_qwen_live, "_search_limiter", api.core._MintLimiter(api.gemini_qwen_live.SEARCH_LIMIT, api.gemini_qwen_live.SEARCH_WINDOW_S))
     app = FastAPI()
     app.include_router(api.router, prefix="/api/plugins/conduit_push")
     return TestClient(app)
@@ -113,15 +113,15 @@ def test_route_reports_a_bad_query(client):
 
 def test_search_survives_an_overflowing_limit():
     seen = []
-    api.run_web_search("q", float("inf"), search=lambda q, n: seen.append(n) or hermes_reply())
+    api.gemini_qwen_live.run_web_search("q", float("inf"), search=lambda q, n: seen.append(n) or hermes_reply())
     assert seen == [3]
 
 
 def test_search_keeps_only_web_urls():
-    result = api.run_web_search("q", 5, search=lambda q, n: hermes_reply([
+    result = api.gemini_qwen_live.run_web_search("q", 5, search=lambda q, n: hermes_reply([
         {"title": "js", "url": "javascript:alert(1)"},
         {"title": "file", "url": "file:///etc/passwd"},
-        {"title": "long", "url": "https://e.com/" + "a" * api.SEARCH_MAX_URL_CHARS},
+        {"title": "long", "url": "https://e.com/" + "a" * api.gemini_qwen_live.SEARCH_MAX_URL_CHARS},
         {"title": "ok", "url": "HTTPS://e.com/ok"},
         {"title": "padded", "url": "  https://e.com/p "},
     ]))
@@ -138,8 +138,8 @@ def test_search_keeps_only_web_urls():
     "x" * 5_000_000,
 ])
 def test_backend_error_text_never_reaches_the_client(error):
-    with pytest.raises(api.TokenError) as err:
-        api.run_web_search("q", search=lambda q, n: hermes_reply(success=False, error=error))
+    with pytest.raises(api.core.TokenError) as err:
+        api.gemini_qwen_live.run_web_search("q", search=lambda q, n: hermes_reply(success=False, error=error))
     assert str(err.value) == "The web search backend failed; the Hermes log has the details"
 
 
@@ -148,22 +148,22 @@ def test_backend_error_text_never_reaches_the_client(error):
     "FIRECRAWL_API_KEY is not set",
 ])
 def test_hermes_configuration_messages_reach_the_client(error):
-    with pytest.raises(api.TokenError) as err:
-        api.run_web_search("q", search=lambda q, n: hermes_reply(success=False, error=error))
+    with pytest.raises(api.core.TokenError) as err:
+        api.gemini_qwen_live.run_web_search("q", search=lambda q, n: hermes_reply(success=False, error=error))
     assert str(err.value) == error
 
 
 def test_search_rejects_a_huge_query_before_normalizing():
-    with pytest.raises(api.TokenError) as err:
-        api.run_web_search(" " * (api.SEARCH_MAX_QUERY_CHARS * 4 + 1), search=lambda q, n: pytest.fail("must not search"))
+    with pytest.raises(api.core.TokenError) as err:
+        api.gemini_qwen_live.run_web_search(" " * (api.gemini_qwen_live.SEARCH_MAX_QUERY_CHARS * 4 + 1), search=lambda q, n: pytest.fail("must not search"))
     assert err.value.status == 400
 
 
 def test_route_times_out_a_slow_backend(client, monkeypatch):
     import time
 
-    monkeypatch.setattr(api, "SEARCH_TIMEOUT_S", 0.05)
-    monkeypatch.setattr(api, "_hermes_web_search", lambda q, n: time.sleep(0.3) or hermes_reply())
+    monkeypatch.setattr(api.gemini_qwen_live, "SEARCH_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(api.gemini_qwen_live, "_hermes_web_search", lambda q, n: time.sleep(0.3) or hermes_reply())
     response = client.post("/api/plugins/conduit_push/web-search", json={"query": "slow"})
     assert response.status_code == 504
     assert response.headers["cache-control"] == "no-store"
@@ -174,7 +174,7 @@ def test_a_broken_import_inside_hermes_is_not_reported_as_missing():
         raise ModuleNotFoundError("No module named 'ruamel'", name="ruamel")
 
     with pytest.raises(ModuleNotFoundError):
-        api.run_web_search("q", search=broken)
+        api.gemini_qwen_live.run_web_search("q", search=broken)
 
 
 def test_route_refuses_an_oversized_body(client):

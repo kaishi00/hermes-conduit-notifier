@@ -26,7 +26,7 @@ def _load_plugin_api():
 
 api = _load_plugin_api()
 # The real transport, before the openai fixture stubs it.
-REAL_POST_SDP = api._post_sdp
+REAL_POST_SDP = api.gpt_live._post_sdp
 
 
 def _jwt(claims):
@@ -79,7 +79,7 @@ def hermes(monkeypatch):
     monkeypatch.setitem(sys.modules, "hermes_cli.web_server_profiles", profiles)
     monkeypatch.setitem(sys.modules, "tools", types.ModuleType("tools"))
     monkeypatch.setitem(sys.modules, "tools.voice_live", None)
-    monkeypatch.setattr(api, "_gpt_live_limiter", api._MintLimiter(api.GPT_LIVE_LIMIT, api.GPT_LIVE_WINDOW_S))
+    monkeypatch.setattr(api.gpt_live, "_gpt_live_limiter", api.core._MintLimiter(api.gpt_live.GPT_LIVE_LIMIT, api.gpt_live.GPT_LIVE_WINDOW_S))
     return state
 
 
@@ -92,7 +92,7 @@ def openai(monkeypatch):
         calls.append((url, headers, body))
         return reply["status"], reply["answer"], reply["location"]
 
-    monkeypatch.setattr(api, "_post_sdp", post)
+    monkeypatch.setattr(api.gpt_live, "_post_sdp", post)
     return types.SimpleNamespace(calls=calls, reply=reply)
 
 
@@ -112,7 +112,7 @@ def test_session_uses_the_codex_sign_in_and_keeps_it_on_the_host(client, openai)
         "session": {"id": "rtc_abc123"}, "transport": {"type": "webrtc", "sdp": ANSWER},
     }
     url, headers, body = openai.calls[0]
-    assert url == api.GPT_LIVE_URL
+    assert url == api.gpt_live.GPT_LIVE_URL
     assert headers == {"Authorization": f"Bearer {GOOD_TOKEN}", "ChatGPT-Account-Id": "acct-1",
                        "OpenAI-Alpha": "quicksilver=v2"}
     assert body["sdp"] == OFFER
@@ -128,13 +128,13 @@ def test_session_reads_the_profile_config_and_seeds_history(client, hermes, open
                                             "subscription_voice": "ember", "instructions": "Speak French.",
                                             "auth": "api"}}}
     history = [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": f"{i}"}]}
-               for i in range(api.GPT_LIVE_MAX_HISTORY_ITEMS + 5)]
+               for i in range(api.gpt_live.GPT_LIVE_MAX_HISTORY_ITEMS + 5)]
     client.post(f"{BASE}/gpt-live/session?profile=coder", json={"sdp": OFFER, "history": history})
     session = openai.calls[0][2]["session"]
     assert session["model"] == "gpt-live-2-codex"
     assert session["audio"] == {"output": {"voice": "ember"}}
-    assert session["instructions"].endswith("\n\nSpeak French.\n\n" + api.GPT_LIVE_WAIT_FOR_USER)
-    assert session["initial_items"] == history[-api.GPT_LIVE_MAX_HISTORY_ITEMS:]
+    assert session["instructions"].endswith("\n\nSpeak French.\n\n" + api.gpt_live.GPT_LIVE_WAIT_FOR_USER)
+    assert session["initial_items"] == history[-api.gpt_live.GPT_LIVE_MAX_HISTORY_ITEMS:]
     assert hermes.entered == ["coder"]
 
 
@@ -152,24 +152,24 @@ def test_session_briefing_joins_the_instructions_instead_of_context_appends(clie
     hermes.config = {"voice": {"gpt_live": {"instructions": "Speak French."}}}
     body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "briefing": "  [Conduit rules] "}).json()
     assert body["briefing_applied"] is True
-    assert openai.calls[0][2]["session"]["instructions"].endswith("Speak French.\n\n[Conduit rules]\n\n" + api.GPT_LIVE_WAIT_FOR_USER)
+    assert openai.calls[0][2]["session"]["instructions"].endswith("Speak French.\n\n[Conduit rules]\n\n" + api.gpt_live.GPT_LIVE_WAIT_FOR_USER)
 
 
 def test_session_greets_first_only_when_conduit_asks(client, hermes, openai):
     hermes.config = {"voice": {"gpt_live": {"instructions": "Speak French."}}}
     body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER}).json()
     assert body["greeting_applied"] is False
-    assert openai.calls[0][2]["session"]["instructions"].endswith(api.GPT_LIVE_WAIT_FOR_USER)
+    assert openai.calls[0][2]["session"]["instructions"].endswith(api.gpt_live.GPT_LIVE_WAIT_FOR_USER)
 
     body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "greeting": ""}).json()
     assert body["greeting_applied"] is True
     instructions = openai.calls[1][2]["session"]["instructions"]
-    assert api.GPT_LIVE_WAIT_FOR_USER not in instructions
-    assert instructions.endswith(api._greet_first("")) and "Say:" not in instructions
+    assert api.gpt_live.GPT_LIVE_WAIT_FOR_USER not in instructions
+    assert instructions.endswith(api.gpt_live._greet_first("")) and "Say:" not in instructions
 
     client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "greeting": ' Hey Neal,\n I\'m "here". '})
     instructions = openai.calls[2][2]["session"]["instructions"]
-    assert instructions.endswith(api._greet_first("Hey Neal, I'm 'here'."))
+    assert instructions.endswith(api.gpt_live._greet_first("Hey Neal, I'm 'here'."))
     assert 'Say: "Hey Neal, I\'m \'here\'."' in instructions, "the user's text stays on one line, inside the quotes"
 
 
@@ -178,24 +178,24 @@ def test_session_opens_a_call_hermes_placed_by_speaking_first(client, hermes, op
                        json={"sdp": OFFER, "briefing": "About this call", "call_opening": True}).json()
     assert body["greeting_applied"] is True, "Conduit must not send its own opening turn as well"
     instructions = openai.calls[0][2]["session"]["instructions"]
-    assert instructions.endswith("About this call\n\n" + api.GPT_LIVE_CALL_OPENING)
-    assert api.GPT_LIVE_WAIT_FOR_USER not in instructions
+    assert instructions.endswith("About this call\n\n" + api.gpt_live.GPT_LIVE_CALL_OPENING)
+    assert api.gpt_live.GPT_LIVE_WAIT_FOR_USER not in instructions
 
     # It wins over a greeting, and false keeps the usual policy.
     assert client.post(f"{BASE}/gpt-live/session",
                        json={"sdp": OFFER, "briefing": "About this call", "greeting": "Hi", "call_opening": True}).status_code == 200
-    assert openai.calls[1][2]["session"]["instructions"].endswith(api.GPT_LIVE_CALL_OPENING)
+    assert openai.calls[1][2]["session"]["instructions"].endswith(api.gpt_live.GPT_LIVE_CALL_OPENING)
     body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "call_opening": False}).json()
     assert body["greeting_applied"] is False
-    assert openai.calls[2][2]["session"]["instructions"].endswith(api.GPT_LIVE_WAIT_FOR_USER)
+    assert openai.calls[2][2]["session"]["instructions"].endswith(api.gpt_live.GPT_LIVE_WAIT_FOR_USER)
 
 
 def test_call_opening_without_a_briefing_never_guesses_why(client, hermes, openai):
     body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "call_opening": True}).json()
     assert body["greeting_applied"] is True
     instructions = openai.calls[0][2]["session"]["instructions"]
-    assert instructions.endswith(api.GPT_LIVE_CALL_OPENING_UNBRIEFED)
-    assert api.GPT_LIVE_CALL_OPENING not in instructions
+    assert instructions.endswith(api.gpt_live.GPT_LIVE_CALL_OPENING_UNBRIEFED)
+    assert api.gpt_live.GPT_LIVE_CALL_OPENING not in instructions
 
 
 @pytest.mark.parametrize("call_opening", [1, "true", []])
@@ -205,10 +205,10 @@ def test_session_rejects_a_bad_call_opening(client, openai, call_opening):
 
 
 def test_greeting_control_characters_become_spaces():
-    assert api._clean_greeting("Hi\x00there\u200b!") == "Hi there !"
+    assert api.gpt_live._clean_greeting("Hi\x00there\u200b!") == "Hi there !"
 
 
-@pytest.mark.parametrize("greeting", [5, True, False, "x" * (api.GPT_LIVE_MAX_GREETING_CHARS + 1)])
+@pytest.mark.parametrize("greeting", [5, True, False, "x" * (api.gpt_live.GPT_LIVE_MAX_GREETING_CHARS + 1)])
 def test_session_rejects_a_bad_greeting(client, openai, greeting):
     assert client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "greeting": greeting}).status_code == 400
     assert openai.calls == []
@@ -223,7 +223,7 @@ def test_session_takes_a_briefing_with_a_long_memory(client, openai):
     assert body["briefing_applied"] is True
 
 
-@pytest.mark.parametrize("briefing", [5, "x" * (api.GPT_LIVE_MAX_BRIEFING_CHARS + 1), "😀" * (api.GPT_LIVE_MAX_BRIEFING_CHARS + 1)])
+@pytest.mark.parametrize("briefing", [5, "x" * (api.gpt_live.GPT_LIVE_MAX_BRIEFING_CHARS + 1), "😀" * (api.gpt_live.GPT_LIVE_MAX_BRIEFING_CHARS + 1)])
 def test_session_rejects_a_bad_briefing(client, openai, briefing):
     assert client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "briefing": briefing}).status_code == 400
     assert openai.calls == []
@@ -232,7 +232,7 @@ def test_session_rejects_a_bad_briefing(client, openai, briefing):
 def test_a_multibyte_briefing_at_the_limit_fits_the_request_body(client, openai):
     """The body limit is in bytes and the briefing limit in characters: one at its
     limit in 4-byte characters still reaches the briefing check, not a 413."""
-    briefing = "😀" * api.GPT_LIVE_MAX_BRIEFING_CHARS
+    briefing = "😀" * api.gpt_live.GPT_LIVE_MAX_BRIEFING_CHARS
     assert client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "briefing": briefing}).status_code == 200
 
 
@@ -255,7 +255,7 @@ def test_bad_requests_never_reach_openai(client, openai, body, status):
 
 
 def test_oversized_body_is_refused(client, openai):
-    response = client.post(f"{BASE}/gpt-live/session", json={"sdp": "v=0" + "x" * api.GPT_LIVE_MAX_BODY_BYTES})
+    response = client.post(f"{BASE}/gpt-live/session", json={"sdp": "v=0" + "x" * api.gpt_live.GPT_LIVE_MAX_BODY_BYTES})
     assert response.status_code == 413
     assert openai.calls == []
 
@@ -292,8 +292,8 @@ def test_status_checks_credentials_without_refreshing(client, hermes):
     assert body == {"ok": True, "auth": "subscription", "model": "gpt-live-1-codex", "voice": "cove",
                     "source": "plugin", "available": True, "reason": None,
                     "api": {"auth": "api", "model": "gpt-live-1", "voice": "marin", "enabled": False,
-                            "daily_limit": api.GPT_LIVE_API_DAILY_CALLS, "available": False,
-                            "reason": api.GPT_LIVE_API_OFF}}
+                            "daily_limit": api.gpt_live.GPT_LIVE_API_DAILY_CALLS, "available": False,
+                            "reason": api.gpt_live.GPT_LIVE_API_OFF}}
     assert "conduit_api_billing" in body["api"]["reason"]
     assert hermes.refresh == [False]
 
@@ -303,7 +303,7 @@ def test_status_checks_credentials_without_refreshing(client, hermes):
 
 
 def test_session_rate_limit(client, openai):
-    for _ in range(api.GPT_LIVE_LIMIT):
+    for _ in range(api.gpt_live.GPT_LIVE_LIMIT):
         assert client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER}).status_code == 200
     assert client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER}).status_code == 429
 
@@ -341,7 +341,7 @@ def test_hands_off_to_hermes_when_it_ships_the_exchange(client, hermes, openai, 
                     "session": {"id": "rtc_up"}, "transport": {"type": "webrtc", "sdp": ANSWER}}
     # Subscription is forced even when the desktop's own setting says api.
     assert calls[0] == ("build", [{"type": "message"}], {"auth": "subscription", "subscription_voice": "ember",
-                                                             "instructions": api.GPT_LIVE_WAIT_FOR_USER})
+                                                             "instructions": api.gpt_live.GPT_LIVE_WAIT_FOR_USER})
     assert calls[1] == ("exchange", OFFER, {"model": "upstream-model"})
     assert openai.calls == []
     calls.clear()
@@ -369,13 +369,13 @@ def test_hermes_path_reports_the_greeting_only_when_its_config_carries_it(client
     _upstream(monkeypatch, calls, built=lambda live: {"session": {"instructions": live["instructions"]}})
     body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "greeting": "Hi"}).json()
     assert body["greeting_applied"] is True
-    assert calls[0][2]["instructions"].endswith(api._greet_first("Hi"))
+    assert calls[0][2]["instructions"].endswith(api.gpt_live._greet_first("Hi"))
     body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER}).json()
     assert body["greeting_applied"] is False
     calls.clear()
     body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "briefing": "About this call", "call_opening": True}).json()
     assert body["greeting_applied"] is True
-    assert calls[0][0] == "build" and calls[0][2]["instructions"].endswith(api.GPT_LIVE_CALL_OPENING)
+    assert calls[0][0] == "build" and calls[0][2]["instructions"].endswith(api.gpt_live.GPT_LIVE_CALL_OPENING)
 
 
 @pytest.mark.parametrize("audio", ["loud", {"output": "x"}, {"output": {"voice": "bad voice!"}}])
@@ -407,8 +407,8 @@ def test_a_differently_shaped_hermes_exchange_is_not_used(client, openai, monkey
 
 def test_persona_matches_hermes(monkeypatch):
     # Kept in step with tools/voice_live.py so the plugin path sounds like Hermes' own.
-    assert api.GPT_LIVE_PERSONA.startswith("You are Hermes, a calm and friendly voice assistant.")
-    assert "Delegation policy:" in api.GPT_LIVE_PERSONA
+    assert api.gpt_live.GPT_LIVE_PERSONA.startswith("You are Hermes, a calm and friendly voice assistant.")
+    assert "Delegation policy:" in api.gpt_live.GPT_LIVE_PERSONA
 
 
 def test_whitespace_config_falls_back_to_the_defaults(client, hermes, openai):
@@ -427,10 +427,10 @@ def test_malformed_config_uses_the_defaults(client, hermes, config):
 
 def test_a_stuck_exchange_is_a_504(client, monkeypatch):
     import time
-    monkeypatch.setattr(api, "GPT_LIVE_REQUEST_TIMEOUT_S", 0.05)
-    monkeypatch.setattr(api, "_plugin_gpt_live_session", lambda *a, **k: time.sleep(0.5))
+    monkeypatch.setattr(api.gpt_live, "GPT_LIVE_REQUEST_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(api.gpt_live, "_plugin_gpt_live_session", lambda *a, **k: time.sleep(0.5))
     assert client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER}).status_code == 504
-    monkeypatch.setattr(api, "gpt_live_status", lambda: time.sleep(0.5))
+    monkeypatch.setattr(api.gpt_live, "gpt_live_status", lambda: time.sleep(0.5))
     assert client.get(f"{BASE}/gpt-live/status").status_code == 504
 
 
@@ -452,13 +452,13 @@ def test_oversized_answer_is_refused():
         def open(self, request, timeout=None):
             return Big()
 
-    original = api._opener
-    api._opener = Opener()
+    original = api.gemini_qwen_live._opener
+    api.gemini_qwen_live._opener = Opener()
     try:
-        with pytest.raises(api.TokenError) as raised:
-            api._post_sdp(api.GPT_LIVE_URL, {}, {"sdp": OFFER})
+        with pytest.raises(api.core.TokenError) as raised:
+            api.gpt_live._post_sdp(api.gpt_live.GPT_LIVE_URL, {}, {"sdp": OFFER})
     finally:
-        api._opener = original
+        api.gemini_qwen_live._opener = original
     assert raised.value.status == 502
 
 
@@ -500,8 +500,8 @@ def test_a_header_injecting_token_is_refused(client, hermes, openai):
 
 
 def test_the_exchange_never_follows_redirects():
-    request = api.urllib.request.Request("https://example.com")
-    assert api._NoRedirect().redirect_request(request, None, 302, "Found", {}, "https://evil.example") is None
+    request = api.gpt_live.urllib.request.Request("https://example.com")
+    assert api.gemini_qwen_live._NoRedirect().redirect_request(request, None, 302, "Found", {}, "https://evil.example") is None
 
 
 @pytest.mark.parametrize("sdp, call_id", [("not-an-sdp", "rtc_up"), (ANSWER, "../../evil"), (ANSWER, "https://evil.example/x")])
@@ -548,9 +548,9 @@ def test_an_unencodable_header_is_a_502_without_the_value(monkeypatch):
         def open(self, request, timeout=None):
             raise UnicodeEncodeError("latin-1", "SECRET-DETAIL", 0, 1, "nope")
 
-    monkeypatch.setattr(api, "_opener", Boom())
-    with pytest.raises(api.TokenError) as raised:
-        api._post_sdp(api.GPT_LIVE_URL, {}, {"sdp": OFFER})
+    monkeypatch.setattr(api.gemini_qwen_live, "_opener", Boom())
+    with pytest.raises(api.core.TokenError) as raised:
+        api.gpt_live._post_sdp(api.gpt_live.GPT_LIVE_URL, {}, {"sdp": OFFER})
     assert raised.value.status == 502
     assert "No API fallback" in str(raised.value) and "SECRET-DETAIL" not in str(raised.value)
 
@@ -567,8 +567,8 @@ def api_key(hermes, openai, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-live-test")
     hermes.config = {"voice": {"gpt_live": {"conduit_api_billing": True}}}
     openai.reply.update(status=200, answer=json.dumps(API_ANSWER), location="")
-    monkeypatch.setattr(api, "_gpt_live_api_daily", api._MintLimiter(api.GPT_LIVE_API_DAILY_CALLS, api.GPT_LIVE_DAY_S,
-                                                               message=api._gpt_live_api_daily.message))
+    monkeypatch.setattr(api.gpt_live, "_gpt_live_api_daily", api.core._MintLimiter(api.gpt_live.GPT_LIVE_API_DAILY_CALLS, api.gpt_live.GPT_LIVE_DAY_S,
+                                                               message=api.gpt_live._gpt_live_api_daily.message))
     return hermes
 
 
@@ -576,7 +576,7 @@ def test_a_request_without_billing_is_never_billed_to_the_api_key(client, api_ke
     openai.reply.update(status=201, answer=ANSWER, location="/v1/realtime/calls/rtc_abc123")
     response = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER})
     assert response.json()["auth"] == "subscription"
-    assert openai.calls[0][0] == api.GPT_LIVE_URL
+    assert openai.calls[0][0] == api.gpt_live.GPT_LIVE_URL
 
 
 def test_api_billing_uses_the_public_live_api_on_the_hosts_key(client, api_key, openai):
@@ -658,8 +658,8 @@ def test_api_billing_rejects_a_bad_answer(client, api_key, openai, status, answe
 
 def test_api_transport_failures_name_the_api_path(client, api_key, monkeypatch):
     def post(url, headers, body):
-        raise api.TokenError(502, "GPT-Live connection failed. " + api.GPT_LIVE_NO_FALLBACK)
-    monkeypatch.setattr(api, "_post_sdp", post)
+        raise api.core.TokenError(502, "GPT-Live connection failed. " + api.gpt_live.GPT_LIVE_NO_FALLBACK)
+    monkeypatch.setattr(api.gpt_live, "_post_sdp", post)
     detail = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "billing": "api"}).json()["detail"]
     assert "No API fallback" not in detail and "subscription was not used" in detail
 
@@ -690,7 +690,7 @@ def test_status_reports_the_api_path_on_its_own(client, api_key):
     body = client.get(f"{BASE}/gpt-live/status").json()
     assert body["auth"] == "subscription" and body["available"] is True
     assert body["api"] == {"auth": "api", "model": "gpt-live-1", "voice": "marin", "enabled": True,
-                           "daily_limit": api.GPT_LIVE_API_DAILY_CALLS, "available": True, "reason": None,
+                           "daily_limit": api.gpt_live.GPT_LIVE_API_DAILY_CALLS, "available": True, "reason": None,
                            "host": "api.openai.com"}
     assert "sk-live-test" not in json.dumps(body)
 
@@ -772,7 +772,7 @@ def test_a_broken_hermes_key_lookup_is_a_failure_not_the_environment(client, api
 
 def test_release_gives_back_the_failed_calls_own_slot():
     now = [0.0]
-    limiter = api._MintLimiter(2, 100.0, clock=lambda: now[0], message="capped")
+    limiter = api.core._MintLimiter(2, 100.0, clock=lambda: now[0], message="capped")
     early = limiter.acquire("p")
     now[0] = 90.0
     limiter.acquire("p")
@@ -780,13 +780,13 @@ def test_release_gives_back_the_failed_calls_own_slot():
     # The later call's slot is still counted: it keeps the window busy until 190, not 100.
     now[0] = 120.0
     limiter.acquire("p")
-    with pytest.raises(api.TokenError):
+    with pytest.raises(api.core.TokenError):
         limiter.acquire("p")
 
 
 def test_a_zero_limit_leaves_no_empty_bucket_behind():
-    limiter = api._MintLimiter(2, 100.0, clock=lambda: 0.0, message="capped")
-    with pytest.raises(api.TokenError):
+    limiter = api.core._MintLimiter(2, 100.0, clock=lambda: 0.0, message="capped")
+    with pytest.raises(api.core.TokenError):
         limiter.acquire("p", limit=0)
     limiter.acquire("other")
     only = limiter.acquire("p")
@@ -833,7 +833,7 @@ def _read_times_out(size=-1):
 
 
 def _chunked_body_cut_off(size=-1):
-    raise api.http.client.IncompleteRead(b"", 10)
+    raise api.gpt_live.http.client.IncompleteRead(b"", 10)
 
 
 @pytest.mark.parametrize("read", [_oversized, _read_times_out, _chunked_body_cut_off])
@@ -844,12 +844,12 @@ def test_an_unreadable_answer_after_a_2xx_keeps_its_daily_slot(client, api_key, 
         def open(self, request, timeout=None):
             return _Answered200(read)
 
-    monkeypatch.setattr(api, "_opener", Opener())
-    monkeypatch.setattr(api, "_post_sdp", REAL_POST_SDP)
+    monkeypatch.setattr(api.gemini_qwen_live, "_opener", Opener())
+    monkeypatch.setattr(api.gpt_live, "_post_sdp", REAL_POST_SDP)
     first = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "billing": "api"})
     assert first.status_code == 502
     assert "subscription was not used" in first.json()["detail"]
-    monkeypatch.setattr(api, "_post_sdp", lambda url, headers, body: (200, json.dumps(API_ANSWER), ""))
+    monkeypatch.setattr(api.gpt_live, "_post_sdp", lambda url, headers, body: (200, json.dumps(API_ANSWER), ""))
     # OpenAI answered 2xx before the body failed, so it may have started (and billed) that session.
     assert client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "billing": "api"}).status_code == 429
 
@@ -859,12 +859,12 @@ def test_a_connection_that_never_answers_gives_its_daily_slot_back(client, api_k
 
     class Opener:
         def open(self, request, timeout=None):
-            raise api.urllib.error.URLError("refused")
+            raise api.gpt_live.urllib.error.URLError("refused")
 
-    monkeypatch.setattr(api, "_opener", Opener())
-    monkeypatch.setattr(api, "_post_sdp", REAL_POST_SDP)
+    monkeypatch.setattr(api.gemini_qwen_live, "_opener", Opener())
+    monkeypatch.setattr(api.gpt_live, "_post_sdp", REAL_POST_SDP)
     assert client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "billing": "api"}).status_code == 502
-    monkeypatch.setattr(api, "_post_sdp", lambda url, headers, body: (200, json.dumps(API_ANSWER), ""))
+    monkeypatch.setattr(api.gpt_live, "_post_sdp", lambda url, headers, body: (200, json.dumps(API_ANSWER), ""))
     assert client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "billing": "api"}).status_code == 200
 
 
@@ -879,7 +879,7 @@ def test_the_shared_key_never_goes_to_a_non_standard_port(client, api_key, opena
 def test_a_failing_env_lookup_is_a_reason_not_a_500(client, api_key, openai, monkeypatch):
     def boom(_key):
         raise RuntimeError("unscoped secret")
-    monkeypatch.setattr(api, "_env_value", boom)
+    monkeypatch.setattr(api.gemini_qwen_live, "_env_value", boom)
     status = client.get(f"{BASE}/gpt-live/status")
     assert status.status_code == 200 and status.json()["api"]["available"] is False
     assert client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "billing": "api"}).status_code == 503

@@ -553,8 +553,8 @@ def test_the_list_says_which_agents_of_yours_are_in_it(copies):
 
 @pytest.fixture
 def client(copies, monkeypatch):
-    monkeypatch.setattr(api, "_room_links_root", lambda: copies.tmp_path / "laifu")
-    monkeypatch.setattr(api, "_start_room_handlers", lambda root: None)
+    monkeypatch.setattr(api.linked_rooms, "_room_links_root", lambda: copies.tmp_path / "laifu")
+    monkeypatch.setattr(api.linked_rooms, "_start_room_handlers", lambda root: None)
     app = FastAPI()
     app.include_router(api.router, prefix=BASE)
     return TestClient(app)
@@ -575,7 +575,7 @@ def test_the_routes_list_read_and_forget_copies(copies, client):
     gone = client.delete(f"{BASE}/rooms/copies", params={"room_id": room_id})
     assert gone.json() == {"ok": True, "room_id": room_id, "forgotten": True}
     assert client.get(f"{BASE}/rooms/copies").json()["copies"] == []
-    assert "room-copies" in api.ROUTE_CAPABILITIES
+    assert "room-copies" in api.capabilities.ROUTE_CAPABILITIES
 
 
 def test_the_cli_lists_copies(copies, capsys):

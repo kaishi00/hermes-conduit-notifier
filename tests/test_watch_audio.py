@@ -42,43 +42,43 @@ DOWN = "host-to-watch"
 
 
 def test_stream_keys_follow_the_documented_derivation():
-    keys = api.watch_audio_keys(SECRET, SID)
+    keys = api.watch_audio.watch_audio_keys(SECRET, SID)
     for direction in (UP, DOWN):
         expected = HKDF(algorithm=hashes.SHA256(), length=32, salt=b"conduit-watch-audio-v1",
                         info=f"conduit-watch-audio-v1 {direction} stream=ZGVmZ2hpamtsbW5vcHFycw".encode()).derive(SECRET)
         assert keys[direction] == expected
     assert keys[UP] != keys[DOWN]
-    assert api.watch_audio_keys(SECRET, bytes(16))[UP] != keys[UP]
+    assert api.watch_audio.watch_audio_keys(SECRET, bytes(16))[UP] != keys[UP]
 
 
 def test_shared_vectors_for_conduit():
     # Conduit's tests carry the same values.
-    keys = api.watch_audio_keys(SECRET, SID)
+    keys = api.watch_audio.watch_audio_keys(SECRET, SID)
     assert keys[UP].hex() == "a970c88b4c9fad954c1c7c46e50ba2a6cbb65e7cc660cb9c9903aaba94ec21d5"
     assert keys[DOWN].hex() == "bfba0a519d8cc7330fb2c5eaafbada1094ba8906e9c613cdae24ec67a7f5791a"
-    assert api.watch_audio_aad(UP, GRANT_ID, SID, 3) == (
+    assert api.watch_audio.watch_audio_aad(UP, GRANT_ID, SID, 3) == (
         b"conduit-watch-audio/1\nwatch-to-host\ngrant=GGGGGGGGGGGGGGGGGGGGGG\nsid=ZGVmZ2hpamtsbW5vcHFycw\ntype=3")
-    start = api.seal_watch_audio(keys[UP], UP, GRANT_ID, SID, 3, 0, b'{"type":"start","engine":"gpt_live"}')
+    start = api.watch_audio.seal_watch_audio(keys[UP], UP, GRANT_ID, SID, 3, 0, b'{"type":"start","engine":"gpt_live"}')
     assert start.hex() == ("03000000000000000065911b5180de3d861bf69d75d796d56ed8363e51361e991a4f351df10440d35e"
                            "3239930328e694505b7254359bab106607b55cf2")
-    audio = api.seal_watch_audio(keys[DOWN], DOWN, GRANT_ID, SID, 1, 1, b"\x01\x00\x02\x00")
+    audio = api.watch_audio.seal_watch_audio(keys[DOWN], DOWN, GRANT_ID, SID, 1, 1, b"\x01\x00\x02\x00")
     assert audio.hex() == "01000000000000000163f89b82063f879f7eccbfb0b3f896f105565f24"
 
 
 def test_a_sealed_message_is_chacha20_poly1305_with_the_counter_nonce():
-    key = api.watch_audio_keys(SECRET, SID)[UP]
-    sealed = api.seal_watch_audio(key, UP, GRANT_ID, SID, 2, 7, b"hello")
+    key = api.watch_audio.watch_audio_keys(SECRET, SID)[UP]
+    sealed = api.watch_audio.seal_watch_audio(key, UP, GRANT_ID, SID, 2, 7, b"hello")
     assert sealed[0] == 2 and int.from_bytes(sealed[1:9], "big") == 7
     plain = ChaCha20Poly1305(key).decrypt(b"\0" * 4 + (7).to_bytes(8, "big"), sealed[9:],
-                                          api.watch_audio_aad(UP, GRANT_ID, SID, 2))
+                                          api.watch_audio.watch_audio_aad(UP, GRANT_ID, SID, 2))
     assert plain == b"hello"
-    assert api.open_watch_audio(key, UP, GRANT_ID, SID, sealed) == (2, 7, b"hello")
+    assert api.watch_audio.open_watch_audio(key, UP, GRANT_ID, SID, sealed) == (2, 7, b"hello")
 
 
 @pytest.mark.parametrize("change", ["type", "counter", "body", "grant", "sid", "direction", "short"])
 def test_a_changed_message_does_not_open(change):
-    key = api.watch_audio_keys(SECRET, SID)[UP]
-    sealed = bytearray(api.seal_watch_audio(key, UP, GRANT_ID, SID, 2, 3, b'{"type":"x"}'))
+    key = api.watch_audio.watch_audio_keys(SECRET, SID)[UP]
+    sealed = bytearray(api.watch_audio.seal_watch_audio(key, UP, GRANT_ID, SID, 2, 3, b'{"type":"x"}'))
     grant, sid, direction = GRANT_ID, SID, UP
     if change == "type":
         sealed[0] = 1  # replayed as audio
@@ -94,39 +94,39 @@ def test_a_changed_message_does_not_open(change):
         direction = DOWN
     else:
         sealed = sealed[:20]
-    with pytest.raises(api.WatchAudioError):
-        api.open_watch_audio(key, direction, grant, sid, bytes(sealed))
+    with pytest.raises(api.watch_audio.WatchAudioError):
+        api.watch_audio.open_watch_audio(key, direction, grant, sid, bytes(sealed))
 
 
 def test_a_stream_rejects_replays_and_counts_what_it_sends():
-    stream = api._WatchAudioStream(GRANT_ID, SECRET, SID)
-    up = api.watch_audio_keys(SECRET, SID)[UP]
-    first = api.seal_watch_audio(up, UP, GRANT_ID, SID, 1, 0, b"a")
-    second = api.seal_watch_audio(up, UP, GRANT_ID, SID, 1, 5, b"b")
+    stream = api.watch_audio._WatchAudioStream(GRANT_ID, SECRET, SID)
+    up = api.watch_audio.watch_audio_keys(SECRET, SID)[UP]
+    first = api.watch_audio.seal_watch_audio(up, UP, GRANT_ID, SID, 1, 0, b"a")
+    second = api.watch_audio.seal_watch_audio(up, UP, GRANT_ID, SID, 1, 5, b"b")
     assert stream.open(first) == (1, b"a")
     assert stream.open(second) == (1, b"b")
-    for again in (first, second, api.seal_watch_audio(up, UP, GRANT_ID, SID, 1, 4, b"c")):
-        with pytest.raises(api.WatchAudioError):
+    for again in (first, second, api.watch_audio.seal_watch_audio(up, UP, GRANT_ID, SID, 1, 4, b"c")):
+        with pytest.raises(api.watch_audio.WatchAudioError):
             stream.open(again)
-    down = api.watch_audio_keys(SECRET, SID)[DOWN]
+    down = api.watch_audio.watch_audio_keys(SECRET, SID)[DOWN]
     sent = [stream.seal(3, b"x"), stream.seal(1, b"y")]
-    assert [api.open_watch_audio(down, DOWN, GRANT_ID, SID, m)[:2] for m in sent] == [(3, 0), (1, 1)]
+    assert [api.watch_audio.open_watch_audio(down, DOWN, GRANT_ID, SID, m)[:2] for m in sent] == [(3, 0), (1, 1)]
 
 
 def test_a_message_too_large_for_the_relay_is_refused():
-    key = api.watch_audio_keys(SECRET, SID)[DOWN]
-    sealed = api.seal_watch_audio(key, DOWN, GRANT_ID, SID, 2, 0, b"x" * api.WATCH_AUDIO_MAX_PLAIN_BYTES)
-    assert len(sealed) == api.WATCH_AUDIO_MAX_MESSAGE_BYTES
-    with pytest.raises(api.WatchAudioError):
-        api.seal_watch_audio(key, DOWN, GRANT_ID, SID, 2, 0, b"x" * (api.WATCH_AUDIO_MAX_PLAIN_BYTES + 1))
-    with pytest.raises(api.WatchAudioError):
-        api.seal_watch_audio(key, DOWN, GRANT_ID, SID, 4, 0, b"")
+    key = api.watch_audio.watch_audio_keys(SECRET, SID)[DOWN]
+    sealed = api.watch_audio.seal_watch_audio(key, DOWN, GRANT_ID, SID, 2, 0, b"x" * api.watch_audio.WATCH_AUDIO_MAX_PLAIN_BYTES)
+    assert len(sealed) == api.watch_audio.WATCH_AUDIO_MAX_MESSAGE_BYTES
+    with pytest.raises(api.watch_audio.WatchAudioError):
+        api.watch_audio.seal_watch_audio(key, DOWN, GRANT_ID, SID, 2, 0, b"x" * (api.watch_audio.WATCH_AUDIO_MAX_PLAIN_BYTES + 1))
+    with pytest.raises(api.watch_audio.WatchAudioError):
+        api.watch_audio.seal_watch_audio(key, DOWN, GRANT_ID, SID, 4, 0, b"")
 
 
 def test_an_event_too_large_to_seal_goes_as_its_type():
     big = json.dumps({"type": "session.updated", "session": {"instructions": "x" * 70_000}})
-    assert json.loads(api._watch_audio_event_text(big)) == {"type": "session.updated", "conduit_truncated": True}
-    assert api._watch_audio_event_text('{"type":"a"}') == b'{"type":"a"}'
+    assert json.loads(api.watch_audio._watch_audio_event_text(big)) == {"type": "session.updated", "conduit_truncated": True}
+    assert api.watch_audio._watch_audio_event_text('{"type":"a"}') == b'{"type":"a"}'
 
 
 # --- Pacing -------------------------------------------------------------------
@@ -144,7 +144,7 @@ def test_grok_audio_is_paced_to_real_time_and_events_keep_their_place():
             sent.append((time.monotonic(), kind, data))
             return True
 
-        pacer = api._WatchAudioPacer(send, 24_000, lead_s=0.0)
+        pacer = api.watch_audio._WatchAudioPacer(send, 24_000, lead_s=0.0)
         task = asyncio.ensure_future(pacer.run())
         start = time.monotonic()
         pacer.audio(b"\1\0" * 12_000)  # 0.5 s
@@ -171,7 +171,7 @@ def test_an_interruption_drops_audio_not_yet_sent_but_keeps_events():
             sent.append((kind, data))
             return True
 
-        pacer = api._WatchAudioPacer(send, 24_000, lead_s=0.0)
+        pacer = api.watch_audio._WatchAudioPacer(send, 24_000, lead_s=0.0)
         pacer.audio(b"\1\0" * 48_000)  # 2 s
         pacer.event('{"type":"response.output_audio_transcript.delta"}')
         task = asyncio.ensure_future(pacer.run())
@@ -197,7 +197,7 @@ def test_the_lead_lets_the_watch_buffer_ahead():
             sent.append(kind)
             return True
 
-        pacer = api._WatchAudioPacer(send, 24_000, lead_s=1.0)
+        pacer = api.watch_audio._WatchAudioPacer(send, 24_000, lead_s=1.0)
         task = asyncio.ensure_future(pacer.run())
         pacer.audio(b"\1\0" * 72_000)  # 3 s
         await asyncio.sleep(0.1)
@@ -209,8 +209,8 @@ def test_the_lead_lets_the_watch_buffer_ahead():
 
 
 def test_events_held_behind_audio_are_bounded(monkeypatch):
-    monkeypatch.setattr(api, "WATCH_AUDIO_MAX_QUEUED_EVENT_BYTES", 100)
-    pacer = api._WatchAudioPacer(lambda kind, data: True, 24_000)
+    monkeypatch.setattr(api.watch_audio, "WATCH_AUDIO_MAX_QUEUED_EVENT_BYTES", 100)
+    pacer = api.watch_audio._WatchAudioPacer(lambda kind, data: True, 24_000)
     pacer.audio(b"\1\0" * 2_400)
     for index in range(10):
         pacer.event(json.dumps({"type": "delta", "n": index}))
@@ -226,7 +226,7 @@ def test_sent_events_leave_the_bound():
         async def send(kind, data):
             return True
 
-        pacer = api._WatchAudioPacer(send, 24_000, lead_s=0.0)
+        pacer = api.watch_audio._WatchAudioPacer(send, 24_000, lead_s=0.0)
         task = asyncio.ensure_future(pacer.run())
         pacer.event('{"type":"response.done"}')
         await asyncio.sleep(0.05)
@@ -260,14 +260,14 @@ class FakeRun:
 
 
 def _runtime(tmp_path, run=None, which=lambda name: None, has=lambda name: False):
-    return api._WatchAudioRuntime(env_dir=lambda: str(tmp_path / "env"), run=run or FakeRun(), which=which,
+    return api.watch_audio._WatchAudioRuntime(env_dir=lambda: str(tmp_path / "env"), run=run or FakeRun(), which=which,
                                   has_module=has, base_python="/usr/bin/python3")
 
 
 def test_no_python_with_aiortc_reads_as_missing(tmp_path):
     runtime = _runtime(tmp_path)
     assert runtime.python() is None
-    assert runtime.status() == {"runtime": "missing", "source": None, "reason": api.WATCH_AUDIO_NEEDS_RUNTIME}
+    assert runtime.status() == {"runtime": "missing", "source": None, "reason": api.watch_audio.WATCH_AUDIO_NEEDS_RUNTIME}
 
 
 def test_hermes_own_python_is_used_when_it_has_aiortc(tmp_path):
@@ -306,8 +306,8 @@ def test_an_environment_made_for_another_pin_is_not_ready(tmp_path, marker, herm
         pin = json.loads(marker).get("requirement")
     except (ValueError, AttributeError):
         pin = None
-    reason = (api.WATCH_AUDIO_STALE_RUNTIME if pin is not None and pin != api.WATCH_AUDIO_AIORTC
-              else api.WATCH_AUDIO_NEEDS_RUNTIME)
+    reason = (api.watch_audio.WATCH_AUDIO_STALE_RUNTIME if pin is not None and pin != api.watch_audio.WATCH_AUDIO_AIORTC
+              else api.watch_audio.WATCH_AUDIO_NEEDS_RUNTIME)
     assert runtime.status() == {"runtime": "missing", "source": None, "reason": reason}
     assert runtime.missing_reason() == reason
     # Prepare makes it again for the current pin.
@@ -373,7 +373,7 @@ def test_the_status_route_reports_both_engines(monkeypatch, tmp_path):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
-    monkeypatch.setattr(api, "_watch_audio_runtime", _runtime(tmp_path))
+    monkeypatch.setattr(api.watch_audio, "_watch_audio_runtime", _runtime(tmp_path))
     app = FastAPI()
     app.include_router(api.router, prefix="/p")
     body = TestClient(app).get("/p/watch-audio/status").json()
@@ -409,28 +409,28 @@ class GrantRelay:
 
 @pytest.fixture()
 def fresh_grants(monkeypatch):
-    monkeypatch.setattr(api, "_watch_grants", api._WatchGrants())
+    monkeypatch.setattr(api.watch_tools, "_watch_grants", api.watch_tools._WatchGrants())
 
 
 def test_an_audio_grant_carries_the_watch_side_url_and_engines(tmp_path, monkeypatch, fresh_grants):
-    monkeypatch.setattr(api, "_watch_audio_runtime", _runtime(tmp_path, has=lambda name: True))
+    monkeypatch.setattr(api.watch_audio, "_watch_audio_runtime", _runtime(tmp_path, has=lambda name: True))
     relay = GrantRelay()
     started = []
-    grant = api.open_watch_grant({"tools": ["web_search"], "audio": True}, profile=None, path=_pairing(tmp_path),
+    grant = api.watch_tools.open_watch_grant({"tools": ["web_search"], "audio": True}, profile=None, path=_pairing(tmp_path),
                                  relay=relay, start=lambda g: None, start_audio=started.append)
     assert relay.requests[0][2]["audio"] is True
     assert grant["audio"] == {"url": f"wss://relay.example/v1/watch-audio/{'A' * 22}/watch", "version": 1,
                               "engines": ["gpt_live", "grok"]}
-    [live] = api._watch_grants.all()
-    assert started == [live] and live.audio.secret == api._unb64u(grant["key"])
+    [live] = api.watch_tools._watch_grants.all()
+    assert started == [live] and live.audio.secret == api.watch_tools._unb64u(grant["key"])
     # Closing the grant stops its bridge.
-    api._close_watch_grant_here(live)
+    api.watch_tools._close_watch_grant_here(live)
     assert live.audio.stop_requested.is_set()
 
 
 def test_gpt_live_is_left_out_until_its_runtime_is_ready(tmp_path, monkeypatch, fresh_grants):
-    monkeypatch.setattr(api, "_watch_audio_runtime", _runtime(tmp_path))
-    grant = api.open_watch_grant({"tools": ["web_search"], "audio": True}, profile=None, path=_pairing(tmp_path),
+    monkeypatch.setattr(api.watch_audio, "_watch_audio_runtime", _runtime(tmp_path))
+    grant = api.watch_tools.open_watch_grant({"tools": ["web_search"], "audio": True}, profile=None, path=_pairing(tmp_path),
                                  relay=GrantRelay(), start=lambda g: None, start_audio=lambda g: None)
     assert grant["audio"]["engines"] == ["grok"]
 
@@ -438,41 +438,41 @@ def test_gpt_live_is_left_out_until_its_runtime_is_ready(tmp_path, monkeypatch, 
 def test_a_relay_without_watch_audio_refuses_the_grant_and_closes_it_there(tmp_path, monkeypatch, fresh_grants):
     relay = GrantRelay(audio_echo=False)
     closed = []
-    monkeypatch.setattr(api, "_close_watch_grant_on_relay_later", lambda grant, relay: closed.append(grant.grant_id))
-    with pytest.raises(api.TokenError) as raised:
-        api.open_watch_grant({"tools": ["web_search"], "audio": True}, profile=None, path=_pairing(tmp_path),
+    monkeypatch.setattr(api.watch_tools, "_close_watch_grant_on_relay_later", lambda grant, relay: closed.append(grant.grant_id))
+    with pytest.raises(api.core.TokenError) as raised:
+        api.watch_tools.open_watch_grant({"tools": ["web_search"], "audio": True}, profile=None, path=_pairing(tmp_path),
                              relay=relay, start=lambda g: None, start_audio=lambda g: None)
     assert raised.value.status == 501 and "doesn't support Watch audio" in str(raised.value)
     assert closed == ["A" * 22]
-    assert api._watch_grants.all() == []
+    assert api.watch_tools._watch_grants.all() == []
 
 
 def test_a_grant_without_audio_asks_the_relay_for_none(tmp_path, fresh_grants):
     relay = GrantRelay()
-    grant = api.open_watch_grant({"tools": ["web_search"]}, profile=None, path=_pairing(tmp_path), relay=relay,
+    grant = api.watch_tools.open_watch_grant({"tools": ["web_search"]}, profile=None, path=_pairing(tmp_path), relay=relay,
                                  start=lambda g: None)
     assert "audio" not in relay.requests[0][2] and "audio" not in grant
 
 
 def test_audio_must_be_a_boolean(tmp_path, fresh_grants):
-    with pytest.raises(api.TokenError) as raised:
-        api.open_watch_grant({"tools": ["web_search"], "audio": "yes"}, profile=None, path=_pairing(tmp_path),
+    with pytest.raises(api.core.TokenError) as raised:
+        api.watch_tools.open_watch_grant({"tools": ["web_search"], "audio": "yes"}, profile=None, path=_pairing(tmp_path),
                              relay=GrantRelay(), start=lambda g: None)
     assert raised.value.status == 400
 
 
 def test_a_bridge_that_cannot_start_closes_the_grant(tmp_path, monkeypatch, fresh_grants):
     closed = []
-    monkeypatch.setattr(api, "_close_watch_grant_on_relay_later", lambda grant, relay: closed.append(grant.grant_id))
+    monkeypatch.setattr(api.watch_tools, "_close_watch_grant_on_relay_later", lambda grant, relay: closed.append(grant.grant_id))
 
     def no_thread(grant):
         raise RuntimeError("can't start new thread")
 
-    with pytest.raises(api.TokenError) as raised:
-        api.open_watch_grant({"tools": ["web_search"], "audio": True}, profile=None, path=_pairing(tmp_path),
+    with pytest.raises(api.core.TokenError) as raised:
+        api.watch_tools.open_watch_grant({"tools": ["web_search"], "audio": True}, profile=None, path=_pairing(tmp_path),
                              relay=GrantRelay(), start=lambda g: None, start_audio=no_thread)
     assert raised.value.status == 503
-    assert closed == ["A" * 22] and api._watch_grants.all() == []
+    assert closed == ["A" * 22] and api.watch_tools._watch_grants.all() == []
 
 
 # --- The bridge, with a stand-in relay socket --------------------------------------
@@ -502,7 +502,7 @@ class FakeSocket:
         self.incoming.put_nowait(None)
 
 
-class EchoSession(api._WatchAudioSession):
+class EchoSession(api.watch_audio._WatchAudioSession):
     """An engine that echoes audio and events and ends when asked."""
 
     engine = "grok"
@@ -512,17 +512,17 @@ class EchoSession(api._WatchAudioSession):
         await self.stopping.wait()
 
     async def audio(self, pcm):
-        await self.send(api.WATCH_AUDIO_AUDIO, pcm[::-1])
+        await self.send(api.watch_audio.WATCH_AUDIO_AUDIO, pcm[::-1])
 
     async def event(self, data):
-        await self.send(api.WATCH_AUDIO_EVENT, data)
+        await self.send(api.watch_audio.WATCH_AUDIO_EVENT, data)
 
 
-class FailingSession(api._WatchAudioSession):
+class FailingSession(api.watch_audio._WatchAudioSession):
     engine = "gpt_live"
 
     async def run(self):
-        raise api.WatchAudioFailure("unavailable", api.WATCH_AUDIO_NEEDS_RUNTIME)
+        raise api.watch_audio.WatchAudioFailure("unavailable", api.watch_audio.WATCH_AUDIO_NEEDS_RUNTIME)
 
 
 class Watch:
@@ -530,7 +530,7 @@ class Watch:
 
     def __init__(self, sid=None):
         self.sid = sid or os.urandom(16)
-        keys = api.watch_audio_keys(SECRET, self.sid)
+        keys = api.watch_audio.watch_audio_keys(SECRET, self.sid)
         self.up, self.down = keys[UP], keys[DOWN]
         self.counter = 0
         self.received = -1
@@ -539,7 +539,7 @@ class Watch:
         return bytes([4]) + self.sid + bytes([version])
 
     def seal(self, kind, plain):
-        message = api.seal_watch_audio(self.up, UP, GRANT_ID, self.sid, kind, self.counter, plain)
+        message = api.watch_audio.seal_watch_audio(self.up, UP, GRANT_ID, self.sid, kind, self.counter, plain)
         self.counter += 1
         return message
 
@@ -547,7 +547,7 @@ class Watch:
         return self.seal(3, json.dumps(payload).encode())
 
     def open(self, message):
-        kind, counter, plain = api.open_watch_audio(self.down, DOWN, GRANT_ID, self.sid, message)
+        kind, counter, plain = api.watch_audio.open_watch_audio(self.down, DOWN, GRANT_ID, self.sid, message)
         assert counter > self.received
         self.received = counter
         return kind, json.loads(plain) if kind == 3 else plain
@@ -556,7 +556,7 @@ class Watch:
 def _bridge(sessions=None, slots=None):
     grant = types.SimpleNamespace(grant_id=GRANT_ID, profile=None, relay_url="https://relay.example",
                                   credential="c", expires_at=time.monotonic() + 600, closed=types.SimpleNamespace(is_set=lambda: False))
-    bridge = api._WatchAudioBridge(grant, SECRET, slots=slots or api._WatchAudioSlots(4))
+    bridge = api.watch_audio._WatchAudioBridge(grant, SECRET, slots=slots or api.watch_audio._WatchAudioSlots(4))
     return bridge
 
 
@@ -605,7 +605,7 @@ async def _until(predicate, timeout=3.0):
 
 
 def test_a_watch_stream_starts_echoes_and_ends(monkeypatch):
-    monkeypatch.setitem(api._WATCH_AUDIO_SESSIONS, "grok", EchoSession)
+    monkeypatch.setitem(api.watch_local_live._WATCH_AUDIO_SESSIONS, "grok", EchoSession)
 
     async def scenario():
         bridge = _bridge()
@@ -630,7 +630,7 @@ def test_a_watch_stream_starts_echoes_and_ends(monkeypatch):
 
 
 def test_the_watch_leaving_ends_the_session_without_writing_to_its_stream(monkeypatch):
-    monkeypatch.setitem(api._WATCH_AUDIO_SESSIONS, "grok", EchoSession)
+    monkeypatch.setitem(api.watch_local_live._WATCH_AUDIO_SESSIONS, "grok", EchoSession)
 
     async def scenario():
         bridge = _bridge()
@@ -667,7 +667,7 @@ def test_a_stream_id_is_taken_once(monkeypatch):
 
 
 def test_replayed_and_forged_messages_are_ignored(monkeypatch):
-    monkeypatch.setitem(api._WATCH_AUDIO_SESSIONS, "grok", EchoSession)
+    monkeypatch.setitem(api.watch_local_live._WATCH_AUDIO_SESSIONS, "grok", EchoSession)
 
     async def scenario():
         bridge = _bridge()
@@ -689,10 +689,10 @@ def test_replayed_and_forged_messages_are_ignored(monkeypatch):
 
 
 def test_an_unknown_engine_a_full_host_and_a_failing_engine_each_say_why(monkeypatch):
-    monkeypatch.setitem(api._WATCH_AUDIO_SESSIONS, "gpt_live", FailingSession)
+    monkeypatch.setitem(api.watch_local_live._WATCH_AUDIO_SESSIONS, "gpt_live", FailingSession)
 
     async def scenario():
-        slots = api._WatchAudioSlots(0)
+        slots = api.watch_audio._WatchAudioSlots(0)
         bridge = _bridge(slots=slots)
         socket = await _attach(bridge)
         watch = Watch()
@@ -735,7 +735,7 @@ def test_a_gpt_live_start_without_its_runtime_says_why(tmp_path, state):
     if state == "failed":
         assert "ensurepip is not available" in error["message"]
     else:
-        assert error["message"] == api.WATCH_AUDIO_STALE_RUNTIME
+        assert error["message"] == api.watch_audio.WATCH_AUDIO_STALE_RUNTIME
     assert ended == {"type": "ended", "engine": "gpt_live", "reason": "error"}
 
 
@@ -753,9 +753,9 @@ def test_a_watch_on_another_version_is_told_so(monkeypatch):
 
 
 def test_the_watch_url_is_the_relay_over_websocket():
-    assert api._watch_audio_ws_url("https://push.example", "A" * 22, "watch") == \
+    assert api.watch_audio._watch_audio_ws_url("https://push.example", "A" * 22, "watch") == \
         f"wss://push.example/v1/watch-audio/{'A' * 22}/watch"
-    assert api._watch_audio_ws_url("http://127.0.0.1:9000", "A" * 22, "host") == \
+    assert api.watch_audio._watch_audio_ws_url("http://127.0.0.1:9000", "A" * 22, "host") == \
         f"ws://127.0.0.1:9000/v1/watch-audio/{'A' * 22}/host"
 
 
@@ -934,4 +934,4 @@ def test_a_current_environment_missing_its_python_is_not_called_out_of_date(tmp_
     runtime.prepare(start=lambda target: target())
     (tmp_path / "env" / "bin" / "python").unlink()
     assert runtime.python() is None
-    assert runtime.missing_reason() == api.WATCH_AUDIO_NEEDS_RUNTIME
+    assert runtime.missing_reason() == api.watch_audio.WATCH_AUDIO_NEEDS_RUNTIME

@@ -69,7 +69,7 @@ def load_state() -> dict[str, Any] | None:
 
 
 def state_lock_path(path: Path) -> Path:
-    # dashboard/plugin_api.py locks the same file (_pairing_state_lock_path);
+    # dashboard/api/pairing.py locks the same file (_pairing_state_lock_path);
     # tests/test_e2e.py checks the two stay identical.
     return path.with_name(f".{path.name}.lock")
 

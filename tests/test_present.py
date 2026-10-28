@@ -454,10 +454,10 @@ def test_present_v1_is_a_plugin_capability():
 
 @pytest.fixture()
 def route_home(tmp_path, monkeypatch):
-    monkeypatch.setattr(api, "_calls_home", lambda: tmp_path)
-    monkeypatch.setattr(api, "_pairing_state_path", lambda: tmp_path / "conduit-push.json")
-    monkeypatch.setattr(api, "_profile_scope", lambda profile: contextlib.nullcontext())
-    api._present_exchange_limiter._mints.clear()
+    monkeypatch.setattr(api.core, "_calls_home", lambda: tmp_path)
+    monkeypatch.setattr(api.core, "_pairing_state_path", lambda: tmp_path / "conduit-push.json")
+    monkeypatch.setattr(api.core, "_profile_scope", lambda profile: contextlib.nullcontext())
+    api.notifications._present_exchange_limiter._mints.clear()
     (tmp_path / "conduit-push.json").write_text(json.dumps({"credential": "c", "installation_id": "i", "gateway_id": "g"}))
     return tmp_path
 
@@ -499,13 +499,13 @@ def test_the_route_needs_a_paired_profile(route_home):
 
 def test_the_route_is_rate_limited(route_home):
     http = _http()
-    for _ in range(api.PRESENT_EXCHANGE_LIMIT):
+    for _ in range(api.notifications.PRESENT_EXCHANGE_LIMIT):
         assert http.post(f"{BASE}/present/exchange", json={"installation_id": PHONE}).status_code == 200
     assert http.post(f"{BASE}/present/exchange", json={"installation_id": PHONE}).status_code == 429
 
 
 def test_the_route_is_a_reported_capability():
-    assert "present-v1" in api.ROUTE_CAPABILITIES
+    assert "present-v1" in api.capabilities.ROUTE_CAPABILITIES
 
 
 def test_a_session_id_with_control_characters_is_dropped_and_a_nested_file_reads_as_empty(store, tmp_path):

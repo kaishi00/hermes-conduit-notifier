@@ -720,9 +720,9 @@ def test_ssh_deletes_a_link_to_a_secret_but_not_the_secret(tree):
 
 @pytest.fixture
 def client(monkeypatch):
-    monkeypatch.setattr(api, "_workspace_files", lambda: wf)
-    monkeypatch.setattr(api, "_workspace_module", wf)
-    monkeypatch.setattr(api, "_workspace", lambda profile: wf.LocalWorkspace())
+    monkeypatch.setattr(api.workspace, "_workspace_files", lambda: wf)
+    monkeypatch.setattr(api.workspace, "_workspace_module", wf)
+    monkeypatch.setattr(api.workspace, "_workspace", lambda profile: wf.LocalWorkspace())
     app = FastAPI()
     app.include_router(api.router, prefix=BASE)
     return TestClient(app)
@@ -762,15 +762,15 @@ def test_routes_say_why_they_refuse(tree, client):
 
 
 def test_without_hermes_routing_the_routes_refuse(monkeypatch):
-    monkeypatch.setattr(api, "_workspace_files", lambda: wf)
+    monkeypatch.setattr(api.workspace, "_workspace_files", lambda: wf)
     monkeypatch.setitem(sys.modules, "hermes_cli.web_routers.files", None)
-    with pytest.raises(api.TokenError) as exc:
-        api._workspace(None)
+    with pytest.raises(api.core.TokenError) as exc:
+        api.workspace._workspace(None)
     assert exc.value.status == 501
 
 
 def test_the_capability_is_listed():
-    assert "workspace-files" in api.ROUTE_CAPABILITIES
+    assert "workspace-files" in api.capabilities.ROUTE_CAPABILITIES
 
 
 def test_a_search_given_up_on_frees_its_slot_only_once_it_ends(tree, client, monkeypatch):
@@ -784,17 +784,17 @@ def test_a_search_given_up_on_frees_its_slot_only_once_it_ends(tree, client, mon
             release.wait(5)
             return {"names": [], "matches": [], "truncated": False}
 
-    monkeypatch.setattr(api, "_workspace", lambda profile: Slow())
-    monkeypatch.setattr(api, "WORKSPACE_TIMEOUT_S", 0.2)
-    monkeypatch.setattr(api, "_workspace_walks", threading.BoundedSemaphore(1))
+    monkeypatch.setattr(api.workspace, "_workspace", lambda profile: Slow())
+    monkeypatch.setattr(api.workspace, "WORKSPACE_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(api.workspace, "_workspace_walks", threading.BoundedSemaphore(1))
     assert client.get(f"{BASE}/workspace/search", params={"root": str(tree), "q": "x"}).status_code == 504
     assert started.is_set()
     # The walk is still running: a second one waits its turn.
     assert client.get(f"{BASE}/workspace/search", params={"root": str(tree), "q": "x"}).status_code == 503
     release.set()
     for _ in range(50):
-        if api._workspace_walks.acquire(blocking=False):
-            api._workspace_walks.release()
+        if api.workspace._workspace_walks.acquire(blocking=False):
+            api.workspace._workspace_walks.release()
             break
         time.sleep(0.05)
     else:
@@ -803,15 +803,15 @@ def test_a_search_given_up_on_frees_its_slot_only_once_it_ends(tree, client, mon
 
 def test_a_flood_is_turned_away_before_its_body_is_read(tree, client, monkeypatch):
     read = []
-    original = api._read_json_body
+    original = api.core._read_json_body
 
     async def counting(request, limit):
         read.append(limit)
         return await original(request, limit)
 
-    monkeypatch.setattr(api, "_read_json_body", counting)
-    monkeypatch.setattr(api, "_workspace_limiter",
-                        api._MintLimiter(1, 60.0, message="Too many file requests; try again shortly"))
+    monkeypatch.setattr(api.core, "_read_json_body", counting)
+    monkeypatch.setattr(api.workspace, "_workspace_limiter",
+                        api.core._MintLimiter(1, 60.0, message="Too many file requests; try again shortly"))
     body = {"root": str(tree), "path": str(tree), "name": "a"}
     assert client.post(f"{BASE}/workspace/mkdir", json=body).status_code == 200
     assert client.post(f"{BASE}/workspace/mkdir", json={**body, "name": "b"}).status_code == 429

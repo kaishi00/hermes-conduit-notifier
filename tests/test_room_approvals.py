@@ -418,10 +418,10 @@ def approval_routes(routes, monkeypatch):
     grant = _agent_grant(routes, room_id)
     runs.waiting(RUN, grant)
     _watched(routes, RUN, grant)
-    dashboard = api._plugin_package_module("room_approvals")
+    dashboard = api.core._plugin_package_module("room_approvals")
     monkeypatch.setattr(dashboard, "here", lambda root: dashboard.Approvals(
         root, hermes=runs, link=lambda link_id: routes.links["laifu"].get(link_id), clock=routes.clock))
-    monkeypatch.setattr(api._room_approvals_limiter, "_mints", {})
+    monkeypatch.setattr(api.linked_rooms._room_approvals_limiter, "_mints", {})
     routes.runs, routes.room_id = runs, room_id
     return routes
 
@@ -452,7 +452,7 @@ def test_routes_list_and_answer_your_agents_approvals(approval_routes):
 def test_the_approvals_routes_answer_sixty_requests_a_minute(approval_routes, monkeypatch):
     # Conduit asks for them every few seconds while it shows a room, beside the drafts and invites.
     now = [1000.0]
-    monkeypatch.setattr(api._room_approvals_limiter, "clock", lambda: now[0])
+    monkeypatch.setattr(api.linked_rooms._room_approvals_limiter, "clock", lambda: now[0])
     for _ in range(60):
         assert approval_routes.call("laifu", "GET", "/rooms/approvals").status_code == 200
 
@@ -487,7 +487,7 @@ def test_an_api_server_too_slow_for_the_route_reads_as_not_answering(approval_ro
         return None, {}
 
     monkeypatch.setattr(approval_routes.runs, "run", stuck)
-    monkeypatch.setattr(api, "ROOM_APPROVALS_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(api.linked_rooms, "ROOM_APPROVALS_TIMEOUT_S", 0.2)
     try:
         refused = approval_routes.call("laifu", "GET", "/rooms/approvals")
     finally:

@@ -77,8 +77,8 @@ def hermes(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "hermes_cli.web_server_profiles", profiles)
     monkeypatch.setitem(sys.modules, "agent", types.ModuleType("agent"))
     monkeypatch.setitem(sys.modules, "agent.prompt_builder", prompt_builder)
-    monkeypatch.setattr(api, "_personality_limiter",
-                        api._MintLimiter(api.PERSONALITY_LIMIT, api.PERSONALITY_WINDOW_S))
+    monkeypatch.setattr(api.memory, "_personality_limiter",
+                        api.core._MintLimiter(api.memory.PERSONALITY_LIMIT, api.memory.PERSONALITY_WINDOW_S))
     state.home = tmp_path
     return state
 
@@ -111,7 +111,7 @@ def test_route_without_a_soul_is_unavailable(client, hermes, soul):
 def test_text_is_capped(client, hermes):
     hermes.souls["default"] = "x" * 20000
     text = client.get(f"{BASE}/personality").json()["text"]
-    assert len(text) == api.PERSONALITY_MAX_CHARS
+    assert len(text) == api.memory.PERSONALITY_MAX_CHARS
     assert text.endswith("…")
 
 
@@ -123,16 +123,16 @@ def test_older_hermes_without_load_soul_md_is_unavailable(client, hermes, monkey
 
 def test_hermes_without_the_agent_package_is_unavailable(hermes, monkeypatch):
     monkeypatch.setitem(sys.modules, "agent.prompt_builder", None)  # import raises ModuleNotFoundError
-    assert api.personality() == {"available": False, "text": ""}
+    assert api.memory.personality() == {"available": False, "text": ""}
 
 
 def test_a_broken_import_inside_hermes_is_not_reported_as_missing(hermes, monkeypatch):
     def broken():
         raise ModuleNotFoundError("No module named 'yaml'", name="yaml")
 
-    monkeypatch.setattr(api, "_hermes_soul_md", broken)
+    monkeypatch.setattr(api.memory, "_hermes_soul_md", broken)
     with pytest.raises(ModuleNotFoundError):
-        api.personality()
+        api.memory.personality()
 
 
 def test_route_reads_the_requested_profile(client, hermes):
@@ -171,7 +171,7 @@ def test_route_hides_unexpected_errors(client, hermes, monkeypatch):
     def broken():
         raise OSError("/home/secret/.hermes/SOUL.md unreadable")
 
-    monkeypatch.setattr(api, "_hermes_soul_md", broken)
+    monkeypatch.setattr(api.memory, "_hermes_soul_md", broken)
     response = client.get(f"{BASE}/personality")
     assert response.status_code == 500
     assert "secret" not in response.text
@@ -179,7 +179,7 @@ def test_route_hides_unexpected_errors(client, hermes, monkeypatch):
 
 
 def test_route_is_rate_limited_per_profile(client, hermes, monkeypatch):
-    monkeypatch.setattr(api, "_personality_limiter", api._MintLimiter(1, 60.0, message="slow down"))
+    monkeypatch.setattr(api.memory, "_personality_limiter", api.core._MintLimiter(1, 60.0, message="slow down"))
     assert client.get(f"{BASE}/personality").status_code == 200
     assert client.get(f"{BASE}/personality?profile=coder").status_code == 200
     limited = client.get(f"{BASE}/personality?profile=current")
@@ -340,8 +340,8 @@ def test_a_hung_read_times_out(client, hermes, monkeypatch):
         release.wait(5)
         return "late"
 
-    monkeypatch.setattr(api, "_hermes_soul_md", hung)
-    monkeypatch.setattr(api, "PERSONALITY_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(api.memory, "_hermes_soul_md", hung)
+    monkeypatch.setattr(api.memory, "PERSONALITY_TIMEOUT_S", 0.2)
     try:
         response = client.get(f"{BASE}/personality")
     finally:

@@ -874,11 +874,11 @@ class Restarts:
 
 @pytest.fixture
 def client(hermes, monkeypatch):
-    monkeypatch.setattr(api, "_calls_home", lambda: hermes.root)
-    monkeypatch.setattr(api, "_room_setup", lambda: setup)
-    monkeypatch.setattr(api, "_room_setup_hermes", lambda module: hermes.adapter())
-    monkeypatch.setattr(api, "_room_setup_limiter", api._MintLimiter(100, 600.0))
-    monkeypatch.setattr(api, "_room_setup_read_limiter", api._MintLimiter(100, 60.0))
+    monkeypatch.setattr(api.core, "_calls_home", lambda: hermes.root)
+    monkeypatch.setattr(api.linked_rooms, "_room_setup", lambda: setup)
+    monkeypatch.setattr(api.linked_rooms, "_room_setup_hermes", lambda module: hermes.adapter())
+    monkeypatch.setattr(api.linked_rooms, "_room_setup_limiter", api.core._MintLimiter(100, 600.0))
+    monkeypatch.setattr(api.linked_rooms, "_room_setup_read_limiter", api.core._MintLimiter(100, 60.0))
     restarts = Restarts()
     gateway = types.ModuleType("hermes_cli.web_server_gateway")
     gateway.live_session_refusal = restarts.live_session_refusal
@@ -973,20 +973,20 @@ def test_a_restart_that_fails_says_so_without_its_error(client, hermes, monkeypa
 
     monkeypatch.setattr(sys.modules["hermes_cli.web_server_gateway"], "_restart_gateway_after", fails)
     response = client.post(f"{BASE}/rooms/setup", json={})
-    assert response.json()["restart"] == {"started": False, "busy": False, "error": api._ROOM_SETUP_RESTART_FAILED}
+    assert response.json()["restart"] == {"started": False, "busy": False, "error": api.linked_rooms._ROOM_SETUP_RESTART_FAILED}
     assert "hermes-agent" not in response.text
 
 
 def test_the_setup_route_takes_a_profile(client, hermes, monkeypatch):
     seen = []
-    real = api._profile_scope
+    real = api.core._profile_scope
 
     def scope(profile):
         seen.append(profile)
         return real(None)
 
-    monkeypatch.setattr(api, "_profile_scope", scope)
-    monkeypatch.setattr(api, "_calls_home", lambda: hermes.home("laifu"))
+    monkeypatch.setattr(api.core, "_profile_scope", scope)
+    monkeypatch.setattr(api.core, "_calls_home", lambda: hermes.home("laifu"))
     body = client.post(f"{BASE}/rooms/setup", params={"profile": "laifu"}, json={"ceiling": ["web"]}).json()
     assert body["profile"] == "laifu" and "laifu" in seen
     assert _ceiling(hermes, "laifu") == ["no_mcp", "web"]
@@ -998,14 +998,14 @@ def test_the_setup_route_takes_a_profile(client, hermes, monkeypatch):
 
 def test_the_setup_route_takes_another_profile_as_conduit_profile(client, hermes, monkeypatch):
     seen = []
-    real = api._profile_scope
+    real = api.core._profile_scope
 
     def scope(profile):
         seen.append(profile)
         return real(None)
 
-    monkeypatch.setattr(api, "_profile_scope", scope)
-    monkeypatch.setattr(api, "_calls_home", lambda: hermes.home("laifu"))
+    monkeypatch.setattr(api.core, "_profile_scope", scope)
+    monkeypatch.setattr(api.core, "_calls_home", lambda: hermes.home("laifu"))
     read = client.get(f"{BASE}/rooms/setup", params={"conduit_profile": "laifu"})
     assert read.status_code == 200 and read.json()["profile"] == "laifu"
     body = client.post(f"{BASE}/rooms/setup", params={"conduit_profile": "laifu"}, json={"ceiling": ["web"]}).json()
@@ -1023,7 +1023,7 @@ def test_a_setup_in_a_plugin_host_saves_but_never_restarts_the_gateway(client, h
     monkeypatch.setenv("HERMES_PLUGIN_HOST_PROCESS", "1")
     body = client.post(f"{BASE}/rooms/setup", json={"interrupt": interrupt}).json()
     assert body["ok"] and "api_server_key" in body["changed"]
-    assert body["restart"] == {"started": False, "busy": False, "error": api._ROOM_SETUP_HOST_RESTART}
+    assert body["restart"] == {"started": False, "busy": False, "error": api.linked_rooms._ROOM_SETUP_HOST_RESTART}
     assert client.restarts.asked == []
     assert "API_SERVER_KEY" in _env(hermes.root / ".env")
 
@@ -1042,11 +1042,11 @@ def test_the_setup_route_refuses_conduit_profile_where_the_profile_turned_the_pl
     dashboard = types.ModuleType("hermes_cli.web_server_dashboard")
 
     async def refused(name):
-        return name == api.PLUGIN_NAME
+        return name == api.core.PLUGIN_NAME
 
     dashboard._plugin_api_request_refused = refused
     monkeypatch.setitem(sys.modules, "hermes_cli.web_server_dashboard", dashboard)
-    monkeypatch.setattr(api, "_profile_scope", lambda profile: contextlib.nullcontext())
+    monkeypatch.setattr(api.core, "_profile_scope", lambda profile: contextlib.nullcontext())
     response = getattr(client, method)(f"{BASE}/rooms/setup", params={"conduit_profile": "laifu"},
                                        **({"json": {}} if method == "post" else {}))
     assert response.status_code == 404 and response.headers["cache-control"] == "no-store"
@@ -1059,8 +1059,8 @@ def test_the_dashboard_writes_each_homes_env_in_its_own_profiles_scope(hermes, m
     loaded = {}
     monkeypatch.setattr(setup.Hermes, "load", classmethod(lambda cls, env_scope=None: loaded.update(scope=env_scope)))
     seen = []
-    monkeypatch.setattr(api, "_profile_scope", lambda profile: seen.append(profile))
-    api._room_setup_hermes(setup)
+    monkeypatch.setattr(api.core, "_profile_scope", lambda profile: seen.append(profile))
+    api.linked_rooms._room_setup_hermes(setup)
     loaded["scope"](hermes.root)
     loaded["scope"](hermes.home("laifu"))
     assert seen == ["default", "laifu"]
@@ -1094,13 +1094,13 @@ def test_the_setup_route_on_a_hermes_without_the_calls_answers_501(client, monke
     def unsupported(module):
         raise module.SetupError("unsupported", "This Hermes can't be set up for Linked Rooms here", 501)
 
-    monkeypatch.setattr(api, "_room_setup_hermes", unsupported)
+    monkeypatch.setattr(api.linked_rooms, "_room_setup_hermes", unsupported)
     response = client.get(f"{BASE}/rooms/setup")
     assert response.status_code == 501 and response.json()["code"] == "unsupported"
 
 
 def test_setup_changes_are_limited(client, hermes, monkeypatch):
-    monkeypatch.setattr(api, "_room_setup_limiter", api._MintLimiter(2, 600.0, message="Too many setup changes"))
+    monkeypatch.setattr(api.linked_rooms, "_room_setup_limiter", api.core._MintLimiter(2, 600.0, message="Too many setup changes"))
     assert client.post(f"{BASE}/rooms/setup", json={"ceiling": ["web"]}).status_code == 200
     assert client.post(f"{BASE}/rooms/setup", json={"ceiling": ["web"]}).status_code == 200
     assert client.post(f"{BASE}/rooms/setup", json={"ceiling": ["web"]}).status_code == 429

@@ -47,10 +47,10 @@ def hermes(monkeypatch):
     monkeypatch.setitem(sys.modules, "hermes_cli.config", config)
     monkeypatch.setitem(sys.modules, "hermes_cli.web_server_profiles", profiles)
     monkeypatch.setitem(sys.modules, "hermes_cli.web_server_chat", chat)
-    monkeypatch.setattr(api, "_speech_server_limiter",
-                        api._MintLimiter(api.SPEECH_SERVER_LIMIT, api.SPEECH_SERVER_WINDOW_S))
-    monkeypatch.setattr(api, "_speech_server_auth_failure_limiter",
-                        api._MintLimiter(api.SPEECH_SERVER_AUTH_FAILURE_LIMIT, api.SPEECH_SERVER_WINDOW_S))
+    monkeypatch.setattr(api.speech_server, "_speech_server_limiter",
+                        api.core._MintLimiter(api.speech_server.SPEECH_SERVER_LIMIT, api.speech_server.SPEECH_SERVER_WINDOW_S))
+    monkeypatch.setattr(api.speech_server, "_speech_server_auth_failure_limiter",
+                        api.core._MintLimiter(api.speech_server.SPEECH_SERVER_AUTH_FAILURE_LIMIT, api.speech_server.SPEECH_SERVER_WINDOW_S))
     return state
 
 
@@ -101,7 +101,7 @@ def server(monkeypatch):
             raise state.error
         return state.upstream
 
-    monkeypatch.setattr(api, "_connect_speech_server", connect)
+    monkeypatch.setattr(api.speech_server, "_connect_speech_server", connect)
     return state
 
 
@@ -134,7 +134,7 @@ def _wait_close(ws):
     ("wss://voice.example.com:443/v1/realtime?model=x", "wss://voice.example.com:443/v1/realtime?model=x"),
 ])
 def test_url_policy_accepts(raw, expected):
-    assert api.speech_server_url(raw) == expected
+    assert api.speech_server.speech_server_url(raw) == expected
 
 
 @pytest.mark.parametrize("raw,fragment", [
@@ -152,8 +152,8 @@ def test_url_policy_accepts(raw, expected):
     ("ws://10.0.0.5/a\x7fb", "must look like"),
 ])
 def test_url_policy_refuses(raw, fragment):
-    with pytest.raises(api.TokenError) as caught:
-        api.speech_server_url(raw)
+    with pytest.raises(api.core.TokenError) as caught:
+        api.speech_server.speech_server_url(raw)
     assert fragment in str(caught.value)
     assert caught.value.status == 503
 
@@ -193,8 +193,8 @@ def test_status_says_when_the_config_cannot_be_read(client, hermes):
 
 def test_key_with_a_control_character_is_refused(hermes):
     _settings(hermes, url="ws://10.0.0.5:8765", api_key="sec\x00ret")
-    with pytest.raises(api.TokenError) as caught:
-        api.speech_server_target()
+    with pytest.raises(api.core.TokenError) as caught:
+        api.speech_server.speech_server_target()
     assert "control character" in str(caught.value)
 
 
@@ -202,23 +202,23 @@ def test_key_file_is_read_on_every_connection(hermes, tmp_path):
     key = tmp_path / "token"
     key.write_text("first\n")
     _settings(hermes, url="ws://10.0.0.5:8765", api_key_file=str(key))
-    assert api.speech_server_target() == ("ws://10.0.0.5:8765/v1/realtime", "first")
+    assert api.speech_server.speech_server_target() == ("ws://10.0.0.5:8765/v1/realtime", "first")
     key.write_text("rotated")  # a projected token the kubelet just refreshed
-    assert api.speech_server_target()[1] == "rotated"
-    assert api.speech_server_status()["has_key"] is True
+    assert api.speech_server.speech_server_target()[1] == "rotated"
+    assert api.speech_server.speech_server_status()["has_key"] is True
 
 
 def test_an_inline_key_wins_over_the_key_file(hermes, tmp_path):
     key = tmp_path / "token"
     key.write_text("from-file")
     _settings(hermes, url="ws://10.0.0.5:8765", api_key="inline", api_key_file=str(key))
-    assert api.speech_server_target()[1] == "inline"
+    assert api.speech_server.speech_server_target()[1] == "inline"
 
 
 def test_an_unreadable_key_file_is_an_error_not_no_key(hermes, tmp_path):
     _settings(hermes, url="ws://10.0.0.5:8765", api_key_file=str(tmp_path / "missing"))
-    with pytest.raises(api.TokenError) as caught:
-        api.speech_server_target()
+    with pytest.raises(api.core.TokenError) as caught:
+        api.speech_server.speech_server_target()
     assert caught.value.status == 503 and "key file" in str(caught.value)
 
 
@@ -227,8 +227,8 @@ def test_an_empty_oversized_or_binary_key_file_is_refused(hermes, tmp_path, cont
     key = tmp_path / "token"
     key.write_bytes(content)
     _settings(hermes, url="ws://10.0.0.5:8765", api_key_file=str(key))
-    with pytest.raises(api.TokenError) as caught:
-        api.speech_server_target()
+    with pytest.raises(api.core.TokenError) as caught:
+        api.speech_server.speech_server_target()
     assert caught.value.status == 503
 
 
@@ -237,20 +237,20 @@ def test_a_fifo_key_file_is_refused_without_blocking(hermes, tmp_path):
     fifo = tmp_path / "fifo"
     os.mkfifo(fifo)
     _settings(hermes, url="ws://10.0.0.5:8765", api_key_file=str(fifo))
-    with pytest.raises(api.TokenError):
-        api.speech_server_target()
+    with pytest.raises(api.core.TokenError):
+        api.speech_server.speech_server_target()
 
 
 def test_a_key_file_with_a_bom_and_a_home_relative_path_is_read(hermes, tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     (tmp_path / "token").write_bytes("\ufefftok\n".encode("utf-8"))
     _settings(hermes, url="ws://10.0.0.5:8765", api_key_file="~/token")
-    assert api.speech_server_target()[1] == "tok"
+    assert api.speech_server.speech_server_target()[1] == "tok"
 
 
 def test_the_status_names_no_detail_of_an_unusable_key_file(hermes, tmp_path):
     _settings(hermes, url="ws://10.0.0.5:8765", api_key_file=str(tmp_path / "missing"))
-    status = api.speech_server_status()
+    status = api.speech_server.speech_server_status()
     assert status["available"] is False and status["has_key"] is True
     assert "missing" not in status["reason"] and "FileNotFound" not in status["reason"]
 
@@ -290,9 +290,9 @@ def test_test_without_a_server_says_why(client, hermes, server):
 
 
 def test_an_invalid_url_does_not_spend_a_rate_limit_slot(client, hermes, monkeypatch):
-    monkeypatch.setattr(api, "_speech_server_limiter", api._MintLimiter(1, api.SPEECH_SERVER_WINDOW_S))
+    monkeypatch.setattr(api.speech_server, "_speech_server_limiter", api.core._MintLimiter(1, api.speech_server.SPEECH_SERVER_WINDOW_S))
     # The fake server stays silent; the slot is spent either way.
-    monkeypatch.setattr(api, "SPEECH_SERVER_TEST_FIRST_EVENT_S", 0.05)
+    monkeypatch.setattr(api.speech_server, "SPEECH_SERVER_TEST_FIRST_EVENT_S", 0.05)
     _settings(hermes, url="ws://voice.example.com")
     for _ in range(3):
         assert "needs wss://" in client.post(f"{BASE}/speech-server/test").json()["reason"]
@@ -309,7 +309,7 @@ def test_test_reports_an_unreachable_server_without_echoing_the_error(client, se
 
 
 def test_test_reports_a_refused_key(client, server):
-    server.error = api.RealtimeUpstreamRefused(401)
+    server.error = api.grok_live.RealtimeUpstreamRefused(401)
     body = client.post(f"{BASE}/speech-server/test").json()
     assert body["connected"] is False and "refused the key" in body["reason"]
 
@@ -321,7 +321,7 @@ def test_test_refuses_a_server_that_is_not_realtime(client, server):
 
 
 def test_test_times_out_on_a_silent_server(client, server, monkeypatch):
-    monkeypatch.setattr(api, "SPEECH_SERVER_TEST_FIRST_EVENT_S", 0.05)
+    monkeypatch.setattr(api.speech_server, "SPEECH_SERVER_TEST_FIRST_EVENT_S", 0.05)
     body = client.post(f"{BASE}/speech-server/test").json()
     assert body["connected"] is False and "sent nothing" in body["reason"]
     assert server.upstream.closed
@@ -345,7 +345,7 @@ def test_socket_without_a_server_closes_with_the_reason(client, hermes, server):
     hermes.config = {}
     with client.websocket_connect(f"{BASE}/speech-server/socket") as ws:
         close = _wait_close(ws)
-    assert close.code == api.SPEECH_SERVER_CLOSE_NOT_CONFIGURED
+    assert close.code == api.speech_server.SPEECH_SERVER_CLOSE_NOT_CONFIGURED
     assert "No speech server is set" in close.reason
     assert server.connects == []
 
@@ -354,7 +354,7 @@ def test_socket_refuses_without_dashboard_auth(client, hermes, server):
     hermes.ws_auth = False
     with client.websocket_connect(f"{BASE}/speech-server/socket") as ws:
         close = _wait_close(ws)
-    assert close.code == api.SPEECH_SERVER_CLOSE_UNAUTHORIZED
+    assert close.code == api.speech_server.SPEECH_SERVER_CLOSE_UNAUTHORIZED
     assert server.connects == []
 
 
@@ -362,7 +362,7 @@ def test_socket_maps_an_unreachable_server_to_retryable(client, server):
     server.error = OSError("boom")
     with client.websocket_connect(f"{BASE}/speech-server/socket") as ws:
         close = _wait_close(ws)
-    assert close.code == api.SPEECH_SERVER_CLOSE_UNREACHABLE
+    assert close.code == api.speech_server.SPEECH_SERVER_CLOSE_UNREACHABLE
 
 
 def test_socket_maps_a_dropped_server_to_retryable(client, server):
@@ -370,7 +370,7 @@ def test_socket_maps_a_dropped_server_to_retryable(client, server):
     server.upstream.release.set()
     with client.websocket_connect(f"{BASE}/speech-server/socket") as ws:
         close = _wait_close(ws)
-    assert close.code == api.SPEECH_SERVER_CLOSE_UNREACHABLE
+    assert close.code == api.speech_server.SPEECH_SERVER_CLOSE_UNREACHABLE
 
 
 def test_socket_keeps_the_servers_own_close_reason(client, server):
@@ -378,7 +378,7 @@ def test_socket_keeps_the_servers_own_close_reason(client, server):
     server.upstream.release.set()
     with client.websocket_connect(f"{BASE}/speech-server/socket") as ws:
         close = _wait_close(ws)
-    assert close.code == api.SPEECH_SERVER_CLOSE_REFUSED
+    assert close.code == api.speech_server.SPEECH_SERVER_CLOSE_REFUSED
     assert close.reason == "The speech server closed the connection (4000: model not loaded)"
 
 
@@ -391,7 +391,7 @@ def test_socket_sends_the_key_as_a_bearer(client, hermes, server):
 
 
 def test_socket_closes_an_idle_client(client, server, monkeypatch):
-    monkeypatch.setattr(api, "SPEECH_SERVER_IDLE_S", 0.05)
+    monkeypatch.setattr(api.speech_server, "SPEECH_SERVER_IDLE_S", 0.05)
     with client.websocket_connect(f"{BASE}/speech-server/socket") as ws:
         close = _wait_close(ws)
     assert close.code == 1000 and close.reason == "Idle for too long"
@@ -399,37 +399,37 @@ def test_socket_closes_an_idle_client(client, server, monkeypatch):
 
 
 def test_socket_caps_open_relays_on_the_host(client, server, monkeypatch):
-    monkeypatch.setattr(api, "_speech_server_open", {"a": 3, "b": 3, "c": 2})
+    monkeypatch.setattr(api.speech_server, "_speech_server_open", {"a": 3, "b": 3, "c": 2})
     with client.websocket_connect(f"{BASE}/speech-server/socket?profile=work") as ws:
         close = _wait_close(ws)
-    assert close.code == api.SPEECH_SERVER_CLOSE_RATE_LIMITED
+    assert close.code == api.speech_server.SPEECH_SERVER_CLOSE_RATE_LIMITED
     assert server.connects == []
 
 
 def test_socket_rate_limit_closes_with_4429(client, server, monkeypatch):
-    monkeypatch.setattr(api, "_speech_server_limiter", api._MintLimiter(1, api.SPEECH_SERVER_WINDOW_S))
+    monkeypatch.setattr(api.speech_server, "_speech_server_limiter", api.core._MintLimiter(1, api.speech_server.SPEECH_SERVER_WINDOW_S))
     server.upstream.release.set()
     with client.websocket_connect(f"{BASE}/speech-server/socket") as ws:
         _wait_close(ws)
     with client.websocket_connect(f"{BASE}/speech-server/socket") as ws:
         close = _wait_close(ws)
-    assert close.code == api.SPEECH_SERVER_CLOSE_RATE_LIMITED
+    assert close.code == api.speech_server.SPEECH_SERVER_CLOSE_RATE_LIMITED
 
 
 def test_socket_refuses_oversized_frames(client, server):
     with client.websocket_connect(f"{BASE}/speech-server/socket") as ws:
-        ws.send_text("x" * (api.SPEECH_SERVER_MAX_CLIENT_FRAME_BYTES + 1))
+        ws.send_text("x" * (api.speech_server.SPEECH_SERVER_MAX_CLIENT_FRAME_BYTES + 1))
         close = _wait_close(ws)
     assert close.code == 1009
 
 
 def test_socket_caps_open_relays_per_profile(client, server, monkeypatch):
-    monkeypatch.setattr(api, "_speech_server_open", {api._limiter_key("work"): api.SPEECH_SERVER_MAX_OPEN_PER_PROFILE})
+    monkeypatch.setattr(api.speech_server, "_speech_server_open", {api.core._limiter_key("work"): api.speech_server.SPEECH_SERVER_MAX_OPEN_PER_PROFILE})
     with client.websocket_connect(f"{BASE}/speech-server/socket?profile=work") as ws:
         close = _wait_close(ws)
-    assert close.code == api.SPEECH_SERVER_CLOSE_RATE_LIMITED
+    assert close.code == api.speech_server.SPEECH_SERVER_CLOSE_RATE_LIMITED
     assert server.connects == []
 
 
 def test_capability_is_advertised():
-    assert "speech-server" in api.ROUTE_CAPABILITIES
+    assert "speech-server" in api.capabilities.ROUTE_CAPABILITIES

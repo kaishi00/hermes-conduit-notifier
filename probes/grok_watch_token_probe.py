@@ -73,7 +73,7 @@ def load_plugin_api():
 
 def scoped(api, profile: Optional[str], fn, *args, **kwargs):
     """`fn` under the Hermes profile the dashboard would use for `?profile=`."""
-    with api._profile_scope(profile):
+    with api.core._profile_scope(profile):
         return fn(*args, **kwargs)
 
 
@@ -269,11 +269,11 @@ async def run(args, api) -> Dict[str, Any]:
     t0 = time.monotonic()
     summary: Dict[str, Any] = {}
     try:
-        bearer, auth = await asyncio.to_thread(scoped, api, args.profile, api.grok_live_credentials)
-        model, voice = await asyncio.to_thread(scoped, api, args.profile, api.grok_live_model_voice)
+        bearer, auth = await asyncio.to_thread(scoped, api, args.profile, api.grok_live.grok_live_credentials)
+        model, voice = await asyncio.to_thread(scoped, api, args.profile, api.grok_live.grok_live_model_voice)
     except Exception as exc:
         # TokenError texts are the plugin's own user-facing messages.
-        summary["error"] = str(exc)[:200] if isinstance(exc, api.TokenError) else exc.__class__.__name__
+        summary["error"] = str(exc)[:200] if isinstance(exc, api.core.TokenError) else exc.__class__.__name__
         return summary
     summary.update(auth=auth, model=model, voice=voice, expires_requested_s=args.expires)
     mark(t0, f"xAI sign-in: {auth}")

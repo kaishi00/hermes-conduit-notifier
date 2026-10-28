@@ -304,7 +304,7 @@ def test_the_tool_says_how_to_start_when_nothing_was_logged(store):
 
 
 def _client(monkeypatch, home):
-    monkeypatch.setattr(api, "_calls_home", lambda: home)
+    monkeypatch.setattr(api.core, "_calls_home", lambda: home)
     app = FastAPI()
     app.include_router(api.router, prefix=BASE)
     return TestClient(app)
@@ -439,7 +439,7 @@ def test_new_events_wake_the_pulse_loop_that_runs_here(monkeypatch):
         monkeypatch.setitem(sys.modules, "hermes_plugins.conduit_push.pulse", live)
         monkeypatch.setitem(sys.modules, "conduit_push_dashboard_pkg.pulse", idle)
         # Other suites may leave a real loop running in this process too.
-        assert api._wake_running_pulse() >= 1
+        assert api.phone_data._wake_running_pulse() >= 1
         assert woken == ["live"]  # the running loop, not an import whose thread never started
     finally:
         stop.set()
@@ -450,9 +450,9 @@ def test_the_route_caps_follow_the_store_limits():
     # caps in step with it.
     fields = (inbox.MAX_SOURCE_CHARS + inbox.MAX_TITLE_CHARS + inbox.MAX_TEXT_CHARS + inbox.MAX_AMOUNT_CHARS
               + inbox.MAX_TRIGGER_CHARS)
-    assert api.INBOX_MAX_INGEST_BODY_BYTES == \
+    assert api.phone_data.INBOX_MAX_INGEST_BODY_BYTES == \
         (inbox.MAX_EVENTS_PER_BATCH * (4 * fields + 512)) * 4 // 3 + 4096
-    assert api.INBOX_MAX_DELETE_BODY_BYTES == inbox.MAX_DELETE * (inbox.MAX_EVENT_ID_CHARS + 3) + 1024
+    assert api.phone_data.INBOX_MAX_DELETE_BODY_BYTES == inbox.MAX_DELETE * (inbox.MAX_EVENT_ID_CHARS + 3) + 1024
 
 
 def test_a_full_batch_of_long_fields_fits_the_ingest_route(monkeypatch, tmp_path):

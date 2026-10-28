@@ -254,7 +254,7 @@ module_paths:
   - tools/xai_http
   - tui_gateway
 
-# The plugin's routes under /api/plugins/conduit_push/, from dashboard/plugin_api.py.
+# The plugin's routes under /api/plugins/conduit_push/, from dashboard/.
 routes:
   - GET /artifacts
   - GET /calls

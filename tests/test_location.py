@@ -1009,9 +1009,9 @@ def test_a_call_at_an_avoided_place_is_held_back_and_not_counted(tmp_path):
 
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
-    monkeypatch.setattr(api, "_calls_home", lambda: tmp_path)
+    monkeypatch.setattr(api.core, "_calls_home", lambda: tmp_path)
     for name in ("_location_ingest_limiter", "_location_key_limiter", "_location_wipe_limiter"):
-        monkeypatch.setattr(api, name, api._MintLimiter(1000, 60))
+        monkeypatch.setattr(api.phone_data, name, api.core._MintLimiter(1000, 60))
     started, removed = [], []
     cron = types.ModuleType("cron")
     jobs = types.ModuleType("cron.jobs")
@@ -1087,14 +1087,14 @@ def test_status_says_whether_hermes_can_ask_for_a_fresh_position(client, monkeyp
     # conduit_location's locate can reach this phone; it mirrors locate's own
     # not_paired gate (background sharing is the phone's own setting).
     pairing = client.home / "conduit-push.json"
-    monkeypatch.setattr(api, "_pairing_state_path", lambda: pairing)
+    monkeypatch.setattr(api.core, "_pairing_state_path", lambda: pairing)
     assert client.get(f"{BASE}/location/status").json()["locate"] == {"available": False}
     pairing.write_text(json.dumps({"credential": "c" * 32, "installation_id": "i" * 16}))
     assert client.get(f"{BASE}/location/status").json()["locate"] == {"available": True}
 
 
 def test_ingest_refuses_an_oversized_body(client):
-    response = client.post(f"{BASE}/location/ingest", content=b"x" * (api.LOCATION_MAX_INGEST_BODY_BYTES + 1),
+    response = client.post(f"{BASE}/location/ingest", content=b"x" * (api.phone_data.LOCATION_MAX_INGEST_BODY_BYTES + 1),
                            headers={"content-type": "application/json"})
     assert response.status_code == 413
 
@@ -1169,19 +1169,19 @@ class VoicePhone(Phone):
         return opened["result"]
 
 
-_ORIGINAL_MODULES = api._voice_tool_modules
+_ORIGINAL_MODULES = api.phone_data._voice_tool_modules
 
 
 @pytest.fixture()
 def voice(tmp_path, monkeypatch):
     """The voice routes on a profile whose location store runs at NOW."""
-    monkeypatch.setattr(api, "_calls_home", lambda: tmp_path)
-    monkeypatch.setattr(api, "_voice_tools_limiter", api._MintLimiter(1000, 60))
-    modules = api._voice_tool_modules()
+    monkeypatch.setattr(api.core, "_calls_home", lambda: tmp_path)
+    monkeypatch.setattr(api.phone_data, "_voice_tools_limiter", api.core._MintLimiter(1000, 60))
+    modules = api.phone_data._voice_tool_modules()
     entry = modules["conduit_location"]
     dashboard_store = entry[1]
     modules["conduit_location"] = (entry[0], lambda home: dashboard_store(home, clock=lambda: NOW), *entry[2:])
-    monkeypatch.setattr(api, "_voice_tool_modules", lambda: modules)
+    monkeypatch.setattr(api.phone_data, "_voice_tool_modules", lambda: modules)
     app = FastAPI()
     app.include_router(api.router, prefix=BASE)
     store = location.LocationStore(tmp_path, clock=lambda: NOW)
@@ -1236,7 +1236,7 @@ def test_a_voice_read_answers_sealed_and_is_logged_as_a_call(voice):
 def test_a_new_key_during_the_read_seals_nothing_to_the_old_key(voice, monkeypatch, action):
     client, store = voice
     owner = _voice_phone(store, fix=fix())
-    tool = api._plugin_package_module("location_tool")
+    tool = api.core._plugin_package_module("location_tool")
     read = tool.voice_handle
 
     def re_keyed_meanwhile(*args, **kwargs):
@@ -1332,14 +1332,14 @@ def test_a_voice_envelope_with_a_bad_nonce_or_body_is_a_400(voice, field, value)
 
 
 def test_a_broken_location_module_leaves_health_voice_reads(tmp_path, monkeypatch):
-    real = api._plugin_package_module
+    real = api.core._plugin_package_module
 
     def broken(name):
         if name == "location_tool":
             raise ImportError("half installed")
         return real(name)
 
-    monkeypatch.setattr(api, "_plugin_package_module", broken)
+    monkeypatch.setattr(api.core, "_plugin_package_module", broken)
     assert list(_ORIGINAL_MODULES()) == ["conduit_health"]
 
 
@@ -1347,7 +1347,7 @@ def test_a_damaged_location_store_hides_only_location_from_the_voice_list(voice,
     client, store = voice
     _voice_phone(store, fix=fix())
     # Health has something shared here, so it stays listed beside the damage.
-    monkeypatch.setattr(api._plugin_package_module("health_tool"), "voice_shared", lambda _store: True)
+    monkeypatch.setattr(api.core._plugin_package_module("health_tool"), "voice_shared", lambda _store: True)
     store.path.write_bytes(b"not a database" * 100)
     response = client.get(f"{BASE}/voice-tools")
     assert response.status_code == 200

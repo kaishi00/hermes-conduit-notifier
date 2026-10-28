@@ -177,9 +177,9 @@ def lookup(api, grant: dict, query: str) -> dict:
     if not query.strip():
         return {"ok": False, "detail": "nothing to look up"}
     secret = base64.urlsafe_b64decode(grant["key"] + "=" * (-len(grant["key"]) % 4))
-    keys = api.watch_tool_keys(secret)
+    keys = api.watch_tools.watch_tool_keys(secret)
     rid = base64.urlsafe_b64encode(os.urandom(16)).rstrip(b"=").decode("ascii")
-    sealed = api.seal_watch_tool(keys["call"], "call", grant["grant_id"], rid,
+    sealed = api.watch_tools.seal_watch_tool(keys["call"], "call", grant["grant_id"], rid,
                                  {"tool": "web_search", "args": {"query": query.strip()[:300], "limit": 3}})
     request = urllib.request.Request(
         f"{grant['relay_url']}/v1/watch-tools/grants/{grant['grant_id']}/calls",
@@ -187,7 +187,7 @@ def lookup(api, grant: dict, query: str) -> dict:
         headers={"Authorization": f"Bearer {grant['watch_key']}", "Content-Type": "application/json"})
     try:
         # The plugin's opener follows no redirect: the relay key stays with the relay.
-        with api._relay_opener.open(request, timeout=LOOKUP_TIMEOUT_S) as response:
+        with api.watch_tools._relay_opener.open(request, timeout=LOOKUP_TIMEOUT_S) as response:
             raw = response.read(64 * 1024)
     except urllib.error.HTTPError as exc:
         exc.close()
@@ -202,8 +202,8 @@ def lookup(api, grant: dict, query: str) -> dict:
         # Cut at 64 KB, or not an object.
         return {"ok": False, "detail": "the relay's answer wasn't a readable JSON object"}
     try:
-        return api.open_watch_tool(keys["result"], "result", grant["grant_id"], rid, body, max_bytes=64 * 1024)
-    except api.WatchToolError as exc:
+        return api.watch_tools.open_watch_tool(keys["result"], "result", grant["grant_id"], rid, body, max_bytes=64 * 1024)
+    except api.watch_tools.WatchToolError as exc:
         return {"ok": False, "detail": f"the answer didn't open ({exc})"}
 
 
@@ -279,7 +279,7 @@ async def call(api, grant: dict, engine: str, speech: Dict[int, bytes], seconds:
         return {"error": "the host's bridge never reached the relay"}
     run.mark("Watch socket open (host there)")
     sid = os.urandom(16)
-    keys = api.watch_audio_keys(secret, sid)
+    keys = api.watch_audio.watch_audio_keys(secret, sid)
     sent = {"n": 0}
     received = {"n": -1}
     # The mic and the lookups both send: one at a time, so counters rise in order.
@@ -289,7 +289,7 @@ async def call(api, grant: dict, engine: str, speech: Dict[int, bytes], seconds:
 
     async def send(kind: int, plain: bytes) -> None:
         async with sending:
-            await socket.send(api.seal_watch_audio(keys[UP], UP, grant["grant_id"], sid, kind, sent["n"], plain))
+            await socket.send(api.watch_audio.seal_watch_audio(keys[UP], UP, grant["grant_id"], sid, kind, sent["n"], plain))
             sent["n"] += 1
 
     started = asyncio.get_running_loop().create_future()
@@ -393,8 +393,8 @@ async def call(api, grant: dict, engine: str, speech: Dict[int, bytes], seconds:
             if isinstance(message, str) or not message or message[0] == 0:
                 continue
             try:
-                kind, counter, plain = api.open_watch_audio(keys[DOWN], DOWN, grant["grant_id"], sid, message)
-            except api.WatchAudioError as exc:
+                kind, counter, plain = api.watch_audio.open_watch_audio(keys[DOWN], DOWN, grant["grant_id"], sid, message)
+            except api.watch_audio.WatchAudioError as exc:
                 print(f"  a message didn't open: {exc}")
                 continue
             if counter <= received["n"]:
@@ -481,8 +481,8 @@ def main() -> int:
     api = load_plugin_api()
 
     if args.prepare:
-        runtime = api._watch_audio_runtime
-        print(f"Preparing GPT-Live's WebRTC runtime in {api._watch_audio_env_dir()} (a few minutes the first time)")
+        runtime = api.watch_audio._watch_audio_runtime
+        print(f"Preparing GPT-Live's WebRTC runtime in {api.watch_audio._watch_audio_env_dir()} (a few minutes the first time)")
         started_at = time.monotonic()
         status = runtime.prepare(start=lambda target: target())
         print(f"  {status['runtime']} in {time.monotonic() - started_at:.0f} s"
@@ -491,7 +491,7 @@ def main() -> int:
             return 3
         if not args.wav:
             return 0
-    print(f"Watch audio status: {json.dumps(api.watch_audio_status())}")
+    print(f"Watch audio status: {json.dumps(api.watch_audio.watch_audio_status())}")
 
     speech: Dict[int, bytes] = {}
     if args.wav:
@@ -502,11 +502,11 @@ def main() -> int:
 
     run = Run()
     try:
-        with api._profile_scope(args.profile):
-            grant = api.open_watch_grant({"tools": ["web_search"], "audio": True}, profile=args.profile)
+        with api.core._profile_scope(args.profile):
+            grant = api.watch_tools.open_watch_grant({"tools": ["web_search"], "audio": True}, profile=args.profile)
     except Exception as exc:
         # TokenError texts are the plugin's own user-facing messages.
-        print(f"Opening the grant failed: {str(exc)[:300] if isinstance(exc, api.TokenError) else exc.__class__.__name__}")
+        print(f"Opening the grant failed: {str(exc)[:300] if isinstance(exc, api.core.TokenError) else exc.__class__.__name__}")
         return 3
     run.mark(f"grant open (engines {grant['audio']['engines']})")
     summary: dict = {"engine": args.engine, "relay": grant["relay_url"]}
@@ -515,8 +515,8 @@ def main() -> int:
     except Exception as exc:  # the probe reports, never raises
         result = {"error": exc.__class__.__name__}
     finally:
-        api.revoke_watch_grant({"grant_id": grant["grant_id"]}, profile=args.profile,
-                               tell_relay=api._close_watch_grant_on_relay)
+        api.watch_tools.revoke_watch_grant({"grant_id": grant["grant_id"]}, profile=args.profile,
+                               tell_relay=api.watch_tools._close_watch_grant_on_relay)
 
     path = args.out / f"watch-audio-{args.engine}.wav"
     output_rate = int((result.get("started") or {}).get("output_rate") or 24_000)

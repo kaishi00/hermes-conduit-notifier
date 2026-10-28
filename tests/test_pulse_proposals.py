@@ -452,8 +452,8 @@ def test_the_suggestion_routes(live, handset, monkeypatch):
     api = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(api)
     modules = {"pulse_control": control, "pulse": pulse}
-    monkeypatch.setattr(api, "_plugin_package_module", lambda name: modules[name])
-    monkeypatch.setattr(api, "_calls_home", lambda: live.home)
+    monkeypatch.setattr(api.core, "_plugin_package_module", lambda name: modules[name])
+    monkeypatch.setattr(api.core, "_calls_home", lambda: live.home)
     app = fastapi.FastAPI()
     app.include_router(api.router, prefix="/api/plugins/conduit_push")
     http = TestClient(app)

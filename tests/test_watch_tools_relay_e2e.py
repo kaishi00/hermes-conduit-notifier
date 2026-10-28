@@ -126,8 +126,8 @@ def paired(relay, tmp_path, monkeypatch):
         "gateway_id": claimed["gateway_id"],
         "relay_url": relay,
     }), encoding="utf-8")
-    monkeypatch.setattr(api, "_WATCH_RELAY_SCHEMES", ("https://", "http://127.0.0.1"))
-    monkeypatch.setattr(api, "_watch_grants", api._WatchGrants())
+    monkeypatch.setattr(api.watch_tools, "_WATCH_RELAY_SCHEMES", ("https://", "http://127.0.0.1"))
+    monkeypatch.setattr(api.watch_tools, "_watch_grants", api.watch_tools._WatchGrants())
     return path
 
 
@@ -136,13 +136,13 @@ def b64u(data):
 
 
 def watch_call(relay, grant, rid, payload):
-    keys = api.watch_tool_keys(base64.urlsafe_b64decode(grant["key"] + "="))
-    sealed = api.seal_watch_tool(keys["call"], "call", grant["grant_id"], rid, payload)
+    keys = api.watch_tools.watch_tool_keys(base64.urlsafe_b64decode(grant["key"] + "="))
+    sealed = api.watch_tools.seal_watch_tool(keys["call"], "call", grant["grant_id"], rid, payload)
     status, body = _request(relay, f"/v1/watch-tools/grants/{grant['grant_id']}/calls", method="POST",
                             body={"rid": rid, **sealed}, credential=grant["watch_key"])
     if status != 200:
         return status, body
-    return status, api.open_watch_tool(keys["result"], "result", grant["grant_id"], rid, body, max_bytes=64 * 1024)
+    return status, api.watch_tools.open_watch_tool(keys["result"], "result", grant["grant_id"], rid, body, max_bytes=64 * 1024)
 
 
 def test_a_watch_lookup_goes_through_the_relay_and_ends_with_the_grant(relay, paired, monkeypatch):
@@ -153,8 +153,8 @@ def test_a_watch_lookup_goes_through_the_relay_and_ends_with_the_grant(relay, pa
         return json.dumps({"success": True, "data": {"web": [
             {"title": "Tokyo weather", "url": "https://example.com/tokyo", "description": "Sunny, 21°C"}]}})
 
-    monkeypatch.setattr(api, "_hermes_web_search", search)
-    grant = api.open_watch_grant({"tools": ["web_search"]}, profile=None, path=paired)
+    monkeypatch.setattr(api.gemini_qwen_live, "_hermes_web_search", search)
+    grant = api.watch_tools.open_watch_grant({"tools": ["web_search"]}, profile=None, path=paired)
 
     status, answer = watch_call(relay, grant, b64u(os.urandom(16)), {"tool": "web_search", "args": {"query": "weather in Tokyo", "limit": 3}})
     assert status == 200
@@ -168,17 +168,17 @@ def test_a_watch_lookup_goes_through_the_relay_and_ends_with_the_grant(relay, pa
     # A call sealed with another key never reaches a tool; the Watch's
     # request just times out at the relay, so only check nothing ran.
     # The relay is told synchronously here, so the next call meets a closed grant.
-    assert api.revoke_watch_grant({"grant_id": grant["grant_id"]}, profile=None,
-                                  tell_relay=api._close_watch_grant_on_relay) == {"revoked": True}
+    assert api.watch_tools.revoke_watch_grant({"grant_id": grant["grant_id"]}, profile=None,
+                                  tell_relay=api.watch_tools._close_watch_grant_on_relay) == {"revoked": True}
     status, _ = watch_call(relay, grant, b64u(os.urandom(16)), {"tool": "web_search", "args": {"query": "again"}})
     assert status == 401
     assert len(searches) == 1
 
 
 def test_the_watch_closing_its_grant_stops_the_host_poller(relay, paired):
-    grant = api.open_watch_grant({"tools": ["web_search"]}, profile=None, path=paired)
-    [live] = api._watch_grants.all()
+    grant = api.watch_tools.open_watch_grant({"tools": ["web_search"]}, profile=None, path=paired)
+    [live] = api.watch_tools._watch_grants.all()
     status, _ = _request(relay, f"/v1/watch-tools/grants/{grant['grant_id']}", method="DELETE", credential=grant["watch_key"])
     assert status == 204
     assert live.closed.wait(10)
-    assert api._watch_grants.all() == []
+    assert api.watch_tools._watch_grants.all() == []
