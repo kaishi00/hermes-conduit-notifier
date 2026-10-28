@@ -83,6 +83,9 @@ DEFAULTS: dict[str, Any] = {
     # in the background, for what waits for a place and for its look-ups.
     # Off until the user turns it on.
     "where": False,
+    # Walking past (pulse_spots): with Where you are, the phone watches a few
+    # shops near the user for what the look ahead held for one. On with it.
+    "spots": True,
     # Hide private reminders on the Lock Screen (pulse_push): a push about a
     # gift, a surprise, someone's day, health or money says only "Pulse has
     # something for you". On until the user turns it off.
@@ -307,6 +310,31 @@ CREATE TABLE IF NOT EXISTS claims (
     kept_at REAL NOT NULL,
     UNIQUE(chat_id, message_id, action)
 );
+-- Walking past (pulse_spots): each shop the phone said the user walked
+-- into, the watch it was for, and how late iOS told the app (how far inside
+-- the circle the fix was, and the estimate made from it). Kept 30 days, and
+-- deleted with the moments (Pulse or Where you are off, a wipe).
+CREATE TABLE IF NOT EXISTS spot_entries (
+    id TEXT PRIMARY KEY,
+    device TEXT NOT NULL,
+    watch TEXT NOT NULL,
+    query TEXT NOT NULL,
+    name TEXT NOT NULL,
+    at REAL NOT NULL,
+    received_at REAL NOT NULL,
+    distance_m REAL,
+    accuracy_m REAL,
+    speed_mps REAL,
+    radius_m REAL,
+    depth_m REAL,
+    late_s REAL,
+    -- The watch's intent (pulse_spots.INTENTS), and whether the fix said the
+    -- user was close enough for it (an entry that wasn't makes no moment).
+    intent TEXT NOT NULL DEFAULT 'opportunity',
+    confirmed INTEGER NOT NULL DEFAULT 1,
+    -- The moment it became ('' when its watch was gone).
+    moment TEXT NOT NULL DEFAULT ''
+);
 -- What ratings taught Pulse (pulse_learning): each row changes what Pulse
 -- does until it's undone.
 CREATE TABLE IF NOT EXISTS lessons (
@@ -459,6 +487,9 @@ CREATE TABLE IF NOT EXISTS moments (
     at REAL NOT NULL,
     received_at REAL NOT NULL,
     keep INTEGER NOT NULL DEFAULT 1,
+    -- A shop walked into (pulse_spots): the narrowest intent the phone's fix
+    -- was close enough for ('' for a saved place).
+    reach TEXT NOT NULL DEFAULT '',
     handled_at REAL,
     -- What it did (pulse_places.handle, JSON): the items it made due, or why none.
     outcome TEXT NOT NULL DEFAULT ''
@@ -529,7 +560,8 @@ _ADDED_COLUMNS = (("cards", "topic", "TEXT NOT NULL DEFAULT ''"), ("cards", "bri
                   ("attempts", "looked", "TEXT NOT NULL DEFAULT ''"), ("cards", "looked", "TEXT NOT NULL DEFAULT ''"),
                   ("cards", "proposal", "INTEGER"), ("items", "place_words", "TEXT NOT NULL DEFAULT ''"),
                   ("items", "place_on", "TEXT NOT NULL DEFAULT ''"), ("cards", "moment", "TEXT NOT NULL DEFAULT ''"),
-                  ("cards", "back", "TEXT NOT NULL DEFAULT ''"), ("cards", "back_acted_at", "REAL"))
+                  ("cards", "back", "TEXT NOT NULL DEFAULT ''"), ("cards", "back_acted_at", "REAL"),
+                  ("moments", "reach", "TEXT NOT NULL DEFAULT ''"))
 # What report cards said for Why? before a candidate's reason did (an item's card,
 # never shown; a whole report's card), and the setting that says a store has
 # cleared them.
@@ -1411,9 +1443,9 @@ class PulseStore:
         with _lock, self._connect() as conn:
             for moment in moments:
                 if conn.execute("INSERT OR IGNORE INTO moments(id, place_id, place, kind, event, at, received_at, "
-                                "keep) VALUES(?,?,?,?,?,?,?,?)",
+                                "keep, reach) VALUES(?,?,?,?,?,?,?,?,?)",
                                 (moment["id"], moment["place_id"], moment["place"], moment["kind"], moment["on"],
-                                 moment["at"], now, 1 if moment["keep"] else 0)).rowcount:
+                                 moment["at"], now, 1 if moment["keep"] else 0, moment.get("reach") or "")).rowcount:
                     added.append(moment["id"])
         return added
 
@@ -1447,13 +1479,39 @@ class PulseStore:
             return conn.execute("DELETE FROM moments WHERE received_at < ?", (before,)).rowcount
 
     def clear_moments(self, device: Optional[str] = None) -> int:
-        """Deletes every moment (Pulse or Where you are turned off, or the
-        location shared here wiped), or one device's (that device wiped)."""
+        """Deletes every moment and shop walked into (Pulse or Where you are
+        turned off, or the location shared here wiped), or one device's
+        (that device wiped)."""
         with _lock, self._connect() as conn:
             if device is None:
+                conn.execute("DELETE FROM spot_entries")
                 return conn.execute("DELETE FROM moments").rowcount
+            conn.execute("DELETE FROM spot_entries WHERE device=?", (device,))
             prefix = f"{device}/"
             return conn.execute("DELETE FROM moments WHERE substr(id, 1, ?) = ?", (len(prefix), prefix)).rowcount
+
+    # Walking past (pulse_spots) ------------------------------------------------
+
+    def add_spot_entry(self, entry: dict[str, Any]) -> bool:
+        """Keeps a shop the phone said the user walked into, once (a batch
+        sent again adds nothing); whether it was new."""
+        with _lock, self._connect() as conn:
+            return bool(conn.execute(
+                "INSERT OR IGNORE INTO spot_entries(id, device, watch, query, name, at, received_at, distance_m, "
+                "accuracy_m, speed_mps, radius_m, depth_m, late_s, intent, confirmed, moment) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                tuple(entry.get(key) for key in ("id", "device", "watch", "query", "name", "at", "received_at",
+                                                 "distance_m", "accuracy_m", "speed_mps", "radius_m", "depth_m",
+                                                 "late_s", "intent", "confirmed", "moment"))).rowcount)
+
+    def spot_entries(self, limit: int = 50) -> list[dict]:
+        """The shops walked into, newest first (`pulse spots`)."""
+        with self._connect() as conn:
+            return [dict(row) for row in conn.execute(
+                "SELECT * FROM spot_entries ORDER BY at DESC, id DESC LIMIT ?", (limit,)).fetchall()]
+
+    def prune_spot_entries(self, before: float) -> int:
+        with _lock, self._connect() as conn:
+            return conn.execute("DELETE FROM spot_entries WHERE received_at < ?", (before,)).rowcount
 
     # Cards and lessons (pulse_learning) --------------------------------------
 

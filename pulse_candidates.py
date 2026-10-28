@@ -173,7 +173,8 @@ def recent_section(pulse_store: store.PulseStore, zone: tzinfo, now: float) -> s
         if card["done"]:
             continue
         wait = store.card_moment(card)
-        did = "leaves" if wait.get("on") == "leave" else "gets to"
+        did = ((("gets to" if wait.get("intent") in ("errand", "arrival") else "passes near")
+                if wait.get("kind") == "spot" else "leaves" if wait.get("on") == "leave" else "gets to"))
         ref = f" (remembered #{card['item_id']})" if card["item_id"] is not None else ""
         line = (f"- {_local(card['created_at'], zone)} [{card['topic'] or card['kind']}] "
                 f"{_clip(card['news'] or card['title'], RECENT_CLIP)}{ref} (held: Pulse brings it up when the user "

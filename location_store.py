@@ -102,6 +102,9 @@ WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 MAX_DEVICES = 4
 MAX_PLACES = 20
 MAX_EVENTS = 100
+# Shops the phone watched for Pulse (pulse_spots) that the user walked into,
+# in one batch; past it, the rest are dropped.
+MAX_SPOT_ENTRIES = 20
 MAX_RULES = 20
 MAX_NAME_CHARS = 40
 MAX_DEVICE_NAME_CHARS = 60
@@ -237,6 +240,11 @@ def ingest_aad(kid: str, device_id: str, batch_id: str) -> bytes:
 def maps_aad(direction: str, kid: str, device_id: str, request_id: str) -> bytes:
     """``direction`` is ``request`` (host to phone) or ``answer``."""
     return f"{AAD_TAG}\nmaps-{direction}\nkid={kid}\ndev={device_id}\nid={request_id}".encode("utf-8")
+
+
+def spots_aad(kid: str, device_id: str, batch_id: str) -> bytes:
+    """The sealed reply to a batch: the shops Pulse asks the phone to watch."""
+    return "\n".join([AAD_TAG, "spots", f"kid={kid}", f"dev={device_id}", f"batch={batch_id}"]).encode("utf-8")
 
 
 def voice_aad(direction: str, tool: str, kid: str, device_id: str, call_id: str) -> bytes:
@@ -554,10 +562,13 @@ class LocationStore:
 
     # Ingest --------------------------------------------------------------------
 
-    def ingest(self, envelope: Any) -> dict[str, Any]:
+    def ingest(self, envelope: Any, reply: Callable[[str, dict[str, Any]], Any] | None = None) -> dict[str, Any]:
         """A sealed batch from a device. ``rules_fired`` lists the place
         rules an arrival or departure in it set off (the route starts their
-        jobs once this has committed)."""
+        jobs once this has committed). ``reply`` (device id, this result),
+        once it has committed, makes what goes back to a phone that asked
+        for shops to watch ("spot_entries" in its batch): sealed for it as
+        ``reply`` (spots_aad)."""
         if not isinstance(envelope, dict) or type(envelope.get("v")) is not int or envelope.get("v") != 1:
             raise LocationError("malformed", "Expected a version 1 sealed batch")
         device_id, kid, batch_id = envelope.get("device_id"), envelope.get("kid"), envelope.get("batch_id")
@@ -586,7 +597,15 @@ class LocationStore:
             # their window when no new lookup comes.
             _prune_maps(db, now)
             generation = _meta(db, "generation")
-        return {**result, "generation": generation}
+        result = {**result, "generation": generation}
+        if reply is not None and "spot_entries" in batch:
+            answer = reply(device_id, result)
+            if answer is not None:
+                self._still_keyed(device_id, kid)
+                nonce, ct = seal(key, json.dumps(answer, ensure_ascii=False).encode("utf-8"),
+                                 spots_aad(kid, device_id, batch_id))
+                result["reply"] = {"nonce": nonce, "ct": ct}
+        return result
 
     # Status, log and wipe -------------------------------------------------------------
 
@@ -1291,6 +1310,46 @@ def _parse_event(value: Any, index: int, places: dict[str, dict[str, Any]], shar
             "private": private, "area": area}
 
 
+_SPOT_ID = re.compile(r"^[0-9]{1,2}\.[ci][0-9]{1,12}\Z")
+
+
+def _spot_entries(value: Any, now: float) -> list[dict[str, Any]]:
+    """The shops the phone said the user walked into (pulse_spots), the
+    usable ones: an entry that doesn't parse is dropped, never the batch,
+    so a newer app's fields can't break an older host. Each: id, spot_id
+    (the watch, "0.c12"), name, at, and from the fix taken then, fix_at,
+    distance_m (from the shop), accuracy_m, speed_mps (None when unknown)
+    and radius_m (the circle watched)."""
+    if not isinstance(value, list):
+        return []
+    found = []
+    for index, entry in enumerate(value[:MAX_SPOT_ENTRIES]):
+        field = f"spot_entries[{index}]"
+        try:
+            if not isinstance(entry, dict):
+                continue
+            entry_id, spot_id = entry.get("id"), entry.get("spot_id")
+            if not isinstance(entry_id, str) or not _RECORD_ID.match(entry_id):
+                continue
+            if not isinstance(spot_id, str) or not _SPOT_ID.match(spot_id):
+                continue
+            name = clean_text(entry.get("name"), f"{field}.name", 120)
+            at = parse_time(entry.get("at"), f"{field}.at").timestamp()
+            if not name or at > now + RULE_EVENT_SKEW_S:
+                continue
+            fix_at = parse_time(entry["fix_at"], f"{field}.fix_at").timestamp() \
+                if entry.get("fix_at") is not None else None
+            speed = _number(entry.get("speed_mps"), f"{field}.speed_mps", -1.0, 100.0)
+            found.append({"id": entry_id, "spot_id": spot_id, "name": name, "at": at, "fix_at": fix_at,
+                          "distance_m": _number(entry.get("distance_m"), f"{field}.distance_m", 0.0, 100_000.0),
+                          "accuracy_m": _number(entry.get("accuracy_m"), f"{field}.accuracy_m", 0.0, 100_000.0),
+                          "speed_mps": speed if speed is not None and speed >= 0 else None,
+                          "radius_m": _number(entry.get("radius_m"), f"{field}.radius_m", 1.0, 5_000.0)})
+        except LocationError:
+            continue
+    return found
+
+
 def _decode(text: str | None, default: Any) -> Any:
     """Stored JSON, or ``default`` when it's missing or damaged."""
     if not text:
@@ -1417,7 +1476,14 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: f
                                 "kind": place["kind"], "on": event["kind"], "at": event["at"],
                                 "keep": sharing["retention_days"] > 0})
     _prune(db, device_id, sharing["retention_days"], now)
-    return {"accepted": True, "fix": stored_fix, "events": added, "rules_fired": fired, "moments": moments}
+    # A shop's name and how far the phone was from it say where the user is
+    # as closely as a precise fix: only at that precision (pulse_spots).
+    watching = not paused and sharing["background"] and sharing["background_precision"] == "precise"
+    spots = _spot_entries(batch.get("spot_entries"), now) if watching else []
+    room = batch.get("spots_room")
+    return {"accepted": True, "fix": stored_fix, "events": added, "rules_fired": fired, "moments": moments,
+            "spot_entries": spots, "spots_watching": watching,
+            "spots_room": room if isinstance(room, int) and not isinstance(room, bool) and 0 <= room <= 20 else None}
 
 
 def _fire_rules(db: sqlite3.Connection, event: dict[str, Any], place: dict[str, Any], now: float) -> list[dict[str, Any]]:

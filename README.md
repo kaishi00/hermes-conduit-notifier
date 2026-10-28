@@ -2675,6 +2675,55 @@ and she loved Kyoto"):
   what each arrival or departure brought up; `pulse status` and `pulse
   ahead` count the look ahead's picks held for a place.
 
+## Pulse watches shops you walk past (plugin 0.110+)
+
+With Where you are on, Conduit sharing location in the background at
+Precise (a shop's name and how far you were from it say as much as a
+precise fix), and walking past on (`hermes conduit-push pulse spots on|off`, PUT /pulse's
+`spots`, on by default), Pulse can ask the phone to watch a few kinds of
+shop near you, never coordinates:
+
+- **What it watches.** The daily look ahead may hold a pick for a kind of
+  shop instead of a saved place, `"moment": {"spot": "a florist"}`: flowers
+  before an anniversary, a card before a birthday. Code keeps a few words
+  (at most 5 words, 40 characters) that name no saved place, and the pick
+  waits off the screen as one held for a place does. Something you said
+  for a place that matches no saved place ("next time I'm at Costco") is
+  watched by its words too. At most six at once.
+- **How the phone hears it.** The reply to the location batches Conduit
+  already sends (an arrival, a departure, a visit, opening the app) lists
+  the watches, sealed for that phone, so the phone needs no app open to
+  hear the day's. A Conduit build that watches shops (the plugin
+  reports capability `pulse_spots`) searches Apple Maps for each near where you are, watches the nearest few until the
+  watch ends (saved places come first in iOS's twenty), and searches again
+  as you move.
+- **How close counts.** Each watch has an intent and a circle, one size
+  for walking and one for driving; the phone uses whichever fits how
+  you're moving. The aim is a useful chance to act, not the shop's edge.
+  An opportunity (a look ahead pick, unless it says otherwise) is broad,
+  750 m walking and 3 km driving: worth a detour. An errand (something you
+  said for a place) is 100 m and counts only when the phone's fix on entry
+  is inside it. An arrival is 100 m too and counts only when the fix is
+  inside with its whole accuracy. Even then Pulse only says you're at or
+  right by the shop, never that you went in. The look ahead may give a
+  pick `"intent": "errand"` or `"arrival"`, and its own `"radius_m"` (500
+  to 5000 m for an opportunity, 50 to 300 m otherwise). An entry that
+  wasn't close enough is kept for `pulse spots` and does nothing else; the
+  watch stays.
+- **Coming near one.** The next batch says which shop, when iOS said so,
+  and where the phone was then. It's a moment at that shop, as getting to a
+  saved place is: it brings up the pick held for that kind of shop, in a
+  turn of its own with a time-sensitive push, or makes due what you said
+  for it, with the same checks (not at night, on a quiet day or while
+  busy). Why? says which shop it was.
+- **How late iOS told it.** Each shop come near is kept 30 days with how
+  far inside the watched circle the phone's fix was and an estimate of the
+  seconds that took (at the fix's speed, or walking pace). Turning Pulse or
+  Where you are off, or deleting your location from your gateway, deletes
+  them. `hermes conduit-push pulse spots` lists what's watched, how many
+  more places the phone said it could watch, and the shops walked into with
+  their timing.
+
 ## Pulse pushes: how much they interrupt, and private ones (plugin 0.104+)
 
 Each Pulse push says how much it may interrupt, decided in code, never by
