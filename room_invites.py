@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import tempfile
 import threading
 import time
@@ -947,7 +948,11 @@ class Rooms:
         for link_id, agent in leaving:
             self._leave(link_id, agent)
         for room_id in forgotten:
-            room_posts.forget(self.root, room_id)
+            try:
+                room_posts.forget(self.root, room_id)
+            except (sqlite3.Error, OSError) as exc:
+                logger.warning("Linked Rooms couldn't forget who posted in room %s (%s)", room_id,
+                               type(exc).__name__)
 
     # --- Helpers -------------------------------------------------------------------------
 

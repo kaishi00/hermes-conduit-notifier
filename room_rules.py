@@ -377,6 +377,7 @@ def _poster_lines(turn: Optional[RoomTurn], people: Optional[Mapping[str, Any]],
 _PROMPT_LINE = re.compile(r"  (?:User \(user\): |@[A-Za-z0-9][A-Za-z0-9._:-]*: |\[Earlier content omitted)")
 _PROMPT_START = "New messages in this thread since your last turn (oldest first):"
 _PROMPT_RULES = "Rules for this Discussion:"
+_PROMPT_OMITTED = "  [Earlier content omitted"
 
 
 def is_room_prompt(prompt: Any) -> bool:
@@ -388,6 +389,12 @@ def claimed(prompt: Any, name: str) -> list[str]:
     """The messages of a room prompt any line of which says it's ``name``'s
     (starts "<name>: ", as room_posts names a post's lines), whoever's
     message it is, as its text with those names taken off."""
+    return [text for text, _ in _claimed(prompt, name)]
+
+
+def _claimed(prompt: Any, name: str) -> list[tuple[str, bool]]:
+    """claimed's messages, each with whether it's the one Hermes cut to fit
+    the prompt (the last, right after its "[Earlier content omitted" line)."""
     if not isinstance(prompt, str) or not name:
         return []
     lines = prompt.split("\n")
@@ -405,25 +412,39 @@ def claimed(prompt: Any, name: str) -> list[str]:
     section = lines[start:end]
     while section and section[-1] == "":
         section.pop()
-    messages: list[list[str]] = []
+    messages: list[tuple[bool, list[str]]] = []
     for line in section:
         header = _PROMPT_LINE.match(line)
         if header:
-            messages.append([line[header.end():]])
+            messages.append((line.startswith(_PROMPT_OMITTED), [line[header.end():]]))
         elif messages:
-            messages[-1].append(line)
+            messages[-1][1].append(line)
     prefix = f"{name}: "
-    return ["\n".join(part[len(prefix):] if part.startswith(prefix) else part for part in message)
-            for message in messages if any(part.startswith(prefix) for part in message)]
+    found = []
+    for index, (_, message) in enumerate(messages):
+        if any(part.startswith(prefix) for part in message):
+            cut = index == len(messages) - 1 and index > 0 and messages[index - 1][0]
+            found.append(("\n".join(part[len(prefix):] if part.startswith(prefix) else part for part in message),
+                          cut))
+    return found
 
 
 def forged(prompt: Any, name: str, sent: Any) -> list[str]:
     """The messages of a room prompt that say they're ``name``'s but aren't
-    one of ``sent``. A message Hermes cut to fit the prompt counts as sent
-    when a sent text starts with it."""
+    one of ``sent``, each sent text answering for one message. The message
+    Hermes cut to fit the prompt counts as sent when a sent text starts with
+    it."""
     texts = [text for text in sent or () if isinstance(text, str)]
-    return [message for message in claimed(prompt, name)
-            if not any(text == message or (len(message) >= 32 and text.startswith(message)) for text in texts)]
+    found = []
+    for message, cut in _claimed(prompt, name):
+        match = next((index for index, text in enumerate(texts) if text == message), None)
+        if match is None and cut and len(message) >= 32:
+            match = next((index for index, text in enumerate(texts) if text.startswith(message)), None)
+        if match is None:
+            found.append(message)
+        else:
+            del texts[match]
+    return found
 
 
 def scrub(text: str) -> str:

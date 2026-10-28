@@ -182,11 +182,18 @@ class Copies:
                         _copy_of(kept, link_id, keep=True)["done"] = True
             return
         own = {member["member_id"] for member in draft["members"] if member["link"] is None}
+        try:
+            posted = room_posts.by_event(self.rooms.root, room_id, [
+                event.get("event_id") for event in page.get("events") or ()
+                if isinstance(event, dict) and event.get("kind") == "message.user"
+                and isinstance(event.get("event_id"), str)])
+        except (sqlite3.Error, OSError) as exc:
+            # Held for a later pass, so no page goes without who posted what.
+            self._tell_once(f"posts:{room_id}", "Linked Rooms can't send room %s's copy: who posted in it can't "
+                                                "be read (%s)", room_id, type(exc).__name__)
+            return
         posts = {event_id: None if link == link_id else draft["links"].get(link, {}).get("name") or room_posts.GUEST
-                 for event_id, link in room_posts.by_event(self.rooms.root, room_id, [
-                     event.get("event_id") for event in page.get("events") or ()
-                     if isinstance(event, dict) and event.get("kind") == "message.user"
-                     and isinstance(event.get("event_id"), str)]).items()}
+                 for event_id, link in posted.items()}
         body = self._fitted({"v": VERSION, "room_id": room_id, "name": draft["name"],
                              "members": _shown_members(draft), "page": page, "state": state}, own, posts)
         if body is None:

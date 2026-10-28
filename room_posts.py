@@ -239,9 +239,14 @@ class Posts:
                     error = "too_long"
             if error is None and seq is None:
                 # Kept before it's sent, with no seq yet: a page the rooms loop reads meanwhile says who it's by.
-                with _db_lock, closing(_open(self.path)) as conn, conn:
-                    conn.execute("INSERT OR IGNORE INTO posted VALUES (?, ?, 0, ?, ?, ?)",
-                                 (room_id, event_id, link_id, client_id, float(self.rooms.clock())))
+                try:
+                    with _db_lock, closing(_open(self.path)) as conn, conn:
+                        conn.execute("INSERT OR IGNORE INTO posted VALUES (?, ?, 0, ?, ?, ?)",
+                                     (room_id, event_id, link_id, client_id, float(self.rooms.clock())))
+                except (sqlite3.Error, OSError) as exc:
+                    logger.warning("Linked Rooms couldn't keep a post in room %s (%s)", room_id, type(exc).__name__)
+                    error = "unavailable"
+            if error is None and seq is None:
                 try:
                     found = self.rooms.starter.find(draft.get("started_in") or draft["where"])
                     event = found.service.send(room_id=room_id, event_id=event_id,
@@ -253,8 +258,14 @@ class Posts:
                     error = "unavailable"
                 # A send that failed may still have posted it: who it's for stays, its seq waits for a resend.
                 if error is None:
-                    with _db_lock, closing(_open(self.path)) as conn, conn:
-                        conn.execute("UPDATE posted SET seq=? WHERE room_id=? AND event_id=?", (seq, room_id, event_id))
+                    try:
+                        with _db_lock, closing(_open(self.path)) as conn, conn:
+                            conn.execute("UPDATE posted SET seq=? WHERE room_id=? AND event_id=?",
+                                         (seq, room_id, event_id))
+                    except (sqlite3.Error, OSError) as exc:
+                        # Posted, and who it's for is kept: a resend is the same event and fills in its seq.
+                        logger.warning("Linked Rooms couldn't keep a post's seq in room %s (%s)", room_id,
+                                       type(exc).__name__)
         answer = {"v": VERSION, "room_id": room_id, "event_id": client_id, "seq": seq if error is None else None,
                   "error": error}
         with self.rooms.store.update() as state:
