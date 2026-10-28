@@ -54,8 +54,9 @@ them: the routes and the code behind them are in the modules
 - What three or more features use goes in `core`.
 - A module stays under 150 KB, small enough for an agent or a reviewer to
   read whole. Past that, give part of it a module of its own.
-- Tests reach a name through its module: `api.watch_jobs.WATCH_JOB_TOOLS`,
-  `monkeypatch.setattr(api.core, "_calls_home", ...)`.
+- Tests and probes reach a name through its module:
+  `api.watch_jobs.WATCH_JOB_TOOLS`, `monkeypatch.setattr(api.core, "_calls_home", ...)`,
+  a probe's `hasattr(module.watch_audio, "_WatchAudioBridge")`.
 
 A branch that still has the single file merges main from just before the
 split, runs `python3 scripts/split_plugin_api.py write` and commits, then

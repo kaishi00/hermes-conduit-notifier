@@ -70,8 +70,10 @@ def load_plugin_api():
     except Exception as exc:
         sys.exit(f"Could not load {path} ({exc.__class__.__name__}: {str(exc)[:120]}); "
                  "run the probe with the Python Hermes itself uses")
-    missing = [name for name in ("_profile_scope", "create_gpt_live_session", "gpt_live_status", "TokenError")
-               if not hasattr(module, name)]
+    missing = [f"{part}.{name}" for part, name in (("core", "_profile_scope"), ("core", "TokenError"),
+                                                   ("gpt_live", "create_gpt_live_session"),
+                                                   ("gpt_live", "gpt_live_status"))
+               if not hasattr(getattr(module, part), name)]
     if missing:
         sys.exit(f"This plugin checkout lacks {', '.join(missing)}; use the probe's own branch")
     return module

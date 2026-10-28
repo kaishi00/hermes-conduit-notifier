@@ -84,7 +84,7 @@ def load_plugin_api():
     except Exception as exc:
         sys.exit(f"Could not load {path} ({exc.__class__.__name__}: {str(exc)[:120]}); "
                  "run the probe with the Python Hermes itself uses")
-    if not hasattr(module, "_WatchAudioBridge"):
+    if not hasattr(module.watch_audio, "_WatchAudioBridge"):
         sys.exit("This plugin checkout has no Watch audio; use the probe's own branch")
     return module
 

@@ -29,7 +29,6 @@ from . import link_status
 logger = logging.getLogger(__package__.rpartition(".")[0] or __name__)
 
 
-
 def _dashboard_dir() -> str:
     """dashboard/ (this file is dashboard/api/core.py)."""
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

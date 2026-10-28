@@ -46,10 +46,12 @@ REWRITTEN_DIRS = ("tests", "probes")
 
 HEADER = re.compile(r"^# --- (?P<title>.+?) -{3,}\s*$")
 
-# The modules in the order they run, which is also the order their routes are
-# tried, and what each holds: plugin_api.py's index, and the first line of each
-# module's docstring. A module's top-level statements may use only the modules
-# above it while it loads (``analyze`` says when one doesn't).
+# What the split makes, not the list a module is added to afterwards (that's
+# dashboard/api/__init__.py's MODULES, and plugin_api.py's index). The modules
+# in the order they run, which is also the order their routes are tried, and
+# what each holds: plugin_api.py's index, and the first line of each module's
+# docstring. A module's top-level statements may use only the modules above it
+# while it loads (``analyze`` says when one doesn't).
 MODULES: List[Tuple[str, str]] = [
     ("core", "What three or more features share: errors, rate limits, request bodies, the profile a request "
              "acts for, and the plugin's own files"),
@@ -185,7 +187,6 @@ CORE_PREAMBLE = '''\
 logger = logging.getLogger(__package__.rpartition(".")[0] or __name__)
 
 
-
 def _dashboard_dir() -> str:
     """dashboard/ (this file is dashboard/api/core.py)."""
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -260,6 +261,21 @@ TEST_TEXT_FIXES: List[Tuple[str, str, str]] = [
      "        grok_live=types.SimpleNamespace(grok_live_credentials=lambda: (\"bearer\", \"test sign-in\"),\n"
      "                                        grok_live_model_voice=lambda: (\"grok-test\", \"Ara\")),\n"
      "    )\n"),
+    # A probe's check of the names it needs, from more than one module: each names its module.
+    ("probes/gpt_live_bridge_probe.py",
+     '    missing = [name for name in ("_profile_scope", "create_gpt_live_session", "gpt_live_status", "TokenError")\n'
+     '               if not hasattr(module, name)]\n',
+     '    missing = [f"{part}.{name}" for part, name in (("core", "_profile_scope"), ("core", "TokenError"),\n'
+     '                                                   ("gpt_live", "create_gpt_live_session"),\n'
+     '                                                   ("gpt_live", "gpt_live_status"))\n'
+     '               if not hasattr(getattr(module, part), name)]\n'),
+    ("probes/grok_watch_token_probe.py",
+     '    missing = [name for name in ("_profile_scope", "grok_live_credentials", "grok_live_model_voice", "TokenError")\n'
+     '               if not hasattr(module, name)]\n',
+     '    missing = [f"{part}.{name}" for part, name in (("core", "_profile_scope"), ("core", "TokenError"),\n'
+     '                                                   ("grok_live", "grok_live_credentials"),\n'
+     '                                                   ("grok_live", "grok_live_model_voice"))\n'
+     '               if not hasattr(getattr(module, part), name)]\n'),
     # Parametrized names from more than one module: each value names its module.
     ("tests/test_watch_jobs.py",
      '@pytest.mark.parametrize("pattern, valid", [\n'
@@ -1380,6 +1396,15 @@ def analyze_test(path: str, text: str) -> TestFile:
         (holders if holds else others)[bound].add(target.id)
         if spec is not None and spec.id in test_specs[binding_scope(spec.id, scope_of[spec])]:
             handles[bound][target.id] = test_specs[binding_scope(spec.id, scope_of[spec])][spec.id]
+    # What a loader hands back holds the loaded file in the loader too: a probe's
+    # check of the names it needs, before it returns the file.
+    for function in tree.body:
+        if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)) and function.name in loaders:
+            for node in ast.walk(function):
+                if isinstance(node, ast.Return) and isinstance(node.value, ast.Name) and node.value in scope_of:
+                    bound = binding_scope(node.value.id, scope_of[node.value])
+                    holders[bound].add(node.value.id)
+                    others[bound].discard(node.value.id)
     return TestFile(path, text, tree, resolver, top, scope_of, parents, holders, others, handles)
 
 
@@ -1421,15 +1446,33 @@ def add_imported_holders(test: TestFile, module_holders: Dict[str, Set[str]]) ->
     return added
 
 
+def _loop_values(target: ast.AST, iterable: ast.AST, name: str):
+    """The strings a loop's ``name`` takes from a tuple of them, or from a column of
+    a tuple of tuples (``for part, name in (("core", "TokenError"), ...)``): None
+    when they aren't all strings, False when the loop doesn't bind ``name``."""
+    names = [target] if isinstance(target, ast.Name) else list(target.elts) if isinstance(target, ast.Tuple) else []
+    i = next((i for i, t in enumerate(names) if isinstance(t, ast.Name) and t.id == name), None)
+    if i is None:
+        return False
+    items = iterable.elts if isinstance(iterable, (ast.Tuple, ast.List)) else []
+    if isinstance(target, ast.Tuple):
+        items = [row.elts[i] if isinstance(row, (ast.Tuple, ast.List)) and len(row.elts) == len(names) else None
+                 for row in items]
+    return [e.value for e in items] if items and all(
+        isinstance(e, ast.Constant) and isinstance(e.value, str) for e in items) else None
+
+
 def _string_values(test: TestFile, name: ast.Name) -> Optional[List[str]]:
-    """The strings a name can hold when it's a for loop's over a tuple of them, or a
-    parametrized test's argument; None for any other name."""
+    """The strings a name can hold when a for loop or a comprehension takes it from
+    a tuple of them, or it's a parametrized test's argument; None for any other name."""
     up = test.parents.get(name)
     while up is not None:
-        if isinstance(up, (ast.For, ast.AsyncFor)) and isinstance(up.target, ast.Name) and up.target.id == name.id:
-            items = up.iter.elts if isinstance(up.iter, (ast.Tuple, ast.List)) else []
-            return [e.value for e in items] if items and all(
-                isinstance(e, ast.Constant) and isinstance(e.value, str) for e in items) else None
+        loops = [up] if isinstance(up, (ast.For, ast.AsyncFor, ast.comprehension)) else \
+            up.generators if isinstance(up, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)) else []
+        for loop in loops:
+            values = _loop_values(loop.target, loop.iter, name.id)
+            if values is not False:
+                return values
         if isinstance(up, (ast.FunctionDef, ast.AsyncFunctionDef)):
             for d in up.decorator_list:
                 if not (isinstance(d, ast.Call) and ast.unparse(d.func) == "pytest.mark.parametrize"

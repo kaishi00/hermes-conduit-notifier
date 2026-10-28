@@ -9,11 +9,16 @@ import builtins
 import importlib.util
 import re
 import symtable
+import sys
+import types
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD = ROOT / "dashboard"
 API = DASHBOARD / "api"
+PROBES = sorted(p.stem for p in (ROOT / "probes").glob("*.py") if "def load_plugin_api(" in p.read_text())
 MODULE_SIZE_LIMIT = 150_000  # bytes: what an agent or a reviewer still reads whole
 MODULE_GLOBALS = {"__name__", "__file__", "__package__", "__spec__", "__doc__", "__loader__", "__builtins__"}
 
@@ -116,6 +121,24 @@ def test_the_package_runs_every_module_and_plugin_api_lists_them_in_its_order():
 def test_plugin_api_only_loads_the_package():
     table = symtable.symtable((DASHBOARD / "plugin_api.py").read_text(encoding="utf-8"), "plugin_api.py", "exec")
     assert {s.get_name() for s in table.get_symbols() if s.is_assigned()} == {"_load_api", "_api", "router", "_name"}
+
+
+@pytest.mark.parametrize("name", PROBES)
+def test_each_probe_finds_what_it_needs_in_the_loaded_file(name, monkeypatch):
+    # A probe checks the names it needs before it runs, and no other test runs
+    # that check. aiortc and av, which only a call needs, stand in when absent.
+    try:
+        import aiortc.mediastreams  # noqa: F401
+        import av  # noqa: F401
+    except ImportError:
+        for module, names in (("av", {}), ("aiortc", {"RTCPeerConnection": object, "RTCSessionDescription": object}),
+                              ("aiortc.mediastreams", {"AudioStreamTrack": object, "MediaStreamError": Exception})):
+            monkeypatch.setitem(sys.modules, module, types.SimpleNamespace(**names))
+    spec = importlib.util.spec_from_file_location(f"conduit_layout_probe_{name}", ROOT / "probes" / f"{name}.py")
+    probe = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(probe)
+    loaded = probe.load_plugin_api()
+    assert loaded.router is loaded.core.router
 
 
 def test_a_module_takes_another_by_module():
