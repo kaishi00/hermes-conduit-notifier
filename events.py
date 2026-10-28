@@ -101,6 +101,7 @@ def push_event(
     body: str = "",
     title_label: str = "",
     session_title: str = "",
+    headline: str = "",
     decision: dict[str, Any] | None = None,
     call: dict[str, Any] | None = None,
     mode: str | None = None,
@@ -145,6 +146,11 @@ def push_event(
     chat_title = _clean(session_title, 120) if isinstance(session_title, str) else ""
     if chat_title:
         event["session_title"] = chat_title
+    # The title Hermes wrote for a reply's push (conduit_notify, #1415):
+    # its own words, so Conduit shows it only with Full previews.
+    written = _shown_clean(headline, 60) if isinstance(headline, str) and kind == "response.ready" else ""
+    if written:
+        event["headline"] = written
     # `decision` carries the structured card content that lets Conduit render
     # an answerable card from the push payload alone, without the one-shot
     # gateway stream event (which is missed while the app is backgrounded).

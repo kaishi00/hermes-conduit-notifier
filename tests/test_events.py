@@ -586,6 +586,15 @@ def test_redact_event_keeps_the_title_label_but_not_the_chat_title():
     assert "title" not in redacted
 
 
+def test_a_written_reply_title_is_content(monkeypatch):
+    # conduit_notify's title (#1415): only on a reply, cut to 60, and gone with redaction.
+    event = push_event("response.ready", identifier="response:1", title="Report finished",
+                       headline="Report finished " + "x" * 80, title_label="response.ready")
+    assert event["headline"].startswith("Report finished") and len(event["headline"]) == 60
+    assert "headline" not in redact_event(event)
+    assert "headline" not in push_event("turn.failed", identifier="failure:1", headline="Report finished")
+
+
 def test_an_alert_call_says_so_and_keeps_it_through_redaction():
     event = push_event(
         "call.requested",

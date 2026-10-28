@@ -514,13 +514,15 @@ def test_the_title_label_and_chat_title_ride_inside_the_envelope():
         "title": "Approval needed · Quarterly numbers",
         "title_label": "approval.needed",
         "session_title": "Quarterly numbers",
+        "headline": "Numbers are in",
     }
     sealed = e2e.seal_event(event, keys, installation_id=INSTALLATION, gateway_id=GATEWAY, now=1_760_000_000)
-    assert "Quarterly numbers" not in json.dumps(sealed)
+    assert "Quarterly numbers" not in json.dumps(sealed) and "Numbers are in" not in json.dumps(sealed)
     assert "title_label" not in sealed and "session_title" not in sealed
     inner = e2e.open_event(sealed, keys, installation_id=INSTALLATION, gateway_id=GATEWAY)
     assert inner["title_label"] == "approval.needed"
     assert inner["session_title"] == "Quarterly numbers"
+    assert inner["headline"] == "Numbers are in"
 
 
 

@@ -15,7 +15,7 @@ from typing import Any
 from hermes_constants import get_hermes_home
 
 from . import (call_tool, call_watches, calls, chat_on_screen, clarify_loop, client, conduit_first, cron_runs,
-               desktop_selected, health_tool, inbox_tool, live_activity, location_tool, maps_tool, phone_tool,
+               desktop_selected, health_tool, inbox_tool, live_activity, location_tool, maps_tool, notify_tool, phone_tool,
                present_tool, pulse, reply_sources, review_notices, room_cleanup, room_cutoff, room_identity,
                room_invites, room_memory, room_planner, room_rules, room_wakeups, settings_tool, show_tool,
                turn_surface, voice_archive)
@@ -112,6 +112,9 @@ def register(ctx: Any) -> None:
     # Hermes puts a table, steps or links on the screen of the user's voice
     # call instead of reading them out.
     show_tool.register(ctx, is_child=_is_child)
+    # Hermes writes the title and body of the push its turn sends when it
+    # ends, for a result the user asked to be told about (#1415).
+    notify_tool.register(ctx, is_child=_is_child)
     # Health data Conduit shares from Apple Health, read-only, with its skill.
     health_tool.register(ctx, is_child=_is_child,
                          skill_path=Path(__file__).resolve().parent / "skills" / health_tool.SKILL_NAME / "SKILL.md")
@@ -300,9 +303,16 @@ def _post_llm_call(**kwargs: Any) -> None:
              or (pulse_turn and not pulse.pushes(session_id, kwargs.get("turn_id"), response))
              or _member_room_turn(session_id))
     chat_title = "" if quiet or pulse_turn else _session_title(session_id)
+    # What the turn wrote for its push with conduit_notify, taken whatever
+    # happens so it never rides a later turn's reply.
+    headline = notify_tool.take(session_id, kwargs.get("turn_id"))
     # A Pulse push is titled by what it brings, not by Pulse's hidden chat.
-    copy = (pulse.push_copy(session_id, kwargs.get("turn_id"), response) if pulse_turn and not quiet
-            else {"title": chat_title, "title_label": "response.ready", "body": response})
+    if pulse_turn and not quiet:
+        copy = pulse.push_copy(session_id, kwargs.get("turn_id"), response)
+    elif headline and not pulse_turn:
+        copy = {"title": headline[0], "title_label": "response.ready", "body": headline[1], "headline": headline[0]}
+    else:
+        copy = {"title": chat_title, "title_label": "response.ready", "body": response}
     ready = None if quiet else push_event(
         "response.ready",
         identifier=event_id("response", kwargs.get("turn_id"), session_id),
@@ -313,6 +323,7 @@ def _post_llm_call(**kwargs: Any) -> None:
         title_label=copy["title_label"],
         session_title=chat_title,
         body=plain_text(copy["body"]),
+        headline=copy.get("headline", ""),
         count=copy.get("count"),
         level=copy.get("level"),
         private=copy.get("private") is True,
@@ -513,6 +524,7 @@ def _on_session_end(**kwargs: Any) -> None:
         return
     _end_parent_turn(session_id)
     _drop_unnamed_end(session_id)
+    notify_tool.drop(session_id)
     pulse_turn = pulse.is_pulse_turn(session_id, kwargs.get("turn_id"))
     _quietly(pulse.turn_ended, session_id, kwargs.get("turn_id"))
     # A turn Hermes doesn't call failed but that didn't complete (it hit the
