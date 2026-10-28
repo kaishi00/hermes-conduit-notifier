@@ -108,6 +108,7 @@ class Copies:
         self.hermes = hermes if hermes is not None else Hermes()
         self.path = path(rooms.root)
         self._told: set[str] = set()
+        self._told_lock = threading.Lock()
 
     # --- The home's pages ------------------------------------------------------------------
 
@@ -168,11 +169,17 @@ class Copies:
         if not page.get("events") and digest == copy["state"]:
             if draft["status"] == "ended" and not copy.get("done"):
                 with self.rooms.store.update() as stored:
-                    _copy_of(stored["drafts"][room_id], link_id, keep=True)["done"] = True
+                    kept = stored["drafts"].get(room_id)
+                    if kept is not None:
+                        _copy_of(kept, link_id, keep=True)["done"] = True
             return
         own = {member["member_id"] for member in draft["members"] if member["link"] is None}
         body = self._fitted({"v": VERSION, "room_id": room_id, "name": draft["name"],
                              "members": _shown_members(draft), "page": page, "state": state}, own)
+        if body is None:
+            self._tell_once(f"fit:{room_id}", "Linked Rooms can't send room %s's copy: its page doesn't fit an "
+                                              "envelope even with one event and no payload", room_id)
+            return
         events = body["page"]["events"]
         to = events[-1]["seq"] if events else copy["acked"]
         tries = sent["tries"] + 1 if sent is not None and (sent["to"], sent["digest"]) == (to, digest) else 1
@@ -182,23 +189,32 @@ class Copies:
         waiting = {"to": to, "digest": digest, "at": now, "tries": tries}
         with self.rooms.store.update() as stored:
             kept = stored["drafts"].get(room_id)
-            if kept is None:
-                return
+            if kept is None or _copy_of(kept, link_id)["sent"] != sent:
+                return  # gone, or its answer came while this page was read
             _copy_of(kept, link_id, keep=True)["sent"] = waiting
         try:
             self.rooms.send(link_id, PAGE, body, message_id=message_id)
         except room_links.LinkError as exc:
-            logger.info("Linked Rooms will send room %s's copy over Link %s later (%s)", room_id, link_id, exc.code)
+            gone = exc.code == "not_linked"
+            if gone:
+                logger.info("Linked Rooms stopped sending room %s's copy: Link %s ended", room_id, link_id)
+            else:
+                logger.info("Linked Rooms will send room %s's copy over Link %s later (%s)", room_id, link_id,
+                            exc.code)
             with self.rooms.store.update() as stored:
                 kept = stored["drafts"].get(room_id)
                 copy = (kept.get("copies") or {}).get(link_id) if kept is not None else None
                 if copy is not None and copy["sent"] == waiting:
-                    copy["sent"] = None
+                    # Due again now, under the next try's id: the mailbox may have taken this one.
+                    copy["sent"] = {**waiting, "at": now - WAIT_S}
+                    if gone:
+                        copy["gone"] = True
 
     @staticmethod
-    def _fitted(body: dict[str, Any], own: set[str]) -> dict[str, Any]:
+    def _fitted(body: dict[str, Any], own: set[str]) -> Optional[dict[str, Any]]:
         """The page as it goes: without the home's own agents' turn errors, and as many of its events as fit
-        PAGE_BYTES; one that fits no page goes without its payload, so the copy has no gap."""
+        PAGE_BYTES; one that fits no page goes without its payload, so the copy has no gap. None when even
+        that doesn't fit."""
         page = body["page"]
         events = [_kept_event(event, own) for event in page.get("events") or ()]
 
@@ -222,7 +238,7 @@ class Copies:
         if low == 0 and events:
             events[0] = {**events[0], "payload": dict(_OMITTED)}
             low = 1
-        return built(low)
+        return built(low) if fits(low) else None
 
     def on_copied(self, received: room_links.Received) -> None:
         """A copy's answer: what it holds, from the Link a page went to. A page it took clears the wait, and one
@@ -240,6 +256,10 @@ class Copies:
                             received.link_id)
                 return
             sent = copy["sent"]
+            if body["seq"] > max(copy["acked"], sent["to"] if sent is not None else 0):
+                logger.info("Linked Rooms dropped a room.copied from Link %s for more of room %s than it sent",
+                            received.link_id, body["room_id"])
+                return
             copy["acked"] = body["seq"]
             if sent is not None and body["seq"] >= sent["to"]:
                 copy["state"] = sent["digest"]
@@ -288,9 +308,11 @@ class Copies:
                         room_id, exc.code)
 
     def _tell_once(self, key: str, message: str, *args: Any) -> None:
-        if key not in self._told:
+        with self._told_lock:
+            if key in self._told:
+                return
             self._told.add(key)
-            logger.info(message, *args)
+        logger.info(message, *args)
 
 
 # --- What Conduit reads ------------------------------------------------------------------
@@ -375,10 +397,12 @@ def _receiving(draft: dict[str, Any]) -> list[str]:
         return []
     if draft["status"] == "ended" and draft["reason"] not in ENDED:
         return []
+    copies = draft.get("copies") or {}
     links = sorted({member["link"] for member in draft["members"]
-                    if member["link"] is not None and member.get("status", "in") == "in"})
+                    if member["link"] is not None and member.get("status", "in") == "in"
+                    and not copies.get(member["link"], {}).get("gone")})
     if draft["status"] == "ended":
-        links = [link_id for link_id in links if not (draft.get("copies") or {}).get(link_id, {}).get("done")]
+        links = [link_id for link_id in links if not copies.get(link_id, {}).get("done")]
     return links
 
 
@@ -442,6 +466,7 @@ def _page_from(body: Any) -> Optional[dict[str, Any]]:
 
 def _create(file: Path) -> None:
     file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    file.parent.chmod(0o700)
     descriptor = os.open(file, os.O_CREAT | os.O_RDWR, 0o600)
     os.close(descriptor)
     file.chmod(0o600)

@@ -271,6 +271,55 @@ def test_a_page_the_copy_cant_take_is_answered_with_what_it_holds(copies):
     assert copy_of(copies, "laifu", room_id)["last_seq"] == 4
 
 
+def test_a_page_that_went_but_failed_goes_again_under_a_new_id(copies):
+    room_id = started(copies, links=("link1",))
+    copies.wire.holding = True
+    send = copies.furina.send
+
+    def lost(link_id, kind, body, message_id=None):
+        send(link_id, kind, body, message_id=message_id)  # the mailbox took it; its answer didn't come back
+        raise invites_module.room_links.LinkError("unreachable", "Couldn't reach the mailbox", 503)
+
+    copies.furina.send = lost
+    copies.furina.pass_once()
+    copies.furina.send = send
+    copies.furina.pass_once()
+
+    [(_, first, first_id), (_, again, again_id)] = pages(copies)
+    assert first == again and first_id != again_id
+    copies.wire.release()
+    assert copy_of(copies, "laifu", room_id)["last_seq"] == 1
+
+
+def test_a_link_that_ended_gets_no_more_pages(copies):
+    room_id = started(copies, links=("link1",))
+    tried = []
+
+    def unlinked(link_id, kind, body, message_id=None):
+        tried.append(kind)
+        raise invites_module.room_links.LinkError("not_linked", "That Link is gone", 404)
+
+    copies.furina.send = unlinked
+    copies.furina.pass_once()
+    copies.clock.now += copies_module.WAIT_S
+    say(copies, room_id, "anyone?")
+    copies.furina.pass_once()
+
+    assert tried.count("room.page") == 1
+
+
+def test_a_page_that_cant_fit_isnt_sent(copies, monkeypatch, caplog):
+    started(copies, links=("link1",))
+    monkeypatch.setattr(copies_module, "PAGE_BYTES", 200)  # less than the room's members alone
+
+    with caplog.at_level(logging.INFO):
+        copies.furina.pass_once()
+        copies.furina.pass_once()
+
+    assert pages(copies) == []
+    assert sum("fit" in record.getMessage() for record in caplog.records) == 1
+
+
 def test_a_page_fits_an_envelope(copies):
     room_id = started(copies, links=("link1",))
     for n in range(4):
@@ -408,7 +457,9 @@ def test_answers_that_arent_from_a_copy_are_dropped(copies):
 
     for link_id, body in (("link2", {"v": 1, "room_id": room_id, "seq": 1}),
                           ("link1", {"v": 1, "room_id": room_id, "seq": -1}),
-                          ("link1", {"v": 1, "room_id": "conduit-other", "seq": 1})):
+                          ("link1", {"v": 1, "room_id": "conduit-other", "seq": 1}),
+                          # More than the home sent: the next page would read ahead of its log.
+                          ("link1", {"v": 1, "room_id": room_id, "seq": 99})):
         copies.furina.handle(invites_module.room_links.Received(link_id=link_id, kind="room.copied",
                                                                 message_id="m", at=int(NOW), body=body))
 
@@ -540,3 +591,14 @@ def test_the_cli_lists_copies(copies, capsys):
     out = capsys.readouterr().out
     assert "@laifu" in out and "Laifu's" in out
     assert cli._room_copies("conduit-other", copies.tmp_path / "laifu") == 1
+
+
+def test_the_cli_says_so_when_a_copy_is_unreadable(copies, capsys):
+    room_id = started(copies, links=("link1",))
+    copies.furina.pass_once()
+    with sqlite3.connect(copies_module.path(copies.tmp_path / "laifu")) as conn:
+        conn.execute("UPDATE conduit_room_copies SET state_json='{' WHERE room_id=?", (room_id,))
+    cli = _load("conduit_push.cli", ROOT / "cli.py")
+
+    assert cli._room_copies("", copies.tmp_path / "laifu") == 1
+    assert "Couldn't show them" in capsys.readouterr().out

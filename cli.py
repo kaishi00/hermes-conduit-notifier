@@ -1069,7 +1069,7 @@ def _room_copies(room: str, root: Path) -> int:
 
     try:
         shown = [room_copies.copy(root, room)] if room else room_copies.copies(root)
-    except (room_copies.CopiesError, OSError, sqlite3.Error) as error:
+    except (room_copies.CopiesError, OSError, sqlite3.Error, ValueError) as error:
         print(f"Couldn't show {'it' if room else 'them'}: {error}")
         return 1
     if not shown:
