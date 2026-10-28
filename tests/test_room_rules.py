@@ -845,7 +845,9 @@ def test_the_framing_leaves_out_the_agents_that_left_a_room_over_links():
 
     # Hermes' roster keeps them; their turns are cut off.
     assert "agents that belong to other people: @laifu (Laifu's)." in framing
-    assert "worky" not in framing.casefold() and "mona" not in framing.casefold()
+    assert "worky" not in framing.casefold() and "@mona" not in framing.casefold()
+    # Mona's posts stay in the room after she's out, so lines under her name are still hers (N7a).
+    assert '"Laifu:" or "Mona:", which that person wrote' in framing
 
 
 def test_room_turns_get_no_other_plugin_notes(host, notes):

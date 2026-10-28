@@ -3685,7 +3685,8 @@ room's user, as Conduit's own messages are, with every line of it starting
 with the person's name as its Link calls them (`Mona: `, or `Guest: ` for a
 Link without a name), so the home's agents can tell it from their owner's.
 It takes a post only from someone with an agent still in the room, of at
-most 16,000 bytes, and 60 an hour from each person in each room. Both sides
+most 16,000 bytes (and 64 KB with its lines named), and 60 an hour from each
+person in each room; any kind of line break starts a named line. Both sides
 keep what they need in `conduit-rooms/posts.db` (owner only): the home, who
 each post was for, which its pages to the copies carry (an event the plugin
 posted gets `"post": {"by": "Mona"}` in `GET /rooms/copies/log`, with `by`

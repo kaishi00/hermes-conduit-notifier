@@ -1094,7 +1094,8 @@ def people(root: Any, room_id: Any) -> Optional[dict[str, Any]]:
             gone = {agent["member_id"]: agent["reason"] for agent in invite.get("gone", [])}
             mine = {agent["member_id"] for agent in invite["joined"]} | set(gone)
             # What the home calls this installation's owner: the name its posts carry there.
-            you = next((member["owner"] for member in invite["members"] if member["member_id"] in mine), None)
+            you = next((member["owner"] or room_posts.GUEST for member in invite["members"]
+                        if member["member_id"] in mine), None)
             return {"room_id": room_id, "home": invite["from"], "you": you, "members": [
                 {"member_id": member["member_id"], "handle": member["handle"],
                  "display_name": member["display_name"],

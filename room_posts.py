@@ -36,6 +36,8 @@ KINDS = (POST, POSTED)
 FILE_NAME = "posts.db"
 # A post's text, before the home names its lines: well under Hermes' MAX_USER_TEXT_BYTES (64 KB) and an envelope.
 MAX_TEXT_BYTES = 16_000
+# The post as the home sends it, its lines named: Hermes' MAX_USER_TEXT_BYTES.
+MAX_NAMED_BYTES = 64 * 1024
 # Posts a person may make in one room in an hour: the home's agents answer each.
 PER_HOUR = 60
 HOUR_S = 3600
@@ -214,29 +216,38 @@ class Posts:
             if seq is None and self._recent(room_id, link_id) >= PER_HOUR:
                 error = "too_many"
             elif seq is None:
+                named = _named(text, draft["links"][link_id].get("name") or GUEST)
+                if len(named.encode("utf-8")) > MAX_NAMED_BYTES:
+                    error = "too_long"
+            if error is None and seq is None:
+                # Kept before it's sent, with no seq yet: a page the rooms loop reads meanwhile says who it's by.
+                with _db_lock, closing(_open(self.path)) as conn, conn:
+                    conn.execute("INSERT OR IGNORE INTO posted VALUES (?, ?, 0, ?, ?, ?)",
+                                 (room_id, event_id, link_id, client_id, float(self.rooms.clock())))
                 try:
                     found = self.rooms.starter.find(draft.get("started_in") or draft["where"])
-                    event = found.service.send(room_id=room_id, event_id=event_id, payload={
-                        "thread_id": THREAD, "text": _named(text, draft["links"][link_id].get("name") or GUEST)})
+                    event = found.service.send(room_id=room_id, event_id=event_id,
+                                               payload={"thread_id": THREAD, "text": named})
                     seq = int(event["seq"])
                 except Exception as exc:  # noqa: BLE001 - no service here, or it refused: they can post again
                     logger.info("Linked Rooms couldn't post in room %s for Link %s (%s)", room_id, link_id,
                                 getattr(exc, "code", type(exc).__name__))
                     error = "unavailable"
-                else:
-                    with _db_lock, closing(_open(self.path)) as conn, conn:
-                        conn.execute("INSERT OR IGNORE INTO posted VALUES (?, ?, ?, ?, ?, ?)",
-                                     (room_id, event_id, seq, link_id, client_id, float(self.rooms.clock())))
+                with _db_lock, closing(_open(self.path)) as conn, conn:
+                    if error is None:
+                        conn.execute("UPDATE posted SET seq=? WHERE room_id=? AND event_id=?", (seq, room_id, event_id))
+                    else:
+                        conn.execute("DELETE FROM posted WHERE room_id=? AND event_id=? AND seq=0", (room_id, event_id))
         answer = {"v": VERSION, "room_id": room_id, "event_id": client_id, "seq": seq if error is None else None,
                   "error": error}
         with self.rooms.store.update() as state:
             room_invites._queue(state, link_id, POSTED, room_id, answer, int(self.rooms.clock()),
-                                parts=(client_id, error or ""))
+                                parts=(client_id, error or "", received.message_id))
         self.rooms.flush()
 
     def _posted_seq(self, room_id: str, event_id: str) -> Optional[int]:
         rows = _rows(self.path, "SELECT seq FROM posted WHERE room_id=? AND event_id=?", (room_id, event_id))
-        return int(rows[0]["seq"]) if rows else None
+        return int(rows[0]["seq"]) if rows and rows[0]["seq"] else None
 
     def _recent(self, room_id: str, link_id: str) -> int:
         rows = _rows(self.path, "SELECT COUNT(*) AS n FROM posted WHERE room_id=? AND link=? AND posted_at>?",
@@ -270,14 +281,15 @@ def by_event(root: Any, room_id: str, event_ids: Any) -> dict[str, str]:
 
 def latest(root: Any, room_id: str, limit: int = PEOPLE_POSTS) -> list[dict[str, Any]]:
     """The room's latest posts the plugin made, oldest first: event id, seq and Link."""
-    rows = _rows(path(root), "SELECT event_id, seq, link FROM posted WHERE room_id=? ORDER BY seq DESC LIMIT ?",
-                 (room_id, limit))
+    rows = _rows(path(root), "SELECT event_id, seq, link FROM posted WHERE room_id=? AND seq>0 "
+                             "ORDER BY seq DESC LIMIT ?", (room_id, limit))
     return [{"event_id": row["event_id"], "seq": int(row["seq"]), "link": row["link"]} for row in reversed(rows)]
 
 
 def sent_texts(root: Any, room_id: str) -> list[str]:
-    """The texts this installation's owner posted in the room, the latest, as the home took them."""
-    rows = _rows(path(root), "SELECT text FROM sent WHERE room_id=? AND status='posted' "
+    """The texts this installation's owner posted in the room, the latest: those the home took, and those on
+    their way (its page can come before its answer)."""
+    rows = _rows(path(root), "SELECT text FROM sent WHERE room_id=? AND status IN ('posted', 'sending') "
                              "ORDER BY created_at DESC, rowid DESC LIMIT ?", (room_id, SENT_TEXTS))
     return [row["text"] for row in rows]
 
@@ -297,7 +309,8 @@ def forget(root: Any, room_id: str) -> None:
 def _text(value: Any) -> str:
     if not isinstance(value, str):
         raise PostsError("bad_text", "text is the post's words")
-    text = "\n".join(value.replace("\r\n", "\n").replace("\r", "\n").split("\n")).strip()
+    # Every kind of line break is one, so no line goes without its name (_named).
+    text = "\n".join(value.splitlines()).strip()
     if not text:
         raise PostsError("empty", "Write something to post")
     if len(text.encode("utf-8")) > MAX_TEXT_BYTES:
