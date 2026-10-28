@@ -28,6 +28,8 @@ const defaultPreferences = Object.freeze({
   // is easy to miss; default on, with its own opt-out.
   attention_sound: true,
   show_previews: false,
+  // With previews off, still name the chat in the title (#1415).
+  show_chat_names: false,
   // Dedicated opt-out for structured decision content (answerable approval
   // cards) in the push payload. Deliberately independent of show_previews:
   // the feature's audience is exactly the approval-gate crowd, so cards
