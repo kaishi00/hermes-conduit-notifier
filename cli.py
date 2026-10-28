@@ -91,7 +91,7 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
                             "for claims: nothing to list what Hermes said it did with no call behind it, or 'all' "
                             "for every claim with the call that backed it; "
                             "for spots: 'on' or 'off' (whether the phone watches shops for what Pulse held for one), "
-                            "or nothing to list what it watches and the shops you walked into, with how late iOS told it")
+                            "or nothing to list what it watches and the shops you came near, with how late iOS told it")
     pulse.add_argument("extra", nargs="?", default="",
                        help="for memory forget: the item number; for memory backfill: how many days back "
                             "(it shows what that costs), 'start', 'stop' or 'cancel'; "
@@ -2210,13 +2210,13 @@ def _pulse_claims(pulse_store: Any, home: Any, value: str) -> int:
 
 def _pulse_spots(pulse_store: Any, home: Any, value: str) -> int:
     """Walking past (pulse_spots): what the phone watches now, how many it
-    said it could, and the shops the user walked into with how late iOS told
+    said it could, and the shops the user came near with how late iOS told
     the app; `on` and `off` switch it."""
     from . import pulse, pulse_places, pulse_spots
     if value in ("on", "off"):
         pulse_store.set(pulse_spots.SETTING, value == "on")
         print("With Where you are on, the phone watches a few shops near you for what Pulse held for one, and Pulse "
-              "brings it up when you walk into one." if value == "on" else
+              "brings it up when you come near one." if value == "on" else
               "The phone stops watching shops for Pulse once it next sends its location; what was held for a shop "
               "comes to the Pulse screen at the end of its window.")
         return 0

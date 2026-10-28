@@ -110,10 +110,11 @@ def test_watches_list_held_picks_and_places_said_that_arent_saved(holding):
     placed(holding, "home", said_at=now - 60)  # only a saved place can be home
     placed(holding, "the Costco", on="leave", said_at=now - 60)  # leaving a shop isn't watched
     watching = spots.watches(holding.store, holding.home, now)
-    assert watching == [{"id": f"c{card['id']}", "query": "florist", "until": at(28), "intent": "opportunity",
-                         "radius": {"walk": 750.0, "drive": 3000.0}},
-                        {"id": f"i{costco}", "query": "Costco", "until": now + spots.ITEM_WATCH_S,
-                         "intent": "errand", "radius": {"walk": 100.0, "drive": 100.0}}]
+    # The soonest window's end first, picks and items alike.
+    assert watching == [{"id": f"i{costco}", "query": "Costco", "until": now + spots.ITEM_WATCH_S,
+                         "intent": "errand", "radius": {"walk": 100.0, "drive": 100.0}},
+                        {"id": f"c{card['id']}", "query": "florist", "until": at(28), "intent": "opportunity",
+                         "radius": {"walk": 750.0, "drive": 3000.0}}]
 
 
 def test_nothing_is_watched_without_where_you_are_walking_past_or_pulse(holding):
@@ -203,6 +204,23 @@ def test_an_errand_with_its_own_circle_counts_within_it():
     assert not spots.close_enough(wider, "errand")
     assert spots.close_enough(wider, "errand", own=300.0)
     assert not spots.close_enough({**wider, "radius_m": 200.0}, "errand", own=300.0)  # the phone watched less
+
+
+def test_an_errand_pick_with_its_own_circle_is_brought_up_within_it(holding):
+    _, card = held_for(holding, intent="errand", radius_m=300)
+    now = LEFT
+    wider = entry(f"0.c{card['id']}", at_=now - 30, distance_m=250.0, radius_m=300.0)
+    assert spots.entered([holding.home], DEVICE, [wider], now)
+    places.take_moments(holding.store, holding.home, UTC, now)
+    [row] = holding.store.moments()
+    assert json.loads(row["outcome"])["pick"] == card["id"]
+
+
+def test_words_only_a_saved_place_can_be_arent_searched(holding):
+    now = LOOKED + 60
+    for said in ("my place", "my office", "my gym"):
+        placed(holding, said, said_at=now - 60)
+    assert spots.watches(holding.store, holding.home, now) == []
 
 
 def test_a_shop_only_nearby_isnt_enough_for_an_errand(holding):

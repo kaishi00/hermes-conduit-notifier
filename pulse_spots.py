@@ -185,9 +185,10 @@ def watches(pulse_store: Any, home: Path, now: float) -> list[dict[str, Any]]:
         wanted = intent(wait.get("intent"))
         found.append({"id": f"c{card['id']}", "query": str(wait["spot"]), "until": _until(wait),
                       "intent": wanted, "radius": radius(wanted, wait.get("radius_m"))})
-    found.sort(key=lambda watch: (watch["until"], watch["id"]))
     saved = places.saved(places.view(home))
-    kinds = {word for words_ in places.KIND_KEYS.values() for word in words_}
+    # Words only a saved place can stand for: "home", and "my place" too.
+    kinds = {word for words_ in places.KIND_KEYS.values() for word in words_} | {
+        places._phrase(words_) for kind in places.KIND_WORDS.values() for words_ in kind}
     for item in places.waiting(pulse_store, "arrive"):
         said = item.get("place_words")
         searched = query(said)
@@ -197,6 +198,7 @@ def watches(pulse_store: Any, home: Path, now: float) -> list[dict[str, Any]]:
         if end > now:
             found.append({"id": f"i{item['id']}", "query": searched, "until": end, "intent": ITEM_INTENT,
                           "radius": radius(ITEM_INTENT)})
+    found.sort(key=lambda watch: (watch["until"], watch["id"]))
     unique: dict[tuple[str, str], dict[str, Any]] = {}
     for watch in found:
         unique.setdefault((places._phrase(watch["query"]), watch["intent"]), watch)
@@ -294,9 +296,11 @@ def _entered(pulse_store: Any, home: Path, device_id: str, watch: str, entry: di
         return False  # done, reached or gone since: nothing waits for it
     depth, late = lateness(entry)
     confirmed = close_enough(entry, wanted, own)
+    # A watch with its own wider circle counts its entries for its intent.
+    reached = max(reach(entry), wanted if confirmed else "opportunity", key=places.REACH.index)
     moment_id = f"{device_id}/{entry['id']}"
     moment = {"id": moment_id, "place_id": PREFIX + places._phrase(searched), "place": entry["name"], "kind": KIND,
-              "on": "arrive", "at": entry["at"], "keep": True, "reach": reach(entry)}
+              "on": "arrive", "at": entry["at"], "keep": True, "reach": reached}
     pulse_store.add_spot_entry({
         "id": moment_id, "device": device_id, "watch": watch, "query": searched, "name": entry["name"],
         "at": entry["at"], "received_at": now, "distance_m": entry.get("distance_m"),
