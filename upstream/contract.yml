@@ -355,6 +355,8 @@ routes:
   - DELETE /rooms/copies
   - GET /rooms/copies
   - GET /rooms/copies/log
+  - GET /rooms/copies/messages
+  - POST /rooms/copies/messages
   - GET /rooms/defaults
   - PUT /rooms/defaults
   - DELETE /rooms/drafts
