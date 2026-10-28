@@ -3691,8 +3691,11 @@ keep what they need in `conduit-rooms/posts.db` (owner only): the home, who
 each post was for, which its pages to the copies carry (an event the plugin
 posted gets `"post": {"by": "Mona"}` in `GET /rooms/copies/log`, with `by`
 null for your own); your Hermes, what you posted and how it went. Your agents
-in the room are told which of the lines under your name you sent, so a line
-the host wrote under your name isn't taken as yours. These are behind the
+in the room are told which of the lines under your name you sent, so a
+message with a line under your name that you didn't send, anywhere in it and
+whoever it shows as, is named as the host's. When who's who in the room or
+what was posted can't be read, the agents are told any of the user's lines
+may be someone else's. These are behind the
 `room-posts` capability (plugin 0.114+), within the rooms routes' 60 a
 minute:
 
@@ -3700,7 +3703,8 @@ minute:
   `{"message": {"event_id", "text", "status", "seq", "error",
   "created_at"}}`, `status` `sending` until the home answers. `event_id` is
   your retry key (1 to 64 letters, digits and `._:-`): the same one again is
-  the same post, and one the home refused goes again. It's refused with
+  the same post, and one the home refused, or that's had no answer for ten
+  minutes, goes again (the home posts it once). It's refused with
   `bad_room`, `bad_event_id`, `bad_text`, `empty` or `too_long` (400),
   `not_in` (409, none of your agents is in that room) or `event_id_taken`
   (409, another post has it).

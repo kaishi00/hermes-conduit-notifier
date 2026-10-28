@@ -883,20 +883,32 @@ def _room_framing(session_id: str, platform: Any = None, prompt: Any = None) -> 
         choices = room_rules.choices_for(turn, home)
     except Exception:  # noqa: BLE001 — the tools stay blocked; the careful defaults frame the turn
         choices = room_rules.RoomChoices()
-    people, posts = None, None
+    people, posts, unread = None, None, False
     if turn.room_id and home is not None:
         root = room_identity.root_home(home)
         try:
             people = room_invites.people(root, turn.room_id)
-        except Exception:  # noqa: BLE001 — framed without owners' names
-            logger.debug("conduit_push: couldn't read who's who in room %s", turn.room_id, exc_info=True)
+        except Exception:  # noqa: BLE001 — framed without owners' names, and told the user's lines may be anyone's
+            unread = True
+            _warn_room_once("people", "conduit_push: couldn't read who's who in room %s", turn.room_id)
         if turn.side == "member" and people is not None and people.get("you"):
             try:
                 posts = {"as": people["you"], "prompt": prompt,
                          "sent": room_posts.sent_texts(root, turn.room_id)}
-            except Exception:  # noqa: BLE001 — framed without checking its owner's lines
-                logger.debug("conduit_push: couldn't read the posts of room %s", turn.room_id, exc_info=True)
-    return room_rules.framing(turn, choices, people, posts)
+            except Exception:  # noqa: BLE001 — framed without checking its owner's lines, and told so
+                unread = True
+                _warn_room_once("posts", "conduit_push: couldn't read the posts of room %s", turn.room_id)
+    return room_rules.framing(turn, choices, people, posts, unread=unread)
+
+
+_room_warned: set[tuple[str, str]] = set()
+
+
+def _warn_room_once(what: str, message: str, room_id: str) -> None:
+    """Logs a room's unreadable record at warning the first time, then at debug."""
+    level = logging.DEBUG if (what, room_id) in _room_warned else logging.WARNING
+    _room_warned.add((what, room_id))
+    logger.log(level, message, room_id, exc_info=True)
 
 
 def _room_platform(platform: Any) -> bool:

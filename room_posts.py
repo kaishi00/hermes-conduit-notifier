@@ -41,6 +41,8 @@ MAX_NAMED_BYTES = 64 * 1024
 # Posts a person may make in one room in an hour: the home's agents answer each.
 PER_HOUR = 60
 HOUR_S = 3600
+# A post still unanswered after this long is sent again under an id of its own when the person posts it again.
+UNANSWERED_S = 600
 # The room thread Conduit's composer posts in (AppState.GroupRoomSurface.mainThreadID).
 THREAD = "main"
 # Who a post is from when the home's Link for its person has no name.
@@ -119,7 +121,7 @@ class Posts:
             raise PostsError("not_in", "Your agents aren't in that room, so you can't post in it", 409)
         link_id, now = invite["link"], float(self.rooms.clock())
         with _db_lock, closing(_open(self.path)) as conn, conn:
-            row = conn.execute("SELECT text, status FROM sent WHERE link=? AND room_id=? AND event_id=?",
+            row = conn.execute("SELECT text, status, created_at FROM sent WHERE link=? AND room_id=? AND event_id=?",
                                (link_id, room_id, event_id)).fetchone()
             if row is not None and row["text"] != text:
                 raise PostsError("event_id_taken", "That event_id is another post's", 409)
@@ -131,7 +133,10 @@ class Posts:
                 conn.execute("UPDATE sent SET status='sending', error=NULL WHERE link=? AND room_id=? AND "
                              "event_id=?", (link_id, room_id, event_id))
             sending = row is None or row["status"] != "posted"
-            tried = "" if row is None or row["status"] != "refused" else repr(now)
+            # Refused, or unanswered long enough that it or its answer was lost: under an id of its own too.
+            again = row is not None and (row["status"] == "refused" or (
+                row["status"] == "sending" and now - float(row["created_at"]) > UNANSWERED_S))
+            tried = repr(now) if again else ""
         if sending:
             with self.rooms.store.update() as state:
                 room_invites._queue(state, link_id, POST, room_id,
@@ -233,11 +238,10 @@ class Posts:
                     logger.info("Linked Rooms couldn't post in room %s for Link %s (%s)", room_id, link_id,
                                 getattr(exc, "code", type(exc).__name__))
                     error = "unavailable"
-                with _db_lock, closing(_open(self.path)) as conn, conn:
-                    if error is None:
+                # A send that failed may still have posted it: who it's for stays, its seq waits for a resend.
+                if error is None:
+                    with _db_lock, closing(_open(self.path)) as conn, conn:
                         conn.execute("UPDATE posted SET seq=? WHERE room_id=? AND event_id=?", (seq, room_id, event_id))
-                    else:
-                        conn.execute("DELETE FROM posted WHERE room_id=? AND event_id=? AND seq=0", (room_id, event_id))
         answer = {"v": VERSION, "room_id": room_id, "event_id": client_id, "seq": seq if error is None else None,
                   "error": error}
         with self.rooms.store.update() as state:
