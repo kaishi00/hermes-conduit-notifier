@@ -5661,15 +5661,16 @@ def _chat_call_index_entry(raw: Any) -> Optional[Dict[str, Any]]:
 
 
 def _stored_chat_call_index(db) -> Optional[list]:
-    """The list as stored; None when this host has never written it."""
+    """The list as stored; None when this host has never written it, or
+    when it's unreadable (it's read from the calls again then)."""
     raw = db.get_meta(VOICE_CHAT_CALL_INDEX_KEY)
     if raw is None:
         return None
     try:
         stored = json.loads(raw or "[]")
     except ValueError:
-        logger.warning("Conduit voice: the chat call list is unreadable; starting over")
-        return []
+        logger.warning("Conduit voice: the chat call list is unreadable; reading it from the calls")
+        return None
     entries = [_chat_call_index_entry(e) for e in stored] if isinstance(stored, list) else []
     return [e for e in entries if e is not None]
 
@@ -5739,9 +5740,12 @@ def _chat_call_index(db) -> list:
         return entries
     entries = _chat_calls_on_disk()
     if hasattr(db, "set_meta"):
-        with _voice_lock():
-            if _stored_chat_call_index(db) is None:
-                _write_chat_call_index(db, entries)
+        try:
+            with _voice_lock():
+                if _stored_chat_call_index(db) is None:
+                    _write_chat_call_index(db, entries)
+        except Exception:  # noqa: BLE001 — the list is still answered; the next read writes it
+            logger.warning("Conduit voice: couldn't keep the chat call list", exc_info=True)
     return entries
 
 
@@ -5813,6 +5817,12 @@ def _save_chat_call_turns(chat_id: str, call_id: str, engine: str, turns: list,
                     {"chat_id": chat_id, "engine": engine, "turns": stored + messages},
                     separators=(",", ":")))
                 _index_chat_call(db, call_id, chat_id, engine, stored + messages)
+            elif call is not None:
+                # A retry after a failed list write: the turns are stored, so
+                # the call is listed now.
+                listed = _stored_chat_call_index(db)
+                if listed is None or all(e["call_id"] != call_id for e in listed):
+                    _index_chat_call(db, call_id, chat_id, engine, stored)
             result = {"session_id": None, "chat_id": chat_id, "written": last + 1, "appended": len(messages),
                       "skipped": len(turns) - len(fresh), "created": False}
         finally:
@@ -5917,9 +5927,30 @@ def archive_classic_voice_chat(body: Dict[str, Any]) -> Dict[str, Any]:
 def voice_tags() -> Dict[str, Any]:
     db = _open_voice_db()
     try:
-        return {"tags": _voice_tags(db), "chat_calls": _chat_call_index(db)}
+        tags, calls = _voice_tags(db), _chat_call_index(db)
+        # A chat deleted in Desktop leaves no save to clear its calls: they
+        # go here, the first time a device asks.
+        gone = {chat_id for chat_id in {e["chat_id"] for e in calls} if not db.get_session(chat_id)} \
+            if hasattr(db, "get_session") else set()
     finally:
         db.close()
+    if gone:
+        _drop_gone_chats_calls(gone)
+    return {"tags": tags, "chat_calls": [e for e in calls if e["chat_id"] not in gone]}
+
+
+def _drop_gone_chats_calls(chat_ids: set) -> None:
+    try:
+        with _voice_lock():
+            db = _open_voice_db(_VOICE_WRITE)
+            try:
+                for chat_id in chat_ids:
+                    if not db.get_session(chat_id):
+                        _drop_chat_calls(db, chat_id)
+            finally:
+                db.close()
+    except Exception:  # noqa: BLE001 — they're left out of the answer anyway; the next read retries
+        logger.warning("Conduit voice: couldn't clear gone chats' calls", exc_info=True)
 
 
 def voice_summary(session_id: Any) -> Dict[str, Any]:
@@ -12613,7 +12644,11 @@ class _WatchJobs:
             self._close_session(job)
             return {"ok": True, "status": "not_started", "title": job.title,
                     "message": f"{job.title} was cancelled before it started."}
-        self._tag(job)
+        with self.lock:
+            # The chat the call took is the call's, not a job, as on the phone.
+            call_chat = self.call_chat is job
+        if not call_chat:
+            self._tag(job)
         where = f" on {job.profile}" if job.profile else ""
         return {"ok": True, "status": "started", "job_id": job.job_id, "title": job.title,
                 "session_id": job.stored_session_id or sid,
@@ -13194,6 +13229,8 @@ class _WatchJobs:
                     try:
                         if _voice_tags(db).get(session_id, {}).get("kind") != "call":
                             _set_voice_tag(db, session_id, {"kind": "job"})
+                            # Its turn may have ended before the tag landed.
+                            _archive_settled_job(db, session_id)
                     finally:
                         db.close()
         except Exception as exc:  # noqa: BLE001 — the job runs untagged

@@ -1354,14 +1354,12 @@ def test_calls_a_chat_forgot_or_lost_leave_the_list(client, hermes, monkeypatch)
     assert listed() == ["call-4"]
 
 
-def test_the_list_is_bounded_and_an_unreadable_one_starts_over(client, hermes, monkeypatch):
+def test_the_list_is_bounded_and_its_entries_checked(client, hermes, monkeypatch):
     store = chat(hermes)
     monkeypatch.setattr(api, "VOICE_MAX_CHAT_CALL_INDEX", 2)
     for call_id in ("call-1", "call-2", "call-3"):
         save(client, chat_id="chat-1", call_id=call_id, turns=turns(("user", call_id)))
     assert [e["call_id"] for e in client.get(f"{BASE}/voice/tags").json()["chat_calls"]] == ["call-2", "call-3"]
-    store.meta[api.VOICE_CHAT_CALL_INDEX_KEY] = "not json"
-    assert client.get(f"{BASE}/voice/tags").json()["chat_calls"] == []
     store.meta[api.VOICE_CHAT_CALL_INDEX_KEY] = json.dumps([{"call_id": "ok", "chat_id": "chat-1"}, {"call_id": 3},
                                                             {"call_id": "x", "chat_id": "chat-1", "started_at": True}])
     assert client.get(f"{BASE}/voice/tags").json()["chat_calls"] == [
@@ -1387,10 +1385,46 @@ def test_a_host_whose_calls_predate_the_list_reads_them_once(client, hermes, tmp
     conn.commit()
     conn.close()
     store = chat(hermes)
-    assert client.get(f"{BASE}/voice/tags").json()["chat_calls"] == [
+    chat(hermes, "chat-2")
+    both = [
         {"call_id": "early", "chat_id": "chat-2", "engine": "gpt-live",
          "started_at": 1_780_000_000, "ended_at": 1_780_000_000},
         {"call_id": "late", "chat_id": "chat-1", "engine": "grok-live",
          "started_at": 1_780_000_100, "ended_at": 1_780_000_160},
     ]
+    assert client.get(f"{BASE}/voice/tags").json()["chat_calls"] == both
     assert len(json.loads(store.meta[api.VOICE_CHAT_CALL_INDEX_KEY])) == 2, "kept from then on"
+    # An unreadable list is read from the calls again, not emptied.
+    store.meta[api.VOICE_CHAT_CALL_INDEX_KEY] = "not json"
+    assert client.get(f"{BASE}/voice/tags").json()["chat_calls"] == both
+    assert len(json.loads(store.meta[api.VOICE_CHAT_CALL_INDEX_KEY])) == 2
+
+
+def test_a_failed_backfill_write_still_answers(client, hermes, monkeypatch):
+    store = chat(hermes)
+    store.set_meta = lambda key, value: (_ for _ in ()).throw(RuntimeError("locked"))
+    monkeypatch.setattr(api, "_chat_calls_on_disk", lambda: [{"call_id": "call-1", "chat_id": "chat-1"}])
+    answer = client.get(f"{BASE}/voice/tags")
+    assert answer.status_code == 200
+    assert answer.json()["chat_calls"] == [{"call_id": "call-1", "chat_id": "chat-1"}]
+
+
+def test_a_chat_deleted_in_desktop_leaves_the_list_when_asked(client, hermes):
+    store = chat(hermes)
+    chat(hermes, "chat-2")
+    save(client, chat_id="chat-1", turns=turns(("user", "a")))
+    save(client, chat_id="chat-2", call_id="call-2", turns=turns(("user", "b")))
+    del store.sessions["chat-1"]  # no save reaches it again
+    assert [e["call_id"] for e in client.get(f"{BASE}/voice/tags").json()["chat_calls"]] == ["call-2"]
+    assert [e["call_id"] for e in json.loads(store.meta[api.VOICE_CHAT_CALL_INDEX_KEY])] == ["call-2"]
+    assert store.meta[api.VOICE_CHAT_CALL_KEY.format(call_id="call-1")] == ""
+
+
+def test_a_call_whose_list_write_failed_is_listed_on_the_retry(client, hermes, monkeypatch):
+    store = chat(hermes)
+    real = api._index_chat_call
+    monkeypatch.setattr(api, "_index_chat_call", lambda *a: (_ for _ in ()).throw(RuntimeError("locked")))
+    assert save(client, chat_id="chat-1", turns=turns(("user", "a"))).status_code >= 500
+    monkeypatch.setattr(api, "_index_chat_call", real)
+    assert save(client, chat_id="chat-1", turns=turns(("user", "a"))).json()["appended"] == 0
+    assert [e["call_id"] for e in client.get(f"{BASE}/voice/tags").json()["chat_calls"]] == ["call-1"]

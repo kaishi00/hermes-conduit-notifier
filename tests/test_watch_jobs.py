@@ -1811,6 +1811,18 @@ def test_work_kept_apart_gets_a_chat_of_its_own():
     assert start_joining(grant, "and book the hotel")["session_id"] == "st-2"
 
 
+def test_the_calls_chat_isnt_filed_as_a_job_and_a_tagged_job_is_archived_if_answered(tags, monkeypatch):
+    archived = []
+    monkeypatch.setattr(api, "_archive_settled_job", lambda db, sid: archived.append(sid))
+    grant = make_jobs()
+    # The chat the call took stays listed, as on the phone; a job is filed
+    # and, if its turn already ended, archived with its tag.
+    assert start_joining(grant, "plan the trip")["session_id"] == "st-1"
+    assert start(grant, "research flights")["session_id"] == "st-2"
+    assert tags() == {"st-2": {"kind": "job"}}
+    assert archived == ["st-2"]
+
+
 def test_the_calls_chat_closes_after_its_last_request():
     grant = make_jobs()
     server = grant.jobs.server

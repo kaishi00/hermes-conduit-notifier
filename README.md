@@ -1247,8 +1247,9 @@ start the agent or call a model. A resumed call appends to the same session.
   call named by `call_id`. `voice/tags` also lists every chat's kept calls
   (`chat_calls`, the latest 300, oldest first, with each call's first and
   last turn's time), so each device files those chats under Voice and draws
-  their call cards; a host whose calls predate the list reads it once from
-  the calls themselves.
+  their call cards; a host whose calls predate the list (or whose list is
+  unreadable) reads it from the calls themselves. A chat deleted in Desktop
+  leaves the list, and its calls are cleared, the next time it's asked for.
   A chat keeps its latest 50 calls of at most 2000 turns each.
   When the call ends it is written to the memory provider under the chat's
   session, but no session-end hooks fire: the chat goes on. A chat that no
@@ -1278,7 +1279,8 @@ start the agent or call a model. A resumed call appends to the same session.
   `(voice) `, as Conduit and the Watch send a job's corrections. A turn
   typed into it brings it back for good, and a pinned, archived, running or
   unanswered one stays as it is. The chat an unattached call took for its
-  first request is the call's chat, never tagged a job, and stays listed.
+  first request is the call's chat, never tagged a job (on the phone or
+  the Watch), and stays listed.
 - A create is idempotent per `call_id`: a retried first save whose response
   was lost continues the row it made instead of starting a second one.
 - Appends and summaries go only to rows saved as voice calls; any other
