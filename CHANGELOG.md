@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.114.1 (2026-10-28)
+
+### Fixes
+- A Bot Chat's notifications named a bot that has no name by its profile id
+  in lowercase, while Conduit shows it capitalized. They now match.
+
 ## 0.114.0 (2026-10-28)
 
 ### New and improved

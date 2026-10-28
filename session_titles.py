@@ -88,9 +88,13 @@ def bot_name() -> str:
 
 
 def _bot_name(home: Any) -> str:
-    """The name the Bots list shows for the bot a Hermes home belongs to: the
-    name it was given, else its profile id."""
-    return _given_name(home) or _profile_of(home)
+    """The name Conduit shows for the bot a Hermes home belongs to: the name
+    it was given, else its profile id capitalized."""
+    given = _given_name(home)
+    if given:
+        return given
+    profile = _profile_of(home)
+    return profile[:1].upper() + profile[1:]
 
 
 def _given_name(home: Any) -> str:
