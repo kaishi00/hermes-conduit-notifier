@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.110.0 (2026-10-28)
+## 0.111.0 (2026-10-28)
 
 ### New and improved
 - With Where you are on, Pulse can hold something for when you walk past a
@@ -22,6 +22,14 @@ checks it). The format is fixed, because Conduit reads it:
   shop you said you'd stop at is watched too. A detour is enough for an
   opportunity like the flowers (about 750 m on foot, 3 km driving); an
   errand like eggs at Costco waits until you're at the shop.
+
+## 0.110.0 (2026-10-28)
+
+### New and improved
+- Linked Rooms: everyone whose agents are in a room keeps a copy of it on
+  their own Hermes, sent by the room's host as it goes on, so Conduit can
+  show rooms other people host from your own Hermes. You keep your copy
+  when you leave.
 
 ## 0.109.1 (2026-10-28)
 

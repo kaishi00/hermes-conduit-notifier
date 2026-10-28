@@ -8586,6 +8586,68 @@ async def post_room_approval_answer(request: Request, response: Response) -> Any
         body.get("run_id"), body.get("request_id"), body.get("choice"))}, "approval answer")
 
 
+# Copies of rooms other people host (room_copies.py): every person whose
+# agents are in a room keeps one on their own Hermes, sent by the room's home
+# a page at a time, and Conduit reads it here, never from the home. Reading
+# one is local, so they share the invites' 60 a minute.
+
+
+def room_copies(action: Callable[[Any, Path], Dict[str, Any]]) -> Dict[str, Any]:
+    module = _plugin_package_module("room_copies")
+    root = _room_links_root()
+    # The rooms loop and its handlers take the pages.
+    _start_room_handlers(root)
+    try:
+        return action(module, root)
+    except module.CopiesError as exc:
+        raise TokenError(exc.status, str(exc), exc.code)
+
+
+async def _room_copies_route(action: Callable[[Any, Path], Dict[str, Any]], route: str) -> Any:
+    try:
+        answer = await _run_scoped(None, _limited(_room_invites_limiter, None, lambda: room_copies(action)))
+        return {"ok": True, **answer}
+    except TokenError as exc:
+        # ``code`` is room_copies' word for the refusal (no_copy, bad_room,
+        # bad_since, bad_limit).
+        return _store_refusal(exc)
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
+        raise
+    except Exception as exc:
+        raise _unexpected(route, exc, feature="Linked Rooms")
+
+
+@router.get("/rooms/copies")
+async def get_room_copies(response: Response) -> Any:
+    """Each room hosted elsewhere this Hermes keeps a copy of, the one that
+    changed last first: its name, who hosts it and over which ``link``, the
+    members with their owners, your agents in it (``yours``), whether it goes
+    on (``status``, ``reason``), what it's doing (``state``: ``ended``,
+    ``working``, ``activity``, ``routes``) and the seqs the copy holds."""
+    response.headers["Cache-Control"] = "no-store"
+    return await _room_copies_route(lambda module, root: {"copies": module.copies(root)}, "copies")
+
+
+@router.get("/rooms/copies/log")
+async def get_room_copy_log(response: Response, room_id: Optional[str] = None, since_seq: int = 0,
+                            limit: int = 100) -> Any:
+    """A copy's events after ``since_seq``, as groups.log pages a room this
+    Hermes hosts: ``events``, ``cursor``, ``latest_seq`` (what the copy
+    holds), ``has_more`` and the room's ``authority``."""
+    response.headers["Cache-Control"] = "no-store"
+    return await _room_copies_route(lambda module, root: module.log(root, room_id, since_seq=since_seq, limit=limit),
+                                    "copy log")
+
+
+@router.delete("/rooms/copies")
+async def delete_room_copy(response: Response, room_id: Optional[str] = None) -> Any:
+    """Forgets this Hermes' copy of a room other people host; a page its
+    home sends later starts it again."""
+    response.headers["Cache-Control"] = "no-store"
+    return await _room_copies_route(lambda module, root: module.forget(root, room_id), "forget copy")
+
+
 # Setting this Hermes up for rooms (room_setup.py): the API server, which is
 # the installation's, and the profile's room ceiling and approvals, then the
 # gateway restart that starts the API server. The limits are the
@@ -17679,6 +17741,9 @@ ROUTE_CAPABILITIES = (
     # GET /rooms/approvals and POST /rooms/approvals/answer: your agents'
     # approvals from rooms other people host (Linked Rooms).
     "room-approvals",
+    # GET/DELETE /rooms/copies and GET /rooms/copies/log: this Hermes' copies
+    # of rooms other people host, sent by their home (Linked Rooms).
+    "room-copies",
     # ?conduit_profile= on POST /rooms/drafts and GET/POST /rooms/setup: a
     # room made for, and this Hermes set up for rooms on, any profile's, on a
     # Hermes that hosts other profiles' plugins apart (hermes-conduit#1336).
