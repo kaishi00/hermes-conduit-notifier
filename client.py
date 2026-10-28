@@ -34,7 +34,7 @@ from hermes_constants import get_hermes_home
 
 from . import e2e, link_status
 from .events import PLUGIN_VERSION, redact_event
-from .relay_urls import check_claim_base, check_request_url, is_https, paired_relay_url
+from .relay_urls import check_claim_base, check_request_url, is_https, paired_relay_url, replaced_pairing_query
 
 
 DEFAULT_RELAY_URL = "https://push.milim.dev"
@@ -238,11 +238,11 @@ def claim_pairing(code: str, relay_url: str = DEFAULT_RELAY_URL, gateway_name: s
         if previous.get("redact_key"):
             state["redact_key"] = previous["redact_key"]
         _write_state(state, path)
-    _revoke_replaced(previous, state["credential"])
+    _revoke_replaced(previous, state["credential"], state)
     return state
 
 
-def _revoke_replaced(previous: dict[str, Any], credential: str) -> None:
+def _revoke_replaced(previous: dict[str, Any], credential: str, current: dict[str, Any]) -> None:
     """Best-effort revoke of the credential a re-pair replaced: the relay
     mints a new gateway per claim, so the old one would stay live and take
     one of the phone's gateway slots (#250). The new pairing works either way."""
@@ -251,7 +251,8 @@ def _revoke_replaced(previous: dict[str, Any], credential: str) -> None:
         return
     try:
         url = check_request_url(f"{str(previous.get('relay_url') or '').rstrip('/')}/v1/gateways/current")
-        request_json(url, method="DELETE", credential=old, timeout=5.0)
+        # Checked without the query, which is ours (request_json refuses any).
+        _request(url + replaced_pairing_query(previous, current), method="DELETE", credential=old, timeout=5.0)
     except RelayRejected as error:
         if error.status != 401:
             logger.info("Conduit relay did not revoke the replaced pairing: %s", error)
@@ -917,7 +918,7 @@ def _deliver(event: dict[str, Any], *, sleep: Callable[[float], None] = _pause,
                 logger.info("Conduit notification for %s not sent: the relay doesn't take it yet",
                             event.get("type", "event"))
                 return False
-            _send(event, state, timeout=timeout)
+            answer = _send(event, state, timeout=timeout)
         except Exception as error:
             if delay is not None and _worth_retrying(error) and clock() - started + delay <= RETRY_BUDGET:
                 logger.info("Conduit notification delivery for %s will be retried: %s", event.get("type", "event"), error)
@@ -930,8 +931,27 @@ def _deliver(event: dict[str, Any], *, sleep: Callable[[float], None] = _pause,
             return False
         record_relay_accepted(state)
         _note_push(True)
+        if event.get("type") == "call.requested":
+            logger.info("Conduit call request: %s", call_delivery(answer))
         return True
     return False  # not reached: the last attempt has no delay
+
+
+def call_delivery(answer: Any) -> str:
+    """Where the relay says a call went, for the host's log: a call that
+    rang nowhere is told apart from one that rang, without the phone's trace."""
+    answer = answer if isinstance(answer, dict) else {}
+    if answer.get("delivered") is False:
+        return "not sent: the paired iPhone turned off notifications of this kind"
+    if answer.get("rang") is not True:
+        return ("sent as a \"Hermes wants to talk\" notification: the paired iPhone has no ringing "
+                "(Ring like a phone call is off, or Conduit hasn't registered it)")
+    if answer.get("watch") is True:
+        return "rang the paired iPhone and its Apple Watch"
+    if answer.get("watch") is False:
+        return "rang the paired iPhone; no Apple Watch rings for it"
+    return "rang the paired iPhone"
+
 
 
 def _note_push(ok: bool, error: Exception | None = None) -> None:

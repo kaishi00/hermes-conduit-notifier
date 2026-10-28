@@ -13,6 +13,18 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.113.0 (2026-10-28)
+
+### Fixes
+- After moving to a new iPhone, calls from Hermes rang only the Apple Watch,
+  as a call for the old iPhone, and answering there gave no voice. Pairing a
+  profile with the new iPhone now moves the Watch's ring there too (needs
+  push relay 0.23).
+
+### New and improved
+- The host's log says where each call from Hermes went: the iPhone, the
+  iPhone and its Apple Watch, or a notification because the iPhone can't ring.
+
 ## 0.112.0 (2026-10-28)
 
 ### New and improved

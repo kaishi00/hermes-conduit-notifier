@@ -252,7 +252,7 @@ gateway-bound inactive records still require separately reviewed maintenance.
 | POST | `/v1/installations/:id/pairings` | Create a pairing code |
 | POST | `/v1/pairings/claim` | Claim a pairing code (gateway side) |
 | POST | `/v1/events` | Deliver a notification event; a reply's `level` (`passive`, `active` or `time-sensitive`) sets its interruption level (0.20+, capability `push-levels`) |
-| DELETE | `/v1/gateways/current` | Revoke a gateway credential |
+| DELETE | `/v1/gateways/current` | Revoke a gateway credential; `?replaced_by=<installation id>` names the phone a re-pair moved it to, so the Apple Watch's ring follows (0.23+) |
 | PUT / DELETE | `/v1/installations/:id/live-activities` | Register (`push_token`, `session_ids`) or remove (`push_token`) the Live Activity the phone started for a chat (0.15+) |
 | POST | `/v1/live-activity` | Report a running turn's progress (`session_id`, `state`, optional `end`); answers `tracked` (gateway side, 0.15+) |
 | POST | `/v1/watch-tools/grants` | Open a Watch tool grant for one call (gateway side) |
@@ -366,6 +366,15 @@ tokens can't be challenged this way, so a registration or update naming one
 that another active installation already holds is accepted without it: a
 registration gets none (`voip`, `watch_voip` or `location` comes back
 `false`), and an update keeps the token the installation had.
+
+A Watch moves to a new iPhone with its PushKit token, which the old phone's
+installation still holds (0.23+). The new installation's answer says
+`watch_voip_elsewhere: true`, and the relay remembers the token it asked for.
+When the host pairs a profile with the new phone, the plugin (0.113+) revokes
+the old pairing with `?replaced_by=<new installation>`, and the Watch token
+moves there if that installation asked for that very token. An old phone left
+with no pairing lets its Watch token go anyway (nothing can ring it), and the
+phone that wants it takes it with its next update.
 
 A challenge answers `400 invalid_device_token` when APNs refuses the token,
 so it shows whether a token is currently live for the app. The nonce never
@@ -1828,7 +1837,9 @@ and the dashboard routes under one file lock, so they survive restarts:
   (APNs refusing or unreachable, a call with no chat to open) sends the usual
   "Hermes wants to talk" notification instead, and a PushKit token APNs calls
   gone is forgotten until the phone registers a new one. The
-  relay answers `rang: true` when APNs took the VoIP push. Calls carry a `reason` of up to
+  relay answers `rang: true` when APNs took the VoIP push, with `watch: true`
+  when the Watch was rung too (0.23+); the plugin logs where each call went
+  (0.113+). Calls carry a `reason` of up to
   200 characters (dropped with previews off, like the title), and the kinds
   `approval` and `question` besides how a job ended.
 
