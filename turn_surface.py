@@ -71,6 +71,11 @@ HINTS = {
 SCREENS = ("iphone", "ipad", "mac", "vision")
 FORM_HINT = ("When you need several details only the user can give (like dates or a budget), ask them in one "
              "clarify call with open questions: Conduit shows it as a form, and they may leave some blank.")
+# Said for a spoken message, a voice call's or a voice job's: the answer is
+# heard, so audio the agent makes itself (text_to_speech's MEDIA: file) would
+# be read out as a path. Hermes' own spoken-reply note isn't on every Hermes
+# (a farm Local voice call read one out, 2026-10-28).
+SPOKEN_HINT = "The answer is heard: reply in words, never with text_to_speech or a MEDIA: file."
 
 
 class Report:
@@ -160,7 +165,8 @@ def _message_text(message: Any) -> Optional[str]:
 def line(surface: str, entry: Optional[str] = None) -> str:
     where = SURFACES[surface] + (f", {entry}" if entry else "")
     hint = FORM_HINT if surface in SCREENS and entry == "typed" else HINTS.get(surface)
-    return f"[Conduit: this message came from {where}.{' ' + hint if hint else ''}]"
+    hints = [text for text in (hint, SPOKEN_HINT if entry == "spoken" else None) if text]
+    return f"[Conduit: this message came from {where}.{''.join(' ' + text for text in hints)}]"
 
 
 def current_session() -> Any:

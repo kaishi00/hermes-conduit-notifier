@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.112.1 (2026-10-28)
+
+### Fixes
+- In a voice call, Hermes no longer answers with a sound file of its own,
+  which the call then read out as a file path.
+
 ## 0.112.0 (2026-10-28)
 
 ### New and improved
