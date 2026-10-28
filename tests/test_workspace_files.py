@@ -685,6 +685,23 @@ def test_a_move_across_disks_that_copies_only_part_says_where_the_part_is(tree, 
     assert exc.value.status == 403 and not [n for n in os.listdir(tree) if n.startswith(".conduit-")]
 
 
+def test_a_move_across_disks_replaces_with_a_link_to_a_folder_when_asked(tree, monkeypatch):
+    (tree / "folder-link").symlink_to(tree / "docs")
+    (tree / "taken.txt").write_text("old")
+    real_replace = os.replace
+    first = []
+
+    def replace(source, target):
+        if not first:
+            first.append(target)
+            raise OSError(18, "Invalid cross-device link")
+        return real_replace(source, target)
+
+    monkeypatch.setattr(os, "replace", replace)
+    ws().move(str(tree), str(tree / "folder-link"), str(tree), "taken.txt", overwrite=True)
+    assert os.path.islink(tree / "taken.txt") and not os.path.lexists(tree / "folder-link")
+
+
 def test_deleting_a_secret_name_is_refused_whether_or_not_it_is_there(tree):
     for workspace in (ws(), ssh(tree)):
         with pytest.raises(wf.WorkspaceError) as exc:

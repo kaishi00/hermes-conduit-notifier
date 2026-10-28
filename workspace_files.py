@@ -441,7 +441,7 @@ class LocalWorkspace:
         except FileNotFoundError:
             raise WorkspaceError(404, "That folder isn't there any more")
         except OSError as exc:
-            raise WorkspaceError(500, f"Couldn't move this ({exc.strerror or 'error'})")
+            raise WorkspaceError(500, f"Couldn't move this ({exc.strerror or exc})")
         temp = os.path.join(box, os.path.basename(target))
         try:
             try:
@@ -462,9 +462,9 @@ class LocalWorkspace:
                     raise WorkspaceError(403, "Hermes can't move this")
                 if isinstance(exc, FileNotFoundError):
                     raise WorkspaceError(404, "That file or folder isn't there any more")
-                raise WorkspaceError(500, f"Couldn't move this ({exc.strerror or 'error'})")
+                raise WorkspaceError(500, f"Couldn't move this ({exc.strerror or exc})")
             try:
-                if overwrite and not os.path.isdir(temp):
+                if overwrite and not (os.path.isdir(temp) and not os.path.islink(temp)):
                     os.replace(temp, target)
                 else:
                     _rename_no_replace(temp, target)
@@ -474,7 +474,7 @@ class LocalWorkspace:
             except PermissionError:
                 failed = WorkspaceError(403, "Hermes can't move this")
             except OSError as exc:
-                failed = WorkspaceError(500, f"Couldn't move this ({exc.strerror or 'error'})")
+                failed = WorkspaceError(500, f"Couldn't move this ({exc.strerror or exc})")
             try:
                 if os.path.lexists(source):
                     raise FileExistsError(source)
