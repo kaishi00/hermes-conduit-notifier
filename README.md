@@ -372,9 +372,10 @@ installation still holds (0.23+). The new installation's answer says
 `watch_voip_elsewhere: true`, and the relay remembers the token it asked for.
 When the host pairs a profile with the new phone, the plugin (0.113+) revokes
 the old pairing with `?replaced_by=<new installation>`, and the Watch token
-moves there if that installation asked for that very token. An old phone left
-with no pairing lets its Watch token go anyway (nothing can ring it), and the
-phone that wants it takes it with its next update.
+moves there if that installation asked for that very token. An old phone a
+re-pair leaves with no pairing lets its Watch token go anyway (nothing can
+ring it), and the phone that wants it takes it with its next update; an
+unpair keeps it, so pairing the same phone again rings the Watch too.
 
 A challenge answers `400 invalid_device_token` when APNs refuses the token,
 so it shows whether a token is currently live for the app. The nonce never
@@ -1838,7 +1839,7 @@ and the dashboard routes under one file lock, so they survive restarts:
   "Hermes wants to talk" notification instead, and a PushKit token APNs calls
   gone is forgotten until the phone registers a new one. The
   relay answers `rang: true` when APNs took the VoIP push, with `watch: true`
-  when the Watch was rung too (0.23+); the plugin logs where each call went
+  when the ring was sent to the Watch too (0.23+); the plugin logs where each call went
   (0.113+). Calls carry a `reason` of up to
   200 characters (dropped with previews off, like the title), and the kinds
   `approval` and `question` besides how a job ended.

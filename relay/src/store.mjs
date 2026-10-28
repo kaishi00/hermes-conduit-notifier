@@ -417,11 +417,13 @@ export class RelayStore {
   }
 
   // A host revoked one of `fromId`'s pairings, after pairing that profile
-  // with `replacedById` (null when it didn't say). The Watch rings for
-  // the phone it is paired with, so its token moves with the pairing when
-  // that installation asked for this very token; an installation left with
-  // no pairing lets it go anyway, since nothing can ring it any more, and
-  // the phone that wants it takes it with its next registration update.
+  // with `replacedById` (null when it didn't say: an unpair, or an older
+  // plugin). The Watch rings for the phone it is paired with, so its token
+  // moves with the pairing when that installation asked for this very
+  // token; an installation the pairing moved away from that is left with
+  // none lets it go anyway, since nothing can ring it any more, and the
+  // phone that wants it takes it with its next registration update. An
+  // unpair keeps it, so pairing the same phone again rings the Watch too.
   // 'moved', 'released' or null.
   gatewayRevoked(fromId, replacedById) {
     const from = this.data.installations[fromId];
@@ -429,7 +431,7 @@ export class RelayStore {
     if (!token) return null;
     const to = replacedById && replacedById !== fromId ? this.data.installations[replacedById] : undefined;
     const moves = Boolean(to?.active && to.wantedWatchVoipToken === token);
-    if (!moves && Object.keys(from.gateways ?? {}).length > 0) return null;
+    if (!moves && (!to || Object.keys(from.gateways ?? {}).length > 0)) return null;
     const now = new Date().toISOString();
     delete from.watchVoipToken;
     from.updatedAt = now;

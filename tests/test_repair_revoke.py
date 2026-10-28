@@ -257,7 +257,8 @@ def test_the_new_phone_is_named_only_when_it_is_another_on_the_same_relay(previo
 
 
 @pytest.mark.parametrize("answer, said", [
-    ({"accepted": True, "delivered": True, "rang": True, "watch": True}, "rang the paired iPhone and its Apple Watch"),
+    ({"accepted": True, "delivered": True, "rang": True, "watch": True}, "rang the paired iPhone, and sent the ring to its Apple Watch"),
+    ({"accepted": True, "duplicate": True}, "already sent"),
     ({"accepted": True, "delivered": True, "rang": True, "watch": False}, "rang the paired iPhone; no Apple Watch rings for it"),
     ({"accepted": True, "delivered": True, "rang": True}, "rang the paired iPhone"),
     ({"accepted": True, "delivered": True}, "sent as a \"Hermes wants to talk\" notification"),

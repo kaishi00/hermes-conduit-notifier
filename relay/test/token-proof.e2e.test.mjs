@@ -325,15 +325,25 @@ test('a re-pair to a phone that never asked for the Watch leaves it where it is'
   assert.equal((await current(old)).watch_voip, true, 'the old phone has another pairing and keeps its Watch');
 });
 
-test("an old phone's last pairing revoked lets the Watch go, and the phone that wants it takes it next", async () => {
+test("an old phone the pairing moved away from lets the Watch go, and the phone that wants it takes it next", async () => {
   const watch = '7a'.repeat(32);
   const old = await phone('7b'.repeat(32), { watch_voip_token: watch });
   const gateway = await pair(old);
-  const moved = await phone('7c'.repeat(32), { watch_voip_token: watch });
-  // A host on an older plugin doesn't say where the pairing went.
-  assert.equal((await revoke(gateway)).status, 204);
+  // The new phone hadn't heard from the Watch yet when it was paired.
+  const moved = await phone('7c'.repeat(32));
+  await pair(moved);
+  assert.equal((await revoke(gateway, `?replaced_by=${moved.id}`)).status, 204);
   assert.equal((await current(old)).watch_voip, false);
-  assert.equal((await current(moved)).watch_voip, false, 'nothing names it yet');
+  assert.equal((await current(moved)).watch_voip, false, 'it never asked');
   const update = await api(`/v1/installations/${moved.id}`, { method: 'PUT', credential: moved.credential, body: { watch_voip_token: watch } });
   assert.equal(update.json.installation.watch_voip, true);
+});
+
+test('unpairing keeps the Watch, so pairing the same phone again rings it', async () => {
+  const watch = '8a'.repeat(32);
+  const own = await phone('8b'.repeat(32), { watch_voip_token: watch });
+  const gateway = await pair(own);
+  assert.equal((await revoke(gateway)).status, 204);
+  await pair(own);
+  assert.equal((await current(own)).watch_voip, true);
 });
