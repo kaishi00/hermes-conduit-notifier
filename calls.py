@@ -665,8 +665,9 @@ def call_delivery(answer: Any) -> str:
     if answer.get("delivered") is False:
         return "not sent: the paired iPhone turned off notifications of this kind"
     if answer.get("rang") is not True:
-        return ("sent as a \"Hermes wants to talk\" notification: the paired iPhone has no ringing "
-                "(Ring like a phone call is off, or Conduit hasn't registered it)")
+        return ("sent as a \"Hermes wants to talk\" notification: the relay didn't ring the paired iPhone "
+                "(Ring like a phone call is off, Conduit hasn't registered it, or Apple refused the ring; "
+                "the relay's log says which)")
     if answer.get("watch") is True:
         return "rang the paired iPhone, and sent the ring to its Apple Watch (the relay's log says if Apple refused it)"
     if answer.get("watch") is False:
