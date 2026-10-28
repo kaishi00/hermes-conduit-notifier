@@ -48,6 +48,8 @@ NOTES_PROMPT = ('Your owner\'s room "{name}" {why}. Write your notes on it for y
                 'their answer. Read it with conduit_room (action read, room_id "{room_id}", after_seq {after}): '
                 "that's what's new since your last notes. Keep them short, and only what matters to your owner. "
                 "Nothing you write goes back to the room.")
+# A room's name is the host's to set: it goes into the agent's context only as plain text on one line.
+MAX_NAME_CHARS = 80
 QUIET_WHY = "has gone quiet"
 ENDED_WHY = "has ended"
 
@@ -170,7 +172,7 @@ def note(session_id: Any, home: Any, *, reader: Optional[room_reading.Reader] = 
         name = next((room["name"] for room in reader.rooms() if room["room_id"] == room_id), name)
     except Exception:  # noqa: BLE001 - the line still says which room
         logger.debug("Linked Rooms couldn't read room %s's name for its chat", room_id, exc_info=True)
-    return CHAT_LINE.format(name=name, room_id=room_id)
+    return CHAT_LINE.format(name=room_name(name), room_id=room_id)
 
 
 class Notes:
@@ -205,10 +207,16 @@ class Notes:
             _tell_once("notes:rooms", "Linked Rooms can't look for rooms to take notes on (%s)", type(exc).__name__)
             return
         for room in rooms:
-            for profile in self._listening(room):
+            try:
+                profiles = self._listening(room)
+            except Exception as exc:  # noqa: BLE001 - one room's notes never stop the others'
+                _tell_once(f"notes:{room['room_id']}", "Linked Rooms couldn't send notes on room %s (%s)",
+                           room["room_id"], type(exc).__name__)
+                continue
+            for profile in profiles:
                 try:
                     self._notes(room, profile)
-                except Exception as exc:  # noqa: BLE001 - one room's notes never stop the others'
+                except Exception as exc:  # noqa: BLE001
                     _tell_once(f"notes:{room['room_id']}:{profile}", "Linked Rooms couldn't send notes on room %s "
                                                                      "(%s)", room["room_id"], type(exc).__name__)
 
@@ -236,9 +244,12 @@ class Notes:
         if not self.available():
             _tell_once("notes:host", "Linked Rooms sends no room notes from this process: it has no session host")
             return
-        prompt = NOTES_PROMPT.format(name=room["name"], room_id=room_id, after=kept["notes_seq"],
+        prompt = NOTES_PROMPT.format(name=room_name(room["name"]), room_id=room_id, after=kept["notes_seq"],
                                      why=ENDED_WHY if ended else QUIET_WHY)
-        sent = self.send(kept["chat_id"], prompt, profile=profile)
+        try:
+            sent = self.send(kept["chat_id"], prompt, profile=profile)
+        except Exception as exc:  # noqa: BLE001 - it may have gone in: waited on like a refusal, not sent again now
+            sent = type("Sent", (), {"ok": False, "detail": type(exc).__name__})()
         if getattr(sent, "ok", False):
             store.noted(room_id, kept["chat_id"], last[0])
         else:
@@ -248,6 +259,14 @@ class Notes:
 
 
 # --- Helpers ---------------------------------------------------------------------------------
+
+
+def room_name(name: Any) -> str:
+    """A room's name as the agent reads it: one line, no double quotes or control characters, at most
+    MAX_NAME_CHARS; "this room" when nothing's left."""
+    text = "".join(" " if not char.isprintable() else char for char in str(name or "")).replace('"', "'")
+    text = " ".join(text.split())[:MAX_NAME_CHARS].strip()
+    return text or "this room"
 
 
 def _reader(home: Any) -> room_reading.Reader:

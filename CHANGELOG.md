@@ -25,8 +25,9 @@ checks it). The format is fixed, because Conduit reads it:
 ### New and improved
 - Your agents can read your rooms with other people for you in your
   private chats: notes, a summary, what someone said, a draft reply.
-- A room where your agent only listens gets notes from it in the room's
-  private chat once it goes quiet or ends.
+- Groundwork for a room's own private chat, where an agent that only
+  listens will leave you notes once the room goes quiet or ends. It starts
+  working with the Conduit update that opens these chats.
 
 ## 0.115.2 (2026-10-28)
 

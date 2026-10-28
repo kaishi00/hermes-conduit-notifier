@@ -341,6 +341,14 @@ def sent_texts(root: Any, room_id: str) -> list[str]:
     return [row["text"] for row in rows]
 
 
+def own_posts(root: Any, room_id: str) -> tuple[set[int], set[str]]:
+    """The seqs the home gave this installation's owner's posts in the room, and their texts (for those still on
+    their way, which a page can come before)."""
+    link, params = _link_filter(root, room_id)
+    rows = _rows(path(root), f"SELECT seq, text FROM sent WHERE {_OWNED}{link}", params)
+    return {int(row["seq"]) for row in rows if row["seq"]}, {row["text"] for row in rows}
+
+
 def forged_for(root: Any, room_id: str, session_id: str, name: str, prompt: Any) -> list[str]:
     """The messages of a room prompt that say they're the owner's (under ``name``) but aren't one of their posts,
     for one of their agents' sessions: a post answers for one message in the session's turns (a turn tried again

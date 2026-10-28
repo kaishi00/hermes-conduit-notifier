@@ -108,14 +108,17 @@ def _handle(args: dict[str, Any], session_id: str, is_child: Callable[[Any], boo
     if is_child(session_id):
         return {"ok": False, "error": "subagent",
                 "note": "Only the main conversation can read rooms. Report back; the main agent can look."}
-    if session_id:
-        try:
-            turn = room_turn(session_id)
-        except room_rules.RoomStoreError:  # SessionStoreError too: this may be a room's session
-            turn = True
-        if turn is not None:
-            return {"ok": False, "error": "room_turn",
-                    "note": "Rooms are read in the user's private chats, never from inside a room."}
+    # A call that can't say which chat it's in may be a room's: refused like one.
+    if not session_id:
+        return {"ok": False, "error": "no_session",
+                "note": "Rooms are read in the user's private chats; this call didn't say which chat it's in."}
+    try:
+        turn = room_turn(session_id)
+    except room_rules.RoomStoreError:  # SessionStoreError too: this may be a room's session
+        turn = True
+    if turn is not None:
+        return {"ok": False, "error": "room_turn",
+                "note": "Rooms are read in the user's private chats, never from inside a room."}
     action = args.get("action")
     if action not in ("list", "read"):
         return {"ok": False, "error": "invalid", "note": "action is list or read."}
