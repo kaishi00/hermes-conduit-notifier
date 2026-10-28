@@ -87,14 +87,22 @@ def bot_name() -> str:
     return value
 
 
+# Conduit's name for a main bot nobody named (AppState.profileDisplayName).
+MAIN_BOT_NAME = "Hermes"
+
+
 def _bot_name(home: Any) -> str:
     """The name Conduit shows for the bot a Hermes home belongs to: the name
-    it was given, else its profile id capitalized. A name that is only the id
-    names it no more than the id (Conduit's BotProfile.displayLabel)."""
+    it was given, else its profile id capitalized, and "Hermes" for the main
+    one. A name that is only the id names it no more than the id (Conduit's
+    BotProfile.displayLabel). A name given the main bot in Conduit stays on
+    the phone, which puts it on the push."""
     given = _given_name(home)
     profile = _profile_of(home)
     if given and given != profile:
         return given
+    if profile.lower() == "default":
+        return MAIN_BOT_NAME
     return profile[:1].upper() + profile[1:]
 
 
