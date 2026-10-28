@@ -19,7 +19,7 @@ import threading
 import time
 from typing import Any, Callable
 
-from . import client
+from . import client, pulse
 
 logger = logging.getLogger("hermes.plugins.conduit_push")
 
@@ -113,6 +113,9 @@ def _handle(args: Any, session_id: Any, is_child: Callable[[Any], bool]) -> dict
                 "note": "Only the main conversation's reply notifies. Report back; the main agent can write it."}
     if not session:
         return {"ok": False, "error": "no_session", "note": "This conversation doesn't send notifications."}
+    if pulse.in_turn(session):
+        return {"ok": False, "error": "pulse_turn",
+                "note": "Pulse writes its own notification for this turn; this one wouldn't be shown."}
     if client.load_state() is None:
         return {"ok": False, "error": "not_paired",
                 "note": "This Hermes profile isn't paired with the Conduit app, so nothing reaches the phone."}

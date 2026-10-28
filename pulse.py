@@ -301,6 +301,13 @@ def is_pulse_turn(session_id: str, turn_id: Any) -> bool:
         return (session_id, turn_id) in _turns
 
 
+def in_turn(session_id: str) -> bool:
+    """Whether a Pulse turn is running in this chat, for a hook that isn't
+    told the turn's id."""
+    with _turns_lock:
+        return any(session == session_id for session, _ in _turns)
+
+
 def _turn_attempt(session_id: str, turn_id: Any) -> Optional[dict]:
     """The attempt a Pulse turn is (None when it isn't one, or its store
     can't be read)."""

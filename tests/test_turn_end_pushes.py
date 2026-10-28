@@ -707,3 +707,11 @@ def test_conduit_notify_registers_on_a_hermes_without_display_fields():
 
     notify_tool.register(OlderHermes(), is_child=lambda _: False)
     assert registered == [("conduit_notify", notify_tool.available)]
+
+
+def test_conduit_notify_refuses_inside_a_pulse_turn(paired, monkeypatch):
+    pulse = sys.modules["conduit_push.pulse"]
+    monkeypatch.setattr(pulse, "_turns", {("pulse-chat", "t"): "tag"})
+    assert "pulse_turn" in notify_tool.handle({"title": "a", "body": "b"}, session_id="pulse-chat")
+    assert notify_tool.take("pulse-chat") is None
+    assert '"ok": true' in notify_tool.handle({"title": "a", "body": "b"}, session_id="s")
