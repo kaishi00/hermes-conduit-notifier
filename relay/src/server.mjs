@@ -1465,7 +1465,7 @@ function chatNamesTitle(genericTitle, event) {
 function profileLine(event, title) {
   const named = String(event.profileName || '').trim();
   const id = String(event.profile || '').trim();
-  const name = named || (id === 'default' ? '' : id);
+  const name = named || (id.toLowerCase() === 'default' ? '' : id);
   if (!name || title === name || title.endsWith(` · ${name}`)) return '';
   return name;
 }
