@@ -89,11 +89,12 @@ def bot_name() -> str:
 
 def _bot_name(home: Any) -> str:
     """The name Conduit shows for the bot a Hermes home belongs to: the name
-    it was given, else its profile id capitalized."""
+    it was given, else its profile id capitalized. A name that is only the id
+    names it no more than the id (Conduit's BotProfile.displayLabel)."""
     given = _given_name(home)
-    if given:
-        return given
     profile = _profile_of(home)
+    if given and given != profile:
+        return given
     return profile[:1].upper() + profile[1:]
 
 
