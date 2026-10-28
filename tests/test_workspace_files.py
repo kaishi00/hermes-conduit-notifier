@@ -675,6 +675,15 @@ def test_a_move_across_disks_that_copies_only_part_says_where_the_part_is(tree, 
         ws().move(str(tree), str(tree / "docs" / "part"), str(tree), "part")
     assert exc.value.status == 403 and not [n for n in os.listdir(tree) if n.startswith(".conduit-")]
 
+    def a_file(source, target):
+        pathlib.Path(target).write_text("")
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(wf.shutil, "move", a_file)
+    with pytest.raises(wf.WorkspaceError) as exc:
+        ws().move(str(tree), str(tree / "docs" / "part" / "a.txt"), str(tree), "a.txt")
+    assert exc.value.status == 403 and not [n for n in os.listdir(tree) if n.startswith(".conduit-")]
+
 
 def test_deleting_a_secret_name_is_refused_whether_or_not_it_is_there(tree):
     for workspace in (ws(), ssh(tree)):
