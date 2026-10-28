@@ -70,7 +70,8 @@ def titled(prefix: str, key: Any) -> str:
 
 def bot_name() -> str:
     """The name this profile's bot has in Hermes, as the Bots list shows it,
-    or "" when it has none (the Bots list shows its profile id). Cached like
+    or "" when it has none (the Bots list shows its profile id, and Hermes
+    for the main bot). Cached like
     titles, so a turn's several pushes read profile.yaml once."""
     home = _home()
     if home is None:
