@@ -15,6 +15,7 @@ watch_paths:
   - hermes_cli/dashboard_auth/
   - hermes_cli/config*.py
   - hermes_state_schema.py
+  - gateway/hosted_room*.py
   - website/docs/user-guide/features/plugins.md
   - website/docs/user-guide/features/extending-the-dashboard.md
 
@@ -47,6 +48,12 @@ notes:
     run's own grant (GET /v1/runs/{id}) and answered with an approve-only grant of its scope
     (POST /v1/runs/{id}/approval) on this Hermes' API server, and matched to their notification by
     sessions.session_key in the profile's state.db.
+  Linked Rooms copies: >-
+    Copies of rooms other people host (feature map: "Linked Rooms"). The home pages its room log
+    with gateway.hosted_rooms.read_events, and each member's Hermes keeps the copy with
+    gateway.hosted_room_replicas.ingest_page (its ReplicaError refusals answered with what the copy
+    holds), both loaded with importlib, so module_paths doesn't list them. Without them, no pages
+    go and no copies are kept, with one log line.
   workspace files: >-
     The Folder tab in Conduit's Artifacts (feature map: "Workspace files"). /workspace/* reads a
     profile's SSH workspace through hermes_cli.web_routers.files._fs_backend (and the adapter's
