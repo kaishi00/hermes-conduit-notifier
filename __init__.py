@@ -17,8 +17,8 @@ from hermes_constants import get_hermes_home
 from . import (call_tool, call_watches, calls, chat_on_screen, clarify_loop, client, conduit_first, cron_runs,
                desktop_selected, health_tool, inbox_tool, live_activity, location_tool, maps_tool, notify_tool, phone_tool,
                present_tool, pulse, reply_sources, review_notices, room_cleanup, room_cutoff, room_identity,
-               room_invites, room_memory, room_planner, room_rules, room_wakeups, settings_tool, show_tool,
-               turn_surface, voice_archive)
+               room_invites, room_memory, room_planner, room_posts, room_rules, room_wakeups, settings_tool,
+               show_tool, turn_surface, voice_archive)
 from .session_titles import bot_name as _bot_name, title as _session_title, titled as _titled
 from .client import enqueue
 from .events import approval_decision, clarification_text, event_id, is_silent_response, plain_text, push_event
@@ -785,7 +785,7 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
             logger.debug("conduit_push: voice chat un-archive check failed", exc_info=True)
     # A room with other people's agents gets its owner's rules and nothing
     # else: the notes below carry the owner's own data and calls.
-    room_framing = _room_framing(session_id, kwargs.get("platform"))
+    room_framing = _room_framing(session_id, kwargs.get("platform"), kwargs.get("user_message"))
     if room_framing:
         return {"context": room_framing}
     notes = [
@@ -860,9 +860,11 @@ def _in_room_with_others(session_id: str, platform: Any = None) -> bool:
     return turn is not None and turn.with_others
 
 
-def _room_framing(session_id: str, platform: Any = None) -> str | None:
+def _room_framing(session_id: str, platform: Any = None, prompt: Any = None) -> str | None:
     """Who's asking and what the owner allows, for a turn in a room with
-    other people's agents (room_rules.py); None for any other turn."""
+    other people's agents (room_rules.py); None for any other turn. On a
+    member's Hermes, the turn's ``prompt`` is checked for lines under its
+    owner's name that they didn't post (room_posts.py)."""
     if not session_id:
         return None
     try:
@@ -887,13 +889,36 @@ def _room_framing(session_id: str, platform: Any = None) -> str | None:
         choices = room_rules.choices_for(turn, home)
     except Exception:  # noqa: BLE001 — the tools stay blocked; the careful defaults frame the turn
         choices = room_rules.RoomChoices()
-    people = None
+    people, posts, unread = None, None, False
     if turn.room_id and home is not None:
+        root = room_identity.root_home(home)
         try:
-            people = room_invites.people(room_identity.root_home(home), turn.room_id)
-        except Exception:  # noqa: BLE001 — framed without owners' names
-            logger.debug("conduit_push: couldn't read who's who in room %s", turn.room_id, exc_info=True)
-    return room_rules.framing(turn, choices, people)
+            people = room_invites.people(root, turn.room_id, strict=True)
+        except Exception:  # noqa: BLE001 — framed without owners' names, and told the user's lines may be anyone's
+            unread = True
+            _warn_room_once("people", "conduit_push: couldn't read who's who in room %s", turn.room_id)
+        if turn.side == "member" and people is not None and people.get("you"):
+            try:
+                posts = {"as": people["you"], "forged": room_posts.forged_for(
+                    root, turn.room_id, session_id, str(people["you"]), prompt)}
+                if not room_rules.is_room_prompt(prompt):
+                    # Its lines under the owner's name can't be checked.
+                    _warn_room_once("prompt", "conduit_push: a turn in room %s isn't Hermes' room prompt",
+                                    turn.room_id, exc_info=False)
+            except Exception:  # noqa: BLE001 — framed without checking its owner's lines, and told so
+                unread = True
+                _warn_room_once("posts", "conduit_push: couldn't read the posts of room %s", turn.room_id)
+    return room_rules.framing(turn, choices, people, posts, unread=unread)
+
+
+_room_warned: set[tuple[str, str]] = set()
+
+
+def _warn_room_once(what: str, message: str, room_id: str, exc_info: bool = True) -> None:
+    """Logs what a room's framing couldn't read at warning the first time, then at debug."""
+    level = logging.DEBUG if (what, room_id) in _room_warned else logging.WARNING
+    _room_warned.add((what, room_id))
+    logger.log(level, message, room_id, exc_info=exc_info)
 
 
 def _room_platform(platform: Any) -> bool:

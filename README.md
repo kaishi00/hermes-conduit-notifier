@@ -3619,7 +3619,11 @@ installation's):
   member's `status` `in`, `left` or `removed` (on a member's Hermes, only
   for its own agents). A member's Hermes answers for a room its agents left,
   or that ended, too, with each member as it was when it ended
-  (`GET /rooms/invites` says how it ended).
+  (`GET /rooms/invites` says how it ended). With `room-posts` (plugin
+  0.115+), the home adds `posts`, the room's latest 500 posts it made for
+  linked people, each `{"event_id", "seq", "by"}` with `by` their name as
+  your Link calls them, and a member's Hermes adds `you`, the name the home
+  gives you (the one your posts carry there).
 
 Taking agents out goes through these, behind the `room-leave` capability
 (plugin 0.94+):
@@ -3697,7 +3701,46 @@ minute:
   sends later starts the copy again from its first event.
 
 They're refused with `bad_room`, `bad_since` or `bad_limit` (400) and
-`no_copy` (404).
+`no_copy` (404). A copy or an event this Hermes can't read is left out, and
+its log says so once.
+
+People whose agents are in a room someone else hosts post in it from their
+own Conduit, through their own Hermes, which sends the post to the room's
+home over the Link that invited it. The home posts it in the room as the
+room's user, as Conduit's own messages are, with every line of it starting
+with the person's name as its Link calls them (`Mona: `, or `Guest: ` for a
+Link without a name, or with one that has anything but letters, digits,
+spaces and `.'&-`), so the home's agents can tell it from their owner's.
+It takes a post only from someone with an agent still in the room, of at
+most 16,000 bytes (and 64 KB with its lines named), and 60 an hour from each
+person in each room; any kind of line break starts a named line. Both sides
+keep what they need in `conduit-rooms/posts.db` (owner only): the home, who
+each post was for, which its pages to the copies carry (an event the plugin
+posted gets `"post": {"by": "Mona"}` in `GET /rooms/copies/log`, with `by`
+null for your own); your Hermes, what you posted and how it went. Your agents
+in the room are told which of the lines under your name you sent, so a
+message with a line under your name that you didn't send, anywhere in it and
+whoever it shows as, is named as the host's. Each of your posts answers for
+one message in each agent's turns, so the host saying it again later is the
+host's too. When who's who in the room or
+what was posted can't be read, the agents are told any of the user's lines
+may be someone else's. These are behind the
+`room-posts` capability (plugin 0.115+), within the rooms routes' 60 a
+minute:
+
+- `POST /rooms/copies/messages` with `{"room_id", "event_id", "text"}`:
+  `{"message": {"event_id", "text", "status", "seq", "error",
+  "created_at"}}`, `status` `sending` until the home answers. `event_id` is
+  your retry key (1 to 64 letters, digits and `._:-`): the same one again is
+  the same post, and one the home refused, or that's had no answer for ten
+  minutes, goes again (the home posts it once). It's refused with
+  `bad_room`, `bad_event_id`, `bad_text`, `empty` or `too_long` (400),
+  `not_in` (409, none of your agents is in that room) or `event_id_taken`
+  (409, another post has it).
+- `GET /rooms/copies/messages?room_id=`: `{"messages": [...]}`, what you
+  posted there, oldest first, each `status` `sending`, `posted` (with the
+  room's `seq`) or `refused` (with its `error`: `ended`, `not_in`,
+  `too_long`, `too_many`, `unavailable` or `bad_post`).
 
 ## Capabilities (plugin 0.4+)
 

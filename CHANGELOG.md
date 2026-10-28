@@ -13,6 +13,16 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.115.0 (2026-10-28)
+
+### Fixes
+- A room's copy with one damaged entry couldn't be read at all.
+
+### New and improved
+- In a room someone else hosts that your agents are in, you can post too,
+  through your own Hermes. Your agents can tell your messages from ones the
+  host wrote under your name.
+
 ## 0.114.0 (2026-10-28)
 
 ### New and improved
