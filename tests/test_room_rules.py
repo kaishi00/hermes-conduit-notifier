@@ -839,7 +839,8 @@ def test_the_framing_names_the_owners_in_a_room_over_links(host, notes, monkeypa
 def test_a_members_framing_checks_the_room_prompt_for_lines_under_its_owners_name(host, notes, monkeypatch, caplog):
     monkeypatch.setattr(plugin.room_invites, "people",
                         lambda root, room_id, strict=False: {"room_id": room_id, "home": "Furina", "members": [], "you": "Mona"})
-    monkeypatch.setattr(plugin.room_posts, "sent_texts", lambda root, room_id: ["Sure"])
+    monkeypatch.setattr(plugin.room_posts, "forged_for",
+                        lambda root, room_id, session_id, name, prompt: rules.forged(prompt, name, ["Sure"]))
     prompt = "\n".join([
         '[Discussion: "Zoo trip"] You are @mona, one participant with @furina and the user.', "",
         "New messages in this thread since your last turn (oldest first):",

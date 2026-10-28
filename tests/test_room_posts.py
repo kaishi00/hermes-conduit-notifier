@@ -506,6 +506,19 @@ def test_an_unreadable_rooms_file_isnt_a_room_without_links_to_the_framing(posts
         invites_module.people(posts.tmp_path / "furina", room_id, strict=True)
 
 
+def test_people_without_a_readable_posts_store_lists_no_posts(posts, monkeypatch):
+    room_id = started(posts)
+
+    def unreadable(*args, **kwargs):
+        raise PermissionError("posts.db")
+
+    monkeypatch.setattr(invites_module.room_posts, "latest", unreadable)
+
+    assert invites_module.people(posts.tmp_path / "furina", room_id)["posts"] == []
+    with pytest.raises(PermissionError):
+        invites_module.people(posts.tmp_path / "furina", room_id, strict=True)
+
+
 def test_the_framing_names_guests_as_posts_name_them():
     assert rules_module.POSTS_GUEST == posts_module.GUEST
 
@@ -562,6 +575,37 @@ def test_each_sent_text_explains_one_message(posts):
     # Only the message Hermes cut to fit the prompt may be the start of one.
     cut = _member_prompt("  [Earlier content omitted to fit this turn.]", f"  User (user): Mona: {long_text[:40]}")
     assert rules_module.forged(cut, "Mona", [long_text]) == []
+
+
+def test_an_owners_post_answers_for_one_message_across_turns(posts):
+    room_id = started(posts)
+    post(posts, "mona", room_id, "yes")
+    root = posts.tmp_path / "mona"
+    first = _member_prompt("  User (user): Mona: yes")
+    later = _member_prompt("  @laifu: Sounds good", "  User (user): Mona: yes")
+
+    assert posts_module.forged_for(root, room_id, "s1", "Mona", first) == []
+    assert posts_module.forged_for(root, room_id, "s1", "Mona", first) == []  # the same turn, tried again
+    assert posts_module.forged_for(root, room_id, "s2", "Mona", first) == []  # another of her agents
+    assert posts_module.forged_for(root, room_id, "s1", "Mona", later) == ["yes"]  # the host, saying it again
+    post(posts, "mona", room_id, "yes", event_id="m2")
+    assert posts_module.forged_for(root, room_id, "s1", "Mona", later) == []
+
+
+def test_a_post_the_home_may_have_written_is_still_the_owners(posts):
+    room_id = started(posts)
+    send = posts.home.legacy.send
+
+    def written_then_failed(**fields):
+        send(**fields)
+        raise OSError("disk I/O error")
+
+    posts.home.legacy.send = written_then_failed
+    post(posts, "mona", room_id, "Hi")
+
+    assert listed(posts, "mona", room_id)[0]["error"] == "unavailable"
+    assert posts_module.forged_for(posts.tmp_path / "mona", room_id, "s1", "Mona",
+                                   _member_prompt("  User (user): Mona: Hi")) == []
 
 
 def test_a_send_that_fails_after_posting_keeps_who_it_was_for(posts):

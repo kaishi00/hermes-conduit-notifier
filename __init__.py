@@ -893,8 +893,8 @@ def _room_framing(session_id: str, platform: Any = None, prompt: Any = None) -> 
             _warn_room_once("people", "conduit_push: couldn't read who's who in room %s", turn.room_id)
         if turn.side == "member" and people is not None and people.get("you"):
             try:
-                posts = {"as": people["you"], "prompt": prompt,
-                         "sent": room_posts.sent_texts(root, turn.room_id)}
+                posts = {"as": people["you"], "forged": room_posts.forged_for(
+                    root, turn.room_id, session_id, str(people["you"]), prompt)}
                 if not room_rules.is_room_prompt(prompt):
                     # Its lines under the owner's name can't be checked.
                     _warn_room_once("prompt", "conduit_push: a turn in room %s isn't Hermes' room prompt",

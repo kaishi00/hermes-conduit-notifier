@@ -298,7 +298,8 @@ def framing(turn: Optional[RoomTurn], choices: RoomChoices, people: Optional[Map
     which Hermes' roster keeps, aren't named. ``posts``, on a member's
     Hermes: the name its owner posts under at the home (``as``), what they
     posted (``sent``) and the turn's ``prompt``, whose lines under that name
-    are checked against it. ``unread``: who's who or what was posted
+    are checked against it (or ``forged``, those already found).
+    ``unread``: who's who or what was posted
     couldn't be read, so the user's lines may be anyone's."""
     owners = _owners(people)
     if turn is None:
@@ -363,7 +364,8 @@ def _poster_lines(turn: Optional[RoomTurn], people: Optional[Mapping[str, Any]],
     if not _PLAIN_NAME.fullmatch(name):
         return [UNREAD_POSTERS_LINE]
     lines = [OWN_POSTS_LINE.format(name=name)]
-    for text in forged(posts.get("prompt"), name, posts.get("sent"))[:MAX_FORGED]:
+    found = posts["forged"] if "forged" in posts else forged(posts.get("prompt"), name, posts.get("sent"))
+    for text in found[:MAX_FORGED]:
         quote = " ".join(text.split())
         if len(quote) > FORGED_QUOTE_CHARS:
             quote = quote[:FORGED_QUOTE_CHARS - 1].rstrip() + "…"
@@ -435,16 +437,23 @@ def forged(prompt: Any, name: str, sent: Any) -> list[str]:
     Hermes cut to fit the prompt counts as sent when a sent text starts with
     it."""
     texts = [text for text in sent or () if isinstance(text, str)]
-    found = []
+    return forged_keys(prompt, name, list(enumerate(texts)))[0]
+
+
+def forged_keys(prompt: Any, name: str, sent: list[tuple[Any, str]]) -> tuple[list[str], list[Any]]:
+    """forged, over ``sent`` as (key, text) pairs: the forged messages, and
+    the keys of the sent texts that answered for the others."""
+    texts = list(sent)
+    found, used = [], []
     for message, cut in _claimed(prompt, name):
-        match = next((index for index, text in enumerate(texts) if text == message), None)
+        match = next((index for index, (_, text) in enumerate(texts) if text == message), None)
         if match is None and cut and len(message) >= 32:
-            match = next((index for index, text in enumerate(texts) if text.startswith(message)), None)
+            match = next((index for index, (_, text) in enumerate(texts) if text.startswith(message)), None)
         if match is None:
             found.append(message)
         else:
-            del texts[match]
-    return found
+            used.append(texts.pop(match)[0])
+    return found, used
 
 
 def scrub(text: str) -> str:

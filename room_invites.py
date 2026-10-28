@@ -1093,9 +1093,17 @@ def people(root: Any, room_id: Any, strict: bool = False) -> Optional[dict[str, 
     draft = state["drafts"].get(room_id) if isinstance(room_id, str) else None
     if draft is not None and draft["status"] == "started":
         names = {link_id: person["name"] or room_posts.GUEST for link_id, person in draft["links"].items()}
+        try:
+            latest = room_posts.latest(root, room_id)
+        except (sqlite3.Error, OSError) as exc:
+            if strict:
+                raise
+            # Who's who still shows; whose each post was waits for posts.db.
+            logger.warning("Linked Rooms couldn't read who posted in room %s (%s)", room_id, type(exc).__name__)
+            latest = []
         return {"room_id": room_id, "home": None, "members": _members(draft), "posts": [
             {"event_id": each["event_id"], "seq": each["seq"], "by": names.get(each["link"], room_posts.GUEST)}
-            for each in room_posts.latest(root, room_id)]}
+            for each in latest]}
     for invite in state["invites"].values():
         if invite["room_id"] == room_id and invite["status"] in ("started", "left", "ended") \
                 and invite["members"] is not None:

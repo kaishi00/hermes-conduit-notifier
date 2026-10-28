@@ -16,6 +16,7 @@ Hermes' calls come in through ``Hermes``. Nothing here imports Hermes at module 
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import logging
 import os
@@ -63,6 +64,11 @@ _SCHEMA = (
         link TEXT NOT NULL, room_id TEXT NOT NULL, event_id TEXT NOT NULL, text TEXT NOT NULL,
         status TEXT NOT NULL, seq INTEGER, error TEXT, created_at REAL NOT NULL,
         PRIMARY KEY (link, room_id, event_id))""",
+    # Which of the owner's posts each of their agents' sessions has seen in its prompt (by the prompt's digest):
+    # a post answers for one message in each session, so the host saying it again later is the host's.
+    """CREATE TABLE IF NOT EXISTS claimed (
+        room_id TEXT NOT NULL, session_id TEXT NOT NULL, link TEXT NOT NULL, event_id TEXT NOT NULL,
+        prompt TEXT NOT NULL, PRIMARY KEY (room_id, session_id, link, event_id))""",
 )
 _db_lock = threading.Lock()
 
@@ -314,12 +320,38 @@ def latest(root: Any, room_id: str, limit: int = PEOPLE_POSTS) -> list[dict[str,
     return [{"event_id": row["event_id"], "seq": int(row["seq"]), "link": row["link"]} for row in reversed(rows)]
 
 
+# The owner's posts that are theirs in a prompt: those the home took, those on their way (a page can come before
+# its answer), and those it answered unavailable for (its send may have written them).
+_OWNED = "room_id=? AND (status IN ('posted', 'sending') OR (status='refused' AND error='unavailable'))"
+
+
 def sent_texts(root: Any, room_id: str) -> list[str]:
-    """The texts this installation's owner posted in the room, the latest: those the home took, and those on
-    their way (its page can come before its answer)."""
-    rows = _rows(path(root), "SELECT text FROM sent WHERE room_id=? AND status IN ('posted', 'sending') "
-                             "ORDER BY created_at DESC, rowid DESC LIMIT ?", (room_id, SENT_TEXTS))
+    """The texts this installation's owner posted in the room, the latest."""
+    rows = _rows(path(root), f"SELECT text FROM sent WHERE {_OWNED} ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                 (room_id, SENT_TEXTS))
     return [row["text"] for row in rows]
+
+
+def forged_for(root: Any, room_id: str, session_id: str, name: str, prompt: Any) -> list[str]:
+    """The messages of a room prompt that say they're the owner's (under ``name``) but aren't one of their posts,
+    for one of their agents' sessions: a post answers for one message in the session's turns (a turn tried again
+    with the same prompt is the same turn), so the host saying it again in a later turn is the host's."""
+    from . import room_rules
+
+    if not room_rules.is_room_prompt(prompt):
+        return []
+    digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    rows = _rows(path(root), f"SELECT link, event_id, text FROM sent WHERE {_OWNED} AND NOT EXISTS ("
+                             "SELECT 1 FROM claimed WHERE claimed.room_id=sent.room_id AND claimed.session_id=? "
+                             "AND claimed.link=sent.link AND claimed.event_id=sent.event_id AND claimed.prompt!=?) "
+                             "ORDER BY created_at, rowid", (room_id, session_id, digest))
+    found, used = room_rules.forged_keys(prompt, name, [((row["link"], row["event_id"]), row["text"])
+                                                        for row in rows][-SENT_TEXTS:])
+    if used:
+        with _db_lock, closing(_open(path(root))) as conn, conn:
+            conn.executemany("INSERT OR IGNORE INTO claimed VALUES (?, ?, ?, ?, ?)",
+                             [(room_id, session_id, link, event_id, digest) for link, event_id in used])
+    return found
 
 
 def forget(root: Any, room_id: str) -> None:
@@ -329,6 +361,7 @@ def forget(root: Any, room_id: str) -> None:
         with _db_lock, closing(_open(file)) as conn, conn:
             conn.execute("DELETE FROM posted WHERE room_id=?", (room_id,))
             conn.execute("DELETE FROM sent WHERE room_id=?", (room_id,))
+            conn.execute("DELETE FROM claimed WHERE room_id=?", (room_id,))
 
 
 # --- Helpers ---------------------------------------------------------------------------

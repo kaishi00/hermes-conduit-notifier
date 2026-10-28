@@ -3705,7 +3705,9 @@ posted gets `"post": {"by": "Mona"}` in `GET /rooms/copies/log`, with `by`
 null for your own); your Hermes, what you posted and how it went. Your agents
 in the room are told which of the lines under your name you sent, so a
 message with a line under your name that you didn't send, anywhere in it and
-whoever it shows as, is named as the host's. When who's who in the room or
+whoever it shows as, is named as the host's. Each of your posts answers for
+one message in each agent's turns, so the host saying it again later is the
+host's too. When who's who in the room or
 what was posted can't be read, the agents are told any of the user's lines
 may be someone else's. These are behind the
 `room-posts` capability (plugin 0.114+), within the rooms routes' 60 a
