@@ -18,10 +18,20 @@ checks it). The format is fixed, because Conduit reads it:
 ### New and improved
 - With Where you are on, Pulse can hold something for when you walk past a
   kind of shop, like a florist before an anniversary, and your iPhone
-  watches the nearest few. Walking into one brings it up right there. A
+  watches the nearest few. Coming near one brings it up right there. A
   shop you said you'd stop at is watched too. A detour is enough for an
   opportunity like the flowers (about 750 m on foot, 3 km driving); an
   errand like eggs at Costco waits until you're at the shop.
+
+## 0.109.1 (2026-10-28)
+
+### Fixes
+- Moving a file in the Folder tab to a different disk could follow a link
+  instead of moving the link itself, or land inside a folder that had just
+  appeared with the target's name. It now lands beside the target first.
+- Deleting a link to a key or password file over SSH was refused. It now
+  deletes the link, never the file it points to.
+- When a copy's name couldn't be claimed, the Folder tab now says why.
 
 ## 0.109.0 (2026-10-27)
 
