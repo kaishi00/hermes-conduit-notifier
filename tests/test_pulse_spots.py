@@ -435,9 +435,13 @@ def test_pulse_spots_lists_what_is_watched_and_walked_into(holding, capsys, monk
 
 
 def test_the_control_route_reads_and_sets_walking_past(holding):
+    _, card = held_for(holding)
+    spots.entered([holding.home], DEVICE, [entry(f"0.c{card['id']}", at_=LEFT - 30)], LEFT)
+    assert holding.store.spot_entries()
     assert control.state(holding.store, holding.home)["spots"] is True
     control.update(holding.store, {"spots": False})
     assert control.state(holding.store, holding.home)["spots"] is False
+    assert holding.store.spot_entries() == []  # off forgets the shops come near
     with pytest.raises(control.Refused):
         control.update(holding.store, {"spots": "yes"})
 

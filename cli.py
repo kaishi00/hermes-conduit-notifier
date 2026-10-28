@@ -2215,6 +2215,8 @@ def _pulse_spots(pulse_store: Any, home: Any, value: str) -> int:
     from . import pulse, pulse_places, pulse_spots
     if value in ("on", "off"):
         pulse_store.set(pulse_spots.SETTING, value == "on")
+        if value == "off":
+            pulse_store.clear_spot_entries()  # off forgets the shops come near
         print("With Where you are on, the phone watches a few shops near you for what Pulse held for one, and Pulse "
               "brings it up when you come near one." if value == "on" else
               "The phone stops watching shops for Pulse once it next sends its location; what was held for a shop "

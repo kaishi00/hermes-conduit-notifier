@@ -1509,6 +1509,11 @@ class PulseStore:
             return [dict(row) for row in conn.execute(
                 "SELECT * FROM spot_entries ORDER BY at DESC, id DESC LIMIT ?", (limit,)).fetchall()]
 
+    def clear_spot_entries(self) -> int:
+        """Forgets every shop come near (walking past turned off)."""
+        with _lock, self._connect() as conn:
+            return conn.execute("DELETE FROM spot_entries").rowcount
+
     def prune_spot_entries(self, before: float) -> int:
         with _lock, self._connect() as conn:
             return conn.execute("DELETE FROM spot_entries WHERE received_at < ?", (before,)).rowcount

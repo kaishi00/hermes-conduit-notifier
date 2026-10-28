@@ -298,6 +298,8 @@ def update(pulse_store: Any, body: Any, home: Any = None) -> None:
     if changes.get("where") is False or changes.get("enabled") is False:
         # Off keeps nothing of where the user was: no tick runs to prune it.
         pulse_store.clear_moments()
+    if changes.get("spots") is False:
+        pulse_store.clear_spot_entries()  # off forgets the shops come near
     if changes.get("enabled") is False:
         pulse_claims.stop(pulse_store)  # the ledger stops recording
 
