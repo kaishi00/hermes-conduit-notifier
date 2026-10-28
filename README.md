@@ -1512,7 +1512,10 @@ message's turn gets one line of context, for example
 `[Conduit: this message came from CarPlay in the user's car, spoken. They are likely driving: …]`.
 A message typed on an iPhone, iPad, Mac or Vision Pro adds that several
 details only the user can give go in one clarify call with open questions,
-which Conduit shows as a form they may leave partly blank (0.82+).
+which Conduit shows as a form they may leave partly blank (0.82+). A spoken
+message adds that the answer is heard: Hermes says it in words, not with
+`text_to_speech` or a sound file of its own, which a voice would read out as
+a file path; a file the user asks for still goes (0.114.1+).
 
 - `POST /api/plugins/conduit_push/turn-surface` with
   `{"session_id": "<runtime session id>", "text_sha256": "<hex>", "surface": "carplay", "input": "spoken"}`
