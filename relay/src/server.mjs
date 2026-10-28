@@ -1475,7 +1475,7 @@ function chatNamesTitle(genericTitle, event) {
 }
 
 // Which profile a push came from, as Conduit's NotificationCopy.profileLine
-// says it: the bot's name, else the id, nothing for an unnamed default
+// says it: the bot's name, else the id capitalized, nothing for an unnamed default
 // profile or when the title already ends with it (a Bot Chat's).
 function profileLine(event, title) {
   const unnamedDefault = !profileGivenName(event) && String(event.profile || '').trim().toLowerCase() === 'default';
