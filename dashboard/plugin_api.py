@@ -9628,11 +9628,44 @@ def _clear_rule_jobs() -> None:
 
 
 def _location_ingest(body: Any) -> Dict[str, Any]:
-    result = _location_call(lambda store: store.ingest(body))
+    result = _location_call(lambda store: store.ingest(body, reply=_location_spots))
     fired = result.pop("rules_fired", [])
     result["rules_fired"] = len(_start_rule_jobs(fired))
     _location_tell_pulse(result.pop("moments", []))
+    for key in ("spot_entries", "spots_room", "spots_watching", "spots_keep"):
+        result.pop(key, None)
     return result
+
+
+def _location_spots(device_id: str, result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """What goes back, sealed, to a phone that watches shops for Pulse
+    (pulse_spots): the shops it said the user walked into become moments
+    in the profile whose watch each was, and the reply lists what to watch
+    now, every reading profile's. Only where Pulse runs; the batch is
+    stored whatever happens here, and a failure sends no list (the phone
+    keeps watching what it has until its time runs out). Paused, or sharing
+    in the background at less than Precise: an empty list. An older batch
+    arriving late (stale) says nothing either way: no list."""
+    try:
+        spots = _plugin_package_module("pulse_spots")
+        places = _plugin_package_module("pulse_places")
+        pulse_store = _plugin_package_module("pulse_store")
+        if result.get("stale"):
+            return None
+        if not result.get("spots_watching"):
+            return {"spots": []}
+        homes = places.homes(Path(_calls_home()))
+        now = time.time()
+        if spots.entered(homes, device_id, result.get("spot_entries") or [], now, keep=result.get("spots_keep", True)):
+            _wake_running_pulse()
+        if result.get("spots_room") is not None:
+            for home in homes:
+                if (home / pulse_store.DB_NAME).exists():
+                    spots.phone_said(pulse_store.open_store(home), result["spots_room"], now)
+        return spots.reply(homes, now)
+    except Exception:  # noqa: BLE001 — taking the phone's batch never fails on Pulse
+        logger.warning("conduit_push: location couldn't tell Pulse about shops walked into", exc_info=True)
+        return None
 
 
 def _location_tell_pulse(moments: Any) -> None:
@@ -17645,6 +17678,13 @@ ROUTE_CAPABILITIES = (
     # "levels" has "next", held for the morning brief until the user turns
     # it up.
     "pulse_next",
+    # Walking past (pulse_spots): a /location/ingest batch carrying
+    # "spot_entries" (the watched shops the user came near, maybe none) and
+    # "spots_room" gets "reply" back, sealed (spots_aad): {"spots": [{"id",
+    # "query", "until", "intent", "radius": {"walk", "drive"}}]}, the shops
+    # to watch now. GET /pulse says
+    # "spots" and PUT /pulse takes it.
+    "pulse_spots",
     "present-v1",
     "health-sync",
     "voice-tools",

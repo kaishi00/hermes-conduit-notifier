@@ -52,6 +52,7 @@ from . import pulse_places as places
 from . import pulse_push as push
 from . import pulse_quiet as quiet
 from . import pulse_report as report
+from . import pulse_spots as spots
 from . import pulse_store as store
 
 logger = logging.getLogger(__name__)
@@ -107,6 +108,10 @@ What belongs in "ahead" is what needs getting ready for in time: a trip to book 
 MOMENT_RULE = """
 
 A date or an "ahead" entry may wait for a place instead of the morning brief: add "moment": {"place": "Work", "on": "leave"}, the place one listed under "Saved places", by its name, and "on" either "arrive" or "leave". Give one only when it's best heard as the user gets there or leaves, a day or more before its day: flowers or a gift on the way home before an anniversary, something to pick up at a shop they go to. Pulse brings it up the next time they do, and on the Pulse screen without a notification if they don't in time. With a moment, write the line so it still reads right on a later day: name the day ("on Monday 3 November"), not "in two weeks"."""
+# Added to INSTRUCTIONS when Pulse may hold a pick for a kind of shop (pulse_spots).
+SPOT_RULE = """
+
+A date or an "ahead" entry may instead wait for the user to pass a kind of shop: add "moment": {"spot": "a florist"}, a few words for the shop as you'd search a map for it ("a florist", "a pharmacy", "a card shop", "Costco"). The phone watches the nearest ones and Pulse brings it up when the user comes near one. Give one only when it's best done on the way past a shop, a day or more before its day: flowers before an anniversary, a card for a birthday. Add "intent" for how close the user has to be: "opportunity" (the default) when a short detour is worth it, as for flowers on the way (about 750 m walking, 3 km driving); "errand" when it only makes sense at that shop; "arrival" when only being there counts. You may add "radius_m" to size the circle yourself (500 to 5000 for an opportunity, 50 to 300 otherwise). The same line rule applies: name the day, not "in two weeks"."""
 PLACES_TITLE = "## Saved places (what may wait for the user to get to or leave one)"
 
 TEXT = """Pulse look ahead.
@@ -172,14 +177,16 @@ class Looked:
     """What a look ahead reads: its text, the yearly dates in it by key
     (D1...), those at a lead time today and not decided yet (``due``), the
     remembered items it shows by id, whether anything lies ahead at all
-    (without anything, nothing is asked), and the saved places a pick may
-    wait for (pulse_places.saved; none without Where you are)."""
+    (without anything, nothing is asked), the saved places a pick may wait
+    for (pulse_places.saved; none without Where you are), and whether one
+    may wait for a kind of shop the user walks past (pulse_spots.reads)."""
     text: str
     dates: dict[str, pulse_dates.Coming]
     due: list[pulse_dates.Coming]
     items: dict[int, dict]
     ahead: bool
     places: list[dict] = field(default_factory=list)
+    spots: bool = False
 
 
 def context(pulse_store: store.PulseStore, home: Path, *, zone: tzinfo, now: float,
@@ -210,7 +217,8 @@ def context(pulse_store: store.PulseStore, home: Path, *, zone: tzinfo, now: flo
                 phone, listed, named, candidates.recent_section(pulse_store, zone, now)]
     return Looked(text="\n\n".join(section for section in sections if section), dates=keyed, due=list(due_now),
                   items={item["id"]: item for item in shown},
-                  ahead=bool(coming or phoned or any(item["due_at"] is not None for item in shown)), places=saved)
+                  ahead=bool(coming or phoned or any(item["due_at"] is not None for item in shown)), places=saved,
+                  spots=spots.reads(pulse_store, now, home))
 
 
 def held_places(pulse_store: store.PulseStore, home: Path, now: float) -> list[dict]:
@@ -381,12 +389,21 @@ def parse(reply: Any, looked: Looked, *, zone: tzinfo) -> list[dict]:
 def _held(row: dict, entry: dict, looked: Looked) -> dict:
     """``row``, with the place the model held it for ("moment": the saved
     place, pulse_places.held_place, and "on") when it named one Pulse
-    offered (``Looked.places``) and getting there or leaving."""
+    offered (``Looked.places``) and getting there or leaving, or the kind
+    of shop (pulse_spots.held_spot) when Pulse may watch one
+    (``Looked.spots``)."""
     moment = entry.get("moment")
-    if looked.places and isinstance(moment, dict) and moment.get("on") in ("arrive", "leave"):
+    if not isinstance(moment, dict):
+        return row
+    if looked.places and moment.get("on") in ("arrive", "leave"):
         place = places.held_place(moment.get("place"), looked.places)
         if place is not None:
             row["moment"] = {**place, "on": moment["on"]}
+            return row
+    if looked.spots and moment.get("spot"):
+        spot = spots.held_spot(moment.get("spot"), looked.places, moment.get("intent"), moment.get("radius_m"))
+        if spot is not None:
+            row["moment"] = {**spot, "on": "arrive"}
     return row
 
 
@@ -489,7 +506,8 @@ def run(pulse_store: store.PulseStore, home: Path, llm: candidates.Llm, *, zone:
             text = TEXT.format(fence=fence, context=looked.text)
             reply, tokens = llm(INSTRUCTIONS.format(limit=MAX_AHEAD, kinds=", ".join(report.FOUND_KINDS),
                                                     areas=", ".join(candidates.AREAS))
-                                + (MOMENT_RULE if looked.places else "") + report.note_block(report.note(pulse_store)),
+                                + (MOMENT_RULE if looked.places else "") + (SPOT_RULE if looked.spots else "")
+                                + report.note_block(report.note(pulse_store)),
                                 text)
         except Exception as error:  # noqa: BLE001 — the dates still come up, in code's words
             logger.warning("conduit_push: Pulse look ahead call failed", exc_info=True)

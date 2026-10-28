@@ -35,6 +35,10 @@ pushes; the card then comes on the screen with the turn's words. At its
 window's end, with Where you are off, or once the user makes its kind
 quieter than a push, it comes on the screen without one.
 
+A pick may also wait for a kind of shop the user passes near or walks into (pulse_spots):
+the phone watches the nearest few, and walking into one is a moment at that
+shop (kind SPOT), which brings it up the same way.
+
 A place's words match a saved place by its name ("Costco" matches "Costco
 Wholesale") or its kind ("home", "work" or "the office", "the gym",
 "school"). Words that match no saved place are kept, and match one saved
@@ -433,8 +437,20 @@ def handle(pulse_store: Any, home: Path, zone: tzinfo, moment: dict, now: float,
 def _make_due(pulse_store: Any, home: Path, zone: tzinfo, moment: dict, now: float,
               found: Optional[Memories]) -> dict[str, Any]:
     """What a moment makes due of what waits for its place (``handle``)."""
-    match = matcher({"name": moment["place"], "kind": moment["kind"]})
-    items = [item for item in waiting(pulse_store, moment["event"]) if match(item["place_words"])]
+    by_name = matcher({"name": moment["place"], "kind": moment["kind"]})
+    match = by_name
+    if moment["kind"] == SPOT:
+        from . import pulse_spots as spots
+
+        # A shop also stands for the words it was searched for ("pharmacy"
+        # found a Walgreens), as an item said for them was watched.
+        searched = str(moment.get("place_id") or "").partition(":")[2]
+
+        def match(words: Any) -> bool:
+            return by_name(words) or (bool(searched) and _phrase(spots.query(words)) == searched)
+    # What was said for a place needs the user at it: a shop only nearby isn't.
+    near = moment["kind"] == SPOT and _reach(moment.get("reach")) < REACH.index("errand")
+    items = [] if near else [item for item in waiting(pulse_store, moment["event"]) if match(item["place_words"])]
     ids = [item["id"] for item in items]
     # What waits for a place, here or elsewhere, has its own moment.
     related = [item["id"] for item in found.related(*place_keys(moment["place"], moment["kind"]),
@@ -491,6 +507,32 @@ MAX_HELD = 10
 WORDS_RETRY_S = 600.0
 # What the user did at the place, in a turn's message and a card's Why?.
 DID = {"arrive": "got to", "leave": "left"}
+# A moment's kind for a shop walked into (pulse_spots.KIND): the phone
+# watched it for a pick held for that kind of shop, or for what was said.
+SPOT = "spot"
+# How close a shop walked into was (pulse_spots.INTENTS), loosest first: a
+# moment's "reach" brings up what waits for its own intent or a looser one,
+# and makes due what was said for a place (an errand) only from an errand on.
+REACH = ("opportunity", "errand", "arrival")
+
+
+def _reach(value: Any) -> int:
+    return REACH.index(value) if value in REACH else 0
+
+
+def spot_verbs(intent: Any) -> tuple[str, str]:
+    """What the user does for a pick held for a kind of shop, by its intent:
+    (now, done), "pass near" for an opportunity, else "get to". Never
+    "walk into": the phone can't tell the user went in."""
+    return ("pass near", "passed near") if _reach(intent) == 0 else ("get to", "got to")
+
+
+def _came(wait: dict[str, Any]) -> str:
+    """What happened when a shop's moment reached a held pick, as close as
+    the phone can tell (the moment's reach): near the shop, or at or right
+    by it."""
+    shop = _clip(wait.get("at_place"), 60) or "one"
+    return f"came near {shop}" if _reach(wait.get("reach")) == 0 else f"got to {shop} or right by it"
 # Why a held pick went to the screen without a notification (``release_picks``).
 FIRED, ENDED, OFF, QUIETER = "fired", "ended", "off", "quieter"
 PICK_TEXT = """Pulse noticed something {tag}.
@@ -538,6 +580,10 @@ def picks_for(pulse_store: Any, moment: dict, now: float) -> list[dict]:
         wait = held(card)
         if card["done"] or "reached_at" in wait or wait.get("on") != moment["event"] or _until(wait) <= now:
             continue
+        if (wait.get("kind") == SPOT) != (moment.get("kind") == SPOT):
+            continue  # a shop's name never stands for a saved place, nor the other way
+        if wait.get("kind") == SPOT and _reach(wait.get("intent")) > _reach(moment.get("reach")):
+            continue  # walked near it, not close enough for what it waits for
         name = _phrase(wait.get("place"))
         if (wait.get("place_id") and wait["place_id"] == moment["place_id"]) or (name and name == _phrase(moment["place"])):
             found.append(card)
@@ -560,6 +606,9 @@ def bring_up(pulse_store: Any, home: Path, zone: tzinfo, moment: dict, now: floa
             reasons.append(why)
             continue
         reached = {**held(card), "reached_at": now, "at": float(moment["at"])}
+        if moment.get("kind") == SPOT:
+            reached["at_place"] = str(moment.get("place") or "")  # the shop it was
+            reached["reach"] = str(moment.get("reach") or REACH[0])  # how close
         if pulse_store.swap_card_moment(card["id"], card["moment"], json.dumps(reached, sort_keys=True)):
             return {"pick": card["id"]}
         # Another process took it meanwhile (it came on the screen, or another
@@ -608,8 +657,10 @@ def pick_text(card: dict, *, zone: tzinfo) -> Any:
     wait = held(card)
     at = datetime.fromtimestamp(float(wait.get("at") or card["created_at"]), zone)
     made = datetime.fromtimestamp(float(card["created_at"]), zone)
-    lines = [f"The user just {DID.get(wait.get('on'), 'got to')} {wait.get('place') or 'a saved place'}, at "
-             f"{at:%H:%M} on {at:%A} {at.day} {at:%B}.",
+    where = (f"{_came(wait)} ({wait.get('place') or wait.get('spot')})"
+             if wait.get("kind") == SPOT else
+             f"{DID.get(wait.get('on'), 'got to')} {wait.get('place') or 'a saved place'}")
+    lines = [f"The user just {where}, at {at:%H:%M} on {at:%A} {at.day} {at:%B}.",
              f"Pulse's daily look ahead held this for that moment on {made:%A} {made.day} {made:%B}:",
              _clip(card["news"], learning.NOTICED_NEWS_LIMIT)]
     if card["title"] and card["title"] != card["news"]:
@@ -703,9 +754,16 @@ def release_picks(pulse_store: Any, now: float) -> list[int]:
 def _held_why(card: dict, wait: dict[str, Any], how: str) -> str:
     """A held pick's Why? once it's on the screen: its own, and what came of
     waiting for its place."""
-    did, place = DID.get(wait.get("on"), "got to"), _clip(wait.get("place"), 60) or "a saved place"
-    note = (f"Pulse held this for when you {did} {place}, and you just did." if how == FIRED else
-            f"Pulse held this for when you next {did} {place}. " + {
+    if wait.get("kind") == SPOT:
+        place = _clip(wait.get("place") or wait.get("spot"), 60) or "a shop"
+        happened = f"you just {_came(wait)}"
+        next_time, did = spot_verbs(wait.get("intent"))
+    else:
+        place = _clip(wait.get("place"), 60) or "a saved place"
+        happened, did = "you just did", DID.get(wait.get("on"), "got to")
+        next_time = did
+    note = (f"Pulse held this for when you {did} {place}, and {happened}." if how == FIRED else
+            f"Pulse held this for when you next {next_time} {place}. " + {
                 ENDED: "That didn't happen in time, so it's here without a notification.",
                 OFF: "Where you are was turned off, so it's here without a notification.",
                 QUIETER: "You've since asked for these more quietly, so it's here without a notification."}[how])
@@ -717,7 +775,8 @@ def held_line(card: dict, zone: tzinfo) -> str:
     """A held pick as `pulse where` lists it."""
     wait = held(card)
     until = datetime.fromtimestamp(_until(wait), zone).strftime("%a %d %b %H:%M") if _until(wait) else "?"
-    what = "leaving " if wait.get("on") == "leave" else ""
+    what = ("leaving " if wait.get("on") == "leave" else
+            ("near " if _reach(wait.get("intent")) == 0 else "at ") if wait.get("kind") == SPOT else "")
     state = (", marked done" if card["done"] else ", coming up now" if "reached_at" in wait else "")
     return f"- {_clip(card['news'], 160)} ({what}{wait.get('place') or '?'}, until {until}{state})"
 
@@ -727,7 +786,8 @@ def describe(moment: dict, zone: tzinfo, texts: dict[int, str], picks: Optional[
     ``picks``: the cards of the picks held for it, as they are now, by id
     (None for one that's gone)."""
     when = datetime.fromtimestamp(float(moment["at"]), zone).strftime("%a %d %b %H:%M")
-    verb = "Arrived at" if moment["event"] == "arrive" else "Left"
+    verb = (("Came near" if _reach(moment.get("reach")) == 0 else "Got to") if moment.get("kind") == SPOT else
+            "Arrived at" if moment["event"] == "arrive" else "Left")
     try:
         outcome = json.loads(moment.get("outcome") or "{}")
     except (TypeError, ValueError):

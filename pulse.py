@@ -70,6 +70,7 @@ from . import pulse_proposals as proposals
 from . import pulse_push as push
 from . import pulse_quiet as quiet
 from . import pulse_report as report
+from . import pulse_spots as spots
 from . import pulse_store as store
 from . import pulse_tools as tools
 
@@ -690,6 +691,7 @@ def tick(now: Optional[float] = None) -> None:
     pulse_store.prune_signals(now - prefs.KEEP_S)
     # Claims too, with memory off: they're kept a month at most.
     pulse_store.prune_claims(now - claims.KEEP_S)
+    pulse_store.prune_spot_entries(now - spots.KEEP_S)
     # Deadlines from the Shortcuts inbox: a day after they're over, or at
     # once when their event was deleted there.
     memory.forget_inbox(pulse_store, home, now)

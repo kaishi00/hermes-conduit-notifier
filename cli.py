@@ -53,11 +53,11 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     )
     pulse = commands.add_parser("pulse", help="Pulse, the proactivity experiment: on, off, status, probe, report, home, outcomes, memory, followups, "
                                                  "cards, rate, done, learned, nudge, budget, candidates, note, quiet, night, "
-                                                 "dates, ahead, inbox, look, where, private, claims")
+                                                 "dates, ahead, inbox, look, where, private, claims, spots")
     pulse.add_argument("pulse_action", choices=["on", "off", "status", "probe", "report", "home", "outcomes", "memory",
                                                 "followups", "cards", "rate", "done", "learned", "nudge", "budget",
                                                 "candidates", "note", "quiet", "night", "dates", "ahead", "inbox",
-                                                "look", "where", "private", "claims"])
+                                                "look", "where", "private", "claims", "spots"])
     pulse.add_argument("value", nargs="?", default="",
                        help="for home: the id of the chat to use, or 'auto' to find it by title; "
                             "for outcomes: how many to show, or a chat id; "
@@ -89,7 +89,9 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
                             "for private: 'on' or 'off' (whether a push about a gift, a surprise, someone's "
                             "birthday, health or money hides its words on the Lock Screen), or nothing to show it; "
                             "for claims: nothing to list what Hermes said it did with no call behind it, or 'all' "
-                            "for every claim with the call that backed it")
+                            "for every claim with the call that backed it; "
+                            "for spots: 'on' or 'off' (whether the phone watches shops for what Pulse held for one), "
+                            "or nothing to list what it watches and the shops you came near, with how late iOS told it")
     pulse.add_argument("extra", nargs="?", default="",
                        help="for memory forget: the item number; for memory backfill: how many days back "
                             "(it shows what that costs), 'start', 'stop' or 'cancel'; "
@@ -385,7 +387,7 @@ def _pulse(args: argparse.Namespace) -> int:
     action = args.pulse_action
     # Follow-ups are on by default, so even `followups on|off` needs no file yet.
     listing = action in ("followups", "cards", "rate", "done", "learned", "candidates", "dates", "claims") \
-        or (action in ("memory", "ahead", "inbox", "look", "where", "private")
+        or (action in ("memory", "ahead", "inbox", "look", "where", "private", "spots")
             and (args.value or "").strip() not in ("on", "off")) \
         or (action == "nudge" and not (args.value or "").strip()) \
         or (action == "note" and (args.value or "").strip() in ("", "clear")) \
@@ -470,6 +472,8 @@ def _pulse(args: argparse.Namespace) -> int:
         return _pulse_private(pulse_store, (args.value or "").strip())
     if action == "claims":
         return _pulse_claims(pulse_store, home, (args.value or "").strip())
+    if action == "spots":
+        return _pulse_spots(pulse_store, home, (args.value or "").strip())
     print(f"Pulse: {'on' if pulse_store.get('enabled') else 'off'}")
     chat, problem = pulse.home_chat(pulse_store, home)
     if chat is not None:
@@ -2232,6 +2236,55 @@ def _pulse_claims(pulse_store: Any, home: Any, value: str) -> int:
         except ValueError:
             calls = []
         print(_printable("  That turn's calls: " + ("; ".join(str(call) for call in calls) if calls else "none")))
+    return 0
+
+
+def _pulse_spots(pulse_store: Any, home: Any, value: str) -> int:
+    """Walking past (pulse_spots): what the phone watches now, how many it
+    said it could, and the shops the user came near with how late iOS told
+    the app; `on` and `off` switch it."""
+    from . import pulse, pulse_places, pulse_spots
+    if value in ("on", "off"):
+        pulse_store.set(pulse_spots.SETTING, value == "on")
+        if value == "off":
+            pulse_store.clear_spot_entries()  # off forgets the shops come near
+        print("With Where you are on, the phone watches a few shops near you for what Pulse held for one, and Pulse "
+              "brings it up when you come near one." if value == "on" else
+              "The phone stops watching shops for Pulse once it next sends its location; what was held for a shop "
+              "comes to the Pulse screen at the end of its window.")
+        return 0
+    if value:
+        print("Usage: hermes conduit-push pulse spots [on|off]")
+        return 2
+    now = time.time()
+    zone = pulse.report_zone(pulse_store, home)
+    state = "on" if pulse_spots.on(pulse_store) else "off"
+    if pulse_spots.on(pulse_store) and not pulse_spots.reads(pulse_store, now, Path(home)):
+        state += (" (waiting: Pulse is off)" if not pulse_store.get("enabled") else
+                  " (waiting: Where you are is off)" if not pulse_places.on(pulse_store) else
+                  " (waiting: the phone isn't sharing its location in the background)")
+    elif pulse_spots.on(pulse_store) and not pulse_spots.precise(Path(home)):
+        state += " (waiting: the phone shares its location in the background at less than Precise)"
+    print(f"Walking past: {state}")
+    phone = pulse_store.get(pulse_spots.PHONE)
+    if isinstance(phone, dict) and isinstance(phone.get("room"), int):
+        said = datetime.fromtimestamp(float(phone.get("at") or 0), zone).strftime("%a %d %b %H:%M")
+        print(f"The phone said it could watch {phone['room']} more places ({said}).")
+    watching = pulse_spots.watches(pulse_store, Path(home), now)
+    if watching and not pulse_spots.precise(Path(home)):
+        print("None of these go to the phone until it shares at Precise.")
+    print("Watching for:" if watching else "Watching for nothing now.")
+    for watch in watching:
+        until = datetime.fromtimestamp(watch["until"], zone).strftime("%a %d %b %H:%M")
+        circle = watch["radius"]
+        size = (f"{circle['walk']:.0f} m" if circle["walk"] == circle["drive"] else
+                f"{circle['walk']:.0f} m walking, {circle['drive']:.0f} m driving")
+        print(_printable(f"- {watch['query']} ({watch['intent']}, {size}, until {until})"))
+    entries = pulse_store.spot_entries()
+    print("Came within a watched shop's circle (how late is an estimate from the phone's fix):" if entries
+          else "Came within no watched shop's circle yet.")
+    for entry in entries:
+        print(_printable(pulse_spots.describe(entry, zone)))
     return 0
 
 
