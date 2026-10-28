@@ -593,12 +593,28 @@ def test_the_cli_lists_copies(copies, capsys):
     assert cli._room_copies("conduit-other", copies.tmp_path / "laifu") == 1
 
 
-def test_the_cli_says_so_when_a_copy_is_unreadable(copies, capsys):
-    room_id = started(copies, links=("link1",))
+def test_a_corrupt_copy_row_is_skipped(copies, caplog):
+    first = started(copies, links=("link1",))
+    second = started(copies, links=("link1",))
+    say(copies, second, "Saturday?")
     copies.furina.pass_once()
     with sqlite3.connect(copies_module.path(copies.tmp_path / "laifu")) as conn:
-        conn.execute("UPDATE conduit_room_copies SET state_json='{' WHERE room_id=?", (room_id,))
-    cli = _load("conduit_push.cli", ROOT / "cli.py")
+        conn.execute("UPDATE conduit_room_copies SET state_json='{' WHERE room_id=?", (first,))
+        conn.execute("UPDATE hosted_room_replica_events SET payload_json='{' WHERE room_id=? AND seq=1", (second,))
 
-    assert cli._room_copies("", copies.tmp_path / "laifu") == 1
-    assert "Couldn't show them" in capsys.readouterr().out
+    assert [each["room_id"] for each in copies_module.copies(copies.tmp_path / "laifu")] == [second]
+    assert [event["seq"] for event in log_of(copies, "laifu", second)["events"]] == [2]
+    assert log_of(copies, "laifu", second)["cursor"] == 2
+    assert "skipped its copy of room" in caplog.text and "skipped an event of room" in caplog.text
+
+
+def test_a_copy_path_with_a_question_mark_reads(copies, tmp_path):
+    root = tmp_path / "odd?home#1"
+    file = copies_module.path(root)
+    file.parent.mkdir(parents=True)
+    ingest_page(file, room_id="conduit-odd", room_name="Odd", members=[], page={
+        "events": [{"seq": 1, "event_id": "e1", "kind": "room.created", "actor": {"kind": "system", "id": "x"},
+                    "authority_epoch": 1, "payload": {}, "created_at": NOW}],
+        "latest_seq": 1, "authority": {"gateway_id": FURINA, "epoch": 1}})
+
+    assert [event["seq"] for event in copies_module.log(root, "conduit-odd")["events"]] == [1]

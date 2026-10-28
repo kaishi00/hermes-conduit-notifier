@@ -34,8 +34,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
-from . import (client, room_bridge, room_choices, room_copies, room_identity, room_join, room_links, room_start,
-               session_titles)
+from . import (client, room_bridge, room_choices, room_copies, room_identity, room_join, room_links, room_posts,
+               room_start, session_titles)
 from .events import event_id, push_event
 
 logger = logging.getLogger(__name__)
@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 VERSION = 1
 INVITE, ANSWER, START = "room.invite", "room.answer", "room.start"
 GRANT, LEAVE, ENDED = "room.grant", "room.leave", "room.ended"
-KINDS = (INVITE, ANSWER, START, GRANT, LEAVE, ENDED, *room_copies.KINDS)
+KINDS = (INVITE, ANSWER, START, GRANT, LEAVE, ENDED, *room_copies.KINDS, *room_posts.KINDS)
 DIRECTORY = room_identity.DIRECTORY
 FILE_NAME = "rooms.json"
 
@@ -124,12 +124,14 @@ class Rooms:
     """The rooms over Links of the installation at ``root``: ``send`` is Links.send, ``link(link_id)`` the Link
     as Links.get shows it, ``profile_home(profile)`` a profile's home, ``joiner`` the member's Hermes calls
     (room_join.Joiner), ``starter`` the home's (room_start.Starter), ``notify(invite)`` what tells the phone
-    about a new invite (notify_invite) and ``copier`` Hermes' calls for the rooms' copies (room_copies.Hermes)."""
+    about a new invite (notify_invite), ``copier`` Hermes' calls for the rooms' copies (room_copies.Hermes) and
+    ``poster`` those for posts in them (room_posts.Hermes)."""
 
     def __init__(self, root: Any, *, send: Optional[Callable[..., Any]] = None,
                  link: Optional[Callable[[str], Optional[dict]]] = None, clock: Callable[[], float] = time.time,
                  profile_home: Optional[Callable[[str], Path]] = None, joiner: Any = None,
-                 starter: Any = None, notify: Optional[Callable[[dict], None]] = None, copier: Any = None) -> None:
+                 starter: Any = None, notify: Optional[Callable[[dict], None]] = None, copier: Any = None,
+                 poster: Any = None) -> None:
         self.root = Path(root)
         self.store = Store(self.root)
         links = None if send is not None and link is not None else room_links.Links(self.root)
@@ -144,6 +146,7 @@ class Rooms:
         # Until when a profile's renewals wait for its API server, which didn't answer (R16).
         self._api_waits: dict[str, int] = {}
         self.copies = room_copies.Copies(self, hermes=copier)
+        self.posts = room_posts.Posts(self, hermes=poster)
 
     # --- The home's drafts ---------------------------------------------------------
 
@@ -415,7 +418,8 @@ class Rooms:
         """An envelope from a Link, as the Link's loop hands it over."""
         handler = {INVITE: self.on_invite, ANSWER: self.on_answer, START: self.on_start, GRANT: self.on_grant,
                    LEAVE: self.on_leave, ENDED: self.on_ended, room_copies.PAGE: self.copies.on_page,
-                   room_copies.COPIED: self.copies.on_copied}.get(received.kind)
+                   room_copies.COPIED: self.copies.on_copied, room_posts.POST: self.posts.on_post,
+                   room_posts.POSTED: self.posts.on_posted}.get(received.kind)
         if handler is not None:
             handler(received)
 
@@ -924,15 +928,17 @@ class Rooms:
     def _settle(self) -> None:
         """What time has ended: a draft that lapsed ends and says so; a join whose room never started is
         undone once word of it can't come any more (its invite's time and the mailbox's hold); what ended a
-        month ago is forgotten. Started rooms are kept until they end (left, removed, disbanded)."""
+        month ago is forgotten, with who the home posted for in it. Started rooms are kept until they end (left,
+        removed, disbanded)."""
         now = int(self.clock())
-        leaving = []
+        leaving, forgotten = [], []
         with self.store.update() as state:
             for room_id, draft in list(state["drafts"].items()):
                 if draft["status"] == "waiting" and now >= draft["expires_at"]:
                     self._end(state, room_id, "lapsed", now)
                 elif draft["status"] == "ended" and draft["ended_at"] + KEPT_S < now:
                     del state["drafts"][room_id]
+                    forgotten.append(room_id)
             for invite in state["invites"].values():
                 if invite["status"] == "joined" and now >= invite["expires_at"] + LASTS_S:
                     leaving.extend((invite["link"], agent) for agent in invite["joined"])
@@ -940,6 +946,8 @@ class Rooms:
             _forget_old(state, now)
         for link_id, agent in leaving:
             self._leave(link_id, agent)
+        for room_id in forgotten:
+            room_posts.forget(self.root, room_id)
 
     # --- Helpers -------------------------------------------------------------------------
 
@@ -1067,20 +1075,27 @@ def people(root: Any, room_id: Any) -> Optional[dict[str, Any]]:
     member with its owner's name (None for this installation's own) and its ``status``: in, or left or removed
     (R10; on a member's Hermes, only its own agents' are known). A member's Hermes keeps answering for a room it
     left or that ended, whose hidden chats it keeps, with each member as it was when it ended (the invite says how
-    it ended). None for any other room."""
+    it ended). On the home, ``posts``: the room's latest posts the plugin made for linked people (room_posts), each
+    event id and seq with who it's ``by``; on a member's Hermes, ``you``: what the home calls this installation's
+    owner, the name their posts carry there. None for any other room."""
     try:
         state = Store(root).read()
     except RoomsError:
         return None
     draft = state["drafts"].get(room_id) if isinstance(room_id, str) else None
     if draft is not None and draft["status"] == "started":
-        return {"room_id": room_id, "home": None, "members": _members(draft)}
+        names = {link_id: person["name"] or room_posts.GUEST for link_id, person in draft["links"].items()}
+        return {"room_id": room_id, "home": None, "members": _members(draft), "posts": [
+            {"event_id": each["event_id"], "seq": each["seq"], "by": names.get(each["link"], room_posts.GUEST)}
+            for each in room_posts.latest(root, room_id)]}
     for invite in state["invites"].values():
         if invite["room_id"] == room_id and invite["status"] in ("started", "left", "ended") \
                 and invite["members"] is not None:
             gone = {agent["member_id"]: agent["reason"] for agent in invite.get("gone", [])}
             mine = {agent["member_id"] for agent in invite["joined"]} | set(gone)
-            return {"room_id": room_id, "home": invite["from"], "members": [
+            # What the home calls this installation's owner: the name its posts carry there.
+            you = next((member["owner"] for member in invite["members"] if member["member_id"] in mine), None)
+            return {"room_id": room_id, "home": invite["from"], "you": you, "members": [
                 {"member_id": member["member_id"], "handle": member["handle"],
                  "display_name": member["display_name"],
                  "owner": None if member["member_id"] in mine else member["owner"] or invite["from"],
