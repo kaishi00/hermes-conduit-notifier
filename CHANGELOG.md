@@ -18,8 +18,7 @@ checks it). The format is fixed, because Conduit reads it:
 ### Fixes
 - Notifications called the main bot "Default" when it has no name, in its
   Bot Chat's title and in the relay's plain copy, while Conduit calls it
-  Hermes. They now say Hermes (push relay 0.23.2), and a name you gave it
-  in Conduit still shows there.
+  Hermes. They now say Hermes (push relay 0.23.2).
 
 ## 0.115.2 (2026-10-28)
 
