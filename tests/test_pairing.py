@@ -42,7 +42,7 @@ def _recording_claim(calls, answer=None):
 @pytest.fixture(autouse=True)
 def _no_revoke(monkeypatch):
     # Re-pairs here replace an "old" credential: its revoke stays off the network.
-    monkeypatch.setattr(api, "_revoke_replaced_pairing", lambda relay_url, credential: None)
+    monkeypatch.setattr(api, "_revoke_replaced_pairing", lambda relay_url, credential, replaced_by="": None)
 
 
 @pytest.fixture(autouse=True)

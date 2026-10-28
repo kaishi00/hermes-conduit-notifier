@@ -7252,15 +7252,17 @@ def _claim_pairing(relay_url: str, code: str, gateway_name: str) -> Dict[str, An
     return body
 
 
-def _revoke_replaced_pairing(relay_url: str, credential: str) -> None:
+def _revoke_replaced_pairing(relay_url: str, credential: str, replaced_by: str = "") -> None:
     """Revokes a credential that a new pairing replaced, off the pairing path.
 
     The relay mints a new gateway per claim, so without this every re-pair
     leaves a live gateway behind until the phone's slots run out (#250).
-    Best effort: the new pairing already works either way.
+    `replaced_by` names the phone it moved to (client.replaced_pairing_query),
+    so the Apple Watch's ring follows it. Best effort: the new pairing
+    already works either way.
     """
     try:
-        url = _relay_urls().check_request_url(f"{relay_url.rstrip('/')}/v1/gateways/current")
+        url = _relay_urls().check_request_url(f"{relay_url.rstrip('/')}/v1/gateways/current") + replaced_by
     except ValueError:
         # Plain http:// off this machine (a pairing saved before HTTPS was
         # required): the credential isn't sent there.
@@ -7344,7 +7346,7 @@ def pair_profile(body: Any, profile: Optional[str] = None, path: Any = None,
     old_credential, old_relay = previous.get("credential"), previous.get("relay_url")
     if isinstance(old_credential, str) and old_credential and old_credential != state["credential"] \
             and isinstance(old_relay, str) and old_relay:
-        _revoke_replaced_pairing(old_relay, old_credential)
+        _revoke_replaced_pairing(old_relay, old_credential, _relay_urls().replaced_pairing_query(previous, state))
     return {"paired": True, "installation_id": state["installation_id"], "gateway_id": state["gateway_id"],
             "gateway_name": gateway_name, "relay_url": state["relay_url"]}
 

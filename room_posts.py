@@ -227,7 +227,7 @@ class Posts:
             try:
                 seq = self._posted_seq(room_id, event_id)
                 recent = self._recent(room_id, link_id) if seq is None else 0
-            except sqlite3.Error as exc:
+            except (sqlite3.Error, OSError) as exc:
                 logger.info("Linked Rooms couldn't read the posts of room %s (%s)", room_id, type(exc).__name__)
                 error = "unavailable"
         if error is None:

@@ -246,6 +246,19 @@ def test_a_home_that_cant_name_the_event_answers_unavailable(posts):
     assert listed(posts, "mona", room_id)[0]["status"] == "refused"
 
 
+def test_a_home_that_cant_open_its_posts_answers_unavailable(posts):
+    room_id = started(posts)
+
+    def unopenable(*args):
+        raise PermissionError("posts.db")
+
+    posts.furina.posts._posted_seq = unopenable
+    post(posts, "mona", room_id, "Hi")
+
+    assert posted_answers(posts)[-1]["error"] == "unavailable"
+    assert posts.sends == []
+
+
 def test_forgetting_a_copy_or_an_old_room_forgets_its_posts(posts):
     room_id = started(posts)
     post(posts, "mona", room_id, "Hi")

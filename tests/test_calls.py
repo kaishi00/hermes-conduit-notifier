@@ -226,6 +226,26 @@ def test_a_duplicate_after_a_dropped_connection_counts_as_sent(home, fake, sleep
     assert fake.enqueued == []
 
 
+@pytest.mark.parametrize("answer, said", [
+    ({"accepted": True, "delivered": True, "rang": True, "watch": True}, "rang the paired iPhone, and sent the ring to its Apple Watch (the relay's log says if Apple refused it)"),
+    ({"accepted": True, "duplicate": True}, "already sent"),
+    ({"accepted": True, "delivered": True, "rang": True, "watch": False}, "rang the paired iPhone; no Apple Watch rings for it"),
+    ({"accepted": True, "delivered": True, "rang": True}, "rang the paired iPhone"),
+    ({"accepted": True, "delivered": True}, "sent as a \"Hermes wants to talk\" notification"),
+    ({"accepted": True, "delivered": False}, "not sent"),
+])
+def test_the_host_log_says_where_a_call_went(answer, said):
+    assert calls.call_delivery(answer).startswith(said)
+
+
+def test_a_delivered_call_logs_where_it_rang(home, fake, caplog):
+    fake.answers = [{"accepted": True, "delivered": True, "rang": True, "watch": False}]
+    _watch(home, "rt-1")
+    with caplog.at_level("INFO"):
+        calls.turn_ended("rt-1", "done", profile="default", fallback=READY)
+    assert "Conduit call request: rang the paired iPhone; no Apple Watch rings for it" in caplog.text
+
+
 def test_relay_errors_carry_their_status_and_a_bounded_detail(monkeypatch):
     import io
     import urllib.error

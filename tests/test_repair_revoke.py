@@ -213,3 +213,44 @@ def test_the_cli_names_the_way_out_of_a_full_gateway_list(monkeypatch, capsys):
     assert cli.dispatch(args) == 1
     out = capsys.readouterr().out
     assert "gateway_limit_reached" in out and "turn notifications off and on" in out.lower()
+
+
+OLD_PHONE = "11111111-1111-4111-8111-111111111111"
+NEW_PHONE = "22222222-2222-4222-8222-222222222222"
+
+
+def test_a_re_pair_to_another_phone_names_it_so_the_watch_follows(tmp_path, relay_calls):
+    path = tmp_path / "s.json"
+    path.write_text(json.dumps({"credential": f"{OLD_PHONE}.gw-1.old", "installation_id": OLD_PHONE,
+                                "relay_url": "https://relay.example"}))
+    api.pair_profile({"pairing_code": CODE}, path=path,
+                     claim=lambda relay, code, name: {**NEW, "installation_id": NEW_PHONE})
+    assert relay_calls == [(f"https://relay.example/v1/gateways/current?replaced_by={NEW_PHONE}", "DELETE",
+                            f"{OLD_PHONE}.gw-1.old")]
+
+
+def test_the_cli_re_pair_names_the_new_phone_too(monkeypatch, tmp_path):
+    path, calls = _client_requests(monkeypatch, tmp_path, {"credential": f"{OLD_PHONE}.gw-1.old",
+                                                           "installation_id": OLD_PHONE,
+                                                           "relay_url": "https://relay.example"})
+    monkeypatch.setattr(client, "_request", lambda url, *, method, payload=None, credential="", timeout:
+                        calls.append((url, method, credential)) or
+                        ({**NEW, "installation_id": NEW_PHONE} if method == "POST" else {}))
+    client.claim_pairing(CODE, "https://relay.example", "box")
+    assert calls[1] == (f"https://relay.example/v1/gateways/current?replaced_by={NEW_PHONE}", "DELETE",
+                        f"{OLD_PHONE}.gw-1.old")
+
+
+@pytest.mark.parametrize("previous, current", [
+    # The same phone re-paired: nothing moves.
+    ({"installation_id": NEW_PHONE, "relay_url": "https://relay.example"},
+     {"installation_id": NEW_PHONE, "relay_url": "https://relay.example"}),
+    # Another relay never learns this one's installations.
+    ({"installation_id": OLD_PHONE, "relay_url": "https://old.example"},
+     {"installation_id": NEW_PHONE, "relay_url": "https://relay.example"}),
+    # Not an installation id.
+    ({"installation_id": OLD_PHONE, "relay_url": "https://relay.example"},
+     {"installation_id": "x&y=1", "relay_url": "https://relay.example"}),
+])
+def test_the_new_phone_is_named_only_when_it_is_another_on_the_same_relay(previous, current):
+    assert api._relay_urls().replaced_pairing_query(previous, current) == ""
