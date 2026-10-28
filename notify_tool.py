@@ -40,8 +40,9 @@ SCHEMA: dict[str, Any] = {
         "when the report is ready\"), and for the result of a scheduled job or a long task. The title says what "
         "happened in a few words (\"Report finished\"); the body says the result in a sentence or two, only "
         "what this turn actually found or did. It goes with your final reply, so still end the turn with the "
-        "full answer, and it follows the user's notification settings: they may see only the chat's name. It "
-        "doesn't ring; to call the user, use conduit_call_user."
+        "full answer, and it follows the user's notification settings: they may see only the chat's name. A Pulse "
+        "check writes its own notification, so this one isn't used there. It doesn't ring; to call the user, use "
+        "conduit_call_user."
     ),
     "parameters": {
         "type": "object",
