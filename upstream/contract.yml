@@ -54,6 +54,11 @@ notes:
     gateway.hosted_room_replicas.ingest_page (its ReplicaError refusals answered with what the copy
     holds), both loaded with importlib, so module_paths doesn't list them. Without them, no pages
     go and no copies are kept, with one log line.
+  Linked Rooms posts: >-
+    Posting in rooms other people host (feature map: "Linked Rooms"). The home names each post's
+    event with gateway.hosted_rooms.user_event_id (loaded with importlib) and posts it with the
+    running room service's HostedRoomService.send(room_id=, event_id=, payload={thread_id, text}),
+    as the room's user. Without them, every post is answered unavailable.
   workspace files: >-
     The Folder tab in Conduit's Artifacts (feature map: "Workspace files"). /workspace/* reads a
     profile's SSH workspace through hermes_cli.web_routers.files._fs_backend (and the adapter's
