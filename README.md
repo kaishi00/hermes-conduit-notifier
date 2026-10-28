@@ -3778,8 +3778,11 @@ a send that failed). A room with no chat yet gets none until it has one.
 
 In a copy, a message the home says is one of yours is shown as yours only
 when it is: one this Hermes posted (by its seq, or its text while it's on
-its way). Any other is the host's, "as if from you (not one of your posts)".
-In a room you host, a person's message whose poster can't be read just then
+its way). Any other is the host's, "as if from you (not one of your posts)",
+and a person or owner named "you" shows as Guest. Room and agent names
+another Hermes gives are kept to one line of at most 80 characters. A long page read forward keeps its
+first messages (more come after), one read back keeps its last. In a room
+you host, a person's message whose poster can't be read just then
 is shown as "you or someone you've linked with", never as yours.
 A call without a chat's session id is refused (`no_session`).
 

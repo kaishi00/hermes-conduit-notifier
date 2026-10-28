@@ -342,11 +342,11 @@ def sent_texts(root: Any, room_id: str) -> list[str]:
 
 
 def own_posts(root: Any, room_id: str) -> tuple[set[int], set[str]]:
-    """The seqs the home gave this installation's owner's posts in the room, and their texts (for those still on
-    their way, which a page can come before)."""
+    """The seqs the home gave this installation's owner's posts in the room, and the texts of those still on their
+    way (which a page can come before): a post with a seq is matched by it alone."""
     link, params = _link_filter(root, room_id)
     rows = _rows(path(root), f"SELECT seq, text FROM sent WHERE {_OWNED}{link}", params)
-    return {int(row["seq"]) for row in rows if row["seq"]}, {row["text"] for row in rows}
+    return {int(row["seq"]) for row in rows if row["seq"]}, {row["text"] for row in rows if not row["seq"]}
 
 
 def forged_for(root: Any, room_id: str, session_id: str, name: str, prompt: Any) -> list[str]:
@@ -424,10 +424,16 @@ def _link_filter(root: Any, room_id: str) -> tuple[str, tuple]:
         invites = _invites_store(root).read()["invites"].values()
     except Exception:  # noqa: BLE001 - every Link's, as before
         return "", (room_id,)
-    found = [invite for invite in invites if invite["room_id"] == room_id and invite["members"] is not None]
-    current = next((invite for invite in found if invite["status"] == "started" and invite["joined"]), None) or max(
-        found, key=lambda invite: invite.get("started_at") or 0, default=None)
+    current = current_invite(invites, room_id)
     return ("", (room_id,)) if current is None else (" AND link=?", (room_id, current["link"]))
+
+
+def current_invite(invites: Any, room_id: str) -> Optional[dict[str, Any]]:
+    """The invite a room hosted elsewhere is on now: the started one an agent of this installation's is in, else
+    the one that started last (a room id is only unique per home, so a re-join over a new Link has its own)."""
+    found = [invite for invite in invites if invite["room_id"] == room_id and invite["members"] is not None]
+    return next((invite for invite in found if invite["status"] == "started" and invite["joined"]), None) or max(
+        found, key=lambda invite: invite.get("started_at") or 0, default=None)
 
 
 def _invites_store(root: Any) -> Any:

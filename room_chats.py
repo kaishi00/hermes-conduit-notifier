@@ -49,7 +49,7 @@ NOTES_PROMPT = ('Your owner\'s room "{name}" {why}. Write your notes on it for y
                 "that's what's new since your last notes. Keep them short, and only what matters to your owner. "
                 "Nothing you write goes back to the room.")
 # A room's name is the host's to set: it goes into the agent's context only as plain text on one line.
-MAX_NAME_CHARS = 80
+MAX_NAME_CHARS = room_reading.MAX_NAME_CHARS
 QUIET_WHY = "has gone quiet"
 ENDED_WHY = "has ended"
 
@@ -264,9 +264,7 @@ class Notes:
 def room_name(name: Any) -> str:
     """A room's name as the agent reads it: one line, no double quotes or control characters, at most
     MAX_NAME_CHARS; "this room" when nothing's left."""
-    text = "".join(" " if not char.isprintable() else char for char in str(name or "")).replace('"', "'")
-    text = " ".join(text.split())[:MAX_NAME_CHARS].strip()
-    return text or "this room"
+    return room_reading.plain(name) or "this room"
 
 
 def _reader(home: Any) -> room_reading.Reader:
