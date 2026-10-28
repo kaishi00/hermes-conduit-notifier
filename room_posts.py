@@ -170,9 +170,14 @@ class Posts:
         changed = 0
         if self.path.exists():
             with _db_lock, closing(_open(self.path)) as conn, conn:
+                # A post the home posted stays posted, whatever an older answer to an earlier try says.
                 changed = conn.execute("UPDATE sent SET status=?, seq=?, error=? WHERE link=? AND room_id=? "
-                                       "AND event_id=?", (status, body["seq"], body["error"], received.link_id,
-                                                          body["room_id"], body["event_id"])).rowcount
+                                       "AND event_id=? AND (?='posted' OR status!='posted')",
+                                       (status, body["seq"], body["error"], received.link_id, body["room_id"],
+                                        body["event_id"], status)).rowcount
+                changed = changed or conn.execute("SELECT 1 FROM sent WHERE link=? AND room_id=? AND event_id=?",
+                                                  (received.link_id, body["room_id"],
+                                                   body["event_id"])).fetchone() is not None
         if not changed:
             logger.info("Linked Rooms dropped a room.posted from Link %s for a post it didn't send",
                         received.link_id)
@@ -213,12 +218,20 @@ class Posts:
         if error is None:
             try:
                 event_id = self.hermes.user_event_id(f"post:{room_invites.peer_id(link_id)}:{client_id}")
-            except PostsError as exc:
-                self._tell_once("event_id", "Linked Rooms can't take posts in its rooms: %s", exc)
+            except Exception as exc:  # noqa: BLE001 - no hosted rooms here: they can post again
+                self._tell_once("event_id", "Linked Rooms can't take posts in its rooms: %s",
+                                exc if isinstance(exc, PostsError) else type(exc).__name__)
                 event_id, error = None, "unavailable"
+        seq = None
         if error is None:
-            seq = self._posted_seq(room_id, event_id)
-            if seq is None and self._recent(room_id, link_id) >= PER_HOUR:
+            try:
+                seq = self._posted_seq(room_id, event_id)
+                recent = self._recent(room_id, link_id) if seq is None else 0
+            except sqlite3.Error as exc:
+                logger.info("Linked Rooms couldn't read the posts of room %s (%s)", room_id, type(exc).__name__)
+                error = "unavailable"
+        if error is None:
+            if seq is None and recent >= PER_HOUR:
                 error = "too_many"
             elif seq is None:
                 named = _named(text, draft["links"][link_id].get("name") or GUEST)

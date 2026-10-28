@@ -1069,7 +1069,7 @@ def invites(root: Any) -> list[dict[str, Any]]:
     return _viewer(root).invites()
 
 
-def people(root: Any, room_id: Any) -> Optional[dict[str, Any]]:
+def people(root: Any, room_id: Any, strict: bool = False) -> Optional[dict[str, Any]]:
     """Who's who in a started room over Links that this installation hosts or has agents in (plan ruling 8):
     ``home``, the host's owner as this installation's Link names them (None when it's this one), and each
     member with its owner's name (None for this installation's own) and its ``status``: in, or left or removed
@@ -1077,10 +1077,13 @@ def people(root: Any, room_id: Any) -> Optional[dict[str, Any]]:
     left or that ended, whose hidden chats it keeps, with each member as it was when it ended (the invite says how
     it ended). On the home, ``posts``: the room's latest posts the plugin made for linked people (room_posts), each
     event id and seq with who it's ``by``; on a member's Hermes, ``you``: what the home calls this installation's
-    owner, the name their posts carry there. None for any other room."""
+    owner, the name their posts carry there. None for any other room, and for any while rooms.json can't be
+    read, unless ``strict``, when that raises RoomsError."""
     try:
         state = Store(root).read()
     except RoomsError:
+        if strict:
+            raise
         return None
     draft = state["drafts"].get(room_id) if isinstance(room_id, str) else None
     if draft is not None and draft["status"] == "started":

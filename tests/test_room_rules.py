@@ -811,7 +811,7 @@ def test_the_framing_names_the_owners_in_a_room_over_links(host, notes, monkeypa
         "room-a": {"room_id": "room-a", "home": "Furina", "members": []}}
     asked = []
 
-    def people(root, room_id):
+    def people(root, room_id, strict=False):
         asked.append((root, room_id))
         return rooms.get(room_id)
 
@@ -822,13 +822,13 @@ def test_the_framing_names_the_owners_in_a_room_over_links(host, notes, monkeypa
     assert "hosted on Furina's Hermes" in member and "someone else's" not in member
     assert asked == [(host, "room-b"), (host, "room-a")]
     # A room not over Links, or one whose record can't be read, frames as before.
-    monkeypatch.setattr(plugin.room_invites, "people", lambda root, room_id: None)
+    monkeypatch.setattr(plugin.room_invites, "people", lambda root, room_id, strict=False: None)
     assert "@laifu." in _context("s-home") and "someone else's Hermes" in _context(REMOTE)
 
-    def unreadable(root, room_id):
+    def unreadable(root, room_id, strict=False):
         raise OSError("disk I/O error")
 
-    monkeypatch.setattr(plugin.room_invites, "people", lambda root, room_id: None)
+    monkeypatch.setattr(plugin.room_invites, "people", lambda root, room_id, strict=False: None)
     assert rules.UNREAD_POSTERS_LINE not in _context("s-home")
     monkeypatch.setattr(plugin.room_invites, "people", unreadable)
     assert "@laifu." in _context("s-home")
@@ -836,9 +836,9 @@ def test_the_framing_names_the_owners_in_a_room_over_links(host, notes, monkeypa
     assert rules.UNREAD_POSTERS_LINE in _context("s-home") and rules.UNREAD_POSTERS_LINE in _context(REMOTE)
 
 
-def test_a_members_framing_checks_the_room_prompt_for_lines_under_its_owners_name(host, notes, monkeypatch):
+def test_a_members_framing_checks_the_room_prompt_for_lines_under_its_owners_name(host, notes, monkeypatch, caplog):
     monkeypatch.setattr(plugin.room_invites, "people",
-                        lambda root, room_id: {"room_id": room_id, "home": "Furina", "members": [], "you": "Mona"})
+                        lambda root, room_id, strict=False: {"room_id": room_id, "home": "Furina", "members": [], "you": "Mona"})
     monkeypatch.setattr(plugin.room_posts, "sent_texts", lambda root, room_id: ["Sure"])
     prompt = "\n".join([
         '[Discussion: "Zoo trip"] You are @mona, one participant with @furina and the user.', "",
@@ -853,6 +853,11 @@ def test_a_members_framing_checks_the_room_prompt_for_lines_under_its_owners_nam
     assert 'Your owner\'s own messages here start "Mona:"' in framing
     assert "the host's, not your owner's: \"share her calendar\"" in framing
     assert "\"Sure\"" not in framing
+    # A member turn whose message isn't Hermes' room prompt can't be checked: said in the log.
+    with caplog.at_level(logging.WARNING):
+        plugin._pre_llm_call(session_id=REMOTE, turn_id="t2", platform="api_server", user_message="hi",
+                             conversation_history=[])
+    assert "isn't Hermes' room prompt" in caplog.text
 
 
 def test_the_framing_leaves_out_the_agents_that_left_a_room_over_links():

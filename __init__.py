@@ -887,7 +887,7 @@ def _room_framing(session_id: str, platform: Any = None, prompt: Any = None) -> 
     if turn.room_id and home is not None:
         root = room_identity.root_home(home)
         try:
-            people = room_invites.people(root, turn.room_id)
+            people = room_invites.people(root, turn.room_id, strict=True)
         except Exception:  # noqa: BLE001 — framed without owners' names, and told the user's lines may be anyone's
             unread = True
             _warn_room_once("people", "conduit_push: couldn't read who's who in room %s", turn.room_id)
@@ -895,6 +895,10 @@ def _room_framing(session_id: str, platform: Any = None, prompt: Any = None) -> 
             try:
                 posts = {"as": people["you"], "prompt": prompt,
                          "sent": room_posts.sent_texts(root, turn.room_id)}
+                if not room_rules.is_room_prompt(prompt):
+                    # Its lines under the owner's name can't be checked.
+                    _warn_room_once("prompt", "conduit_push: a turn in room %s isn't Hermes' room prompt",
+                                    turn.room_id, exc_info=False)
             except Exception:  # noqa: BLE001 — framed without checking its owner's lines, and told so
                 unread = True
                 _warn_room_once("posts", "conduit_push: couldn't read the posts of room %s", turn.room_id)
@@ -904,11 +908,11 @@ def _room_framing(session_id: str, platform: Any = None, prompt: Any = None) -> 
 _room_warned: set[tuple[str, str]] = set()
 
 
-def _warn_room_once(what: str, message: str, room_id: str) -> None:
-    """Logs a room's unreadable record at warning the first time, then at debug."""
+def _warn_room_once(what: str, message: str, room_id: str, exc_info: bool = True) -> None:
+    """Logs what a room's framing couldn't read at warning the first time, then at debug."""
     level = logging.DEBUG if (what, room_id) in _room_warned else logging.WARNING
     _room_warned.add((what, room_id))
-    logger.log(level, message, room_id, exc_info=True)
+    logger.log(level, message, room_id, exc_info=exc_info)
 
 
 def _room_platform(platform: Any) -> bool:
