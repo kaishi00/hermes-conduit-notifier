@@ -387,3 +387,29 @@ def test_the_framing_names_the_tool_for_ask_me_first():
 def test_the_tool_description_says_when_to_use_it():
     description = asks.SCHEMA["description"]
     assert "Ask me first" in description and "share" in description
+
+
+def test_room_asks_never_push_the_owners_own_prompt_off_the_phone(store, sleeper, pushes, clock):
+    exchange(store)
+    plain = _confirm(store, ttl_minutes=24 * 60)
+    for n in range(8):
+        turn = rules.RoomTurn(room_id=f"room-{n}", side="member", with_others=True, session_id=f"room_{n:032x}")
+        for q in range(3):
+            asks.handle({"question": f"Q{q}", "share": "x"}, session_id=turn.session_id,
+                        room_turn=lambda _, turn=turn: turn, choices=lambda _: room_choices.RoomChoices(),
+                        room_name=lambda _: "R", store=store, push=pushes.append, sleep=sleeper.sleep,
+                        monotonic=sleeper.monotonic)
+        clock.now += 3600
+    shown = [prompt["id"] for prompt in exchange(store)["prompts"]]
+    assert plain["id"] in shown and len(shown) == 24 + 1
+
+
+def test_a_rooms_unheard_answer_outlives_later_prompts(store, sleeper, pushes, clock):
+    exchange(store)
+    asked = call(store, sleeper, pushes)
+    exchange(store, results=[{"id": asked["id"], "outcome": "confirmed", "via": "tap"}])
+    for n in range(store_module.MAX_PROMPTS + 5):
+        prompt = _confirm(store)
+        exchange(store, results=[{"id": prompt["id"], "outcome": "declined", "via": "tap"}])
+        clock.now += 3600 / store_module.PER_HOUR
+    assert len(asks.answered(store, "zoo-trip")) == 1

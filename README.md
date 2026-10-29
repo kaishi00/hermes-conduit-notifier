@@ -3840,7 +3840,9 @@ same question with the same share while one waits returns that one (another
 share is another ask: a yes covers only what you saw, and the tool's answer
 gives it back as `share`), a room asks at most 6 times an hour and all rooms
 12, budgets of their own: other people steering a room's agent never use up
-your own confirm prompts (20 an hour, 20 waiting). An answer counts as heard
+your own confirm prompts (20 an hour, 20 waiting, all shown on the phone
+however many rooms ask). A room's answer its agent hasn't heard stays until it
+does, or for its week. An answer counts as heard
 once a room turn framed with it replies, so a turn that fails gets it again.
 Private
 chats never see them: `conduit_present` leaves them out of `status` and

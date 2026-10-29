@@ -76,6 +76,7 @@ ROOM_ASK_TTL_MINUTES = 24 * 60
 MAX_ROOM_ASKS_WAITING = 3
 ROOM_ASKS_PER_HOUR = 6
 ROOM_ASKS_ALL_PER_HOUR = 12
+MAX_ROOM_ASKS_SHOWN = 40
 MAX_ROOM_BUDGETS = 64
 MAX_ROOM_ID_CHARS = 128
 MAX_ROOM_NAME_CHARS = 80
@@ -187,9 +188,13 @@ class PresentStore:
             for result in results:
                 _take_result(state, installation, device["features"], result, now)
             # The newest, within a cap only a hand-edited store can exceed.
-            waiting = [_public(prompt) for prompt in state["prompts"] if prompt["status"] == "waiting"
-                       and (not prompt.get("maps") or NAVIGATE_FEATURE in device["features"])
-                       and (not prompt.get("room") or ROOM_ASK_FEATURE in device["features"])][-MAX_WAITING:]
+            shown = [prompt for prompt in state["prompts"] if prompt["status"] == "waiting"
+                     and (not prompt.get("maps") or NAVIGATE_FEATURE in device["features"])
+                     and (not prompt.get("room") or ROOM_ASK_FEATURE in device["features"])]
+            # Each the newest within its own cap: a room's asks never push the owner's own prompts off the phone.
+            kept = {prompt["id"] for prompt in [prompt for prompt in shown if not prompt.get("room")][-MAX_WAITING:]
+                    + [prompt for prompt in shown if prompt.get("room")][-MAX_ROOM_ASKS_SHOWN:]}
+            waiting = [_public(prompt) for prompt in shown if prompt["id"] in kept]
             # Expired cards leave the file; the rest go only to a phone that
             # shows them.
             state["cards"] = [card for card in state["cards"] if now < card["expires_at"]]
@@ -665,12 +670,15 @@ def _trim_devices(state: dict[str, Any]) -> None:
 
 
 def _trim_prompts(state: dict[str, Any]) -> None:
-    """Keeps the newest prompts; finished ones go first, never a waiting one."""
+    """Keeps the newest prompts; finished ones go first, those already reported before the rest, never a waiting
+    one or a room's answer its agent hasn't heard (it lasts its week)."""
     prompts = state["prompts"]
     extra = len(prompts) - MAX_PROMPTS
     if extra <= 0:
         return
-    finished = [prompt["id"] for prompt in prompts if prompt["status"] != "waiting"][:extra]
+    done = [prompt for prompt in prompts if prompt["status"] != "waiting"
+            and not (prompt.get("room") and not prompt["reported"])]
+    finished = [prompt["id"] for prompt in sorted(done, key=lambda prompt: not prompt["reported"])][:extra]
     state["prompts"] = [prompt for prompt in prompts if prompt["id"] not in finished]
 
 
