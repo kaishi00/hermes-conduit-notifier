@@ -181,7 +181,12 @@ def _handle(args: dict[str, Any], session: str, is_child: Callable[[Any], bool],
         _nudge(prompt, f"{name}: {first_line(share)}", push, profile)
         prompt = _wait(store, {**prompt, "preview": share}, sleep, monotonic)
     else:
-        prompt = store.room_ask(prompt["id"]) or prompt
+        try:
+            prompt = store.room_ask(prompt["id"]) or prompt
+        except OSError:
+            # The ask is kept and waiting: it's that one, as ask_room returned it.
+            logger.debug("conduit_push: couldn't read a room's waiting ask", exc_info=True)
+            prompt = {**prompt, "preview": share}
     if prompt["status"] != "waiting":
         _given(session, prompt["id"])
     return {"ok": True, **_with_note(prompt)}
@@ -284,12 +289,6 @@ def _given(session_id: str, prompt_id: str) -> None:
         given = _framed.get(session_id, [])
         if prompt_id not in given:
             _keep_locked(session_id, given + [prompt_id])
-
-
-def heard(store_for: Callable[[], PresentStore], session_id: str, did: bool) -> None:
-    """A turn in ``session_id`` ended having replied (``did``) or not: replied and ended in one."""
-    replied(session_id, did)
-    ended(store_for, session_id, did)
 
 
 def answers(store: PresentStore, room_id: Any) -> list[tuple[str, str]]:
