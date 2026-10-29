@@ -59,8 +59,10 @@ them: the routes and the code behind them are in the modules
   a probe's `hasattr(module.watch_audio, "_WatchAudioBridge")`.
 
 A branch that still has the single file merges main from just before the
-split, runs `python3 scripts/split_plugin_api.py write` and commits, then
-merges main: only its own changes conflict.
+split (f68d017), which doesn't have the script yet, so it takes it from main:
+`git checkout origin/main -- scripts/split_plugin_api.py`. Then it runs
+`python3 scripts/split_plugin_api.py write`, commits, and merges main: only
+its own changes conflict.
 
 ## Plugin version
 

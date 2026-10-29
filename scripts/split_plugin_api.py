@@ -17,9 +17,10 @@ comment arrives exactly once.
     python3 scripts/split_plugin_api.py check REF     # the split files are what write makes of REF's
 
 A branch still carrying the single file merges main from just before the
-split, runs ``write`` on itself and commits, then merges main: only its own
-changes conflict. A section or a statement the tables below don't place makes
-it stop and say so. Once no branch carries the single file, this script can go.
+split (f68d017), takes this script from main, runs ``write`` on itself and
+commits, then merges main: only its own changes conflict. A section or a
+statement the tables below don't place makes it stop and say so. Once no
+branch carries the single file, this script can go.
 """
 
 from __future__ import annotations
