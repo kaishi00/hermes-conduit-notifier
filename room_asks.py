@@ -51,7 +51,8 @@ DESCRIPTION = (
     "what you'd say if they agree. It waits a little for the answer: \"confirmed\" means share exactly that, "
     "\"edit\" means say only what your owner wrote (edit_text), \"declined\" means don't share it, and \"waiting\" "
     "means tell the room you'll check with your owner and share nothing yet; their answer reaches you before your "
-    "next turn here. Ask once per question; asking again while one waits returns that one."
+    "next turn here. Ask once per question; asking again with the same question and share while one waits returns "
+    "that one."
 )
 
 SCHEMA: dict[str, Any] = {
@@ -74,7 +75,7 @@ SCHEMA: dict[str, Any] = {
 _NOTES = {
     "waiting": (f"Your owner hasn't answered yet. {_CHECK_LATER} Their answer reaches you before your next turn in "
                 "this room."),
-    "confirmed": "Your owner said yes: share exactly share (the text they saw), nothing more.",
+    "confirmed": "Your owner said yes: share exactly the share you gave (the text they saw), nothing more.",
     "declined": "Your owner said no: don't share it. Say you can't share that.",
     "edit": "Your owner wrote what to say instead (edit_text): say only what your owner wrote, nothing more.",
     "expired": "Your owner didn't answer in time: don't share it.",
@@ -198,7 +199,12 @@ def _wait(store: PresentStore, prompt: dict[str, Any], sleep: Callable[[float], 
             return prompt
         sleep(min(delay, remaining))
         delay = min(delay * 1.5, POLL_MAX_S)
-        current = store.room_ask(prompt["id"])  # with the share, as every result gives it back
+        try:
+            current = store.room_ask(prompt["id"])  # with the share, as every result gives it back
+        except OSError:
+            # The ask is kept and on the phone: it's waiting, and its answer reaches a later turn.
+            logger.debug("conduit_push: couldn't read a room's ask while it waited", exc_info=True)
+            return prompt
         if current is None:
             return prompt
         if current["status"] != "waiting":
@@ -216,35 +222,59 @@ def _nudge(prompt: dict[str, Any], body: str, push: Callable[[dict], None], prof
         logger.warning("conduit_push: could not wake the phone for a room's ask", exc_info=True)
 
 
-# Answers framed into a room session's turn, or given it by the tool, marked heard when it replies (heard). Hooks
-# and tools of turns in different sessions run at once.
+# Answers framed into a room session's turn, or given it by the tool, marked heard once the turn ended having
+# replied (replied, then ended). Hooks and tools of turns in different sessions run at once.
 _framed: dict[str, list[str]] = {}
+_replied: set[str] = set()
 _framed_lock = threading.Lock()
 MAX_FRAMED = 256
 
 
-def begin(session_id: str) -> None:
+def begin(store_for: Callable[[], PresentStore], session_id: str) -> None:
     """A turn in ``session_id`` starts: what an earlier turn of it was framed with or given is no longer this
-    one's, framed or not."""
-    with _framed_lock:
-        _framed.pop(session_id, None)
+    one's, framed or not. An earlier turn that replied and whose end Hermes never reported heard it."""
+    ended(store_for, session_id, None)
 
 
-def _keep(session_id: str, prompt_ids: list[str]) -> None:
+def replied(session_id: str, did: bool) -> None:
+    """A turn in ``session_id`` wrote its reply (post_llm_call, which Hermes also runs for a turn that failed with
+    its error text): its answers are heard once its end says it answered."""
     with _framed_lock:
-        _framed.pop(session_id, None)
-        _framed[session_id] = prompt_ids
-        while len(_framed) > MAX_FRAMED:
-            _framed.pop(next(iter(_framed)))
+        if did and session_id in _framed:
+            _replied.add(session_id)
+        else:
+            _replied.discard(session_id)
+
+
+def ended(store_for: Callable[[], PresentStore], session_id: str, answered: Optional[bool]) -> None:
+    """A turn in ``session_id`` ended (on_session_end): what it was framed with or given is heard when it replied
+    and didn't fail. ``answered`` None: Hermes didn't say, so the reply decides."""
+    with _framed_lock:
+        prompt_ids = _framed.pop(session_id, None)
+        did = session_id in _replied
+        _replied.discard(session_id)
+    if prompt_ids and did and answered is not False:
+        store_for().mark_heard(prompt_ids)
+
+
+def _keep_locked(session_id: str, prompt_ids: list[str]) -> None:
+    """Keeps a turn's list (under _framed_lock), the newest MAX_FRAMED sessions'."""
+    _framed.pop(session_id, None)
+    _framed[session_id] = prompt_ids
+    while len(_framed) > MAX_FRAMED:
+        oldest = next(iter(_framed))
+        del _framed[oldest]
+        _replied.discard(oldest)
 
 
 def frame(store: PresentStore, room_id: Any, session_id: str) -> list[str]:
     """The answers for a turn in ``room_id`` now starting in ``session_id``, left unheard until the turn replies, so
     a turn that fails before it reads them frames them again."""
-    begin(session_id)
+    begin(lambda: store, session_id)
     found = answers(store, room_id)
     if found:
-        _keep(session_id, [prompt_id for prompt_id, _ in found])
+        with _framed_lock:
+            _keep_locked(session_id, [prompt_id for prompt_id, _ in found])
     return [line for _, line in found]
 
 
@@ -252,16 +282,14 @@ def _given(session_id: str, prompt_id: str) -> None:
     """The tool gave this turn an answer: heard once the turn replies, framed again if it doesn't."""
     with _framed_lock:
         given = _framed.get(session_id, [])
-    _keep(session_id, given + [prompt_id] if prompt_id not in given else given)
+        if prompt_id not in given:
+            _keep_locked(session_id, given + [prompt_id])
 
 
-def heard(store_for: Callable[[], PresentStore], session_id: str, replied: bool) -> None:
-    """A turn in ``session_id`` ended: what it was framed with is heard once it replied."""
-    with _framed_lock:
-        if not replied or session_id not in _framed:
-            return
-        prompt_ids = _framed.pop(session_id)
-    store_for().mark_heard(prompt_ids)
+def heard(store_for: Callable[[], PresentStore], session_id: str, did: bool) -> None:
+    """A turn in ``session_id`` ended having replied (``did``) or not: replied and ended in one."""
+    replied(session_id, did)
+    ended(store_for, session_id, did)
 
 
 def answers(store: PresentStore, room_id: Any) -> list[tuple[str, str]]:

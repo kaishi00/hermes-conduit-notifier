@@ -3875,7 +3875,9 @@ your own confirm prompts (20 an hour, 20 waiting, all shown on the phone
 however many rooms ask). A room's answer its agent hasn't heard stays until it
 does, or for its week (the newest 10 a room, 60 across rooms). An answer
 counts as heard once the room turn the tool gave it to, or a turn framed with
-it, replies, so a turn that fails gets it again. Private chats never see
+it, replies and ends without failing, so a turn that fails (even with an
+error message) gets it again. A subagent the room's agent delegates to never
+hears them. Private chats never see
 them: `conduit_present` leaves them out of `status` and `earlier_answers`.
 When no ask is kept (no such Conduit, over these limits, or a room session
 Hermes hasn't titled yet), no answer will come, so the agent says it can't
