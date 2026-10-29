@@ -3836,9 +3836,13 @@ room and the room's session. Only a Conduit that says it shows a room's asks
 with none, the tool refuses (`no_device`) and the agent says it'll check
 with you. Asks are the room's, not the chat session's, so a room session
 Hermes compacted still hears its answers. At most 3 asks wait per room, the
-same question while one waits returns that one, and a room asks at most 6
-times an hour, a budget of its own, so other people steering a room's agent
-never use up your own confirm prompts (20 an hour). Private
+same question with the same share while one waits returns that one (another
+share is another ask: a yes covers only what you saw, and the tool's answer
+gives it back as `share`), a room asks at most 6 times an hour and all rooms
+12, budgets of their own: other people steering a room's agent never use up
+your own confirm prompts (20 an hour, 20 waiting). An answer counts as heard
+once a room turn framed with it replies, so a turn that fails gets it again.
+Private
 chats never see them: `conduit_present` leaves them out of `status` and
 `earlier_answers`. The tool works only in a room turn with other people's
 agents set to ask you first (`not_room`, `not_ask_first`, `subagent`

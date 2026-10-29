@@ -75,6 +75,7 @@ ROOM_ASK_FEATURE = "room-asks"
 ROOM_ASK_TTL_MINUTES = 24 * 60
 MAX_ROOM_ASKS_WAITING = 3
 ROOM_ASKS_PER_HOUR = 6
+ROOM_ASKS_ALL_PER_HOUR = 12
 MAX_ROOM_BUDGETS = 64
 MAX_ROOM_ID_CHARS = 128
 MAX_ROOM_NAME_CHARS = 80
@@ -269,7 +270,7 @@ class PresentStore:
         with self._locked() as state:
             now = self.clock()
             if room is not None:
-                same = _room_waiting(state, room["id"], clean_title)
+                same = _room_waiting(state, room["id"], clean_title, clean_preview)
                 if same is not None:
                     return _shown(same), False
                 if not any(ROOM_ASK_FEATURE in device.get("features", []) and now - device["seen_at"]
@@ -282,6 +283,9 @@ class PresentStore:
                 recent = [at for at in state["room_asked"].get(room["id"], []) if now - at < HOUR_S]
                 if len(recent) >= ROOM_ASKS_PER_HOUR:
                     raise PresentError("rate_limited", f"This room asked {ROOM_ASKS_PER_HOUR} times this hour.")
+                if sum(now - at < HOUR_S for times in state["room_asked"].values() for at in times) \
+                        >= ROOM_ASKS_ALL_PER_HOUR:
+                    raise PresentError("rate_limited", f"Rooms asked {ROOM_ASKS_ALL_PER_HOUR} times this hour.")
             elif not state["devices"]:
                 raise PresentError("no_device", "No Conduit that shows confirm prompts has connected to this "
                                                 "Hermes profile yet.")
@@ -290,7 +294,9 @@ class PresentStore:
                 if len(recent) >= PER_HOUR:
                     raise PresentError("rate_limited", "Too many confirm prompts this hour. Ask the user in chat "
                                                        "instead.")
-            if sum(prompt["status"] == "waiting" for prompt in state["prompts"]) >= MAX_WAITING:
+            # A room's asks have their own caps, so they never crowd out the owner's own prompts.
+            if room is None and sum(prompt["status"] == "waiting" and not prompt.get("room")
+                                    for prompt in state["prompts"]) >= MAX_WAITING:
                 raise PresentError("too_many", "Too many prompts are still waiting. Cancel ones you no longer need.")
             created = int(now)
             prompt = {
@@ -325,9 +331,9 @@ class PresentStore:
         return self._keep(question, share, "Share", spoken_yes=["share it"], session_id=session_id,
                           ttl_minutes=ROOM_ASK_TTL_MINUTES, room=room)
 
-    def room_answers(self, room_id: Any) -> list[dict[str, Any]]:
+    def room_answers(self, room_id: Any, *, mark: bool = True) -> list[dict[str, Any]]:
         """The answered (or expired) asks of a room its agent hasn't heard
-        yet, oldest first, marked heard, each with its question (``title``)
+        yet, oldest first, marked heard unless ``mark`` is False, each with its question (``title``)
         and what it would share (``preview``). By room, not session: a
         compacted room session's continuation hears them too."""
         if not isinstance(room_id, str) or not room_id:
@@ -335,9 +341,21 @@ class PresentStore:
         with self._locked() as state:
             found = [prompt for prompt in state["prompts"] if prompt.get("room", {}).get("id") == room_id
                      and prompt["status"] != "waiting" and not prompt["reported"]]
-            for prompt in found:
-                prompt["reported"] = True
+            if mark:
+                for prompt in found:
+                    prompt["reported"] = True
             return [{**_shown(prompt), "preview": prompt["preview"]} for prompt in found]
+
+    def mark_heard(self, prompt_ids: Any) -> None:
+        """Marks a room's answered asks heard (its turn read them)."""
+        ids = {prompt_id for prompt_id in prompt_ids if isinstance(prompt_id, str)} if isinstance(
+            prompt_ids, (list, tuple, set)) else set()
+        if not ids:
+            return
+        with self._locked() as state:
+            for prompt in state["prompts"]:
+                if prompt["id"] in ids and prompt.get("room") and prompt["status"] != "waiting":
+                    prompt["reported"] = True
 
     def room_ask(self, prompt_id: Any) -> dict[str, Any] | None:
         """One of a room's asks as it stands; one that's answered is marked
@@ -348,7 +366,7 @@ class PresentStore:
                 return None
             if prompt["status"] != "waiting":
                 prompt["reported"] = True
-            return _shown(prompt)
+            return {**_shown(prompt), "preview": prompt["preview"]}
 
     def show(self, title: Any, markdown: Any, *, session_id: Any = None, cards: Any = None,
              markdown_is_fallback: bool = False) -> dict[str, Any]:
@@ -560,13 +578,15 @@ def _public(prompt: dict[str, Any]) -> dict[str, Any]:
     return public
 
 
-def _room_waiting(state: dict[str, Any], room_id: str, title: str | None = None) -> Any:
-    """A room's waiting asks, or the one with ``title`` (case-folded), or None."""
+def _room_waiting(state: dict[str, Any], room_id: str, title: str | None = None, preview: str | None = None) -> Any:
+    """A room's waiting asks, or the one asking ``title`` (case-folded) to share exactly ``preview``, or None: a
+    yes covers only the share the owner saw."""
     waiting = [prompt for prompt in state["prompts"] if prompt.get("room", {}).get("id") == room_id
                and prompt["status"] == "waiting"]
     if title is None:
         return waiting
-    return next((prompt for prompt in waiting if prompt["title"].casefold() == title.casefold()), None)
+    return next((prompt for prompt in waiting if prompt["title"].casefold() == title.casefold()
+                 and prompt["preview"] == preview), None)
 
 
 def _room(value: Any) -> dict[str, str] | None:
@@ -738,12 +758,15 @@ def _normalized(raw: Any, now: float) -> dict[str, Any]:
         state["asked"] = [at for at in asked if isinstance(at, (int, float)) and not isinstance(at, bool)
                           and now - at < HOUR_S][-PER_HOUR:]
     room_asked = raw.get("room_asked")
+    budgets = {}
     for room_id, times in room_asked.items() if isinstance(room_asked, dict) else ():
-        kept = [at for at in times if isinstance(at, (int, float)) and not isinstance(at, bool)
-                and now - at < HOUR_S][-ROOM_ASKS_PER_HOUR:] if isinstance(times, list) else []
-        if isinstance(room_id, str) and _room({"id": room_id}) is not None and kept \
-                and len(state["room_asked"]) < MAX_ROOM_BUDGETS:
-            state["room_asked"][room_id] = kept
+        kept = sorted(at for at in times if isinstance(at, (int, float)) and not isinstance(at, bool)
+                      and now - at < HOUR_S)[-ROOM_ASKS_PER_HOUR:] if isinstance(times, list) else []
+        if isinstance(room_id, str) and _room({"id": room_id}) is not None and kept:
+            budgets[room_id] = kept
+    # The rooms that asked most recently.
+    for room_id in sorted(budgets, key=lambda room: budgets[room][-1])[-MAX_ROOM_BUDGETS:]:
+        state["room_asked"][room_id] = budgets[room_id]
     cards = raw.get("cards")
     card_ids: set[str] = set()
     for item in cards if isinstance(cards, list) else []:

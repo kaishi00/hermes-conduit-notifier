@@ -75,7 +75,7 @@ def call(store, sleeper, pushes, args=ASK, *, session_id=ROOM_SESSION, turn=TURN
 
 def answer_while_waiting(store, sleeper, outcome, after=5.0, **result):
     def answer():
-        [prompt] = [p for p in exchange(store)["prompts"] if p.get("room")]
+        prompt = [p for p in exchange(store)["prompts"] if p.get("room")][-1]  # the newest
         exchange(store, results=[{"id": prompt["id"], "outcome": outcome, "via": "tap", **result}])
 
     sleeper.during = (after, answer)
@@ -130,6 +130,16 @@ def test_say_instead_returns_what_the_owner_wrote(store, sleeper, pushes):
     answer = call(store, sleeper, pushes)
     assert answer["status"] == "edit" and answer["edit_text"] == "Only the afternoon of the 22nd."
     assert "only what your owner wrote" in answer["note"].lower()
+
+
+def test_say_instead_with_no_text_reads_as_a_no(store, sleeper, pushes):
+    exchange(store)
+    answer_while_waiting(store, sleeper, "edit", edit_text="  ")
+    answer = call(store, sleeper, pushes)
+    assert answer["status"] == "declined" and "don't share" in answer["note"].lower()
+    later = call(store, sleeper, pushes, {"question": "Mona asks about Sunday", "share": "Sunday works."})
+    exchange(store, results=[{"id": later["id"], "outcome": "edit", "via": "tap"}])
+    assert asks.answered(store, "zoo-trip") == ['Your owner said no to "Mona asks about Sunday": don\'t share it.']
 
 
 def test_a_no_says_dont_share(store, sleeper, pushes):
@@ -213,8 +223,12 @@ def test_the_plugin_frames_a_room_turn_with_later_answers(store, sleeper, pushes
     monkeypatch.setattr(plugin.room_rules, "room_turn", lambda session, home=None: TURN)
     monkeypatch.setattr(plugin.room_rules, "choices_for", lambda turn, home: room_choices.RoomChoices())
     monkeypatch.setattr(plugin.room_invites, "people", lambda *a, **k: None)
-    framing = plugin._room_framing(ROOM_SESSION)
-    assert f'- Your owner said no to "{QUESTION}": don\'t share it.' in framing.splitlines()
+    line = f'- Your owner said no to "{QUESTION}": don\'t share it.'
+    assert line in plugin._room_framing(ROOM_SESSION).splitlines()
+    # Heard only once a turn that read it answers: a failed turn (no reply) frames it again.
+    plugin._post_llm_call(session_id=ROOM_SESSION, assistant_response="", turn_id="t1")
+    assert line in plugin._room_framing(ROOM_SESSION).splitlines()
+    plugin._post_llm_call(session_id=ROOM_SESSION, assistant_response="I can't share that.", turn_id="t2")
     assert 'said no' not in (plugin._room_framing(ROOM_SESSION) or "")
 
 
@@ -268,9 +282,65 @@ def test_the_question_and_share_are_checked(store, sleeper, pushes):
 def test_the_same_question_waiting_is_not_asked_twice(store, sleeper, pushes):
     exchange(store)
     first = call(store, sleeper, pushes)
-    again = call(store, sleeper, pushes, {"question": QUESTION.upper(), "share": "Something else"})
+    again = call(store, sleeper, pushes, {"question": QUESTION.upper(), "share": SHARE})
     assert again["id"] == first["id"] and again["status"] == "waiting"
     assert len(pushes) == 1 and len(exchange(store)["prompts"]) == 1
+
+
+def test_a_yes_licenses_only_the_share_the_owner_saw(store, sleeper, pushes):
+    # The same question with another share is another ask: a yes to the first never covers the second.
+    exchange(store)
+    first = call(store, sleeper, pushes)
+    other = call(store, sleeper, pushes, {"question": QUESTION, "share": "You're free on the 22nd and 23rd."})
+    assert other["id"] != first["id"] and len(pushes) == 2
+    exchange(store, results=[{"id": first["id"], "outcome": "confirmed", "via": "tap"}])
+    again = call(store, sleeper, pushes, {"question": QUESTION, "share": "You're free on the 22nd and 23rd."})
+    assert again["id"] == other["id"] and again["status"] == "waiting"
+    answer_while_waiting(store, sleeper, "confirmed")
+    confirmed = call(store, sleeper, pushes, {"question": "Mona asks about lunch", "share": "Lunch works."})
+    assert confirmed["status"] == "confirmed" and confirmed["share"] == "Lunch works."
+    assert "share exactly share" in confirmed["note"].lower()
+
+
+def test_room_asks_never_fill_the_owners_own_waiting_prompts(store, sleeper, pushes, clock):
+    exchange(store)
+    rooms = [rules.RoomTurn(room_id=f"room-{n}", side="member", with_others=True, session_id=f"room_{n:032x}")
+             for n in range(8)]
+    choices = room_choices.RoomChoices()
+    for turn in rooms:
+        for q in range(3):
+            asks.handle({"question": f"Q{q}", "share": "x"}, session_id=turn.session_id,
+                        room_turn=lambda _, turn=turn: turn, choices=lambda _: choices, room_name=lambda _: "R",
+                        store=store, push=pushes.append, sleep=sleeper.sleep, monotonic=sleeper.monotonic)
+        clock.now += 3600  # past every hourly cap
+    for _ in range(store_module.MAX_WAITING):
+        _confirm(store)
+        clock.now += 3600 / store_module.PER_HOUR
+
+
+def test_room_asks_have_a_cap_across_rooms(store, sleeper, pushes):
+    exchange(store)
+    choices = room_choices.RoomChoices()
+    sent = 0
+    for n in range(store_module.ROOM_ASKS_ALL_PER_HOUR + 2):
+        turn = rules.RoomTurn(room_id=f"room-{n}", side="member", with_others=True, session_id=f"room_{n:032x}")
+        answer = json.loads(asks.handle({"question": "Q", "share": "x"}, session_id=turn.session_id,
+                                        room_turn=lambda _, turn=turn: turn, choices=lambda _: choices,
+                                        room_name=lambda _: "R", store=store, push=pushes.append,
+                                        sleep=sleeper.sleep, monotonic=sleeper.monotonic))
+        sent += answer["ok"]
+    assert sent == store_module.ROOM_ASKS_ALL_PER_HOUR and answer["error"] == "rate_limited"
+
+
+def test_room_budgets_keep_the_newest_rooms(store, clock, tmp_path):
+    exchange(store)
+    path = tmp_path / store_module.FILE_NAME
+    state = json.loads(path.read_text())
+    state["room_asked"] = {f"room-{n}": [clock.now - 3000 + n] for n in range(store_module.MAX_ROOM_BUDGETS + 5)}
+    path.write_text(json.dumps(state))
+    kept = store._load()["room_asked"]
+    assert len(kept) == store_module.MAX_ROOM_BUDGETS and "room-0" not in kept
+    assert f"room-{store_module.MAX_ROOM_BUDGETS + 4}" in kept
 
 
 def test_at_most_three_asks_wait_per_room(store, sleeper, pushes):

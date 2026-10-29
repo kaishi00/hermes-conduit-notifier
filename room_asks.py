@@ -72,7 +72,7 @@ SCHEMA: dict[str, Any] = {
 _NOTES = {
     "waiting": (f"Your owner hasn't answered yet. {_CHECK_LATER} Their answer reaches you before your next turn in "
                 "this room."),
-    "confirmed": "Your owner said yes: share exactly what you asked to share, nothing more.",
+    "confirmed": "Your owner said yes: share exactly share (the text they saw), nothing more.",
     "declined": "Your owner said no: don't share it. Say you can't share that.",
     "edit": "Your owner wrote what to say instead (edit_text): say only what your owner wrote, nothing more.",
     "expired": "Your owner didn't answer in time: don't share it.",
@@ -211,19 +211,48 @@ def _nudge(prompt: dict[str, Any], body: str, push: Callable[[dict], None], prof
 
 def answered(store: PresentStore, room_id: Any) -> list[str]:
     """What the owner answered since, for a turn in the room ``room_id`` (whichever of its sessions asked): a private
-    line each, once."""
+    line each, marked heard."""
+    return [line for _, line in answers(store, room_id, mark=True)]
+
+
+# Answers framed into a room session's turn, marked heard when it replies (heard).
+_framed: dict[str, list[str]] = {}
+MAX_FRAMED = 256
+
+
+def frame(store: PresentStore, room_id: Any, session_id: str) -> list[str]:
+    """The answers for a turn in ``room_id`` now starting in ``session_id``, left unheard until the turn replies, so
+    a turn that fails before it reads them frames them again."""
+    found = answers(store, room_id, mark=False)
+    if found:
+        _framed.pop(session_id, None)
+        _framed[session_id] = [prompt_id for prompt_id, _ in found]
+        while len(_framed) > MAX_FRAMED:
+            _framed.pop(next(iter(_framed)))
+    return [line for _, line in found]
+
+
+def heard(store_for: Callable[[], PresentStore], session_id: str, replied: bool) -> None:
+    """A turn in ``session_id`` ended: what it was framed with is heard once it replied."""
+    if not replied or session_id not in _framed:
+        return
+    store_for().mark_heard(_framed.pop(session_id))
+
+
+def answers(store: PresentStore, room_id: Any, *, mark: bool) -> list[tuple[str, str]]:
     lines = []
-    for prompt in store.room_answers(room_id):
+    for prompt in store.room_answers(room_id, mark=mark):
         question = prompt["title"]
         if prompt["status"] == "confirmed":
-            lines.append(f'Your owner said yes to "{question}": you may share this, and nothing more: '
-                         f'{_one_line(prompt["preview"])}')
+            lines.append((prompt["id"], f'Your owner said yes to "{question}": you may share this, and nothing more: '
+                         f'{_one_line(prompt["preview"])}'))
         elif prompt["status"] == "edit" and prompt.get("edit_text"):
-            lines.append(f'Your owner answered "{question}" with: {_one_line(prompt["edit_text"])} Share only that.')
+            lines.append((prompt["id"], f'Your owner answered "{question}" with: {_one_line(prompt["edit_text"])} '
+                                        'Share only that.'))
         elif prompt["status"] == "expired":
-            lines.append(f'Your owner didn\'t answer "{question}" in time: don\'t share it.')
+            lines.append((prompt["id"], f'Your owner didn\'t answer "{question}" in time: don\'t share it.'))
         else:
-            lines.append(f'Your owner said no to "{question}": don\'t share it.')
+            lines.append((prompt["id"], f'Your owner said no to "{question}": don\'t share it.'))
     return lines
 
 
@@ -232,9 +261,13 @@ def _one_line(text: str) -> str:
 
 
 def _with_note(prompt: dict[str, Any]) -> dict[str, Any]:
-    shown = {key: value for key, value in prompt.items() if key not in ("device", "finished_at", "room")}
+    shown = {key: value for key, value in prompt.items() if key not in ("device", "finished_at", "room", "preview")}
+    if "preview" in prompt:
+        shown["share"] = prompt["preview"]
     status = prompt["status"]
-    shown["note"] = _NOTES[status] if status != "edit" or prompt.get("edit_text") else _NOTES["declined"]
+    if status == "edit" and not prompt.get("edit_text"):
+        status = shown["status"] = "declined"  # Say instead with nothing to say
+    shown["note"] = _NOTES[status]
     return shown
 
 

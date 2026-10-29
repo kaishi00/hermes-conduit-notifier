@@ -295,6 +295,9 @@ def _member_room_turn(session_id: str) -> bool:
 def _post_llm_call(**kwargs: Any) -> None:
     session_id = _text(kwargs.get("session_id"))
     response = kwargs.get("assistant_response")
+    # A room turn that replied read its owner's answers (room_asks); a failed one is framed with them again.
+    _quietly(room_asks.heard, lambda: PresentStore(get_hermes_home()), session_id,
+             isinstance(response, str) and bool(response.strip()))
     if _is_child(session_id):
         return
     # The Lock Screen's end waits for on_session_end too: this hook also runs
@@ -934,7 +937,8 @@ def _room_framing(session_id: str, platform: Any = None, prompt: Any = None) -> 
     if home is not None and turn.room_id:
         try:
             # What the owner answered the agent's asks since (room_asks), once.
-            framing += "".join(f"\n- {line}" for line in room_asks.answered(PresentStore(home), turn.room_id))
+            framing += "".join(f"\n- {line}" for line in room_asks.frame(PresentStore(home), turn.room_id,
+                                                                            session_id))
         except Exception:  # noqa: BLE001 — the answers wait for the next turn
             _warn_room_once("asks", "conduit_push: couldn't read the answers to session %s's asks", session_id)
     return framing
