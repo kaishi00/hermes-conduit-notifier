@@ -214,8 +214,9 @@ After Conduit crashes or freezes, iOS hands it a MetricKit diagnostic on the
 next launch, and Conduit asks the user once whether to send it. Send posts
 the diagnostic (call stacks, exception and termination codes, version, build,
 iOS version and device model; never an exception's message text) to
-`POST /v1/crash-reports` on Conduit's own relay, whichever relay the user's
-notifications use. The relay keeps each as a file under
+`POST /v1/crash-reports` on the developer's relay (`push.milim.dev`), even
+when the user's notifications use another relay. A post holds at most
+600,000 characters. The relay keeps each as a file under
 `data/crash-reports/`, at most 1,000 and for 90 days, and takes at most 10
 an hour from one address and 500 a day in all. The route takes posts from
 anyone, so a flood from many addresses can spend the day's 500 or push the
