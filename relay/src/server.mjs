@@ -197,7 +197,10 @@ function main() {
   // Testers' crash and freeze reports (crash-reports.mjs), on a relay
   // with CRASH_REPORTS_TOKEN only.
   const crashReportStore = crashReportsFromEnv(process.env, config.dataPath);
-  if (crashReportStore.reports) RELAY_INFO.capabilities.push(CRASH_REPORTS_CAPABILITY);
+  if (crashReportStore.reports) {
+    RELAY_INFO.capabilities.push(CRASH_REPORTS_CAPABILITY);
+    setInterval(() => crashReportStore.reports.prune(), 86_400_000).unref();
+  }
   crashReports = crashReportRoutes({ ...crashReportStore, readJson, enforceRateLimit, clientAddress });
   watchTools = watchToolRoutes({
     grants: watchGrants,

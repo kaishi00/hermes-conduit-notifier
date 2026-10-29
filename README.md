@@ -217,7 +217,10 @@ iOS version and device model; never an exception's message text) to
 `POST /v1/crash-reports` on Conduit's own relay, whichever relay the user's
 notifications use. The relay keeps each as a file under
 `data/crash-reports/`, at most 1,000 and for 90 days, and takes at most 10
-an hour from one address and 500 a day in all. It takes reports only when
+an hour from one address and 500 a day in all. The route takes posts from
+anyone, so a flood from many addresses can spend the day's 500 or push the
+oldest reports past the 1,000; the stacks are what matter, and a crash that
+keeps happening comes back. It takes reports only when
 `CRASH_REPORTS_TOKEN` (32 characters or more) is set in `.env`; the same
 token reads them:
 

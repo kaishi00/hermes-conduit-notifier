@@ -36,17 +36,37 @@ export class CrashReports {
     this.maxAgeMs = maxAgeMs;
     this.now = now;
     mkdirSync(directory, { recursive: true, mode: 0o700 });
+    // Each report's heading, by id, oldest first: listing never reads a
+    // report's stacks. Each heading is also a small file beside its report.
+    this.headings = new Map();
+    for (const id of this.ids()) {
+      try {
+        this.headings.set(id, JSON.parse(readFileSync(this.path(id, 'head'), 'utf8')));
+      } catch {
+        this.remove(id);
+      }
+    }
+    this.prune();
+  }
+
+  path(id, part) {
+    return join(this.directory, `${id}.${part}.json`);
   }
 
   // Keeps one report; returns its id. The id leads with the time, so names
   // sort oldest first.
   save(report) {
     const id = `${this.now()}-${randomBytes(6).toString('hex')}`;
-    writeFileSync(join(this.directory, `${id}.json`), JSON.stringify({ id, received_at: new Date(this.now()).toISOString(), ...report }), { mode: 0o600 });
+    const { diagnostic, ...fields } = report;
+    const heading = { id, received_at: new Date(this.now()).toISOString(), ...fields };
+    writeFileSync(this.path(id, 'report'), JSON.stringify({ ...heading, diagnostic }), { mode: 0o600 });
+    writeFileSync(this.path(id, 'head'), JSON.stringify(heading), { mode: 0o600 });
+    this.headings.set(id, heading);
     this.prune();
     return id;
   }
 
+  // The ids of the reports on disk, oldest first.
   ids() {
     let names;
     try {
@@ -54,34 +74,41 @@ export class CrashReports {
     } catch {
       return [];
     }
-    return names.filter((name) => name.endsWith('.json')).map((name) => name.slice(0, -5)).filter((id) => ID_PATTERN.test(id)).sort();
+    return names.filter((name) => name.endsWith('.report.json')).map((name) => name.slice(0, -'.report.json'.length)).filter((id) => ID_PATTERN.test(id)).sort();
   }
 
-  // Every report's heading, oldest first, optionally of one build.
+  // Every current report's heading, oldest first, optionally of one build.
   list({ build } = {}) {
-    return this.ids().map((id) => this.get(id)).filter(Boolean)
-      .filter((report) => !build || report.build === build)
-      .map(({ id, received_at, app_version, build: reportBuild, os, device, kind, signature }) => ({ id, received_at, app_version, build: reportBuild, os, device, kind, signature }));
+    return [...this.headings.values()].filter((heading) => this.current(heading.id) && (!build || heading.build === build));
   }
 
   get(id) {
-    if (!ID_PATTERN.test(id)) return null;
+    if (!ID_PATTERN.test(id) || !this.headings.has(id) || !this.current(id)) return null;
     try {
-      return JSON.parse(readFileSync(join(this.directory, `${id}.json`), 'utf8'));
+      return JSON.parse(readFileSync(this.path(id, 'report'), 'utf8'));
     } catch {
       return null;
     }
   }
 
+  current(id) {
+    return Number(id.split('-')[0]) >= this.now() - this.maxAgeMs;
+  }
+
+  // Drops reports past their age and the oldest past the cap. The relay
+  // also runs it daily, so a quiet relay keeps none past its age.
   prune() {
-    const ids = this.ids();
-    const cutoff = this.now() - this.maxAgeMs;
+    const ids = [...this.headings.keys()];
     ids.forEach((id, index) => {
-      const old = Number(id.split('-')[0]) < cutoff;
-      if (old || index < ids.length - this.maxReports) {
-        try { unlinkSync(join(this.directory, `${id}.json`)); } catch { /* gone already */ }
-      }
+      if (!this.current(id) || index < ids.length - this.maxReports) this.remove(id);
     });
+  }
+
+  remove(id) {
+    this.headings.delete(id);
+    for (const part of ['report', 'head']) {
+      try { unlinkSync(this.path(id, part)); } catch { /* gone already */ }
+    }
   }
 }
 
@@ -102,26 +129,40 @@ export function validateReport(body) {
   if (!KINDS.has(report.kind)) throw badRequest('invalid_kind');
   const diagnostic = body?.diagnostic;
   if (!diagnostic || typeof diagnostic !== 'object' || Array.isArray(diagnostic)) throw badRequest('invalid_diagnostic');
-  report.diagnostic = diagnostic;
-  report.signature = signature(diagnostic);
+  const crashDiagnostics = Array.isArray(diagnostic.crashDiagnostics) ? diagnostic.crashDiagnostics : [];
+  const hangDiagnostics = Array.isArray(diagnostic.hangDiagnostics) ? diagnostic.hangDiagnostics : [];
+  if (!crashDiagnostics.length && !hangDiagnostics.length) throw badRequest('invalid_diagnostic');
+  // Only crashes and hangs, without an exception's message or its
+  // arguments, whatever the app sent: they can quote anything.
+  report.diagnostic = withoutMessages({ timeStampBegin: diagnostic.timeStampBegin, timeStampEnd: diagnostic.timeStampEnd, crashDiagnostics, hangDiagnostics });
+  report.signature = signature(report.diagnostic);
   return report;
+}
+
+function withoutMessages(value) {
+  if (Array.isArray(value)) return value.map(withoutMessages);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.entries(value)
+    .filter(([key]) => key !== 'composedMessage' && key !== 'arguments')
+    .map(([key, child]) => [key, withoutMessages(child)]));
 }
 
 // What groups reports of the same fault: the first crash's or hang's
 // exception and termination codes and the first frames of its stack, hashed.
 export function signature(diagnostic) {
-  const first = diagnostic.crashDiagnostics?.[0] ?? diagnostic.hangDiagnostics?.[0];
+  const list = (value) => (Array.isArray(value) ? value : []);
+  const first = list(diagnostic.crashDiagnostics)[0] ?? list(diagnostic.hangDiagnostics)[0];
   if (!first || typeof first !== 'object') return null;
-  const meta = first.diagnosticMetaData ?? {};
+  const meta = first.diagnosticMetaData && typeof first.diagnosticMetaData === 'object' ? first.diagnosticMetaData : {};
   const frames = [];
-  const walk = (frame) => {
-    if (!frame || typeof frame !== 'object' || frames.length >= 8) return;
+  const walk = (frame, depth) => {
+    if (!frame || typeof frame !== 'object' || frames.length >= 8 || depth > 64) return;
     frames.push(`${frame.binaryName ?? '?'}+${frame.offsetIntoBinaryTextSegment ?? '?'}`);
-    for (const child of frame.subFrames ?? []) walk(child);
+    for (const child of list(frame.subFrames)) walk(child, depth + 1);
   };
-  const threads = first.callStackTree?.callStacks ?? [];
+  const threads = list(first.callStackTree?.callStacks);
   const crashed = threads.find((thread) => thread?.threadAttributed) ?? threads[0];
-  for (const root of crashed?.callStackRootFrames ?? []) walk(root);
+  for (const root of list(crashed?.callStackRootFrames)) walk(root, 0);
   const parts = [meta.exceptionType, meta.exceptionCode, meta.signal, meta.terminationReason, ...frames].map((part) => String(part ?? ''));
   return createHash('sha256').update(parts.join('|')).digest('hex').slice(0, 16);
 }
@@ -145,9 +186,10 @@ export function crashReportRoutes({ reports, adminToken, readJson, enforceRateLi
     const id = match[1];
     if (request.method === 'POST' && !id) {
       enforceRateLimit(`crash-report:${clientAddress(request)}`, REPORTS_PER_ADDRESS_PER_HOUR, 60 * 60_000);
+      const report = validateReport(await readJson(request, MAX_REPORT_CHARS));
+      // Only a well-formed report spends the relay's daily budget.
       enforceRateLimit('crash-report-global', REPORTS_PER_DAY, 24 * 60 * 60_000);
-      const body = await readJson(request, MAX_REPORT_CHARS);
-      const saved = reports.save(validateReport(body));
+      const saved = reports.save(report);
       sendJson(response, 201, { id: saved });
       return true;
     }

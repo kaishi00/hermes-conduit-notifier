@@ -54,18 +54,22 @@ test('reports are kept as private files, newest kept, old ones pruned', () => {
     const first = reports.save(validateReport(post()));
     now += 1;
     const second = reports.save(validateReport(post({ build: '237' })));
-    assert.equal(statSync(join(dir, 'crash-reports', `${first}.json`)).mode & 0o777, 0o600);
+    assert.equal(statSync(join(dir, 'crash-reports', `${first}.report.json`)).mode & 0o777, 0o600);
     assert.deepEqual(reports.list().map((report) => report.id), [first, second]);
     assert.deepEqual(reports.list({ build: '237' }).map((report) => report.id), [second]);
     assert.equal(reports.list()[0].diagnostic, undefined, 'the list carries headings only');
-    assert.deepEqual(reports.get(first).diagnostic, diagnostic());
+    assert.deepEqual(reports.get(first).diagnostic.crashDiagnostics, diagnostic().crashDiagnostics);
     assert.equal(reports.get('../relay'), null);
     now += 1;
     const third = reports.save(validateReport(post()));
     assert.deepEqual(reports.ids(), [second, third], 'at most maxReports');
     now += 20_000;
+    assert.deepEqual(reports.list(), [], 'past maxAgeMs, gone before any new save');
+    assert.equal(reports.get(third), null);
+    reports.prune();
+    assert.deepEqual(reports.ids(), []);
     reports.save(validateReport(post()));
-    assert.equal(reports.ids().length, 1, 'older than maxAgeMs');
+    assert.equal(new CrashReports({ directory: join(dir, 'crash-reports'), now: () => now }).list().length, 1, 'headings load back on restart');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -114,7 +118,7 @@ test('anyone posts a report; only the token reads them', async () => {
   try {
     const sent = await relay.api('/v1/crash-reports', { method: 'POST', body: post() });
     assert.equal(sent.status, 201);
-    assert.ok(existsSync(join(relay.dir, 'crash-reports', `${sent.json.id}.json`)), 'kept beside the relay data');
+    assert.ok(existsSync(join(relay.dir, 'crash-reports', `${sent.json.id}.report.json`)), 'kept beside the relay data');
     assert.equal((await relay.api('/v1/crash-reports', { method: 'POST', body: post({ kind: 'nope' }) })).status, 400);
     assert.equal((await relay.api('/v1/crash-reports')).status, 401);
     assert.equal((await relay.api('/v1/crash-reports', { token: 'b'.repeat(40) })).status, 401);
@@ -122,7 +126,7 @@ test('anyone posts a report; only the token reads them', async () => {
     assert.deepEqual(listed.json.reports.map((report) => report.id), [sent.json.id]);
     const read = await relay.api(`/v1/crash-reports/${sent.json.id}`, { token: TOKEN });
     assert.equal(read.json.device, 'iPhone17,2');
-    assert.deepEqual(read.json.diagnostic, diagnostic());
+    assert.deepEqual(read.json.diagnostic.crashDiagnostics, diagnostic().crashDiagnostics);
     assert.equal((await relay.api('/v1/crash-reports', { method: 'DELETE', token: TOKEN })).status, 405);
   } finally {
     relay.stop();
