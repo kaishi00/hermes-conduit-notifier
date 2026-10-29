@@ -11,6 +11,8 @@ watch_paths:
   - hermes_cli/web_server*.py
   - hermes_cli/web_routers/
   - hermes_cli/plugins*.py
+  - tools/plugin_guard*.py
+  - tools/skills_guard.py
   - hermes_cli/profiles*.py
   - hermes_cli/dashboard_auth/
   - hermes_cli/config*.py
@@ -66,6 +68,10 @@ notes:
     hermes_cli.web_server_files._agent_fs_path, keeps a locked or hosted install's roots inside
     the folder _managed_files_policy names, and keeps out what _is_sensitive_path keeps out of
     Hermes' own file routes.
+  plugin install scan: >-
+    Conduit's one-tap plugin update (feature map: "Conduit plugin update"). tools.plugin_guard scans
+    every shipped file before an install or update; one high finding makes it caution, which the
+    update can't confirm, so hosts stay on the old version (hermes-conduit#1500).
 
 # Upstream behaviors we know are broken, keyed by test and failure signature.
 # A listed test xfails while it fails with this signature, and fails when it
