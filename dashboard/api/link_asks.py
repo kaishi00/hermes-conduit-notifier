@@ -64,6 +64,7 @@ async def put_link_rules(request: Request, response: Response) -> Any:
 @router.get("/links/asks")
 async def get_link_asks(response: Response) -> Any:
     """The asks linked Hermes made of this one, newest first, each with how it
-    went; those still waiting for the owner have ``status`` held."""
+    went; those still waiting for the owner have ``status`` held. One that
+    couldn't be read has ``asked`` null and ``status`` bad_ask."""
     response.headers["Cache-Control"] = "no-store"
     return await _link_asks_route(lambda asks: {"asks": asks.received()}, "link asks")

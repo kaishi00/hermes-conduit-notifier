@@ -522,3 +522,21 @@ def test_many_busy_spans_are_capped_and_say_how_many_more(pair, monkeypatch):
     answer = pair.ask({"free_on": {"date": "2026-10-15"}})
     assert len(answer["busy"]) == link_asks.MAX_BUSY_SPANS
     assert answer["answer"].endswith(f"and {60 - link_asks.MAX_BUSY_SPANS} more busy times; free otherwise.")
+
+
+def test_cli_answer_for_a_deleted_profile_writes_nothing_there(cli, pair, capsys):
+    import shutil
+
+    work = pair.homes["asked"] / "profiles" / "work"
+    work.mkdir(parents=True)
+    (work / "config.yaml").write_text("model: {}\n")
+    rules_for(pair, profile="work")
+    pair.phone_shows_link_asks()
+    ask = pair.ask({"question": "Is Mona coming?"})
+    (held,) = pair.asked.held()
+    shutil.rmtree(work)
+    opened = []
+    pair.asked.present = lambda profile: opened.append(profile)
+    assert cli("answer", held["id"], text="Yes, after six.") == 0
+    pair.asked.flush()
+    assert pair.asker.sent(ask["id"])["answer"] == "Yes, after six." and opened == []

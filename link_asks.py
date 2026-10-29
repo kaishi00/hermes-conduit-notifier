@@ -353,7 +353,9 @@ class Asks:
             raise AsksError("invalid", "Write the answer")
         outcome = "edit" if written else "confirmed" if share else "declined"
         try:
-            self.present(entry["profile"]).settle_link(entry["prompt_id"], outcome, written)
+            # A profile deleted while the ask waited has no prompt to settle, and isn't made again.
+            if self._profile_exists(entry["profile"]):
+                self.present(entry["profile"]).settle_link(entry["prompt_id"], outcome, written)
         except Exception:  # noqa: BLE001 — the answer goes all the same; the phone's prompt expires
             logger.debug("Linked Rooms couldn't settle an ask's prompt", exc_info=True)
         if not self._settle(entry, _owners(entry, outcome, written)):
