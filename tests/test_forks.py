@@ -208,17 +208,6 @@ def test_a_forks_approval_sends_nothing(hermes, marks, monkeypatch):
     assert sent == []
 
 
-def test_a_forks_approval_response_leaves_the_chats_approval_alone(hermes, marks, monkeypatch):
-    # The chat's own approval is still open: a fork's answered approval mustn't cancel its alert or card.
-    cancelled, thinking = [], []
-    monkeypatch.setattr(plugin.calls, "cancel_alerts", lambda *args: cancelled.append(args))
-    monkeypatch.setattr(plugin.live_activity.reporter, "thinking", lambda *args: thinking.append(args))
-    _fork_run(hermes, lambda: plugin._post_approval_response(session_id="s", session_key="s", turn_id="f"))
-    assert cancelled == [] and thinking == []
-    plugin._post_approval_response(session_id="s", session_key="s", turn_id="t")
-    assert cancelled == [("s", "approval")] and thinking == [("s",)]
-
-
 def test_a_fork_started_before_a_pulse_attempt_is_not_held(hermes, marks, monkeypatch):
     # The rule for the chat's own turns (pulse._held_home_turn): only a turn that started after the attempt is held.
     monkeypatch.setattr(plugin.pulse, "_in_flight_here", lambda session_id: [10.0**10])
@@ -255,3 +244,61 @@ def test_a_declined_call_note_waits_for_the_chats_next_turn(hermes, marks, tmp_p
     assert "declined" not in str(contexts[0])
     turn = plugin._pre_llm_call(session_id="s", turn_id="t", user_message="hi")
     assert turn["context"].startswith("[Conduit: the user declined the phone call")
+
+
+def test_a_forks_approval_answer_leaves_the_chats_alert_and_card(hermes, marks, monkeypatch, lock_screen):
+    reporter, posts = lock_screen
+    cancelled = []
+    monkeypatch.setattr(plugin.calls, "cancel_alerts", lambda *args: cancelled.append(args))
+    reporter.flush()
+    before = len(posts)
+    _fork_run(hermes, lambda: plugin._post_approval_response(session_id="s", session_key="s", choice="deny"))
+    reporter.flush()
+    assert cancelled == [] and len(posts) == before
+    plugin._post_approval_response(session_id="s", session_key="s", choice="once")
+    assert cancelled == [("s", "approval")], "the chat's own answer still stops its alert"
+
+
+def test_a_fork_inside_the_chats_turn_leaves_the_turns_state(pushed, hermes, marks, monkeypatch):
+    monkeypatch.setattr(plugin, "_unnamed_ends", {})
+    monkeypatch.setattr(plugin, "_room_framing", lambda *args: None)
+    plugin._pre_llm_call(session_id="s", turn_id="t", user_message="Why does the download fail?")
+    parent, unnamed = dict(plugin._parent_turns), dict(plugin._unnamed_ends)
+    _fork_run(hermes, _prediction_hooks)
+    assert plugin._parent_turns == parent and plugin._unnamed_ends == unnamed
+
+
+def test_a_tool_worker_hermes_starts_on_a_copy_of_the_context_sees_the_mark(hermes, marks):
+    # Hermes runs a turn's tools on workers given a copy of the turn's context (propagate_context_to_thread).
+    import concurrent.futures
+    import contextvars
+
+    seen = []
+
+    def hooks():
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            seen.append(pool.submit(contextvars.copy_context().run, marks.inside).result())
+
+    _fork_run(hermes, hooks)
+    assert seen == [True]
+
+
+def test_a_caller_that_imports_the_builder_when_it_forks_gets_the_wrapper(hermes, marks):
+    # Hermes' /btw (agent/side_question._answer_via_fork) imports the builder inside the function.
+    def answer_via_fork(parent):
+        from agent.background_review import build_cache_parity_fork
+
+        fork, _runtime, _routed = build_cache_parity_fork(parent, None, max_iterations=3, write_origin="side_question")
+        return fork.run_conversation(user_message="Side question: …")
+
+    inside = []
+    answer_via_fork(types.SimpleNamespace(hooks=lambda: inside.append(marks.inside())))
+    assert inside == [True]
+
+
+def test_every_load_of_the_module_shares_one_mark(hermes, marks):
+    other = _load("conduit_forks_second_copy")
+    assert other._in_fork is marks._in_fork
+    seen = []
+    _fork_run(hermes, lambda: seen.append(other.inside()))
+    assert seen == [True]
