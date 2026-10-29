@@ -775,6 +775,21 @@ def test_what_pulse_left_out_lists_each_thing_once_by_its_newest_decision(live):
     assert control.left_out(store.open_store(live.home / "fresh"), now=now) == []  # no list yet
 
 
+def test_a_card_brought_up_from_a_kanban_worker_names_its_task_as_the_feed_does(live):
+    """The app shows the brought-up card as it comes back, so its Do it
+    starts a new chat about the task rather than opening the worker."""
+    now = time.time()
+    live.db.session(sid="worker", title=None, pinned=0, source="kanban")
+    live.db.message("user", "Task context...\n\nwork kanban task t_c64b17a2", sid="worker", at=now - 7200)
+    [left] = journal(live, "r1", [
+        {"text": "The task stalled on a rate limit", "kind": "watch", "decision": candidates.NOT_PICKED,
+         "chat_id": "worker", "place": prefs.place("", "worker"), "band": prefs.UNDATED}], now - 600)
+    card = control.bring_up(live.store, left, live.home, now=now)
+    assert (card["chat_id"], card["kanban_task"]) == ("worker", "t_c64b17a2")
+    [listed] = [entry for entry in control.feed(live.store, live.home)["cards"] if entry["id"] == card["id"]]
+    assert listed["kanban_task"] == "t_c64b17a2"
+
+
 def test_bringing_up_what_pulse_left_out_makes_a_card_once(live):
     """A card on the Pulse screen, as a report's: its reason, the part
     learning played and the chat it came from, and its thumbs teach about

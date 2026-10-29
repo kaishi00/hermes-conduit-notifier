@@ -21,6 +21,13 @@ checks it). The format is fixed, because Conduit reads it:
   should say instead, or don't share; an answer that comes later reaches it
   before its next turn in that room. Needs a Conduit that shows a room's asks.
 
+## 0.117.1 (2026-10-29)
+
+### Fixes
+- Do it on a Pulse card that came from a Kanban task's worker opened the
+  worker's chat, which can't be continued. It now starts a new chat about
+  the task, and Conduit shows the task where the chat was.
+
 ## 0.117.0 (2026-10-29)
 
 ### Fixes

@@ -178,6 +178,7 @@ The plugin sends relay credentials only over HTTPS with a trusted certificate (p
 | `.env` | APNs key ID, team ID, topic, public URL | Yes |
 | `secrets/*.p8` | Apple Push Notification signing key | Yes |
 | `data/relay.json` | Installation records, gateway credentials | Yes |
+| `data/crash-reports/` | Crash and freeze reports testers sent | Yes |
 
 See [`relay/deploy/.env.example`](relay/deploy/.env.example) for all required environment variables.
 
@@ -206,6 +207,34 @@ pairing codes and parked decisions): an inactive installation can never be
 used again, since its credential no longer authenticates and its hosts'
 events are refused. Only a relay full of active installations refuses new
 ones.
+
+### Crash and freeze reports
+
+After Conduit crashes or freezes, iOS hands it a MetricKit diagnostic on the
+next launch, and Conduit asks the user once whether to send it. Send posts
+the diagnostic (call stacks, exception and termination codes, version, build,
+iOS version and device model; never an exception's message text) to
+`POST /v1/crash-reports` on the developer's relay (`push.milim.dev`), even
+when the user's notifications use another relay. A post holds at most
+600,000 characters, and the relay keeps only the diagnostic keys it names
+(metadata codes, exception type and name, stack frames), at most 600,000
+bytes of them, so the folder stays under about 600 MB. The relay keeps each as a file under
+`data/crash-reports/`, at most 1,000 and for 90 days, and takes at most 10
+an hour from one address and 500 a day in all. The route takes posts from
+anyone, so a flood from many addresses can spend the day's 500 or push the
+oldest reports past the 1,000; the stacks are what matter, and a crash that
+keeps happening comes back. It takes reports only when
+`CRASH_REPORTS_TOKEN` (32 characters or more; a shorter one leaves reports off) is set in `.env`; the same token reads them:
+
+```shell
+curl -H "Authorization: Bearer $CRASH_REPORTS_TOKEN" "$PUBLIC_URL/v1/crash-reports?build=236"
+curl -H "Authorization: Bearer $CRASH_REPORTS_TOKEN" "$PUBLIC_URL/v1/crash-reports/<id>"
+```
+
+The list gives each report's id, build, device, kind and `signature`, a hash
+of its exception codes and top frames, so reports of one fault group. The
+stacks are unsymbolicated MetricKit frames (binary name and offset); match
+them to the build's dSYM with `atos`.
 
 For offline reclamation, `storage:prune-inactive` previews the number of
 eligible records by default. It removes only installations that have been
@@ -267,6 +296,8 @@ gateway-bound inactive records still require separately reviewed maintenance.
 | GET | `/v1/rings/:id/session` | The Watch fetches it, waiting up to `?wait=20` seconds (0.11+; the ring's token as the bearer) |
 | POST | `/v1/rings/:id/control` | The phone or the Watch mutes, unmutes or ends a call the Watch answered that stays on the phone's headset (0.17+; the ring's token) |
 | GET | `/v1/rings/:id/control` | Either reads the other's change past `?after=` its last seq, waiting up to `?wait=20` seconds (0.17+; the ring's token as the bearer) |
+| POST | `/v1/crash-reports` | A crash or freeze report from Conduit, no credential (0.24+, capability `crash-reports`; see "Crash and freeze reports") |
+| GET | `/v1/crash-reports`, `/v1/crash-reports/:id` | List reports (`?build=`) or read one (`CRASH_REPORTS_TOKEN` as the bearer) |
 
 Watch tool grants carry an Apple Watch call's lookups while the Watch can't
 reach Conduit on the iPhone. Calls and answers are sealed with a per-call key

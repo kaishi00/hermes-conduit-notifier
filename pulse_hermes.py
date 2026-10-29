@@ -11,6 +11,7 @@ it needs isn't there, so the caller can tell "Hermes has no row" from
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -272,6 +273,54 @@ def chat_titles(home: Path, ids: Iterable[str]) -> dict[str, str]:
     rows = _run(home, "SELECT id, title FROM sessions WHERE id IN (SELECT value FROM json_each(?))",
                 (json.dumps(wanted),))
     return {row["id"]: row["title"] or "" for row in rows}
+
+
+# A Kanban task's worker runs in a session of its own, which Hermes won't
+# reopen as a chat (session.resume 4132): source `kanban`, or a `cli` or
+# `local` one from before Hermes tagged them, whose whole first message is
+# the dispatcher's prompt (watch_tools.is_legacy_kanban_worker). The tagged
+# one's first message ends in that prompt, after the task's context.
+WORKER_SOURCE = "kanban"
+LEGACY_WORKER_SOURCES = frozenset({"cli", "local"})
+_WORKER_PROMPT = re.compile(r"(?:\A|\n)\s*work kanban task (\S+)\s*\Z", re.IGNORECASE)
+# How much of a first message's end to read for the prompt, and how far up a
+# compression chain to look for the session that has it.
+_PROMPT_TAIL, _WORKER_DEPTH = 300, 20
+_WORKERS = (
+    "WITH RECURSIVE up(start, id, parent, source, depth) AS ("
+    "SELECT id, id, parent_session_id, source, 0 FROM sessions WHERE id IN (SELECT value FROM json_each(?)) "
+    "UNION ALL SELECT up.start, s.id, s.parent_session_id, s.source, up.depth + 1 FROM sessions s "
+    "JOIN up ON s.id = up.parent WHERE lower(COALESCE(up.source, '')) = 'kanban' AND up.depth < ?) "
+    "SELECT up.start, up.depth, up.source, "
+    "(SELECT substr(m.content, -?) FROM messages m WHERE m.session_id = up.id AND m.role = 'user' "
+    "ORDER BY m.id LIMIT 1) AS tail, "
+    "(SELECT length(m.content) FROM messages m WHERE m.session_id = up.id AND m.role = 'user' "
+    "ORDER BY m.id LIMIT 1) AS size "
+    "FROM up ORDER BY up.start, up.depth")
+
+
+def worker_tasks(home: Path, ids: Iterable[str]) -> dict[str, str]:
+    """The ones of ``ids`` that are a Kanban task's worker, each with its
+    task's id ("" when no message names it): a tagged worker's from its
+    first message, or that of the session it was compressed from."""
+    wanted = sorted({chat for chat in ids if chat})
+    if not wanted:
+        return {}
+    rows = _run(home, _WORKERS, (json.dumps(wanted), _WORKER_DEPTH, _PROMPT_TAIL))
+    found: dict[str, str] = {}
+    for row in rows:
+        source = (row["source"] or "").lower()
+        tail = row["tail"] if isinstance(row["tail"], str) else ""
+        prompt = _WORKER_PROMPT.search(tail) if (row["size"] or 0) <= len(tail) or source == WORKER_SOURCE else None
+        if row["depth"] == 0:
+            if source == WORKER_SOURCE:
+                found[row["start"]] = ""
+            elif source in LEGACY_WORKER_SOURCES and prompt and tail.strip().lower().startswith("work kanban task"):
+                found[row["start"]] = prompt.group(1)
+                continue
+        if row["start"] in found and not found[row["start"]] and source == WORKER_SOURCE and prompt:
+            found[row["start"]] = prompt.group(1)
+    return found
 
 
 def chain_messages(home: Path, *, chat_id: str, after_id: int, max_chars: int, limit: int) -> list[sqlite3.Row]:
