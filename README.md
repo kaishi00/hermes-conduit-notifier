@@ -178,6 +178,7 @@ The plugin sends relay credentials only over HTTPS with a trusted certificate (p
 | `.env` | APNs key ID, team ID, topic, public URL | Yes |
 | `secrets/*.p8` | Apple Push Notification signing key | Yes |
 | `data/relay.json` | Installation records, gateway credentials | Yes |
+| `data/crash-reports/` | Crash and freeze reports testers sent | Yes |
 
 See [`relay/deploy/.env.example`](relay/deploy/.env.example) for all required environment variables.
 
@@ -206,6 +207,29 @@ pairing codes and parked decisions): an inactive installation can never be
 used again, since its credential no longer authenticates and its hosts'
 events are refused. Only a relay full of active installations refuses new
 ones.
+
+### Crash and freeze reports
+
+After Conduit crashes or freezes, iOS hands it a MetricKit diagnostic on the
+next launch, and Conduit asks the user once whether to send it. Send posts
+the diagnostic (call stacks, exception and termination codes, version, build,
+iOS version and device model; never an exception's message text) to
+`POST /v1/crash-reports` on Conduit's own relay, whichever relay the user's
+notifications use. The relay keeps each as a file under
+`data/crash-reports/`, at most 1,000 and for 90 days, and takes at most 10
+an hour from one address and 500 a day in all. It takes reports only when
+`CRASH_REPORTS_TOKEN` (32 characters or more) is set in `.env`; the same
+token reads them:
+
+```shell
+curl -H "Authorization: Bearer $CRASH_REPORTS_TOKEN" "$PUBLIC_URL/v1/crash-reports?build=236"
+curl -H "Authorization: Bearer $CRASH_REPORTS_TOKEN" "$PUBLIC_URL/v1/crash-reports/<id>"
+```
+
+The list gives each report's id, build, device, kind and `signature`, a hash
+of its exception codes and top frames, so reports of one fault group. The
+stacks are unsymbolicated MetricKit frames (binary name and offset); match
+them to the build's dSYM with `atos`.
 
 For offline reclamation, `storage:prune-inactive` previews the number of
 eligible records by default. It removes only installations that have been
