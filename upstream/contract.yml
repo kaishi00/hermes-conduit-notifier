@@ -300,6 +300,9 @@ routes:
   - POST /inbox/list
   - GET /inbox/status
   - POST /inbox/wipe
+  - GET /links/asks
+  - GET /links/rules
+  - PUT /links/rules
   - POST /local-live/key
   - WS /local-live/socket
   - GET /local-live/status
