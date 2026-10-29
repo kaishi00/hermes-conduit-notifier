@@ -15,6 +15,7 @@ from test_room_invites import rooms
 from test_room_reading import copied, reader, say, side, started, user
 
 chats_module = _load("conduit_push.room_chats", ROOT / "room_chats.py")
+LIMIT = chats_module.room_reading.MAX_LIMIT
 
 assert rooms and side  # the fixtures, imported for these tests
 
@@ -120,7 +121,7 @@ def test_a_quiet_listening_room_gets_notes_once(side):
     notes(side, sender).pass_once()
     [(chat_id, text, profile)] = sender.sent
     assert (chat_id, profile) == ("chat-a", "default")
-    assert text == chats_module.NOTES_PROMPT.format(name="Zoo trip", room_id=room_id, after=0, until=seq,
+    assert text == chats_module.NOTES_PROMPT.format(name="Zoo trip", room_id=room_id, after=0, limit=LIMIT, until=seq,
                                                     why=chats_module.QUIET_WHY)
     assert "more_after" in text and f"through seq {seq}" in text  # a long stretch is read to its end
     assert store(side, "laifu").get(room_id)["notes_seq"] == seq
@@ -134,7 +135,7 @@ def test_a_quiet_listening_room_gets_notes_once(side):
     side.clock.now += chats_module.QUIET_S + 60
     notes(side, sender).pass_once()
     assert sender.sent[-1][1] == chats_module.NOTES_PROMPT.format(name="Zoo trip", room_id=room_id, after=seq,
-                                                                  until=later, why=chats_module.QUIET_WHY)
+                                                                  limit=LIMIT, until=later, why=chats_module.QUIET_WHY)
     assert store(side, "laifu").get(room_id)["notes_seq"] == later
 
 
@@ -151,7 +152,7 @@ def test_an_ended_room_gets_its_last_notes(side):
     notes(side, sender).pass_once()  # ended: no need to wait
 
     [(_, text, _)] = sender.sent
-    assert text == chats_module.NOTES_PROMPT.format(name="Zoo trip", room_id=room_id, after=0, until=seq,
+    assert text == chats_module.NOTES_PROMPT.format(name="Zoo trip", room_id=room_id, after=0, limit=LIMIT, until=seq,
                                                     why=chats_module.ENDED_WHY)
     assert store(side, "laifu").get(room_id)["notes_seq"] == seq
 
@@ -298,6 +299,42 @@ def test_a_room_whose_newest_time_cant_be_read_still_gets_notes(side):
     listening(side, room_id)
     seq = say(side, room_id, "The 22nd works.")
     side.log.rooms[room_id][seq - 1]["created_at"] = 1e300
+    copied(side)
+    store(side, "laifu").set(room_id, "chat-a")
+    sender = Sender()
+
+    notes(side, sender).pass_once()
+
+    assert len(sender.sent) == 1
+
+
+def test_a_long_stretch_gets_its_notes_a_page_at_a_time(side):
+    room_id = started(side)
+    listening(side, room_id)
+    seqs = [say(side, room_id, f"Message {n}") for n in range(chats_module.room_reading.MAX_LIMIT + 50)]
+    for _ in range(5):
+        copied(side)
+    assert reader(side, "laifu").last_message(room_id)[0] == seqs[-1]
+    store(side, "laifu").set(room_id, "chat-a")
+    side.clock.now = reader(side, "laifu").last_message(room_id)[1] + chats_module.QUIET_S + 60
+    sender = Sender()
+
+    notes(side, sender).pass_once()
+    first = seqs[chats_module.room_reading.MAX_LIMIT - 1]
+    assert f"through seq {first}" in sender.sent[-1][1]
+    assert store(side, "laifu").get(room_id)["notes_seq"] == first
+
+    side.clock.now += chats_module.LOOK_S
+    notes(side, sender).pass_once()
+    assert f"after_seq {first}" in sender.sent[-1][1] and f"through seq {seqs[-1]}" in sender.sent[-1][1]
+    assert store(side, "laifu").get(room_id)["notes_seq"] == seqs[-1]
+
+
+def test_a_newest_message_from_the_future_doesnt_keep_a_room_from_its_notes(side):
+    room_id = started(side)
+    listening(side, room_id)
+    seq = say(side, room_id, "The 22nd works.")
+    side.log.rooms[room_id][seq - 1]["created_at"] = side.clock.now + 365 * 86400
     copied(side)
     store(side, "laifu").set(room_id, "chat-a")
     sender = Sender()

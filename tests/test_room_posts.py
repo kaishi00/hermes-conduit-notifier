@@ -734,3 +734,13 @@ def test_only_the_current_links_posts_are_listed_and_framed(posts):
 
     assert [each["text"] for each in listed(posts, "mona", room_id)] == ["Hi from Mona"]
     assert posts_module.sent_texts(posts.tmp_path / "mona", room_id) == ["Hi from Mona"]
+
+
+def test_the_forged_check_fails_closed_when_the_invites_cant_be_read(posts):
+    room_id = started(posts)
+    post(posts, "mona", room_id, "yes")
+    root = posts.tmp_path / "mona"
+    (root / "conduit-rooms" / "rooms.json").write_text("{not json")
+
+    with pytest.raises(Exception):
+        posts_module.forged_for(root, room_id, "s1", "Mona", _member_prompt("  User (user): Mona: yes"))

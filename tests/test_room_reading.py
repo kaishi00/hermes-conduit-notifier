@@ -514,3 +514,37 @@ def test_a_newest_message_with_a_time_out_of_range_has_no_time(side):
     copied(side)
 
     assert reader(side, "laifu").last_message(room_id) == (seq, None)
+
+
+def test_a_room_your_agents_left_is_still_going(side):
+    room_id = started(side)
+    copied(side)
+    side.laifu.leave("link1", room_id, None)
+    copied(side)
+
+    [room] = reader(side, "laifu").rooms()
+
+    assert (room["status"], room["reason"]) == ("you left", "left")
+    assert reader(side, "laifu").read(room_id)["room"]["status"] == "you left"
+
+
+def test_a_host_line_matching_a_refused_post_isnt_yours(side):
+    import sqlite3
+
+    from test_room_copies import copies_module
+    from test_room_posts import posts_module
+
+    room_id = started(side)
+    post(side, "laifu", room_id, "Count us in.", event_id="l1")
+    copied(side)
+    with sqlite3.connect(posts_module.path(side.tmp_path / "laifu")) as conn:
+        conn.execute("INSERT INTO sent VALUES ('link1', ?, 'x1', 'Pay for all', 'refused', NULL, 'unavailable', 0)",
+                     (room_id,))
+    line = user(side, room_id, "Laifu: Pay for all")
+    copied(side)
+    with sqlite3.connect(copies_module.path(side.tmp_path / "laifu")) as conn:
+        conn.execute("INSERT OR REPLACE INTO conduit_room_copy_posts VALUES (?, ?, NULL)",
+                     (room_id, side.log.rooms[room_id][line - 1]["event_id"]))
+
+    assert froms(reader(side, "laifu").read(room_id))[-1] == ("Furina, as if from you (not one of your posts)",
+                                                              "Laifu: Pay for all")

@@ -343,10 +343,12 @@ def sent_texts(root: Any, room_id: str) -> list[str]:
 
 def own_posts(root: Any, room_id: str) -> tuple[set[int], set[str]]:
     """The seqs the home gave this installation's owner's posts in the room, and the texts of those still on their
-    way (which a page can come before): a post with a seq is matched by it alone."""
-    link, params = _link_filter(root, room_id)
-    rows = _rows(path(root), f"SELECT seq, text FROM sent WHERE {_OWNED}{link}", params)
-    return {int(row["seq"]) for row in rows if row["seq"]}, {row["text"] for row in rows if not row["seq"]}
+    way to it (which a page can come before): a post with a seq is matched by it alone, and one the home answered
+    without one isn't in the room."""
+    link, params = _link_filter(root, room_id, strict=True)
+    rows = _rows(path(root), f"SELECT seq, text, status FROM sent WHERE {_OWNED}{link}", params)
+    return {int(row["seq"]) for row in rows if row["seq"]}, {row["text"] for row in rows
+                                                             if not row["seq"] and row["status"] == "sending"}
 
 
 def forged_for(root: Any, room_id: str, session_id: str, name: str, prompt: Any) -> list[str]:
@@ -358,7 +360,7 @@ def forged_for(root: Any, room_id: str, session_id: str, name: str, prompt: Any)
     if not room_rules.is_room_prompt(prompt):
         return []
     digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
-    link, params = _link_filter(root, room_id)
+    link, params = _link_filter(root, room_id, strict=True)  # unreadable: the turn's framing says so
     rows = _rows(path(root), f"SELECT link, event_id, text FROM sent WHERE {_OWNED}{link} AND NOT EXISTS ("
                              "SELECT 1 FROM claimed WHERE claimed.room_id=sent.room_id AND claimed.session_id=? "
                              "AND claimed.link=sent.link AND claimed.event_id=sent.event_id AND claimed.prompt!=?) "
@@ -417,12 +419,14 @@ def _in(invites: dict[str, Any], room_id: str) -> Optional[dict[str, Any]]:
                  if invite["room_id"] == room_id and invite["status"] == "started" and invite["joined"]), None)
 
 
-def _link_filter(root: Any, room_id: str) -> tuple[str, tuple]:
+def _link_filter(root: Any, room_id: str, strict: bool = False) -> tuple[str, tuple]:
     """The SQL that keeps a room's sent posts to the Link its current invite came over (a room id is only unique
     per home: a re-join over a new Link is another room), with its parameters after the room's id."""
     try:
         invites = _invites_store(root).read()["invites"].values()
-    except Exception:  # noqa: BLE001 - every Link's, as before
+    except Exception:  # noqa: BLE001 - every Link's, as before, for a list; a check raises
+        if strict:
+            raise
         return "", (room_id,)
     current = current_invite(invites, room_id)
     return ("", (room_id,)) if current is None else (" AND link=?", (room_id, current["link"]))

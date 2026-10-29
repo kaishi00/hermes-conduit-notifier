@@ -98,7 +98,8 @@ class Reader:
                                "in": member.get("status", "in") == "in"})
             shown.append({"room_id": copy["room_id"], "name": plain(copy["name"]) or "a room",
                           "host": _person(copy["from"]),
-                          "status": "going" if copy["status"] == "started" else "ended",
+                          # Your agents left a room that goes on: not ended.
+                          "status": {"started": "going", "left": "you left"}.get(copy["status"], "ended"),
                           "reason": copy["reason"] if copy["status"] != "started" else None, "agents": agents,
                           "yours": [agent["name"] for agent in agents if agent["owner"] == YOU],
                           "you": people.get("you") or _you_in(copy), "copy": copy})
@@ -173,7 +174,7 @@ class Reader:
         # Each message's size counted once; until the answer fits, the oldest go first, or the newest when reading
         # forward (after_seq), so paging on from the last one shown misses nothing.
         size = len(json.dumps(answer, ensure_ascii=False).encode("utf-8"))
-        forward = after_seq is not None and not (before_seq is not None and before_seq <= 1)
+        forward = after_seq is not None
         sizes = [len(json.dumps(message, ensure_ascii=False).encode("utf-8")) + 2 for message in messages]
         if forward:
             sizes.reverse()
