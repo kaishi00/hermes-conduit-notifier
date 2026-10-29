@@ -178,7 +178,7 @@ def _handle(args: dict[str, Any], session: str, is_child: Callable[[Any], bool],
         return {"ok": False, "error": error.code, "note": f"{UNAVAILABLE} ({error})"}
     if new:
         _nudge(prompt, f"{name}: {first_line(share)}", push, profile)
-        prompt = _wait(store, prompt, sleep, monotonic)
+        prompt = _wait(store, {**prompt, "preview": share}, sleep, monotonic)
     else:
         prompt = store.room_ask(prompt["id"]) or prompt
     if prompt["status"] != "waiting":
@@ -198,11 +198,11 @@ def _wait(store: PresentStore, prompt: dict[str, Any], sleep: Callable[[float], 
             return prompt
         sleep(min(delay, remaining))
         delay = min(delay * 1.5, POLL_MAX_S)
-        current = store.get(prompt["id"])
+        current = store.room_ask(prompt["id"])  # with the share, as every result gives it back
         if current is None:
             return prompt
         if current["status"] != "waiting":
-            return store.room_ask(prompt["id"]) or current
+            return current
         prompt = current
 
 

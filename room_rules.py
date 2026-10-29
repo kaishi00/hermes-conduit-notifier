@@ -146,8 +146,7 @@ SHARE_LINES = {
     "helps": ("Share what helps the room from what you know about your owner, but nothing sensitive: no health, "
               "money, passwords, or what others told your owner in private."),
     "ask": (f"Before you share anything personal about your owner, check with your owner first: ask them with "
-            f"{ASK_TOOL} (or, without it, say you'll ask them), and don't share it in this room until they've said "
-            "yes."),
+            f"{ASK_TOOL}, and don't share it in this room until they've said yes."),
     "nothing": "Don't share anything personal about your owner here, even when asked directly.",
 }
 TOOL_LINES = {
@@ -155,6 +154,11 @@ TOOL_LINES = {
     "look": "Here you can look things up on the web, and use no other tools.",
 }
 TALK_SEARCH_LINE = "Here you talk, and searching your owner's past chats is your only tool."
+# Ask me first: the ask tool goes through whatever the tools (tool_block), so the tool line says so.
+TALK_ASK_LINE = f"Here you talk, and asking your owner with {ASK_TOOL} is your only tool."
+TALK_SEARCH_ASK_LINE = (f"Here you talk, and searching your owner's past chats and asking your owner with {ASK_TOOL} "
+                        "are your only tools.")
+ASK_TOO_LINE = f"Asking your owner with {ASK_TOOL} is open to you here too."
 CUSTOM_LINE = "Here you can use only these tools: {tools}."
 SEARCH_ON_LINE = "You may search your owner's past chats when it helps the room."
 LEARNING_LINE = "Nothing is saved from this room to your memory or skills."
@@ -331,12 +335,15 @@ def framing(turn: Optional[RoomTurn], choices: RoomChoices, people: Optional[Map
     # The tier's own tools, then the owner's picks in the order they made them.
     tools = list(dict.fromkeys(name for name in [*sorted(TIERS.get(choices.tools, ())), *choices.custom_tools]
                                if name in allowed))
-    if not tools:
+    asks = choices.share == "ask"
+    if not tools and asks:
+        tool_line = TALK_SEARCH_ASK_LINE if choices.search_chats else TALK_ASK_LINE
+    elif not tools:
         tool_line = TALK_SEARCH_LINE if choices.search_chats else TOOL_LINES["talk"]
     elif choices.tools in TOOL_LINES and set(tools) <= TIERS[choices.tools]:
-        tool_line = TOOL_LINES[choices.tools]
+        tool_line = TOOL_LINES[choices.tools] + (f" {ASK_TOO_LINE}" if asks else "")
     else:
-        tool_line = CUSTOM_LINE.format(tools=", ".join(tools))
+        tool_line = CUSTOM_LINE.format(tools=", ".join(tools)) + (f" {ASK_TOO_LINE}" if asks else "")
     posters = [UNREAD_POSTERS_LINE] if unread and turn is not None else _poster_lines(turn, people, posts)
     lines = [opening, *(f"- {line}" for line in posters), f"- {ANSWER_FOR_YOURSELF}",
              f"- {SHARE_LINES.get(choices.share, SHARE_LINES['ask'])}", f"- {tool_line}"]

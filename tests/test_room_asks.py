@@ -544,3 +544,28 @@ def test_a_turn_that_couldnt_be_framed_never_hears_a_failed_turns_answers(store,
     plugin._post_llm_call(session_id=ROOM_SESSION, assistant_response="Not sure.", turn_id="t2")
     monkeypatch.setattr(plugin.room_rules, "room_turn", lambda session, home=None: TURN)
     assert f'- Your owner said no to "{QUESTION}": don\'t share it.' in plugin._room_framing(ROOM_SESSION).splitlines()
+
+
+def test_a_default_room_is_told_the_ask_tool_is_there():
+    # Talk only and Ask me first (the defaults): the tool goes through, so the framing never says there are none.
+    framing = rules.framing(TURN, room_choices.RoomChoices())
+    assert "without tools" not in framing and "you'll ask them" not in framing
+    assert framing.count(asks.TOOL_NAME) >= 2  # the share line and the tool line
+    with_search = rules.framing(TURN, room_choices.RoomChoices(search_chats=True))
+    assert asks.TOOL_NAME in with_search.split("past chats", 1)[1]
+    for tools in ("look", "custom"):
+        tiered = rules.framing(TURN, room_choices.RoomChoices(tools=tools, custom_tools=("web_search",)))
+        assert asks.TOOL_NAME in tiered.split("- Here", 1)[1]
+
+
+def test_a_room_not_set_to_ask_first_never_mentions_the_tool():
+    for share in ("helps", "nothing"):
+        framing = rules.framing(TURN, room_choices.RoomChoices(share=share))
+        assert asks.TOOL_NAME not in framing and "without tools" in framing
+
+
+def test_every_result_gives_back_the_share(store, sleeper, pushes):
+    exchange(store)
+    waited = call(store, sleeper, pushes)
+    again = call(store, sleeper, pushes)
+    assert waited["status"] == again["status"] == "waiting" and waited["share"] == again["share"] == SHARE
