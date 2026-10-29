@@ -658,6 +658,8 @@ def _pre_approval_request(**kwargs: Any) -> None:
 
 
 def _post_approval_response(**kwargs: Any) -> None:
+    if forks.inside():
+        return  # a fork's answer is no answer to the chat's approval (_pre_approval_request)
     session_key = _text(kwargs.get("session_key"))
     calls.cancel_alerts(session_key or _text(kwargs.get("session_id")), "approval")
     _quietly(live_activity.reporter.thinking, _text(kwargs.get("session_id")) or session_key)

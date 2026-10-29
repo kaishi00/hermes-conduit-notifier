@@ -11,7 +11,8 @@ answer went out as the chat's reply push (a prediction's raw JSON), its
 start and end moved the chat's Lock Screen, and it took the notes kept for
 the chat's next turn. The plugin wraps the fork builder so each fork's run
 is marked, and the hooks take a marked run for a subagent's. A newer Hermes
-runs no hooks for a fork, and the mark changes nothing there.
+runs no hooks for a fork, so there the mark only makes Conduit's tools
+refuse a fork, as they refuse a subagent.
 """
 
 from __future__ import annotations

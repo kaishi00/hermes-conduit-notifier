@@ -244,3 +244,25 @@ def test_a_declined_call_note_waits_for_the_chats_next_turn(hermes, marks, tmp_p
     assert "declined" not in str(contexts[0])
     turn = plugin._pre_llm_call(session_id="s", turn_id="t", user_message="hi")
     assert turn["context"].startswith("[Conduit: the user declined the phone call")
+
+
+def test_a_forks_approval_answer_leaves_the_chats_alert_and_card(hermes, marks, monkeypatch, lock_screen):
+    reporter, posts = lock_screen
+    cancelled = []
+    monkeypatch.setattr(plugin.calls, "cancel_alerts", lambda *args: cancelled.append(args))
+    reporter.flush()
+    before = len(posts)
+    _fork_run(hermes, lambda: plugin._post_approval_response(session_id="s", session_key="s", choice="deny"))
+    reporter.flush()
+    assert cancelled == [] and len(posts) == before
+    plugin._post_approval_response(session_id="s", session_key="s", choice="once")
+    assert cancelled == [("s", "approval")], "the chat's own answer still stops its alert"
+
+
+def test_a_fork_inside_the_chats_turn_leaves_the_turns_state(pushed, hermes, marks, monkeypatch):
+    monkeypatch.setattr(plugin, "_unnamed_ends", {})
+    monkeypatch.setattr(plugin, "_room_framing", lambda *args: None)
+    plugin._pre_llm_call(session_id="s", turn_id="t", user_message="Why does the download fail?")
+    parent, unnamed = dict(plugin._parent_turns), dict(plugin._unnamed_ends)
+    _fork_run(hermes, _prediction_hooks)
+    assert plugin._parent_turns == parent and plugin._unnamed_ends == unnamed
