@@ -3844,8 +3844,10 @@ your own confirm prompts (20 an hour, 20 waiting, all shown on the phone
 however many rooms ask). A room's answer its agent hasn't heard stays until it
 does, or for its week (the newest 10 a room, 60 across rooms). An answer
 counts as heard once the room turn the tool gave it to, or a turn framed with
-it, replies, so a turn that fails gets it again. Private chats never see them: `conduit_present` leaves them out of `status` and
-`earlier_answers`. The tool works only in a room turn with other people's
+it, replies, so a turn that fails gets it again. Private chats never see
+them: `conduit_present` leaves them out of `status` and `earlier_answers`. An
+ask over these limits (`too_many`, `rate_limited`) isn't kept, so the agent
+says it can't share that rather than that it'll check. The tool works only in a room turn with other people's
 agents set to ask you first (`not_room`, `not_ask_first`, `subagent`
 otherwise); the room rules let it through whatever the room's tools are,
 Talk only included, and keep Tool Search open for it, since Hermes may put it

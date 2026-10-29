@@ -41,6 +41,9 @@ POLL_MAX_S = 1.0
 
 _CHECK_LATER = "Tell the room you'll check with your owner, and don't share it until they've said yes."
 UNAVAILABLE = f"Your owner couldn't be asked. {_CHECK_LATER}"
+# Over a limit no ask is kept, so no answer will come.
+_REFUSED = {"too_many", "rate_limited"}
+_NOT_NOW = "Your owner can't be asked about this right now. Don't share it: say you can't share that here."
 
 DESCRIPTION = (
     "Ask your owner on their phone before you share something personal about them in this group room (the room is "
@@ -145,7 +148,11 @@ def _handle(args: dict[str, Any], session: str, is_child: Callable[[Any], bool],
     if is_child(session):
         return {"ok": False, "error": "subagent",
                 "note": "Only the room's own turn can ask your owner. Report back; the main agent can ask."}
-    turn = room_turn(session) if session else None
+    try:
+        turn = room_turn(session) if session else None
+    except room_rules.RoomStoreError:
+        logger.debug("conduit_push: an ask from room session %s Hermes hasn't titled yet", session, exc_info=True)
+        return {"ok": False, "error": "unavailable", "note": UNAVAILABLE}
     if turn is not None and turn.with_others and not turn.room_id:
         # A member's session Hermes hasn't titled with its room yet: a room all the same.
         return {"ok": False, "error": "unavailable", "note": UNAVAILABLE}
@@ -169,6 +176,8 @@ def _handle(args: dict[str, Any], session: str, is_child: Callable[[Any], bool],
     try:
         prompt, new = store.ask_room(question, share, room_id=turn.room_id, room_name=name, session_id=session)
     except PresentError as error:
+        if error.code in _REFUSED:
+            return {"ok": False, "error": error.code, "note": f"{_NOT_NOW} ({error})"}
         return {"ok": False, "error": error.code, "note": f"Your owner couldn't be asked ({error}). {_CHECK_LATER}"}
     if new:
         _nudge(prompt, f"{name}: {first_line(share)}", push, profile)
@@ -219,8 +228,9 @@ def frame(store: PresentStore, room_id: Any, session_id: str) -> list[str]:
     """The answers for a turn in ``room_id`` now starting in ``session_id``, left unheard until the turn replies, so
     a turn that fails before it reads them frames them again."""
     found = answers(store, room_id)
+    # A turn frames once, at its start: what an earlier turn of the session was framed with is no longer this one's.
+    _framed.pop(session_id, None)
     if found:
-        _framed.pop(session_id, None)
         _framed[session_id] = [prompt_id for prompt_id, _ in found]
         while len(_framed) > MAX_FRAMED:
             _framed.pop(next(iter(_framed)))

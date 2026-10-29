@@ -322,9 +322,13 @@ def test_room_asks_never_fill_the_owners_own_waiting_prompts(store, sleeper, pus
                         room_turn=lambda _, turn=turn: turn, choices=lambda _: choices, room_name=lambda _: "R",
                         store=store, push=pushes.append, sleep=sleeper.sleep, monotonic=sleeper.monotonic)
         clock.now += 3600  # past every hourly cap
+    mine = []
     for _ in range(store_module.MAX_WAITING):
-        _confirm(store)
+        mine.append(_confirm(store, ttl_minutes=24 * 60)["id"])
         clock.now += 3600 / store_module.PER_HOUR
+    waiting = [prompt for prompt in store._load()["prompts"] if prompt["status"] == "waiting"]
+    assert sum(bool(prompt.get("room")) for prompt in waiting) == 24
+    assert {prompt["id"] for prompt in waiting if not prompt.get("room")} == set(mine)
 
 
 def test_room_asks_have_a_cap_across_rooms(store, sleeper, pushes):
@@ -485,3 +489,34 @@ def test_unheard_answers_keep_only_the_newest_per_room_and_across_rooms(store, s
     # The newest are kept: the last room keeps its newest answers, the first rooms lose theirs.
     newest = [prompt["title"] for prompt in store.room_answers(f"room-{rooms - 1}")]
     assert newest == [f"Q{q}" for q in range(2, per_room + 2)] and kept["room-0"] == 0
+
+
+def test_an_ask_over_the_limits_never_promises_a_check(store, sleeper, pushes):
+    exchange(store)
+    for n in range(store_module.MAX_ROOM_ASKS_WAITING):
+        call(store, sleeper, pushes, {"question": f"Question {n}", "share": "x"})
+    refused = call(store, sleeper, pushes, {"question": "One more", "share": "x"})
+    assert refused["error"] == "too_many"
+    assert "check with your owner" not in refused["note"] and "don't share" in refused["note"].lower()
+
+
+def test_a_local_member_session_hermes_hasnt_titled_says_to_check_later_quietly(store, sleeper, pushes, caplog):
+    def untitled(_session):
+        raise rules.RoomStoreError("not titled yet")
+
+    with caplog.at_level("WARNING", logger="hermes.plugins.conduit_push"):
+        answer = json.loads(asks.handle(ASK, session_id=ROOM_SESSION, room_turn=untitled,
+                                        choices=lambda _: room_choices.RoomChoices(), store=store,
+                                        push=pushes.append, sleep=sleeper.sleep, monotonic=sleeper.monotonic))
+    assert answer["error"] == "unavailable" and "check with your owner" in answer["note"]
+    assert caplog.records == []
+
+
+def test_a_turn_with_nothing_to_frame_never_hears_an_earlier_turns_list(store, sleeper, pushes):
+    exchange(store)
+    asked = call(store, sleeper, pushes)
+    exchange(store, results=[{"id": asked["id"], "outcome": "declined", "via": "tap"}])
+    assert asks.frame(store, "zoo-trip", ROOM_SESSION)  # that turn failed: never heard
+    assert asks.frame(store, "other-room", ROOM_SESSION) == []
+    asks.heard(lambda: store, ROOM_SESSION, True)
+    assert len(answered(store, "zoo-trip")) == 1
