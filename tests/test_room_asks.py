@@ -81,10 +81,16 @@ def answer_while_waiting(store, sleeper, outcome, after=5.0, **result):
     sleeper.during = (after, answer)
 
 
+def heard(store_for, session_id, did):
+    """A turn that ended having replied (did) or not, its hooks in Hermes' order."""
+    asks.replied(session_id, did)
+    asks.ended(store_for, session_id, did)
+
+
 def answered(store, room_id, session_id="any-session"):
     """What a turn in the room is framed with, heard as a turn that replies hears it (the plugin's path)."""
     lines = asks.frame(store, room_id, session_id)
-    asks.heard(lambda: store, session_id, True)
+    heard(lambda: store, session_id, True)
     return lines
 
 
@@ -129,7 +135,7 @@ def test_the_answer_within_the_wait_comes_back(store, sleeper, pushes):
     assert answer["status"] == "confirmed" and "share exactly" in answer["note"].lower()
     assert sleeper.now < asks.WAIT_S
     # Heard once its turn replies: the next turn isn't told again.
-    asks.heard(lambda: store, ROOM_SESSION, True)
+    heard(lambda: store, ROOM_SESSION, True)
     assert answered(store, "zoo-trip") == []
 
 
@@ -146,7 +152,7 @@ def test_say_instead_with_no_text_reads_as_a_no(store, sleeper, pushes):
     answer_while_waiting(store, sleeper, "edit", edit_text="  ")
     answer = call(store, sleeper, pushes)
     assert answer["status"] == "declined" and "don't share" in answer["note"].lower()
-    asks.heard(lambda: store, ROOM_SESSION, True)
+    heard(lambda: store, ROOM_SESSION, True)
     later = call(store, sleeper, pushes, {"question": "Mona asks about Sunday", "share": "Sunday works."})
     exchange(store, results=[{"id": later["id"], "outcome": "edit", "via": "tap"}])
     assert answered(store, "zoo-trip") == ['Your owner said no to "Mona asks about Sunday": don\'t share it.']
@@ -310,7 +316,7 @@ def test_a_yes_licenses_only_the_share_the_owner_saw(store, sleeper, pushes):
     answer_while_waiting(store, sleeper, "confirmed")
     confirmed = call(store, sleeper, pushes, {"question": "Mona asks about lunch", "share": "Lunch works."})
     assert confirmed["status"] == "confirmed" and confirmed["share"] == "Lunch works."
-    assert "share exactly share" in confirmed["note"].lower()
+    assert "share exactly the share you gave" in confirmed["note"].lower()
 
 
 def test_room_asks_never_fill_the_owners_own_waiting_prompts(store, sleeper, pushes, clock):
@@ -459,7 +465,7 @@ def test_an_answer_the_tool_returned_is_framed_again_when_its_turn_never_replied
     exchange(store)
     answer_while_waiting(store, sleeper, "confirmed")
     assert call(store, sleeper, pushes)["status"] == "confirmed"
-    asks.heard(lambda: store, ROOM_SESSION, False)  # the turn failed before it replied
+    heard(lambda: store, ROOM_SESSION, False)  # the turn failed before it replied
     assert answered(store, "zoo-trip", ROOM_SESSION) == [
         f'Your owner said yes to "{QUESTION}": you may share this, and nothing more: {SHARE}']
     assert answered(store, "zoo-trip", ROOM_SESSION) == []
@@ -469,7 +475,7 @@ def test_an_answer_the_tool_returned_is_heard_once_its_turn_replies(store, sleep
     exchange(store)
     answer_while_waiting(store, sleeper, "declined")
     assert call(store, sleeper, pushes)["status"] == "declined"
-    asks.heard(lambda: store, ROOM_SESSION, True)
+    heard(lambda: store, ROOM_SESSION, True)
     assert answered(store, "zoo-trip") == []
 
 
@@ -520,7 +526,7 @@ def test_a_turn_with_nothing_to_frame_never_hears_an_earlier_turns_list(store, s
     exchange(store, results=[{"id": asked["id"], "outcome": "declined", "via": "tap"}])
     assert asks.frame(store, "zoo-trip", ROOM_SESSION)  # that turn failed: never heard
     assert asks.frame(store, "other-room", ROOM_SESSION) == []
-    asks.heard(lambda: store, ROOM_SESSION, True)
+    heard(lambda: store, ROOM_SESSION, True)
     assert len(answered(store, "zoo-trip")) == 1
 
 
@@ -569,3 +575,134 @@ def test_every_result_gives_back_the_share(store, sleeper, pushes):
     waited = call(store, sleeper, pushes)
     again = call(store, sleeper, pushes)
     assert waited["status"] == again["status"] == "waiting" and waited["share"] == again["share"] == SHARE
+
+
+# --- Follow-ups (review of #460) -------------------------------------------------------------
+
+
+@pytest.fixture
+def room_plugin(store, tmp_path, monkeypatch, clock):
+    monkeypatch.setattr(plugin, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(plugin, "PresentStore", lambda home: PresentStore(home, clock=clock))
+    monkeypatch.setattr(plugin.room_rules, "room_turn", lambda session, home=None: TURN)
+    monkeypatch.setattr(plugin.room_rules, "choices_for", lambda turn, home: room_choices.RoomChoices())
+    monkeypatch.setattr(plugin.room_invites, "people", lambda *a, **k: None)
+    exchange(store)
+    return plugin
+
+
+def _declined(store, sleeper, pushes):
+    asked = call(store, sleeper, pushes)
+    exchange(store, results=[{"id": asked["id"], "outcome": "declined", "via": "tap"}])
+    return f'- Your owner said no to "{QUESTION}": don\'t share it.'
+
+
+def test_a_turn_that_failed_with_error_text_frames_its_answers_again(room_plugin, store, sleeper, pushes):
+    line = _declined(store, sleeper, pushes)
+    assert line in room_plugin._room_framing(ROOM_SESSION).splitlines()
+    # Hermes runs post_llm_call for a failed turn with its error explanation; on_session_end says it failed.
+    room_plugin._post_llm_call(session_id=ROOM_SESSION, assistant_response="Error: the model timed out.",
+                               turn_id="t1")
+    room_plugin._on_session_end(session_id=ROOM_SESSION, turn_id="t1", completed=False, failed=True,
+                                interrupted=False)
+    assert line in room_plugin._room_framing(ROOM_SESSION).splitlines()
+    room_plugin._post_llm_call(session_id=ROOM_SESSION, assistant_response="I can't share that.", turn_id="t2")
+    room_plugin._on_session_end(session_id=ROOM_SESSION, turn_id="t2", completed=True, interrupted=False)
+    assert "said no" not in (room_plugin._room_framing(ROOM_SESSION) or "")
+
+
+def test_a_hermes_that_never_says_how_the_turn_ended_hears_a_turn_that_replied(room_plugin, store, sleeper, pushes):
+    line = _declined(store, sleeper, pushes)
+    assert line in room_plugin._room_framing(ROOM_SESSION).splitlines()
+    room_plugin._post_llm_call(session_id=ROOM_SESSION, assistant_response="I can't share that.", turn_id="t1")
+    # No on_session_end: the next turn's start settles it.
+    assert "said no" not in (room_plugin._room_framing(ROOM_SESSION) or "")
+
+
+def test_a_delegated_childs_turn_never_hears_the_rooms_answers(room_plugin, store, sleeper, pushes, monkeypatch):
+    line = _declined(store, sleeper, pushes)
+    child = "child-of-room"
+    monkeypatch.setattr(room_plugin, "_is_child", lambda session: session == child)
+    assert line not in (room_plugin._room_framing(child) or "").splitlines()
+    room_plugin._post_llm_call(session_id=child, assistant_response="Done.", turn_id="c1")
+    room_plugin._on_session_end(session_id=child, turn_id="c1", completed=True, interrupted=False)
+    assert line in room_plugin._room_framing(ROOM_SESSION).splitlines()
+
+
+def test_two_answers_given_at_once_in_one_turn_are_both_heard(store, monkeypatch):
+    import threading
+    import time
+    start = threading.Barrier(8)
+    keep = asks._keep_locked
+
+    def slow_keep(session_id, prompt_ids):
+        time.sleep(0.02)  # every other call reads the list meanwhile, unless the read waits for the write
+        keep(session_id, prompt_ids)
+
+    monkeypatch.setattr(asks, "_keep_locked", slow_keep)
+
+    def give(n):
+        start.wait()
+        asks._given("racing-session", f"prompt-{n}")
+
+    threads = [threading.Thread(target=give, args=(n,)) for n in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert sorted(asks._framed.pop("racing-session")) == sorted(f"prompt-{n}" for n in range(8))
+
+
+def test_the_tool_text_says_a_re_ask_must_match_and_names_the_share():
+    assert "same question and share" in asks.DESCRIPTION
+    assert "share exactly share" not in asks._NOTES["confirmed"]
+
+
+def test_a_store_read_failing_mid_wait_still_says_the_ask_waits(store, sleeper, pushes, monkeypatch):
+    exchange(store)
+
+    def unreadable(_prompt_id):
+        raise OSError("present file busy")
+
+    sleeper.during = (1.0, lambda: monkeypatch.setattr(store, "room_ask", unreadable))
+    answer = call(store, sleeper, pushes)
+    assert answer["ok"] is True and answer["status"] == "waiting" and answer["share"] == SHARE
+    assert "check with your owner" in answer["note"]
+
+
+def test_a_room_ask_is_never_answered_automatically(store, sleeper, pushes):
+    exchange(store)
+    asked = call(store, sleeper, pushes)
+    exchange(store, results=[{"id": asked["id"], "outcome": "confirmed", "via": "auto"}])
+    assert store.get(asked["id"])["status"] == "waiting"
+
+
+def test_a_store_read_failing_on_a_re_ask_still_says_the_ask_waits(store, sleeper, pushes, monkeypatch):
+    exchange(store)
+    first = call(store, sleeper, pushes)
+
+    def unreadable(_prompt_id):
+        raise OSError("present file busy")
+
+    monkeypatch.setattr(store, "room_ask", unreadable)
+    again = call(store, sleeper, pushes)
+    assert again["ok"] is True and again["id"] == first["id"] and again["status"] == "waiting"
+    assert again["share"] == SHARE and "check with your owner" in again["note"]
+
+
+def test_a_stopped_turn_never_hears_its_answers_whatever_hermes_reports(room_plugin, store, sleeper, pushes):
+    line = _declined(store, sleeper, pushes)
+    assert line in room_plugin._room_framing(ROOM_SESSION).splitlines()
+    room_plugin._post_llm_call(session_id=ROOM_SESSION, assistant_response="Partial answer", turn_id="t1")
+    room_plugin._on_session_end(session_id=ROOM_SESSION, turn_id="t1", interrupted=True)  # no completed or failed
+    assert line in room_plugin._room_framing(ROOM_SESSION).splitlines()
+
+
+def test_an_end_that_doesnt_say_how_the_turn_ended_frames_its_answers_again(room_plugin, store, sleeper, pushes):
+    # The push path counts such a turn failed and drops its held reply, so its answers never reached the room.
+    line = _declined(store, sleeper, pushes)
+    assert line in room_plugin._room_framing(ROOM_SESSION).splitlines()
+    room_plugin._post_llm_call(session_id=ROOM_SESSION, assistant_response="Error: the model timed out.",
+                               turn_id="t1")
+    room_plugin._on_session_end(session_id=ROOM_SESSION, turn_id="t1")
+    assert line in room_plugin._room_framing(ROOM_SESSION).splitlines()

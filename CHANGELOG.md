@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.118.1 (2026-10-29)
+
+### Fixes
+- With Ask me first, your answer could be lost to the room when your
+  agent's turn failed with an error, or when a helper it started ran first.
+  It now reaches the agent's next turn in that room.
+
 ## 0.118.0 (2026-10-29)
 
 ### New and improved

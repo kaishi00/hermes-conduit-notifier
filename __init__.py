@@ -295,11 +295,10 @@ def _member_room_turn(session_id: str) -> bool:
 def _post_llm_call(**kwargs: Any) -> None:
     session_id = _text(kwargs.get("session_id"))
     response = kwargs.get("assistant_response")
-    # A room turn that replied read its owner's answers (room_asks); a failed one is framed with them again.
-    _quietly(room_asks.heard, lambda: PresentStore(get_hermes_home()), session_id,
-             isinstance(response, str) and bool(response.strip()))
     if _is_child(session_id):
         return
+    # A room turn that replied read its owner's answers (room_asks), heard once on_session_end says it didn't fail.
+    _quietly(room_asks.replied, session_id, isinstance(response, str) and bool(response.strip()))
     # The Lock Screen's end waits for on_session_end too: this hook also runs
     # for a failed turn, and the first end the phone gets is the one it keeps.
     started = _take_turn_start(kwargs.get("turn_id"))
@@ -542,6 +541,9 @@ def _on_session_end(**kwargs: Any) -> None:
     # that doesn't say counts it failed, as before.
     answered = (not kwargs.get("interrupted") and kwargs.get("failed") is not True
                 and (kwargs.get("completed") or kwargs.get("failed") is False))
+    # A room turn's owner's answers are heard when it answered; a failed or stopped one, or one Hermes doesn't say
+    # (its held reply is dropped too), is framed with them again.
+    _quietly(room_asks.ended, lambda: PresentStore(get_hermes_home()), session_id, answered)
     if not pulse_turn:
         # A Pulse turn never started a Live Activity, so there is none to end.
         _quietly(live_activity.reporter.turn_ended, session_id,
@@ -887,8 +889,11 @@ def _room_framing(session_id: str, platform: Any = None, prompt: Any = None) -> 
     owner's name that they didn't post (room_posts.py)."""
     if not session_id:
         return None
-    # A turn starts: only what this turn is framed with or given is heard when it replies (room_asks).
-    _quietly(room_asks.begin, session_id)
+    # A turn starts: only what this turn is framed with or given is heard when it replies (room_asks). A delegated
+    # child's turn is the room's agent at work, never the room's turn: it neither hears nor is framed with answers.
+    child = _is_child(session_id)
+    if not child:
+        _quietly(room_asks.begin, lambda: PresentStore(get_hermes_home()), session_id)
     try:
         home = get_hermes_home()
     except Exception:  # noqa: BLE001
@@ -936,7 +941,7 @@ def _room_framing(session_id: str, platform: Any = None, prompt: Any = None) -> 
                 unread = True
                 _warn_room_once("posts", "conduit_push: couldn't read the posts of room %s", turn.room_id)
     framing = room_rules.framing(turn, choices, people, posts, unread=unread)
-    if home is not None and turn.room_id:
+    if home is not None and turn.room_id and not child:
         try:
             # What the owner answered the agent's asks since (room_asks), once.
             framing += "".join(f"\n- {line}" for line in room_asks.frame(PresentStore(home), turn.room_id,
