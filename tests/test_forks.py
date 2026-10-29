@@ -266,3 +266,18 @@ def test_a_fork_inside_the_chats_turn_leaves_the_turns_state(pushed, hermes, mar
     parent, unnamed = dict(plugin._parent_turns), dict(plugin._unnamed_ends)
     _fork_run(hermes, _prediction_hooks)
     assert plugin._parent_turns == parent and plugin._unnamed_ends == unnamed
+
+
+def test_a_tool_worker_hermes_starts_on_a_copy_of_the_context_sees_the_mark(hermes, marks):
+    # Hermes runs a turn's tools on workers given a copy of the turn's context (propagate_context_to_thread).
+    import concurrent.futures
+    import contextvars
+
+    seen = []
+
+    def hooks():
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            seen.append(pool.submit(contextvars.copy_context().run, marks.inside).result())
+
+    _fork_run(hermes, hooks)
+    assert seen == [True]

@@ -26,9 +26,10 @@ from typing import Any, Callable, Optional
 logger = logging.getLogger(__name__)
 
 _GUARD_FLAG = "__conduit_fork_marks__"
-# Set for the length of a fork's run, on the thread that runs it: Hermes
-# calls the turn's hooks there (a worker thread it starts on a copy of the
-# context sees it too).
+# Set for the length of a fork's run, on the thread that runs it. Hermes
+# calls the turn's hooks there (post_llm_call and on_session_end from the
+# run's finalizer) and runs its tools on workers given a copy of the
+# context (tool_executor's propagate_context_to_thread), which see it too.
 _in_fork: contextvars.ContextVar[bool] = contextvars.ContextVar("conduit_push_in_fork", default=False)
 
 _lock = threading.Lock()

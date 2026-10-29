@@ -954,8 +954,8 @@ def _room_framing(session_id: str, platform: Any = None, prompt: Any = None) -> 
             try:
                 posts = {"as": people["you"], "forged": room_posts.forged_for(
                     root, turn.room_id, session_id, str(people["you"]), prompt)}
-                if not room_rules.is_room_prompt(prompt):
-                    # Its lines under the owner's name can't be checked.
+                if not fork and not room_rules.is_room_prompt(prompt):
+                    # Its lines under the owner's name can't be checked (a fork's question has none).
                     _warn_room_once("prompt", "conduit_push: a turn in room %s isn't Hermes' room prompt",
                                     turn.room_id, exc_info=False)
             except Exception:  # noqa: BLE001 — framed without checking its owner's lines, and told so
