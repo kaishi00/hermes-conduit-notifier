@@ -67,6 +67,15 @@ MAPS_MODES = ("driving", "walking", "transit", "cycling")
 NAVIGATE_FEATURE = "maps-navigate"
 MAX_MAPS_TO_CHARS = 200
 MAX_FEATURES = 16
+# A room's ask (room_asks, Ask me first): an agent in a room with other
+# people's agents asks its owner before it shares something. Only a Conduit
+# that says it shows them gets one, and only its answer counts: another would
+# show it as a plain confirm, whose Edit opens the room's hidden session.
+ROOM_ASK_FEATURE = "room-asks"
+ROOM_ASK_TTL_MINUTES = 24 * 60
+MAX_ROOM_ASKS_WAITING = 3
+MAX_ROOM_ID_CHARS = 128
+MAX_ROOM_NAME_CHARS = 80
 
 MAX_TITLE_CHARS = 80
 MAX_PREVIEW_CHARS = 2000
@@ -176,7 +185,8 @@ class PresentStore:
                 _take_result(state, installation, device["features"], result, now)
             # The newest, within a cap only a hand-edited store can exceed.
             waiting = [_public(prompt) for prompt in state["prompts"] if prompt["status"] == "waiting"
-                       and (not prompt.get("maps") or NAVIGATE_FEATURE in device["features"])][-MAX_WAITING:]
+                       and (not prompt.get("maps") or NAVIGATE_FEATURE in device["features"])
+                       and (not prompt.get("room") or ROOM_ASK_FEATURE in device["features"])][-MAX_WAITING:]
             # Expired cards leave the file; the rest go only to a phone that
             # shows them.
             state["cards"] = [card for card in state["cards"] if now < card["expires_at"]]
@@ -215,7 +225,8 @@ class PresentStore:
         return bool(drawing) and all(feature in features for features in drawing)
 
     def confirm(self, title: Any, preview: Any, action_label: Any = None, *, spoken_yes: Any = None,
-                session_id: Any = None, ttl_minutes: Any = None, maps: Any = None) -> dict[str, Any]:
+                session_id: Any = None, ttl_minutes: Any = None, maps: Any = None,
+                room: Any = None) -> dict[str, Any]:
         """Keeps a confirm prompt for the phone. Raises PresentError when it
         won't."""
         clean_title = _line(title, MAX_TITLE_CHARS + 1)
@@ -264,9 +275,65 @@ class PresentStore:
             }
             if navigate is not None:
                 prompt["maps"] = navigate
+            if room is not None:
+                prompt["room"] = room
             state["prompts"].append(prompt)
             _trim_prompts(state)
             state["asked"] = (recent + [now])[-PER_HOUR:]
+            return _shown(prompt)
+
+    def ask_room(self, question: Any, share: Any, *, room_id: Any, room_name: Any, session_id: Any
+                 ) -> tuple[dict[str, Any], bool]:
+        """Keeps a room's ask (room_asks) for a Conduit that shows them: the
+        question as its title, what would be shared as its preview. The same
+        question still waiting in that room's session is returned instead of
+        a new one; the bool says whether it's new. Raises PresentError when
+        it won't."""
+        session = _session_key(session_id)
+        room = _room({"id": room_id, "name": room_name})
+        if not session or room is None:
+            raise PresentError("invalid", "A room's ask needs the room and its session.")
+        with self._locked() as state:
+            now = self.clock()
+            mine = [prompt for prompt in state["prompts"] if prompt.get("room") and prompt["session_id"] == session
+                    and prompt["status"] == "waiting"]
+            asked = _line(question, MAX_TITLE_CHARS + 1).casefold()
+            same = next((prompt for prompt in mine if prompt["title"].casefold() == asked), None)
+            if same is not None:
+                return _shown(same), False
+            if not any(ROOM_ASK_FEATURE in device.get("features", []) and now - device["seen_at"]
+                       < CARD_DEVICE_RECENT_S for device in state["devices"].values()):
+                raise PresentError("no_device", "No Conduit that shows a room's asks has connected to this Hermes "
+                                                "profile recently.")
+            if len(mine) >= MAX_ROOM_ASKS_WAITING:
+                raise PresentError("too_many", f"{MAX_ROOM_ASKS_WAITING} asks from this room are still waiting.")
+        prompt = self.confirm(question, share, "Share", spoken_yes=["share it"], session_id=session,
+                              ttl_minutes=ROOM_ASK_TTL_MINUTES, room=room)
+        return prompt, True
+
+    def room_answers(self, session_id: Any) -> list[dict[str, Any]]:
+        """The answered (or expired) asks of a room's session its agent hasn't
+        heard yet, oldest first, marked heard, each with its question
+        (``title``) and what it would share (``preview``)."""
+        session = _session_key(session_id)
+        if not session:
+            return []
+        with self._locked() as state:
+            found = [prompt for prompt in state["prompts"] if prompt.get("room") and prompt["session_id"] == session
+                     and prompt["status"] != "waiting" and not prompt["reported"]]
+            for prompt in found:
+                prompt["reported"] = True
+            return [{**_shown(prompt), "preview": prompt["preview"]} for prompt in found]
+
+    def room_ask(self, prompt_id: Any) -> dict[str, Any] | None:
+        """One of a room's asks as it stands; one that's answered is marked
+        heard."""
+        with self._locked() as state:
+            prompt = _find(state, prompt_id)
+            if prompt is None or not prompt.get("room"):
+                return None
+            if prompt["status"] != "waiting":
+                prompt["reported"] = True
             return _shown(prompt)
 
     def show(self, title: Any, markdown: Any, *, session_id: Any = None, cards: Any = None,
@@ -322,12 +389,13 @@ class PresentStore:
         every outcome the agent hasn't seen. Outcomes returned are marked
         reported."""
         with self._locked() as state:
+            # A room's asks are its agent's (room_asks), never a private chat's.
             if prompt_id is not None:
                 prompt = _find(state, prompt_id)
-                found = [prompt] if prompt else []
+                found = [prompt] if prompt and not prompt.get("room") else []
             else:
-                found = [prompt for prompt in state["prompts"]
-                         if prompt["status"] == "waiting" or not prompt["reported"]]
+                found = [prompt for prompt in state["prompts"] if not prompt.get("room")
+                         and (prompt["status"] == "waiting" or not prompt["reported"])]
             shown = [_shown(prompt) for prompt in found]
             for prompt in found:
                 if prompt["status"] != "waiting":
@@ -337,7 +405,8 @@ class PresentStore:
     def unreported_outcomes(self) -> list[dict[str, Any]]:
         """Outcomes the agent hasn't seen yet, oldest first, marked seen."""
         with self._locked() as state:
-            found = [prompt for prompt in state["prompts"] if prompt["status"] != "waiting" and not prompt["reported"]]
+            found = [prompt for prompt in state["prompts"] if prompt["status"] != "waiting" and not prompt["reported"]
+                     and not prompt.get("room")]
             for prompt in found:
                 prompt["reported"] = True
             return [_shown(prompt) for prompt in found]
@@ -347,7 +416,7 @@ class PresentStore:
         answered one keeps its answer), or None when there's no such prompt."""
         with self._locked() as state:
             prompt = _find(state, prompt_id)
-            if prompt is None:
+            if prompt is None or prompt.get("room"):
                 return None
             if prompt["status"] == "waiting":
                 prompt.update(status="cancelled", finished_at=int(self.clock()))
@@ -472,7 +541,19 @@ def _public(prompt: dict[str, Any]) -> dict[str, Any]:
     public = {key: prompt[key] for key in _PUBLIC}
     if prompt.get("maps"):
         public["maps"] = prompt["maps"]
+    if prompt.get("room"):
+        public["room"] = prompt["room"]
     return public
+
+
+def _room(value: Any) -> dict[str, str] | None:
+    """A room's ask's room: its id and name, on one line each."""
+    if not isinstance(value, dict) or not isinstance(value.get("id"), str):
+        return None
+    room_id = value["id"].strip()
+    if not room_id or len(room_id) > MAX_ROOM_ID_CHARS or _SESSION_KEY_CONTROL.search(room_id):
+        return None
+    return {"id": room_id, "name": _line(value.get("name"), MAX_ROOM_NAME_CHARS) or "a room"}
 
 
 def _maps(value: Any) -> dict[str, str] | None:
@@ -519,6 +600,8 @@ def _take_result(state: dict[str, Any], installation: str, features: list[str], 
     # A Go prompt is answered only by a Conduit that opens Maps (it's the only
     # one that gets it).
     if prompt.get("maps") and NAVIGATE_FEATURE not in features:
+        return
+    if prompt.get("room") and ROOM_ASK_FEATURE not in features:
         return
     # Conduit opens Maps by itself, and only as a yes to a Go prompt.
     if via == "auto" and (outcome != "confirmed" or not prompt.get("maps")):
@@ -576,6 +659,12 @@ def _prompt(raw: Any, now: float) -> dict[str, Any] | None:
         navigate = _maps(raw.get("maps"))
         if navigate is not None:
             prompt["maps"] = navigate
+    if raw.get("room") is not None:
+        # One whose room can't be read is dropped, not kept as a plain prompt a private chat would hear.
+        room = _room(raw["room"])
+        if room is None or not prompt["session_id"]:
+            return None
+        prompt["room"] = room
     if raw.get("via") in VIAS:
         prompt["via"] = raw["via"]
     edit_text = _text(raw.get("edit_text"), MAX_EDIT_TEXT_CHARS)

@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.118.0 (2026-10-29)
+
+### New and improved
+- Ask me first: in a room with other people's agents, your agent asks your
+  phone before it shares something personal about you. Share, say what it
+  should say instead, or don't share; an answer that comes later reaches it
+  before its next turn in that room. Needs a Conduit that shows a room's asks.
+
 ## 0.117.0 (2026-10-29)
 
 ### Fixes
