@@ -355,6 +355,8 @@ routes:
   - PUT /room-images/{room_id}
   - GET /rooms/approvals
   - POST /rooms/approvals/answer
+  - GET /rooms/chats
+  - PUT /rooms/chats
   - GET /rooms/choices
   - PUT /rooms/choices
   - DELETE /rooms/copies
