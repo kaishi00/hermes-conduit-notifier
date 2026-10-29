@@ -263,7 +263,11 @@ export function crashReportRoutes({ reports, adminToken, readJson, enforceRateLi
 export function crashReportsFromEnv(env, dataPath) {
   const token = env.CRASH_REPORTS_TOKEN;
   if (!token) return { reports: null, adminToken: null };
-  if (token.length < 32) throw new Error('CRASH_REPORTS_TOKEN must be at least 32 characters.');
+  if (token.length < 32) {
+    // An optional feature never stops the relay's notifications.
+    console.error(JSON.stringify({ level: 'error', message: 'CRASH_REPORTS_TOKEN is under 32 characters; crash reports are off' }));
+    return { reports: null, adminToken: null };
+  }
   const directory = join(dirname(dataPath), 'crash-reports');
   return { reports: new CrashReports({ directory }), adminToken: token };
 }

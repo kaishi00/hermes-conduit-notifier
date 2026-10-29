@@ -224,8 +224,7 @@ an hour from one address and 500 a day in all. The route takes posts from
 anyone, so a flood from many addresses can spend the day's 500 or push the
 oldest reports past the 1,000; the stacks are what matter, and a crash that
 keeps happening comes back. It takes reports only when
-`CRASH_REPORTS_TOKEN` (32 characters or more; a shorter one stops the relay at
-startup) is set in `.env`; the same token reads them:
+`CRASH_REPORTS_TOKEN` (32 characters or more; a shorter one leaves reports off) is set in `.env`; the same token reads them:
 
 ```shell
 curl -H "Authorization: Bearer $CRASH_REPORTS_TOKEN" "$PUBLIC_URL/v1/crash-reports?build=236"

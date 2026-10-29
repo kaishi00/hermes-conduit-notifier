@@ -121,9 +121,9 @@ test('a heading without its report is dropped on start', () => {
   }
 });
 
-test('no token, no reports; a short token is refused', () => {
+test('no token or a short one, no reports', () => {
   assert.equal(crashReportsFromEnv({}, '/tmp/x/relay.json').reports, null);
-  assert.throws(() => crashReportsFromEnv({ CRASH_REPORTS_TOKEN: 'short' }, '/tmp/x/relay.json'), /at least 32/);
+  assert.equal(crashReportsFromEnv({ CRASH_REPORTS_TOKEN: 'short' }, '/tmp/x/relay.json').reports, null, 'a short token leaves reports off, the relay up');
 });
 
 async function startRelay(extraEnv) {

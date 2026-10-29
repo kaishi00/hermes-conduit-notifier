@@ -22,7 +22,7 @@ services:
       MAPS_KEY_PATH: ${MAPS_KEY_ID:+/run/secrets/maps/maps.p8}
       # Testers' crash and freeze reports (optional): set it to 32+ random
       # characters to take them; the same token reads them. A
-      # shorter one stops the relay at startup.
+      # shorter one leaves reports off.
       CRASH_REPORTS_TOKEN: ${CRASH_REPORTS_TOKEN:-}
       TRUST_PROXY: 1
       RELAY_MAX_INSTALLATIONS: ${RELAY_MAX_INSTALLATIONS:-}
