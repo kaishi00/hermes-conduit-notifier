@@ -931,10 +931,10 @@ def _room_framing(session_id: str, platform: Any = None, prompt: Any = None) -> 
                 unread = True
                 _warn_room_once("posts", "conduit_push: couldn't read the posts of room %s", turn.room_id)
     framing = room_rules.framing(turn, choices, people, posts, unread=unread)
-    if home is not None:
+    if home is not None and turn.room_id:
         try:
             # What the owner answered the agent's asks since (room_asks), once.
-            framing += "".join(f"\n- {line}" for line in room_asks.answered(PresentStore(home), session_id))
+            framing += "".join(f"\n- {line}" for line in room_asks.answered(PresentStore(home), turn.room_id))
         except Exception:  # noqa: BLE001 — the answers wait for the next turn
             _warn_room_once("asks", "conduit_push: couldn't read the answers to session %s's asks", session_id)
     return framing

@@ -259,10 +259,14 @@ def tool_block(tool_name: Any, choices: RoomChoices, args: Any = None) -> Option
     (a ``tool_call`` is checked by the tools it names)."""
     name = str(tool_name or "")
     if name == BRIDGE_CALL:
-        for called in _called_names(args):
+        called_names = _called_names(args)
+        for called in called_names:
             block = tool_block(called, choices)
             if block is not None:
                 return block
+        # One whose tool can't be read is let through only where some tool is.
+        if not called_names and not allowed_tools(choices):
+            return TALK_ONLY_BLOCK
     if name == ASK_TOOL:
         return None if choices.share == "ask" else ASK_BLOCK
     if name in _LEARNING_TOOLS:

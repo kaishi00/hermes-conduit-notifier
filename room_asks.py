@@ -4,7 +4,8 @@ the ``conduit_ask_owner`` tool (designs/cross-owner-agents, N7c).
 In a room set to Ask me first, the agent asks its owner's phone ("Laifu asks whether you're free on the 22nd",
 with what it would share), and waits a little for the answer: Share, Say instead (what the owner writes), or Don't
 share. Unanswered, it tells the room it'll check, and the answer reaches it privately before its next turn in that
-room (``answered``, from the turn's framing). Nothing goes into the room by itself.
+room (``answered``, from the turn's framing). Asks are the room's, not the session's, so a compacted room session's
+continuation hears them too. Nothing goes into the room by itself.
 
 The ask is a confirm prompt in the profile's present store, so the panel, its notification and its voice yes are
 Conduit's own; only a Conduit that says it shows a room's asks gets one (present_store.ROOM_ASK_FEATURE). The tool
@@ -145,7 +146,10 @@ def _handle(args: dict[str, Any], session: str, is_child: Callable[[Any], bool],
         return {"ok": False, "error": "subagent",
                 "note": "Only the room's own turn can ask your owner. Report back; the main agent can ask."}
     turn = room_turn(session) if session else None
-    if turn is None or not turn.with_others or not turn.room_id:
+    if turn is not None and turn.with_others and not turn.room_id:
+        # A member's session Hermes hasn't titled with its room yet: a room all the same.
+        return {"ok": False, "error": "unavailable", "note": UNAVAILABLE}
+    if turn is None or not turn.with_others:
         return {"ok": False, "error": "not_room",
                 "note": "This asks your owner from a group room with other people's agents; this isn't one. In "
                         "a private chat, ask the user directly."}
@@ -205,10 +209,11 @@ def _nudge(prompt: dict[str, Any], body: str, push: Callable[[dict], None], prof
         logger.warning("conduit_push: could not wake the phone for a room's ask", exc_info=True)
 
 
-def answered(store: PresentStore, session_id: Any) -> list[str]:
-    """What the owner answered since, for a turn in the room session ``session_id``: a private line each, once."""
+def answered(store: PresentStore, room_id: Any) -> list[str]:
+    """What the owner answered since, for a turn in the room ``room_id`` (whichever of its sessions asked): a private
+    line each, once."""
     lines = []
-    for prompt in store.room_answers(session_id):
+    for prompt in store.room_answers(room_id):
         question = prompt["title"]
         if prompt["status"] == "confirmed":
             lines.append(f'Your owner said yes to "{question}": you may share this, and nothing more: '

@@ -121,7 +121,7 @@ def test_the_answer_within_the_wait_comes_back(store, sleeper, pushes):
     assert answer["status"] == "confirmed" and "share exactly" in answer["note"].lower()
     assert sleeper.now < asks.WAIT_S
     # Taken: the next turn isn't told again.
-    assert asks.answered(store, ROOM_SESSION) == []
+    assert asks.answered(store, "zoo-trip") == []
 
 
 def test_say_instead_returns_what_the_owner_wrote(store, sleeper, pushes):
@@ -151,26 +151,56 @@ def test_a_later_answer_frames_the_next_turn_once(store, sleeper, pushes, clock)
     first = call(store, sleeper, pushes)
     second = call(store, sleeper, pushes, {"question": "Mona asks for your address", "share": "12 Elm Street"})
     third = call(store, sleeper, pushes, {"question": "Laifu asks about Sunday", "share": "Sunday works."})
-    assert asks.answered(store, ROOM_SESSION) == []
+    assert asks.answered(store, "zoo-trip") == []
     exchange(store, results=[
         {"id": first["id"], "outcome": "confirmed", "via": "tap"},
         {"id": second["id"], "outcome": "declined", "via": "tap"},
         {"id": third["id"], "outcome": "edit", "via": "tap", "edit_text": "Say I'll know by Friday."}])
-    lines = asks.answered(store, ROOM_SESSION)
+    lines = asks.answered(store, "zoo-trip")
     assert lines == [
         f'Your owner said yes to "{QUESTION}": you may share this, and nothing more: {SHARE}',
         'Your owner said no to "Mona asks for your address": don\'t share it.',
         'Your owner answered "Laifu asks about Sunday" with: Say I\'ll know by Friday. Share only that.']
-    assert asks.answered(store, ROOM_SESSION) == []
-    # Another room's session never gets them, nor a private chat's status.
-    assert asks.answered(store, "room_" + "f" * 32) == []
+    assert asks.answered(store, "zoo-trip") == []
+    # Another room never gets them.
+    assert asks.answered(store, "other-room") == []
+
+
+def test_a_compacted_room_session_still_hears_the_answer_and_asks_once(store, sleeper, pushes):
+    # Hermes continues a compacted room session under a new id; the room is the same (room_rules follows it).
+    exchange(store)
+    first = call(store, sleeper, pushes)
+    later = "room_" + "f" * 32
+    continued = rules.RoomTurn(room_id="zoo-trip", side="member", with_others=True, session_id=later)
+    choices = room_choices.RoomChoices()
+    again = json.loads(asks.handle(ASK, session_id=later, room_turn=lambda _: continued, choices=lambda _: choices,
+                                   room_name=lambda _: "Zoo trip", store=store, push=pushes.append,
+                                   sleep=sleeper.sleep, monotonic=sleeper.monotonic))
+    assert again["id"] == first["id"] and len(pushes) == 1
+    exchange(store, results=[{"id": first["id"], "outcome": "declined", "via": "tap"}])
+    assert asks.answered(store, continued.room_id) == [f'Your owner said no to "{QUESTION}": don\'t share it.']
+
+
+def test_a_rooms_asks_have_their_own_budget(store, sleeper, pushes, clock):
+    # Other people steer a room's agent: its asks never use up the owner's own confirm prompts.
+    exchange(store)
+    for n in range(store_module.ROOM_ASKS_PER_HOUR):
+        asked = call(store, sleeper, pushes, {"question": f"Question {n}", "share": "x"})
+        exchange(store, results=[{"id": asked["id"], "outcome": "declined", "via": "tap"}])
+    refused = call(store, sleeper, pushes, {"question": "One more", "share": "x"})
+    assert refused["error"] == "rate_limited" and "don't share" in refused["note"].lower()
+    assert len(pushes) == store_module.ROOM_ASKS_PER_HOUR
+    for _ in range(store_module.PER_HOUR):
+        _confirm(store)
+    clock.now += 3600
+    assert call(store, sleeper, pushes, {"question": "Next hour", "share": "x"})["ok"] is True
 
 
 def test_an_expired_ask_frames_as_not_answered(store, sleeper, pushes, clock):
     exchange(store)
     call(store, sleeper, pushes)
     clock.now += 24 * 3600
-    assert asks.answered(store, ROOM_SESSION) == [
+    assert asks.answered(store, "zoo-trip") == [
         f'Your owner didn\'t answer "{QUESTION}" in time: don\'t share it.']
 
 
@@ -205,6 +235,10 @@ def test_only_ask_me_first_lets_the_tool_through_even_in_talk_only():
     assert rules.tool_block("tool_search", ask_first) is None
     assert rules.tool_block("tool_call", ask_first, {"name": asks.TOOL_NAME}) is None
     assert rules.tool_block("tool_call", ask_first, {"name": "web_search"}) == rules.TALK_ONLY_BLOCK
+    # One whose tool can't be read stays blocked where no tool is allowed.
+    for args in ({}, {"calls": "not json"}, {"calls": [{"tool": "web_search"}]}, None):
+        assert rules.tool_block("tool_call", ask_first, args) == rules.TALK_ONLY_BLOCK
+    assert rules.tool_block("tool_call", room_choices.RoomChoices(share="ask", tools="look"), {}) is None
 
 
 def test_the_tool_refuses_outside_a_room_and_in_a_subagent(store, sleeper, pushes):
@@ -213,6 +247,11 @@ def test_the_tool_refuses_outside_a_room_and_in_a_subagent(store, sleeper, pushe
     assert call(store, sleeper, pushes, session_id="")["error"] == "not_room"
     alone = rules.RoomTurn(room_id="zoo-trip", side="home", with_others=False, session_id=ROOM_SESSION)
     assert call(store, sleeper, pushes, turn=alone)["error"] == "not_room"
+    # A member's room session not titled with its room yet is still a room: never told to ask "the user" there.
+    untitled = rules.RoomTurn(room_id="", side="member", with_others=True, session_id=ROOM_SESSION)
+    refused = call(store, sleeper, pushes, turn=untitled)
+    assert refused["error"] == "unavailable" and "you'll check with your owner" in refused["note"]
+    assert "ask the user" not in refused["note"]
     assert call(store, sleeper, pushes, is_child=lambda _: True)["error"] == "subagent"
     assert call(store, sleeper, pushes, share="helps")["error"] == "not_ask_first"
     assert pushes == [] and exchange(store)["prompts"] == []
@@ -252,7 +291,7 @@ def test_private_status_leaves_room_asks_out(store, sleeper, pushes):
     assert store.status(asked["id"]) == [] and store.cancel(asked["id"]) is None
     assert store.unreported_outcomes() == []
     # Still the room's to hear.
-    assert len(asks.answered(store, ROOM_SESSION)) == 1
+    assert len(asks.answered(store, "zoo-trip")) == 1
 
 
 def test_a_room_prompt_with_a_bad_room_on_disk_is_dropped(store, sleeper, pushes, tmp_path):

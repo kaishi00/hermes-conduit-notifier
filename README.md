@@ -3834,8 +3834,11 @@ An ask is a prompt in the profile's `conduit-present.json` that carries its
 room and the room's session. Only a Conduit that says it shows a room's asks
 (feature `room-asks` on its exchange) gets one, and only its answer counts;
 with none, the tool refuses (`no_device`) and the agent says it'll check
-with you. At most 3 asks wait per room, the same question while one waits
-returns that one, and they count toward the 20 prompts an hour. Private
+with you. Asks are the room's, not the chat session's, so a room session
+Hermes compacted still hears its answers. At most 3 asks wait per room, the
+same question while one waits returns that one, and a room asks at most 6
+times an hour, a budget of its own, so other people steering a room's agent
+never use up your own confirm prompts (20 an hour). Private
 chats never see them: `conduit_present` leaves them out of `status` and
 `earlier_answers`. The tool works only in a room turn with other people's
 agents set to ask you first (`not_room`, `not_ask_first`, `subagent`
