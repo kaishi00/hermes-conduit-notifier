@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.119.0 (2026-10-29)
+
+### New and improved
+- Use my data: in a room with other people's agents, your agent can say
+  when you're busy, from the calendar your phone shares, to find a time.
+  Only the busy times go, with your time zone and when your phone last
+  synced, never what, where or with whom.
+
 ## 0.118.1 (2026-10-29)
 
 ### Fixes
