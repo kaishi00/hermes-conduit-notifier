@@ -166,6 +166,7 @@ test('a relay without the token takes no reports', async () => {
   try {
     assert.equal((await relay.api('/v1/crash-reports', { method: 'POST', body: post() })).status, 404);
     assert.ok(!(await relay.capabilities()).includes('crash-reports'));
+    assert.equal((await relay.api('/v1/crash-reports', { token: TOKEN })).status, 404);
     assert.ok(!existsSync(join(relay.dir, 'crash-reports')), 'no reports directory');
   } finally {
     relay.stop();
