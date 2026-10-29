@@ -5,6 +5,7 @@ import { dirname } from 'node:path';
 import { isIP } from 'node:net';
 import { pathToFileURL } from 'node:url';
 import { ApnsClient } from './apns.mjs';
+import { CRASH_REPORTS_CAPABILITY, crashReportRoutes, crashReportsFromEnv } from './crash-reports.mjs';
 import { SWEEP_INTERVAL_MS } from './event-ledger.mjs';
 import { limitsFromEnv } from './limits.mjs';
 import { LIVE_ACTIVITIES_CAPABILITY, LiveActivities, validateRegistration, validateReport, validateToken } from './live-activities.mjs';
@@ -21,9 +22,9 @@ const RELAY_CAPABILITIES = ['decisions', 'decision-cards', 'meta', 'e2e-v1', WAT
 const RELAY_INFO = (() => {
   try {
     const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-    return { version: String(pkg.version || 'unknown'), capabilities: RELAY_CAPABILITIES };
+    return { version: String(pkg.version || 'unknown'), capabilities: [...RELAY_CAPABILITIES] };
   } catch {
-    return { version: 'unknown', capabilities: RELAY_CAPABILITIES };
+    return { version: 'unknown', capabilities: [...RELAY_CAPABILITIES] };
   }
 })();
 
@@ -33,6 +34,7 @@ let apns;
 let limits;
 let apnsSend;
 let watchTools;
+let crashReports;
 let watchGrants;
 let rings;
 let liveActivities;
@@ -192,6 +194,14 @@ function main() {
     clientAddress,
     socketOptions: config.watchAudioIdleMs ? { idleMs: config.watchAudioIdleMs } : {},
   });
+  // Testers' crash and freeze reports (crash-reports.mjs), on a relay
+  // with CRASH_REPORTS_TOKEN only.
+  const crashReportStore = crashReportsFromEnv(process.env, config.dataPath);
+  if (crashReportStore.reports) {
+    RELAY_INFO.capabilities.push(CRASH_REPORTS_CAPABILITY);
+    setInterval(() => crashReportStore.reports.prune(), 86_400_000).unref();
+  }
+  crashReports = crashReportRoutes({ ...crashReportStore, readJson, enforceRateLimit, clientAddress });
   watchTools = watchToolRoutes({
     grants: watchGrants,
     readJson,
@@ -993,6 +1003,8 @@ async function route(request, response) {
   // Wrist-down tools for a Watch call: a sealed rendezvous between the
   // Watch and its host (watch-tools.mjs).
   if (await watchTools(request, response, url)) return;
+
+  if (await crashReports(request, response, url, sendJson)) return;
 
   sendJson(response, 404, { error: 'not_found' });
 }
