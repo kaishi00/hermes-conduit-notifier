@@ -1023,6 +1023,9 @@ def _link_asks_command(args: argparse.Namespace, root: Path) -> int:
             answered = asks.answer_held(target, text=text or None, share=share, decline=decline)
             print(f"Answered {_printable(answered['from'])}." if not decline
                   else f"Declined {_printable(answered['from'])}'s ask.")
+            from . import room_links
+
+            _say_if_nothing_reads(room_links, root, "the answer waits here")
     except (link_asks.AsksError, OSError) as error:
         print(f"Couldn't {verb}: {error}")
         return 1

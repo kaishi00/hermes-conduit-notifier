@@ -3934,7 +3934,8 @@ model there. Each Link has rules, set by the person asked:
 A Link without rules asks you for everything. Free on a date reads the
 calendar your phone shares with that profile, busy times only, as for
 Use my data; a date more than 92 days off or past what the phone synced
-answers that it can't tell. What waits for you is a prompt on your phone
+answers that it can't tell; an answer from a phone that last shared its
+calendar more than 6 hours ago says how long ago. What waits for you is a prompt on your phone
 (a Conduit that shows a Link's asks, feature `link-asks`; with none, the
 ask is answered that it can't be now) for 24 hours, and unanswered the
 asker hears no answer came. You can answer from here too:
@@ -3946,6 +3947,7 @@ asker hears no answer came. You can answer from here too:
 
 Each Link may ask 10 times an hour, with at most 3 asks waiting for you
 (20 across Links); past that the ask is answered that there are too many.
+They wait on your phone with a room's asks, within the same 40 it shows.
 Asks are kept in `conduit-rooms/asks.json` (owner only) for a week.
 
 Conduit reads and changes the rules with capability `link-asks`:

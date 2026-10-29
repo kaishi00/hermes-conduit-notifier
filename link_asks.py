@@ -118,6 +118,8 @@ def question(value: Any) -> str:
 
 def described(asked: dict[str, Any]) -> str:
     """What's asked, on one line: "free on 2026-10-22, 10:00-12:00?" or the question."""
+    if not isinstance(asked, dict):
+        return "an ask that couldn't be read"
     if "free_on" in asked:
         when = asked["free_on"]
         window = f", {when['from']}-{when['to']}" if "from" in when else ""
@@ -274,6 +276,10 @@ class Asks:
         rule = rules["free_on"] if "free_on" in asked else rules["questions"]
         if rule == "off":
             self._settle(entry, {"status": NOT_ALLOWED, "text": "They don't take asks like this."})
+            return
+        if not self._profile_exists(rules["profile"]):
+            # Its profile was deleted since: nothing is written there, so it isn't made again.
+            self._settle(entry, {"status": UNAVAILABLE, "text": "They can't be asked right now."})
             return
         computed = self._free(rules["profile"], asked["free_on"], times=rule == "times") if "free_on" in asked \
             else None
@@ -443,7 +449,12 @@ class Asks:
                 if device["window_from"] and (start_s < window[0] or end_s > window[1]):
                     return {"status": UNAVAILABLE, "text": "That date is past what their phone shares."}
                 blocks = store.busy_blocks(db, device["id"], start_s, end_s)
+                synced = device.get("last_seen")
+                now = store.clock()
         except PhoneError:
+            return cant
+        except Exception as exc:  # noqa: BLE001 — answered all the same, so the ask isn't dropped
+            logger.warning("Linked Rooms couldn't read a calendar for an ask (%s)", type(exc).__name__)
             return cant
         when = described({"free_on": asked}).removeprefix("free on ").removesuffix("?")
         answer: dict[str, Any] = {"status": ANSWERED, "free": not blocks, "time_zone": tz}
@@ -453,6 +464,9 @@ class Asks:
             answer["text"] = f"Busy {spans} on {asked['date']} ({tz}), free otherwise."
         else:
             answer["text"] = f"{'Free' if not blocks else 'Busy'} on {when}."
+        stale = _stale(synced, now)
+        if stale:
+            answer["text"] += f" Their phone last shared its calendar {stale}."
         return answer
 
     def _hold(self, entry: dict[str, Any], computed: Optional[dict[str, Any]]) -> None:
@@ -460,7 +474,8 @@ class Asks:
         unavailable."""
         share = computed is not None
         title = _title(entry["asked"])
-        preview = computed["text"] if share else entry["asked"]["question"]
+        # The question is the other side's words: shown as plain text, never as Markdown.
+        preview = computed["text"] if share else _plain(entry["asked"]["question"])
         try:
             prompt = self.present(entry["profile"]).ask_link(
                 title, preview, link={"id": entry["link"], "name": entry["name"], "share": share},
@@ -471,10 +486,17 @@ class Asks:
             return
         with self.store.update() as state:
             key = _received_key(entry["link"], entry["ask_id"])
-            if key in state["received"]:
-                return
-            state["received"][key] = {**entry, "status": "held", "prompt_id": prompt["id"],
-                                      **({"computed": computed} if share else {})}
+            again = key in state["received"]
+            if not again:
+                state["received"][key] = {**entry, "status": "held", "prompt_id": prompt["id"],
+                                          **({"computed": computed} if share else {})}
+        if again:
+            # The same ask, handled twice at once: the other one's prompt stands, so this one leaves the phone.
+            try:
+                self.present(entry["profile"]).settle_link(prompt["id"], "declined")
+            except Exception:  # noqa: BLE001
+                logger.debug("Linked Rooms couldn't take back a second prompt for an ask", exc_info=True)
+            return
         self._notify(entry)
 
     def _notify(self, entry: dict[str, Any]) -> None:
@@ -707,6 +729,26 @@ def _shown_received(entry: dict[str, Any]) -> dict[str, Any]:
         if entry.get(field) not in (None, ""):
             shown[field] = entry[field]
     return shown
+
+
+_MARKDOWN = re.compile(r"([\\`*_{}\[\]()#+!<>|~])")
+STALE_S = 6 * 3600
+
+
+def _plain(text: str) -> str:
+    """Text shown as itself where Markdown is read: each Markdown character escaped."""
+    return _MARKDOWN.sub(r"\\\1", text)
+
+
+def _stale(synced: Any, now: float) -> str:
+    """How long ago the phone last shared its calendar, when it's over STALE_S; else ""."""
+    try:
+        seconds = int(now) - int(synced)
+    except (TypeError, ValueError):
+        return ""
+    if seconds <= STALE_S:
+        return ""
+    return f"{seconds // 3600} hours ago" if seconds < 2 * 86400 else f"{seconds // 86400} days ago"
 
 
 def _busy(value: Any) -> Optional[list[dict[str, str]]]:

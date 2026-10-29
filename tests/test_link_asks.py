@@ -319,6 +319,7 @@ def cli(pair, monkeypatch):
 
     module = _load("conduit_push.cli", ROOT / "cli.py")
     monkeypatch.setattr(module, "_link_asks_for", lambda root: pair.asked)
+    monkeypatch.setattr(module, "LINKS_READING_WAIT_S", 0)
 
     def run(action, target="", **values):
         return module.dispatch(argparse.Namespace(
@@ -377,3 +378,60 @@ def test_the_ask_commands_parse():
     args = parser.parse_args(["links", "answer", "ask_abcdefgh", "--text", "Yes, after 6."])
     assert (args.links_action, args.text, args.share, args.decline) == ("answer", "Yes, after 6.", False, False)
     assert parser.parse_args(["links", "answer", "ask_abcdefgh", "--decline"]).decline is True
+
+
+def test_an_unreadable_ask_lists_and_answers_without_failing(cli, pair, capsys):
+    pair.asked.on_ask(room_links.Received(link_id=MONA, kind=link_asks.ASK, message_id="z", at=NOW,
+                                          body={"v": 1, "ask_id": "bad-ask-00009", "free_on": "soon"}))
+    assert cli("asks") == 0
+    assert "an ask that couldn't be read" in capsys.readouterr().out
+
+
+def test_a_calendar_answer_says_when_the_phone_last_shared_it(pair):
+    import sqlite3
+
+    pair.share_calendar()
+    rules_for(pair, free_on="yes_no")
+    assert "last shared" not in pair.ask({"free_on": {"date": "2026-10-16"}})["answer"]
+    store = phone.PhoneStore(pair.homes["asked"], clock=pair.clock)
+    db = sqlite3.connect(store.path)
+    db.execute("UPDATE devices SET last_seen=?", (NOW - 3 * 86400,))
+    db.commit()
+    db.close()
+    assert pair.ask({"free_on": {"date": "2026-10-17"}})["answer"].endswith(
+        "Their phone last shared its calendar 3 days ago.")
+
+
+def test_a_calendar_that_fails_to_read_answers_unavailable(pair, monkeypatch):
+    rules_for(pair, free_on="yes_no")
+    pair.share_calendar()
+    monkeypatch.setattr(phone.PhoneStore, "busy_blocks", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("db")))
+    assert pair.ask({"free_on": {"date": "2026-10-16"}})["status"] == "unavailable"
+
+
+def test_an_ask_for_a_deleted_profile_writes_nothing_there(pair):
+    (pair.homes["asked"] / "profiles" / "work").mkdir(parents=True)
+    rules_for(pair, profile="work")
+    (pair.homes["asked"] / "profiles" / "work").rmdir()
+    opened = []
+    pair.asked.present = lambda profile: opened.append(profile)
+    pair.asked.phone = lambda profile: opened.append(profile)
+    assert pair.ask({"question": "Is Mona coming?"})["status"] == "unavailable"
+    assert pair.ask({"free_on": {"date": "2026-10-16"}})["status"] == "unavailable"
+    assert opened == []
+
+
+def test_a_question_shows_on_the_phone_as_plain_text(pair):
+    pair.phone_shows_link_asks()
+    pair.ask({"question": "Coming? [Tap here](https://x.example) **now**"})
+    prompt = [p for p in pair.phone_shows_link_asks()["prompts"] if p.get("link")][0]
+    assert prompt["preview"] == r"Coming? \[Tap here\]\(https://x.example\) \*\*now\*\*"
+
+
+def test_cli_answer_says_when_nothing_sends_it(cli, pair, capsys, monkeypatch):
+    pair.share_calendar()
+    pair.phone_shows_link_asks()
+    ask = pair.ask({"free_on": {"date": "2026-10-16"}})
+    monkeypatch.setattr(room_links, "reading", lambda root: False)
+    assert cli("answer", ask["id"], decline=True) == 0
+    assert "Nothing on this Hermes reads its rooms mailbox" in capsys.readouterr().out
