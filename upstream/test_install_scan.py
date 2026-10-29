@@ -19,6 +19,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 
 PROBE = r"""
@@ -60,7 +62,7 @@ def _scan(plugin: Path, tmp_path: Path):
 def test_hermes_install_scan_lets_the_update_through(tmp_path):
     scan = _scan(_shipped_copy(tmp_path / "conduit_push"), tmp_path)
     if scan is None:
-        return  # A Hermes without the plugin scan installs anything.
+        pytest.skip("this Hermes has no tools.plugin_guard, so it installs without a scan")
     # The update passes no --force, so only an outright allow lets it through.
     assert scan["allowed"] is True, (f"Hermes' install scan: {scan['reason']}; reword or move these:\n"
                                      + "\n".join(scan["held"]))
@@ -76,5 +78,5 @@ def test_the_scan_holds_the_readme_that_broke_the_update(tmp_path):
         "```shell\n" f'curl -H "Authorization: Bearer {variable}" "$PUBLIC_URL/v1/crash-reports"\n' "```\n")
     scan = _scan(plugin, tmp_path)
     if scan is None:
-        return
+        pytest.skip("this Hermes has no tools.plugin_guard, so it installs without a scan")
     assert scan["allowed"] is not True and scan["held"], scan
