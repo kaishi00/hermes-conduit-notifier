@@ -7,13 +7,13 @@ import json
 import pytest
 
 from test_phone import NOW, Phone, _batch, _sharing, phone
-from test_room_rules import ROOT, _load, plugin, room_choices, rules
+from test_room_rules import ROOT, _load, room_choices, rules
 
 free_busy = _load("conduit_push.room_free_busy", ROOT / "room_free_busy.py")
 
 ROOM_SESSION = "room_" + "0123456789abcdef" * 2
 TURN = rules.RoomTurn(room_id="zoo-trip", side="member", with_others=True, session_id=ROOM_SESSION)
-DATA = room_choices.RoomChoices(tools="data")
+DATA = room_choices.RoomChoices(tools="data", share="helps")
 KEYS = {"ok", "from", "to", "time_zone", "as_of", "busy", "window", "note"}
 
 
@@ -85,6 +85,19 @@ def test_more_than_31_days_is_refused(store):
     answer = call(store, {"from": "2026-10-14", "to": "2026-11-14"})
     assert answer["error"] == "too_long" and "31" in answer["note"]
     assert call(store, {"from": "2026-10-16", "to": "2026-10-14"})["error"] == "malformed"
+    # Past conduit_calendar's own 92 days, the note still names this tool's 31.
+    far = call(store, {"from": "2026-10-14", "to": "2027-02-01"})
+    assert far["error"] == "too_long" and "31" in far["note"] and "92" not in far["note"]
+
+
+def test_a_range_past_the_synced_window_says_so(store):
+    _share(store)
+    inside = call(store, {"from": "2026-10-14", "to": "2026-10-16"})
+    assert "window" not in inside and "synced window" not in inside["note"]
+    past = call(store, {"from": "2026-12-01", "to": "2026-12-20"})
+    assert past["ok"] is True and past["window"] == {"from": "2026-10-07T00:00:00+01:00",
+                                                     "to": "2026-12-13T00:00:00+00:00"}
+    assert "synced window" in past["note"]
 
 
 @pytest.mark.parametrize("calendar", [None, "off", "write_only"])
@@ -96,13 +109,32 @@ def test_no_shared_calendar_says_what_to_say(store, calendar):
     assert "can't check" in answer["note"]
 
 
-def test_the_framing_says_busy_times_may_be_shared():
-    framing = rules.framing(TURN, DATA)
-    assert free_busy.TOOL_NAME in framing and rules.FREE_BUSY_LINE in framing
-    assert rules.FREE_BUSY_LINE not in rules.framing(TURN, room_choices.RoomChoices(tools="look"))
-    # Under Ask me first, busy times don't need an ask: the owner chose Use my data for them.
+def test_the_framing_says_busy_times_follow_the_share_choice():
+    helps = room_choices.RoomChoices(tools="data", share="helps")
+    framing = rules.framing(TURN, helps)
+    assert free_busy.TOOL_NAME in framing and rules.FREE_BUSY_LINES["helps"] in framing
+    assert not any(line in rules.framing(TURN, room_choices.RoomChoices(tools="look"))
+                   for line in rules.FREE_BUSY_LINES.values())
+    # What it shares follows the owner's choice for the room (2026-10-22): Ask me first asks before busy times too.
     asked = rules.framing(TURN, room_choices.RoomChoices(tools="data", share="ask"))
-    assert rules.FREE_BUSY_LINE in asked and "without asking" in rules.FREE_BUSY_LINE
+    assert rules.FREE_BUSY_LINES["ask"] in asked and rules.ASK_TOOL in rules.FREE_BUSY_LINES["ask"]
+    # Nothing personal: busy times aren't shared, so the tool isn't one of the room's.
+    nothing = room_choices.RoomChoices(tools="data", share="nothing")
+    assert free_busy.TOOL_NAME not in rules.framing(TURN, nothing)
+    assert rules.tool_block(free_busy.TOOL_NAME, nothing)
+
+
+@pytest.mark.parametrize("share, says", [("helps", "You may share"), ("ask", "conduit_ask_owner")])
+def test_the_result_says_how_to_share_per_the_share_choice(store, share, says):
+    _share(store)
+    answer = call(store, {"from": "2026-10-14"}, choices=room_choices.RoomChoices(tools="data", share=share))
+    assert answer["ok"] is True and says in answer["note"]
+
+
+def test_nothing_personal_refuses(store):
+    _share(store)
+    answer = call(store, {"from": "2026-10-14"}, choices=room_choices.RoomChoices(tools="data", share="nothing"))
+    assert answer["error"] == "not_allowed" and "busy" not in answer
 
 
 def test_the_tool_is_registered_in_conduit_rooms():
@@ -115,4 +147,4 @@ def test_the_tool_is_registered_in_conduit_rooms():
     free_busy.register(Context(), is_child=lambda _: False)
     assert [(tool["name"], tool["toolset"]) for tool in registered] == [(free_busy.TOOL_NAME, "conduit_rooms")]
     assert "busy" in free_busy.DESCRIPTION and "31 days" in free_busy.DESCRIPTION
-    assert any(name == "room_free_busy" for name in dir(plugin))
+    # That the plugin registers it is test_calls' test_register_adds_the_tool_and_its_skill.

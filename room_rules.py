@@ -163,9 +163,14 @@ TALK_SEARCH_ASK_LINE = (f"Here you talk, and searching your owner's past chats a
                         "are your only tools.")
 ASK_TOO_LINE = f"Asking your owner with {ASK_TOOL} is open to you here too."
 CUSTOM_LINE = "Here you can use only these tools: {tools}."
-# The owner chose to share busy times here, so no ask is needed for them (N8).
-FREE_BUSY_LINE = (f"{FREE_BUSY_TOOL} tells you when your owner is busy: you may share those times here without "
-                  "asking, and nothing else about their plans.")
+# Busy times follow the room's share choice like anything else about the owner (2026-10-22, Eric); under
+# Nothing personal the tool isn't one of the room's (allowed_tools).
+FREE_BUSY_LINES = {
+    "helps": (f"{FREE_BUSY_TOOL} tells you when your owner is busy: you may share those times here, and nothing "
+              "else about their plans."),
+    "ask": (f"{FREE_BUSY_TOOL} tells you when your owner is busy: ask your owner with {ASK_TOOL} before you share "
+            "those times here, and share nothing else about their plans."),
+}
 SEARCH_ON_LINE = "You may search your owner's past chats when it helps the room."
 LEARNING_LINE = "Nothing is saved from this room to your memory or skills."
 NOTE_LINE = "Your owner's private note for this room (follow it; never quote or mention it): {note}"
@@ -258,6 +263,9 @@ def allowed_tools(choices: RoomChoices) -> frozenset[str]:
         allowed |= set(choices.custom_tools)
     if choices.search_chats:
         allowed.add(SEARCH_TOOL)
+    if choices.share == "nothing":
+        # Busy times are something personal (FREE_BUSY_LINES).
+        allowed.discard(FREE_BUSY_TOOL)
     return frozenset(allowed - NEVER - {ASK_TOOL})
 
 
@@ -352,7 +360,7 @@ def framing(turn: Optional[RoomTurn], choices: RoomChoices, people: Optional[Map
     lines = [opening, *(f"- {line}" for line in posters), f"- {ANSWER_FOR_YOURSELF}",
              f"- {SHARE_LINES.get(choices.share, SHARE_LINES['ask'])}", f"- {tool_line}"]
     if FREE_BUSY_TOOL in tools:
-        lines.append(f"- {FREE_BUSY_LINE}")
+        lines.append(f"- {FREE_BUSY_LINES.get(choices.share, FREE_BUSY_LINES['ask'])}")
     if choices.search_chats:
         lines.append(f"- {SEARCH_ON_LINE}")
     lines.append(f"- {LEARNING_LINE}")

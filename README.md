@@ -3898,13 +3898,15 @@ inclusive), at most 31 days a call. It reads the calendar your phone shares
 with that profile (Settings › Calendar & phone in Conduit), as of its last
 sync, and gets only the busy times: merged across your shared calendars,
 without free, cancelled or declined events, or all-day ones unless they're
-marked busy. Never a title, place, calendar, attendee or device. Choosing Use
-my data is choosing to share those times, so the agent shares them without
-asking you first, whatever the room's share choice, and nothing else about
-your plans. With no calendar shared (or only adds), it says it can't check
-your calendar there. The tool refuses outside a room turn with other people's
-agents, in a subagent, and in a room not set to Use my data or Custom with it
-picked. Capability `room-free-busy`.
+marked busy. Never a title, place, calendar, attendee or device. Sharing
+those times follows the room's share choice, as anything about you does: with
+What helps it may share them, with Ask me first it asks you before it does
+(`conduit_ask_owner`), and with Nothing personal the tool isn't one of the
+room's. Either way it shares nothing else about your plans. With no calendar
+shared (or only adds), it says it can't check your calendar there. The tool
+refuses outside a room turn with other people's agents, in a subagent, and in
+a room not set to Use my data or Custom with it picked. Capability
+`room-free-busy`.
 
 ## Capabilities (plugin 0.4+)
 

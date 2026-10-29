@@ -4,8 +4,9 @@
 In a room whose owner chose Use my data, the agent reads when its owner is busy from the calendar the phone shares
 with the profile (phone_store's busy blocks: merged across the shared calendars; free, cancelled and declined events
 don't count, nor all-day ones unless marked busy), at most 31 days a call. It gets the busy times and nothing else:
-no titles, places, calendars, people or device. Choosing Use my data is the owner's pick of these times, so the agent
-shares them without asking, whatever the room's share choice (room_rules.FREE_BUSY_LINE).
+no titles, places, calendars, people or device. Sharing them follows the room's share choice, as anything else about
+the owner does: What helps shares them, Ask me first asks before it does, and Nothing personal keeps the tool out
+(room_rules.FREE_BUSY_LINES).
 
 The tool is in ``conduit_rooms``, which room setup keeps in every room ceiling, and the room rules let it through only
 in a room that allows it (room_rules.allowed_tools); the handler checks again. Anywhere else it refuses.
@@ -31,12 +32,19 @@ TOOLSET = room_asks.TOOLSET
 MAX_DAYS = 31
 
 _CANT = "Say you can't check your owner's calendar here, and share nothing about their plans."
-NOTE = ("When your owner is busy, from their calendar as their phone last synced it (as_of): you may share these "
-        "times here, nothing else about their plans. Times between them are free, as far as that calendar knows.")
+NOTE = ("When your owner is busy, from their calendar as their phone last synced it (as_of). Times between them "
+        "are free, as far as that calendar knows. ")
+# What it shares follows the room's share choice (room_rules.FREE_BUSY_LINES); Nothing personal never gets here.
+SHARE_NOTES = {
+    "helps": "You may share these times here, nothing else about their plans.",
+    "ask": (f"Ask your owner with {room_rules.ASK_TOOL} before you share these times here (share: exactly the times "
+            "you'd say), and share nothing else about their plans."),
+}
 
 DESCRIPTION = (
     "When your owner is busy, for finding a time in this group room (the room is set to Use my data): only the "
-    "busy times from the calendar their phone shares, never what, where or with whom, and you may share them here. "
+    "busy times from the calendar their phone shares, never what, where or with whom; share them as this room "
+    "allows (with Ask me first, ask your owner before you do). "
     "from: a local date (YYYY-MM-DD) or ISO time; to: the end, a local date (inclusive) or ISO time, default the "
     f"from date. At most {MAX_DAYS} days a call."
 )
@@ -104,7 +112,8 @@ def _handle(args: dict[str, Any], session: str, is_child: Callable[[Any], bool],
         return {"ok": False, "error": "not_room",
                 "note": "This says when your owner is busy in a group room with other people's agents; this isn't "
                         "one. In a private chat, use conduit_calendar."}
-    if not turn.room_id or TOOL_NAME not in room_rules.allowed_tools(choices(turn)):
+    chosen = choices(turn)
+    if not turn.room_id or TOOL_NAME not in room_rules.allowed_tools(chosen):
         return {"ok": False, "error": "not_allowed", "note": room_rules.TOOL_BLOCK.format(tool=TOOL_NAME)}
     if now is not None:
         store.clock = now
@@ -122,7 +131,9 @@ def _handle(args: dict[str, Any], session: str, is_child: Callable[[Any], bool],
                 return {"ok": False, "error": "too_long", "note": f"At most {MAX_DAYS} days per call; split the range."}
             blocks = store.busy_blocks(db, device["id"], start, end)
     except PhoneError as error:
-        if error.code in ("too_long", "malformed"):
+        if error.code == "too_long":  # _range's own cap is conduit_calendar's, past this tool's
+            return {"ok": False, "error": "too_long", "note": f"At most {MAX_DAYS} days per call; split the range."}
+        if error.code == "malformed":
             return {"ok": False, "error": error.code, "note": str(error)}
         return {"ok": False, "error": "nothing_shared", "note": f"Your owner's calendar can't be read here. {_CANT}"}
     answer = {"ok": True, **shown, "time_zone": tz, "as_of": phone_tool._ago(device["last_seen"], store.clock()),
@@ -132,7 +143,7 @@ def _handle(args: dict[str, Any], session: str, is_child: Callable[[Any], bool],
         note = " Only the synced window (window) is known: say so for times outside it."
     else:
         note = ""
-    answer["note"] = NOTE + note
+    answer["note"] = NOTE + SHARE_NOTES.get(chosen.share, SHARE_NOTES["ask"]) + note
     return answer
 
 

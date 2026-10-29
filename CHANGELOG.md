@@ -18,7 +18,8 @@ checks it). The format is fixed, because Conduit reads it:
 ### New and improved
 - Use my data: in a room with other people's agents, your agent can say
   when you're busy, from the calendar your phone shares, to find a time.
-  Only the busy times go, never what, where or with whom.
+  Only the busy times go, with your time zone and when your phone last
+  synced, never what, where or with whom.
 
 ## 0.118.1 (2026-10-29)
 

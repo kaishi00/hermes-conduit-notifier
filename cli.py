@@ -152,10 +152,10 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     rooms.add_argument("--no-restart", dest="no_restart", action="store_true",
                        help="for setup: don't restart the gateway; say how to")
     rooms.add_argument("--tools", choices=["talk", "look", "data", "custom"],
-                       help="talk: no tools; look: web lookups; data: lookups and the data tools you pick; "
+                       help="talk: no tools; look: web lookups; data: lookups and when you're busy (free/busy); "
                             "custom: only the tools you pick")
     rooms.add_argument("--tool", action="append", default=None, metavar="NAME",
-                       help="a tool to allow with --tools custom or data; repeat it for more (replaces the list)")
+                       help="a tool to allow with --tools custom; repeat it for more (replaces the list)")
     rooms.add_argument("--share", choices=["helps", "ask", "nothing"],
                        help="what it may share about you: what helps, ask you first, or nothing personal")
     rooms.add_argument("--search", choices=["on", "off"], help="whether it may search your past chats")
