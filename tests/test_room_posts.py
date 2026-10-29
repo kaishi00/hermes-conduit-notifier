@@ -310,6 +310,7 @@ def test_forgetting_a_copy_or_an_old_room_forgets_its_posts(posts):
     room_id = started(posts)
     post(posts, "mona", room_id, "Hi")
     posts.furina.disbanded(room_id)
+    posts.furina.pass_once()  # Mona's Hermes hears it ended
 
     copies_module.forget(posts.tmp_path / "mona", room_id)
     posts.clock.now += invites_module.KEPT_S + 1
@@ -708,3 +709,38 @@ def test_the_routes_post_and_list(posts, monkeypatch):
                           json={"room_id": "conduit-other", "event_id": "m2", "text": "Hi"})
     assert (refused.status_code, refused.json()["code"]) == (409, "not_in")
     assert "room-posts" in api.capabilities.ROUTE_CAPABILITIES
+
+
+def test_a_page_that_failed_after_its_events_were_kept_still_says_who_posted(posts, monkeypatch):
+    room_id = started(posts)
+    post(posts, "mona", room_id, "Hi from Mona")
+    mona_seq = posts.log.rooms[room_id][-1]["seq"]
+    # The copy's own row can't be written once the page's events are kept: its posts are kept first.
+    monkeypatch.setattr(copies_module, "_TABLE", "CREATE TABLE broken (")
+
+    posts.furina.pass_once()
+
+    events = {event["seq"]: event for event in log_of(posts, "laifu", room_id)["events"]}
+    assert events[mona_seq]["post"] == {"by": "Mona"}
+
+
+def test_only_the_current_links_posts_are_listed_and_framed(posts):
+    room_id = started(posts)
+    post(posts, "mona", room_id, "Hi from Mona")
+    # A post kept from an earlier Link into a room with the same id (a re-join after relinking).
+    with sqlite3.connect(posts_module.path(posts.tmp_path / "mona")) as conn:
+        conn.execute("INSERT INTO sent VALUES ('link-old', ?, 'old1', 'Old hello', 'posted', 1, NULL, 0)",
+                     (room_id,))
+
+    assert [each["text"] for each in listed(posts, "mona", room_id)] == ["Hi from Mona"]
+    assert posts_module.sent_texts(posts.tmp_path / "mona", room_id) == ["Hi from Mona"]
+
+
+def test_the_forged_check_fails_closed_when_the_invites_cant_be_read(posts):
+    room_id = started(posts)
+    post(posts, "mona", room_id, "yes")
+    root = posts.tmp_path / "mona"
+    (root / "conduit-rooms" / "rooms.json").write_text("{not json")
+
+    with pytest.raises(Exception):
+        posts_module.forged_for(root, room_id, "s1", "Mona", _member_prompt("  User (user): Mona: yes"))

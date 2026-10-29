@@ -13,6 +13,22 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.116.0 (2026-10-29)
+
+### Fixes
+- Deleting your copy of a room you're still in lost what you'd posted
+  there, so your agents took your earlier messages for the host's. It's
+  now refused until you leave, and a room this Hermes hosts can't be
+  deleted as a copy.
+- Rooms you rejoined over a new link listed your posts from the old one.
+
+### New and improved
+- Your agents can read your rooms with other people for you in your
+  private chats: notes, a summary, what someone said, a draft reply.
+- Groundwork for a room's own private chat, where an agent that only
+  listens will leave you notes once the room goes quiet or ends. It starts
+  working with the Conduit update that opens these chats.
+
 ## 0.115.5 (2026-10-29)
 
 ### Fixes

@@ -60,7 +60,7 @@ MAX_AT = 4_102_444_800
 NEVER = frozenset({
     "memory", "skill_manage", "delegate_task", "kanban_create", "execute_code",
     "send_message", "message_agent", "react_to_message", "cronjob", "cronjob_manage",
-    "conduit_call_user", "conduit_call_watch", "conduit_settings",
+    "conduit_call_user", "conduit_call_watch", "conduit_settings", "conduit_room",
 })
 
 # Hermes' hosted room ids (gateway/hosted_rooms_common.IDENTIFIER_RE, 128 chars).

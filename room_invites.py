@@ -148,6 +148,7 @@ class Rooms:
         self._api_waits: dict[str, int] = {}
         self.copies = room_copies.Copies(self, hermes=copier)
         self.posts = room_posts.Posts(self, hermes=poster)
+        self._notes: Any = None
 
     # --- The home's drafts ---------------------------------------------------------
 
@@ -909,10 +910,10 @@ class Rooms:
 
     def pass_once(self) -> None:
         """What the rooms loop does each time it looks: the envelopes still to go, this installation's agents'
-        fresh grants, then the drafts ready to start and the route changes in started rooms, and the started
-        rooms' copies for the people in them (room_copies). An installation that
-        never had a room over a Link has nothing to look at, but where the dashboard runs in the gateway, the loop
-        holds the drafts from the CLI from its first pass (room_start's claim)."""
+        fresh grants, then the drafts ready to start and the route changes in started rooms, the started rooms'
+        copies for the people in them (room_copies), and the notes on rooms elsewhere (room_chats). An installation
+        that never had a room over a Link has nothing to look at, but where the dashboard runs in the gateway, the
+        loop holds the drafts from the CLI from its first pass (room_start's claim)."""
         if self.starter is not None:
             self.starter.claim()
         if not self.store.path.exists():
@@ -925,6 +926,16 @@ class Rooms:
             self._start_ready()
             self.copies.send_pages()
         self.flush()
+        # Notes in the private chats of the rooms elsewhere your agents only listen in (room_chats).
+        self.notes.pass_once()
+
+    @property
+    def notes(self) -> Any:
+        if self._notes is None:
+            from . import room_chats
+
+            self._notes = room_chats.Notes(self.root, profile_home=self.profile_home, clock=self.clock)
+        return self._notes
 
     def _settle(self) -> None:
         """What time has ended: a draft that lapsed ends and says so; a join whose room never started is
@@ -1104,21 +1115,22 @@ def people(root: Any, room_id: Any, strict: bool = False) -> Optional[dict[str, 
         return {"room_id": room_id, "home": None, "members": _members(draft), "posts": [
             {"event_id": each["event_id"], "seq": each["seq"], "by": names.get(each["link"], room_posts.GUEST)}
             for each in latest]}
-    for invite in state["invites"].values():
-        if invite["room_id"] == room_id and invite["status"] in ("started", "left", "ended") \
-                and invite["members"] is not None:
-            gone = {agent["member_id"]: agent["reason"] for agent in invite.get("gone", [])}
-            mine = {agent["member_id"] for agent in invite["joined"]} | set(gone)
-            # What the home calls this installation's owner: the name its posts carry there.
-            you = next((room_posts.poster(member["owner"]) for member in invite["members"]
-                        if member["member_id"] in mine), None)
-            return {"room_id": room_id, "home": invite["from"], "you": you, "members": [
-                {"member_id": member["member_id"], "handle": member["handle"],
-                 "display_name": member["display_name"],
-                 "owner": None if member["member_id"] in mine else member["owner"] or invite["from"],
-                 "status": gone[member["member_id"]] if gone.get(member["member_id"]) in ("left", "removed")
-                 else "in"}
-                for member in invite["members"]]}
+    # The invite the room is on now: a re-join over a new Link has its own, beside the old one's.
+    invite = room_posts.current_invite([invite for invite in state["invites"].values()
+                                        if invite["status"] in ("started", "left", "ended")], room_id)
+    if invite is not None:
+        gone = {agent["member_id"]: agent["reason"] for agent in invite.get("gone", [])}
+        mine = {agent["member_id"] for agent in invite["joined"]} | set(gone)
+        # What the home calls this installation's owner: the name its posts carry there.
+        you = next((room_posts.poster(member["owner"]) for member in invite["members"]
+                    if member["member_id"] in mine), None)
+        return {"room_id": room_id, "home": invite["from"], "you": you, "members": [
+            {"member_id": member["member_id"], "handle": member["handle"],
+             "display_name": member["display_name"],
+             "owner": None if member["member_id"] in mine else member["owner"] or invite["from"],
+             "status": gone[member["member_id"]] if gone.get(member["member_id"]) in ("left", "removed")
+             else "in"}
+            for member in invite["members"]]}
     return None
 
 

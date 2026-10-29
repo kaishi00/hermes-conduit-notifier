@@ -638,8 +638,11 @@ async def get_room_copy_log(response: Response, room_id: Optional[str] = None, s
 
 @router.delete("/rooms/copies")
 async def delete_room_copy(response: Response, room_id: Optional[str] = None) -> Any:
-    """Forgets this Hermes' copy of a room other people host; a page its
-    home sends later starts it again."""
+    """Forgets this Hermes' copy of a room other people host, once your agents
+    are out of it; a page its home sends later starts it again. Refused while
+    an agent of yours is still in it (``still_in``, 409), for a room this
+    Hermes hosts (``hosted``, 409) and when the copies can't be read
+    (``unreadable``, 503)."""
     response.headers["Cache-Control"] = "no-store"
     return await _room_copies_route(lambda module, root: module.forget(root, room_id), "forget copy")
 

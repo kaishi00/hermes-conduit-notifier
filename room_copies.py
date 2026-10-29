@@ -63,6 +63,11 @@ _POSTS_TABLE = """CREATE TABLE IF NOT EXISTS conduit_room_copy_posts (
 _db_lock = threading.Lock()
 
 
+# On each member a copy keeps: its profile when it's one of this installation's agents, as its invite had them (the
+# home's own value for it is replaced), so the copy still knows its agents once the invite is forgotten.
+YOURS = "yours"
+
+
 class CopiesError(Exception):
     def __init__(self, code: str, message: str, status: int = 400) -> None:
         super().__init__(message)
@@ -313,17 +318,21 @@ class Copies:
         with _db_lock:
             _create(self.path)
             try:
+                # Who posted what goes first, so a page whose events are kept is never without it: a page that
+                # failed after them and comes again may find nothing left to ingest.
+                with closing(sqlite3.connect(self.path)) as conn, conn:
+                    conn.execute(_POSTS_TABLE)
+                    conn.executemany("INSERT OR REPLACE INTO conduit_room_copy_posts VALUES (?, ?, ?)",
+                                     [(room_id, each["event_id"], each["by"]) for each in body.get("posts", ())])
                 result = self.hermes.ingest_page(self.path, room_id=room_id, room_name=body["name"],
                                                  members=body["members"], page=body["page"])
                 seq = int(result["stored_seq"])
                 with closing(sqlite3.connect(self.path)) as conn, conn:
                     conn.execute(_TABLE)
                     conn.execute("INSERT OR REPLACE INTO conduit_room_copies VALUES (?, ?, ?, ?, ?, ?)",
-                                 (room_id, received.link_id, invite["from"], json.dumps(body["members"]),
+                                 (room_id, received.link_id, invite["from"],
+                                  json.dumps(_marked(body["members"], invite)),
                                   json.dumps(body["state"]), float(self.rooms.clock())))
-                    conn.execute(_POSTS_TABLE)
-                    conn.executemany("INSERT OR REPLACE INTO conduit_room_copy_posts VALUES (?, ?, ?)",
-                                     [(room_id, each["event_id"], each["by"]) for each in body.get("posts", ())])
             except self.hermes.replica_error as exc:
                 logger.info("Linked Rooms' copy of room %s didn't take a page (%s)", room_id, exc)
                 seq = _held(self.path, room_id)
@@ -360,12 +369,29 @@ def copies(root: Any) -> list[dict[str, Any]]:
     invites = room_invites.Store(root).read()["invites"]
     shown = []
     for row in _rows(path(root)):
+        invite = invites.get(f"{row['link']}/{row['room_id']}")
         try:
-            shown.append(_shown(row, invites.get(f"{row['link']}/{row['room_id']}")))
+            shown.append(_shown(row, invite))
+            if invite is not None:
+                _note_yours(path(root), row, invite)
         except (TypeError, ValueError, RecursionError, AttributeError):
             _skipped(f"copy:{row['room_id']}", "Linked Rooms skipped its copy of room %s: it can't read it",
                      row["room_id"])
     return shown
+
+
+def _note_yours(file: Path, row: sqlite3.Row, invite: dict[str, Any]) -> None:
+    """A copy kept before it noted your agents (0.115) notes them while its invite lasts: an ended room's copy
+    takes no more pages."""
+    members = json.loads(row["members_json"])
+    if all(YOURS in member for member in members):
+        return
+    try:
+        with _db_lock, closing(sqlite3.connect(file)) as conn, conn:
+            conn.execute("UPDATE conduit_room_copies SET members_json=? WHERE room_id=? AND members_json=?",
+                         (json.dumps(_marked(members, invite)), row["room_id"], row["members_json"]))
+    except sqlite3.Error:  # noted on a later read
+        pass
 
 
 def copy(root: Any, room_id: Any) -> dict[str, Any]:
@@ -432,10 +458,22 @@ def log(root: Any, room_id: Any, *, since_seq: Any = 0, limit: Any = 100) -> dic
 
 
 def forget(root: Any, room_id: Any) -> dict[str, Any]:
-    """Deletes this installation's copy of a room, and what its owner posted there: a later page starts it
-    again."""
+    """Deletes this installation's copy of a room that's over for it, and what its owner posted there. A room its
+    agents are still in is refused (its posts frame their turns: leave first), and so is one this installation
+    hosts, whose posts are the home's record of who wrote what."""
+    from . import room_invites
+
     if not isinstance(room_id, str) or not room_id:
         raise CopiesError("bad_room", "Name the room")
+    try:
+        state = room_invites.Store(root).read()
+    except room_invites.RoomsError:
+        raise CopiesError("unreadable", "This Hermes can't read its rooms now: try again", 503) from None
+    if room_id in state["drafts"]:
+        raise CopiesError("hosted", "This Hermes hosts that room: it keeps no copy of it", 409)
+    if any(invite["room_id"] == room_id and invite["status"] == "started" and invite["joined"]
+           for invite in state["invites"].values()):
+        raise CopiesError("still_in", "Your agents are still in that room: leave it first", 409)
     file = path(root)
     forgotten = False
     if file.exists():
@@ -604,17 +642,25 @@ def _rows(file: Path) -> list[sqlite3.Row]:
 def _shown(row: sqlite3.Row, invite: Optional[dict[str, Any]]) -> dict[str, Any]:
     """A copy as Conduit shows it, with what its invite says while this installation keeps it: your agents in it,
     and whether it goes on."""
-    state = json.loads(row["state_json"])
+    state, members = json.loads(row["state_json"]), json.loads(row["members_json"])
     if invite is not None:
         status, reason, started_at, ended_at = invite["status"], invite["reason"], invite["started_at"], \
             invite["ended_at"]
         yours = [{"member_id": agent["member_id"], "profile": agent["profile"], "handle": agent["handle"]}
                  for agent in invite["joined"]]
-    else:
-        status, reason, started_at, ended_at, yours = "ended", state.get("ended"), None, None, []
+    else:  # the invite forgotten: your agents as the copy marked them, and left unless its home said it ended
+        status, reason, started_at, ended_at = "left", "left", None, None
+        yours = [{"member_id": member["member_id"], "profile": member[YOURS], "handle": member.get("handle")}
+                 for member in members if isinstance(member.get(YOURS), str)]
     if state.get("ended") is not None:
         status, reason = "ended", state["ended"]
+    members = [{key: value for key, value in member.items() if key != YOURS} for member in members]
     return {"room_id": row["room_id"], "name": row["name"], "link": row["link"], "from": row["home_name"],
-            "members": json.loads(row["members_json"]), "yours": yours, "status": status, "reason": reason,
+            "members": members, "yours": yours, "status": status, "reason": reason,
             "started_at": started_at, "ended_at": ended_at, "state": state, "last_seq": int(row["last_seq"]),
             "latest_seq": int(row["latest_seq"]), "updated_at": float(row["updated_at"])}
+
+
+def _marked(members: list[dict[str, Any]], invite: dict[str, Any]) -> list[dict[str, Any]]:
+    mine = {agent["member_id"]: agent["profile"] for agent in [*invite["joined"], *invite.get("gone", ())]}
+    return [{**member, YOURS: mine.get(member.get("member_id"))} for member in members]

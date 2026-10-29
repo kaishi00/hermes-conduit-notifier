@@ -750,7 +750,7 @@ def test_register_adds_the_tool_and_its_skill():
     assert [tool["name"] for tool in tools] == ["conduit_call_user", "conduit_call_watch", "conduit_watch_report",
                                                   "conduit_settings", "conduit_present", "conduit_show", "conduit_notify", "conduit_health",
                                                   "conduit_inbox", "conduit_location", "conduit_maps", "conduit_calendar",
-                                                  "conduit_phone", "conduit_contacts"]
+                                                  "conduit_phone", "conduit_contacts", "conduit_room"]
     tool = tools[0]
     assert (tool["toolset"], tool["schema"]["name"]) == ("conduit", "conduit_call_user")
     assert tool["schema"]["parameters"]["required"] == ["reason", "asked_by_user"]
@@ -781,7 +781,7 @@ def test_a_hermes_without_the_display_fields_still_gets_the_tool(home, paired):
     plugin.register(ctx)
     assert [name for name, _ in tools] == ["conduit_call_user", "conduit_call_watch", "conduit_watch_report", "conduit_settings",
                                            "conduit_present", "conduit_show", "conduit_notify", "conduit_health", "conduit_inbox", "conduit_location", "conduit_maps", "conduit_calendar", "conduit_phone",
-                                           "conduit_contacts"]
+                                           "conduit_contacts", "conduit_room"]
     handler = tools[0][1]
     _settings(home)
     # Hermes passes the agent itself as parent_agent; only a child session is refused.

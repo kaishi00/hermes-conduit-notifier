@@ -3693,18 +3693,23 @@ minute:
   "handle", "display_name", "owner"}` (`owner` null for the host's own), your
   agents in it `{"member_id", "profile", "handle"}`, the invite's `status`
   and `reason` (`ended` with the home's reason once it ends; after this Hermes
-  forgets the invite, a month after it ended, `yours` is empty and the dates
-  null), and `state`: `{"ended", "working", "activity", "routes"}`, each of
-  the last two a list of `{"member_id", "status"}`.
+  forgets the invite, a month after it ended, it's `left` unless the home said
+  it ended, the dates are null and `yours` is the agents the copy noted as
+  yours when it took the room's pages), and `state`: `{"ended", "working",
+  "activity", "routes"}`, each of the last two a list of `{"member_id",
+  "status"}`.
 - `GET /rooms/copies/log?room_id=&since_seq=0&limit=100`: the copy's events
   after `since_seq`, as `groups.log` pages a room this Hermes hosts:
   `{"events", "cursor", "latest_seq", "has_more", "authority"}`, with
   `latest_seq` what the copy holds. `limit` is 1 to 500.
-- `DELETE /rooms/copies?room_id=`: `{"room_id", "forgotten"}`. A page the home
-  sends later starts the copy again from its first event.
+- `DELETE /rooms/copies?room_id=`: `{"room_id", "forgotten"}`, once the room
+  is over for you (you left it, were taken out, or it ended), with what you
+  posted there. While an agent of yours is still in it, it's refused with
+  `still_in` (409: your posts there frame your agents' turns, so leave
+  first), and a room this Hermes hosts with `hosted` (409, plugin 0.116+).
 
-They're refused with `bad_room`, `bad_since` or `bad_limit` (400) and
-`no_copy` (404). A copy or an event this Hermes can't read is left out, and
+They're refused with `bad_room`, `bad_since` or `bad_limit` (400),
+`no_copy` (404) and `unreadable` (503, the rooms can't be read now). A copy or an event this Hermes can't read is left out, and
 its log says so once.
 
 People whose agents are in a room someone else hosts post in it from their
@@ -3744,6 +3749,52 @@ minute:
   posted there, oldest first, each `status` `sending`, `posted` (with the
   room's `seq`) or `refused` (with its `error`: `ended`, `not_in`,
   `too_long`, `too_many`, `unavailable` or `bad_post`).
+
+## Your agent works on a room for you (plugin 0.116+)
+
+In your private chats, your agents can read your rooms with other people for
+you, with the `conduit_room` tool: notes, a summary, "what did Mona say about
+Saturday?", a draft of your reply. `list` gives the rooms you host with
+people you've linked and your copies of rooms they host: who hosts each, its
+agents and whose they are, and whether it's going, ended, or going on
+without your agents (`you left`). `read` gives a
+room's messages, the newest 100 by default (up to 200, `after_seq` or
+`before_seq` for others), each with who it's from as Conduit's room screen
+names them: "you", a person by the name their Link has here, an agent with
+its owner ("Laifu (Mona's)", "Furina (yours)"). Long messages are cut at
+4,000 characters and an answer stays under 64 KB. It reads what this Hermes
+keeps (the room's log, or its copy) and sends nothing to the room. A room
+turn never has it (the API server keeps the `conduit` tools out, and the
+room rules never allow it), and neither does a subagent.
+
+A room can have a private chat of its own with one of your agents
+(`conduit-room-chats.json` in the profile's home, owner only). Conduit opens
+it and tells this Hermes which room it's for, through routes that come in a
+later version: until then no room has one, and nothing below happens. Each
+turn there is told which room it's about (its name as one plain line, framed
+as the host's words). In a room hosted elsewhere where an agent of yours
+Listens only, that agent writes you notes in that chat once the room has
+been quiet for 30 minutes after new messages, or has ended: what was
+decided, what you said you'd do, what you might have missed. The rooms loop
+sends them as a hidden turn into the chat, once for each stretch of the
+room, and tries again 30 minutes after a chat that refused them (or a send
+that failed). Each turn covers at most 200 messages, what one read gives,
+and is told to read them through the last one; a longer stretch gets its
+next notes on the next look. A stretch counts as noted once its chat takes
+the turn. A room whose newest message has a time that can't be one, or one
+from the future, counts as quiet. A room with no chat yet gets none until it
+has one.
+
+In a copy, a message the home says is one of yours is shown as yours only
+when it is: one this Hermes posted (by its seq, or its text while it's on
+its way). Any other is the host's, "as if from you (not one of your posts)",
+and a person or owner named "you" (or near it, like "you.") shows as Guest.
+Room and agent names another Hermes gives are kept to one line of at most 80
+characters. A long page read forward keeps its first messages (more come
+after), one read back keeps its last. In a room you host, a person's message
+whose poster can't be read just then is shown as "you or someone you've
+linked with", never as yours. A call without a chat's session id is refused
+(`no_session`).
 
 ## Capabilities (plugin 0.4+)
 
