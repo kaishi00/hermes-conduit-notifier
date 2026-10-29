@@ -3774,7 +3774,8 @@ the room has been quiet for 30 minutes after new messages, or has ended:
 what was decided, what you said you'd do, what you might have missed. The
 rooms loop sends them as a hidden turn into the chat, once for each stretch
 of the room, and tries again 30 minutes after a chat that refused them (or
-a send that failed). A room with no chat yet gets none until it has one.
+a send that failed). A stretch counts as noted once its chat takes the turn,
+which is told to read it through its last message, page by page. A room with no chat yet gets none until it has one.
 
 In a copy, a message the home says is one of yours is shown as yours only
 when it is: one this Hermes posted (by its seq, or its text while it's on

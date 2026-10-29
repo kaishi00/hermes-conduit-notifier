@@ -468,3 +468,16 @@ def test_your_agents_stay_yours_once_the_invite_is_forgotten(side):
 
     assert room["yours"] == ["Laifu"]
     assert froms(reader(side, "laifu").read(room_id)) == [("Laifu (yours)", "Booked.")]
+
+
+def test_who_is_who_follows_the_current_invite(side):
+    room_id = started(side)
+    copied(side)
+    with side.laifu.store.update() as state:
+        current = dict(state["invites"])
+        old = {**current[f"link1/{room_id}"], "link": "link0", "status": "left", "from": "Someone else",
+               "started_at": 1, "joined": []}
+        state["invites"].clear()
+        state["invites"].update({f"link0/{room_id}": old, **current})
+
+    assert reading_module.room_invites.people(side.tmp_path / "laifu", room_id)["home"] == "Furina"
