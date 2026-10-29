@@ -387,3 +387,27 @@ def test_a_lone_surrogate_in_a_summary_cant_sink_an_answer():
     answer = api.watch_tools.run_watch_read_chat(grant, {"number": "1"}, routes=routes,
                                      summarize=lambda older: "Odd \ud800 summary.", now=NOW)
     assert answer["ok"] and "Odd ? summary." in answer["chat"]
+
+
+def test_pulse_tells_legacy_workers_apart_the_same_way(tmp_path):
+    # Pulse's worker cards (pulse_hermes.worker_tasks) read the first message
+    # the way the Watch's find chat reads the preview.
+    import sqlite3
+    spec = importlib.util.spec_from_file_location("conduit_pulse_hermes_watch_chats", ROOT / "pulse_hermes.py")
+    hermes = importlib.util.module_from_spec(spec)
+    import sys
+    sys.modules[spec.name] = hermes  # its dataclasses look their module up
+    spec.loader.exec_module(hermes)
+    rows = [("w", "cli", "work kanban task t_9f2c"), ("w2", "local", " Work Kanban Task t_1 "),
+            ("c", "cli", "work kanban task t_1 and then fix it"), ("t", "telegram", "work kanban task t_1"),
+            ("k", "kanban", "context\n\nwork kanban task t_3")]
+    with sqlite3.connect(tmp_path / "state.db") as conn:
+        conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, parent_session_id TEXT)")
+        conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT)")
+        for sid, source, text in rows:
+            conn.execute("INSERT INTO sessions VALUES (?, ?, NULL)", (sid, source))
+            conn.execute("INSERT INTO messages(session_id, role, content) VALUES (?, 'user', ?)", (sid, text))
+    workers = hermes.worker_tasks(tmp_path, [sid for sid, _, _ in rows])
+    for sid, source, text in rows[:4]:
+        assert (sid in workers) == api.watch_tools.is_legacy_kanban_worker({"source": source, "preview": text}), sid
+    assert workers["k"] == "t_3"

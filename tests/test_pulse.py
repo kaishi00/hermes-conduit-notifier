@@ -259,8 +259,12 @@ def test_worker_tasks_name_the_task_of_each_kanban_worker(db, tmp_path):
     db.message("user", "work kanban task t_9f2c", sid="old")
     db.session(sid="chat", title="Plans", source="cli")
     db.message("user", "work kanban task t_9f2c and then tell me", sid="chat")
-    assert hermes.worker_tasks(tmp_path, ["w", "w2", "old", "chat", "missing", ""]) == {
-        "w": "t_c64b17a2", "w2": "t_c64b17a2", "old": "t_9f2c"}
+    db.session(sid="old2", title=None, source="local")
+    db.message("user", "work kanban task t_1", sid="old2")
+    db.session(sid="long", title=None, source="cli")  # a person's long message ending in the prompt
+    db.message("user", "x" * 400 + "\nwork kanban task t_2", sid="long")
+    assert hermes.worker_tasks(tmp_path, ["w", "w2", "old", "old2", "long", "chat", "missing", ""]) == {
+        "w": "t_c64b17a2", "w2": "t_c64b17a2", "old": "t_9f2c", "old2": "t_1"}
     assert hermes.worker_tasks(tmp_path, []) == {}
 
 

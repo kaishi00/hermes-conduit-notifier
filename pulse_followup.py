@@ -592,7 +592,8 @@ def act_material(home: Path, card: dict, acted_at: float, *, zone: tzinfo,
     (a message there, nothing remembered behind it), which stays out even
     when that chat can't be named now or has moved on: Do it opened a new
     chat, found with the other chats by its subject, since the reminder Do it
-    leaves in it shares the card's words."""
+    leaves in it shares the card's words. So did a card from a Kanban task's
+    worker, which Hermes won't reopen as a chat (``worker_tasks``)."""
     where = home_for(home, card["profile"])
     if where is None:
         raise ChatUnreadable(f"no profile named {card['profile']!r} any more")
