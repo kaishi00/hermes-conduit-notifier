@@ -147,6 +147,15 @@ _WATCH_AUDIO_HELPER = os.path.join(core._dashboard_dir(), "watch_audio_helper.py
 _WATCH_AUDIO_HELPER_ENV = ("PATH", "HOME", "USER", "LOGNAME", "LANG", "TZ", "TMPDIR", "TEMP", "TMP",
                            "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH",
                            "DYLD_FALLBACK_LIBRARY_PATH")
+# What pip and uv get on top of that when they make the helper's environment:
+# how to reach a package index (proxies, certificates), where their caches
+# and settings live, and their own PIP_*/UV_* settings. A package's build
+# step runs with this, so it gets none of the keys Hermes holds either.
+_WATCH_AUDIO_BUILD_ENV = ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "http_proxy", "https_proxy",
+                          "no_proxy", "all_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE",
+                          "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
+                          "PROGRAMDATA", "SYSTEMDRIVE")
+_WATCH_AUDIO_BUILD_ENV_PREFIXES = ("PIP_", "UV_")
 _GROK_AUDIO_DELTAS = ("response.output_audio.delta", "response.audio.delta")
 WATCH_AUDIO_NEEDS_RUNTIME = ("GPT-Live on the Watch needs its WebRTC runtime on the Hermes host; "
                              "prepare it from Conduit's Voice settings")
@@ -318,9 +327,10 @@ def _watch_audio_marker_current(env_dir: str) -> bool:
     return _watch_audio_marker_pin(env_dir) == WATCH_AUDIO_AIORTC
 
 
-def _watch_audio_helper_env(extra: Tuple[str, ...] = ()) -> Dict[str, str]:
+def _watch_audio_helper_env(extra: Tuple[str, ...] = (), prefixes: Tuple[str, ...] = ()) -> Dict[str, str]:
     names = frozenset(_WATCH_AUDIO_HELPER_ENV + extra)
-    return {name: value for name, value in os.environ.items() if name in names or name.startswith("LC_")}
+    prefixes = ("LC_",) + prefixes
+    return {name: value for name, value in os.environ.items() if name in names or name.startswith(prefixes)}
 
 
 class _WatchAudioRuntime:
@@ -421,10 +431,13 @@ class _WatchAudioRuntime:
             self.failure = failure
 
     def _step(self, command: list, timeout: float, what: str) -> str:
-        # Hermes points PYTHONPATH at its own site-packages, so pip (and uv)
-        # would count Hermes' cffi and cryptography as installed and leave
-        # them out of an environment the helper runs isolated (#340).
-        env = {name: value for name, value in os.environ.items() if name != "PYTHONPATH"}
+        # Only what pip and uv need, never all of Hermes' environment: the
+        # keys and tokens Hermes holds stay out of package build steps. That
+        # leaves out PYTHONPATH too, which Hermes points at its own
+        # site-packages, so pip (and uv) would count Hermes' cffi and
+        # cryptography as installed and leave them out of an environment the
+        # helper runs isolated (#340).
+        env = _watch_audio_helper_env(_WATCH_AUDIO_BUILD_ENV, _WATCH_AUDIO_BUILD_ENV_PREFIXES)
         try:
             done = self._run(command, capture_output=True, text=True, timeout=timeout, env=env)
         except subprocess.TimeoutExpired:

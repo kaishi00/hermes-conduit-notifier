@@ -349,6 +349,24 @@ def test_preparing_leaves_out_hermes_import_path(tmp_path, monkeypatch, uv):
     assert all(env["HTTPS_PROXY"] == "http://proxy:3128" for env in run.envs)
 
 
+@pytest.mark.parametrize("uv", [False, True])
+def test_preparing_never_hands_pip_hermes_keys(tmp_path, monkeypatch, uv):
+    # A package's build step runs with pip's environment.
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("HERMES_GATEWAY_TOKEN", "secret")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("PIP_INDEX_URL", "https://mirror.example/simple")
+    monkeypatch.setenv("UV_INDEX_URL", "https://mirror.example/simple")
+    monkeypatch.setenv("NO_PROXY", "localhost")
+    run = FakeRun(fail=("-m venv",) if uv else ())
+    runtime = _runtime(tmp_path, run=run, which=lambda name: "/opt/uv" if uv else None)
+    assert runtime.prepare(start=lambda target: target())["runtime"] == "ready"
+    for env in run.envs:
+        assert "OPENAI_API_KEY" not in env and "HERMES_GATEWAY_TOKEN" not in env
+        assert env["PATH"] == "/usr/bin" and env["NO_PROXY"] == "localhost"
+        assert env["PIP_INDEX_URL"] == env["UV_INDEX_URL"] == "https://mirror.example/simple"
+
+
 def test_a_failed_prepare_says_why_and_can_be_asked_again(tmp_path):
     runtime = _runtime(tmp_path, run=FakeRun(fail=("-m venv",)))
     status = runtime.prepare(start=lambda target: target())

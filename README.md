@@ -3041,7 +3041,12 @@ relay key. The host still opens no inbound route.
   runs, or `uv` where that Python has no venv or pip, then
   `pip install aiortc==1.15.0` (about 150 MB), run isolated and without
   Hermes' `PYTHONPATH` so it installs everything aiortc needs rather than
-  counting on packages Hermes already has. It goes in
+  counting on packages Hermes already has. Pip and uv get only a small part
+  of Hermes' environment (plugin 0.120.2+): `PATH`, `HOME`, the locale,
+  temp folders, proxies (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`,
+  `ALL_PROXY`), certificate paths and their own `PIP_*` and `UV_*`
+  settings, never the API keys and tokens Hermes holds, since a package's
+  build step runs with it. It goes in
   `~/.hermes/conduit_push/watch-audio-env` (under `HERMES_HOME` when that's
   set, or `CONDUIT_WATCH_AUDIO_ENV`). Nothing is installed into Hermes' own
   Python; if that Python already has `aiortc`, it's used as it is.

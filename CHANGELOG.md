@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.120.2 (2026-10-29)
+
+### Security
+- Preparing GPT-Live for the Apple Watch ran pip with all of Hermes'
+  environment, API keys and tokens included, so a package's build step
+  could read them. Pip and uv now get only what they need to install:
+  the path, home and locale, proxies, certificates and their own settings.
+
 ## 0.120.1 (2026-10-29)
 
 ### Fixes
