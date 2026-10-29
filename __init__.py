@@ -666,7 +666,7 @@ def _pre_approval_request(**kwargs: Any) -> None:
 
 def _post_approval_response(**kwargs: Any) -> None:
     if forks.inside():
-        return  # a fork asked nothing of the phone (_pre_approval_request): the chat's alert and card stay
+        return  # a fork's answer is no answer to the chat's approval (_pre_approval_request)
     session_key = _text(kwargs.get("session_key"))
     calls.cancel_alerts(session_key or _text(kwargs.get("session_id")), "approval")
     _quietly(live_activity.reporter.thinking, _text(kwargs.get("session_id")) or session_key)
@@ -946,8 +946,8 @@ def _room_framing(session_id: str, platform: Any = None, prompt: Any = None) -> 
     if not session_id:
         return None
     # A turn starts: only what this turn is framed with or given is heard when it replies (room_asks). A delegated
-    # child's turn (a fork of the chat's too, forks) is the room's agent at work, never the room's turn: it neither
-    # hears nor is framed with answers.
+    # child's turn is the room's agent at work, never the room's turn: it neither hears nor is framed with answers.
+    # Nor is a fork of the chat (forks), so the turn keeps the answers it was framed with.
     child = _is_child(session_id)
     if not child:
         _quietly(room_asks.begin, lambda: PresentStore(get_hermes_home()), session_id)
@@ -990,8 +990,8 @@ def _room_framing(session_id: str, platform: Any = None, prompt: Any = None) -> 
             try:
                 posts = {"as": people["you"], "forged": room_posts.forged_for(
                     root, turn.room_id, session_id, str(people["you"]), prompt)}
-                if not room_rules.is_room_prompt(prompt):
-                    # Its lines under the owner's name can't be checked.
+                if not child and not room_rules.is_room_prompt(prompt):
+                    # Its lines under the owner's name can't be checked (a child's prompt is no room prompt).
                     _warn_room_once("prompt", "conduit_push: a turn in room %s isn't Hermes' room prompt",
                                     turn.room_id, exc_info=False)
             except Exception:  # noqa: BLE001 — framed without checking its owner's lines, and told so
