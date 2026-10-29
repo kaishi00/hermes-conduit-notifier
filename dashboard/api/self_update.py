@@ -189,7 +189,7 @@ def self_restart(schedule: Callable[[float, Callable[[], None]], Any],
             "version": capabilities._plugin_version()}
 
 
-@router.post("/self/restart")
+@router.post("/self/restart", dependencies=core._UNLESS_LOCKED)
 async def post_self_restart(response: Response) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     loop = asyncio.get_running_loop()
@@ -597,7 +597,7 @@ def _bot_name(client: Any) -> str:
         return ""
 
 
-@router.post("/self/update")
+@router.post("/self/update", dependencies=core._UNLESS_LOCKED)
 async def post_self_update(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     loop = asyncio.get_running_loop()

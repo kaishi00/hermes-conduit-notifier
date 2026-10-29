@@ -458,7 +458,7 @@ async def get_e2e(response: Response, profile: Optional[str] = None) -> Dict[str
         raise core._unexpected("status", exc, feature="Encrypted notifications")
 
 
-@router.post("/e2e")
+@router.post("/e2e", dependencies=core._UNLESS_LOCKED)
 async def post_e2e(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     # The body is a secret: never cached on the way back either.
     response.headers["Cache-Control"] = "no-store"
@@ -706,7 +706,7 @@ def pair_profile(body: Any, profile: Optional[str] = None, path: Any = None,
             "gateway_name": gateway_name, "relay_url": state["relay_url"]}
 
 
-@router.post("/pair")
+@router.post("/pair", dependencies=core._UNLESS_LOCKED)
 async def post_pair(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     try:

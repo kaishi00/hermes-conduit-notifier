@@ -1380,7 +1380,7 @@ async def get_watch_audio_status(request: Request, response: Response, profile: 
         raise core._unexpected("status", exc, feature="Watch audio")
 
 
-@router.post("/watch-audio/prepare")
+@router.post("/watch-audio/prepare", dependencies=core._UNLESS_LOCKED)
 async def post_watch_audio_prepare(response: Response) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     try:

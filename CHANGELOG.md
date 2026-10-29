@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.121.0 (2026-10-29)
+
+### New and improved
+- Locked mode: with `CONDUIT_LOCKED=1` on the host, the dashboard can no
+  longer update or restart the plugin, set Hermes up for rooms, pair, hand
+  over a new encryption key, install the Watch's GPT-Live runtime or change
+  workspace files. Off unless you turn it on.
+
 ## 0.120.1 (2026-10-29)
 
 ### Fixes

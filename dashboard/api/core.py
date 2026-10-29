@@ -22,7 +22,7 @@ from typing import Any, Callable, Dict, Optional, TypeVar
 from fastapi import APIRouter, Depends, HTTPException, Request
 from starlette.requests import HTTPConnection
 
-from . import link_status
+from . import gemini_qwen_live, link_status
 
 # The plugin's logger, under the name it always had (the module Hermes loads,
 # plugin_api.py): every module logs through it.
@@ -302,6 +302,38 @@ async def _read_json_body(request: Request, max_bytes: int = SEARCH_MAX_BODY_BYT
         return json.loads(bytes(raw) or b"{}")
     except (ValueError, RecursionError):
         raise HTTPException(status_code=400, detail="Request body is not JSON", headers=no_store)
+
+
+# --- Locked mode --------------------------------------------------------------
+
+# Locked mode (CONDUIT_LOCKED=1, in the environment Hermes runs in or its
+# .env): the routes that change the host itself rather than Conduit's data
+# (updating or restarting the plugin, rewriting Hermes' config for rooms,
+# installing packages, writing workspace files, pairing or handing over a
+# new encryption key) refuse with 403, for a dashboard whose password more
+# people know than should run those. Off by default. On the host itself
+# nothing changes (`hermes plugins update conduit_push`, `hermes
+# conduit-push pair`, and so on).
+LOCKED_ENV_VAR = "CONDUIT_LOCKED"
+LOCKED_MESSAGE = (f"Locked mode is on for this host ({LOCKED_ENV_VAR}), so this can't be done "
+                  "from the dashboard; do it on the host, or turn locked mode off and restart the gateway")
+_LOCKED_TRUE = frozenset({"1", "true", "yes", "on"})
+
+
+def conduit_locked() -> bool:
+    # Either place turns it on: a .env the dashboard can't rewrite while
+    # locked, or the service's own environment, which it never can.
+    return any(str(value or "").strip().lower() in _LOCKED_TRUE
+               for value in (os.environ.get(LOCKED_ENV_VAR), gemini_qwen_live._env_value(LOCKED_ENV_VAR)))
+
+
+async def _refuse_when_locked() -> None:
+    if conduit_locked():
+        raise HTTPException(status_code=403, detail=LOCKED_MESSAGE, headers={"Cache-Control": "no-store"})
+
+
+# The dependency each of those routes takes.
+_UNLESS_LOCKED = [Depends(_refuse_when_locked)]
 
 
 # --- The pairing state --------------------------------------------------------

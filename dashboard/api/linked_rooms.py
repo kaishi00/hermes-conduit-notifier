@@ -858,7 +858,7 @@ async def get_room_setup(request: Request, response: Response, profile: Optional
     return await _room_setup_route(profile, lambda: room_setup(profile), _room_setup_read_limiter)
 
 
-@router.post("/rooms/setup")
+@router.post("/rooms/setup", dependencies=core._UNLESS_LOCKED)
 async def post_room_setup(request: Request, response: Response, profile: Optional[str] = None) -> Any:
     """Sets this Hermes up for rooms, with ``ceiling`` (the saved one, or
     the default, without it), and restarts the gateway when the API server

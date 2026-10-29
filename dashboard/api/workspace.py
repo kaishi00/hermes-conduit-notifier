@@ -313,7 +313,7 @@ def _workspace_mtime(body: Dict[str, Any]) -> Optional[float]:
     return float(value)
 
 
-@router.post("/workspace/{action}")
+@router.post("/workspace/{action}", dependencies=core._UNLESS_LOCKED)
 async def post_workspace(action: str, request: Request, response: Response,
                          profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
