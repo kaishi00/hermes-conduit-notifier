@@ -41,23 +41,33 @@ def inside() -> bool:
     return _in_fork.get()
 
 
-def _mark(fork: Any) -> None:
-    run = getattr(fork, "run_conversation", None)
-    if not callable(run):
-        return
+# The fork's whole life under the chat's id: its run, and its teardown in
+# case a Hermes reports the end from there.
+MARKED = ("run_conversation", "shutdown_memory_provider", "close")
 
-    @functools.wraps(run)
-    def run_conversation(*args: Any, **kwargs: Any) -> Any:
+
+def _marked(method: Callable[..., Any]) -> Callable[..., Any]:
+    @functools.wraps(method)
+    def run(*args: Any, **kwargs: Any) -> Any:
         token = _in_fork.set(True)
         try:
-            return run(*args, **kwargs)
+            return method(*args, **kwargs)
         finally:
             _in_fork.reset(token)
 
-    try:
-        fork.run_conversation = run_conversation
-    except Exception:  # noqa: BLE001 - the fork runs unmarked, as before
-        logger.warning("conduit_push: couldn't mark a chat's fork; its answer may reach the phone", exc_info=True)
+    return run
+
+
+def _mark(fork: Any) -> None:
+    for name in MARKED:
+        method = getattr(fork, name, None)
+        if not callable(method):
+            continue
+        try:
+            setattr(fork, name, _marked(method))
+        except Exception:  # noqa: BLE001 - the fork runs unmarked, as before
+            logger.warning("conduit_push: couldn't mark a chat's fork; its answer may reach the phone", exc_info=True)
+            return
 
 
 def _build(original: Callable[..., Any]) -> Callable[..., Any]:

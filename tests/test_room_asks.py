@@ -569,3 +569,32 @@ def test_every_result_gives_back_the_share(store, sleeper, pushes):
     waited = call(store, sleeper, pushes)
     again = call(store, sleeper, pushes)
     assert waited["status"] == again["status"] == "waiting" and waited["share"] == again["share"] == SHARE
+
+
+def test_a_fork_of_a_room_turn_leaves_the_turn_its_answers(store, sleeper, pushes, tmp_path, monkeypatch, clock):
+    # The self-improvement review or a /btw of the room's chat runs under its id (forks.py).
+    exchange(store)
+    first = call(store, sleeper, pushes)
+    exchange(store, results=[{"id": first["id"], "outcome": "declined", "via": "tap"}])
+    monkeypatch.setattr(plugin, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(plugin, "PresentStore", lambda home: PresentStore(home, clock=clock))
+    monkeypatch.setattr(plugin.room_rules, "room_turn", lambda session, home=None: TURN)
+    monkeypatch.setattr(plugin.room_rules, "choices_for", lambda turn, home: room_choices.RoomChoices())
+    monkeypatch.setattr(plugin.room_invites, "people", lambda *a, **k: None)
+    line = f'- Your owner said no to "{QUESTION}": don\'t share it.'
+    assert line in plugin._room_framing(ROOM_SESSION).splitlines()  # the room's turn
+    # Answered while the turn runs: the turn never read it.
+    later = call(store, sleeper, pushes, {"question": "Next hour", "share": "x"})
+    exchange(store, results=[{"id": later["id"], "outcome": "declined", "via": "tap"}])
+    later_line = '- Your owner said no to "Next hour": don\'t share it.'
+    token = plugin.forks._in_fork.set(True)
+    try:
+        framed = plugin._room_framing(ROOM_SESSION).splitlines()
+        assert line in framed and later_line in framed, "the fork is framed with both"
+        plugin._post_llm_call(session_id=ROOM_SESSION, assistant_response="Noted.", turn_id="fork")
+    finally:
+        plugin.forks._in_fork.reset(token)
+    assert asks._framed.get(ROOM_SESSION) == [first["id"]], "the turn's framed answers are still its own"
+    plugin._post_llm_call(session_id=ROOM_SESSION, assistant_response="I can't share that.", turn_id="t1")
+    framed = plugin._room_framing(ROOM_SESSION).splitlines()
+    assert line not in framed and later_line in framed, "the later answer waits for the next turn"

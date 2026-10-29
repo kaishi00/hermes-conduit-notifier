@@ -207,15 +207,19 @@ def _pre_tool_call(**kwargs: Any) -> dict[str, str] | None:
     block = _room_tool_block(kwargs)
     if block is not None:
         return block
-    if _is_child(kwargs.get("session_id")):
+    child = _is_child(kwargs.get("session_id"))
+    fork = forks.inside()
+    if child and not fork:
         return None
     # A Pulse turn may only look things up (pulse_tools). Fails closed:
     # Hermes blocks the call when this hook raises, so the check is outside
-    # _quietly.
+    # _quietly. A fork of the chat is held by it like any turn of the chat.
     block = pulse.pre_tool_call(_text(kwargs.get("session_id")), kwargs.get("turn_id"), kwargs.get("tool_name"),
                                 kwargs.get("args"))
     if block is not None:
         return block
+    if child:
+        return None  # a fork: nothing on the Lock Screen, and no question of the chat's
     _quietly(live_activity.reporter.tool_started, _text(kwargs.get("session_id")), kwargs.get("tool_name"))
     if kwargs.get("tool_name") != "clarify":
         return
@@ -595,7 +599,9 @@ def _on_session_end(**kwargs: Any) -> None:
 
 
 def _pre_approval_request(**kwargs: Any) -> None:
-    if kwargs.get("surface") == "smart":
+    # A fork's approval isn't the chat's to ask: Hermes denies it for the
+    # review, and the predict route refuses every tool.
+    if kwargs.get("surface") == "smart" or forks.inside():
         return
     session_id = _text(kwargs.get("session_key"))
     description = _text(kwargs.get("description"))
@@ -895,7 +901,10 @@ def _room_framing(session_id: str, platform: Any = None, prompt: Any = None) -> 
     if not session_id:
         return None
     # A turn starts: only what this turn is framed with or given is heard when it replies (room_asks).
-    _quietly(room_asks.begin, session_id)
+    # A fork of the chat's turn leaves the chat's turn what it was framed with.
+    fork = forks.inside()
+    if not fork:
+        _quietly(room_asks.begin, session_id)
     try:
         home = get_hermes_home()
     except Exception:  # noqa: BLE001
@@ -946,8 +955,10 @@ def _room_framing(session_id: str, platform: Any = None, prompt: Any = None) -> 
     if home is not None and turn.room_id:
         try:
             # What the owner answered the agent's asks since (room_asks), once.
-            framing += "".join(f"\n- {line}" for line in room_asks.frame(PresentStore(home), turn.room_id,
-                                                                            session_id))
+            store = PresentStore(home)
+            lines = ([line for _, line in room_asks.answers(store, turn.room_id)] if fork
+                     else room_asks.frame(store, turn.room_id, session_id))
+            framing += "".join(f"\n- {line}" for line in lines)
         except Exception:  # noqa: BLE001 — the answers wait for the next turn
             _warn_room_once("asks", "conduit_push: couldn't read the answers to session %s's asks", session_id)
     return framing

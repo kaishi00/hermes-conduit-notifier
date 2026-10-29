@@ -152,3 +152,57 @@ def test_without_the_mark_an_older_hermes_pushed_the_fork(pushed, hermes):
     # Why the mark is there: the same hooks, unmarked, are the chat's turn.
     _fork_run(hermes, _prediction_hooks)
     assert [event["body"] for event in pushed] == [PREDICTION]
+
+
+def test_a_forks_teardown_is_marked_too(hermes, marks):
+    fork, _runtime, _routed = hermes.module.build_cache_parity_fork(types.SimpleNamespace(), max_iterations=3)
+    seen = []
+    fork.close = lambda: seen.append(marks.inside())
+    marks._mark(fork)
+    fork.close()
+    assert seen == [True] and not marks.inside()
+
+
+def test_a_forks_tool_call_still_meets_pulse(hermes, marks, monkeypatch):
+    # Pulse holds a call of its home chat's turns while it runs there; a fork of that chat is held the same.
+    held = {"action": "block", "message": "Pulse is working in this chat."}
+    asked = []
+    monkeypatch.setattr(plugin.pulse, "pre_tool_call", lambda *args: asked.append(args) or held)
+    monkeypatch.setattr(plugin, "_room_tool_block", lambda kwargs: None)
+    blocks = []
+    _fork_run(hermes, lambda: blocks.append(plugin._pre_tool_call(session_id="home", turn_id="f",
+                                                                 tool_name="memory", args={})))
+    assert blocks == [held] and len(asked) == 1
+
+
+def test_a_forks_allowed_tool_call_starts_nothing(hermes, marks, monkeypatch, lock_screen):
+    reporter, posts = lock_screen
+    monkeypatch.setattr(plugin.pulse, "pre_tool_call", lambda *args: None)
+    monkeypatch.setattr(plugin, "_room_tool_block", lambda kwargs: None)
+    sent = []
+    monkeypatch.setattr(plugin, "enqueue", sent.append)
+    monkeypatch.setattr(plugin, "_clarify_loop_active", False)
+    reporter.flush()
+    before = len(posts)
+    results = []
+    _fork_run(hermes, lambda: results.append(plugin._pre_tool_call(session_id="s", turn_id="f",
+                                                                  tool_name="clarify", args={"question": "?"})))
+    reporter.flush()
+    assert results == [None] and sent == [] and len(posts) == before
+
+
+def test_a_subagent_still_skips_pulse(monkeypatch):
+    asked = []
+    monkeypatch.setattr(plugin.pulse, "pre_tool_call", lambda *args: asked.append(args))
+    monkeypatch.setattr(plugin, "_room_tool_block", lambda kwargs: None)
+    monkeypatch.setattr(plugin, "_is_child", lambda session_id: True)
+    assert plugin._pre_tool_call(session_id="c", turn_id="t", tool_name="memory", args={}) is None
+    assert asked == []
+
+
+def test_a_forks_approval_sends_nothing(hermes, marks, monkeypatch):
+    sent = []
+    monkeypatch.setattr(plugin, "enqueue", sent.append)
+    _fork_run(hermes, lambda: plugin._pre_approval_request(session_id="s", session_key="s", turn_id="f",
+                                                           description="rm -rf build", command="rm -rf build"))
+    assert sent == []
