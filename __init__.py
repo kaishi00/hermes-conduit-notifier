@@ -15,9 +15,10 @@ from typing import Any
 from hermes_constants import get_hermes_home
 
 from . import (call_tool, call_watches, calls, chat_on_screen, clarify_loop, client, conduit_first, cron_runs,
-               desktop_selected, health_tool, inbox_tool, live_activity, location_tool, maps_tool, notify_tool, phone_tool,
-               present_tool, pulse, reply_sources, review_notices, room_asks, room_chats, room_cleanup, room_cutoff,
-               room_free_busy, room_identity, room_invites, room_memory, room_planner, room_posts, room_rules, room_tool,
+               desktop_selected, forks, health_tool, inbox_tool, live_activity, location_tool, maps_tool, notify_tool,
+               phone_tool, present_tool, pulse, reply_sources, review_notices, room_asks, room_chats, room_cleanup,
+               room_cutoff, room_free_busy, room_identity, room_invites, room_memory, room_planner, room_posts,
+               room_rules, room_tool,
                room_wakeups, settings_tool, show_tool, turn_surface, voice_archive)
 from .session_titles import bot_name as _bot_name, title as _session_title, titled as _titled
 from .client import enqueue
@@ -82,6 +83,10 @@ def register(ctx: Any) -> None:
     # An open chat's self-improvement updates follow the setting as it is
     # now, not as it was when the chat opened (review_notices).
     review_notices.install()
+    # A fork of a chat (the self-improvement review, /btw, Conduit's
+    # predictions) shares the chat's session id: its turn is never the
+    # chat's (forks).
+    forks.install()
     ctx.register_hook("pre_tool_call", _pre_tool_call)
     ctx.register_hook("post_llm_call", _post_llm_call)
     ctx.register_hook("on_session_end", _on_session_end)
@@ -204,15 +209,19 @@ def _pre_tool_call(**kwargs: Any) -> dict[str, str] | None:
     block = _room_tool_block(kwargs)
     if block is not None:
         return block
-    if _is_child(kwargs.get("session_id")):
+    child = _is_child(kwargs.get("session_id"))
+    fork = forks.inside()
+    if child and not fork:
         return None
     # A Pulse turn may only look things up (pulse_tools). Fails closed:
     # Hermes blocks the call when this hook raises, so the check is outside
-    # _quietly.
+    # _quietly. A fork of the chat is held by it like any turn of the chat.
     block = pulse.pre_tool_call(_text(kwargs.get("session_id")), kwargs.get("turn_id"), kwargs.get("tool_name"),
                                 kwargs.get("args"))
     if block is not None:
         return block
+    if child:
+        return None  # a fork: nothing on the Lock Screen, and no question of the chat's
     _quietly(live_activity.reporter.tool_started, _text(kwargs.get("session_id")), kwargs.get("tool_name"))
     if kwargs.get("tool_name") != "clarify":
         return
@@ -294,6 +303,8 @@ def _member_room_turn(session_id: str) -> bool:
 
 
 def _post_llm_call(**kwargs: Any) -> None:
+    if forks.inside():
+        return
     session_id = _text(kwargs.get("session_id"))
     response = kwargs.get("assistant_response")
     if _is_child(session_id):
@@ -473,6 +484,7 @@ def _unload() -> None:
     room_cleanup.uninstall()
     room_rules.forget()
     review_notices.uninstall()
+    forks.uninstall()
     deadline = time.monotonic() + 1.0
     live_activity.reporter.stop(timeout=max(0.0, deadline - time.monotonic()))
     client.stop(timeout=max(0.0, deadline - time.monotonic()))
@@ -530,6 +542,10 @@ def _on_session_end(**kwargs: Any) -> None:
     # any turn with text, a failed one too): the one place a watched job's
     # failure or stop shows up, and where a held reply goes out.
     session_id = _text(kwargs.get("session_id"))
+    if forks.inside():
+        # Only when it started is forgotten, as for any turn's end (pre_llm_call).
+        _quietly(pulse.turn_ended, session_id, kwargs.get("turn_id"))
+        return
     if _is_child(session_id):
         return
     _end_parent_turn(session_id)
@@ -591,7 +607,9 @@ def _on_session_end(**kwargs: Any) -> None:
 
 
 def _pre_approval_request(**kwargs: Any) -> None:
-    if kwargs.get("surface") == "smart":
+    # A fork's approval isn't the chat's to ask: Hermes denies it for the
+    # review, and the predict route refuses every tool.
+    if kwargs.get("surface") == "smart" or forks.inside():
         return
     session_id = _text(kwargs.get("session_key"))
     description = _text(kwargs.get("description"))
@@ -644,6 +662,8 @@ def _pre_approval_request(**kwargs: Any) -> None:
 
 
 def _post_approval_response(**kwargs: Any) -> None:
+    if forks.inside():
+        return  # a fork asked nothing of the phone (_pre_approval_request): the chat's alert and card stay
     session_key = _text(kwargs.get("session_key"))
     calls.cancel_alerts(session_key or _text(kwargs.get("session_id")), "approval")
     _quietly(live_activity.reporter.thinking, _text(kwargs.get("session_id")) or session_key)
@@ -781,6 +801,10 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
     Conduit shares here, to use before other routes."""
     session_id = _text(kwargs.get("session_id"))
     child = _is_child(session_id)
+    if forks.inside():
+        # Pulse holds a fork of its home chat as it holds the chat's turns:
+        # only one that started after its attempt (pulse._held_home_turn).
+        _quietly(pulse.note_started, session_id, kwargs.get("turn_id"))
     pulse_note = None if child else _pulse_note(session_id, kwargs.get("turn_id"), kwargs.get("user_message"))
     if pulse_note:
         # Pulse's own turn: no Lock Screen progress, and only its note.
@@ -891,7 +915,8 @@ def _room_framing(session_id: str, platform: Any = None, prompt: Any = None) -> 
     if not session_id:
         return None
     # A turn starts: only what this turn is framed with or given is heard when it replies (room_asks). A delegated
-    # child's turn is the room's agent at work, never the room's turn: it neither hears nor is framed with answers.
+    # child's turn (a fork of the chat's too, forks) is the room's agent at work, never the room's turn: it neither
+    # hears nor is framed with answers.
     child = _is_child(session_id)
     if not child:
         _quietly(room_asks.begin, lambda: PresentStore(get_hermes_home()), session_id)
@@ -1083,8 +1108,10 @@ def _inside_delegated_child() -> bool:
 
 def _is_child(session_id: Any) -> bool:
     """Whether the session running now is a delegated child: Hermes'
-    delegation flag, else :func:`_is_child_session`."""
-    return _inside_delegated_child() or _is_child_session(session_id)
+    delegation flag, else :func:`_is_child_session`. A fork of a chat
+    (forks) counts as one: it runs under its chat's id, and nothing it does
+    is the chat's turn."""
+    return forks.inside() or _inside_delegated_child() or _is_child_session(session_id)
 
 
 def _is_child_session(session_id: Any) -> bool:
