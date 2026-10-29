@@ -476,6 +476,8 @@ class Asks:
                 end = datetime.combine(day, day_time.fromisoformat(asked["to"]), zone) if "to" in asked \
                     else datetime.combine(day + timedelta(days=1), day_time(0, 0), zone)
                 start_s, end_s = int(start.timestamp()), int(end.timestamp())
+                # The asked day's end: its next midnight, or 01:00 where clocks go forward at midnight.
+                day_end_s = int(datetime.combine(day + timedelta(days=1), day_time(0, 0), zone).timestamp())
                 window = (_epoch(device["window_from"]), _epoch(device["window_to"]))
                 if device["window_from"] and (start_s < window[0] or end_s > window[1]):
                     return {"status": UNAVAILABLE, "text": "That date is past what their phone shares."}
@@ -490,7 +492,7 @@ class Asks:
         when = described({"free_on": asked}).removeprefix("free on ").removesuffix("?")
         answer: dict[str, Any] = {"status": ANSWERED, "free": not blocks, "time_zone": tz}
         if blocks and times:
-            answer["busy"] = [{"start": _clock(a, zone), "end": _clock(b, zone, end=True)}
+            answer["busy"] = [{"start": _clock(a, zone), "end": "24:00" if b >= day_end_s else _clock(b, zone)}
                               for a, b in blocks[:MAX_BUSY_SPANS]]
             spans = ", ".join(f"{span['start']}-{span['end']}" for span in answer["busy"])
             more = len(blocks) - len(answer["busy"])
@@ -817,10 +819,9 @@ def _busy(value: Any) -> Optional[list[dict[str, str]]]:
     return spans
 
 
-def _clock(epoch: int, zone: Any, *, end: bool = False) -> str:
-    """A time of the asked day, HH:MM; an ``end`` at the midnight after it is 24:00, never 00:00."""
-    shown = datetime.fromtimestamp(epoch, zone).strftime("%H:%M")
-    return "24:00" if end and shown == "00:00" else shown
+def _clock(epoch: int, zone: Any) -> str:
+    """A time of the asked day, HH:MM (its end, the next day's start, is "24:00" where _free builds it)."""
+    return datetime.fromtimestamp(epoch, zone).strftime("%H:%M")
 
 
 def _epoch(value: Any) -> int:
