@@ -478,8 +478,9 @@ def run_watch_tool(grant: _WatchGrant, request: Dict[str, Any]) -> Dict[str, Any
 # hears. read_chat reads only a chat the grant's newest find_chat returned.
 
 WATCH_CHAT_RESULTS = 5
-# VoiceChatFinder.path's exclude_sources (SessionSource.hermesKanbanSource).
-CHAT_SEARCH_EXCLUDED_SOURCES = "kanban"
+# VoiceChatFinder.path's exclude_sources (SessionSource.nonChatExcludedSources):
+# the sessions Hermes' own pickers hide as not conversations.
+CHAT_SEARCH_EXCLUDED_SOURCES = "kanban,oneshot,tool"
 WATCH_CHAT_QUERY_CHARS = 200
 WATCH_CHAT_SNIPPET_CHARS = 160
 # Under the Watch's 35 s wait for an answer (WatchToolRelayClient).
@@ -808,7 +809,8 @@ def run_watch_find_chat(grant: _WatchGrant, args: Dict[str, Any], routes=None,
         return {"ok": False, "status": 501, "detail": "Searching chats needs a newer Hermes on this host."}
 
     # Kanban workers' transcripts aren't chats (Hermes won't reopen one; the
-    # board runs it), so a call never finds them, as on the iPhone. A Hermes
+    # board runs it), nor are tool integrations and one-shot runs, so a call
+    # never finds them, as on the iPhone. A Hermes
     # whose route predates the filter searches without it.
     scope = {"exclude_sources": CHAT_SEARCH_EXCLUDED_SOURCES} if _accepts_keyword(
         routes.search_sessions, "exclude_sources") else {}
